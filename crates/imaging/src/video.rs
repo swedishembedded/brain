@@ -30,7 +30,8 @@
 //! one step left, and the user needs to be told which.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::pixels::Rgb8;
@@ -362,7 +363,7 @@ pub struct VideoEncodeOpts {
     /// x264 constant-rate factor: 0 lossless, 18 visually near-lossless, 51
     /// worst. Ignored for containers that do not take an x264 stream (`.gif`).
     pub crf: u32,
-    /// Where the numbered PPMs go when `ffmpeg` is missing. `None` derives
+    /// Where the numbered PPMs go when `ffmpeg` is missing or fails. `None` derives
     /// `<output>.frames/` so the frames land beside the file the caller asked
     /// for, not in a temp directory that the next reboot deletes.
     pub frames_dir: Option<PathBuf>,
@@ -396,8 +397,9 @@ impl Default for VideoEncodeOpts {
 pub enum Encoded {
     /// `ffmpeg` wrote the container at this path.
     Video(PathBuf),
-    /// `ffmpeg` was not on `PATH`. The numbered PPMs are in `dir`; `command`
-    /// is the invocation that turns them into the requested file.
+    /// `ffmpeg` was not on `PATH`, or could not write the requested file. The
+    /// numbered PPMs are in `dir`; `command` is the invocation that turns them
+    /// into the requested file.
     ///
     /// `audio` is the WAV that was written beside them, or `None` when the
     /// clip is silent - including when a track was generated but the
@@ -440,7 +442,7 @@ pub fn write_frame_dir_with_audio(frames: &[Rgb8], dir: &Path, out: &Path, fps: 
     if let (Some(a), Some(p)) = (audio, wav.as_ref()) {
         write_wav(a, p)?;
     }
-    let args = ffmpeg_args(dir, out, fps, crf, w, h, wav.as_deref());
+    let args = ffmpeg_args(Frames::Dir(dir), out, fps, crf, w, h, wav.as_deref());
     let command = std::iter::once("ffmpeg".to_string())
         .chain(args.into_iter().map(|a| shell_quote(&a)))
         .collect::<Vec<_>>()
@@ -501,14 +503,12 @@ pub fn encode_frames(frames: &[Rgb8], path: &Path, fps: f64, opts: &VideoEncodeO
         return Ok(Encoded::Frames { dir, command, audio });
     }
 
+    // Only the sound goes through a file; the picture is streamed.
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("brain-video-encode-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("imaging::video: creating {}: {e}", dir.display()))?;
     let _cleanup = TempDirGuard(&dir);
-    for (i, f) in frames.iter().enumerate() {
-        crate::codec::save_ppm(dir.join(format!("frame_{:05}.ppm", i + 1)), f)?;
-    }
     let wav = audio.map(|_| dir.join("audio.wav"));
     if let (Some(a), Some(p)) = (audio, wav.as_ref()) {
         write_wav(a, p)?;
@@ -517,12 +517,36 @@ pub fn encode_frames(frames: &[Rgb8], path: &Path, fps: f64, opts: &VideoEncodeO
         eprintln!("imaging::video: {w}x{h} has an odd dimension; padding to {}x{} so 4:2:0 chroma is representable", w.next_multiple_of(2), h.next_multiple_of(2));
     }
 
-    let out = Command::new("ffmpeg")
-        .args(ffmpeg_args(&dir, path, fps, opts.crf, w, h, wav.as_deref()))
-        .output()
+    let mut child = Command::new("ffmpeg")
+        .args(ffmpeg_args(Frames::RawStdin, path, fps, opts.crf, w, h, wav.as_deref()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("imaging::video: spawning ffmpeg: {e}"))?;
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    // Written from a second thread while this one drains stderr, so neither pipe can fill and stall the other. A
+    // write error means ffmpeg stopped reading, which its exit status reports.
+    let out = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            for f in frames {
+                if stdin.write_all(&f.px).is_err() {
+                    break;
+                }
+            }
+        });
+        child.wait_with_output()
+    })
+    .map_err(|e| format!("imaging::video: waiting for ffmpeg: {e}"))?;
     if !out.status.success() {
-        return Err(format!("imaging::video: ffmpeg exited {}: {}", out.status, String::from_utf8_lossy(&out.stderr)));
+        // The frames and the sound are the expensive part; an encoder that cannot write this container (a build
+        // without the codec, a container it has no muxer for) gets the same answer as a missing one.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        eprintln!("imaging::video: ffmpeg exited {} writing {}: {last}; keeping the frames instead", out.status, path.display());
+        let dir = opts.frames_dir.clone().unwrap_or_else(|| frames_dir_for(path));
+        let (command, audio) = write_frame_dir_with_audio(frames, &dir, path, fps, opts.crf, audio)?;
+        return Ok(Encoded::Frames { dir, command, audio });
     }
     if !path.exists() {
         return Err(format!("imaging::video: ffmpeg reported success but {} does not exist", path.display()));
@@ -575,16 +599,16 @@ fn audio_codec_for(ext: &str) -> Option<&'static str> {
 /// SECOND `-i` input, which is why the video filter and codec flags below are
 /// all stream-qualified: an unqualified `-vf` with two inputs present is
 /// ambiguous.
-fn ffmpeg_args(dir: &Path, out: &Path, fps: f64, crf: u32, w: u32, h: u32, audio_wav: Option<&Path>) -> Vec<String> {
+fn ffmpeg_args(input: Frames<'_>, out: &Path, fps: f64, crf: u32, w: u32, h: u32, audio_wav: Option<&Path>) -> Vec<String> {
     let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let acodec = audio_wav.and_then(|_| audio_codec_for(&ext));
-    let mut v: Vec<String> = vec![
-        "-y".into(),
-        "-framerate".into(),
-        format!("{fps}"),
-        "-i".into(),
-        dir.join("frame_%05d.ppm").to_string_lossy().into_owned(),
-    ];
+    let mut v: Vec<String> = vec!["-y".into()];
+    match input {
+        Frames::Dir(dir) => v.extend(["-framerate".into(), format!("{fps}"), "-i".into(), dir.join("frame_%05d.ppm").to_string_lossy().into_owned()]),
+        Frames::RawStdin => v.extend(
+            ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &format!("{w}x{h}"), "-framerate", &format!("{fps}"), "-i", "-"].map(String::from),
+        ),
+    }
     if let (Some(wav), Some(_)) = (audio_wav, acodec) {
         v.push("-i".into());
         v.push(wav.to_string_lossy().into_owned());
@@ -619,6 +643,17 @@ fn ffmpeg_args(dir: &Path, out: &Path, fps: f64, crf: u32, w: u32, h: u32, audio
     }
     v.push(out.to_string_lossy().into_owned());
     v
+}
+
+/// Where `ffmpeg` reads the picture from.
+#[derive(Clone, Copy)]
+enum Frames<'a> {
+    /// The numbered PPMs of a frame directory: the printed fallback command,
+    /// run later by whoever has an encoder.
+    Dir(&'a Path),
+    /// Raw RGB on stdin: what [`encode_frames`] feeds, needing no frame files
+    /// and no image decoder in the `ffmpeg` build.
+    RawStdin,
 }
 
 /// Minimal POSIX single-quote quoting - the printed fallback command has to be
@@ -828,6 +863,32 @@ mod tests {
         assert!(wav.is_none(), "no sound track means there is nothing to report");
         assert!(!cmd.contains("audio.wav"), "a silent clip's command must not name a WAV: {cmd}");
         assert!(!silent.join("audio.wav").exists(), "a silent clip must not leave a stray WAV behind");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An `ffmpeg` that is present but fails to write the file (here: a
+    /// container it has no muxer for) must not take the generation with it:
+    /// the frames and the sound land in `<output>.frames/` with the command,
+    /// exactly as when `ffmpeg` is missing.
+    #[test]
+    fn a_failing_ffmpeg_keeps_the_frames_and_the_sound() {
+        if !ffmpeg_available() {
+            brain_testutil::skip_unavailable("ffmpeg not installed");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("brain-imaging-video-failing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let out = base.join("clip.nosuchcontainer");
+        let frames = moving_block(4, 8, 8);
+        let opts = VideoEncodeOpts { audio: Some(stereo_tone(0.5, 16_000)), ..Default::default() };
+        match encode_frames(&frames, &out, 8.0, &opts).expect("a failed encode is not a lost generation") {
+            Encoded::Frames { dir, command, .. } => {
+                assert_eq!(dir, frames_dir_for(&out));
+                assert!(dir.join("frame_00004.ppm").exists(), "every frame must be kept in {}", dir.display());
+                assert!(command.starts_with("ffmpeg "), "{command}");
+            }
+            other => panic!("ffmpeg cannot write a .nosuchcontainer file, yet the encode reported {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 
