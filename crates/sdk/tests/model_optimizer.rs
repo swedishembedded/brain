@@ -15,6 +15,8 @@
 //!   deployed kernels against the original and every uniform format that fits,
 //!   with `accepted` decided by those measurements alone.
 //! * The calibration and held-out records are disjoint and cover the dataset.
+//! * Asked to, it distills a recovery adapter over the base held at the plan
+//!   and measures the plan without and with it on the same build.
 //! * Every planned format is one the architecture serves per linear. A default
 //!   candidate the device would widen (int8 on the CPU backend) is left out and
 //!   reported; one named by the caller that cannot be measured on its deployed
@@ -76,6 +78,8 @@ fn a_search_reports_a_plan_measured_on_the_deployed_kernels() {
     let plan = outcome.deployed[0].loss;
     let beats = outcome.deployed.iter().filter(|d| report.baselines.iter().any(|b| b.tier == d.label)).all(|d| plan < d.loss);
     assert_eq!(outcome.accepted, beats, "accepted is decided by the deployed measurements: {:?}", outcome.deployed);
+    assert_eq!(outcome.measured_on, "serving engine", "qwen3 is measured through the engine brain serve runs");
+    assert!(outcome.recovery.is_none(), "no recovery unless asked");
     assert!(outcome.deployed.iter().all(|d| d.loss.is_finite()), "{:?}", outcome.deployed);
 
     eprintln!("policy {}, deployed {:?}, simulated plan {} baselines {:?}, excluded {:?}", report.policy, outcome.deployed, report.plan_loss, report.baselines, outcome.excluded_tiers);
@@ -113,4 +117,31 @@ fn a_default_candidate_the_device_would_widen_is_left_out_and_reported() {
     assert!(outcome.excluded_tiers.iter().any(|e| e.tier == "i8" && e.held_as == "f32"), "{:?}", outcome.excluded_tiers);
     let policy = model::ops::TierPolicy::parse(&outcome.report.policy).expect("a policy");
     assert!(policy.dtypes().all(|t| t != gpu_core::select::Dtype::I8), "an excluded tier is never planned: {}", outcome.report.policy);
+}
+
+#[test]
+fn recovery_distills_an_adapter_over_the_base_held_at_the_plan() {
+    let model = chat_model_dir_of("optimize-recover", qwen3::QwenConfig::tiny_i8());
+    let dataset = write_dataset(&model, 12);
+    let out = model.join("run");
+    let mut steps = 0;
+    let outcome = ModelOptimizer::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+        .dataset(&dataset)
+        .out_dir(&out)
+        .recover(6)
+        .recover_lr(1e-3)
+        .recover_rank(4)
+        .run_with(|p| {
+            if let brain::OptimizerProgress::Recovering { step, .. } = p {
+                steps = *step;
+            }
+        })
+        .expect("the search and the recovery run");
+    let rec = outcome.recovery.expect("a recovery was asked for");
+    assert_eq!((rec.steps, rec.rank, steps), (6, 4, 6), "every step ran and was reported");
+    assert!(rec.adapter.is_file(), "the adapter is written: {}", rec.adapter.display());
+    assert!(rec.plan_loss.is_finite() && rec.recovered_loss.is_finite(), "{rec:?}");
+    assert_ne!(rec.plan_loss, rec.recovered_loss, "the trained adapter changes what the base at the plan computes");
+    let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&outcome.report_path).unwrap()).unwrap();
+    assert_eq!(written["recovery"]["steps"], 6);
 }

@@ -27,16 +27,24 @@
 //! estimated loss increase on the calibration set, solves for the tiers that
 //! fit the budget, and measures the plan against the original and every
 //! uniform tier that fits, with the weights simulated by the deployed codec.
-//! Then the plan and those uniform tiers are each measured again with the base
-//! built at them on the deployed kernels (the trainer's frozen-base build, the
-//! kernels serving uses), which is what [`ModelOptimizerOutcome::accepted`]
-//! is decided on. The report is written to `optimize.json` in the out
-//! directory.
+//! Then the plan and those uniform tiers are each measured again as deployed:
+//! through the family's serving engine where it has a scoring path (its
+//! kernels, int8 activation quantization included), else on the trainer's
+//! frozen-base build ([`ModelOptimizerOutcome::measured_on`] says which). That
+//! measurement alone decides [`ModelOptimizerOutcome::accepted`]. The report is
+//! written to `optimize.json` in the out directory.
+//!
+//! **Recovery.** With [`ModelOptimizer::recover`], a LoRA adapter is then
+//! distilled over the base held at the plan: the original model's top-K
+//! distributions on the calibration records are the teacher, the quantized
+//! base plus the adapter the student. The adapter is measured on the trainer
+//! build that trained it, and served beside the policy as an overlay.
 //!
 //! The candidate tiers default to every tier the architecture's trainer holds a
-//! frozen base in (so each can be measured on its deployed kernels) that its
-//! serving engine holds per linear (so an accepted plan can be served) and the
-//! device holds as itself; the budget defaults to the bytes of uniform int8.
+//! frozen base in (so each can be measured) that its serving engine holds per
+//! linear (so an accepted plan can be served) and the device holds as itself;
+//! the budget defaults to halfway between the two smallest candidates' uniform
+//! sizes, so the plan has bytes to place and a uniform deployment to beat.
 
 use std::path::{Path, PathBuf};
 
@@ -55,6 +63,13 @@ const REPORT_FILE: &str = "optimize.json";
 const HELD_OUT_SHARE: f64 = 0.25;
 /// Rows per batch of the search and the measurements.
 const ROWS: u32 = 4;
+/// The recovery adapter, inside the out directory.
+const RECOVERY_FILE: &str = "recovery.safetensors";
+/// Teacher distribution entries kept per position for recovery.
+const TEACHER_TOP_K: usize = 16;
+/// Where the measurements that decide acceptance ran.
+const ON_ENGINE: &str = "serving engine";
+const ON_TRAINER: &str = "trainer frozen-base build";
 
 /// The weight precision search of a chat model. See this module's doc.
 #[derive(Clone, Debug)]
@@ -71,11 +86,15 @@ pub struct ModelOptimizer {
     max_block: Option<u32>,
     device: Device,
     thinking: bool,
+    recover_steps: u32,
+    recover_lr: f32,
+    recover_rank: u32,
 }
 
 /// The budget as the caller stated it, resolved against the model once its sites are known.
 #[derive(Clone, Debug, PartialEq)]
 enum BudgetSpec {
+    Midway,
     Uniform(String),
     BitsPerWeight(f64),
     Bytes(u64),
@@ -84,6 +103,7 @@ enum BudgetSpec {
 impl BudgetSpec {
     fn resolve(&self) -> Result<Budget> {
         match self {
+            BudgetSpec::Midway => Ok(Budget::Midway),
             BudgetSpec::Uniform(name) => {
                 let tier = model::policy::parse_weight_format(name).ok().and_then(|p| p.uniform_dtype()).ok_or_else(|| Error::Backend(format!("ModelOptimizer: budget tier {name:?} is not a weight format")))?;
                 Ok(Budget::Uniform(tier))
@@ -106,8 +126,31 @@ pub struct ExcludedTier {
 pub enum OptimizerProgress {
     /// The search on the trainable build: calibration, estimates, simulated measurements.
     Search(modelopt::Progress),
-    /// A plan (`"plan"`, `"original"`, a uniform format) is about to be built and measured on the deployed kernels.
+    /// A plan (`"plan"`, `"original"`, a uniform format) is about to be built and measured as deployed.
     Deployed { label: String },
+    /// The recovery teacher's distributions are being collected.
+    Teacher,
+    /// A recovery distillation step finished.
+    Recovering { step: u32, steps: u32, loss: f32 },
+}
+
+/// A LoRA adapter distilled over the base held at the plan.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Recovery {
+    pub adapter: PathBuf,
+    pub steps: u32,
+    pub rank: u32,
+    /// The trainer build's held-out loss at the plan, without and with the adapter: the same build, so the two
+    /// compare directly.
+    pub plan_loss: f64,
+    pub recovered_loss: f64,
+}
+
+impl Recovery {
+    /// Whether the adapter lowered the held-out loss of the plan.
+    pub fn improves(&self) -> bool {
+        self.recovered_loss < self.plan_loss
+    }
 }
 
 /// One measurement on the deployed kernels.
@@ -129,6 +172,11 @@ pub struct ModelOptimizerOutcome {
     /// Whether the plan measured lower held-out loss on the deployed kernels than every uniform tier that fits the
     /// budget: the condition for deploying it instead of one of them.
     pub accepted: bool,
+    /// Where the measurements in [`Self::deployed`] ran: the family's serving engine, or its trainer's frozen-base
+    /// build when it has no engine scoring path.
+    pub measured_on: &'static str,
+    /// The recovery adapter, when [`ModelOptimizer::recover`] asked for one.
+    pub recovery: Option<Recovery>,
     /// Default candidates left out because the device would hold them at a wider tier, so neither their bytes nor
     /// their loss would be what the search assumed.
     pub excluded_tiers: Vec<ExcludedTier>,
@@ -151,12 +199,15 @@ impl ModelOptimizer {
             dataset: None,
             held_out: None,
             out_dir: None,
-            budget: BudgetSpec::Uniform("int8".to_string()),
+            budget: BudgetSpec::Midway,
             tiers: None,
             seed: None,
             max_block: None,
             device: Device::default(),
             thinking: true,
+            recover_steps: 0,
+            recover_lr: 1e-4,
+            recover_rank: 16,
         }
     }
 
@@ -194,7 +245,8 @@ impl ModelOptimizer {
     }
 
     /// The budget: the bytes every searched linear would take at one weight
-    /// format (`int8`, the default, or `bf16`, `nf4`, `q4`, ...).
+    /// format (`int8`, `bf16`, `nf4`, `q4`, ...). The default is halfway
+    /// between the two smallest candidates' uniform sizes.
     pub fn budget_like(mut self, format: impl Into<String>) -> Self {
         self.budget = BudgetSpec::Uniform(format.into());
         self
@@ -240,6 +292,25 @@ impl ModelOptimizer {
         self
     }
 
+    /// After the search, distill a LoRA adapter over the base held at the plan
+    /// for `steps` steps, the original model as the teacher (default 0: none).
+    pub fn recover(mut self, steps: u32) -> Self {
+        self.recover_steps = steps;
+        self
+    }
+
+    /// The recovery adapter's learning rate (default 1e-4).
+    pub fn recover_lr(mut self, lr: f32) -> Self {
+        self.recover_lr = lr;
+        self
+    }
+
+    /// The recovery adapter's rank, its alpha equal to it (default 16).
+    pub fn recover_rank(mut self, rank: u32) -> Self {
+        self.recover_rank = rank;
+        self
+    }
+
     /// Whether the chat template renders the reasoning block (default on).
     pub fn thinking(mut self, on: bool) -> Self {
         self.thinking = on;
@@ -279,24 +350,77 @@ impl ModelOptimizer {
         let opts = model::FitOpts { batch_size: ROWS, ..fit_opts(1, block, 0.0, seed) };
 
         let report = (chat.search)(&open, &prepared_dir, &opts, &tiers, self.budget.resolve()?, &mut |p| on_progress(&OptimizerProgress::Search(p))).map_err(|e| Error::Backend(format!("searching: {e}")))?;
-        let mut measure = |label: String, bytes: u64, policy: &model::ops::TierPolicy| -> Result<DeployedLoss> {
-            on_progress(&OptimizerProgress::Deployed { label: label.clone() });
-            let loss = (chat.measure)(&open, &prepared_dir, &opts, policy).map_err(|e| Error::Backend(format!("measuring {label}: {e}")))?;
-            Ok(DeployedLoss { label, bytes, loss })
-        };
         let plan_policy = model::ops::TierPolicy::parse(&report.policy).map_err(Error::Backend)?;
-        let mut deployed = vec![measure("plan".into(), report.plan_bytes, &plan_policy)?, measure("original".into(), report.f32_bytes, &model::ops::TierPolicy::uniform(Dtype::F32))?];
+        let mut measured_on = ON_ENGINE;
+        let mut deployed = Vec::new();
+        let mut plans: Vec<(String, u64, model::ops::TierPolicy)> = vec![("plan".into(), report.plan_bytes, plan_policy.clone()), ("original".into(), report.f32_bytes, model::ops::TierPolicy::uniform(Dtype::F32))];
         for b in &report.baselines {
             let tier = Dtype::from_name(b.tier).ok_or_else(|| Error::Backend(format!("unknown tier {}", b.tier)))?;
-            deployed.push(measure(b.tier.to_string(), b.bytes, &model::ops::TierPolicy::uniform(tier))?);
+            plans.push((b.tier.to_string(), b.bytes, model::ops::TierPolicy::uniform(tier)));
+        }
+        for (label, bytes, policy) in plans {
+            on_progress(&OptimizerProgress::Deployed { label: label.clone() });
+            let served = (chat.served)(&open, &policy, None, &prepared_dir, &opts);
+            if served.is_none() {
+                measured_on = ON_TRAINER;
+            }
+            let loss = served.unwrap_or_else(|| (chat.measure)(&open, &prepared_dir, &opts, &policy, None)).map_err(|e| Error::Backend(format!("measuring {label}: {e}")))?;
+            deployed.push(DeployedLoss { label, bytes, loss });
         }
         let plan_loss = deployed[0].loss;
         let accepted = deployed.iter().filter(|d| report.baselines.iter().any(|b| b.tier == d.label)).all(|d| plan_loss < d.loss);
+        let recovery = if self.recover_steps > 0 { Some(self.distill_recovery(&chat, &open, &prepared_dir, &opts, &plan_policy, &report.policy, &mut on_progress)?) } else { None };
 
         let report_path = out_dir.join(REPORT_FILE);
-        let outcome = ModelOptimizerOutcome { report, deployed, accepted, excluded_tiers, calibration_records: calibration.len(), held_out_records: held_out.len(), seed, report_path: report_path.clone() };
+        let outcome = ModelOptimizerOutcome { report, deployed, accepted, measured_on, recovery, excluded_tiers, calibration_records: calibration.len(), held_out_records: held_out.len(), seed, report_path: report_path.clone() };
         write_report(&report_path, &outcome)?;
         Ok(outcome)
+    }
+}
+
+impl ModelOptimizer {
+    /// Distill the recovery adapter over the base held at `plan`, then measure the plan without and with it on the
+    /// trainer build that trained it.
+    #[allow(clippy::too_many_arguments)]
+    fn distill_recovery(&self, chat: &crate::chat_trainer::ChatEntry, open: &Path, prepared_dir: &Path, opts: &model::FitOpts, plan: &model::ops::TierPolicy, policy: &str, on_progress: &mut impl FnMut(&OptimizerProgress)) -> Result<Recovery> {
+        on_progress(&OptimizerProgress::Teacher);
+        // The teacher reads whole-row logits (`Model::logits_all`), which a model built for one row gives.
+        let one_row = model::FitOpts { batch_size: 1, ..opts.clone() };
+        let examples = (chat.teacher)(open, prepared_dir, &one_row, TEACHER_TOP_K).map_err(|e| Error::Backend(format!("the teacher: {e}")))?;
+        let student = model::FitOpts { batch_size: 1, ..fit_opts(self.recover_steps, opts.block_size, self.recover_lr, opts.seed) };
+        let out_dir = prepared_dir.parent().unwrap_or(prepared_dir);
+        let adapter = out_dir.join(RECOVERY_FILE);
+        let base_id = loader::model_dir::resolve_base(&self.base, loader::model_dir::resolve(self.models_dir.as_deref()).as_deref()).map_err(Error::ModelNotFound)?.2;
+        let card_id = format!("{base_id}:local:recovery:latest");
+        let base_digest = crate::finetune::base_digest(open)?;
+        let provenance = checkpoint::st::TrainingProvenance {
+            code_revision: format!("brain {}", env!("CARGO_PKG_VERSION")),
+            regime: "quantization-recovery distillation".to_string(),
+            seed: student.seed,
+            hyperparams: serde_json::json!({ "rank": self.recover_rank, "steps": self.recover_steps, "lr": self.recover_lr, "top_k": TEACHER_TOP_K, "weight_format": policy, "examples": examples.len() }),
+            environment: gpu_core::backend_name().to_string(),
+            gate: None,
+            trained_from: None,
+            base_digest: Some(base_digest),
+            cycle: 0,
+        };
+        let mut on_step = |s: &model::StepReport| {
+            on_progress(&OptimizerProgress::Recovering { step: s.step, steps: s.steps, loss: s.loss });
+            true
+        };
+        let job = crate::chat_trainer::DistillJob {
+            base: open,
+            lora: model::finetune::LoraRequest { rank: self.recover_rank, alpha: self.recover_rank as f32, continue_from: None, base: plan },
+            opts: &student,
+            examples,
+            adapter: &adapter,
+            lineage: model::finetune::AdapterLineage { card_id: &card_id, base_id: &base_id, dataset_id: None, provenance: Some(provenance) },
+        };
+        (chat.distill)(job, model::FitControl { on_step: Some(&mut on_step), ..Default::default() }).map_err(|e| Error::Backend(format!("recovery: {e}")))?;
+        on_progress(&OptimizerProgress::Deployed { label: "plan with the recovery adapter".into() });
+        let plan_loss = (chat.measure)(open, prepared_dir, opts, plan, None).map_err(|e| Error::Backend(format!("measuring the plan: {e}")))?;
+        let recovered_loss = (chat.measure)(open, prepared_dir, opts, plan, Some((&adapter, self.recover_rank, self.recover_rank as f32))).map_err(|e| Error::Backend(format!("measuring the recovery adapter: {e}")))?;
+        Ok(Recovery { adapter, steps: self.recover_steps, rank: self.recover_rank, plan_loss, recovered_loss })
     }
 }
 

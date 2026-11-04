@@ -24,7 +24,8 @@ brain optimize BASE --dataset FILE --out DIR [options]
                      given.
   --out DIR          where the prepared dataset and optimize.json go.
   --held-out FILE    chat JSONL to measure on; all of --dataset calibrates.
-  --budget FORMAT    the bytes of every linear at one format (default int8).
+  --budget FORMAT    the bytes of every linear at one format (default: halfway
+                     between the two smallest candidates' uniform sizes).
   --bits-per-weight B  mean stored bits per weight, scales included.
   --max-bytes N      bytes over every searched linear.
   --formats LIST     candidate formats, comma separated (default: every
@@ -36,6 +37,11 @@ brain optimize BASE --dataset FILE --out DIR [options]
                      reported).
   --max-block N      the longest record, in tokens.
   --no-thinking      render records without the reasoning block.
+  --recover-steps N  then distill a LoRA adapter over the base held at the
+                     plan for N steps, the original model as the teacher; it
+                     is written to DIR/recovery.safetensors (default 0: none).
+  --recover-lr LR    the recovery adapter's learning rate (default 1e-4).
+  --recover-rank R   the recovery adapter's rank (default 16).
 
 Exit status: 0 when the plan measured better than every uniform format that
 fits its budget (accepted), 3 when it did not, 1 or 2 on an error.
@@ -62,10 +68,13 @@ struct Args {
     seed: Option<u64>,
     max_block: Option<u32>,
     thinking: bool,
+    recover_steps: u32,
+    recover_lr: Option<f32>,
+    recover_rank: Option<u32>,
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
-    let mut a = Args { base: String::new(), dataset: None, out: None, held_out: None, budget: None, formats: None, arch: None, models_dir: None, seed: None, max_block: None, thinking: true };
+    let mut a = Args { base: String::new(), dataset: None, out: None, held_out: None, budget: None, formats: None, arch: None, models_dir: None, seed: None, max_block: None, thinking: true, recover_steps: 0, recover_lr: None, recover_rank: None };
     let mut i = 0;
     let need = |i: &mut usize, flag: &str| -> Result<String, String> {
         *i += 1;
@@ -108,6 +117,18 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 a.max_block = Some(v.parse().map_err(|_| number(&v, "--max-block"))?);
             }
             "--no-thinking" => a.thinking = false,
+            "--recover-steps" => {
+                let v = need(&mut i, "--recover-steps")?;
+                a.recover_steps = v.parse().map_err(|_| number(&v, "--recover-steps"))?;
+            }
+            "--recover-lr" => {
+                let v = need(&mut i, "--recover-lr")?;
+                a.recover_lr = Some(v.parse().map_err(|_| number(&v, "--recover-lr"))?);
+            }
+            "--recover-rank" => {
+                let v = need(&mut i, "--recover-rank")?;
+                a.recover_rank = Some(v.parse().map_err(|_| number(&v, "--recover-rank"))?);
+            }
             "-h" | "--help" => return Err(String::new()),
             other if other.starts_with('-') => return Err(format!("brain optimize: unknown option '{other}'")),
             other if a.base.is_empty() => a.base = other.to_string(),
@@ -153,20 +174,29 @@ fn optimizer(a: &Args) -> brain::ModelOptimizer {
     if let Some(m) = a.max_block {
         o = o.max_block(m);
     }
+    o = o.recover(a.recover_steps);
+    if let Some(lr) = a.recover_lr {
+        o = o.recover_lr(lr);
+    }
+    if let Some(r) = a.recover_rank {
+        o = o.recover_rank(r);
+    }
     o
 }
 
 /// One line on stderr per stage; calibration and estimation only at every tenth of the way, so a long search stays
 /// readable.
 fn report_progress(p: &brain::OptimizerProgress) {
-    use brain::OptimizerProgress::{Deployed, Search};
+    use brain::OptimizerProgress::{Deployed, Recovering, Search, Teacher};
     use brain::OptimizerSearchProgress::{Calibrated, Estimated, Measuring};
     let tenth = |i: usize, of: usize| i == of || i.is_multiple_of(of.div_ceil(10).max(1));
     match p {
         Search(Calibrated { batch, of }) if tenth(*batch, *of) => eprintln!("calibrating: batch {batch}/{of}"),
         Search(Estimated { site, of }) if tenth(*site, *of) => eprintln!("estimating: site {site}/{of}"),
         Search(Measuring { label }) => eprintln!("measuring {label} (simulated weights)"),
-        Deployed { label } => eprintln!("measuring {label} (deployed kernels)"),
+        Deployed { label } => eprintln!("measuring {label} as deployed"),
+        Teacher => eprintln!("recovery: collecting the original model's distributions"),
+        Recovering { step, steps, loss } if tenth(*step as usize, *steps as usize) => eprintln!("recovery: step {step}/{steps}, loss {loss:.4}"),
         _ => {}
     }
 }
@@ -195,6 +225,7 @@ pub fn run_optimize(argv: &[String]) -> ! {
         println!("left out: {} (this device holds it as {})", e.tier, e.held_as);
     }
     println!("budget {} bytes; plan {} bytes ({:.2} bits/weight) of {} at f32", r.budget_bytes, r.plan_bytes, r.bits_per_weight, r.f32_bytes);
+    println!("deployed loss measured on the {}", outcome.measured_on);
     println!("{:<10} {:>14} {:>16} {:>16}", "", "bytes", "simulated loss", "deployed loss");
     for d in &outcome.deployed {
         let simulated = match d.label.as_str() {
@@ -205,6 +236,17 @@ pub fn run_optimize(argv: &[String]) -> ! {
         println!("{:<10} {:>14} {:>16} {:>16.6}", d.label, d.bytes, simulated.map_or("-".to_string(), |l| format!("{l:.6}")), d.loss);
     }
     println!("--weight-format {}", r.policy);
+    if let Some(rec) = &outcome.recovery {
+        println!(
+            "recovery adapter {} ({} steps, rank {}): held-out loss {:.6} -> {:.6} on the trainer build{}",
+            rec.adapter.display(),
+            rec.steps,
+            rec.rank,
+            rec.plan_loss,
+            rec.recovered_loss,
+            if rec.improves() { "" } else { " (no improvement)" }
+        );
+    }
     println!("report: {}", outcome.report_path.display());
     if outcome.accepted {
         println!("accepted: the plan beats every uniform format that fits its budget");
@@ -224,7 +266,8 @@ mod tests {
 
     #[test]
     fn parses_the_documented_options() {
-        let a = parse(&s(&["Qwen/Qwen3-0.6B", "--dataset", "d.jsonl", "--out", "run", "--held-out", "h.jsonl", "--bits-per-weight", "6.5", "--formats", "bf16,int8,nf4", "--seed", "7", "--max-block", "512", "--no-thinking"])).unwrap();
+        let a = parse(&s(&["Qwen/Qwen3-0.6B", "--dataset", "d.jsonl", "--out", "run", "--held-out", "h.jsonl", "--bits-per-weight", "6.5", "--formats", "bf16,int8,nf4", "--seed", "7", "--max-block", "512", "--no-thinking", "--recover-steps", "50", "--recover-lr", "2e-4", "--recover-rank", "8"])).unwrap();
+        assert_eq!((a.recover_steps, a.recover_lr, a.recover_rank), (50, Some(2e-4), Some(8)));
         assert_eq!(a.base, "Qwen/Qwen3-0.6B");
         assert_eq!((a.dataset.as_deref(), a.out.as_deref(), a.held_out.as_deref()), (Some("d.jsonl"), Some("run"), Some("h.jsonl")));
         assert_eq!(a.budget, Some(BudgetArg::Bits(6.5)));

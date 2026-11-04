@@ -23,6 +23,8 @@ use data::preference::EncodedTurn;
 use gpu_core::select::Dtype;
 use model::ops::TierPolicy;
 use modelopt::{Budget, MeasureFit, Progress, Report, SearchFit};
+use rl::fit::{DistillFit, TeacherFit};
+use rl::objective::distill::{DistillConfig, DistillExample};
 use model::finetune::{AdapterLineage, ChatTrainer, LoraRequest, OptimizerState, PreferenceMargins};
 use model::{FitControl, FitOpts, FitReport};
 use rl::fit::DpoFit;
@@ -52,7 +54,24 @@ type FullFn = for<'c> fn(&Path, &Path, &FitOpts, &Path, OptimizerState, FitContr
 type PreferenceFn = for<'j, 'c> fn(PreferenceJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, ResidentMargins)>;
 type MarginsFn = fn(&Path, Option<&Path>, &Path, &[(EncodedTurn, EncodedTurn)], u32) -> Option<PreferenceMargins>;
 type SearchFn = fn(&Path, &Path, &FitOpts, &[Dtype], Budget, &mut dyn FnMut(Progress)) -> std::io::Result<Report>;
-type MeasureFn = fn(&Path, &Path, &FitOpts, &TierPolicy) -> std::io::Result<f64>;
+/// An adapter to apply: its file, rank and alpha.
+pub(crate) type AdapterArg<'a> = Option<(&'a Path, u32, f32)>;
+type MeasureFn = fn(&Path, &Path, &FitOpts, &TierPolicy, AdapterArg<'_>) -> std::io::Result<f64>;
+type ServedFn = fn(&Path, &TierPolicy, Option<&Path>, &Path, &FitOpts) -> Option<std::io::Result<f64>>;
+type TeacherFn = fn(&Path, &Path, &FitOpts, usize) -> std::io::Result<Vec<DistillExample>>;
+type DistillFn = for<'j, 'c> fn(DistillJob<'j>, FitControl<'c>) -> std::io::Result<FitReport>;
+
+/// One distillation of a LoRA adapter over a frozen base held at `lora.base`.
+pub(crate) struct DistillJob<'a> {
+    pub base: &'a Path,
+    pub lora: LoraRequest<'a>,
+    /// Rows of one example each, `block_size` the longest example.
+    pub opts: &'a FitOpts,
+    pub examples: Vec<DistillExample>,
+    /// Where the trained adapter is written (unless the run is interrupted).
+    pub adapter: &'a Path,
+    pub lineage: AdapterLineage<'a>,
+}
 
 /// What the SDK's full-parameter and preference fine-tuners need of one
 /// architecture, resolved once per table row.
@@ -72,8 +91,15 @@ pub(crate) struct ChatEntry {
     pub served_weights: &'static [Dtype],
     /// The weight precision search over the trainable build of a base, on a prepared dataset.
     pub search: SearchFn,
-    /// The held-out loss of a base built with its linears at a tier policy, on the deployed kernels.
+    /// The held-out loss of a base built with its linears at a tier policy, on the deployed kernels, with an
+    /// adapter applied when one is given.
     pub measure: MeasureFn,
+    /// The held-out loss of a base at a tier policy through the family's serving engine, where it has one.
+    pub served: ServedFn,
+    /// The top-K distributions the base (fp32, trainable build) gives a prepared dataset's train split.
+    pub teacher: TeacherFn,
+    /// A LoRA adapter distilled from teacher examples over a frozen base at a tier policy.
+    pub distill: DistillFn,
 }
 
 impl ChatEntry {
@@ -90,6 +116,9 @@ impl ChatEntry {
             served_weights: T::SERVED_WEIGHTS,
             search: search::<T>,
             measure: measure::<T>,
+            served: T::served_loss,
+            teacher: teacher::<T>,
+            distill: distill::<T>,
         }
     }
 }
@@ -118,9 +147,28 @@ fn search<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, tiers: &[Dtyp
 
 /// The base built as a LoRA trainer over a frozen base at `tiers`: the family's
 /// own per-leaf build on its deployed kernels. A fresh adapter is a zero delta,
-/// so the loss measured is the base's at those tiers.
-fn measure<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, tiers: &TierPolicy) -> std::io::Result<f64> {
+/// so the loss measured is the base's at those tiers; `adapter` continues a
+/// trained one instead, so the loss is the base's with it.
+fn measure<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, tiers: &TierPolicy, adapter: AdapterArg<'_>) -> std::io::Result<f64> {
     let mut fit = MeasureFit { dir, opts, loss: None };
-    T::train_lora(base, &LoraRequest { rank: 1, alpha: 1.0, continue_from: None, base: tiers }, opts, &mut fit)?;
+    let (continue_from, rank, alpha) = adapter.map_or((None, 1, 1.0), |(path, rank, alpha)| (Some(path), rank, alpha));
+    T::train_lora(base, &LoraRequest { rank, alpha, continue_from, base: tiers }, opts, &mut fit)?;
     fit.loss.ok_or_else(|| std::io::Error::other("the measurement did not run"))
+}
+
+/// The teacher is the base itself, built trainable in fp32 (the build every
+/// family offers); no step is taken, so its optimizer state stays on the host.
+fn teacher<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, k: usize) -> std::io::Result<Vec<DistillExample>> {
+    let mut fit = TeacherFit { dir, opts, k, examples: Vec::new() };
+    T::train_full(base, opts, OptimizerState::HostOffload, &mut fit)?;
+    Ok(fit.examples)
+}
+
+fn distill<T: ChatTrainer>(job: DistillJob<'_>, control: FitControl<'_>) -> std::io::Result<FitReport> {
+    let mut fit = DistillFit::new(DistillConfig { seq_len: job.opts.block_size as usize }, job.examples, job.opts, control);
+    let (report, trained) = T::train_lora(job.base, &job.lora, job.opts, &mut fit)?;
+    if !report.interrupted {
+        T::save_adapter(&trained, job.adapter, &job.lineage).map_err(|e| std::io::Error::new(e.kind(), format!("{}: saving the adapter: {e}", job.adapter.display())))?;
+    }
+    Ok(report)
 }
