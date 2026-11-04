@@ -202,7 +202,7 @@ fn a_reopened_learner_serves_what_was_promoted_rather_than_the_base() {
 
     let promoted = {
         let mut learner: ModelLearner<'_, qwen3::model::Qwen, QwenBpe> =
-            ModelLearner::new(&base, &work, &tok, cfg(), fit_opts(), rollout.clone(), RANK, ALPHA).expect("learner");
+            ModelLearner::new(&base, &work, &tok, cfg(), fit_opts(), rollout, RANK, ALPHA).expect("learner");
         let owned = rows();
         let row_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
         learner.train(&row_refs, 7);
@@ -237,7 +237,7 @@ fn the_same_rows_at_the_same_seed_train_the_same_adapter() {
 
     let once = {
         let mut l: ModelLearner<'_, qwen3::model::Qwen, QwenBpe> =
-            ModelLearner::new(&base, &dir.join("work-a"), &tok, cfg(), fit_opts(), rollout.clone(), RANK, ALPHA).expect("learner");
+            ModelLearner::new(&base, &dir.join("work-a"), &tok, cfg(), fit_opts(), rollout, RANK, ALPHA).expect("learner");
         l.train(&row_refs, 13)
     };
     let twice = {

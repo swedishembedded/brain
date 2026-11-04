@@ -147,7 +147,7 @@ impl LoraArch for Flux2 {
         let base = modelgrad::init_model::<f32>(&c, seed);
         let trainer = match encoding {
             Dtype::F32 => DeviceTrainer::with_gpu(Gpu::new_cpu(flux2::devgrad::KERNELS), c.clone(), 4, &base),
-            Dtype::I8 => DeviceTrainer::build(&TrainerSpec { card: None, cards: 1, base: BasePrecision::Int8 }, c.clone(), 4, &base).unwrap_or_else(|e| panic!("{e}")),
+            Dtype::I8 => DeviceTrainer::build(&TrainerSpec { card: None, cards: 1, base: BasePrecision::Int8, attention: flux2::devgrad::AttentionPath::Gemm }, c.clone(), 4, &base).unwrap_or_else(|e| panic!("{e}")),
             other => panic!("flux2 trains over an f32 or int8 base, not {other:?}"),
         };
         let x0 = noise(seed ^ 1, c.n_gen() * c.in_channels);

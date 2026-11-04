@@ -117,7 +117,7 @@ fn distillation_lowers_its_kl<M: Model>(b: &Build<M>) {
     // The teacher is the student's own base, so the gap to close is the sharpening
     // of its distribution (see `teacher_example`).
     let teacher = (b.make)(1, SEED);
-    let vocab = ModelConfig::vocab(student.config()) as u32;
+    let vocab = ModelConfig::vocab(student.config());
     let prompt = [1u32, 2, 3];
     let completion: Vec<u32> = (0..4).map(|i| (7 * i + 5) % vocab).collect();
     let examples = vec![teacher_example(&teacher, &prompt, &completion, 8)];
@@ -155,7 +155,7 @@ fn grpo_trains_only_adapters<M: Model>(b: &Build<M>) {
 fn dpo_widens_its_margin<M: Model>(b: &Build<M>) {
     let what = format!("{} {:?} dpo", b.arch, b.encoding);
     let policy = (b.make)(2, SEED);
-    let vocab = ModelConfig::vocab(policy.config()) as u32;
+    let vocab = ModelConfig::vocab(policy.config());
     let all = vec![true; T];
     let chosen: Vec<u32> = (0..T as u32).map(|i| (i * 5 + 1) % vocab).collect();
     let rejected: Vec<u32> = (0..T as u32).map(|i| (i * 3 + 2) % vocab).collect();
