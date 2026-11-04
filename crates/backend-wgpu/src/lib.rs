@@ -183,48 +183,8 @@ pub fn adapter_desc() -> Option<AdapterDesc> {
 /// the two enumerations.
 #[cfg(not(target_arch = "wasm32"))]
 fn adapter_identity(adapter: &wgpu::Adapter, ordinal: usize) -> backend_api::GpuIdentity {
-    use ash::vk;
     let info = adapter.get_info();
-    let (mut uuid, mut pci_bus, mut vram_bytes) = (None, None, 0u64);
-    if info.backend == wgpu::Backend::Vulkan {
-        // SAFETY: the guard is only dereferenced, never destroyed; the raw
-        // handles are used for read-only property queries.
-        if let Some(hal) = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() } {
-            let instance = hal.shared_instance().raw_instance();
-            let pd = hal.raw_physical_device();
-            unsafe {
-                let mut idp = vk::PhysicalDeviceIDProperties::default();
-                let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut idp);
-                instance.get_physical_device_properties2(pd, &mut p2);
-                uuid = (idp.device_uuid != [0u8; 16]).then_some(idp.device_uuid);
-                let has_pci = instance
-                    .enumerate_device_extension_properties(pd)
-                    .map(|exts| {
-                        exts.iter().any(|e| {
-                            std::ffi::CStr::from_ptr(e.extension_name.as_ptr())
-                                == ash::ext::pci_bus_info::NAME
-                        })
-                    })
-                    .unwrap_or(false);
-                if has_pci {
-                    let mut pci = vk::PhysicalDevicePCIBusInfoPropertiesEXT::default();
-                    let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut pci);
-                    instance.get_physical_device_properties2(pd, &mut p2);
-                    pci_bus = Some(format!(
-                        "{:04x}:{:02x}:{:02x}.{:x}",
-                        pci.pci_domain, pci.pci_bus, pci.pci_device, pci.pci_function
-                    ));
-                }
-                let mem = instance.get_physical_device_memory_properties(pd);
-                vram_bytes = mem.memory_heaps[..mem.memory_heap_count as usize]
-                    .iter()
-                    .filter(|h| h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
-                    .map(|h| h.size)
-                    .max()
-                    .unwrap_or(0);
-            }
-        }
-    }
+    let (uuid, pci_bus, vram_bytes) = vulkan_identity(adapter).unwrap_or((None, None, 0));
     backend_api::GpuIdentity {
         name: info.name.clone(),
         vendor_id: info.vendor,
@@ -239,6 +199,62 @@ fn adapter_identity(adapter: &wgpu::Adapter, ordinal: usize) -> backend_api::Gpu
             _ => backend_api::DeviceClass::IntegratedGpu,
         },
     }
+}
+
+/// The device UUID, PCI bus id and largest device-local heap of a
+/// Vulkan-backed adapter, read off its raw `VkPhysicalDevice`; `None` for any
+/// other adapter.
+#[cfg(all(not(target_arch = "wasm32"), not(target_vendor = "apple")))]
+fn vulkan_identity(adapter: &wgpu::Adapter) -> Option<(Option<[u8; 16]>, Option<String>, u64)> {
+    use ash::vk;
+    if adapter.get_info().backend != wgpu::Backend::Vulkan {
+        return None;
+    }
+    // SAFETY: the guard is only dereferenced, never destroyed; the raw
+    // handles are used for read-only property queries.
+    let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }?;
+    let instance = hal.shared_instance().raw_instance();
+    let pd = hal.raw_physical_device();
+    // SAFETY: read-only property queries on a live physical device.
+    unsafe {
+        let mut idp = vk::PhysicalDeviceIDProperties::default();
+        let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut idp);
+        instance.get_physical_device_properties2(pd, &mut p2);
+        let uuid = (idp.device_uuid != [0u8; 16]).then_some(idp.device_uuid);
+        let has_pci = instance
+            .enumerate_device_extension_properties(pd)
+            .map(|exts| {
+                exts.iter().any(|e| {
+                    std::ffi::CStr::from_ptr(e.extension_name.as_ptr())
+                        == ash::ext::pci_bus_info::NAME
+                })
+            })
+            .unwrap_or(false);
+        let pci_bus = has_pci.then(|| {
+            let mut pci = vk::PhysicalDevicePCIBusInfoPropertiesEXT::default();
+            let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut pci);
+            instance.get_physical_device_properties2(pd, &mut p2);
+            format!(
+                "{:04x}:{:02x}:{:02x}.{:x}",
+                pci.pci_domain, pci.pci_bus, pci.pci_device, pci.pci_function
+            )
+        });
+        let mem = instance.get_physical_device_memory_properties(pd);
+        let vram_bytes = mem.memory_heaps[..mem.memory_heap_count as usize]
+            .iter()
+            .filter(|h| h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+            .map(|h| h.size)
+            .max()
+            .unwrap_or(0);
+        Some((uuid, pci_bus, vram_bytes))
+    }
+}
+
+/// wgpu has no Vulkan backend on Apple systems (Metal is theirs), so no
+/// adapter there carries a `VkPhysicalDevice` to read.
+#[cfg(all(not(target_arch = "wasm32"), target_vendor = "apple"))]
+fn vulkan_identity(_adapter: &wgpu::Adapter) -> Option<(Option<[u8; 16]>, Option<String>, u64)> {
+    None
 }
 
 /// The physical-GPU adapter list this backend selects cards from: real GPUs
