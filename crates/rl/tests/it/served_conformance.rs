@@ -148,6 +148,24 @@ fn qwen3_serves_what_it_trains() {
     });
 }
 
+/// The Qwen2/Llama config variant the registry serves with this crate:
+/// attention biases and no QK-norm. The biases are drawn large enough that a
+/// path dropping them would move the loss past the comparison's tolerance.
+#[test]
+fn qwen2_variant_serves_what_it_trains() {
+    let cfg = qwen3::QwenConfig { block_size: SEQ as u32, qk_norm: false, attn_bias: true, ..qwen3::QwenConfig::tiny_i8() };
+    served_matches_the_trainer::<qwen3::finetune::Qwen3Trainer>(cfg.vocab, |path| {
+        let mut init = loud_mlp(qwen3::init_weights(&cfg, data::rng::random_seed()));
+        let mut biases = 0;
+        for (_, b) in init.iter_mut().filter(|(n, _)| n.ends_with(".bias")) {
+            b.iter_mut().for_each(|v| *v *= 50.0);
+            biases += 1;
+        }
+        assert!(biases > 0, "the variant carries attention biases");
+        qwen3::Qwen::new(cfg.clone(), 1, SEQ as u32, &init).save(path.to_str().unwrap());
+    });
+}
+
 #[test]
 fn qwen35_serves_what_it_trains() {
     let cfg = qwen35::config::Qwen35Config { block_size: SEQ as u32, ..qwen35::config::Qwen35Config::tiny_i8() };
