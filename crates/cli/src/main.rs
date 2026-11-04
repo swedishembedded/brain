@@ -49,6 +49,7 @@ mod pid_cli;
 mod placement;
 mod plan_cli;
 mod pull_cli;
+mod optimize_cli;
 mod quantize_cli;
 mod qwen35_cli;
 mod qwen35moe_cli;
@@ -548,6 +549,14 @@ QUANTIZE (the export sibling: any checkpoint -> a quantized GGUF)
       GGUF. Needs no per-architecture code: a tensor is quantized if it is
       rank 2 with a block-aligned row, unless --keep names it. --plan prints
       the per-tensor decision and writes nothing.
+
+OPTIMIZE (the weight format of every linear, searched within a byte budget)
+  brain optimize BASE --dataset FILE --out DIR [--budget FORMAT | --bits-per-weight B | --max-bytes N]
+      Rank every linear and candidate format by its estimated loss increase
+      on the dataset, solve for the formats that fit the budget, and accept
+      the plan only if it measures better on held-out records, on the
+      deployed kernels, than every uniform format that fits. Prints the
+      --weight-format policy; `brain optimize --help` for every option.
 
 OTHER
   brain gradcheck                          # finite-difference backprop check (GPT2)
