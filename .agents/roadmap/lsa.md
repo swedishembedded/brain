@@ -120,8 +120,18 @@ head layout; clustering, selection and the sparse read are written once.
       2.14 -> 0.0006 on a learnable teacher, recovering its temperature.
 - [ ] D-LSA on the generic trainer (`ModelFit`) and device kernels for the
       distillation arithmetic, which is host math today.
-- [ ] N-LSA: sparse attention backward (selection inverted per key group, no
-      atomics) and its gradient check with the selection held fixed.
+- [x] N-LSA training (`Qwen::enable_native_lsa`): every layer's queries read
+      only their selection, built each forward from the layer's own rotated
+      queries and keys (identity index space, no learned projection), held
+      fixed while gradients flow exactly through the selected entries; the
+      mask is added to the materialised scores before the softmax and the
+      backward's recompute reuses it. `long_range: false` is the
+      window-only baseline. Gate: at a full budget a training step's loss
+      equals dense and its gradients agree to 1e-8 (largest 2.8e-2);
+      window-only changes them.
+- [ ] N-LSA with a sub-quadratic training kernel (the selection inverted per
+      key group for dK/dV, no atomics); training today runs materialised
+      `[b, heads, t, t]` attention under the mask.
 - [ ] Tree search (node-bucket levels and beam descent) after flat accuracy
       is proven at long context.
 - [ ] Quantized index storage (bf16 centroids, fp8 tree nodes) gated on
