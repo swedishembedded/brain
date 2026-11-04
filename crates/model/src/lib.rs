@@ -73,6 +73,7 @@ pub mod kquant;
 pub mod logitscale;
 pub mod logprobs;
 pub mod lora;
+pub mod lsa;
 pub mod lossw;
 pub mod lut4;
 pub mod moe;

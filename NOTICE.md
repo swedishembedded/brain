@@ -168,3 +168,24 @@ https://github.com/karpathy/nanoGPT
     this is a defensive/courtesy credit, not a translation attribution.
 
   (MIT permission text as reproduced above under llama.cpp/ggml applies.)
+
+================================================================================
+Latent Sparse Attention reference implementation -- Apache License 2.0
+Copyright (c) 2026 the Latent Sparse Attention authors (the repository names no other holder)
+https://github.com/Prefrontal-AI/latent-sparse-attention
+
+  - crates/model/src/lsa/ward.rs, crates/model/src/lsa/select.rs: the Ward
+    merge round (every live bucket's cheapest allowed partner, mutual pairs
+    merging into the lower member, the cheapest-first cut in the round that
+    reaches the bucket count, ties to the lower index) and the read order
+    (top-p buckets best first with ties to the lower bucket, expansion that
+    skips sink and window keys and cuts the last bucket short, then the
+    window, then the sinks) follow src/lsa/core/ward.py and
+    src/lsa/core/reference.py (pinned at commit
+    97b82d695b74ca341965a16bbc2a951c8b0c567a). The method is Kubicek et al.,
+    "Latent Sparse Attention: Towards Subquadratic Ultra-Long Context
+    Attention", arXiv:2610.42147. brain's Rust is an independent
+    implementation, gated against that reference's own output by
+    tools/goldens/lsa_dump_reference.py.
+
+  (Apache-2.0 text: see LICENSE.)

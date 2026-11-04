@@ -60,6 +60,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`lfm2`](lfm2.md) | lfm2 | LFM2.5-Encoder (`crates/lfm2`). |
 | [`licensing-audit`](licensing-audit.md) | Licensing & copyright provenance audit - 2026-09-03 | Code and weight provenance audit of the workspace. |
 | [`llava`](llava.md) | llava | LLaVA-1.5-13B (`crates/llava`). |
+| [`lsa`](lsa.md) | lsa | Latent sparse attention - the semantic key index, selection-driven sparse attention over the paged KV cache, and their training (`model::lsa`, `model::paged_sparse`). |
 | [`ltxv`](ltxv.md) | ltxv | LTX-2.5 video+audio diffusion and its Gemma-4 text encoder (`crates/ltxv`, `gemma4`). |
 | [`minicpmv`](minicpmv.md) | minicpmv | MiniCPM-V 4.6 (`crates/minicpmv`). |
 | [`minimaxh3-pipeline-glue-audit`](minimaxh3-pipeline-glue-audit.md) | MiniMax-H3: audit of the pipeline glue around the DiT | Audit of the MiniMax-H3 pipeline glue around the DiT. |
