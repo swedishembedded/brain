@@ -158,6 +158,26 @@ pub fn weights_bf16_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
         .sum()
 }
 
+/// The device bytes of `cfg`'s weights with each linear and the head at the tier `tiers` names for it
+/// (packed words plus int8's group scales); embeddings and norms stay fp32.
+pub fn weights_bytes_at(cfg: &qwen3::config::QwenConfig, tiers: &model::ops::TierPolicy) -> u64 {
+    use gpu_core::select::Dtype;
+    cfg.param_list()
+        .into_iter()
+        .map(|(name, elems)| {
+            let elems = elems as u64;
+            if !(qwen3::q8::Q8::is_i8_linear(&name) || name == cfg.head_weight()) {
+                return elems * 4;
+            }
+            match tiers.want(&name) {
+                Dtype::I8 => elems + (elems / 32) * 4,
+                Dtype::BF16 | Dtype::F16 => elems * 2,
+                _ => elems * 4,
+            }
+        })
+        .sum()
+}
+
 pub fn weights_int8_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
     cfg.param_list()
         .into_iter()
@@ -531,6 +551,9 @@ pub struct QwenServeConfig {
     /// `--weight-format bf16`: the linears and the head are stored as bf16 and decoded inline (rounded to
     /// bf16, exact for a checkpoint that ships bf16; half the fp32 bytes). Takes precedence over `weights_int8`.
     pub weights_bf16: bool,
+    /// A per-leaf `--weight-format` (`f32,blocks.0.mlp.up.weight=i8,...`, what `brain optimize` prints): each
+    /// linear and the head at the tier it names. Takes precedence over `weights_int8`/`weights_bf16`.
+    pub weight_tiers: Option<model::ops::TierPolicy>,
     /// `the prefill row cap N`, clamped to `1..=512`, default 512.
     pub max_prefill_cap: u32,
     /// `the KV pool size N`: the KV pool's size in tokens, shared by every
@@ -574,7 +597,7 @@ pub struct QwenServeConfig {
 pub const QWEN3_POLICY: model::policy::PolicySupport = model::policy::PolicySupport {
     model: "qwen3",
     weights: &[gpu_core::select::Dtype::F32, gpu_core::select::Dtype::BF16, gpu_core::select::Dtype::I8],
-    weight_rules: false,
+    weight_rules: true,
     kv_cache: &["f32", "int8", "fp8"],
     gemm: true,
     fuse_norm: true,
@@ -597,6 +620,7 @@ impl QwenServeConfig {
         }
         if let Some(w) = &p.weights {
             use gpu_core::select::Dtype;
+            self.weight_tiers = (w.rule_count() > 0).then(|| w.clone());
             let (int8, bf16) = match w.default_dtype() {
                 Dtype::I8 => (Some(true), false),
                 Dtype::BF16 => (None, true),
@@ -637,7 +661,7 @@ impl QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None }
+        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, weight_tiers: None, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None }
     }
 }
 
@@ -858,6 +882,8 @@ pub struct QwenResident {
     kv_offload_bytes: u64,
     weights_int8_requested: bool,
     weights_bf16_requested: bool,
+    /// A per-leaf weight policy, which the engine is built at instead of one tier.
+    weight_tiers: Option<model::ops::TierPolicy>,
     max_prefill_cap: u32,
     kv_tokens: Option<u32>,
     card_budget_bytes: Option<u64>,
@@ -962,6 +988,7 @@ impl QwenResident {
             kv_offload_bytes: (cfg.kv_offload_gb.max(0.0) * (1u64 << 30) as f64) as u64,
             weights_int8_requested,
             weights_bf16_requested: cfg.weights_bf16,
+            weight_tiers: cfg.weight_tiers.clone(),
             max_prefill_cap: cfg.max_prefill_cap.clamp(1, 512),
             kv_tokens,
             card_budget_bytes: cfg.card_budget_bytes.or(cfg.auto_budget_bytes),
@@ -1184,7 +1211,9 @@ impl QwenResident {
     /// `decoder_param_list` builds the engine from), so the estimate and `activate()`
     /// cannot disagree about which tensors are quantized.
     fn weight_bytes(&self, cfg: &qwen3::config::QwenConfig) -> u64 {
-        if self.weights_bf16_requested {
+        if let Some(tiers) = &self.weight_tiers {
+            weights_bytes_at(cfg, tiers)
+        } else if self.weights_bf16_requested {
             weights_bf16_bytes(cfg)
         } else if self.weights_int8_requested {
             weights_int8_bytes(cfg)
@@ -1446,7 +1475,13 @@ impl ResidentModel for QwenResident {
             } else {
                 qwen3::Dtype::F32
             };
-            let mut eng = qwen3::serve::Engine::from_source_tier(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier);
+            let mut eng = match &self.weight_tiers {
+                Some(tiers) => {
+                    qwen3::serve::Engine::check_tiers(&cfg, tiers).map_err(|e| format!("qwen: --weight-format {}: {e}", tiers.describe()))?;
+                    qwen3::serve::Engine::from_source_tiers(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tiers)
+                }
+                None => qwen3::serve::Engine::from_source_tier(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier),
+            };
             if self.kv_fp8_requested {
                 if kv_int8 {
                     eng.set_kv_fp8().map_err(|e| format!("qwen: --kv-cache fp8: {e}"))?;
@@ -1640,6 +1675,28 @@ mod tests {
         let e = cfg.apply_policy(&p).unwrap_err();
         assert!(e.contains("qwen3") && e.contains("f32, int8, fp8"), "{e}");
         assert_eq!(cfg.refused.as_deref(), Some(e.as_str()));
+    }
+
+    /// A per-leaf `--weight-format` (what `brain optimize` prints) is taken whole, sized leaf by leaf, and a
+    /// rule naming a tier the engine cannot serve is refused by name.
+    #[test]
+    fn a_per_leaf_weight_format_is_served_leaf_by_leaf() {
+        use gpu_core::select::Dtype;
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--weight-format", "f32,attn.=int8,mlp.down.weight=bf16").unwrap();
+        let mut cfg = QwenServeConfig::default();
+        cfg.apply_policy(&p).unwrap();
+        let tiers = cfg.weight_tiers.clone().expect("a per-leaf policy is kept whole");
+        assert_eq!((tiers.want("blocks.3.attn.wo.weight"), tiers.want("blocks.3.mlp.down.weight"), tiers.want("blocks.3.mlp.up.weight")), (Dtype::I8, Dtype::BF16, Dtype::F32));
+
+        let shape = qwen3::QwenConfig::qwen3_0_6b();
+        let bytes = weights_bytes_at(&shape, &tiers);
+        assert!(weights_int8_bytes(&shape) < bytes && bytes < weights_fp32_bytes(&shape) * 10 / 13, "between all-int8 and fp32: {bytes}");
+
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--weight-format", "f32,mlp.=nf4").unwrap();
+        let e = QwenServeConfig::default().apply_policy(&p).unwrap_err();
+        assert!(e.contains("qwen3") && e.contains("nf4"), "{e}");
     }
 
     /// `--checkpoint` naming a Hugging Face repo directory serves the

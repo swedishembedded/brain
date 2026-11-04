@@ -22,7 +22,7 @@ use gpu_core::provider::library::{self, GemmPrecision, LibraryGemmProvider};
 use gpu_core::{DeviceBuffer, DeviceCaps, DeviceClass, Gpu, Step};
 use model::block::{self, KernelIds};
 use model::dispatch::I8Scratch;
-use model::ops::{Ops, Weight};
+use model::ops::{Ops, TierPolicy, Weight};
 use model::kv_offload::{HostKvPool, KvOffload, KvOffloadError, OffloadStats};
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, PrefixCache, BASE_KV_NAMESPACE};
 use paramstore::ParamStore;
@@ -1166,13 +1166,13 @@ impl Engine {
     /// half fp32's memory - a 7B decoder in about 14 GB - and compute in fp32.
     #[allow(clippy::too_many_arguments)]
     pub fn from_map_tier(cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
-        Self::build(Gpu::new(pipelines()), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
+        Self::build(Gpu::new(pipelines()), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, &TierPolicy::uniform(tier))
     }
 
     /// [`Self::from_map_tier`] on `parent`'s device.
     #[allow(clippy::too_many_arguments)]
     pub fn from_map_tier_on(parent: &Gpu, cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
-        Self::build(parent.new_like(pipelines()), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
+        Self::build(parent.new_like(pipelines()), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, &TierPolicy::uniform(tier))
     }
 
     /// [`Self::from_map_tier`] reading each tensor from a checkpoint source as it uploads, so a model is
@@ -1181,26 +1181,67 @@ impl Engine {
     /// source is read one tensor at a time.
     #[allow(clippy::too_many_arguments)]
     pub fn from_source_tier(cfg: QwenConfig, src: &dyn checkpoint::TensorSource, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
-        Self::build(Gpu::new(pipelines()), cfg, src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
+        Self::build(Gpu::new(pipelines()), cfg, src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, &TierPolicy::uniform(tier))
     }
 
     /// [`Self::from_source_tier`] on `parent`'s device.
     #[allow(clippy::too_many_arguments)]
     pub fn from_source_tier_on(parent: &Gpu, cfg: QwenConfig, src: &dyn checkpoint::TensorSource, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
-        Self::build(parent.new_like(pipelines()), cfg, src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
+        Self::build(parent.new_like(pipelines()), cfg, src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, &TierPolicy::uniform(tier))
+    }
+
+    /// [`Self::from_source_tiers_on`] on a fresh device.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_source_tiers(cfg: QwenConfig, src: &dyn checkpoint::TensorSource, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tiers: &TierPolicy) -> Engine {
+        Self::build(Gpu::new(pipelines()), cfg, src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tiers)
+    }
+
+    /// [`Self::from_source_tier_on`] with each linear (and the head) stored at the tier `tiers` names for
+    /// it: a per-leaf `--weight-format` such as a searched plan. Each fused group (Q/K/V, gate/up) must
+    /// take one tier, the half tiers cannot be mixed with each other, and int8 falls back to fp32 where
+    /// the device has no packed-int8 path, said out loud ([`Self::check_tiers`] holds the rules).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_source_tiers_on(parent: &Gpu, cfg: QwenConfig, src: &dyn checkpoint::TensorSource, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tiers: &TierPolicy) -> Engine {
+        Self::build(parent.new_like(pipelines()), cfg, src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tiers)
+    }
+
+    /// Whether this engine can hold `tiers`: every tier it names is a serving tier (F32, I8, BF16,
+    /// F16), bf16 and f16 are not both used (one inline-decode kernel set is built), and the tensors
+    /// fused into one GEMM ([`model::Model::coupled_tensors`]) take one tier. A refusal names the rule.
+    pub fn check_tiers(cfg: &QwenConfig, tiers: &TierPolicy) -> Result<(), String> {
+        if let Some(bad) = tiers.dtypes().find(|t| !matches!(t, Dtype::F32 | Dtype::I8 | Dtype::BF16 | Dtype::F16)) {
+            return Err(format!("{bad:?} weights are not a serving tier (F32, I8, BF16, F16)"));
+        }
+        if tiers.dtypes().any(|t| t == Dtype::BF16) && tiers.dtypes().any(|t| t == Dtype::F16) {
+            return Err("bf16 and f16 linears cannot be served together; hold the half-precision linears at one of them".into());
+        }
+        for l in 0..cfg.n_layers {
+            for group in [&["attn.wq.weight", "attn.wk.weight", "attn.wv.weight"][..], &["mlp.gate.weight", "mlp.up.weight"][..]] {
+                let names: Vec<String> = group.iter().map(|leaf| format!("blocks.{l}.{leaf}")).collect();
+                let first = tiers.want(&names[0]);
+                if let Some(other) = names.iter().find(|n| tiers.want(n) != first) {
+                    return Err(format!("{} and {other} are one fused GEMM, so they take one tier ({:?} and {:?} asked)", names[0], first, tiers.want(other)));
+                }
+            }
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     fn from_map_with_gpu(gpu: Gpu, cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
         let tier = if weights_int8 { Dtype::I8 } else { Dtype::F32 };
-        Self::build(gpu, cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
+        Self::build(gpu, cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, &TierPolicy::uniform(tier))
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build(gpu: Gpu, cfg: QwenConfig, weights: &dyn checkpoint::TensorSource, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
-        assert!(matches!(tier, Dtype::F32 | Dtype::I8 | Dtype::BF16 | Dtype::F16), "serve: {tier:?} weights are not a serving tier (F32, I8, BF16, F16)");
-        let weights_int8 = tier == Dtype::I8;
-        let half = HALF_TIERS.contains(&tier);
+    fn build(gpu: Gpu, cfg: QwenConfig, weights: &dyn checkpoint::TensorSource, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tiers: &TierPolicy) -> Engine {
+        if let Err(e) = Self::check_tiers(&cfg, tiers) {
+            panic!("serve: {e}");
+        }
+        let weights_int8 = tiers.dtypes().any(|t| t == Dtype::I8);
+        // The one half tier the policy uses, if any (`check_tiers` refuses both).
+        let half_tier = tiers.dtypes().find(|t| HALF_TIERS.contains(t));
+        let half = half_tier.is_some();
         // Int8 weights are capability-driven, never assumed: the request only
         // takes effect where the packed-dot GEMM executes (the selector's
         // PackedInt8 gate). Elsewhere - the CPU JIT - fp32 weights stay, and
@@ -1223,12 +1264,18 @@ impl Engine {
         }
         // The half tiers decode inline in the GEMM (`#w=bf16`/`#w=f16`), which
         // every backend runs; they need only the kernels [`pipelines`] adds.
-        let half_gemm = half.then(|| {
+        let half_gemm = half_tier.map(|tier| {
             let tag = if tier == Dtype::BF16 { "bf16" } else { "f16" };
             let id = |name: &str| gpu.kernel_index(&format!("{name}#w={tag}")).unwrap_or_else(|| panic!("serve: {name}#w={tag} is not registered; build a half-tier engine with Engine::from_map_tier"));
             HalfGemm { plain: id("matmul"), gemv: id("matmul_gemv"), tiled: id("matmul_reg3") }
         });
-        // The linears live in the packed bank when it is on.
+        // The tier a linear is held at: what the policy asks, with int8 falling back to fp32 (said
+        // above) where the packed-dot GEMM does not execute.
+        let leaf_tier = |name: &str| match tiers.want(name) {
+            Dtype::I8 if !w8_on => Dtype::F32,
+            t => t,
+        };
+        // The linears live in the packed bank when any of them is held narrower than fp32.
         let packed = w8_on || half;
         // The 7 per-layer linears live in the int8 bank when it is on - loading
         // them into the fp32 ParamStore as well would keep both copies resident
@@ -1412,7 +1459,6 @@ impl Engine {
         // SAME kind of seam `Ops::matmul` does instead of hand-checking a
         // private `HashMap` before falling back to a second, separate
         // selector field.
-        let want = if half { tier } else if weights_int8 { Dtype::I8 } else { Dtype::F32 };
         // Host staging for the tiled uploads: one tile at a time, whatever the tensor size.
         let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(64 << 20, 0));
         let ops = Ops::new(gpu.new_like(ops_kernel_list())).unwrap_or_else(|e| panic!("serve: Ops::new: {e}"));
@@ -1437,7 +1483,7 @@ impl Engine {
                 let name = format!("blocks.{l}.{leaf}");
                 let (wn, wk) = dims(leaf);
                 let w = if packed {
-                    model::ops::upload_from_source(&ops, weights, &name, wn, wk, want, &staging).unwrap_or_else(|| panic!("serve: missing weight {name}"))
+                    model::ops::upload_from_source(&ops, weights, &name, wn, wk, leaf_tier(&name), &staging).unwrap_or_else(|| panic!("serve: missing weight {name}"))
                 } else {
                     Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
                 };
@@ -1461,7 +1507,8 @@ impl Engine {
             let fused_weight = |leaves: &[&str], n_total: usize| -> Weight {
                 let names: Vec<String> = leaves.iter().map(|leaf| format!("blocks.{l}.{leaf}")).collect();
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                model::ops::upload_fused_from_source(&ops, weights, &names, n_total, dm, want, &staging).unwrap_or_else(|e| panic!("serve: {e}"))
+                // `check_tiers` holds every part of a fused group at one tier.
+                model::ops::upload_fused_from_source(&ops, weights, &names, n_total, dm, leaf_tier(names[0]), &staging).unwrap_or_else(|e| panic!("serve: {e}"))
             };
             lin_weights.insert(format!("blocks.{l}.{WQKV}"), fused_weight(&["attn.wq.weight", "attn.wk.weight", "attn.wv.weight"], hqm + 2 * hkvm));
             lin_weights.insert(format!("blocks.{l}.{WGATEUP}"), fused_weight(&["mlp.gate.weight", "mlp.up.weight"], 2 * ffm));
@@ -1473,14 +1520,16 @@ impl Engine {
         // for the `F32` tier either; `Weight::upload` always uploads it
         // fresh, exactly the cost the old `head_dev = gpu.storage_init(...)`
         // this replaces already paid.
-        lin_weights.insert(head_name, model::ops::upload_from_source(&ops, weights, head_src, cfg.vocab as usize, cfg.d_model as usize, want, &staging).expect("head weight"));
+        let head_tier = leaf_tier(&head_name);
+        lin_weights.insert(head_name, model::ops::upload_from_source(&ops, weights, head_src, cfg.vocab as usize, cfg.d_model as usize, head_tier, &staging).expect("head weight"));
         if half {
             // A half weight is bound whole: two bytes a value.
-            if let Some((name, w)) = lin_weights.iter().find(|(_, w)| w.n() as u64 * w.k() as u64 * 2 > gpu.max_storage_binding_bytes()) {
-                panic!("serve: {name} ({} x {}) does not fit one storage binding at {tier:?}", w.n(), w.k());
+            if let Some((name, w)) = lin_weights.iter().find(|(_, w)| HALF_TIERS.contains(&w.dtype()) && w.n() as u64 * w.k() as u64 * 2 > gpu.max_storage_binding_bytes()) {
+                panic!("serve: {name} ({} x {}) does not fit one storage binding at {:?}", w.n(), w.k(), w.dtype());
             }
         }
-        let tier = if half { tier } else if w8_on { Dtype::I8 } else { Dtype::F32 };
+        // The tier reported for the engine: the one most leaves take, after the int8 fallback.
+        let tier = leaf_tier("");
         gpu_core::profile::stage_time("qwen engine build: per-layer linear weight quantize+upload", stage_t0);
         let stage_t0 = std::time::Instant::now();
         // Int8 activation-quantization scratch (`model::dispatch::I8Scratch`,
@@ -1520,7 +1569,7 @@ impl Engine {
         // are unreachable from an all-I8 engine, see `Self::linear`) and the
         // device actually built a split-K scratch buffer at all.
         let tuned_splitk = match (&splitk_part, splitk_cap) {
-            (Some(part), Some(cap)) if !w8_on => Self::tune_splitk(&gpu, &lin_weights, part, cap, b as u32),
+            (Some(part), Some(cap)) if lin_weights.values().any(|w| w.dtype() == Dtype::F32) => Self::tune_splitk(&gpu, &lin_weights, part, cap, b as u32),
             _ => HashMap::new(),
         };
         gpu_core::profile::stage_time("qwen engine build: tune_splitk (fp32 split-k autotune sweep)", stage_t0);
@@ -2341,6 +2390,7 @@ impl Engine {
     /// lin_weights`'s tier, never a separate on/off flag inspected here.
     /// `x` must already be quantized (`Self::quant_once`) when `w` is `I8`.
     fn linear(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, out: &DeviceBuffer, rows: u32) {
+        let bf16 = w.dtype() == Dtype::BF16;
         match w {
             Weight::F32 { w, n, k } => {
                 // Rows from `library_min_rows` up (batched decode and prefill) on TF32 tensor cores; fewer
@@ -2360,7 +2410,7 @@ impl Engine {
                 // rounded to bf16 for the product, fp32 accumulation); fewer rows stream the weight through
                 // the inline-decode GEMV below.
                 let whole = |buf| library::Operand { buf, range: (0, 0) };
-                if matches!(self.tier, Dtype::BF16) && rows >= self.library_min_rows && self.gemm.forward(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
+                if bf16 && rows >= self.library_min_rows && self.gemm.forward(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
                     return;
                 }
                 // Same kernels, same selection as the fp32 path, with the
@@ -2619,8 +2669,15 @@ impl Engine {
     /// qk_norm_rope`'s fused pair).
     ///
     /// `keep_fp32` forces the unfused pair on an int8 engine: a per-row
-    /// adapter correction `A.x` reads the fp32 activation, which the fused
-    /// kernel never writes.
+    /// adapter correction `A.x`, or a linear held at another tier on a mixed
+    /// engine ([`Self::reads_int8`]), reads the fp32 activation, which the
+    /// fused kernel never writes.
+    /// Whether the linear `name` reads the int8-packed activation rather than
+    /// the fp32 one: an `I8` weight, on any engine.
+    fn reads_int8(&self, name: &str) -> bool {
+        self.lin_weights.get(name).is_some_and(|w| w.dtype() == Dtype::I8)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn rms_quant(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, d: u32, rows: u32, keep_fp32: bool) {
         match &self.i8_scratch {
@@ -2868,7 +2925,7 @@ impl Engine {
             // q/k/v). Falls back to the unfused `rms` + `Self::quant_once`
             // pair (a no-op on an all-fp32 engine) otherwise.
             if !ln1_done {
-                self.rms_quant(&mut s, &sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b, lora && self.lora_reads(&[LoraSite::Wq, LoraSite::Wk, LoraSite::Wv]));
+                self.rms_quant(&mut s, &sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b, !self.reads_int8(&p(WQKV)) || (lora && self.lora_reads(&[LoraSite::Wq, LoraSite::Wk, LoraSite::Wv])));
             }
             // M4.1: one fused GEMM (`wq;wk;wv` concatenated at weight-load
             // time - see `from_map_with_gpu`) instead of three, then
@@ -3055,7 +3112,7 @@ impl Engine {
             if !add_rms(&mut s, &sc.res[l], &sc.proj, w(&p("ln2.weight")), &sc.xmid, &sc.xn2, true) {
                 s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
                 // M4.3: same fusion as ln1 above, for `sc.xn2` -> gate/up.
-                self.rms_quant(&mut s, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b, lora && self.lora_reads(&[LoraSite::Gate, LoraSite::Up]));
+                self.rms_quant(&mut s, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b, !self.reads_int8(&p(WGATEUP)) || (lora && self.lora_reads(&[LoraSite::Gate, LoraSite::Up])));
             }
             // M4.1: one fused GEMM (`gate;up` concatenated at weight-load
             // time) instead of two, `concat_split` narrowing its `[b, 2*ff]`
@@ -4995,6 +5052,53 @@ mod tests {
         // And the engine still decodes end-to-end on the int8 path.
         let out = eng8.generate_greedy(&[prompt], 8, None);
         assert_eq!(out[0].len(), 8, "int8 engine must produce the requested tokens");
+    }
+
+    /// A per-leaf policy (a searched `--weight-format`) holds every linear at
+    /// its own tier and still computes the model: the hidden state of a mixed
+    /// engine tracks the fp32 one. Both directions are covered, int8 attention
+    /// beside a bf16 MLP and fp32 attention beside an int8 MLP; the second is
+    /// the one where a norm feeding an fp32 GEMM must keep its fp32 output on
+    /// an engine that also quantizes activations. A policy splitting a fused
+    /// GEMM is refused by name.
+    #[test]
+    fn mixed_tiers_serve_each_linear_at_its_own_tier() {
+        let cfg = QwenConfig::tiny_i8();
+        let map = tiny_weights(&cfg);
+        let prompt = vec![1u32, 5, 3, 9, 2, 7];
+        let hidden = |tiers: &TierPolicy| {
+            let mut eng = Engine::build(gpu_core::testgpu::dev(pipelines()), cfg.clone(), &map, 4, 64, 2, 8, 32, false, tiers);
+            let mut t = BlockTable::new();
+            let h = eng.prefill(&mut t, &prompt);
+            assert_eq!(eng.generate_greedy(std::slice::from_ref(&prompt), 4, None)[0].len(), 4, "a mixed engine decodes");
+            (eng, h)
+        };
+        let (_, reference) = hidden(&TierPolicy::uniform(Dtype::F32));
+        let rel = |h: &[f32]| {
+            let err: f32 = h.iter().zip(&reference).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
+            err / reference.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12)
+        };
+        let int8 = gpu_core::testgpu::dev(pipelines()).caps().numeric.int8_dot;
+        let i8_or_f32 = if int8 { Dtype::I8 } else { Dtype::F32 };
+        for (label, tiers, attn, mlp) in [
+            ("int8 attention, bf16 mlp", TierPolicy::uniform(Dtype::F32).with(&["attn."], Dtype::I8).with(&["mlp."], Dtype::BF16), i8_or_f32, Dtype::BF16),
+            ("fp32 attention, int8 mlp", TierPolicy::uniform(Dtype::F32).with(&["mlp."], Dtype::I8), Dtype::F32, i8_or_f32),
+        ] {
+            let (eng, h) = hidden(&tiers);
+            for l in 0..cfg.n_layers {
+                for (leaf, want) in [(WQKV, attn), ("attn.wo.weight", attn), (WGATEUP, mlp), ("mlp.down.weight", mlp)] {
+                    assert_eq!(eng.lin_weights[&format!("blocks.{l}.{leaf}")].dtype(), want, "{label}: blocks.{l}.{leaf}");
+                }
+            }
+            assert_eq!(eng.lin_weights[cfg.head_weight()].dtype(), Dtype::F32, "{label}: the head keeps the default tier");
+            let r = rel(&h);
+            // The quantized linears move the hidden state by about 1e-3 here; a linear reading a norm output
+            // the fused int8 kernel never wrote moves it by several percent.
+            assert!(r < 0.01, "{label}: hidden state diverged from fp32: relative L2 {r:.5}");
+        }
+        let split = TierPolicy::uniform(Dtype::F32).with(&["blocks.0.attn.wq.weight"], Dtype::I8);
+        let err = Engine::check_tiers(&cfg, &split).expect_err("a split fused group is refused");
+        assert!(err.contains("blocks.0.attn.wq.weight") && err.contains("fused"), "{err}");
     }
 
     /// A request too long for the engine must be REJECTED, not crash the process

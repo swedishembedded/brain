@@ -359,8 +359,8 @@ impl PolicySupport {
             if !self.weight_rules && w.rule_count() > 0 {
                 return Err(format!("{}: per-leaf weight rules are not supported (--weight-format {}); give one format of {}", self.model, w.describe(), names(self.weights)));
             }
-            if !self.weights.contains(&w.default_dtype()) {
-                return Err(format!("{}: weight format {} is not supported; supported: {}", self.model, pretty(w.default_dtype()), names(self.weights)));
+            if let Some(bad) = w.dtypes().find(|t| !self.weights.contains(t)) {
+                return Err(format!("{}: weight format {} is not supported; supported: {}", self.model, pretty(bad), names(self.weights)));
             }
         }
         if let Some(t) = policy.kv_cache {
@@ -634,6 +634,12 @@ mod tests {
         let mut p = ServePolicy::default();
         p.set("--weight-format", "int8,up=f32").unwrap();
         assert!(LLM.check(&p).unwrap_err().contains("per-leaf"));
+
+        // A rule's tier is checked like the default's, on a model that honours rules.
+        let mut p = ServePolicy::default();
+        p.set("--weight-format", "int8,up=nf4").unwrap();
+        let e = PolicySupport { weight_rules: true, ..LLM }.check(&p).unwrap_err();
+        assert!(e.contains("nf4") && e.contains("f32, bf16, int8"), "{e}");
 
         let mut p = ServePolicy::default();
         p.switch("no-fuse-norm").unwrap();
