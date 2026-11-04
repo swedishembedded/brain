@@ -59,6 +59,8 @@ pub enum Progress {
     Calibrated { batch: usize, of: usize },
     /// The codec errors of site `site` (1-based) of `of` are estimated.
     Estimated { site: usize, of: usize },
+    /// Distinct product shape `shape` (1-based) of `of` is timed at every candidate tier.
+    Timed { shape: usize, of: usize },
     /// A plan (`"plan"`, `"original"`, a uniform tier's name) is about to be measured on the held-out batches.
     Measuring { label: String },
 }
@@ -70,6 +72,28 @@ pub struct SearchRequest<'a, 'b> {
     pub budget: Budget,
     pub calibration: &'a [Batch<'b>],
     pub held_out: &'a [Batch<'b>],
+    /// Time every site's product on the device, and optionally limit the plan by it.
+    pub timing: Option<Timing<'a>>,
+}
+
+/// Seconds of one `rows x k` by `n x k` product at a tier on the target device.
+pub type Timer<'a> = &'a dyn Fn(u32, usize, usize, Dtype) -> Result<f64, String>;
+
+/// How the search times the sites and what it limits.
+pub struct Timing<'a> {
+    /// The rows of the timed product: 1 is single-stream decode, where a
+    /// narrower weight streams fewer bytes and its decode cost shows.
+    pub rows: u32,
+    pub limit: Option<LatencyLimit>,
+    pub time: Timer<'a>,
+}
+
+/// The latency a plan may take, summed over its sites' products.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LatencyLimit {
+    Seconds(f64),
+    /// No slower than every site at one tier.
+    Uniform(Dtype),
 }
 
 /// One site of the chosen plan.
@@ -82,6 +106,8 @@ pub struct SiteReport {
     pub elements: usize,
     pub tier: &'static str,
     pub bytes: u64,
+    /// The measured seconds of the site's product at its tier, when timed.
+    pub seconds: Option<f64>,
     /// The estimated loss increase at the chosen tier.
     pub estimated_error: f64,
 }
@@ -91,6 +117,7 @@ pub struct SiteReport {
 pub struct Baseline {
     pub tier: &'static str,
     pub bytes: u64,
+    pub seconds: Option<f64>,
     pub loss: f64,
 }
 
@@ -104,6 +131,12 @@ pub struct Report {
     pub sites: Vec<SiteReport>,
     pub budget_bytes: u64,
     pub plan_bytes: u64,
+    /// The summed product seconds of the plan, of the searched linears at f32,
+    /// and the limit, when the search timed the sites.
+    pub plan_seconds: Option<f64>,
+    pub f32_seconds: Option<f64>,
+    pub latency_limit_seconds: Option<f64>,
+    pub timed_rows: Option<u32>,
     /// The searched linears at f32, for scale.
     pub f32_bytes: u64,
     pub bits_per_weight: f64,
@@ -149,8 +182,25 @@ pub fn search_weights<M: Model>(m: &M, req: &SearchRequest, on_progress: &mut dy
     }
     let sites = sites(m)?;
     let budget_bytes = req.budget.bytes(&sites, req.tiers)?;
-    let table = sensitivity(m, &sites, req.tiers, req.calibration, on_progress)?;
-    let plan = assign(&table, budget_bytes)?;
+    let mut table = sensitivity(m, &sites, req.tiers, req.calibration, on_progress)?;
+    let site_seconds = match &req.timing {
+        Some(t) => Some(time_sites(&sites, req.tiers, t, on_progress)?),
+        None => None,
+    };
+    if let Some(times) = &site_seconds {
+        for (row, times) in table.iter_mut().zip(times) {
+            for c in &mut row.choices {
+                c.seconds = times.iter().find(|(t, _)| *t == c.tier).map_or(0.0, |(_, s)| *s);
+            }
+        }
+    }
+    let seconds_at = |tier: Dtype| -> Option<f64> { site_seconds.as_ref().and_then(|times| times.iter().map(|row| row.iter().find(|(t, _)| *t == tier).map(|(_, s)| *s)).sum()) };
+    let latency_limit_seconds = match req.timing.as_ref().and_then(|t| t.limit) {
+        None => None,
+        Some(LatencyLimit::Seconds(s)) => Some(s),
+        Some(LatencyLimit::Uniform(tier)) => Some(seconds_at(tier).ok_or_else(|| format!("a latency limit like uniform {}: that tier is not a timed candidate", tier.name()))?),
+    };
+    let plan = assign(&table, crate::Limits { bytes: budget_bytes, seconds: latency_limit_seconds })?;
     on_progress(Progress::Measuring { label: "original".into() });
     let original_loss = held_out_loss(m, req.held_out);
     on_progress(Progress::Measuring { label: "plan".into() });
@@ -160,10 +210,11 @@ pub fn search_weights<M: Model>(m: &M, req: &SearchRequest, on_progress: &mut dy
         .tiers
         .iter()
         .filter_map(|&tier| bytes_at(tier).filter(|&b| b <= budget_bytes).map(|bytes| (tier, bytes)))
+        .filter(|&(tier, _)| latency_limit_seconds.is_none_or(|limit| seconds_at(tier).is_some_and(|s| s <= limit)))
         .map(|(tier, bytes)| {
             let uniform: Vec<Assignment> = sites.iter().map(|s| Assignment { site: s.name.clone(), tier }).collect();
             on_progress(Progress::Measuring { label: tier.name().into() });
-            Baseline { tier: tier.name(), bytes, loss: measure_policy(m, &sites, &uniform, req.held_out) }
+            Baseline { tier: tier.name(), bytes, seconds: seconds_at(tier), loss: measure_policy(m, &sites, &uniform, req.held_out) }
         })
         .collect();
     let elements: usize = sites.iter().map(Site::numel).sum();
@@ -180,6 +231,7 @@ pub fn search_weights<M: Model>(m: &M, req: &SearchRequest, on_progress: &mut dy
                 elements: row.site.numel(),
                 tier: a.tier.name(),
                 bytes: chosen.bytes,
+                seconds: site_seconds.is_some().then_some(chosen.seconds),
                 estimated_error: chosen.error,
             }
         })
@@ -189,6 +241,10 @@ pub fn search_weights<M: Model>(m: &M, req: &SearchRequest, on_progress: &mut dy
         sites: site_reports,
         budget_bytes,
         plan_bytes: plan.bytes,
+        plan_seconds: site_seconds.is_some().then_some(plan.seconds),
+        f32_seconds: seconds_at(Dtype::F32),
+        latency_limit_seconds,
+        timed_rows: req.timing.as_ref().map(|t| t.rows),
         f32_bytes: bytes_at(Dtype::F32).unwrap_or(0),
         bits_per_weight: plan.bytes as f64 * 8.0 / elements as f64,
         estimated_error: plan.estimated_error,
@@ -210,4 +266,35 @@ fn same_batch(a: &Batch, b: &Batch) -> bool {
         }
     };
     matches!((tokens(a), tokens(b)), (Some(x), Some(y)) if x == y)
+}
+
+/// Every site's product seconds at every candidate tier its tensors pack,
+/// timed once per distinct shape: a site's tensors that share a contraction
+/// width are one fused product (`rows x k` by the summed `n`), as the engines
+/// that fuse them run it.
+fn time_sites(sites: &[Site], tiers: &[Dtype], timing: &Timing, on_progress: &mut dyn FnMut(Progress)) -> Result<Vec<Vec<(Dtype, f64)>>, String> {
+    let products = |site: &Site| -> Vec<(usize, usize)> {
+        let mut by_k: Vec<(usize, usize)> = Vec::new();
+        for t in &site.tensors {
+            match by_k.iter_mut().find(|(_, k)| *k == t.k) {
+                Some((n, _)) => *n += t.n,
+                None => by_k.push((t.n, t.k)),
+            }
+        }
+        by_k
+    };
+    let mut shapes: Vec<(usize, usize)> = sites.iter().flat_map(products).collect();
+    shapes.sort_unstable();
+    shapes.dedup();
+    let mut timed: std::collections::HashMap<(usize, usize, Dtype), f64> = std::collections::HashMap::new();
+    for (i, &(n, k)) in shapes.iter().enumerate() {
+        for &tier in tiers.iter().filter(|&&t| Weight::packs(t, n, k)) {
+            timed.insert((n, k, tier), (timing.time)(timing.rows, n, k, tier).map_err(|e| format!("timing a {} x {k} product at {}: {e}", n, tier.name()))?);
+        }
+        on_progress(Progress::Timed { shape: i + 1, of: shapes.len() });
+    }
+    Ok(sites
+        .iter()
+        .map(|site| tiers.iter().filter_map(|&tier| products(site).iter().map(|&(n, k)| timed.get(&(n, k, tier)).copied()).sum::<Option<f64>>().map(|s| (tier, s))).collect())
+        .collect())
 }

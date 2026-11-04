@@ -89,6 +89,15 @@ pub struct ModelOptimizer {
     recover_steps: u32,
     recover_lr: f32,
     recover_rank: u32,
+    latency_rows: u32,
+    latency_limit: Option<LatencySpec>,
+}
+
+/// The latency limit as the caller stated it.
+#[derive(Clone, Debug, PartialEq)]
+enum LatencySpec {
+    Like(String),
+    Seconds(f64),
 }
 
 /// The budget as the caller stated it, resolved against the model once its sites are known.
@@ -208,6 +217,8 @@ impl ModelOptimizer {
             recover_steps: 0,
             recover_lr: 1e-4,
             recover_rank: 16,
+            latency_rows: 1,
+            latency_limit: None,
         }
     }
 
@@ -292,6 +303,26 @@ impl ModelOptimizer {
         self
     }
 
+    /// The rows each site's product is timed at on the device (default 1,
+    /// single-stream decode). Every plan's seconds are reported.
+    pub fn latency_rows(mut self, rows: u32) -> Self {
+        self.latency_rows = rows.max(1);
+        self
+    }
+
+    /// Limit the plan's summed product seconds to those of every linear at
+    /// one format (`int8`, `bf16`, ...): no slower than that uniform deployment.
+    pub fn max_latency_like(mut self, format: impl Into<String>) -> Self {
+        self.latency_limit = Some(LatencySpec::Like(format.into()));
+        self
+    }
+
+    /// Limit the plan's summed product seconds.
+    pub fn max_latency_seconds(mut self, seconds: f64) -> Self {
+        self.latency_limit = Some(LatencySpec::Seconds(seconds));
+        self
+    }
+
     /// After the search, distill a LoRA adapter over the base held at the plan
     /// for `steps` steps, the original model as the teacher (default 0: none).
     pub fn recover(mut self, steps: u32) -> Self {
@@ -349,7 +380,19 @@ impl ModelOptimizer {
         crate::full_finetune::plan_before_load(&open, block, &set)?;
         let opts = model::FitOpts { batch_size: ROWS, ..fit_opts(1, block, 0.0, seed) };
 
-        let report = (chat.search)(&open, &prepared_dir, &opts, &tiers, self.budget.resolve()?, &mut |p| on_progress(&OptimizerProgress::Search(p))).map_err(|e| Error::Backend(format!("searching: {e}")))?;
+        let limit = match &self.latency_limit {
+            None => None,
+            Some(LatencySpec::Seconds(s)) if s.is_finite() && *s > 0.0 => Some(modelopt::LatencyLimit::Seconds(*s)),
+            Some(LatencySpec::Seconds(s)) => return Err(Error::Backend(format!("ModelOptimizer: a latency limit must be finite and positive, got {s}"))),
+            Some(LatencySpec::Like(name)) => {
+                let tier = model::policy::parse_weight_format(name).ok().and_then(|p| p.uniform_dtype()).ok_or_else(|| Error::Backend(format!("ModelOptimizer: latency tier {name:?} is not a weight format")))?;
+                Some(modelopt::LatencyLimit::Uniform(tier))
+            }
+        };
+        let timer = DeviceTimer::new();
+        let time = |rows: u32, n: usize, k: usize, tier: Dtype| timer.time(rows, n, k, tier);
+        let timing = modelopt::Timing { rows: self.latency_rows, limit, time: &time };
+        let report = (chat.search)(&open, &prepared_dir, &opts, &tiers, self.budget.resolve()?, Some(timing), &mut |p| on_progress(&OptimizerProgress::Search(p))).map_err(|e| Error::Backend(format!("searching: {e}")))?;
         let plan_policy = model::ops::TierPolicy::parse(&report.policy).map_err(Error::Backend)?;
         let mut measured_on = ON_ENGINE;
         let mut deployed = Vec::new();
@@ -453,6 +496,35 @@ fn candidates(asked: Option<&str>, trainer: model::policy::TrainBases, served: &
             let (kept, widened): (Vec<Dtype>, Vec<Dtype>) = servable.partition(|&&t| t.promote(numeric) == t);
             Ok((kept, widened.into_iter().map(|t| ExcludedTier { tier: t.name(), held_as: t.promote(numeric).name() }).collect()))
         }
+    }
+}
+
+/// Times one product on the device the search runs on, through the ops façade
+/// a model's linears go through ([`model::probe::gemm`]: the selector's
+/// kernel for the tier, the fastest of repeated runs), the device first
+/// brought to its operating point once.
+struct DeviceTimer {
+    ops: std::cell::OnceCell<model::ops::Ops>,
+}
+
+impl DeviceTimer {
+    fn new() -> DeviceTimer {
+        DeviceTimer { ops: std::cell::OnceCell::new() }
+    }
+
+    fn time(&self, rows: u32, n: usize, k: usize, tier: Dtype) -> std::result::Result<f64, String> {
+        let shape = (rows, u32::try_from(n).map_err(|_| "n too large")?, u32::try_from(k).map_err(|_| "k too large")?);
+        let plan = model::probe::Plan { shapes: vec![shape], budget: std::time::Duration::from_millis(250), reps: 16, warmup: std::time::Duration::ZERO };
+        let ops = match self.ops.get() {
+            Some(ops) => ops,
+            None => {
+                let ops = model::ops::Ops::new(gpu_core::Gpu::new(model::ops::training_kernel_list()))?;
+                // Only the operating point matters here, not how the clock ramped to it.
+                let _ramp = model::probe::warm_up(&ops, &model::probe::Plan { warmup: std::time::Duration::from_secs(2), ..plan.clone() });
+                self.ops.get_or_init(|| ops)
+            }
+        };
+        model::probe::gemm(ops, tier, &plan).map(|t| t.best_seconds).map_err(|e| e.to_string())
     }
 }
 

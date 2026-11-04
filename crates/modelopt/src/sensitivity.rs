@@ -17,6 +17,9 @@ use crate::Site;
 pub struct Choice {
     pub tier: Dtype,
     pub bytes: u64,
+    /// The measured seconds of the site's product at this tier, summed over
+    /// its tensors; 0 when the search times nothing.
+    pub seconds: f64,
     pub error: f64,
 }
 
@@ -97,7 +100,7 @@ pub fn sensitivity<M: Model>(m: &M, sites: &[Site], tiers: &[Dtype], calibration
             .filter_map(|(q, &tier)| {
                 let error = per_tensor.iter().map(|e| e[q]).sum::<Option<f64>>()?;
                 let bytes = site.tensors.iter().map(|t| Weight::bytes_for(tier, t.n, t.k)).sum();
-                Some(Choice { tier, bytes, error })
+                Some(Choice { tier, bytes, seconds: 0.0, error })
             })
             .collect();
         choices.sort_by(|a, b| a.bytes.cmp(&b.bytes).then(a.error.total_cmp(&b.error)));

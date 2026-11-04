@@ -115,7 +115,7 @@ fn searched_policy_beats_every_uniform_tier_within_its_budget() {
     let budget = bytes_at(Dtype::Q4) + (bytes_at(Dtype::I8) - bytes_at(Dtype::Q4)) / 2;
     let original = held_out_loss(&m, &held_out);
     let mut progress = Vec::new();
-    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Midway, calibration: &calibration, held_out: &held_out }, &mut |p| progress.push(p)).expect("search");
+    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Midway, calibration: &calibration, held_out: &held_out, timing: None }, &mut |p| progress.push(p)).expect("search");
     let count = |f: fn(&Progress) -> bool| progress.iter().filter(|p| f(p)).count();
     assert_eq!(count(|p| matches!(p, Progress::Calibrated { .. })), calibration.len(), "one event per calibration batch");
     assert_eq!(count(|p| matches!(p, Progress::Estimated { .. })), sites.len(), "one event per site");
@@ -149,6 +149,41 @@ fn a_search_refuses_to_accept_on_the_data_it_ranked_on() {
     let m = qwen3::Qwen::new(cfg.clone(), ROWS, cfg.block_size, &qwen3::init_weights(&cfg, rng.next_u64()));
     let owned = batches(&mut rng, 2, cfg.vocab, cfg.block_size);
     let both = as_batches(&owned);
-    let err = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::BitsPerWeight(8.5), calibration: &both, held_out: &both[1..] }, &mut |_| {}).expect_err("overlapping sets are refused");
+    let err = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::BitsPerWeight(8.5), calibration: &both, held_out: &both[1..], timing: None }, &mut |_| {}).expect_err("overlapping sets are refused");
     assert!(err.contains("held-out"), "{err}");
+}
+
+/// With the sites timed (here by a synthetic device on which nf4 is small but
+/// slow), a latency limit keeps the plan off the slow tier even where its
+/// bytes would fit, every distinct product shape is timed once per tier, and
+/// the report carries the seconds of the plan and of each baseline.
+#[test]
+fn a_latency_limit_keeps_a_slow_tier_out_of_the_plan() {
+    let mut rng = data::rng::Rng::random();
+    let m = trained(&mut rng);
+    let (vocab, seq) = (m.config().vocab, m.config().block_size);
+    let calibration = batches(&mut rng, 2, vocab, seq);
+    let held_out = batches(&mut rng, 4, vocab, seq);
+    let (calibration, held_out) = (as_batches(&calibration), as_batches(&held_out));
+    let calls = std::cell::Cell::new(0usize);
+    let per_element = |tier: Dtype| match tier {
+        Dtype::F32 => 4.0,
+        Dtype::BF16 => 2.0,
+        Dtype::I8 => 1.0,
+        Dtype::Q4 => 0.6,
+        _ => 8.0,
+    };
+    let timer = |rows: u32, n: usize, k: usize, tier: Dtype| -> Result<f64, String> {
+        calls.set(calls.get() + 1);
+        Ok(rows as f64 * n as f64 * k as f64 * per_element(tier) * 1e-9)
+    };
+    let timing = modelopt::Timing { rows: 1, limit: Some(modelopt::LatencyLimit::Uniform(Dtype::I8)), time: &timer };
+    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Midway, calibration: &calibration, held_out: &held_out, timing: Some(timing) }, &mut |_| {}).expect("search");
+    let limit = report.latency_limit_seconds.expect("a latency limit");
+    let plan_seconds = report.plan_seconds.expect("the plan is timed");
+    assert!(plan_seconds <= limit * (1.0 + 1e-9), "plan {plan_seconds} s over its limit {limit} s");
+    assert!(report.sites.iter().all(|s| s.tier != "nf4"), "nf4 is the slow tier: {}", report.policy);
+    assert!(report.baselines.iter().all(|b| b.seconds.is_some_and(|s| s <= limit * (1.0 + 1e-9))), "a baseline fits both limits: {:?}", report.baselines);
+    // tiny_i8 products: fused Q/K/V, wo, fused gate/up, down - four shapes, each at every tier it packs.
+    assert_eq!(calls.get(), 4 * TIERS.len(), "every distinct shape is timed once per tier");
 }

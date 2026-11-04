@@ -79,6 +79,8 @@ fn a_search_reports_a_plan_measured_on_the_deployed_kernels() {
     let beats = outcome.deployed.iter().filter(|d| report.baselines.iter().any(|b| b.tier == d.label)).all(|d| plan < d.loss);
     assert_eq!(outcome.accepted, beats, "accepted is decided by the deployed measurements: {:?}", outcome.deployed);
     assert_eq!(outcome.measured_on, "serving engine", "qwen3 is measured through the engine brain serve runs");
+    assert!(report.plan_seconds.is_some_and(|s| s > 0.0) && report.f32_seconds.is_some(), "every plan is timed on the device: {report:?}");
+    assert!(report.baselines.iter().all(|b| b.seconds.is_some()), "{:?}", report.baselines);
     assert!(outcome.recovery.is_none(), "no recovery unless asked");
     assert!(outcome.deployed.iter().all(|d| d.loss.is_finite()), "{:?}", outcome.deployed);
 
@@ -144,4 +146,23 @@ fn recovery_distills_an_adapter_over_the_base_held_at_the_plan() {
     assert_ne!(rec.plan_loss, rec.recovered_loss, "the trained adapter changes what the base at the plan computes");
     let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&outcome.report_path).unwrap()).unwrap();
     assert_eq!(written["recovery"]["steps"], 6);
+}
+
+#[test]
+fn a_latency_limit_holds_the_plan_to_a_uniform_format_s_speed() {
+    // Uniform int8 meets both limits (its bytes are within bf16's, its time is the limit), so a plan exists on
+    // any device, whichever format that device runs fastest at these small shapes.
+    let model = chat_model_dir_of("optimize-latency", qwen3::QwenConfig::tiny_i8());
+    let dataset = write_dataset(&model, 8);
+    let outcome = ModelOptimizer::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+        .dataset(&dataset)
+        .out_dir(model.join("run"))
+        .budget_like("bf16")
+        .max_latency_like("int8")
+        .run()
+        .expect("the search runs");
+    let r = &outcome.report;
+    let limit = r.latency_limit_seconds.expect("a limit like uniform int8");
+    assert!(r.plan_seconds.is_some_and(|s| s <= limit * (1.0 + 1e-9)), "plan {:?} s over its limit {limit} s", r.plan_seconds);
+    assert!(r.baselines.iter().all(|b| b.seconds.is_some_and(|s| s <= limit * (1.0 + 1e-9))), "{:?}", r.baselines);
 }

@@ -28,6 +28,12 @@ brain optimize BASE --dataset FILE --out DIR [options]
                      between the two smallest candidates' uniform sizes).
   --bits-per-weight B  mean stored bits per weight, scales included.
   --max-bytes N      bytes over every searched linear.
+  --latency-rows N   the rows each linear's product is timed at on the device
+                     (default 1: single-stream decode); every plan's time is
+                     reported.
+  --max-latency-like FORMAT  no slower, summed over the linears' products,
+                     than every linear at FORMAT.
+  --max-latency-ms MS  the linears' summed product time, in milliseconds.
   --formats LIST     candidate formats, comma separated (default: every
                      frozen-base format the architecture's trainer holds that
                      the device holds as itself).
@@ -71,10 +77,19 @@ struct Args {
     recover_steps: u32,
     recover_lr: Option<f32>,
     recover_rank: Option<u32>,
+    latency_rows: Option<u32>,
+    latency: Option<LatencyArg>,
+}
+
+/// How the latency limit was given; at most one form.
+#[derive(Debug, PartialEq)]
+enum LatencyArg {
+    Like(String),
+    Ms(f64),
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
-    let mut a = Args { base: String::new(), dataset: None, out: None, held_out: None, budget: None, formats: None, arch: None, models_dir: None, seed: None, max_block: None, thinking: true, recover_steps: 0, recover_lr: None, recover_rank: None };
+    let mut a = Args { base: String::new(), dataset: None, out: None, held_out: None, budget: None, formats: None, arch: None, models_dir: None, seed: None, max_block: None, thinking: true, recover_steps: 0, recover_lr: None, recover_rank: None, latency_rows: None, latency: None };
     let mut i = 0;
     let need = |i: &mut usize, flag: &str| -> Result<String, String> {
         *i += 1;
@@ -117,6 +132,16 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 a.max_block = Some(v.parse().map_err(|_| number(&v, "--max-block"))?);
             }
             "--no-thinking" => a.thinking = false,
+            "--latency-rows" => {
+                let v = need(&mut i, "--latency-rows")?;
+                a.latency_rows = Some(v.parse().map_err(|_| number(&v, "--latency-rows"))?);
+            }
+            "--max-latency-like" | "--max-latency-ms" if a.latency.is_some() => return Err("brain optimize: give one of --max-latency-like and --max-latency-ms".to_string()),
+            "--max-latency-like" => a.latency = Some(LatencyArg::Like(need(&mut i, "--max-latency-like")?)),
+            "--max-latency-ms" => {
+                let v = need(&mut i, "--max-latency-ms")?;
+                a.latency = Some(LatencyArg::Ms(v.parse().map_err(|_| number(&v, "--max-latency-ms"))?));
+            }
             "--recover-steps" => {
                 let v = need(&mut i, "--recover-steps")?;
                 a.recover_steps = v.parse().map_err(|_| number(&v, "--recover-steps"))?;
@@ -174,6 +199,14 @@ fn optimizer(a: &Args) -> brain::ModelOptimizer {
     if let Some(m) = a.max_block {
         o = o.max_block(m);
     }
+    if let Some(rows) = a.latency_rows {
+        o = o.latency_rows(rows);
+    }
+    o = match &a.latency {
+        Some(LatencyArg::Like(f)) => o.max_latency_like(f.clone()),
+        Some(LatencyArg::Ms(ms)) => o.max_latency_seconds(ms / 1000.0),
+        None => o,
+    };
     o = o.recover(a.recover_steps);
     if let Some(lr) = a.recover_lr {
         o = o.recover_lr(lr);
@@ -188,12 +221,13 @@ fn optimizer(a: &Args) -> brain::ModelOptimizer {
 /// readable.
 fn report_progress(p: &brain::OptimizerProgress) {
     use brain::OptimizerProgress::{Deployed, Recovering, Search, Teacher};
-    use brain::OptimizerSearchProgress::{Calibrated, Estimated, Measuring};
+    use brain::OptimizerSearchProgress::{Calibrated, Estimated, Measuring, Timed};
     let tenth = |i: usize, of: usize| i == of || i.is_multiple_of(of.div_ceil(10).max(1));
     match p {
         Search(Calibrated { batch, of }) if tenth(*batch, *of) => eprintln!("calibrating: batch {batch}/{of}"),
         Search(Estimated { site, of }) if tenth(*site, *of) => eprintln!("estimating: site {site}/{of}"),
         Search(Measuring { label }) => eprintln!("measuring {label} (simulated weights)"),
+        Search(Timed { shape, of }) => eprintln!("timing: shape {shape}/{of}"),
         Deployed { label } => eprintln!("measuring {label} as deployed"),
         Teacher => eprintln!("recovery: collecting the original model's distributions"),
         Recovering { step, steps, loss } if tenth(*step as usize, *steps as usize) => eprintln!("recovery: step {step}/{steps}, loss {loss:.4}"),
@@ -225,15 +259,19 @@ pub fn run_optimize(argv: &[String]) -> ! {
         println!("left out: {} (this device holds it as {})", e.tier, e.held_as);
     }
     println!("budget {} bytes; plan {} bytes ({:.2} bits/weight) of {} at f32", r.budget_bytes, r.plan_bytes, r.bits_per_weight, r.f32_bytes);
+    if let (Some(rows), Some(limit)) = (r.timed_rows, r.latency_limit_seconds) {
+        println!("latency limit {:.3} ms over the linears' products at {rows} row(s)", limit * 1e3);
+    }
     println!("deployed loss measured on the {}", outcome.measured_on);
-    println!("{:<10} {:>14} {:>16} {:>16}", "", "bytes", "simulated loss", "deployed loss");
+    println!("{:<10} {:>14} {:>12} {:>16} {:>16}", "", "bytes", "product ms", "simulated loss", "deployed loss");
+    let ms = |s: Option<f64>| s.map_or("-".to_string(), |s| format!("{:.3}", s * 1e3));
     for d in &outcome.deployed {
-        let simulated = match d.label.as_str() {
-            "plan" => Some(r.plan_loss),
-            "original" => Some(r.original_loss),
-            tier => r.baselines.iter().find(|b| b.tier == tier).map(|b| b.loss),
+        let (simulated, seconds) = match d.label.as_str() {
+            "plan" => (Some(r.plan_loss), r.plan_seconds),
+            "original" => (Some(r.original_loss), r.f32_seconds),
+            tier => r.baselines.iter().find(|b| b.tier == tier).map_or((None, None), |b| (Some(b.loss), b.seconds)),
         };
-        println!("{:<10} {:>14} {:>16} {:>16.6}", d.label, d.bytes, simulated.map_or("-".to_string(), |l| format!("{l:.6}")), d.loss);
+        println!("{:<10} {:>14} {:>12} {:>16} {:>16.6}", d.label, d.bytes, ms(seconds), simulated.map_or("-".to_string(), |l| format!("{l:.6}")), d.loss);
     }
     println!("--weight-format {}", r.policy);
     if let Some(rec) = &outcome.recovery {
@@ -273,6 +311,13 @@ mod tests {
         assert_eq!(a.budget, Some(BudgetArg::Bits(6.5)));
         assert_eq!(a.formats.as_deref(), Some("bf16,int8,nf4"));
         assert_eq!((a.seed, a.max_block, a.thinking), (Some(7), Some(512), false));
+    }
+
+    #[test]
+    fn one_latency_limit_form_at_most() {
+        let a = parse(&s(&["base", "--latency-rows", "8", "--max-latency-like", "int8"])).unwrap();
+        assert_eq!((a.latency_rows, a.latency), (Some(8), Some(LatencyArg::Like("int8".into()))));
+        assert!(parse(&s(&["base", "--max-latency-ms", "2", "--max-latency-like", "int8"])).unwrap_err().contains("one of"));
     }
 
     #[test]
