@@ -226,6 +226,16 @@ pub trait ChatTrainer {
     /// is folded in when given.
     fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>) -> Result<(), String>;
 
+    /// The held-out loss of the base at `base` scored through the family's
+    /// serving engine with each linear at the tier `tiers` names (and
+    /// `adapter` applied when given), over the validation split of the
+    /// prepared dataset at `dir`: what serving the policy computes, kernels and
+    /// activation quantization included. `None` when the family has no engine
+    /// scoring path, so a caller measures on a trainer build instead.
+    fn served_loss(_base: &Path, _tiers: &TierPolicy, _adapter: Option<&Path>, _dir: &Path, _opts: &FitOpts) -> Option<std::io::Result<f64>> {
+        None
+    }
+
     /// Per-pair preference margins of the adapter at `policy` against
     /// `reference` (or the base), `None` when the family does not score
     /// preference pairs.
