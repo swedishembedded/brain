@@ -45,6 +45,8 @@ pub fn random_seed() -> u64 {
         .unwrap_or(0);
     let pid = std::process::id() as u64;
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Only Unix mixes in /dev/urandom below.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut mixed = nanos ^ pid.rotate_left(17) ^ count.wrapping_mul(0x9E37_79B9_7F4A_7C15);
 
     #[cfg(unix)]

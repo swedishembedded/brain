@@ -345,22 +345,10 @@ impl EpisodeDataset {
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            self.file
-                .read_exact_at(buf, offset)
-                .map_err(|e| format!("episode: read at {offset} failed: {e}"))
-        }
-        #[cfg(not(unix))]
-        {
-            // Fallback: positional reads through a fresh seek. `&File` cannot
-            // seek without unix's pread, so clone the handle.
-            use std::io::{Read, Seek, SeekFrom};
-            let mut f = self.file.try_clone().map_err(|e| format!("episode: {e}"))?;
-            f.seek(SeekFrom::Start(offset)).map_err(|e| format!("episode: {e}"))?;
-            f.read_exact(buf).map_err(|e| format!("episode: read at {offset} failed: {e}"))
-        }
+        use checkpoint::pio::PositionedIo;
+        self.file
+            .read_exact_at(buf, offset)
+            .map_err(|e| format!("episode: read at {offset} failed: {e}"))
     }
 
     /// Frame `i` as raw CHW `u8`.

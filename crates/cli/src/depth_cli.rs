@@ -417,6 +417,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 // Live camera path
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "linux")]
 const CAM_HELP: &str = "\
 brain zipdepth --camera - realtime webcam depth (Linux/V4L2, YUYV)
 

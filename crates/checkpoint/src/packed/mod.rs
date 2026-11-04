@@ -11,7 +11,6 @@ pub mod budget;
 pub mod codec;
 mod concat;
 pub mod encoding;
-#[cfg(unix)]
 pub mod convert;
 pub mod file_sink;
 pub mod hfquant;
@@ -26,7 +25,6 @@ mod testfix;
 
 pub use budget::{BoundedWorkspace, BudgetError, Lease, MemoryBudget, Pool, PoolStats};
 pub use codec::{Codec, CodecRegistry, EncodeCtx, Tile, TileBuf};
-#[cfg(unix)]
 pub use convert::{convert_to_file, ConversionReport};
 pub use encoding::{BlockGeometry, Codebook, Element, FloatFormat, Packing, QuantEncoding, ScaleGranularity, ScaleLevel, TensorDescriptor, INT8_SCALE_SUFFIX};
 pub use load::{LoadConfig, LoadOp, LoadPlan, LoadPolicy, LoadReport, LoadRequest, LoadStep, Loader};

@@ -384,8 +384,7 @@ impl MmapSafetensors {
     /// here because the mapping is read-only — dropped pages simply re-fault from the
     /// file on next access.
     pub fn advise_dontneed(&self) {
-        // SAFETY: read-only file mapping ⇒ MADV_DONTNEED loses no data.
-        let _ = unsafe { self.mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
+        crate::pio::drop_mapped_pages(&self.mmap, 0, self.mmap.len());
     }
 
     /// Bytes `bytes` (relative to the tensor's start) of `name`, borrowed from
@@ -409,8 +408,7 @@ impl MmapSafetensors {
         if bytes.start >= bytes.end || bytes.end > m.end - m.start {
             return;
         }
-        // SAFETY: read-only file mapping => MADV_DONTNEED loses no data.
-        let _ = unsafe { self.mmap.unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, self.blob_start + m.start + bytes.start, bytes.end - bytes.start) };
+        crate::pio::drop_mapped_pages(&self.mmap, self.blob_start + m.start + bytes.start, bytes.end - bytes.start);
     }
 
     /// [`Self::advise_dontneed`] for one tensor's byte range only — per-group
@@ -420,8 +418,7 @@ impl MmapSafetensors {
         let Some(m) = self.index.get(name) else { return };
         let start = self.blob_start + m.start;
         let len = m.end - m.start;
-        // SAFETY: read-only file mapping ⇒ MADV_DONTNEED loses no data.
-        let _ = unsafe { self.mmap.unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, len) };
+        crate::pio::drop_mapped_pages(&self.mmap, start, len);
     }
 }
 

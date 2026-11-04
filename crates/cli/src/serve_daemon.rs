@@ -37,17 +37,23 @@
 //! never has to decide what a mid-flight job, a resident weight set or a GPU
 //! allocation should do at a moment nobody asked for.
 
+#[cfg(unix)]
 use std::fs::{File, OpenOptions};
+#[cfg(unix)]
 use std::io::{self, Read, Seek, Write};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 /// How long `--reload` waits for the previous server to exit on `SIGTERM`
 /// before escalating to `SIGKILL`. Generous: a server shutting down may be
 /// finishing an in-flight job and freeing device memory.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[cfg(unix)]
 /// How long `-d` waits for the detached server to report itself listening.
 /// Model scanning and a cold activation happen before the first surface
 /// binds, so this is minutes, not seconds.
@@ -67,7 +73,16 @@ pub fn state_dir(runtime_dir: Option<&Path>) -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir).join("brain");
     }
-    std::env::temp_dir().join(format!("brain-{}", unsafe { libc::getuid() }))
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        std::env::temp_dir().join(format!("brain-{}", unsafe { libc::getuid() }))
+    }
+    // Windows' temp directory is the user's own already.
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join("brain")
+    }
 }
 
 /// The connection record a server publishes in its state directory, one per
@@ -77,21 +92,26 @@ pub fn record_path(state: &Path) -> PathBuf {
     state.join(format!("serve-{}.json", std::process::id()))
 }
 
+#[cfg(unix)]
 /// The `--runtime-dir` value in `brain serve`'s argv, if any.
 pub fn runtime_dir_arg(argv: &[String]) -> Option<PathBuf> {
     argv.iter().position(|a| a == "--runtime-dir").and_then(|i| argv.get(i + 1)).map(PathBuf::from)
 }
 
+#[cfg(unix)]
 pub fn pid_path(state: &Path) -> PathBuf {
     state.join("serve.pid")
 }
+#[cfg(unix)]
 pub fn log_path(state: &Path) -> PathBuf {
     state.join("serve.log")
 }
+#[cfg(unix)]
 pub fn default_ready_path(state: &Path) -> PathBuf {
     state.join("serve.ready")
 }
 
+#[cfg(unix)]
 /// An exclusive claim on "the brain server on this machine", held for as long
 /// as the file stays open. Dropping it (or the process dying, however
 /// abruptly) releases the lock.
@@ -124,6 +144,7 @@ pub struct PidGuard {
     file: File,
 }
 
+#[cfg(unix)]
 impl PidGuard {
     /// Keep the claim for the rest of the process's life.
     ///
@@ -136,6 +157,7 @@ impl PidGuard {
     }
 }
 
+#[cfg(unix)]
 /// The outcome of trying to claim the pidfile.
 pub enum Claim {
     /// The claim is ours.
@@ -144,6 +166,7 @@ pub enum Claim {
     HeldBy(Option<i32>),
 }
 
+#[cfg(unix)]
 /// Try to claim the single-server lock, writing our pid into it on success.
 pub fn claim(path: &Path) -> io::Result<Claim> {
     if let Some(parent) = path.parent() {
@@ -167,6 +190,7 @@ pub fn claim(path: &Path) -> io::Result<Claim> {
     Ok(Claim::Ours(PidGuard { file }))
 }
 
+#[cfg(unix)]
 /// The pid recorded in `path`, if it parses.
 pub fn read_pid(path: &Path) -> Option<i32> {
     let mut s = String::new();
@@ -174,6 +198,7 @@ pub fn read_pid(path: &Path) -> Option<i32> {
     s.trim().parse().ok()
 }
 
+#[cfg(unix)]
 /// Whether `pid` is a live process we may signal.
 ///
 /// `kill(pid, 0)` also succeeds for a ZOMBIE -- a process that has exited but
@@ -186,11 +211,13 @@ pub fn alive(pid: i32) -> bool {
     pid > 0 && unsafe { libc::kill(pid, 0) } == 0
 }
 
+#[cfg(unix)]
 /// The pid of a server currently holding `path`, if any is actually running.
 pub fn running(path: &Path) -> Option<i32> {
     read_pid(path).filter(|p| alive(*p))
 }
 
+#[cfg(unix)]
 /// Stop the server recorded in `path`: `SIGTERM`, then `SIGKILL` if it has not
 /// exited within `timeout`. `Ok(None)` when nothing was running.
 pub fn stop(path: &Path, timeout: Duration) -> io::Result<Option<i32>> {
@@ -215,6 +242,7 @@ pub fn stop(path: &Path, timeout: Duration) -> io::Result<Option<i32>> {
 }
 
 
+#[cfg(unix)]
 /// Handle `brain serve`'s lifecycle flags **before anything probes a device**,
 /// returning the argv the rest of `main` should use.
 ///
@@ -324,6 +352,7 @@ pub fn lifecycle(mut argv: Vec<String>, subcommand: usize) -> Vec<String> {
     argv
 }
 
+#[cfg(unix)]
 /// Detach into the background, returning **only in the daemon**.
 ///
 /// The caller continues exactly as it would have in the foreground; the
@@ -389,6 +418,7 @@ pub fn detach_process(ready: &Path, pid_file: &Path, log: &Path, timeout: Durati
     Ok(())
 }
 
+#[cfg(unix)]
 /// Point stdin at `/dev/null` and stdout/stderr at the log.
 ///
 /// Deliberately no `chdir("/")`: the traditional daemon step would break every
@@ -405,6 +435,7 @@ fn redirect_stdio(log: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 /// Follows a log file, handing whatever has been appended since the last look
 /// to a sink.
 ///
@@ -415,6 +446,7 @@ fn redirect_stdio(log: &Path) -> io::Result<()> {
 /// read as a hung script.
 struct LogTail(Option<File>);
 
+#[cfg(unix)]
 impl LogTail {
     /// Opens `path` positioned at its current end, so only what is written from
     /// now on is echoed; the previous run's log is not this run's progress.
@@ -438,6 +470,7 @@ impl LogTail {
     }
 }
 
+#[cfg(unix)]
 /// Wait for the detached server to record its pid and report itself listening,
 /// echoing its log to stderr meanwhile so the wait shows its work.
 fn wait_ready(ready: &Path, pid_file: &Path, tail: &mut LogTail, timeout: Duration) -> Result<i32, String> {
@@ -471,7 +504,24 @@ fn wait_ready(ready: &Path, pid_file: &Path, tail: &mut LogTail, timeout: Durati
     }
 }
 
-#[cfg(test)]
+/// `serve` with none of the detached-serving flags, unchanged; with one of
+/// them, refused. Detaching (`-d`), `--reload`, `--stop` and `--status` are
+/// built on fork, setsid, flock and signals, which a Unix system has: run
+/// `brain serve` under the system's own service manager here.
+#[cfg(not(unix))]
+pub fn lifecycle(argv: Vec<String>, subcommand: usize) -> Vec<String> {
+    if argv.get(subcommand).map(String::as_str) != Some("serve") {
+        return argv;
+    }
+    let lifecycle_flag = ["-d", "--detach", "--reload", "--stop", "--status"];
+    if let Some(flag) = argv.iter().find(|a| lifecycle_flag.contains(&a.as_str())) {
+        eprintln!("brain serve: {flag} needs a Unix system; run brain serve in the foreground, under a service manager");
+        std::process::exit(2);
+    }
+    argv
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

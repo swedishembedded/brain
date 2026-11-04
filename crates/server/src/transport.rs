@@ -9,6 +9,7 @@
 use crate::{pump_connection, Session};
 use std::io::{self, BufReader};
 use std::net::{TcpListener, ToSocketAddrs};
+#[cfg(unix)]
 use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -96,6 +97,7 @@ impl CloneStream for std::net::TcpStream {
         Ok(Box::new(self.try_clone()?))
     }
 }
+#[cfg(unix)]
 impl CloneStream for std::os::unix::net::UnixStream {
     fn dup(&self) -> io::Result<Box<dyn io::Write + Send>> {
         Ok(Box::new(self.try_clone()?))
@@ -104,6 +106,7 @@ impl CloneStream for std::os::unix::net::UnixStream {
 
 /// Serve the `events::Event` protocol over a Unix domain socket. Removes a stale
 /// socket file at `path` first. Blocks forever (run on its own thread).
+#[cfg(unix)]
 pub fn serve_unix<P: AsRef<std::path::Path>>(
     path: P,
     make: SessionFactory,
@@ -113,6 +116,20 @@ pub fn serve_unix<P: AsRef<std::path::Path>>(
     let _ = std::fs::remove_file(path); // clear a stale socket
     let listener = UnixListener::bind(path)?;
     accept_loop(move || listener.accept().map(|(s, _)| s), make, opts)
+}
+
+/// Refuses: Unix domain sockets are a Unix transport; serve over TCP here.
+///
+/// # Errors
+///
+/// Always (`ErrorKind::Unsupported`).
+#[cfg(not(unix))]
+pub fn serve_unix<P: AsRef<std::path::Path>>(
+    _path: P,
+    _make: SessionFactory,
+    _opts: ServeOpts,
+) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "Unix domain sockets are not available on this system; serve over TCP"))
 }
 
 /// Serve the `events::Event` protocol over TCP. Blocks forever.
@@ -125,7 +142,7 @@ pub fn serve_tcp<A: ToSocketAddrs>(
     accept_loop(move || listener.accept().map(|(s, _)| s), make, opts)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};

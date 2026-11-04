@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
-use std::os::unix::fs::FileExt;
+use crate::pio::PositionedIo;
 use std::path::Path;
 
 use serde_json::Value;

@@ -1841,7 +1841,7 @@ impl MmapGguf {
     /// [`Self::tensor`]'s own [`dequantize`] (e.g. a quantization-exactness
     /// parity test that reimplements a quant format's dequant math from the
     /// GGUF spec, to check this reader's own output rather than trust it -
-    /// `crates/ltxv/tests/gguf_quant_real.rs` is the first such caller).
+    /// `crates/ltxv/tests/it/gguf_quant_real.rs` is the first such caller).
     /// `None` if the name is unknown. Every other public accessor
     /// ([`Self::tensor`], the [`crate::TensorSource`] impl) still goes
     /// through [`dequantize`] unchanged - this is purely an additional read
@@ -1867,8 +1867,7 @@ impl MmapGguf {
         if bytes.start >= bytes.end || bytes.end > nbytes {
             return;
         }
-        // SAFETY: read-only file mapping => MADV_DONTNEED loses no data.
-        let _ = unsafe { self.mmaps[part].unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start + bytes.start, bytes.end - bytes.start) };
+        crate::pio::drop_mapped_pages(&self.mmaps[part], start + bytes.start, bytes.end - bytes.start);
     }
 }
 

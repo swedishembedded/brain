@@ -11,8 +11,6 @@
 //! checks in [`loader::doctor`]; loads no weights, opens no network and
 //! allocates nothing on a card.
 
-use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use loader::doctor::{diagnose, Report, Verdict};
@@ -24,7 +22,10 @@ const USAGE: &str = "usage: brain doctor [--model <vendor>/<repo>] [--models-dir
 /// Bytes a non-privileged writer can still create on the filesystem holding
 /// `path`, or its nearest existing ancestor; `None` when the system will not
 /// say.
+#[cfg(unix)]
 fn free_bytes(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
     let anchor = path.ancestors().find(|a| a.exists())?;
     let c_path = CString::new(anchor.as_os_str().as_bytes()).ok()?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -39,6 +40,12 @@ fn free_bytes(path: &Path) -> Option<u64> {
     // is right for both.
     let bytes = u128::from(stat.f_bavail).saturating_mul(u128::from(stat.f_frsize));
     Some(u64::try_from(bytes).unwrap_or(u64::MAX))
+}
+
+/// Not asked on this system: the report goes without the free disk.
+#[cfg(not(unix))]
+fn free_bytes(_path: &Path) -> Option<u64> {
+    None
 }
 
 fn render(report: &Report) -> String {

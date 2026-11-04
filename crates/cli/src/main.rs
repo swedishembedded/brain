@@ -69,6 +69,8 @@ mod splat_cli;
 mod supply;
 mod tree;
 mod tts_cli;
+/// `brain tts serve`: a Unix domain socket server, so Unix only.
+#[cfg(unix)]
 mod tts_serve;
 mod wan_cli;
 mod wan_report;

@@ -17,6 +17,10 @@ brain-shutdown.workspace = true
 brain-modelref.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+
+
+# The bus and its FD transport: Linux only (see lib.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
 zbus.workspace = true
 tokio.workspace = true
 nix = { version = "0.29", features = ["socket", "mman", "fs", "uio", "ioctl", "poll"] }

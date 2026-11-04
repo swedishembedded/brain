@@ -22,6 +22,9 @@ pub mod gguf_write;
 pub mod quantize;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mmap;
+/// Positioned file I/O and page-cache hints for every supported system.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pio;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod weightio;
 /// Native only: it wraps `gguf::MmapGguf`, which needs `std::fs`/mmap.

@@ -20,7 +20,7 @@
 //! to info@swedishembedded.com.
 
 use model::adapter::kind::{LORA_A, LORA_B};
-use std::os::unix::fs::FileExt;
+use checkpoint::pio::PositionedIo;
 use std::path::Path;
 
 use checkpoint::gguf::GgufValue;

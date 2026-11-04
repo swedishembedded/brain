@@ -299,11 +299,13 @@ impl<D: Fn(&[u32]) -> String> ExternalVerifier<D> {
     /// The reward the command reports for `completion` on `task`.
     pub fn grade(&self, task: &Task, completion: &str) -> Reward {
         use std::io::{Read, Write};
-        use std::os::unix::process::CommandExt;
         let failed = |part: &str| Reward { value: 0.0, parts: BTreeMap::from([(part.to_string(), 1.0)]) };
-        let mut child = match std::process::Command::new(&self.command[0])
+        let mut command = std::process::Command::new(&self.command[0]);
+        // Its own process group, so the deadline ends everything it started.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = match command
             .args(&self.command[1..])
-            .process_group(0)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -312,6 +314,7 @@ impl<D: Fn(&[u32]) -> String> ExternalVerifier<D> {
             Ok(c) => c,
             Err(_) => return failed("verifier_error"),
         };
+        #[cfg(unix)]
         let group = child.id() as i32;
         let input = serde_json::json!({ "task_id": task.id, "answer": task.answer, "completion": completion }).to_string();
         let mut stdin = child.stdin.take().expect("piped");
@@ -337,7 +340,14 @@ impl<D: Fn(&[u32]) -> String> ExternalVerifier<D> {
         // SAFETY: `kill` with a negative pid signals the process group the
         // child leads (`process_group(0)` above); it touches no memory. The
         // group is ours alone, so nothing else is signalled.
-        unsafe { libc::kill(-group, libc::SIGKILL) };
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-group, libc::SIGKILL)
+        };
+        // Elsewhere the command itself is ended; a process it started of its
+        // own is not (Windows has no process group to signal).
+        #[cfg(not(unix))]
+        let _ = child.kill();
         let _ = child.wait();
         let _ = writer.join();
         let out = reader.join().unwrap_or_default();

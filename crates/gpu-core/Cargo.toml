@@ -35,6 +35,10 @@ brain-memauth.workspace = true
 # runtime per `Gpu` instance (registry lookup by name). wasm keeps only the
 # wgpu/WebGPU backend (Cranelift/ash can't target the browser).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Linux CPU affinity for `--device cpu<N>`, and `_exit` for `hard_exit` on
+# every native system (Linux, macOS, Windows' CRT). Pure Rust bindings; no
+# bindgen/libclang in the build path, already present via cranelift-jit / wgpu-hal.
+libc.workspace = true
 brain-backend-wgpu.workspace = true
 brain-backend-cpu.workspace = true
 brain-backend-vulkan.workspace = true
@@ -52,10 +56,6 @@ brain-kernels-cuda.workspace = true
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 brain-backend-wgpu.workspace = true
 
-# Linux CPU affinity for `--device cpu<N>` (pure Rust; no bindgen/libclang in the
-# build path, and already transitively present via cranelift-jit / wgpu-hal).
-[target.'cfg(target_os = "linux")'.dependencies]
-libc.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

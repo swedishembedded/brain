@@ -20,7 +20,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::FileExt;
+use checkpoint::pio::PositionedIo;
 use std::path::Path;
 
 use paramstore::precision::StateFormat;

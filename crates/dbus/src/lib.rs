@@ -29,10 +29,37 @@
 //! - [`stream`] — the `Subscribe`/`StreamTranscribe` SEQPACKET frame protocol.
 //! - `serve` — wires a Tokio runtime + a zbus connection + the executor together.
 
+// D-Bus, its FD transport (memfd, DMA heaps, SEQPACKET) and the service are
+// Linux only. Elsewhere the options still exist, so callers compile
+// unchanged, and `serve` and `client::plan_blocking` refuse with a message
+// that says so.
+#[cfg(target_os = "linux")]
 pub mod client;
+#[cfg(target_os = "linux")]
 pub mod fd;
+#[cfg(target_os = "linux")]
 pub mod service;
+#[cfg(target_os = "linux")]
 pub mod stream;
+
+/// Why the D-Bus surface is not there on this system.
+#[cfg(not(target_os = "linux"))]
+pub const UNSUPPORTED: &str = "the D-Bus surface (brain serve --dbus, brain plan) is available on Linux only";
+
+/// The client of a running `brain serve --dbus`; Linux only.
+#[cfg(not(target_os = "linux"))]
+pub mod client {
+    use super::DbusOpts;
+
+    /// Refuses: there is no D-Bus surface on this system.
+    ///
+    /// # Errors
+    ///
+    /// Always.
+    pub fn plan_blocking(_opts: &DbusOpts, _model: &str, _action: &str, _params: &str) -> Result<String, String> {
+        Err(super::UNSUPPORTED.to_string())
+    }
+}
 
 use residency::Executor;
 
@@ -123,6 +150,7 @@ impl ServeOpts {
 /// well-known name, and serves the [`service::Manager`] at [`OBJECT_PATH`]. The
 /// executor owns the residency manager + scheduler worker (inference runs there,
 /// off the bus threads). Blocks the calling thread for the lifetime of the service.
+#[cfg(target_os = "linux")]
 pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyhow::Result<()> {
     let shutdown = serve_opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
     let ServeOpts { supplier, ready, deadlines, .. } = serve_opts;
@@ -181,4 +209,14 @@ pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyho
         conn.graceful_shutdown().await;
         Ok::<(), anyhow::Error>(())
     })
+}
+
+/// Refuses: the D-Bus surface is Linux only.
+///
+/// # Errors
+///
+/// Always.
+#[cfg(not(target_os = "linux"))]
+pub fn serve(_executor: Executor, _opts: DbusOpts, _serve_opts: ServeOpts) -> anyhow::Result<()> {
+    anyhow::bail!(UNSUPPORTED)
 }

@@ -48,7 +48,13 @@ pub fn run_tts(args: &[String]) {
         Some("clone") => clone(&args[1..]),
         Some("synth") | Some("infer") => synth(&args[1..]),
         Some("design") => design(&args[1..]),
+        #[cfg(unix)]
         Some("serve") => crate::tts_serve::run_serve(&args[1..]),
+        #[cfg(not(unix))]
+        Some("serve") => {
+            eprintln!("brain tts serve: it serves on a Unix domain socket, which this system does not have");
+            std::process::exit(2);
+        }
         Some("sim") => sim(&args[1..]),
         Some("finetune") => finetune(&args[1..]),
         // Any other verb is forwarded to the GENERIC capability dispatcher,

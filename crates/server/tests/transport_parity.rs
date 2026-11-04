@@ -5,6 +5,8 @@
 //! frames** whether driven over the in-process stdio pump or over a Unix socket.
 //! This is the guarantee that makes the transport swappable under a client.
 
+#![cfg(unix)]
+
 use fcbench::RandomWalk;
 use forecast::{ForecastSpec, Panel, Representation, Variate};
 use server::{pump_connection, serve_unix, ControllerSession, ServeOpts};
