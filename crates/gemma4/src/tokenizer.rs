@@ -10,27 +10,19 @@
 //! file. [`extract_tokenizer_json_bytes`] recovers those bytes from
 //! [`checkpoint::safetensors::StTensor`]'s already-decoded `f32` form
 //! (`U8` bytes decode losslessly to `f32`, see `checkpoint::safetensors`'s
-//! own `parse`); [`load_tokenizer`] feeds them straight to
-//! [`data::qwen_tokenizer::QwenBpe::from_json_bytes`].
+//! own `parse`); [`load_tokenizer`] parses them with
+//! [`data::llama_bpe::LlamaBpe`].
 //!
-//! **No new tokenizer implementation was needed.** Per this repo's own
-//! "check for reuse first" ethos (`kernels.md` §F.3 for kernels, the same
-//! discipline applied here to non-kernel code), `crates/data` already ships
-//! two `tokenizer.json`-compatible readers: [`data::qwen_tokenizer::
-//! QwenBpe`] (byte-level BPE) and `data::unigram` (SentencePiece unigram,
-//! for the umT5/T5/ALBERT/XLNet family). Range-fetching the real
-//! `tokenizer_json` tensor this session (see this crate's roadmap entry for
-//! the fetch recipe) and parsing it confirmed Gemma-4's tokenizer IS a
-//! `QwenBpe`-compatible byte-level BPE, not a unigram model:
-//! `model.type == "BPE"`, `model.vocab` has exactly 262144 entries (matching
-//! [`crate::config::Gemma4Config::gemma4_12b`]'s `vocab_size` exactly), and
-//! it round-trips `encode`/`decode` bit-for-bit on ordinary text. No fields
-//! [`data::qwen_tokenizer::QwenBpe::from_json_bytes`] cannot already parse
-//! were found - this module is a thin extraction + reuse, not a partial or
-//! fragile new parser.
+//! Gemma-4's tokenizer is SentencePiece-style BPE, the scheme `LlamaBpe`
+//! implements, not byte-level BPE: the normalizer replaces every space with
+//! `▁`, the initial symbols are characters, and a character the vocabulary
+//! lacks falls back to its UTF-8 bytes as `<0xNN>` pieces
+//! (`model.byte_fallback`). Read as byte-level BPE, a space maps to a symbol
+//! the vocabulary does not hold and is dropped, so every prompt reaches the
+//! encoder with its words run together.
 
 use checkpoint::safetensors::StTensor;
-use data::qwen_tokenizer::QwenBpe;
+use data::llama_bpe::LlamaBpe;
 
 /// The real checkpoint's `tokenizer_json` tensor's raw byte length -
 /// `data_offsets` span `[26231604668, 26263774294)` in the real
@@ -69,27 +61,47 @@ pub fn bytes_from_f32(name: &str, data: &[f32]) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// Extract + parse in one call - [`extract_tokenizer_json_bytes`] then
-/// [`data::qwen_tokenizer::QwenBpe::from_json_bytes`].
-pub fn load_tokenizer(tensors: &[StTensor]) -> Result<QwenBpe, String> {
-    let bytes = extract_tokenizer_json_bytes(tensors)?;
-    QwenBpe::from_json_bytes(&bytes)
+/// Extract + parse in one call - [`extract_tokenizer_json_bytes`] then [`parse_tokenizer`].
+pub fn load_tokenizer(tensors: &[StTensor]) -> Result<LlamaBpe, String> {
+    parse_tokenizer(&extract_tokenizer_json_bytes(tensors)?)
+}
+
+/// The tokenizer the raw `tokenizer.json` bytes declare.
+pub fn parse_tokenizer(bytes: &[u8]) -> Result<LlamaBpe, String> {
+    let json = std::str::from_utf8(bytes).map_err(|e| format!("gemma4 tokenizer: tokenizer_json is not UTF-8: {e}"))?;
+    LlamaBpe::from_tokenizer_json(json)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A tiny but structurally real `tokenizer.json` (BPE model, one merge,
-    /// one added special token) encoded the same way `checkpoint::
-    /// safetensors::parse` decodes a real `U8` tensor (each byte value
-    /// stored as its own `f32`) - proves the byte round-trip AND that the
-    /// recovered bytes are actually consumable by [`QwenBpe::
-    /// from_json_bytes`], without needing the real 32MB tensor or any
-    /// network access.
+    /// A tiny Gemma-shaped `tokenizer.json` (byte-fallback BPE with every
+    /// `<0xNN>` piece, the `Replace` normalizer, one merge, the four specials)
+    /// encoded the way `checkpoint::safetensors::parse` decodes a real `U8`
+    /// tensor (each byte value stored as its own `f32`): proves the byte
+    /// round-trip and that the recovered bytes parse, without the real 32 MB
+    /// tensor.
     fn synthetic_tokenizer_json_tensor() -> StTensor {
-        let json = br#"{"model":{"type":"BPE","vocab":{"h":0,"i":1,"hi":2},"merges":[["h","i"]]},"added_tokens":[{"id":3,"content":"<end>"}]}"#;
-        StTensor { name: "tokenizer_json".into(), shape: vec![json.len()], data: json.iter().map(|&b| b as f32).collect() }
+        let mut vocab = serde_json::Map::new();
+        for (i, name) in ["<pad>", "<eos>", "<bos>", "<unk>"].iter().enumerate() {
+            vocab.insert(name.to_string(), (i as u32).into());
+        }
+        for b in 0u32..256 {
+            vocab.insert(format!("<0x{b:02X}>"), (4 + b).into());
+        }
+        for (i, p) in ["h", "i", "hi"].iter().enumerate() {
+            vocab.insert(p.to_string(), (260 + i as u32).into());
+        }
+        let json = serde_json::json!({
+            "normalizer": {"type": "Replace", "pattern": {"String": " "}, "content": "\u{2581}"},
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "added_tokens": [],
+            "model": {"type": "BPE", "byte_fallback": true, "merges": [["h", "i"]], "vocab": vocab}
+        })
+        .to_string();
+        StTensor { name: "tokenizer_json".into(), shape: vec![json.len()], data: json.bytes().map(|b| b as f32).collect() }
     }
 
     #[test]
@@ -108,11 +120,11 @@ mod tests {
     }
 
     #[test]
-    fn load_tokenizer_parses_the_recovered_bytes_as_a_real_bpe_tokenizer() {
+    fn load_tokenizer_parses_the_recovered_bytes() {
         let src = synthetic_tokenizer_json_tensor();
         let tok = load_tokenizer(&[src]).expect("parse");
-        assert_eq!(tok.vocab_size(), 4); // max id (3, "<end>") + 1
-        assert_eq!(tok.special_id("<end>"), Some(3));
+        assert_eq!(tok.bos_id(), 2);
+        assert_eq!(tok.encode_raw("hi"), [262]);
     }
 
     /// Documentation pin, not a network check - see this module's doc for

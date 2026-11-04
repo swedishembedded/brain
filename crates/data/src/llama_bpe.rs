@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! LLaMA's SentencePiece byte-fallback BPE tokenizer - the text front-end for
-//! Vicuna-1.5-13B, LLaVA-1.5's decoder half (`crates/llava`).
+//! SentencePiece byte-fallback BPE: the text front-end for Vicuna-1.5-13B,
+//! LLaVA-1.5's decoder half (`crates/llava`), and for Gemma-4, LTX-2.5's text
+//! encoder (`crates/gemma4`). The two declare the scheme slightly differently
+//! (Gemma only replaces spaces, LLaMA also prepends `▁`; Gemma splits at
+//! spaces that the normalizer has already replaced; their specials are
+//! spelled differently); each declared variant is read as declared.
 //!
 //! # Why this is a separate type and not a mode on [`crate::clip_bpe::ClipBpe`]
 //! or [`crate::bpe::Gpt2Bpe`]
@@ -105,8 +109,8 @@ struct WireModel {
     dropout: Option<f32>,
     #[serde(default)]
     byte_fallback: bool,
-    /// `(left, right)`-space-joined merge rules, in priority order.
-    merges: Vec<String>,
+    /// Merge rules in priority order: `"left right"` strings, or `[left, right]` pairs.
+    merges: Vec<Value>,
     /// piece -> id.
     vocab: HashMap<String, u32>,
 }
@@ -133,6 +137,8 @@ pub struct LlamaBpe {
     bos_id: u32,
     eos_id: u32,
     unk_id: u32,
+    /// Whether the normalizer prepends `▁` (LLaMA) or only replaces spaces (Gemma).
+    prepend: bool,
 }
 
 impl LlamaBpe {
@@ -157,13 +163,8 @@ impl LlamaBpe {
         if j.model.dropout.is_some() {
             return Err("tokenizer.json: BPE dropout is set - that makes encoding nondeterministic, which this reader does not support".into());
         }
-        validate_normalizer(j.normalizer.as_ref())?;
-        if j.pre_tokenizer.as_ref().is_some_and(|v| !v.is_null()) {
-            return Err(format!(
-                "tokenizer.json: pre_tokenizer is set ({}) - this reader assumes LLaMA's \"no pre-tokenizer, whole string is one BPE sequence\" shape",
-                j.pre_tokenizer.unwrap()
-            ));
-        }
+        let prepend = parse_normalizer(j.normalizer.as_ref())?;
+        validate_pre_tokenizer(j.pre_tokenizer.as_ref())?;
 
         let mut encoder: HashMap<String, u32> = HashMap::with_capacity(j.model.vocab.len());
         let mut decoder: HashMap<u32, String> = HashMap::with_capacity(j.model.vocab.len());
@@ -183,13 +184,8 @@ impl LlamaBpe {
 
         let fallback_ids: [u32; 256] = std::array::from_fn(|b| encoder[&format!("<0x{b:02X}>")]);
         let mut ranked: Vec<(String, String)> = Vec::with_capacity(j.model.merges.len());
-        for (rank, line) in j.model.merges.iter().enumerate() {
-            let mut it = line.split(' ');
-            let left = it.next().ok_or_else(|| format!("tokenizer.json: merge {rank} is empty"))?.to_string();
-            let right = it
-                .next()
-                .ok_or_else(|| format!("tokenizer.json: merge {rank} ({line:?}) has no right half"))?
-                .to_string();
+        for (rank, rule) in j.model.merges.iter().enumerate() {
+            let (left, right) = merge_rule(rank, rule)?;
             if !encoder.contains_key(&format!("{left}{right}")) {
                 return Err(format!("tokenizer.json: merge {left:?}+{right:?} produces a token absent from vocab"));
             }
@@ -198,19 +194,23 @@ impl LlamaBpe {
         let merges = MergeTable::new(ranked, &encoder);
 
         let added: HashMap<String, u32> = j.added_tokens.into_iter().map(|a| (a.content, a.id)).collect();
+        // The declared special tokens first, for every spelling, before the plain vocabulary: Gemma's vocabulary
+        // also holds `<s>` as an ordinary piece, while its BOS is the added token `<bos>`.
         let id_of = |names: &[&str]| -> Result<u32, String> {
-            for n in names {
-                if let Some(&id) = added.get(*n).or_else(|| encoder.get(*n)) {
-                    return Ok(id);
-                }
-            }
-            Err(format!("tokenizer.json: none of {names:?} present in added_tokens/vocab"))
+            let declared = names.iter().find_map(|n| added.get(*n));
+            declared
+                .or_else(|| names.iter().find_map(|n| encoder.get(*n)))
+                .copied()
+                .ok_or_else(|| format!("tokenizer.json: none of {names:?} present in added_tokens/vocab"))
         };
-        let bos_id = bos_id_from_post_processor(j.post_processor.as_ref())?.unwrap_or(id_of(&["<s>"])?);
-        let eos_id = id_of(&["</s>"])?;
+        let bos_id = match bos_id_from_post_processor(j.post_processor.as_ref())? {
+            Some(id) => id,
+            None => id_of(&["<s>", "<bos>"])?,
+        };
+        let eos_id = id_of(&["</s>", "<eos>"])?;
         let unk_id = id_of(&["<unk>"])?;
 
-        Ok(LlamaBpe { encoder, decoder, merges, fallback_ids, bos_id, eos_id, unk_id })
+        Ok(LlamaBpe { encoder, decoder, merges, fallback_ids, bos_id, eos_id, unk_id, prepend })
     }
 
     /// Build from a checkpoint DIRECTORY holding `tokenizer.json`.
@@ -244,7 +244,9 @@ impl LlamaBpe {
             return Vec::new();
         }
         let mut normalized = String::with_capacity(text.len() + 4);
-        normalized.push(METASPACE);
+        if self.prepend {
+            normalized.push(METASPACE);
+        }
         for c in text.chars() {
             normalized.push(if c == ' ' { METASPACE } else { c });
         }
@@ -301,6 +303,9 @@ impl LlamaBpe {
             }
         }
         let s = String::from_utf8_lossy(&bytes).into_owned();
+        if !self.prepend {
+            return s;
+        }
         s.strip_prefix(' ').map(str::to_string).unwrap_or(s)
     }
 }
@@ -311,13 +316,19 @@ fn byte_fallback_value(piece: &str) -> Option<u8> {
     u8::from_str_radix(hex, 16).ok()
 }
 
-/// The reference normalizer is exactly `Sequence[Prepend("▁"),
-/// Replace(" " -> "▁")]` - anything else is rejected by name, since a
-/// silently-different normalizer changes ids for every input.
-fn validate_normalizer(v: Option<&Value>) -> Result<(), String> {
+/// The normalizer, which must be one of the two shapes this scheme ships:
+/// LLaMA's `Sequence[Prepend("▁"), Replace(" " -> "▁")]` or Gemma's
+/// `Replace(" " -> "▁")` alone. Returns whether it prepends. Anything else is
+/// rejected by name, since a silently-different normalizer changes ids for
+/// every input.
+fn parse_normalizer(v: Option<&Value>) -> Result<bool, String> {
     let v = v.ok_or("tokenizer.json: no normalizer")?;
+    let is_replace = |step: &Value| step["type"] == "Replace" && step["pattern"]["String"] == " " && step["content"] == METASPACE.to_string();
+    if is_replace(v) {
+        return Ok(false);
+    }
     if v["type"] != "Sequence" {
-        return Err(format!("tokenizer.json: normalizer.type is {:?}, not Sequence", v["type"]));
+        return Err(format!("tokenizer.json: normalizer is {v}, expected Replace(\" \" -> \"▁\") or Sequence[Prepend, Replace]"));
     }
     let steps = v["normalizers"].as_array().ok_or("tokenizer.json: normalizer.normalizers is not an array")?;
     if steps.len() != 2 {
@@ -326,10 +337,34 @@ fn validate_normalizer(v: Option<&Value>) -> Result<(), String> {
     if steps[0]["type"] != "Prepend" || steps[0]["prepend"] != METASPACE.to_string() {
         return Err(format!("tokenizer.json: normalizer step 0 is {}, expected Prepend(\"▁\")", steps[0]));
     }
-    if steps[1]["type"] != "Replace" || steps[1]["pattern"]["String"] != " " || steps[1]["content"] != METASPACE.to_string() {
+    if !is_replace(&steps[1]) {
         return Err(format!("tokenizer.json: normalizer step 1 is {}, expected Replace(\" \" -> \"▁\")", steps[1]));
     }
-    Ok(())
+    Ok(true)
+}
+
+/// No pre-tokenizer (LLaMA), or a split at literal spaces (Gemma). The split
+/// runs on the normalized text, where every space is already `▁`, so it
+/// finds nothing and the whole string stays one BPE sequence either way.
+/// Any other pre-tokenizer would cut the sequence, and is refused by name.
+fn validate_pre_tokenizer(v: Option<&Value>) -> Result<(), String> {
+    let Some(v) = v.filter(|v| !v.is_null()) else { return Ok(()) };
+    if v["type"] == "Split" && v["pattern"]["String"] == " " && v["invert"] != true {
+        return Ok(());
+    }
+    Err(format!("tokenizer.json: pre_tokenizer is {v} - this reader treats the whole normalized string as one BPE sequence"))
+}
+
+/// One merge rule: `"left right"` (split at the first space) or `[left, right]`.
+fn merge_rule(rank: usize, rule: &Value) -> Result<(String, String), String> {
+    if let Some(line) = rule.as_str() {
+        let (left, right) = line.split_once(' ').ok_or_else(|| format!("tokenizer.json: merge {rank} ({line:?}) has no right half"))?;
+        return Ok((left.to_string(), right.to_string()));
+    }
+    match rule.as_array().map(Vec::as_slice) {
+        Some([Value::String(left), Value::String(right)]) => Ok((left.clone(), right.clone())),
+        _ => Err(format!("tokenizer.json: merge {rank} is {rule}, not \"left right\" or [left, right]")),
+    }
 }
 
 /// The reference `post_processor` is `TemplateProcessing` with a single
@@ -343,6 +378,12 @@ fn bos_id_from_post_processor(v: Option<&Value>) -> Result<Option<u32>, String> 
         return Err(format!("tokenizer.json: post_processor.type is {:?}, not TemplateProcessing", v["type"]));
     }
     let single = v["single"].as_array().ok_or("tokenizer.json: post_processor.single is not an array")?;
+    // A template that is the sequence alone adds no token (Gemma 4).
+    if let [only] = single.as_slice() {
+        if only.get("Sequence").is_some() {
+            return Ok(None);
+        }
+    }
     if single.len() != 2 || single[1].get("Sequence").is_none() {
         return Err("tokenizer.json: post_processor.single is not [SpecialToken, Sequence]".into());
     }
@@ -467,5 +508,58 @@ mod tests {
         assert!(bad(&|j| j["model"]["dropout"] = 0.1.into()).contains("dropout"));
         assert!(bad(&|j| j["pre_tokenizer"] = serde_json::json!({"type": "Whitespace"})).contains("pre_tokenizer"));
         assert!(bad(&|j| j["normalizer"]["normalizers"][0]["type"] = "Replace".into()).contains("Prepend"));
+    }
+
+    /// Gemma's shape of the same scheme: a `Replace` normalizer alone (no
+    /// `Prepend`), a `Split(" ")` pre-tokenizer, a template that adds no
+    /// token, `<bos>`/`<eos>` specials (and `<s>` as an ordinary piece, as in
+    /// Gemma's vocabulary) and merges as `[left, right]` pairs.
+    fn gemma_json() -> String {
+        let mut vocab = serde_json::Map::new();
+        for (i, name) in ["<pad>", "<eos>", "<bos>", "<unk>"].iter().enumerate() {
+            vocab.insert(name.to_string(), (i as u32).into());
+        }
+        for b in 0u32..256 {
+            vocab.insert(format!("<0x{b:02X}>"), (4 + b).into());
+        }
+        for (i, p) in ["\u{2581}", "a", "b", "c", "\u{2581}a", "ab", "\u{2581}ab", "\n", "\u{2581}\u{2581}", "<s>"].iter().enumerate() {
+            vocab.insert(p.to_string(), (260 + i as u32).into());
+        }
+        let added: Vec<_> = ["<pad>", "<eos>", "<bos>", "<unk>"]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| serde_json::json!({"id": i, "content": c, "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}))
+            .collect();
+        serde_json::json!({
+            "added_tokens": added,
+            "normalizer": {"type": "Replace", "pattern": {"String": " "}, "content": "\u{2581}"},
+            "pre_tokenizer": {"type": "Split", "pattern": {"String": " "}, "behavior": "MergedWithPrevious", "invert": false},
+            "post_processor": {"type": "TemplateProcessing", "single": [{"Sequence": {"id": "A", "type_id": 0}}], "special_tokens": {}},
+            "model": {
+                "type": "BPE",
+                "byte_fallback": true,
+                "merges": [["\u{2581}", "a"], ["a", "b"], ["\u{2581}a", "b"], ["\u{2581}", "\u{2581}"]],
+                "vocab": vocab
+            }
+        })
+        .to_string()
+    }
+
+    /// The ids the reference `tokenizers` library (0.23) gives the same file,
+    /// and its decode back to the input.
+    #[test]
+    fn gemma_shape_encodes_like_the_reference() {
+        let t = LlamaBpe::from_tokenizer_json(&gemma_json()).unwrap();
+        assert_eq!((t.bos_id(), t.eos_id(), t.unk_id()), (2, 1, 3));
+        for (text, want) in [
+            ("ab ab", &[265, 266][..]),
+            ("a  b\nc", &[261, 268, 262, 267, 263]),
+            ("\u{e9} ab", &[199, 173, 266]),
+            ("  ab ", &[260, 266, 260]),
+            ("abc", &[265, 263]),
+        ] {
+            assert_eq!(t.encode_raw(text), want, "{text:?}");
+            assert_eq!(t.decode(want), text, "{want:?}");
+        }
     }
 }

@@ -724,7 +724,6 @@ pub struct TextContext {
 
 #[tracing::instrument(level = "info", name = "text_encode", skip_all, fields(prompt_chars = prompt.len(), guidance = guidance))]
 fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance: f32, device: Option<&str>, want_audio: bool) -> Result<TextContext, String> {
-    use data::Tokenizer as _;
     let cross_attention_dim = dit_cfg.cross_attention_dim as usize;
 
     let cfg = gemma4::Gemma4Config::gemma4_12b();
@@ -827,12 +826,6 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
         "text encoder opened"
     );
 
-    // A real tokenizer can legitimately return zero tokens for an empty (or
-    // whitespace-only) string; `T=0` has no representable RoPE/attention
-    // shape anywhere in this pipeline, so fall back to token id 0 (the
-    // tokenizer's own id-0 entry, whatever it is) exactly the way an
-    // all-zero fallback context already stands in for "no real content" in
-    // the guidance<=1.0 branch below.
     // `resources/ltxv/source/packages/ltx-core/src/ltx_core/text_encoders/
     // gemma/gemma_assets.py::TOKENIZER_MAX_LENGTH = 1024`, `truncation=True`
     // in `LTXGemmaTokenizer.tokenize_with_weights` - the reference truncates
@@ -844,38 +837,19 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
     // `LTXGemmaTokenizer.tokenize_with_weights` (`ltx_core/text_encoders/
     // gemma/tokenizer.py`) prepends it unconditionally, and says why in its
     // own class doc: "Gemma 3 already emits it via post_processor; Gemma 4
-    // does not, so we prepend". This crate's `data::qwen_tokenizer::QwenBpe`
-    // is deliberately template-free (`template_prefix`'s doc - callers that
-    // want an HF-equivalent encoding prepend it themselves), so nothing added
-    // it here and every prompt was encoded one token short of what the
-    // checkpoint was trained on, with each caption token sitting at the
-    // position the next one down should hold.
-    //
-    // Looked up by content rather than hard-coded: an id constant would be a
-    // second, unverifiable copy of the checkpoint's own vocabulary. A
-    // checkpoint whose tokenizer declares no `<bos>` at all keeps the old
-    // behaviour rather than inventing a token - it is not this function's
-    // place to decide what such a file meant.
-    let bos_id = tok.special_id("<bos>");
-    if bos_id.is_none() {
-        tracing::warn!("the text encoder's tokenizer declares no <bos>; encoding without the leading BOS the reference prepends");
-    }
+    // does not, so we prepend". `encode_raw` adds no token, so it is added
+    // here; without it every caption token sits one position off from where
+    // the checkpoint was trained to read it.
+    let bos_id = tok.bos_id();
     let tokenize = |s: &str| -> Vec<u32> {
         // `text.strip()`, same line of the reference.
-        let mut ids = tok.encode(s.trim());
+        let mut ids = tok.encode_raw(s.trim());
+        if ids.first() != Some(&bos_id) {
+            ids.insert(0, bos_id);
+        }
+        // Never empty: an empty prompt is `<bos>` alone.
         ids.truncate(GEMMA4_MAX_PROMPT_TOKENS);
-        match bos_id {
-            Some(bos) if ids.first() != Some(&bos) => {
-                ids.insert(0, bos);
-                ids.truncate(GEMMA4_MAX_PROMPT_TOKENS);
-            }
-            _ => {}
-        }
-        if ids.is_empty() {
-            vec![0u32]
-        } else {
-            ids
-        }
+        ids
     };
 
     // One closure covers both loaders and both prompts, so the conditional

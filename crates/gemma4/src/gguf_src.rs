@@ -149,9 +149,8 @@ impl Gemma4GgufSource {
     }
 
     /// Extract + parse, the GGUF twin of `crate::tokenizer::load_tokenizer`.
-    pub fn tokenizer(&self) -> Result<data::qwen_tokenizer::QwenBpe, String> {
-        let bytes = self.tokenizer_json()?;
-        data::qwen_tokenizer::QwenBpe::from_json_bytes(&bytes)
+    pub fn tokenizer(&self) -> Result<data::llama_bpe::LlamaBpe, String> {
+        crate::tokenizer::parse_tokenizer(&self.tokenizer_json()?)
     }
 }
 

@@ -1464,6 +1464,7 @@ dependencies = [
  "brain-model",
  "brain-paramstore",
  "brain-testutil",
+ "serde_json",
  "tracing",
 ]
 
