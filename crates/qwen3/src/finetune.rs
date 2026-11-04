@@ -808,6 +808,8 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
     type Trained = Trained;
     const SCORES_EXPORTED_PAIRS: bool = true;
     const LORA_BASES: model::policy::TrainBases = TRAIN_BASES;
+    /// `serve::Engine::check_tiers`' serving tiers less f16, which no qwen3 base is trained over.
+    const SERVED_WEIGHTS: &'static [Dtype] = &[Dtype::F32, Dtype::BF16, Dtype::I8];
     const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen3", state: model::StateSupport::Any, resident: true, layer_streamed: true, f32_streamed: false };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {

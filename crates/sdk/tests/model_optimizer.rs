@@ -15,10 +15,11 @@
 //!   deployed kernels against the original and every uniform format that fits,
 //!   with `accepted` decided by those measurements alone.
 //! * The calibration and held-out records are disjoint and cover the dataset.
-//! * A default candidate the device would widen (int8 on the CPU backend) is
-//!   left out and reported; one named by the caller that cannot be measured
-//!   on its deployed kernels, and a run missing its dataset or out directory,
-//!   are refused by name.
+//! * Every planned format is one the architecture serves per linear. A default
+//!   candidate the device would widen (int8 on the CPU backend) is left out and
+//!   reported; one named by the caller that cannot be measured on its deployed
+//!   kernels or served, and a run missing its dataset or out directory, are
+//!   refused by name.
 
 use std::path::{Path, PathBuf};
 
@@ -64,6 +65,8 @@ fn a_search_reports_a_plan_measured_on_the_deployed_kernels() {
         assert!(qkv.windows(2).all(|w| w[0] == w[1]) && gate_up[0] == gate_up[1], "a fused projection takes one format: {}", report.policy);
     }
 
+    let served = [gpu_core::select::Dtype::F32, gpu_core::select::Dtype::BF16, gpu_core::select::Dtype::I8];
+    assert!(policy.dtypes().all(|t| served.contains(&t)), "every planned format is one qwen3 serves per linear: {}", report.policy);
     let labels: Vec<&str> = outcome.deployed.iter().map(|d| d.label.as_str()).collect();
     assert_eq!(&labels[..2], ["plan", "original"]);
     for b in &report.baselines {
@@ -88,6 +91,8 @@ fn a_candidate_that_cannot_be_measured_is_refused_before_anything_loads() {
     let base = model.join("model.safetensors");
     let err = ModelOptimizer::from_pretrained(base.to_str().unwrap()).dataset(&dataset).out_dir(model.join("run")).tiers("int8,q4").run().expect_err("q4 has no frozen-base build to measure");
     assert!(err.to_string().contains("q4"), "{err}");
+    let err = ModelOptimizer::from_pretrained(base.to_str().unwrap()).dataset(&dataset).out_dir(model.join("run")).tiers("int8,nf4").run().expect_err("qwen3 does not serve nf4 per linear");
+    assert!(err.to_string().contains("nf4") && err.to_string().contains("serve"), "{err}");
 
     let err = ModelOptimizer::from_pretrained(base.to_str().unwrap()).dataset(&dataset).out_dir(model.join("run")).tiers("int8").device(cpu()).run().expect_err("the CPU backend holds int8 as f32");
     assert!(err.to_string().contains("i8") && err.to_string().contains("f32"), "{err}");
@@ -104,7 +109,7 @@ fn a_candidate_that_cannot_be_measured_is_refused_before_anything_loads() {
 fn a_default_candidate_the_device_would_widen_is_left_out_and_reported() {
     let model = chat_model_dir_of("optimize-cpu", qwen3::QwenConfig::tiny_i8());
     let dataset = write_dataset(&model, 8);
-    let outcome = ModelOptimizer::from_pretrained(model.join("model.safetensors").to_str().unwrap()).dataset(&dataset).out_dir(model.join("run")).device(cpu()).run().expect("the search runs on the CPU backend");
+    let outcome = ModelOptimizer::from_pretrained(model.join("model.safetensors").to_str().unwrap()).dataset(&dataset).out_dir(model.join("run")).device(cpu()).budget_like("bf16").run().expect("the search runs on the CPU backend");
     assert!(outcome.excluded_tiers.iter().any(|e| e.tier == "i8" && e.held_as == "f32"), "{:?}", outcome.excluded_tiers);
     let policy = model::ops::TierPolicy::parse(&outcome.report.policy).expect("a policy");
     assert!(policy.dtypes().all(|t| t != gpu_core::select::Dtype::I8), "an excluded tier is never planned: {}", outcome.report.policy);

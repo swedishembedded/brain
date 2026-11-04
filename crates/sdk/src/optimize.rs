@@ -33,9 +33,10 @@
 //! is decided on. The report is written to `optimize.json` in the out
 //! directory.
 //!
-//! The candidate tiers default to every frozen-base tier the architecture's
-//! trainer holds, so every candidate can be measured on its deployed kernels;
-//! the budget defaults to the bytes of uniform int8.
+//! The candidate tiers default to every tier the architecture's trainer holds a
+//! frozen base in (so each can be measured on its deployed kernels) that its
+//! serving engine holds per linear (so an accepted plan can be served) and the
+//! device holds as itself; the budget defaults to the bytes of uniform int8.
 
 use std::path::{Path, PathBuf};
 
@@ -203,10 +204,10 @@ impl ModelOptimizer {
         self
     }
 
-    /// The candidate weight formats, comma separated (`"bf16,int8,nf4"`;
-    /// default: every frozen-base format the architecture's trainer holds and
-    /// the device holds as itself). A format the trainer or the device cannot
-    /// hold is refused before anything is loaded: it could not be measured.
+    /// The candidate weight formats, comma separated (`"bf16,int8"`; default:
+    /// every format the architecture's trainer holds a frozen base in, its
+    /// engine serves per linear, and the device holds as itself). A format
+    /// failing any of the three is refused before anything is loaded.
     pub fn tiers(mut self, formats: impl Into<String>) -> Self {
         self.tiers = Some(formats.into());
         self
@@ -242,7 +243,7 @@ impl ModelOptimizer {
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ModelOptimizer: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ModelOptimizer: no out directory; call .out_dir(path)".to_string()))?;
         let set = crate::device::resolve(&self.device)?;
-        let (tiers, excluded_tiers) = candidates(self.tiers.as_deref(), chat.lora_bases, &gpu_core::Gpu::new(&[]).caps().numeric)?;
+        let (tiers, excluded_tiers) = candidates(self.tiers.as_deref(), chat.lora_bases, chat.served_weights, &gpu_core::Gpu::new(&[]).caps().numeric)?;
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
         let (weights, model_dir, _) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         let open = (chat.checkpoint_path)(&weights, &model_dir);
@@ -284,15 +285,22 @@ impl ModelOptimizer {
     }
 }
 
-/// The candidate tiers: the caller's, each of which the trainer must hold (so it can be measured on its deployed
-/// kernels) and the device must hold as itself, else an error naming it; or by default every tier the trainer holds,
-/// less those the device would widen, which are returned with the tier they would become.
-fn candidates(asked: Option<&str>, trainer: model::policy::TrainBases, numeric: &gpu_core::NumericSupport) -> Result<(Vec<Dtype>, Vec<ExcludedTier>)> {
+/// The candidate tiers. Each must be one the trainer holds a frozen base in (so it can be measured on its deployed
+/// kernels), one the family serves per linear (so an accepted plan can be served) and one the device holds as itself
+/// (so its bytes and loss are what the search assumed). The caller's list is refused by the first that is not; the
+/// default is every tier that is all three, with those the device would widen returned with what it would hold.
+fn candidates(asked: Option<&str>, trainer: model::policy::TrainBases, served: &[Dtype], numeric: &gpu_core::NumericSupport) -> Result<(Vec<Dtype>, Vec<ExcludedTier>)> {
+    if served.is_empty() {
+        return Err(Error::Backend(format!("ModelOptimizer: {} serves no per-linear weight format, so no searched plan could be served", trainer.model)));
+    }
     match asked {
         Some(list) => {
             let mut tiers = Vec::new();
             for spec in list.split(',').map(str::trim) {
                 let tier = trainer.parse(spec).map_err(|why| Error::Backend(format!("ModelOptimizer: candidate {spec:?} cannot be measured on its deployed kernels: {why}")))?;
+                if !served.contains(&tier) {
+                    return Err(Error::Backend(format!("ModelOptimizer: candidate {}: {} does not serve it per linear; it serves {}", tier.name(), trainer.model, served.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "))));
+                }
                 let held = tier.promote(numeric);
                 if held != tier {
                     return Err(Error::Backend(format!("ModelOptimizer: candidate {}: this device holds it as {}", tier.name(), held.name())));
@@ -302,7 +310,8 @@ fn candidates(asked: Option<&str>, trainer: model::policy::TrainBases, numeric: 
             Ok((tiers, Vec::new()))
         }
         None => {
-            let (kept, widened): (Vec<Dtype>, Vec<Dtype>) = trainer.bases.iter().partition(|&&t| t.promote(numeric) == t);
+            let servable = trainer.bases.iter().filter(|t| served.contains(t));
+            let (kept, widened): (Vec<Dtype>, Vec<Dtype>) = servable.partition(|&&t| t.promote(numeric) == t);
             Ok((kept, widened.into_iter().map(|t| ExcludedTier { tier: t.name(), held_as: t.promote(numeric).name() }).collect()))
         }
     }

@@ -68,6 +68,8 @@ pub(crate) struct ChatEntry {
     pub lora_bases: model::policy::TrainBases,
     /// The family scores the exported adapter ([`Self::margins`]) rather than the resident model.
     pub scores_exported_pairs: bool,
+    /// The weight formats the family's serving engine holds per linear.
+    pub served_weights: &'static [Dtype],
     /// The weight precision search over the trainable build of a base, on a prepared dataset.
     pub search: SearchFn,
     /// The held-out loss of a base built with its linears at a tier policy, on the deployed kernels.
@@ -85,6 +87,7 @@ impl ChatEntry {
             margins: T::preference_margins,
             lora_bases: T::LORA_BASES,
             scores_exported_pairs: T::SCORES_EXPORTED_PAIRS,
+            served_weights: T::SERVED_WEIGHTS,
             search: search::<T>,
             measure: measure::<T>,
         }

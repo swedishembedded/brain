@@ -196,6 +196,12 @@ pub trait ChatTrainer {
     /// model instead (reference = the model the run starts from).
     const SCORES_EXPORTED_PAIRS: bool = false;
 
+    /// The weight formats this family's serving engine holds a linear in, one
+    /// linear at a time (a per-leaf `--weight-format`). A precision search
+    /// offers only these, so every plan it accepts can be served. Empty (the
+    /// default): the family serves no per-leaf policy.
+    const SERVED_WEIGHTS: &'static [Dtype] = &[];
+
     /// The vocabulary of the checkpoint at `open`.
     fn vocab(open: &Path) -> Result<usize, String>;
 

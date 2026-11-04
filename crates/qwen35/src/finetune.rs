@@ -434,6 +434,8 @@ pub struct Qwen35Trainer;
 impl model::finetune::ChatTrainer for Qwen35Trainer {
     type Trained = Qwen35;
     const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35", bases: crate::base_source::LORA_BASES };
+    /// What the GGUF resident's engine holds per leaf (`serve::Engine::from_source_tier`).
+    const SERVED_WEIGHTS: &'static [Dtype] = &[Dtype::F32, Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::Q4, Dtype::NF4];
     const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen35", state: model::StateSupport::Any, resident: true, layer_streamed: true, f32_streamed: false };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {
