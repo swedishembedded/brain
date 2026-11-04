@@ -88,6 +88,7 @@ way.
 | `brain models profile <model>` | price one already-pulled model now and cache the result - errors, never fetches, if it isn't pulled |
 | `brain import FILE` | GGUF import with no architecture token - dispatches on the file's own `general.architecture` header instead of the command line |
 | `brain quantize SRC` | the export direction: any safetensors/GGUF checkpoint to a quantized GGUF, with no per-architecture code at all |
+| `brain optimize BASE` | the weight format of every linear of a chat model, searched within a byte budget and accepted only on held-out measurements - see [Optimizing a model](../guides/serving/optimizing.md) |
 
 `models`, `flops`, `perf`, `bench`, `devices` and `roofline` sound similar but
 answer different questions, and none of them subsumes another: `models` is

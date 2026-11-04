@@ -27,6 +27,7 @@ PDF (`make docs/pdf`).
   [NVIDIA GPUs (CUDA)](guides/hardware/cuda.md),
   [benchmarking your setup](guides/hardware/benchmarking.md).
 - **Serving:** [running a server](guides/serving/serving.md),
+  [optimizing a model for a memory budget](guides/serving/optimizing.md),
   [monitoring with `braintop`](guides/serving/monitoring.md),
   [security posture](guides/serving/security.md).
 

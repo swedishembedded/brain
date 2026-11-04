@@ -39,6 +39,7 @@ navigation:
       - title: Serving
         pages:
           - docs/guides/serving/serving.md
+          - docs/guides/serving/optimizing.md
           - docs/guides/serving/monitoring.md
           - docs/guides/serving/security.md
   - title: Concepts
