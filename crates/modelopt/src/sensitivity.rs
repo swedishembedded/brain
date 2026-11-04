@@ -11,8 +11,8 @@ use model::{Batch, Model};
 use crate::Site;
 
 /// One candidate tier for one site: its physical bytes
-/// ([`Weight::bytes_for`]: packed words plus scales) and the estimated loss
-/// increase of storing the site at it.
+/// ([`Weight::bytes_for`]: packed words plus scales, summed over the site's
+/// tensors) and the estimated loss increase of storing the site at it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Choice {
     pub tier: Dtype,
@@ -27,9 +27,9 @@ pub struct SiteChoices {
     pub choices: Vec<Choice>,
 }
 
-/// The estimated loss increase of every site at every tier in `tiers` its
-/// shape packs ([`Weight::packs`]), by the second-order Taylor expansion of
-/// the loss around the trained weights:
+/// The estimated loss increase of every site at every tier in `tiers` all of
+/// its tensors pack ([`Weight::packs`]), by the second-order Taylor expansion
+/// of the loss around the trained weights:
 ///
 /// `error[i, q] = 1/2 * sum_j F_j * (w_j - Q_q(w_j))^2`
 ///
@@ -42,13 +42,14 @@ pub struct SiteChoices {
 /// accepts one ([`crate::measure_policy`]).
 ///
 /// Runs one forward and backward per calibration batch and holds one f32 per
-/// site element on the host. A gradient that is not finite is an error naming
-/// the site, never a silently zero sensitivity.
+/// site element on the host. A loss or gradient that is not finite is an error
+/// naming where, never a silently zero sensitivity.
 pub fn sensitivity<M: Model>(m: &M, sites: &[Site], tiers: &[Dtype], calibration: &[Batch]) -> Result<Vec<SiteChoices>, String> {
     if calibration.is_empty() {
         return Err("sensitivity needs at least one calibration batch".into());
     }
-    let mut fisher: Vec<Vec<f32>> = sites.iter().map(|s| vec![0f32; s.numel()]).collect();
+    let tensors: Vec<&crate::Tensor> = sites.iter().flat_map(|s| &s.tensors).collect();
+    let mut fisher: Vec<Vec<f32>> = tensors.iter().map(|t| vec![0f32; t.n * t.k]).collect();
     for &batch in calibration {
         m.zero_grads();
         m.set_batch(batch);
@@ -57,14 +58,14 @@ pub fn sensitivity<M: Model>(m: &M, sites: &[Site], tiers: &[Dtype], calibration
             return Err(format!("a calibration batch has a non-finite loss ({loss})"));
         }
         m.backward();
-        for (site, f) in sites.iter().zip(&mut fisher) {
-            let grad = m.read_grad(&site.name);
+        for (t, f) in tensors.iter().zip(&mut fisher) {
+            let grad = m.read_grad(&t.name);
             if grad.len() != f.len() {
-                return Err(format!("{}: gradient has {} elements, the site {}", site.name, grad.len(), f.len()));
+                return Err(format!("{}: gradient has {} elements, the tensor {}", t.name, grad.len(), f.len()));
             }
             for (fj, gj) in f.iter_mut().zip(&grad) {
                 if !gj.is_finite() {
-                    return Err(format!("{}: non-finite gradient on calibration data", site.name));
+                    return Err(format!("{}: non-finite gradient on calibration data", t.name));
                 }
                 *fj += gj * gj;
             }
@@ -72,18 +73,36 @@ pub fn sensitivity<M: Model>(m: &M, sites: &[Site], tiers: &[Dtype], calibration
     }
     m.zero_grads();
     let scale = 0.5 / calibration.len() as f64;
-    Ok(sites
+    // error[tensor][tier], for the tiers the tensor packs.
+    let per_tensor: Vec<Vec<Option<f64>>> = tensors
         .iter()
         .zip(&fisher)
-        .map(|(site, f)| {
-            let w = m.read_weight(&site.name);
+        .map(|(t, f)| {
+            let w = m.read_weight(&t.name);
+            tiers
+                .iter()
+                .map(|&tier| {
+                    Weight::packs(tier, t.n, t.k).then(|| {
+                        let q = Weight::round_trip(&w, t.n, t.k, tier);
+                        f.iter().zip(w.iter().zip(&q)).map(|(&fj, (&wj, &qj))| fj as f64 * ((wj - qj) as f64).powi(2)).sum::<f64>() * scale
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    let mut next = 0;
+    Ok(sites
+        .iter()
+        .map(|site| {
+            let rows = &per_tensor[next..next + site.tensors.len()];
+            next += site.tensors.len();
             let mut choices: Vec<Choice> = tiers
                 .iter()
-                .filter(|&&tier| Weight::packs(tier, site.n, site.k))
-                .map(|&tier| {
-                    let q = Weight::round_trip(&w, site.n, site.k, tier);
-                    let error = f.iter().zip(w.iter().zip(&q)).map(|(&fj, (&wj, &qj))| fj as f64 * ((wj - qj) as f64).powi(2)).sum::<f64>() * scale;
-                    Choice { tier, bytes: Weight::bytes_for(tier, site.n, site.k), error }
+                .enumerate()
+                .filter_map(|(q, &tier)| {
+                    let error = rows.iter().map(|r| r[q]).sum::<Option<f64>>()?;
+                    let bytes = site.tensors.iter().map(|t| Weight::bytes_for(tier, t.n, t.k)).sum();
+                    Some(Choice { tier, bytes, error })
                 })
                 .collect();
             choices.sort_by(|a, b| a.bytes.cmp(&b.bytes).then(a.error.total_cmp(&b.error)));

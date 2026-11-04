@@ -29,15 +29,26 @@ pub struct Plan {
 
 impl Plan {
     /// The plan as the per-leaf policy `--weight-format` serves: f32 by
-    /// default, and a rule naming each site that is stored narrower. The
-    /// default is f32 rather than the most common tier so that a leaf the plan
-    /// does not cover (an embedding, a norm) keeps the precision it has.
+    /// default, and a rule naming each tensor of each site that is stored
+    /// narrower. The default is f32 rather than the most common tier so that a
+    /// leaf the plan does not cover (an embedding, a norm) keeps the precision
+    /// it has.
     pub fn policy(&self, sites: &[Site]) -> TierPolicy {
-        self.assignments
-            .iter()
-            .filter(|a| a.tier != Dtype::F32 && sites.iter().any(|s| s.name == a.site))
-            .fold(TierPolicy::uniform(Dtype::F32), |p, a| p.with(&[a.site.as_str()], a.tier))
+        policy_of(&self.assignments, sites)
     }
+}
+
+/// [`Plan::policy`] of any assignment list.
+pub fn policy_of(assignments: &[Assignment], sites: &[Site]) -> TierPolicy {
+    let mut policy = TierPolicy::uniform(Dtype::F32);
+    for a in assignments.iter().filter(|a| a.tier != Dtype::F32) {
+        if let Some(site) = sites.iter().find(|s| s.name == a.site) {
+            for t in &site.tensors {
+                policy = policy.with(&[t.name.as_str()], a.tier);
+            }
+        }
+    }
+    policy
 }
 
 /// An upgrade of one site from its current choice to a larger, more accurate
@@ -104,7 +115,7 @@ fn best_upgrade(site: usize, front: &[Choice], from: usize, room: u64) -> Option
 pub fn assign(table: &[SiteChoices], budget: u64) -> Result<Plan, String> {
     let fronts: Vec<Vec<Choice>> = table.iter().map(|s| frontier(&s.choices)).collect();
     if let Some(empty) = table.iter().zip(&fronts).find(|(_, f)| f.is_empty()) {
-        return Err(format!("{}: no candidate tier packs its [{}, {}] shape", empty.0.site.name, empty.0.site.n, empty.0.site.k));
+        return Err(format!("{}: no candidate tier packs every tensor of the site", empty.0.site.name));
     }
     let mut at: Vec<usize> = vec![0; fronts.len()];
     let floor: u64 = fronts.iter().map(|f| f[0].bytes).sum();
@@ -143,7 +154,7 @@ mod tests {
 
     fn site(name: &str, choices: &[(Dtype, u64, f64)]) -> SiteChoices {
         SiteChoices {
-            site: Site { name: name.into(), n: 1, k: 32, layer: None, roles: vec![] },
+            site: Site { name: name.into(), tensors: vec![crate::Tensor { name: name.into(), n: 1, k: 32 }], layer: None, roles: vec![] },
             choices: choices.iter().map(|&(tier, bytes, error)| Choice { tier, bytes, error }).collect(),
         }
     }

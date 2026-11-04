@@ -22,17 +22,27 @@
 //!    simulated quantization, scored on held-out batches, and undone. The
 //!    estimate picks a plan; only this measurement accepts one.
 //!
+//! [`search_weights`] runs the three as one call and returns a [`Report`]
+//! with the plan measured against every uniform tier that fits its budget.
+//!
+//! A site is a stored tensor, or the tensors a deployed engine fuses into one
+//! weight ([`model::Model::coupled_tensors`]), which share a tier.
+//!
 //! A plan is expressed as a [`model::ops::TierPolicy`] ([`Plan::policy`]), the
 //! same per-leaf value `--weight-format` serves. Simulated quantization is
 //! [`model::ops::Weight::round_trip`], the codec the deployed upload packs
-//! with, so a measured plan is the deployed plan.
+//! with, so the simulated weights are the deployed weights. Tiers whose
+//! kernels also quantize activations (int8) are confirmed by building the
+//! model at the plan on its deployed kernels, which the front end does.
 
 mod manifest;
 mod measure;
+mod search;
 mod sensitivity;
 mod solve;
 
-pub use manifest::{sites, Site};
+pub use manifest::{sites, Site, Tensor};
 pub use measure::{held_out_loss, measure_policy};
+pub use search::{search_weights, Baseline, Budget, Report, SearchRequest, SiteReport};
 pub use sensitivity::{sensitivity, Choice, SiteChoices};
-pub use solve::{assign, Assignment, Plan};
+pub use solve::{assign, policy_of, Assignment, Plan};

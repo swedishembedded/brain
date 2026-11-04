@@ -457,6 +457,15 @@ pub trait Model {
         Vec::new()
     }
 
+    /// Groups of stored tensors this model's deployed engine holds as ONE
+    /// weight (a fused projection: Q/K/V concatenated into one GEMM), which
+    /// therefore take one storage tier together. Empty (the default) when
+    /// every tensor is held on its own. A precision search assigns a group one
+    /// tier; a serving policy that split a group would be refused by the engine.
+    fn coupled_tensors(&self) -> Vec<Vec<String>> {
+        Vec::new()
+    }
+
     fn read_weight(&self, name: &str) -> Vec<f32>;
     fn write_weight(&self, name: &str, data: &[f32]);
     fn read_grad(&self, name: &str) -> Vec<f32>;

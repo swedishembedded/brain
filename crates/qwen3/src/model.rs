@@ -4442,6 +4442,16 @@ impl model::Model for Qwen {
     fn adapter_sites(&self) -> Vec<model::adapter::LinearSite> {
         model::adapter::sites::LoraSites::lora_sites(&self.cfg)
     }
+    /// The serving engine fuses each layer's Q/K/V into one GEMM and its
+    /// gate/up into another (`serve::Engine::build`).
+    fn coupled_tensors(&self) -> Vec<Vec<String>> {
+        (0..self.cfg.n_layers)
+            .flat_map(|l| {
+                [&["attn.wq.weight", "attn.wk.weight", "attn.wv.weight"][..], &["mlp.gate.weight", "mlp.up.weight"][..]]
+                    .map(|leaves| leaves.iter().map(|leaf| format!("blocks.{l}.{leaf}")).collect())
+            })
+            .collect()
+    }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         Qwen::read_weight(self, name)
     }

@@ -25,7 +25,7 @@
 
 use gpu_core::select::Dtype;
 use model::{Batch, Model, IGNORE};
-use modelopt::{assign, held_out_loss, measure_policy, sensitivity, sites, Assignment};
+use modelopt::{held_out_loss, measure_policy, search_weights, sites, Assignment, Budget, SearchRequest};
 
 const ROWS: u32 = 8;
 
@@ -54,20 +54,37 @@ fn as_batches(owned: &[(Vec<u32>, Vec<u32>)]) -> Vec<Batch<'_>> {
     owned.iter().map(|(tokens, targets)| Batch::Lm { tokens, targets }).collect()
 }
 
-fn uniform(sites: &[modelopt::Site], tier: Dtype) -> Vec<Assignment> {
-    sites.iter().map(|s| Assignment { site: s.name.clone(), tier }).collect()
+/// A tiny qwen3 trained on the recurrence until it has learned it.
+fn trained(rng: &mut data::rng::Rng) -> qwen3::Qwen {
+    let cfg = qwen3::QwenConfig::tiny_i8();
+    let (vocab, seq) = (cfg.vocab, cfg.block_size);
+    let m = qwen3::Qwen::new(cfg, ROWS, seq, &qwen3::init_weights(&qwen3::QwenConfig::tiny_i8(), rng.next_u64()));
+    let train = batches(rng, 64, vocab, seq);
+    let first = held_out_loss(&m, &as_batches(&train[..4]));
+    for step in 0..600u32 {
+        let (tokens, targets) = &train[step as usize % train.len()];
+        Model::zero_grads(&m);
+        Model::set_batch(&m, Batch::Lm { tokens, targets });
+        Model::forward(&m);
+        Model::backward(&m);
+        Model::adamw_step(&m, step + 1, 1e-2, 0.0, Default::default(), Some(1.0), 1.0);
+    }
+    let learned = held_out_loss(&m, &as_batches(&train[..4]));
+    assert!(learned < 0.5 * first, "the fixture must learn the task before it is compressed: loss {first} -> {learned}");
+    m
 }
 
-/// `plan`'s tiers dealt again among sites of the same shape: the same bytes
-/// and the same tier counts, with the choice of which site gets which left to
-/// chance.
+/// `plan`'s tiers dealt again among sites of the same tensor shapes: the same
+/// bytes and the same tier counts, with the choice of which site gets which
+/// left to chance.
 fn shuffle_within_shapes(sites: &[modelopt::Site], plan: &[Assignment], rng: &mut data::rng::Rng) -> Vec<Assignment> {
+    let shape = |s: &modelopt::Site| s.tensors.iter().map(|t| (t.n, t.k)).collect::<Vec<_>>();
     let mut out = plan.to_vec();
-    let mut shapes: Vec<(usize, usize)> = sites.iter().map(|s| (s.n, s.k)).collect();
+    let mut shapes: Vec<Vec<(usize, usize)>> = sites.iter().map(shape).collect();
     shapes.sort();
     shapes.dedup();
-    for shape in shapes {
-        let idx: Vec<usize> = (0..sites.len()).filter(|&i| (sites[i].n, sites[i].k) == shape).collect();
+    for wanted in shapes {
+        let idx: Vec<usize> = (0..sites.len()).filter(|&i| shape(&sites[i]) == wanted).collect();
         let mut tiers: Vec<Dtype> = idx.iter().map(|&i| plan[i].tier).collect();
         for i in (1..tiers.len()).rev() {
             tiers.swap(i, rng.gen_range_inclusive(0, i as i64) as usize);
@@ -79,50 +96,51 @@ fn shuffle_within_shapes(sites: &[modelopt::Site], plan: &[Assignment], rng: &mu
     out
 }
 
+const TIERS: [Dtype; 5] = [Dtype::F32, Dtype::BF16, Dtype::I8, Dtype::NF4, Dtype::Q4];
+
 #[test]
 fn searched_policy_beats_every_uniform_tier_within_its_budget() {
-    let cfg = qwen3::QwenConfig::tiny_i8();
-    let (vocab, seq) = (cfg.vocab, cfg.block_size);
     let mut rng = data::rng::Rng::random();
-    let init = qwen3::init_weights(&cfg, rng.next_u64());
-    let m = qwen3::Qwen::new(cfg, ROWS, seq, &init);
-
-    let train = batches(&mut rng, 64, vocab, seq);
-    let first = held_out_loss(&m, &as_batches(&train[..4]));
-    for step in 0..600u32 {
-        let (tokens, targets) = &train[step as usize % train.len()];
-        Model::zero_grads(&m);
-        Model::set_batch(&m, Batch::Lm { tokens, targets });
-        Model::forward(&m);
-        Model::backward(&m);
-        Model::adamw_step(&m, step + 1, 1e-2, 0.0, Default::default(), Some(1.0), 1.0);
-    }
-    let trained = held_out_loss(&m, &as_batches(&train[..4]));
-    assert!(trained < 0.5 * first, "the fixture must learn the task before it is compressed: loss {first} -> {trained}");
+    let m = trained(&mut rng);
+    let (vocab, seq) = (m.config().vocab, m.config().block_size);
 
     let sites = sites(&m).expect("qwen3 declares its linear sites");
-    assert_eq!(sites.len(), 14, "two layers of seven linears");
+    assert_eq!(sites.len(), 8, "per layer: fused Q/K/V, wo, fused gate/up, down");
     let calibration = batches(&mut rng, 4, vocab, seq);
     let held_out = batches(&mut rng, 8, vocab, seq);
     let (calibration, held_out) = (as_batches(&calibration), as_batches(&held_out));
 
-    let tiers = [Dtype::F32, Dtype::BF16, Dtype::I8, Dtype::NF4, Dtype::Q4];
-    let table = sensitivity(&m, &sites, &tiers, &calibration).expect("sensitivity");
-    let bytes_at = |tier: Dtype| sites.iter().map(|s| model::ops::Weight::bytes_for(tier, s.n, s.k)).sum::<u64>();
+    let bytes_at = |tier: Dtype| sites.iter().flat_map(|s| &s.tensors).map(|t| model::ops::Weight::bytes_for(tier, t.n, t.k)).sum::<u64>();
     let budget = (bytes_at(Dtype::I8) + bytes_at(Dtype::Q4)) / 2;
-    let plan = assign(&table, budget).expect("a budget above uniform q4 is feasible");
-    assert!(plan.bytes <= budget, "plan {} bytes over its budget {budget}", plan.bytes);
-
     let original = held_out_loss(&m, &held_out);
-    let searched = measure_policy(&m, &sites, &plan.assignments, &held_out);
-    assert_eq!(held_out_loss(&m, &held_out), original, "measuring a policy must restore every weight");
-    for tier in tiers.into_iter().filter(|&t| bytes_at(t) <= budget) {
-        let baseline = measure_policy(&m, &sites, &uniform(&sites, tier), &held_out);
-        assert!(searched < baseline, "searched policy ({} bytes) loss {searched} must beat uniform {tier:?} ({} bytes) loss {baseline}", plan.bytes, bytes_at(tier));
+    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Bytes(budget), calibration: &calibration, held_out: &held_out }).expect("search");
+    assert_eq!(held_out_loss(&m, &held_out), original, "a search must leave every weight as it was");
+    assert!(report.plan_bytes <= budget, "plan {} bytes over its budget {budget}", report.plan_bytes);
+    assert_eq!(report.original_loss, original);
+    let fitting: Vec<&str> = TIERS.iter().filter(|&&t| bytes_at(t) <= budget).map(|t| t.name()).collect();
+    assert_eq!(report.baselines.iter().map(|b| b.tier).collect::<Vec<_>>(), fitting, "every uniform tier that fits is a baseline");
+    assert!(report.beats_baselines(), "searched loss {} must beat every uniform tier that fits: {:?}", report.plan_loss, report.baselines);
+
+    let policy = model::ops::TierPolicy::parse(&report.policy).expect("the report's policy parses as --weight-format");
+    for group in m.coupled_tensors() {
+        let tiers: Vec<Dtype> = group.iter().map(|t| policy.want(t)).collect();
+        assert!(tiers.windows(2).all(|w| w[0] == w[1]), "a fused group takes one tier: {group:?} -> {tiers:?}");
     }
-    let mut shuffled: Vec<f64> = (0..9).map(|_| measure_policy(&m, &sites, &shuffle_within_shapes(&sites, &plan.assignments, &mut rng), &held_out)).collect();
+
+    let plan: Vec<Assignment> = report.sites.iter().map(|s| Assignment { site: s.site.clone(), tier: Dtype::from_name(s.tier).expect("a tier name") }).collect();
+    let mut shuffled: Vec<f64> = (0..9).map(|_| measure_policy(&m, &sites, &shuffle_within_shapes(&sites, &plan, &mut rng), &held_out)).collect();
     shuffled.sort_by(f64::total_cmp);
-    assert!(searched < shuffled[4], "searched loss {searched} must beat the median {} of the same tiers dealt at random ({shuffled:?})", shuffled[4]);
-    eprintln!("shuffled median {}", shuffled[4]);
-    eprintln!("original {original}, searched {searched} at {} of {} bytes ({})", plan.bytes, bytes_at(Dtype::F32), plan.policy(&sites).summary());
+    assert!(report.plan_loss < shuffled[4], "searched loss {} must beat the median {} of the same tiers dealt at random ({shuffled:?})", report.plan_loss, shuffled[4]);
+    eprintln!("original {original}, searched {} at {:.2} bits/weight ({}), shuffled median {}, baselines {:?}", report.plan_loss, report.bits_per_weight, policy.summary(), shuffled[4], report.baselines);
+}
+
+#[test]
+fn a_search_refuses_to_accept_on_the_data_it_ranked_on() {
+    let mut rng = data::rng::Rng::random();
+    let cfg = qwen3::QwenConfig::tiny_i8();
+    let m = qwen3::Qwen::new(cfg.clone(), ROWS, cfg.block_size, &qwen3::init_weights(&cfg, rng.next_u64()));
+    let owned = batches(&mut rng, 2, cfg.vocab, cfg.block_size);
+    let both = as_batches(&owned);
+    let err = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::BitsPerWeight(8.5), calibration: &both, held_out: &both[1..] }).expect_err("overlapping sets are refused");
+    assert!(err.contains("held-out"), "{err}");
 }
