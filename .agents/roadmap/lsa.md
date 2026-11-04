@@ -76,7 +76,21 @@ head layout; clustering, selection and the sparse read are written once.
       speculation = greedy). Refused on int8/fp8 KV and under YaRN.
 - [ ] Serving surface: a policy flag to attach an indexer, memory accounted
       in `memplan`, selected-key metrics.
-- [ ] int8/fp8 KV for the sparse kernels (the served default is int8 KV).
+- [x] Packed (int8/fp8) KV, the served default: `paged_sparse_flash_gqa_i8`
+      (per KV head, decode) and `paged_sparse_flash_rows_i8` (one workgroup
+      per query row and every head: each selected key resolved once and its
+      whole packed K/V row staged in one coalesced sweep - the prefill
+      read), `lsa_index_keys_i8` building pages from the packed pool; fp8 by
+      the shared decode rewrite. Selection rows carry their header, freeing
+      the bindings. Gates: packed kernels bit-identical to f32 over the
+      dequantised pool, whole-row within float rounding of the per-KV-head
+      kernel at 16/8/128, 32/8/128, 8/2/64; real Qwen3-0.6B over int8 KV at
+      a full budget is as close to f32 as dense int8 (4.6e-2 vs 4.5e-2);
+      conformance with sparse attention over int8 KV. One layer at the
+      0.6B shape, int8 KV, k=1024, w=512, P40 shared with another GPU job
+      (indicative): dense `paged_flash_prefill_i8` 2238 / 10284 ms at
+      32k / 64k against whole-row sparse 787 / 1610 ms (2.8x / 6.4x);
+      crossover near 12k.
 - [ ] YaRN: the index-vector kernel un-rotates plain RoPE only.
 - [ ] D-LSA: PCA initialisation, loading the released distilled maps, the
       distillation objective (forward KL against head-averaged teacher

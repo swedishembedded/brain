@@ -25,6 +25,15 @@ use gpu_core::{DeviceBuffer, Gpu, Step};
 /// The kernels, for a caller's pipeline list.
 pub const KERNELS: [(&str, &str); 2] = [("lsa_index_vectors", kernels::LSA_INDEX_VECTORS), ("lsa_read", kernels::LSA_READ)];
 
+/// The index-key kernel over a packed KV pool ([`crate::paged_sparse::PackedKv`]).
+pub fn index_keys_kernel(kv: crate::paged_sparse::PackedKv) -> Result<(&'static str, &'static str), String> {
+    let int8 = ("lsa_index_keys_i8", kernels::LSA_INDEX_KEYS_I8);
+    match kv {
+        crate::paged_sparse::PackedKv::Int8 => Ok(int8),
+        crate::paged_sparse::PackedKv::Fp8 => kernels::template::fp8_decode_variant(int8.0, int8.1),
+    }
+}
+
 /// Most buckets a query may pick on the device (the read kernel's `P_MAX`).
 pub const MAX_TOP_P: usize = 1024;
 /// Widest index vector the device kernels hold.
@@ -86,6 +95,35 @@ impl IndexHeads {
         self.check(heads)?;
         let params = [rows, heads, self.n_kv_heads, self.head_dim, self.index_dim, self.rope_base.to_bits()];
         Ok(g.dispatch(kernel, &[b.x, b.row_off, b.pos, b.w, b.out], &params, gpu_core::Dispatch::Workgroups(rows)))
+    }
+}
+
+/// The buffers one packed-pool index-key dispatch binds.
+pub struct PackedKeyBuffers<'a> {
+    /// The packed key pool, `[slots, n_kv_heads * head_dim / 4]` u32.
+    pub pool: &'a DeviceBuffer,
+    /// `[slots, n_kv_heads]` f32 scales.
+    pub scales: &'a DeviceBuffer,
+    /// `[rows]` token slot of each key.
+    pub slots: &'a DeviceBuffer,
+    /// `[rows]` position each key was rotated at.
+    pub pos: &'a DeviceBuffer,
+    /// `[n_kv_heads * head_dim, index_dim]` projection.
+    pub w: &'a DeviceBuffer,
+    /// `[rows, index_dim]` out.
+    pub out: &'a DeviceBuffer,
+}
+
+impl IndexHeads {
+    /// Record index keys for `rows` keys read from a packed pool by token
+    /// slot. `kernel` is the caller's index of [`index_keys_kernel`].
+    pub fn step_packed_keys(&self, g: &Gpu, kernel: usize, rows: u32, b: &PackedKeyBuffers) -> Result<Step, String> {
+        self.check(self.n_kv_heads)?;
+        if !self.head_dim.is_multiple_of(4) {
+            return Err(format!("LSA index keys: a packed pool needs head_dim % 4 == 0, got {}", self.head_dim));
+        }
+        let params = [rows, self.n_kv_heads, self.n_kv_heads, self.head_dim, self.index_dim, self.rope_base.to_bits()];
+        Ok(g.dispatch(kernel, &[b.pool, b.slots, b.pos, b.w, b.out, b.scales], &params, gpu_core::Dispatch::Workgroups(rows)))
     }
 }
 
@@ -162,17 +200,21 @@ pub struct ReadBuffers<'a> {
     pub seqlen: &'a DeviceBuffer,
     /// `[rows, score_stride]` scratch.
     pub scores: &'a DeviceBuffer,
-    /// `[rows, selection_width]` out.
+    /// `[rows, row_stride]` out: each row's header, then its positions.
     pub sel: &'a DeviceBuffer,
-    /// `[rows, 3]` out, the sparse attention row metadata.
-    pub row_meta: &'a DeviceBuffer,
 }
 
 impl ReadGeometry {
-    /// Widest selection row: long-range keys, the window, one cluster block
-    /// whose page is not built yet (read through the widened window), sinks.
+    /// Most positions a selection row holds: long-range keys, the window,
+    /// one cluster block whose page is not built yet (read through the widened
+    /// window), sinks.
     pub fn selection_width(&self) -> u32 {
         (self.cfg.selection_width() + self.cfg.cluster_block) as u32
+    }
+
+    /// Words per selection row: the sparse attention header, then positions.
+    pub fn row_stride(&self) -> u32 {
+        self.selection_width() + crate::paged_sparse::ROW_HEADER
     }
 
     /// Scores a row holds: every bucket of every page it may list.
@@ -211,12 +253,12 @@ impl ReadGeometry {
             c.top_k as u32,
             c.sink as u32,
             c.window as u32,
-            self.selection_width(),
+            self.row_stride(),
             early_position,
             early_top_p,
             early_top_k,
         ];
-        let bufs = [b.iq, b.centroids, b.members, b.page_tab, b.seqlen, b.scores, b.sel, b.row_meta];
+        let bufs = [b.iq, b.centroids, b.members, b.page_tab, b.seqlen, b.scores, b.sel];
         Ok(g.dispatch(kernel, &bufs, &params, gpu_core::Dispatch::Workgroups(rows)))
     }
 }

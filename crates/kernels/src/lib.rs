@@ -722,6 +722,8 @@ pub const LORA_DELTA_ROWS_MULTI: &str = include_str!("../wgsl/lora_delta_rows_mu
 pub const LORA_XA_ROWS: &str = include_str!("../wgsl/lora_xa_rows.wgsl");
 /// `wgsl/lora_xa_rows_serial.wgsl`
 pub const LORA_XA_ROWS_SERIAL: &str = include_str!("../wgsl/lora_xa_rows_serial.wgsl");
+/// `wgsl/lsa_index_keys_i8.wgsl`
+pub const LSA_INDEX_KEYS_I8: &str = include_str!("../wgsl/lsa_index_keys_i8.wgsl");
 /// `wgsl/lsa_index_vectors.wgsl`
 pub const LSA_INDEX_VECTORS: &str = include_str!("../wgsl/lsa_index_vectors.wgsl");
 /// `wgsl/lsa_read.wgsl`
@@ -1005,6 +1007,10 @@ pub const PAGED_KV_APPEND_I8_CLIPPED_BATCHED: &str = include_str!("../wgsl/paged
 pub const PAGED_SPARSE_FLASH_DECODE: &str = include_str!("../wgsl/paged_sparse_flash_decode.wgsl");
 /// `wgsl/paged_sparse_flash_gqa.wgsl`
 pub const PAGED_SPARSE_FLASH_GQA: &str = include_str!("../wgsl/paged_sparse_flash_gqa.wgsl");
+/// `wgsl/paged_sparse_flash_gqa_i8.wgsl`
+pub const PAGED_SPARSE_FLASH_GQA_I8: &str = include_str!("../wgsl/paged_sparse_flash_gqa_i8.wgsl");
+/// `wgsl/paged_sparse_flash_rows_i8.wgsl`
+pub const PAGED_SPARSE_FLASH_ROWS_I8: &str = include_str!("../wgsl/paged_sparse_flash_rows_i8.wgsl");
 /// `wgsl/pexp_nll_grad.wgsl`
 pub const PEXP_NLL_GRAD: &str = include_str!("../wgsl/pexp_nll_grad.wgsl");
 /// `wgsl/pexp_nll_value.wgsl`
@@ -1721,6 +1727,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("lora_delta_rows_multi", LORA_DELTA_ROWS_MULTI),
     ("lora_xa_rows", LORA_XA_ROWS),
     ("lora_xa_rows_serial", LORA_XA_ROWS_SERIAL),
+    ("lsa_index_keys_i8", LSA_INDEX_KEYS_I8),
     ("lsa_index_vectors", LSA_INDEX_VECTORS),
     ("lsa_read", LSA_READ),
     ("lstm_gates", LSTM_GATES),
@@ -1851,6 +1858,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_kv_append_i8_clipped_batched", PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
     ("paged_sparse_flash_decode", PAGED_SPARSE_FLASH_DECODE),
     ("paged_sparse_flash_gqa", PAGED_SPARSE_FLASH_GQA),
+    ("paged_sparse_flash_gqa_i8", PAGED_SPARSE_FLASH_GQA_I8),
+    ("paged_sparse_flash_rows_i8", PAGED_SPARSE_FLASH_ROWS_I8),
     ("pexp_nll_grad", PEXP_NLL_GRAD),
     ("pexp_nll_value", PEXP_NLL_VALUE),
     ("pinball_grad_w", PINBALL_GRAD_W),

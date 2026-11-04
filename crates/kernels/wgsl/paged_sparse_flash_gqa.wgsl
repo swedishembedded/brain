@@ -72,8 +72,7 @@ struct Params {
 @group(0) @binding(3) var<storage, read>       pool_v:       array<f32>;
 @group(0) @binding(4) var<storage, read>       block_tables: array<u32>;
 @group(0) @binding(5) var<storage, read>       sel:          array<u32>;
-@group(0) @binding(6) var<storage, read>       row_meta:     array<u32>;
-@group(0) @binding(7) var<storage, read_write> ctx:          array<f32>;
+@group(0) @binding(6) var<storage, read_write> ctx:          array<f32>;
 
 var<workgroup> qsh:   array<f32, GROUP * HD>;
 var<workgroup> tile:  array<f32, BC * HD>;
@@ -98,10 +97,10 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
 
     let q_row = p.n_heads * hd;
     let kv_row = p.n_kv_heads * hd;
-    let count = row_meta[r * 3u];
-    let table = row_meta[r * 3u + 1u] * p.max_bt;
-    let live = row_meta[r * 3u + 2u];
-    let sel_base = r * p.sel_width;
+    let count = sel[r * p.sel_width];
+    let table = sel[r * p.sel_width + 1u] * p.max_bt;
+    let live = sel[r * p.sel_width + 2u];
+    let sel_base = r * p.sel_width + 3u;
     let lt = lid.x;
 
     // The group's query heads are contiguous: heads hkv*GROUP .. +GROUP.

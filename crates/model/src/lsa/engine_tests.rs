@@ -50,7 +50,7 @@ fn fixture(rng: &mut Lcg) -> Option<Fixture> {
 }
 
 fn kernels() -> LsaKernels {
-    LsaKernels { index_vectors: 0, read: 1, attend: 2, per_kv_head: true }
+    LsaKernels { index_vectors: 0, read: 1, attend: 2, layout: crate::paged_sparse::Layout::PerKvHead, attend_few: 2, layout_few: crate::paged_sparse::Layout::PerKvHead, index_keys_packed: None }
 }
 
 /// A sequence's contiguous K or V rows gathered from a pool.
@@ -80,7 +80,7 @@ fn a_decode_step_reads_its_selection_and_matches_the_oracle() {
     }).collect();
     {
         let mut rows: Vec<(&mut BlockTable, u32, u32)> = tables.iter_mut().zip(lens).map(|(t, n)| (t, n, 1)).collect();
-        lsa.prepare(&f.g, &mut rows, &f.pool_k).unwrap();
+        lsa.prepare(&f.g, &mut rows, KeyPools { keys: &f.pool_k, scales: None }).unwrap();
     }
     for (t, &n) in tables.iter().zip(&lens) {
         assert_eq!(t.index_pages().len(), (n / 32) as usize, "one page per closed cluster block");
@@ -105,7 +105,7 @@ fn a_decode_step_reads_its_selection_and_matches_the_oracle() {
     let ctx = g.storage((rows * NH * HD) as u64);
     for layer in 0..2 {
         let mut s = Vec::new();
-        let b = LayerBuffers { q: &q, pos: &pos, seqlen: &seqlen, block_tables: &block_tables, pool_k: &f.pool_k[layer], pool_v: &f.pool_v[layer], ctx: &ctx };
+        let b = LayerBuffers { q: &q, pos: &pos, seqlen: &seqlen, block_tables: &block_tables, pool_k: &f.pool_k[layer], pool_v: &f.pool_v[layer], scales: None, ctx: &ctx };
         lsa.record_layer(g, &mut s, layer, rows, &b).unwrap();
         g.submit(&[], &s);
         let got = g.read(&ctx, (rows * NH * HD) as usize);
@@ -133,12 +133,12 @@ fn a_decode_step_reads_its_selection_and_matches_the_oracle() {
     // A sequence over the same KV blocks shares the pages instead of
     // rebuilding them; truncation and release give them back.
     let mut twin = tables[0].fork(&mut f.alloc);
-    lsa.prepare(&f.g, &mut [(&mut twin, 150, 1)], &f.pool_k).unwrap();
+    lsa.prepare(&f.g, &mut [(&mut twin, 150, 1)], KeyPools { keys: &f.pool_k, scales: None }).unwrap();
     assert_eq!(twin.index_pages(), tables[0].index_pages());
     assert_eq!(lsa.built_pages(), (150 / 32 + 70 / 32) as u64, "the twin's pages were rebuilt");
     let in_use = lsa.page_usage().0;
     twin.truncate(64, &mut f.alloc);
-    lsa.prepare(&f.g, &mut [(&mut twin, 64, 1)], &f.pool_k).unwrap();
+    lsa.prepare(&f.g, &mut [(&mut twin, 64, 1)], KeyPools { keys: &f.pool_k, scales: None }).unwrap();
     assert_eq!(twin.index_pages().len(), 2);
     assert_eq!(lsa.page_usage().0, in_use, "shared pages stay while the original holds them");
     for t in tables.iter_mut().chain(std::iter::once(&mut twin)) {

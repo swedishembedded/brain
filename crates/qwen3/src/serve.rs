@@ -262,8 +262,19 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.extend(model::kv_tier::fp8_pool_pipelines());
         v.extend(model::lsa::device::KERNELS);
         v.push(model::paged_sparse::KERNEL);
+        for kv in [model::paged_sparse::PackedKv::Int8, model::paged_sparse::PackedKv::Fp8] {
+            v.push(model::lsa::device::index_keys_kernel(kv).expect("lsa_index_keys_i8 marks its byte decode"));
+        }
         for group in LSA_GQA_GROUPS {
             v.push(model::paged_sparse::gqa_kernel(group).expect("paged_sparse_flash_gqa declares the GROUP knob"));
+            for kv in [model::paged_sparse::PackedKv::Int8, model::paged_sparse::PackedKv::Fp8] {
+                v.push(model::paged_sparse::gqa_kernel_kv(group, kv).expect("paged_sparse_flash_gqa_i8 declares GROUP and marks its byte decode"));
+            }
+        }
+        for (heads, kv_heads) in LSA_WHOLE_ROW_GEOMETRIES {
+            for kv in [model::paged_sparse::PackedKv::Int8, model::paged_sparse::PackedKv::Fp8] {
+                v.push(model::paged_sparse::rows_kernel_kv(heads, kv_heads, 128, kv).expect("the Qwen3 geometries have a whole-row kernel"));
+            }
         }
         v
     })
@@ -273,6 +284,11 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
 /// 4B/8B: 4, 14B: 5, 32B: 8) whose per-KV-head sparse attention kernel is
 /// compiled in; another group reads through the per-head kernel.
 const LSA_GQA_GROUPS: [u32; 4] = [2, 4, 5, 8];
+
+/// `(query heads, KV heads)` of the Qwen3 family (head width 128) whose
+/// whole-row packed-pool prefill kernel is compiled in: 0.6B/1.7B and 4B/8B.
+/// The query heads must divide the workgroup's 64 threads.
+const LSA_WHOLE_ROW_GEOMETRIES: [(u32, u32); 2] = [(16, 8), (32, 8)];
 
 /// Output columns per thread of the int8 prefill tile: 4 gives a 128x64
 /// workgroup tile whose register block fits two workgroups per SM, faster
@@ -1653,13 +1669,11 @@ impl Engine {
     /// as cluster blocks close, so prefix-cache hits, cached-token accounting
     /// and continuous batching are unchanged.
     ///
-    /// Refused on an int8/fp8 KV cache and under YaRN position scaling, which
-    /// the sparse kernels do not read yet.
+    /// Reads f32, int8 and fp8 KV caches (the packed ones a quarter of the
+    /// bytes per key). Refused under YaRN position scaling, which the index
+    /// does not un-rotate yet.
     pub fn set_lsa(&mut self, indexer: &model::lsa::indexer::Indexer) -> Result<(), String> {
         let c = &self.cfg;
-        if self.kv_int8 {
-            return Err("latent sparse attention reads an f32 KV cache; serve with --kv-cache f32".into());
-        }
         if self.yarn.is_some() {
             return Err("latent sparse attention does not read YaRN-scaled positions yet; serve within the model's native context".into());
         }
@@ -1667,12 +1681,20 @@ impl Engine {
         indexer.check_model(&geometry)?;
         let group = c.n_heads / c.n_kv_heads;
         let name = |n: &str| self.gpu.kernel_index(n).ok_or_else(|| format!("latent sparse attention: kernel {n} is not registered"));
-        let (attend, per_kv_head) = if LSA_GQA_GROUPS.contains(&group) {
-            (name(model::paged_sparse::gqa_kernel(group)?.0)?, true)
-        } else {
-            (name(model::paged_sparse::KERNEL.0)?, false)
+        use model::paged_sparse::{Layout, PackedKv};
+        let packed = self.kv_int8.then(|| if self.kv_fp8.is_some() { PackedKv::Fp8 } else { PackedKv::Int8 });
+        // Decode steps read per KV head (or per head outside the compiled
+        // groups); prefill chunks over a packed pool read a whole row per
+        // workgroup where the model's geometry has that kernel compiled.
+        let (few, layout_few, index_keys_packed) = match (packed, LSA_GQA_GROUPS.contains(&group)) {
+            (Some(kv), true) => (name(model::paged_sparse::gqa_kernel_kv(group, kv)?.0)?, Layout::PerKvHead, Some(name(model::lsa::device::index_keys_kernel(kv)?.0)?)),
+            (Some(_), false) => return Err(format!("latent sparse attention over a packed KV cache needs a compiled group ({LSA_GQA_GROUPS:?}), the model's is {group}; serve with --kv-cache f32")),
+            (None, true) => (name(model::paged_sparse::gqa_kernel(group)?.0)?, Layout::PerKvHead, None),
+            (None, false) => (name(model::paged_sparse::KERNEL.0)?, Layout::PerHead, None),
         };
-        let kernels = model::lsa::engine::LsaKernels { index_vectors: name(model::lsa::device::KERNELS[0].0)?, read: name(model::lsa::device::KERNELS[1].0)?, attend, per_kv_head };
+        let whole_row = packed.and_then(|kv| model::paged_sparse::rows_kernel_kv(c.n_heads, c.n_kv_heads, c.head_dim, kv).ok()).and_then(|(n, _)| self.gpu.kernel_index(n));
+        let (attend, layout) = whole_row.map_or((few, layout_few), |k| (k, Layout::PerRow));
+        let kernels = model::lsa::engine::LsaKernels { index_vectors: name(model::lsa::device::KERNELS[0].0)?, read: name(model::lsa::device::KERNELS[1].0)?, attend, layout, attend_few: few, layout_few, index_keys_packed };
         let kv = model::lsa::engine::KvGeometry { block_size: self.block_size, max_blocks_per_seq: self.max_blocks_per_seq };
         let cluster = indexer.cfg.cluster_block as u32;
         // Shared prefixes share pages; sequences that diverge inside a cluster
@@ -1695,7 +1717,8 @@ impl Engine {
     /// `rows` consecutive positions starting after its `cached` written keys.
     fn lsa_prepare_chunk(&mut self, table: &mut BlockTable, cached: u32, rows: u32) {
         if let Some(lsa) = self.lsa.as_mut() {
-            lsa.prepare(&self.gpu, &mut [(table, cached, rows)], &self.pool_k).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
+            let pools = model::lsa::engine::KeyPools { keys: &self.pool_k, scales: self.kv_int8.then_some(&self.scales_k[..]) };
+            lsa.prepare(&self.gpu, &mut [(table, cached, rows)], pools).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
         }
     }
 
@@ -1804,7 +1827,8 @@ impl Engine {
                     (&mut **t, cached, 1)
                 })
                 .collect();
-            lsa.prepare(&self.gpu, &mut rows, &self.pool_k).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
+            let pools = model::lsa::engine::KeyPools { keys: &self.pool_k, scales: self.kv_int8.then_some(&self.scales_k[..]) };
+            lsa.prepare(&self.gpu, &mut rows, pools).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
         }
         let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut bt = vec![0u32; bsz as usize * mbt];
@@ -2674,69 +2698,77 @@ impl Engine {
                 // serves decode at every batch size, so `fused` answers
                 // `true` in both regimes; asking once and branching mirrors
                 // the fp32 arm.
-                let fused = fused_paged_attention(g, causal_chunk, true, hd, b);
-                if fused && causal_chunk {
-                    // One dispatch per (head, query-tile), no `scores`/`probs`
-                    // at all - BR=64 is the kernel's own tile size,
-                    // @workgroup_size(256) its own launch shape (both pinned
-                    // in its own WGSL header), identical to the fp32 twin.
-                    let ntiles_q = b.div_ceil(64);
-                    let params = [b, nh, nkv, hd, group, bs, mbt];
-                    // fp16 tensor cores where the device has them and the fp32 tier was not pinned
-                    // (same buffers, uniform and launch geometry as the portable kernel).
-                    let native = (!self.gemm.is_reference_pinned())
-                        .then(|| {
-                            let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_k[l], &self.scales_v[l]];
-                            if self.kv_fp8.is_some() {
-                                block::native_paged_flash_prefill_kvfp8(g, hd, &bufs, &params, nh * ntiles_q)
-                            } else {
-                                block::native_paged_flash_prefill_kv8(g, hd, &bufs, &params, nh * ntiles_q)
-                            }
-                        })
-                        .flatten();
-                    s.push(native.unwrap_or_else(|| {
-                        g.dispatch(
-                            self.kv_fp8.map_or(PAGED_FLASH_PREFILL_I8, |k| k.prefill),
-                            &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
-                            &params,
-                            gpu_core::Dispatch::Workgroups(nh * ntiles_q),
-                        )
-                    }));
-                } else if fused {
-                    // Batched GQA split-key decode: one workgroup per
-                    // (row, kv head, 4-head slab, split) reads each K/V byte
-                    // once per slab, and walks only the row's live chunks -
-                    // `seqlen_buf` is read on the device, so this tape's
-                    // dispatch size and parameters depend on `b` alone and
-                    // stay valid for every step it is replayed at. The
-                    // combine pass merges the splits that did work.
-                    let n_splits = int8_decode_splits(c, b, cap);
-                    let slabs = group.div_ceil(INT8_DECODE_SLAB);
-                    s.push(g.dispatch(
-                        self.kv_fp8.map_or(PAGED_FLASH_DECODE_SPLIT_I8, |k| k.decode_split),
-                        &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.part_i8],
-                        &[b, nh, nkv, hd, group, bs, mbt, n_splits],
-                        gpu_core::Dispatch::Workgroups(b * nkv * slabs * n_splits),
-                    ));
-                    s.push(g.step(PAGED_FLASH_DECODE_COMBINE_I8, &[&sc.part_i8, &sc.seqlen_buf, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
-                } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned() && self.kv_fp8.is_none())
-                    .then(|| block::native_paged_decode_batched(g, true, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
-                    .flatten()
-                {
-                    // The whole triad as one launch for two or more sequences where the split-key pair above is not
-                    // selected; that pair is faster where both run (`qwen_bench flash-decode-i8` times the two).
-                    s.push(step);
+                if let Some(lsa) = self.lsa.as_ref().filter(|a| a.sparse(l)) {
+                    // Latent sparse attention over the packed pool: the same three
+                    // shape-only dispatches as the f32 arm, the sparse read
+                    // dequantising each selected key against its scale.
+                    let bufs = model::lsa::engine::LayerBuffers { q: &sc.q, pos: &sc.pos_buf, seqlen: &sc.seqlen_buf, block_tables: &sc.bt_buf, pool_k: &self.pool_k[l], pool_v: &self.pool_v[l], scales: Some((&self.scales_k[l], &self.scales_v[l])), ctx: &sc.ctx };
+                    lsa.record_layer(g, &mut s, l, b, &bufs).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
                 } else {
-                    let sp = [b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)];
-                    if let Some(k) = self.kv_fp8 {
-                        // The fp8 kernels are template rewrites of the f32 triad, which binds the scales last.
-                        s.push(g.step(k.scores, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores, &self.scales_k[l]], &sp, b * nh * cap));
-                        s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
-                        s.push(g.step(k.apply, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_v[l]], &sp[..8], b * nh * hd));
+                    let fused = fused_paged_attention(g, causal_chunk, true, hd, b);
+                    if fused && causal_chunk {
+                        // One dispatch per (head, query-tile), no `scores`/`probs`
+                        // at all - BR=64 is the kernel's own tile size,
+                        // @workgroup_size(256) its own launch shape (both pinned
+                        // in its own WGSL header), identical to the fp32 twin.
+                        let ntiles_q = b.div_ceil(64);
+                        let params = [b, nh, nkv, hd, group, bs, mbt];
+                        // fp16 tensor cores where the device has them and the fp32 tier was not pinned
+                        // (same buffers, uniform and launch geometry as the portable kernel).
+                        let native = (!self.gemm.is_reference_pinned())
+                            .then(|| {
+                                let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_k[l], &self.scales_v[l]];
+                                if self.kv_fp8.is_some() {
+                                    block::native_paged_flash_prefill_kvfp8(g, hd, &bufs, &params, nh * ntiles_q)
+                                } else {
+                                    block::native_paged_flash_prefill_kv8(g, hd, &bufs, &params, nh * ntiles_q)
+                                }
+                            })
+                            .flatten();
+                        s.push(native.unwrap_or_else(|| {
+                            g.dispatch(
+                                self.kv_fp8.map_or(PAGED_FLASH_PREFILL_I8, |k| k.prefill),
+                                &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
+                                &params,
+                                gpu_core::Dispatch::Workgroups(nh * ntiles_q),
+                            )
+                        }));
+                    } else if fused {
+                        // Batched GQA split-key decode: one workgroup per
+                        // (row, kv head, 4-head slab, split) reads each K/V byte
+                        // once per slab, and walks only the row's live chunks -
+                        // `seqlen_buf` is read on the device, so this tape's
+                        // dispatch size and parameters depend on `b` alone and
+                        // stay valid for every step it is replayed at. The
+                        // combine pass merges the splits that did work.
+                        let n_splits = int8_decode_splits(c, b, cap);
+                        let slabs = group.div_ceil(INT8_DECODE_SLAB);
+                        s.push(g.dispatch(
+                            self.kv_fp8.map_or(PAGED_FLASH_DECODE_SPLIT_I8, |k| k.decode_split),
+                            &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.part_i8],
+                            &[b, nh, nkv, hd, group, bs, mbt, n_splits],
+                            gpu_core::Dispatch::Workgroups(b * nkv * slabs * n_splits),
+                        ));
+                        s.push(g.step(PAGED_FLASH_DECODE_COMBINE_I8, &[&sc.part_i8, &sc.seqlen_buf, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
+                    } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned() && self.kv_fp8.is_none())
+                        .then(|| block::native_paged_decode_batched(g, true, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
+                        .flatten()
+                    {
+                        // The whole triad as one launch for two or more sequences where the split-key pair above is not
+                        // selected; that pair is faster where both run (`qwen_bench flash-decode-i8` times the two).
+                        s.push(step);
                     } else {
-                        s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &sp, b * nh * cap));
-                        s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
-                        s.push(g.step(APPLY_I8, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_v[l], &sc.ctx], &sp[..8], b * nh * hd));
+                        let sp = [b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)];
+                        if let Some(k) = self.kv_fp8 {
+                            // The fp8 kernels are template rewrites of the f32 triad, which binds the scales last.
+                            s.push(g.step(k.scores, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores, &self.scales_k[l]], &sp, b * nh * cap));
+                            s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
+                            s.push(g.step(k.apply, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_v[l]], &sp[..8], b * nh * hd));
+                        } else {
+                            s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &sp, b * nh * cap));
+                            s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
+                            s.push(g.step(APPLY_I8, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_v[l], &sc.ctx], &sp[..8], b * nh * hd));
+                        }
                     }
                 }
             } else {
@@ -2768,7 +2800,7 @@ impl Engine {
                     // queries, the read over this layer's index pages, and
                     // attention over the selected keys of the paged pool. Shapes
                     // only, so a cached decode tape stays valid.
-                    let bufs = model::lsa::engine::LayerBuffers { q: &sc.q, pos: &sc.pos_buf, seqlen: &sc.seqlen_buf, block_tables: &sc.bt_buf, pool_k: &self.pool_k[l], pool_v: &self.pool_v[l], ctx: &sc.ctx };
+                    let bufs = model::lsa::engine::LayerBuffers { q: &sc.q, pos: &sc.pos_buf, seqlen: &sc.seqlen_buf, block_tables: &sc.bt_buf, pool_k: &self.pool_k[l], pool_v: &self.pool_v[l], scales: None, ctx: &sc.ctx };
                     lsa.record_layer(g, &mut s, l, b, &bufs).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
                 } else {
                     let fused = fused_paged_attention(g, causal_chunk, false, hd, b);

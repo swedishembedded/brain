@@ -71,15 +71,34 @@ fn a_budget_past_the_context_generates_what_dense_attention_does() {
     assert_eq!(sparse, dense, "every-key sparse attention diverged from dense attention");
 }
 
-/// An int8 KV cache is refused by name rather than read wrongly.
+/// Over the served default, an int8 KV cache, a budget past the context is
+/// as accurate as the dense int8 engine: measured against the f32-KV dense
+/// engine, both carry the int8 quantisation error (~5e-2 on the last hidden
+/// state) and the sparse read adds none of its own (the two int8 paths reduce
+/// the same dequantised values in different orders, ~1e-2 apart).
 #[test]
-fn an_int8_kv_cache_is_refused() {
+fn an_int8_kv_cache_reads_sparsely_as_accurately_as_dense() {
     let Some(path) = checkpoint() else { return };
-    let (cfg, src) = qwen3::open_checkpoint(&path).expect("open Qwen3-0.6B");
-    let mut e = Engine::from_source_tier(cfg, &*src, BLOCK, 64, 2, 32, MAX_PREFILL, true, qwen3::Dtype::F32);
-    let indexer = Indexer::random(LsaConfig::default(), geometry(&path), 1).unwrap();
-    let err = e.set_lsa(&indexer).unwrap_err();
-    assert!(err.contains("f32"), "{err}");
+    let mut rng = Lcg::random();
+    let p = prompt(&mut rng, 3 * 512 + 200);
+    let int8_engine = |path: &str| {
+        let (cfg, src) = qwen3::open_checkpoint(path).expect("open Qwen3-0.6B");
+        let mbt = 4096u32.div_ceil(BLOCK);
+        Engine::from_source_tier(cfg, &*src, BLOCK, 2 * mbt + 8, 2, mbt, MAX_PREFILL, true, qwen3::Dtype::F32)
+    };
+    let hidden = |e: &mut Engine| {
+        let mut table = model::paged::BlockTable::new();
+        e.prefill_for_perf(&mut table, &p)
+    };
+    let reference = hidden(&mut engine(&path, 4096));
+    let dense = hidden(&mut int8_engine(&path));
+    let mut sparse = int8_engine(&path);
+    sparse.set_lsa(&Indexer::random(LsaConfig { top_p: 1024, top_k: 4096, ..LsaConfig::default() }, geometry(&path), rng.next_u64()).unwrap()).unwrap();
+    let got = hidden(&mut sparse);
+    let rel = |a: &[f32], b: &[f32]| (a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>() / b.iter().map(|y| y * y).sum::<f32>()).sqrt();
+    let (dense_err, sparse_err) = (rel(&dense, &reference), rel(&got, &reference));
+    println!("int8 KV against f32 KV: dense {dense_err:.2e}, every-key sparse {sparse_err:.2e}; sparse vs dense int8 {:.2e}", rel(&got, &dense));
+    assert!(sparse_err <= 1.5 * dense_err.max(1e-6), "int8 sparse attention ({sparse_err}) strays further from f32 than dense int8 ({dense_err})");
 }
 
 /// The sparse path is the one running: over the same prompt the last hidden

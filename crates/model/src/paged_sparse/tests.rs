@@ -67,11 +67,9 @@ impl Cache {
         g.write(&bt, &self.tables);
         let sel = g.storage(rows.sel.len().max(1) as u64);
         g.write(&sel, &rows.sel);
-        let meta = g.storage(rows.row_meta.len() as u64);
-        g.write(&meta, &rows.row_meta);
         let ctx = g.storage(q.len() as u64);
-        let bufs = SparseBuffers { q: &qb, pool_k: &pk, pool_v: &pv, block_tables: &bt, sel: &sel, row_meta: &meta, ctx: &ctx };
-        let step = self.shape.step(g, kernel, per_kv_head, rows.rows, rows.width, &bufs).unwrap();
+        let bufs = SparseBuffers { q: &qb, pool_k: &pk, pool_v: &pv, block_tables: &bt, sel: &sel, scales: None, ctx: &ctx };
+        let step = self.shape.step(g, kernel, if per_kv_head { Layout::PerKvHead } else { Layout::PerHead }, rows.rows, rows.stride, &bufs).unwrap();
         g.submit(&[], &[step]);
         g.read(&ctx, q.len())
     }
@@ -187,7 +185,7 @@ fn a_position_the_sequence_does_not_hold_is_never_read() {
     let q: Vec<f32> = (0..(shape.n_heads * shape.head_dim) as usize).map(|_| rng.next_gaussian() as f32).collect();
     // Packed against 20 live keys, then the sequence is cut back to 12.
     let mut rows = SparseRows::pack(&selection, &[0], &[20]).unwrap();
-    rows.row_meta[2] = 12;
+    rows.sel[2] = 12; // the header's live keys
     let (pk, pv) = cache.f32_pools();
     let device = cache.run(&g, 0, false, &q, &rows, (&pk, &pv));
     let kept = Selection { width: 2, ids: vec![2, 9], lens: vec![2] };
@@ -255,5 +253,145 @@ fn the_per_kv_head_kernel_matches_the_per_head_kernel() {
         let per_kv_head = cache.run(&g, 1, true, &q, &rows, (&pk, &pv));
         let w = worst(&per_kv_head, &per_head);
         assert!(w < 1e-5, "group {}: per-KV-head vs per-head maxabs {w}", nh / nkv);
+    }
+}
+
+/// Random packed pool bytes (NaN codes avoided for fp8) and per-(slot, kv head)
+/// scales, with the f32 pool they dequantise to.
+fn packed_pool(rng: &mut Rng, slots: usize, n_kv: usize, hd: usize, kv: PackedKv) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+    let bytes: Vec<u8> = (0..slots * n_kv * hd)
+        .map(|_| {
+            let b = (rng.next_gaussian() * 40.0) as i32 as u8;
+            if kv == PackedKv::Fp8 && b & 0x7f == 0x7f { 0x7e } else { b }
+        })
+        .collect();
+    let scales: Vec<f32> = (0..slots * n_kv).map(|_| 0.01 + rng.next_gaussian().abs() as f32 * 0.02).collect();
+    let words = bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
+    let deq = bytes
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| {
+            let v = match kv {
+                PackedKv::Int8 => b as i8 as f32,
+                PackedKv::Fp8 => crate::kv_tier::decode_e4m3(b),
+            };
+            v * scales[i / hd]
+        })
+        .collect();
+    (words, scales, deq)
+}
+
+/// The packed-pool kernels stage the very values a host dequantisation gives,
+/// then run the f32 kernel's arithmetic: bit-identical to it over the
+/// dequantised pool, int8 and fp8, on ragged rows of two sequences.
+#[test]
+fn packed_pools_read_what_the_f32_kernel_reads_dequantised() {
+    for kv in [PackedKv::Int8, PackedKv::Fp8] {
+        let (nh, nkv, hd) = (8u32, 4u32, 64u32);
+        let pipes: &'static [(&str, &str)] = Box::leak(vec![gqa_kernel(nh / nkv).unwrap(), gqa_kernel_kv(nh / nkv, kv).unwrap()].into_boxed_slice());
+        let Some(g) = barrier_gpu(pipes) else { return };
+        let shape = SparseAttention { n_heads: nh, n_kv_heads: nkv, head_dim: hd, block_size: 8, max_bt: 32 };
+        let mut rng = Rng::new(data::rng::random_seed());
+        let slots = (2 * 32 * 8) as usize;
+        let (words_k, scales_k, deq_k) = packed_pool(&mut rng, slots, nkv as usize, hd as usize, kv);
+        let (words_v, scales_v, deq_v) = packed_pool(&mut rng, slots, nkv as usize, hd as usize, kv);
+        let tables: Vec<u32> = (0..2u32).flat_map(|b| (0..32u32).map(move |i| b + i * 2)).collect();
+        let width = 50usize;
+        let (lens, rows_per) = ([180u32, 90], 6usize);
+        let mut ids = vec![-1i32; 2 * rows_per * width];
+        let (mut row_lens, mut table_rows, mut live) = (Vec::new(), Vec::new(), Vec::new());
+        for (seq, &len) in lens.iter().enumerate() {
+            for r in 0..rows_per {
+                let row = seq * rows_per + r;
+                let n = 1 + (r * 9) % width;
+                for (i, slot) in ids[row * width..][..n].iter_mut().enumerate() {
+                    *slot = ((i * 11 + r * 3) % len as usize) as i32;
+                }
+                row_lens.push(n as u32);
+                table_rows.push(seq as u32);
+                live.push(len);
+            }
+        }
+        let rows = SparseRows::pack(&Selection { width, ids, lens: row_lens }, &table_rows, &live).unwrap();
+        let q: Vec<f32> = (0..rows.rows * nh * hd).map(|_| rng.next_gaussian() as f32).collect();
+        let run = |kernel: usize, pk: &gpu_core::DeviceBuffer, pv: &gpu_core::DeviceBuffer, scales: Option<(&gpu_core::DeviceBuffer, &gpu_core::DeviceBuffer)>| {
+            let qb = g.storage_init("q", &q);
+            let bt = g.storage(tables.len() as u64);
+            g.write(&bt, &tables);
+            let sel = g.storage(rows.sel.len() as u64);
+            g.write(&sel, &rows.sel);
+            let ctx = g.storage(q.len() as u64);
+            let b = SparseBuffers { q: &qb, pool_k: pk, pool_v: pv, block_tables: &bt, sel: &sel, scales, ctx: &ctx };
+            g.submit(&[], &[shape.step(&g, kernel, Layout::PerKvHead, rows.rows, rows.stride, &b).unwrap()]);
+            g.read(&ctx, q.len())
+        };
+        let (dk, dv) = (g.storage_init("dk", &deq_k), g.storage_init("dv", &deq_v));
+        let f32_out = run(0, &dk, &dv, None);
+        let (pk, pv) = (g.storage(words_k.len() as u64), g.storage(words_v.len() as u64));
+        g.write(&pk, &words_k);
+        g.write(&pv, &words_v);
+        let (sk, sv) = (g.storage_init("sk", &scales_k), g.storage_init("sv", &scales_v));
+        let packed_out = run(1, &pk, &pv, Some((&sk, &sv)));
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert!(f32_out.iter().any(|x| *x != 0.0));
+        assert_eq!(bits(&packed_out), bits(&f32_out), "{kv:?} pool: the packed kernel differs from the f32 kernel over the dequantised pool");
+    }
+}
+
+/// The whole-row kernel (one workgroup per query row, every head) agrees with
+/// the f32 per-KV-head kernel over the dequantised pool - to float rounding, as
+/// it applies each key's scale after the dot product rather than per element -
+/// at the model geometries it is built for, int8 and fp8.
+#[test]
+fn the_whole_row_kernel_matches_over_the_dequantised_pool() {
+    for (nh, nkv, hd) in [(16u32, 8u32, 128u32), (32, 8, 128), (8, 2, 64)] {
+        for kv in [PackedKv::Int8, PackedKv::Fp8] {
+            let pipes: &'static [(&str, &str)] = Box::leak(vec![gqa_kernel(nh / nkv).unwrap(), rows_kernel_kv(nh, nkv, hd, kv).unwrap()].into_boxed_slice());
+            let Some(g) = barrier_gpu(pipes) else { return };
+            let shape = SparseAttention { n_heads: nh, n_kv_heads: nkv, head_dim: hd, block_size: 8, max_bt: 32 };
+            let mut rng = Rng::new(data::rng::random_seed());
+            let slots = (2 * 32 * 8) as usize;
+            let (words_k, scales_k, deq_k) = packed_pool(&mut rng, slots, nkv as usize, hd as usize, kv);
+            let (words_v, scales_v, deq_v) = packed_pool(&mut rng, slots, nkv as usize, hd as usize, kv);
+            let tables: Vec<u32> = (0..2u32).flat_map(|b| (0..32u32).map(move |i| b + i * 2)).collect();
+            let width = 45usize;
+            let (lens, rows_per) = ([200u32, 77], 7usize);
+            let mut ids = vec![-1i32; 2 * rows_per * width];
+            let (mut row_lens, mut table_rows, mut live) = (Vec::new(), Vec::new(), Vec::new());
+            for (seq, &len) in lens.iter().enumerate() {
+                for r in 0..rows_per {
+                    let row = seq * rows_per + r;
+                    let n = 1 + (r * 13) % width;
+                    for (i, slot) in ids[row * width..][..n].iter_mut().enumerate() {
+                        *slot = ((i * 7 + r * 5) % len as usize) as i32;
+                    }
+                    row_lens.push(n as u32);
+                    table_rows.push(seq as u32);
+                    live.push(len);
+                }
+            }
+            let rows = SparseRows::pack(&Selection { width, ids, lens: row_lens }, &table_rows, &live).unwrap();
+            let q: Vec<f32> = (0..rows.rows * nh * hd).map(|_| rng.next_gaussian() as f32).collect();
+            let run = |kernel: usize, layout: Layout, pk: &gpu_core::DeviceBuffer, pv: &gpu_core::DeviceBuffer, scales: Option<(&gpu_core::DeviceBuffer, &gpu_core::DeviceBuffer)>| {
+                let qb = g.storage_init("q", &q);
+                let bt = g.storage(tables.len() as u64);
+                g.write(&bt, &tables);
+                let sel = g.storage(rows.sel.len() as u64);
+                g.write(&sel, &rows.sel);
+                let ctx = g.storage(q.len() as u64);
+                let b = SparseBuffers { q: &qb, pool_k: pk, pool_v: pv, block_tables: &bt, sel: &sel, scales, ctx: &ctx };
+                g.submit(&[], &[shape.step(&g, kernel, layout, rows.rows, rows.stride, &b).unwrap()]);
+                g.read(&ctx, q.len())
+            };
+            let (dk, dv) = (g.storage_init("dk", &deq_k), g.storage_init("dv", &deq_v));
+            let want = run(0, Layout::PerKvHead, &dk, &dv, None);
+            let (pk, pv) = (g.storage(words_k.len() as u64), g.storage(words_v.len() as u64));
+            g.write(&pk, &words_k);
+            g.write(&pv, &words_v);
+            let (sk, sv) = (g.storage_init("sk", &scales_k), g.storage_init("sv", &scales_v));
+            let got = run(1, Layout::PerRow, &pk, &pv, Some((&sk, &sv)));
+            let w = worst(&got, &want);
+            assert!(w < 1e-4, "{nh}/{nkv}/{hd} {kv:?}: whole-row kernel vs per-KV-head maxabs {w}");
+        }
     }
 }

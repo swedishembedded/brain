@@ -43,8 +43,8 @@
 //      first `top_k` kept (the last bucket cut short);
 //   5. appends the window `[min(pos + 1 - window, built * cluster_block),
 //      pos]` and the sinks below it,
-//      and writes `row_meta[r] = (count, r, seqlen[r])` - the exact rows the
-//      sparse attention kernels read, with block-table row `r`.
+//      writing the row's header `[count, r, seqlen[r]]` first - the exact
+//      selection rows the sparse attention kernels read, block-table row `r`.
 //
 // Given the same f32 scores the result is identical to `read_scores`,
 // position for position. Members are absolute positions, `0xFFFFFFFF` past a
@@ -60,8 +60,8 @@
 //   page_tab  : [rows, 1 + max_pages] built pages, then each block's page
 //   seqlen    : [rows] live keys of the row's sequence
 //   scores    : [rows, score_stride] scratch
-//   sel       : [rows, sel_width] out
-//   row_meta  : [rows, 3] out (selected count, block-table row, live keys)
+//   sel       : [rows, sel_width] out: header (count, table row, live keys),
+//               then positions
 
 const P_MAX: u32 = 1024u;
 const WG: u32 = 64u;
@@ -93,7 +93,6 @@ struct Params {
 @group(0) @binding(5) var<storage, read>       seqlen:    array<u32>;
 @group(0) @binding(6) var<storage, read_write> scores:    array<f32>;
 @group(0) @binding(7) var<storage, read_write> sel:       array<u32>;
-@group(0) @binding(8) var<storage, read_write> row_meta:  array<u32>;
 
 var<workgroup> pick_key: array<u32, 1024>; // P_MAX
 var<workgroup> pick_idx: array<u32, 1024>; // P_MAX
@@ -286,7 +285,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     part_b[lt] = 0u;
     scan_parts(lt);
     let long_range = min(workgroupUniformLoad(&total_a), top_k);
-    let out = r * p.sel_width;
+    let out = r * p.sel_width + 3u;
     var at = part_a[lt];
     for (var s = blo; s < bhi; s = s + 1u) {
         let mrow = bucket_row(ptab, pick_idx[s]) * p.bucket_cap;
@@ -310,8 +309,8 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         sel[out + long_range + window_len + i] = i;
     }
     if (lt == 0u) {
-        row_meta[r * 3u] = long_range + window_len + sinks;
-        row_meta[r * 3u + 1u] = r;
-        row_meta[r * 3u + 2u] = live;
+        sel[r * p.sel_width] = long_range + window_len + sinks;
+        sel[r * p.sel_width + 1u] = r;
+        sel[r * p.sel_width + 2u] = live;
     }
 }

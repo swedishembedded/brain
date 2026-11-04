@@ -20,9 +20,10 @@
 // info@swedishembedded.com.
 //
 // `paged_flash_decode` with the dense key walk `j = 0..seq_len` replaced by a
-// walk over an explicit list: query row `r` reads exactly the logical
-// positions `sel[r * sel_width + i]`, `i < row_meta[r].len`, resolved
-// through its sequence's block table. This is the attention half of any
+// walk over an explicit list. Query row `r`'s selection row is
+// `sel[r * sel_width ..]` = `[count, table_row, live, pos_0, pos_1, ...]`:
+// it reads exactly the `count` logical positions listed, resolved through
+// block-table row `table_row`; `live` is its sequence's cached keys. This is the attention half of any
 // selection-based sparse attention (latent sparse attention's bucket read,
 // a top-k indexer, block-sparse or window-plus-global patterns): the index
 // decides which keys, this kernel reads them, and no selected K/V is ever
@@ -31,9 +32,7 @@
 //   q            : [rows, n_heads*head_dim]
 //   pool_k/pool_v: [num_blocks*block_size, n_kv_heads*head_dim]  (paged pool)
 //   block_tables : [n_tables, max_bt]  physical block per logical block
-//   sel          : [rows, sel_width]   selected logical positions (u32)
-//   row_meta     : [rows, 3]           (selected count, block-table row,
-//                                       live keys of that sequence)
+//   sel          : [rows, sel_width]   3-word header, then logical positions
 //   ctx          : [rows, n_heads*head_dim]
 //
 // Rows are independent queries: decode passes one row per sequence, prefill
@@ -66,7 +65,7 @@ struct Params {
     group: u32,        // n_heads / n_kv_heads
     block_size: u32,
     max_bt: u32,       // block_tables row stride (blocks per sequence)
-    sel_width: u32,    // sel row stride
+    sel_width: u32,    // sel row stride, header included
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -75,8 +74,7 @@ struct Params {
 @group(0) @binding(3) var<storage, read>       pool_v:       array<f32>;
 @group(0) @binding(4) var<storage, read>       block_tables: array<u32>;
 @group(0) @binding(5) var<storage, read>       sel:          array<u32>;
-@group(0) @binding(6) var<storage, read>       row_meta:     array<u32>;
-@group(0) @binding(7) var<storage, read_write> ctx:          array<f32>;
+@group(0) @binding(6) var<storage, read_write> ctx:          array<f32>;
 
 var<workgroup> qsh:  array<f32, 128>;  // HD
 var<workgroup> ksh:  array<f32, 1024>; // BC*HD -> 4 KiB
@@ -99,10 +97,10 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let hkv = h / p.group;
     let q_row = p.n_heads * hd;
     let kv_row = p.n_kv_heads * hd;
-    let count = row_meta[r * 3u];
-    let table = row_meta[r * 3u + 1u] * p.max_bt;
-    let live = row_meta[r * 3u + 2u];
-    let sel_base = r * p.sel_width;
+    let count = sel[r * p.sel_width];
+    let table = sel[r * p.sel_width + 1u] * p.max_bt;
+    let live = sel[r * p.sel_width + 2u];
+    let sel_base = r * p.sel_width + 3u;
 
     let lt = lid.x;
     let row = lt / LANES;

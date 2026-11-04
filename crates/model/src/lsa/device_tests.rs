@@ -149,25 +149,67 @@ fn the_device_read_matches_the_host_read() {
     let sl = g.storage(rows as u64);
     g.write(&sl, &seqlen);
     let scores = g.storage((rows as u64) * geom.score_stride() as u64);
-    let width = geom.selection_width() as usize;
+    let width = geom.row_stride() as usize;
     let sel = g.storage((rows * width) as u64);
-    let meta = g.storage((rows * 3) as u64);
-    let bufs = ReadBuffers { iq: &iq, centroids: &pool.centroids, members: &pool.members, page_tab: &page_tab, seqlen: &sl, scores: &scores, sel: &sel, row_meta: &meta };
+    let bufs = ReadBuffers { iq: &iq, centroids: &pool.centroids, members: &pool.members, page_tab: &page_tab, seqlen: &sl, scores: &scores, sel: &sel };
     let step = geom.step(&g, 1, rows as u32, &bufs).unwrap();
     g.submit(&[], &[step]);
     let dev_scores = g.read(&scores, rows * geom.score_stride() as usize);
     let dev_sel: Vec<u32> = g.read(&sel, rows * width).iter().map(|x| x.to_bits()).collect();
-    let dev_meta: Vec<u32> = g.read(&meta, rows * 3).iter().map(|x| x.to_bits()).collect();
 
     let stride = geom.score_stride() as usize;
     let mut lagged = 0;
     for r in 0..rows {
         let host = read_scores(&index, &dev_scores[r * stride..][..stride], stride, &positions[r..r + 1], built[r]).unwrap();
         let want: Vec<u32> = host.row(0).iter().map(|&j| j as u32).collect();
-        let n = dev_meta[r * 3] as usize;
-        assert_eq!(dev_meta[r * 3 + 1..r * 3 + 3], [r as u32, seqlen[r]], "row {r} metadata");
-        assert_eq!(&dev_sel[r * width..][..n], &want[..], "row {r} (position {}, {} pages built) selects differently", positions[r], built[r]);
+        let row = &dev_sel[r * width..][..width];
+        let n = row[0] as usize;
+        assert_eq!(row[1..3], [r as u32, seqlen[r]], "row {r} header");
+        assert_eq!(&row[3..3 + n], &want[..], "row {r} (position {}, {} pages built) selects differently", positions[r], built[r]);
         lagged += usize::from(built[r] < (positions[r] as usize + 1) / cfg.cluster_block);
     }
     assert!(lagged > 0, "the fixture must exercise a lagging index");
+}
+
+/// Index keys read from a packed pool by token slot equal the f32 kernel's
+/// over the dequantised pool, bit for bit, int8 and fp8.
+#[test]
+fn packed_index_keys_match_the_dequantised_pool() {
+    use crate::paged_sparse::PackedKv;
+    for kv in [PackedKv::Int8, PackedKv::Fp8] {
+        let pipes: &'static [(&str, &str)] = Box::leak(vec![KERNELS[0], index_keys_kernel(kv).unwrap()].into_boxed_slice());
+        let Some(g) = barrier_gpu(pipes) else { return };
+        let (nkv, hd, dim, slots) = (2usize, 16usize, 8usize, 40usize);
+        let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope_base: 10000.0, index_dim: dim as u32 };
+        let mut rng = Lcg::random();
+        let bytes: Vec<u8> = (0..slots * nkv * hd).map(|_| {
+            let b = rng.next_u32() as u8;
+            if kv == PackedKv::Fp8 && b & 0x7f == 0x7f { 0x7e } else { b }
+        }).collect();
+        let scales: Vec<f32> = (0..slots * nkv).map(|_| 0.01 + rng.unit() * 0.05).collect();
+        let deq: Vec<f32> = bytes.iter().enumerate().map(|(i, &b)| {
+            let v = match kv { PackedKv::Int8 => b as i8 as f32, PackedKv::Fp8 => crate::kv_tier::decode_e4m3(b) };
+            v * scales[i / hd]
+        }).collect();
+        let words: Vec<u32> = bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
+        let key_slots: Vec<u32> = vec![7, 0, 33, 12, 39, 5];
+        let pos: Vec<u32> = vec![100, 3, 250, 17, 4000, 64];
+        let rows = key_slots.len();
+        let w: Vec<f32> = (0..nkv * hd * dim).map(|_| rng.signed()).collect();
+        let (wb, posb) = (g.storage_init("w", &w), g.storage(rows as u64));
+        g.write(&posb, &pos);
+        let f32_pool = g.storage_init("pool", &deq);
+        let off = g.storage(rows as u64);
+        g.write(&off, &key_slots.iter().map(|s| s * (nkv * hd) as u32).collect::<Vec<_>>());
+        let out_f32 = g.storage((rows * dim) as u64);
+        let s1 = heads.step(&g, 0, nkv as u32, rows as u32, &IndexVectorBuffers { x: &f32_pool, row_off: &off, pos: &posb, w: &wb, out: &out_f32 }).unwrap();
+        let packed = g.storage(words.len() as u64);
+        g.write(&packed, &words);
+        let (sb, slotb, out_p) = (g.storage_init("s", &scales), g.storage(rows as u64), g.storage((rows * dim) as u64));
+        g.write(&slotb, &key_slots);
+        let s2 = heads.step_packed_keys(&g, 1, rows as u32, &PackedKeyBuffers { pool: &packed, scales: &sb, slots: &slotb, pos: &posb, w: &wb, out: &out_p }).unwrap();
+        g.submit(&[], &[s1, s2]);
+        let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+        assert_eq!(bits(g.read(&out_p, rows * dim)), bits(g.read(&out_f32, rows * dim)), "{kv:?} index keys differ from the dequantised f32 pool's");
+    }
 }

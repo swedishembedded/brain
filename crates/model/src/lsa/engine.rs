@@ -21,7 +21,7 @@
 //! words (20 KiB at the paper's sizes, for 512 tokens), plus bounded scratch
 //! sized by the engine's widest forward.
 
-use super::device::{IndexHeads, IndexPool, IndexVectorBuffers, ReadBuffers, ReadGeometry};
+use super::device::{IndexHeads, IndexPool, IndexVectorBuffers, PackedKeyBuffers, ReadBuffers, ReadGeometry};
 use super::indexer::Indexer;
 use super::{cluster_block, ClosedBlock, LsaConfig};
 use crate::paged::{BlockAllocator, BlockTable};
@@ -36,11 +36,34 @@ pub struct LsaKernels {
     pub index_vectors: usize,
     /// `lsa_read`.
     pub read: usize,
-    /// The sparse attention kernel: `paged_sparse_flash_gqa` specialised for
-    /// the model's group (`per_kv_head`) or `paged_sparse_flash_decode`.
+    /// The sparse attention kernel for forwards of at least
+    /// [`MANY_ROWS`] rows (prefill chunks).
     pub attend: usize,
-    /// Whether `attend` is the per-KV-head kernel.
-    pub per_kv_head: bool,
+    /// How `attend` splits a forward.
+    pub layout: crate::paged_sparse::Layout,
+    /// The kernel for fewer rows (decode steps), which needs more workgroups
+    /// per row to fill the device.
+    pub attend_few: usize,
+    /// How `attend_few` splits a forward.
+    pub layout_few: crate::paged_sparse::Layout,
+    /// `lsa_index_keys_i8` (or its fp8 variant) when the KV pool is packed:
+    /// index pages then read keys through it, and `attend` must be the
+    /// matching packed sparse kernel.
+    pub index_keys_packed: Option<usize>,
+}
+
+/// Rows from which a forward reads through [`LsaKernels::attend`]: a whole-row
+/// kernel launches one workgroup per row, which a prefill chunk fills and a
+/// decode step of a few sequences does not.
+pub const MANY_ROWS: u32 = 64;
+
+/// The engine's key pools, one per layer, as index pages read them.
+#[derive(Clone, Copy)]
+pub struct KeyPools<'a> {
+    /// Per layer, the key pool (f32, or packed with `scales`).
+    pub keys: &'a [DeviceBuffer],
+    /// Per layer, the packed pool's `[slots, n_kv_heads]` scales.
+    pub scales: Option<&'a [DeviceBuffer]>,
 }
 
 /// The paged KV cache the engine attends over.
@@ -66,6 +89,8 @@ pub struct LayerBuffers<'a> {
     pub pool_k: &'a DeviceBuffer,
     /// The layer's value pool.
     pub pool_v: &'a DeviceBuffer,
+    /// `(scales_k, scales_v)` of a packed pool.
+    pub scales: Option<(&'a DeviceBuffer, &'a DeviceBuffer)>,
     /// `[rows, n_heads * head_dim]` attention context out.
     pub ctx: &'a DeviceBuffer,
 }
@@ -98,7 +123,6 @@ pub struct LsaAttention {
     iq: DeviceBuffer,
     scores: DeviceBuffer,
     sel: DeviceBuffer,
-    row_meta: DeviceBuffer,
     page_tab: DeviceBuffer,
     // Index-page build scratch: one cluster block's keys per layer.
     key_off: DeviceBuffer,
@@ -153,8 +177,7 @@ impl LsaAttention {
             q_off: q_off_buf,
             iq: g.storage((rows * d).max(1)),
             scores: g.storage((rows * read.score_stride() as u64).max(1)),
-            sel: g.storage((rows * read.selection_width() as u64).max(1)),
-            row_meta: g.storage((rows * 3).max(1)),
+            sel: g.storage((rows * read.row_stride() as u64).max(1)),
             page_tab: g.storage((rows * (max_pages as u64 + 1)).max(1)),
             key_off: g.storage(block),
             key_pos: g.storage(block),
@@ -180,7 +203,7 @@ impl LsaAttention {
         let sparse = self.layers.iter().filter(|l| l.is_some()).count() as u64;
         let per_layer = 2 * input * d * 4 + IndexPool::bytes(&self.cfg, self.pages.num_blocks()) + self.cfg.cluster_block as u64 * d * 4;
         let rows = self.max_rows as u64;
-        let scratch = 4 * rows * (1 + d + self.read.score_stride() as u64 + self.read.selection_width() as u64 + 3 + self.read.max_pages as u64 + 1) + 8 * self.cfg.cluster_block as u64;
+        let scratch = 4 * rows * (1 + d + self.read.score_stride() as u64 + self.read.row_stride() as u64 + self.read.max_pages as u64 + 1) + 8 * self.cfg.cluster_block as u64;
         sparse * per_layer + scratch
     }
 
@@ -207,23 +230,28 @@ impl LsaAttention {
             g,
             self.k.read,
             rows,
-            &ReadBuffers { iq: &self.iq, centroids: &l.pool.centroids, members: &l.pool.members, page_tab: &self.page_tab, seqlen: b.seqlen, scores: &self.scores, sel: &self.sel, row_meta: &self.row_meta },
+            &ReadBuffers { iq: &self.iq, centroids: &l.pool.centroids, members: &l.pool.members, page_tab: &self.page_tab, seqlen: b.seqlen, scores: &self.scores, sel: &self.sel },
         )?);
         let attn = SparseAttention { n_heads: self.n_heads, n_kv_heads: self.heads.n_kv_heads, head_dim: self.heads.head_dim, block_size: self.kv.block_size, max_bt: self.kv.max_blocks_per_seq };
-        let bufs = SparseBuffers { q: b.q, pool_k: b.pool_k, pool_v: b.pool_v, block_tables: b.block_tables, sel: &self.sel, row_meta: &self.row_meta, ctx: b.ctx };
-        s.push(attn.step(g, self.k.attend, self.k.per_kv_head, rows, self.read.selection_width(), &bufs)?);
+        if b.scales.is_some() != self.k.index_keys_packed.is_some() {
+            return Err("LSA: the KV pool's packing does not match the kernels the engine resolved".into());
+        }
+        let bufs = SparseBuffers { q: b.q, pool_k: b.pool_k, pool_v: b.pool_v, block_tables: b.block_tables, sel: &self.sel, scales: b.scales, ctx: b.ctx };
+        let (kernel, layout) = if rows >= MANY_ROWS { (self.k.attend, self.k.layout) } else { (self.k.attend_few, self.k.layout_few) };
+        s.push(attn.step(g, kernel, layout, rows, self.read.row_stride(), &bufs)?);
         Ok(())
     }
 
     /// Read back the last recorded layer's selection of `rows` rows: per row
-    /// its selected positions, and the `[rows, 3]` sparse-attention metadata.
-    /// A diagnostic (selection statistics, gates); it synchronises the device.
+    /// its selected positions, and the `[rows, 3]` row headers (count,
+    /// block-table row, live keys). A diagnostic (selection statistics,
+    /// gates); it synchronises the device.
     pub fn read_selection(&self, g: &Gpu, rows: u32) -> (Vec<Vec<u32>>, Vec<u32>) {
-        let width = self.read.selection_width() as usize;
-        let meta: Vec<u32> = g.read(&self.row_meta, rows as usize * 3).iter().map(|x| x.to_bits()).collect();
-        let sel: Vec<u32> = g.read(&self.sel, rows as usize * width).iter().map(|x| x.to_bits()).collect();
-        let rows = (0..rows as usize).map(|r| sel[r * width..][..meta[r * 3] as usize].to_vec()).collect();
-        (rows, meta)
+        let stride = self.read.row_stride() as usize;
+        let sel: Vec<u32> = g.read(&self.sel, rows as usize * stride).iter().map(|x| x.to_bits()).collect();
+        let header: Vec<u32> = (0..rows as usize).flat_map(|r| sel[r * stride..][..3].to_vec()).collect();
+        let rows = (0..rows as usize).map(|r| sel[r * stride + 3..][..header[r * 3] as usize].to_vec()).collect();
+        (rows, header)
     }
 
     /// Bring each sequence's index up to date for a forward and write the
@@ -237,13 +265,13 @@ impl LsaAttention {
     /// that has none (the keys are read from the pool: nothing is
     /// recomputed), reusing a page another sequence already built over the
     /// same KV blocks, and frees the pages of blocks a truncation removed.
-    pub fn prepare(&mut self, g: &Gpu, rows: &mut [(&mut BlockTable, u32, u32)], pool_k: &[DeviceBuffer]) -> Result<(), String> {
+    pub fn prepare(&mut self, g: &Gpu, rows: &mut [(&mut BlockTable, u32, u32)], pools: KeyPools) -> Result<(), String> {
         let total: u32 = rows.iter().map(|r| r.2).sum();
         if total > self.max_rows {
             return Err(format!("LSA: a forward of {total} rows exceeds the {} the scratch holds", self.max_rows));
         }
         for (table, cached, _) in rows.iter_mut() {
-            self.index_table(g, table, *cached, pool_k)?;
+            self.index_table(g, table, *cached, pools)?;
         }
         let width = self.read.max_pages as usize + 1;
         let mut tab = vec![0u32; total as usize * width];
@@ -277,7 +305,7 @@ impl LsaAttention {
         }
     }
 
-    fn index_table(&mut self, g: &Gpu, table: &mut BlockTable, cached: u32, pool_k: &[DeviceBuffer]) -> Result<(), String> {
+    fn index_table(&mut self, g: &Gpu, table: &mut BlockTable, cached: u32, pools: KeyPools) -> Result<(), String> {
         let cb = self.cfg.cluster_block as u32;
         let closed = (cached.min(table.len()) / cb) as usize;
         if closed > self.read.max_pages as usize {
@@ -297,7 +325,7 @@ impl LsaAttention {
                 }
                 None => {
                     let page = self.pages.alloc().ok_or_else(|| format!("LSA: all {} index pages are in use", self.pages.num_blocks()))?;
-                    if let Err(e) = self.build_page(g, table, c, page, pool_k) {
+                    if let Err(e) = self.build_page(g, table, c, page, pools) {
                         self.pages.decref(page);
                         return Err(e);
                     }
@@ -315,15 +343,17 @@ impl LsaAttention {
     /// Compute cluster block `c`'s index keys from the pool on every sparse
     /// layer, Ward-merge them on the host (layers in parallel) and upload the
     /// buckets into `page`.
-    fn build_page(&self, g: &Gpu, table: &BlockTable, c: usize, page: u32, pool_k: &[DeviceBuffer]) -> Result<(), String> {
+    fn build_page(&self, g: &Gpu, table: &BlockTable, c: usize, page: u32, pools: KeyPools) -> Result<(), String> {
         let cb = self.cfg.cluster_block as u32;
         let bs = self.kv.block_size;
         let kv_row = self.heads.n_kv_heads * self.heads.head_dim;
         let base = c as u32 * cb;
+        // A packed pool is addressed by token slot, an f32 pool by element.
+        let unit = if pools.scales.is_some() { 1 } else { kv_row };
         let (off, pos): (Vec<u32>, Vec<u32>) = (base..base + cb)
             .map(|p| {
                 let (block, offset) = table.locate(p, bs);
-                ((block * bs + offset) * kv_row, p)
+                ((block * bs + offset) * unit, p)
             })
             .unzip();
         g.write(&self.key_off, &off);
@@ -331,8 +361,15 @@ impl LsaAttention {
         let mut steps = Vec::new();
         for (l, layer) in self.layers.iter().enumerate() {
             if let Some(layer) = layer {
-                let pk = pool_k.get(l).ok_or_else(|| format!("LSA: no key pool for layer {l}"))?;
-                steps.push(self.heads.step(g, self.k.index_vectors, self.heads.n_kv_heads, cb, &IndexVectorBuffers { x: pk, row_off: &self.key_off, pos: &self.key_pos, w: &layer.wk, out: &self.keys[l] })?);
+                let pk = pools.keys.get(l).ok_or_else(|| format!("LSA: no key pool for layer {l}"))?;
+                steps.push(match (pools.scales, self.k.index_keys_packed) {
+                    (Some(scales), Some(kernel)) => {
+                        let sk = scales.get(l).ok_or_else(|| format!("LSA: no key scales for layer {l}"))?;
+                        self.heads.step_packed_keys(g, kernel, cb, &PackedKeyBuffers { pool: pk, scales: sk, slots: &self.key_off, pos: &self.key_pos, w: &layer.wk, out: &self.keys[l] })?
+                    }
+                    (None, None) => self.heads.step(g, self.k.index_vectors, self.heads.n_kv_heads, cb, &IndexVectorBuffers { x: pk, row_off: &self.key_off, pos: &self.key_pos, w: &layer.wk, out: &self.keys[l] })?,
+                    _ => return Err("LSA: the KV pool's packing does not match the kernels the engine resolved".into()),
+                });
             }
         }
         g.submit(&[], &steps);
