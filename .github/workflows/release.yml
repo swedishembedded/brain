@@ -1,0 +1,198 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Builds the `brain` executable for every supported system from a release
+# tag and publishes them as the tag's GitHub release, with the tag's own
+# CHANGELOG section as its notes. Started by `make release/publish`, which
+# only pushes main and the tag: no release build runs on a developer's
+# machine.
+#
+#   Linux   x86_64, aarch64   brain-linux-<arch>, brain-linux-<arch>.deb
+#   macOS   universal         brain-darwin-universal (x86_64 + Apple silicon)
+#   Windows x86_64            brain-windows-x86_64.exe
+#
+# Every platform is required: a release missing one is not published. Linux
+# builds link glibc, not musl: brain loads the GPU driver (Vulkan) at run
+# time, which a static musl binary cannot.
+name: Release
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+      && (github.event.inputs.dry_run == 'true'
+          && format('Release dry-run ({0})', github.ref_name)
+          || format('Release manual ({0})', github.ref_name))
+      || format('Release {0}', github.ref_name) }}
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >
+          When true, builds every platform but does not create a GitHub
+          Release. Turn off only if you intend to publish from this ref.
+        type: boolean
+        default: true
+
+# Read-only for every job: only `publish`, which creates the release, may
+# write. Third-party actions are pinned to commits.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ── Linux: x86_64 and aarch64, each on its own architecture's runner ────────
+  build-linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            deb_arch: amd64
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            deb_arch: arm64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: release-linux-${{ matrix.arch }}
+
+      # mold: .cargo/config.toml links x86_64 Linux builds with it.
+      - name: Install the build dependencies (cmake for libopus, mold, dpkg-dev for the package)
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake mold dpkg-dev
+
+      - name: Release build
+        run: cargo build --release --locked -p brain-cli
+
+      - name: It runs
+        run: target/release/brain --version
+
+      - name: Debian package
+        run: bash scripts/build/build-deb.sh --binary target/release/brain --arch ${{ matrix.deb_arch }} --out-dir target/debian
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          cp target/release/brain dist/brain-linux-${{ matrix.arch }}
+          cp target/debian/brain_*_${{ matrix.deb_arch }}.deb dist/brain-linux-${{ matrix.arch }}.deb
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/
+
+  # ── macOS: one universal binary, Intel and Apple silicon ────────────────────
+  build-macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: release-macos
+
+      - name: Install cmake (libopus)
+        run: command -v cmake || brew install cmake
+
+      - name: Build x86_64
+        run: cargo build --release --locked -p brain-cli --target x86_64-apple-darwin
+
+      - name: Build aarch64
+        run: cargo build --release --locked -p brain-cli --target aarch64-apple-darwin
+
+      - name: Create the universal binary
+        run: |
+          mkdir -p dist
+          lipo -create \
+            target/x86_64-apple-darwin/release/brain \
+            target/aarch64-apple-darwin/release/brain \
+            -output dist/brain-darwin-universal
+          lipo -info dist/brain-darwin-universal
+          dist/brain-darwin-universal --version
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos
+          path: dist/
+
+  # ── Windows x86_64 ──────────────────────────────────────────────────────────
+  build-windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: release-windows
+
+      - name: Release build
+        run: cargo build --release --locked -p brain-cli
+
+      - name: It runs
+        run: target\release\brain.exe --version
+
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/brain.exe dist/brain-windows-x86_64.exe
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows
+          path: dist/
+
+  # ── GitHub Release ──────────────────────────────────────────────────────────
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-macos, build-windows]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download every platform's artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum brain-* > checksums.txt
+          cat checksums.txt
+
+      - name: Release notes (the tag's CHANGELOG section)
+        run: make release/notes
+
+      - name: Dry run - skip GitHub Release
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' }}
+        run: |
+          ls -lh dist/
+          echo "Dry run: every platform built; no release created."
+
+      - name: Create GitHub Release
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true') }}
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: dist/*
+          body_path: target/release-notes-${{ github.ref_name }}.md
+          fail_on_unmatched_files: true

@@ -1,0 +1,68 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Every push to main and every pull request: the `brain` executable still
+# builds on each system a release ships for (release.yml), so a change that
+# breaks one is found here rather than at the release tag. The full test
+# suites need GPUs and model files and run where those are (make test).
+name: CI
+run-name: "CI - ${{ github.ref_name }} (${{ github.event_name }})"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: brain builds on ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            runner: ubuntu-latest
+            targets: ""
+          - name: Linux aarch64
+            runner: ubuntu-24.04-arm
+            targets: ""
+          - name: macOS (Intel and Apple silicon)
+            runner: macos-latest
+            targets: x86_64-apple-darwin,aarch64-apple-darwin
+          - name: Windows x86_64
+            runner: windows-latest
+            targets: ""
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      # mold: .cargo/config.toml links x86_64 Linux builds with it.
+      - name: Install cmake (libopus) and mold
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake mold
+
+      - name: Check
+        if: matrix.targets == ''
+        run: cargo check --locked -p brain-cli
+
+      - name: Check both macOS architectures
+        if: matrix.targets != ''
+        run: |
+          cargo check --locked -p brain-cli --target x86_64-apple-darwin
+          cargo check --locked -p brain-cli --target aarch64-apple-darwin

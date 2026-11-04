@@ -68,8 +68,10 @@ BRAIN_BIN ?= ./target/debug/brain
 # .deb); this mirrors it for the release machinery only.
 BRAIN_VERSION := 3.0.0
 # The git remote whose GitHub repository receives a release (release/publish,
-# package/deb/publish).
-RELEASE_REMOTE ?= origin
+# package/deb/publish): the public repository, RELEASE_REPO. Add it once with
+#   git remote add upstream git@github.com:swedishembedded/brain.git
+RELEASE_REMOTE ?= upstream
+RELEASE_REPO   := swedishembedded/brain
 PIP    ?= python3 -m pip
 DATA   ?= data
 OUT    ?= out
@@ -156,7 +158,7 @@ package/deb/release: build/release
 
 # Checks every precondition (gh, its login, the tag checked out and on GitHub,
 # a signing key) before the release build, so a missing one costs seconds.
-## package/deb/publish - sign the release package and attach it to the GitHub release of v<version> (created if missing; an earlier upload is replaced); needs gh, a GnuPG key and the tag on GitHub (RELEASE_REMOTE, default origin)
+## package/deb/publish - sign the release package and attach it to the GitHub release of v<version> (created if missing; an earlier upload is replaced); needs gh, a GnuPG key and the tag on GitHub (RELEASE_REMOTE, default upstream)
 package/deb/publish: release/notes
 	bash scripts/build/publish-deb.sh --check --version $(BRAIN_VERSION) --remote $(RELEASE_REMOTE)
 	$(MAKE) package/deb/release
@@ -2126,14 +2128,25 @@ release/notes:
 		{ echo "error: v$(BRAIN_VERSION) section not found in CHANGELOG.md"; exit 1; }
 	@echo "wrote target/release-notes-v$(BRAIN_VERSION).md"
 
-# The one target in this section that touches the remote: push the tagged
-# bump commit and its tag (only that tag), then publish the signed package to
-# the tag's GitHub release. Deliberately not part of release/{patch,minor,major}
-# - see that section's note above.
-## release/publish - push HEAD and the tag v<version> to RELEASE_REMOTE, then package/deb/publish
+# The one target in this section that touches the remote: push main and the
+# release tag (only that tag) to the public repository. The tag starts the
+# Release workflow (.github/workflows/release.yml), which builds every platform
+# (Linux x86_64 and aarch64, macOS universal, Windows x86_64) and the .deb
+# packages on GitHub's runners and creates the GitHub release with them: no
+# release build runs here. Refused unless RELEASE_REMOTE is RELEASE_REPO and
+# HEAD is the tagged release commit, so a stray commit or the wrong remote is
+# never published. Deliberately not part of release/{patch,minor,major} - see
+# that section's note above.
+## release/publish - push main and the tag v<version> to RELEASE_REMOTE (swedishembedded/brain); CI builds and publishes the release
 release/publish:
-	git push $(RELEASE_REMOTE) HEAD "v$(BRAIN_VERSION)"
-	$(MAKE) package/deb/publish
+	@url="$$(git remote get-url $(RELEASE_REMOTE) 2>/dev/null)" || \
+		{ echo "error: no git remote '$(RELEASE_REMOTE)'; add it with: git remote add $(RELEASE_REMOTE) git@github.com:$(RELEASE_REPO).git" >&2; exit 1; }; \
+	case "$$url" in *$(RELEASE_REPO)|*$(RELEASE_REPO).git) ;; \
+		*) echo "error: remote '$(RELEASE_REMOTE)' is $$url, not $(RELEASE_REPO)" >&2; exit 1 ;; esac
+	@[ "$$(git rev-parse HEAD)" = "$$(git rev-parse "v$(BRAIN_VERSION)^{commit}" 2>/dev/null)" ] || \
+		{ echo "error: HEAD is not the release commit v$(BRAIN_VERSION) (run make release/{patch,minor,major} first)" >&2; exit 1; }
+	git push $(RELEASE_REMOTE) HEAD:main "v$(BRAIN_VERSION)"
+	@echo "pushed v$(BRAIN_VERSION): the Release workflow builds and publishes it - https://github.com/$(RELEASE_REPO)/actions"
 
 # ---------------------------------------------------------------------------
 ##@ Housekeeping
