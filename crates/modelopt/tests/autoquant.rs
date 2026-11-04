@@ -146,8 +146,10 @@ fn a_latency_limit_keeps_a_slow_tier_out_of_the_plan() {
 
 /// A frontier spans the candidates' range: its plans run smallest first,
 /// each within its own budget, the efficient ones are exactly those no
-/// smaller plan beats, and spending the largest budget measures no worse than
-/// the smallest.
+/// smaller plan beats, and at the largest candidate's full size the plan is
+/// that candidate everywhere, which measures as the original. (Loss need not
+/// fall as bytes grow: on a small model, rounding noise can lower held-out
+/// loss, which is why every point is measured rather than assumed.)
 #[test]
 fn a_frontier_spans_the_trade_off_between_bytes_and_loss() {
     let mut rng = data::rng::Rng::random();
@@ -165,6 +167,7 @@ fn a_frontier_spans_the_trade_off_between_bytes_and_loss() {
         let beaten = f.iter().any(|q| q.plan_bytes <= p.plan_bytes && q.loss < p.loss);
         assert_eq!(p.efficient, !beaten, "{p:?}");
     }
-    assert!(f.last().unwrap().loss <= f.first().unwrap().loss, "the largest plan measures no worse than the smallest: {f:?}");
+    let last = f.last().unwrap();
+    assert_eq!((last.policy.as_str(), last.loss), ("f32", report.original_loss), "the full-size plan is the original: {last:?}");
     assert!(f.first().unwrap().efficient, "nothing is smaller than the smallest plan");
 }
