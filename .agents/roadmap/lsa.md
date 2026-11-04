@@ -76,8 +76,15 @@ head layout; clustering, selection and the sparse read are written once.
       whole-row sparse kernel (the heads must divide its 64 threads), so its
       sparse attention is slow and its crossover sits at 12800 tokens.
       Past the native context (YaRN, 0.6B): 128k tokens dense 1411.57 s,
-      sparse 204.79 s (6.89x); 256k tokens sparse 545.63 s (dense not timed),
-      the flat read's per-query bucket scoring growing with the context.
+      sparse 204.79 s (6.89x); 256k tokens sparse 545.63 s (dense not timed).
+      At 256k the flat read is 44% of device time (227 s, as much as sparse
+      attention's 218 s): every query scores every bucket of every closed
+      block. Through a tree (beams 64 then 16) the read takes 25 s and the
+      prefill 369.63 s (1.48x the flat read; 709 tok/s), with node pages built
+      for every layer in parallel and a growth's bucket sums read back in one
+      pass (each per-page readback stalled the device: 91 s of host time
+      before, 67 s after, 34 s flat). At 64k the tree is 79.02 s against the
+      flat read's 83.59 s.
 - [x] Device indexing (`model::lsa::device`): `lsa_index_vectors` turns
       post-RoPE heads (a chunk's queries or a cached key's pool slot) into
       unit index vectors (un-rotate with the forward kernels' own angle, sum
