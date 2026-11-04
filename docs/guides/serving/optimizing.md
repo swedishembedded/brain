@@ -40,16 +40,27 @@ println!("--weight-format {}", outcome.report.policy);
    stored in that format: the squared rounding error of the real codec,
    weighted by how sensitive the loss is to each weight (the mean squared
    gradient).
-3. **Plans.** It picks the format of every linear that minimizes the summed
-   estimate within the budget. Linears the engine fuses into one matrix
+3. **Plans.** It times every linear's matrix product on the device in every
+   candidate format, then picks the format of every linear that minimizes the
+   summed estimate within the byte budget and, when you set one, a latency
+   limit: a format that is small but slow to decode on this device is avoided
+   where the limit needs it. Linears the engine fuses into one matrix
    product (Q/K/V, gate/up) always get one format together.
 4. **Measures.** On the held-out records it measures the plan, the original
    model, and every single format that fits the budget, first with the weights
-   rounded by the deployed codec, then with the model built in each format on
-   the kernels serving uses.
-5. **Decides.** The plan is **accepted** when its held-out loss on the
-   deployed kernels is lower than that of every single format that fits the
-   budget. `brain optimize` exits 0 when accepted and 3 when not.
+   rounded by the deployed codec, then as deployed: through the serving engine
+   `brain serve` runs (its kernels, int8's quantized activations included)
+   where the architecture has an engine scoring path, else on the
+   training build's frozen base. The report says which.
+5. **Decides.** The plan is **accepted** when its deployed held-out loss is
+   lower than that of every single format that fits the budget.
+   `brain optimize` exits 0 when accepted and 3 when not.
+6. **Recovers (optional).** With `--recover-steps N`, a LoRA adapter is
+   trained over the base held at the plan to match the original model's
+   output distributions on the calibration records, and the plan is
+   measured without and with it. The adapter is written to
+   `DIR/recovery.safetensors` and is served beside the policy like any
+   adapter.
 
 The estimate only chooses what to measure. Acceptance always comes from the
 held-out measurement.
@@ -61,14 +72,19 @@ held-out measurement.
 | `--dataset FILE` | chat JSONL (the fine-tuning format) representative of what will be served |
 | `--out DIR` | where the prepared data and `optimize.json` go |
 | `--held-out FILE` | chat JSONL to measure on; all of `--dataset` then calibrates |
-| `--budget FORMAT` | the bytes every linear takes in one format (default `int8`) |
+| `--budget FORMAT` | the bytes every linear takes in one format; by default the budget is halfway between the two smallest candidates' uniform sizes |
 | `--bits-per-weight B` | mean stored bits per weight, scales included (`int8` is 9) |
 | `--max-bytes N` | bytes over every searched linear |
+| `--latency-rows N` | the rows each product is timed at (default 1, single-stream decode) |
+| `--max-latency-like FORMAT` | no slower, summed over the linears' products, than every linear in FORMAT |
+| `--max-latency-ms MS` | the linears' summed product time in milliseconds |
 | `--formats LIST` | candidate formats, comma separated |
 | `--arch ID` | the model's architecture (default `qwen3`) |
 | `--seed N` | the split's seed (default random, reported) |
 | `--max-block N` | the longest record, in tokens |
 | `--no-thinking` | render records without the reasoning block |
+| `--recover-steps N` | distill a recovery adapter for N steps (default 0: none) |
+| `--recover-lr LR`, `--recover-rank R` | the recovery adapter's learning rate (default 1e-4) and rank (default 16) |
 
 The candidates default to every format that the architecture can (a) hold a
 frozen base in, which is what lets each be measured on its deployed kernels,
