@@ -126,6 +126,14 @@ head layout; clustering, selection and the sparse read are written once.
       positions on the device in use; prefill chunks ending at or below the
       crossover read densely and skip index building
       (`set_lsa_dense_until` overrides it, `qwen_lsa prefill --dense-until`).
+- [x] Serving metrics: `lsa_read` adds each row's selected keys and live
+      keys to 64-bit device counters (one atomic per row, read only when a
+      snapshot asks); `PagedDecoder::sparse_attention_stats` carries them
+      with index bytes, pages and dense-read rows into the scheduler's
+      `lsa_*` metrics. Gates: the counters equal the selection rows' counts
+      over two reads; a budget past the context selects exactly the causal
+      keys over a real generation; chunks below the crossover read and index
+      nothing.
 - [x] D-LSA training (`model::lsa::distill`): teacher targets (head-averaged
       attention over the keys outside sink and window, top 2048,
       renormalised), the forward-KL objective with analytic gradients of both
@@ -180,7 +188,6 @@ head layout; clustering, selection and the sparse read are written once.
 - [ ] Sparse prefill bandwidth: bf16 KV tier for the sparse read, the
       shared window as a dense sliding tile (it is a fifth of every
       selection), and more bytes in flight per workgroup.
-- [ ] Selected-key counts and page use in the stats snapshot.
 - [ ] D-LSA on the generic trainer (`ModelFit`) and device kernels for the
       distillation arithmetic, which is host math today.
 - [ ] N-LSA with a sub-quadratic training kernel (the selection inverted per

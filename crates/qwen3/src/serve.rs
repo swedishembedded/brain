@@ -1065,6 +1065,8 @@ pub struct Engine {
     lsa_dense_until: u32,
     /// Set while recording a prefill chunk that reads densely.
     lsa_dense_now: std::cell::Cell<bool>,
+    /// Prefill rows read densely below the crossover.
+    lsa_dense_rows: u64,
     /// [`Engine::capture_attention`]'s per-layer `[T, q_dim]` query buffers and
     /// the first row of the chunk being recorded; `None` outside a capture.
     capture: Option<(Vec<DeviceBuffer>, std::cell::Cell<u32>)>,
@@ -1582,6 +1584,7 @@ impl Engine {
             lsa: None,
             lsa_dense_until: 0,
             lsa_dense_now: std::cell::Cell::new(false),
+            lsa_dense_rows: 0,
             capture: None,
             bank: None,
             warned_calib_with_adapters: false,
@@ -1737,6 +1740,11 @@ impl Engine {
         self.lsa = Some(model::lsa::engine::LsaAttention::new(&self.gpu, indexer, kernels, kv, rows, pages, yarn)?);
         self.tape_cache.clear();
         self.lsa_dense_until = self.measure_lsa_crossover();
+        // The measurement's reads served no row.
+        if let Some(lsa) = &self.lsa {
+            lsa.reset_read_stats(&self.gpu);
+        }
+        self.lsa_dense_rows = 0;
         Ok(())
     }
 
@@ -1908,10 +1916,14 @@ impl Engine {
         self.lsa_dense_until = position;
     }
 
-    /// Latent sparse attention's device bytes, index pages in use and built,
-    /// or `None` when every layer reads densely.
-    pub fn lsa_stats(&self) -> Option<(u64, (u32, u32), u64)> {
-        self.lsa.as_ref().map(|a| (a.device_bytes(), a.page_usage(), a.built_pages()))
+    /// What latent sparse attention holds and has done (one small
+    /// readback of the read counters), or `None` when every layer reads
+    /// densely.
+    pub fn lsa_stats(&self) -> Option<model::lsa::engine::LsaStats> {
+        self.lsa.as_ref().map(|a| {
+            let (pages_in_use, page_capacity) = a.page_usage();
+            model::lsa::engine::LsaStats { device_bytes: a.device_bytes(), pages_in_use, page_capacity, pages_built: a.built_pages(), reads: a.read_stats(&self.gpu), dense_rows: self.lsa_dense_rows }
+        })
     }
 
     /// Set up a prefill chunk of `rows` consecutive positions starting after
@@ -1922,6 +1934,9 @@ impl Engine {
     fn lsa_prepare_chunk(&mut self, table: &mut BlockTable, cached: u32, rows: u32) {
         let dense = cached + rows <= self.lsa_dense_until;
         self.lsa_dense_now.set(dense);
+        if dense && self.lsa.is_some() {
+            self.lsa_dense_rows += u64::from(rows);
+        }
         if let Some(lsa) = self.lsa.as_mut().filter(|_| !dense) {
             let pools = model::lsa::engine::KeyPools { keys: &self.pool_k, scales: self.kv_int8.then_some(&self.scales_k[..]) };
             lsa.prepare(&self.gpu, &mut [(table, cached, rows)], pools).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
@@ -4183,6 +4198,9 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn offload_stats(&self) -> OffloadStats {
         self.host_kv.stats()
+    }
+    fn sparse_attention_stats(&self) -> Option<model::lsa::engine::LsaStats> {
+        self.lsa_stats()
     }
     fn adapter_availability(&mut self, adapter: model::serve::AdapterId) -> model::serve::AdapterAvailability {
         self.bank_availability(adapter)

@@ -268,6 +268,11 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   at growing positions on the device in use, and prefill chunks ending
   below that crossover read densely and leave the index for the first
   sparse chunk or decode step to build: a short prompt runs at dense speed.
+  A served model reports `lsa_*` metrics with its executor stats: the
+  index's device bytes and pages (in use, capacity, built), the rows read
+  sparsely and densely, and the keys the sparse reads selected beside the
+  keys dense attention would have read for the same rows - their ratio is
+  the share of attention actually read.
   The indexer is made for one checkpoint and
   refused on another; keep it outside the checkpoint's directory, whose
   reader takes every safetensors file there as model weights. Off by default. Make an

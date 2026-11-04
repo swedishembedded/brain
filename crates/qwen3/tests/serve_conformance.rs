@@ -113,7 +113,6 @@ fn the_planned_sparse_attention_bytes_are_the_allocated_ones() {
     // seed: the same fixture indexer as `sparse_engine_on`.
     let indexer = model::lsa::indexer::Indexer::random(lsa, geometry, 11).unwrap();
     let planned = qwen3::serve::lsa_device_bytes(&indexer, BLOCK, 96, (MIN_SEQ_TOKENS as u32).div_ceil(BLOCK), 4, 16);
-    let (allocated, _, _) = e.lsa_stats().unwrap();
-    assert_eq!(planned, allocated);
+    assert_eq!(planned, e.lsa_stats().unwrap().device_bytes);
     assert!(planned > 0);
 }

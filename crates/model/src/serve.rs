@@ -534,6 +534,12 @@ pub trait PagedDecoder {
         crate::kv_offload::OffloadStats::default()
     }
 
+    /// Latent sparse attention's index and read counters, for a server's
+    /// metrics; `None` (the default) when the decoder reads every key.
+    fn sparse_attention_stats(&self) -> Option<crate::lsa::engine::LsaStats> {
+        None
+    }
+
     // ---- runtime adapters (optional) ----
     //
     // Every method below has a default that reports "this decoder serves the
@@ -1486,6 +1492,11 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// Swap accounting - see [`PagedDecoder::offload_stats`].
     pub fn offload_stats(&self) -> crate::kv_offload::OffloadStats {
         self.dec.offload_stats()
+    }
+
+    /// See [`PagedDecoder::sparse_attention_stats`].
+    pub fn sparse_attention_stats(&self) -> Option<crate::lsa::engine::LsaStats> {
+        self.dec.sparse_attention_stats()
     }
 
     /// The decoder, for an operation between scheduling steps that must not

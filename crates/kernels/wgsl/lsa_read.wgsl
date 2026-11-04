@@ -63,6 +63,9 @@
 //   scores    : [rows, score_stride] scratch
 //   sel       : [rows, sel_width] out: header (count, table row, live keys),
 //               then positions
+//   stats     : 6 words, accumulated across reads as three 64-bit counters
+//               (low word, high word): rows read, keys selected, keys a
+//               dense read of the same rows would attend
 
 const P_MAX: u32 = 1024u;
 const WG: u32 = 64u;
@@ -95,6 +98,14 @@ struct Params {
 @group(0) @binding(5) var<storage, read>       seqlen:    array<u32>;
 @group(0) @binding(6) var<storage, read_write> scores:    array<f32>;
 @group(0) @binding(7) var<storage, read_write> sel:       array<u32>;
+@group(0) @binding(8) var<storage, read_write> stats:     array<atomic<u32>>;
+
+// Add `v` to the 64-bit counter at words `at` (low) and `at + 1` (high): the
+// add that wraps the low word carries.
+fn count(at: u32, v: u32) {
+    let old = atomicAdd(&stats[at], v);
+    if (old > 0xFFFFFFFFu - v) { atomicAdd(&stats[at + 1u], 1u); }
+}
 
 var<workgroup> pick_key: array<u32, 1024>; // P_MAX
 var<workgroup> pick_idx: array<u32, 1024>; // P_MAX
@@ -314,5 +325,8 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         sel[r * p.sel_width] = long_range + window_len + sinks;
         sel[r * p.sel_width + 1u] = r;
         sel[r * p.sel_width + 2u] = live;
+        count(0u, 1u);
+        count(2u, long_range + window_len + sinks);
+        count(4u, live);
     }
 }

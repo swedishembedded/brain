@@ -21,7 +21,7 @@
 //! words (20 KiB at the paper's sizes, for 512 tokens), plus bounded scratch
 //! sized by the engine's widest forward.
 
-use super::device::{IndexHeads, IndexPool, IndexVectorBuffers, PackedKeyBuffers, ReadBuffers, ReadGeometry, Rope};
+use super::device::{IndexHeads, IndexPool, IndexVectorBuffers, PackedKeyBuffers, ReadBuffers, ReadGeometry, ReadStats, Rope};
 use super::indexer::Indexer;
 use super::LsaConfig;
 use crate::paged::{BlockAllocator, BlockTable};
@@ -104,6 +104,40 @@ struct Layer {
     slot: u32,
 }
 
+/// What latent sparse attention holds and has done in a serving engine, for
+/// a server's metrics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LsaStats {
+    /// Device bytes of the index and its scratch.
+    pub device_bytes: u64,
+    /// Index pages in use.
+    pub pages_in_use: u32,
+    /// Index pages the pool holds.
+    pub page_capacity: u32,
+    /// Index pages built (a page reused over a cached prefix is not rebuilt).
+    pub pages_built: u64,
+    /// The sparse reads, summed over every sparse layer.
+    pub reads: ReadStats,
+    /// Prefill rows read densely, below the measured crossover.
+    pub dense_rows: u64,
+}
+
+impl LsaStats {
+    /// The snapshot as named metrics (`lsa_*`).
+    pub fn metrics(&self) -> Vec<(&'static str, u64)> {
+        vec![
+            ("lsa_index_bytes", self.device_bytes),
+            ("lsa_index_pages_in_use", u64::from(self.pages_in_use)),
+            ("lsa_index_page_capacity", u64::from(self.page_capacity)),
+            ("lsa_index_pages_built", self.pages_built),
+            ("lsa_sparse_row_reads", self.reads.rows),
+            ("lsa_selected_keys", self.reads.selected_keys),
+            ("lsa_causal_keys", self.reads.causal_keys),
+            ("lsa_dense_rows", self.dense_rows),
+        ]
+    }
+}
+
 /// Index pages per page key: a cluster block and the KV blocks holding it.
 type PageKey = (u32, Vec<u32>);
 
@@ -131,6 +165,8 @@ pub struct LsaAttention {
     scores: DeviceBuffer,
     sel: DeviceBuffer,
     page_tab: DeviceBuffer,
+    /// What every read has done ([`ReadStats`]).
+    read_stats: DeviceBuffer,
     // Index-page build scratch: one cluster block's keys, a slot per layer.
     key_off: DeviceBuffer,
     key_pos: DeviceBuffer,
@@ -203,6 +239,7 @@ impl LsaAttention {
             scores: g.storage((rows * read.score_stride() as u64).max(1)),
             sel: g.storage((rows * read.row_stride() as u64).max(1)),
             page_tab: g.storage((rows * (max_pages as u64 + 1)).max(1)),
+            read_stats: g.storage(ReadStats::WORDS),
             key_off: g.storage(block),
             key_pos: g.storage(block),
             keys,
@@ -239,7 +276,7 @@ impl LsaAttention {
         let read = ReadGeometry { cfg: *cfg, max_pages: (kv.max_blocks_per_seq * kv.block_size) / cfg.cluster_block as u32 };
         let per_layer = 2 * input as u64 * d * 4 + IndexPool::bytes(cfg, page_capacity) + cfg.cluster_block as u64 * d * 4 + 4 * IndexPool::ward_scratch_words(cfg);
         let rows = max_rows as u64;
-        let scratch = 4 * rows * (1 + d + read.score_stride() as u64 + read.row_stride() as u64 + read.max_pages as u64 + 1) + 8 * cfg.cluster_block as u64;
+        let scratch = 4 * rows * (1 + d + read.score_stride() as u64 + read.row_stride() as u64 + read.max_pages as u64 + 1) + 8 * cfg.cluster_block as u64 + 4 * ReadStats::WORDS;
         sparse as u64 * per_layer + scratch
     }
 
@@ -253,6 +290,16 @@ impl LsaAttention {
         (self.pages.num_blocks() - self.pages.free_blocks(), self.pages.num_blocks())
     }
 
+    /// What the reads have done since the engine started or
+    /// [`Self::reset_read_stats`] (one small readback; not for a hot path).
+    pub fn read_stats(&self, g: &Gpu) -> ReadStats {
+        ReadStats::read(g, &self.read_stats)
+    }
+
+    /// Zero the read counters (after reads whose rows were not served).
+    pub fn reset_read_stats(&self, g: &Gpu) {
+        g.write(&self.read_stats, &[0u32; ReadStats::WORDS as usize]);
+    }
 
     /// Record `layer`'s attention for `rows` query rows: index queries, the
     /// read, sparse attention into `b.ctx`. The rows' page tables must have
@@ -275,7 +322,7 @@ impl LsaAttention {
             g,
             self.k.read,
             rows,
-            &ReadBuffers { iq: &self.iq, centroids: &self.pool.centroids, members: &self.pool.members, page_tab: &self.page_tab, seqlen: b.seqlen, scores: &self.scores, sel: &self.sel, row0: self.pool.row0(l.slot) },
+            &ReadBuffers { iq: &self.iq, centroids: &self.pool.centroids, members: &self.pool.members, page_tab: &self.page_tab, seqlen: b.seqlen, scores: &self.scores, sel: &self.sel, row0: self.pool.row0(l.slot), stats: &self.read_stats },
         )?);
         Ok(())
     }

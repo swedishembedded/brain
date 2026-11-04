@@ -611,8 +611,9 @@ pub fn run_open_scheduled<D: PagedDecoder>(
     }
 }
 
-/// The prefix-cache metrics every scheduler-backed resident reports through
-/// `Executor::stats().metrics`.
+/// The prefix-cache and speculation metrics every scheduler-backed resident
+/// reports through `Executor::stats().metrics`, and latent sparse attention's
+/// (`lsa_*`) where the decoder reads sparsely.
 pub fn scheduler_metrics<D: PagedDecoder>(sched: &Scheduler<D>) -> Vec<(String, serde_json::Value)> {
     let (hit, looked, cached) = sched.prefix_stats();
     let rate = if looked > 0 { hit as f64 / looked as f64 } else { 0.0 };
@@ -633,6 +634,9 @@ pub fn scheduler_metrics<D: PagedDecoder>(sched: &Scheduler<D>) -> Vec<(String, 
         ("spec_accept_rate".to_string(), serde_json::json!(accept)),
         ("spec_tokens_per_round".to_string(), serde_json::json!(spec.tokens_per_round())),
     ]
+    .into_iter()
+    .chain(sched.sparse_attention_stats().into_iter().flat_map(|s| s.metrics()).map(|(k, v)| (k.to_string(), serde_json::json!(v))))
+    .collect()
 }
 
 /// A residency [`Instance`] that serves one text family through the generic

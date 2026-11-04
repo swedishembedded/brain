@@ -270,6 +270,32 @@ pub struct ReadBuffers<'a> {
     pub sel: &'a DeviceBuffer,
     /// The layer's first bucket row in the pool ([`IndexPool::row0`]).
     pub row0: u32,
+    /// [`ReadStats::WORDS`] counters every read adds to.
+    pub stats: &'a DeviceBuffer,
+}
+
+/// What reads have done since their counters were zeroed: summed over every
+/// row of every read (a forward reads once per sparse layer).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadStats {
+    /// Query rows read.
+    pub rows: u64,
+    /// Keys their selections held: what sparse attention read.
+    pub selected_keys: u64,
+    /// Keys dense attention would have read for the same rows (each row's
+    /// live keys).
+    pub causal_keys: u64,
+}
+
+impl ReadStats {
+    /// Words of the device counters a read accumulates into.
+    pub const WORDS: u64 = 6;
+
+    /// Read the counters back (one small readback).
+    pub fn read(g: &Gpu, counters: &DeviceBuffer) -> ReadStats {
+        let w: Vec<u64> = g.read(counters, Self::WORDS as usize).iter().map(|x| u64::from(x.to_bits())).collect();
+        ReadStats { rows: w[0] | w[1] << 32, selected_keys: w[2] | w[3] << 32, causal_keys: w[4] | w[5] << 32 }
+    }
 }
 
 impl ReadGeometry {
@@ -327,7 +353,7 @@ impl ReadGeometry {
             early_top_k,
             b.row0,
         ];
-        let bufs = [b.iq, b.centroids, b.members, b.page_tab, b.seqlen, b.scores, b.sel];
+        let bufs = [b.iq, b.centroids, b.members, b.page_tab, b.seqlen, b.scores, b.sel, b.stats];
         Ok(g.dispatch(kernel, &bufs, &params, gpu_core::Dispatch::Workgroups(rows)))
     }
 }

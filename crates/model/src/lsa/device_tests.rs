@@ -152,11 +152,18 @@ fn the_device_read_matches_the_host_read() {
     let scores = g.storage((rows as u64) * geom.score_stride() as u64);
     let width = geom.row_stride() as usize;
     let sel = g.storage((rows * width) as u64);
-    let bufs = ReadBuffers { iq: &iq, centroids: &pool.centroids, members: &pool.members, page_tab: &page_tab, seqlen: &sl, scores: &scores, sel: &sel, row0: 0 };
+    let stats = g.storage(ReadStats::WORDS);
+    let bufs = ReadBuffers { iq: &iq, centroids: &pool.centroids, members: &pool.members, page_tab: &page_tab, seqlen: &sl, scores: &scores, sel: &sel, row0: 0, stats: &stats };
     let step = geom.step(&g, 1, rows as u32, &bufs).unwrap();
-    g.submit(&[], &[step]);
+    // Twice: the counters accumulate across reads.
+    g.submit(&[], &[step.clone(), step]);
     let dev_scores = g.read(&scores, rows * geom.score_stride() as usize);
     let dev_sel: Vec<u32> = g.read(&sel, rows * width).iter().map(|x| x.to_bits()).collect();
+
+    let counted = ReadStats::read(&g, &stats);
+    let selected: u64 = (0..rows).map(|r| u64::from(dev_sel[r * width])).sum();
+    let live: u64 = seqlen.iter().map(|&n| u64::from(n)).sum();
+    assert_eq!(counted, ReadStats { rows: 2 * rows as u64, selected_keys: 2 * selected, causal_keys: 2 * live }, "the read's counters");
 
     let stride = geom.score_stride() as usize;
     let mut lagged = 0;

@@ -75,10 +75,16 @@ fn a_budget_past_the_context_generates_what_dense_attention_does() {
     // Every prefill chunk sparse, whatever the measured crossover.
     sparse_engine.set_lsa_dense_until(0);
     let sparse = sparse_engine.generate_greedy(std::slice::from_ref(&p), new, None);
-    let (_, (pages, _), built) = sparse_engine.lsa_stats().unwrap();
-    println!("dense  {:?}\nsparse {:?}\npages in use {pages}, built {built}", dense[0], sparse[0]);
-    assert!(built >= 4, "a 2036-token prompt plus {new} tokens closes four cluster blocks; {built} pages were built");
+    let stats = sparse_engine.lsa_stats().unwrap();
+    println!("dense  {:?}\nsparse {:?}\n{stats:?}", dense[0], sparse[0]);
+    assert!(stats.pages_built >= 4, "a 2036-token prompt plus {new} tokens closes four cluster blocks; {} pages were built", stats.pages_built);
     assert_eq!(sparse, dense, "every-key sparse attention diverged from dense attention");
+    // Every row of every layer read sparsely and, past the context, selected
+    // every key dense attention would have read.
+    let layers = geometry(&path).n_layers as u64;
+    assert_eq!(stats.dense_rows, 0);
+    assert!(stats.reads.rows >= layers * (p.len() as u64 + new as u64 - 1), "{} rows read", stats.reads.rows);
+    assert_eq!(stats.reads.selected_keys, stats.reads.causal_keys, "a budget past the context selects every causal key");
 }
 
 /// Over the served default, an int8 KV cache, a budget past the context is
@@ -193,6 +199,6 @@ fn chunks_below_the_measured_crossover_read_densely() {
     };
     let dense = hidden(&mut engine(&path, 4096));
     assert_eq!(hidden(&mut e), dense, "a prompt below the crossover must read densely");
-    let (_, _, built) = e.lsa_stats().unwrap();
-    assert_eq!(built, 0, "dense chunks build no index pages");
+    let stats = e.lsa_stats().unwrap();
+    assert_eq!((stats.dense_rows, stats.reads.rows, stats.pages_built), (p.len() as u64, 0, 0), "dense chunks neither read nor index: {stats:?}");
 }
