@@ -20,6 +20,7 @@
 //! qwen_lsa eval    --corpus DIR --indexer FILE[,FILE...] [--tokens 8192]
 //!          [--held-docs 6] [--queries 32] [--tail 256] [--seed N]
 //! qwen_lsa prefill --indexer FILE [--tokens 4096,8192,16384,32768] [--corpus DIR]
+//!          [--kv-cache int8|f32|fp8]
 //! ```
 //!
 //! `--indexer random` or `pca` in `eval` builds that training-free indexer
@@ -103,11 +104,28 @@ fn seed(args: &Args) -> Result<u64, String> {
     Ok(s)
 }
 
+/// The KV cache tier an engine stores.
+#[derive(Clone, Copy, PartialEq)]
+enum Kv {
+    F32,
+    Int8,
+    Fp8,
+}
+
 fn engine(path: &str, max_tokens: u32) -> Result<(Engine, IndexGeometry), String> {
+    engine_kv(path, max_tokens, Kv::F32)
+}
+
+fn engine_kv(path: &str, max_tokens: u32, kv: Kv) -> Result<(Engine, IndexGeometry), String> {
     let (cfg, src) = qwen3::open_checkpoint(path)?;
     let geometry = IndexGeometry { n_layers: cfg.n_layers as usize, n_heads: cfg.n_heads as usize, n_kv_heads: cfg.n_kv_heads as usize, head_dim: cfg.head_dim as usize, rope_base: cfg.rope_theta };
     let mbt = max_tokens.div_ceil(BLOCK);
-    Ok((Engine::from_source_tier(cfg, &*src, BLOCK, mbt + 4, 1, mbt, 512, false, qwen3::Dtype::F32), geometry))
+    // Room for a warm-up prompt the prefix cache keeps beside the measured one.
+    let mut e = Engine::from_source_tier(cfg, &*src, BLOCK, 2 * mbt + 8, 1, mbt, 512, kv != Kv::F32, qwen3::Dtype::F32);
+    if kv == Kv::Fp8 {
+        e.set_kv_fp8()?;
+    }
+    Ok((e, geometry))
 }
 
 /// The corpus as documents of `tokens` tokens: every text file under `dir`
@@ -328,7 +346,13 @@ fn prefill(args: &Args) -> Result<(), String> {
     let mut ix = Indexer::load(args.req("indexer")?)?;
     ix.cfg.top_k = cfg.top_k;
     ix.cfg.top_p = cfg.top_p;
-    println!("prefill of one sequence, Qwen3 f32 KV, top_k {} top_p {} window {}", cfg.top_k, cfg.top_p, cfg.window);
+    let kv = match args.get("kv-cache").unwrap_or("int8") {
+        "f32" => Kv::F32,
+        "int8" => Kv::Int8,
+        "fp8" => Kv::Fp8,
+        other => return Err(format!("--kv-cache {other:?}: f32, int8 or fp8")),
+    };
+    println!("prefill of one sequence, Qwen3 {} KV, top_k {} top_p {} window {}", args.get("kv-cache").unwrap_or("int8"), cfg.top_k, cfg.top_p, cfg.window);
     for &n in &lens {
         let prompt = &doc[..n];
         // One warm-up prefill of other tokens (pipelines, allocator), then the
@@ -346,10 +370,10 @@ fn prefill(args: &Args) -> Result<(), String> {
             e.release_for_perf(&mut table);
             secs
         };
-        let (mut dense, _) = engine(&path, n as u32)?;
+        let (mut dense, _) = engine_kv(&path, n as u32, kv)?;
         let td = time(&mut dense);
         drop(dense);
-        let (mut sparse, _) = engine(&path, n as u32)?;
+        let (mut sparse, _) = engine_kv(&path, n as u32, kv)?;
         sparse.set_lsa(&ix)?;
         let ts = time(&mut sparse);
         println!("T={n:>6}  dense {:>8.2} s  sparse {:>8.2} s  speedup {:>5.2}x  ({:.0} vs {:.0} tok/s)", td, ts, td / ts, n as f64 / td, n as f64 / ts);

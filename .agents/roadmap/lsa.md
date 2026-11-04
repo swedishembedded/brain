@@ -39,6 +39,18 @@ head layout; clustering, selection and the sparse read are written once.
 
 ## Not yet done
 
+- [x] End-to-end prefill, Qwen3-0.6B, every layer sparse, int8 KV (the
+      served default), one sequence, 512-row chunks, P40 (wgpu), top_k 1024,
+      top_p 256, window 512 (`qwen_lsa prefill --kv-cache int8`):
+      | T | dense | sparse | speedup |
+      |---|---|---|---|
+      | 4096 | 2.38 s | 3.89 s | 0.61x |
+      | 8192 | 7.33 s | 8.63 s | 0.85x |
+      | 16384 | 24.97 s | 18.35 s | 1.36x |
+      | 32768 | 91.81 s | 39.19 s | 2.34x |
+      Dense throughput falls 1721 -> 357 tok/s (quadratic); sparse stays
+      1052 -> 836 tok/s (linear). Below ~12k the selection holds most causal
+      keys anyway and the per-query gather costs more than dense tiles.
 - [ ] Sparse prefill bandwidth: bf16 KV tier for the sparse read, the
       shared window as a dense sliding tile (it is a fifth of every
       selection), and more bytes in flight per workgroup.
