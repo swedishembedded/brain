@@ -7937,6 +7937,19 @@ impl model::Model for Qwen35 {
     fn adapter_sites(&self) -> Vec<model::adapter::LinearSite> {
         model::adapter::sites::LoraSites::lora_sites(&self.cfg)
     }
+    /// Each layer's MLP hidden channels (one `intermediate_size`): the rows of
+    /// gate and up, the columns of down.
+    fn prunable_dims(&self) -> Vec<model::prunable::PrunableDim> {
+        use model::prunable::{Axis, PrunableDim};
+        (0..self.cfg.n_layers)
+            .map(|l| PrunableDim {
+                name: format!("blocks.{l}.mlp"),
+                width: self.cfg.intermediate_size as usize,
+                config_key: "intermediate_size",
+                slices: vec![(format!("blocks.{l}.mlp.gate.weight"), Axis::Rows), (format!("blocks.{l}.mlp.up.weight"), Axis::Rows), (format!("blocks.{l}.mlp.down.weight"), Axis::Cols)],
+            })
+            .collect()
+    }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         Qwen35::read_weight(self, name)
     }

@@ -4427,6 +4427,43 @@ impl model::Model for Qwen35 {
     fn adapter_sites(&self) -> Vec<model::adapter::LinearSite> {
         model::adapter::sites::LoraSites::lora_sites(&self.cfg)
     }
+    /// The adapter sites, every routed expert's and the shared expert's
+    /// projections: the linears a precision search places tiers on.
+    fn linear_sites(&self) -> Vec<model::adapter::LinearSite> {
+        use model::adapter::{LinearSite, TargetSpec};
+        let (d, ff, sff) = (self.cfg.d_model as usize, self.cfg.moe_intermediate_size as usize, self.cfg.shared_expert_intermediate_size as usize);
+        let mut sites = model::adapter::sites::LoraSites::lora_sites(&self.cfg);
+        for l in 0..self.cfg.n_layers as usize {
+            let site = |name: String, leaf: &'static str, out: usize, inn: usize| LinearSite { name, leaf, layer: Some(l), spec: TargetSpec::whole(out, inn), save_name: None };
+            for e in 0..self.cfg.n_experts {
+                sites.push(site(format!("blocks.{l}.mlp.experts.{e}.gate.weight"), "expert_gate", ff, d));
+                sites.push(site(format!("blocks.{l}.mlp.experts.{e}.up.weight"), "expert_up", ff, d));
+                sites.push(site(format!("blocks.{l}.mlp.experts.{e}.down.weight"), "expert_down", d, ff));
+            }
+            sites.push(site(format!("blocks.{l}.mlp.shared_expert.gate.weight"), "shared_gate", sff, d));
+            sites.push(site(format!("blocks.{l}.mlp.shared_expert.up.weight"), "shared_up", sff, d));
+            sites.push(site(format!("blocks.{l}.mlp.shared_expert.down.weight"), "shared_down", d, sff));
+        }
+        sites
+    }
+    /// Every routed expert's hidden channels (one `moe_intermediate_size`) and
+    /// the shared expert's (`shared_expert_intermediate_size`), per layer.
+    fn prunable_dims(&self) -> Vec<model::prunable::PrunableDim> {
+        use model::prunable::{Axis, PrunableDim};
+        let mlp = |prefix: String, width: u32, config_key: &'static str| PrunableDim {
+            name: prefix.clone(),
+            width: width as usize,
+            config_key,
+            slices: vec![(format!("{prefix}.gate.weight"), Axis::Rows), (format!("{prefix}.up.weight"), Axis::Rows), (format!("{prefix}.down.weight"), Axis::Cols)],
+        };
+        (0..self.cfg.n_layers)
+            .flat_map(|l| {
+                (0..self.cfg.n_experts)
+                    .map(move |e| mlp(format!("blocks.{l}.mlp.experts.{e}"), self.cfg.moe_intermediate_size, "moe_intermediate_size"))
+                    .chain(std::iter::once(mlp(format!("blocks.{l}.mlp.shared_expert"), self.cfg.shared_expert_intermediate_size, "shared_expert_intermediate_size")))
+            })
+            .collect()
+    }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         Qwen35::read_weight(self, name)
     }

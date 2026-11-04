@@ -33,7 +33,7 @@ impl Site {
     }
 }
 
-/// The model's quantizable tensors, from [`Model::adapter_sites`] (grouped by
+/// The model's quantizable tensors, from [`Model::linear_sites`] (grouped by
 /// the tensor that stores each linear: the stored width is the site's row
 /// stride, and the row count follows from the stored element count), then
 /// joined into the groups [`Model::coupled_tensors`] declares.
@@ -42,9 +42,9 @@ impl Site {
 /// coupled group naming a tensor that is not a linear site is a declaration
 /// error; both are refused by name rather than treated as an empty plan.
 pub fn sites<M: Model>(m: &M) -> Result<Vec<Site>, String> {
-    let declared = m.adapter_sites();
+    let declared = m.linear_sites();
     if declared.is_empty() {
-        return Err("the model declares no linear sites (Model::adapter_sites), so there is nothing to place a tier on".into());
+        return Err("the model declares no linear sites (Model::linear_sites), so there is nothing to place a tier on".into());
     }
     let mut out: Vec<Site> = Vec::new();
     for site in declared {

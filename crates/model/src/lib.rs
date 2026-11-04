@@ -458,6 +458,14 @@ pub trait Model {
         Vec::new()
     }
 
+    /// Every linear whose storage tier can be chosen on its own: what a
+    /// precision search places a tier on. Defaults to [`Self::adapter_sites`];
+    /// a model whose adapters target fewer linears than it stores (a
+    /// mixture-of-experts model's routed experts) lists the rest too.
+    fn linear_sites(&self) -> Vec<adapter::LinearSite> {
+        self.adapter_sites()
+    }
+
     /// Groups of stored tensors this model's deployed engine holds as ONE
     /// weight (a fused projection: Q/K/V concatenated into one GEMM), which
     /// therefore take one storage tier together. Empty (the default) when
