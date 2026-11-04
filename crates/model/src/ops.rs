@@ -2943,6 +2943,11 @@ impl Ops {
     /// name is what a reader can grep for.
     #[must_use]
     pub fn matmul_kernel(&self, w: &Weight, m: u32) -> &'static str {
+        // The tiers `Self::matmul` runs as a bounded tile decode feeding the dense product have no selector
+        // entry of their own (`Self::bind` has none for them): name that path.
+        if matches!(w.dtype(), Dtype::NF4 | Dtype::F8E4M3 | Dtype::F8E5M2 | Dtype::F4E2M1) {
+            return "weight_decode tiles + dense product";
+        }
         let shape = OpShape { m, n: w.n(), k: w.k(), dtype: w.dtype() };
         Self::bind(self.selector.select(Op::MatMul, shape, &self.caps), w.dtype(), w.group())
     }
