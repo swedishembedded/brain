@@ -794,6 +794,57 @@ impl Weight {
         Weight::bytes_for(self.dtype(), self.n() as usize, self.k() as usize)
     }
 
+    /// Whether [`Self::upload`] and [`Self::round_trip`] can pack an `[n, k]`
+    /// weight at `tier`: the group-scaled tiers need whole groups along `k`,
+    /// FP8 whole words, and a tier with no upload path packs nothing.
+    pub fn packs(tier: Dtype, n: usize, k: usize) -> bool {
+        n > 0
+            && k > 0
+            && match tier {
+                Dtype::F32 | Dtype::BF16 | Dtype::F16 => true,
+                Dtype::I8 | Dtype::Q4 | Dtype::NF4 => k.is_multiple_of(crate::int8::GROUP),
+                Dtype::F8E4M3 | Dtype::F8E5M2 => k.is_multiple_of(4),
+                Dtype::Q4K | Dtype::Q8K | Dtype::F4E2M1 => false,
+            }
+    }
+
+    /// `raw` (`[n, k]`, row-major) as the device computes with it once
+    /// [`Self::upload`] has stored it at `tier`: packed by the same codec,
+    /// decoded back to f32 on the host. Simulated quantization (sensitivity
+    /// analysis, quantization-aware training) goes through here so that what
+    /// it measures is the deployed weight; `tests/weight_round_trip.rs` holds
+    /// it equal to the device's own decode.
+    ///
+    /// The tier is taken as asked, never promoted: whether a device can hold
+    /// it is the caller's question (`Dtype::promote`), not this codec's.
+    /// Accepts exactly the tiers [`Self::upload`] does.
+    pub fn round_trip(raw: &[f32], n: usize, k: usize, tier: Dtype) -> Vec<f32> {
+        assert_eq!(raw.len(), n * k, "Weight::round_trip: raw len {} != n*k ({n}*{k})", raw.len());
+        match tier {
+            Dtype::F32 => raw.to_vec(),
+            Dtype::BF16 => raw.iter().map(|&v| f32::from_bits((crate::half::f32_to_bf16(v) as u32) << 16)).collect(),
+            Dtype::F16 => raw.iter().map(|&v| ::half::f16::from_bits(crate::half::f32_to_f16(v)).to_f32()).collect(),
+            Dtype::I8 => {
+                let (packed, scales) = crate::int8::quantize_weight(raw, n, k);
+                crate::int8::dequantize_weight(&packed, &scales, n, k)
+            }
+            Dtype::Q4 => {
+                let (packed, scales) = crate::int4::quantize_weight_q4(raw, n, k);
+                crate::int4::dequantize_weight_q4(&packed, &scales, n, k)
+            }
+            Dtype::NF4 => {
+                let (packed, scales) = crate::lut4::quantize_weight_lut4(raw, n, k, &crate::lut4::NF4_LUT);
+                crate::lut4::dequantize_weight_lut4(&packed, &scales, n, k, &crate::lut4::NF4_LUT)
+            }
+            Dtype::F8E4M3 | Dtype::F8E5M2 => {
+                let fmt = if tier == Dtype::F8E4M3 { crate::fp8::Fp8Format::E4M3 } else { crate::fp8::Fp8Format::E5M2 };
+                let (packed, scales) = crate::fp8::quantize_weight_fp8(raw, n, k, fmt, FP8_BLOCK as usize);
+                crate::fp8::dequantize_weight_fp8(&packed, &scales, n, k, fmt, FP8_BLOCK as usize)
+            }
+            Dtype::Q4K | Dtype::Q8K | Dtype::F4E2M1 => panic!("Weight::round_trip: {tier:?} has no Weight::upload path, so there is no deployed decode to simulate"),
+        }
+    }
+
     /// The ONE upload path: quantizes/packs `raw` (`[n, k]`, row-major) per
     /// `want.promote(ops.caps().numeric)` - never narrower than what `want`
     /// asked for, never wider than what the device can execute - then
