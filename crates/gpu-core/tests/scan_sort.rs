@@ -2,13 +2,14 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Correctness gate for the generic device scan + radix-sort primitives, run
-//! on the CPU (Cranelift JIT) backend so it needs no GPU; the same checks run
-//! on wgpu unless MOE_SKIP_GPU_TESTS is set. Device results are compared
-//! against plain Rust references (iterator scan, stable sort).
+//! on the CPU (Cranelift JIT) backend so it needs no GPU, and on the test
+//! device. Device results are compared against plain Rust references
+//! (iterator scan, stable sort).
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu};
-use splat::sort::{record_scan, record_sort_pairs, ScanScratch, SortScratch};
-use splat::Kernels;
+use gpu_core::sort::{record_scan, record_sort_pairs, ScanKernels, ScanScratch, SortKernels, SortScratch, KERNELS};
+
+const KS: SortKernels = SortKernels { scan: ScanKernels { scan_block: 0, scan_add: 1 }, sort_hist: 2, sort_scatter: 3 };
 
 struct Lcg(u64);
 impl Lcg {
@@ -32,7 +33,7 @@ fn read_u32(g: &Gpu, b: &DeviceBuffer, n: usize) -> Vec<u32> {
     g.read(b, n).iter().map(|x| x.to_bits()).collect()
 }
 
-fn check_scan(g: &Gpu, ks: &Kernels, n: usize, seed: u64) {
+fn check_scan(g: &Gpu, ks: &SortKernels, n: usize, seed: u64) {
     let mut r = Lcg(seed);
     let data: Vec<u32> = (0..n).map(|_| r.next_u32() % 1000).collect();
     let expect: Vec<u32> = data
@@ -48,7 +49,7 @@ fn check_scan(g: &Gpu, ks: &Kernels, n: usize, seed: u64) {
     let buf = ubuf(g, &data);
     let scratch = ScanScratch::new(g, n);
     let mut steps = Vec::new();
-    let t = record_scan(g, ks, &buf, n, &scratch, &mut steps);
+    let t = record_scan(g, &ks.scan, &buf, n, &scratch, &mut steps);
     g.submit(&[], &steps);
 
     assert_eq!(read_u32(g, &buf, n), expect, "scan mismatch n={n}");
@@ -64,7 +65,7 @@ fn check_scan(g: &Gpu, ks: &Kernels, n: usize, seed: u64) {
 /// the previous full-size scan left behind. That is how a caller that reuses
 /// one scratch for varying lengths - differentiating a frame in bands, say -
 /// silently gets a stale count.
-fn check_scan_in_oversized_scratch(g: &Gpu, ks: &Kernels, n: usize, max_n: usize, seed: u64) {
+fn check_scan_in_oversized_scratch(g: &Gpu, ks: &SortKernels, n: usize, max_n: usize, seed: u64) {
     let mut r = Lcg(seed);
     let data: Vec<u32> = (0..max_n).map(|_| r.next_u32() % 1000).collect();
     let total: u32 = data[..n].iter().sum();
@@ -74,19 +75,19 @@ fn check_scan_in_oversized_scratch(g: &Gpu, ks: &Kernels, n: usize, max_n: usize
     // rather than accidentally right.
     let warm = ubuf(g, &data);
     let mut steps = Vec::new();
-    let t = record_scan(g, ks, &warm, max_n, &scratch, &mut steps);
+    let t = record_scan(g, &ks.scan, &warm, max_n, &scratch, &mut steps);
     g.submit(&[], &steps);
     let full = read_u32(g, t, 1)[0];
     assert_eq!(full, data.iter().sum::<u32>(), "full-size scan total");
 
     let buf = ubuf(g, &data[..n]);
     let mut steps = Vec::new();
-    let t = record_scan(g, ks, &buf, n, &scratch, &mut steps);
+    let t = record_scan(g, &ks.scan, &buf, n, &scratch, &mut steps);
     g.submit(&[], &steps);
     assert_eq!(read_u32(g, t, 1)[0], total, "scan total n={n} in scratch for {max_n}");
 }
 
-fn check_sort(g: &Gpu, ks: &Kernels, n: usize, key_bits: u32, seed: u64) {
+fn check_sort(g: &Gpu, ks: &SortKernels, n: usize, key_bits: u32, seed: u64) {
     let mut r = Lcg(seed);
     let mask = if key_bits == 32 { u32::MAX } else { (1u32 << key_bits) - 1 };
     let keys: Vec<u32> = (0..n).map(|_| r.next_u32() & mask).collect();
@@ -116,7 +117,7 @@ fn check_sort(g: &Gpu, ks: &Kernels, n: usize, key_bits: u32, seed: u64) {
 }
 
 fn run_all(g: &Gpu) {
-    let ks = Kernels::at(0);
+    let ks = KS;
     for (i, &n) in [1usize, 5, 255, 256, 257, 4096, 65535, 65536, 65537, 1_000_000].iter().enumerate() {
         check_scan(g, &ks, n, 0x5eed + i as u64);
     }
@@ -136,24 +137,21 @@ fn run_all(g: &Gpu) {
 
 #[test]
 fn scan_sort_cpu() {
-    let g = Gpu::new_cpu(splat::PIPELINES);
+    let g = Gpu::new_cpu(&KERNELS);
     run_all(&g);
 }
 
 #[test]
 fn scan_sort_gpu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return;
-    }
-    let g = gpu_core::testgpu::dev(splat::PIPELINES);
+    let g = gpu_core::testgpu::dev(&KERNELS);
     run_all(&g);
 }
 
 /// Large-size smoke: 4M-element scan (3 recursion levels) on CPU.
 #[test]
 fn scan_4m_cpu() {
-    let g = Gpu::new_cpu(splat::PIPELINES);
-    let ks = Kernels::at(0);
+    let g = Gpu::new_cpu(&KERNELS);
+    let ks = KS;
     check_scan(&g, &ks, 4_000_000, 0xbead);
 }
 
@@ -161,11 +159,8 @@ fn scan_4m_cpu() {
 /// (`SORT_CHUNK_MAX`), not the 256 of a small sort: still stable, still exact.
 #[test]
 fn sort_with_large_chunks_gpu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return;
-    }
-    let g = gpu_core::testgpu::dev(splat::PIPELINES);
-    let ks = Kernels::at(0);
+    let g = gpu_core::testgpu::dev(&KERNELS);
+    let ks = KS;
     for (i, &n) in [2_500_000usize, 17_000_000].iter().enumerate() {
         check_sort(&g, &ks, n, 32, 0x1a49e + i as u64);
     }

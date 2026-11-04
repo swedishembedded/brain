@@ -1124,7 +1124,6 @@ crates/sdxlunet/tests/skipfuse.rs	MOE_SKIP_GPU_TESTS
 crates/splat/examples/exact_eval.rs	EXACT_EVAL_DUMP
 crates/splat/src/opt.rs	BRAIN_SPLAT_PROFILE
 crates/splat/src/renderer.rs	BRAIN_SPLAT_PROFILE
-crates/splat/tests/s0_scan_sort.rs	MOE_SKIP_GPU_TESTS
 crates/splat/tests/s13_depth_supervision.rs	MOE_SKIP_GPU_TESTS
 crates/splat/tests/s1_project_naive.rs	MOE_SKIP_GPU_TESTS
 crates/splat/tests/s23_ray_renderer.rs	NOAA

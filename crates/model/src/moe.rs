@@ -1785,10 +1785,8 @@ pub fn expert_fwd_compact_layer(
 // it into per-row top-k expert ids; [`GroupedExpertFwdIds::group_counts`]
 // (new, `moe_group_counts.wgsl`) counts each expert's routed rows AND the
 // GEMM tiles that count needs in one pass; two device-side exclusive scans
-// (the SAME `scan_block.wgsl`/`scan_add.wgsl` recursive-scan pattern
-// `crates/splat/src/sort.rs::record_scan` already orchestrates for its own
-// radix sort, reimplemented here as [`record_group_scan`] rather than
-// pulling a rendering crate into this one) turn those counts into
+// ([`gpu_core::sort::record_scan`]'s recursive `scan_block.wgsl`/
+// `scan_add.wgsl` pattern) turn those counts into
 // exclusive per-expert row and tile offsets; [`GroupedExpertFwdIds::
 // perm_emit`] (new, `moe_group_perm_emit.wgsl`) emits BOTH the row
 // permutation (`embed.wgsl`'s existing gather consumes it unchanged) and
@@ -1837,68 +1835,9 @@ pub struct GroupedExpertFwdIds {
     pub combine: usize,
 }
 
-/// Elements per `scan_block` run - the same 256-per-block convention
-/// `crates/splat/src/sort.rs::SCAN_BLOCK_LEN` uses, kept private here since
-/// nothing outside this scan needs to know it.
-const GROUP_SCAN_BLOCK: u32 = 256;
-
 /// GEMM tile height `matmul_reg3_grouped.wgsl` hardcodes as `BM` - kept in
 /// sync by [`expert_fwd_grouped`]'s own doc, not re-derived from the WGSL.
 const GROUP_GEMM_BM: u32 = 128;
-
-/// Per-level block-sum scratch for an exclusive scan of up to `max_n`
-/// elements, mirroring `crates/splat/src/sort.rs::ScanScratch` (duplicated
-/// rather than imported: `crates/splat` is a rendering crate this one has
-/// no business depending on, and the pattern is ~15 lines).
-struct GroupScan {
-    levels: Vec<DeviceBuffer>,
-}
-
-impl GroupScan {
-    fn new(g: &Gpu, max_n: usize) -> GroupScan {
-        let mut levels = Vec::new();
-        let mut n = max_n.max(1);
-        loop {
-            let nb = n.div_ceil(GROUP_SCAN_BLOCK as usize);
-            levels.push(g.storage(nb as u64));
-            if nb <= 1 {
-                break;
-            }
-            n = nb;
-        }
-        GroupScan { levels }
-    }
-}
-
-/// Record an in-place exclusive prefix scan of `data[0..n]` (u32 payload),
-/// recursing into `scratch`'s block-sum levels exactly like
-/// `crates/splat/src/sort.rs::record_scan`. At every `n_experts` this
-/// engine runs today (<= a few hundred) `n <= GROUP_SCAN_BLOCK` so this is
-/// ONE dispatch, not a real recursion - the recursion exists so a future
-/// larger `n_experts` stays correct without another change here.
-fn record_group_scan(g: &Gpu, scan_block: usize, scan_add: usize, data: &DeviceBuffer, n: usize, scratch: &GroupScan, steps: &mut Vec<Step>) {
-    record_group_scan_level(g, scan_block, scan_add, data, n, scratch, 0, steps);
-}
-
-fn record_group_scan_level(
-    g: &Gpu,
-    scan_block: usize,
-    scan_add: usize,
-    data: &DeviceBuffer,
-    n: usize,
-    scratch: &GroupScan,
-    level: usize,
-    steps: &mut Vec<Step>,
-) {
-    let sums = &scratch.levels[level];
-    let nb = n.div_ceil(GROUP_SCAN_BLOCK as usize);
-    let params = [n as u32, GROUP_SCAN_BLOCK];
-    steps.push(g.step(scan_block, &[data, sums], &params, nb as u32));
-    if nb > 1 {
-        record_group_scan_level(g, scan_block, scan_add, sums, nb, scratch, level + 1, steps);
-        steps.push(g.step(scan_add, &[data, sums], &params, n as u32));
-    }
-}
 
 /// Scratch for [`expert_fwd_grouped`], sized for up to `shape.rows *
 /// shape.top_k` compacted rows (the exact total across every expert - every
@@ -1911,8 +1850,8 @@ pub struct GroupedExpertScratch {
     row_count: DeviceBuffer,
     row_start: DeviceBuffer,
     tile_start: DeviceBuffer,
-    row_scan: GroupScan,
-    tile_scan: GroupScan,
+    row_scan: gpu_core::sort::ScanScratch,
+    tile_scan: gpu_core::sort::ScanScratch,
     perm: DeviceBuffer,
     pos_for_slot: DeviceBuffer,
     x_compact: DeviceBuffer,
@@ -1936,8 +1875,8 @@ impl GroupedExpertScratch {
             row_count: g.storage(e as u64),
             row_start: g.storage(e as u64),
             tile_start: g.storage(e as u64),
-            row_scan: GroupScan::new(g, e as usize),
-            tile_scan: GroupScan::new(g, e as usize),
+            row_scan: gpu_core::sort::ScanScratch::new(g, (e as usize).max(1)),
+            tile_scan: gpu_core::sort::ScanScratch::new(g, (e as usize).max(1)),
             perm: g.storage(cap),
             pos_for_slot: g.storage(cap),
             x_compact: g.storage(cap * d),
@@ -2011,8 +1950,9 @@ pub fn expert_fwd_grouped(
         &[rows, e, GROUP_GEMM_BM],
         e,
     ));
-    record_group_scan(g, ids.scan_block, ids.scan_add, &scratch.row_start, e as usize, &scratch.row_scan, &mut steps);
-    record_group_scan(g, ids.scan_block, ids.scan_add, &scratch.tile_start, e as usize, &scratch.tile_scan, &mut steps);
+    let scan = gpu_core::sort::ScanKernels { scan_block: ids.scan_block, scan_add: ids.scan_add };
+    gpu_core::sort::record_scan(g, &scan, &scratch.row_start, e as usize, &scratch.row_scan, &mut steps);
+    gpu_core::sort::record_scan(g, &scan, &scratch.tile_start, e as usize, &scratch.tile_scan, &mut steps);
     steps.push(g.step(
         ids.perm_emit,
         &[gate, &scratch.top_ids, &scratch.row_start, &scratch.perm, &scratch.pos_for_slot],

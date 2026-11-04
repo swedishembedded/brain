@@ -3164,9 +3164,7 @@ Four new kernels: `moe_group_counts.wgsl` (per-expert row count AND tile
 count in one pass), `moe_group_perm_emit.wgsl` (row permutation + its
 inverse), `matmul_reg3_grouped.wgsl` (the grouped GEMM), `moe_group_combine
 .wgsl` (the gate-scaled combine). `scan_block.wgsl`/`scan_add.wgsl`'s
-existing recursive-scan pattern (`crates/splat/src/sort.rs::record_scan`'s
-own orchestration, reimplemented locally as `record_group_scan` rather than
-pulling a rendering crate into `crates/model` - ~30 lines) is reused
+existing recursive scan (`gpu_core::sort::record_scan`) is reused
 unchanged, not reinvented.
 
 `matmul_reg3_grouped.wgsl` is `matmul_reg3.wgsl`'s K-accumulation loop

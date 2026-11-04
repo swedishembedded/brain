@@ -8,7 +8,7 @@
 
 use gpu_core::{f, DeviceBuffer, Gpu};
 
-use crate::sort::{record_scan, record_sort_pairs, ScanScratch, SortScratch};
+use gpu_core::sort::{record_scan, record_sort_pairs, ScanScratch, SortScratch};
 use crate::types::{Camera, Mode, RenderOpts, Splats};
 use crate::Kernels;
 
@@ -308,7 +308,7 @@ impl Renderer {
             &[s.n as u32, tiles_x, tiles_y, TILE],
             s.n as u32,
         ));
-        let ctotal = record_scan(gpu, &self.ks, &self.counts, s.n, &self.count_scan, &mut steps);
+        let ctotal = record_scan(gpu, &self.ks.sort().scan, &self.counts, s.n, &self.count_scan, &mut steps);
         gpu.submit(&[], &steps);
         let total = gpu.read(ctotal, 1)[0].to_bits() as usize;
         if self.grow && total > self.isect_cap {
@@ -355,7 +355,7 @@ impl Renderer {
         let mut sorted_in_b = false;
         if n_isects > 0 {
             sorted_in_b = record_sort_pairs(
-                gpu, &self.ks, &self.keys_a, &self.vals_a, &self.keys_b, &self.vals_b,
+                gpu, &self.ks.sort(), &self.keys_a, &self.vals_a, &self.keys_b, &self.vals_b,
                 n_isects, 32, &self.sort, &mut steps,
             );
             let (keys, order, vals) = self.sorted(sorted_in_b);
@@ -414,7 +414,7 @@ impl Renderer {
             return total;
         }
         let mut steps = Vec::new();
-        let sum = record_scan(gpu, &self.ks, &self.joined, n_px + 1, &self.joined_scan, &mut steps);
+        let sum = record_scan(gpu, &self.ks.sort().scan, &self.joined, n_px + 1, &self.joined_scan, &mut steps);
         gpu.submit(&[], &steps);
         let total = gpu.read(sum, 1)[0].to_bits() as usize;
         self.scanned = Some(total);

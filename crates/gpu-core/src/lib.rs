@@ -365,6 +365,9 @@ pub mod tape;
 /// Replay arena for the per-iteration scratch of a repeated pass.
 pub mod scratch;
 
+/// Device prefix scan and stable radix sort.
+pub mod sort;
+
 /// Which stream of a device work runs on: the urgent lane a decode step takes
 /// while a prefill keeps the device busy.
 #[cfg(not(target_arch = "wasm32"))]

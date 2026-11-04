@@ -7,11 +7,35 @@
 //! add-back, the sort ranks per 256-element chunk with private offset tables.
 //!
 //! Callers *record* steps into a `Vec<Step>` (nothing executes until
-//! `Gpu::submit`), so scans/sorts compose into larger frame pipelines.
+//! `Gpu::submit`), so scans/sorts compose into larger pipelines. A caller
+//! registers [`KERNELS`] in its pipeline list and passes their indices as
+//! [`SortKernels`].
 
-use gpu_core::{DeviceBuffer, Gpu, Step};
+use crate::{DeviceBuffer, Gpu, Step};
 
-use crate::Kernels;
+/// The kernels the scan and sort dispatch, for a caller's pipeline list.
+pub const KERNELS: [(&str, &str); 4] = [
+    ("scan_block", kernels::SCAN_BLOCK),
+    ("scan_add", kernels::SCAN_ADD),
+    ("sort_hist", kernels::SORT_HIST),
+    ("sort_scatter", kernels::SORT_SCATTER),
+];
+
+/// The caller's pipeline indices of the scan's two kernels (the first two
+/// of [`KERNELS`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ScanKernels {
+    pub scan_block: usize,
+    pub scan_add: usize,
+}
+
+/// The caller's pipeline indices of [`KERNELS`].
+#[derive(Clone, Copy, Debug)]
+pub struct SortKernels {
+    pub scan: ScanKernels,
+    pub sort_hist: usize,
+    pub sort_scatter: usize,
+}
 
 /// Elements per `scan_block` run. Fixed by convention; the kernels take it as
 /// a parameter so it can be tuned without a WGSL change.
@@ -70,7 +94,7 @@ impl ScanScratch {
 /// for varying lengths has to read the buffer this hands back.
 pub fn record_scan<'a>(
     gpu: &Gpu,
-    ks: &Kernels,
+    ks: &ScanKernels,
     data: &DeviceBuffer,
     n: usize,
     scratch: &'a ScanScratch,
@@ -84,7 +108,7 @@ pub fn record_scan<'a>(
 /// Returns the level whose buffer holds the grand total.
 fn record_scan_level(
     gpu: &Gpu,
-    ks: &Kernels,
+    ks: &ScanKernels,
     data: &DeviceBuffer,
     n: usize,
     scratch: &ScanScratch,
@@ -132,7 +156,7 @@ impl SortScratch {
 #[allow(clippy::too_many_arguments)]
 pub fn record_sort_pairs(
     gpu: &Gpu,
-    ks: &Kernels,
+    ks: &SortKernels,
     keys_a: &DeviceBuffer,
     vals_a: &DeviceBuffer,
     keys_b: &DeviceBuffer,
@@ -153,7 +177,7 @@ pub fn record_sort_pairs(
     for pass in 0..passes {
         let params = [n as u32, 8 * pass, n_chunks as u32, chunk as u32];
         steps.push(gpu.step(ks.sort_hist, &[src.0, &scratch.hist], &params, n_chunks as u32));
-        record_scan(gpu, ks, &scratch.hist, hist_n, &scratch.hist_scan, steps);
+        record_scan(gpu, &ks.scan, &scratch.hist, hist_n, &scratch.hist_scan, steps);
         steps.push(gpu.step(
             ks.sort_scatter,
             &[src.0, src.1, &scratch.hist, dst.0, dst.1],

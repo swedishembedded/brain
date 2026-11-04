@@ -32,7 +32,6 @@ pub mod quality;
 pub mod reference;
 pub mod renderer;
 pub mod sh;
-pub mod sort;
 pub(crate) mod train;
 pub mod types;
 
@@ -129,6 +128,11 @@ pub struct Kernels {
 }
 
 impl Kernels {
+    /// The scan and sort kernels' indices, for [`gpu_core::sort`].
+    pub fn sort(&self) -> gpu_core::sort::SortKernels {
+        gpu_core::sort::SortKernels { scan: gpu_core::sort::ScanKernels { scan_block: self.scan_block, scan_add: self.scan_add }, sort_hist: self.sort_hist, sort_scatter: self.sort_scatter }
+    }
+
     /// Resolve indices for a `Gpu` built with [`PIPELINES`] at offset `base`
     /// (0 when the splat pipelines are the whole list).
     pub fn at(base: usize) -> Kernels {
