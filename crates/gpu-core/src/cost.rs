@@ -655,6 +655,13 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let kv = if base == "paged_sparse_flash_gqa" { 8 * rows * nkv * width * hd } else { 2 * rows * nkv * width * hd + 8 * rows * nkv * width };
             f(rows * nh * width * (4 * hd + 6), 8 * rows * nh * hd + kv + 4 * rows * stride)
         }
+        // An additive per-(query, key) mask shared by every head onto the
+        // scores (DSA and native sparse attention): params [batch, n_heads,
+        // t], one read-add-write per score plus the mask read.
+        "add_index_mask" => {
+            let (b, h, t) = (p(0)?, p(1)?, p(2)?);
+            f(b * h * t * t, 8 * b * h * t * t + 4 * b * t * t)
+        }
         // The latent-sparse-attention read: params [rows, score_stride, ...,
         // index_dim at 3, ..., sel_width at 11]. Costed at a full score row
         // (every bucket a page table can list) scored and radix-selected over
@@ -2012,7 +2019,7 @@ mod tests {
             "paged_flash_decode_split_i8", "paged_flash_decode_combine", "paged_flash_decode_combine_i8",
             "paged_sparse_flash_decode", "paged_sparse_flash_gqa", "paged_sparse_flash_gqa_i8", "paged_sparse_flash_rows_i8",
             // the latent-sparse-attention index
-            "lsa_read", "lsa_index_vectors", "lsa_index_keys_i8",
+            "lsa_read", "lsa_index_vectors", "lsa_index_keys_i8", "add_index_mask",
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }
