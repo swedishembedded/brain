@@ -645,6 +645,32 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, nh, hd, width) = (p(0)?, p(1)?, p(3)?, p(7)?);
             f(rows * nh * width * (4 * hd + 6), 8 * rows * nh * hd + 8 * rows * nh * width * hd + 4 * rows * width)
         }
+        // Its per-KV-head and whole-row siblings read each selected K/V row
+        // once per KV head (f32, or packed bytes plus one scale per row and KV
+        // head); the selection row's width is `sel_width` less its 3-word
+        // header.
+        "paged_sparse_flash_gqa" | "paged_sparse_flash_gqa_i8" | "paged_sparse_flash_rows_i8" => {
+            let (rows, nh, nkv, hd, stride) = (p(0)?, p(1)?, p(2)?, p(3)?, p(7)?);
+            let width = stride.saturating_sub(3);
+            let kv = if base == "paged_sparse_flash_gqa" { 8 * rows * nkv * width * hd } else { 2 * rows * nkv * width * hd + 8 * rows * nkv * width };
+            f(rows * nh * width * (4 * hd + 6), 8 * rows * nh * hd + kv + 4 * rows * stride)
+        }
+        // The latent-sparse-attention read: params [rows, score_stride, ...,
+        // index_dim at 3, ..., sel_width at 11]. Costed at a full score row
+        // (every bucket a page table can list) scored and radix-selected over
+        // its 32 bisection passes, then a full selection row written.
+        "lsa_read" => {
+            let (rows, stride, d, width) = (p(0)?, p(1)?, p(3)?, p(11)?);
+            f(rows * stride * (2 * d + 64), rows * stride * (4 * d + 4 * 34) + 4 * rows * (d + width))
+        }
+        // Index vectors: params [rows, heads, n_kv_heads, head_dim, index_dim,
+        // rope_base]. A row's heads are read once (f32, or packed bytes plus
+        // per-KV-head scales), summed over the group, projected and normalised.
+        "lsa_index_vectors" | "lsa_index_keys_i8" => {
+            let (rows, heads, nkv, hd, d) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?);
+            let input = if base == "lsa_index_vectors" { 4 * rows * heads * hd } else { rows * nkv * hd + 4 * rows * nkv };
+            f(rows * (heads * hd + 2 * nkv * hd * d + 3 * d), input + 4 * nkv * hd * d + 4 * rows * d)
+        }
         // Merge of the split-KV partials: params [batch, n_heads, head_dim,
         // n_splits]; a rescaled weighted sum of n_splits partial contexts.
         "paged_flash_decode_combine" | "paged_flash_decode_combine_i8" => {
@@ -1984,7 +2010,9 @@ mod tests {
             "paged_flash_prefill", "paged_flash_prefill_hd256", "paged_flash_prefill_i8",
             "paged_flash_decode", "paged_flash_decode_i8", "paged_flash_decode_split",
             "paged_flash_decode_split_i8", "paged_flash_decode_combine", "paged_flash_decode_combine_i8",
-            "paged_sparse_flash_decode",
+            "paged_sparse_flash_decode", "paged_sparse_flash_gqa", "paged_sparse_flash_gqa_i8", "paged_sparse_flash_rows_i8",
+            // the latent-sparse-attention index
+            "lsa_read", "lsa_index_vectors", "lsa_index_keys_i8",
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }
