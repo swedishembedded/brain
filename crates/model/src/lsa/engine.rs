@@ -23,6 +23,9 @@
 
 use super::device::{IndexHeads, IndexPool, IndexVectorBuffers, PackedKeyBuffers, ReadBuffers, ReadGeometry, ReadStats, Rope};
 use super::indexer::Indexer;
+use super::tree::Growth;
+use super::tree_device::TreeReadBuffers;
+use super::tree_engine::TreeEngine;
 use super::LsaConfig;
 use crate::paged::{BlockAllocator, BlockTable};
 use crate::paged_sparse::{SparseAttention, SparseBuffers};
@@ -38,6 +41,8 @@ pub struct LsaKernels {
     pub read: usize,
     /// `lsa_ward`.
     pub ward: usize,
+    /// `lsa_read_tree`, which an indexer with a tree needs.
+    pub tree: Option<usize>,
     /// The sparse attention kernel for forwards of at least
     /// [`MANY_ROWS`] rows (prefill chunks).
     pub attend: usize,
@@ -175,6 +180,8 @@ pub struct LsaAttention {
     /// one-word placeholder under plain RoPE.
     inv_freq: DeviceBuffer,
     built_pages: u64,
+    /// The indexer's tree, read in place of the flat read.
+    tree: Option<TreeEngine>,
 }
 
 impl LsaAttention {
@@ -210,7 +217,15 @@ impl LsaAttention {
                 Layer { wq: g.storage_init("lsa.wq", &p.wq), wk: g.storage_init("lsa.wk", &p.wk), slot: slots - 1 }
             }));
         }
-        let pool = IndexPool::new(g, cfg, page_capacity, slots)?;
+        let mut pool = IndexPool::new(g, cfg, page_capacity, slots)?;
+        let tree = match (&indexer.tree, kernels.tree) {
+            (None, _) => None,
+            (Some(_), None) => return Err("LSA: the indexer reads through a tree, and lsa_read_tree is not registered".into()),
+            (Some(t), Some(_)) => {
+                pool.keep_sums(g);
+                Some(TreeEngine::new(g, cfg, t.clone(), max_pages, page_capacity, slots, max_rows)?)
+            }
+        };
         let ward_scratch = g.storage(slots as u64 * IndexPool::ward_scratch_words(&cfg));
         let rows = max_rows as u64;
         let d = cfg.index_dim as u64;
@@ -245,6 +260,7 @@ impl LsaAttention {
             keys,
             inv_freq: yarn_inv_freq.cloned().unwrap_or_else(|| g.storage(1)),
             built_pages: 0,
+            tree,
         })
     }
 
@@ -261,23 +277,26 @@ impl LsaAttention {
     /// Device bytes held: projections, index pages and scratch.
     pub fn device_bytes(&self) -> u64 {
         let sparse = self.layers.iter().filter(|l| l.is_some()).count();
-        Self::bytes(&self.cfg, self.heads.n_kv_heads * self.heads.head_dim, sparse, self.kv, self.max_rows, self.pages.num_blocks())
+        let tree = self.tree.as_ref().map(|t| &t.geom.tree);
+        Self::bytes(&self.cfg, tree, self.heads.n_kv_heads * self.heads.head_dim, sparse, self.kv, self.max_rows, self.pages.num_blocks())
     }
 
     /// The device bytes [`Self::new`] allocates for `indexer` with these
     /// arguments, before allocating: what a memory planner charges.
     pub fn device_bytes_for(indexer: &Indexer, kv: KvGeometry, max_rows: u32, page_capacity: u32) -> u64 {
         let sparse = indexer.layers.iter().filter(|l| l.is_some()).count();
-        Self::bytes(&indexer.cfg, indexer.geometry.input_dim() as u32, sparse, kv, max_rows, page_capacity)
+        Self::bytes(&indexer.cfg, indexer.tree.as_ref(), indexer.geometry.input_dim() as u32, sparse, kv, max_rows, page_capacity)
     }
 
-    fn bytes(cfg: &LsaConfig, input: u32, sparse: usize, kv: KvGeometry, max_rows: u32, page_capacity: u32) -> u64 {
+    fn bytes(cfg: &LsaConfig, tree: Option<&super::tree::TreeConfig>, input: u32, sparse: usize, kv: KvGeometry, max_rows: u32, page_capacity: u32) -> u64 {
         let d = cfg.index_dim as u64;
         let read = ReadGeometry { cfg: *cfg, max_pages: (kv.max_blocks_per_seq * kv.block_size) / cfg.cluster_block as u32 };
         let per_layer = 2 * input as u64 * d * 4 + IndexPool::bytes(cfg, page_capacity) + cfg.cluster_block as u64 * d * 4 + 4 * IndexPool::ward_scratch_words(cfg);
         let rows = max_rows as u64;
         let scratch = 4 * rows * (1 + d + read.score_stride() as u64 + read.row_stride() as u64 + read.max_pages as u64 + 1) + 8 * cfg.cluster_block as u64 + 4 * ReadStats::WORDS;
-        sparse as u64 * per_layer + scratch
+        let max_pages = (kv.max_blocks_per_seq * kv.block_size) / cfg.cluster_block as u32;
+        let tree = tree.and_then(|t| TreeEngine::bytes(cfg, t, max_pages, page_capacity, sparse as u32, max_rows).ok()).unwrap_or(0);
+        sparse as u64 * per_layer + scratch + tree
     }
 
     /// Index pages built since the engine started (page reuse excluded).
@@ -316,6 +335,14 @@ impl LsaAttention {
         let l = self.layers.get(layer).and_then(Option::as_ref).ok_or_else(|| format!("LSA: layer {layer} is dense"))?;
         if rows > self.max_rows {
             return Err(format!("LSA: a forward of {rows} rows exceeds the {} the scratch holds", self.max_rows));
+        }
+        if let (Some(tree), Some(kernel)) = (&self.tree, self.k.tree) {
+            // The tree read takes its index queries from the head of its scratch.
+            s.push(self.heads.step(g, self.k.index_vectors, self.n_heads, rows, &IndexVectorBuffers { x: b.q, row_off: &self.q_off, pos: b.pos, w: &l.wq, out: &tree.cand, inv_freq: &self.inv_freq, out0: 0 })?);
+            let level_row0 = tree.nodes.level_row0(l.slot);
+            let bufs = TreeReadBuffers { seqlen: b.seqlen, centroids: &self.pool.centroids, members: &self.pool.members, nodes: &tree.nodes.nodes, tables: &tree.tables, cand: &tree.cand, sel: &self.sel, stats: &self.read_stats, row0: self.pool.row0(l.slot), level_row0: &level_row0 };
+            s.push(tree.geom.step(g, kernel, rows, &bufs)?);
+            return Ok(());
         }
         s.push(self.heads.step(g, self.k.index_vectors, self.n_heads, rows, &IndexVectorBuffers { x: b.q, row_off: &self.q_off, pos: b.pos, w: &l.wq, out: &self.iq, inv_freq: &self.inv_freq, out0: 0 })?);
         s.push(self.read.step(
@@ -407,6 +434,27 @@ impl LsaAttention {
         for (table, cached, _) in rows.iter_mut() {
             self.index_table(g, table, *cached, pools)?;
         }
+        if let Some(tree) = self.tree.as_mut() {
+            // Each sequence's levels as its last row's page needs them, then
+            // every row's table: its pages, its own page's growth, the levels.
+            let stride = tree.geom.table_stride() as usize;
+            let top = tree.geom.tree.top_level();
+            let mut tab = vec![0u32; total as usize * stride];
+            let mut r = 0usize;
+            for (table, cached, count) in rows.iter_mut() {
+                let built = table.index_pages().len();
+                let last = tree.growth(*cached + count.saturating_sub(1), built);
+                tree.grow(g, &self.pool, table, &last)?;
+                let held: Vec<Vec<u32>> = (1..=top).map(|l| table.node_pages(l).to_vec()).collect();
+                for i in 0..*count {
+                    let growth = tree.growth(*cached + i, built);
+                    tree.geom.write_row(&mut tab[r * stride..][..stride], table.index_pages(), &growth, &held)?;
+                    r += 1;
+                }
+            }
+            g.write(&tree.tables, &tab);
+            return Ok(());
+        }
         let width = self.read.max_pages as usize + 1;
         let mut tab = vec![0u32; total as usize * width];
         let mut r = 0usize;
@@ -431,6 +479,18 @@ impl LsaAttention {
         let width = self.read.max_pages as usize + 1;
         let built = built.min(self.read.max_pages);
         let pages = self.pool.pages().max(1);
+        if let Some(tree) = &self.tree {
+            // No level grown: the tree read scores every visible bucket.
+            let stride = tree.geom.table_stride() as usize;
+            let list: Vec<u32> = (0..built).map(|i| i % pages).collect();
+            let none = Growth { covered_buckets: 0, made: vec![0; tree.geom.tree.top_level()], closed: vec![0; tree.geom.tree.top_level()] };
+            let mut tab = vec![0u32; rows.min(self.max_rows) as usize * stride];
+            for row in tab.chunks_exact_mut(stride) {
+                tree.geom.write_row(row, &list, &none, &[]).expect("a timing row fits the table");
+            }
+            g.write(&tree.tables, &tab);
+            return;
+        }
         let mut tab = vec![0u32; rows.min(self.max_rows) as usize * width];
         for row in tab.chunks_exact_mut(width) {
             row[0] = built;
@@ -443,6 +503,9 @@ impl LsaAttention {
 
     /// Release a finished sequence's pages (before its KV blocks are released).
     pub fn release(&mut self, table: &mut BlockTable) {
+        if let Some(tree) = self.tree.as_mut() {
+            tree.release(table);
+        }
         for page in table.take_index_pages() {
             self.drop_page(page);
         }
@@ -454,7 +517,16 @@ impl LsaAttention {
             if let Some(key) = self.key_of.remove(&page) {
                 self.page_of.remove(&key);
             }
+            if let Some(tree) = self.tree.as_mut() {
+                tree.index_page_freed(page);
+            }
         }
+    }
+
+    /// Node pages the tree built since the engine started (reuse excluded),
+    /// and the node pages in use; `None` without a tree.
+    pub fn tree_pages(&self) -> Option<(u64, u32)> {
+        self.tree.as_ref().map(|t| (t.built_pages(), t.pages_in_use()))
     }
 
     fn index_table(&mut self, g: &Gpu, table: &mut BlockTable, cached: u32, pools: KeyPools) -> Result<(), String> {

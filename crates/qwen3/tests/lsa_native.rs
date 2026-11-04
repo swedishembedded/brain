@@ -177,7 +177,7 @@ fn native_sparse_attention_learns_long_range_recall_and_serves_sparsely() {
     let dim = (cfg.n_kv_heads * cfg.head_dim) as usize;
     let identity: Vec<f32> = (0..dim * dim).map(|i| f32::from(u8::from(i / dim == i % dim))).collect();
     let geometry = IndexGeometry { n_layers: cfg.n_layers as usize, n_heads: cfg.n_heads as usize, n_kv_heads: cfg.n_kv_heads as usize, head_dim: cfg.head_dim as usize, rope_base: cfg.rope_theta };
-    let indexer = Indexer { cfg: LsaConfig { index_dim: dim, ..cfg_lsa }, geometry, layers: vec![Some(LayerProjection { wq: identity.clone(), wk: identity }); cfg.n_layers as usize], origin: "native".into() };
+    let indexer = Indexer { cfg: LsaConfig { index_dim: dim, ..cfg_lsa }, geometry, layers: vec![Some(LayerProjection { wq: identity.clone(), wk: identity }); cfg.n_layers as usize], origin: "native".into(), tree: None };
     let mut engine = qwen3::serve::Engine::load(path.to_str().unwrap(), 16, 64, 1, t / 16, 64, false, false);
     engine.set_lsa(&indexer).unwrap();
     let (x, y, answers) = &held_out[0];

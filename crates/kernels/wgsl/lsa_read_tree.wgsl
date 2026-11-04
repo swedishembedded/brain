@@ -16,12 +16,15 @@
 // search and hierarchical indexing, you can procure our services by sending
 // an email to info@swedishembedded.com.
 //
-// The device half of `model::lsa::tree::select_tree`. Query row `r`'s table
-// row (`table_stride` words from `r * table_stride`) holds its live keys, its
-// built pages and their bucket pages (as `lsa_read`'s page table), then from
-// `growth_off` the levels as they stood at its page's start - covered
-// buckets, then made and closed node buckets a level - and from each level's
-// `tab_off` that level's node pages. Logical node `n` of level `l` lives in
+// The device half of `model::lsa::tree::select_tree`. Query row `r` sits at
+// position `seqlen[r] - 1`, as in `lsa_read`. Its table row (`table_stride`
+// words from `r * table_stride`) starts as `lsa_read`'s page-table row - its
+// built pages, then their pages - then holds from `growth_off` the levels as
+// they stood at its page's start (covered buckets, then made and closed node
+// buckets a level) and from each level's `tab_off` that level's node pages.
+// Its index query is the first `index_dim` words of its scratch row region:
+// `cand` holds `[rows, index_dim]` index queries (f32 bits), then the
+// candidate scratch. Logical node `n` of level `l` lives in
 // node row `row0_l + page_(n / npp_l) * npp_l + n % npp_l` of `nodes`, a row
 // being the centroid (`index_dim` floats) then the node's children (logical
 // rows of the level below, as u32 bits).
@@ -75,7 +78,7 @@ struct Params {
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read>       iq:        array<f32>;
+@group(0) @binding(1) var<storage, read>       seqlen:    array<u32>;
 @group(0) @binding(2) var<storage, read>       centroids: array<f32>;
 @group(0) @binding(3) var<storage, read>       members:   array<u32>;
 @group(0) @binding(4) var<storage, read>       nodes:     array<f32>;
@@ -136,7 +139,7 @@ fn scan_parts(lt: u32) {
 }
 
 fn bucket_row(tab: u32, b: u32) -> u32 {
-    return p.row0 + tables[tab + 2u + b / p.buckets_per_block] * p.buckets_per_block + b % p.buckets_per_block;
+    return p.row0 + tables[tab + 1u + b / p.buckets_per_block] * p.buckets_per_block + b % p.buckets_per_block;
 }
 
 fn node_row(tab: u32, level: u32, n: u32) -> u32 {
@@ -205,15 +208,15 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     if (r >= p.rows) { return; }
     let lt = lid.x;
     let tab = r * p.table_stride;
-    let live = tables[tab];
+    let live = seqlen[r];
     let pos = live - 1u;
-    let built = min(tables[tab + 1u], p.max_pages);
+    let built = min(tables[tab], p.max_pages);
     let visible = min(pos / p.cluster_block, built) * p.buckets_per_block;
-    let base = r * p.cand_stride * 2u;     // ids, keys
+    let base = p.rows * p.index_dim + r * p.cand_stride * 2u;     // ids, keys
     let nbs = p.node_bucket_size;
     let node_stride = p.index_dim + nbs;
     for (var c = lt; c < p.index_dim; c = c + WG) {
-        qsh[c] = iq[r * p.index_dim + c];
+        qsh[c] = bitcast<f32>(cand[r * p.index_dim + c]);
     }
     workgroupBarrier();
 

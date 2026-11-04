@@ -273,6 +273,13 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   sparsely and densely, and the keys the sparse reads selected beside the
   keys dense attention would have read for the same rows - their ratio is
   the share of attention actually read.
+  For ultra-long contexts an indexer can carry a tree (`qwen_lsa distill
+  --tree SPEC`, or `prefill --tree SPEC` to time one): node buckets over the
+  buckets, grown as a sequence reaches each page end and shared across a
+  cached prefix like index pages, and a beam down them per query, so a
+  query scores the beam's buckets instead of every bucket of every closed
+  block. A beam wide enough to keep every node bucket reads exactly what the
+  flat index reads.
   The indexer is made for one checkpoint and
   refused on another; keep it outside the checkpoint's directory, whose
   reader takes every safetensors file there as model weights. Off by default. Make an

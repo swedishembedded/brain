@@ -32,6 +32,7 @@
 //! | [`select`] | a query's read: score, pick, expand, add window and sinks |
 //! | [`tree`] | node bucket levels over the buckets and a beam down them |
 //! | [`tree_device`] | the tree read on the device over a paged node pool |
+//! | [`tree_engine`] | a serving engine's node pages, grown and shared like index pages |
 //! | [`attend`] | attention restricted to a selection, the numerical oracle |
 //! | [`native`] | training attention over a selection (N-LSA), forward and backward |
 //!
@@ -52,6 +53,7 @@ pub mod select;
 pub mod space;
 pub mod tree;
 pub mod tree_device;
+pub mod tree_engine;
 pub mod ward;
 
 pub use config::{EarlyBudget, LsaConfig};

@@ -191,6 +191,8 @@ pub struct BlockTable {
     /// Index pages of the sequence's closed cluster blocks, in block order, for a decoder with a sparse
     /// attention index (see [`Self::index_pages`]).
     index_pages: Vec<u32>,
+    /// Node pages of each level of the same index's tree (see [`Self::node_pages`]).
+    node_pages: Vec<Vec<u32>>,
 }
 
 impl BlockTable {
@@ -256,6 +258,26 @@ impl BlockTable {
     /// Hand every index page back.
     pub fn take_index_pages(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.index_pages)
+    }
+    /// The node pages a sparse-attention decoder built over this sequence's index pages for `level` (from 1)
+    /// of its tree, in order - a cache of the decoder's like [`Self::index_pages`].
+    pub fn node_pages(&self, level: usize) -> &[u32] {
+        self.node_pages.get(level - 1).map_or(&[], |v| &v[..])
+    }
+    /// Record the next node page of `level` (from 1).
+    pub fn push_node_page(&mut self, level: usize, page: u32) {
+        if self.node_pages.len() < level {
+            self.node_pages.resize(level, Vec::new());
+        }
+        self.node_pages[level - 1].push(page);
+    }
+    /// Keep the first `n` node pages of `level` (from 1) and hand back the rest.
+    pub fn truncate_node_pages(&mut self, level: usize, n: usize) -> Vec<u32> {
+        self.node_pages.get_mut(level - 1).map_or_else(Vec::new, |v| v.split_off(n.min(v.len())))
+    }
+    /// Hand every node page back, level by level (level 1 first).
+    pub fn take_node_pages(&mut self) -> Vec<Vec<u32>> {
+        std::mem::take(&mut self.node_pages)
     }
 
     /// How many leading prompt tokens this sequence did not have to compute because a prefix cache served them
@@ -337,7 +359,7 @@ impl BlockTable {
         for &b in &self.blocks {
             alloc.incref(b);
         }
-        BlockTable { blocks: self.blocks.clone(), len: self.len, kv_namespace: self.kv_namespace, state_row: None, cached_rows: 0, index_pages: Vec::new() }
+        BlockTable { blocks: self.blocks.clone(), len: self.len, kv_namespace: self.kv_namespace, state_row: None, cached_rows: 0, index_pages: Vec::new(), node_pages: Vec::new() }
     }
 
     /// Copy-on-write the last (writable) block if it is shared: allocate a private
@@ -369,7 +391,7 @@ impl BlockTable {
     /// demoted from: the restored bytes are only valid under it.
     pub fn restore(kv_namespace: KvNamespace, blocks: Vec<u32>, len: u32) -> BlockTable {
         assert!(!blocks.is_empty() || len == 0, "restore: {len} tokens cannot live in zero blocks");
-        BlockTable { blocks, len, kv_namespace, state_row: None, cached_rows: 0, index_pages: Vec::new() }
+        BlockTable { blocks, len, kv_namespace, state_row: None, cached_rows: 0, index_pages: Vec::new(), node_pages: Vec::new() }
     }
 
     /// Start a FRESH table from shared full prefix blocks (incref each): the

@@ -38,9 +38,11 @@
 use super::select::expand;
 use super::ward::ward_labels;
 use super::{dot, BucketIndex, Selection};
+use serde::{Deserialize, Serialize};
 
 /// The tree's sizes and budgets beside the flat [`super::LsaConfig`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TreeConfig {
     /// Children a node bucket holds, a power of two from 2.
     pub node_bucket_size: usize,
@@ -139,6 +141,42 @@ fn pair_into_node_buckets(sums: &[f32], blocks: usize, block: usize, dim: usize,
     Ok(labels)
 }
 
+/// One node cluster block's node buckets: the block's rows of the level
+/// below paired into node buckets ([`pair_into_node_buckets`]), numbered in
+/// the order of their first row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodePage {
+    /// `[nodes, dim]` normalised key sums.
+    pub centroids: Vec<f32>,
+    /// `[nodes, size]` logical rows of the level below, `first` onwards.
+    pub children: Vec<u32>,
+    /// `[nodes, dim]` key sums, what the level above pairs.
+    pub sums: Vec<f32>,
+}
+
+/// Build the node page of one node cluster block from its rows' key sums
+/// (`[block, dim]`, the first being logical row `first` of the level below).
+pub fn node_page(child_sums: &[f32], dim: usize, size: usize, first: u32) -> Result<NodePage, String> {
+    let block = child_sums.len() / dim;
+    if block == 0 || !block.is_multiple_of(size) || child_sums.len() != block * dim {
+        return Err(format!("LSA tree: {} key-sum values are not a block of rows that {size} divides", child_sums.len()));
+    }
+    let labels = pair_into_node_buckets(child_sums, 1, block, dim, size)?;
+    // The block's rows in the order of their node buckets.
+    let mut order: Vec<u32> = (0..block as u32).collect();
+    order.sort_by_key(|&r| labels[r as usize]);
+    let nodes = block / size;
+    let mut sums = vec![0f32; nodes * dim];
+    for (n, kids) in order.chunks_exact(size).enumerate() {
+        for &kid in kids {
+            for (o, x) in sums[n * dim..][..dim].iter_mut().zip(&child_sums[kid as usize * dim..][..dim]) {
+                *o += x;
+            }
+        }
+    }
+    Ok(NodePage { centroids: sums.chunks_exact(dim).flat_map(crate::hostmath::l2_normalize).collect(), children: order.into_iter().map(|r| first + r).collect(), sums })
+}
+
 /// Build every level up to the tree's top level over `index`'s buckets,
 /// whose keys are `keys` (`[len, index_dim]`, the index's own). A level that
 /// fills no node cluster block ends the hierarchy.
@@ -165,25 +203,15 @@ pub fn build_hierarchy(index: &BucketIndex, keys: &[f32], tree: &TreeConfig) -> 
         if blocks == 0 {
             break;
         }
-        let labels = pair_into_node_buckets(&sums[..blocks * block * dim], blocks, block, dim, size)?;
-        // Each block's rows in the order of their node buckets, block after block.
-        let mut order: Vec<u32> = Vec::with_capacity(blocks * block);
+        let (mut centroids, mut children, mut next) = (Vec::new(), Vec::new(), Vec::new());
         for b in 0..blocks {
-            let mut rows: Vec<usize> = (0..block).collect();
-            rows.sort_by_key(|&r| labels[b * block + r]);
-            order.extend(rows.into_iter().map(|r| (b * block + r) as u32));
+            let page = node_page(&sums[b * block * dim..][..block * dim], dim, size, (b * block) as u32)?;
+            centroids.extend(page.centroids);
+            children.extend(page.children);
+            next.extend(page.sums);
         }
-        let nodes = order.len() / size;
-        let mut next = vec![0f32; nodes * dim];
-        for (n, kids) in order.chunks_exact(size).enumerate() {
-            for &kid in kids {
-                for (o, x) in next[n * dim..][..dim].iter_mut().zip(&sums[kid as usize * dim..][..dim]) {
-                    *o += x;
-                }
-            }
-        }
-        hierarchy.node_centroids.push(next.chunks_exact(dim).flat_map(crate::hostmath::l2_normalize).collect());
-        hierarchy.children.push(order);
+        hierarchy.node_centroids.push(centroids);
+        hierarchy.children.push(children);
         sums = next;
     }
     Ok(hierarchy)

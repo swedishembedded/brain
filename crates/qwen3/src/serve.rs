@@ -261,6 +261,7 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
         }
         v.extend(model::kv_tier::fp8_pool_pipelines());
         v.extend(model::lsa::device::KERNELS);
+        v.push(model::lsa::tree_device::KERNEL);
         v.push(("splice", kernels::SPLICE));
         v.push(model::paged_sparse::KERNEL);
         for kv in [model::paged_sparse::PackedKv::Int8, model::paged_sparse::PackedKv::Fp8] {
@@ -1732,7 +1733,7 @@ impl Engine {
         };
         let whole_row = packed.and_then(|kv| model::paged_sparse::rows_kernel_kv(c.n_heads, c.n_kv_heads, c.head_dim, kv).ok()).and_then(|(n, _)| self.gpu.kernel_index(n));
         let (attend, layout) = whole_row.map_or((few, layout_few), |k| (k, Layout::PerRow));
-        let kernels = model::lsa::engine::LsaKernels { index_vectors: name(model::lsa::device::KERNELS[0].0)?, read: name(model::lsa::device::KERNELS[1].0)?, ward: name(model::lsa::device::KERNELS[2].0)?, attend, layout, attend_few: few, layout_few, index_keys_packed };
+        let kernels = model::lsa::engine::LsaKernels { index_vectors: name(model::lsa::device::KERNELS[0].0)?, read: name(model::lsa::device::KERNELS[1].0)?, ward: name(model::lsa::device::KERNELS[2].0)?, tree: Some(name(model::lsa::tree_device::KERNEL.0)?), attend, layout, attend_few: few, layout_few, index_keys_packed };
         let kv = model::lsa::engine::KvGeometry { block_size: self.block_size, max_blocks_per_seq: self.max_blocks_per_seq };
         let pages = lsa_page_capacity(self.alloc.num_blocks(), self.block_size, indexer.cfg.cluster_block as u32);
         let rows = self.max_prefill.max(self.max_batch);

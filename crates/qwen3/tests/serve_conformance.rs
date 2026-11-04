@@ -78,41 +78,50 @@ fn qwen3_with_int8_kv_conforms() {
     conformance::run_all(&Conformance { make: || engine(true), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
 }
 
-/// The engine reading sparsely: a tiny latent-sparse-attention configuration
-/// whose cluster blocks close every 8 tokens and whose 3-key budget drops keys,
-/// so index pages are built, adopted with cached prefixes and freed throughout.
-fn sparse_engine_on(kv_int8: bool) -> Engine {
-    let mut e = engine(kv_int8);
+/// A tiny latent-sparse-attention indexer whose cluster blocks close every 8
+/// tokens and whose 3-key budget drops keys, so index pages are built,
+/// adopted with cached prefixes and freed throughout; with `tree`, node
+/// pages of two levels grow every 16 tokens beneath a 2-wide beam.
+fn sparse_indexer(tree: bool) -> model::lsa::indexer::Indexer {
     let cfg = QwenConfig::tiny();
     let geometry = model::lsa::indexer::IndexGeometry { n_layers: cfg.n_layers as usize, n_heads: cfg.n_heads as usize, n_kv_heads: cfg.n_kv_heads as usize, head_dim: cfg.head_dim as usize, rope_base: cfg.rope_theta };
     let lsa = model::lsa::LsaConfig { index_dim: 4, pool_size: 1, bucket_size: 2, bucket_cap: 4, cluster_block: 8, top_p: 2, top_k: 3, sink: 1, window: 8, early: None };
     // seed: the indexer is a fixture; every engine of the suite must index alike.
     let indexer = model::lsa::indexer::Indexer::random(lsa, geometry, 11).unwrap();
-    e.set_lsa(&indexer).unwrap();
+    let tree = tree.then(|| model::lsa::tree::TreeConfig { node_bucket_size: 2, node_cluster_block: vec![4, 4], beam_width: vec![2, 2], start_nodes: None, page_size: 16, growth_buckets: 4 });
+    model::lsa::indexer::Indexer { tree, ..indexer }
+}
+
+/// The engine reading sparsely through [`sparse_indexer`].
+fn sparse_engine_on(kv_int8: bool, tree: bool) -> Engine {
+    let mut e = engine(kv_int8);
+    e.set_lsa(&sparse_indexer(tree)).unwrap();
     e
 }
 
 #[test]
 fn qwen3_with_latent_sparse_attention_conforms() {
-    conformance::run_all(&Conformance { make: || sparse_engine_on(false), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
+    conformance::run_all(&Conformance { make: || sparse_engine_on(false, false), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
 }
 
 #[test]
 fn qwen3_with_latent_sparse_attention_over_int8_kv_conforms() {
-    conformance::run_all(&Conformance { make: || sparse_engine_on(true), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
+    conformance::run_all(&Conformance { make: || sparse_engine_on(true, false), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
+}
+
+#[test]
+fn qwen3_with_latent_sparse_attention_through_a_tree_conforms() {
+    conformance::run_all(&Conformance { make: || sparse_engine_on(true, true), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
 }
 
 /// What a memory planner charges for sparse attention before loading is what
 /// the engine allocates.
 #[test]
 fn the_planned_sparse_attention_bytes_are_the_allocated_ones() {
-    let e = sparse_engine_on(false);
-    let cfg = QwenConfig::tiny();
-    let geometry = model::lsa::indexer::IndexGeometry { n_layers: cfg.n_layers as usize, n_heads: cfg.n_heads as usize, n_kv_heads: cfg.n_kv_heads as usize, head_dim: cfg.head_dim as usize, rope_base: cfg.rope_theta };
-    let lsa = model::lsa::LsaConfig { index_dim: 4, pool_size: 1, bucket_size: 2, bucket_cap: 4, cluster_block: 8, top_p: 2, top_k: 3, sink: 1, window: 8, early: None };
-    // seed: the same fixture indexer as `sparse_engine_on`.
-    let indexer = model::lsa::indexer::Indexer::random(lsa, geometry, 11).unwrap();
-    let planned = qwen3::serve::lsa_device_bytes(&indexer, BLOCK, 96, (MIN_SEQ_TOKENS as u32).div_ceil(BLOCK), 4, 16);
-    assert_eq!(planned, e.lsa_stats().unwrap().device_bytes);
-    assert!(planned > 0);
+    for tree in [false, true] {
+        let e = sparse_engine_on(false, tree);
+        let planned = qwen3::serve::lsa_device_bytes(&sparse_indexer(tree), BLOCK, 96, (MIN_SEQ_TOKENS as u32).div_ceil(BLOCK), 4, 16);
+        assert_eq!(planned, e.lsa_stats().unwrap().device_bytes, "tree {tree}");
+        assert!(planned > 0);
+    }
 }

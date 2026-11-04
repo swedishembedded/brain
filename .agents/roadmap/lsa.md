@@ -144,6 +144,27 @@ head layout; clustering, selection and the sparse read are written once.
       node buckets, their centroids and all 64 selections exactly, beaming
       from the top and from `start_nodes`; 48 of the 64 queries read other
       keys than the flat read.
+- [x] Tree read on the device and in serving: `lsa_read_tree` runs the
+      host tree's beam per query row (a radix select of the best by score,
+      then the lower id, over arbitrary candidate lists); an indexer may carry
+      a `TreeConfig` (`qwen_lsa distill --tree SPEC`); the engine grows node
+      pages as a sequence reaches each page end, keys them by the pages under
+      them so cached prefixes share them, builds them from the bucket key sums
+      the device Ward keeps (read back once per index page) and charges them
+      in the memory plan. Gates: the device read selects what the host tree
+      selects at every growth stage, from the top and from `start_nodes`, and
+      with no level grown; a full beam reads exactly as the flat index in the
+      engine (prefill chunks, serving sizes) and on Qwen3-0.6B (the last
+      hidden state bit for bit); a 2-wide beam prunes (8% fewer keys read at
+      4.4k tokens); node pages are shared by a forked sequence and freed on
+      release; the conformance suite passes through a tree (batched equals
+      single, cached prefixes, speculation). Speed, Qwen3-0.6B int8 on a P40,
+      a pruning tree (beams 64 then 16) against the flat read: 38.63 s
+      against 37.21 s at 32k tokens, 84.09 s against 83.59 s at 64k - at
+      these lengths the read is not where prefill time goes, and node
+      building adds host work; the tree is for contexts far past what the
+      card holds. A scratch region two threads exchanged values through
+      returned stale data until each address became one thread's.
 - [x] D-LSA training (`model::lsa::distill`): teacher targets (head-averaged
       attention over the keys outside sink and window, top 2048,
       renormalised), the forward-KL objective with analytic gradients of both
@@ -228,7 +249,5 @@ head layout; clustering, selection and the sparse read are written once.
 - [ ] N-LSA at short contexts: the window as a dense banded tile in the
       training kernels (it is half of every selection), so training below
       8k stops paying gathers for it.
-- [ ] Tree search (node-bucket levels and beam descent) after flat accuracy
-      is proven at long context.
 - [ ] Quantized index storage (bf16 centroids, fp8 tree nodes) gated on
       retrieval agreement separately from KV-tier numerical error.

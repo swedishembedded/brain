@@ -12,9 +12,10 @@
 //! an email to info@swedishembedded.com.
 //!
 //! A query row's *table row* tells the kernel what its sequence holds: its
-//! live keys, its built index pages and their pages (as the flat read's page
-//! table), the levels as they stood at its page's start ([`super::tree::
-//! Growth`]), and each level's node pages. A node page holds one node cluster
+//! built index pages and their pages (the flat read's page-table row), the
+//! levels as they stood at its page's start ([`super::tree::Growth`]), and
+//! each level's node pages; its live keys come from the forward's `seqlen`,
+//! so a decode window advanced on the device reads current positions. A node page holds one node cluster
 //! block's node buckets (`node_cluster_block / node_bucket_size` of them); a
 //! node row is its centroid, then its children - logical rows of the level
 //! below - as u32 bits.
@@ -42,8 +43,8 @@ pub struct TreeReadGeometry {
 
 /// The buffers one tree read binds.
 pub struct TreeReadBuffers<'a> {
-    /// `[rows, index_dim]` unit index queries.
-    pub iq: &'a DeviceBuffer,
+    /// `[rows]` live keys of each row's sequence.
+    pub seqlen: &'a DeviceBuffer,
     /// The index pool's bucket centroids.
     pub centroids: &'a DeviceBuffer,
     /// The index pool's bucket members.
@@ -52,7 +53,8 @@ pub struct TreeReadBuffers<'a> {
     pub nodes: &'a DeviceBuffer,
     /// `[rows, table_stride]` table rows ([`TreeReadGeometry::write_row`]).
     pub tables: &'a DeviceBuffer,
-    /// `[rows, 2 * cand_stride]` scratch.
+    /// `[rows, index_dim]` unit index queries (f32 bits), then
+    /// `[rows, 2 * cand_stride]` scratch: [`cand_words`].
     pub cand: &'a DeviceBuffer,
     /// `[rows, row_stride]` out: selection rows.
     pub sel: &'a DeviceBuffer,
@@ -99,10 +101,10 @@ impl TreeReadGeometry {
         (rows / self.tree.node_cluster_block[level - 1]) as u32
     }
 
-    /// Words before the growth counts in a table row: live keys, built
-    /// pages, the pages.
+    /// Words before the growth counts in a table row: built pages, the
+    /// pages.
     fn growth_off(&self) -> u32 {
-        2 + self.max_pages
+        1 + self.max_pages
     }
 
     /// Word where `level`'s node page table starts in a table row.
@@ -143,16 +145,15 @@ impl TreeReadGeometry {
         super::device::ReadGeometry { cfg: self.cfg, max_pages: self.max_pages }.row_stride()
     }
 
-    /// Fill one table row: the row's live keys, its built index pages, the
-    /// levels as its page saw them, and each level's node pages.
-    pub fn write_row(&self, row: &mut [u32], live: u32, pages: &[u32], growth: &Growth, node_pages: &[Vec<u32>]) -> Result<(), String> {
+    /// Fill one table row: the row's built index pages, the levels as its
+    /// page saw them, and each level's node pages.
+    pub fn write_row(&self, row: &mut [u32], pages: &[u32], growth: &Growth, node_pages: &[Vec<u32>]) -> Result<(), String> {
         if row.len() != self.table_stride() as usize || pages.len() > self.max_pages as usize {
             return Err(format!("LSA tree read: a table row of {} words for {} pages", row.len(), pages.len()));
         }
         row.fill(0);
-        row[0] = live;
-        row[1] = pages.len() as u32;
-        row[2..2 + pages.len()].copy_from_slice(pages);
+        row[0] = pages.len() as u32;
+        row[1..1 + pages.len()].copy_from_slice(pages);
         let g = self.growth_off() as usize;
         row[g] = growth.covered_buckets as u32;
         for l in 0..self.tree.top_level() {
@@ -206,7 +207,7 @@ impl TreeReadGeometry {
                 params.extend([0, 1, 0, 0]);
             }
         }
-        Ok(g.dispatch(kernel, &[b.iq, b.centroids, b.members, b.nodes, b.tables, b.cand, b.sel, b.stats], &params, gpu_core::Dispatch::Workgroups(rows)))
+        Ok(g.dispatch(kernel, &[b.seqlen, b.centroids, b.members, b.nodes, b.tables, b.cand, b.sel, b.stats], &params, gpu_core::Dispatch::Workgroups(rows)))
     }
 }
 
@@ -276,9 +277,10 @@ impl NodePool {
     }
 }
 
-/// Words of scratch a read of `rows` rows needs ([`TreeReadBuffers::cand`]).
+/// Words of scratch a read of `rows` rows needs ([`TreeReadBuffers::cand`]):
+/// their index queries, then two candidate lists a row.
 pub fn cand_words(geometry: &TreeReadGeometry, rows: u32) -> u64 {
-    2 * u64::from(geometry.cand_stride()) * u64::from(rows)
+    (geometry.cfg.index_dim as u64 + 2 * u64::from(geometry.cand_stride())) * u64::from(rows)
 }
 
 /// Stats words, re-exported for callers sizing [`TreeReadBuffers::stats`].

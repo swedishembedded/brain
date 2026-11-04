@@ -326,7 +326,7 @@ impl Distiller {
     /// The indexer the training produced.
     pub fn indexer(&self) -> Indexer {
         let layers = self.layers.iter().map(|l| l.as_ref().map(LayerDistiller::projection)).collect();
-        Indexer { cfg: self.base.cfg, geometry: self.base.geometry, layers, origin: format!("distilled({})", self.base.origin) }
+        Indexer { cfg: self.base.cfg, geometry: self.base.geometry, layers, origin: format!("distilled({})", self.base.origin), tree: self.base.tree.clone() }
     }
 
     /// Each layer's current temperature.

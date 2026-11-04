@@ -16,13 +16,20 @@
 //! ```text
 //! qwen_lsa distill --corpus DIR --out FILE [--tokens 8192] [--train-docs 48]
 //!          [--epochs 3] [--queries 64] [--lr 1e-3] [--top-k 1024] [--top-p 256]
-//!          [--seed N]
+//!          [--tree SPEC] [--seed N]
 //! qwen_lsa eval    --corpus DIR --indexer FILE[,FILE...] [--tokens 8192]
 //!          [--held-docs 6] [--skip-docs 48] [--pca-corpus DIR] [--queries 32]
 //!          [--tail 256] [--seed N]
 //! qwen_lsa prefill --indexer FILE [--tokens 4096,8192,16384,32768] [--corpus DIR]
-//!          [--kv-cache int8|f32|fp8] [--dense-until N]
+//!          [--kv-cache int8|f32|fp8] [--dense-until N] [--tree SPEC]
 //! ```
+//!
+//! `--tree size=4,blocks=1024:4096,beam=2048:2048,page=4096,growth=1024[,start=N]`
+//! reads through node bucket levels (`model::lsa::tree`): node buckets of
+//! `size` children, each level's node cluster block and beam width (one value
+//! a level, `:`-separated), the page that levels grow at, the buckets level 1
+//! takes at once, and the node buckets a beam may start from. `distill`
+//! writes it into the indexer; `prefill` reads through it.
 //!
 //! `--indexer random` or `pca` in `eval` builds that training-free indexer
 //! in place (PCA from the first two documents of `--pca-corpus`, by default
@@ -208,6 +215,32 @@ fn capture(e: &mut Engine, g: &IndexGeometry, doc: &[u32], positions: &[u32]) ->
     Ok(out)
 }
 
+/// `--tree size=S,blocks=B1:B2..,beam=W1:W2..,page=P,growth=G[,start=N]`.
+fn tree_config(args: &Args) -> Result<Option<model::lsa::tree::TreeConfig>, String> {
+    let Some(spec) = args.get("tree") else { return Ok(None) };
+    let mut fields = std::collections::HashMap::new();
+    for part in spec.split(',') {
+        let (k, v) = part.split_once('=').ok_or_else(|| format!("--tree {spec:?}: {part:?} is not key=value"))?;
+        if fields.insert(k, v).is_some() {
+            return Err(format!("--tree {spec:?}: {k} given twice"));
+        }
+    }
+    let num = |k: &str| -> Result<usize, String> { fields.get(k).ok_or_else(|| format!("--tree {spec:?}: no {k}"))?.parse().map_err(|_| format!("--tree {spec:?}: {k} is not a number")) };
+    let list = |k: &str| -> Result<Vec<usize>, String> { fields.get(k).ok_or_else(|| format!("--tree {spec:?}: no {k}"))?.split(':').map(|v| v.parse().map_err(|_| format!("--tree {spec:?}: {k} holds {v:?}"))).collect() };
+    let tree = model::lsa::tree::TreeConfig {
+        node_bucket_size: num("size")?,
+        node_cluster_block: list("blocks")?,
+        beam_width: list("beam")?,
+        start_nodes: fields.get("start").map(|v| v.parse().map_err(|_| format!("--tree {spec:?}: start is not a number"))).transpose()?,
+        page_size: num("page")?,
+        growth_buckets: num("growth")?,
+    };
+    if let Some(k) = fields.keys().find(|k| !["size", "blocks", "beam", "start", "page", "growth"].contains(k)) {
+        return Err(format!("--tree {spec:?}: unknown {k}"));
+    }
+    Ok(Some(tree))
+}
+
 fn distill(args: &Args) -> Result<(), String> {
     let path = checkpoint(args)?;
     let tokens: usize = args.num("tokens", 8192)?;
@@ -253,7 +286,8 @@ fn distill(args: &Args) -> Result<(), String> {
         println!("epoch {epoch}: mean KL {:.4}", kl_sum / docs.len() as f64);
     }
     let out = args.req("out")?;
-    d.indexer().save(out)?;
+    let indexer = Indexer { tree: tree_config(args)?, ..d.indexer() };
+    indexer.save(out)?;
     println!("wrote {out}; temperatures {:?}", d.temperatures().iter().map(|t| t.map(|v| (v * 1000.0).round() / 1000.0)).collect::<Vec<_>>());
     Ok(())
 }
@@ -353,6 +387,10 @@ fn prefill(args: &Args) -> Result<(), String> {
     let mut ix = Indexer::load(args.req("indexer")?)?;
     ix.cfg.top_k = cfg.top_k;
     ix.cfg.top_p = cfg.top_p;
+    if let Some(tree) = tree_config(args)? {
+        println!("through a tree: {tree:?}");
+        ix.tree = Some(tree);
+    }
     let kv = match args.get("kv-cache").unwrap_or("int8") {
         "f32" => Kv::F32,
         "int8" => Kv::Int8,

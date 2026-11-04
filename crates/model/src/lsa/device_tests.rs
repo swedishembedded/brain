@@ -116,19 +116,20 @@ fn index_vectors_case(g: &gpu_core::Gpu, nh: usize, nkv: usize, hd: usize, dim: 
 fn the_device_read_matches_the_host_read() {
     static PIPES: &[(&str, &str)] = &KERNELS;
     let Some(g) = barrier_gpu(PIPES) else { return };
-    // A narrow index, and one wider than a workgroup.
-    for index_dim in [16, 160] {
-        read_case(&g, index_dim);
-    }
+    let small = LsaConfig { index_dim: 16, pool_size: 2, bucket_size: 4, bucket_cap: 8, cluster_block: 32, top_p: 5, top_k: 13, sink: 2, window: 32, early: Some(EarlyBudget { position: 70, top_k: 6, top_p: 2 }) };
+    // A narrow index, one wider than a workgroup, and rows that see more
+    // buckets than a workgroup has threads several times over.
+    read_case(&g, small, 6);
+    read_case(&g, LsaConfig { index_dim: 160, ..small }, 6);
+    read_case(&g, LsaConfig { bucket_size: 2, bucket_cap: 4, top_p: 24, top_k: 60, early: None, ..small }, 14);
 }
 
-fn read_case(g: &gpu_core::Gpu, index_dim: usize) {
-    let cfg = LsaConfig { index_dim, pool_size: 2, bucket_size: 4, bucket_cap: 8, cluster_block: 32, top_p: 5, top_k: 13, sink: 2, window: 32, early: Some(EarlyBudget { position: 70, top_k: 6, top_p: 2 }) };
+fn read_case(g: &gpu_core::Gpu, cfg: LsaConfig, blocks: usize) {
     let mut rng = Lcg::random();
-    let t = 6 * cfg.cluster_block + 11;
+    let t = blocks * cfg.cluster_block + 11;
     let index = BucketIndex::build(cfg, &unit_rows(&mut rng, t, cfg.index_dim)).unwrap();
     let blocks = index.closed_blocks();
-    let max_pages = 8u32;
+    let max_pages = 16u32;
     let pool = IndexPool::new(g, cfg, max_pages, 1).unwrap();
     // Block b lives in page (b * 3 + 1) % max_pages.
     let page_of = |b: usize| ((b * 3 + 1) % max_pages as usize) as u32;
@@ -141,7 +142,8 @@ fn read_case(g: &gpu_core::Gpu, index_dim: usize) {
         };
         pool.write(g, page_of(b), 0, &block).unwrap();
     }
-    let positions: Vec<u32> = vec![0, 1, 31, 32, 40, 63, 64, 69, 70, 100, 150, 191, 192, t as u32 - 1, t as u32 - 2];
+    let mut positions: Vec<u32> = vec![0, 1, 31, 32, 40, 63, 64, 69, 70, 100, 150, 191, 192, t as u32 - 1, t as u32 - 2];
+    positions.extend((0..12).map(|_| rng.next_u32() % t as u32));
     let rows = positions.len();
     // Every third row's index lags one block behind its closed blocks.
     let built: Vec<usize> = positions.iter().enumerate().map(|(r, &p)| {
@@ -294,7 +296,8 @@ fn the_device_ward_builds_the_host_page() {
     let cfg = LsaConfig::default();
     let d = cfg.index_dim;
     let mut rng = Lcg::random();
-    let pool = IndexPool::new(&g, cfg, 4, 1).unwrap();
+    let mut pool = IndexPool::new(&g, cfg, 4, 1).unwrap();
+    pool.keep_sums(&g);
     let scratch = g.storage(IndexPool::ward_scratch_words(&cfg));
     let bpb = cfg.buckets_per_block();
     let run = |keys: &[f32], page: u32, base: u32| -> (Vec<f32>, Vec<u32>) {
@@ -322,6 +325,19 @@ fn the_device_ward_builds_the_host_page() {
     assert_eq!(members, host_members, "device buckets differ from the host's on unambiguous keys");
     let worst = centroids.iter().zip(&host.centroids).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
     assert!(worst < 1e-4, "centroids differ by {worst}");
+    // Each bucket's key sum, kept for a tree's node buckets.
+    let sums = g.read(pool.sums.as_ref().unwrap(), 4 * bpb * d);
+    for (b, row) in host_members.chunks_exact(cfg.bucket_cap).enumerate() {
+        let mut want = vec![0f32; d];
+        for &m in row.iter().take_while(|&&m| m != NO_KEY) {
+            for (w, x) in want.iter_mut().zip(&keys[(m - base) as usize * d..][..d]) {
+                *w += x;
+            }
+        }
+        let got = &sums[(2 * bpb + b) * d..][..d];
+        let worst = got.iter().zip(&want).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(worst < 1e-4, "bucket {b}'s key sum differs by {worst}");
+    }
 
     // Spread keys, and keys all near one direction as a model's keys often
     // are (costs nearly tied): every key lands in exactly one bucket.
@@ -416,8 +432,10 @@ fn the_device_tree_read_matches_the_host_tree() {
     let positions: Vec<u32> = [0u32, 511, 512, 1023, 1024, 2047, 2048, 4095, 4096, 5000, 6143, 6144, t as u32 - 1].into_iter().chain((0..19).map(|_| rng.next_u32() % t as u32)).collect();
     let rows = positions.len();
     let queries = unit_rows(&mut rng, rows, d);
-    for start_nodes in [None, Some(40)] {
-        let tree = TreeConfig { node_bucket_size: 2, node_cluster_block: vec![32, 8, 4], beam_width: vec![6, 4, 3], start_nodes, page_size: 1024, growth_buckets: 64 };
+    // Beaming from the top, from `start_nodes`, and with levels that never
+    // grow (every visible bucket a candidate of the last stage).
+    for (start_nodes, page_size) in [(None, 1024), (Some(40), 1024), (None, 16 * 512)] {
+        let tree = TreeConfig { node_bucket_size: 2, node_cluster_block: vec![32, 8, 4], beam_width: vec![6, 4, 3], start_nodes, page_size, growth_buckets: 64 };
         let h = build_hierarchy(&index, &keys, &tree).unwrap();
         let want = select_tree(&index, &h, &tree, &queries, &positions).unwrap();
 
@@ -455,17 +473,20 @@ fn the_device_tree_read_matches_the_host_tree() {
             let growth = growth_at(&tree, pos as usize / tree.page_size * page_buckets, page_buckets);
             let pages: Vec<u32> = (0..blocks).map(page_of).collect();
             let held: Vec<Vec<u32>> = (1..=tree.top_level()).map(|l| (0..growth.made[l - 1].div_ceil(geom.nodes_per_page(l) as usize)).map(|p| node_page_of(l, p)).collect()).collect();
-            geom.write_row(&mut tables[r * stride..][..stride], pos + 1, &pages, &growth, &held).unwrap();
+            geom.write_row(&mut tables[r * stride..][..stride], &pages, &growth, &held).unwrap();
         }
         let tb = g.storage(tables.len() as u64);
         g.write(&tb, &tables);
-        let iq = g.storage_init("iq", &queries);
+        // The index queries head the scratch.
         let cand = g.storage(super::tree_device::cand_words(&geom, rows as u32));
+        g.write_f32(&cand, &queries);
+        let seqlen = g.storage(rows as u64);
+        g.write(&seqlen, &positions.iter().map(|p| p + 1).collect::<Vec<u32>>());
         let width = geom.row_stride() as usize;
         let sel = g.storage((rows * width) as u64);
         let stats = g.storage(ReadStats::WORDS);
         let level_row0 = nodes.level_row0(0);
-        let bufs = TreeReadBuffers { iq: &iq, centroids: &pool.centroids, members: &pool.members, nodes: &nodes.nodes, tables: &tb, cand: &cand, sel: &sel, stats: &stats, row0: 0, level_row0: &level_row0 };
+        let bufs = TreeReadBuffers { seqlen: &seqlen, centroids: &pool.centroids, members: &pool.members, nodes: &nodes.nodes, tables: &tb, cand: &cand, sel: &sel, stats: &stats, row0: 0, level_row0: &level_row0 };
         g.submit(&[], &[geom.step(&g, 0, rows as u32, &bufs).unwrap()]);
         let got: Vec<u32> = g.read(&sel, rows * width).iter().map(|x| x.to_bits()).collect();
         for r in 0..rows {
@@ -475,7 +496,7 @@ fn the_device_tree_read_matches_the_host_tree() {
             if row[3..3 + n] != host[..] {
                 let only_dev: Vec<u32> = row[3..3 + n].iter().copied().filter(|k| !host.contains(k)).collect();
                 let only_host: Vec<u32> = host.iter().copied().filter(|k| !row[3..3 + n].contains(k)).collect();
-                panic!("start_nodes {start_nodes:?}: row {r} (position {}) selects differently: device only {only_dev:?}, host only {only_host:?}", positions[r]);
+                panic!("start_nodes {start_nodes:?}, page {page_size}: row {r} (position {}) selects differently: device only {only_dev:?}, host only {only_host:?}", positions[r]);
             }
         }
     }

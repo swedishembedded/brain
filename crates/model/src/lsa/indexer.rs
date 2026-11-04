@@ -63,6 +63,9 @@ pub struct Indexer {
     /// Where the projections came from, for the record (`random`, `pca`,
     /// `distilled`, ...).
     pub origin: String,
+    /// Node bucket levels over the buckets and a beam down them, for
+    /// ultra-long contexts ([`super::tree`]); `None` reads flat.
+    pub tree: Option<super::tree::TreeConfig>,
 }
 
 /// The artifact header, validated field by field on load.
@@ -74,6 +77,8 @@ struct Header {
     geometry: IndexGeometry,
     config: ConfigHeader,
     sparse_layers: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tree: Option<super::tree::TreeConfig>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -116,6 +121,12 @@ impl Indexer {
                 }
             }
         }
+        if let Some(tree) = &self.tree {
+            tree.validate(self.cfg.cluster_block)?;
+            if self.cfg.early.is_some() {
+                return Err("LSA indexer: an early budget is a flat read's, not a tree's".into());
+            }
+        }
         if self.layers.iter().all(Option::is_none) {
             return Err("LSA indexer: no layer reads sparsely".into());
         }
@@ -145,7 +156,7 @@ impl Indexer {
                 Some(LayerProjection { wq: w.clone(), wk: w })
             })
             .collect();
-        let indexer = Indexer { cfg, geometry, layers, origin: format!("random(seed={seed})") };
+        let indexer = Indexer { cfg, geometry, layers, origin: format!("random(seed={seed})"), tree: None };
         indexer.validate()?;
         Ok(indexer)
     }
@@ -163,7 +174,7 @@ impl Indexer {
             slot[0] = Some(pca_layer(&keys_per_layer[l], dim, cfg.index_dim).map(|w| LayerProjection { wq: w.clone(), wk: w }));
         });
         let layers = layers.into_iter().map(|l| l.expect("every layer was computed").map(Some)).collect::<Result<Vec<_>, _>>()?;
-        let indexer = Indexer { cfg, geometry, layers, origin: "pca".into() };
+        let indexer = Indexer { cfg, geometry, layers, origin: "pca".into(), tree: None };
         indexer.validate()?;
         Ok(indexer)
     }
@@ -205,6 +216,7 @@ impl Indexer {
                 early: c.early.map(|e| (e.position, e.top_k, e.top_p)),
             },
             sparse_layers: self.layers.iter().enumerate().filter(|(_, l)| l.is_some()).map(|(i, _)| i).collect(),
+            tree: self.tree.clone(),
         };
         let shape = vec![self.geometry.input_dim() as u64, c.index_dim as u64];
         let mut tensors = Vec::new();
@@ -250,7 +262,7 @@ impl Indexer {
         if let Some(name) = tensors.keys().next() {
             return Err(format!("LSA indexer {path}: tensor {name} belongs to no listed layer"));
         }
-        let indexer = Indexer { cfg, geometry: header.geometry, layers, origin: header.origin };
+        let indexer = Indexer { cfg, geometry: header.geometry, layers, origin: header.origin, tree: header.tree };
         indexer.validate()?;
         Ok(indexer)
     }

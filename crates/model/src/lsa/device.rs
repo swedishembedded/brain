@@ -178,6 +178,12 @@ pub struct IndexPool {
     /// `[pages * buckets_per_block, bucket_cap]` u32 positions, [`NO_KEY`]
     /// padded.
     pub members: DeviceBuffer,
+    /// `[pages, slots, buckets_per_block, index_dim]` f32 bucket key sums
+    /// (page-major: one page's sums for every slot are one range), kept only
+    /// for a tree's node buckets ([`Self::keep_sums`]).
+    pub sums: Option<DeviceBuffer>,
+    /// Bound in place of `sums` when they are not kept.
+    no_sums: DeviceBuffer,
 }
 
 impl IndexPool {
@@ -191,7 +197,16 @@ impl IndexPool {
             slots,
             centroids: g.storage((rows * cfg.index_dim as u64).max(1)),
             members: g.storage((rows * cfg.bucket_cap as u64).max(1)),
+            sums: None,
+            no_sums: g.storage(1),
         })
+    }
+
+    /// Keep every bucket's key sum beside its centroid from now on (the
+    /// device Ward writes them): what a tree's node buckets are built from.
+    pub fn keep_sums(&mut self, g: &Gpu) {
+        let rows = self.slots as u64 * self.pages as u64 * self.cfg.buckets_per_block() as u64;
+        self.sums = Some(g.storage((rows * self.cfg.index_dim as u64).max(1)));
     }
 
     /// Pages each layer slot holds.
@@ -239,8 +254,9 @@ impl IndexPool {
                 c.index_dim
             ));
         }
-        let params = [c.index_dim as u32, c.cluster_block as u32, c.pool_size as u32, c.buckets_per_block() as u32, c.bucket_cap as u32, page, base, self.pages, seq_blocks];
-        Ok(g.dispatch(kernel, &[keys, scratch, &self.centroids, &self.members], &params, gpu_core::Dispatch::Workgroups(self.slots)))
+        let params = [c.index_dim as u32, c.cluster_block as u32, c.pool_size as u32, c.buckets_per_block() as u32, c.bucket_cap as u32, page, base, self.pages, seq_blocks, u32::from(self.sums.is_some()), self.slots];
+        let sums = self.sums.as_ref().unwrap_or(&self.no_sums);
+        Ok(g.dispatch(kernel, &[keys, scratch, &self.centroids, &self.members, sums], &params, gpu_core::Dispatch::Workgroups(self.slots)))
     }
 
     /// Upload one closed block's buckets into `page` of layer `slot`.

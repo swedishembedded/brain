@@ -48,7 +48,10 @@
 // 0: every slot's block starts at `base`); training gives every block of
 // `b` sequences of `seq_blocks` blocks a slot of one page, block `w %
 // seq_blocks` of its sequence starting at `base + (w % seq_blocks) *
-// cluster_block`. Limits: pools (cluster_block / pool_size) <= 256,
+// cluster_block`. With `write_sums` each bucket's key sum (the centroid before
+// normalising) also goes to `key_sums`, page-major - row `(page * slots + w)
+// * buckets_per_block + bucket` - so one page's sums for every slot read back
+// as one range: a tree's node buckets are built from them. Limits: pools (cluster_block / pool_size) <= 256,
 // buckets_per_block <= 128, index_dim <= 1024 (64-channel chunks).
 
 const WG: u32 = 64u;
@@ -66,6 +69,8 @@ struct Params {
     base: u32,       // position of the block's first key
     pages: u32,      // pages per layer slot
     seq_blocks: u32, // blocks per sequence when every slot is a block (0: none)
+    write_sums: u32, // 1: also write each bucket's key sum into `key_sums`
+    slots: u32,      // slots the dispatch covers
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -73,6 +78,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> scratch:   array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> centroids: array<f32>;
 @group(0) @binding(4) var<storage, read_write> members:   array<u32>;
+@group(0) @binding(5) var<storage, read_write> key_sums:  array<f32>;
 
 // The scratch is read back by other threads after it changes (the Gram
 // matrix is merged in place every round), so every access is an atomic load
@@ -291,6 +297,10 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             for (var c = 0u; c < cw; c = c + 1u) {
                 centroids[crow + c0 + c] = acc[c];
                 norm2 = norm2 + acc[c] * acc[c];
+            }
+            if (p.write_sums == 1u) {
+                let srow = ((p.page * p.slots + w) * p.buckets_per_block + bkt) * d;
+                for (var c = 0u; c < cw; c = c + 1u) { key_sums[srow + c0 + c] = acc[c]; }
             }
         }
         let inv = 1.0 / max(sqrt(norm2), 1e-30);

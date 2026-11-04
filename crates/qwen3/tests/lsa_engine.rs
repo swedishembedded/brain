@@ -202,3 +202,37 @@ fn chunks_below_the_measured_crossover_read_densely() {
     let stats = e.lsa_stats().unwrap();
     assert_eq!((stats.dense_rows, stats.reads.rows, stats.pages_built), (p.len() as u64, 0, 0), "dense chunks neither read nor index: {stats:?}");
 }
+
+/// The tree on the real model: two levels of node pages grow over a long
+/// prompt's index as prefill reaches each page end. With beams that keep
+/// every node bucket the prefill reads exactly what the flat index reads
+/// (the last hidden state bit for bit); with narrow beams it prunes - reads
+/// otherwise - and stays a valid read.
+#[test]
+fn the_tree_prefills_like_the_flat_index_at_a_full_beam() {
+    let _device = device();
+    let Some(path) = checkpoint() else { return };
+    let mut rng = Lcg::random();
+    let p = prompt(&mut rng, 8 * 512 + 300);
+    let hidden = |indexer: &Indexer| {
+        let mut e = engine(&path, 8192);
+        e.set_lsa(indexer).unwrap();
+        e.set_lsa_dense_until(0);
+        let mut table = model::paged::BlockTable::new();
+        let h = e.prefill_for_perf(&mut table, &p);
+        let reads = e.lsa_stats().unwrap().reads;
+        (h, reads)
+    };
+    let cfg = LsaConfig { top_p: 24, top_k: 256, ..LsaConfig::default() };
+    let flat = Indexer::random(cfg, geometry(&path), rng.next_u64()).unwrap();
+    let tree = |beams: Vec<usize>| Indexer { tree: Some(model::lsa::tree::TreeConfig { node_bucket_size: 4, node_cluster_block: vec![64, 16], beam_width: beams, start_nodes: None, page_size: 1024, growth_buckets: 64 }), ..flat.clone() };
+    let (flat_h, flat_reads) = hidden(&flat);
+    let (full_h, full_reads) = hidden(&tree(vec![1024, 1024]));
+    assert_eq!(full_h, flat_h, "a full beam must prefill exactly as the flat index does");
+    assert_eq!(full_reads, flat_reads);
+    let (narrow_h, narrow_reads) = hidden(&tree(vec![2, 2]));
+    let rel = (narrow_h.iter().zip(&flat_h).map(|(a, b)| (a - b) * (a - b)).sum::<f32>() / flat_h.iter().map(|b| b * b).sum::<f32>()).sqrt();
+    println!("narrow beam against flat: last hidden state relative difference {rel:.3e}; keys read {} against {}", narrow_reads.selected_keys, flat_reads.selected_keys);
+    assert!(narrow_h.iter().all(|x| x.is_finite()));
+    assert!(rel > 0.0, "a 2-wide beam read exactly what the flat index reads: nothing was pruned");
+}
