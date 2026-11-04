@@ -43,7 +43,7 @@ mod search;
 mod sensitivity;
 mod solve;
 
-pub use fit::{MeasureFit, SearchFit};
+pub use fit::{MeasureFit, PruneFit, PruneReport, PruneWidth, SearchFit};
 pub use manifest::{sites, Site, Tensor};
 pub use measure::{held_out_loss, measure_policy};
 pub use prune::{channel_importance, measure_pruned, plan_prune, pruned_weights, PrunePlan, PrunedModel};
