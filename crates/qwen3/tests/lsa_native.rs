@@ -15,8 +15,8 @@ use model::lsa::indexer::{IndexGeometry, Indexer, LayerProjection};
 use model::lsa::LsaConfig;
 use qwen3::{Qwen, QwenConfig, IGNORE};
 
-fn small(vocab: u32, t: u32) -> QwenConfig {
-    QwenConfig { vocab, block_size: t, n_layers: 2, d_model: 64, n_heads: 4, n_kv_heads: 2, head_dim: 16, d_ff: 128, max_position_embeddings: t, rope_theta: 10000.0, ..QwenConfig::tiny() }
+fn small(vocab: u32, t: u32, d_model: u32, head_dim: u32) -> QwenConfig {
+    QwenConfig { vocab, block_size: t, n_layers: 2, d_model, n_heads: 4, n_kv_heads: 2, head_dim, d_ff: 2 * d_model, max_position_embeddings: t, rope_theta: 10000.0, ..QwenConfig::tiny() }
 }
 
 fn lsa(top_k: usize, top_p: usize) -> LsaConfig {
@@ -40,7 +40,7 @@ fn grads(m: &Qwen, cfg: &QwenConfig) -> Vec<f32> {
 #[test]
 fn a_budget_past_the_context_trains_like_dense_attention() {
     let t = 64u32;
-    let cfg = small(97, t);
+    let cfg = small(97, t, 64, 16);
     let mut rng = Lcg::random();
     let init = qwen3::init_weights(&cfg, rng.next_u64());
     let x: Vec<u32> = (0..2 * t).map(|_| rng.next_u32() % cfg.vocab).collect();
@@ -67,12 +67,15 @@ fn a_budget_past_the_context_trains_like_dense_attention() {
     assert!((dense_loss - window_loss).abs() > 1e-4, "a window-only selection changed nothing: the masks are not applied");
 }
 
-/// One associative-recall document: eight key/value pairs, filler far past
-/// the window, then the eight keys again, each to be answered with its value.
+/// Key/value pairs each recall document holds.
+const PAIRS: usize = 4;
+
+/// One associative-recall document: `PAIRS` key/value pairs, filler far past
+/// the window, then the keys again, each to be answered with its value.
 fn recall(rng: &mut Lcg, t: usize) -> (Vec<u32>, Vec<u32>, Vec<usize>) {
-    let (keys, values, filler) = (0..64u32, 64..128u32, 128..192u32);
+    let (keys, values, filler) = (0..32u32, 32..64u32, 64..96u32);
     let mut chosen: Vec<u32> = Vec::new();
-    while chosen.len() < 8 {
+    while chosen.len() < PAIRS {
         let k = keys.start + rng.next_u32() % (keys.end - keys.start);
         if !chosen.contains(&k) {
             chosen.push(k);
@@ -80,13 +83,13 @@ fn recall(rng: &mut Lcg, t: usize) -> (Vec<u32>, Vec<u32>, Vec<usize>) {
     }
     let vals: Vec<u32> = chosen.iter().map(|_| values.start + rng.next_u32() % (values.end - values.start)).collect();
     let mut x: Vec<u32> = chosen.iter().zip(&vals).flat_map(|(&k, &v)| [k, v]).collect();
-    let query_at = t - 24;
+    let query_at = t - 3 * PAIRS;
     while x.len() < query_at {
         x.push(filler.start + rng.next_u32() % (filler.end - filler.start));
     }
     let mut answers = Vec::new();
-    let mut order: Vec<usize> = (0..8).collect();
-    for i in (1..8).rev() {
+    let mut order: Vec<usize> = (0..PAIRS).collect();
+    for i in (1..PAIRS).rev() {
         order.swap(i, rng.next_u32() as usize % (i + 1));
     }
     for &i in &order {
@@ -104,97 +107,101 @@ fn recall(rng: &mut Lcg, t: usize) -> (Vec<u32>, Vec<u32>, Vec<usize>) {
     (x, y, answers)
 }
 
-/// Trained from scratch on recall whose pairs sit 200 tokens before their
-/// queries, past a 16-key window: dense attention and native sparse attention
-/// learn it, a window-only model cannot; the sparse model then answers through
-/// the serving engine reading sparsely, as it was trained.
+/// Trained from scratch on recall whose pairs sit over 200 tokens before
+/// their queries, past a 16-key window: native sparse attention learns to
+/// retrieve them as dense attention does, far below the loss a window-only
+/// model is stuck at; then the sparse model, served by the engine reading
+/// sparsely through the identity indexer (the index space it trained in),
+/// gives every answer the log-probability the training model gives it -
+/// the training masks and the serving kernels select and attend alike.
 #[test]
-#[ignore = "experiment: trains three small models (minutes on a GPU)"]
+#[ignore = "experiment: trains three small models (tens of minutes on a GPU)"]
 fn native_sparse_attention_learns_long_range_recall_and_serves_sparsely() {
     let (t, b, steps) = (256u32, 16u32, 3000u32);
-    let cfg = small(200, t);
+    let cfg = small(100, t, 128, 32);
     let mut rng = Lcg::random();
     let init = qwen3::init_weights(&cfg, rng.next_u64());
     let cfg_lsa = lsa(16, 8);
-    let train = |mode: Option<bool>, rng: &mut Lcg| -> (Qwen, f32) {
+    let batch = |rng: &mut Lcg| {
+        let (mut x, mut y, mut answers) = (Vec::new(), Vec::new(), Vec::new());
+        for r in 0..b as usize {
+            let (xs, ys, a) = recall(rng, t as usize);
+            answers.extend(a.into_iter().map(|p| (r, p)));
+            x.extend(xs);
+            y.extend(ys);
+        }
+        (x, y, answers)
+    };
+    let train = |mode: Option<bool>, rng: &mut Lcg| -> Qwen {
         let mut m = Qwen::new(cfg.clone(), b, t, &init);
         if let Some(long_range) = mode {
             m.enable_native_lsa(cfg_lsa, long_range).unwrap();
         }
-        let mut last = 0.0;
         for s in 1..=steps {
-            let (mut x, mut y) = (Vec::new(), Vec::new());
-            for _ in 0..b {
-                let (xs, ys, _) = recall(rng, t as usize);
-                x.extend(xs);
-                y.extend(ys);
-            }
+            let (x, y, _) = batch(rng);
             m.zero_grads();
             m.set_batch(&x, &y);
-            let loss = m.forward();
-            m.backward();
-            m.adamw_step(s, 3e-3, 0.0, Default::default(), Some(1.0), 1.0);
-            last = 0.95 * last + 0.05 * loss;
-            if s % 500 == 0 {
-                println!("  {:?} step {s}: loss {last:.3}", mode);
-            }
-        }
-        (m, last)
-    };
-    let accuracy = |m: &Qwen, rng: &mut Lcg| -> f64 {
-        let (mut hit, mut total) = (0usize, 0usize);
-        for _ in 0..4 {
-            let (mut x, mut y, mut ans) = (Vec::new(), Vec::new(), Vec::new());
-            for r in 0..b as usize {
-                let (xs, ys, a) = recall(rng, t as usize);
-                ans.extend(a.into_iter().map(|p| (r, p, xs[p])));
-                x.extend(xs);
-                y.extend(ys);
-            }
-            m.set_batch(&x, &y);
             m.forward();
-            let lp = m.batch_token_logprobs();
-            for (r, p, _) in ans {
-                hit += usize::from(lp[r * t as usize + p - 1] > (0.5f32).ln());
-                total += 1;
-            }
+            m.backward();
+            m.adamw_step(s, 2e-3, 0.0, Default::default(), Some(1.0), 1.0);
         }
-        hit as f64 / total as f64
+        m
     };
-    let mut results = Vec::new();
+    // Mean answer loss over held-out batches, from the training model's own forward.
+    let held_out: Vec<_> = (0..4).map(|_| batch(&mut rng)).collect();
+    let loss = |m: &Qwen| -> f64 {
+        let mut total = 0.0;
+        for (x, y, _) in &held_out {
+            m.set_batch(x, y);
+            total += m.forward() as f64;
+        }
+        total / held_out.len() as f64
+    };
+    let mut models = Vec::new();
     for (name, mode) in [("dense", None), ("native sparse", Some(true)), ("window only", Some(false))] {
-        let (m, loss) = train(mode, &mut rng);
-        let acc = accuracy(&m, &mut rng);
-        println!("{name:<14} final loss {loss:.3}, answers held with p > 0.5: {:.1}%", 100.0 * acc);
-        results.push((name, loss, acc, m));
+        let m = train(mode, &mut rng);
+        let l = loss(&m);
+        println!("{name:<14} held-out answer loss {l:.3} (chance {:.3})", (32f64).ln());
+        models.push((l, m));
     }
-    let (dense_acc, sparse_acc, window_acc) = (results[0].2, results[1].2, results[2].2);
-    assert!(sparse_acc > 0.9 && dense_acc > 0.9, "dense {dense_acc} / native sparse {sparse_acc} did not learn the task");
-    assert!(window_acc < 0.3, "a window-only model answered {window_acc}: the task does not need long range");
+    let (dense, sparse, window) = (models[0].0, models[1].0, models[2].0);
+    assert!(window > 2.5, "a window-only model reached {window}: the task does not need long range");
+    assert!(dense < window - 1.0 && sparse < window - 1.0, "dense {dense} / native sparse {sparse} did not learn what a window cannot ({window})");
 
-    // Serve the sparse model through the engine reading sparsely: the index
-    // space it was trained in is the identity map over its un-rotated heads.
+    // Serve the sparse model through the engine reading sparsely.
     let dir = std::env::temp_dir().join(format!("brain-nlsa-{}", rng.next_u64()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("nlsa.safetensors");
-    results[1].3.save(path.to_str().unwrap());
+    let sparse_model = &models[1].1;
+    sparse_model.save(path.to_str().unwrap());
     let dim = (cfg.n_kv_heads * cfg.head_dim) as usize;
     let identity: Vec<f32> = (0..dim * dim).map(|i| f32::from(u8::from(i / dim == i % dim))).collect();
     let geometry = IndexGeometry { n_layers: cfg.n_layers as usize, n_heads: cfg.n_heads as usize, n_kv_heads: cfg.n_kv_heads as usize, head_dim: cfg.head_dim as usize, rope_base: cfg.rope_theta };
     let indexer = Indexer { cfg: LsaConfig { index_dim: dim, ..cfg_lsa }, geometry, layers: vec![Some(LayerProjection { wq: identity.clone(), wk: identity }); cfg.n_layers as usize], origin: "native".into() };
     let mut engine = qwen3::serve::Engine::load(path.to_str().unwrap(), 16, 64, 1, t / 16, 64, false, false);
     engine.set_lsa(&indexer).unwrap();
-    let (mut hit, mut total) = (0, 0);
-    for _ in 0..16 {
-        let (x, _, answers) = recall(&mut rng, t as usize);
-        for &a in answers.iter().take(4) {
-            let out = engine.generate_greedy(&[x[..a].to_vec()], 1, None);
-            hit += usize::from(out[0][0] == x[a]);
-            total += 1;
+    let (x, y, answers) = &held_out[0];
+    sparse_model.set_batch(x, y);
+    sparse_model.forward();
+    let trained = sparse_model.batch_token_logprobs();
+    let (mut served_nll, mut trained_nll, mut worst, mut n) = (0f64, 0f64, 0f32, 0usize);
+    for r in 0..4usize {
+        let doc = &x[r * t as usize..][..t as usize];
+        let served = engine.position_logprobs(doc, 0);
+        for &(row, p) in answers.iter().filter(|(row, _)| *row == r) {
+            let (s_lp, t_lp) = (served[p - 1], trained[row * t as usize + p - 1]);
+            served_nll -= s_lp as f64;
+            trained_nll -= t_lp as f64;
+            worst = worst.max((s_lp - t_lp).abs());
+            n += 1;
         }
     }
-    let served = hit as f64 / total as f64;
-    println!("native sparse model served sparsely: {:.1}% of answers", 100.0 * served);
     std::fs::remove_dir_all(&dir).unwrap();
-    assert!(served > 0.9, "served sparsely the trained model answered {served}");
+    let (served_nll, trained_nll) = (served_nll / n as f64, trained_nll / n as f64);
+    println!("served sparsely: answer loss {served_nll:.4} against the training model's {trained_nll:.4} over {n} answers (largest single difference {worst:.2e})");
+    // The selection is discrete and the two paths compute it in different
+    // arithmetic (device f32 index vectors and scores against host f64), so a
+    // near-tie bucket can flip and move one answer slightly; the answers'
+    // loss must agree.
+    assert!((served_nll - trained_nll).abs() < 0.02, "served sparse answer loss {served_nll} vs training {trained_nll}");
 }

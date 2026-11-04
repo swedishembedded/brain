@@ -38,16 +38,18 @@ head layout; clustering, selection and the sparse read are written once.
       per-head kernel was 1.6-1.8x slower still.
 
 - [x] End-to-end prefill, Qwen3-0.6B, every layer sparse, int8 KV (the
-      served default), one sequence, 512-row chunks, P40 (wgpu), top_k 1024,
-      top_p 256, window 512 (`qwen_lsa prefill --kv-cache int8`):
+      served default), one sequence of another repository's documentation, 512-row chunks,
+      P40 (wgpu, no other job on the card), the distilled indexer at top_k
+      1024, top_p 256, window 512 (`qwen_lsa prefill --kv-cache int8`):
       | T | dense | sparse | speedup |
       |---|---|---|---|
-      | 4096 | 2.38 s | 3.89 s | 0.61x |
-      | 8192 | 7.33 s | 8.63 s | 0.85x |
-      | 16384 | 24.97 s | 18.35 s | 1.36x |
-      | 32768 | 91.81 s | 39.19 s | 2.34x |
-      Dense throughput falls 1721 -> 357 tok/s (quadratic); sparse stays
-      1052 -> 836 tok/s (linear). Below ~12k the selection holds most causal
+      | 4096 | 2.35 s | 3.91 s | 0.60x |
+      | 8192 | 7.34 s | 8.71 s | 0.84x |
+      | 16384 | 25.20 s | 18.70 s | 1.35x |
+      | 32768 | 92.25 s | 39.81 s | 2.32x |
+      | 65536 | 357.54 s | 87.88 s | 4.07x |
+      Dense throughput falls 1744 -> 183 tok/s (quadratic); sparse stays
+      1048 -> 746 tok/s (linear). Below ~12k the selection holds most causal
       keys anyway and the per-query gather costs more than dense tiles.
 - [x] Device indexing (`model::lsa::device`): `lsa_index_vectors` turns
       post-RoPE heads (a chunk's queries or a cached key's pool slot) into
@@ -113,6 +115,25 @@ head layout; clustering, selection and the sparse read are written once.
       initialisation, retention of dense attention, held-out loss, prefill
       timing). Gates: gradients against central differences; held-out KL
       2.14 -> 0.0006 on a learnable teacher, recovering its temperature.
+      Run on Qwen3-0.6B (`qwen_lsa distill`, brain's `crates` sources, 48
+      documents of 8192 tokens, 64 sampled queries each, 2 epochs, lr 2e-3,
+      PCA initialisation, about 40 s a document on a P40 and 48 cores):
+      mean KL over the 28 layers 0.770 (epoch 1) -> 0.686 (epoch 2), the
+      same documents scoring lower on their second pass; learned
+      temperatures 0.090-0.094.
+      Held-out evaluation (`qwen_lsa eval`, another repository's
+      documentation, 6 documents of 8192 tokens, top_k 1024, top_p 256,
+      PCA fitted on the training corpus):
+      | selection | dense attention kept | next-token loss, last 256 positions |
+      |---|---|---|
+      | dense | 1 | 3.0759 (ppl 21.67) |
+      | window 512 + sinks | 0.8506 | - |
+      | random projection | 0.9247 | 3.1870 (+0.111) |
+      | PCA | 0.9483 | 3.1044 (+0.029) |
+      | distilled (D-LSA) | 0.9528 | 3.0867 (+0.011) |
+      Distillation closes 90% of the random indexer's loss gap and 62% of
+      PCA's: +1.1% perplexity while each query reads about a third of its
+      keys.
 - [x] N-LSA training (`Qwen::enable_native_lsa`): every layer's queries read
       only their selection, built each forward from the layer's own rotated
       queries and keys (identity index space, no learned projection), held
@@ -121,10 +142,23 @@ head layout; clustering, selection and the sparse read are written once.
       backward's recompute reuses it. `long_range: false` is the
       window-only baseline. Gate: at a full budget a training step's loss
       equals dense and its gradients agree to 1e-8 (largest 2.8e-2);
-      window-only changes them.
+      window-only changes them. Experiment (`lsa_native`, run by hand): a
+      2-layer, 128-wide model trained from scratch for 3000 steps on recall
+      whose key/value pairs sit over 200 tokens before their queries, past a
+      16-key window (top_k 16, top_p 8): held-out answer loss dense 0.930,
+      native sparse 1.050, window only 3.083 (chance 3.466; an earlier run
+      0.946 / 1.024 / 3.143) - sparse attention learns the retrieval a window
+      cannot. The sparse model, saved and served by the engine reading
+      sparsely through the identity indexer, gives its answers the training
+      model's loss (1.0154 both, largest single answer 3.3e-6 apart; a
+      near-tie bucket can flip between the host and device arithmetic and
+      move one answer a few hundredths).
 
 ## Not yet done
 
+- [ ] Dense attention for prefill chunks below the measured crossover (about
+      12k tokens at the 0.6B shape on a P40), so short prompts do not pay the
+      sparse read: measure the crossover per device and chunk position.
 - [ ] Sparse prefill bandwidth: bf16 KV tier for the sparse read, the
       shared window as a dense sliding tile (it is a fifth of every
       selection), and more bytes in flight per workgroup.
