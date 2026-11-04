@@ -1,0 +1,19 @@
+[package]
+name = "brain-modelopt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Model optimization: measured, budget-constrained compression of any model::Model. Ranks every quantizable linear and storage tier by its estimated loss increase, solves for the assignment that fits a byte budget, and accepts a result only on a whole-model measurement on held-out data. No architecture-specific code."
+
+[lib]
+name = "modelopt"
+path = "src/lib.rs"
+
+[dependencies]
+brain-model.workspace = true
+brain-gpu-core.workspace = true
+
+[dev-dependencies]
+brain-data.workspace = true
+# `tests/autoquant.rs` trains a tiny `qwen3::Qwen` as the model under search.
+brain-qwen3.workspace = true

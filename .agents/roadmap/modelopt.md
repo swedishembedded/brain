@@ -45,8 +45,8 @@ changes the model. A plan is inspectable before anything is written.
    ranks on is never the set that accepts its result.
 5. **Simulated quantization is the deployed codec.** Fake quantization is
    `Weight::round_trip`, the same host codec `Weight::upload` packs with.
-6. **Every result names its baseline** (the original, and the uniform tier of
-   at least the same size) and reports the measured delta against each.
+6. **Every result names its baseline** (the original, and every uniform tier
+   that fits the same budget) and reports the measured delta against each.
 
 ## Weight precision search (AutoQuantize)
 
@@ -56,18 +56,23 @@ Fisher (mean squared gradient over calibration batches), the second-order
 Taylor estimate of the loss increase. The solve is a multiple-choice knapsack:
 minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
 
-- [ ] `Weight::round_trip(raw, n, k, tier)` in `model::ops`: the host codec
-      every uploadable tier packs with, decoded back to f32.
-- [ ] `modelopt::manifest`: the quantizable sites of any `Model` with their
-      `[n, k]`, layer and role, from `Model::adapter_sites`.
-- [ ] `modelopt::sensitivity`: diagonal-Fisher sensitivity per site and tier.
-- [ ] `modelopt::solve`: exact-enough constrained assignment under a byte
-      budget, returning a `TierPolicy`.
-- [ ] `modelopt::validate`: apply a plan by fake quantization, score held-out
-      loss, restore; compare against the original and uniform baselines.
-- [ ] Acceptance: on a trained tiny qwen3, a searched policy meets its byte
-      budget and has lower measured held-out loss than every uniform tier that
-      is no smaller.
+- [x] `Weight::round_trip` and `Weight::packs` in `model::ops`: the host
+      codec every uploadable tier packs with, decoded back to f32, held equal
+      to the device's own decode (`model/tests/weight_round_trip.rs`).
+- [x] `modelopt::sites`: the stored tensors behind `Model::adapter_sites`,
+      with `[n, k]`, layer and roles.
+- [x] `modelopt::sensitivity`: diagonal-Fisher sensitivity per site and tier.
+- [x] `modelopt::assign`: greedy multiple-choice knapsack under a byte
+      budget (`Plan::policy` is the `TierPolicy`, f32 outside the plan).
+- [x] `modelopt::measure_policy`: a plan applied by fake quantization, scored
+      on held-out batches, restored.
+- [x] Acceptance (`modelopt/tests/autoquant.rs`): a trained tiny qwen3 at a
+      budget halfway between uniform int8 and q4 (43008 of 196608 f32 bytes)
+      meets the budget, has lower held-out loss than every uniform tier that
+      fits it, and beats the median of the same tiers dealt at random among
+      same-shape sites. Held over 13 random seeds.
+- [ ] Bounded host memory: `sensitivity` holds one f32 per site element; a
+      model whose linears do not fit host RAM in fp32 needs it per layer.
 - [ ] Runtime cost: per-tier GEMM time from `model::probe` at each site's
       shape as a second constraint (`min_memory` with a latency cap, and
       `min_latency` with a memory cap).

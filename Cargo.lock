@@ -1972,6 +1972,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-modelopt"
+version = "3.0.0"
+dependencies = [
+ "brain-data",
+ "brain-gpu-core",
+ "brain-model",
+ "brain-qwen3",
+]
+
+[[package]]
 name = "brain-modelref"
 version = "3.0.0"
 dependencies = [

@@ -179,6 +179,7 @@ brain-fcbench	5
 brain-federated	5
 brain-gradcheck	5
 brain-modelcost	5
+brain-modelopt	5
 brain-rl	5
 
 # layer 6: serving, front ends, SDK, samples

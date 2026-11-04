@@ -69,7 +69,7 @@ layer 4 - models
     toyautoencoder, toymoe, toypid, toyseq2seq, viewport, vqgan, wan, wm-core, wm-display,
     worldmirror2, yolov5, yolov8, zipdepth
 layer 5 - cross-cutting evaluation and tooling
-    bench, capture, fcbench, federated, gradcheck, modelcost, rl
+    bench, capture, fcbench, federated, gradcheck, modelcost, modelopt, rl
 layer 6 - serving, front ends, SDK, samples
     apiserve, appopts, brain, braintop, capability-mock, catalog, cli, dbus, hfsm, loader, perf,
     runtime, sample-decision-arena, sample-decision-doom, sample-decision-intents, sample-
@@ -392,6 +392,7 @@ before relying on one.
 | trainable parameter with independent storage/gradient/optimizer-state dtype, optimizer state formats and storage, transactional state | 3 `paramstore`, `optim` | one AdamW definition; state formats are data, not new optimizers per format |
 | `Weight` variants and generic quantized forward/input-grad/weight-grad ops, adapter runtime (definition, execution, optimization), KV storage descriptor, saved-activation policy, generic trainers and objectives, parameter manifest and capability traits | 3 `model` | extend `model::ops`, `adapter::sites`, `model::training`, `model::conformance` rather than adding parallel seams |
 | graph, parameter manifest (roles, adapter targets), declarative checkpoint mapping, I/O and objectives, custom ops | 4 model crates | nothing else: no codec, loader, adapter, optimizer or trainer code |
+| model optimization: sensitivity, constrained precision/structure search, plan measurement and reports (`.agents/roadmap/modelopt.md`) | 5 `modelopt` | composes `Model`, `Weight::round_trip`/`bytes_for` and `TierPolicy`; a codec, a training objective or a cost probe it needs is added to its lower-layer owner, never here |
 | residency, serving, sdk | 5-6 | consume `MemoryBudget`/`LoadPlan` and the generic trainers; never re-implement them |
 
 Acceptance test of the layering: adding a storage format, adapter kind,
