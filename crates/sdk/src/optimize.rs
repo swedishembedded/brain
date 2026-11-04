@@ -75,7 +75,7 @@ pub(crate) const ON_TRAINER: &str = "trainer frozen-base build";
 #[derive(Clone, Debug)]
 pub struct ModelOptimizer {
     base: String,
-    arch: String,
+    arch: Option<String>,
     models_dir: Option<String>,
     dataset: Option<PathBuf>,
     held_out: Option<PathBuf>,
@@ -206,7 +206,7 @@ impl ModelOptimizer {
     pub fn from_pretrained(base: impl Into<String>) -> ModelOptimizer {
         ModelOptimizer {
             base: base.into(),
-            arch: "qwen3".to_string(),
+            arch: None,
             models_dir: None,
             dataset: None,
             held_out: None,
@@ -226,9 +226,10 @@ impl ModelOptimizer {
         }
     }
 
-    /// The architecture of the base (a `brain_arch` id; default `qwen3`).
+    /// The architecture of the base (a `brain_arch` id); by default the one the
+    /// checkpoint's `config.json` names.
     pub fn arch(mut self, id: impl Into<String>) -> Self {
-        self.arch = id.into();
+        self.arch = Some(id.into());
         self
     }
 
@@ -370,7 +371,7 @@ impl ModelOptimizer {
         let work = prepare(&WorkloadSpec {
             who: "ModelOptimizer",
             base: &self.base,
-            arch: &self.arch,
+            arch: self.arch.as_deref(),
             models_dir: self.models_dir.as_deref(),
             dataset: self.dataset.as_deref(),
             held_out: self.held_out.as_deref(),
@@ -528,7 +529,8 @@ pub(crate) struct WorkloadSpec<'a> {
     /// The public type's name, for errors.
     pub who: &'static str,
     pub base: &'a str,
-    pub arch: &'a str,
+    /// `None`: read from the checkpoint.
+    pub arch: Option<&'a str>,
     pub models_dir: Option<&'a str>,
     pub dataset: Option<&'a Path>,
     pub held_out: Option<&'a Path>,
@@ -556,16 +558,33 @@ pub(crate) struct Workload {
     pub held_out_records: usize,
 }
 
+/// The registered architecture a brain-format checkpoint names in its own
+/// config (`model`), through the registry's family aliases.
+fn brain_checkpoint_arch(weights: &Path) -> Option<&'static str> {
+    let reader = checkpoint::weightio::WeightReader::open(weights.to_str()?).ok()?;
+    let config = reader.config();
+    brain_arch::by_family(config["model"].as_str()?).map(|a| a.id)
+}
+
 /// Resolve the base, read and split the dataset ([`split`], or the held-out
 /// file), and prepare both splits for the base's tokenizer and template;
 /// refuses a run whose base does not fit the devices before anything loads.
 pub(crate) fn prepare(spec: &WorkloadSpec<'_>) -> Result<Workload> {
-    let chat = crate::full_finetune::chat_entry(spec.arch)?;
     let dataset = spec.dataset.ok_or_else(|| Error::MissingArgument(format!("{}: no dataset; call .dataset(path)", spec.who)))?;
     let out_dir = spec.out_dir.ok_or_else(|| Error::MissingArgument(format!("{}: no out directory; call .out_dir(path)", spec.who)))?;
     let set = crate::device::resolve(spec.device)?;
     let store_root = loader::model_dir::resolve(spec.models_dir);
     let (weights, model_dir, base_id) = loader::model_dir::resolve_base(spec.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+    // The architecture is the checkpoint's own (its config.json, through the registry) unless the caller names one.
+    let arch = match spec.arch {
+        Some(id) => id.to_string(),
+        None => crate::study::arch_of_checkpoint(&model_dir)
+            .map(|entry| entry.id)
+            .or_else(|| brain_checkpoint_arch(&weights))
+            .map(str::to_string)
+            .ok_or_else(|| Error::UnsupportedArchitecture(format!("{}: cannot tell the architecture of {} from a config.json beside it or its own config; name it with .arch(id)", spec.who, spec.base)))?,
+    };
+    let chat = crate::full_finetune::chat_entry(&arch)?;
     let open = (chat.checkpoint_path)(&weights, &model_dir);
     let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
     let no_think = if spec.thinking { None } else { tmpl.no_think_block() };

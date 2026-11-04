@@ -54,7 +54,7 @@ const REPORT_FILE: &str = "prune.json";
 #[derive(Clone, Debug)]
 pub struct ModelPruner {
     base: String,
-    arch: String,
+    arch: Option<String>,
     models_dir: Option<String>,
     dataset: Option<PathBuf>,
     held_out: Option<PathBuf>,
@@ -92,7 +92,7 @@ impl ModelPruner {
     pub fn from_pretrained(base: impl Into<String>) -> ModelPruner {
         ModelPruner {
             base: base.into(),
-            arch: "qwen3".to_string(),
+            arch: None,
             models_dir: None,
             dataset: None,
             held_out: None,
@@ -108,9 +108,10 @@ impl ModelPruner {
         }
     }
 
-    /// The architecture of the base (a `brain_arch` id; default `qwen3`).
+    /// The architecture of the base (a `brain_arch` id); by default the one the
+    /// checkpoint's `config.json` names.
     pub fn arch(mut self, id: impl Into<String>) -> Self {
-        self.arch = id.into();
+        self.arch = Some(id.into());
         self
     }
 
@@ -204,7 +205,7 @@ impl ModelPruner {
         let work = prepare(&WorkloadSpec {
             who: "ModelPruner",
             base: &self.base,
-            arch: &self.arch,
+            arch: self.arch.as_deref(),
             models_dir: self.models_dir.as_deref(),
             dataset: self.dataset.as_deref(),
             held_out: self.held_out.as_deref(),

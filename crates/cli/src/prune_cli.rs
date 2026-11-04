@@ -14,7 +14,8 @@ const USAGE: &str = "\
 brain prune BASE --dataset FILE --out DIR [options]
 
   Remove the least important channels of every prunable dimension of a chat
-  model (qwen3: each layer's MLP hidden channels), ranked by the estimated
+  model (the dimensions it declares, e.g. each layer's MLP hidden channels),
+  ranked by the estimated
   loss of removing each on the dataset, and write the narrower model to
   DIR/checkpoint, a checkpoint directory brain serves like any other. The
   original and the pruned model are measured on held-out records; DIR/prune.json
@@ -29,7 +30,7 @@ brain prune BASE --dataset FILE --out DIR [options]
   --keep F           the share of each dimension's channels kept (default 0.75).
   --keep-channels N  keep exactly N channels of each dimension.
   --held-out FILE    chat JSONL to measure on; all of --dataset ranks.
-  --arch ID          the base's architecture (default qwen3).
+  --arch ID          the base's architecture (default: what its config names).
   --models-dir DIR   where a vendor/repo base resolves.
   --seed N           the calibration/held-out split's seed (default random).
   --max-block N      the longest record, in tokens.

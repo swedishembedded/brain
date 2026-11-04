@@ -40,7 +40,7 @@ brain optimize BASE --dataset FILE --out DIR [options]
   --formats LIST     candidate formats, comma separated (default: every
                      frozen-base format the architecture's trainer holds that
                      the device holds as itself).
-  --arch ID          the base's architecture (default qwen3).
+  --arch ID          the base's architecture (default: what its config names).
   --models-dir DIR   where a vendor/repo base resolves.
   --seed N           the calibration/held-out split's seed (default random,
                      reported).

@@ -313,7 +313,8 @@ pub const ARCHS: &[Arch] = &[
     // `qwen3::spec::Qwen3Spec` (the model-store resolver) - see
     // `crates/catalog/src/lib.rs`'s `resolver_spec_for`, same shape as
     // `qwen35`'s own row.
-    arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"], default_ref: Some("Qwen/Qwen3-0.6B"),
+    // `families: &["qwen"]`: the `model` a brain-format qwen3 checkpoint records in its own config.
+    arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"], default_ref: Some("Qwen/Qwen3-0.6B"), families: &["qwen"],
         caps: Caps::NONE.full_ft().lora(&[BaseTier::F32, BaseTier::Bf16, BaseTier::I8, BaseTier::Nf4, BaseTier::Fp8]).other(),
         variants: &[
             Variant { reference: "Qwen/Qwen3-0.6B", params: 596_000_000, quants: &["Q8_0"], license: None },
