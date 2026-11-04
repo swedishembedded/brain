@@ -20,6 +20,7 @@
 //! * [`DpoFit`] - preference pairs against the starting policy as reference.
 //! * [`GrpoFit`] - group-relative policy optimisation against an environment.
 //! * [`PolicyGradientFit`] - the same clipped objective on rollouts collected outside brain.
+//! * [`TeacherFit`] - the top-K distributions a teacher gives a prepared dataset, for [`DistillFit`].
 //! * [`DistillFit`] - top-K forward-KL distillation from teacher distributions.
 //!   Every pass is a weighted cross-entropy, which `Model` computes through the
 //!   chunked LM head (`model::head_ce`), so the logits of a whole vocabulary
@@ -29,7 +30,7 @@ use model::finetune::ModelFit;
 use model::{fit_controlled, FitControl, FitOpts, FitReport, Model};
 
 use crate::env::{Environment, Verifier};
-use crate::objective::distill::{DistillConfig, DistillExample, DistillTopK};
+use crate::objective::distill::{DistillConfig, DistillExample, DistillTopK, TopK};
 use crate::objective::dpo::{Dpo, DpoConfig, PackedPair};
 use crate::objective::external::{ExternalPolicyGradient, PolicyGradientConfig, PolicyGradientStats};
 use crate::objective::grpo::Grpo;
@@ -113,6 +114,52 @@ impl<E: Environment, V: Verifier> ModelFit for GrpoFit<'_, '_, E, V> {
     }
 }
 
+/// The distillation examples of one prepared-dataset row (`tokens`, with
+/// `targets[t]` the token after `tokens[t]` or IGNORE): the prompt runs
+/// through the first supervised position, the completion to the last, and
+/// `logits` (`[positions, vocab]`, from the row's first position) gives each
+/// supervised position its teacher's top `k`. An unsupervised position inside
+/// the completion (the user's turn between two answers) carries no teacher
+/// signal. `None` for a row with nothing supervised.
+pub fn teacher_example(tokens: &[u32], targets: &[u32], logits: &[f32], vocab: usize, k: usize) -> Option<DistillExample> {
+    let supervised = |t: usize| targets[t] != model::IGNORE;
+    let first = (0..targets.len()).find(|&t| supervised(t))?;
+    let last = (0..targets.len()).rev().find(|&t| supervised(t))?;
+    let completion: Vec<u32> = (first..=last).map(|t| if supervised(t) { targets[t] } else { tokens[t + 1] }).collect();
+    let teacher = (first..=last).map(|t| if supervised(t) { TopK::from_logits(&logits[t * vocab..(t + 1) * vocab], k) } else { TopK::default() }).collect();
+    Some(DistillExample { prompt: tokens[..=first].to_vec(), completion, teacher })
+}
+
+/// The teacher's top-`k` distributions over the train split of the prepared
+/// dataset at `dir` ([`teacher_example`] per record), from whichever model the
+/// trainer builds: the examples a [`DistillFit`] then trains a student on.
+/// The model must be built for one row (`opts.batch_size` 1): the logits of a
+/// whole record come from [`Model::logits_all`].
+pub struct TeacherFit<'a> {
+    pub dir: &'a std::path::Path,
+    pub opts: &'a FitOpts,
+    pub k: usize,
+    /// The examples, once the visit has run.
+    pub examples: Vec<DistillExample>,
+}
+
+impl ModelFit for TeacherFit<'_> {
+    fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(FitReport, M)> {
+        let (train, _, cfg, vocab) = model::load_dataset(self.dir, self.opts)?;
+        let one = data::loader::BatchConfig { batch_size: 1, ..cfg };
+        for (x, targets) in model::example_rows(&train, &one) {
+            let Some(last) = targets.iter().rposition(|&t| t != model::IGNORE) else { continue };
+            let logits = model.logits_all(&x[..=last]).ok_or_else(|| std::io::Error::other("the teacher has no logits"))?;
+            self.examples.extend(teacher_example(&x, &targets, &logits, vocab as usize, self.k));
+        }
+        if self.examples.is_empty() {
+            return Err(std::io::Error::other("the prepared dataset has no supervised record to distill"));
+        }
+        let report = FitReport { initial_loss: 0.0, final_loss: None, steps_completed: 0, resumed_at: None, interrupted: false, evaluations: Vec::new(), kept_best: None, stopped_early: false };
+        Ok((report, model))
+    }
+}
+
 /// Top-K distillation over whichever model the trainer builds: the student
 /// learns the teacher's per-position distributions carried by `examples`.
 pub struct DistillFit<'a, 'c> {
@@ -171,5 +218,30 @@ impl ModelFit for PolicyGradientFit<'_, '_> {
         let result = fit_controlled(model, &mut objective, self.opts, None, control);
         self.stats = Some(objective.into_stats());
         result
+    }
+}
+
+#[cfg(test)]
+mod teacher_tests {
+    use super::*;
+
+    /// tokens 10..16; positions 2 and 4 are supervised, 3 (between them) is not.
+    #[test]
+    fn a_teacher_example_spans_the_supervised_positions() {
+        let tokens = [10, 11, 12, 13, 14, 15];
+        let i = model::IGNORE;
+        let targets = [i, i, 13, i, 15, i];
+        let vocab = 20;
+        let mut logits = vec![0f32; 5 * vocab];
+        logits[2 * vocab + 13] = 9.0;
+        logits[4 * vocab + 15] = 9.0;
+        let ex = teacher_example(&tokens, &targets, &logits, vocab, 2).expect("a supervised row");
+        assert_eq!(ex.prompt, [10, 11, 12], "the prompt runs through the first supervised position");
+        assert_eq!(ex.completion, [13, 14, 15], "the completion runs to the last, the gap's own token kept");
+        assert_eq!(ex.teacher[0].ids[0], 13);
+        assert!(ex.teacher[1].ids.is_empty(), "an unsupervised position carries no teacher signal");
+        assert_eq!(ex.teacher[2].ids[0], 15);
+        assert!((ex.teacher[0].probs.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!(teacher_example(&tokens, &[i; 6], &logits, vocab, 2).is_none());
     }
 }
