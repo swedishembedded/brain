@@ -74,8 +74,12 @@ head layout; clustering, selection and the sparse read are written once.
       scheduler conformance suite passes with LSA on (batched = single,
       prefix hits prefill only the suffix and report their cached tokens,
       speculation = greedy). Refused on int8/fp8 KV and under YaRN.
-- [ ] Serving surface: a policy flag to attach an indexer, memory accounted
-      in `memplan`, selected-key metrics.
+- [x] Serving surface: `--sparse-attention FILE` (`model::policy`), honoured
+      by the Qwen3 resident (`Engine::set_lsa`) and refused by name by every
+      model that does not declare it.
+- [ ] Memory accounted in `memplan` (index pages and scratch:
+      `LsaAttention::device_bytes`) and selected-key metrics in the stats
+      snapshot.
 - [x] Packed (int8/fp8) KV, the served default: `paged_sparse_flash_gqa_i8`
       (per KV head, decode) and `paged_sparse_flash_rows_i8` (one workgroup
       per query row and every head: each selected key resolved once and its

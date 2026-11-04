@@ -564,6 +564,10 @@ pub struct QwenServeConfig {
     /// by the Qwen3 resident (set by [`Self::apply_policy`]); activation
     /// refuses with it instead of serving something else.
     pub refused: Option<String>,
+    /// `--sparse-attention FILE`: the latent-sparse-attention indexer the
+    /// engine reads its attention through (`Engine::set_lsa`); `None` reads
+    /// densely.
+    pub sparse_attention: Option<String>,
 }
 
 /// What the Qwen3 paged engine honours of a [`model::policy::ServePolicy`].
@@ -579,6 +583,7 @@ pub const QWEN3_POLICY: model::policy::PolicySupport = model::policy::PolicySupp
     act_precision: false,
     gdn_state: false,
     linear_activations: false,
+    sparse_attention: true,
 };
 
 impl QwenServeConfig {
@@ -611,6 +616,9 @@ impl QwenServeConfig {
         if let Some(f) = p.fuse_norm {
             self.fuse_residual_norm = f;
         }
+        if let Some(path) = &p.sparse_attention {
+            self.sparse_attention = Some(path.clone());
+        }
         let l = &p.limits;
         self.ctx = l.ctx.or(self.ctx);
         self.max_batch = l.max_batch.unwrap_or(self.max_batch);
@@ -629,7 +637,7 @@ impl QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false, refused: None }
+        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None }
     }
 }
 
@@ -835,6 +843,8 @@ pub struct QwenResident {
     max_batch: u32,
     kv_int8_requested: bool,
     kv_fp8_requested: bool,
+    /// `--sparse-attention`: the indexer file the engine reads through.
+    sparse_attention: Option<String>,
     kv_calib_opt_in: bool,
     kv_offload_bytes: u64,
     weights_int8_requested: bool,
@@ -938,6 +948,7 @@ impl QwenResident {
             max_batch: cfg.max_batch.max(1),
             kv_int8_requested: cfg.kv_int8,
             kv_fp8_requested: cfg.kv_fp8,
+            sparse_attention: cfg.sparse_attention.clone(),
             kv_calib_opt_in: cfg.kv_calib_opt_in,
             kv_offload_bytes: (cfg.kv_offload_gb.max(0.0) * (1u64 << 30) as f64) as u64,
             weights_int8_requested,
@@ -1429,6 +1440,10 @@ impl ResidentModel for QwenResident {
                     eprintln!("serve: {}: --kv-cache fp8 needs the packed KV pools but the KV cache is fp32; ignoring", self.path);
                 }
             }
+            if let Some(path) = &self.sparse_attention {
+                let indexer = model::lsa::indexer::Indexer::load(path).map_err(|e| format!("qwen: --sparse-attention: {e}"))?;
+                eng.set_lsa(&indexer).map_err(|e| format!("qwen: --sparse-attention {path}: {e}"))?;
+            }
             eng.set_gemm_precision(self.gemm_precision);
             eng.set_fuse_residual_norm(self.fuse_residual_norm);
             // The adapter bank, once per engine, from the settings the
@@ -1597,9 +1612,11 @@ mod tests {
         p.set("--max-batch", "32").unwrap();
         p.set("--kv-offload-gb", "2").unwrap();
         p.set("prefix-slots", "16").unwrap();
+        p.set("--sparse-attention", "/indexers/qwen3-0.6b.safetensors").unwrap();
         let mut cfg = QwenServeConfig::default();
         let notes = cfg.apply_policy(&p).unwrap();
         assert!(cfg.weights_bf16 && cfg.kv_int8 && cfg.kv_fp8);
+        assert_eq!(cfg.sparse_attention.as_deref(), Some("/indexers/qwen3-0.6b.safetensors"));
         assert_eq!((cfg.ctx, cfg.max_batch, cfg.kv_offload_gb), (Some(4096), 32, 2.0));
         assert_eq!(cfg.gemm_precision, gpu_core::provider::library::GemmPrecision::Fp32Reference);
         assert!(notes.iter().any(|n| n.contains("prefix-slots")), "{notes:?}");

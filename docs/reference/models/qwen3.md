@@ -255,6 +255,23 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   while staging; off by default).
 - `--kv-calibration` - opt in to per-head KV clip ranges produced by `brain
   qwen3 calib` (off by default).
+- `--sparse-attention FILE` - latent sparse attention (Kubicek et al.,
+  arXiv:2610.42147) through the indexer `FILE`. Each query attends its
+  first 4 keys, its 512 most recent keys and up to `top_k` keys of the key
+  clusters its index query scores highest, instead of every cached key, so a
+  long prompt's attention cost grows linearly rather than quadratically.
+  Index pages are built from the cached keys as each 512-key block fills (a
+  prefix-cache hit reuses or rebuilds them without recomputing a token), and
+  the read works over every KV cache tier (f32, int8, fp8). The indexer is
+  made for one checkpoint and refused on another; positions past the
+  model's native context (YaRN) are refused. Off by default. Make an
+  indexer with the `qwen_lsa` tool built beside `brain`:
+  `qwen_lsa distill --checkpoint DIR --corpus TEXTDIR --out indexer.safetensors`
+  trains it against the model's own attention (D-LSA);
+  `qwen_lsa eval --checkpoint DIR --corpus TEXTDIR --indexer FILE` reports
+  the share of dense attention it keeps and the held-out loss, and
+  `qwen_lsa prefill --checkpoint DIR --indexer FILE` times prefill dense
+  against sparse.
 - `--kv-offload-gb N` - host RAM the serving engine may use to park
   preempted sessions' KV cache (default `0`, off). See below.
 - `--weight-format int8` / `--weight-format f32` - quantize the 7

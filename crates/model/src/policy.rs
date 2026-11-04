@@ -192,6 +192,9 @@ pub struct ServePolicy {
     pub linear_activations: Option<LinearActivations>,
     /// `Some(false)` turns the residual-add plus norm fusion off (an A/B switch).
     pub fuse_norm: Option<bool>,
+    /// `--sparse-attention FILE`: read the attention layers an indexer
+    /// covers through latent sparse attention (`model::lsa`).
+    pub sparse_attention: Option<String>,
     /// `--exact-decode`: make a decode row's result independent of which other
     /// sequences share its batch (see [`PolicySupport`] models that honour it).
     /// Off by default: today's batched numerics, unchanged.
@@ -200,7 +203,7 @@ pub struct ServePolicy {
 }
 
 /// The public flags that take a value.
-pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--act-precision", "--gdn-state", "--linear-activations", "--ctx", "--max-batch", "--kv-offload-gb", "--itl-target-ms"];
+pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--act-precision", "--gdn-state", "--linear-activations", "--sparse-attention", "--ctx", "--max-batch", "--kv-offload-gb", "--itl-target-ms"];
 /// The public switches (no value).
 pub const SWITCH_FLAGS: &[&str] = &["--kv-calibration", "--exact-decode"];
 /// Settings that are derived by default and exist only as the target of a
@@ -229,6 +232,12 @@ impl ServePolicy {
             "--act-precision" => self.act_precision = Some(gpu_core::ActChoice::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--act-precision {value:?}: expected auto, f32 or bf16"))?),
             "--gdn-state" => self.gdn_state = Some(GdnState::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--gdn-state {value:?}: expected f32 or bf16"))?),
             "--linear-activations" => self.linear_activations = Some(LinearActivations::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--linear-activations {value:?}: expected auto, bf16 or e4m3"))?),
+            "--sparse-attention" => {
+                if value.trim().is_empty() {
+                    return Err("--sparse-attention needs the path of an indexer file".into());
+                }
+                self.sparse_attention = Some(value.trim().to_string());
+            }
             "--ctx" => self.limits.ctx = Some(count(flag, value)?),
             "--max-batch" => self.limits.max_batch = Some(count(flag, value)?),
             "--itl-target-ms" => match count(flag, value)? {
@@ -278,6 +287,9 @@ impl ServePolicy {
         }
         if self.exact_decode {
             v.push("exact-decode".into());
+        }
+        if let Some(path) = &self.sparse_attention {
+            v.push(format!("sparse-attention={path}"));
         }
         let l = &self.limits;
         for (name, x) in [("ctx", l.ctx), ("max-batch", l.max_batch), ("itl-target-ms", l.itl_target_ms), ("kv-tokens", l.kv_tokens), ("prefix-slots", l.prefix_slots), ("max-prefill", l.max_prefill), ("prefill-slice", l.prefill_slice), ("prefill-batch", l.prefill_batch)] {
@@ -332,6 +344,8 @@ pub struct PolicySupport {
     pub gdn_state: bool,
     /// `--linear-activations` honoured: the model's quantized-weight linears can take their activation operand in the chosen precision.
     pub linear_activations: bool,
+    /// `--sparse-attention` honoured: the model's attention can read through latent sparse attention.
+    pub sparse_attention: bool,
 }
 
 impl PolicySupport {
@@ -374,6 +388,9 @@ impl PolicySupport {
         }
         if policy.linear_activations.is_some() && !self.linear_activations {
             return Err(format!("{}: --linear-activations is not supported", self.model));
+        }
+        if policy.sparse_attention.is_some() && !self.sparse_attention {
+            return Err(format!("{}: --sparse-attention is not supported", self.model));
         }
         Ok(())
     }
@@ -537,6 +554,7 @@ mod tests {
         act_precision: false,
         gdn_state: false,
         linear_activations: false,
+        sparse_attention: false,
     };
 
     #[test]
@@ -575,6 +593,13 @@ mod tests {
         gdn.set("--gdn-state", "f32").unwrap();
         assert!(LLM.check(&gdn).unwrap_err().contains("--gdn-state"), "a model that does not declare it refuses the flag");
         assert!(PolicySupport { gdn_state: true, ..LLM }.check(&gdn).is_ok());
+        let mut sparse = ServePolicy::default();
+        sparse.set("--sparse-attention", "indexer.safetensors").unwrap();
+        assert_eq!(sparse.sparse_attention.as_deref(), Some("indexer.safetensors"));
+        assert!(sparse.describe().contains("sparse-attention=indexer.safetensors"), "{}", sparse.describe());
+        assert!(LLM.check(&sparse).unwrap_err().contains("--sparse-attention"), "a model that does not declare it refuses the flag");
+        assert!(PolicySupport { sparse_attention: true, ..LLM }.check(&sparse).is_ok());
+        assert!(ServePolicy::default().set("--sparse-attention", " ").is_err(), "an empty indexer path is refused");
         let mut only = ServePolicy::default();
         only.set("--act-precision", "auto").unwrap();
         assert!(LLM.check(&only).unwrap_err().contains("--act-precision"), "a model that does not declare it refuses the flag");

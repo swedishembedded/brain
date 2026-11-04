@@ -378,6 +378,7 @@ pub const QWEN35_GGUF_POLICY: model::policy::PolicySupport = model::policy::Poli
     act_precision: true,
     gdn_state: true,
     linear_activations: true,
+    sparse_attention: false,
 };
 
 /// What the brain-checkpoint Qwen3.8 resident honours of a serving policy: the weight tier is the checkpoint's own
@@ -394,6 +395,7 @@ pub const QWEN35_FP32_POLICY: model::policy::PolicySupport = model::policy::Poli
     act_precision: false,
     gdn_state: false,
     linear_activations: false,
+    sparse_attention: false,
 };
 
 impl Qwen35ServeConfig {
@@ -836,6 +838,11 @@ mod tests {
         let e = cfg.apply_policy(&p).unwrap_err();
         assert!(e.contains("qwen35") && e.contains("--gemm"), "{e}");
         assert!(gguf_resident("none.gguf", "t/x", &[], 0, &cfg.gguf).err().unwrap().contains("--gemm"), "a refused resident must not build");
+
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--sparse-attention", "indexer.safetensors").unwrap();
+        let e = Qwen35ServeConfig::default().apply_policy(&p).unwrap_err();
+        assert!(e.contains("--sparse-attention"), "the hybrid decoder has no sparse attention to read through: {e}");
     }
 
     /// `--exact-decode` reaches both Qwen3.8 residents and stays off when it is
