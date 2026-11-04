@@ -999,6 +999,8 @@ pub const PAGED_KV_APPEND_FP8_CLIPPED_BATCHED: &str = include_str!("../wgsl/page
 pub const PAGED_KV_APPEND_I8_CLIPPED_BATCHED: &str = include_str!("../wgsl/paged_kv_append_i8_clipped_batched.wgsl");
 /// `wgsl/paged_sparse_flash_decode.wgsl`
 pub const PAGED_SPARSE_FLASH_DECODE: &str = include_str!("../wgsl/paged_sparse_flash_decode.wgsl");
+/// `wgsl/paged_sparse_flash_gqa.wgsl`
+pub const PAGED_SPARSE_FLASH_GQA: &str = include_str!("../wgsl/paged_sparse_flash_gqa.wgsl");
 /// `wgsl/pexp_nll_grad.wgsl`
 pub const PEXP_NLL_GRAD: &str = include_str!("../wgsl/pexp_nll_grad.wgsl");
 /// `wgsl/pexp_nll_value.wgsl`
@@ -1842,6 +1844,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_kv_append_fp8_clipped_batched", PAGED_KV_APPEND_FP8_CLIPPED_BATCHED),
     ("paged_kv_append_i8_clipped_batched", PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
     ("paged_sparse_flash_decode", PAGED_SPARSE_FLASH_DECODE),
+    ("paged_sparse_flash_gqa", PAGED_SPARSE_FLASH_GQA),
     ("pexp_nll_grad", PEXP_NLL_GRAD),
     ("pexp_nll_value", PEXP_NLL_VALUE),
     ("pinball_grad_w", PINBALL_GRAD_W),

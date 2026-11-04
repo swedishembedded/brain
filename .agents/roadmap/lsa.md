@@ -26,9 +26,22 @@ head layout; clustering, selection and the sparse read are written once.
       key in order reproduces `paged_flash_decode` bit for bit; an LSA
       selection matches the host oracle; a position past the sequence's live
       keys is refused when packing and masked by the kernel (wgpu and Vulkan).
+- [x] Prefill-shaped sparse kernel `paged_sparse_flash_gqa`: one workgroup per
+      (row, KV head) serves the whole query-head group from each staged row,
+      16-key tiles, no redundant P.V work; matches the per-head kernel at
+      groups 1, 2, 4, 8. Measured one Qwen3-0.6B-shaped layer on a P40 (wgpu,
+      f32 KV, `crates/model/tests/lsa_prefill_bench.rs`, k=2048, w=512):
+      dense `paged_flash_prefill` 45 / 143 / 569 / 2249 / 9011 ms at
+      4k / 8k / 16k / 32k / 64k tokens against sparse 556 / 1371 / 2957 /
+      6312 / 12869 ms - linear against quadratic, but the per-query gather
+      runs at ~155 GB/s and only crosses dense past 64k. The decode-shaped
+      per-head kernel was 1.6-1.8x slower still.
 
 ## Not yet done
 
+- [ ] Sparse prefill bandwidth: bf16 KV tier for the sparse read, the
+      shared window as a dense sliding tile (it is a fifth of every
+      selection), and more bytes in flight per workgroup.
 - [ ] Device indexing: index-key projection, pooling, Ward and centroid
       scoring, top-p and expansion as WGSL kernels gated against the host
       reference; selection stays device-resident so decode needs no readback.

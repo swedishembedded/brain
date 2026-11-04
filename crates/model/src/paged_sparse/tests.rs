@@ -57,7 +57,7 @@ impl Cache {
 
     /// Run `kernel` over `q` and `rows` on the device; `pools` are the pool
     /// contents as uploaded (f32, or packed bf16 for the bf16 variant).
-    fn run(&self, g: &Gpu, kernel: usize, q: &[f32], rows: &SparseRows, pools: (&[u32], &[u32])) -> Vec<f32> {
+    fn run(&self, g: &Gpu, kernel: usize, per_kv_head: bool, q: &[f32], rows: &SparseRows, pools: (&[u32], &[u32])) -> Vec<f32> {
         let qb = g.storage_init("q", q);
         let pk = g.storage(pools.0.len() as u64);
         g.write(&pk, pools.0);
@@ -71,7 +71,7 @@ impl Cache {
         g.write(&meta, &rows.row_meta);
         let ctx = g.storage(q.len() as u64);
         let bufs = SparseBuffers { q: &qb, pool_k: &pk, pool_v: &pv, block_tables: &bt, sel: &sel, row_meta: &meta, ctx: &ctx };
-        let step = self.shape.step(g, kernel, rows.rows, rows.width, &bufs).unwrap();
+        let step = self.shape.step(g, kernel, per_kv_head, rows.rows, rows.width, &bufs).unwrap();
         g.submit(&[], &[step]);
         g.read(&ctx, q.len())
     }
@@ -114,7 +114,7 @@ fn selecting_every_key_in_order_reproduces_paged_flash_decode_bit_for_bit() {
     let dense = crate::lsa::attend::dense_selection(&positions);
     let rows = SparseRows::pack(&dense, &(0..batch).collect::<Vec<_>>(), &lens).unwrap();
     let (pk, pv) = cache.f32_pools();
-    let sparse = cache.run(&g, 1, &q, &rows, (&pk, &pv));
+    let sparse = cache.run(&g, 1, false, &q, &rows, (&pk, &pv));
 
     let qb = g.storage_init("q", &q);
     let pkb = g.storage_init("pk", &cache.pool_k);
@@ -163,7 +163,7 @@ fn an_lsa_selection_matches_the_host_oracle() {
         let table_rows = vec![seq as u32; positions.len()];
         let live = vec![len; positions.len()];
         let rows = SparseRows::pack(&selection, &table_rows, &live).unwrap();
-        let device = cache.run(&g, 0, &q, &rows, (&pk, &pv));
+        let device = cache.run(&g, 0, false, &q, &rows, (&pk, &pv));
         let host = cache.oracle(&q, &selection, &cache.k[seq], &cache.v[seq]);
         let w = worst(&device, &host);
         assert!(w < 1e-4, "sequence {seq}: device vs host oracle maxabs {w}");
@@ -189,7 +189,7 @@ fn a_position_the_sequence_does_not_hold_is_never_read() {
     let mut rows = SparseRows::pack(&selection, &[0], &[20]).unwrap();
     rows.row_meta[2] = 12;
     let (pk, pv) = cache.f32_pools();
-    let device = cache.run(&g, 0, &q, &rows, (&pk, &pv));
+    let device = cache.run(&g, 0, false, &q, &rows, (&pk, &pv));
     let kept = Selection { width: 2, ids: vec![2, 9], lens: vec![2] };
     let host = cache.oracle(&q, &kept, &cache.k[0], &cache.v[0]);
     assert!(worst(&device, &host) < 1e-5, "the masked position was read");
@@ -210,9 +210,50 @@ fn the_bf16_pool_variant_matches_the_oracle_on_rounded_kv() {
     let q: Vec<f32> = (0..(shape.n_heads * shape.head_dim) as usize).map(|_| rng.next_gaussian() as f32).collect();
     let selection = Selection { width: 6, ids: vec![0, 1, 33, 50, 98, 99], lens: vec![6] };
     let rows = SparseRows::pack(&selection, &[0], &lens).unwrap();
-    let device = cache.run(&g, 0, &q, &rows, (&crate::half::pack_bf16(&cache.pool_k), &crate::half::pack_bf16(&cache.pool_v)));
+    let device = cache.run(&g, 0, false, &q, &rows, (&crate::half::pack_bf16(&cache.pool_k), &crate::half::pack_bf16(&cache.pool_v)));
     let round = |x: &[f32]| x.iter().map(|&f| f32::from_bits((crate::half::f32_to_bf16(f) as u32) << 16)).collect::<Vec<_>>();
     let host = cache.oracle(&q, &selection, &round(&cache.k[0]), &round(&cache.v[0]));
     let w = worst(&device, &host);
     assert!(w < 1e-4, "bf16 pools vs oracle on rounded K/V maxabs {w}");
+}
+
+/// The per-KV-head kernel agrees with the per-head kernel at the group sizes
+/// models use (1, 2, 4, 8), on ragged rows over two sequences, to float
+/// reassociation: its tiles are 16 keys, the per-head kernel's 8.
+#[test]
+fn the_per_kv_head_kernel_matches_the_per_head_kernel() {
+    for (nh, nkv) in [(16u32, 8u32), (8, 2), (4, 4), (16, 2)] {
+        let gqa = gqa_kernel(nh / nkv).unwrap();
+        let pipes: &'static [(&str, &str)] = Box::leak(vec![KERNEL, gqa].into_boxed_slice());
+        let Some(g) = barrier_gpu(pipes) else { return };
+        let shape = SparseAttention { n_heads: nh, n_kv_heads: nkv, head_dim: 64, block_size: 8, max_bt: 32 };
+        let lens = [200u32, 77];
+        let mut rng = Rng::new(data::rng::random_seed());
+        let cache = Cache::new(&mut rng, shape, &lens);
+        let rows_per_seq = 9usize;
+        let width = 40usize;
+        let mut ids = vec![-1i32; 2 * rows_per_seq * width];
+        let mut row_lens = Vec::new();
+        let (mut tables, mut live) = (Vec::new(), Vec::new());
+        for (seq, &len) in lens.iter().enumerate() {
+            for r in 0..rows_per_seq {
+                let row = seq * rows_per_seq + r;
+                let n = 1 + (r * 7) % width;
+                for (i, slot) in ids[row * width..][..n].iter_mut().enumerate() {
+                    *slot = ((i * 13 + r * 5) % len as usize) as i32;
+                }
+                row_lens.push(n as u32);
+                tables.push(seq as u32);
+                live.push(len);
+            }
+        }
+        let selection = Selection { width, ids, lens: row_lens };
+        let rows = SparseRows::pack(&selection, &tables, &live).unwrap();
+        let q: Vec<f32> = (0..rows.rows * nh * 64).map(|_| rng.next_gaussian() as f32).collect();
+        let (pk, pv) = cache.f32_pools();
+        let per_head = cache.run(&g, 0, false, &q, &rows, (&pk, &pv));
+        let per_kv_head = cache.run(&g, 1, true, &q, &rows, (&pk, &pv));
+        let w = worst(&per_kv_head, &per_head);
+        assert!(w < 1e-5, "group {}: per-KV-head vs per-head maxabs {w}", nh / nkv);
+    }
 }

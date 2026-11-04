@@ -20,8 +20,18 @@
 use crate::lsa::Selection;
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-/// The kernel, for a caller's pipeline list.
+/// The per-query-head kernel, for a caller's pipeline list.
 pub const KERNEL: (&str, &str) = ("paged_sparse_flash_decode", kernels::PAGED_SPARSE_FLASH_DECODE);
+
+/// The per-KV-head kernel specialised for `group` query heads per KV head:
+/// each staged K/V row serves the whole group, so K/V traffic falls by
+/// `group`. Same bindings and parameters as [`KERNEL`], bit-identical result.
+pub fn gqa_kernel(group: u32) -> Result<(&'static str, &'static str), String> {
+    if group == 0 {
+        return Err("sparse attention: a GQA group of 0 query heads".into());
+    }
+    kernels::template::interned("paged_sparse_flash_gqa", kernels::PAGED_SPARSE_FLASH_GQA, &[("GROUP", group)])
+}
 
 /// Widest head the kernel's register tile holds (its `HD`).
 pub const MAX_HEAD_DIM: u32 = 128;
@@ -121,14 +131,16 @@ impl SparseAttention {
         Ok(())
     }
 
-    /// Record one dispatch of `kernel` (the caller's index of [`KERNEL`] or
-    /// its bf16-pool variant) over `rows` query rows of selection width
-    /// `width`.
-    pub fn step(&self, g: &Gpu, kernel: usize, rows: u32, width: u32, b: &SparseBuffers) -> Result<Step, String> {
+    /// Record one dispatch over `rows` query rows of selection width `width`.
+    /// `kernel` is the caller's pipeline index of [`KERNEL`] (`per_kv_head`
+    /// false) or of [`gqa_kernel`] for this geometry's group (true), either
+    /// possibly a bf16-pool variant.
+    pub fn step(&self, g: &Gpu, kernel: usize, per_kv_head: bool, rows: u32, width: u32, b: &SparseBuffers) -> Result<Step, String> {
         self.check()?;
         let params = [rows, self.n_heads, self.n_kv_heads, self.head_dim, self.n_heads / self.n_kv_heads, self.block_size, self.max_bt, width];
         let bufs = [b.q, b.pool_k, b.pool_v, b.block_tables, b.sel, b.row_meta, b.ctx];
-        Ok(g.dispatch(kernel, &bufs, &params, gpu_core::Dispatch::Workgroups(rows * self.n_heads)))
+        let groups = if per_kv_head { self.n_kv_heads } else { self.n_heads };
+        Ok(g.dispatch(kernel, &bufs, &params, gpu_core::Dispatch::Workgroups(rows * groups)))
     }
 }
 
