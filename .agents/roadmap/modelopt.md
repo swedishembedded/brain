@@ -99,10 +99,15 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
 - [x] Serving a plan: qwen3's engine takes a per-leaf `TierPolicy`
       (`Engine::check_tiers` refuses a split fused group);
       `serve::tests::mixed_tiers_serve_each_linear_at_its_own_tier`.
-- [ ] A real checkpoint: Qwen3-0.6B on ARC-Easy chat records. At the uniform
-      int8 budget the only feasible plan was all-int8 (f32/bf16/int8
-      candidates), which is why the default budget is midway; the midway run
-      and serving its policy through `brain serve` are next.
+- [x] A real checkpoint: Qwen3-0.6B, 240 ARC-Easy chat records calibrating
+      and 80 held out, on a P40 (wgpu). Midway budget (int8 to bf16, 12.5
+      bits/weight): serving-engine held-out loss plan 4.6848, f32 4.6974,
+      uniform int8 4.6789, so the plan was correctly not accepted: int8 is
+      lossless on this data and qwen3 serves no format below it, leaving
+      mixed precision nothing to win without a latency limit. The searched
+      per-leaf policy serves through `brain serve --weight-format` and answers
+      chat requests. A 100-step recovery adapter raised the trainer-build loss
+      (4.683 to 4.706): the teacher measures worse than the plan here.
 - [ ] qwen35: no engine scoring path yet (`served_loss` is `None`), so its
       plans are accepted on the trainer build.
 - [x] Host codecs row-parallel (fp8 quantize of a 3072 x 1024 tensor 1.31 s
@@ -148,6 +153,11 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
 - [x] Front end: `brain::ModelPruner` / `brain prune` write a checkpoint
       directory with the base's tokenizer, measured through the serving
       engine; `--recover-steps` distills an adapter over it.
+- [x] A real checkpoint: Qwen3-0.6B at 75% MLP width (d_ff 3072 to 2304,
+      596M to 530M parameters) on the ARC-Easy split above: held-out loss
+      4.6974 to 4.7235 on the serving engine, matching the trainer's zeroed
+      estimate to 1e-5; the pruned checkpoint serves through `brain serve
+      --checkpoint` and answers chat requests.
 - [ ] Attention heads and whole layers (a qwen3 config has one head count and
       depth for every layer: both need a per-layer config to prune unevenly).
 - [ ] Recovery by full fine-tune distillation, not only an adapter.
