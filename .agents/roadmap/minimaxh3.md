@@ -272,11 +272,13 @@ port is real-weight-parity-gated.
 - ~~the Qwen3-VL layer-50 extraction call site~~ - solved: stock `transformers` `output_hidden_states=True` + generic hook-based capture (no MiniMax-H3-specific forward hook), `hidden_states[50]` is pre-final-norm (the helper's own `ValueError` guard exists specifically to keep it that way), and brain's existing `res[0]`=embed/`res[l]`=block-`l-1`-output/pre-norm convention in `qwen3::Qwen::encode_hidden` already matches this exactly - `encode_hidden(tokens, 50)` needs no off-by-one adjustment. Presentation is plain token concatenation, no chat template, vision content as inline `<|vision_start|>...<|vision_end|>` runs.
 
 ### Still open - settle before claiming the relevant phase's parity
-- [ ] `ref2va`'s full packed layout beyond the structural skeleton already
-      seen (`MiniMaxH3Ref2VAPrepareLayoutStep`'s full body, `denoise.py`'s
-      `MiniMaxH3Ref2VADenoiseStep`, the audio-reference summation-order
-      trap noted above) - read once at a research pass, not yet implemented
-      (Phase 9 deliberately deferred it - see the Phases list).
+- [x] `ref2va`'s packed layout - `pipeline::build_ref2va_packed_sequence`
+      (`[text | references | audio | video]`, one rotary clock), reference
+      normalization and encoding (`references.rs`) and the Qwen3-VL
+      presentation (`presentation.rs`, `<Picture i>`/`<Audio j>`/`<Video k>`,
+      2 fps video sampling, multi-run DeepStack) each match a tiny-config
+      diffusers golden (`minimaxh3_layout`, `minimaxh3_ref2va_references`,
+      `minimaxh3_presentation`). Not yet run on `transformer_ref/`.
 - [ ] diffusers' generic `FeedForward(activation_fn="swiglu")`'s exact
       internal gate/up split order - low priority, not MiniMax-H3-specific.
 
@@ -1124,14 +1126,13 @@ module); the arena (`Gpu::scratch_scope_in`) removed it.
   ~1-2). Real layer-50 features carry outlier channels three to four orders
   of magnitude larger (table above), so `context_embedder`'s behaviour at
   the real conditioning magnitude is still unmeasured.
-- `t2va`/`fl2va`'s denoise loop threads neither cancellation nor per-step
-  progress yet (`wan`/`ltxv` both poll `inv.cancel` per step; this one does
-  neither) - `.streaming()` on the manifest currently means "long-running"
-  only.
-- `fl2va`'s 2-keyframe TEXT conditioning (not the DiT-side conditioning
-  rows, which are unaffected) needs `qwen3vl::Qwen3Vl` to splice two images
-  into one presentation - it currently supports exactly one (see Phase 9
-  detail).
+- ~~`t2va`/`fl2va`'s denoise loop threads neither cancellation nor per-step
+  progress~~ - every task polls the request's cancel token per step and
+  reports denoise / video decode / audio decode progress.
+- ~~`fl2va`'s 2-keyframe TEXT conditioning needs `qwen3vl::Qwen3Vl` to splice
+  two images into one presentation~~ - `presentation::PresentationEncoder`
+  presents every keyframe or reference to the text tower as the reference
+  does.
 - `video_vae/` not yet downloaded; Phase 6's real-checkpoint validation
   (written, gated on `BRAIN_MINIMAXH3_DIR`) is blocked on it.
 - ~~`crate::caps::read_tensors` (the DiT loader) still uses eager
@@ -1199,10 +1200,9 @@ module); the arena (`Gpu::scratch_scope_in`) removed it.
   slowdown - worth a generic cross-check test (parse every kernel's
   `@cpu native` tag, assert a live `FastIdx`/equivalent entry exists for
   every model's own `KERNELS` table) but not written this session.
-- `ref2va` is not implemented (Phase 9's own deliberate scope cut - its
-  layout needs its own builder, not a generalization of t2va/fl2va's); the
-  DiT/scheduler/VAE machinery it would reuse is otherwise ready once
-  `transformer_ref/` finishes downloading.
+- `ref2va` runs on its own layout builder and the shared DiT/scheduler/VAE
+  machinery; the `transformer_ref/` weights it denoises with are not in the
+  store here, so it has run only at tiny config.
 - The golden-dump script Phase 1 originally named
   (`tools/goldens/minimaxh3_dump_reference.py`) never got written as one script -
   instead, three per-component dumpers now exist and are in real use

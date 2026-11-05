@@ -21,7 +21,7 @@ gate is green.
 |---|:---:|
 | `t2va` (text -> video+audio) | [ ] in progress |
 | `fl2va` (first/last-frame -> video+audio) | [ ] in progress |
-| `ref2va` (image/video/audio references -> video+audio) | [ ] in progress |
+| `ref2va` (image/video/audio references -> video+audio) | [~] implemented and golden-checked (layout, reference normalization and encoding, Qwen3-VL presentation); not yet run on the `transformer_ref/` weights |
 | Training (LoRA) | [ ] in progress |
 
 ## Getting the weights
@@ -48,6 +48,26 @@ BRAIN_MINIMAXH3_ALLOW_COMMUNITY=1 brain minimaxh3 fl2va \
 `t2va` takes the same flags without `--first_frame`/`--last_frame`. The clip
 carries the sound the same forward generated as its own track; `--out
 audio=…` also writes it as a WAV.
+
+`ref2va` takes `--references`, a comma-separated list of up to 9 images, 3
+videos and 3 soundtracks (12 in all): a WAV is a soundtrack, a PNG/JPEG/WebP
+an image, anything else a video, whose own sound is attached as
+`clip.mp4+clip.wav`. A soundtrack needs a visual reference beside it. The
+prompt refers to them as the reference pipeline labels them - `<Picture 1>`,
+`<Video 1>`, `<Audio 1>` in order of kind:
+
+```
+BRAIN_MINIMAXH3_ALLOW_COMMUNITY=1 brain minimaxh3 ref2va \
+  --prompt "the dog from <Picture 1> runs down the street from <Video 1>" \
+  --references dog.png,street.mp4+street.wav --width 704 --height 384 \
+  --num_frames 121 --steps 20 --out video=dog.mp4
+```
+
+Images are scaled to a 2048-pixel short edge and videos resampled to 24 fps
+as the reference does; each reference is VAE-encoded and packed ahead of the
+generated audio and video under the same rotary clock, and the prompt is
+encoded with the references themselves presented to Qwen3-VL. Every run
+reports per-step progress and stops at the next step boundary when cancelled.
 
 * **The text encoder is placed per prompt.** The first 50 layers of the
   Qwen3-VL language tower (~27 GB at int8) are spread over as many of the
