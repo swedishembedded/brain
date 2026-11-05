@@ -492,6 +492,27 @@ impl StreamPlan {
         StreamPlan::balanced(cost, &gpus)
     }
 
+    /// Resident placement: every layer HELD on a card for the plan's life,
+    /// split over the fewest of `cards` (`(canonical index, usable bytes)`)
+    /// that hold it ([`plan_fewest_devices`]). `None` when no combination of
+    /// them does - the caller then streams, or refuses, rather than
+    /// allocating until the driver says no.
+    pub fn fit(cost: &LayerBytes, cards: &[(usize, u64)]) -> Option<StreamPlan> {
+        plan_fewest_devices(cost, cards).map(|placed| StreamPlan { stages: placed.into_iter().map(|p| p.shard).collect() })
+    }
+
+    /// The cards `device` (the `--device` grammar, ambient when `None`) may
+    /// schedule, each with its VRAM less `reserve` - what [`Self::fit`]
+    /// places over. Empty on a CPU-only selection.
+    pub fn cards(device: Option<&str>, reserve: u64) -> Vec<(usize, u64)> {
+        let all = gpu_core::devices::gpus();
+        schedulable_gpus(device)
+            .into_iter()
+            .filter_map(|i| all.iter().find(|d| d.index as usize == i).map(|d| (i, d.identity.vram_bytes.saturating_sub(reserve))))
+            .filter(|&(_, usable)| usable > 0)
+            .collect()
+    }
+
     pub fn stages(&self) -> &[Shard] {
         &self.stages
     }
@@ -1202,6 +1223,27 @@ mod tests {
 
     fn layer_counts(shards: &[Shard]) -> Vec<usize> {
         shards.iter().map(|s| s.end - s.start).collect()
+    }
+
+    /// A resident plan holds each card to its own capacity, uses one card when
+    /// one is enough, and says so when nothing fits.
+    #[test]
+    fn a_resident_plan_fits_each_card_or_refuses() {
+        let cost = LayerBytes { per_layer: vec![10; 8], embed: 5, head: 3 };
+        let one = StreamPlan::fit(&cost, &[(1, 200), (0, 200)]).expect("fits one card");
+        assert_eq!(one.n_stages(), 1);
+        assert_eq!(one.stages()[0].gpu_index, 1, "the first card offered takes it");
+
+        let two = StreamPlan::fit(&cost, &[(0, 60), (1, 60)]).expect("fits two cards");
+        assert_eq!(two.n_stages(), 2);
+        assert_eq!(two.n_layers(), 8);
+        assert!(two.stages()[0].embed && two.stages()[1].head);
+        for (i, shard) in two.stages().iter().enumerate() {
+            assert!(cost.stage_bytes(shard.start, shard.end, i, 2) <= 60, "stage {i} over its card: {shard:?}");
+        }
+
+        assert!(StreamPlan::fit(&cost, &[(0, 40), (1, 40)]).is_none(), "88 bytes cannot fit 80");
+        assert!(StreamPlan::fit(&cost, &[]).is_none(), "no card holds nothing resident");
     }
 
     #[test]
