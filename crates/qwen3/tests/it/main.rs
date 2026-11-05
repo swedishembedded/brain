@@ -75,4 +75,5 @@ mod serve_conformance;
 mod shard_microbatch;
 mod shard_parity;
 mod slice;
+mod split_encode;
 mod step_timing;

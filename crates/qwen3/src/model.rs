@@ -3392,6 +3392,30 @@ impl Qwen {
             .collect()
     }
 
+    /// One stage of an encode split across layer shards: run this shard's
+    /// layers over the prompt `tokens` and return the stream leaving them,
+    /// `[tokens.len(), d_model]` - the next stage's `incoming`, or the hidden
+    /// state after `shard.end` layers from the last stage. The embed stage
+    /// gathers `tokens` itself and takes no `incoming`; every later stage
+    /// takes the previous stage's output. Only the prompt's own rows run and
+    /// cross the cut, exactly as [`Self::encode_hiddens`] runs them.
+    pub fn encode_stage(&self, tokens: &[u32], incoming: Option<&[f32]>) -> Vec<f32> {
+        let t_use = tokens.len() as u32;
+        assert!(t_use <= self.t && self.b == 1, "qwen encode stage sized too small");
+        assert_eq!(self.shard.embed, incoming.is_none(), "qwen encode stage: the embed stage gathers tokens, every other stage takes the previous stage's stream");
+        assert!(!self.decode_only && self.res_saved.is_none(), "qwen encode stage: needs a batched build with fp32 boundaries");
+        let rows = (t_use * self.cfg.d_model) as usize;
+        match incoming {
+            None => self.set_batch(tokens, &vec![IGNORE; t_use as usize]),
+            Some(stream) => {
+                assert_eq!(stream.len(), rows, "qwen encode stage: incoming stream is not [tokens, d_model]");
+                self.gpu.write(&self.res[self.shard.start], bytemuck::cast_slice(stream));
+            }
+        }
+        self.body_tape(1, t_use).submit(&self.gpu);
+        self.gpu.read(&self.res[self.shard.end], rows)
+    }
+
     // ---- incremental KV-cache decode (the O(T)/token twin of the O(T²) forward) ----
 
     /// The decode KV cache, allocated on first use by a training build.
