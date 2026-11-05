@@ -805,6 +805,56 @@ fn load_connector_tensors(src: &dyn TensorSource, manifest: Vec<(String, Vec<usi
     w
 }
 
+/// `context` routed through `stream`'s embeddings connector at `cfg` - the
+/// DiT's own view of a prompt - answered from `cache` when this exact
+/// context was routed before, else computed on `gpu` and stored there.
+///
+/// The connector reads nothing but the context and its own weights, so its
+/// output is fixed for a whole generation; routing it once ahead of the
+/// first forward (as a duration prediction does) is therefore free for that
+/// forward, which then hits the same entry. An adapter that corrects the
+/// connector changes those weights, and the cache is keyed on the context
+/// alone, so such a routing is neither read from nor written to it.
+#[allow(clippy::too_many_arguments)]
+pub fn routed_context(
+    gpu: &Gpu,
+    src: &dyn TensorSource,
+    cfg: &LtxDitConfig,
+    stream: Stream,
+    context: &[f32],
+    context_valid: &[f32],
+    context_len: usize,
+    cache: &GenerationCache,
+    adapter: Option<&crate::pipeline::SharedAdapter>,
+) -> Vec<f32> {
+    let connector = stream.connector();
+    let want = format!("{connector}.");
+    let adapted = adapter.is_some_and(|a| a.lock().unwrap_or_else(|e| e.into_inner()).deltas().iter().any(|d| d.key.starts_with(&want)));
+    if !adapted {
+        if let Some(out) = cache.connector_hit(connector, context, context_valid, context_len) {
+            return out;
+        }
+    }
+    // A config without the connector routes the context through unchanged
+    // and reads none of its tensors, which such a checkpoint does not carry.
+    let mut manifest = Vec::new();
+    if cfg.use_embeddings_connector {
+        push_connector(&mut manifest, connector, cfg.connector_num_learnable_registers as usize, cfg.connector_inner_dim() as usize, cfg.connector_num_layers, 4);
+    }
+    let w = load_connector_tensors(src, manifest, connector, adapter);
+    #[rustfmt::skip]
+    let (out, _) = route_context_through_connector(
+        gpu, &w, connector, cfg.use_embeddings_connector, context, context_valid, context_len as u32,
+        cfg.connector_inner_dim(), cfg.connector_num_attention_heads, cfg.connector_attention_head_dim,
+        cfg.connector_num_layers, cfg.connector_num_learnable_registers, cfg.connector_apply_gated_attention,
+        cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
+    );
+    if !adapted {
+        cache.connector_store(connector, context, context_valid, context_len, &out);
+    }
+    out
+}
+
 impl LtxDit {
     pub fn new(cfg: LtxDitConfig, weights: Tensors, device: Option<&str>) -> LtxDit {
         let shard = Shard::whole(cfg.num_layers as usize);
@@ -1492,33 +1542,13 @@ pub fn forward_q_streamed_in(session: &crate::devres::DitSession, cfg: &LtxDitCo
     // The connector's inputs (`context`, `context_valid`, `context_len`) are
     // fixed for a whole generation, so its answer is too - see this function's
     // `cache` doc. Ask the cache first; only a genuinely new context pays.
-    let connector = stream.connector();
-    let conn_hit = cache.connector_hit(connector, context, context_valid, context_len);
-    let conn_was_hit = conn_hit.is_some();
-    let connector_context = match conn_hit {
-        Some(out) => out,
-        None => {
-            let mut manifest = Vec::new();
-            push_connector(&mut manifest, connector, cfg.connector_num_learnable_registers as usize, cfg.connector_inner_dim() as usize, cfg.connector_num_layers, 4);
-            let w = load_connector_tensors(src, manifest, connector, session.adapter());
-            #[rustfmt::skip]
-            let (out, _connector_out) = route_context_through_connector(
-                &gpu, &w, connector, cfg.use_embeddings_connector, context, context_valid, context_len as u32,
-                cfg.connector_inner_dim(), cfg.connector_num_attention_heads, cfg.connector_attention_head_dim,
-                cfg.connector_num_layers, cfg.connector_num_learnable_registers, cfg.connector_apply_gated_attention,
-                cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
-            );
-            cache.connector_store(connector, context, context_valid, context_len, &out);
-            out
-        }
-    };
+    let connector_context = routed_context(&gpu, src, cfg, stream, context, context_valid, context_len, cache, session.adapter());
     gpu_core::profile::stage_time("forward_q_streamed: embeddings connector routing", s_conn);
     tracing::debug!(
         stage = "connector",
         ms = s_conn.elapsed().as_secs_f32() * 1e3,
         enabled = cfg.use_embeddings_connector,
         layers = cfg.connector_num_layers,
-        cache = if conn_was_hit { "hit" } else { "miss" },
         "host stage done"
     );
 
@@ -1795,27 +1825,8 @@ pub fn av_forward_q_streamed_in(
 
     // ---- both embeddings connectors, cached per context -------------------
     let s_conn = std::time::Instant::now();
-    let connector = |prefix: &str, ctx: &[f32], valid: &[f32], ctx_len: usize, inner: u32, heads: u32, head_dim: u32| -> Vec<f32> {
-        if let Some(out) = cache.connector_hit(prefix, ctx, valid, ctx_len) {
-            return out;
-        }
-        let w = load_connector_tensors(src, av_dit_tensor_manifest(cfg), prefix, session.adapter());
-        #[rustfmt::skip]
-        let (out, _) = route_context_through_connector(
-            &gpu, &w, prefix, vcfg.use_embeddings_connector, ctx, valid, ctx_len as u32,
-            inner, heads, head_dim,
-            vcfg.connector_num_layers, vcfg.connector_num_learnable_registers, vcfg.connector_apply_gated_attention,
-            vcfg.connector_norm_output, vcfg.positional_embedding_theta, &vcfg.connector_positional_embedding_max_pos, vcfg.norm_eps,
-        );
-        cache.connector_store(prefix, ctx, valid, ctx_len, &out);
-        out
-    };
-    #[rustfmt::skip]
-    let v_ctx = connector("video_embeddings_connector", step.v_context, step.v_context_valid, step.v_context_len,
-        vcfg.connector_inner_dim(), vcfg.connector_num_attention_heads, vcfg.connector_attention_head_dim);
-    #[rustfmt::skip]
-    let a_ctx = connector("audio_embeddings_connector", step.a_context, step.a_context_valid, step.a_context_len,
-        acfg.connector_inner_dim(), acfg.connector_num_attention_heads, acfg.connector_attention_head_dim);
+    let v_ctx = routed_context(&gpu, src, vcfg, Stream::Video, step.v_context, step.v_context_valid, step.v_context_len, cache, session.adapter());
+    let a_ctx = routed_context(&gpu, src, &cfg.audio_stream(), Stream::Audio, step.a_context, step.a_context_valid, step.a_context_len, cache, session.adapter());
     gpu_core::profile::stage_time("av_forward_q_streamed: both embeddings connectors", s_conn);
 
     let mut t_block = crate::block::BlockTimings::default();

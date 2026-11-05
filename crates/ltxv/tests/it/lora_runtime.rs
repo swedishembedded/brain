@@ -345,12 +345,16 @@ fn a_connector_correction_reaches_the_connector_read_on_demand() {
     let spec = AdapterSpec { path: path.to_string_lossy().into_owned(), scale: 4.0 };
     let run = Run::new(&cfg);
     let ctx_valid = vec![1.0f32; run.context_len];
-    let forward = |s: &DitSession| -> Vec<f32> {
-        forward_q_streamed_in(s, &cfg, &w, &head, QTier::Int8, &run.step(&run.latent, &ctx_valid), &GenerationCache::default())
-    };
+    // ONE cache for every forward, as one checkpoint's store is shared
+    // across generations: the connector routing it holds is keyed on the
+    // context alone, so an adapted routing must neither be served from nor
+    // left in it.
+    let cache = GenerationCache::default();
+    let forward = |s: &DitSession| -> Vec<f32> { forward_q_streamed_in(s, &cfg, &w, &head, QTier::Int8, &run.step(&run.latent, &ctx_valid), &cache) };
     let base = forward(&DitSession::transient(None));
     let adapter: ltxv::pipeline::SharedAdapter = std::sync::Arc::new(std::sync::Mutex::new(runtime_adapter(std::slice::from_ref(&spec)).unwrap()));
     let adapted = forward(&DitSession::transient(None).with_adapter(Some(adapter)));
+    assert_eq!(forward(&DitSession::transient(None)), base, "the adapted routing must not have replaced the base one in the shared cache");
 
     let base32 = run.fp32(&LtxDit::new(cfg, w.clone(), None));
     let adapted32 = run.fp32(&LtxDit::new(cfg, w.clone(), None).with_adapter(runtime_adapter(std::slice::from_ref(&spec)).unwrap()).unwrap());
