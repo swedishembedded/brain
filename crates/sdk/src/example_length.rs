@@ -68,8 +68,9 @@ impl ExampleMeter {
         let asked = Asked { tok: &*self.tok, tmpl: &self.tmpl, no_think: self.no_think.as_deref(), render: self.render, pack: self.pack, images: &*self.images };
         let mut longest = 0;
         for example in asked.examples_of(&sample).map_err(invalid)? {
-            let (ids, _) = example.encode_with(&*self.tok, &self.tmpl, self.render).map_err(|e| invalid(e.to_string()))?;
-            longest = longest.max(ids.len());
+            let encoded = example.encode_rollout(&*self.tok, &self.tmpl, self.render).map_err(|e| invalid(e.to_string()))?;
+            // A teacher's rendering is scored in a row of its own, so the row has to hold it too.
+            longest = longest.max(encoded.ids.len()).max(encoded.teacher.map_or(0, |(ids, _)| ids.len()));
         }
         Ok(longest)
     }
@@ -103,6 +104,16 @@ mod tests {
         let chars: String = (32u8..127).map(char::from).chain(['\n']).collect();
         let tok = data::tokenizer::CharTokenizer::from_corpus(&chars);
         ExampleMeter::from_parts(Box::new(tok), tmpl, Box::new(Pictures), thinking, pack)
+    }
+
+    /// A record with a teacher context is measured by the longer of its two renderings: the row holds the teacher's too.
+    #[test]
+    fn a_teacher_context_counts_toward_the_length_of_a_record() {
+        let plain = r#"{"messages":[{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true}]}"#;
+        let taught = r#"{"teacher_context":{"at":1,"messages":[{"role":"user","content":"the hidden check wants a"}]},"messages":[{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true}]}"#;
+        let m = meter(true, false);
+        let (alone, with_teacher) = (m.tokens(plain).unwrap(), m.tokens(taught).unwrap());
+        assert!(with_teacher > alone + "the hidden check wants a".len(), "{alone} -> {with_teacher}");
     }
 
     /// The meter's length is the longest example `Asked` yields, encoded: the
