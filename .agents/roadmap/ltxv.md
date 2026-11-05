@@ -84,8 +84,8 @@ this port:
 - [ ] **Audio to video past one window** - `audio_source` is refused for a
       multi-window clip; the frozen soundtrack has to be sliced per window the
       way the carried audio prefix is.
-- [ ] **HQ preset** - `LTX_2_3_HQ_PARAMS` (res_2s, 15 steps, STG off, rescale
-      0.45/1.0) as a `--guidance-preset`.
+- [x] **HQ preset** - `LTX_2_3_HQ_PARAMS`'s guidance (STG off, rescale
+      0.45/1.0) as `--guidance-preset hq`, run with `--sampler res2s`.
 
 - [x] **A trained adapter reaches inference** - closed in Phase 41 (runtime
       corrections beside the int8 weights). The original finding: both

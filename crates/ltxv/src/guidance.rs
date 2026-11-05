@@ -154,6 +154,14 @@ impl Guidance {
         Guidance { video: GuiderParams::reference_video(), audio: GuiderParams::reference_audio() }
     }
 
+    /// The reference's high-quality preset (`LTX_2_3_HQ_PARAMS`, which its
+    /// res_2s pipeline runs): CFG 3 video / 7 audio and modality guidance 3
+    /// as [`Self::reference`], no STG, rescale 0.45 video / 1.0 audio.
+    pub fn hq() -> Guidance {
+        let base = GuiderParams { stg: 0.0, stg_blocks: Vec::new(), ..GuiderParams::reference_video() };
+        Guidance { video: GuiderParams { rescale: 0.45, ..base.clone() }, audio: GuiderParams { cfg: 7.0, rescale: 1.0, ..base } }
+    }
+
     /// The passes one step runs, in order, beyond the conditional one -
     /// `audio` when the audio stream is generated alongside.
     pub fn passes(&self, audio: bool) -> Vec<Pass> {
@@ -173,12 +181,14 @@ impl Guidance {
     }
 
     /// A named starting point: `none` (one conditional forward per step - the
-    /// distilled checkpoint) or `reference` ([`Self::reference`]).
+    /// distilled checkpoint), `reference` ([`Self::reference`]) or `hq`
+    /// ([`Self::hq`]).
     pub fn preset(name: &str) -> Result<Guidance, String> {
         match name {
             "none" => Ok(Guidance::default()),
             "reference" => Ok(Guidance::reference()),
-            other => Err(format!("unknown guidance preset '{other}' (none, reference)")),
+            "hq" => Ok(Guidance::hq()),
+            other => Err(format!("unknown guidance preset '{other}' (none, reference, hq)")),
         }
     }
 
@@ -272,6 +282,16 @@ mod tests {
         assert!(close(&masked, &OUT_MASKED), "{masked:?}");
         let whole = params().combine(&COND, Some(&UNCOND), Some(&PTB), Some(&MOD), None, 3);
         assert!(close(&whole, &OUT), "{whole:?}");
+    }
+
+    /// `LTX_2_3_HQ_PARAMS`: no STG pass, so an hq step runs the negative
+    /// prompt and the isolated-modality pass only.
+    #[test]
+    fn the_hq_preset_is_the_references() {
+        let hq = Guidance::preset("hq").unwrap();
+        assert_eq!((hq.video.cfg, hq.video.stg, hq.video.rescale, hq.video.modality), (3.0, 0.0, 0.45, 3.0));
+        assert_eq!((hq.audio.cfg, hq.audio.stg, hq.audio.rescale, hq.audio.modality), (7.0, 0.0, 1.0, 3.0));
+        assert_eq!(hq.passes(true).len(), 2);
     }
 
     #[test]

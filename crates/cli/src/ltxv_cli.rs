@@ -34,10 +34,13 @@ use ltxv::spec::LtxvSpec;
 macro_rules! guidance_help {
     () => {
         "  --guidance-preset <P>     none (one conditional forward per step - the
-                            distilled checkpoint; the default) or reference (the
+                            distilled checkpoint; the default), reference (the
                             reference pipeline's non-distilled guidance: CFG 3
                             video / 7 audio, STG 1 on block 28, rescale 0.7,
-                            modality guidance 3). The flags below override it.
+                            modality guidance 3) or hq (its high-quality
+                            preset: no STG, rescale 0.45 video / 1.0 audio;
+                            pair with --sampler res2s). The flags below
+                            override it.
   --guidance <G>            classifier-free guidance on both streams (1 = off)
   --audio-guidance <G>      classifier-free guidance on the audio stream
   --stg <S>                 spatio-temporal guidance: self-attention bypassed in

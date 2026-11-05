@@ -641,7 +641,7 @@ fn sampler_from(inv: &Invocation) -> Result<(Sampler, f64), String> {
 /// conditional forward per step - what the distilled checkpoint denoises with.
 fn guidance_params() -> Vec<ParamSpec> {
     vec![
-        ParamSpec::new("guidance_preset", ParamType::Enum(vec!["none".into(), "reference".into()]), "starting guidance: none (one conditional forward per step - the distilled checkpoint) or reference (the reference pipeline's non-distilled guidance: CFG 3 video / 7 audio, STG 1 on block 28, rescale 0.7, modality guidance 3)").default(json!("none")),
+        ParamSpec::new("guidance_preset", ParamType::Enum(vec!["none".into(), "reference".into(), "hq".into()]), "starting guidance: none (one conditional forward per step - the distilled checkpoint), reference (the reference pipeline's non-distilled guidance: CFG 3 video / 7 audio, STG 1 on block 28, rescale 0.7, modality guidance 3) or hq (its high-quality res_2s preset: no STG, rescale 0.45 video / 1.0 audio; pair with sampler res2s)").default(json!("none")),
         ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance scale on both streams; 1 is off (overrides the preset)"),
         ParamSpec::new("audio_guidance", ParamType::Float, "classifier-free guidance scale on the audio stream alone (overrides guidance)"),
         ParamSpec::new("stg", ParamType::Float, "spatio-temporal guidance scale (self-attention bypassed in stg_blocks); 0 is off"),

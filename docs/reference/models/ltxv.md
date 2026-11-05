@@ -123,7 +123,9 @@ checkpoint; the distilled one has a fixed schedule.
 The distilled checkpoint denoises with one conditional forward per step,
 which is the default. `--guidance-preset reference` selects the reference
 pipeline's non-distilled guidance (CFG 3 video / 7 audio, STG 1 on block 28,
-rescale 0.7, isolated-modality guidance 3), and each term has its own flag
+rescale 0.7, isolated-modality guidance 3), `--guidance-preset hq` its
+high-quality preset (no STG, rescale 0.45 video / 1.0 audio, run with
+`--sampler res2s`), and each term has its own flag
 per stream (`--guidance`, `--stg`, `--stg-blocks`, `--rescale`,
 `--modality-guidance`, and their `--audio-*` counterparts). The terms combine
 on the x0 estimate exactly as `MultiModalGuider` does: STG bypasses
