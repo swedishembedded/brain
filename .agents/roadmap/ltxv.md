@@ -55,6 +55,38 @@ this port:
 
 ## Not yet done
 
+- [x] **Reference feature surface** - multimodal guidance (`crate::guidance`:
+      CFG/STG/rescale/isolated modality per stream, perturbations threaded
+      through every DiT forward), the res_2s sampler (`pipeline::res2s_loop`
+      over the shared `GuidedModel::x0`), text to audio (the audio stream as a
+      single-stream DiT, `LtxAvDitConfig::audio_stream`), audio to video
+      (`GenOpts::audio_source`), retakes and video to audio
+      (`MaskedOpts::window`/`regenerate_*`), extension (`pipeline::extend`),
+      the duration head driving an unnamed clip length (`predict_frames`),
+      real-checkpoint defaults (`resolve_defaults`), and `v2v`/`extend`/
+      `upscale` capability actions with video input blobs.
+- [ ] **GPU gates written but not yet run** - `av_dit_parity::the_audio_stream_
+      alone_is_the_joint_forward_with_the_cross_modal_attention_cut` (bit
+      equality), `lora_runtime`'s shared-cache connector adapter check, the
+      perturbation int8 test, and the precision of the two-level int8
+      activation quantization (`quant_residual.wgsl`) against single-level,
+      per block and end to end, with its speed cost.
+- [ ] **Duration head on real weights** - the head's parity test and the
+      prediction path exist; the weights (`model_patches/ltx-2.5-duration-
+      head-bf16.safetensors`) are not in the store here, so no prediction has
+      run end to end.
+- [ ] **Real-weight DFR** - `generate_dfr` still builds the tiny DiT and a
+      stub context; the reference's DFR runs the real checkpoint with its
+      detailing IC-LoRA (`DETAILING_LORA_STRENGTH`) in stage 2 and tiled
+      temporal rounds.
+- [ ] **IC-LoRA attention mask** - reference tokens need a per-key weight in
+      the flash attention kernel.
+- [ ] **Audio to video past one window** - `audio_source` is refused for a
+      multi-window clip; the frozen soundtrack has to be sliced per window the
+      way the carried audio prefix is.
+- [ ] **HQ preset** - `LTX_2_3_HQ_PARAMS` (res_2s, 15 steps, STG off, rescale
+      0.45/1.0) as a `--guidance-preset`.
+
 - [x] **A trained adapter reaches inference** - closed in Phase 41 (runtime
       corrections beside the int8 weights). The original finding: both
       `lora::LoraAdapter::fold_into_tensors` and its A/V twin in `av_lora.rs`
