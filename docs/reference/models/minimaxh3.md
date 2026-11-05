@@ -28,34 +28,49 @@ gate is green.
 
 **Weights are never auto-fetched.** `minimaxh3` has no `default_ref` in
 `arch::ARCHS` - the same deliberate omission `supir`/`fincast` use, here for
-a different reason (see Licensing below). Point brain at a local checkout
-you obtained yourself:
+a different reason (see Licensing below). Put a checkout you obtained
+yourself in the model store, laid out as the release ships it: the root
+`MiniMaxH3ModularPipeline` (`model_index.json` beside `transformer/`, `vae/`,
+`audio_vae/`, `text_encoder/` and `tokenizer/`). `brain minimaxh3` finds every
+component from that root; `--dit`, `--video-vae`, `--vocoder`,
+`--text-encoder` and `--tokenizer` name one outright. The served adapter
+reads `BRAIN_MINIMAXH3_DIR`, the same root.
+
+## Running it
 
 ```
-BRAIN_MINIMAXH3_DIR=/path/to/MiniMax-H3   # root of the flat component layout
+BRAIN_MINIMAXH3_ALLOW_COMMUNITY=1 brain minimaxh3 fl2va \
+  --prompt "a red kayak plunges through whitewater rapids, spray everywhere" \
+  --first_frame still.png --width 704 --height 384 --num_frames 121 \
+  --steps 20 --out video=kayak.mp4
 ```
 
-The layout this port targets is the repo's root `MiniMaxH3ModularPipeline`
-one: `transformer/`, `vae/`, `audio_vae/`, `text_encoder/`, `tokenizer/`
-component directories directly under the root (a legacy `FL2VA/`-partitioned
-tree, where each component lived under a task partition, also exists - the
-importers accept its `model.safetensors` weight-file name alongside the root
-layout's `diffusion_pytorch_model.safetensors`, but the fixed sub-paths
-`minimaxh3::caps::Paths::resolve` builds assume the flat root).
+`t2va` takes the same flags without `--first_frame`/`--last_frame`. The clip
+carries the sound the same forward generated as its own track; `--out
+audio=…` also writes it as a WAV.
+
+* **The text encoder is placed per prompt.** The first 50 layers of the
+  Qwen3-VL language tower (~27 GB at int8) are spread over as many of the
+  `--device` cards as hold them, run once, and dropped before the DiT loads.
+  A selection that cannot hold them is refused, naming the bytes.
+* **The DiT is held resident at int8 when the cards hold it**, with the
+  request's forward workspace free on each (~25 GB of packed linears and
+  norms, split over two cards), so every step reads weights already on the
+  cards. Otherwise it streams one block at a time at fp32, which any card
+  holds but which reads the whole checkpoint every step. On two P40s with
+  21.9 GiB free each, 704x384 x 121 frames (~11k packed rows) holds resident
+  and peaks at ~21.9 GB per card; 768x448 (~13.6k rows) does not - its first
+  step needs ~10.9 GB of workspace beside ~12.5 GB of weights per card.
 
 ## Hardware and limits
 
-2xTesla P40 (24GB each) + 184GB RAM is what this port targets. Pascal has no
-bf16 compute and brain's loader demotes BF16->F32 on read, so the 66GB bf16
-checkpoint is 132GB of fp32-equivalent bytes - too large to hold resident at
-fp32. The real shard header shows `adaln_proj` alone is 260M params/block x
-50 blocks = 13.0B of the 33B total; folding that into small precomputed
-per-(step,modality) modulation tables (the `precompute-adaln` tool, once it
-lands) turns the DiT into a ~19.3B backbone that fits fully resident at int8
-(~19GB) across both cards. The Qwen3-VL text encoder is a separate
-~33B-class model and cannot be co-resident with the DiT - generation runs in
-sequential phases (encode -> free -> denoise -> free -> decode), the same
-pattern `wan`'s pipeline already uses.
+2xTesla P40 (24GB each) + 184GB RAM is what this port targets. The 66GB
+bf16 checkpoint is 132GB at fp32, too large to hold resident; at int8 the
+DiT's linears sit across both cards. Of the 33B parameters, 13.0B are the
+per-block `adaln_proj` projections, which never load as weights: each step's
+modulation rows are projected once per distinct timestep and cached. The Qwen3-VL text encoder is a
+separate ~33B-class model and is never co-resident with the DiT: generation
+runs in sequential phases (encode -> free -> denoise -> free -> decode).
 
 License: **MiniMax H3 Community License Agreement** - a territorial
 carve-out (the ordinary grant excludes the EU, UK, South Korea and the US;

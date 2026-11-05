@@ -857,7 +857,89 @@ different mechanism (`ltxv`/`minimaxmusic3`'s `devplan` CFG-split shape) from
 the layer sharding done here. Neither is wired; the DiT was the memory-hungry,
 user-visible half and went first.
 
+## Phase 13 detail: running from the store, a two-card text tower, an int8 resident DiT
+
+What a real `brain minimaxh3 fl2va` run needed, each fixed in its own layer:
+
+- **Resolution.** The released root is a `PipelineDir` (`model_index.json`,
+  `MiniMaxH3ModularPipeline`) whose `transformer/` and `vae/` are loose
+  shards: block-prefixed DiT names, and the video VAE's discriminating
+  tensors in different shards. `H3Spec` now classifies the root itself for
+  every role (`Confidence::Recorded`) and `Paths::component` maps it to the
+  fixed subfolder. Qwen3-VL keeps `hidden_size`/`vocab_size` under
+  `text_config` (`modelstore::resolve::language_config_field`), and
+  `context_embedder.weight` is `[hidden, text_dim]` - validate read dim 0.
+- **The CLI route.** `minimaxh3` was served but not in `ARCH_TO_MODEL`.
+- **Direct provider.** `t2va` loaded the DiT eagerly at fp32 (~132 GB);
+  `fl2va` refused. Both run `caps::generate_on`; keyframes are loaded in
+  `caps::encode_keyframes`.
+- **Text encoder.** 50 int8 layers of the 32B tower are ~27 GB: on one P40
+  it OOMed at 23.8 GB requested. `qwen3vl::TextTower` places the language
+  tower over the fewest cards that hold it (`model::shard::plan_fewest_devices`)
+  and chains `qwen3::Qwen::encode_stage`; built per prompt at the prompt's
+  own length, dropped before the DiT loads. It needs both cards.
+- **Resident int8 DiT.** Linears are `model::ops::Weight`s through `Ops`;
+  `pipeline::generate` holds the DiT resident at `RESIDENT_TIER` (int8) when
+  `StreamPlan::fit` places it with the request's workspace free, and streams
+  at fp32 otherwise. Streamed and resident share `forward_core`.
+
+Measured, one real-shape block (`dit_attn_vram 10752`, Tesla P40, linears at
+random values - the cost does not depend on them):
+
+| tier | wall | device | GEMM | attention |
+|---|---:|---:|---:|---:|
+| fp32 (streamed path's arithmetic) | 3.61 s | 2.89 s | `matmul_reg2` 1989 ms (~4.2 TFLOP/s) | `flash_attn_bidir_reg2` 866 ms |
+| int8 | 1.99 s | 1.60 s | `matmul_i8_dyn` 728 ms (~11.4 TOPS) | 830 ms |
+| int8, per-block scratch arena | 1.64 s | 1.60 s | | |
+
+The 0.43 s/block wall-minus-device gap was the driver allocating each op's
+fresh multi-hundred-MB buffer (94% of host samples in the NVIDIA kernel
+module); the arena (`Gpu::scratch_scope_in`) removed it.
+
 ## Recorded gaps (kept current)
+
+- `matmul_i8_dyn` runs at 51-54% of the measured int8 roof at H3's shapes
+  (`qwen_bench gemm8 10752 5376 7168`: 11.7 TOPS); WGSL's `dot4I8Packed`
+  lowers to DP4A plus a separate add, which bounds it near half the DP4A
+  peak. A faster int8 prefill GEMM is a new candidate through the provider
+  seam, not an H3 path.
+- `Ops` binds `matmul_i8_dyn`'s default 128x128 tile at every shape. At
+  H3's (10752 rows, gpu1, synthetic data) the `TN=4` 128x64 tile is faster
+  at three of four: qkv `[5376->7168]` 77.9 -> 57.3 ms, fc1 `[5376->14336]`
+  145.3 -> 113.4 ms, to_out `[7168->5376]` 73.5 -> 61.4 ms; it loses at fc2
+  `[14336->5376]` (147.9 -> 162.6 ms), and 64x128 loses everywhere. The win
+  is per shape, so it belongs in `Ops` as a measured candidate
+  (`backend_api::select::AutoTuner`), not a constant here; `qwen3::serve`
+  fixes `TN` in its own engine today.
+- `flash_attn_bidir_reg2` is now the largest kernel of an int8 block (~52%
+  of device time) at ~3.9 TFLOP/s, about a third of the fp32 peak. It is
+  the fastest registered rung at H3's shape (10752 rows, 56x128): `reg`
+  1368 ms, `split` 1638 ms against its 830 ms, and the one-row `bidir` rung
+  does not finish within the 30 s device wait - so the static choice is
+  right and a faster attention is a new kernel.
+- `adaln_proj` (13.0B params) never loads as weights: modulation rows are
+  projected once per distinct timestep and cached (`adaln::AdalnCache`).
+- **A real clip, end to end** (`fl2va`, 704x384 x 121 frames, 20 steps, two
+  P40s, a warm page cache): 55.7 min wall, 17.3 GB peak RSS. Per card the
+  denoise is ~815 s of device time: `flash_attn_bidir_reg2` 51%,
+  `matmul_i8_dyn` 44%. The video VAE decode was 786 s of device time, 87% of
+  it the materialized attention trio - the decoder now runs the DiT's one
+  `block::attention`, which takes the flash family on a GPU.
+- **Placement had to see real free memory.** `StreamPlan::cards` budgeted a
+  card at its total size; it now reads `gpu_core::capacity`. At 768x448
+  (~13.6k rows) a card held ~12.5 GB of int8 weights and the first step
+  needed ~10.9 GB more against 21.9 GiB free, and the parity taps cost five
+  full-sequence readbacks per step - they are read only by
+  `forward_with_taps` now, and `forward_workspace_bytes` counts the stage's
+  packed sequence and residuals. 768x448 still does not hold resident: the
+  per-block scratch arena issues every buffer of a block its own slot
+  (`gpu_core::scratch`'s replay contract), so a block's peak is the SUM of
+  its intermediates (~7.7 GB at 13.3k rows), not the larger of its
+  attention and FFN phases (about half). Liveness-aware slot reuse inside
+  one scope is the change that would admit it.
+- The residency adapter places its DiT on its ONE scheduled device; an int8
+  DiT with a 10k-row workspace does not fit one 24 GB card, so resident
+  serving refuses on this box while the direct path places over both.
 
 - ~~The DiT's GPU path dispatches the untiled `matmul.wgsl` and therefore
   measures ~20x slower than the optimized CPU path on a P40~~ - fixed:
@@ -865,9 +947,8 @@ user-visible half and went first.
   (the same seam ~15 other model crates already use), which selects
   `matmul_reg3` for this crate's large/wide shapes - see the GPU-placement
   detail above for the measured before/after. `BRAIN_DEVICE=vulkan` is no
-  longer a pessimization for the matmul family; `dit_roofline`'s own probe
-  still needs widening to exercise the fix at H3's exact shapes (it
-  currently measures only the pre-fix naive baseline).
+  longer a pessimization for the matmul family. The linears now go through
+  `model::ops` (phase 13), which owns the selection.
 - Eight of the thirteen kernels `crate::block` dispatches still run as
   Cranelift-JIT scalar code on CPU (`rmsnorm_eps`, `embed`, `row_scatter`,
   `bias_add`, `rope2d_partial`, `mul`, `add2`, `gate_row`). Together they are
