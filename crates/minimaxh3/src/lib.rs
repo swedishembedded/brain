@@ -55,6 +55,7 @@
 //! capability it names is real-weight-complete.
 
 pub mod adaln;
+pub mod audio_encoder;
 pub mod block;
 pub mod caps;
 pub mod config;

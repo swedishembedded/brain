@@ -72,7 +72,7 @@ const K_CONV1D: usize = 0;
 const K_CONVTR1D: usize = 1;
 const K_SNAKE_BETA: usize = 2;
 const K_AXPY: usize = 3;
-const K_ADD2: usize = 4;
+pub(crate) const K_ADD2: usize = 4;
 const K_PAD1D_EDGE: usize = 5;
 const K_ADD_CHAN_INPLACE: usize = 6;
 const K_IM2COL1D_AT: usize = 7;
@@ -81,8 +81,10 @@ const K_MATMUL_DX_REG: usize = 9;
 const K_MATMUL_DW_REG_SPLITK: usize = 10;
 const K_NLC_BIAS_NCHW: usize = 11;
 const K_COL2IM1D_BIAS: usize = 12;
+/// The DAC encoder's single-parameter Snake ([`crate::audio_encoder`]).
+pub(crate) const K_SNAKE1D: usize = 13;
 
-const KERNELS: [(&str, &str); 13] = [
+const KERNELS: [(&str, &str); 14] = [
     ("conv1d", kernels::CONV1D),
     ("convtr1d", kernels::CONVTR1D),
     ("snake_beta", kernels::SNAKE_BETA),
@@ -96,6 +98,7 @@ const KERNELS: [(&str, &str); 13] = [
     ("matmul_dw_reg_splitk", kernels::MATMUL_DW_REG_SPLITK),
     ("nlc_bias_nchw", kernels::NLC_BIAS_NCHW),
     ("col2im1d_bias", kernels::COL2IM1D_BIAS),
+    ("snake1d", kernels::SNAKE1D),
 ];
 
 /// `SnakeBeta`'s fixed `eps` (`no_div_by_zero`, never a config field).
@@ -221,7 +224,7 @@ impl VocoderConfig {
 
 /// The direct kernels, used for the depthwise antialias convolutions and as
 /// the selector's own structural fallback inside [`gemm_kernels`].
-fn kernels_id() -> ConvKernels {
+pub(crate) fn kernels_id() -> ConvKernels {
     ConvKernels { fwd: K_CONV1D, dx: 0, dw: 0 }
 }
 fn kernels_id_tr() -> ConvKernels {
@@ -229,7 +232,7 @@ fn kernels_id_tr() -> ConvKernels {
 }
 
 /// The selected-lowering pipeline set for the `groups == 1` convolutions.
-fn gemm_kernels(direct: ConvKernels) -> ConvGemmKernels {
+pub(crate) fn gemm_kernels(direct: ConvKernels) -> ConvGemmKernels {
     ConvGemmKernels {
         direct,
         bias: K_ADD_CHAN_INPLACE,
@@ -249,10 +252,10 @@ fn weight<'a>(t: &'a Tensors, name: &str) -> &'a [f32] {
 /// One synthesis run's device context: the handle, the weights, the shared
 /// GEMM scratch and the antialias-filter cache. Same shape as the existing
 /// in-workspace BigVGAN precedent this file reparameterizes.
-struct Ctx<'a> {
-    gpu: Gpu,
+pub(crate) struct Ctx<'a> {
+    pub(crate) gpu: Gpu,
     t: &'a Tensors,
-    scratch: ConvScratch,
+    pub(crate) scratch: ConvScratch,
     /// `(channels, the filter's 12 taps as bits) -> the depthwise weight`.
     filters: HashMap<(u32, Vec<u32>), DeviceBuffer>,
     /// A zeroed `[cout]` bias for the one convolution the checkpoint gives no
@@ -261,7 +264,7 @@ struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    fn new(device: Option<&str>, t: &'a Tensors) -> Ctx<'a> {
+    pub(crate) fn new(device: Option<&str>, t: &'a Tensors) -> Ctx<'a> {
         Ctx { gpu: Gpu::open(device, &KERNELS), t, scratch: ConvScratch::new(), filters: HashMap::new(), zero_bias: HashMap::new() }
     }
 
@@ -269,7 +272,7 @@ impl<'a> Ctx<'a> {
         weight(self.t, name)
     }
 
-    fn upload(&self, name: &str) -> DeviceBuffer {
+    pub(crate) fn upload(&self, name: &str) -> DeviceBuffer {
         self.gpu.storage_init(name, self.w(name))
     }
 
