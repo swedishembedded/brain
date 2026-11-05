@@ -329,6 +329,10 @@ are VAE-encoded at the geometry the adapter declares in its own metadata
 (`reference_downscale_factor`, `reference_temporal_scale_factor`) and appended
 as clean tokens at their own positions, which the adapter learned to attend
 across. `--reference-strength` (default 1.0) sets how strongly they are held.
+`--reference-attention-strength` (default 1.0) sets how strongly the reference
+and the generated clip attend to each other - 0 cuts the reference off - and
+`--reference-attention-mask <video>` sets that weight per region and frame from
+a grayscale video (white attends, black does not), scaled by the strength.
 
 ```bash
 brain --device gpu0 ltxv t2v \

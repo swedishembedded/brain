@@ -99,6 +99,7 @@ fn run(session: &DitSession, cfg: &LtxDitConfig, src: &(dyn checkpoint::TensorSo
         t: i.t,
         context_valid: &i.context_valid,
         perturbations: &ltxv::block::NO_PERTURBATIONS,
+        reference_attention: None,
     };
     forward_q_streamed_in(session, cfg, src, head, QTier::Int8, &step, cache)
 }

@@ -22,7 +22,7 @@
 
 use ltxv::refcond::{
     append_reference_video_conditioning, dense_attention_mask, downsample_mask_to_latent,
-    reference_pixel_extent, reference_video_positions,
+    reference_attention, reference_pixel_extent, reference_video_positions,
 };
 
 // ------------------------------------------------------------------ metrics
@@ -248,4 +248,27 @@ fn ltxv_refcond_pixel_extent_follows_the_causal_vae() {
     assert_eq!(reference_pixel_extent((1, 4, 4)), (1, 128, 128), "a single latent frame covers ONE pixel frame (causal VAE)");
     assert_eq!(reference_pixel_extent((2, 4, 4)), (9, 128, 128), "each later latent frame covers 8");
     assert_eq!(reference_pixel_extent((3, 8, 4)), (17, 256, 128));
+}
+
+/// The per-token form the attention kernels add is the reference's own bias
+/// over the dense mask (`_prepare_self_attention_mask`: `ln w` where `w > 0`,
+/// `finfo.min` elsewhere), entry for entry: summed across the two groups,
+/// nothing inside either.
+#[test]
+fn the_factored_attention_bias_is_the_reference_log_of_the_dense_mask() {
+    let base_t = 5;
+    let cross_mask = [1.0, 0.5, 0.0, 0.25, 1e-3, 0.0];
+    let total = base_t + cross_mask.len();
+    let dense = dense_attention_mask(base_t, &cross_mask);
+    let bias = reference_attention(base_t, base_t, &cross_mask);
+    assert_eq!(bias.split, base_t);
+    for q in 0..total {
+        for k in 0..total {
+            let w = dense[q * total + k];
+            let want = if w > 0.0 { w.max(f32::MIN_POSITIVE).ln() } else { f32::MIN };
+            let crosses = (q < bias.split) != (k < bias.split);
+            let got = if crosses { bias.log_weights[q] + bias.log_weights[k] } else { 0.0 };
+            assert_eq!(got.to_bits(), want.to_bits(), "pair ({q}, {k}): mask {w}");
+        }
+    }
 }

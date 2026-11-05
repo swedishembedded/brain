@@ -353,6 +353,14 @@ Adapters:
                              the IC-LoRA trained to read it; one window only.
   --reference-strength <s>   how strongly the reference is held, 0..1
                              (default 1.0: perfectly clean)
+  --reference-attention-strength <s>
+                             how strongly the reference and the clip attend
+                             to each other, 0..1 (default 1.0; 0 cuts the
+                             reference off)
+  --reference-attention-mask <path>
+                             a grayscale mask video setting that weight per
+                             region and frame (white attends, black does not),
+                             scaled by --reference-attention-strength
   --stage-2-ic-lora          keep the adapters and the reference on a two-stage
                              run's refinement too (default: stage 2 runs the
                              bare checkpoint, as the reference recipe does)
@@ -759,6 +767,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let mut scaled = 0usize;
     let mut reference_path: Option<String> = None;
     let mut reference_strength = 1.0f32;
+    let mut reference_attention_strength = 1.0f32;
+    let mut reference_attention_mask: Option<String> = None;
     let mut context_frames = ltxv::longform::CONTEXT_FRAMES;
     let mut prompt: Option<String> = None;
     let mut scene_specs: Vec<String> = Vec::new();
@@ -829,6 +839,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--lora-scale" => crate::args::attach_lora_scale(&mut o.adapters, &mut scaled, flt(i, "--lora-scale")?)?,
             "--reference-video" => reference_path = Some(need(i)?.clone()),
             "--reference-strength" => reference_strength = flt(i, "--reference-strength")?,
+            "--reference-attention-strength" => reference_attention_strength = flt(i, "--reference-attention-strength")?,
+            "--reference-attention-mask" => reference_attention_mask = Some(need(i)?.clone()),
             "--stage-2-ic-lora" => {
                 o.refine_in_context = true;
                 i += 1;
@@ -880,7 +892,13 @@ fn t2v(args: &[String]) -> Result<(), String> {
         if !(0.0..=1.0).contains(&reference_strength) {
             return Err(format!("--reference-strength {reference_strength} is outside [0, 1]"));
         }
-        o.reference = Some(ltxv::pipeline::VideoReference { clip: read_clip(path, o.fps)?, strength: reference_strength });
+        if !(0.0..=1.0).contains(&reference_attention_strength) {
+            return Err(format!("--reference-attention-strength {reference_attention_strength} is outside [0, 1]"));
+        }
+        let attention_mask = reference_attention_mask.as_deref().map(|m| read_clip(m, o.fps)).transpose()?;
+        o.reference = Some(ltxv::pipeline::VideoReference { attention_strength: reference_attention_strength, attention_mask, ..ltxv::pipeline::VideoReference::new(read_clip(path, o.fps)?, reference_strength) });
+    } else if reference_attention_mask.is_some() || reference_attention_strength != 1.0 {
+        return Err("--reference-attention-strength and --reference-attention-mask weight a --reference-video, and there is none".into());
     }
     // One scene is what a `--prompt`/`--frames` run always was, so the whole
     // command below has exactly one shape to handle. Without `--frames` its
@@ -1723,6 +1741,10 @@ mod tests {
             "--mid-frame-at",
             "--conditioning-strength",
             "--context-frames",
+            "--reference-video",
+            "--reference-strength",
+            "--reference-attention-strength",
+            "--reference-attention-mask",
         ] {
             assert!(super::HELP.contains(flag), "{flag} is parsed but not in --help");
             assert!(src.contains(&format!("\"{flag}\"")) || super::guidance_flag(flag), "{flag} is in --help but not parsed");

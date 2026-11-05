@@ -95,6 +95,7 @@ impl Run {
             t: self.t,
             context_valid,
             perturbations: &ltxv::block::NO_PERTURBATIONS,
+            reference_attention: None,
         }
     }
 

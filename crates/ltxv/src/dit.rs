@@ -685,6 +685,16 @@ pub(crate) fn upload_rope_tables(gpu: &Gpu, rope: &LtxRopeTables) -> (Vec<Device
     (cos_bufs, sin_bufs)
 }
 
+/// A reference's self-attention bias on the card: its `t` log weights (the
+/// forward's token count) and its two boundaries.
+fn upload_reference_attention(gpu: &Gpu, r: &crate::refcond::ReferenceAttention, t: usize) -> (DeviceBuffer, u32, u32) {
+    assert_eq!(r.log_weights.len(), t, "a reference attention bias covers {} tokens, the forward has {t}", r.log_weights.len());
+    assert!(r.noisy <= r.split && r.split < t, "a reference attention bias needs generated tokens, then the reference: noisy {}, split {}, t {t}", r.noisy, r.split);
+    let b = gpu.storage(t as u64);
+    gpu.write_f32(&b, &r.log_weights);
+    (b, r.noisy as u32, r.split as u32)
+}
+
 /// Every tap a parity test bisects with - the golden's own tensor names.
 pub struct DitTaps {
     /// `[heads, T, head_dim/2]`.
@@ -1018,7 +1028,7 @@ impl LtxDit {
         };
 
         let (x_final, _block_out, _taps) =
-            self.forward_blocks(&gpu, &x0, &adaln_table.expand(), &batch.context, &cos_bufs, &sin_bufs, batch.t as u32, batch.context_len as u32, self.shard.start as u32, self.shard.end as u32);
+            self.forward_blocks(&gpu, &x0, &adaln_table.expand(), &batch.context, crate::block::SelfAttnTables::rope(&cos_bufs, &sin_bufs), batch.t as u32, batch.context_len as u32, self.shard.start as u32, self.shard.end as u32);
         *self.res_out.borrow_mut() = Some(x_final.clone());
 
         if self.shard.head {
@@ -1048,8 +1058,7 @@ impl LtxDit {
         x: &[f32],
         adaln_table: &[f32],
         context: &[f32],
-        cos_bufs: &[DeviceBuffer],
-        sin_bufs: &[DeviceBuffer],
+        rope: crate::block::SelfAttnTables,
         t: u32,
         context_len: u32,
         lo: u32,
@@ -1065,7 +1074,7 @@ impl LtxDit {
             // `gpu_core::transient` for what accumulates when they are not.
             let prefix = format!("transformer_blocks.{l}");
             let blk = LtxBlock::on(gpu, &self.cfg, &self.block_weights(&prefix), &prefix, t, context_len);
-            let (out, tp) = blk.forward(&xx, adaln_table, context, cos_bufs, sin_bufs, t);
+            let (out, tp) = blk.forward(&xx, adaln_table, context, rope, t);
             xx = out;
             block_out.push(xx.clone());
             taps.push(tp);
@@ -1133,6 +1142,13 @@ impl LtxDit {
     /// disabled.
     #[allow(clippy::too_many_arguments)]
     pub fn forward(&self, latent: &[f32], timesteps: &[f32], positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, t: usize, context_valid: &[f32]) -> DitTaps {
+        self.forward_referenced(&ForwardInputs { latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid }, None)
+    }
+
+    /// [`Self::forward`] with a weighted IC-LoRA reference's self-attention
+    /// bias among the `t` tokens (`crate::refcond::reference_attention`).
+    pub fn forward_referenced(&self, inp: &ForwardInputs, reference: Option<&crate::refcond::ReferenceAttention>) -> DitTaps {
+        let ForwardInputs { latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid } = *inp;
         let cfg = &self.cfg;
         let dim = cfg.inner_dim as usize;
         assert_eq!(latent.len(), t * cfg.in_channels as usize);
@@ -1173,7 +1189,9 @@ impl LtxDit {
             cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
         );
 
-        let (x_final, block_out, mut taps) = self.forward_blocks(&gpu, &x, &adaln_table.expand(), &connector_context, &cos_bufs, &sin_bufs, t as u32, context_len as u32, 0, cfg.num_layers);
+        let bias = reference.map(|r| upload_reference_attention(&gpu, r, t));
+        let tables = crate::block::SelfAttnTables { cos: &cos_bufs, sin: &sin_bufs, bias: bias.as_ref().map(|(b, noisy, split)| crate::block::SelfAttnBias { log_weights: b, noisy: *noisy, split: *split }) };
+        let (x_final, block_out, mut taps) = self.forward_blocks(&gpu, &x, &adaln_table.expand(), &connector_context, tables, t as u32, context_len as u32, 0, cfg.num_layers);
         x = x_final;
         assert!(!taps.is_empty(), "num_layers must be >= 1");
         let b0 = taps.remove(0);
@@ -1376,8 +1394,22 @@ pub fn forward_q_streamed(
     cache: &GenerationCache,
 ) -> Vec<f32> {
     let session = crate::devres::DitSession::transient(device);
-    let step = StreamedStep { stream: Stream::Video, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, perturbations: &crate::block::NO_PERTURBATIONS };
+    let step = StreamedStep { stream: Stream::Video, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, perturbations: &crate::block::NO_PERTURBATIONS, reference_attention: None };
     forward_q_streamed_in(&session, cfg, src, head, tier, &step, cache)
+}
+
+/// One host forward's inputs ([`LtxDit::forward_referenced`]), the fields
+/// [`LtxDit::forward`] takes as arguments.
+#[derive(Clone, Copy)]
+pub struct ForwardInputs<'a> {
+    pub latent: &'a [f32],
+    pub timesteps: &'a [f32],
+    pub positions: &'a [f32],
+    pub keyframes_mask: &'a [f32],
+    pub context: &'a [f32],
+    pub context_len: usize,
+    pub t: usize,
+    pub context_valid: &'a [f32],
 }
 
 /// One single-stream forward's inputs - [`forward_q_streamed_in`]'s step,
@@ -1399,6 +1431,9 @@ pub struct StreamedStep<'a> {
     /// self-attention bypass is the `video_self_attn_blocks` set whichever
     /// stream runs: it names the stream being denoised.
     pub perturbations: &'a crate::block::Perturbations,
+    /// A weighted IC-LoRA reference's self-attention bias over these `t`
+    /// tokens (`crate::refcond::reference_attention`), or `None` for none.
+    pub reference_attention: Option<&'a crate::refcond::ReferenceAttention>,
 }
 
 /// [`forward_q_streamed`] against a caller-owned [`crate::devres::DitSession`]
@@ -1420,7 +1455,7 @@ pub struct StreamedStep<'a> {
 /// WHEN bytes move, never what any kernel reads.
 #[tracing::instrument(level = "info", name = "dit_forward_streamed", skip_all, fields(stream = ?step.stream, t = step.t, context_len = step.context_len, layers = cfg.num_layers, tier = ?tier))]
 pub fn forward_q_streamed_in(session: &crate::devres::DitSession, cfg: &LtxDitConfig, src: &(dyn TensorSource + Sync), head: &Tensors, tier: QTier, step: &StreamedStep, cache: &GenerationCache) -> Vec<f32> {
-    let StreamedStep { stream, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, perturbations } = *step;
+    let StreamedStep { stream, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, perturbations, reference_attention } = *step;
     let dim = cfg.inner_dim as usize;
     assert_eq!(latent.len(), t * cfg.in_channels as usize);
     assert_eq!(timesteps.len(), t);
@@ -1538,6 +1573,8 @@ pub fn forward_q_streamed_in(session: &crate::devres::DitSession, cfg: &LtxDitCo
     gpu_core::profile::stage_time("forward_q_streamed: RoPE tables (host f64 build + upload, cached per generation)", s_rope);
     tracing::debug!(stage = "rope_tables", ms = s_rope.elapsed().as_secs_f32() * 1e3, theta = cfg.positional_embedding_theta, "host stage done");
 
+    let bias = reference_attention.map(|r| upload_reference_attention(&gpu, r, t));
+
     let s_conn = std::time::Instant::now();
     // The connector's inputs (`context`, `context_valid`, `context_len`) are
     // fixed for a whole generation, so its answer is too - see this function's
@@ -1591,7 +1628,7 @@ pub fn forward_q_streamed_in(session: &crate::devres::DitSession, cfg: &LtxDitCo
         let mut ahead = crate::devres::Lookahead::new(scope, cfg.num_layers as usize, &quantize, &uncached);
         #[rustfmt::skip]
         let out = session.run_blocks(
-            &gpu, cfg, tier, t, context_len, x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, perturbations,
+            &gpu, cfg, tier, t, context_len, x, &adaln_table, &connector_context, crate::block::SelfAttnTables { cos: &cos_bufs, sin: &sin_bufs, bias: bias.as_ref().map(|(b, noisy, split)| crate::block::SelfAttnBias { log_weights: b, noisy: *noisy, split: *split }) }, perturbations,
             &mut |l, host| weights(l, host, &mut |l| ahead.take(l)), &mut after_block,
         );
         out
@@ -1666,6 +1703,9 @@ pub struct AvStreamedStep<'a> {
     /// What this forward's guidance pass perturbs - [`crate::block::NO_PERTURBATIONS`]
     /// for a plain forward.
     pub perturbations: &'a crate::block::Perturbations,
+    /// A weighted IC-LoRA reference's bias over the video stream's `tv`
+    /// tokens, or `None` for none.
+    pub reference_attention: Option<&'a crate::refcond::ReferenceAttention>,
 }
 
 /// [`forward_q_streamed`]'s audio+video twin: one joint forward at the real
@@ -1822,6 +1862,7 @@ pub fn av_forward_q_streamed_in(
     let (v_cross_cos, v_cross_sin) = table("video_cross", acfg.cross_attention_dim, acfg.num_heads, &cross_max_pos, &step.v_positions[0..tv * 2], tv);
     let (a_cross_cos, a_cross_sin) = table("audio_cross", acfg.cross_attention_dim, acfg.num_heads, &cross_max_pos, step.a_positions, ta);
     gpu_core::profile::stage_time("av_forward_q_streamed: four RoPE table sets (host f64 build + upload, cached per generation)", s_rope);
+    let v_bias = step.reference_attention.map(|r| upload_reference_attention(&gpu, r, tv));
 
     // ---- both embeddings connectors, cached per context -------------------
     let s_conn = std::time::Instant::now();
@@ -1847,6 +1888,7 @@ pub fn av_forward_q_streamed_in(
         v_cross_sin: &v_cross_sin,
         a_cross_cos: &a_cross_cos,
         a_cross_sin: &a_cross_sin,
+        v_bias: v_bias.as_ref().map(|(b, noisy, split)| crate::block::SelfAttnBias { log_weights: b, noisy: *noisy, split: *split }),
     };
     let inp = crate::devres::AvForwardInputs {
         v_adaln: &v_adaln,

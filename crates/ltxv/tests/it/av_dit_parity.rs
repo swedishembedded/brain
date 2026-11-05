@@ -530,7 +530,7 @@ fn av_int8_block_tracks_the_fp32_av_block() {
 
     let gpu_q = Gpu::open(None, &KERNELS);
     let rq = c.rope(&gpu_q);
-    let rope = AvRope { v_cos: &rq.0, v_sin: &rq.1, a_cos: &rq.2, a_sin: &rq.3, v_cross_cos: &rq.4, v_cross_sin: &rq.5, a_cross_cos: &rq.6, a_cross_sin: &rq.7 };
+    let rope = AvRope { v_cos: &rq.0, v_sin: &rq.1, a_cos: &rq.2, a_sin: &rq.3, v_cross_cos: &rq.4, v_cross_sin: &rq.5, a_cross_cos: &rq.6, a_cross_sin: &rq.7, v_bias: None };
     let blkq = LtxAvBlockQ::on(&gpu_q, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
     #[rustfmt::skip]
     let (vq, aq, tq) = blkq.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
@@ -554,7 +554,7 @@ fn av_int8_block_tracks_the_fp32_av_block_under_every_perturbation() {
     let (vcfg, acfg) = (&c.cfg.video, &c.cfg.audio);
     let gpu = Gpu::open(None, &KERNELS);
     let r = c.rope(&gpu);
-    let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7 };
+    let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7, v_bias: None };
     let f = LtxAvBlock::on(&gpu, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len);
     let q = LtxAvBlockQ::on(&gpu, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
     let fp32 = |ptb: Perturbation| {
@@ -656,7 +656,7 @@ fn a_runtime_adapter_on_the_av_int8_block_delivers_the_exact_fp32_fold() {
     let int8 = |adapter: Option<&model::lora::RuntimeLora>| {
         let gpu = Gpu::open(None, &KERNELS);
         let r = c.rope(&gpu);
-        let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7 };
+        let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7, v_bias: None };
         let mut blk = LtxAvBlockQ::on(&gpu, vcfg, acfg, &c.w, p, c.v_ctx_len, c.a_ctx_len, QTier::Int8);
         if let Some(a) = adapter {
             blk.attach_lora(a, p);
@@ -726,7 +726,7 @@ fn device_derived_av_modulation_is_bit_identical_to_the_host_uploaded_form() {
 
     let gpu = Gpu::open(None, &KERNELS);
     let r = c.rope(&gpu);
-    let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7 };
+    let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7, v_bias: None };
     let blk = LtxAvBlockQ::on(&gpu, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
 
     #[rustfmt::skip]
@@ -819,7 +819,7 @@ fn a_closed_cross_modal_gate_makes_the_gated_stream_independent_of_the_other() {
     let run = |w: &vae::blocks::Tensors, ax: &[f32], a2v_gate: &[f32], v2a_gate: &[f32]| -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
         let gpu = Gpu::open(None, &KERNELS);
         let r = c.rope(&gpu);
-        let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7 };
+        let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7, v_bias: None };
         let q = LtxAvBlockQ::on(&gpu, &vcfg, &acfg, w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
         #[rustfmt::skip]
         let (vq, aq, _) = q.forward(&c.vx, ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
@@ -951,7 +951,7 @@ fn real_q8_0_av_block0_int8_compute_matches_fp32() {
     let (ac2, as2) = upload_rope(&gpu_q, &ar);
     let (vcc2, vcs2) = upload_rope(&gpu_q, &vcr);
     let (acc2, acs2) = upload_rope(&gpu_q, &acr);
-    let rope = AvRope { v_cos: &vc2, v_sin: &vs2, a_cos: &ac2, a_sin: &as2, v_cross_cos: &vcc2, v_cross_sin: &vcs2, a_cross_cos: &acc2, a_cross_sin: &acs2 };
+    let rope = AvRope { v_cos: &vc2, v_sin: &vs2, a_cos: &ac2, a_sin: &as2, v_cross_cos: &vcc2, v_cross_sin: &vcs2, a_cross_cos: &acc2, a_cross_sin: &acs2, v_bias: None };
     let blkq = LtxAvBlockQ::on(&gpu_q, &vcfg, &acfg, &w, "transformer_blocks.0", v_ctx_len, a_ctx_len, QTier::Int8);
     #[rustfmt::skip]
     let (vq, aq, tq) = blkq.forward(&vx, &ax, &v_adaln, &a_adaln, &v_context, &a_context, rope,
@@ -1076,6 +1076,7 @@ fn real_q8_0_av_streamed_forward_matches_the_eager_fp32_forward() {
     let head = ltxv::dit::load_av_head_tensors_from_source(&src, &cfg);
     let step = ltxv::dit::AvStreamedStep {
         perturbations: &ltxv::block::NO_PERTURBATIONS,
+        reference_attention: None,
         v_latent: &v_latent,
         v_timesteps: &v_timesteps,
         v_positions: &v_positions,
@@ -1142,6 +1143,7 @@ impl AvShape {
     fn step<'a>(&'a self, v_context: &'a [f32], a_context: &'a [f32], context_valid: &'a [f32], ctx_len: usize) -> ltxv::dit::AvStreamedStep<'a> {
         ltxv::dit::AvStreamedStep {
         perturbations: &ltxv::block::NO_PERTURBATIONS,
+        reference_attention: None,
             v_latent: &self.v_latent,
             v_timesteps: &self.v_timesteps,
             v_positions: &self.v_positions,
@@ -1315,6 +1317,7 @@ fn the_audio_stream_alone_is_the_joint_forward_with_the_cross_modal_attention_cu
         t: ta,
         context_valid: &context_valid,
         perturbations: &ltxv::block::NO_PERTURBATIONS,
+        reference_attention: None,
     };
     let cache = ltxv::block::GenerationCache::default();
     // Streaming, so every block it reads passes through the host cache and

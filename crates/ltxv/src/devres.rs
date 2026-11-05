@@ -804,8 +804,7 @@ impl DitSession {
         x: Vec<f32>,
         adaln_table: &dit::adaln::RowTable,
         connector_context: &[f32],
-        cos_bufs: &[gpu_core::DeviceBuffer],
-        sin_bufs: &[gpu_core::DeviceBuffer],
+        rope: crate::block::SelfAttnTables,
         perturbations: &crate::block::Perturbations,
         weights: &mut dyn FnMut(usize, HostCopy) -> std::sync::Arc<CachedQBlockWeights>,
         after_block: &mut dyn FnMut(usize, bool, std::time::Duration, &BlockTimings),
@@ -877,7 +876,7 @@ impl DitSession {
                 Some(idx) => {
                     let w = guard.as_ref().expect("a slot index implies a window");
                     let blk = &w.slots[idx].as_ref().expect("the slot was just filled").1;
-                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt, perturbations.block(l), self.exec)
+                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, rope, t as u32, &mut bt, perturbations.block(l), self.exec)
                 }
                 None => {
                     // No window (or a slot the budget refused): upload, run,
@@ -899,7 +898,7 @@ impl DitSession {
                     let mut blk = LtxBlockQ::on_cached(scratch, cfg, &cached, t as u32, context_len as u32, tier);
                     adapted(&self.adapter, &mut *blk, l);
                     up_ms += s.elapsed();
-                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt, perturbations.block(l), self.exec)
+                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, rope, t as u32, &mut bt, perturbations.block(l), self.exec)
                 }
             };
             after_block(l, uploaded, up_ms, &bt);

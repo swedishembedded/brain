@@ -549,6 +549,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
             t: t as usize,
             context_valid: &context_valid,
             perturbations: &ltxv::block::NO_PERTURBATIONS,
+            reference_attention: None,
         };
         let out = ltxv::dit::forward_q_streamed_in(&session, &cfg, &src, &head, ltxv::block::QTier::Int8, &step, cache);
         let wall = t1.elapsed().as_secs_f64();
@@ -671,6 +672,7 @@ fn bench_av(tokens: u32, ctx_len: u32, frames: u32, fps: u32) {
     // what makes the two rows of this comparison a comparison.
     let step = ltxv::dit::AvStreamedStep {
         perturbations: &ltxv::block::NO_PERTURBATIONS,
+        reference_attention: None,
         v_latent: &v_latent,
         v_timesteps: &v_timesteps,
         v_positions: &v_positions,
@@ -767,6 +769,7 @@ fn bench_streamed_av(layers: u32, tv: u32, ctx_len: u32, ta: u32, reuse_cache: b
     };
     let step = ltxv::dit::AvStreamedStep {
         perturbations: &ltxv::block::NO_PERTURBATIONS,
+        reference_attention: None,
         v_latent: &v_latent,
         v_timesteps: &v_timesteps,
         v_positions: &v_positions,

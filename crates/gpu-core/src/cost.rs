@@ -1090,6 +1090,13 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
         // Workgroup-cooperative row softmax; params [rows, cols] — the same math
         // as attn_softmax_* (max, exp+sum, normalize per row).
+        // A two-group bias on materialized scores: params [heads, nq, nk,
+        // split]; each score is read and written once, the per-token log
+        // weights are read beside it.
+        "attn_bias_groups" => {
+            let (h, nq, nk) = (p(0)?, p(1)?, p(2)?);
+            f(2 * h * nq * nk, 4 * (2 * h * nq * nk + nq + nk))
+        }
         "softmax_rows" => {
             let (rows, cols) = (p(0)?, p(1)?);
             f(rows * (6 * cols + 1), 8 * rows * cols)
@@ -1103,7 +1110,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // same ideal traffic. They differ only in how the inner loops are
         // scheduled (see `model::block::FlashIds`), which is a constant factor
         // on the achieved rate, not on the work.
-        "flash_attn_bidir" | "flash_attn_bidir_split" | "flash_attn_bidir_reg" | "flash_attn_bidir_reg2" => {
+        "flash_attn_bidir" | "flash_attn_bidir_split" | "flash_attn_bidir_reg" | "flash_attn_bidir_reg2" | "flash_attn_bidir_bias" => {
             let (b, h, t, hd) = (p(0)?, p(1)?, p(2)?, p(3)?);
             f(
                 b * h * t * t * (2 * hd + 1) + b * h * t * (6 * t + 1) + 2 * b * h * hd * t * t,

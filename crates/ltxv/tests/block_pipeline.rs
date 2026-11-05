@@ -84,6 +84,7 @@ impl Inputs {
             t: self.t,
             context_valid: &self.context_valid,
             perturbations: &ltxv::block::NO_PERTURBATIONS,
+            reference_attention: None,
         }
     }
 }

@@ -79,8 +79,14 @@ this port:
       stub context; the reference's DFR runs the real checkpoint with its
       detailing IC-LoRA (`DETAILING_LORA_STRENGTH`) in stage 2 and tiled
       temporal rounds.
-- [ ] **IC-LoRA attention mask** - reference tokens need a per-key weight in
-      the flash attention kernel.
+- [x] **IC-LoRA attention mask** - `--reference-attention-strength` /
+      `--reference-attention-mask` weight the reference<->clip attention as
+      `ConditioningItemAttentionStrengthWrapper` does: per-token log weights
+      (`refcond::reference_attention`) added to the scores across the two
+      groups (`attn_bias_groups.wgsl` on the materialized arm,
+      `flash_attn_bidir_bias.wgsl` on the fused one), on the host, int8
+      streamed and audio-visual forwards. The fused rung has not run on a GPU
+      yet.
 - [x] **Audio to video past one window** - the soundtrack is encoded once and
       each window holds its own slice frozen, starting where the window's audio
       sequence does (its carried prefix included); the clip returns the source

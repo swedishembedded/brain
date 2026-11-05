@@ -92,12 +92,49 @@ fn a_reference_video_reaches_the_in_context_stage() {
     let dir = tempdir("reaches");
     let a = adapter(&dir, "ic.safetensors", &[]);
     let without = run(&paths, &opts(vec![a.clone()], None)).unwrap();
-    let with_a = run(&paths, &opts(vec![a.clone()], Some(VideoReference { clip: clip(9, 64, 1), strength: 1.0 }))).unwrap();
-    let with_b = run(&paths, &opts(vec![a], Some(VideoReference { clip: clip(9, 64, 2), strength: 1.0 }))).unwrap();
+    let with_a = run(&paths, &opts(vec![a.clone()], Some(VideoReference::new(clip(9, 64, 1), 1.0)))).unwrap();
+    let with_b = run(&paths, &opts(vec![a], Some(VideoReference::new(clip(9, 64, 2), 1.0)))).unwrap();
     assert_eq!(with_a.len(), without.len(), "the reference must not change the clip's own length");
     assert_eq!(with_a[0].len(), without[0].len(), "nor its frame size");
     assert_ne!(with_a, without, "the reference tokens must reach the model");
     assert_ne!(with_a, with_b, "a different reference must give a different clip");
+}
+
+/// A constant `side`x`side` mask video of `frames` frames at gray level `v`.
+fn mask(frames: usize, side: u32, v: u8) -> Video {
+    Video { width: side, height: side, fps: 8, frames: vec![vec![v; (side * side * 3) as usize]; frames], audio: None }
+}
+
+/// The attention strength cuts the reference off from the generated tokens:
+/// at 0 the clip is the clip generated with no reference at all, and between
+/// 0 and 1 it is neither that nor the fully attended one. A white mask is the
+/// strength alone, a black one cuts it off like strength 0.
+#[test]
+fn the_reference_attention_strength_weights_what_the_clip_draws_from_it() {
+    let Some(vae) = vae_path() else {
+        brain_testutil::skip("no ltx-2.5-video-vae-conv-bf16.safetensors in the model store (Lightricks/LTX-2.5)");
+        return;
+    };
+    let paths = Paths::new(vae.clone());
+    let dir = tempdir("attention");
+    let a = adapter(&dir, "ic.safetensors", &[]);
+    let at = |attention_strength: f32, attention_mask: Option<Video>| {
+        let reference = VideoReference { attention_strength, attention_mask, ..VideoReference::new(clip(9, 64, 1), 1.0) };
+        run(&paths, &opts(vec![a.clone()], Some(reference))).unwrap()
+    };
+    let max_diff = |x: &[Vec<u8>], y: &[Vec<u8>]| x.iter().flatten().zip(y.iter().flatten()).map(|(p, q)| p.abs_diff(*q)).max().unwrap_or(0);
+    let without = run(&paths, &opts(vec![a.clone()], None)).unwrap();
+    let full = at(1.0, None);
+    let cut = at(0.0, None);
+    let half = at(0.5, None);
+    assert_ne!(full, without, "the reference reaches the clip at full strength");
+    assert!(max_diff(&cut, &without) <= 1, "at strength 0 the clip is the unreferenced one (max pixel diff {})", max_diff(&cut, &without));
+    assert_ne!(half, full, "a half-strength reference is not the full one");
+    assert_ne!(half, cut, "nor the cut-off one");
+    assert_eq!(at(0.5, Some(mask(9, 64, 255))), half, "a white mask is the strength alone");
+    assert!(max_diff(&at(1.0, Some(mask(9, 64, 0))), &cut) <= 1, "a black mask cuts the reference off");
+    let e = run(&paths, &opts(vec![a], Some(VideoReference { attention_mask: Some(mask(5, 64, 255)), ..VideoReference::new(clip(9, 64, 1), 1.0) }))).unwrap_err();
+    assert!(e.contains("attention mask video has 5 frames"), "{e}");
 }
 
 /// A reference is meaningless to the base checkpoint, and one shorter than
@@ -109,10 +146,10 @@ fn a_reference_without_an_adapter_or_too_short_is_refused() {
         return;
     };
     let paths = Paths::new(vae.clone());
-    let e = run(&paths, &opts(Vec::new(), Some(VideoReference { clip: clip(9, 64, 3), strength: 1.0 }))).unwrap_err();
+    let e = run(&paths, &opts(Vec::new(), Some(VideoReference::new(clip(9, 64, 3), 1.0)))).unwrap_err();
     assert!(e.contains("--adapter"), "{e}");
     let dir = tempdir("short");
-    let e = run(&paths, &opts(vec![adapter(&dir, "ic.safetensors", &[])], Some(VideoReference { clip: clip(5, 64, 4), strength: 1.0 }))).unwrap_err();
+    let e = run(&paths, &opts(vec![adapter(&dir, "ic.safetensors", &[])], Some(VideoReference::new(clip(5, 64, 4), 1.0)))).unwrap_err();
     assert!(e.contains("fewer than"), "{e}");
 }
 

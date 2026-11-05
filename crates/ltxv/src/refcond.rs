@@ -292,6 +292,34 @@ pub fn dense_attention_mask(base_t: usize, cross_mask: &[f32]) -> Vec<f32> {
     out
 }
 
+/// What a weighted reference adds to self-attention, in the per-token form
+/// the attention kernels take. Tokens `[0, noisy)` are generated,
+/// `[noisy, split)` are conditioning items appended before the reference,
+/// `[split, ..)` the reference. A generated<->reference pair is biased by
+/// `log_weights[q] + log_weights[k]`, which is the reference's own `log` of
+/// [`dense_attention_mask`]'s entry for that pair
+/// (`transformer_args._prepare_self_attention_mask`): `ln w` for `w > 0`,
+/// `f32::MIN` (`torch.finfo(float32).min`) for `w <= 0`. An earlier-item<->
+/// reference pair is masked (`build_attention_mask`'s `0` between distinct
+/// conditioning groups), and every other pair is unbiased.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReferenceAttention {
+    /// `[split + m]`, `0` outside the reference.
+    pub log_weights: Vec<f32>,
+    pub noisy: usize,
+    pub split: usize,
+}
+
+/// [`ReferenceAttention`] for `cross_mask`, the per-token weights of a
+/// reference appended after `split` tokens of which the first `noisy` are
+/// generated.
+pub fn reference_attention(noisy: usize, split: usize, cross_mask: &[f32]) -> ReferenceAttention {
+    assert!(noisy <= split, "reference_attention: {noisy} generated tokens but the reference starts at {split}");
+    let log = |w: f32| if w > 0.0 { w.max(f32::MIN_POSITIVE).ln() } else { f32::MIN };
+    let log_weights = std::iter::repeat_n(0.0, split).chain(cross_mask.iter().map(|&w| log(w))).collect();
+    ReferenceAttention { log_weights, noisy, split }
+}
+
 /// Pixel-space extent a reference latent of `ref_dims` covers, for sizing the
 // perf-number: the VAE's spatial/temporal downsample factors are architecture constants, not measured speedups
 /// mask video a caller has to supply: the VAE's own `32x32` spatial and `8x`

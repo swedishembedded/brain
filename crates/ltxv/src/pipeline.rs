@@ -542,17 +542,43 @@ pub struct GenOpts {
     pub runtime: Runtime,
 }
 
-/// A reference video for IC-LoRA conditioning: the decoded clip and how
-/// strongly its tokens are held (`1.0` keeps them perfectly clean).
+/// A reference video for IC-LoRA conditioning: the decoded clip, how
+/// strongly its tokens are held (`1.0` keeps them perfectly clean), and how
+/// strongly they and the generated tokens attend to each other
+/// (`ICLoraPipeline`'s `conditioning_attention_strength` and
+/// `conditioning_attention_mask`).
 #[derive(Clone)]
 pub struct VideoReference {
     pub clip: Video,
     pub strength: f32,
+    /// The attention weight, in `[0, 1]`: `1.0` attends fully, `0.0` cuts
+    /// the reference off from the clip. Scales [`Self::attention_mask`] when
+    /// one is given.
+    pub attention_strength: f32,
+    /// A grayscale mask video setting the weight per region and frame
+    /// (white attends, black does not): its first `frames` frames, at half
+    /// the output resolution as the reference loads it, averaged onto the
+    /// reference's latent grid.
+    pub attention_mask: Option<Video>,
+}
+
+impl VideoReference {
+    /// A reference at full attention strength and no mask.
+    pub fn new(clip: Video, strength: f32) -> VideoReference {
+        VideoReference { clip, strength, attention_strength: 1.0, attention_mask: None }
+    }
 }
 
 impl std::fmt::Debug for VideoReference {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VideoReference").field("frames", &self.clip.frames.len()).field("width", &self.clip.width).field("height", &self.clip.height).field("strength", &self.strength).finish()
+        f.debug_struct("VideoReference")
+            .field("frames", &self.clip.frames.len())
+            .field("width", &self.clip.width)
+            .field("height", &self.clip.height)
+            .field("strength", &self.strength)
+            .field("attention_strength", &self.attention_strength)
+            .field("attention_mask_frames", &self.attention_mask.as_ref().map(|m| m.frames.len()))
+            .finish()
     }
 }
 
@@ -2197,6 +2223,10 @@ struct StepInputs<'a> {
     /// What this forward's guidance pass perturbs (STG, isolated modality) -
     /// [`crate::block::NO_PERTURBATIONS`] for the conditional pass.
     perturbations: &'a crate::block::Perturbations,
+    /// A weighted IC-LoRA reference's self-attention bias over these `t`
+    /// tokens, `None` when the stage carries no reference or carries it at
+    /// full strength.
+    reference_attention: Option<&'a crate::refcond::ReferenceAttention>,
 }
 
 impl<'a> StepInputs<'a> {
@@ -2246,7 +2276,8 @@ struct AudioState<'a> {
 impl Denoiser for LtxDit {
     fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
         assert_eq!(i.perturbations, &crate::block::NO_PERTURBATIONS, "the tiny host DiT runs no perturbed guidance pass");
-        LtxDit::forward(self, i.latent, i.timesteps, i.positions, i.keyframes_mask, context, i.context_len, i.t, i.context_valid).out
+        let inp = crate::dit::ForwardInputs { latent: i.latent, timesteps: i.timesteps, positions: i.positions, keyframes_mask: i.keyframes_mask, context, context_len: i.context_len, t: i.t, context_valid: i.context_valid };
+        self.forward_referenced(&inp, i.reference_attention).out
     }
 }
 
@@ -2287,6 +2318,7 @@ fn av_step<'a>(i: &StepInputs<'a>, a: &AudioInputs<'a>, v_context: &'a [f32], a_
         a_sigma: i.sigma,
         a_context_valid: i.context_valid,
         perturbations: i.perturbations,
+        reference_attention: i.reference_attention,
     }
 }
 
@@ -2509,6 +2541,7 @@ impl Denoiser for RealDit {
             t: i.t,
             context_valid: i.context_valid,
             perturbations: i.perturbations,
+            reference_attention: i.reference_attention,
         };
         crate::dit::forward_q_streamed_in(&session, &self.cfg, &self.src, &self.head, crate::block::QTier::Int8, &step, &self.cache)
     }
@@ -2657,6 +2690,10 @@ struct Frozen<'a> {
     mask: &'a [f32],
     clean: &'a [f32],
     channels: usize,
+    /// The self-attention bias a weighted IC-LoRA reference among these
+    /// tokens carries ([`crate::refcond::reference_attention`]); `None` when
+    /// every conditioning token attends at full strength.
+    attention: Option<&'a crate::refcond::ReferenceAttention>,
 }
 
 fn post_process_latent(denoised: &mut [f32], frozen: &Frozen) {
@@ -2820,6 +2857,7 @@ impl GuidedModel<'_> {
             t: self.t,
             sigma: sigma as f32,
             perturbations: &NO_PERTURBATIONS,
+            reference_attention: self.frozen.and_then(|f| f.attention),
         };
         let x0 = |v: Vec<f32>| to_denoised(latent, &v, &timesteps, self.channels);
         // The conditional pass first; the others only when some stream's
@@ -2892,7 +2930,7 @@ impl GuidedModel<'_> {
                     return Err(format!("the denoiser produced non-finite audio values at step {step} (sigma = {sigma:.4})"));
                 }
                 if let Some((mask, clean)) = self.audio.and_then(|s| s.frozen.as_ref()) {
-                    post_process_latent(&mut a, &Frozen { mask, clean, channels: self.a_channels });
+                    post_process_latent(&mut a, &Frozen { mask, clean, channels: self.a_channels, attention: None });
                 }
                 Some(a)
             }
@@ -2903,7 +2941,7 @@ impl GuidedModel<'_> {
 
     /// The audio stream's frozen prefix as a [`Frozen`], when it has one.
     fn audio_frozen(&self) -> Option<Frozen<'_>> {
-        self.audio.and_then(|a| a.frozen.as_ref()).map(|(mask, clean)| Frozen { mask, clean, channels: self.a_channels })
+        self.audio.and_then(|a| a.frozen.as_ref()).map(|(mask, clean)| Frozen { mask, clean, channels: self.a_channels, attention: None })
     }
 }
 
@@ -3110,7 +3148,7 @@ fn res2s_loop(model: &GuidedModel, sigmas: &[f64], latent: Vec<f32>, a_latent: O
         x
     };
     let mut streams: Vec<Vec<f64>> = std::iter::once(widen(&latent)).chain(a_latent.as_deref().map(widen)).collect();
-    let frozen_of = |k: usize| if k == 0 { model.frozen.map(|f| Frozen { mask: f.mask, clean: f.clean, channels: f.channels }) } else { model.audio_frozen() };
+    let frozen_of = |k: usize| if k == 0 { model.frozen.map(|f| Frozen { mask: f.mask, clean: f.clean, channels: f.channels, attention: f.attention }) } else { model.audio_frozen() };
     for i in 0..steps {
         check_cancel(cancel, i + 1, steps)?;
         let (sigma, sigma_next) = (sigmas[i], sigmas[i + 1]);
@@ -3233,6 +3271,37 @@ fn encode_reference(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, r: &Vi
     let latent = enc.encode(&rgb8_to_chw(&resized, rh, rw));
     let (lh, lw) = (rh / 32, rw / 32);
     Ok((chw_to_tc(&latent, channels, lat_f, lh, lw), (lat_f, lh, lw)))
+}
+
+/// The per-token attention weights of a reference whose latent is
+/// `(lat_f, lat_h, lat_w)`, or `None` when it attends at full strength
+/// (`append_ic_lora_reference_video_conditionings`): the mask video's
+/// grayscale - its first `frames` frames, resized to half of `output`
+/// (`_load_mask_video`) and area-averaged onto the latent grid - times the
+/// strength, or the strength alone when it is below 1 and there is no mask.
+fn reference_cross_mask(r: &VideoReference, frames: usize, output: (usize, usize), (lat_f, lat_h, lat_w): (usize, usize, usize)) -> Result<Option<Vec<f32>>, String> {
+    let strength = r.attention_strength;
+    if !(0.0..=1.0).contains(&strength) {
+        return Err(format!("the reference's attention strength {strength} is outside [0, 1]"));
+    }
+    let Some(mask) = &r.attention_mask else {
+        return Ok((strength < 1.0).then(|| vec![strength; lat_f * lat_h * lat_w]));
+    };
+    if mask.frames.len() < frames {
+        return Err(format!("the attention mask video has {} frames, fewer than the {frames} being generated", mask.frames.len()));
+    }
+    if lat_f > 1 && !(frames - 1).is_multiple_of(lat_f - 1) {
+        return Err(format!("{frames} mask frames do not average onto {lat_f} reference latent frames ((frames - 1) must divide by {})", lat_f - 1));
+    }
+    let (w, h) = (output.0 / 2, output.1 / 2);
+    let mut gray = Vec::with_capacity(frames * h * w);
+    for (i, frame) in mask.frames[..frames].iter().enumerate() {
+        let img = image::RgbImage::from_raw(mask.width, mask.height, frame.clone()).ok_or_else(|| format!("attention mask frame {i} is not {}x{} RGB8", mask.width, mask.height))?;
+        let px = image::imageops::resize(&img, w as u32, h as u32, image::imageops::FilterType::Lanczos3).into_raw();
+        gray.extend(px.as_chunks::<3>().0.iter().map(|[r, g, b]| ((*r as f32 + *g as f32 + *b as f32) / (3.0 * 255.0)).clamp(0.0, 1.0)));
+    }
+    let latent = crate::refcond::downsample_mask_to_latent(&gray, frames, h, w, lat_f, lat_h, lat_w);
+    Ok(Some(latent.into_iter().map(|v| v * strength).collect()))
 }
 
 /// Everything one denoising stage needs that does NOT vary between the two
@@ -3548,6 +3617,7 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
     };
     // The IC-LoRA reference, appended LAST - after every other conditioning
     // item, as `ICLoraPipeline` orders them - at this stage's own resolution.
+    let mut reference_attention = None;
     let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = match sc.reference {
         None => (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen),
         Some((reference, (downscale, temporal))) => {
@@ -3555,7 +3625,9 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
                 return Err("a masked video-to-video pass cannot also take an IC-LoRA reference video".into());
             }
             let (tokens, dims) = encode_reference(sc.vcfg, sc.vweights, reference, o.frames, st.width, st.height, downscale, temporal, c, o.device.as_deref())?;
-            let rc = crate::refcond::append_reference_video_conditioning(denoise_t_count, &positions_d, &keyframes_mask_d, c, o.fps as f64, dims, &tokens, downscale, temporal, reference.strength, None);
+            let cross_mask = reference_cross_mask(reference, o.frames, (o.width, o.height), dims)?;
+            let rc = crate::refcond::append_reference_video_conditioning(denoise_t_count, &positions_d, &keyframes_mask_d, c, o.fps as f64, dims, &tokens, downscale, temporal, reference.strength, cross_mask.as_deref());
+            reference_attention = rc.cross_mask.as_deref().map(|cm| crate::refcond::reference_attention(t, denoise_t_count, cm));
             let total_t = rc.keyframes_mask.len();
             // `GaussianNoiser`: the appended tokens start at
             // `lerp(clean, noise, denoise_mask)`, which is exactly the clean
@@ -3569,11 +3641,11 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
             let (mut mask, mut clean) = frozen.unwrap_or_else(|| (vec![1f32; denoise_t_count], vec![0f32; denoise_t_count * c]));
             mask.extend_from_slice(&rc.denoise_mask[denoise_t_count..]);
             clean.extend_from_slice(&rc.clean[denoise_t_count * c..]);
-            tracing::info!(stage = st.label, reference_tokens = total_t - denoise_t_count, dims = ?dims, downscale, temporal, strength = reference.strength, "IC-LoRA reference video appended");
+            tracing::info!(stage = st.label, reference_tokens = total_t - denoise_t_count, dims = ?dims, downscale, temporal, strength = reference.strength, attention_strength = reference.attention_strength, attention_mask = reference.attention_mask.is_some(), "IC-LoRA reference video appended");
             (latent, rc.positions, rc.keyframes_mask, total_t, Some((mask, clean)))
         }
     };
-    let frozen_ref = frozen.as_ref().map(|(mask, clean)| Frozen { mask, clean, channels: c });
+    let frozen_ref = frozen.as_ref().map(|(mask, clean)| Frozen { mask, clean, channels: c, attention: reference_attention.as_ref() });
     tracing::info!(stage = st.label, width = st.width, height = st.height, tokens = denoise_t_count, base_tokens = t, steps = st.sigmas.len() - 1, eta = st.eta, seeded = st.seed_chw.is_some(), "stage denoising");
     let done_before = st.done_before;
     let dim = crate::audio::TOKEN_DIM as usize;
@@ -3847,6 +3919,9 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, adapters: &
         // arms share one cache without either seeing the other's bytes.
         let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
         if o.runtime.av_fp32_reference {
+            if o.reference.as_ref().is_some_and(|r| r.attention_strength < 1.0 || r.attention_mask.is_some()) {
+                return Err("--av-fp32-reference does not weight a reference's attention: drop it, or the --reference-attention-* flags".into());
+            }
             tracing::warn!(
                 gib = crate::av_stream::host_floats(&cfg) * 4 / (1 << 30),
                 "denoising on the eager host-fp32 audio-visual REFERENCE arm, expanding the whole checkpoint (drop --av-fp32-reference for the quantized, device-resident path)"
@@ -4996,7 +5071,7 @@ mod masked_stage_tests {
         // "the token did not move" cannot be true by accident.
         let velocity: Vec<f32> = (0..t * c).map(|i| 3.0 + i as f32).collect();
         let mut denoised = to_denoised(&latent, &velocity, &timesteps, c);
-        post_process_latent(&mut denoised, &Frozen { mask: &mc.denoise_mask, clean: &mc.clean, channels: c });
+        post_process_latent(&mut denoised, &Frozen { mask: &mc.denoise_mask, clean: &mc.clean, channels: c, attention: None });
 
         for tok in 0..t {
             let (a, b) = (tok * c, tok * c + c);
@@ -7193,7 +7268,7 @@ mod tests {
         let kf = vec![7.0f32, 7.5];
         let valid = vec![8.0f32; 4];
         let (v_ctx, a_ctx) = (vec![9.0f32; 4], vec![10.0f32; 3]);
-        let i = StepInputs { latent: &v_latent, timesteps: &v_ts, positions: &v_pos, keyframes_mask: &kf, context_len: 4, context_valid: &valid, t: 2, sigma: 0.25, perturbations: &crate::block::NO_PERTURBATIONS };
+        let i = StepInputs { latent: &v_latent, timesteps: &v_ts, positions: &v_pos, keyframes_mask: &kf, context_len: 4, context_valid: &valid, t: 2, sigma: 0.25, perturbations: &crate::block::NO_PERTURBATIONS, reference_attention: None };
         let a = AudioInputs { latent: &a_latent, timesteps: &a_ts, positions: &a_pos, ta: 1 };
         let s = av_step(&i, &a, &v_ctx, &a_ctx);
 
@@ -7333,7 +7408,7 @@ mod tests {
         // a value no arithmetic in the step could land on by accident.
         let mask = vec![1.0f32, 0.0];
         let clean = vec![0.0f32, 5.0];
-        let frozen = Frozen { mask: &mask, clean: &clean, channels };
+        let frozen = Frozen { mask: &mask, clean: &clean, channels, attention: None };
         // `GaussianNoiser`: a fully conditioned token starts AT its clean
         // content, never at noise.
         let latent0 = vec![0.0f32, 5.0];
@@ -7382,7 +7457,7 @@ mod tests {
         // Token 0 denoises freely; token 1 is conditioned at strength 0.5.
         let mask = vec![1.0f32, 0.5];
         let clean = vec![0.0f32, 10.0];
-        let frozen = Frozen { mask: &mask, clean: &clean, channels };
+        let frozen = Frozen { mask: &mask, clean: &clean, channels, attention: None };
         let latent0 = vec![0.0f32, 10.0];
         // `FakeDit` predicts velocity 1.0 everywhere, and token 1's own
         // timestep is `0.5 * 0.5`, so its x0 estimate is `10 - 0.25`; the
@@ -7433,7 +7508,7 @@ mod tests {
         let context_valid = vec![1.0f32; 1];
         let mask = vec![1.0f32, 0.0];
         let clean = vec![0.0f32, 5.0];
-        let frozen = Frozen { mask: &mask, clean: &clean, channels };
+        let frozen = Frozen { mask: &mask, clean: &clean, channels, attention: None };
         let latent0 = vec![0.0f32, 5.0];
 
         for eta in [0.0f64, 1.0] {
@@ -7504,7 +7579,7 @@ mod tests {
                 *v = 100.0 + (lo * channels + i) as f32;
             }
         }
-        let frozen = Frozen { mask: &mask, clean: &clean, channels };
+        let frozen = Frozen { mask: &mask, clean: &clean, channels, attention: None };
         let mut latent0 = seeded_noise(t * channels, 11);
         for &(lo, hi) in &frozen_ranges {
             latent0[lo * channels..hi * channels].copy_from_slice(&clean[lo * channels..hi * channels]);
@@ -7571,7 +7646,7 @@ mod tests {
         // Tokens 2 and 3 are a frozen conditioning block; 0 and 1 denoise.
         let mask = vec![1.0f32, 1.0, 0.0, 0.0];
         let clean = vec![0.0f32; t * channels];
-        let frozen = Frozen { mask: &mask, clean: &clean, channels };
+        let frozen = Frozen { mask: &mask, clean: &clean, channels, attention: None };
         denoise(&dit, &sigmas, vec![0.0; t * channels], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(0.0, 1.0, 7), 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
 
         let seen = dit.timesteps_seen.borrow().clone();
@@ -7725,7 +7800,7 @@ mod tests {
         let (keyframes_mask, context_valid) = (vec![0.0f32; t], vec![1.0f32; 1]);
         let mask = vec![0.0f32, 1.0, 1.0];
         let clean = vec![2.0f32, -2.0, 0.0, 0.0, 0.0, 0.0];
-        let frozen = Frozen { mask: &mask, clean: &clean, channels };
+        let frozen = Frozen { mask: &mask, clean: &clean, channels, attention: None };
         let latent0 = vec![2.0f32, -2.0, 0.7, -0.4, 1.3, 0.1];
         let (a_ctx, ta) = (vec![0.0f32; 1], 2usize);
         let mut audio = AudioState { latent: vec![0.9, -1.1, 0.2, 0.4], positions: crate::audio::positions(ta), ta, ctx_cond: &a_ctx, ctx_uncond: &a_ctx, frozen: None };
@@ -7930,6 +8005,7 @@ mod tests {
             context_valid: &inputs_owned.4,
             t,
             perturbations: &crate::block::NO_PERTURBATIONS,
+            reference_attention: None,
         };
         let d = cfg.cross_attention_dim as usize;
         let cond: Vec<f32> = (0..ctx_len * d).map(|k| (k as f32 * 0.021).cos()).collect();

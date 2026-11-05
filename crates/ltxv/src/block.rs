@@ -234,11 +234,16 @@ const K_LORA_DELTA: usize = 28;
 const K_QUANT_RESIDUAL_PACK: usize = 29;
 /// `add`: `dst += src`, [`qquant_linear`]'s fold of the second level's product.
 const K_ADD: usize = 30;
+/// `attn_bias_groups`: an IC-LoRA reference's attention strength on the
+/// materialized scores ([`SelfAttnBias`]).
+const K_ATTN_BIAS_GROUPS: usize = 31;
+/// `flash_attn_bidir_bias`: the fused self-attention under the same bias.
+const K_FLASH_BIDIR_BIAS: usize = 32;
 
 /// Every kernel this block dispatches - all pre-existing except
 /// [`K_ADALN_ROW`] and [`K_FLASH_CROSS_REG2`], all at their documented general
 /// contract.
-pub const KERNELS: [(&str, &str); 31] = [
+pub const KERNELS: [(&str, &str); 33] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm", kernels::RMSNORM),
@@ -273,6 +278,8 @@ pub const KERNELS: [(&str, &str); 31] = [
     ("lora_delta", kernels::LORA_DELTA),
     ("quant_residual_pack", kernels::QUANT_RESIDUAL_PACK),
     ("add", kernels::ADD),
+    ("attn_bias_groups", kernels::ATTN_BIAS_GROUPS),
+    ("flash_attn_bidir_bias", kernels::FLASH_ATTN_BIDIR_BIAS),
 ];
 
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
@@ -542,6 +549,43 @@ fn flash_cross_attn(gpu: &Gpu, self_attn: bool, head_dim: u32) -> bool {
     model::block::flash_gate(&caps, !self_attn && head_dim <= 128) && model::block::flash_cross_supported(&caps)
 }
 
+/// An IC-LoRA reference's attention strength on one stream's
+/// self-attention (`ltx_core`'s `ConditioningItemAttentionStrengthWrapper`),
+/// on the card: `[t]` log weights, the end of the generated tokens and the
+/// first reference token - `crate::refcond::ReferenceAttention` has the
+/// grouping and `attn_bias_groups.wgsl` the bias it implies.
+#[derive(Clone, Copy)]
+pub struct SelfAttnBias<'a> {
+    pub log_weights: &'a DeviceBuffer,
+    pub noisy: u32,
+    pub split: u32,
+}
+
+/// One stream's self-attention inputs beside its activations: the per-head
+/// RoPE tables and, when the stream carries a weighted IC-LoRA reference, its
+/// [`SelfAttnBias`].
+#[derive(Clone, Copy)]
+pub struct SelfAttnTables<'a> {
+    pub cos: &'a [DeviceBuffer],
+    pub sin: &'a [DeviceBuffer],
+    pub bias: Option<SelfAttnBias<'a>>,
+}
+
+impl<'a> SelfAttnTables<'a> {
+    /// Tables with no reference bias.
+    pub fn rope(cos: &'a [DeviceBuffer], sin: &'a [DeviceBuffer]) -> SelfAttnTables<'a> {
+        SelfAttnTables { cos, sin, bias: None }
+    }
+}
+
+/// What one attention call attends: a stream to itself (under an optional
+/// reference bias), or one sequence to another.
+#[derive(Clone, Copy)]
+enum Attend<'a> {
+    SelfAttn(Option<SelfAttnBias<'a>>),
+    Cross,
+}
+
 /// The attention context `[nq, inner_dim]` for already-projected, already-
 /// QK-normed, already-RoPE'd `q`/`k`/`v` - the ONE place this crate decides
 /// between a fused flash kernel and the materialized scores/softmax/apply
@@ -585,21 +629,35 @@ fn attn_context(
     inner_dim: u32,
     nq: u32,
     nk: u32,
-    self_attn: bool,
+    attend: Attend,
 ) -> DeviceBuffer {
+    let (self_attn, bias) = match attend {
+        Attend::SelfAttn(bias) => (true, bias),
+        Attend::Cross => (false, None),
+    };
     let ctx = gpu.storage((nq * inner_dim) as u64);
     if flash_self_attn(gpu, self_attn, head_dim) {
         assert_eq!(nq, nk, "ltxv attn_context: self_attn=true needs nq == nk (got {nq} vs {nk})");
         let qkv = gpu.storage(nq as u64 * 3 * inner_dim as u64);
         s.push(gpu.step(K_PACK_QKV, &[q, k, v, &qkv], &[nq, inner_dim], nq * 3 * inner_dim));
-        model::block::flash_bidir_fwd(gpu, FLASH_IDS, heads, head_dim, inner_dim, &qkv, 3 * inner_dim, 0, inner_dim, 2 * inner_dim, &ctx, &[(0, nq)], s);
+        match bias {
+            // The one rung that takes the bias: 64 query rows per workgroup,
+            // the family's base layout and Params plus the two boundaries.
+            Some(b) => s.push(gpu.dispatch(
+                K_FLASH_BIDIR_BIAS,
+                &[&qkv, b.log_weights, &ctx],
+                &[1, heads, nq, head_dim, 3 * inner_dim, 0, inner_dim, 2 * inner_dim, inner_dim, b.noisy, b.split],
+                gpu_core::Dispatch::Workgroups(heads * nq.div_ceil(64)),
+            )),
+            None => model::block::flash_bidir_fwd(gpu, FLASH_IDS, heads, head_dim, inner_dim, &qkv, 3 * inner_dim, 0, inner_dim, 2 * inner_dim, &ctx, &[(0, nq)], s),
+        }
     } else if flash_cross_attn(gpu, self_attn, head_dim) {
         // No pack: q, k and v are already three plain `[rows, inner_dim]`
         // buffers, which is exactly this kernel's operand shape.
         let lay = model::block::FlashCrossLayout { q_stride: inner_dim, q_off: 0, k_stride: inner_dim, k_off: 0, v_stride: inner_dim, v_off: 0, d_out: inner_dim };
         s.push(model::block::flash_cross_step(gpu, K_FLASH_CROSS_REG2, 1, heads, head_dim, nq, nk, lay, q, k, v, &ctx));
     } else {
-        attn_context_materialized(gpu, s, q, k, v, &ctx, heads, head_dim, inner_dim, nq, nk);
+        attn_context_materialized(gpu, s, q, k, v, &ctx, heads, head_dim, inner_dim, (nq, nk), bias);
     }
     ctx
 }
@@ -623,10 +681,13 @@ fn attn_context_materialized(
     heads: u32,
     head_dim: u32,
     inner_dim: u32,
-    nq: u32,
-    nk: u32,
+    (nq, nk): (u32, u32),
+    bias: Option<SelfAttnBias>,
 ) {
     let scores = attn_scores_kt(gpu, s, q, k, heads, head_dim, inner_dim, nq, nk);
+    if let Some(b) = bias {
+        s.push(gpu.step(K_ATTN_BIAS_GROUPS, &[b.log_weights, &scores], &[heads, nq, nk, b.noisy, b.split], heads * nq * nk));
+    }
     let probs = gpu.storage((heads * nq * nk) as u64);
     attn_softmax(gpu, s, &scores, &probs, heads, nq, nk);
     s.push(gpu.step(K_ATTN_APPLY, &[&probs, v, ctx], &[1, heads, nq, nk, head_dim, inner_dim, 0, inner_dim], heads * nq * head_dim));
@@ -765,7 +826,7 @@ fn attention(
     k_rope: Option<(&[DeviceBuffer], &[DeviceBuffer])>,
     kernel_rope2d: usize,
     eps: f32,
-    self_attn: bool,
+    attend: Attend,
 ) -> DeviceBuffer {
     let q_pre = gpu.storage((nq * inner_dim) as u64);
     let k_pre = gpu.storage((nk * inner_dim) as u64);
@@ -792,7 +853,7 @@ fn attention(
         }
     }
 
-    let ctx = attn_context(gpu, s, &q, &k, &v, heads, head_dim, inner_dim, nq, nk, self_attn);
+    let ctx = attn_context(gpu, s, &q, &k, &v, heads, head_dim, inner_dim, nq, nk, attend);
 
     let ctx_gated = if let Some(gate) = &w.gate {
         let logits = gpu.storage((nq * heads) as u64);
@@ -1040,7 +1101,7 @@ pub struct LtxBlock {
 /// `scale_shift_table` ([`slice_mod`]'s output). `ctx_buf`/`ctx_len`: this
 /// stream's RAW text context (this block's own `prompt_scale_shift_table`
 /// modulates it here, fresh each block - see [`BlockWeights`]'s doc).
-/// `cos_bufs`/`sin_bufs`: this stream's own self-attention RoPE tables.
+/// `rope`: this stream's own self-attention RoPE tables and reference bias.
 ///
 /// Returns `(x2, attn1_out, ca_raw)`: `x2` is this stream's state after the
 /// text-CA residual add (ready for the AV cross-attention step, or - in the
@@ -1058,8 +1119,7 @@ fn self_attn_and_text_ca(
     m: &Mod,
     ctx_buf: &DeviceBuffer,
     ctx_len: u32,
-    cos_bufs: &[DeviceBuffer],
-    sin_bufs: &[DeviceBuffer],
+    rope: SelfAttnTables,
     dim: u32,
     heads: u32,
     head_dim: u32,
@@ -1108,7 +1168,7 @@ fn self_attn_and_text_ca(
         linear(gpu, s, &v, &w.attn1.wo, Some(&w.attn1.bo), &out, t, dim, dim);
         out
     } else {
-        attention(gpu, s, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((cos_bufs, sin_bufs)), Some((cos_bufs, sin_bufs)), K_ROPE2D, eps, true)
+        attention(gpu, s, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((rope.cos, rope.sin)), Some((rope.cos, rope.sin)), K_ROPE2D, eps, Attend::SelfAttn(rope.bias))
     };
     let x_fma = gpu.storage(td as u64);
     gate_row(gpu, s, x_buf, &gate_msa, &attn1_out, &x_fma, t, dim, 1);
@@ -1130,7 +1190,7 @@ fn self_attn_and_text_ca(
     mul(gpu, s, ctx_buf, &one_plus_scale_kv_buf, &enc_tmp1, ctxd);
     add2(gpu, s, &enc_tmp1, &shift_kv_buf, &enc_hidden, ctxd);
 
-    let ca_raw = attention(gpu, s, &w.attn2, dim, dim, dim, heads, head_dim, &attn_input, &enc_hidden, t, ctx_len, None, None, K_ROPE2D, eps, false);
+    let ca_raw = attention(gpu, s, &w.attn2, dim, dim, dim, heads, head_dim, &attn_input, &enc_hidden, t, ctx_len, None, None, K_ROPE2D, eps, Attend::Cross);
     let ca_gated = gpu.storage(td as u64);
     mul(gpu, s, &ca_raw, &gate_q, &ca_gated, td);
     let x2 = gpu.storage(td as u64);
@@ -1211,7 +1271,7 @@ impl LtxBlock {
     /// exists there because the VAE's per-block taps are large real-weight
     /// buffers this crate's much smaller DiT tensors do not need to guard).
     #[allow(clippy::too_many_arguments)]
-    pub fn forward(&self, x: &[f32], adaln_table: &[f32], context: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<f32>, BlockTaps) {
+    pub fn forward(&self, x: &[f32], adaln_table: &[f32], context: &[f32], rope: SelfAttnTables, t: u32) -> (Vec<f32>, BlockTaps) {
         let gpu = &self.gpu;
         let cfg = &self.cfg;
         let dim = cfg.inner_dim;
@@ -1236,7 +1296,7 @@ impl LtxBlock {
         let mut s: Vec<Step> = Vec::new();
         let td = t * dim;
 
-        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, &x_buf, &m, &ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps, false);
+        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, &x_buf, &m, &ctx_buf, ctx_len, rope, dim, heads, head_dim, t, eps, false);
         let (x3, ff_out) = mlp_sublayer(gpu, &mut s, &self.w.ff, &self.ones_t, &x2, &m.shift_mlp, &m.one_plus_scale_mlp, &m.gate_mlp, dim, t, eps);
 
         gpu.submit(&[], &s);
@@ -1277,7 +1337,7 @@ impl LtxBlock {
         let m = slice_mod(&combined, t as usize, dim as usize);
 
         let mut s: Vec<Step> = Vec::new();
-        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, x_buf, &m, ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps, false);
+        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, x_buf, &m, ctx_buf, ctx_len, SelfAttnTables::rope(cos_bufs, sin_bufs), dim, heads, head_dim, t, eps, false);
         let (x3, _ff_out) = mlp_sublayer(gpu, &mut s, &self.w.ff, &self.ones_t, &x2, &m.shift_mlp, &m.one_plus_scale_mlp, &m.gate_mlp, dim, t, eps);
         (s, x3)
     }
@@ -1491,8 +1551,8 @@ impl LtxAvBlock {
         // ---- 1-2: video, then audio - self-attn + text-CA, each stream run
         // to completion before the AV step touches either (this struct's
         // doc, steps 1-2).
-        let (vx1, v_attn1_out, v_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.vw, &self.ones_v, &vx_buf, &vm, &v_ctx_buf, self.v_ctx_len, v_cos, v_sin, vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
-        let (ax1, a_attn1_out, a_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.aw, &self.ones_a, &ax_buf, &am, &a_ctx_buf, self.a_ctx_len, a_cos, a_sin, adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
+        let (vx1, v_attn1_out, v_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.vw, &self.ones_v, &vx_buf, &vm, &v_ctx_buf, self.v_ctx_len, SelfAttnTables::rope(v_cos, v_sin), vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
+        let (ax1, a_attn1_out, a_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.aw, &self.ones_a, &ax_buf, &am, &a_ctx_buf, self.a_ctx_len, SelfAttnTables::rope(a_cos, a_sin), adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
 
         // ---- 3: audio<->video cross-attention - vx1/ax1 are the pre-AV
         // snapshot BOTH directions read (this struct's doc, step 3).
@@ -1535,7 +1595,7 @@ impl LtxAvBlock {
         let a2v_ax_scaled = gpu.storage(atd as u64);
         ada_zero(gpu, &mut s, &self.ones_a, &ax1, &scale_a2v_a_buf, &shift_a2v_a_buf, &a_tmp1, &a_tmp2, &a2v_ax_scaled, adim, ta, eps);
 
-        let a2v_out = attention(gpu, &mut s, &self.avw.a2v, vdim, adim, adim, aheads, ahd, &a2v_vx_scaled, &a2v_ax_scaled, tv, ta, Some((v_cross_cos, v_cross_sin)), Some((a_cross_cos, a_cross_sin)), K_ROPE2D, eps, false);
+        let a2v_out = attention(gpu, &mut s, &self.avw.a2v, vdim, adim, adim, aheads, ahd, &a2v_vx_scaled, &a2v_ax_scaled, tv, ta, Some((v_cross_cos, v_cross_sin)), Some((a_cross_cos, a_cross_sin)), K_ROPE2D, eps, Attend::Cross);
         let vx2 = gpu.storage(vtd as u64);
         gate_row(gpu, &mut s, &vx1, &gate_a2v_buf, &a2v_out, &vx2, tv, vdim, tv);
 
@@ -1549,7 +1609,7 @@ impl LtxAvBlock {
         let v2a_ax_scaled = gpu.storage(atd as u64);
         ada_zero(gpu, &mut s, &self.ones_a, &ax1, &scale_v2a_a_buf, &shift_v2a_a_buf, &a_tmp3, &a_tmp4, &v2a_ax_scaled, adim, ta, eps);
 
-        let v2a_out = attention(gpu, &mut s, &self.avw.v2a, adim, vdim, adim, aheads, ahd, &v2a_ax_scaled, &v2a_vx_scaled, ta, tv, Some((a_cross_cos, a_cross_sin)), Some((v_cross_cos, v_cross_sin)), K_ROPE2D, eps, false);
+        let v2a_out = attention(gpu, &mut s, &self.avw.v2a, adim, vdim, adim, aheads, ahd, &v2a_ax_scaled, &v2a_vx_scaled, ta, tv, Some((a_cross_cos, a_cross_sin)), Some((v_cross_cos, v_cross_sin)), K_ROPE2D, eps, Attend::Cross);
         let ax2 = gpu.storage(atd as u64);
         gate_row(gpu, &mut s, &ax1, &gate_v2a_buf, &v2a_out, &ax2, ta, adim, ta);
 
@@ -2098,7 +2158,7 @@ fn attention_q(
     k_rope: Option<(&[DeviceBuffer], &[DeviceBuffer])>,
     kernel_rope2d: usize,
     eps: f32,
-    self_attn: bool,
+    attend: Attend,
 ) -> DeviceBuffer {
     let q_pre = gpu.storage((nq * inner_dim) as u64);
     qquant_linear(gpu, s, tier, q_in, &w.wq, &q_pre, nq, q_dim, inner_dim);
@@ -2125,7 +2185,7 @@ fn attention_q(
         }
     }
 
-    let ctx = attn_context(gpu, s, &q, &k, &v, heads, head_dim, inner_dim, nq, nk, self_attn);
+    let ctx = attn_context(gpu, s, &q, &k, &v, heads, head_dim, inner_dim, nq, nk, attend);
 
     // Gating stays fp32 - `to_gate_logits` is never quantized (small,
     // fixes the gate's own numeric scale, see `crate::int8::is_never_
@@ -2164,8 +2224,7 @@ fn self_attn_and_text_ca_q(
     m: &ModBufs,
     ctx_buf: &DeviceBuffer,
     ctx_len: u32,
-    cos_bufs: &[DeviceBuffer],
-    sin_bufs: &[DeviceBuffer],
+    rope: SelfAttnTables,
     dim: u32,
     heads: u32,
     head_dim: u32,
@@ -2217,7 +2276,7 @@ fn self_attn_and_text_ca_q(
         qquant_linear(gpu, s, tier, &v, &w.attn1.wo, &out, t, dim, dim);
         out
     } else {
-        attention_q(gpu, s, tier, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((cos_bufs, sin_bufs)), Some((cos_bufs, sin_bufs)), K_ROPE2D, eps, true)
+        attention_q(gpu, s, tier, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((rope.cos, rope.sin)), Some((rope.cos, rope.sin)), K_ROPE2D, eps, Attend::SelfAttn(rope.bias))
     };
     let x_fma = gpu.storage(td as u64);
     gate_row(gpu, s, x_buf, gate_msa, &attn1_out, &x_fma, t, dim, 1);
@@ -2236,7 +2295,7 @@ fn self_attn_and_text_ca_q(
     mul(gpu, s, ctx_buf, &one_plus_scale_kv_buf, &enc_tmp1, ctxd);
     add2(gpu, s, &enc_tmp1, &shift_kv_buf, &enc_hidden, ctxd);
 
-    let ca_raw = attention_q(gpu, s, tier, &w.attn2, dim, dim, dim, heads, head_dim, &attn_input, &enc_hidden, t, ctx_len, None, None, K_ROPE2D, eps, false);
+    let ca_raw = attention_q(gpu, s, tier, &w.attn2, dim, dim, dim, heads, head_dim, &attn_input, &enc_hidden, t, ctx_len, None, None, K_ROPE2D, eps, Attend::Cross);
     let ca_gated = gpu.storage(td as u64);
     mul(gpu, s, &ca_raw, gate_q, &ca_gated, td);
     let x2 = gpu.storage(td as u64);
@@ -2547,7 +2606,7 @@ impl LtxBlockQ {
         let mut s: Vec<Step> = Vec::new();
         let td = t * dim;
 
-        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca_q(gpu, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, &ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps, false);
+        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca_q(gpu, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, &ctx_buf, ctx_len, SelfAttnTables::rope(cos_bufs, sin_bufs), dim, heads, head_dim, t, eps, false);
         let (x3, ff_out) = mlp_sublayer_q(gpu, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
         // Every `wf` above is a synchronous `queue.write_buffer` and NOTHING
         // computes until `submit`, so the span this closes is exactly the
@@ -2610,7 +2669,7 @@ impl LtxBlockQ {
         let x_buf = scratch.storage((t * dim) as u64);
         wf(scratch, &x_buf, x);
         timings.record_upload += s_rec.elapsed();
-        let x3 = self.forward_prod_dev(scratch, &x_buf, adaln_buf, adaln_map_buf, ctx_buf, cos_bufs, sin_bufs, t, timings, ptb, BlockExec::default());
+        let x3 = self.forward_prod_dev(scratch, &x_buf, adaln_buf, adaln_map_buf, ctx_buf, SelfAttnTables::rope(cos_bufs, sin_bufs), t, timings, ptb, BlockExec::default());
         let s_back = std::time::Instant::now();
         let out = scratch.read(&x3, (t * dim) as usize);
         timings.readback += s_back.elapsed();
@@ -2658,8 +2717,7 @@ impl LtxBlockQ {
         adaln_buf: &DeviceBuffer,
         adaln_map_buf: &DeviceBuffer,
         ctx_buf: &DeviceBuffer,
-        cos_bufs: &[DeviceBuffer],
-        sin_bufs: &[DeviceBuffer],
+        rope: SelfAttnTables,
         t: u32,
         timings: &mut BlockTimings,
         ptb: Perturbation,
@@ -2683,7 +2741,7 @@ impl LtxBlockQ {
         let s_rec = std::time::Instant::now();
         let mut s: Vec<Step> = Vec::new();
         let mb = ModBufs::derive(scratch, &mut s, adaln_buf, adaln_map_buf, &self.sst_buf, t, dim);
-        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(scratch, &mut s, self.tier, &self.w, &self.ones_t, x_buf, &mb, ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps, ptb.video_self_attn);
+        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(scratch, &mut s, self.tier, &self.w, &self.ones_t, x_buf, &mb, ctx_buf, ctx_len, rope, dim, heads, head_dim, t, eps, ptb.video_self_attn);
         let (x3, _ff_out) = mlp_sublayer_q(scratch, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
         timings.record_upload += s_rec.elapsed();
         let s_sub = std::time::Instant::now();
@@ -3039,6 +3097,8 @@ pub struct AvRope<'a> {
     pub v_cross_sin: &'a [DeviceBuffer],
     pub a_cross_cos: &'a [DeviceBuffer],
     pub a_cross_sin: &'a [DeviceBuffer],
+    /// The video stream's IC-LoRA reference bias, when it carries one.
+    pub v_bias: Option<SelfAttnBias<'a>>,
 }
 
 /// One AV block's whole op sequence, recorded (not submitted) - the single
@@ -3081,9 +3141,9 @@ fn av_block_body_q(
     // ---- 1-2: each stream's self-attention + text cross-attention, run to
     // completion before the AV step touches either.
     #[rustfmt::skip]
-    let (vx1, v_attn1, v_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.vw, ones_v, vx_buf, vm, v_ctx, v_ctx_len, rope.v_cos, rope.v_sin, vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
+    let (vx1, v_attn1, v_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.vw, ones_v, vx_buf, vm, v_ctx, v_ctx_len, SelfAttnTables { cos: rope.v_cos, sin: rope.v_sin, bias: rope.v_bias }, vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
     #[rustfmt::skip]
-    let (ax1, a_attn1, a_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.aw, ones_a, ax_buf, am, a_ctx, a_ctx_len, rope.a_cos, rope.a_sin, adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
+    let (ax1, a_attn1, a_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.aw, ones_a, ax_buf, am, a_ctx, a_ctx_len, SelfAttnTables::rope(rope.a_cos, rope.a_sin), adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
 
     // ---- 3: audio<->video cross-attention. `vx1`/`ax1` are the pre-AV
     // snapshot BOTH directions read. A cut direction (the isolated-modality
@@ -3104,7 +3164,7 @@ fn av_block_body_q(
     let a2v_ax_scaled = gpu.storage(atd as u64);
     ada_zero(gpu, s, ones_a, &ax1, &avm.scale_a2v_a, &avm.shift_a2v_a, &a_tmp1, &a_tmp2, &a2v_ax_scaled, adim, ta, eps);
     #[rustfmt::skip]
-    let a2v = attention_q(gpu, s, tier, &w.avw.a2v, vdim, adim, adim, aheads, ahd, &a2v_vx_scaled, &a2v_ax_scaled, tv, ta, Some((rope.v_cross_cos, rope.v_cross_sin)), Some((rope.a_cross_cos, rope.a_cross_sin)), K_ROPE2D, eps, false);
+    let a2v = attention_q(gpu, s, tier, &w.avw.a2v, vdim, adim, adim, aheads, ahd, &a2v_vx_scaled, &a2v_ax_scaled, tv, ta, Some((rope.v_cross_cos, rope.v_cross_sin)), Some((rope.a_cross_cos, rope.a_cross_sin)), K_ROPE2D, eps, Attend::Cross);
     let vx2 = gpu.storage(vtd as u64);
     // `rows_per_cond = rows`: ONE gate row, broadcast across every token.
     gate_row(gpu, s, &vx1, cut_a2v.as_ref().unwrap_or(&avm.gate_a2v), &a2v, &vx2, tv, vdim, tv);
@@ -3118,7 +3178,7 @@ fn av_block_body_q(
     let v2a_ax_scaled = gpu.storage(atd as u64);
     ada_zero(gpu, s, ones_a, &ax1, &avm.scale_v2a_a, &avm.shift_v2a_a, &a_tmp3, &a_tmp4, &v2a_ax_scaled, adim, ta, eps);
     #[rustfmt::skip]
-    let v2a = attention_q(gpu, s, tier, &w.avw.v2a, adim, vdim, adim, aheads, ahd, &v2a_ax_scaled, &v2a_vx_scaled, ta, tv, Some((rope.a_cross_cos, rope.a_cross_sin)), Some((rope.v_cross_cos, rope.v_cross_sin)), K_ROPE2D, eps, false);
+    let v2a = attention_q(gpu, s, tier, &w.avw.v2a, adim, vdim, adim, aheads, ahd, &v2a_ax_scaled, &v2a_vx_scaled, ta, tv, Some((rope.a_cross_cos, rope.a_cross_sin)), Some((rope.v_cross_cos, rope.v_cross_sin)), K_ROPE2D, eps, Attend::Cross);
     let ax2 = gpu.storage(atd as u64);
     gate_row(gpu, s, &ax1, cut_v2a.as_ref().unwrap_or(&avm.gate_v2a), &v2a, &ax2, ta, adim, ta);
 
@@ -3592,7 +3652,7 @@ impl EmbeddingsConnector {
         for blk in &self.blocks {
             let normed = gpu.storage(td as u64);
             rmsnorm(gpu, &mut ops, &cur, &self.ones, &normed, dim, s, self.eps);
-            let attn_out = attention(gpu, &mut ops, &blk.attn1, dim, dim, dim, self.heads, self.head_dim, &normed, &normed, s, s, Some((&cos_bufs, &sin_bufs)), Some((&cos_bufs, &sin_bufs)), K_ROPE2D, self.eps, true);
+            let attn_out = attention(gpu, &mut ops, &blk.attn1, dim, dim, dim, self.heads, self.head_dim, &normed, &normed, s, s, Some((&cos_bufs, &sin_bufs)), Some((&cos_bufs, &sin_bufs)), K_ROPE2D, self.eps, Attend::SelfAttn(None));
             let x2 = gpu.storage(td as u64);
             add2(gpu, &mut ops, &attn_out, &cur, &x2, td);
 
@@ -3646,6 +3706,33 @@ mod tests {
     /// differing is cross-attention, and the SAME expression covers both,
     /// which is exactly why a wrong `nq`/`nk` swap in a kernel cannot hide
     /// here.
+    /// [`host_attention`] for self-attention with `bias(i, j)` added to
+    /// every scaled score.
+    fn host_attention_with(q: &[f32], k: &[f32], v: &[f32], heads: usize, head_dim: usize, t: usize, bias: impl Fn(usize, usize) -> f64) -> Vec<f32> {
+        let inner = heads * head_dim;
+        let scale = 1.0 / (head_dim as f64).sqrt();
+        let mut out = vec![0f32; t * inner];
+        let mut row = vec![0f64; t];
+        for h in 0..heads {
+            for i in 0..t {
+                for (j, r) in row.iter_mut().enumerate() {
+                    let d: f64 = (0..head_dim).map(|c| q[i * inner + h * head_dim + c] as f64 * k[j * inner + h * head_dim + c] as f64).sum();
+                    *r = d * scale + bias(i, j);
+                }
+                let m = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let sum: f64 = row.iter_mut().map(|r| {
+                    *r = (*r - m).exp();
+                    *r
+                }).sum();
+                for c in 0..head_dim {
+                    let acc: f64 = row.iter().enumerate().map(|(j, &r)| r * v[j * inner + h * head_dim + c] as f64).sum();
+                    out[i * inner + h * head_dim + c] = (acc / sum) as f32;
+                }
+            }
+        }
+        out
+    }
+
     fn host_attention(q: &[f32], k: &[f32], v: &[f32], heads: usize, head_dim: usize, nq: usize, nk: usize) -> Vec<f32> {
         let inner = heads * head_dim;
         let scale = 1.0 / (head_dim as f64).sqrt();
@@ -3736,14 +3823,75 @@ mod tests {
         let (qb, kb, vb) = (up(q), up(k), up(v));
         let mut s: Vec<Step> = Vec::new();
         let ctx = if fused {
-            attn_context(gpu, &mut s, &qb, &kb, &vb, heads, head_dim, inner, nq, nk, self_attn)
+            attn_context(gpu, &mut s, &qb, &kb, &vb, heads, head_dim, inner, nq, nk, if self_attn { Attend::SelfAttn(None) } else { Attend::Cross })
         } else {
             let c = gpu.storage((nq * inner) as u64);
-            attn_context_materialized(gpu, &mut s, &qb, &kb, &vb, &c, heads, head_dim, inner, nq, nk);
+            attn_context_materialized(gpu, &mut s, &qb, &kb, &vb, &c, heads, head_dim, inner, (nq, nk), None);
             c
         };
         gpu.submit(&[], &s);
         gpu.read(&ctx, (nq * inner) as usize)
+    }
+
+    /// An IC-LoRA reference's attention bias, on both arms, against a host
+    /// oracle built the way the reference builds it: the dense `[0, 1]` mask
+    /// (`w` between a generated and a reference token, `0` between the
+    /// reference and an earlier conditioning item, `1` elsewhere) turned into
+    /// `ln w` / `f32::MIN` and added to every score. The materialized arm runs
+    /// everywhere; the fused rung needs workgroup reductions.
+    #[test]
+    fn a_reference_attention_bias_matches_the_dense_mask_oracle_on_both_arms() {
+        let gpu = Gpu::open(None, &KERNELS);
+        let mut rng = data::rng::Lcg::new(0x5eed_b1a5); // seed: GPU kernel parity of the biased attention against its host oracle
+        let mut randn = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.unit() * 2.0 - 1.0).collect() };
+        for &(heads, head_dim, noisy, split, t) in &[(2u32, 64u32, 70usize, 70usize, 101usize), (3, 16, 20, 29, 45), (1, 128, 64, 80, 150)] {
+            let inner = (heads * head_dim) as usize;
+            let (q, k, v) = (randn(t * inner), randn(t * inner), randn(t * inner));
+            let weights: Vec<f32> = (0..t - split).map(|j| [1.0, 0.5, 0.0, 0.1][j % 4]).collect();
+            let r = crate::refcond::reference_attention(noisy, split, &weights);
+            let up = |data: &[f32]| {
+                let b = gpu.storage(data.len() as u64);
+                wf(&gpu, &b, data);
+                b
+            };
+            let (qb, kb, vb, lw) = (up(&q), up(&k), up(&v), up(&r.log_weights));
+            let bias = SelfAttnBias { log_weights: &lw, noisy: noisy as u32, split: split as u32 };
+            let run = |fused: bool| {
+                let mut st: Vec<Step> = Vec::new();
+                let ctx = if fused {
+                    attn_context(&gpu, &mut st, &qb, &kb, &vb, heads, head_dim, inner as u32, t as u32, t as u32, Attend::SelfAttn(Some(bias)))
+                } else {
+                    let c = gpu.storage((t * inner) as u64);
+                    attn_context_materialized(&gpu, &mut st, &qb, &kb, &vb, &c, heads, head_dim, inner as u32, (t as u32, t as u32), Some(bias));
+                    c
+                };
+                gpu.submit(&[], &st);
+                gpu.read(&ctx, t * inner)
+            };
+            let mask = |i: usize, j: usize| -> f32 {
+                match (i >= split, j >= split) {
+                    (true, true) | (false, false) => 1.0,
+                    (true, false) if j < noisy => weights[i - split],
+                    (false, true) if i < noisy => weights[j - split],
+                    _ => 0.0,
+                }
+            };
+            let host = host_attention_with(&q, &k, &v, heads as usize, head_dim as usize, t, |i, j| {
+                let w = mask(i, j);
+                if w > 0.0 { (w as f64).ln() } else { f32::MIN as f64 }
+            });
+            for fused in [false, true] {
+                if fused && !flash_self_attn(&gpu, true, head_dim) {
+                    eprintln!("device has no workgroup reductions - the fused biased rung is not selected here");
+                    continue;
+                }
+                let got = run(fused);
+                let err = max_abs(&got, &host);
+                eprintln!("fused={fused} heads={heads} head_dim={head_dim} noisy={noisy} split={split} t={t}: max|got-host|={err:.3e}");
+                assert!(got.iter().all(|x| x.is_finite()), "non-finite biased attention (fused={fused})");
+                assert!(err < 1e-5, "biased attention vs the dense-mask oracle: max_abs {err:.3e} (fused={fused}, t={t})");
+            }
+        }
     }
 
     /// The gate. For each shape: the flash arm, the exact materialized

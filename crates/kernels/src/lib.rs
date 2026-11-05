@@ -116,6 +116,8 @@ pub const ARGMAX_ROW: &str = include_str!("../wgsl/argmax_row.wgsl");
 pub const ATTENTION: &str = include_str!("../wgsl/attention.wgsl");
 /// `wgsl/attn_apply.wgsl`
 pub const ATTN_APPLY: &str = include_str!("../wgsl/attn_apply.wgsl");
+/// `wgsl/attn_bias_groups.wgsl`
+pub const ATTN_BIAS_GROUPS: &str = include_str!("../wgsl/attn_bias_groups.wgsl");
 /// `wgsl/attn_apply_bidir.wgsl`
 pub const ATTN_APPLY_BIDIR: &str = include_str!("../wgsl/attn_apply_bidir.wgsl");
 /// `wgsl/attn_apply_cross.wgsl`
@@ -464,6 +466,8 @@ pub const FILM_ROW_DSB: &str = include_str!("../wgsl/film_row_dsb.wgsl");
 pub const FILM_ROW_DX: &str = include_str!("../wgsl/film_row_dx.wgsl");
 /// `wgsl/flash_attn_bidir.wgsl`
 pub const FLASH_ATTN_BIDIR: &str = include_str!("../wgsl/flash_attn_bidir.wgsl");
+/// `wgsl/flash_attn_bidir_bias.wgsl`
+pub const FLASH_ATTN_BIDIR_BIAS: &str = include_str!("../wgsl/flash_attn_bidir_bias.wgsl");
 /// `wgsl/flash_attn_bidir_reg.wgsl`
 pub const FLASH_ATTN_BIDIR_REG: &str = include_str!("../wgsl/flash_attn_bidir_reg.wgsl");
 /// `wgsl/flash_attn_bidir_reg2.wgsl`
@@ -1453,6 +1457,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_apply_bidir", ATTN_APPLY_BIDIR),
     ("attn_apply_cross", ATTN_APPLY_CROSS),
     ("attn_apply_full", ATTN_APPLY_FULL),
+    ("attn_bias_groups", ATTN_BIAS_GROUPS),
     ("attn_bwd_dbias", ATTN_BWD_DBIAS),
     ("attn_bwd_dk", ATTN_BWD_DK),
     ("attn_bwd_dk_bias", ATTN_BWD_DK_BIAS),
@@ -1624,6 +1629,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("film_row_dsb", FILM_ROW_DSB),
     ("film_row_dx", FILM_ROW_DX),
     ("flash_attn_bidir", FLASH_ATTN_BIDIR),
+    ("flash_attn_bidir_bias", FLASH_ATTN_BIDIR_BIAS),
     ("flash_attn_bidir_reg", FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", FLASH_ATTN_BIDIR_REG2),
     ("flash_attn_bidir_spans", FLASH_ATTN_BIDIR_SPANS),
