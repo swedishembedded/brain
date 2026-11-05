@@ -12,6 +12,7 @@ mod chat_final_turn_mask;
 mod chat_image_parts;
 mod chat_packed_answers;
 mod chat_rollout_records;
+mod chat_teacher_context;
 mod chat_sample_encode;
 mod chat_template_cross_check;
 mod clip_tokenizer_parity;

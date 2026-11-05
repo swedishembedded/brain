@@ -28,7 +28,7 @@ use std::io;
 use std::path::Path;
 
 use crate::binio;
-use crate::chat_rollout::{self, Rollout};
+use crate::chat_rollout::{self, Rollout, Teacher};
 use crate::chat_template::{ChatTemplate, TemplateError};
 use crate::tokenizer::Tokenizer;
 
@@ -257,7 +257,8 @@ impl ChatSample {
                 }
             })
             .collect();
-        ChatSample { messages, tools: self.tools.clone(), rendered: None, media: self.media.clone(), rollout: self.rollout.clone() }
+        let rollout = self.rollout.as_ref().map(|r| Rollout { teacher: r.teacher.as_ref().map(|t| Teacher { sample: Box::new(t.sample.answering_without_thinking(block)), inserted: t.inserted }), ..r.clone() });
+        ChatSample { messages, tools: self.tools.clone(), rendered: None, media: self.media.clone(), rollout }
     }
 
     /// Drop the images the sample's text does not place: a sample made from a longer conversation (one answer of
@@ -310,7 +311,7 @@ impl ChatSample {
 
     /// The first `len` messages as a sample of their own.
     fn until(&self, len: usize) -> ChatSample {
-        ChatSample { messages: self.messages[..len].to_vec(), tools: self.tools.clone(), rendered: None, media: self.media.clone(), rollout: self.rollout.as_ref().map(|r| Rollout { advantage: r.advantage, behavior_logprobs: r.behavior_logprobs[..len].to_vec() }) }
+        ChatSample { messages: self.messages[..len].to_vec(), tools: self.tools.clone(), rendered: None, media: self.media.clone(), rollout: self.rollout.as_ref().map(|r| r.derived(r.behavior_logprobs[..len].to_vec(), r.teacher.as_ref().map(|t| Teacher { sample: Box::new(t.sample.until(len + t.inserted)), inserted: t.inserted }))) }
     }
 
     /// This sample's last message as one example the way the model is asked
@@ -323,7 +324,11 @@ impl ChatSample {
         let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
         let (prompt, completion) = full.split_at(answer.start);
         let behavior = self.rollout.as_ref().and_then(|r| r.behavior_logprobs.last().cloned().flatten());
-        let rollout = self.rollout.as_ref().map(|r| Rollout { advantage: r.advantage, behavior_logprobs: Vec::new() });
+        let teacher = match self.rollout.as_ref().and_then(|r| r.teacher.as_ref()) {
+            Some(t) => Some(Teacher { sample: Box::new(t.sample.rendered_final_turn(tmpl, thinking)?), inserted: t.inserted }),
+            None => None,
+        };
+        let rollout = self.rollout.as_ref().map(|r| r.derived(Vec::new(), teacher));
         Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered::answer(prompt, completion, behavior)), media: self.media.clone(), rollout })
     }
 
@@ -384,7 +389,14 @@ impl ChatSample {
             segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior });
             previous_prompt = prompt.to_string();
         }
-        let rollout = self.rollout.as_ref().map(|r| Rollout { advantage: r.advantage, behavior_logprobs: Vec::new() });
+        let teacher = match self.rollout.as_ref().and_then(|r| r.teacher.as_ref()) {
+            Some(t) => {
+                let packed = t.sample.answers_packed(tmpl, thinking)?.ok_or_else(|| TemplateError("the teacher's conversation supervises no assistant answer".to_string()))?;
+                Some(Teacher { sample: Box::new(packed), inserted: t.inserted })
+            }
+            None => None,
+        };
+        let rollout = self.rollout.as_ref().map(|r| r.derived(Vec::new(), teacher));
         Ok(Some(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { segments }), media: self.media.clone(), rollout }))
     }
 
@@ -459,6 +471,25 @@ impl ChatSample {
     /// As [`ChatSample::encode_with`]; the log-probabilities of an answer do not number its tokens; a sample of whole
     /// messages carries log-probabilities.
     pub fn encode_rollout(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<EncodedSample, TemplateError> {
+        let mut encoded = self.encode_own(tok, tmpl, opts)?;
+        if let Some(teacher) = self.rollout.as_ref().and_then(|r| r.teacher.as_ref()) {
+            let (t_ids, t_mask) = teacher.sample.encode_with(tok, tmpl, opts)?;
+            let student: Vec<u32> = encoded.ids.iter().zip(&encoded.mask).filter(|(_, m)| **m).map(|(i, _)| *i).collect();
+            let seen: Vec<u32> = t_ids.iter().zip(&t_mask).filter(|(_, m)| **m).map(|(i, _)| *i).collect();
+            if student != seen {
+                return Err(TemplateError(format!(
+                    "\"teacher_context\": the teacher's rendering supervises {} tokens and the student's {}, and the assistant tokens differ between the two renderings (the chat template renders an answer differently once the teacher's messages are in the conversation); the teacher's log-probabilities would not be those of the student's tokens",
+                    seen.len(),
+                    student.len()
+                )));
+            }
+            encoded.teacher = Some((t_ids, t_mask));
+        }
+        Ok(encoded)
+    }
+
+    /// [`ChatSample::encode_rollout`] of this sample's own conversation, without its teacher.
+    fn encode_own(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<EncodedSample, TemplateError> {
         if let Some(Rendered { segments }) = &self.rendered {
             let (mut ids, mut mask, mut behavior) = (Vec::new(), Vec::new(), Vec::new());
             let mut answer = 0;
@@ -479,7 +510,7 @@ impl ChatSample {
                 mask.extend(std::iter::repeat_n(*supervised, encoded.len()));
                 ids.extend(encoded);
             }
-            return Ok(EncodedSample { ids, mask, behavior });
+            return Ok(EncodedSample { ids, mask, behavior, teacher: None });
         }
         if self.rollout.as_ref().is_some_and(Rollout::has_behavior) {
             return Err(TemplateError("\"behavior_logprobs\" are placed on an answer rendered as the model is asked for it; this sample still holds whole messages (render it with answers_as_asked or answers_packed)".to_string()));
@@ -506,7 +537,7 @@ impl ChatSample {
             ids.extend(tid);
         }
         let behavior = vec![f32::NAN; ids.len()];
-        Ok(EncodedSample { ids, mask, behavior })
+        Ok(EncodedSample { ids, mask, behavior, teacher: None })
     }
 
     /// Whether any message carries behaviour log-probabilities, which only an answer rendered as asked can place.
@@ -592,6 +623,24 @@ struct WireRecord {
     /// The group-relative advantage of the rollout this record is one call of ([`crate::chat_rollout`]).
     #[serde(default)]
     advantage: Option<serde_json::Value>,
+    /// Messages only the teacher of a self-distillation run is shown ([`crate::chat_rollout`]).
+    #[serde(default)]
+    teacher_context: Option<WireTeacherContext>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireTeacherContext {
+    /// The index of the record's message the privileged messages are inserted before.
+    at: usize,
+    messages: Vec<WireTeacherMessage>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireTeacherMessage {
+    role: WireRole,
+    content: String,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -671,17 +720,49 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
     }
     let (messages, media, behavior_logprobs) = messages_from_wire_with(record.messages, reader)?;
     reader.check_record(&media)?;
-    let rollout = match record.advantage {
-        Some(advantage) => {
-            let advantage = chat_rollout::check_advantage(&advantage)?;
-            Some(Rollout { advantage, behavior_logprobs })
-        }
-        None => match behavior_logprobs.iter().position(Option::is_some) {
-            Some(at) => return Err(format!("messages[{at}]: \"behavior_logprobs\" belong to a rollout, and the record has no \"advantage\"")),
+    let teacher = record.teacher_context.map(|context| teacher_view(&messages, &record.tools, &media, context)).transpose()?;
+    let advantage = record.advantage.as_ref().map(chat_rollout::check_advantage).transpose()?;
+    let rollout = match (advantage, teacher) {
+        (None, None) => match behavior_logprobs.iter().position(Option::is_some) {
+            Some(at) => return Err(format!("messages[{at}]: \"behavior_logprobs\" belong to a rollout, and the record has no \"advantage\" or \"teacher_context\"")),
             None => None,
         },
+        // A teacher context alone trains on its per-token advantage: the scalar part is 0.
+        (advantage, teacher) => Some(Rollout { advantage: advantage.unwrap_or(0.0), behavior_logprobs, teacher }),
     };
     Ok(ChatSample { messages, tools: record.tools, rendered: None, media, rollout })
+}
+
+/// The teacher's view of a record: its conversation with the privileged messages inserted before message `at`.
+fn teacher_view(messages: &[ChatMessage], tools: &[minijinja::Value], media: &[ImageBytes], context: WireTeacherContext) -> Result<Teacher, String> {
+    let refuse = |why: String| Err(format!("\"teacher_context\": {why}"));
+    if context.messages.is_empty() {
+        return refuse("\"messages\" is empty; omit the teacher context when there is nothing privileged to show".to_string());
+    }
+    if !media.is_empty() {
+        return refuse("the record holds images, and the teacher's rendering is text only".to_string());
+    }
+    let first_supervised = messages.iter().position(|m| m.train).unwrap_or(messages.len());
+    if context.at > first_supervised {
+        return refuse(format!("\"at\" is {}, after the first supervised message (messages[{first_supervised}]); the privileged messages must precede every answer the teacher scores", context.at));
+    }
+    let mut inserted = Vec::with_capacity(context.messages.len());
+    for (k, m) in context.messages.into_iter().enumerate() {
+        let role = match m.role {
+            WireRole::System => "system",
+            WireRole::User => "user",
+            WireRole::Assistant | WireRole::Tool => return refuse(format!("messages[{k}] has the role \"assistant\" or \"tool\"; privileged messages are \"system\" or \"user\" turns")),
+        };
+        if m.content.trim().is_empty() {
+            return refuse(format!("messages[{k}]: \"content\" is empty"));
+        }
+        inserted.push(ChatMessage { role: role.to_string(), content: m.content, tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false });
+    }
+    let count = inserted.len();
+    let mut seen = messages.to_vec();
+    seen.splice(context.at..context.at, inserted);
+    check_tool_pairing(&seen).map_err(|e| format!("\"teacher_context\": {e}"))?;
+    Ok(Teacher { sample: Box::new(ChatSample { messages: seen, tools: tools.to_vec(), rendered: None, media: Vec::new(), rollout: None }), inserted: count })
 }
 
 /// One conversation's wire messages as [`ChatMessage`]s, with the semantic
@@ -955,6 +1036,9 @@ pub struct EncodedSample {
     pub ids: Vec<u32>,
     pub mask: Vec<bool>,
     pub behavior: Vec<f32>,
+    /// The teacher's rendering of the same conversation (tokens and supervision mask), when the record carries a
+    /// teacher context ([`crate::chat_rollout`]).
+    pub teacher: Option<(Vec<u32>, Vec<bool>)>,
 }
 
 /// A split's token stream, supervision mask and the start offset of each
@@ -971,6 +1055,8 @@ pub struct EncodedSplit {
     pub advantage: Vec<f32>,
     /// The behaviour log-probability of each token, aligned with `ids`; NaN where none was recorded.
     pub behavior: Vec<f32>,
+    /// The teacher's rendering of each example, aligned with `starts`; `None` for an example without a teacher context.
+    pub teacher: Vec<Option<(Vec<u32>, Vec<bool>)>>,
 }
 
 impl EncodedSplit {
@@ -982,13 +1068,13 @@ impl EncodedSplit {
     /// [`Self::push`] for an example that also reads `media`, in the order its text places them.
     pub fn push_with_media(&mut self, ids: &[u32], mask: &[bool], media: &[ImageBytes]) {
         let behavior = vec![f32::NAN; ids.len()];
-        self.push_rollout(&EncodedSample { ids: ids.to_vec(), mask: mask.to_vec(), behavior }, media, None);
+        self.push_rollout(&EncodedSample { ids: ids.to_vec(), mask: mask.to_vec(), behavior, teacher: None }, media, None);
     }
 
     /// [`Self::push_with_media`] for an example of a rollout: its `advantage` and the behaviour log-probabilities
     /// `encoded` carries.
     pub fn push_rollout(&mut self, encoded: &EncodedSample, media: &[ImageBytes], advantage: Option<f32>) {
-        let EncodedSample { ids, mask, behavior } = encoded;
+        let EncodedSample { ids, mask, behavior, teacher } = encoded;
         assert_eq!(ids.len(), mask.len(), "EncodedSplit::push: ids and mask differ in length");
         assert_eq!(ids.len(), behavior.len(), "EncodedSplit::push: ids and behaviour log-probabilities differ in length");
         if ids.is_empty() {
@@ -996,15 +1082,17 @@ impl EncodedSplit {
         }
         self.media.push(media.to_vec());
         self.advantage.push(advantage.unwrap_or(f32::NAN));
+        self.teacher.push(teacher.clone());
         self.starts.push(self.ids.len());
         self.ids.extend_from_slice(ids);
         self.mask.extend_from_slice(mask);
         self.behavior.extend_from_slice(behavior);
     }
 
-    /// The longest example, in tokens.
+    /// The longest example, in tokens; a teacher's rendering counts, since the row must hold it too.
     pub fn longest_example(&self) -> usize {
-        self.starts.iter().enumerate().map(|(i, &a)| self.starts.get(i + 1).copied().unwrap_or(self.ids.len()) - a).max().unwrap_or(0)
+        let own = self.starts.iter().enumerate().map(|(i, &a)| self.starts.get(i + 1).copied().unwrap_or(self.ids.len()) - a).max().unwrap_or(0);
+        own.max(self.teacher.iter().flatten().map(|(ids, _)| ids.len()).max().unwrap_or(0))
     }
 }
 
@@ -1027,6 +1115,7 @@ pub fn write_split(dir: &Path, split: &str, data: &EncodedSplit) -> io::Result<(
     let starts: Vec<u64> = data.starts.iter().map(|&s| s as u64).collect();
     binio::write_u64_bin(&dir.join(format!("{split}.ex.bin")), &starts)?;
     chat_rollout::write(dir, split, &data.advantage, &data.behavior)?;
+    chat_rollout::write_teacher(dir, split, &data.teacher)?;
     crate::chat_media::write(dir, split, &data.media)
 }
 
