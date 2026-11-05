@@ -544,6 +544,45 @@ pub enum HostCopy {
     Release,
 }
 
+/// Repacks the block after the one just requested on a worker thread, so a
+/// streamed block's host-side quantization runs while the device is busy
+/// with the block before it instead of stalling it.
+///
+/// Blocks are requested in forward order, so the next one asked for is
+/// nearly always `l + 1`: the window's pinned prefix fills first, then its
+/// rotating tail streams. A request the look-ahead did not predict is
+/// quantized in place, and the stray result is dropped when the scope ends.
+/// At most one block is in flight beside the one being returned.
+pub struct Lookahead<'scope, 'env, W> {
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    quantize: &'scope (dyn Fn(usize) -> W + Sync),
+    wanted: &'scope (dyn Fn(usize) -> bool + Sync),
+    layers: usize,
+    pending: Option<(usize, std::thread::ScopedJoinHandle<'scope, W>)>,
+}
+
+impl<'scope, 'env, W: Send + 'scope> Lookahead<'scope, 'env, W> {
+    /// `quantize(l)` builds layer `l`; `wanted(l)` says whether a request
+    /// for `l` would still need it (a layer the host cache holds does not).
+    pub fn new(scope: &'scope std::thread::Scope<'scope, 'env>, layers: usize, quantize: &'scope (dyn Fn(usize) -> W + Sync), wanted: &'scope (dyn Fn(usize) -> bool + Sync)) -> Self {
+        Lookahead { scope, quantize, wanted, layers, pending: None }
+    }
+
+    /// Layer `l`, and the start of `l + 1`'s build.
+    pub fn take(&mut self, l: usize) -> W {
+        let w = match self.pending.take() {
+            Some((p, h)) if p == l => h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
+            _ => (self.quantize)(l),
+        };
+        let next = l + 1;
+        if next < self.layers && (self.wanted)(next) {
+            let quantize = self.quantize;
+            self.pending = Some((next, self.scope.spawn(move || quantize(next))));
+        }
+        w
+    }
+}
+
 /// One card, for one generation: an open device plus whatever weights are
 /// resident on it. See this module's doc for the lifecycle.
 pub struct DitSession {
@@ -1292,5 +1331,32 @@ mod tests {
         let tail = (n - pinned) as u64;
         assert_eq!(w.uploads, pinned as u64 + tail * passes as u64, "the pinned prefix uploads once; only the tail reloads per pass");
         assert!(w.uploads < n as u64 * passes as u64, "a narrow window must still upload strictly less than the no-window arm");
+    }
+
+    /// The look-ahead only moves work earlier: every request returns exactly
+    /// its own layer's build, in forward order or not, and a layer built
+    /// ahead is not built again when it is asked for.
+    #[test]
+    fn the_lookahead_returns_each_requested_layer_and_builds_a_predicted_one_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let n = 6;
+        let builds: Vec<AtomicUsize> = (0..n).map(|_| AtomicUsize::new(0)).collect();
+        let quantize = |l: usize| {
+            builds[l].fetch_add(1, Ordering::SeqCst);
+            l * 10
+        };
+        let wanted = |l: usize| l != 4;
+        let order = [0usize, 1, 2, 3, 5, 1];
+        let got: Vec<usize> = std::thread::scope(|scope| {
+            let mut ahead = Lookahead::new(scope, n, &quantize, &wanted);
+            order.iter().map(|&l| ahead.take(l)).collect()
+        });
+        assert_eq!(got, order.iter().map(|l| l * 10).collect::<Vec<_>>());
+        let counts: Vec<usize> = builds.iter().map(|b| b.load(Ordering::SeqCst)).collect();
+        // 0..3 in order: each built once (1..3 ahead of time). 4 is not
+        // wanted, so 3 starts nothing; 5 is built on request. The repeat
+        // request for 1 builds it again in place and starts 2 ahead, a stray
+        // nobody takes - the only waste an out-of-order request costs.
+        assert_eq!(counts, vec![1, 2, 2, 1, 0, 1]);
     }
 }

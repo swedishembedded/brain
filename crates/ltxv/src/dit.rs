@@ -1311,7 +1311,7 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 #[allow(clippy::too_many_arguments)]
 pub fn forward_q_streamed(
     cfg: &LtxDitConfig,
-    src: &dyn TensorSource,
+    src: &(dyn TensorSource + Sync),
     head: &Tensors,
     device: Option<&str>,
     tier: QTier,
@@ -1351,7 +1351,7 @@ pub fn forward_q_streamed(
 pub fn forward_q_streamed_in(
     session: &crate::devres::DitSession,
     cfg: &LtxDitConfig,
-    src: &dyn TensorSource,
+    src: &(dyn TensorSource + Sync),
     head: &Tensors,
     tier: QTier,
     latent: &[f32],
@@ -1430,17 +1430,21 @@ pub fn forward_q_streamed_in(
     // GENERATION rather than per forward. The cache hands back an `Arc` and
     // holds no lock while the upload runs, which is what lets two CFG branches
     // read one checkpoint's cache concurrently (see `crate::weightcache`).
-    let mut weights = |l: usize, host: crate::devres::HostCopy| -> std::sync::Arc<crate::block::CachedQBlockWeights> {
+    //
+    // Straight off the checkpoint: a Q8_0 linear repacks to the int8 tier
+    // byte for byte (`model::int8::quantize_from`), never decoded to f32 and
+    // quantized again; only the norms and tables are read as f32. The repack
+    // runs one block ahead (`crate::devres::Lookahead`), so `t_quant` is the
+    // time the forward actually waited for it.
+    let quantize = |l: usize| QBlockWeights::quantize_host(src, &format!("transformer_blocks.{l}"), dim, cfg.apply_gated_attention, tier);
+    let uncached = |l: usize| !cache.is_cached(l, tier);
+    let mut weights = |l: usize, host: crate::devres::HostCopy, fetch: &mut dyn FnMut(usize) -> crate::block::CachedQBlockWeights| -> std::sync::Arc<crate::block::CachedQBlockWeights> {
         if let Some(c) = cache.block(l, tier) {
             return c;
         }
         misses += 1;
-        let prefix = format!("transformer_blocks.{l}");
-        // Straight off the checkpoint: a Q8_0 linear repacks to the int8 tier
-        // byte for byte (`model::int8::quantize_from`), never decoded to f32
-        // and quantized again; only the norms and tables are read as f32.
         let s1 = std::time::Instant::now();
-        let quantized = QBlockWeights::quantize_host(src, &prefix, dim, cfg.apply_gated_attention, tier);
+        let quantized = fetch(l);
         t_quant += s1.elapsed();
         match host {
             crate::devres::HostCopy::Keep => cache.store_block(l, tier, quantized),
@@ -1463,7 +1467,10 @@ pub fn forward_q_streamed_in(
     // `crate::devres::DitSession::prefill` for the measurement that says the
     // order matters (wgpu's allocator pool grows greedily and never shrinks,
     // so long-lived weights taken late lose a race against it).
-    session.prefill(&gpu, cfg, tier, t, context_len, &mut weights);
+    std::thread::scope(|scope| {
+        let mut ahead = crate::devres::Lookahead::new(scope, cfg.num_layers as usize, &quantize, &uncached);
+        session.prefill(&gpu, cfg, tier, t, context_len, &mut |l, host| weights(l, host, &mut |l| ahead.take(l)));
+    });
 
     let s_rope = std::time::Instant::now();
     let (cos_bufs, sin_bufs) = session.rope_tables(rope_id, &mut || {
@@ -1539,10 +1546,15 @@ pub fn forward_q_streamed_in(
             "block done"
         );
     };
-    #[rustfmt::skip]
-    let (x, forward_timings) = session.run_blocks(
-        &gpu, cfg, tier, t, context_len, x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, &mut weights, &mut after_block,
-    );
+    let (x, forward_timings) = std::thread::scope(|scope| {
+        let mut ahead = crate::devres::Lookahead::new(scope, cfg.num_layers as usize, &quantize, &uncached);
+        #[rustfmt::skip]
+        let out = session.run_blocks(
+            &gpu, cfg, tier, t, context_len, x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs,
+            &mut |l, host| weights(l, host, &mut |l| ahead.take(l)), &mut after_block,
+        );
+        out
+    });
     t_block.add(&forward_timings);
     gpu_core::profile::stage_time("forward_q_streamed: block read + int8 quantize (sum over all layers, cache misses only)", std::time::Instant::now() - t_quant);
     gpu_core::profile::stage_time("forward_q_streamed: block weight upload to device (sum over all layers, non-resident blocks only)", std::time::Instant::now() - t_upload);
@@ -1636,7 +1648,7 @@ pub struct AvStreamedStep<'a> {
 #[allow(clippy::too_many_arguments)]
 pub fn av_forward_q_streamed(
     cfg: &LtxAvDitConfig,
-    src: &dyn TensorSource,
+    src: &(dyn TensorSource + Sync),
     head: &Tensors,
     device: Option<&str>,
     tier: QTier,
@@ -1656,7 +1668,7 @@ pub fn av_forward_q_streamed(
 pub fn av_forward_q_streamed_in(
     session: &crate::devres::AvDitSession,
     cfg: &LtxAvDitConfig,
-    src: &dyn TensorSource,
+    src: &(dyn TensorSource + Sync),
     head: &Tensors,
     tier: QTier,
     step: &AvStreamedStep,
@@ -1723,15 +1735,17 @@ pub fn av_forward_q_streamed_in(
     let mut t_upload = std::time::Duration::ZERO;
     let mut misses = 0u32;
     let mut uploads = 0u32;
-    let mut weights = |l: usize, host: crate::devres::HostCopy| -> std::sync::Arc<crate::block::CachedQAvBlockWeights> {
+    // See the video-only loader above: read and repacked in one pass, one
+    // block ahead of the forward.
+    let quantize = |l: usize| crate::block::CachedQAvBlockWeights::quantize(src, &format!("transformer_blocks.{l}"), vcfg, acfg, tier);
+    let uncached = |l: usize| !cache.is_av_cached(l, tier);
+    let mut weights = |l: usize, host: crate::devres::HostCopy, fetch: &mut dyn FnMut(usize) -> crate::block::CachedQAvBlockWeights| -> std::sync::Arc<crate::block::CachedQAvBlockWeights> {
         if let Some(c) = cache.av_block(l, tier) {
             return c;
         }
         misses += 1;
-        let prefix = format!("transformer_blocks.{l}");
-        // See the video-only loader above: read and repacked in one pass.
         let s1 = std::time::Instant::now();
-        let quantized = crate::block::CachedQAvBlockWeights::quantize(src, &prefix, vcfg, acfg, tier);
+        let quantized = fetch(l);
         t_quant += s1.elapsed();
         match host {
             crate::devres::HostCopy::Keep => cache.store_av_block(l, tier, quantized),
@@ -1746,7 +1760,10 @@ pub fn av_forward_q_streamed_in(
     // the block stack have allocated anything - see
     // `crate::devres::DitSession::prefill` for the measurement that says the
     // order matters.
-    session.prefill(&gpu, cfg, tier, tv, step.v_context_len, step.a_context_len, &mut weights);
+    std::thread::scope(|scope| {
+        let mut ahead = crate::devres::Lookahead::new(scope, cfg.video.num_layers as usize, &quantize, &uncached);
+        session.prefill(&gpu, cfg, tier, tv, step.v_context_len, step.a_context_len, &mut |l, host| weights(l, host, &mut |l| ahead.take(l)));
+    });
 
     // Four table sets, each cached for the whole generation - see
     // `crate::devres::RopeCache`. This path has four where the video-only one
@@ -1821,7 +1838,10 @@ pub fn av_forward_q_streamed_in(
         v_context_len: step.v_context_len,
         a_context_len: step.a_context_len,
     };
-    let (vx, ax, forward_timings) = session.run_blocks(&gpu, cfg, tier, vx, ax, &inp, &mut weights, &mut after_block);
+    let (vx, ax, forward_timings) = std::thread::scope(|scope| {
+        let mut ahead = crate::devres::Lookahead::new(scope, cfg.video.num_layers as usize, &quantize, &uncached);
+        session.run_blocks(&gpu, cfg, tier, vx, ax, &inp, &mut |l, host| weights(l, host, &mut |l| ahead.take(l)), &mut after_block)
+    });
     t_block.add(&forward_timings);
     gpu_core::profile::stage_time("av_forward_q_streamed: block read + int8 quantize (sum over all layers, cache misses only)", std::time::Instant::now() - t_quant);
     gpu_core::profile::stage_time("av_forward_q_streamed: block weight upload to device (sum over all layers, non-resident blocks only)", std::time::Instant::now() - t_upload);
