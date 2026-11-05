@@ -2377,7 +2377,7 @@ mod tests {
     /// weights generates. Nothing is written beside the checkpoint.
     #[test]
     fn a_hugging_face_directory_is_served_as_downloaded() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (dir, cfg, init) = write_tiny_hf_dir("hf-dir", 17, 64);
@@ -2428,7 +2428,7 @@ mod tests {
     /// another model's attention is refused at activation, naming the flag.
     #[test]
     fn sparse_attention_is_served_through_the_resident_and_a_foreign_indexer_is_refused() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (dir, cfg, _) = write_tiny_hf_dir("sparse", 23, 256);

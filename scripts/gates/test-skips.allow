@@ -19,7 +19,6 @@ crates/bench/tests/it/survival_bench.rs	1
 crates/bench/tests/survival_mixers.rs	1
 crates/bench/tests/it/toolcall.rs	1
 crates/catalog/src/resident_horizon.rs	1
-crates/catalog/src/resident_llm.rs	1
 crates/catalog/src/resident_ltxv.rs	2
 crates/chronos2/src/forecaster.rs	1
 crates/chronos2/src/import.rs	1
@@ -205,7 +204,6 @@ crates/sdk/tests/it/improve.rs	1
 crates/sdk/tests/it/timeline.rs	7
 crates/sdxlunet/tests/it/inject.rs	2
 crates/sdxlunet/tests/it/skipfuse.rs	2
-crates/splat/tests/s0_scan_sort.rs	1
 crates/splat/tests/it/s13_depth_supervision.rs	2
 crates/splat/tests/it/s1_project_naive.rs	1
 crates/splat/tests/it/s2_tiled_parity.rs	1

@@ -76,7 +76,6 @@ crates/catalog/src/resident_lfm.rs	BRAIN_LFM2_TOKENIZER
 crates/catalog/src/resident_llm.rs	BRAIN_DEVICE
 crates/catalog/src/resident_llm.rs	BRAIN_GLMDSA_WEIGHTS
 crates/catalog/src/resident_llm.rs	BRAIN_GPT2_WEIGHTS
-crates/catalog/src/resident_llm.rs	MOE_SKIP_GPU_TESTS
 crates/catalog/src/resident_llm.rs	QWEN3_DIR
 crates/catalog/src/resident_llm.rs	QWEN_TOKENIZER
 crates/catalog/src/resident_mock.rs	BRAIN_MOCK
