@@ -92,6 +92,12 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
                              clip length; the sound crosses a window seam
                              with the picture. Costs real time and memory -
                              see "Audio" below
+  --audio-source <wav>        generate the video FOR this soundtrack
+                             (audio-to-video): it is encoded through the audio
+                             VAE, held frozen as the clip's audio stream while
+                             the video denoises against it, and muxed as the
+                             clip's sound. Needs --audio and a clip that fits
+                             one denoising window
   --dit-config <name>         DiT config; "tiny" (default, fresh random
                              weights) or "ltx25_22b" (the real 22B
                              checkpoint, needs --dit/$BRAIN_LTXV_DIT)
@@ -699,6 +705,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
                 i += 1;
                 continue;
             }
+            "--audio-source" => o.audio_source = Some(ltxv::audio::read_wav(need(i)?)?),
             "--help" | "-h" => {
                 println!("{HELP}");
                 std::process::exit(0);

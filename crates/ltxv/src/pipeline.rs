@@ -389,6 +389,11 @@ pub struct GenOpts {
     /// Requires `dit_config = "ltx25_22b"` and [`Paths::audio_vae`]; both are
     /// checked before any weight is read.
     pub audio: bool,
+    /// A soundtrack to generate the video FOR (audio-to-video,
+    /// `ltx_pipelines.a2vid_two_stage`): encoded through the audio VAE and
+    /// held as the frozen, clean audio stream every stage denoises the video
+    /// against, and returned as the clip's own audio. Needs [`Self::audio`].
+    pub audio_source: Option<crate::audio::AudioClip>,
     pub device: Option<String>,
     /// First-frame image conditioning (PNG/JPEG), resized to
     /// `width`x`height` and encoded through the real video VAE - see
@@ -529,6 +534,7 @@ impl Default for GenOpts {
             context_len: 8,
             dit_config: "tiny".to_string(),
             audio: false,
+            audio_source: None,
             device: None,
             start_frame: None,
             end_frame: None,
@@ -3661,7 +3667,10 @@ fn build_context(paths: &Paths, prompt: &str, dit_cfg: LtxDitConfig, o: &GenOpts
 /// fill a host weight cache first and fail after it.
 fn check_audio_request(paths: &Paths, o: &GenOpts) -> Result<(), String> {
     if !o.audio {
-        return Ok(());
+        return match o.audio_source {
+            Some(_) => Err("an audio source is the clip's audio stream: it needs --audio".into()),
+            None => Ok(()),
+        };
     }
     if o.dit_config != "ltx25_22b" {
         return Err(format!(
@@ -3897,6 +3906,18 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         tracing::info!(audio_tokens = ta, token_dim = crate::audio::TOKEN_DIM, seconds = o.frames as f32 / o.fps as f32, "audio latent shape resolved from the clip's own duration");
         seeded_noise(ta * crate::audio::TOKEN_DIM as usize, o.seed ^ AUDIO_SEED_SALT)
     });
+    // An audio source is the whole audio stream, carried as a frozen
+    // context: clean, at timestep 0 and re-pinned every step, exactly like a
+    // long-form window's carried prefix - only it covers every token.
+    let audio_frozen: Vec<f32> = match &o.audio_source {
+        Some(source) => {
+            let path = paths.audio_vae.as_deref().ok_or("ltxv: an audio source is encoded through the audio VAE, and no audio VAE path is set")?;
+            let (_, vae_raw): (Vec<_>, Vec<_>) = checkpoint::safetensors::read(path)?.into_iter().partition(|t| t.name.starts_with("vocoder."));
+            let vae_w = crate::import::import_audio_vae(vae_raw, &crate::audio_vae::AudioVaeConfig::ltx25())?;
+            crate::audio::encode(&vae_w, source, ta, o.device.as_deref())?
+        }
+        None => Vec::new(),
+    };
     let (a_ctx_cond, a_ctx_uncond) = (text_a_cond.unwrap_or_default(), text_a_uncond.unwrap_or_default());
     let stage_ctx = StageCtx {
         dit: dit.as_ref(),
@@ -3952,7 +3973,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
                 seed_salt: 0,
                 done_before: 0,
                 label: "stage1",
-                audio: audio_latent0.map(|latent| AudioStage { latent, context: Vec::new() }),
+                audio: audio_latent0.map(|latent| AudioStage { latent, context: audio_frozen.clone() }),
             },
             total,
             &mut progress,
@@ -3978,7 +3999,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
             Refine {
                 upsampler: &upsampler,
                 upsampler_path,
-                audio: stage1.audio.map(|latent| AudioStage { latent, context: Vec::new() }),
+                audio: stage1.audio.map(|latent| AudioStage { latent, context: audio_frozen.clone() }),
                 latent_chw: &stage1.video_chw,
                 lat_t,
                 lh1,
@@ -4008,7 +4029,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
                 seed_salt: 0,
                 done_before: 0,
                 label: "single",
-                audio: audio_latent0.map(|latent| AudioStage { latent, context: Vec::new() }),
+                audio: audio_latent0.map(|latent| AudioStage { latent, context: audio_frozen.clone() }),
             },
             total,
             &mut progress,
@@ -4055,8 +4076,18 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // ---- decode the sound -------------------------------------------------
     // Same forwards, same conditioning, same time window: the audio latent
     // here came out of the joint denoise above, not a second pass.
-    let audio = match audio_latent {
-        Some(latent) => {
+    let audio = match (audio_latent, &o.audio_source) {
+        // The source soundtrack IS the clip's audio: the denoise held it
+        // frozen, so decoding its latent would only add the VAE's loss.
+        (Some(_), Some(source)) => {
+            let mut clip = source.clone();
+            let video_seconds = frames as f32 / o.fps as f32;
+            let keep = (video_seconds * clip.sample_rate as f32).round() as usize;
+            clip.channels.iter_mut().for_each(|c| c.truncate(keep));
+            clip.pad_to_seconds(video_seconds);
+            Some(clip)
+        }
+        (Some(latent), None) => {
             let path = paths.audio_vae.as_deref().expect("generate: an audio request is refused earlier without an audio VAE path");
             let audio_t = Instant::now();
             let mut clip = decode_audio_latent(path, &latent, ta, o.device.as_deref())?;
@@ -4071,7 +4102,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
             tracing::info!(secs = timings.audio_decode, samples = clip.samples_per_channel(), rate = clip.sample_rate, decoded_seconds = before, video_seconds, "audio decode done");
             Some(clip)
         }
-        None => None,
+        (None, _) => None,
     };
     progress(total, total, "done");
     tracing::info!(frames, width = w, height = h, fps = o.fps, audio = audio.is_some(), total_secs = timings.total(), "generation done");
@@ -5082,6 +5113,9 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         // generation, and this entry point must not become a second way of
         // spelling it.
         return generate(paths, prompt, &o.base, cancel, progress);
+    }
+    if o.base.audio_source.is_some() {
+        return Err("an audio source conditions a single-window generation; a clip this long is generated as several windows, which do not route one yet".into());
     }
     if o.base.reference.is_some() {
         return Err("--reference-video is applied by a single-window generation; a clip this long is generated as several windows, which do not route a reference yet".into());
@@ -6485,6 +6519,13 @@ mod tests {
         // No DiT checkpoint.
         let e = generate(&bare, "x", &audio, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
         assert!(e.contains("BRAIN_LTXV_DIT"), "{e}");
+
+        // An audio source is the audio stream: without --audio it has none
+        // to be.
+        let source = crate::audio::AudioClip { channels: vec![vec![0.0; 1600]], sample_rate: 16_000 };
+        let silent_with_source = GenOpts { audio: false, audio_source: Some(source), ..audio.clone() };
+        let e = generate(&bare, "x", &silent_with_source, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
+        assert!(e.contains("--audio"), "{e}");
 
         // No audio VAE - the sound would have nothing to decode it.
         let with_dit = Paths { dit: Some("/dit".into()), ..bare.clone() };

@@ -406,6 +406,77 @@ pub fn unpatchify(tokens: &[f32], ta: usize) -> Vec<f32> {
     out
 }
 
+/// Read a WAV file as an [`AudioClip`], every channel at the file's own rate.
+pub fn read_wav(path: &str) -> Result<AudioClip, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let (sample_rate, channels) = audio::wav::parse_planar(&bytes).map_err(|e| format!("{path}: {e}"))?;
+    Ok(AudioClip { channels, sample_rate })
+}
+
+/// The FFT size and mel bin count of the audio VAE's own front end - the
+/// checkpoint's `preprocessing.stft.filter_length` and `mel.n_mel_channels`.
+pub const N_FFT: usize = 1024;
+pub const MEL_BINS: usize = LATENT_MEL_BINS as usize * 4;
+
+/// `AudioProcessor.waveform_to_mel`: each channel resampled onto
+/// [`SAMPLE_RATE`] with torchaudio's resampler, a reflect-centred
+/// [`N_FFT`]-point STFT magnitude at [`HOP_LENGTH`], [`MEL_BINS`] Slaney mel
+/// bins (Slaney norm) up to Nyquist, then `log(max(mel, 1e-5))`. Returns
+/// `[channels, frames, MEL_BINS]` and the frame count; a mono clip is used
+/// for both of the audio VAE's two channels.
+pub fn log_mel(clip: &AudioClip) -> (Vec<f32>, usize) {
+    let cfg = audio::mel::MelConfig { sample_rate: SAMPLE_RATE, n_fft: N_FFT, hop: HOP_LENGTH as usize, win: N_FFT, n_mels: MEL_BINS, fmin: 0.0, fmax: SAMPLE_RATE as f32 / 2.0, slaney: true, center: true };
+    let fb = audio::mel::mel_filterbank(&cfg);
+    let bins = N_FFT / 2 + 1;
+    let mut out = Vec::new();
+    let mut frames = 0;
+    for c in 0..CHANNELS as usize {
+        let wave = audio::resample::sinc_hann(&clip.channels[c.min(clip.channels.len() - 1)], clip.sample_rate, SAMPLE_RATE);
+        let (power, n, _) = audio::mel::power_spectrogram(&wave, &cfg);
+        frames = n;
+        for fr in 0..n {
+            let mag: Vec<f32> = power[fr * bins..(fr + 1) * bins].iter().map(|p| p.sqrt()).collect();
+            out.extend((0..MEL_BINS).map(|m| fb[m * bins..(m + 1) * bins].iter().zip(&mag).map(|(w, a)| w * a).sum::<f32>().max(1e-5).ln()));
+        }
+    }
+    (out, frames)
+}
+
+/// [`unpatchify`]'s inverse - `AudioPatchifier.patchify`'s
+/// `b c t f -> b t (c f)`: the audio VAE's `[LATENT_CHANNELS, ta,
+/// LATENT_MEL_BINS]` latent as the DiT's `[ta, TOKEN_DIM]` tokens.
+pub fn patchify(latent: &[f32], ta: usize) -> Vec<f32> {
+    let (c, f) = (LATENT_CHANNELS as usize, LATENT_MEL_BINS as usize);
+    assert_eq!(latent.len(), c * ta * f, "ltxv audio patchify: {} values, expected {}", latent.len(), c * ta * f);
+    let mut out = vec![0f32; ta * c * f];
+    for t in 0..ta {
+        for ci in 0..c {
+            out[t * c * f + ci * f..t * c * f + (ci + 1) * f].copy_from_slice(&latent[ci * ta * f + t * f..ci * ta * f + (t + 1) * f]);
+        }
+    }
+    out
+}
+
+/// Encode a soundtrack into the DiT's `[ta, TOKEN_DIM]` audio tokens
+/// (`ltx_core`'s `encode_audio`: [`log_mel`], the audio VAE encoder,
+/// patchify), keeping the first `ta` latent frames - what an
+/// audio-conditioned generation freezes its audio stream to. Refuses a
+/// soundtrack too short to cover `ta`.
+pub fn encode(vae_weights: &vae::blocks::Tensors, clip: &AudioClip, ta: usize, device: Option<&str>) -> Result<Vec<f32>, String> {
+    if clip.channels.is_empty() || clip.channels.len() > CHANNELS as usize {
+        return Err(format!("ltxv audio: a soundtrack must be mono or stereo, got {} channels", clip.channels.len()));
+    }
+    let (mel, frames) = log_mel(clip);
+    let latent = audio_vae::encode(&AudioVaeConfig::ltx25(), vae_weights, &mel, frames as u32, MEL_BINS as u32, device);
+    let have = latent.len() / (LATENT_CHANNELS * LATENT_MEL_BINS) as usize;
+    if have < ta {
+        return Err(format!("ltxv audio: the soundtrack ({:.2} s) encodes to {have} latent frames, the clip needs {ta}", clip.seconds()));
+    }
+    let f = LATENT_MEL_BINS as usize;
+    let kept: Vec<f32> = (0..LATENT_CHANNELS as usize).flat_map(|c| latent[c * have * f..c * have * f + ta * f].iter().copied()).collect();
+    Ok(patchify(&kept, ta))
+}
+
 /// The vocoder half of the audio checkpoint: the 16 kHz base vocoder and the
 /// 48 kHz bandwidth-extension stage ([`crate::import::import_vocoder_with_bwe`]).
 pub struct VocoderWeights {
@@ -528,5 +599,55 @@ mod tests {
         assert_eq!(clip.channels[1], vec![0.0, -0.5, -0.5, -0.5, -0.5]);
         clip.pad_to_seconds(0.01);
         assert_eq!(clip.samples_per_channel(), 5, "pad_to_seconds must never truncate");
+    }
+
+    /// The audio VAE's front end against `ltx_core`'s own `AudioProcessor`
+    /// (`tools/goldens/ltxv_audio_mel_dump_reference.py`): a 44.1 kHz stereo
+    /// waveform resampled, STFT'd and mel-projected to float rounding.
+    #[test]
+    fn log_mel_matches_the_reference_front_end() {
+        let dir = brain_testutil::testdata_path("golden/ltxv/audio_mel");
+        let file = dir.join("ltxv_audio_mel.safetensors");
+        if !file.is_file() {
+            brain_testutil::skip(&format!("{} not found - run tools/goldens/ltxv_audio_mel_dump_reference.py --out {}", file.display(), dir.display()));
+            return;
+        }
+        let fx: std::collections::HashMap<String, checkpoint::safetensors::StTensor> = checkpoint::safetensors::read(file.to_str().unwrap()).unwrap().into_iter().map(|t| (t.name.clone(), t)).collect();
+        let wave = &fx["waveform"];
+        let n = wave.shape[1];
+        let clip = AudioClip { channels: wave.data.chunks(n).map(<[f32]>::to_vec).collect(), sample_rate: 44100 };
+        let (mel, frames) = log_mel(&clip);
+        assert_eq!(frames, fx["mel"].shape[1]);
+        let worst = mel.iter().zip(&fx["mel"].data).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst < 2e-3, "log-mel max abs error {worst:e}");
+    }
+
+    #[test]
+    fn patchify_inverts_unpatchify() {
+        let ta = 3;
+        let tokens: Vec<f32> = (0..ta * TOKEN_DIM as usize).map(|i| i as f32).collect();
+        assert_eq!(patchify(&unpatchify(&tokens, ta), ta), tokens);
+    }
+
+    /// A soundtrack encodes, through the real audio VAE, into exactly the
+    /// `[ta, TOKEN_DIM]` tokens a clip of `ta` audio latents freezes, and one
+    /// too short to cover them is refused rather than padded.
+    #[test]
+    fn a_soundtrack_encodes_into_the_clips_audio_tokens() {
+        let Some(path) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/ltx-2.5-audio-vae-bf16.safetensors")).filter(|p| std::path::Path::new(p).is_file()) else {
+            brain_testutil::skip("no ltx-2.5-audio-vae-bf16.safetensors in the model store (Lightricks/LTX-2.5)");
+            return;
+        };
+        let (_, vae_raw): (Vec<_>, Vec<_>) = checkpoint::safetensors::read(&path).unwrap().into_iter().partition(|t| t.name.starts_with("vocoder."));
+        let vae_w = crate::import::import_audio_vae(vae_raw, &AudioVaeConfig::ltx25()).unwrap();
+        let rate = 22_050u32;
+        let tone = |hz: f32| (0..rate as usize).map(|i| 0.4 * (std::f32::consts::TAU * hz * i as f32 / rate as f32).sin()).collect::<Vec<f32>>();
+        let clip = AudioClip { channels: vec![tone(330.0), tone(660.0)], sample_rate: rate };
+        let ta = latent_frames(17, 24);
+        let tokens = encode(&vae_w, &clip, ta, Some("cpu")).unwrap();
+        assert_eq!(tokens.len(), ta * TOKEN_DIM as usize);
+        assert!(tokens.iter().all(|v| v.is_finite()) && tokens.iter().any(|&v| v != 0.0));
+        let e = encode(&vae_w, &clip, 4 * LATENT_RATE as usize, Some("cpu")).unwrap_err();
+        assert!(e.contains("latent frames"), "{e}");
     }
 }
