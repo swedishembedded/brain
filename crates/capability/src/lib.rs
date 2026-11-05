@@ -39,6 +39,7 @@ pub mod blob;
 pub mod failure;
 pub mod hot;
 pub mod presentation;
+pub mod video;
 
 pub use failure::{classify, tag, FailureClass};
 pub use presentation::{ActionPresentation, ModelPresentation};
@@ -256,11 +257,28 @@ pub struct ActionSpec {
     /// see [`presentation`]. Same all-absent default as
     /// [`Manifest::presentation`].
     pub presentation: ActionPresentation,
+    /// What a video action promises about its clips, so a generic video request
+    /// maps onto its params - see [`video`]. `None` for every other action.
+    pub video: Option<video::VideoContract>,
 }
 
 impl ActionSpec {
     pub fn new(name: &str, summary: &str) -> ActionSpec {
-        ActionSpec { name: name.into(), summary: summary.into(), params: Vec::new(), inputs: Vec::new(), outputs: Vec::new(), streaming: false, presentation: ActionPresentation::default() }
+        ActionSpec {
+            name: name.into(),
+            summary: summary.into(),
+            params: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            streaming: false,
+            presentation: ActionPresentation::default(),
+            video: None,
+        }
+    }
+    /// Builder setter for [`Self::video`].
+    pub fn video(mut self, contract: video::VideoContract) -> ActionSpec {
+        self.video = Some(contract);
+        self
     }
     pub fn param(mut self, p: ParamSpec) -> ActionSpec {
         self.params.push(p);
@@ -298,6 +316,9 @@ impl ActionSpec {
         let presentation = self.presentation.to_json();
         if !presentation.is_null() {
             v["presentation"] = presentation;
+        }
+        if let Some(contract) = &self.video {
+            v["video"] = contract.to_json();
         }
         v
     }

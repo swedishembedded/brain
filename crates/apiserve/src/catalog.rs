@@ -34,7 +34,10 @@
 //!   emitting `Text` - the shared speech-to-text contract
 //!   (`audio::asr_caps::transcribe_spec`) that `/audio/transcriptions` dispatches.
 //!
-//! OpenAI/OpenRouter expose Chat ∪ Embeddings ∪ ImageGen ∪ Transcription;
+//! - **Video**: a sellable action declaring a `VideoContract` with no input clip
+//!   (`capability::video`), which `/videos` renders.
+//!
+//! OpenAI/OpenRouter expose Chat ∪ Embeddings ∪ ImageGen ∪ Transcription ∪ Video;
 //! Anthropic exposes Chat.
 
 use capability::{Manifest, Media};
@@ -55,12 +58,15 @@ pub struct CapSet {
     pub image: bool,
     /// Speech to text, served on `/audio/transcriptions`.
     pub transcription: bool,
+    /// Video generation offered as a product, served on `/videos`: a sellable
+    /// action declaring a `capability::video::VideoContract` with no input clip.
+    pub video: bool,
 }
 
 impl CapSet {
     /// Does this model advertise any exposable capability?
     pub fn any(&self) -> bool {
-        self.chat || self.embeddings || self.image || self.transcription
+        self.chat || self.embeddings || self.image || self.transcription || self.video
     }
 
     /// What a chat request to this model may carry, as model cards spell it.
@@ -81,6 +87,7 @@ impl CapSet {
             ("embeddings", self.embeddings),
             ("images", self.image),
             ("transcription", self.transcription),
+            ("video", self.video),
         ]
             .into_iter()
             .filter_map(|(name, on)| on.then_some(name))
@@ -132,7 +139,8 @@ pub fn api_caps(m: &Manifest) -> CapSet {
             && a.inputs.iter().any(|b| b.name == "audio" && b.media == Media::Audio)
             && a.outputs.iter().any(|o| o.media == Media::Text)
     });
-    CapSet { chat, tools, vision, embeddings, image, transcription }
+    let video = m.actions.iter().any(|a| a.video.as_ref().is_some_and(|c| c.sellable && c.clip_input.is_none()));
+    CapSet { chat, tools, vision, embeddings, image, transcription, video }
 }
 
 /// Does `provider` expose a model with capabilities `caps`?

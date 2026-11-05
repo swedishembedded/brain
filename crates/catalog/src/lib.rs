@@ -72,6 +72,7 @@ pub mod resident_ltxv;
 pub mod resident_minimaxh3;
 pub mod resident_minimaxmusic3;
 pub mod resident_mock;
+pub mod resident_mock_video;
 pub mod resident_moondream3;
 pub mod resident_omni;
 pub mod resident_pulid;

@@ -589,6 +589,7 @@ dependencies = [
  "rand 0.8.7",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "tokio",
  "tokio-stream",
@@ -1754,6 +1755,7 @@ version = "4.0.0"
 dependencies = [
  "brain-audio",
  "brain-backend-cpu",
+ "brain-capability",
  "brain-events",
  "brain-gpu-core",
  "brain-kernels",

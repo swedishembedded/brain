@@ -442,14 +442,7 @@ fn save_blob(b: &Blob, path: &str, sound: Option<&Blob>) -> Result<(), String> {
         // because only the producing action knows it; the fallback is the one
         // value every current producer would have written anyway.
         Media::Video => {
-            let frames = capability::blob::decode_video(&Invocation::new().blob("video", b.clone()), "video")?;
-            let fps = b.meta.get("fps").and_then(|v| v.as_f64()).unwrap_or(16.0);
-            let rgb: Vec<imaging::Rgb8> = frames
-                .iter()
-                .map(|(hwc, w, h)| imaging::pixels::hwc_to_rgb8(hwc, *w, *h, 3, imaging::ChannelPolicy::ReplicateFirst))
-                .collect::<Result<_, _>>()?;
-            let audio = sound.map(sound_track).transpose()?;
-            imaging::video::encode_frames(&rgb, std::path::Path::new(path), fps, &imaging::video::VideoEncodeOpts { audio, ..Default::default() })?;
+            imaging::video::encode_clip(b, sound, std::path::Path::new(path), Default::default())?;
             Ok(())
         }
         Media::Image | Media::Mask => {
@@ -481,19 +474,6 @@ fn save_blob(b: &Blob, path: &str, sound: Option<&Blob>) -> Result<(), String> {
         }
         _ => std::fs::write(path, &b.bytes).map_err(|e| e.to_string()),
     }
-}
-
-/// An audio blob as the sound track of a clip: a WAV keeps its channels, a
-/// headerless one is the mono f32 PCM at `meta.sample_rate` [`save_blob`]
-/// writes for it.
-fn sound_track(b: &Blob) -> Result<imaging::video::AudioTrack, String> {
-    let (sample_rate, channels) = if audio::asr_caps::is_wav(&b.bytes) {
-        audio::wav::parse_planar(&b.bytes).map_err(|e| format!("the sound track: {e}"))?
-    } else {
-        let rate = b.meta.get("sample_rate").and_then(|v| v.as_u64()).ok_or("the sound track has no sample_rate and is not a WAV")? as u32;
-        (rate, vec![b.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes(*q)).collect()])
-    };
-    Ok(imaging::video::AudioTrack { channels, sample_rate })
 }
 
 // ---------------------------------------------------------------- built-in demo provider

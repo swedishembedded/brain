@@ -151,11 +151,12 @@ fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIde
 
 /// What a model takes in and gives out, in OpenRouter's modality names: text
 /// for chat and embeddings, audio for a transcription model, and image output
-/// for an image generator. A model that does several lists the union.
+/// for an image generator, video output for a video generator. A model that
+/// does several lists the union.
 fn modalities(caps: CapSet) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut input = Vec::new();
     let mut output = Vec::new();
-    if caps.chat || caps.embeddings || caps.image {
+    if caps.chat || caps.embeddings || caps.image || caps.video {
         input.push("text");
     }
     if caps.vision {
@@ -172,6 +173,9 @@ fn modalities(caps: CapSet) -> (Vec<&'static str>, Vec<&'static str>) {
     }
     if caps.image {
         output.push("image");
+    }
+    if caps.video {
+        output.push("video");
     }
     (input, output)
 }

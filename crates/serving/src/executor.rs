@@ -300,11 +300,13 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // Deterministic mock model (BRAIN_MOCK): a real ResidentModel - no weights, no
     // GPU - registered as `mock` so the HTTP conformance harness can validate the
     // whole API surface through the true serving path (placement → activate →
-    // run_batch). Advertises generate (chat) + embed + text2image, and a
-    // speech-only sibling `mock-asr` advertises transcribe.
+    // run_batch). Advertises generate (chat) + embed + text2image; a
+    // speech-only sibling `mock-asr` advertises transcribe, and `mock-video`
+    // text-to-video and extend.
     if let Some(m) = catalog::resident_mock::MockResident::from_env() {
         models.push(Arc::new(m));
         models.push(Arc::new(catalog::resident_mock::MockAsrResident));
+        models.push(Arc::new(catalog::resident_mock_video::MockVideoResident));
     }
     // Stateless helpers (no weights) - always available. `demo` is the worked
     // example every transport smoke (busctl_smoke.sh) exercises.

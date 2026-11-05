@@ -22,6 +22,7 @@ use crate::auth::{Authenticator, CallerExt, Principal, StaticKey};
 use crate::capabilities::AsyncJobs;
 use crate::hooks::RequestHooks;
 use crate::surface::Provider;
+use crate::video::VideoJobs;
 
 /// Default admission deadline — see `residency::admission`'s doc (shared with
 /// `crates/dbus` so both transports gate identically).
@@ -39,6 +40,8 @@ pub struct AppState {
     pub jobs: JobRegistry,
     /// The background jobs started through `/v1/jobs`.
     pub async_jobs: Arc<AsyncJobs>,
+    /// The video jobs started through `/videos`, and their spool.
+    pub videos: Arc<VideoJobs>,
     /// Who may call this surface. [`StaticKey`] unless an embedder replaced it.
     pub authenticator: Arc<dyn Authenticator>,
     /// What the embedder wants a say in on every call; `None` for a surface
@@ -70,6 +73,7 @@ impl AppState {
             exec,
             jobs: JobRegistry::new(),
             async_jobs: Arc::default(),
+            videos: Arc::default(),
             authenticator: Arc::new(StaticKey::new(key)),
             hooks: None,
             caller: None,
@@ -104,6 +108,14 @@ impl AppState {
     /// Whether the hooks list `model` on this surface.
     pub fn lists(&self, model: &str) -> bool {
         self.hooks.as_ref().is_none_or(|hooks| hooks.listed(model))
+    }
+
+    /// Keep video jobs' clips in `spool`, at most `bytes` of them
+    /// (builder-style). The default is a private directory under the system's
+    /// temporary directory and [`crate::video::DEFAULT_SPOOL_BYTES`].
+    pub fn with_video_spool(mut self, spool: std::path::PathBuf, bytes: u64) -> AppState {
+        self.videos = Arc::new(VideoJobs::new(spool, bytes));
+        self
     }
 
     /// Override the admission deadline (builder-style). Used by tests to force fast

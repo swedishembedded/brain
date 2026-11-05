@@ -11,3 +11,4 @@ mod api;
 mod audio;
 mod seams;
 mod shutdown;
+mod video;

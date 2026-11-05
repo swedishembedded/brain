@@ -20,6 +20,8 @@
 //!   (Anthropic `x-api-key`, others `Bearer`), and the middleware that applies it.
 //! - [`capabilities`] - routes that reach every model class: the catalogue, `run`,
 //!   and background jobs for work too long to hold a request open.
+//! - [`video`] - the OpenRouter `/videos` routes: video jobs, their encoded
+//!   clips in a bounded spool, and the video model listing.
 //! - [`systemone`] - `POST /v1/systemone`: typed decisions in the System One wire
 //!   shape, a thin layer over the `decide` capability of whichever decision model
 //!   answers.
@@ -56,6 +58,7 @@ pub mod sampling;
 pub mod state;
 pub mod surface;
 pub mod systemone;
+pub mod video;
 
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, State};
@@ -95,8 +98,8 @@ pub fn router(state: AppState) -> Router {
     let provider = state.provider;
     let provider_routes = match state.provider {
         Provider::Anthropic => anthropic::routes(),
-        Provider::OpenAI => openai::routes(),
-        Provider::OpenRouter => openrouter::routes(),
+        Provider::OpenAI => openai::routes().merge(video::routes()),
+        Provider::OpenRouter => openrouter::routes().merge(video::routes()),
     };
 
     // Edge backpressure on the chat/embeddings/image routes only (NOT `/models`):

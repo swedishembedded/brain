@@ -43,6 +43,8 @@ brain-audio.workspace = true
 image = { workspace = true, features = ["jpeg", "png", "tiff", "gif"] }
 # Video files written and read in process (`video`): AV1 + Opus, WebM/MKV/MP4.
 brain-videocodec.workspace = true
+# `encode_clip`/`clip_from_file` speak the video and sound blob wire formats.
+brain-capability.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

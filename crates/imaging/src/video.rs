@@ -321,6 +321,54 @@ fn check_frames(frames: &[Rgb8]) -> Result<(u32, u32), String> {
     Ok((w, h))
 }
 
+// ---------------------------------------------------------------- clips as blobs
+
+/// Write a generated clip to `path`: `video` in the video blob wire format
+/// (`capability::blob::decode_video`; frame rate in `meta.fps`) and, when the
+/// action made one, `sound` as its track. This is the one way an outcome
+/// becomes a playable file, for every caller that saves or serves one.
+pub fn encode_clip(video: &capability::Blob, sound: Option<&capability::Blob>, path: &Path, settings: videocodec::EncodeSettings) -> Result<PathBuf, String> {
+    let frames = capability::blob::decode_video(&capability::Invocation::new().blob("video", video.clone()), "video")?;
+    // Only the producing action knows the rate; the fallback is the one every
+    // current producer would have written anyway.
+    let fps = video.meta.get("fps").and_then(|v| v.as_f64()).unwrap_or(16.0);
+    let rgb: Vec<Rgb8> = frames
+        .iter()
+        .map(|(hwc, w, h)| crate::pixels::hwc_to_rgb8(hwc, *w, *h, 3, crate::ChannelPolicy::ReplicateFirst))
+        .collect::<Result<_, _>>()?;
+    drop(frames);
+    let audio = sound.map(sound_track).transpose()?;
+    encode_frames(&rgb, path, fps, &VideoEncodeOpts { settings, audio })
+}
+
+/// A sound blob as a track: a WAV container, or headerless f32-LE PCM with
+/// `meta.sample_rate` (the two conventions audio-producing actions use).
+pub fn sound_track(b: &capability::Blob) -> Result<AudioTrack, String> {
+    let (sample_rate, channels) = if audio::asr_caps::is_wav(&b.bytes) {
+        audio::wav::parse_planar(&b.bytes).map_err(|e| format!("the sound track: {e}"))?
+    } else {
+        let rate = b.meta.get("sample_rate").and_then(|v| v.as_u64()).ok_or("the sound track has no sample_rate and is not a WAV")? as u32;
+        (rate, vec![b.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes(*q)).collect()])
+    };
+    Ok(AudioTrack { channels, sample_rate })
+}
+
+/// Read a whole clip from `path` into the video blob wire format, every frame
+/// at the file's own rate (recorded in `meta.fps`), refusing one longer than
+/// `max_frames`. The input of an edit (extend, retake, upscale).
+pub fn clip_from_file(path: &Path, max_frames: u32) -> Result<capability::Blob, String> {
+    let fps = probe_fps(path).filter(|f| f.is_finite() && *f > 0.0).ok_or("imaging::video: the clip states no frame rate")?;
+    let frames = decode_frames(path, &VideoDecodeOpts { fps: None, max_frames: max_frames.saturating_add(1), spread: 0 })?;
+    if frames.len() > max_frames as usize {
+        return Err(format!("imaging::video: the clip is longer than {max_frames} frames"));
+    }
+    let mut blob = capability::blob::video_blob(&frames)?;
+    if let Some(meta) = blob.meta.as_object_mut() {
+        meta.insert("fps".into(), serde_json::json!(fps));
+    }
+    Ok(blob)
+}
+
 /// The external decoder for input videos brain does not read itself.
 mod ffmpeg {
     use std::path::Path;

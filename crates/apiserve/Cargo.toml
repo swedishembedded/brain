@@ -33,6 +33,8 @@ rand.workspace = true
 subtle.workspace = true
 anyhow.workspace = true
 libc.workspace = true
+# The digest of each finished clip and of an idempotent request (`video`).
+sha2.workspace = true
 
 [dev-dependencies]
 jsonschema.workspace = true

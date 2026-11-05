@@ -12,7 +12,7 @@ are retired: generation is `brain caps run` locally and `/videos` remotely.
 
 Grounded against HEAD 8b2ee7683 on 2026-11-05.
 
-## What exists
+## Starting point (2026-11-05)
 
 - Video actions: `brain/ltxv` (`t2v`, `dfr`, `t2a`, `v2v`, `extend`, `upscale`),
   `brain/minimaxh3` (`t2va`, `fl2va`, `ref2va`), `brain/wan` (`t2v`). Each returns a
@@ -89,18 +89,39 @@ by the action's own `validate_served`.
 
 ## Milestones
 
-1. `VideoContract` in `capability`, declared on `ltxv` (`t2v`, `v2v`, `extend`,
-   `upscale`), `wan` (`t2v`), `minimaxh3` (`t2va`) and on the new mock video
-   model; unit tests of the mapping (grid snapping, bounds, refusals).
-2. `brain/mock-video` (`BRAIN_MOCK`): `t2v` drawing `synth::video_frame_hwc`
-   with a sine track, and `extend` appending frames to an input clip.
-3. `video.rs` routes, spool and idempotency; `tests/it/api.rs` cases for
-   submit/poll/download/cancel, refusals, another caller's job, spool eviction;
-   the downloaded MP4 decodes back to the mock's frames.
-4. `/models` and model cards list video models with `video` output modality.
-5. `tests/e2e/video_api.bats` (`BRAIN_MOCK=1`): curl drives the whole contract.
-6. CLI: `ltxv_cli.rs` and `wan_cli.rs` removed; anything still needed (GGUF
-   import, flops) through the generic verbs; docs and samples updated.
+Done (2026-11-06), all on the mock model, no GPU:
+
+1. `capability::video::VideoContract`, declared on `ltxv` (`t2v`, `v2v`,
+   `extend`, `upscale`), `wan` (`t2v`), `minimaxh3` (`t2va`) and the mock;
+   mapping unit tests (grid snapping in both directions, bounds, refusals),
+   and a catalog test that every contract names params and inputs its action
+   really has.
+2. `brain/mock-video` (`BRAIN_MOCK`): `t2v` with an optional sound track, and
+   `extend`; flat colours a test can recognise after AV1 coding.
+3. `crates/apiserve/src/video.rs`: routes, spool, `Idempotency-Key`, `Range`,
+   cancel/delete; `tests/it/video.rs` (7 cases: listing, generate-poll-
+   download with decoded frames, ranges, idempotency, an edit fed the
+   previous result, cancel, every refusal before the model runs).
+4. `/models` lists a sellable video model with `video` output.
+5. `tests/e2e/video_api.bats` (`make test/e2e/video-api`), in `test/e2e`.
+
+The outcome encoder (`imaging::video::encode_clip`) is now the one way an
+outcome becomes a file, for the CLI and the server.
+
+Measured, not assumed: AV1 coding is about 185 ms a frame at 1024x512 on a
+48-core host (`videocodec::EncodeSettings` default), so a 5 s 720p clip spends
+tens of seconds on the CPU after the GPU finishes. The encode runs on a
+blocking thread, never the async runtime; it is a candidate for an encoder
+pool if real-weight runs show it dominating.
+
+Open:
+
+6. Retire `ltxv_cli.rs` and `wan_cli.rs` (agreed: every per-model video
+   verb). First an audit mapping each flag to a capability param, because some
+   have none yet: masked v2v (`--mask` folder), several `--adapter`s each with
+   its `--lora-scale`, `--stage-2-ic-lora`, long-form generation, and
+   `wan finetune` (used by `wan_report.rs`). Each gets a param or a generic
+   verb before its file goes.
 
 ## Later
 

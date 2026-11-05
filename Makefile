@@ -607,9 +607,9 @@ test/parity/wan:
 	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE (and BRAIN_TESTDATA if the goldens are not in ./testdata)"; exit 2)
 	BRAIN_REQUIRE_FIXTURES=1 $(CARGO_TEST) -p brain-wan --test dit_parity --test vae_parity
 
-## test/e2e - default: every fast end-to-end bats suite (api-conformance, shutdown, samples, ready)
+## test/e2e - default: every fast end-to-end bats suite (api-conformance, video-api, shutdown, samples, ready)
 ##   Opt-in and heavier: claude-code, scheduler, quickstart, deb, results-hygiene, s3dit-int8.
-test/e2e: test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready
+test/e2e: test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e/samples test/e2e/ready
 
 # End-to-end: HTTP API conformance over a real socket against a single `brain serve`
 # backed by the built-in deterministic mock model (BRAIN_MOCK=1) - no weights, no GPU,
@@ -620,6 +620,12 @@ test/e2e: test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/r
 ## test/e2e/api-conformance - HTTP API conformance of every provider dialect against the mock model
 test/e2e/api-conformance: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/api_conformance.bats
+
+# End-to-end: the OpenRouter /videos contract over a real socket against the mock
+# video model (BRAIN_MOCK=1): list, submit, poll, download, edit. No weights, no GPU.
+## test/e2e/video-api - the /videos contract end to end against the mock video model
+test/e2e/video-api: build/debug
+	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/video_api.bats
 
 # End-to-end: `brain serve` actually stops on SIGINT/SIGTERM, for every combination
 # of surfaces it can be told to serve (D-Bus alone, D-Bus+HTTP together, HTTP
@@ -2170,7 +2176,7 @@ help:
         test test/nextest test/one test/package test/doc test/slow test/full test/times test/capability-report \
         test/gradcheck test/rl test/conformance test/cuda-matrix \
         test/parity test/parity/strict test/parity/forecast test/parity/wan \
-        test/e2e test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready \
+        test/e2e test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e/samples test/e2e/ready \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
         check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/copyright check/paths check/scope check/saved-policy check/hf-fixtures \

@@ -37,6 +37,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
 | embeddings | - | `POST /embeddings` | `POST /embeddings` |
 | image generation | - | `POST /images/generations` | `POST /images/generations` |
 | transcription (speech to text) | - | `POST /audio/transcriptions` | `POST /audio/transcriptions` |
+| video (generate and edit) | - | `POST /videos`, `GET /videos/{id}`, `GET /videos/{id}/content`, `GET /videos/models` | same |
 
 - **Transcription** (`POST /v1/audio/transcriptions`, also without `/v1`): an
   OpenAI multipart form (`file`, `model`, optional `language` as an ISO-639-1
@@ -50,6 +51,31 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   `{"text", "usage": {"type": "duration", "seconds"}}`, where `seconds` is the
   decoded duration. `language` reaches a model only if its `transcribe` action
   takes one.
+- **Video** (`/v1/videos`, also without `/v1`), OpenRouter's asynchronous
+  video contract. `POST /videos` takes `{"model", "prompt", "duration"?,
+  "resolution"?, "aspect_ratio"?, "size"?, "generate_audio"?, "seed"?}` and
+  answers `202 {"id", "polling_url", "status": "pending"}`. `GET /videos/{id}`
+  reports `pending`, `in_progress` (with `progress {step, total}`),
+  `completed` (with `unsigned_urls`, `usage {seconds, frames, fps, width,
+  height, audio}` and `content [{media_type, bytes, sha256}]`), `failed`
+  (`error`), `cancelled` or `expired`. `GET /videos/{id}/content?index=0` is
+  the clip as an MP4 (AV1 video, Opus sound), with `Range` support; it needs
+  the same key. `GET /videos/models` lists each video model with
+  `supported_durations`, `supported_resolutions`, `supported_aspect_ratios`,
+  `supported_sizes`, `generate_audio`, `seed` and, as an extension, its
+  `actions`. Each model maps these fields onto its own frame grid, sizes and
+  rate, and a value it cannot render is a 400 naming the field; nothing is
+  silently changed beyond snapping the frame count to the model's grid.
+  Extensions: an `Idempotency-Key` header returns the job it already started
+  for the same key and body (a different body is a 422);
+  `DELETE /videos/{id}` cancels a running job or deletes a finished one and
+  its file; an edit names one of the model's edit actions in
+  `provider.options.brain.action`, with its own params in
+  `provider.options.brain.params`, and sends the clip to edit as
+  `input_video: {"type": "video_url", "video_url": {"url":
+  "data:video/mp4;base64,..."}}` (MP4 or WebM, AV1). A remote URL is
+  refused. Finished clips are kept for an hour, within the server's spool
+  budget; a restart forgets every job.
 - **Streaming** (`stream:true`): Anthropic emits `message_start`, then per content
   block (the thinking block, when the model reasons, then the text block)
   `content_block_start → content_block_delta* → content_block_stop`, then
