@@ -71,8 +71,8 @@ const K_ATTN_SOFTMAX_BIDIR: usize = 4;
 const K_ATTN_APPLY_FULL: usize = 5;
 const K_SILU_MUL: usize = 6;
 const K_EMBED: usize = 7;
-const K_GATE_ROW: usize = 8;
-const K_MUL: usize = 9;
+const K_GATE_ROWS: usize = 8;
+const K_MODULATE_ROWS: usize = 9;
 const K_ADD2: usize = 10;
 const K_ROW_SCATTER: usize = 11;
 /// Packs the three separate `[seq_len, inner]` q/k/v projections into the one
@@ -97,8 +97,8 @@ pub const KERNELS: [(&str, &str); 17] = [
     ("attn_apply_full", kernels::ATTN_APPLY_FULL),
     ("silu_mul", kernels::SILU_MUL),
     ("embed", kernels::EMBED),
-    ("gate_row", kernels::GATE_ROW),
-    ("mul", kernels::MUL),
+    ("gate_rows", kernels::GATE_ROWS),
+    ("modulate_rows", kernels::MODULATE_ROWS),
     ("add2", kernels::ADD2),
     ("row_scatter", kernels::ROW_SCATTER),
     ("pack_qkv", kernels::PACK_QKV),
@@ -400,13 +400,6 @@ pub(crate) fn gather_rows(cx: &Ctx, idx: &DeviceBuffer, table: &DeviceBuffer, ro
     y
 }
 
-/// `y = a * b`, fresh buffer.
-fn mul(cx: &Ctx, a: &DeviceBuffer, b: &DeviceBuffer, n: u32) -> DeviceBuffer {
-    let y = cx.gpu.storage(n as u64);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_MUL, &[a, b, &y], &[n], n)]);
-    y
-}
-
 /// `y = a + b`, fresh buffer.
 pub(crate) fn add2(cx: &Ctx, a: &DeviceBuffer, b: &DeviceBuffer, n: u32) -> DeviceBuffer {
     let y = cx.gpu.storage(n as u64);
@@ -414,21 +407,22 @@ pub(crate) fn add2(cx: &Ctx, a: &DeviceBuffer, b: &DeviceBuffer, n: u32) -> Devi
     y
 }
 
-/// `y = normed * (1 + scale) + shift`, fresh buffer - the AdaLN-Zero
-/// pre-norm modulation, `scale`/`shift` already gathered to one row per
-/// token (see [`block_forward`]; also used directly by `crate::model` for
-/// `norm_out`'s per-timestep, non-gated modulation).
-pub(crate) fn modulate(cx: &Ctx, normed: &DeviceBuffer, scale: &DeviceBuffer, shift: &DeviceBuffer, n: u32) -> DeviceBuffer {
-    let scaled = mul(cx, normed, scale, n);
-    let plus_x = add2(cx, &scaled, normed, n);
-    add2(cx, &plus_x, shift, n)
+/// `y[r,:] = normed[r,:] * (1 + scale[idx[r],:]) + shift[idx[r],:]`, fresh
+/// buffer - the AdaLN-Zero pre-norm modulation, read straight from the
+/// distinct-row tables (see [`block_forward`]; also used by `crate::model`
+/// for `norm_out`'s per-timestep, non-gated modulation). The per-token
+/// scale/shift are never materialized as `[rows, d]` buffers.
+pub(crate) fn modulate(cx: &Ctx, normed: &DeviceBuffer, idx: &DeviceBuffer, scale: &DeviceBuffer, shift: &DeviceBuffer, rows: u32, d: u32) -> DeviceBuffer {
+    let y = cx.gpu.storage((rows * d) as u64);
+    cx.gpu.submit(&[], &[cx.gpu.step(K_MODULATE_ROWS, &[normed, scale, shift, idx, &y], &[rows, d], rows * d)]);
+    y
 }
 
-/// `y[r,:] = x[r,:] + gate[r,:] * h[r,:]` - the AdaLN-Zero gated residual
-/// merge, `gate` already gathered to one row per token.
-fn gated_residual(cx: &Ctx, x: &DeviceBuffer, gate: &DeviceBuffer, h: &DeviceBuffer, rows: u32, d: u32) -> DeviceBuffer {
+/// `y[r,:] = x[r,:] + gate[idx[r],:] * h[r,:]` - the AdaLN-Zero gated
+/// residual merge, the gate read from its distinct-row table.
+fn gated_residual(cx: &Ctx, x: &DeviceBuffer, idx: &DeviceBuffer, gate: &DeviceBuffer, h: &DeviceBuffer, rows: u32, d: u32) -> DeviceBuffer {
     let y = cx.gpu.storage((rows * d) as u64);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_GATE_ROW, &[x, gate, h, &y], &[rows, d, 1], rows * d)]);
+    cx.gpu.submit(&[], &[cx.gpu.step(K_GATE_ROWS, &[x, gate, idx, h, &y], &[rows, d], rows * d)]);
     y
 }
 
@@ -790,13 +784,11 @@ pub fn block_forward(
 
     assert!(!modulation.is_empty(), "block_forward: at least one timestep's modulation is required");
     let tables = adaln_tables(modulation, hidden as usize);
-    let table_dev: Vec<DeviceBuffer> = tables.iter().map(|t| cx.upload(t)).collect();
-    let g = |i: usize| gather_rows(cx, adaln_indices, &table_dev[i], seq_len, hidden);
-    let (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp) = (g(0), g(1), g(2), g(3), g(4), g(5));
+    let [shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp] = tables.map(|t| cx.upload(&t));
 
     // attention sub-block
     let n1 = rmsnorm(cx, x, &w.norm1, seq_len, hidden, cfg.norm_eps);
-    let mod1 = modulate(cx, &n1, &scale_msa, &shift_msa, seq_len * hidden);
+    let mod1 = modulate(cx, &n1, adaln_indices, &scale_msa, &shift_msa, seq_len, hidden);
     let [q, k, v] = linears(cx, &mod1, [&w.wq, &w.wk, &w.wv], seq_len);
     let qn = rmsnorm(cx, &q, &w.norm_q, seq_len * heads, hd, cfg.qk_norm_eps);
     let kn = rmsnorm(cx, &k, &w.norm_k, seq_len * heads, hd, cfg.qk_norm_eps);
@@ -805,15 +797,15 @@ pub fn block_forward(
     let mode = cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd));
     let attn = attention(&cx.gpu, &DIT_ATTN, mode, &qn, &kn, &v, seq_len, heads, hd);
     let attn_out = linear(cx, &attn, &w.wo, None, seq_len);
-    let h1 = gated_residual(cx, x, &gate_msa, &attn_out, seq_len, hidden);
+    let h1 = gated_residual(cx, x, adaln_indices, &gate_msa, &attn_out, seq_len, hidden);
 
     // FFN sub-block
     let n2 = rmsnorm(cx, &h1, &w.norm2, seq_len, hidden, cfg.norm_eps);
-    let mod2 = modulate(cx, &n2, &scale_mlp, &shift_mlp, seq_len * hidden);
+    let mod2 = modulate(cx, &n2, adaln_indices, &scale_mlp, &shift_mlp, seq_len, hidden);
     let [value, gate] = linears(cx, &mod2, [&w.fc1_value, &w.fc1_gate], seq_len);
     let act = swiglu(cx, &value, &gate, seq_len * ffn);
     let ff_out = linear(cx, &act, &w.fc2, None, seq_len);
-    let out = gated_residual(cx, &h1, &gate_mlp, &ff_out, seq_len, hidden);
+    let out = gated_residual(cx, &h1, adaln_indices, &gate_mlp, &ff_out, seq_len, hidden);
     (out, attn_out)
 }
 

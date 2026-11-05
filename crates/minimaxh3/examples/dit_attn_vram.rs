@@ -14,13 +14,12 @@
 //! two of them together cost `2 * 56 * seq_len^2 * 4` bytes: 7.5 GB at 4096
 //! tokens, 30 GB at 8192, against a 24 GB card.
 //!
-//! It runs `block::refiner_block_forward`, not `block_forward`, deliberately:
-//! the two share the same `attention()` call at the same
-//! `(seq_len, 56, 128)` shape, and the refiner skips the AdaLN table build,
-//! whose ~1 GB of host-side `adaln_proj` weight is real but has nothing to do
-//! with attention and would only add noise to the number being measured. What
-//! is measured here is therefore ONE block's weights plus one block's
-//! activations, with the attention arm as the only variable.
+//! It runs `block::block_forward` itself, AdaLN modulation and gated
+//! residuals included, over a one-timestep modulation table (the table's
+//! values change no cost; its handful of rows is all a real step uploads).
+//! What is measured is therefore ONE DiT block's weights plus everything its
+//! forward allocates, which is what a card's share of the resident model has
+//! to leave free beside its weights.
 //!
 //! Usage: `dit_attn_vram [seq_len] [f32|i8] [reps] [device] [flash|trio]`
 //! (defaults 4096, f32, 3, the ambient device, the device's own pick): the
@@ -39,8 +38,8 @@
 use std::time::Instant;
 
 use gpu_core::select::Dtype;
-use minimaxh3::block::{attn_mode, refiner_block_forward, AttnMode, Ctx, RefinerBlockWeights};
-use minimaxh3::config::H3TransformerConfig;
+use minimaxh3::block::{attn_mode, block_forward, AttnMode, BlockWeights, Ctx};
+use minimaxh3::config::{H3TransformerConfig, MODALITY_NUM};
 use model::ops::Weight;
 
 fn main() {
@@ -80,7 +79,7 @@ fn main() {
     // a cheap deterministic ramp is enough.
     let fill = |n: usize| -> Vec<f32> { (0..n).map(|i| ((i % 97) as f32 - 48.0) * 0.01).collect() };
     let lin = |n: u32, k: u32| Weight::upload(&cx.ops, &fill((n * k) as usize), n as usize, k as usize, tier);
-    let w = RefinerBlockWeights {
+    let w = BlockWeights {
         wq: lin(inner, hidden),
         wk: lin(inner, hidden),
         wv: lin(inner, hidden),
@@ -94,6 +93,12 @@ fn main() {
         fc2: lin(hidden, ffn),
     };
     let x = cx.upload(&fill((seq * hidden) as usize));
+    // One distinct timestep, every row at its first modality's row: the
+    // modulation's values change no cost, only its table's row count does.
+    let modulation = fill(MODALITY_NUM as usize * 6 * hidden as usize);
+    let adaln_idx = cx.upload_u32(&vec![0u32; seq as usize]);
+    let half = 3 * cfg.rope_freq_dim;
+    let (cos, sin) = (cx.upload(&vec![1.0; (seq * half) as usize]), cx.upload(&vec![0.0; (seq * half) as usize]));
 
     // Each forward ends in a readback: on the Vulkan backend `submit` only
     // records and queues, so without a fence this would time submission and
@@ -103,7 +108,7 @@ fn main() {
         // The arena the model's own forward replays its blocks in.
         let out = {
             let _arena = cx.gpu.scratch_scope_in("minimaxh3 block");
-            refiner_block_forward(&cx, &w, &x, &cfg, seq)
+            block_forward(&cx, &w, &x, &adaln_idx, &cos, &sin, &[&modulation], &cfg, seq).0
         };
         let probe = cx.gpu.read(&out, 1);
         assert!(probe[0].is_finite(), "non-finite block output");

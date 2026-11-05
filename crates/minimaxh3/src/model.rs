@@ -306,12 +306,19 @@ fn block_bytes(cfg: &H3TransformerConfig, tier: Dtype) -> u64 {
 }
 
 /// Peak transient device bytes one block's forward allocates over `rows`
-/// packed rows: the residual and its normed/modulated copies and six gathered
-/// AdaLN rows at `hidden`, q/k/v and the attention output at `inner`, and the
-/// SwiGLU's value, gate and product at `ffn`.
+/// packed rows. The block's scratch arena gives every allocation of a block
+/// its own slot, so the peak is their sum: at `hidden`, the two norms, the two
+/// modulated inputs, the attention output, the two gated residuals and the
+/// FFN output; at `inner`, q/k/v, the normed q/k, the flash path's packed
+/// qkv slab and the attention result; at `ffn`, the SwiGLU's value, gate and
+/// product - all fp32 - plus the int8 copy of each linear's input. Measured
+/// at 13312 rows on a P40: 8.24 GB beside the block's weights, against 8.45
+/// GB modelled.
 pub fn block_workspace_bytes(cfg: &H3TransformerConfig, rows: u32) -> u64 {
     let (hidden, inner, ffn) = (cfg.hidden_size as u64, cfg.inner_dim() as u64, cfg.ffn_dim as u64);
-    rows as u64 * (12 * hidden + 6 * inner + 3 * ffn) * 4
+    let fp32 = (8 * hidden + 9 * inner + 3 * ffn) * 4;
+    let int8_inputs = 2 * hidden + inner + ffn;
+    rows as u64 * (fp32 + int8_inputs)
 }
 
 /// Peak transient device bytes one card's share of a forward allocates over
@@ -581,10 +588,8 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
         let shift_dev = cx.upload(&shift_tbl);
         let scale_dev = cx.upload(&scale_tbl);
         let ts_idx_dev = cx.upload_u32(inp.timestep_indices);
-        let shift_g = block::gather_rows(cx, &ts_idx_dev, &shift_dev, seq_len, hidden);
-        let scale_g = block::gather_rows(cx, &ts_idx_dev, &scale_dev, seq_len, hidden);
         let normed = block::rmsnorm(cx, &h, &head.norm_out_norm, seq_len, hidden, cfg.final_norm_eps);
-        let modulated = block::modulate(cx, &normed, &scale_g, &shift_g, seq_len * hidden);
+        let modulated = block::modulate(cx, &normed, &ts_idx_dev, &scale_dev, &shift_dev, seq_len, hidden);
 
         let video_patch_dim = cfg.video_patch_dim();
         let video_full = block::linear(cx, &modulated, &head.proj_out_w, Some(&head.proj_out_b), seq_len);

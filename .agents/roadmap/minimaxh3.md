@@ -931,12 +931,19 @@ module); the arena (`Gpu::scratch_scope_in`) removed it.
   needed ~10.9 GB more against 21.9 GiB free, and the parity taps cost five
   full-sequence readbacks per step - they are read only by
   `forward_with_taps` now, and `forward_workspace_bytes` counts the stage's
-  packed sequence and residuals. 768x448 still does not hold resident: the
-  per-block scratch arena issues every buffer of a block its own slot
+  packed sequence and residuals.
+- **The AdaLN modulation is read from its tables, not gathered.** Each block
+  gathered six `[rows, hidden]` copies of a table with a handful of distinct
+  rows, and each modulate was a `mul` and two `add2`s over fresh buffers.
+  `kernels::{modulate_rows, gate_rows}` index the tables per row instead:
+  one real block at 13312 rows went from 11.41 GB to 8.67 GB of device
+  memory (weights included), 2287 -> 2265 ms of device time. 768x448 is
+  still past what two P40s hold beside the int8 weights: the per-block
+  scratch arena issues every buffer of a block its own slot
   (`gpu_core::scratch`'s replay contract), so a block's peak is the SUM of
-  its intermediates (~7.7 GB at 13.3k rows), not the larger of its
-  attention and FFN phases (about half). Liveness-aware slot reuse inside
-  one scope is the change that would admit it.
+  its intermediates rather than the larger of its attention and FFN phases.
+  Liveness-aware slot reuse inside one scope is the change that would
+  admit it.
 - The residency adapter places its DiT on its ONE scheduled device; an int8
   DiT with a 10k-row workspace does not fit one 24 GB card, so resident
   serving refuses on this box while the direct path places over both.

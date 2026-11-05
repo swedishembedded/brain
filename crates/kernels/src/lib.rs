@@ -492,6 +492,8 @@ pub const GATE_ROW: &str = include_str!("../wgsl/gate_row.wgsl");
 pub const GATE_ROW_DG: &str = include_str!("../wgsl/gate_row_dg.wgsl");
 /// `wgsl/gate_row_dh.wgsl`
 pub const GATE_ROW_DH: &str = include_str!("../wgsl/gate_row_dh.wgsl");
+/// `wgsl/gate_rows.wgsl`
+pub const GATE_ROWS: &str = include_str!("../wgsl/gate_rows.wgsl");
 /// `wgsl/gauss_cens_nll_grad.wgsl`, after `wgsl/lib/{normal}.wgsl`
 pub const GAUSS_CENS_NLL_GRAD: &str = concat!(
     include_str!("../wgsl/lib/normal.wgsl"),
@@ -846,6 +848,8 @@ pub const MLA_BWD_DQ_ROPE: &str = include_str!("../wgsl/mla_bwd_dq_rope.wgsl");
 pub const MLA_INDEX_SCORES: &str = include_str!("../wgsl/mla_index_scores.wgsl");
 /// `wgsl/mla_scores.wgsl`
 pub const MLA_SCORES: &str = include_str!("../wgsl/mla_scores.wgsl");
+/// `wgsl/modulate_rows.wgsl`
+pub const MODULATE_ROWS: &str = include_str!("../wgsl/modulate_rows.wgsl");
 /// `wgsl/moe_group_combine.wgsl`
 pub const MOE_GROUP_COMBINE: &str = include_str!("../wgsl/moe_group_combine.wgsl");
 /// `wgsl/moe_group_counts.wgsl`
@@ -1632,6 +1636,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("gate_row", GATE_ROW),
     ("gate_row_dg", GATE_ROW_DG),
     ("gate_row_dh", GATE_ROW_DH),
+    ("gate_rows", GATE_ROWS),
     ("gauss_cens_nll_grad", GAUSS_CENS_NLL_GRAD),
     ("gauss_cens_nll_value", GAUSS_CENS_NLL_VALUE),
     ("gdn_add_identity", GDN_ADD_IDENTITY),
@@ -1803,6 +1808,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mla_bwd_dq_rope", MLA_BWD_DQ_ROPE),
     ("mla_index_scores", MLA_INDEX_SCORES),
     ("mla_scores", MLA_SCORES),
+    ("modulate_rows", MODULATE_ROWS),
     ("moe_group_combine", MOE_GROUP_COMBINE),
     ("moe_group_counts", MOE_GROUP_COUNTS),
     ("moe_group_perm_emit", MOE_GROUP_PERM_EMIT),
