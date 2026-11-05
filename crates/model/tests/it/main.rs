@@ -110,6 +110,7 @@ mod qops_read_host;
 mod qops_tier_coverage;
 mod qops_upload_preserved;
 mod quant_group_sum;
+mod quant_residual_pack;
 mod quantize_weight_is_schedule_invariant;
 mod readout_topk;
 mod recurrent_slot;

@@ -69,7 +69,7 @@ this port:
       alone_is_the_joint_forward_with_the_cross_modal_attention_cut` (bit
       equality), `lora_runtime`'s shared-cache connector adapter check, the
       perturbation int8 test, and the precision of the two-level int8
-      activation quantization (`quant_residual.wgsl`) against single-level,
+      activation quantization (`quant_residual_pack.wgsl`) against single-level,
       per block and end to end, with its speed cost.
 - [ ] **Duration head on real weights** - the head's parity test and the
       prediction path exist; the weights (`model_patches/ltx-2.5-duration-

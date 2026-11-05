@@ -229,14 +229,16 @@ const K_RMSNORM_ROWS: usize = 27;
 /// `lora_delta`: the accumulate half of a runtime LoRA correction
 /// (`model::dispatch::lora_rows_off`), `out += (x·Aᵀ)·Bᵀ`.
 const K_LORA_DELTA: usize = 28;
-/// `quant_residual`: what an int8 activation's first level drops - the input
-/// of [`qquant_linear`]'s second pass.
-const K_QUANT_RESIDUAL: usize = 29;
+/// `quant_residual_pack`: an int8 activation's second level - what the first
+/// drops, quantized and packed for [`qquant_linear`]'s second pass.
+const K_QUANT_RESIDUAL_PACK: usize = 29;
+/// `add`: `dst += src`, [`qquant_linear`]'s fold of the second level's product.
+const K_ADD: usize = 30;
 
 /// Every kernel this block dispatches - all pre-existing except
 /// [`K_ADALN_ROW`] and [`K_FLASH_CROSS_REG2`], all at their documented general
 /// contract.
-pub const KERNELS: [(&str, &str); 30] = [
+pub const KERNELS: [(&str, &str); 31] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm", kernels::RMSNORM),
@@ -269,7 +271,8 @@ pub const KERNELS: [(&str, &str); 30] = [
     ("flash_attn_cross_reg2", kernels::FLASH_ATTN_CROSS_REG2),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("lora_delta", kernels::LORA_DELTA),
-    ("quant_residual", kernels::QUANT_RESIDUAL),
+    ("quant_residual_pack", kernels::QUANT_RESIDUAL_PACK),
+    ("add", kernels::ADD),
 ];
 
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
@@ -2022,30 +2025,48 @@ fn qgemm(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &Devi
     }
 }
 
+/// Rows of [`qquant_linear`]'s second level per pass: bounds its two
+/// temporaries (packed residual and its product) to `ROWS·(k + 4n)` bytes,
+/// 80 MiB at LTX-2.5's widest FF shape, whatever the token count. A multiple
+/// of 64 rows keeps every sliced binding offset 256-byte aligned for any `k`
+/// that is a multiple of 32.
+pub const FINE_ROWS: u32 = 1024;
+
 /// [`qquant`] + [`qgemm`] in one call, with the activation quantized in two
 /// int8 levels: `x ≈ s₁·q₁ + s₂·q₂`, the second level quantizing what the
-/// first rounds away (`quant_residual`), each multiplied by the same packed
-/// weight and summed. One level alone leaves each group's rounding error at
-/// up to half its step - enough to hold one real LTX-2.5 block at cosine
-/// 0.996 against fp32 - and that error compounds through 48 blocks and every
-/// step. Two levels bring it to ~1/(127·254) of the group scale, so the
+/// first rounds away (`quant_residual_pack`), each multiplied by the same
+/// packed weight and summed. One level alone leaves each group's rounding
+/// error at up to half its step - enough to hold one real LTX-2.5 block at
+/// cosine 0.996 against fp32 - and that error compounds through 48 blocks and
+/// every step. Two levels bring it to ~1/(127·254) of the group scale, so the
 /// quantized linear computes what the checkpoint's own weights do. The bias
 /// and any runtime adapter are added once.
+///
+/// Memory is the single-level linear's plus a bounded slab: the first level's
+/// product goes straight into `out`, and the second level is quantized,
+/// multiplied and folded in [`FINE_ROWS`]-row passes, so no `[rows, k]` f32
+/// residual or extra `[rows, n]` product ever exists - at 1280×704 those
+/// would be 770 MiB each, more than a two-stage forward has to spare.
 #[allow(clippy::too_many_arguments)]
 fn qquant_linear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, x: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
     let xq = gpu.storage((rows * k / 4) as u64);
     let sx = gpu.storage(model::int8::act_scale_len(rows as usize, k as usize) as u64);
     qquant(gpu, s, x, &xq, &sx, rows, k);
-    let residual = gpu.storage((rows * k) as u64);
-    s.push(gpu.step(K_QUANT_RESIDUAL, &[x, &sx, &residual], &[rows, k], rows * k));
-    let rq = gpu.storage((rows * k / 4) as u64);
-    let rs = gpu.storage(model::int8::act_scale_len(rows as usize, k as usize) as u64);
-    qquant(gpu, s, &residual, &rq, &rs, rows, k);
-    let coarse = gpu.storage((rows * n) as u64);
-    qgemm(gpu, s, tier, &xq, &sx, w, &coarse, rows, k, n);
-    let fine = gpu.storage((rows * n) as u64);
-    qgemm(gpu, s, tier, &rq, &rs, w, &fine, rows, k, n);
-    add2(gpu, s, &coarse, &fine, out, rows * n);
+    qgemm(gpu, s, tier, &xq, &sx, w, out, rows, k, n);
+    let slab = rows.min(FINE_ROWS);
+    let rq = gpu.storage((slab * k / 4) as u64);
+    let rs = gpu.storage(model::int8::act_scale_len(slab as usize, k as usize) as u64);
+    let fine = gpu.storage((slab * n) as u64);
+    for r0 in (0..rows).step_by(FINE_ROWS as usize) {
+        let m = (rows - r0).min(FINE_ROWS);
+        let (r0, m64) = (r0 as u64, m as u64);
+        let xo = (r0 * k as u64, m64 * k as u64);
+        let so = model::int8::act_scale_range(r0 as u32, m, k);
+        s.push(gpu.step_sliced(K_QUANT_RESIDUAL_PACK, &[x, &sx, &rq, &rs], &[xo, so, (0, m64 * k as u64 / 4), (0, so.1)], &[m, k], m * k / 32));
+        qgemm(gpu, s, tier, &rq, &rs, w, &fine, m, k, n);
+        let oo = (r0 * n as u64, m64 * n as u64);
+        s.push(gpu.step_sliced(K_ADD, &[&fine, out], &[(0, m64 * n as u64), oo], &[m * n], m * n));
+    }
     if let Some(b) = &w.b {
         s.push(gpu.step(K_BIAS_ADD, &[out, b], &[rows, n], rows * n));
     }

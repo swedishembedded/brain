@@ -1071,8 +1071,8 @@ pub const QKNORM_ROPE_FUSED: &str = include_str!("../wgsl/qknorm_rope_fused.wgsl
 pub const QUANT_GROUP_SUM: &str = include_str!("../wgsl/quant_group_sum.wgsl");
 /// `wgsl/quant_pack.wgsl`
 pub const QUANT_PACK: &str = include_str!("../wgsl/quant_pack.wgsl");
-/// `wgsl/quant_residual.wgsl`
-pub const QUANT_RESIDUAL: &str = include_str!("../wgsl/quant_residual.wgsl");
+/// `wgsl/quant_residual_pack.wgsl`
+pub const QUANT_RESIDUAL_PACK: &str = include_str!("../wgsl/quant_residual_pack.wgsl");
 /// `wgsl/quick_gelu.wgsl`
 pub const QUICK_GELU: &str = include_str!("../wgsl/quick_gelu.wgsl");
 /// `wgsl/quick_gelu_bwd.wgsl`
@@ -1910,7 +1910,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("qknorm_rope_fused", QKNORM_ROPE_FUSED),
     ("quant_group_sum", QUANT_GROUP_SUM),
     ("quant_pack", QUANT_PACK),
-    ("quant_residual", QUANT_RESIDUAL),
+    ("quant_residual_pack", QUANT_RESIDUAL_PACK),
     ("quick_gelu", QUICK_GELU),
     ("quick_gelu_bwd", QUICK_GELU_BWD),
     ("rdft_analysis", RDFT_ANALYSIS),

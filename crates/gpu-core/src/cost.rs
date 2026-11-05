@@ -551,11 +551,12 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, k) = (p(0)?, p(1)?);
             f(3 * m * k, 5 * m * k + 4 * m * (k / 32))
         }
-        // The rounding error an activation's int8 level drops: params [m, k];
-        // r = x - clamp(round(x/sx))·sx reads x and its scale, writes r.
-        "quant_residual" => {
+        // An activation's second int8 level: params [m, k]; recomputes the
+        // first level's rounding error twice (max, then pack) per element,
+        // reads x and its scale, writes the packed residual and its scales.
+        "quant_residual_pack" => {
             let (m, k) = (p(0)?, p(1)?);
-            f(5 * m * k, 4 * (2 * m * k + m * (k / 32)))
+            f(13 * m * k, 4 * (m * k + m * (k / 32)) + m * k + 4 * m * (k / 32))
         }
         // Per-group max|x| scales: params [m, k]. `max_abs_rows` is the
         // cooperative (workgroup-per-row) variant of the same op — same reads,

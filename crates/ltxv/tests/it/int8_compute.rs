@@ -108,6 +108,35 @@ fn dit_forward_stays_close_with_int8_compute_dispatch() {
     }
 }
 
+/// The second activation level runs in [`ltxv::block::FINE_ROWS`]-row passes
+/// to bound its memory, so at a token count spanning several - the last one
+/// partial - every pass's tokens must be as close to fp32 as the first
+/// pass's. Weight rounding dominates the error on this config, so the gate is
+/// relative: a pass folded into the wrong rows, or skipped, leaves its tokens
+/// at single-level accuracy, measurably worse than the first pass.
+#[test]
+fn int8_compute_holds_across_second_level_passes() {
+    let cfg = LtxDitConfig::tiny();
+    let w = random_tiny_weights(&cfg, 0xC0117E);
+    let inputs = synthetic_inputs(&cfg, ltxv::block::FINE_ROWS as usize * 2 + 77, 5);
+    let context_valid = vec![1.0f32; inputs.context_len];
+
+    let model = LtxDit::new(cfg, w, None);
+    let f32_out = model.forward(&inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &context_valid).out;
+    let i8_out = model.forward_q(&inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &context_valid, QTier::Int8).out;
+    let row = f32_out.len() / inputs.t;
+    let pass = ltxv::block::FINE_ROWS as usize * row;
+    let rel = |r: std::ops::Range<usize>| {
+        let (e, n) = f32_out[r.clone()].iter().zip(&i8_out[r]).fold((0f64, 0f64), |(e, n), (&a, &b)| (e + ((a - b) as f64).powi(2), n + (a as f64).powi(2)));
+        (e / n).sqrt()
+    };
+    let (first, second, last) = (rel(0..pass), rel(pass..2 * pass), rel(2 * pass..f32_out.len()));
+    println!("int8-compute over {} tokens: relative error per pass {first:.3e} {second:.3e} {last:.3e}", inputs.t);
+    for (name, e) in [("second", second), ("last, partial", last)] {
+        assert!(e <= first * 1.15, "the {name} second-level pass is less accurate than the first: {e:.3e} vs {first:.3e}");
+    }
+}
+
 // --------------------------------------------------- 2. real-weight-gated
 
 const REPO: &str = "Lightricks/LTX-2.5";
