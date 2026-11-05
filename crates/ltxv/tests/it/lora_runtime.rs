@@ -293,3 +293,52 @@ fn every_residency_shape_applies_the_adapter_and_agrees_bit_for_bit() {
     assert!(rel(&adapted32, &base32) > 0.01, "the adapter must change the output measurably");
     assert!(agree > 0.99, "the session path must deliver the fp32 fold's effect, cosine {agree}");
 }
+
+/// The embeddings connectors run once per prompt (their routing is cached),
+/// so the head a generation keeps resident leaves them on the checkpoint and
+/// a forward reads them only when it routes a new context. An adapter that
+/// corrects a connector linear must still reach that read: the streamed
+/// path delivers the exact fp32 fold's effect.
+#[test]
+fn a_connector_correction_reaches_the_connector_read_on_demand() {
+    use ltxv::block::GenerationCache;
+    use ltxv::devres::DitSession;
+    use ltxv::dit::{forward_q_streamed_in, load_head_tensors_from_source};
+
+    // The int8 tiny width, with its connector on: registers tile the
+    // context, so their count divides `Run`'s 5 tokens, and the connector
+    // works at the context's own width.
+    let cfg = LtxDitConfig {
+        use_embeddings_connector: true,
+        connector_num_attention_heads: 4,
+        connector_attention_head_dim: 16,
+        connector_num_learnable_registers: 5,
+        ..LtxDitConfig::tiny()
+    };
+    let w = weights(&cfg, 0xC0C);
+    let head = load_head_tensors_from_source(&w, &cfg);
+    assert!(head.keys().all(|k| !k.contains("_embeddings_connector.")), "the resident head must leave the connectors on the checkpoint");
+
+    let cd = cfg.connector_inner_dim() as usize;
+    let dir = tempdir("connector");
+    let path = dir.join("adapter.safetensors");
+    write_peft(&path, &[("video_embeddings_connector.transformer_1d_blocks.0.attn1.to_v.weight", cd, cd)], 4, 33);
+    // Strong enough that the effect stands clear of int8 rounding, the
+    // threshold `a_runtime_adapter_delivers_the_same_effect_on_int8_as_the_
+    // exact_fp32_fold` searches its strengths for.
+    let spec = AdapterSpec { path: path.to_string_lossy().into_owned(), scale: 4.0 };
+    let run = Run::new(&cfg);
+    let ctx_valid = vec![1.0f32; run.context_len];
+    let forward = |s: &DitSession| -> Vec<f32> {
+        forward_q_streamed_in(s, &cfg, &w, &head, QTier::Int8, &run.latent, &run.timesteps, &run.positions, &run.mask, &run.context, run.context_len, run.t, &ctx_valid, &GenerationCache::default())
+    };
+    let base = forward(&DitSession::transient(None));
+    let adapter: ltxv::pipeline::SharedAdapter = std::sync::Arc::new(std::sync::Mutex::new(runtime_adapter(std::slice::from_ref(&spec)).unwrap()));
+    let adapted = forward(&DitSession::transient(None).with_adapter(Some(adapter)));
+
+    let base32 = run.fp32(&LtxDit::new(cfg, w.clone(), None));
+    let adapted32 = run.fp32(&LtxDit::new(cfg, w.clone(), None).with_adapter(runtime_adapter(std::slice::from_ref(&spec)).unwrap()).unwrap());
+    let agree = cosine(&diff(&adapted, &base), &diff(&adapted32, &base32));
+    assert!(rel(&adapted32, &base32) > 0.02, "the connector correction must change the output measurably, rel {}", rel(&adapted32, &base32));
+    assert!(agree > 0.99, "the on-demand connector read must apply the correction, cosine {agree}");
+}

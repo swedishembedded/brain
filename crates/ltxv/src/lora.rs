@@ -252,6 +252,17 @@ pub fn runtime_adapter(specs: &[model::adapter::AdapterSpec]) -> Result<model::l
     Ok(model::lora::RuntimeLora::new(deltas))
 }
 
+/// Fold every correction of `adapter` aimed at a tensor `weights` holds into
+/// it, exactly, in fp32. Corrections for tensors `weights` does not hold are
+/// left for whoever builds those (a quantized block attaches its own).
+pub fn fold_held(adapter: &model::lora::RuntimeLora, weights: &mut vae::blocks::Tensors) {
+    for d in adapter.deltas() {
+        let Some((_, w)) = weights.get_mut(&d.key) else { continue };
+        let (out, inn) = (d.pair.out, d.pair.inn);
+        adapter.claim(&d.key, inn, 0, out, 0, inn).expect("the delta's own rectangle").fold_into(w);
+    }
+}
+
 /// The IC-LoRA reference geometry a stack of adapters was trained with:
 /// `(reference_downscale_factor, reference_temporal_scale_factor)` from each
 /// file's safetensors metadata (`ltx_pipelines.iclora_utils`), `1` when no

@@ -3532,28 +3532,24 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, adapters: &
 /// exist at the adapter's shape.
 fn fold_adapter(adapter: &model::lora::RuntimeLora, weights: &mut Tensors) -> Result<(), String> {
     adapter.validate(&|k| weights.get(k).map(|(_, d)| d.len()))?;
-    for d in adapter.deltas() {
-        let (out, inn) = (d.pair.out, d.pair.inn);
-        let (_, w) = weights.get_mut(&d.key).expect("validated above");
-        adapter.claim(&d.key, inn, 0, out, 0, inn).expect("the delta's own rectangle").fold_into(w);
-    }
+    crate::lora::fold_held(adapter, weights);
     Ok(())
 }
 
 /// Split `adapter` for the real streamed checkpoint: head targets fold into
-/// the fp32 `head` tensors now, block targets ride with the sessions and
-/// attach beside each quantized block as it is built. Every target is checked
+/// the fp32 `head` tensors now; block targets ride with the sessions and
+/// attach beside each quantized block as it is built, and connector targets
+/// fold in whenever a forward reads a connector. Every target is checked
 /// against the checkpoint's own tensor sizes first, and a target that is
-/// neither a head tensor this denoiser loads nor a block tensor is refused -
-/// an adapter that silently skipped one would serve the base model.
+/// none of those is refused - an adapter that silently skipped one would
+/// serve the base model.
 fn block_adapter(adapter: model::lora::RuntimeLora, src: &crate::gguf_src::LtxvGgufSource, head: &mut Tensors) -> Result<SharedAdapter, String> {
     use checkpoint::TensorSource;
     adapter.validate(&|k| src.numel(k))?;
-    for d in adapter.deltas().iter().filter(|d| !crate::dit::is_block_key(&d.key)) {
-        let (out, inn) = (d.pair.out, d.pair.inn);
-        let (_, w) = head.get_mut(&d.key).ok_or_else(|| format!("ltxv: the adapter targets {}, a model-level tensor this denoiser does not load", d.key))?;
-        adapter.claim(&d.key, inn, 0, out, 0, inn).expect("the delta's own rectangle").fold_into(w);
+    if let Some(d) = adapter.deltas().iter().find(|d| !crate::dit::is_block_key(&d.key) && !crate::dit::is_connector_key(&d.key) && !head.contains_key(&d.key)) {
+        return Err(format!("ltxv: the adapter targets {}, a model-level tensor this denoiser does not load", d.key));
     }
+    crate::lora::fold_held(&adapter, head);
     Ok(std::sync::Arc::new(std::sync::Mutex::new(adapter)))
 }
 

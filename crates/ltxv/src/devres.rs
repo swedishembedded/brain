@@ -584,6 +584,11 @@ impl DitSession {
         self
     }
 
+    /// The runtime adapter this session's builds apply, if any.
+    pub fn adapter(&self) -> Option<&SharedAdapter> {
+        self.adapter.as_ref()
+    }
+
     /// A session that keeps nothing: every forward opens its own `Gpu` and
     /// uploads every block. The behaviour this crate shipped before device
     /// residency existed, kept as the fallback and as the arm a bit-identity
@@ -925,6 +930,11 @@ impl AvDitSession {
     pub fn with_adapter(mut self, adapter: Option<SharedAdapter>) -> AvDitSession {
         self.adapter = adapter;
         self
+    }
+
+    /// The runtime adapter this session's builds apply, if any.
+    pub fn adapter(&self) -> Option<&SharedAdapter> {
+        self.adapter.as_ref()
     }
 
     /// A session that keeps nothing: a fresh `Gpu` per forward and every

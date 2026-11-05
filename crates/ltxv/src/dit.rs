@@ -779,6 +779,32 @@ pub(crate) fn is_block_key(key: &str) -> bool {
     key.starts_with("transformer_blocks.")
 }
 
+/// The two embeddings connectors' tensors. Model-level, but a generation
+/// routes its context through them once and caches the answer, so a streamed
+/// forward reads them on demand ([`load_connector_tensors`]) instead of
+/// keeping them in the resident head (7.5 GiB as fp32 at the real 22B size).
+pub(crate) fn is_connector_key(key: &str) -> bool {
+    key.starts_with("video_embeddings_connector.") || key.starts_with("audio_embeddings_connector.")
+}
+
+/// What a streamed forward keeps resident for a whole generation: every
+/// model-level tensor except the connectors.
+fn is_resident_head_key(key: &str) -> bool {
+    !is_block_key(key) && !is_connector_key(key)
+}
+
+/// One embeddings connector's (`prefix`) tensors out of `manifest`, read from
+/// `src` for a routing-cache miss, with `adapter`'s corrections to them
+/// folded in.
+fn load_connector_tensors(src: &dyn TensorSource, manifest: Vec<(String, Vec<usize>)>, prefix: &str, adapter: Option<&crate::pipeline::SharedAdapter>) -> Tensors {
+    let want = format!("{prefix}.");
+    let mut w = crate::block::load_manifest_tensors(src, manifest, |name| name.starts_with(&want));
+    if let Some(a) = adapter {
+        crate::lora::fold_held(&a.lock().unwrap_or_else(|e| e.into_inner()), &mut w);
+    }
+    w
+}
+
 impl LtxDit {
     pub fn new(cfg: LtxDitConfig, weights: Tensors, device: Option<&str>) -> LtxDit {
         let shard = Shard::whole(cfg.num_layers as usize);
@@ -1203,16 +1229,15 @@ impl LtxDit {
 // ---------------------------------------------------------------------------
 
 /// Every tensor a real checkpoint carries OUTSIDE the 48
-/// `transformer_blocks.N.*` families (`patchify_proj`, `adaln_single.*`,
-/// `keyframes_abs_pos_embedding`, `video_embeddings_connector.*`, the
+/// `transformer_blocks.N.*` families and the embeddings connector
+/// (`patchify_proj`, `adaln_single.*`, `keyframes_abs_pos_embedding`, the
 /// top-level `scale_shift_table`, `proj_out`) - the "head"
 /// [`forward_q_streamed`] keeps resident in host fp32 for an entire
-/// generation run, since summed together (a few GB, dominated by the
-/// 8-layer connector) they are a small fraction of the 22B model. The other
-/// 48/49ths streams in one block at a time inside [`forward_q_streamed`]
-/// itself via [`load_block_tensors_from_source`].
+/// generation run. The blocks stream in one at a time inside
+/// [`forward_q_streamed`] itself via [`load_block_tensors_from_source`], and
+/// the connector is read only when a new context is routed through it.
 pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig) -> Tensors {
-    crate::block::load_manifest_tensors(src, dit_tensor_manifest(cfg), |name| !name.starts_with("transformer_blocks."))
+    crate::block::load_manifest_tensors(src, dit_tensor_manifest(cfg), is_resident_head_key)
 }
 
 /// [`LtxDit::forward_q`]'s streamed twin: identical op sequence and output
@@ -1457,9 +1482,10 @@ pub fn forward_q_streamed_in(
     let connector_context = match conn_hit {
         Some(out) => out,
         None => {
+            let w = load_connector_tensors(src, dit_tensor_manifest(cfg), "video_embeddings_connector", session.adapter());
             #[rustfmt::skip]
             let (out, _connector_out) = route_context_through_connector(
-                &gpu, head, "video_embeddings_connector", cfg.use_embeddings_connector, context, context_valid, context_len as u32,
+                &gpu, &w, "video_embeddings_connector", cfg.use_embeddings_connector, context, context_valid, context_len as u32,
                 cfg.connector_inner_dim(), cfg.connector_num_attention_heads, cfg.connector_attention_head_dim,
                 cfg.connector_num_layers, cfg.connector_num_learnable_registers, cfg.connector_apply_gated_attention,
                 cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
@@ -1551,11 +1577,12 @@ pub fn forward_q_streamed_in(
 
 /// [`load_head_tensors_from_source`]'s AV twin: every non-block tensor of the
 /// audio+video manifest - both streams' patchify/proj_out/scale_shift pairs,
-/// all EIGHT model-level adaLN groups (including the four A<->V ones) and both
-/// embeddings connectors. Bounded the same way: one tensor decoded into a
-/// temporary at a time, never the whole source.
+/// all EIGHT model-level adaLN groups (including the four A<->V ones), but
+/// not the two embeddings connectors, which are read on demand. Bounded the
+/// same way: one tensor decoded into a temporary at a time, never the whole
+/// source.
 pub fn load_av_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxAvDitConfig) -> Tensors {
-    crate::block::load_manifest_tensors(src, av_dit_tensor_manifest(cfg), |name| !name.starts_with("transformer_blocks."))
+    crate::block::load_manifest_tensors(src, av_dit_tensor_manifest(cfg), is_resident_head_key)
 }
 
 /// One joint audio+video denoise step's inputs - the AV counterpart of
@@ -1741,9 +1768,10 @@ pub fn av_forward_q_streamed_in(
         if let Some(out) = cache.connector_hit(prefix, ctx, valid, ctx_len) {
             return out;
         }
+        let w = load_connector_tensors(src, av_dit_tensor_manifest(cfg), prefix, session.adapter());
         #[rustfmt::skip]
         let (out, _) = route_context_through_connector(
-            &gpu, head, prefix, vcfg.use_embeddings_connector, ctx, valid, ctx_len as u32,
+            &gpu, &w, prefix, vcfg.use_embeddings_connector, ctx, valid, ctx_len as u32,
             inner, heads, head_dim,
             vcfg.connector_num_layers, vcfg.connector_num_learnable_registers, vcfg.connector_apply_gated_attention,
             vcfg.connector_norm_output, vcfg.positional_embedding_theta, &vcfg.connector_positional_embedding_max_pos, vcfg.norm_eps,
