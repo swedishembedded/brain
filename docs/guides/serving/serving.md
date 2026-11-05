@@ -85,6 +85,37 @@ architecture-prefixed spellings (`--qwen-ctx`, `--qwen35-kv`,
 warning until their callers have moved; the ones for derived settings still
 set them so existing launch lines behave as before.
 
+## Serving on several cards
+
+`brain serve --device gpu0,gpu1,gpu2,gpu3` (or `gpu`, every GPU) serves a large
+chat model, such as the Qwen3.8-27B FP8 release, with **one replica per card**
+behind the one endpoint. A replica is a complete instance of the model: its own
+weights, its own KV pool and its own prefix cache, sized for its card. The
+startup log names the replicas and the cards each runs on. A model that needs
+several cards forms one replica per group of cards that holds it; a card that
+cannot hold the model gets none.
+
+Replicas are built when demand needs them, not at startup:
+
+- Requests fill the first replica's `--max-batch` decode slots first, so a light
+  load runs on one card and shares one batch.
+- When every active replica is full, the next request builds the next replica
+  on a free card. A replica that is idle can be released under memory pressure
+  like any other instance, and is built again when demand returns.
+- A request goes to the replica whose prefix cache holds the longest part of its
+  prompt, so an agent that resends a growing conversation every turn returns to
+  the card that served its earlier turns. Only a request with no useful shared
+  prefix goes to the least-loaded replica, and a replica with no free slot is
+  passed over even when it holds the prefix: a system prompt shared by every
+  conversation does not pin them all to one card.
+- Adapters (`--adapter`, `--adapter-targets`) are served by every replica: each
+  builds its own bank from the same set, and a request names the adapter, not
+  the replica.
+
+Each replica is one instance in the monitoring snapshot, with its device, its
+queued and running requests and its prefix-cache counters
+([Monitoring](monitoring.md)).
+
 ## Sampling defaults
 
 A request that omits `temp`, `top_k`, `top_p`, `min_p` or `repetition_penalty` is

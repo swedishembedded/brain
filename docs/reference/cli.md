@@ -266,7 +266,9 @@ like, rather than silently fetching something adjacent.
   [--openrouter [PORT]] [--dbus]` - it makes configured models resident and
   answers requests over one or more transports at once. See
   [Serving](../guides/serving/serving.md) for the full flag reference, access control, and
-  admission behavior.
+  admission behavior. Given several devices (`--device gpu0,gpu1,...`), a
+  large chat model runs one replica per card behind the one endpoint (see
+  [Serving on several cards](../guides/serving/serving.md#serving-on-several-cards)).
 - With `--stdio`, it instead runs an event-driven stdio controller: it reads
   JSONL events on stdin (e.g. `user_text`, `camera_frame`) and streams JSONL
   events back on stdout (e.g. `brain_text_chunk`, `object_detected`), driven

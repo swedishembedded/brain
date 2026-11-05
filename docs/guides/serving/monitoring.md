@@ -63,6 +63,22 @@ The accelerator rows are the residency budget, not the card's raw capacity:
 which is why the two GPUs report different totals here - one was already
 carrying other work.
 
+## One row per replica
+
+A model that runs one instance per card (`brain serve --device gpu0,gpu1,...`,
+see [Serving](serving.md#serving-on-several-cards)) lists each instance under
+its `instances`, one row per device it occupies. Every row carries the replica
+it belongs to, the requests queued for and running on that replica, and the
+counters the instance reports, such as its prefix-cache hit tokens:
+
+The fields are `replica`, `queued`, `running` and the instance's own counters
+(for the serving engine: `kv_prefix_hit_tokens` and `kv_prefix_lookup_tokens`,
+whose ratio is the replica's prefix-cache hit share). `braintop` shows them in
+the model's instance view like any other metric, and `braintop --cli` prints
+them as `model.<id>.instances.<n>.<field>=<value>`.
+
+A replica that has not been built yet, or was released, has no row.
+
 ## The dashboard
 
 Progressive-reveal, responsive layout:
