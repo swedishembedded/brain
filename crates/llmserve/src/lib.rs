@@ -21,6 +21,9 @@
 //! dispatcher groups queued jobs into such a call). Work that arrives while
 //! a call is already running waits for the next call.
 
+mod routing;
+pub use routing::request_prefix_chain;
+
 use capability::{ActionResult, ActionSpec, Invocation, ParamSpec, ParamType, Progress};
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
