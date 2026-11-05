@@ -485,6 +485,11 @@ raises it.
   finite and at most 0. A count that does not match the answer's tokens is refused naming the file, the record and both
   counts. The log-probabilities are those of `softmax(logits / temperature)`; give the sampling temperature as
   `PolicyGradientConfig::temperature`.
+- `"teacher_context"` (record, optional): `{"at": <index>, "messages": [{"role": "system"|"user", "content": "..."}]}`,
+  the privileged messages of on-policy self-distillation (see below). `at` is the index of the record's message they are
+  inserted before, at or before the first supervised message. Unknown fields, a missing `at`, no messages, an empty
+  text, an `assistant`/`tool` role, an `at` past the first answer and a record that holds images are refused naming
+  the field. A record may carry a teacher context instead of an advantage (the scalar part is then 0) or with one.
 - Images and tool turns: records carry them exactly as in supervised fine-tuning (an image in a context turn, never in
   a supervised one); they train through the same vision path.
 
@@ -506,6 +511,9 @@ let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
         loss_agg: LossAgg::SeqMean,            // per-sequence token mean (GRPO), or TokenSum
         temperature: 1.0,                      // the temperature the collector sampled with
         log_kl: true,                          // report the KL even when kl_beta is 0
+        teacher: ReferencePolicy::Base,        // self-distillation: Base, or StartOfRun, scores the privileged view
+        advantage_bound: Some(5.0),            // clip each token's teacher advantage to [-5, 5]; None for none
+        sequence_advantage_cap: Some(50.0),    // cap a sequence's summed |A_t| by scaling it down; None for none
     })
     .run()?;
 for step in &outcome.policy_gradient.unwrap().stats.steps {
@@ -519,6 +527,21 @@ reference `ref` is `-min(r A, clip(r, 1 - eps, 1 + eps) A) + beta * (e^u - u - 1
 weight and the KL estimator are the ones `rl::objective::grpo::Grpo` trains through (`rl::objective::pg_batch`), so a
 brain-sampled GRPO run and an external-rollout run cannot drift apart.
 
+- **Self-distillation with privileged information.** A record with a `"teacher_context"` is a rollout of the student
+  that a teacher, the same frozen model shown the extra messages, scores token by token. Brain renders both
+  conversations with the model's own chat template (the teacher's is the student's with the messages inserted), checks
+  that the two supervise exactly the same assistant tokens (a template that renders the answer differently once the
+  messages are there is refused), and, before the first step, measures `log q_teacher(y_t | privileged context, y_<t)`
+  with the policy `teacher` names (the adapter disabled, or the adapter the run started from; one forward over each
+  teacher rendering). Every supervised token then carries the per-token reverse-KL advantage
+  `A_t = log q_teacher - old_t` (added to the record's scalar advantage), trained through the same clipped step and
+  `pg_batch::backward_weighted` as any advantage: failed attempts get dense credit on the student's own distribution.
+  Guards against collapse, all named: `advantage_bound` clips each `A_t` to `[-c, c]`; `sequence_advantage_cap` scales a
+  sequence's advantages down together when their summed magnitude exceeds it, so a few pivot tokens cannot dominate a
+  step; the k3 KL (`kl_beta`) stays. A teacher rendering longer than the training row, or supervising a different
+  number of tokens than the student, is refused by example. Each step reports the mean, the largest magnitude and the
+  clipped fraction of the token advantages next to the KL and ratio. This is the sampled-token estimator (one teacher
+  log-probability per sampled token), not the full-distribution reverse KL.
 - **Behaviour policy.** The recorded `behavior_logprobs` where there are some. Where there are none the importance ratio
   is taken against the adapter the run **started from** (a fresh adapter: the base), measured by one forward pass over
   the dataset before the first step: the first optimiser step is the plain on-policy estimator `-A * log p` (ratio 1),

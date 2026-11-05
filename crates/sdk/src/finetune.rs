@@ -809,7 +809,7 @@ impl ChatFineTune {
         match &self.policy_gradient {
             None => match sets.iter().find(|(_, carries)| *carries) {
                 Some((name, _)) => Err(Error::Backend(format!(
-                    "ChatFineTune: the {name} records carry an \"advantage\", which supervised training would ignore; call .policy_gradient(..) to train on the rollouts, or remove the field"
+                    "ChatFineTune: the {name} records carry an \"advantage\" or a \"teacher_context\", which supervised training would ignore; call .policy_gradient(..) to train on the rollouts, or remove the field"
                 ))),
                 None => Ok(()),
             },
@@ -818,7 +818,7 @@ impl ChatFineTune {
                     return Err(Error::Backend(format!("ChatFineTune: policy_gradient: the {name} records carry an \"advantage\"; that set is scored without one")));
                 }
                 if !carrying("dataset") && !carrying("replay") {
-                    return Err(Error::Backend("ChatFineTune: policy_gradient: no record of the dataset carries an \"advantage\"; this would be supervised training (drop .policy_gradient(..))".to_string()));
+                    return Err(Error::Backend("ChatFineTune: policy_gradient: no record of the dataset carries an \"advantage\" or a \"teacher_context\"; this would be supervised training (drop .policy_gradient(..))".to_string()));
                 }
                 Ok(())
             }
@@ -979,6 +979,9 @@ impl ChatFineTune {
                 "reference": c.reference.name(),
                 "loss_agg": format!("{:?}", c.loss_agg),
                 "temperature_bits": c.temperature.to_bits(),
+                "teacher": c.teacher.name(),
+                "advantage_bound_bits": c.advantage_bound.map(f32::to_bits),
+                "sequence_advantage_cap_bits": c.sequence_advantage_cap.map(f32::to_bits),
             })),
         });
         let mut step_work: Vec<model::StepWork> = Vec::new();
@@ -1244,6 +1247,11 @@ impl PolicyGradientOutcome {
             "reference": c.reference.name(),
             "loss_agg": format!("{:?}", c.loss_agg),
             "temperature": c.temperature,
+            "teacher": c.teacher.name(),
+            "advantage_bound": c.advantage_bound,
+            "sequence_advantage_cap": c.sequence_advantage_cap,
+            "sequences_with_teacher": s.sequences_with_teacher,
+            "sequences_capped": s.sequences_capped,
             "sequences_with_advantage": s.sequences_with_advantage,
             "sequences_imitation": s.sequences_imitation,
             "tokens_recorded_behavior": s.tokens_recorded_behavior,

@@ -20,6 +20,7 @@ mod chat_trainer_bases;
 mod document_study;
 mod external_policy_gradient;
 mod external_policy_gradient_gradcheck;
+mod self_distill;
 #[cfg(feature = "qwen3")]
 mod lora_acceptance;
 #[cfg(feature = "qwen3")]

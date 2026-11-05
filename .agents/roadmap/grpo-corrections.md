@@ -33,6 +33,23 @@ its definition, the on-policy first step and the supervised parity of a record w
 (`external_policy_gradient.rs`); the SDK run end to end on a qwen35 checkpoint, continuing an adapter
 (`crates/sdk/tests/it/chat_finetune_policy_gradient.rs`).
 
+- [x] On-policy self-distillation with privileged information, sampled-token version: a record's `"teacher_context"`
+      (privileged messages inserted for the teacher only) gives every supervised token
+      `A_t = log q_teacher(y_t | privileged context, y_<t) - old_t`, the frozen base or start-of-run adapter as teacher,
+      through the same `pg_batch::backward_weighted` step. Named guards: `advantage_bound` (clip `A_t`),
+      `sequence_advantage_cap` (scale a sequence down when its summed `|A_t|` is over it), the k3 KL stays; per step the
+      mean, largest magnitude and clipped fraction of the token advantages are reported. Gated on the CPU: spec tests
+      (a preferred token rises, a rejected one falls, an identical view gives zero, guards, refusals by name) in
+      `crates/rl/tests/it/self_distill.rs`, a per-token-advantage gradcheck in `external_policy_gradient_gradcheck.rs`,
+      the record format and the teacher sidecar in `crates/data/tests/it/chat_teacher_context.rs`, and an SDK run in
+      `chat_finetune_policy_gradient.rs`. Not run on real weights.
+- [ ] Full-distribution reverse KL for self-distillation (follow-up). Instead of `log q - log p` at the sampled token,
+      take the teacher's top-K tokens at each position and minimise `sum_v p(v) (log p(v) - log q(v))` over the
+      student's own top-K, reusing the `DistillTopK` weighted-CE trick with the direction reversed (the weight of
+      token `v` is `p(v) (log q(v) - log p(v) + KL-baseline)`, so it still lands in `backward_weighted`). It needs the
+      teacher's top-K log-probabilities stored per position (K ids and values) in the sidecar instead of one scalar.
+- [ ] Self-distillation on a real 27B (bf16 base, rank-16 adapter): confirm teacher advantages are sane (mean near 0,
+      few tokens at the bound), that the sequence cap rarely binds, and that held-out pass rates do not collapse.
 - [ ] A real-weight check, on a card, which has not run: Qwen3.8-27B-FP8 as a bf16 base with a rank-16 adapter, the
       records of a few rollout groups with and without images and with the sampler's log-probabilities. It should
       (1) confirm that the first step's ratios are 1 within bf16 noise when no log-probabilities were recorded and that

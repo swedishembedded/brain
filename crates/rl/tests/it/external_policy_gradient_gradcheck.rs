@@ -106,6 +106,16 @@ impl Harness {
         h
     }
 
+    /// Give every supervised token its own advantage (what a teacher's `A_t` is), cycling `values`, in place of the
+    /// row's scalar.
+    fn with_token_advantages(mut self, values: &[f32]) -> Harness {
+        let supervised: Vec<usize> = (0..self.rows * T).filter(|&i| self.targets[i] != IGNORE && !self.advantage[i].is_nan()).collect();
+        for (k, i) in supervised.into_iter().enumerate() {
+            self.advantage[i] = values[k % values.len()];
+        }
+        self
+    }
+
     fn load(&self) {
         match &self.embeds {
             Some(embeds) => self.m.set_batch_embeds(&self.tokens, &self.targets, embeds),
@@ -184,4 +194,11 @@ fn the_adapters_match_finite_differences_on_text_rows_of_positive_negative_zero_
 #[test]
 fn the_adapters_match_finite_differences_on_rows_that_hold_an_image() {
     check(&Harness::new(13, &[1.3, -0.8], true), "image");
+}
+
+/// The dense advantage of self-distillation is one value per token rather than per row; the one backward path
+/// differentiates it as it does a row's scalar.
+#[test]
+fn the_adapters_match_finite_differences_when_every_token_has_its_own_advantage() {
+    check(&Harness::new(17, &[1.0, 1.0, 1.0], false).with_token_advantages(&[1.3, -0.8, 0.0, 0.45, -1.6, 0.9]), "per-token");
 }

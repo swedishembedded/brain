@@ -48,7 +48,7 @@ fn write_dataset(dir: &Path, rows: &[Row]) {
             assert_eq!(b.len(), row.ids.len() - row.answer_from);
             behavior[row.answer_from..].copy_from_slice(b);
         }
-        split.push_rollout(&data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior }, &[], row.advantage);
+        split.push_rollout(&data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, teacher: None }, &[], row.advantage);
     }
     data::chat::write_split(dir, "train", &split).unwrap();
     data::chat::write_split(dir, "val", &split).unwrap();

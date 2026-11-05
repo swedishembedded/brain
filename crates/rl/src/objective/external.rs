@@ -38,12 +38,26 @@
 //! * **Records without an advantage** are imitation examples: plain cross-entropy (weight 1, no KL), so a dataset may
 //!   mix rollouts with supervised records.
 //!
+//! ## Self-distillation with privileged information
+//!
+//! A record may carry a teacher context instead of (or beside) an advantage ([`data::chat_rollout`]): the same
+//! conversation with extra messages the student never saw. The teacher is the frozen model ([`PolicyGradientConfig::teacher`]:
+//! the base, or the adapter the run started from) scoring the student's own sampled tokens after that context, and
+//! every supervised token gets the dense advantage `A_t = log q_teacher(y_t | privileged context, y_<t) - old_t`, the
+//! per-token reverse-KL signal (`old_t` is the token's behaviour log-probability). It is added to the record's scalar
+//! advantage and trained through the one clipped step above; there is no second loss. Three guards keep it from
+//! collapsing the policy: each `A_t` is clipped to `[-c, c]` ([`PolicyGradientConfig::advantage_bound`]), the sum of
+//! `|A_t|` of a sequence may be capped ([`PolicyGradientConfig::sequence_advantage_cap`], so a few pivot tokens cannot
+//! dominate a step: the sequence's advantages are scaled down together), and the k3 KL to the reference stays.
+//! The teacher's rendering must fit the row and supervise exactly the student's tokens.
+//!
 //! The row of a record with images is read through the model's shared vision path (`Batch::LmExamples`), so images
 //! train as they do in supervised fine-tuning: the tower is frozen and the loss covers the action tokens only.
 
 use std::path::Path;
 
 use data::binio;
+use data::chat_rollout::TeacherStream;
 use data::loader::{BatchConfig, TokenDataset};
 use data::rng::Rng;
 use model::training::{self, Capability, Unsupported};
@@ -102,11 +116,18 @@ pub struct PolicyGradientConfig {
     /// before the first step (none per step; the per-token KL comes from the step's own forward), and a second one only
     /// when a run that continues an adapter is measured against the base.
     pub log_kl: bool,
+    /// Which frozen policy scores the student's tokens in the privileged context (records with a teacher context).
+    pub teacher: ReferencePolicy,
+    /// Clip each token's teacher advantage to `[-bound, bound]`; `None` leaves it unbounded.
+    pub advantage_bound: Option<f32>,
+    /// Cap the sum of `|A_t|` over a sequence's tokens (after clipping) by scaling the sequence's advantages down;
+    /// `None` leaves it uncapped.
+    pub sequence_advantage_cap: Option<f32>,
 }
 
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
-        PolicyGradientConfig { clip_eps: 0.2, kl_beta: 0.02, reference: ReferencePolicy::Base, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true }
+        PolicyGradientConfig { clip_eps: 0.2, kl_beta: 0.02, reference: ReferencePolicy::Base, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None }
     }
 }
 
@@ -121,6 +142,11 @@ impl PolicyGradientConfig {
         }
         if !(self.temperature.is_finite() && self.temperature > 0.0) {
             return Err(format!("temperature is {}; it must be finite and positive", self.temperature));
+        }
+        for (name, value) in [("advantage_bound", self.advantage_bound), ("sequence_advantage_cap", self.sequence_advantage_cap)] {
+            if let Some(v) = value.filter(|v| !(v.is_finite() && *v > 0.0)) {
+                return Err(format!("{name} is {v}; it must be finite and positive (leave it unset for none)"));
+            }
         }
         Ok(())
     }
@@ -154,6 +180,11 @@ pub struct PolicyGradientStep {
     pub mean_advantage: f32,
     /// Tokens trained as imitation (a record without an advantage).
     pub imitation_tokens: usize,
+    /// Over the step's tokens that carry a teacher advantage (after the guards): their mean, the largest magnitude,
+    /// and the fraction the bound clipped. All zero when the step has none.
+    pub token_advantage_mean: f32,
+    pub token_advantage_max: f32,
+    pub token_advantage_clip_fraction: f32,
 }
 
 /// Everything a run measured, per optimiser step, and how it began.
@@ -168,6 +199,9 @@ pub struct PolicyGradientStats {
     /// Supervised tokens whose behaviour log-probability was recorded, and those that took the start-of-run value.
     pub tokens_recorded_behavior: usize,
     pub tokens_start_of_run_behavior: usize,
+    /// Sequences with a teacher context, and of those the ones whose summed advantage the cap scaled down.
+    pub sequences_with_teacher: usize,
+    pub sequences_capped: usize,
 }
 
 impl PolicyGradientStats {
@@ -204,6 +238,35 @@ struct Rows {
     /// Empty until [`ExternalPolicyGradient::prepare`] measured them, and for examples that need neither.
     start_lp: Vec<Vec<f32>>,
     reference_lp: Vec<Vec<f32>>,
+    /// The teacher's renderings, when any example has one.
+    teacher: Option<TeacherStream>,
+    /// Per example with a teacher, set by [`ExternalPolicyGradient::prepare`].
+    teacher_advantage: Vec<Option<TokenAdvantages>>,
+}
+
+/// The teacher advantage of every row position of one example (NaN where the position is not supervised), and which
+/// positions the bound clipped.
+struct TokenAdvantages {
+    value: Vec<f32>,
+    clipped: Vec<bool>,
+}
+
+/// Refuse a teacher rendering that cannot be scored against its student: longer than a row, or supervising a different
+/// number of tokens (a rendering that truncates, or a mask that disagrees). The tokens themselves were checked equal
+/// when the dataset was prepared.
+fn check_teacher(teacher: &TeacherStream, starts: &[usize], ends: &[usize], mask: &[bool], block_size: usize) -> Result<(), String> {
+    for e in 0..starts.len() {
+        let Some((ids, t_mask)) = teacher.example(e) else { continue };
+        if ids.len() > block_size {
+            return Err(format!("example {e}: the teacher's rendering is {} tokens, longer than the row of {block_size}; raise the block size or shorten the privileged context", ids.len()));
+        }
+        let student = (starts[e] + 1..ends[e]).filter(|&t| mask[t]).count();
+        let seen = (1..t_mask.len()).filter(|&t| t_mask[t]).count();
+        if student != seen {
+            return Err(format!("example {e}: the teacher supervises {seen} tokens and the student {student}; the teacher's log-probabilities would not be those of the student's tokens"));
+        }
+    }
+    Ok(())
 }
 
 /// The order examples are drawn in: every example once per epoch, reshuffled each epoch from the seed alone, so a run
@@ -252,6 +315,10 @@ struct StepAccumulator {
     sequences: usize,
     advantage_sum: f64,
     advantaged_sequences: usize,
+    teacher_tokens: usize,
+    teacher_sum: f64,
+    teacher_max: f32,
+    teacher_clipped: usize,
 }
 
 /// Clipped policy-gradient training on a prepared dataset of externally collected rollouts. See the module docs.
@@ -260,6 +327,8 @@ pub struct ExternalPolicyGradient {
     train: TokenDataset,
     batch_cfg: BatchConfig,
     rows: Rows,
+    /// The student's supervision mask over the stream.
+    mask: Vec<bool>,
     /// The dataset holds images: batches name their examples so the model reads them.
     tag_examples: bool,
     order: Option<Order>,
@@ -295,7 +364,11 @@ impl ExternalPolicyGradient {
             Some(r) => (r.advantage, r.behavior),
             None => (vec![f32::NAN; starts.len()], vec![f32::NAN; tokens.len()]),
         };
-        let mut stats = PolicyGradientStats::default();
+        let teacher = data::chat_rollout::read_teacher(dir, "train", starts.len())?;
+        if let Some(teacher) = &teacher {
+            check_teacher(teacher, &starts, &ends, &mask, batch_cfg.block_size).map_err(invalid)?;
+        }
+        let mut stats = PolicyGradientStats { sequences_with_teacher: teacher.as_ref().map_or(0, |t| (0..starts.len()).filter(|&e| t.example(e).is_some()).count()), ..Default::default() };
         for (e, &a) in advantage.iter().enumerate() {
             if a.is_nan() {
                 stats.sequences_imitation += 1;
@@ -314,8 +387,8 @@ impl ExternalPolicyGradient {
             }
         }
         let tag_examples = ["train", "val"].iter().any(|split| dir.join(format!("{split}.img.bin")).exists());
-        let rows = Rows { starts, ends, advantage, behavior, start_lp: Vec::new(), reference_lp: Vec::new() };
-        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, tag_examples, order: None, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, verdict: None })
+        let rows = Rows { starts, ends, advantage, behavior, start_lp: Vec::new(), reference_lp: Vec::new(), teacher, teacher_advantage: Vec::new() };
+        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, verdict: None })
     }
 
     /// What the run has measured so far.
@@ -359,15 +432,92 @@ impl ExternalPolicyGradient {
                 if laid.targets[at] == IGNORE {
                     continue;
                 }
-                laid.advantage[at] = self.rows.advantage[e];
-                let recorded = self.rows.behavior[self.rows.starts[e] + 1 + t];
-                laid.old_lp[at] = if recorded.is_nan() { self.rows.start_lp.get(e).and_then(|lp| lp.get(t)).copied().unwrap_or(0.0) } else { recorded };
+                laid.advantage[at] = self.rows.advantage[e] + self.rows.teacher_advantage.get(e).and_then(Option::as_ref).map_or(0.0, |a| a.value[t]);
+                laid.old_lp[at] = self.old_logprob(e, t);
                 if has_ref {
                     laid.ref_lp[at] = self.rows.reference_lp[e].get(t).copied().unwrap_or(0.0);
                 }
             }
         }
         laid
+    }
+
+    /// The behaviour log-probability of the token row position `t` of example `e` predicts: the recorded one, else the
+    /// start-of-run policy's.
+    fn old_logprob(&self, e: usize, t: usize) -> f32 {
+        let recorded = self.rows.behavior[self.rows.starts[e] + 1 + t];
+        if recorded.is_nan() { self.rows.start_lp.get(e).and_then(|lp| lp.get(t)).copied().unwrap_or(0.0) } else { recorded }
+    }
+
+    /// The model's log-probability, in the teacher's context, of every supervised token of every example that has a
+    /// teacher, in order: one forward pass per batch.
+    fn measure_teacher_logprobs<M: Model>(&self, model: &M, teacher: &TeacherStream) -> Vec<Option<Vec<f32>>> {
+        let (bs, bl) = (self.batch_cfg.batch_size, self.batch_cfg.block_size);
+        let examples = self.rows.starts.len();
+        let mut out: Vec<Option<Vec<f32>>> = vec![None; examples];
+        let with_teacher: Vec<usize> = (0..examples).filter(|&e| teacher.example(e).is_some()).collect();
+        for group in with_teacher.chunks(bs) {
+            let (mut tokens, mut targets) = (vec![0u32; bs * bl], vec![IGNORE; bs * bl]);
+            for (b, &e) in group.iter().enumerate() {
+                let (ids, mask) = teacher.example(e).expect("filtered to examples with a teacher");
+                tokens[b * bl..b * bl + ids.len()].copy_from_slice(ids);
+                for t in 0..ids.len() - 1 {
+                    if mask[t + 1] {
+                        targets[b * bl + t] = ids[t + 1];
+                    }
+                }
+            }
+            model.set_batch(Batch::Lm { tokens: &tokens, targets: &targets });
+            let _ = model.forward();
+            let lp = training::objectives(model).batch_token_logprobs();
+            for (b, &e) in group.iter().enumerate() {
+                out[e] = Some((0..bl).filter(|&t| targets[b * bl + t] != IGNORE).map(|t| lp[b * bl + t]).collect());
+            }
+        }
+        out
+    }
+
+    /// The teacher advantage of every supervised token of every example with a teacher, guards applied.
+    fn measure_teacher<M: Model>(&mut self, model: &M, teacher: &TeacherStream) -> Result<(), Unsupported> {
+        let scored = match self.cfg.teacher {
+            ReferencePolicy::StartOfRun => self.measure_teacher_logprobs(model, teacher),
+            ReferencePolicy::Base => with_adapters_disabled(model, || self.measure_teacher_logprobs(model, teacher)).ok_or_else(|| Unsupported::of::<M>(Capability::ChatLoraFineTune))?,
+        };
+        let bl = self.batch_cfg.block_size;
+        let mut capped = 0;
+        let advantages: Vec<Option<TokenAdvantages>> = scored
+            .iter()
+            .enumerate()
+            .map(|(e, lps)| {
+                let lps = lps.as_ref()?;
+                let supervised = (0..bl.min(self.rows.ends[e] - self.rows.starts[e])).filter(|&t| t + 1 < self.rows.ends[e] - self.rows.starts[e] && self.mask_at(e, t + 1));
+                let (mut value, mut clipped) = (vec![f32::NAN; bl], vec![false; bl]);
+                for (t, q) in supervised.zip(lps) {
+                    let raw = q - self.old_logprob(e, t);
+                    value[t] = match self.cfg.advantage_bound {
+                        Some(c) if raw.abs() > c => {
+                            clipped[t] = true;
+                            raw.clamp(-c, c)
+                        }
+                        _ => raw,
+                    };
+                }
+                let magnitude: f32 = value.iter().filter(|v| !v.is_nan()).map(|v| v.abs()).sum();
+                if let Some(cap) = self.cfg.sequence_advantage_cap.filter(|cap| magnitude > *cap) {
+                    value.iter_mut().filter(|v| !v.is_nan()).for_each(|v| *v *= cap / magnitude);
+                    capped += 1;
+                }
+                Some(TokenAdvantages { value, clipped })
+            })
+            .collect();
+        self.stats.sequences_capped = capped;
+        self.rows.teacher_advantage = advantages;
+        Ok(())
+    }
+
+    /// Whether the token at offset `i` of example `e` is supervised.
+    fn mask_at(&self, e: usize, i: usize) -> bool {
+        self.mask[self.rows.starts[e] + i]
     }
 
     /// The model's log-probability of every supervised token of every example, by one forward pass per batch.
@@ -422,6 +572,9 @@ impl ExternalPolicyGradient {
             ratio_max: if sum.policy_tokens > 0 { sum.ratio_max } else { 1.0 },
             mean_advantage: if acc.advantaged_sequences > 0 { (acc.advantage_sum / acc.advantaged_sequences as f64) as f32 } else { 0.0 },
             imitation_tokens: sum.imitation_tokens,
+            token_advantage_mean: if acc.teacher_tokens > 0 { (acc.teacher_sum / acc.teacher_tokens as f64) as f32 } else { 0.0 },
+            token_advantage_max: acc.teacher_max,
+            token_advantage_clip_fraction: if acc.teacher_tokens > 0 { acc.teacher_clipped as f32 / acc.teacher_tokens as f32 } else { 0.0 },
         });
     }
 
@@ -472,6 +625,11 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         if let Some(start) = start.filter(|_| self.needs_start_of_run_behavior()) {
             self.rows.start_lp = start;
         }
+        if let Some(teacher) = self.rows.teacher.take() {
+            let measured = self.measure_teacher(model, &teacher);
+            self.rows.teacher = Some(teacher);
+            measured?;
+        }
         Ok(())
     }
 
@@ -504,6 +662,14 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
             loss += terms.loss / denominator.unwrap_or(terms.supervised.max(1) as f32);
             for e in l.picks.iter().flatten() {
                 self.accumulating.sequences += 1;
+                if let Some(Some(adv)) = self.rows.teacher_advantage.get(*e) {
+                    for (v, c) in adv.value.iter().zip(&adv.clipped).filter(|(v, _)| !v.is_nan()) {
+                        self.accumulating.teacher_tokens += 1;
+                        self.accumulating.teacher_sum += f64::from(*v);
+                        self.accumulating.teacher_max = self.accumulating.teacher_max.max(v.abs());
+                        self.accumulating.teacher_clipped += usize::from(*c);
+                    }
+                }
                 if !self.rows.advantage[*e].is_nan() {
                     self.accumulating.advantaged_sequences += 1;
                     self.accumulating.advantage_sum += f64::from(self.rows.advantage[*e]);
@@ -536,7 +702,8 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
     fn step_log(&self) -> Option<String> {
         let last = self.stats.steps.last()?;
         let kl = last.kl.map(|kl| format!("kl {kl:.4}  ")).unwrap_or_default();
-        Some(format!("{kl}clip {:.3}  ratio {:.3}", last.clip_fraction, last.ratio_mean))
+        let teacher = if self.stats.sequences_with_teacher > 0 { format!("  adv mean {:+.3} max {:.3} clipped {:.3}", last.token_advantage_mean, last.token_advantage_max, last.token_advantage_clip_fraction) } else { String::new() };
+        Some(format!("{kl}clip {:.3}  ratio {:.3}{teacher}", last.clip_fraction, last.ratio_mean))
     }
 
     fn metrics(&self) -> Vec<(&'static str, f32)> {
@@ -544,6 +711,9 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         let mut m = vec![("pg_loss", last.loss), ("pg_clip_fraction", last.clip_fraction), ("pg_ratio_mean", last.ratio_mean), ("pg_ratio_min", last.ratio_min), ("pg_ratio_max", last.ratio_max), ("pg_mean_advantage", last.mean_advantage)];
         if let Some(kl) = last.kl {
             m.push(("pg_kl", kl));
+        }
+        if self.stats.sequences_with_teacher > 0 {
+            m.extend([("pg_token_advantage_mean", last.token_advantage_mean), ("pg_token_advantage_max", last.token_advantage_max), ("pg_token_advantage_clip_fraction", last.token_advantage_clip_fraction)]);
         }
         m
     }

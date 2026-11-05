@@ -166,3 +166,28 @@ fn records_and_settings_a_policy_gradient_run_cannot_honour_are_refused_before_t
     assert!(why.contains("bad.jsonl") && why.contains("record 2") && why.contains("behavior_logprobs") && why.contains('3') && why.contains('4'), "{why}");
     assert!(!out.join("adapter.safetensors").exists(), "nothing was trained");
 }
+
+/// Self-distillation: records with a privileged teacher context and no advantage train through the same run; the
+/// teacher's per-token advantages are on the outcome, and the run reports its guards.
+#[test]
+fn records_with_a_teacher_context_train_on_the_teachers_per_token_advantage() {
+    let model = qwen35_model_dir("pg-self-distill");
+    let lines: Vec<String> = ROLLOUTS
+        .iter()
+        .map(|(p, a, _)| {
+            let mut r: serde_json::Value = serde_json::from_str(&record(p, a, None, None)).unwrap();
+            r["teacher_context"] = serde_json::json!({"at": 1, "messages": [{"role": "user", "content": "hint: the answer is short"}]});
+            r.to_string()
+        })
+        .collect();
+    let dataset = write_lines(&model.join("self-distill.jsonl"), &lines);
+    let config = PolicyGradientConfig { teacher: ReferencePolicy::StartOfRun, advantage_bound: Some(2.0), sequence_advantage_cap: Some(3.0), ..Default::default() };
+    let outcome = policy_gradient(&model, &dataset, &model.join("run"), config).run().expect("the self-distillation run");
+    assert_eq!(outcome.status, FineTuneStatus::Completed);
+    let pg = outcome.policy_gradient.expect("statistics");
+    assert_eq!(pg.stats.sequences_with_teacher, 4);
+    assert!(pg.stats.steps.iter().all(|s| s.loss.is_finite() && s.token_advantage_max <= 2.0 + 1e-6));
+    assert!(pg.stats.steps[0].token_advantage_max > 0.0, "a hint in the context must change the teacher's view: {:?}", pg.stats.steps[0]);
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(outcome.record.unwrap()).unwrap()).unwrap();
+    assert_eq!(record["policy_gradient"]["teacher"], "start");
+}
