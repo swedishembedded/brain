@@ -552,6 +552,16 @@ Required:
                             the tracker marks occluded (object_score < 0) is
                             conditioned FULLY, so the edit simply does not
                             happen there rather than the frame dissolving.
+  --window <start>:<end>    instead of --mask: a retake - regenerate the
+                            seconds [start, end) of the clip and hold the rest
+  --hold-video              regenerate no frame: with --audio this generates
+                            the clip's sound for its picture (video-to-audio)
+  --audio                   ALSO denoise the clip's sound, jointly with the
+                            picture (needs the same checkpoints as t2v --audio)
+  --audio-source <wav>      the clip's own soundtrack: held outside the
+                            window and regenerated inside it (without one, the
+                            whole soundtrack is generated)
+  --hold-audio              keep --audio-source unchanged everywhere
   --prompt <text>           what the WHOLE frame shows - the model denoises
                             the regenerated region in the context of the
                             carried one. Identity comes from the prompt; no
@@ -1053,6 +1063,22 @@ fn v2v(args: &[String]) -> Result<(), String> {
             "--prompt" => prompt = Some(need(i)?.clone()),
             "--input" | "--in" => input = Some(need(i)?.clone()),
             "--mask" => o.mask_dir = need(i)?.clone(),
+            "--window" => {
+                let v = need(i)?;
+                let (a, b) = v.split_once(':').ok_or_else(|| format!("--window: '{v}' is not <start>:<end> in seconds"))?;
+                let sec = |x: &str| x.trim().parse::<f32>().map_err(|e| format!("--window: '{x}': {e}"));
+                o.window = Some((sec(a)?, sec(b)?));
+            }
+            "--audio-source" => o.base.audio_source = Some(ltxv::audio::read_wav(need(i)?)?),
+            f @ ("--hold-video" | "--hold-audio" | "--audio") => {
+                match f {
+                    "--hold-video" => o.regenerate_video = false,
+                    "--hold-audio" => o.regenerate_audio = false,
+                    _ => o.base.audio = true,
+                }
+                i += 1;
+                continue;
+            }
             "--output-path" | "--out" => out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string()),
             "--strength" => o.strength = flt(i, "--strength")?,
             "--steps" => o.base.steps = num(i, "--steps")?,
@@ -1073,8 +1099,8 @@ fn v2v(args: &[String]) -> Result<(), String> {
     let input = input.ok_or("--input is required")?;
     let out = out.ok_or("--output-path is required")?;
     let prompt = prompt.ok_or("--prompt is required: the model denoises the regenerated region against the text context, and an empty one costs exactly the detail this command exists to produce")?;
-    if o.mask_dir.is_empty() {
-        return Err("--mask is required: without a mask this command has nothing to regenerate and would return the input clip".into());
+    if o.mask_dir.is_empty() && o.window.is_none() {
+        return Err("--mask or --window is required: without one this command has nothing to regenerate and would return the input clip".into());
     }
     let paths = resolve_ltxv(&overrides, None)?;
 
@@ -1346,7 +1372,7 @@ mod tests {
     #[test]
     fn every_v2v_flag_the_parser_accepts_is_documented() {
         let src = include_str!("ltxv_cli.rs");
-        for flag in ["--prompt", "--input", "--mask", "--output-path", "--strength", "--steps", "--guidance", "--seed", "--fps", "--dit-config", "--device"] {
+        for flag in ["--prompt", "--input", "--mask", "--window", "--hold-video", "--audio", "--audio-source", "--hold-audio", "--output-path", "--strength", "--steps", "--guidance", "--seed", "--fps", "--dit-config", "--device"] {
             assert!(super::V2V_HELP.contains(flag), "{flag} is parsed but not in v2v --help");
             assert!(src.contains(&format!("\"{flag}\"")) || super::guidance_flag(flag), "{flag} is in v2v --help but not parsed");
         }

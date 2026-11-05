@@ -46,6 +46,7 @@ mod overfit;
 mod prompt_adherence_real;
 mod recompute;
 mod reference_video;
+mod retake;
 mod refcond_parity;
 mod shard_parity;
 mod streamed_vs_eager_real;

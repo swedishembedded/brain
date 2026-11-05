@@ -3073,6 +3073,11 @@ struct AudioStage {
     /// same frames: what a continuation window holds fixed is the previous
     /// window's own output, never a re-noised or round-tripped copy of it.
     context: Vec<f32>,
+    /// A per-token `(denoise_mask, clean)` over the whole stream instead of
+    /// a carried prefix: a retake holds the source soundtrack fixed outside
+    /// the regenerated window (`TemporalRegionMask`). `None` for every stage
+    /// that carries at most a prefix.
+    frozen: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 /// Run one denoising stage at one latent resolution and return its final
@@ -3271,7 +3276,7 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
     let done_before = st.done_before;
     let dim = crate::audio::TOKEN_DIM as usize;
     let mut audio_state = st.audio.take().map(|a| {
-        let AudioStage { mut latent, context } = a;
+        let AudioStage { mut latent, context, frozen: given } = a;
         let ta = latent.len() / dim;
         // A REFINEMENT stage is handed the previous stage's own DENOISED
         // audio latent and has to re-noise it to this stage's starting sigma
@@ -3298,13 +3303,19 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
         // window's own output, and a re-noised copy of it is a different
         // tensor.
         latent[..context.len()].copy_from_slice(&context);
-        let frozen = (!context.is_empty()).then(|| {
+        if let Some((mask, clean)) = &given {
+            for (i, v) in latent.iter_mut().enumerate() {
+                let m = mask[i / dim];
+                *v = m * *v + (1.0 - m) * clean[i];
+            }
+        }
+        let frozen = given.or_else(|| (!context.is_empty()).then(|| {
             let mut mask = vec![1f32; ta];
             mask[..context.len() / dim].fill(0.0);
             let mut clean = vec![0f32; ta * dim];
             clean[..context.len()].copy_from_slice(&context);
             (mask, clean)
-        });
+        }));
         AudioState { latent, positions: crate::audio::positions(ta), ta, ctx_cond: sc.a_ctx_cond, ctx_uncond: sc.a_ctx_uncond, frozen }
     });
     if let Some(a) = &audio_state {
@@ -3973,7 +3984,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
                 seed_salt: 0,
                 done_before: 0,
                 label: "stage1",
-                audio: audio_latent0.map(|latent| AudioStage { latent, context: audio_frozen.clone() }),
+                audio: audio_latent0.map(|latent| AudioStage { latent, context: audio_frozen.clone(), frozen: None }),
             },
             total,
             &mut progress,
@@ -3999,7 +4010,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
             Refine {
                 upsampler: &upsampler,
                 upsampler_path,
-                audio: stage1.audio.map(|latent| AudioStage { latent, context: audio_frozen.clone() }),
+                audio: stage1.audio.map(|latent| AudioStage { latent, context: audio_frozen.clone(), frozen: None }),
                 latent_chw: &stage1.video_chw,
                 lat_t,
                 lh1,
@@ -4029,7 +4040,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
                 seed_salt: 0,
                 done_before: 0,
                 label: "single",
-                audio: audio_latent0.map(|latent| AudioStage { latent, context: audio_frozen.clone() }),
+                audio: audio_latent0.map(|latent| AudioStage { latent, context: audio_frozen.clone(), frozen: None }),
             },
             total,
             &mut progress,
@@ -4572,8 +4583,20 @@ mod masked_stage_tests {
 pub struct MaskedOpts {
     /// A `brain/sam2-maskseq/1` mask-sequence directory - see
     /// [`crate::maskcond::read_mask_sequence`] for the format, the polarity
-    /// rule, and everything it refuses rather than reconciling.
+    /// rule, and everything it refuses rather than reconciling. Empty when
+    /// [`Self::window`] says what to regenerate instead.
     pub mask_dir: String,
+    /// A retake (`ltx_pipelines.retake`): regenerate `[start, end)` seconds
+    /// of the clip and hold the rest - `TemporalRegionMask` on both streams.
+    pub window: Option<(f32, f32)>,
+    /// Whether the video inside the region is regenerated; `false` holds
+    /// every frame, so with sound on only the audio is generated
+    /// (video-to-audio).
+    pub regenerate_video: bool,
+    /// Whether the audio inside the region is regenerated; `false` holds
+    /// the source soundtrack ([`GenOpts::audio_source`]) unchanged. A clip
+    /// with no source soundtrack generates its whole audio stream.
+    pub regenerate_audio: bool,
     /// `VideoConditionByMask::strength`. `1.0` is the point of this path: the
     /// conditioned region leaves the sampler bit-exactly the source's own
     /// latent, because its per-token timestep is 0 and `post_process_latent`
@@ -4588,7 +4611,7 @@ pub struct MaskedOpts {
 
 impl Default for MaskedOpts {
     fn default() -> MaskedOpts {
-        MaskedOpts { mask_dir: String::new(), strength: 1.0, base: GenOpts::default() }
+        MaskedOpts { mask_dir: String::new(), window: None, regenerate_video: true, regenerate_audio: true, strength: 1.0, base: GenOpts::default() }
     }
 }
 
@@ -4659,9 +4682,43 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
     // The mask is read and reduced BEFORE any weight is touched: a mask
     // sequence that does not match the clip, or whose polarity is not
     // declared, should cost milliseconds rather than a 22B model build.
-    let mask = crate::maskcond::read_mask_sequence(std::path::Path::new(&o.mask_dir), frames, w, h, lat_t, lh, lw)?;
+    check_audio_request(paths, &o.base)?;
+    // `1` on a held token, `0` on a regenerated one - the mask sequence's own
+    // polarity, the complement of the denoise mask.
+    let mask: Vec<f32> = match (o.mask_dir.is_empty(), o.window) {
+        (false, None) => crate::maskcond::read_mask_sequence(std::path::Path::new(&o.mask_dir), frames, w, h, lat_t, lh, lw)?,
+        (true, Some((start, end))) => {
+            if start >= end {
+                return Err(format!("the retake window starts at {start} s, at or after its end {end} s"));
+            }
+            let region = crate::maskcond::temporal_region(&real_pixel_positions(lat_t, lh, lw, clip.fps as f64), t, start, end);
+            region.iter().map(|&r| if o.regenerate_video { 1.0 - r } else { 1.0 }).collect()
+        }
+        _ => return Err("a masked pass regenerates either what a mask sequence marks or a time window, exactly one of the two".into()),
+    };
+    // The audio stream of a sound-on pass: the source soundtrack (when there
+    // is one) encoded and held outside the region, regenerated inside it.
+    let ta = crate::audio::latent_frames(frames, clip.fps);
+    let audio_frozen: Option<(Vec<f32>, Vec<f32>)> = match (o.base.audio, &o.base.audio_source) {
+        (false, _) => None,
+        (true, None) if !o.regenerate_audio => return Err("holding the audio needs a source soundtrack (--audio-source) to hold".into()),
+        (true, None) => None,
+        (true, Some(source)) => {
+            let path = paths.audio_vae.as_deref().expect("an audio request is refused above without an audio VAE path");
+            let (_, vae_raw): (Vec<_>, Vec<_>) = checkpoint::safetensors::read(path)?.into_iter().partition(|t| t.name.starts_with("vocoder."));
+            let vae_w = crate::import::import_audio_vae(vae_raw, &crate::audio_vae::AudioVaeConfig::ltx25())?;
+            let clean = crate::audio::encode(&vae_w, source, ta, o.base.device.as_deref())?;
+            let region = match o.window {
+                Some((start, end)) => crate::maskcond::temporal_region(&crate::audio::positions(ta), ta, start, end),
+                None => vec![1.0; ta],
+            };
+            let denoise: Vec<f32> = region.iter().map(|&r| if o.regenerate_audio { r } else { 0.0 }).collect();
+            Some((denoise, clean))
+        }
+    };
+    let audio_generates = o.base.audio && audio_frozen.as_ref().is_none_or(|(m, _)| m.iter().any(|&m| m > 0.0));
     let generated = mask.iter().filter(|&&m| m < 1.0).count();
-    if generated == 0 {
+    if generated == 0 && !audio_generates {
         return Err(format!(
             "every one of the {t} latent tokens is a conditioning position, so this run would return the input clip unchanged - the mask sequence in {} marks nothing to regenerate (check its declared polarity)",
             o.mask_dir
@@ -4707,10 +4764,11 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
     // `frames`/`width`/`height` come from the clip; image conditioning and
     // audio are cleared, because this entry point's content comes from the
     // source and its sound stays in the source file.
-    let pass_opts = GenOpts { frames, width: w, height: h, start_frame: None, mid_frame: None, end_frame: None, audio: false, ..o.base.clone() };
+    let pass_opts = GenOpts { frames, width: w, height: h, start_frame: None, mid_frame: None, end_frame: None, ..o.base.clone() };
+    let audio_noise = o.base.audio.then(|| seeded_noise(ta * crate::audio::TOKEN_DIM as usize, o.base.seed ^ AUDIO_SEED_SALT));
     let sc = StageCtx {
-        a_ctx_cond: &[],
-        a_ctx_uncond: &[],
+        a_ctx_cond: text.a_cond.as_deref().unwrap_or_default(),
+        a_ctx_uncond: text.a_uncond.as_deref().unwrap_or_default(),
         dit: dit.as_ref(),
         vcfg: &vcfg,
         vweights: &vweights,
@@ -4738,7 +4796,7 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
             seed_salt: 0,
             done_before: 2,
             label: "masked",
-            audio: None,
+            audio: audio_noise.map(|latent| AudioStage { latent, context: Vec::new(), frozen: audio_frozen.clone() }),
         },
         total,
         &mut progress,
@@ -4761,9 +4819,21 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
     timings.tokens = t;
     timings.forwards_per_step = o.base.guidance.forwards_per_step(o.base.audio);
 
+    // The sound: the source soundtrack when the pass held all of it, else
+    // the denoised stream decoded.
+    let audio = match stage_out.audio {
+        Some(_) if !audio_generates => o.base.audio_source.clone(),
+        Some(latent) => {
+            let path = paths.audio_vae.as_deref().expect("an audio request is refused above without an audio VAE path");
+            let mut sound = decode_audio_latent(path, &latent, ta, o.base.device.as_deref())?;
+            sound.pad_to_seconds(frames as f32 / clip.fps as f32);
+            Some(sound)
+        }
+        None => None,
+    };
     progress(total, total, "done");
-    tracing::info!(frames, width = w, height = h, total_secs = timings.total(), "masked video-to-video done");
-    Ok((Video { width: w as u32, height: h as u32, fps: clip.fps, frames: chw_to_rgb8(&pixels, got, h, w), audio: None }, timings))
+    tracing::info!(frames, width = w, height = h, total_secs = timings.total(), audio = audio.is_some(), "masked video-to-video done");
+    Ok((Video { width: w as u32, height: h as u32, fps: clip.fps, frames: chw_to_rgb8(&pixels, got, h, w), audio }, timings))
 }
 
 // ============================================================================
@@ -5338,7 +5408,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
                     seed_salt,
                     done_before,
                     label: "stage1",
-                    audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_half) }),
+                    audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_half), frozen: None }),
                 },
                 total,
                 &mut progress,
@@ -5382,7 +5452,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
                     // above, and for the same reason: what a continuation
                     // window is pinned to is the previous window's own final
                     // output, at this stage's own place in the schedule.
-                    audio: stage1.audio.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_full) }),
+                    audio: stage1.audio.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_full), frozen: None }),
                 },
                 total,
                 &mut progress,
@@ -5403,7 +5473,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
                     seed_salt,
                     done_before,
                     label: "single",
-                    audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_full) }),
+                    audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_full), frozen: None }),
                 },
                 total,
                 &mut progress,
@@ -6526,6 +6596,13 @@ mod tests {
         let silent_with_source = GenOpts { audio: false, audio_source: Some(source), ..audio.clone() };
         let e = generate(&bare, "x", &silent_with_source, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
         assert!(e.contains("--audio"), "{e}");
+
+        // A masked pass regenerates what ONE of a mask sequence or a window
+        // marks, and holding a soundtrack needs one to hold.
+        let clip = Video { width: 32, height: 32, fps: 8, frames: vec![vec![0u8; 32 * 32 * 3]; 9], audio: None };
+        let both = MaskedOpts { mask_dir: "/m".into(), window: Some((0.0, 1.0)), ..Default::default() };
+        let e = generate_masked(&bare, "x", &clip, &both, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
+        assert!(e.contains("exactly one"), "{e}");
 
         // No audio VAE - the sound would have nothing to decode it.
         let with_dit = Paths { dit: Some("/dit".into()), ..bare.clone() };

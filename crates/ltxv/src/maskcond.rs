@@ -438,6 +438,15 @@ impl MaskSeqManifest {
     }
 }
 
+/// `TemporalRegionMask.apply_to`: the denoise mask of a time window -
+/// `1` on every token whose `[start, end)` seconds overlap `[start_s,
+/// end_s)`, `0` elsewhere. `bounds` is a stream's own RoPE position bounds
+/// (`[axes, t, 2]`, the time axis first, in seconds), which is where both
+/// streams already keep each token's time span.
+pub fn temporal_region(bounds: &[f32], t: usize, start_s: f32, end_s: f32) -> Vec<f32> {
+    (0..t).map(|tok| if bounds[tok * 2 + 1] > start_s && bounds[tok * 2] < end_s { 1.0 } else { 0.0 }).collect()
+}
+
 /// Read a `brain/sam2-maskseq/1` directory and reduce it to the `[lat_f *
 /// lat_h * lat_w]` latent conditioning mask [`apply_video_condition_by_mask`]
 /// takes, in the reference's polarity.
@@ -524,6 +533,21 @@ pub fn read_mask_sequence(dir: &Path, clip_frames: usize, clip_width: usize, cli
 
 #[cfg(test)]
 mod tests {
+    use super::temporal_region;
+
+    /// A token is in the window when its span overlaps `[start, end)`: the
+    /// causal first latent frame covers pixel frame 0 alone, each later one
+    /// eight frames, and an edge only touching the window stays out.
+    #[test]
+    fn a_temporal_region_marks_exactly_the_overlapping_tokens() {
+        let fps = 8.0;
+        let bounds = crate::pipeline::real_pixel_positions(4, 1, 1, fps);
+        // Latent frames span [0, 1/8), [1/8, 9/8), [9/8, 17/8), [17/8, 25/8) seconds.
+        assert_eq!(temporal_region(&bounds, 4, 0.5, 1.5), [0.0, 1.0, 1.0, 0.0]);
+        assert_eq!(temporal_region(&bounds, 4, 1.125, 2.0), [0.0, 0.0, 1.0, 0.0], "an end only touching the window is out");
+        assert_eq!(temporal_region(&crate::audio::positions(3), 3, 0.0, 0.01), [1.0, 0.0, 0.0]);
+    }
+
     use super::*;
 
     /// The polarity flip is an involution pair, and it is the ONLY place the
