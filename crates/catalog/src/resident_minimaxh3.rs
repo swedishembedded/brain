@@ -68,13 +68,10 @@ impl MiniMaxH3Resident {
 /// num_audio_latents, dtype)` from an instance key
 /// (`"{task}:{vf}x{vh}x{vw}:{audio}[@{dtype}]"`) - see [`instance_key`]'s own
 /// doc for why the video and audio latent extents are named separately
-/// rather than one being derivable from the other at THIS layer. `dtype`
-/// defaults to `"f32"` when the `@{dtype}` suffix is absent - `resident_wan.
-/// rs::parse_key`'s own precedent for a key shape that predates a dtype
-/// dimension existing at all (there is only one storage tier for this model
-/// today; the suffix is reserved for when a second one exists, e.g. an int8
-/// AdaLN-precomputed backbone - `minimaxh3`'s own crate doc names this as a
-/// planned, not-yet-built path).
+/// rather than one being derivable from the other at THIS layer. `dtype` is
+/// the tier the DiT is held at ([`RESIDENT_DTYPE`]), `"f32"` when the
+/// `@{dtype}` suffix is absent - `resident_wan.rs::parse_key`'s own
+/// precedent.
 fn parse_key(config: &str) -> Option<(String, u32, u32, u32, u32, String)> {
     let (rest, dtype) = match config.rsplit_once('@') {
         Some((r, d)) => (r, d.to_string()),
@@ -115,46 +112,38 @@ fn latent_extents(inv: &Invocation) -> (u32, u32, u32, u32) {
     (num_latent_frames, h / ratio, w / ratio, num_audio_latents)
 }
 
-/// The DiT's own real parameter count from its config numbers alone - no
-/// weight has to be read. Cross-checked against the roadmap's own
-/// independently-confirmed figure (`adaln_proj` = 13.0B of a 33B total) in
-/// this module's own test.
-fn h3_dit_param_count(cfg: &H3TransformerConfig) -> u64 {
-    let (inner, hidden, ffn, hd, te) = (cfg.inner_dim() as u64, cfg.hidden_size as u64, cfg.ffn_dim as u64, cfg.attention_head_dim as u64, cfg.time_embed_dim as u64);
-    // Attention (q/k/v/out, both q/k-norms) + FFN (fused gate/up + down) +
-    // the two pre-norms - shared by both the main block and the (no-AdaLN)
-    // refiner block.
-    let attn_ffn = 4 * inner * hidden + 2 * hd + 2 * hidden + 3 * ffn * hidden;
-    let adaln = cfg.adaln_out_features() as u64 * (te + 1); // linear.weight + linear.bias
-    let block = attn_ffn + adaln;
-    let refiner_block = attn_ffn;
-    let top_level = hidden * (cfg.video_patch_dim() as u64 + 1) // proj_in
-        + hidden * (cfg.audio_in_channels as u64 + 1) // audio_proj_in
-        + hidden * (cfg.text_dim as u64 + 1) // context_embedder
-        + cfg.time_embed_hidden_dim as u64 * (cfg.freq_dim as u64 + 1) // time_embedder.linear_1
-        + te * (cfg.time_embed_hidden_dim as u64 + 1) // time_embedder.linear_2
-        + hidden // refiner_final_norm
-        + hidden // norm_out.norm
-        + cfg.final_adaln_out_features() as u64 * (te + 1) // norm_out.linear
-        + cfg.video_patch_dim() as u64 * (hidden + 1) // proj_out
-        + cfg.audio_in_channels as u64 * (hidden + 1); // audio_proj_out
-    cfg.num_layers as u64 * block + cfg.num_refiner_layers as u64 * refiner_block + top_level
+/// Host bytes the resident DiT keeps beside its cards: every block's
+/// `adaln_proj` (fp32, projected on the host per forward - 13.0B of the 33B
+/// parameters) plus `norm_out`'s projection.
+fn dit_host_bytes(cfg: &H3TransformerConfig) -> u64 {
+    let te = cfg.time_embed_dim as u64 + 1;
+    (cfg.num_layers as u64 * cfg.adaln_out_features() as u64 + cfg.final_adaln_out_features() as u64) * te * 4
 }
 
-/// Real per-dtype byte count for the DiT's weights. Only `f32` exists today
-/// (this crate has no quantized storage tier yet - see [`parse_key`]'s own
-/// doc), so every dtype currently maps to the same fp32 figure; the branch
-/// exists so a future int8/int4 tier is a one-line addition here, matching
-/// `resident_wan.rs::dit_weight_bytes`'s own shape.
-fn dit_weight_bytes(cfg: &H3TransformerConfig, _dtype: &str) -> u64 {
-    // Every dtype this crate can currently produce is fp32 - the `_dtype`
-    // parameter is accepted (not read) purely so the planned int8/int4
-    // branch this function's own doc names is a one-line addition to the
-    // BODY here, not a signature change, once it exists. An unrecognized
-    // `@{dtype}` suffix on a malformed/adversarial key must still cost
-    // something rather than panic - this function never rejects `_dtype`.
-    h3_dit_param_count(cfg) * 4
+/// The tier a key names (`@i8`), or `None` for one this adapter never builds.
+fn key_tier(dtype: &str) -> Option<gpu_core::select::Dtype> {
+    match dtype {
+        "i8" => Some(gpu_core::select::Dtype::I8),
+        "f32" => Some(gpu_core::select::Dtype::F32),
+        _ => None,
+    }
 }
+
+/// The key spelling of `minimaxh3::pipeline::RESIDENT_TIER`, the tier this
+/// adapter holds its DiT at.
+const RESIDENT_DTYPE: &str = "i8";
+
+/// Packed rows a request of these latent extents runs (video + audio rows,
+/// plus the text prompt at its encoder's longest) - what a forward's
+/// workspace is sized from.
+fn packed_rows(vf: u32, vh: u32, vw: u32, audio: u32) -> u32 {
+    let dit_cfg = H3TransformerConfig::real();
+    let (ph, pw) = (dit_cfg.patch_size[1], dit_cfg.patch_size[2]);
+    vf * (vh / ph) * (vw / pw) + audio * minimaxh3::pipeline::AUDIO_CHANNELS + MAX_PROMPT_ROWS
+}
+
+/// The prompt rows a workspace is reserved for: a caption, never a document.
+const MAX_PROMPT_ROWS: u32 = 512;
 
 /// Total bytes of a VAE/vocoder config's own tensor manifest at 4
 /// bytes/element (this repo's safetensors reader is always F32-materialized
@@ -181,7 +170,7 @@ impl ResidentModel for MiniMaxH3Resident {
     /// explicitly instead of assuming the omission transfers.
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
         let (vf, vh, vw, audio) = latent_extents(inv);
-        InstanceKey::new(&self.id, format!("{action}:{vf}x{vh}x{vw}:{audio}"))
+        InstanceKey::new(&self.id, format!("{action}:{vf}x{vh}x{vw}:{audio}@{}", RESIDENT_DTYPE))
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
@@ -191,25 +180,15 @@ impl ResidentModel for MiniMaxH3Resident {
             return MemCost::new(8u64 << 30, 4u64 << 30);
         };
         let dit_cfg = H3TransformerConfig::real();
-        let weights = dit_weight_bytes(&dit_cfg, &dtype);
+        // An unknown tier must still cost the most this model could.
+        let tier = key_tier(&dtype).unwrap_or(gpu_core::select::Dtype::F32);
+        let weights = minimaxh3::model::resident_cost(&dit_cfg, tier).total();
         let vae_weights = manifest_bytes(&VideoVaeConfig::real().tensor_manifest()) + manifest_bytes(&minimaxh3::vocoder::VocoderConfig::h3_32khz().tensor_manifest());
-
-        // Packed-sequence row count this request's shape produces (video
-        // rows + audio rows, channel-major so `* AUDIO_CHANNELS`) - the
-        // activation-buffer driver, the same role `token_count` plays in
-        // `resident_wan.rs::estimate`.
+        let activations = minimaxh3::model::block_workspace_bytes(&dit_cfg, packed_rows(vf, vh, vw, audio));
         let (ph, pw) = (dit_cfg.patch_size[1] as u64, dit_cfg.patch_size[2] as u64);
-        let video_rows = (vf as u64) * (vh as u64 / ph) * (vw as u64 / pw);
-        let audio_rows = audio as u64 * minimaxh3::pipeline::AUDIO_CHANNELS as u64;
-        let rows = video_rows + audio_rows;
-        let hidden = dit_cfg.hidden_size as u64;
-        // A handful of `[rows, hidden]` residual/scratch slabs alive at once
-        // through one block's forward - `resident_wan.rs::estimate`'s own
-        // `* 8` factor for the identical role.
-        let activations = rows * hidden * 4 * 8;
         let pixels = vf as u64 * (vh as u64 * ph) * (vw as u64 * pw) * 3 * 4;
 
-        MemCost::new(weights + vae_weights + activations, weights + vae_weights + pixels + (2u64 << 30))
+        MemCost::new(weights + vae_weights + activations, dit_host_bytes(&dit_cfg) + vae_weights + pixels + (2u64 << 30))
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
@@ -264,13 +243,13 @@ impl MiniMaxH3Instance {
     /// the lock for the WHOLE forward - see [`Instance::run_batch`]'s own doc
     /// for why this model's residency is sequential by design, same as
     /// `resident_wan.rs::WanInstance::run_batch`'s reasoning.
-    fn with_hot_dit<R>(&self, body: impl FnOnce(&minimaxh3::model::H3Transformer) -> Result<R, String>) -> Result<R, String> {
+    fn with_hot_dit<R>(&self, rows: u32, body: impl FnOnce(&minimaxh3::model::H3Transformer) -> Result<R, String>) -> Result<R, String> {
         let want = device_key(self.device);
         self.hot.try_get(
             want,
             || {
                 let dit_reader = minimaxh3::caps::open_dit_reader(&self.paths.dit)?;
-                Ok(minimaxh3::model::H3Transformer::load(&dit_reader, H3TransformerConfig::real(), device_name(self.device).as_deref()))
+                minimaxh3::model::H3Transformer::load(&dit_reader, H3TransformerConfig::real(), device_name(self.device).as_deref(), minimaxh3::pipeline::RESIDENT_TIER, rows)
             },
             body,
         )
@@ -282,54 +261,21 @@ impl Instance for MiniMaxH3Instance {
         // Params (and the license gate they carry) before the weights read -
         // `wan::caps::WanAction::run`'s own ordering.
         let p = minimaxh3::caps::gen_params_from(inv)?;
+        let keyframe_specs = match action {
+            "t2va" => Vec::new(),
+            "fl2va" => minimaxh3::caps::fl2va_keyframes_from(inv)?,
+            other => return Err(format!("minimaxh3: unknown action '{other}'")),
+        };
         let vae = minimaxh3::caps::VaeWeights::load(&self.paths)?;
-        let dit_cfg = H3TransformerConfig::real();
-        match action {
-            "t2va" => self.with_hot_dit(|model| {
-                let empty = vae::blocks::Tensors::default();
-                let ckpt = vae.as_checkpoint(&empty, dit_cfg);
-                minimaxh3::caps::t2va_hot_on(&ckpt, inv, &p, &self.paths, model)
-            }),
-            "fl2va" => {
-                let specs = minimaxh3::caps::fl2va_keyframes_from(inv)?;
-                let (h, w) = p.opts.canvas.unwrap_or_else(|| {
-                    let vcfg = minimaxh3::video_vae::VideoVaeConfig::real();
-                    let m = vcfg.spatial_compression_ratio() * dit_cfg.patch_size[2];
-                    minimaxh3::pipeline::resolve_canvas_size(16.0, 9.0, m, minimaxh3::pipeline::CANVAS_SHORT_EDGE, minimaxh3::pipeline::CANVAS_MAX_PIXELS).unwrap_or((768, 1344))
-                });
-                let mut keyframes = Vec::with_capacity(specs.len());
-                for spec in &specs {
-                    // A served keyframe is a single image file, decoded by
-                    // `imaging` - the dataset-directory lane the CLI's own
-                    // `image_io` carries is CLI policy and has no second
-                    // copy here.
-                    let img = imaging::load(&spec.path).map_err(|e| format!("fl2va: loading {}: {e}", spec.path))?;
-                    let hwc = img.to_hwc_unit();
-                    let (w0, h0) = (img.w, img.h);
-                    let resized = if (w0, h0) != (w, h) { imaging::host::resize_bilinear_hwc(&hwc, 3, w0, h0, w, h) } else { hwc };
-                    let pixels_rgb = hwc_unit_to_chw_255(&resized, w, h);
-                    keyframes.push(minimaxh3::pipeline::encode_keyframe_condition(
-                        &minimaxh3::video_vae::VideoVaeConfig::real(),
-                        &vae.video_vae_tensors,
-                        device_name(self.device).as_deref(),
-                        &pixels_rgb,
-                        h,
-                        w,
-                        &vae.video_latents_mean,
-                        &vae.video_latents_std,
-                        dit_cfg.patch_size,
-                        spec.anchor,
-                        p.opts.seed,
-                    ));
-                }
-                self.with_hot_dit(|model| {
-                    let empty = vae::blocks::Tensors::default();
-                    let ckpt = vae.as_checkpoint(&empty, dit_cfg);
-                    minimaxh3::caps::fl2va_hot_on(&ckpt, inv, &p, &self.paths, &keyframes, model)
-                })
-            }
-            other => Err(format!("minimaxh3: unknown action '{other}'")),
-        }
+        let mut opts = p.opts.clone();
+        opts.device = device_name(self.device);
+        let keyframes = minimaxh3::caps::encode_keyframes(&vae, &keyframe_specs, &opts)?;
+        let (vf, vh, vw, audio) = latent_extents(inv);
+        self.with_hot_dit(packed_rows(vf, vh, vw, audio), |model| {
+            let empty = vae::blocks::Tensors::default();
+            let ckpt = vae.as_checkpoint(&empty, H3TransformerConfig::real());
+            minimaxh3::caps::generate_on(&ckpt, inv, &p, &self.paths, &keyframes, Some(model))
+        })
     }
 
     /// Sequential, deliberately - `resident_wan.rs::WanInstance::run_batch`'s
@@ -341,21 +287,6 @@ impl Instance for MiniMaxH3Instance {
     fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         invs.iter().enumerate().map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p))).collect()
     }
-}
-
-/// `imaging::host::resize_bilinear_hwc`'s output is still HWC `[0,1]`;
-/// [`minimaxh3::pipeline::encode_keyframe_condition`] wants channel-major
-/// `[0,255]` (its own doc, matching `encode_vae_condition`'s `pixels.div(255.0)`
-/// - i.e. the INPUT side is `[0,255]`, not the VAE's internal range).
-fn hwc_unit_to_chw_255(hwc: &[f32], w: u32, h: u32) -> Vec<f32> {
-    let (w, h) = (w as usize, h as usize);
-    let mut chw = vec![0f32; 3 * h * w];
-    for i in 0..h * w {
-        for c in 0..3 {
-            chw[c * h * w + i] = (hwc[i * 3 + c] * 255.0).clamp(0.0, 255.0);
-        }
-    }
-    chw
 }
 
 #[cfg(test)]
@@ -409,35 +340,20 @@ mod tests {
         let (_, vf, vh, vw, audio, dtype) = parse_key(&a.config).expect("a well-formed key");
         assert!(vf > 0 && vh > 0 && vw > 0, "the video latent extent must be real, got {vf}x{vh}x{vw}");
         assert!(audio > 0, "the audio latent extent must be real, got {audio}");
-        assert_eq!(dtype, "f32");
+        assert_eq!(dtype, "i8");
+        assert_eq!(key_tier(&dtype), Some(minimaxh3::pipeline::RESIDENT_TIER), "the key names the tier the adapter loads");
     }
 
-    /// [`h3_dit_param_count`] must land near the roadmap's own independently
-    /// confirmed numbers: `adaln_proj` alone is 13.0B of a 33B total.
-    #[test]
-    fn the_param_count_matches_the_roadmaps_independently_confirmed_numbers() {
-        let cfg = H3TransformerConfig::real();
-        let (inner, hidden, te) = (cfg.inner_dim() as u64, cfg.hidden_size as u64, cfg.time_embed_dim as u64);
-        let adaln_total = cfg.num_layers as u64 * cfg.adaln_out_features() as u64 * (te + 1);
-        let g = 1_000_000_000u64;
-        assert!((12 * g..14 * g).contains(&adaln_total), "adaln_proj should land near 13.0B, got {adaln_total}");
-        assert!(inner > 0 && hidden > 0, "sanity");
-
-        let total = h3_dit_param_count(&cfg);
-        assert!((28 * g..38 * g).contains(&total), "the DiT should land near 33B total, got {total}");
-    }
-
-    /// A real checkpoint's DiT is single-digit-tens-of-GB at fp32 (no
-    /// quantized tier exists yet - see [`dit_weight_bytes`]'s own doc) - not
-    /// zero, not absurd.
+    /// The resident DiT is ~20 GB of int8 linears on the cards, with its
+    /// ~52 GB of fp32 AdaLN projections held on the host.
     #[test]
     fn the_estimate_is_nonzero_and_dominated_by_the_dit_weights() {
         let r = resident();
         let key = r.instance_key("t2va", &Invocation::new().set("prompt", json!("a")));
         let cost = r.estimate(&key);
         let gb = 1u64 << 30;
-        assert!(cost.vram > 100 * gb, "the fp32 DiT should dominate at ~132GB, got {} GB", cost.vram / gb);
-        assert!(cost.ram > cost.vram / 2, "host RAM should track the same weight figure");
+        assert!((18 * gb..60 * gb).contains(&cost.vram), "int8 linears plus the workspace, got {} GB", cost.vram / gb);
+        assert!(cost.ram > 45 * gb, "the host-side AdaLN projections dominate host RAM, got {} GB", cost.ram / gb);
 
         // A bigger request costs more (bigger activations/pixel buffer) on
         // top of the same fixed DiT-weight floor - two EXPLICIT canvases,
@@ -471,19 +387,5 @@ mod tests {
         let fetched = MiniMaxH3Resident::from_paths("MiniMaxAI/MiniMax-H3".to_string(), resident().paths);
         assert_eq!(fetched.manifest().model, "MiniMaxAI/MiniMax-H3");
         assert_eq!(fetched.instance_key("t2va", &Invocation::new()).model, "MiniMaxAI/MiniMax-H3");
-    }
-
-    #[test]
-    fn hwc_unit_to_chw_255_converts_layout_and_scale() {
-        // 1x2 HWC, RGB: px0=(1,0,0.5), px1=(0,1,0.25).
-        let hwc = vec![1.0, 0.0, 0.5, 0.0, 1.0, 0.25];
-        let chw = hwc_unit_to_chw_255(&hwc, 2, 1);
-        assert_eq!(chw.len(), 6);
-        assert_eq!(chw[0], 255.0, "R plane, px0");
-        assert_eq!(chw[1], 0.0, "R plane, px1");
-        assert_eq!(chw[2], 0.0, "G plane, px0");
-        assert_eq!(chw[3], 255.0, "G plane, px1");
-        assert!((chw[4] - 127.5).abs() < 1e-3, "B plane, px0");
-        assert!((chw[5] - 63.75).abs() < 1e-3, "B plane, px1");
     }
 }

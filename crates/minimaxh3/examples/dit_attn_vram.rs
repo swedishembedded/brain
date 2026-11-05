@@ -5,12 +5,11 @@
 //! per-layer shapes (`hidden=5376`, `inner=7168`, `ffn=14336`, 56 heads x 128)
 //! and a caller-chosen packed sequence length.
 //!
-//! Why this exists separately from `dit_roofline`: that probe answers "where
-//! does the TIME go", dispatching each kernel in isolation. This one answers
-//! "where does the MEMORY go", which is the binding constraint on this model -
-//! H3 attends over ONE packed sequence holding every video, audio and text
-//! token of the whole clip at once, so the materialized
-//! `[heads, seq_len, seq_len]` scores and probs matrices grow with the FOURTH
+//! It answers both "where does the TIME go" and "where does the MEMORY go"
+//! for one block, and memory is the binding constraint on this model: H3
+//! attends over ONE packed sequence holding every video, audio and text
+//! token of the whole clip at once, so materialized
+//! `[heads, seq_len, seq_len]` scores and probs matrices would grow with the FOURTH
 //! power of the canvas edge while everything else grows with the second. The
 //! two of them together cost `2 * 56 * seq_len^2 * 4` bytes: 7.5 GB at 4096
 //! tokens, 30 GB at 8192, against a 24 GB card.
@@ -23,11 +22,13 @@
 //! is measured here is therefore ONE block's weights plus one block's
 //! activations, with the attention arm as the only variable.
 //!
-//! Usage: `dit_attn_vram [seq_len]` (default 4096). `BRAIN_DEVICE` selects the
-//! backend; `BRAIN_MINIMAXH3_ATTN=flash|trio` forces the arm, which is how the
-//! before/after pair is taken without checking out an older commit. Poll
-//! `nvidia-smi --query-gpu=memory.used` alongside it for the peak - the number
-//! this prints is the wall time, and the allocation peak lives in the driver.
+//! Usage: `dit_attn_vram [seq_len] [f32|i8] [reps]` (defaults 4096, f32, 3):
+//! the linears at the given tier, exactly as the DiT holds them, and the
+//! fastest of `reps` timed forwards after a warm-up one. `BRAIN_DEVICE` selects
+//! the backend; `BRAIN_MINIMAXH3_ATTN=flash|trio` forces the attention arm.
+//! Poll `nvidia-smi --query-gpu=memory.used` alongside it for the peak - the
+//! number this prints is the wall time, and the allocation peak lives in the
+//! driver.
 //!
 //! Swedish Embedded AB implements measurement-driven inference optimization for
 //! its clients. If your team needs expertise in fitting large transformer
@@ -36,12 +37,20 @@
 
 use std::time::Instant;
 
+use gpu_core::select::Dtype;
 use minimaxh3::block::{attn_mode, refiner_block_forward, Ctx, RefinerBlockWeights};
 use minimaxh3::config::H3TransformerConfig;
+use model::ops::Weight;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let seq: u32 = a.get(1).map(|s| s.parse().expect("seq_len")).unwrap_or(4096);
+    let tier = match a.get(2).map(String::as_str).unwrap_or("f32") {
+        "f32" => Dtype::F32,
+        "i8" => Dtype::I8,
+        other => panic!("tier {other:?}: f32 or i8"),
+    };
+    let reps: usize = a.get(3).map(|s| s.parse().expect("reps")).unwrap_or(3);
     let device = std::env::var("BRAIN_DEVICE").ok();
     let cx = Ctx::new(device.as_deref());
 
@@ -55,34 +64,54 @@ fn main() {
     let trio_bytes = 2u64 * heads as u64 * seq as u64 * seq as u64 * 4;
     let flash_bytes = 3u64 * seq as u64 * inner as u64 * 4;
     let gb = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
-    println!("device={device:?} seq_len={seq} heads={heads} head_dim={hd} attn={mode:?}");
+    println!("device={device:?} seq_len={seq} heads={heads} head_dim={hd} attn={mode:?} tier={tier:?}");
     println!("  materialized scores+probs would cost {:.2} GB", gb(trio_bytes));
     println!("  fused packed-qkv slab costs          {:.2} GB", gb(flash_bytes));
     println!();
 
     // Values are irrelevant to an allocation measurement but must be finite, so
-    // a cheap deterministic ramp is enough - the same one `dit_roofline` uses.
+    // a cheap deterministic ramp is enough.
     let fill = |n: usize| -> Vec<f32> { (0..n).map(|i| ((i % 97) as f32 - 48.0) * 0.01).collect() };
+    let lin = |n: u32, k: u32| Weight::upload(&cx.ops, &fill((n * k) as usize), n as usize, k as usize, tier);
     let w = RefinerBlockWeights {
-        wq: cx.upload(&fill((inner * hidden) as usize)),
-        wk: cx.upload(&fill((inner * hidden) as usize)),
-        wv: cx.upload(&fill((inner * hidden) as usize)),
-        wo: cx.upload(&fill((hidden * inner) as usize)),
+        wq: lin(inner, hidden),
+        wk: lin(inner, hidden),
+        wv: lin(inner, hidden),
+        wo: lin(hidden, inner),
         norm_q: cx.upload(&fill(hd as usize)),
         norm_k: cx.upload(&fill(hd as usize)),
         norm1: cx.upload(&fill(hidden as usize)),
         norm2: cx.upload(&fill(hidden as usize)),
-        fc1_value: cx.upload(&fill((ffn * hidden) as usize)),
-        fc1_gate: cx.upload(&fill((ffn * hidden) as usize)),
-        fc2: cx.upload(&fill((hidden * ffn) as usize)),
+        fc1_value: lin(ffn, hidden),
+        fc1_gate: lin(ffn, hidden),
+        fc2: lin(hidden, ffn),
     };
     let x = cx.upload(&fill((seq * hidden) as usize));
 
-    let t = Instant::now();
-    let out = refiner_block_forward(&cx, &w, &x, &cfg, seq);
-    // Ends in a readback: on the Vulkan backend `submit` only records and
-    // queues, so without a fence this would time submission and, worse, could
-    // return before the peak allocation has even happened.
-    let probe = cx.gpu.read(&out, 1);
-    println!("one block forward: {:.2}s (out[0]={:.6}, finite={})", t.elapsed().as_secs_f64(), probe[0], probe[0].is_finite());
+    // Each forward ends in a readback: on the Vulkan backend `submit` only
+    // records and queues, so without a fence this would time submission and
+    // could return before the peak allocation has even happened.
+    let run = || {
+        let t = Instant::now();
+        // The arena the model's own forward replays its blocks in.
+        let out = {
+            let _arena = cx.gpu.scratch_scope_in("minimaxh3 block");
+            refiner_block_forward(&cx, &w, &x, &cfg, seq)
+        };
+        let probe = cx.gpu.read(&out, 1);
+        assert!(probe[0].is_finite(), "non-finite block output");
+        t.elapsed().as_secs_f64()
+    };
+    let warm = run();
+    let best = (0..reps).map(|_| run()).fold(f64::INFINITY, f64::min);
+    let flops = 2.0 * seq as f64 * (4.0 * inner as f64 * hidden as f64 + 3.0 * ffn as f64 * hidden as f64) + 4.0 * seq as f64 * seq as f64 * inner as f64;
+    println!("one block forward: warm-up {warm:.3}s, best of {reps} {best:.3}s ({:.2} TFLOP/s on the linears + attention)", flops / best / 1e12);
+
+    // Where one forward's DEVICE time goes, per kernel (timestamp queries,
+    // not host wall clock): the device prints its `--kernel-profile` table
+    // when it is dropped.
+    if cx.gpu.set_kernel_timing(true) {
+        cx.gpu.reset_kernel_times();
+        run();
+    }
 }

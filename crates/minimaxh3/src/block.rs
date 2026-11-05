@@ -57,52 +57,39 @@
 //! architectures to new inference stacks, you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
+use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::hostmath::linear_rows;
+use model::ops::{Ops, Weight};
 
 use crate::config::{H3TransformerConfig, MODALITY_NUM};
 
-const K_MATMUL: usize = 0;
-const K_BIAS_ADD: usize = 1;
-const K_RMSNORM_ROWS: usize = 2;
-const K_ROPE2D_PARTIAL: usize = 3;
-const K_ATTN_SCORES_QK: usize = 4;
-const K_ATTN_SOFTMAX_BIDIR: usize = 5;
-const K_ATTN_APPLY_FULL: usize = 6;
-const K_SILU_MUL: usize = 7;
-const K_EMBED: usize = 8;
-const K_GATE_ROW: usize = 9;
-const K_MUL: usize = 10;
-const K_ADD2: usize = 11;
-const K_ROW_SCATTER: usize = 12;
-/// The 128x128 register-tiled GEMM `crate::block::linear` picks via
-/// `model::block::pick_gemm` once a shape clears the measured tile-fill
-/// crossover (`select::GEMM_TILE_MIN_ROWS`/`_COLS`) - the same kernel ~15
-/// other model crates (`qwen3`, `wan`, `clip`, `t5encoder`, `vae`, ...)
-/// already register alongside plain `matmul` for exactly this purpose. On
-/// CPU this and `matmul` are the SAME dispatched AVX2 fast path by kernel
-/// name (`backend_cpu::FastIdx` routes both to `fast_ops::matmul_abt`) - the
-/// choice only changes behavior on a real GPU, where `matmul` is a naive
-/// one-thread-per-output kernel with no operand reuse and (for this crate's
-/// wide, `col = idx % n`-indexed weight rows) a fully uncoalesced access
-/// pattern, while `matmul_reg3` stages both operands through workgroup
-/// memory.
-const K_MATMUL_REG3: usize = 13;
+const K_BIAS_ADD: usize = 0;
+const K_RMSNORM_ROWS: usize = 1;
+const K_ROPE2D_PARTIAL: usize = 2;
+const K_ATTN_SCORES_QK: usize = 3;
+const K_ATTN_SOFTMAX_BIDIR: usize = 4;
+const K_ATTN_APPLY_FULL: usize = 5;
+const K_SILU_MUL: usize = 6;
+const K_EMBED: usize = 7;
+const K_GATE_ROW: usize = 8;
+const K_MUL: usize = 9;
+const K_ADD2: usize = 10;
+const K_ROW_SCATTER: usize = 11;
 /// Packs the three separate `[seq_len, inner]` q/k/v projections into the one
 /// `[seq_len, 3*inner]` slab every kernel in the flash family reads through
 /// `qkv_stride`/`q_off`/`k_off`/`v_off`. Only [`attention_flash`] dispatches
 /// it - the materialized trio reads q/k/v as three bindings and needs no slab.
-const K_PACK_QKV: usize = 14;
+const K_PACK_QKV: usize = 12;
 /// The four interchangeable bidirectional flash-attention rungs, registered as
 /// a complete set so `model::block::flash_bidir_variant` can walk the whole
 /// ladder from this crate's queried `DeviceCaps` (see [`FLASH_IDS`]).
-const K_FLASH_ATTN_BIDIR: usize = 15;
-const K_FLASH_ATTN_BIDIR_SPLIT: usize = 16;
-const K_FLASH_ATTN_BIDIR_REG: usize = 17;
-const K_FLASH_ATTN_BIDIR_REG2: usize = 18;
+const K_FLASH_ATTN_BIDIR: usize = 13;
+const K_FLASH_ATTN_BIDIR_SPLIT: usize = 14;
+const K_FLASH_ATTN_BIDIR_REG: usize = 15;
+const K_FLASH_ATTN_BIDIR_REG2: usize = 16;
 
-pub const KERNELS: [(&str, &str); 19] = [
-    ("matmul", kernels::MATMUL),
+pub const KERNELS: [(&str, &str); 17] = [
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("rope2d_partial", kernels::ROPE2D_PARTIAL),
@@ -115,7 +102,6 @@ pub const KERNELS: [(&str, &str); 19] = [
     ("mul", kernels::MUL),
     ("add2", kernels::ADD2),
     ("row_scatter", kernels::ROW_SCATTER),
-    ("matmul_reg3", kernels::MATMUL_REG3),
     ("pack_qkv", kernels::PACK_QKV),
     ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
     ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
@@ -133,21 +119,44 @@ const FLASH_IDS: model::block::FlashIds = model::block::FlashIds {
     reg2: Some(K_FLASH_ATTN_BIDIR_REG2),
 };
 
+/// Every kernel a [`Ctx`]'s device registers: this crate's own [`KERNELS`]
+/// at their fixed indices, then the `model::ops` façade set its linears
+/// dispatch through (a name already registered keeps its source - both lists
+/// take them from the same `kernels` catalogue).
+pub fn pipelines() -> Vec<(&'static str, &'static str)> {
+    let mut v = KERNELS.to_vec();
+    for &entry in model::ops::kernel_list() {
+        if !v.iter().any(|(name, _)| *name == entry.0) {
+            v.push(entry);
+        }
+    }
+    v
+}
+
 /// One open device + the shared kernel table - every op below dispatches
 /// through this, matching `crate::vocoder::Ctx`'s own role.
 pub struct Ctx {
     pub gpu: Gpu,
+    /// The linears' dispatch: `model::ops` owns the kernel choice for each
+    /// weight's tier, on this same device.
+    pub ops: Ops,
     /// Reused device buffers for [`load_block_streaming`]'s uniform
     /// per-block shapes - see that function's doc for why this exists.
     /// `None` until the streaming block loop's first block; every model
     /// crate's other `Ctx` use (eager resident load, video VAE, vocoder)
     /// never touches this field.
-    block_slots: std::cell::RefCell<Option<BlockSlots>>,
+    block_slots: std::cell::RefCell<Option<BlockWeights>>,
 }
 
 impl Ctx {
     pub fn new(device: Option<&str>) -> Ctx {
-        Ctx { gpu: Gpu::open(device, &KERNELS), block_slots: std::cell::RefCell::new(None) }
+        let gpu = Gpu::open(device, &pipelines());
+        let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("minimaxh3: {e}"));
+        // The quantized activations are allocated on this shared handle, once
+        // per linear group of every block; holding its freed blocks lets each
+        // block take the previous one's (see `Gpu::hold_freed_blocks`).
+        ops.gpu().hold_freed_blocks(true);
+        Ctx { gpu, ops, block_slots: std::cell::RefCell::new(None) }
     }
 
     pub fn upload(&self, data: &[f32]) -> DeviceBuffer {
@@ -163,29 +172,35 @@ impl Ctx {
 
 // ---------------- eager device ops ----------------
 
-/// `y = x @ w^T (+ bias)`. `w` is `[n, k]` row-major (PyTorch `nn.Linear`
-/// convention); `bias` is `[n]` or `None` for the attention/FFN linears,
-/// which the reference builds with `bias=False` throughout.
-///
-/// Kernel choice goes through `model::block::pick_gemm` (the same seam
-/// `qwen3`/`wan`/`clip`/`t5encoder`/`vae` and a dozen other model crates
-/// already use), not a hardcoded `K_MATMUL` - every one of this crate's
-/// linears is a `[m,k]x[n,k]^T` GEMM at real transformer widths (`n` in the
-/// thousands for q/k/v/fc1/fc2), squarely the "large enough to fill a
-/// 128x128 tile" regime `pick_gemm` was measured against. `K_MATMUL_REG3`
-/// is a no-op on CPU (backend-cpu's native fast path treats it and `matmul`
-/// identically) and the fix for a real GPU, where plain `matmul` measured
-/// far slower than the CPU path on this crate's own shapes precisely
-/// because it has neither operand reuse nor coalesced access (adjacent GPU
-/// threads read weight rows `k` floats apart).
-pub(crate) fn linear(cx: &Ctx, x: &DeviceBuffer, w: &DeviceBuffer, bias: Option<&DeviceBuffer>, m: u32, k: u32, n: u32) -> DeviceBuffer {
-    let y = cx.gpu.storage((m * n) as u64);
-    let (mm, threads) = model::block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG3, false);
-    cx.gpu.submit(&[], &[cx.gpu.dispatch(mm, &[x, w, &y], &[m, k, n], threads)]);
+/// `y = x @ w^T (+ bias)` for `m` rows of `x`. `w` is `[n, k]` (PyTorch
+/// `nn.Linear` convention) at whatever tier it was loaded at; `bias` is `[n]`
+/// or `None` for the attention/FFN linears, which the reference builds with
+/// `bias=False` throughout.
+pub(crate) fn linear(cx: &Ctx, x: &DeviceBuffer, w: &Weight, bias: Option<&DeviceBuffer>, m: u32) -> DeviceBuffer {
+    let [y] = linears(cx, x, [w], m);
     if let Some(b) = bias {
-        cx.gpu.submit(&[], &[cx.gpu.step(K_BIAS_ADD, &[&y, b], &[m, n], m * n)]);
+        cx.gpu.submit(&[], &[cx.gpu.step(K_BIAS_ADD, &[&y, b], &[m, w.n()], m * w.n())]);
     }
     y
+}
+
+/// Every linear in `ws` over the same `[m, k]` input - q/k/v over one
+/// modulated row block, the SwiGLU halves over another. `model::ops` picks
+/// each product's kernel from its weight's tier and the shape; the input is
+/// quantized once for all of them when any weight is quantized, and read as
+/// f32 when none is.
+pub(crate) fn linears<const N: usize>(cx: &Ctx, x: &DeviceBuffer, ws: [&Weight; N], m: u32) -> [DeviceBuffer; N] {
+    let k = ws[0].k();
+    let mut steps = Vec::new();
+    let act = if ws.iter().all(|w| w.reads_f32_activations()) { cx.ops.act_f32(x, 0, m, k) } else { cx.ops.act(&mut steps, x, 0, m, k) };
+    let ys = ws.map(|w| {
+        assert_eq!(w.k(), k, "minimaxh3 linears: every weight must read the same input width");
+        let y = cx.gpu.storage((m * w.n()) as u64);
+        cx.ops.matmul(&mut steps, w, &act, &y, 0);
+        y
+    });
+    cx.gpu.submit(&[], &steps);
+    ys
 }
 
 /// RMSNorm, one row per token: `d` channels, `rows` tokens. Dispatches the
@@ -432,18 +447,19 @@ pub fn row_scatter(cx: &Ctx, idx: &DeviceBuffer, src: &DeviceBuffer, out: &Devic
 /// read fresh every forward by [`block_forward`] to build this block's small
 /// per-timestep modulation tables (see this module's own doc on the
 /// row-order deviation).
+#[derive(Clone)]
 pub struct BlockWeights {
-    pub wq: DeviceBuffer,
-    pub wk: DeviceBuffer,
-    pub wv: DeviceBuffer,
-    pub wo: DeviceBuffer,
+    pub wq: Weight,
+    pub wk: Weight,
+    pub wv: Weight,
+    pub wo: Weight,
     pub norm_q: DeviceBuffer,
     pub norm_k: DeviceBuffer,
     pub norm1: DeviceBuffer,
     pub norm2: DeviceBuffer,
-    pub fc1_value: DeviceBuffer,
-    pub fc1_gate: DeviceBuffer,
-    pub fc2: DeviceBuffer,
+    pub fc1_value: Weight,
+    pub fc1_gate: Weight,
+    pub fc2: Weight,
     /// `adaln_proj.linear.weight`, `[6*hidden*MODALITY_NUM, time_embed_dim]`
     /// row-major, untouched (host).
     pub adaln_w: Vec<f32>,
@@ -453,18 +469,19 @@ pub struct BlockWeights {
 
 /// One `MiniMaxH3TokenRefinerBlock`'s weights - the same attention/FFN
 /// shape as [`BlockWeights`] with no AdaLN and no RoPE.
+#[derive(Clone)]
 pub struct RefinerBlockWeights {
-    pub wq: DeviceBuffer,
-    pub wk: DeviceBuffer,
-    pub wv: DeviceBuffer,
-    pub wo: DeviceBuffer,
+    pub wq: Weight,
+    pub wk: Weight,
+    pub wv: Weight,
+    pub wo: Weight,
     pub norm_q: DeviceBuffer,
     pub norm_k: DeviceBuffer,
     pub norm1: DeviceBuffer,
     pub norm2: DeviceBuffer,
-    pub fc1_value: DeviceBuffer,
-    pub fc1_gate: DeviceBuffer,
-    pub fc2: DeviceBuffer,
+    pub fc1_value: Weight,
+    pub fc1_gate: Weight,
+    pub fc2: Weight,
 }
 
 // ---------------- streaming per-block loading ----------------
@@ -517,78 +534,76 @@ pub fn load_host(tensors: &dyn checkpoint::TensorSource, name: &str) -> Vec<f32>
     out.unwrap()
 }
 
-/// Split the fused SwiGLU projection's two output-feature halves into
-/// separate contiguous buffers. The split itself must happen INSIDE the
-/// `with_tensor` callback (the borrowed slice does not outlive it); the
-/// row-count check that would read the tensor's own 2D shape is a numel
-/// check instead - a streaming `TensorSource` has no shape to hand back,
-/// and the total element count is exactly what the split below depends on.
-pub fn load_fc1(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, hidden: u32, ffn: u32) -> (DeviceBuffer, DeviceBuffer) {
-    let name = format!("{prefix}.ff.net.0.proj.weight");
-    let half = (ffn * hidden) as usize;
-    let mut out: Option<(DeviceBuffer, DeviceBuffer)> = None;
-    let found = tensors.with_tensor(&name, &mut |data| {
-        assert_eq!(data.len(), 2 * half, "{name}: expected {} elements, got {}", 2 * half, data.len());
-        out = Some((ctx.upload(&data[..half]), ctx.upload(&data[half..2 * half])));
-    });
-    assert!(found, "minimaxh3 model: missing tensor {name:?}");
-    tensors.advise_drop(&name);
-    out.unwrap()
+/// One `[n, k]` linear at `tier`, read in bounded chunks
+/// (`model::ops::Weight::upload_from`); the device's own capability has the
+/// last word on the tier (`Dtype::promote`).
+pub fn load_linear(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, name: &str, n: u32, k: u32, tier: Dtype) -> Weight {
+    let w = Weight::upload_from(&ctx.ops, tensors, name, n as usize, k as usize, tier).unwrap_or_else(|e| panic!("minimaxh3 model: {e}"));
+    tensors.advise_drop(name);
+    w
 }
 
-/// The 6 attention-projection tensors shared by both block kinds' `.attn`
-/// sub-module naming (`to_q`/`to_k`/`to_v`/`norm_q`/`norm_k`/`to_out.0`).
-pub fn load_attn(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
-    (
-        load_dev(tensors, ctx, &format!("{prefix}.to_q.weight")),
-        load_dev(tensors, ctx, &format!("{prefix}.to_k.weight")),
-        load_dev(tensors, ctx, &format!("{prefix}.to_v.weight")),
-        load_dev(tensors, ctx, &format!("{prefix}.norm_q.weight")),
-        load_dev(tensors, ctx, &format!("{prefix}.norm_k.weight")),
-        load_dev(tensors, ctx, &format!("{prefix}.to_out.0.weight")),
-    )
+/// The fused SwiGLU projection's two output-feature halves (value rows
+/// first, then gate) as two linears, each read straight out of its row range
+/// of the one checkpoint tensor by a declarative slice plan - never the
+/// whole fused tensor at once.
+pub fn load_fc1(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, hidden: u32, ffn: u32, tier: Dtype) -> (Weight, Weight) {
+    let name = format!("{prefix}.ff.net.0.proj.weight");
+    let half = (ffn * hidden) as usize;
+    let plan = [("value", 0), ("gate", half)].into_iter().map(|(part, start)| (part.to_string(), checkpoint::remap::Fetch::Slice { name: name.clone(), start, len: half })).collect();
+    let halves = checkpoint::remap::RemapSource::new(tensors, plan);
+    let value = Weight::upload_from(&ctx.ops, &halves, "value", ffn as usize, hidden as usize, tier).unwrap_or_else(|e| panic!("minimaxh3 model: {name}: {e}"));
+    let gate = Weight::upload_from(&ctx.ops, &halves, "gate", ffn as usize, hidden as usize, tier).unwrap_or_else(|e| panic!("minimaxh3 model: {name}: {e}"));
+    tensors.advise_drop(&name);
+    (value, gate)
+}
+
+/// The attention projections and q/k norms shared by both block kinds'
+/// `.attn` sub-module naming (`to_q`/`to_k`/`to_v`/`norm_q`/`norm_k`/`to_out.0`).
+pub struct AttnWeights {
+    pub wq: Weight,
+    pub wk: Weight,
+    pub wv: Weight,
+    pub norm_q: DeviceBuffer,
+    pub norm_k: DeviceBuffer,
+    pub wo: Weight,
+}
+
+pub fn load_attn(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, hidden: u32, inner: u32, tier: Dtype) -> AttnWeights {
+    AttnWeights {
+        wq: load_linear(tensors, ctx, &format!("{prefix}.to_q.weight"), inner, hidden, tier),
+        wk: load_linear(tensors, ctx, &format!("{prefix}.to_k.weight"), inner, hidden, tier),
+        wv: load_linear(tensors, ctx, &format!("{prefix}.to_v.weight"), inner, hidden, tier),
+        norm_q: load_dev(tensors, ctx, &format!("{prefix}.norm_q.weight")),
+        norm_k: load_dev(tensors, ctx, &format!("{prefix}.norm_k.weight")),
+        wo: load_linear(tensors, ctx, &format!("{prefix}.to_out.0.weight"), hidden, inner, tier),
+    }
 }
 
 /// Load `transformer_blocks.{index}`'s weights - a single [`BlockWeights`],
-/// nothing else. A caller processing blocks one at a time drops the
-/// returned value (freeing its device buffers) before loading the next
-/// index.
-pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, hidden: u32, ffn: u32) -> BlockWeights {
+/// its linears at `tier`, nothing else. A caller processing blocks one at a
+/// time drops the returned value (freeing its device buffers) before loading
+/// the next index.
+pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig, tier: Dtype) -> BlockWeights {
     let p = format!("transformer_blocks.{index}");
-    let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(tensors, ctx, &format!("{p}.attn"));
-    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn);
+    let (hidden, inner, ffn) = (cfg.hidden_size, cfg.inner_dim(), cfg.ffn_dim);
+    let attn = load_attn(tensors, ctx, &format!("{p}.attn"), hidden, inner, tier);
+    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn, tier);
     BlockWeights {
-        wq,
-        wk,
-        wv,
-        wo,
-        norm_q,
-        norm_k,
+        wq: attn.wq,
+        wk: attn.wk,
+        wv: attn.wv,
+        wo: attn.wo,
+        norm_q: attn.norm_q,
+        norm_k: attn.norm_k,
         norm1: load_dev(tensors, ctx, &format!("{p}.norm1.weight")),
         norm2: load_dev(tensors, ctx, &format!("{p}.norm2.weight")),
         fc1_value,
         fc1_gate,
-        fc2: load_dev(tensors, ctx, &format!("{p}.ff.net.2.weight")),
+        fc2: load_linear(tensors, ctx, &format!("{p}.ff.net.2.weight"), hidden, ffn, tier),
         adaln_w: load_host(tensors, &format!("{p}.adaln_proj.linear.weight")),
         adaln_b: load_host(tensors, &format!("{p}.adaln_proj.linear.bias")),
     }
-}
-
-/// Every [`BlockWeights`] field that lives on the device, held resident
-/// and overwritten in place by [`load_block_streaming`] instead of being
-/// allocated fresh per block.
-struct BlockSlots {
-    wq: DeviceBuffer,
-    wk: DeviceBuffer,
-    wv: DeviceBuffer,
-    wo: DeviceBuffer,
-    norm_q: DeviceBuffer,
-    norm_k: DeviceBuffer,
-    norm1: DeviceBuffer,
-    norm2: DeviceBuffer,
-    fc1_value: DeviceBuffer,
-    fc1_gate: DeviceBuffer,
-    fc2: DeviceBuffer,
 }
 
 /// [`load_dev`]'s in-place twin: overwrite an already-allocated buffer's
@@ -608,90 +623,62 @@ fn write_dev(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, name: &str, buf:
     tensors.advise_drop(name);
 }
 
-/// [`load_fc1`]'s in-place twin.
-fn write_fc1(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, hidden: u32, ffn: u32, value: &DeviceBuffer, gate: &DeviceBuffer) {
-    let name = format!("{prefix}.ff.net.0.proj.weight");
+/// The dense buffer a streamed slot's linear is rewritten through.
+fn slot(w: &Weight) -> &DeviceBuffer {
+    w.dense_buffer().expect("a streamed block's linears are dense f32 slots")
+}
+
+/// [`load_block_streaming`]'s in-place rewrite of one block's device tensors.
+fn write_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, p: &str, hidden: u32, ffn: u32, s: &BlockWeights) {
+    for (leaf, w) in [("attn.to_q", &s.wq), ("attn.to_k", &s.wk), ("attn.to_v", &s.wv), ("attn.to_out.0", &s.wo), ("ff.net.2", &s.fc2)] {
+        write_dev(tensors, ctx, &format!("{p}.{leaf}.weight"), slot(w));
+    }
+    for (leaf, buf) in [("attn.norm_q", &s.norm_q), ("attn.norm_k", &s.norm_k), ("norm1", &s.norm1), ("norm2", &s.norm2)] {
+        write_dev(tensors, ctx, &format!("{p}.{leaf}.weight"), buf);
+    }
+    let name = format!("{p}.ff.net.0.proj.weight");
     let half = (ffn * hidden) as usize;
-    let mut wrote = false;
     let found = tensors.with_tensor(&name, &mut |data| {
         assert_eq!(data.len(), 2 * half, "{name}: expected {} elements, got {}", 2 * half, data.len());
-        ctx.gpu.write_f32_chunked(value, &data[..half], 1 << 20);
-        ctx.gpu.write_f32_chunked(gate, &data[half..2 * half], 1 << 20);
-        wrote = true;
+        ctx.gpu.write_f32_chunked(slot(&s.fc1_value), &data[..half], 1 << 20);
+        ctx.gpu.write_f32_chunked(slot(&s.fc1_gate), &data[half..], 1 << 20);
     });
     assert!(found, "minimaxh3 model: missing tensor {name:?}");
-    debug_assert!(wrote);
     tensors.advise_drop(&name);
 }
 
-/// [`load_attn`]'s in-place twin.
-#[allow(clippy::too_many_arguments)]
-fn write_attn(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, wq: &DeviceBuffer, wk: &DeviceBuffer, wv: &DeviceBuffer, norm_q: &DeviceBuffer, norm_k: &DeviceBuffer, wo: &DeviceBuffer) {
-    write_dev(tensors, ctx, &format!("{prefix}.to_q.weight"), wq);
-    write_dev(tensors, ctx, &format!("{prefix}.to_k.weight"), wk);
-    write_dev(tensors, ctx, &format!("{prefix}.to_v.weight"), wv);
-    write_dev(tensors, ctx, &format!("{prefix}.norm_q.weight"), norm_q);
-    write_dev(tensors, ctx, &format!("{prefix}.norm_k.weight"), norm_k);
-    write_dev(tensors, ctx, &format!("{prefix}.to_out.0.weight"), wo);
-}
-
 /// [`load_block`]'s reused-buffer twin for the streaming denoise loop: the
-/// first call allocates each of the block's 11 device buffers exactly
-/// once (sized by `hidden`/`ffn`, uniform across every one of
-/// `cfg.num_layers` blocks AND every denoise step in this architecture);
-/// every later call overwrites those SAME buffers in place via
-/// `write_f32_chunked` instead of allocating fresh ones. Safe to call
-/// back-to-back for different block indices (and across denoise steps,
-/// since the caller keeps the same `Ctx` alive for the whole generation -
-/// see `H3Transformer::forward_streaming`'s own doc) because the
-/// streaming loop's own `cx.gpu.poll_wait()` after every block already
-/// guarantees the previous block's GPU work has fully completed - and so
-/// stopped reading these buffers - before the next block's weights land.
+/// first call allocates the block's device tensors once, at fp32 (sized by
+/// the config, uniform across every block AND every denoise step); every
+/// later call overwrites those SAME buffers in place instead of allocating
+/// fresh ones. Safe to call back-to-back for different block indices (and
+/// across denoise steps, since the caller keeps the same `Ctx` alive for the
+/// whole generation - see `H3Transformer::forward_streaming`'s own doc)
+/// because the streaming loop's own `cx.gpu.poll_wait()` after every block
+/// already guarantees the previous block's GPU work has fully completed -
+/// and so stopped reading these buffers - before the next block's weights
+/// land.
 ///
-/// Exists because a real P40 measurement showed the naive per-block
-/// [`load_block`] path (fresh `storage_init`/`create_buffer_init` calls
-/// every block) performs on the order of 50 blocks x 16 steps x 11
-/// buffers of large create/destroy cycles on one long-lived wgpu device -
-/// which eventually fragments the Vulkan suballocator's free list badly
-/// enough to fail an allocation outright, well below the card's actual
-/// VRAM ceiling (`nvidia-smi`'s reserved-byte counter stayed bounded the
-/// whole time this was happening - the fragmentation is invisible to it).
-/// This cuts that to 11 allocations total for the entire generation. Not
-/// used by [`H3Transformer::load`]'s eager resident-load path, which
-/// needs all `num_layers` blocks' buffers alive SIMULTANEOUSLY and must
-/// keep calling [`load_block`] unchanged.
-pub fn load_block_streaming(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, hidden: u32, ffn: u32) -> BlockWeights {
+/// Exists because a real P40 measurement showed fresh per-block allocations
+/// (50 blocks x 16 steps x 11 buffers of large create/destroy cycles on one
+/// long-lived wgpu device) eventually fragment the Vulkan suballocator's
+/// free list badly enough to fail an allocation outright, well below the
+/// card's actual VRAM ceiling (`nvidia-smi`'s reserved-byte counter stayed
+/// bounded the whole time - the fragmentation is invisible to it). This cuts
+/// that to 11 allocations for the whole generation. Not used by
+/// [`load_block`]'s resident callers, which need every block's buffers
+/// alive at once.
+pub fn load_block_streaming(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig) -> BlockWeights {
     let p = format!("transformer_blocks.{index}");
     let adaln_w = load_host(tensors, &format!("{p}.adaln_proj.linear.weight"));
     let adaln_b = load_host(tensors, &format!("{p}.adaln_proj.linear.bias"));
 
     let mut slots = ctx.block_slots.borrow_mut();
-    if slots.is_none() {
-        let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(tensors, ctx, &format!("{p}.attn"));
-        let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn);
-        *slots = Some(BlockSlots {
-            wq,
-            wk,
-            wv,
-            wo,
-            norm_q,
-            norm_k,
-            norm1: load_dev(tensors, ctx, &format!("{p}.norm1.weight")),
-            norm2: load_dev(tensors, ctx, &format!("{p}.norm2.weight")),
-            fc1_value,
-            fc1_gate,
-            fc2: load_dev(tensors, ctx, &format!("{p}.ff.net.2.weight")),
-        });
-    } else {
-        let s = slots.as_ref().unwrap();
-        write_attn(tensors, ctx, &format!("{p}.attn"), &s.wq, &s.wk, &s.wv, &s.norm_q, &s.norm_k, &s.wo);
-        write_fc1(tensors, ctx, &p, hidden, ffn, &s.fc1_value, &s.fc1_gate);
-        write_dev(tensors, ctx, &format!("{p}.norm1.weight"), &s.norm1);
-        write_dev(tensors, ctx, &format!("{p}.norm2.weight"), &s.norm2);
-        write_dev(tensors, ctx, &format!("{p}.ff.net.2.weight"), &s.fc2);
+    match slots.as_ref() {
+        None => *slots = Some(load_block(tensors, ctx, index, cfg, Dtype::F32)),
+        Some(s) => write_block(tensors, ctx, &p, cfg.hidden_size, cfg.ffn_dim, s),
     }
-
-    let s = slots.as_ref().unwrap();
+    let s = slots.as_ref().expect("filled above");
     BlockWeights {
         wq: s.wq.clone(),
         wk: s.wk.clone(),
@@ -710,22 +697,23 @@ pub fn load_block_streaming(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, i
 }
 
 /// [`load_block`]'s `token_refiner.refiner_blocks.{index}` analogue.
-pub fn load_refiner_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, hidden: u32, ffn: u32) -> RefinerBlockWeights {
+pub fn load_refiner_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig, tier: Dtype) -> RefinerBlockWeights {
     let p = format!("token_refiner.refiner_blocks.{index}");
-    let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(tensors, ctx, &format!("{p}.attn"));
-    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn);
+    let (hidden, inner, ffn) = (cfg.hidden_size, cfg.inner_dim(), cfg.ffn_dim);
+    let attn = load_attn(tensors, ctx, &format!("{p}.attn"), hidden, inner, tier);
+    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn, tier);
     RefinerBlockWeights {
-        wq,
-        wk,
-        wv,
-        wo,
-        norm_q,
-        norm_k,
+        wq: attn.wq,
+        wk: attn.wk,
+        wv: attn.wv,
+        wo: attn.wo,
+        norm_q: attn.norm_q,
+        norm_k: attn.norm_k,
         norm1: load_dev(tensors, ctx, &format!("{p}.norm1.weight")),
         norm2: load_dev(tensors, ctx, &format!("{p}.norm2.weight")),
         fc1_value,
         fc1_gate,
-        fc2: load_dev(tensors, ctx, &format!("{p}.ff.net.2.weight")),
+        fc2: load_linear(tensors, ctx, &format!("{p}.ff.net.2.weight"), hidden, ffn, tier),
     }
 }
 
@@ -734,23 +722,20 @@ pub fn load_refiner_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, ind
 /// `MiniMaxH3TokenRefinerBlock.forward`: plain pre-norm attention (no RoPE)
 /// + plain pre-norm SwiGLU FFN, both residual. `x`: `[seq_len, hidden]`.
 pub fn refiner_block_forward(cx: &Ctx, w: &RefinerBlockWeights, x: &DeviceBuffer, cfg: &H3TransformerConfig, seq_len: u32) -> DeviceBuffer {
-    let (hidden, heads, hd, inner, ffn) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim, cfg.inner_dim(), cfg.ffn_dim);
+    let (hidden, heads, hd, ffn) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim, cfg.ffn_dim);
 
     let n1 = rmsnorm(cx, x, &w.norm1, seq_len, hidden, cfg.norm_eps);
-    let q = linear(cx, &n1, &w.wq, None, seq_len, hidden, inner);
-    let k = linear(cx, &n1, &w.wk, None, seq_len, hidden, inner);
-    let v = linear(cx, &n1, &w.wv, None, seq_len, hidden, inner);
+    let [q, k, v] = linears(cx, &n1, [&w.wq, &w.wk, &w.wv], seq_len);
     let qn = rmsnorm(cx, &q, &w.norm_q, seq_len * heads, hd, cfg.qk_norm_eps);
     let kn = rmsnorm(cx, &k, &w.norm_k, seq_len * heads, hd, cfg.qk_norm_eps);
     let attn = attention(cx, &qn, &kn, &v, seq_len, heads, hd);
-    let attn_out = linear(cx, &attn, &w.wo, None, seq_len, inner, hidden);
+    let attn_out = linear(cx, &attn, &w.wo, None, seq_len);
     let x1 = add2(cx, x, &attn_out, seq_len * hidden);
 
     let n2 = rmsnorm(cx, &x1, &w.norm2, seq_len, hidden, cfg.norm_eps);
-    let value = linear(cx, &n2, &w.fc1_value, None, seq_len, hidden, ffn);
-    let gate = linear(cx, &n2, &w.fc1_gate, None, seq_len, hidden, ffn);
+    let [value, gate] = linears(cx, &n2, [&w.fc1_value, &w.fc1_gate], seq_len);
     let act = swiglu(cx, &value, &gate, seq_len * ffn);
-    let ff_out = linear(cx, &act, &w.fc2, None, seq_len, ffn, hidden);
+    let ff_out = linear(cx, &act, &w.fc2, None, seq_len);
     add2(cx, &x1, &ff_out, seq_len * hidden)
 }
 
@@ -808,7 +793,7 @@ pub fn block_forward(
     cfg: &H3TransformerConfig,
     seq_len: u32,
 ) -> (DeviceBuffer, DeviceBuffer) {
-    let (hidden, heads, hd, inner, ffn) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim, cfg.inner_dim(), cfg.ffn_dim);
+    let (hidden, heads, hd, ffn) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim, cfg.ffn_dim);
     let half = 3 * cfg.rope_freq_dim;
 
     let tables = adaln_tables(w, temb_silu, num_timesteps, hidden as usize, cfg.time_embed_dim as usize);
@@ -821,24 +806,21 @@ pub fn block_forward(
     // attention sub-block
     let n1 = rmsnorm(cx, x, &w.norm1, seq_len, hidden, cfg.norm_eps);
     let mod1 = modulate(cx, &n1, &scale_msa, &shift_msa, seq_len * hidden);
-    let q = linear(cx, &mod1, &w.wq, None, seq_len, hidden, inner);
-    let k = linear(cx, &mod1, &w.wk, None, seq_len, hidden, inner);
-    let v = linear(cx, &mod1, &w.wv, None, seq_len, hidden, inner);
+    let [q, k, v] = linears(cx, &mod1, [&w.wq, &w.wk, &w.wv], seq_len);
     let qn = rmsnorm(cx, &q, &w.norm_q, seq_len * heads, hd, cfg.qk_norm_eps);
     let kn = rmsnorm(cx, &k, &w.norm_k, seq_len * heads, hd, cfg.qk_norm_eps);
     rope_partial(cx, &qn, cos, sin, seq_len, heads, hd, half);
     rope_partial(cx, &kn, cos, sin, seq_len, heads, hd, half);
     let attn = attention(cx, &qn, &kn, &v, seq_len, heads, hd);
-    let attn_out = linear(cx, &attn, &w.wo, None, seq_len, inner, hidden);
+    let attn_out = linear(cx, &attn, &w.wo, None, seq_len);
     let h1 = gated_residual(cx, x, &gate_msa, &attn_out, seq_len, hidden);
 
     // FFN sub-block
     let n2 = rmsnorm(cx, &h1, &w.norm2, seq_len, hidden, cfg.norm_eps);
     let mod2 = modulate(cx, &n2, &scale_mlp, &shift_mlp, seq_len * hidden);
-    let value = linear(cx, &mod2, &w.fc1_value, None, seq_len, hidden, ffn);
-    let gate = linear(cx, &mod2, &w.fc1_gate, None, seq_len, hidden, ffn);
+    let [value, gate] = linears(cx, &mod2, [&w.fc1_value, &w.fc1_gate], seq_len);
     let act = swiglu(cx, &value, &gate, seq_len * ffn);
-    let ff_out = linear(cx, &act, &w.fc2, None, seq_len, ffn, hidden);
+    let ff_out = linear(cx, &act, &w.fc2, None, seq_len);
     let out = gated_residual(cx, &h1, &gate_mlp, &ff_out, seq_len, hidden);
     (out, attn_out)
 }

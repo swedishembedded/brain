@@ -39,7 +39,7 @@ crates/ltxv/src/gguf_src.rs	1	delegating TensorSource wrapper: forwards the call
 crates/ltxv/src/pipeline.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/mimi/src/decode_stream.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/mimi/src/model.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/minimaxh3/src/block.rs	5	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
+crates/minimaxh3/src/block.rs	4	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/minimaxh3/src/import.rs	2	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/minimaxmusic3/src/condition_encoder.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/minimaxmusic3/src/depth_decoder.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)

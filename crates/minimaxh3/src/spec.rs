@@ -96,7 +96,7 @@ fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, 
 /// and the text encoder is the released Qwen3-VL checkpoint as downloaded -
 /// the same `architectures[0]` value `qwen3vl::spec` classifies by,
 /// truncated at an intermediate hidden layer by the caller
-/// (`crate::caps::build_text_encoder`), not a different architecture. Sniff
+/// (`crate::caps::encode_prompt`), not a different architecture. Sniff
 /// the directory's shards first (a directory is classified by what it
 /// holds, not by which model it belongs to), and only fall back to the
 /// config's `architectures` - the text-encoder lane - when no shard carries
@@ -125,15 +125,23 @@ fn classify_hfdir(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String
     }
 }
 
-/// The DiT's `context_embedder.weight` is `[text_dim, hidden]` row-major
-/// (PyTorch `nn.Linear` convention, `[out, in]`), so its first dimension IS
-/// `text_dim`.
+/// A diffusers pipeline root whose `model_index.json` declares the released
+/// `MiniMaxH3ModularPipeline` - the layout [`crate::caps::Paths::resolve`]
+/// maps onto its component subfolders.
+pub fn is_h3_pipeline_root(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path.join("model_index.json")) else { return false };
+    serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| v.get("_class_name").and_then(|c| c.as_str()).map(str::to_string)).as_deref() == Some("MiniMaxH3ModularPipeline")
+}
+
+/// The DiT's `context_embedder.weight` projects the text encoder's states
+/// into the DiT's width: `[hidden, text_dim]` (PyTorch `nn.Linear`'s
+/// `[out, in]`), so its second dimension IS `text_dim`.
 fn dit_text_dim(path: &Path) -> Result<usize, String> {
     let shapes = dit_shapes(path)?;
     shapes
         .iter()
         .find(|(n, _)| n == "context_embedder.weight")
-        .map(|(_, s)| s[0])
+        .and_then(|(_, s)| s.get(1).copied())
         .ok_or_else(|| format!("minimaxh3 validate: no context_embedder.weight under {}", path.display()))
 }
 
@@ -143,7 +151,7 @@ fn text_encoder_hidden(path: &Path) -> Result<usize, String> {
     let config_path = path.join("config.json");
     let bytes = std::fs::read(&config_path).map_err(|e| format!("minimaxh3 validate: reading {}: {e}", config_path.display()))?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("minimaxh3 validate: parsing {}: {e}", config_path.display()))?;
-    v.get("hidden_size")
+    brain_modelstore::resolve::language_config_field(&v, "hidden_size")
         .and_then(|x| x.as_u64())
         .map(|x| x as usize)
         .ok_or_else(|| format!("minimaxh3 validate: {} has no hidden_size", config_path.display()))
@@ -177,6 +185,13 @@ impl ArchSpec for H3Spec {
             match rec.kind {
                 ArtifactKind::Safetensors => classify_safetensors(idx, rec, &mut out),
                 ArtifactKind::HfDir => classify_hfdir(idx, rec, &mut out),
+                // The release as downloaded: its pipeline index names every
+                // component's subfolder outright, which is a declaration the
+                // loose shards inside it (block-prefixed DiT names, a VAE
+                // split across shards) cannot make one file at a time.
+                ArtifactKind::PipelineDir if is_h3_pipeline_root(&rec.path) => {
+                    out.extend(ROLES.iter().map(|role| (idx, role.to_string(), Confidence::Recorded)));
+                }
                 _ => {}
             }
         }
@@ -194,15 +209,14 @@ impl ArchSpec for H3Spec {
     }
 
     fn validate(&self, assembly: &Assembly) -> Result<(), String> {
-        let dit_path = assembly.roles.get("dit").ok_or("minimaxh3 validate: assembly has no dit role")?;
-        let te_path = assembly.roles.get("text_encoder").ok_or("minimaxh3 validate: assembly has no text_encoder role")?;
-        let text_dim = dit_text_dim(dit_path)?;
-        let hidden = text_encoder_hidden(te_path)?;
+        let dit = crate::caps::Paths::component(assembly, "dit").map_err(|e| format!("minimaxh3 validate: {e}"))?;
+        let text_encoder = crate::caps::Paths::component(assembly, "text_encoder").map_err(|e| format!("minimaxh3 validate: {e}"))?;
+        let text_dim = dit_text_dim(Path::new(&dit))?;
+        let hidden = text_encoder_hidden(Path::new(&text_encoder))?;
         if text_dim != hidden {
             return Err(format!(
                 "minimaxh3 validate: dit text_dim={text_dim} does not match text_encoder hidden size={hidden} - dit={}, text_encoder={}",
-                dit_path.display(),
-                te_path.display()
+                dit, text_encoder
             ));
         }
         Ok(())
@@ -238,7 +252,7 @@ mod tests {
             path.to_str().unwrap(),
             &[
                 ("adaln_proj.linear.weight".to_string(), vec![18, 4], vec![0.0f32; 18 * 4]),
-                ("context_embedder.weight".to_string(), vec![TEXT_DIM, HIDDEN], vec![0.0f32; (TEXT_DIM * HIDDEN) as usize]),
+                ("context_embedder.weight".to_string(), vec![HIDDEN, TEXT_DIM], vec![0.0f32; (TEXT_DIM * HIDDEN) as usize]),
             ],
             &serde_json::json!({}),
             None,
@@ -275,7 +289,10 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         // `vocab_size` matching the tokenizer fixture's 100 entries is what
         // `classify_tokenizer_role` pairs the tokenizer on (within 5%).
-        std::fs::write(dir.join("config.json"), serde_json::to_vec(&serde_json::json!({"architectures": ["Qwen3VLForConditionalGeneration"], "hidden_size": hidden, "vocab_size": 100})).unwrap()).unwrap();
+        // The released `config.json`'s own shape: the language tower's sizes
+        // live under `text_config`, beside a `vision_config`.
+        let config = serde_json::json!({"architectures": ["Qwen3VLForConditionalGeneration"], "text_config": {"hidden_size": hidden, "vocab_size": 100}, "vision_config": {"hidden_size": 8}});
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
     }
 
     fn write_tokenizer_json(path: &std::path::Path) {
@@ -409,7 +426,7 @@ mod tests {
         .unwrap();
         checkpoint::st::save_safetensors(
             dit_dir.join("shard2.safetensors").to_str().unwrap(),
-            &[("context_embedder.weight".to_string(), vec![TEXT_DIM, HIDDEN], vec![0.0f32; (TEXT_DIM * HIDDEN) as usize])],
+            &[("context_embedder.weight".to_string(), vec![HIDDEN, TEXT_DIM], vec![0.0f32; (TEXT_DIM * HIDDEN) as usize])],
             &serde_json::json!({}),
             None,
         )
@@ -478,5 +495,59 @@ mod tests {
             }
             other => panic!("expected Resolved, got {other:?}"),
         }
+    }
+    /// The release as a model-store scan actually records it: a diffusers
+    /// pipeline root (`model_index.json`, `MiniMaxH3ModularPipeline`) whose
+    /// `transformer/` and `vae/` hold loose shards with block-prefixed names -
+    /// the VAE's discriminating tensors split across two of them - beside a
+    /// complete `text_encoder/` directory and its own tokenizer copies. Every
+    /// role resolves to the pipeline's own component subfolder.
+    #[test]
+    fn a_released_pipeline_root_resolves_every_role_to_its_component() {
+        let dir = tmp("pipeline-root");
+        let root = dir.join("MiniMaxAI").join("MiniMax-H3");
+        for sub in ["transformer", "vae", "audio_vae", "tokenizer"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::fs::write(root.join("model_index.json"), serde_json::to_vec(&serde_json::json!({"_class_name": "MiniMaxH3ModularPipeline"})).unwrap()).unwrap();
+        let shard = |path: &std::path::Path, tensors: &[(&str, Vec<u64>)]| {
+            let t: Vec<(String, Vec<u64>, Vec<f32>)> = tensors.iter().map(|(n, s)| (n.to_string(), s.clone(), vec![0.0f32; s.iter().product::<u64>() as usize])).collect();
+            checkpoint::st::save_safetensors(path.to_str().unwrap(), &t, &serde_json::json!({}), None).unwrap();
+        };
+        let dit0 = root.join("transformer/diffusion_pytorch_model-00001-of-00002.safetensors");
+        let dit1 = root.join("transformer/diffusion_pytorch_model-00002-of-00002.safetensors");
+        shard(&dit0, &[("transformer_blocks.0.adaln_proj.linear.weight", vec![18, 4]), ("context_embedder.weight", vec![HIDDEN, TEXT_DIM])]);
+        shard(&dit1, &[("transformer_blocks.1.adaln_proj.linear.weight", vec![18, 4])]);
+        let vae0 = root.join("vae/diffusion_pytorch_model-00001-of-00002.safetensors");
+        let vae1 = root.join("vae/diffusion_pytorch_model-00002-of-00002.safetensors");
+        shard(&vae0, &[("encoder.conv_in.weight", vec![1, 1, 1, 1, 1])]);
+        shard(&vae1, &[("decoder.register_tokens", vec![1, 1, 1])]);
+        let voc = root.join("audio_vae/diffusion_pytorch_model.safetensors");
+        write_vocoder_safetensors(&voc);
+        let te = root.join("text_encoder");
+        write_qwen3vl_hfdir(&te, TEXT_DIM);
+        write_tokenizer_json(&te.join("tokenizer.json"));
+        write_tokenizer_json(&root.join("tokenizer/tokenizer.json"));
+
+        let mut records = vec![complete(root.clone(), ArtifactKind::PipelineDir), complete(te.clone(), ArtifactKind::HfDir)];
+        records.extend([dit0, dit1, vae0, vae1, voc].into_iter().map(|p| complete(p, ArtifactKind::Safetensors)));
+        records.push(complete(te.join("tokenizer.json"), ArtifactKind::TokenizerJson));
+        records.push(complete(root.join("tokenizer/tokenizer.json"), ArtifactKind::TokenizerJson));
+        records.push(complete(dir.join("other-vendor").join("unrelated.bin"), ArtifactKind::Opaque));
+
+        let specs: [&dyn ArchSpec; 1] = [&H3Spec];
+        match resolve("minimaxh3", &records, &specs, &BTreeMap::new()) {
+            Resolution::Resolved(a) => {
+                let paths = crate::caps::Paths::from_assembly(&a).unwrap();
+                let at = |sub: &str| root.join(sub).to_string_lossy().into_owned();
+                assert_eq!(paths.dit, at("transformer"));
+                assert_eq!(paths.video_vae, at("vae"));
+                assert_eq!(paths.vocoder, at("audio_vae"));
+                assert_eq!(paths.text_encoder, at("text_encoder"));
+                assert_eq!(paths.tokenizer, at("tokenizer"));
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

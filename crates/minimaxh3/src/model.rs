@@ -31,8 +31,14 @@
 //! models to new inference stacks, you can procure our services by sending
 //! an email to info@swedishembedded.com.
 
+use std::borrow::Cow;
+
+use gpu_core::select::Dtype;
 use gpu_core::DeviceBuffer;
 use model::hostmath::{linear_rows, silu_slice, timestep_embedding};
+use model::ops::Weight;
+use model::shard::LayerBytes;
+use model::StreamPlan;
 #[cfg(test)]
 use vae::blocks::Tensors;
 
@@ -129,98 +135,215 @@ fn build_temb(cfg: &H3TransformerConfig, timestep: &[f32], w0: &[f32], b0: &[f32
     temb
 }
 
-/// The resident, device-ready form of one loaded H3 DiT core.
-pub struct H3Transformer {
-    cfg: H3TransformerConfig,
-    ctx: Ctx,
-
-    proj_in_w: DeviceBuffer,
+/// What the embed stage reads besides its blocks: the three per-modality
+/// input projections and the token refiner. The projections stay fp32 -
+/// they are a sliver of the model and carry its inputs - while the refiner's
+/// full-width blocks take the stack's tier.
+#[derive(Clone)]
+pub struct EmbedWeights {
+    proj_in_w: Weight,
     proj_in_b: DeviceBuffer,
-    audio_proj_in_w: DeviceBuffer,
+    audio_proj_in_w: Weight,
     audio_proj_in_b: DeviceBuffer,
-    context_embedder_w: DeviceBuffer,
+    context_embedder_w: Weight,
     context_embedder_b: DeviceBuffer,
-
-    time_w0: Vec<f32>,
-    time_b0: Vec<f32>,
-    time_w2: Vec<f32>,
-    time_b2: Vec<f32>,
-
     refiner_blocks: Vec<RefinerBlockWeights>,
     refiner_final_norm: DeviceBuffer,
+}
 
-    blocks: Vec<BlockWeights>,
+impl EmbedWeights {
+    fn load(tensors: &dyn checkpoint::TensorSource, cx: &Ctx, cfg: &H3TransformerConfig, tier: Dtype) -> EmbedWeights {
+        let hidden = cfg.hidden_size;
+        let dev = |name: &str| block::load_dev(tensors, cx, name);
+        let lin = |name: &str, k: u32| block::load_linear(tensors, cx, name, hidden, k, Dtype::F32);
+        EmbedWeights {
+            proj_in_w: lin("proj_in.weight", cfg.video_patch_dim()),
+            proj_in_b: dev("proj_in.bias"),
+            audio_proj_in_w: lin("audio_proj_in.weight", cfg.audio_in_channels),
+            audio_proj_in_b: dev("audio_proj_in.bias"),
+            context_embedder_w: lin("context_embedder.weight", cfg.text_dim),
+            context_embedder_b: dev("context_embedder.bias"),
+            refiner_blocks: (0..cfg.num_refiner_layers as usize).map(|i| block::load_refiner_block(tensors, cx, i, cfg, tier)).collect(),
+            refiner_final_norm: dev("token_refiner.final_norm.weight"),
+        }
+    }
+}
 
+/// What the head stage reads after the stack: `norm_out` (its projection on
+/// the host, split per forward into shift/scale) and the two output heads,
+/// fp32 for the same reason as [`EmbedWeights`]' projections.
+#[derive(Clone)]
+pub struct HeadWeights {
     norm_out_norm: DeviceBuffer,
-    /// `norm_out.linear.weight`, `[2*hidden, time_embed_dim]` row-major
-    /// (host; split at forward time into `shift`/`scale` row halves,
-    /// mirroring `crate::block::adaln_tables`'s own per-forward host
-    /// projection).
+    /// `norm_out.linear.weight`, `[2*hidden, time_embed_dim]` row-major.
     norm_out_linear_w: Vec<f32>,
     norm_out_linear_b: Vec<f32>,
-
-    proj_out_w: DeviceBuffer,
+    proj_out_w: Weight,
     proj_out_b: DeviceBuffer,
-    audio_proj_out_w: DeviceBuffer,
+    audio_proj_out_w: Weight,
     audio_proj_out_b: DeviceBuffer,
 }
 
-impl H3Transformer {
-    /// Load every weight `forward` needs from a [`checkpoint::TensorSource`]
-    /// (a streaming [`checkpoint::weightio::WeightReader`], or the eager
-    /// `Tensors` map every existing caller already had - it implements the
-    /// trait, so this widened signature is a strict superset, not a breaking
-    /// change), named after the reference module's own attribute paths
-    /// (`proj_in.weight`, `transformer_blocks.{i}.attn.to_q.weight`,
-    /// `token_refiner.refiner_blocks.{i}.norm1.weight`, ...) - see
-    /// `tools/goldens/minimaxh3_dit_dump_reference.py` for the dump that produces
-    /// exactly this naming.
-    ///
-    /// **Streams, does not materialize the whole checkpoint first**: this
-    /// model is ~33B params (bf16 on disk), the same eager-`read_model_dir`
-    /// mistake `qwen3vl::Qwen3Vl::from_hf` used to make would cost ~132GB
-    /// just for the source before this function uploads a single byte (that
-    /// exact mistake measurably OOMed a 150GB container cap on the
-    /// text encoder before it was fixed the same way). Each tensor is
-    /// fetched, uploaded,
-    /// and `advise_drop`-ped before the next is read - peak host cost from
-    /// THIS function is one tensor's transient plus whatever `ctx.upload`
-    /// leaves resident (currently always fp32 - `Ctx::upload` has no
-    /// reduced-precision tier yet, unlike `qwen3::model::Weight::upload`;
-    /// see the roadmap's own recorded gap for that follow-up).
-    pub fn load(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, device: Option<&str>) -> H3Transformer {
-        let ctx = Ctx::new(device);
-        let dev = |name: &str| block::load_dev(tensors, &ctx, name);
-        let host = |name: &str| block::load_host(tensors, name);
-        let (hidden, ffn) = (cfg.hidden_size, cfg.ffn_dim);
-
-        let refiner_blocks: Vec<RefinerBlockWeights> = (0..cfg.num_refiner_layers as usize).map(|i| block::load_refiner_block(tensors, &ctx, i, hidden, ffn)).collect();
-        let blocks: Vec<BlockWeights> = (0..cfg.num_layers as usize).map(|i| block::load_block(tensors, &ctx, i, hidden, ffn)).collect();
-
-        H3Transformer {
-            proj_in_w: dev("proj_in.weight"),
-            proj_in_b: dev("proj_in.bias"),
-            audio_proj_in_w: dev("audio_proj_in.weight"),
-            audio_proj_in_b: dev("audio_proj_in.bias"),
-            context_embedder_w: dev("context_embedder.weight"),
-            context_embedder_b: dev("context_embedder.bias"),
-            time_w0: host("time_embedder.linear_1.weight"),
-            time_b0: host("time_embedder.linear_1.bias"),
-            time_w2: host("time_embedder.linear_2.weight"),
-            time_b2: host("time_embedder.linear_2.bias"),
-            refiner_blocks,
-            refiner_final_norm: dev("token_refiner.final_norm.weight"),
-            blocks,
+impl HeadWeights {
+    fn load(tensors: &dyn checkpoint::TensorSource, cx: &Ctx, cfg: &H3TransformerConfig) -> HeadWeights {
+        let hidden = cfg.hidden_size;
+        let dev = |name: &str| block::load_dev(tensors, cx, name);
+        HeadWeights {
             norm_out_norm: dev("norm_out.norm.weight"),
-            norm_out_linear_w: host("norm_out.linear.weight"),
-            norm_out_linear_b: host("norm_out.linear.bias"),
-            proj_out_w: dev("proj_out.weight"),
+            norm_out_linear_w: block::load_host(tensors, "norm_out.linear.weight"),
+            norm_out_linear_b: block::load_host(tensors, "norm_out.linear.bias"),
+            proj_out_w: block::load_linear(tensors, cx, "proj_out.weight", cfg.video_patch_dim(), hidden, Dtype::F32),
             proj_out_b: dev("proj_out.bias"),
-            audio_proj_out_w: dev("audio_proj_out.weight"),
+            audio_proj_out_w: block::load_linear(tensors, cx, "audio_proj_out.weight", cfg.audio_in_channels, hidden, Dtype::F32),
             audio_proj_out_b: dev("audio_proj_out.bias"),
-            cfg,
-            ctx,
         }
+    }
+}
+
+/// `time_embedder`'s two linears, host-side (see [`build_temb`]).
+#[derive(Clone)]
+pub struct TimeWeights {
+    w0: Vec<f32>,
+    b0: Vec<f32>,
+    w2: Vec<f32>,
+    b2: Vec<f32>,
+}
+
+impl TimeWeights {
+    fn load(tensors: &dyn checkpoint::TensorSource) -> TimeWeights {
+        let host = |name: &str| block::load_host(tensors, name);
+        TimeWeights { w0: host("time_embedder.linear_1.weight"), b0: host("time_embedder.linear_1.bias"), w2: host("time_embedder.linear_2.weight"), b2: host("time_embedder.linear_2.bias") }
+    }
+}
+
+/// Where one forward finds its weights. The resident [`H3Transformer`] lends
+/// what it holds; [`Streamed`] reads each piece as the forward reaches it, so
+/// at most one block's weights are on a card at a time.
+trait StageWeights {
+    fn time(&self) -> Cow<'_, TimeWeights>;
+    fn embed(&self, cx: &Ctx) -> Cow<'_, EmbedWeights>;
+    fn block(&self, i: usize, cx: &Ctx) -> Cow<'_, BlockWeights>;
+    fn head(&self, cx: &Ctx) -> Cow<'_, HeadWeights>;
+}
+
+/// [`StageWeights`] read off the checkpoint at fp32 as the forward goes.
+struct Streamed<'a> {
+    tensors: &'a dyn checkpoint::TensorSource,
+    cfg: &'a H3TransformerConfig,
+}
+
+impl StageWeights for Streamed<'_> {
+    fn time(&self) -> Cow<'_, TimeWeights> {
+        Cow::Owned(TimeWeights::load(self.tensors))
+    }
+    fn embed(&self, cx: &Ctx) -> Cow<'_, EmbedWeights> {
+        Cow::Owned(EmbedWeights::load(self.tensors, cx, self.cfg, Dtype::F32))
+    }
+    fn block(&self, i: usize, cx: &Ctx) -> Cow<'_, BlockWeights> {
+        Cow::Owned(block::load_block_streaming(self.tensors, cx, i, self.cfg))
+    }
+    fn head(&self, cx: &Ctx) -> Cow<'_, HeadWeights> {
+        Cow::Owned(HeadWeights::load(self.tensors, cx, self.cfg))
+    }
+}
+
+/// The DiT held resident for every forward it serves, its block stack placed
+/// over as many cards as hold it - the shape a denoise loop wants, since every
+/// step reads every weight. [`H3Transformer::forward_streaming`] is the
+/// placement for a machine whose cards cannot hold it.
+pub struct H3Transformer {
+    cfg: H3TransformerConfig,
+    plan: StreamPlan,
+    stages: Vec<Ctx>,
+    time: TimeWeights,
+    embed: EmbedWeights,
+    blocks: Vec<BlockWeights>,
+    head: HeadWeights,
+}
+
+impl StageWeights for H3Transformer {
+    fn time(&self) -> Cow<'_, TimeWeights> {
+        Cow::Borrowed(&self.time)
+    }
+    fn embed(&self, _cx: &Ctx) -> Cow<'_, EmbedWeights> {
+        Cow::Borrowed(&self.embed)
+    }
+    fn block(&self, i: usize, _cx: &Ctx) -> Cow<'_, BlockWeights> {
+        Cow::Borrowed(&self.blocks[i])
+    }
+    fn head(&self, _cx: &Ctx) -> Cow<'_, HeadWeights> {
+        Cow::Borrowed(&self.head)
+    }
+}
+
+/// Device bytes of one block's packed linears at `tier` plus its norms.
+fn block_bytes(cfg: &H3TransformerConfig, tier: Dtype) -> u64 {
+    let (hidden, inner, ffn) = (cfg.hidden_size as usize, cfg.inner_dim() as usize, cfg.ffn_dim as usize);
+    let linears = 3 * Weight::bytes_for(tier, inner, hidden) + Weight::bytes_for(tier, hidden, inner) + 2 * Weight::bytes_for(tier, ffn, hidden) + Weight::bytes_for(tier, hidden, ffn);
+    linears + (2 * hidden + 2 * cfg.attention_head_dim as usize) as u64 * 4
+}
+
+/// Peak transient device bytes one block's forward allocates over `rows`
+/// packed rows: the residual and its normed/modulated copies and six gathered
+/// AdaLN rows at `hidden`, q/k/v and the attention output at `inner`, and the
+/// SwiGLU's value, gate and product at `ffn`.
+pub fn block_workspace_bytes(cfg: &H3TransformerConfig, rows: u32) -> u64 {
+    let (hidden, inner, ffn) = (cfg.hidden_size as u64, cfg.inner_dim() as u64, cfg.ffn_dim as u64);
+    rows as u64 * (12 * hidden + 6 * inner + 3 * ffn) * 4
+}
+
+/// The resident model's per-card cost at `tier`: the block stack, the embed
+/// stage's projections and refiner, and the head stage's output projections.
+pub fn resident_cost(cfg: &H3TransformerConfig, tier: Dtype) -> LayerBytes {
+    let hidden = cfg.hidden_size as usize;
+    let fp32 = |n: usize, k: usize| Weight::bytes_for(Dtype::F32, n, k) + n as u64 * 4;
+    let embed = fp32(hidden, cfg.video_patch_dim() as usize) + fp32(hidden, cfg.audio_in_channels as usize) + fp32(hidden, cfg.text_dim as usize) + cfg.num_refiner_layers as u64 * block_bytes(cfg, tier);
+    let head = fp32(cfg.video_patch_dim() as usize, hidden) + fp32(cfg.audio_in_channels as usize, hidden) + hidden as u64 * 4;
+    LayerBytes { per_layer: vec![block_bytes(cfg, tier); cfg.num_layers as usize], embed, head }
+}
+
+impl H3Transformer {
+    /// Hold the DiT resident at linear tier `tier`, over the fewest cards
+    /// `device` may schedule that hold it while keeping `rows` packed rows of
+    /// forward workspace free on each. `Err` when no combination of them
+    /// does, or when the cards cannot run `tier` - the caller streams instead
+    /// ([`Self::forward_streaming`]).
+    pub fn load(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, device: Option<&str>, tier: Dtype, rows: u32) -> Result<H3Transformer, String> {
+        let reserve = block_workspace_bytes(&cfg, rows) + CARD_RESERVE_BYTES;
+        let cards = StreamPlan::cards(device, reserve);
+        let cost = resident_cost(&cfg, tier);
+        let plan = StreamPlan::fit(&cost, &cards).ok_or_else(|| format!("minimaxh3: the DiT at {tier:?} is {} bytes, which no combination of the schedulable cards holds with {rows}-row workspace free (usable bytes {cards:?})", cost.total()))?;
+        H3Transformer::load_on(tensors, cfg, plan, device, tier)
+    }
+
+    /// [`Self::load`] over the caller's own plan - what a test pinning the
+    /// placement (one stage on the CPU, a forced split) uses.
+    pub fn load_on(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, plan: StreamPlan, device: Option<&str>, tier: Dtype) -> Result<H3Transformer, String> {
+        tracing::info!(plan = %plan.describe(), ?tier, "minimaxh3 resident DiT placement");
+        let mut stages = Vec::with_capacity(plan.n_stages());
+        let mut blocks = Vec::with_capacity(cfg.num_layers as usize);
+        let mut embed = None;
+        let mut head = None;
+        for (s, shard) in plan.stages().iter().enumerate() {
+            let cx = plan.open_stage(s, || Ctx::new(device))?;
+            for i in shard.start..shard.end {
+                let w = block::load_block(tensors, &cx, i, &cfg, tier);
+                if w.wq.dtype() != tier {
+                    return Err(format!("minimaxh3: {tier:?} weights landed as {:?} on stage {s} - this card cannot run the requested tier", w.wq.dtype()));
+                }
+                blocks.push(w);
+            }
+            if shard.embed {
+                embed = Some(EmbedWeights::load(tensors, &cx, &cfg, tier));
+            }
+            if shard.head {
+                head = Some(HeadWeights::load(tensors, &cx, &cfg));
+            }
+            stages.push(cx);
+        }
+        let embed = embed.ok_or("minimaxh3: the plan has no embed stage")?;
+        let head = head.ok_or("minimaxh3: the plan has no head stage")?;
+        Ok(H3Transformer { time: TimeWeights::load(tensors), cfg, plan, stages, embed, blocks, head })
     }
 
     pub fn config(&self) -> &H3TransformerConfig {
@@ -230,7 +353,7 @@ impl H3Transformer {
     /// `MiniMaxH3Transformer3DModel.forward`, at batch size 1 (see this
     /// module's own doc).
     pub fn forward(&self, inp: &PackedInputs) -> H3Output {
-        self.forward_full(inp).0
+        self.forward_with_taps(inp).0
     }
 
     /// [`Self::forward`], plus the intermediate parity taps
@@ -240,324 +363,140 @@ impl H3Transformer {
     /// own entry point, so a mismatch localizes to the first tap it breaks
     /// rather than only showing up in the final output.
     pub fn forward_with_taps(&self, inp: &PackedInputs) -> (H3Output, H3Taps) {
-        self.forward_full(inp)
+        forward_core(&self.cfg, &self.plan, &|s| &self.stages[s], self, inp)
     }
 
-    /// [`Self::forward_with_taps`] WITHOUT ever building a resident
-    /// [`H3Transformer`] - no `Vec<BlockWeights>` for all `num_layers`
-    /// blocks is ever alive at once. Loads (via
-    /// [`block::load_block_streaming`]) one block's weights into a set of
-    /// device buffers reused across every block AND every denoise step,
-    /// runs it, then overwrites those same buffers with the next block's
-    /// weights.
-    ///
-    /// This exists for exactly one reason: a real-weight VALIDATION run
-    /// that only checks a handful of tap points (block 0, a middle block,
-    /// the last block, the final output) has no business holding the whole
-    /// ~132GB fp32 model resident to reach them - peak host cost here is
-    /// ONE block's weights (~2.6GB at real dimensions) plus the small
-    /// always-resident pieces (input/output projections, refiner, time
-    /// embedder - hundreds of MB), not the whole model. See
-    /// `model::tests::dit_matches_the_real_reference_numerically_layer_by_layer`,
-    /// the caller this was built for.
-    ///
-    /// Deliberately a SEPARATE implementation from [`Self::forward_full`]
-    /// rather than a refactor of it into one shared code path: the two
-    /// differ only in where block weights come from (already-resident
-    /// `&self.blocks` vs. freshly streamed-and-dropped per index), but
-    /// unifying that behind one abstraction over "owned vs. borrowed
-    /// `BlockWeights`" was judged a bigger, riskier change to the
-    /// already-working resident-serving path than the two implementations'
-    /// duplication costs - if `forward_full`'s math ever changes, this
-    /// function's own doc (this comment) is the reminder to check whether
-    /// the same change belongs here too.
-    /// [`Self::forward_streaming_with_taps`] without the taps - `pipeline::
-    /// generate`'s own real (non-"hot"/resident) denoise loop calls this once
-    /// per step, since nothing there consumes intermediate taps and there is
-    /// no resident model to call [`Self::forward`] on. This is what lets
-    /// `device` name a real GPU for a real generation at all: the eager
-    /// [`Self::load`] path this replaces needs every block's weights
-    /// resident at once (~132GB fp32), which fits in this host's RAM but no
-    /// single GPU's VRAM on this box; streaming caps the per-step footprint
-    /// at one block's weights (~2.6GB at real dimensions) regardless of
-    /// which device runs the compute.
+    /// One forward WITHOUT a resident model: each stage of `dit`'s plan
+    /// reads its own blocks off `tensors` one at a time, into device buffers
+    /// reused across every block AND every denoise step
+    /// ([`block::load_block_streaming`]), so a card never holds more than one
+    /// block's fp32 weights (~2.6 GB at the real dimensions).
     ///
     /// Takes an ALREADY-OPEN [`StreamingDit`], never a device string - a
     /// caller driving a real multi-step denoise loop must open the devices
     /// ONCE outside the loop and reuse them every step. A real-weight 384x384/
-    /// 16-step generation OOM'd a 24GB P40 when this instead called
-    /// `Ctx::new(device)` internally on every step (opening 16 separate wgpu
-    /// devices in sequence, with no guarantee the previous one's resources
-    /// were reclaimed before the next opened) - the fix is structural, not a
-    /// tighter memory budget: one device per stage, reused.
+    /// 16-step generation OOM'd a 24GB P40 when this instead opened a fresh
+    /// device per step: wgpu gives no guarantee the previous one's resources
+    /// are reclaimed before the next opens.
     pub fn forward_streaming(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, dit: &StreamingDit, inp: &PackedInputs) -> H3Output {
         Self::forward_streaming_with_taps(tensors, cfg, dit, inp).0
     }
 
-    /// The block stack runs across `dit`'s stages - one contiguous block
-    /// range per physical card (`crate::dit_shard`). Only the residual stream
-    /// crosses a stage boundary, host-staged (`gpu.read` on one stage,
-    /// `Ctx::upload` on the next): an f32 round trip through host memory is
-    /// lossless, so a split plan computes bit-identical numbers to the
-    /// single-stage one and changes only where the work happens.
+    /// [`Self::forward_streaming`] with [`Self::forward_with_taps`]'s taps.
     pub fn forward_streaming_with_taps(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, dit: &StreamingDit, inp: &PackedInputs) -> (H3Output, H3Taps) {
-        let host = |name: &str| block::load_host(tensors, name);
-        let hidden = cfg.hidden_size;
-
-        let seq_len = (inp.position_ids.len() / 3) as u32;
-        assert_eq!(inp.token_tags.len(), seq_len as usize, "forward_streaming: token_tags must be [seq_len]");
-        assert_eq!(inp.timestep_indices.len(), seq_len as usize, "forward_streaming: timestep_indices must be [seq_len]");
-        let num_video = inp.video_indices.len() as u32;
-        let num_audio = inp.audio_indices.len() as u32;
-        let num_text = inp.text_indices.len() as u32;
-        let num_timesteps = inp.timestep.len();
-
-        // Everything computed on the HOST is stage-independent and computed
-        // once: the RoPE tables and the timestep embedding are functions of
-        // the layout and the step's scalars, not of any card's state. Each
-        // stage uploads its own copy of the device-side tables it needs -
-        // the same "some weights are replicated per stage, only the residual
-        // crosses the wire" shape `minimaxmusic3::dit_shard` uses for its own
-        // timestep token.
-        let rope_tables = rope::build_tables(cfg, inp.position_ids);
-        let time_w0 = host("time_embedder.linear_1.weight");
-        let time_b0 = host("time_embedder.linear_1.bias");
-        let time_w2 = host("time_embedder.linear_2.weight");
-        let time_b2 = host("time_embedder.linear_2.bias");
-        let temb = build_temb(cfg, inp.timestep, &time_w0, &time_b0, &time_w2, &time_b2);
-        let temb_silu = silu_slice(&temb);
-        // Row -> this port's own AdaLN table address.
-        let adaln_idx = adaln_indices(inp.token_tags, inp.timestep_indices, num_timesteps);
-
-        let n_layers = cfg.num_layers as usize;
-        let mid_block_index = n_layers / 2;
-        let last_block_index = n_layers - 1;
-        let mut tap_refiner_out: Vec<f32> = Vec::new();
-        let mut tap_block0_input: Vec<f32> = Vec::new();
-        let mut tap_block0_attn_out: Vec<f32> = Vec::new();
-        let mut tap_block0_out: Vec<f32> = Vec::new();
-        let mut tap_mid_block_out: Vec<f32> = Vec::new();
-        let mut tap_last_block_out: Vec<f32> = Vec::new();
-        // The residual stream between two stages, host-staged - the ONLY
-        // value that crosses a cut.
-        let mut carry: Option<Vec<f32>> = None;
-        let mut output: Option<H3Output> = None;
-
-        for (s, shard) in dit.plan().stages().iter().enumerate() {
-            let cx = dit.stage(s);
-            let dev = |name: &str| block::load_dev(tensors, cx, name);
-            // Per-stage copies of the tables the block loop reads. A stage
-            // with no blocks of its own (a plan may put the endpoint weights
-            // alone on a card) never uploads them.
-            let block_tables = (shard.end > shard.start).then(|| (cx.upload(&rope_tables.cos), cx.upload(&rope_tables.sin), cx.upload_u32(&adaln_idx)));
-            // The modality row indices are read by the input scatter (embed
-            // stage) and the output gather (head stage); a middle stage never
-            // touches them.
-            let modality_idx = (shard.embed || shard.head).then(|| (cx.upload_u32(inp.video_indices), cx.upload_u32(inp.audio_indices)));
-
-            let mut h = if shard.embed {
-                // 1. Per-modality input projections (video/audio directly;
-                // text through the token refiner) - small weights, held only
-                // by this stage.
-                let proj_in_w = dev("proj_in.weight");
-                let proj_in_b = dev("proj_in.bias");
-                let audio_proj_in_w = dev("audio_proj_in.weight");
-                let audio_proj_in_b = dev("audio_proj_in.bias");
-                let context_embedder_w = dev("context_embedder.weight");
-                let context_embedder_b = dev("context_embedder.bias");
-                let refiner_blocks: Vec<RefinerBlockWeights> = (0..cfg.num_refiner_layers as usize).map(|i| block::load_refiner_block(tensors, cx, i, hidden, cfg.ffn_dim)).collect();
-                let refiner_final_norm = dev("token_refiner.final_norm.weight");
-
-                let video_in = cx.upload(inp.hidden_states);
-                let video_embeds = block::linear(cx, &video_in, &proj_in_w, Some(&proj_in_b), num_video, cfg.video_patch_dim(), hidden);
-                let audio_in = cx.upload(inp.audio_hidden_states);
-                let audio_embeds = block::linear(cx, &audio_in, &audio_proj_in_w, Some(&audio_proj_in_b), num_audio, cfg.audio_in_channels, hidden);
-                let text_in = cx.upload(inp.encoder_hidden_states);
-                let mut text_embeds = block::linear(cx, &text_in, &context_embedder_w, Some(&context_embedder_b), num_text, cfg.text_dim, hidden);
-                for w in &refiner_blocks {
-                    text_embeds = block::refiner_block_forward(cx, w, &text_embeds, cfg, num_text);
-                }
-                let text_embeds = block::rmsnorm(cx, &text_embeds, &refiner_final_norm, num_text, hidden, cfg.final_norm_eps);
-                tap_refiner_out = cx.gpu.read(&text_embeds, (num_text * hidden) as usize);
-
-                // 2. Scatter every modality's projected rows into the packed
-                // sequence buffer (`index_copy` in the reference).
-                let hidden_states = cx.gpu.storage((seq_len * hidden) as u64);
-                cx.gpu.write_f32(&hidden_states, &vec![0f32; (seq_len * hidden) as usize]);
-                let text_idx = cx.upload_u32(inp.text_indices);
-                let (video_idx, audio_idx) = modality_idx.as_ref().expect("the embed stage uploads the modality indices");
-                block::row_scatter(cx, &text_idx, &text_embeds, &hidden_states, num_text, hidden, seq_len);
-                block::row_scatter(cx, video_idx, &video_embeds, &hidden_states, num_video, hidden, seq_len);
-                block::row_scatter(cx, audio_idx, &audio_embeds, &hidden_states, num_audio, hidden, seq_len);
-                hidden_states
-            } else {
-                cx.upload(&carry.take().expect("forward_streaming: a non-embed stage needs the previous stage's residual"))
-            };
-
-            // 3. This stage's own slice of the block stack - ONE block's
-            // weights resident at a time, on this stage's card.
-            if shard.owns(0) {
-                tap_block0_input = cx.gpu.read(&h, (seq_len * hidden) as usize);
-            }
-            for i in shard.start..shard.end {
-                let (cos, sin, adaln_idx_dev) = block_tables.as_ref().expect("a stage with blocks uploads its own RoPE/AdaLN tables");
-                let w = block::load_block_streaming(tensors, cx, i, hidden, cfg.ffn_dim);
-                let (out, attn_out) = block::block_forward(cx, &w, &h, adaln_idx_dev, cos, sin, &temb_silu, num_timesteps, cfg, seq_len);
-                if i == 0 {
-                    tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
-                    tap_block0_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
-                }
-                if i == mid_block_index {
-                    tap_mid_block_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
-                }
-                if i == last_block_index {
-                    tap_last_block_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
-                }
-                h = out;
-                // `w`'s device buffers are REUSED across blocks (see
-                // `block::load_block_streaming`'s doc), not freshly allocated
-                // and dropped each iteration, so this call is not about
-                // reclaiming per-block weight buffers - it still matters for
-                // `out`/`attn_out`/`h`'s own allocations (one fresh buffer
-                // per block for the block's output) and for the intermediate
-                // scratch buffers `block_forward` allocates internally, which
-                // are NOT pooled and must still be proven-finished before
-                // wgpu can recycle them. `poll_wait` is a no-op on the CPU
-                // backend (`backend_cpu::CpuBackend::poll_wait`, `HashMap`-
-                // backed buffers need no such proof), so this costs nothing
-                // there.
-                cx.gpu.poll_wait();
-            }
-
-            if !shard.head {
-                // Hand the residual to the next card through host memory -
-                // lossless for f32, so the split changes placement, not math.
-                carry = Some(cx.gpu.read(&h, (seq_len * hidden) as usize));
-                cx.gpu.poll_wait();
-                continue;
-            }
-
-            // 4. norm_out (per-TIMESTEP shift+scale only, no gate, no
-            // modality axis) then the two output heads, run over every row,
-            // rows of each modality selected after.
-            let norm_out_norm = dev("norm_out.norm.weight");
-            let norm_out_linear_w = host("norm_out.linear.weight");
-            let norm_out_linear_b = host("norm_out.linear.bias");
-            let proj_out_w = dev("proj_out.weight");
-            let proj_out_b = dev("proj_out.bias");
-            let audio_proj_out_w = dev("audio_proj_out.weight");
-            let audio_proj_out_b = dev("audio_proj_out.bias");
-
-            let shift_w = &norm_out_linear_w[..(hidden * cfg.time_embed_dim) as usize];
-            let scale_w = &norm_out_linear_w[(hidden * cfg.time_embed_dim) as usize..];
-            let shift_b = &norm_out_linear_b[..hidden as usize];
-            let scale_b = &norm_out_linear_b[hidden as usize..];
-            let shift_tbl = linear1_rows(&temb_silu, shift_w, shift_b, num_timesteps, cfg.time_embed_dim as usize, hidden as usize);
-            let scale_tbl = linear1_rows(&temb_silu, scale_w, scale_b, num_timesteps, cfg.time_embed_dim as usize, hidden as usize);
-            let shift_dev = cx.upload(&shift_tbl);
-            let scale_dev = cx.upload(&scale_tbl);
-            let ts_idx_dev = cx.upload_u32(inp.timestep_indices);
-            let shift_g = block::gather_rows(cx, &ts_idx_dev, &shift_dev, seq_len, hidden);
-            let scale_g = block::gather_rows(cx, &ts_idx_dev, &scale_dev, seq_len, hidden);
-            let normed = block::rmsnorm(cx, &h, &norm_out_norm, seq_len, hidden, cfg.final_norm_eps);
-            let modulated = block::modulate(cx, &normed, &scale_g, &shift_g, seq_len * hidden);
-
-            let video_patch_dim = cfg.video_patch_dim();
-            let video_full = block::linear(cx, &modulated, &proj_out_w, Some(&proj_out_b), seq_len, hidden, video_patch_dim);
-            let audio_full = block::linear(cx, &modulated, &audio_proj_out_w, Some(&audio_proj_out_b), seq_len, hidden, cfg.audio_in_channels);
-            let (video_idx, audio_idx) = modality_idx.as_ref().expect("the head stage uploads the modality indices");
-            let video_out = block::gather_rows(cx, video_idx, &video_full, num_video, video_patch_dim);
-            let audio_out = block::gather_rows(cx, audio_idx, &audio_full, num_audio, cfg.audio_in_channels);
-
-            output = Some(H3Output { video: cx.gpu.read(&video_out, (num_video * video_patch_dim) as usize), audio: cx.gpu.read(&audio_out, (num_audio * cfg.audio_in_channels) as usize) });
-
-            // Same reasoning as the per-block poll_wait above, but for the
-            // "outer" buffers allocated once per call (norm_out/proj_out
-            // weights, shift/scale tables, gather results) rather than once
-            // per block: this function runs once per denoising step, so
-            // without a final reclaim point these residual buffers compound
-            // step over step even though the per-block leak is already
-            // handled above (measured: a 384x384/16-step generation still
-            // OOM'd, later than before the per-block fix but not fixed).
-            cx.gpu.poll_wait();
-        }
-
-        let output = output.expect("forward_streaming: the plan must have a head stage");
-        let taps = H3Taps {
-            refiner_out: tap_refiner_out,
-            rope_cos: rope_tables.cos,
-            rope_sin: rope_tables.sin,
-            temb: temb.clone(),
-            block0_input: tap_block0_input,
-            block0_attn_out: tap_block0_attn_out,
-            block0_out: tap_block0_out,
-            mid_block_out: tap_mid_block_out,
-            mid_block_index,
-            last_block_out: tap_last_block_out,
-        };
-        (output, taps)
+        forward_core(cfg, dit.plan(), &|s| dit.stage(s), &Streamed { tensors, cfg }, inp)
     }
+}
 
-    fn forward_full(&self, inp: &PackedInputs) -> (H3Output, H3Taps) {
-        let cfg = &self.cfg;
-        let cx = &self.ctx;
-        let hidden = cfg.hidden_size;
-        let seq_len = (inp.position_ids.len() / 3) as u32;
-        assert_eq!(inp.token_tags.len(), seq_len as usize, "forward: token_tags must be [seq_len]");
-        assert_eq!(inp.timestep_indices.len(), seq_len as usize, "forward: timestep_indices must be [seq_len]");
-        let num_video = inp.video_indices.len() as u32;
-        let num_audio = inp.audio_indices.len() as u32;
-        let num_text = inp.text_indices.len() as u32;
-        let num_timesteps = inp.timestep.len();
+/// The scratch arenas a forward's two repeating sequences replay: the block
+/// stack's and the token refiner's (a different row count, so its own slots).
+const BLOCK_ARENA: &str = "minimaxh3 block";
+const REFINER_ARENA: &str = "minimaxh3 refiner";
 
-        // 1. Per-modality input projections (video/audio directly; text
-        // through the token refiner).
-        let video_in = cx.upload(inp.hidden_states);
-        let video_embeds = block::linear(cx, &video_in, &self.proj_in_w, Some(&self.proj_in_b), num_video, cfg.video_patch_dim(), hidden);
-        let audio_in = cx.upload(inp.audio_hidden_states);
-        let audio_embeds = block::linear(cx, &audio_in, &self.audio_proj_in_w, Some(&self.audio_proj_in_b), num_audio, cfg.audio_in_channels, hidden);
-        let text_in = cx.upload(inp.encoder_hidden_states);
-        let mut text_embeds = block::linear(cx, &text_in, &self.context_embedder_w, Some(&self.context_embedder_b), num_text, cfg.text_dim, hidden);
-        for w in &self.refiner_blocks {
-            text_embeds = block::refiner_block_forward(cx, w, &text_embeds, cfg, num_text);
+/// Per card, what resident placement keeps free beyond a forward's workspace:
+/// the driver's own allocations and the allocator's slack.
+const CARD_RESERVE_BYTES: u64 = 1 << 30;
+
+/// The one forward body: the block stack runs across `plan`'s stages, one
+/// contiguous block range per card. Only the residual stream crosses a stage
+/// boundary, host-staged (`gpu.read` on one stage, `Ctx::upload` on the
+/// next): an f32 round trip through host memory is lossless, so a split plan
+/// computes bit-identical numbers to the single-stage one and changes only
+/// where the work happens.
+fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn(usize) -> &'c Ctx, weights: &dyn StageWeights, inp: &PackedInputs) -> (H3Output, H3Taps) {
+    let hidden = cfg.hidden_size;
+    let seq_len = (inp.position_ids.len() / 3) as u32;
+    assert_eq!(inp.token_tags.len(), seq_len as usize, "forward: token_tags must be [seq_len]");
+    assert_eq!(inp.timestep_indices.len(), seq_len as usize, "forward: timestep_indices must be [seq_len]");
+    let num_video = inp.video_indices.len() as u32;
+    let num_audio = inp.audio_indices.len() as u32;
+    let num_text = inp.text_indices.len() as u32;
+    let num_timesteps = inp.timestep.len();
+
+    // Everything computed on the HOST is stage-independent and computed once:
+    // the RoPE tables and the timestep embedding are functions of the layout
+    // and the step's scalars, not of any card's state. Each stage uploads its
+    // own copy of the device-side tables it needs.
+    let rope_tables = rope::build_tables(cfg, inp.position_ids);
+    let time = weights.time();
+    let temb = build_temb(cfg, inp.timestep, &time.w0, &time.b0, &time.w2, &time.b2);
+    let temb_silu = silu_slice(&temb);
+    // Row -> this port's own AdaLN table address.
+    let adaln_idx = adaln_indices(inp.token_tags, inp.timestep_indices, num_timesteps);
+
+    let n_layers = cfg.num_layers as usize;
+    let mid_block_index = n_layers / 2;
+    let last_block_index = n_layers - 1;
+    let mut tap_refiner_out: Vec<f32> = Vec::new();
+    let mut tap_block0_input: Vec<f32> = Vec::new();
+    let mut tap_block0_attn_out: Vec<f32> = Vec::new();
+    let mut tap_block0_out: Vec<f32> = Vec::new();
+    let mut tap_mid_block_out: Vec<f32> = Vec::new();
+    let mut tap_last_block_out: Vec<f32> = Vec::new();
+    // The residual stream between two stages, host-staged - the ONLY value
+    // that crosses a cut.
+    let mut carry: Option<Vec<f32>> = None;
+    let mut output: Option<H3Output> = None;
+
+    for (s, shard) in plan.stages().iter().enumerate() {
+        let cx = stage(s);
+        // A stage with no blocks of its own (a plan may put the endpoint
+        // weights alone on a card) never uploads the block tables.
+        let block_tables = (shard.end > shard.start).then(|| (cx.upload(&rope_tables.cos), cx.upload(&rope_tables.sin), cx.upload_u32(&adaln_idx)));
+        // The modality row indices are read by the input scatter (embed
+        // stage) and the output gather (head stage); a middle stage never
+        // touches them.
+        let modality_idx = (shard.embed || shard.head).then(|| (cx.upload_u32(inp.video_indices), cx.upload_u32(inp.audio_indices)));
+
+        let mut h = if shard.embed {
+            // 1. Per-modality input projections (video/audio directly; text
+            // through the token refiner).
+            let e = weights.embed(cx);
+            let video_in = cx.upload(inp.hidden_states);
+            let video_embeds = block::linear(cx, &video_in, &e.proj_in_w, Some(&e.proj_in_b), num_video);
+            let audio_in = cx.upload(inp.audio_hidden_states);
+            let audio_embeds = block::linear(cx, &audio_in, &e.audio_proj_in_w, Some(&e.audio_proj_in_b), num_audio);
+            let text_in = cx.upload(inp.encoder_hidden_states);
+            let mut text_embeds = block::linear(cx, &text_in, &e.context_embedder_w, Some(&e.context_embedder_b), num_text);
+            for w in &e.refiner_blocks {
+                text_embeds = {
+                    let _arena = cx.gpu.scratch_scope_in(REFINER_ARENA);
+                    block::refiner_block_forward(cx, w, &text_embeds, cfg, num_text)
+                };
+                cx.gpu.poll_wait();
+            }
+            let text_embeds = block::rmsnorm(cx, &text_embeds, &e.refiner_final_norm, num_text, hidden, cfg.final_norm_eps);
+            tap_refiner_out = cx.gpu.read(&text_embeds, (num_text * hidden) as usize);
+
+            // 2. Scatter every modality's projected rows into the packed
+            // sequence buffer (`index_copy` in the reference).
+            let hidden_states = cx.gpu.storage((seq_len * hidden) as u64);
+            cx.gpu.write_f32(&hidden_states, &vec![0f32; (seq_len * hidden) as usize]);
+            let text_idx = cx.upload_u32(inp.text_indices);
+            let (video_idx, audio_idx) = modality_idx.as_ref().expect("the embed stage uploads the modality indices");
+            block::row_scatter(cx, &text_idx, &text_embeds, &hidden_states, num_text, hidden, seq_len);
+            block::row_scatter(cx, video_idx, &video_embeds, &hidden_states, num_video, hidden, seq_len);
+            block::row_scatter(cx, audio_idx, &audio_embeds, &hidden_states, num_audio, hidden, seq_len);
+            hidden_states
+        } else {
+            cx.upload(&carry.take().expect("forward: a non-embed stage needs the previous stage's residual"))
+        };
+
+        // 3. This stage's own slice of the block stack.
+        if shard.owns(0) {
+            tap_block0_input = cx.gpu.read(&h, (seq_len * hidden) as usize);
         }
-        let text_embeds = block::rmsnorm(cx, &text_embeds, &self.refiner_final_norm, num_text, hidden, cfg.final_norm_eps);
-        let tap_refiner_out = cx.gpu.read(&text_embeds, (num_text * hidden) as usize);
-
-        // 2. Scatter every modality's projected rows into the packed
-        // sequence buffer (`index_copy` in the reference).
-        let hidden_states = cx.gpu.storage((seq_len * hidden) as u64);
-        cx.gpu.write_f32(&hidden_states, &vec![0f32; (seq_len * hidden) as usize]);
-        let text_idx = cx.upload_u32(inp.text_indices);
-        let video_idx = cx.upload_u32(inp.video_indices);
-        let audio_idx = cx.upload_u32(inp.audio_indices);
-        block::row_scatter(cx, &text_idx, &text_embeds, &hidden_states, num_text, hidden, seq_len);
-        block::row_scatter(cx, &video_idx, &video_embeds, &hidden_states, num_video, hidden, seq_len);
-        block::row_scatter(cx, &audio_idx, &audio_embeds, &hidden_states, num_audio, hidden, seq_len);
-
-        // 3. RoPE tables and the shared timestep embedding.
-        let rope_tables = rope::build_tables(cfg, inp.position_ids);
-        let cos = cx.upload(&rope_tables.cos);
-        let sin = cx.upload(&rope_tables.sin);
-        let temb = build_temb(cfg, inp.timestep, &self.time_w0, &self.time_b0, &self.time_w2, &self.time_b2);
-        let temb_silu = silu_slice(&temb);
-
-        // 4. Row -> this port's own AdaLN table address (see `adaln_indices`'
-        // own doc for why this differs from the reference's row order).
-        let adaln_idx = adaln_indices(inp.token_tags, inp.timestep_indices, num_timesteps);
-        let adaln_idx_dev = cx.upload_u32(&adaln_idx);
-
-        // 5. The block stack.
-        let tap_block0_input = cx.gpu.read(&hidden_states, (seq_len * hidden) as usize);
-        let mid_block_index = self.blocks.len() / 2;
-        let last_block_index = self.blocks.len() - 1;
-        let mut h = hidden_states;
-        let mut tap_block0_attn_out: Vec<f32> = Vec::new();
-        let mut tap_block0_out: Vec<f32> = Vec::new();
-        let mut tap_mid_block_out: Vec<f32> = Vec::new();
-        let mut tap_last_block_out: Vec<f32> = Vec::new();
-        for (i, w) in self.blocks.iter().enumerate() {
-            let (out, attn_out) = block::block_forward(cx, w, &h, &adaln_idx_dev, &cos, &sin, &temb_silu, num_timesteps, cfg, seq_len);
+        for i in shard.start..shard.end {
+            let (cos, sin, adaln_idx_dev) = block_tables.as_ref().expect("a stage with blocks uploads its own RoPE/AdaLN tables");
+            let w = weights.block(i, cx);
+            // Every block allocates the same activations in the same order;
+            // the arena hands each block the previous block's buffers instead
+            // of a fresh multi-hundred-MB driver allocation per op. The
+            // `poll_wait` below drains the block before the next scope opens.
+            let (out, attn_out) = {
+                let _arena = cx.gpu.scratch_scope_in(BLOCK_ARENA);
+                block::block_forward(cx, &w, &h, adaln_idx_dev, cos, sin, &temb_silu, num_timesteps, cfg, seq_len)
+            };
             if i == 0 {
                 tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
                 tap_block0_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
@@ -569,15 +508,29 @@ impl H3Transformer {
                 tap_last_block_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
             }
             h = out;
+            // Every block's outputs and the scratch `block_forward`
+            // allocates are fresh buffers; proving them finished here lets
+            // wgpu recycle them before the next block allocates its own. A
+            // no-op on the CPU backend.
+            cx.gpu.poll_wait();
         }
 
-        // 6. norm_out (per-TIMESTEP shift+scale only, no gate, no modality
-        // axis - see `crate::block`'s own module doc) then the two output
-        // heads, run over every row, rows of each modality selected after.
-        let shift_w = &self.norm_out_linear_w[..(hidden * cfg.time_embed_dim) as usize];
-        let scale_w = &self.norm_out_linear_w[(hidden * cfg.time_embed_dim) as usize..];
-        let shift_b = &self.norm_out_linear_b[..hidden as usize];
-        let scale_b = &self.norm_out_linear_b[hidden as usize..];
+        if !shard.head {
+            // Hand the residual to the next card through host memory -
+            // lossless for f32, so the split changes placement, not math.
+            carry = Some(cx.gpu.read(&h, (seq_len * hidden) as usize));
+            cx.gpu.poll_wait();
+            continue;
+        }
+
+        // 4. norm_out (per-TIMESTEP shift+scale only, no gate, no modality
+        // axis) then the two output heads, run over every row, rows of each
+        // modality selected after.
+        let head = weights.head(cx);
+        let shift_w = &head.norm_out_linear_w[..(hidden * cfg.time_embed_dim) as usize];
+        let scale_w = &head.norm_out_linear_w[(hidden * cfg.time_embed_dim) as usize..];
+        let shift_b = &head.norm_out_linear_b[..hidden as usize];
+        let scale_b = &head.norm_out_linear_b[hidden as usize..];
         let shift_tbl = linear1_rows(&temb_silu, shift_w, shift_b, num_timesteps, cfg.time_embed_dim as usize, hidden as usize);
         let scale_tbl = linear1_rows(&temb_silu, scale_w, scale_b, num_timesteps, cfg.time_embed_dim as usize, hidden as usize);
         let shift_dev = cx.upload(&shift_tbl);
@@ -585,30 +538,36 @@ impl H3Transformer {
         let ts_idx_dev = cx.upload_u32(inp.timestep_indices);
         let shift_g = block::gather_rows(cx, &ts_idx_dev, &shift_dev, seq_len, hidden);
         let scale_g = block::gather_rows(cx, &ts_idx_dev, &scale_dev, seq_len, hidden);
-        let normed = block::rmsnorm(cx, &h, &self.norm_out_norm, seq_len, hidden, cfg.final_norm_eps);
+        let normed = block::rmsnorm(cx, &h, &head.norm_out_norm, seq_len, hidden, cfg.final_norm_eps);
         let modulated = block::modulate(cx, &normed, &scale_g, &shift_g, seq_len * hidden);
 
         let video_patch_dim = cfg.video_patch_dim();
-        let video_full = block::linear(cx, &modulated, &self.proj_out_w, Some(&self.proj_out_b), seq_len, hidden, video_patch_dim);
-        let audio_full = block::linear(cx, &modulated, &self.audio_proj_out_w, Some(&self.audio_proj_out_b), seq_len, hidden, cfg.audio_in_channels);
-        let video_out = block::gather_rows(cx, &video_idx, &video_full, num_video, video_patch_dim);
-        let audio_out = block::gather_rows(cx, &audio_idx, &audio_full, num_audio, cfg.audio_in_channels);
+        let video_full = block::linear(cx, &modulated, &head.proj_out_w, Some(&head.proj_out_b), seq_len);
+        let audio_full = block::linear(cx, &modulated, &head.audio_proj_out_w, Some(&head.audio_proj_out_b), seq_len);
+        let (video_idx, audio_idx) = modality_idx.as_ref().expect("the head stage uploads the modality indices");
+        let video_out = block::gather_rows(cx, video_idx, &video_full, num_video, video_patch_dim);
+        let audio_out = block::gather_rows(cx, audio_idx, &audio_full, num_audio, cfg.audio_in_channels);
 
-        let output = H3Output { video: cx.gpu.read(&video_out, (num_video * video_patch_dim) as usize), audio: cx.gpu.read(&audio_out, (num_audio * cfg.audio_in_channels) as usize) };
-        let taps = H3Taps {
-            refiner_out: tap_refiner_out,
-            rope_cos: rope_tables.cos,
-            rope_sin: rope_tables.sin,
-            temb: temb.clone(),
-            block0_input: tap_block0_input,
-            block0_attn_out: tap_block0_attn_out,
-            block0_out: tap_block0_out,
-            mid_block_out: tap_mid_block_out,
-            mid_block_index,
-            last_block_out: tap_last_block_out,
-        };
-        (output, taps)
+        output = Some(H3Output { video: cx.gpu.read(&video_out, (num_video * video_patch_dim) as usize), audio: cx.gpu.read(&audio_out, (num_audio * cfg.audio_in_channels) as usize) });
+        // The once-per-forward buffers (head weights when streamed, tables,
+        // gathers) are reclaimed here, or they compound step over step.
+        cx.gpu.poll_wait();
     }
+
+    let output = output.expect("forward: the plan must have a head stage");
+    let taps = H3Taps {
+        refiner_out: tap_refiner_out,
+        rope_cos: rope_tables.cos,
+        rope_sin: rope_tables.sin,
+        temb,
+        block0_input: tap_block0_input,
+        block0_attn_out: tap_block0_attn_out,
+        block0_out: tap_block0_out,
+        mid_block_out: tap_mid_block_out,
+        mid_block_index,
+        last_block_out: tap_last_block_out,
+    };
+    (output, taps)
 }
 
 /// Intermediate parity taps for [`H3Transformer::forward_with_taps`] - see
@@ -889,7 +848,7 @@ mod tests {
     fn tiny_config_forward_is_finite_and_the_right_shape() {
         let cfg = H3TransformerConfig::tiny();
         let tensors = rand_tensors(&cfg, 3);
-        let model = H3Transformer::load(&tensors, cfg, Some("cpu"));
+        let model = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32).expect("a resident tiny model");
         let cfg = model.config();
 
         let num_video = 4u32;
@@ -951,6 +910,120 @@ mod tests {
         assert!(out.audio.iter().any(|&v| v != 0.0), "audio output must not be trivially all-zero");
     }
 
+    /// One small packed request - three text rows, two audio, four video,
+    /// two timesteps - with random inputs, owned so a test can borrow it as
+    /// [`PackedInputs`] as often as it likes.
+    struct Packed {
+        hidden_states: Vec<f32>,
+        audio_hidden_states: Vec<f32>,
+        encoder_hidden_states: Vec<f32>,
+        timestep: Vec<f32>,
+        timestep_indices: Vec<u32>,
+        token_tags: Vec<u32>,
+        position_ids: Vec<f32>,
+        video_indices: Vec<u32>,
+        audio_indices: Vec<u32>,
+        text_indices: Vec<u32>,
+    }
+
+    impl Packed {
+        fn random(cfg: &H3TransformerConfig) -> Packed {
+            let (num_video, num_audio, num_text) = (4u32, 2u32, 3u32);
+            let seq_len = num_text + num_audio + num_video;
+            let mut rng = data::rng::Lcg::new(data::rng::random_seed());
+            let text_indices: Vec<u32> = (0..num_text).collect();
+            let audio_indices: Vec<u32> = (num_text..num_text + num_audio).collect();
+            let video_indices: Vec<u32> = (num_text + num_audio..seq_len).collect();
+            let mut token_tags = vec![0u32; seq_len as usize];
+            let mut timestep_indices = vec![0u32; seq_len as usize];
+            for &i in &text_indices {
+                token_tags[i as usize] = TAG_TEXT;
+            }
+            for (n, &i) in audio_indices.iter().enumerate() {
+                token_tags[i as usize] = TAG_AUDIO;
+                timestep_indices[i as usize] = (n % 2) as u32;
+            }
+            for (n, &i) in video_indices.iter().enumerate() {
+                token_tags[i as usize] = TAG_VIDEO;
+                timestep_indices[i as usize] = (n % 2) as u32;
+            }
+            let mut position_ids = vec![0f32; seq_len as usize * 3];
+            for r in 0..seq_len as usize {
+                position_ids[r * 3] = r as f32;
+                position_ids[r * 3 + 1] = (r % 3) as f32;
+                position_ids[r * 3 + 2] = (r % 2) as f32;
+            }
+            Packed {
+                hidden_states: rng.vec_scaled((num_video * cfg.video_patch_dim()) as usize, 0.3),
+                audio_hidden_states: rng.vec_scaled((num_audio * cfg.audio_in_channels) as usize, 0.3),
+                encoder_hidden_states: rng.vec_scaled((num_text * cfg.text_dim) as usize, 0.3),
+                timestep: vec![0.2, 0.8],
+                timestep_indices,
+                token_tags,
+                position_ids,
+                video_indices,
+                audio_indices,
+                text_indices,
+            }
+        }
+
+        fn inputs(&self) -> PackedInputs<'_> {
+            PackedInputs {
+                hidden_states: &self.hidden_states,
+                audio_hidden_states: &self.audio_hidden_states,
+                encoder_hidden_states: &self.encoder_hidden_states,
+                timestep: &self.timestep,
+                timestep_indices: &self.timestep_indices,
+                token_tags: &self.token_tags,
+                position_ids: &self.position_ids,
+                video_indices: &self.video_indices,
+                audio_indices: &self.audio_indices,
+                text_indices: &self.text_indices,
+            }
+        }
+    }
+
+    /// A model held resident runs the same forward as one streamed block by
+    /// block - the same weights, the same arithmetic, the same bits.
+    #[test]
+    fn a_resident_model_computes_what_the_streamed_forward_computes() {
+        use crate::dit_shard::StreamingDit;
+
+        let cfg = H3TransformerConfig::tiny();
+        let tensors = rand_tensors(&cfg, data::rng::random_seed());
+        let packed = Packed::random(&cfg);
+        let streamed = H3Transformer::forward_streaming(&tensors, &cfg, &StreamingDit::open_single(&cfg, Some("cpu")), &packed.inputs());
+        let resident = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32).expect("a resident tiny model");
+        let out = resident.forward(&packed.inputs());
+        assert_eq!(out.video, streamed.video);
+        assert_eq!(out.audio, streamed.audio);
+        assert!(out.video.iter().any(|&v| v != 0.0), "the comparison must not be trivially all-zero");
+    }
+
+    /// The int8 tier a generation holds its DiT at stays close to the fp32
+    /// model it quantizes - on a device that runs the packed dot product.
+    /// The widths are the tiny config's widened to whole quantization groups.
+    #[test]
+    fn an_int8_resident_model_tracks_the_fp32_one() {
+        let cfg = H3TransformerConfig { hidden_size: 64, text_dim: 32, ..H3TransformerConfig::tiny() };
+        if !Ctx::new(None).ops.caps().numeric.int8_dot {
+            brain_testutil::skip("the ambient device has no packed int8 dot product");
+            return;
+        }
+        let tensors = rand_tensors(&cfg, data::rng::random_seed());
+        let packed = Packed::random(&cfg);
+        let plan = || StreamPlan::single(cfg.num_layers as usize);
+        let fp32 = H3Transformer::load_on(&tensors, cfg, plan(), None, Dtype::F32).expect("fp32").forward(&packed.inputs());
+        let int8 = H3Transformer::load_on(&tensors, cfg, plan(), None, Dtype::I8).expect("int8").forward(&packed.inputs());
+        let cosine = |a: &[f32], b: &[f32]| {
+            let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
+            let norm = |v: &[f32]| v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+            dot / (norm(a) * norm(b))
+        };
+        assert!(cosine(&int8.video, &fp32.video) > 0.99, "video cosine {}", cosine(&int8.video, &fp32.video));
+        assert!(cosine(&int8.audio, &fp32.audio) > 0.99, "audio cosine {}", cosine(&int8.audio, &fp32.audio));
+    }
+
     /// Splitting the block stack over two stages must change WHERE the work
     /// happens and nothing else. Exact equality, not a tolerance: the only
     /// value crossing a stage boundary is the residual, carried host-staged
@@ -971,54 +1044,8 @@ mod tests {
         let cfg = H3TransformerConfig::tiny();
         assert!(cfg.num_layers >= 2, "a two-stage split needs at least two blocks");
         let tensors = rand_tensors(&cfg, 17);
-
-        let num_video = 4u32;
-        let num_audio = 2u32;
-        let num_text = 3u32;
-        let seq_len = num_text + num_audio + num_video;
-
-        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
-        let hidden_states = rng.vec_scaled((num_video * cfg.video_patch_dim()) as usize, 0.3);
-        let audio_hidden_states = rng.vec_scaled((num_audio * cfg.audio_in_channels) as usize, 0.3);
-        let encoder_hidden_states = rng.vec_scaled((num_text * cfg.text_dim) as usize, 0.3);
-
-        let text_indices: Vec<u32> = (0..num_text).collect();
-        let audio_indices: Vec<u32> = (num_text..num_text + num_audio).collect();
-        let video_indices: Vec<u32> = (num_text + num_audio..seq_len).collect();
-
-        let mut token_tags = vec![0u32; seq_len as usize];
-        let mut timestep_indices = vec![0u32; seq_len as usize];
-        for &i in &text_indices {
-            token_tags[i as usize] = TAG_TEXT;
-        }
-        for (n, &i) in audio_indices.iter().enumerate() {
-            token_tags[i as usize] = TAG_AUDIO;
-            timestep_indices[i as usize] = (n % 2) as u32;
-        }
-        for (n, &i) in video_indices.iter().enumerate() {
-            token_tags[i as usize] = TAG_VIDEO;
-            timestep_indices[i as usize] = (n % 2) as u32;
-        }
-        let mut position_ids = vec![0f32; seq_len as usize * 3];
-        for r in 0..seq_len as usize {
-            position_ids[r * 3] = r as f32;
-            position_ids[r * 3 + 1] = (r % 3) as f32;
-            position_ids[r * 3 + 2] = (r % 2) as f32;
-        }
-        let timestep = vec![0.2f32, 0.8f32];
-
-        let inp = PackedInputs {
-            hidden_states: &hidden_states,
-            audio_hidden_states: &audio_hidden_states,
-            encoder_hidden_states: &encoder_hidden_states,
-            timestep: &timestep,
-            timestep_indices: &timestep_indices,
-            token_tags: &token_tags,
-            position_ids: &position_ids,
-            video_indices: &video_indices,
-            audio_indices: &audio_indices,
-            text_indices: &text_indices,
-        };
+        let packed = Packed::random(&cfg);
+        let inp = packed.inputs();
 
         let one = StreamingDit::open_single(&cfg, Some("cpu"));
         assert_eq!(one.plan().n_stages(), 1);
@@ -1092,7 +1119,7 @@ mod tests {
             }
         }
 
-        let model = H3Transformer::load(&tensors, cfg, Some("cpu"));
+        let model = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32).expect("a resident tiny model");
 
         let inp = PackedInputs {
             hidden_states: get("input_hidden_states"),

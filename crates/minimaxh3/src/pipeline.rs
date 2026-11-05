@@ -75,6 +75,12 @@ pub const MAX_DURATION_S: f32 = 15.0;
 pub const KEYFRAME_NOISE_AUG: f32 = 0.999;
 /// `MiniMaxH3ModularPipeline.text_encoder_layer` - the confirmed depth.
 pub const TEXT_ENCODER_LAYER: usize = 50;
+
+/// The linear tier a generation holds its DiT resident at: the packed int8
+/// dot-product path, a quarter of fp32's bytes - what lets the 33B DiT sit on
+/// two 24 GB cards. A card that cannot run it refuses the placement and the
+/// DiT streams instead.
+pub const RESIDENT_TIER: gpu_core::select::Dtype = gpu_core::select::Dtype::I8;
 /// `MiniMaxH3ModularPipeline.pixel_mean` - ImageNet, applied to the video
 /// VAE's RGB input/output.
 pub const PIXEL_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
@@ -484,53 +490,20 @@ pub fn unpatchify_video(rows: &[f32], c: u32, t: u32, h: u32, w: u32, patch: [u3
 // ============================================================================
 
 /// One request's text conditioning: the Qwen3-VL hidden state MiniMax-H3
-/// reads (`qwen3vl::Qwen3Vl::encode_hidden`/`encode_hidden_with_image` at
-/// [`TEXT_ENCODER_LAYER`]) plus the per-row modality tag of every row of it
-/// (`TAG_TEXT` for plain prompt text, `TAG_VIDEO` for a keyframe's own
-/// `"<Picture i>: "` vision-block rows in the presentation -
-/// `MiniMaxH3FL2VATextEncoderStep`'s own tagging).
+/// reads (the language tower's output at [`TEXT_ENCODER_LAYER`],
+/// `crate::caps::encode_prompt`) plus the per-row modality tag of every row
+/// of it - `TAG_TEXT` for prompt text.
 ///
-/// **Built by the caller, not this module** - `get_qwen3vl_prompt_embeds`
-/// (`encoders.py`) needs the full tokenized presentation (label + vision-pad
-/// tokens per keyframe, then the prompt) built by a Qwen3-VL processor/
-/// tokenizer this crate does not own, and `t2va`/`fl2va` share this one
-/// type: a text-only presentation is just `token_tags` all `TAG_TEXT` and no
-/// image.
-///
-/// **`fl2va` with 2 keyframes has a real, documented gap here**:
-/// `qwen3vl::Qwen3Vl::splice_vision` (which `encode_hidden_with_image` calls)
-/// supports exactly ONE spliced image at a FIXED row position baked in at
-/// construction - it cannot place two keyframes' vision blocks at two
-/// different token-stream positions in one forward. [`encode_text`] below
-/// wires the ONE-image case (`t2va` needs no image at all; a single-keyframe
-/// `fl2va` request needs exactly one); a two-keyframe `fl2va` request's text
-/// presentation cannot be built through this crate's dependencies as they
-/// stand today - `qwen3vl`'s splice needs generalizing to multiple images at
-/// multiple positions in one forward first. This is a text-conditioning gap
-/// ONLY: the DiT-side keyframe conditioning rows built by
-/// [`build_packed_sequence`]/[`encode_keyframe_condition`] below - the
-/// mechanism that actually anchors the generated video to the keyframes -
-/// support up to 2 keyframes regardless, since they never touch the text
-/// encoder at all.
+/// The reference's `fl2va` presentation also splices each keyframe's vision
+/// block (`"<Picture i>: "` rows tagged `TAG_VIDEO`,
+/// `MiniMaxH3FL2VATextEncoderStep`) into the text stream; this port encodes
+/// the prompt alone. That is a text-conditioning gap only: the DiT-side
+/// keyframe rows built by [`build_packed_sequence`]/[`encode_keyframe_condition`]
+/// - what actually anchors the clip to its keyframes - are complete.
 pub struct TextConditioning {
     /// `[num_text_tokens, text_dim]`, row-major.
     pub embeds: Vec<f32>,
     pub token_tags: Vec<u32>,
-}
-
-/// Encode one `t2va`/`fl2va` text presentation - `get_qwen3vl_prompt_embeds`
-/// (`encoders.py`), with `tokens`/`token_tags` and (for a single-keyframe
-/// request) `image` already built by the caller. `image = None` is `t2va`'s
-/// own path (`MiniMaxH3TextEncoderStep`); `image = Some(..)` is `fl2va`'s
-/// single-keyframe path (`MiniMaxH3FL2VATextEncoderStep`) - see
-/// [`TextConditioning`]'s own doc for the two-keyframe gap.
-pub fn encode_text(qwen: &qwen3vl::Qwen3Vl, tokens: &[u32], token_tags: &[u32], image: Option<qwen3vl::model::ImageInput<'_>>) -> TextConditioning {
-    assert_eq!(tokens.len(), token_tags.len(), "encode_text: tokens/token_tags length mismatch");
-    let embeds = match image {
-        Some(img) => qwen.encode_hidden_with_image(tokens, img, TEXT_ENCODER_LAYER),
-        None => qwen.encode_hidden(tokens, TEXT_ENCODER_LAYER),
-    };
-    TextConditioning { embeds, token_tags: token_tags.to_vec() }
 }
 
 // ============================================================================
@@ -780,32 +753,31 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
     }
 
     // 4. Denoise, both VAEs still unopened. A caller-supplied `model` (the
-    // "hot"/resident serving path, `t2va_hot`/`fl2va_hot`) stays fully
-    // resident and is reused across requests unchanged. Otherwise this
-    // streams each step's forward one block at a time
-    // (`H3Transformer::forward_streaming`) rather than eagerly loading every
-    // block's weights up front - see that function's own doc for why this is
-    // what actually lets `device` name a real GPU here at all, not only
-    // "cpu": the eager load's ~132GB fp32 resident footprint never fits in
-    // any single GPU's VRAM on this box, streaming's ~2.6GB/block does.
+    // "hot"/resident serving path, `t2va_hot`/`fl2va_hot`) is reused as is.
+    // Otherwise the DiT is held resident at `RESIDENT_TIER` for this one
+    // generation when the schedulable cards hold it with this request's
+    // workspace free - every step reads every weight, so reading them once
+    // is the whole difference - and streamed one block at a time
+    // (`H3Transformer::forward_streaming`) when they do not: its ~2.6 GB per
+    // block fits any card. Either way it is gone before decode.
     //
-    // The devices are opened ONCE here, outside the step loop, and reused
-    // for every step - `forward_streaming` takes an already-open
-    // `StreamingDit` for exactly this reason. Opening a fresh device per step
-    // (as an earlier version of this loop did, since `forward_streaming` used
-    // to take a device string and build its own `Ctx` internally) OOM'd a
-    // 24GB P40 partway through a real 16-step generation: wgpu gives no
-    // guarantee that one device's resources are reclaimed before the next
-    // opens, so 16 devices in sequence accumulated instead of one device's
-    // steady-state footprint repeating.
-    //
-    // "Devices", plural: `StreamingDit::open` spreads the block stack over
-    // every card this process may schedule on (`crate::dit_shard`), so each
-    // card streams its own contiguous block range instead of one card
-    // carrying all 50 blocks while the others idle. One card, a CPU-backend
-    // run or an explicitly named `gpu<i>` resolves to a single stage, which
-    // is the previous behaviour unchanged.
-    let streaming_ctx = model.is_none().then(|| StreamingDit::open(dit_cfg, device));
+    // The streamed devices are opened ONCE here, outside the step loop, and
+    // reused for every step: opening a fresh device per step OOM'd a 24 GB
+    // P40 partway through a real 16-step generation, because wgpu gives no
+    // guarantee one device's resources are reclaimed before the next opens.
+    let seq_len = (packed.position_ids.len() / 3) as u32;
+    let owned = match model {
+        Some(_) => None,
+        None => match H3Transformer::load(ckpt.dit_tensors, *dit_cfg, device, RESIDENT_TIER, seq_len) {
+            Ok(m) => Some(m),
+            Err(reason) => {
+                tracing::info!(%reason, "minimaxh3 DiT streamed one block at a time");
+                None
+            }
+        },
+    };
+    let resident = model.or(owned.as_ref());
+    let streaming_ctx = resident.is_none().then(|| StreamingDit::open(dit_cfg, device));
     let mut sched = DualSchedule::new();
     sched.set_timesteps(opts.num_inference_steps);
     let num_steps = sched.num_steps();
@@ -828,9 +800,9 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
             audio_indices: &packed.audio_indices,
             text_indices: &packed.text_indices,
         };
-        let out = match model {
+        let out = match resident {
             Some(m) => m.forward(&inp),
-            None => H3Transformer::forward_streaming(ckpt.dit_tensors, dit_cfg, streaming_ctx.as_ref().expect("streaming_ctx is Some whenever model is None"), &inp),
+            None => H3Transformer::forward_streaming(ckpt.dit_tensors, dit_cfg, streaming_ctx.as_ref().expect("streamed whenever nothing is resident"), &inp),
         };
 
         let gen_video_pred = &out.video[num_condition_video_rows * video_patch_dim..];
@@ -853,6 +825,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
     // like 16), which only makes sense if the failure is tied to
     // REACHING decode, not to how much denoising happened first.
     drop(streaming_ctx);
+    drop(owned);
 
     // 5. Video decode (`MiniMaxH3AfterDenoiseStep` + `MiniMaxH3VideoDecodeStep`).
     let generated_video_rows = &compact_video[num_condition_video_rows * video_patch_dim..];

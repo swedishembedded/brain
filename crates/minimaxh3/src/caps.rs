@@ -39,47 +39,18 @@
 //!   convention of naming what a request needs to BUILD/ESTIMATE against, and
 //!   forward-compatible with a future compiled-graph device backend that
 //!   would genuinely need one graph per extent), while
-//!   `crates/cli/src/resident_minimaxh3.rs`'s actual hot [`crate::model::
+//!   `crates/catalog/src/resident_minimaxh3.rs`'s actual hot [`crate::model::
 //!   H3Transformer`] is held ONE PER DEVICE, shared across every key -
 //!   switching request shape never forces a reload of the 33B DiT.
 //!
 //! ## Real, tracked gaps
 //!
-//! * **Real DiT weight import does not exist yet.** [`crate::model::
-//!   H3Transformer::load`]'s own doc states it accepts a `Tensors` source
-//!   "named after the reference module's own attribute paths ... or any
-//!   other Tensors source" - this module reads [`Paths::dit`] as exactly
-//!   such a source (a bare `safetensors` file already in this crate's own
-//!   naming: `to_q`/`to_k`/`to_v` split, not the real checkpoint's fused
-//!   `qkv_proj`). Splitting the real checkpoint's fused QKV into that shape
-//!   is a real-checkpoint IMPORT step that has not been built (tracked
-//!   separately) - until it exists, no raw
-//!   `MiniMaxAI/MiniMax-H3` `transformer/` directory satisfies `$BRAIN_MINIMAXH3_DIT`
-//!   directly.
-//! * **No real Qwen3-VL text encoder is wired into this serving path.**
-//!   Building `crate::pipeline::TextConditioning` for real needs a resident
-//!   `qwen3vl::Qwen3Vl` plus a tokenizer, and the loader that assembles one
-//!   from a raw HF directory is private to `qwen3vl::caps`
-//!   (`load_hf_resident`) - not something this module can call today.
-//!   [`text_conditioning_stub`] below stands in, deterministic and
-//!   prompt-seeded but not semantically real - the exact same class of gap
-//!   `ltxv::pipeline::context_stub` documents and ships with for its own
-//!   still-missing real text encoder path. `t2va`/`fl2va` still run a real
-//!   forward, real dual-schedule denoise loop, and real VAE/vocoder decode
-//!   end to end against this stub; only the semantic content of what the
-//!   video/audio actually depict is not driven by the prompt's real meaning
-//!   yet.
 //! * **`fl2va`'s two-keyframe text-presentation gap** (`crate::pipeline::
-//!   TextConditioning`'s own doc) still applies; on top of it, THIS module's
-//!   text-conditioning stub does not splice a keyframe's vision tokens into
-//!   the text presentation AT ALL (0 or 1 or 2 keyframes all read identically
-//!   to the text encoder) - a strict superset of the pipeline-level gap,
-//!   present only because the real Qwen3-VL wiring above is itself missing.
-//!   The DiT-side keyframe conditioning rows (`crate::pipeline::
-//!   build_packed_sequence`/`encode_keyframe_condition`, the mechanism that
-//!   actually anchors the generated video to the keyframes) are unaffected -
-//!   they never touch the text encoder, exactly as `TextConditioning`'s own
-//!   doc already states.
+//!   TextConditioning`'s own doc): the text encoder reads the prompt alone,
+//!   never a keyframe's vision tokens. The DiT-side keyframe conditioning
+//!   rows (`crate::pipeline::build_packed_sequence`/`encode_keyframe_condition`,
+//!   the mechanism that actually anchors the generated video to the
+//!   keyframes) are unaffected - they never touch the text encoder.
 //!
 //! ## Why this gate exists
 //!
@@ -283,7 +254,7 @@ fn decode_gen_params(inv: &capability::Invocation) -> Result<GenParams, String> 
         // Not an invocation parameter: placement is the SERVER's decision,
         // not the caller's - `ltxv::caps::gen_params_from`'s own identical
         // comment. A resident instance overrides this after decoding
-        // (`crates/cli/src/resident_minimaxh3.rs`); the direct provider
+        // (`crates/catalog/src/resident_minimaxh3.rs`); the direct provider
         // above leaves it `None` (the host default).
         device: None,
     };
@@ -291,11 +262,9 @@ fn decode_gen_params(inv: &capability::Invocation) -> Result<GenParams, String> 
 }
 
 /// One `fl2va` keyframe request: which end of the clip it anchors, and the
-/// server-side path to the still image (`crate::pipeline::Anchor`/
-/// `KeyframeCondition`'s own doc for what happens to it once loaded - loading
-/// the PNG/JPEG itself is the CALLER's job, same split
-/// `ltxv::pipeline::load_still_chw`'s call sites keep, since this crate has
-/// no `image`-decoding dependency of its own).
+/// server-side path to the still image ([`encode_keyframes`] loads and
+/// encodes it; `crate::pipeline::Anchor`/`KeyframeCondition`'s own doc for
+/// what happens to it after that).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlKeyframeSpec {
     pub anchor: pipeline::Anchor,
@@ -363,61 +332,6 @@ pub fn has_real_text_encoder(paths: &Paths) -> bool {
         && checkpoint::safetensors::has_model_weights(std::path::Path::new(&paths.text_encoder))
 }
 
-/// A short, fixed context length for one prompt - MiniMax-H3 prompts are a
-/// caption, not a long document, and this is far above any real one while
-/// staying well under the checkpoint's own 262144-token ceiling (no reason
-/// to size a resident buffer for headroom this crate never uses).
-const TEXT_ENCODER_SEQ_LEN: u32 = 512;
-
-/// Load a real [`qwen3vl::Qwen3Vl`] text-only conditioner (`n_visual=0` -
-/// see [`qwen3vl::Qwen3Vl::encode_hidden`]'s own doc for why that is only
-/// valid for a splice-free instance) plus its BPE tokenizer, from `paths`.
-/// Mirrors `qwen3vl::caps`'s own `load_hf_resident` (not reusable directly:
-/// private to that module), no vision capacity - this crate never splices a
-/// keyframe into the SAME instance a plain `t2va` request uses, so there is
-/// no reason to pay for DeepStack/splice buffers here. A REAL load: the
-/// checkpoint is tens of GB, so this is deliberately not called on every
-/// request without [`has_real_text_encoder`] gating it first.
-///
-/// **int8, not fp32** - and relies on [`qwen3vl::Qwen3Vl::from_hf`] streaming
-/// the decoder's weights rather than materializing them eagerly. Measured
-/// directly, not assumed: this checkpoint's `text_encoder/` is 63GB of bf16
-/// on disk, and `checkpoint::safetensors::read_model_dir` (the ORIGINAL
-/// `from_hf` implementation) decodes every tensor to f32 up front regardless
-/// of the caller's requested destination dtype - a ~126GB source held
-/// entirely in memory before `Qwen::new_shard_dt_decode` allocates a single
-/// perf-number: frame-rate constant / memory ratio, not a measured timing
-/// destination byte. That single fact, not a 2x-during-construction "peak",
-/// is what a real run's memory trace confirmed: switching the destination
-/// from fp32 to int8 (halving the DESTINATION buffer) made no measurable
-/// difference to the climb - both attempts hit the same ~149GB container
-/// cap at nearly the same point, because both were still dominated by the
-/// SAME dtype-independent ~126GB source decode. `Qwen3Vl::from_hf` now
-/// streams the decoder (`model.language_model.*`) straight off a
-/// [`checkpoint::weightio::WeightReader`] one tensor at a time
-/// (`qwen3vl::import::decoder_source`), the same mechanism
-/// `qwen3::import::hf_shard_source` already gives FLUX.2's text encoder -
-/// so peak cost is now the destination buffers `dt` actually needs (int8:
-/// ~1 byte/param) plus one tensor's transient f32 expansion, not the whole
-/// checkpoint's. int8 is kept on top of that for the steady-state resident
-/// footprint, not because it was ever the fix for the load-time peak - the
-/// accuracy cost is real but not yet a concern this port has a real-scale
-/// numeric oracle to weigh against anyway (see [`build_text_encoder`]'s own
-/// tests).
-///
-/// **Truncated to [`pipeline::TEXT_ENCODER_LAYER`], not the checkpoint's
-/// full 64 layers** - `encode_text_real`/`pipeline::encode_text` never reads
-/// past that tap (`qwen.encode_hidden(tokens, TEXT_ENCODER_LAYER)`), so the
-/// 14 layers past it are never built, uploaded, or even read off disk (a
-/// shard file none of the truncated shard's required tensors live in is
-/// never faulted into memory - see [`qwen3vl::Qwen3Vl::from_hf_shard`]'s own
-/// doc). This is the same truncated-tap-layer shape FLUX.2's own Qwen3 text
-/// encoder already uses, applied here for the first time to `Qwen3Vl`.
-/// A truncated shard's decoder can only run the batched-forward path (the
-/// incremental KV-cache path `Qwen::decode_steps` uses refuses a non-whole
-/// shard outright), which `encode_hidden` already falls back to correctly -
-/// this is also the FASTER path for a whole-prompt encode: one batched pass
-/// over the sequence, not one incremental step per token.
 /// The best per-layer-linear storage tier the AMBIENT device (`--device`/
 /// `BRAIN_DEVICE`) can actually deliver, cheapest-real-cost first: int8 (if
 /// `caps.numeric.int8_dot`), else bf16 (if `caps.numeric.bf16_storage` -
@@ -428,8 +342,8 @@ const TEXT_ENCODER_SEQ_LEN: u32 = 512;
 /// **Why this exists, not a hardcoded request**: `gpu_core::select::Dtype::
 /// promote` silently demotes an unsupported tier back to fp32 -
 /// `Weight::upload`'s own doc says as much ("read `Qwen::linear_dtype` for
-/// what actually landed, never this request"), but `build_text_encoder`
-/// used to just ask for `Dtype::I8` and never check. On the CPU JIT backend
+/// what actually landed, never this request"), and the text tower once
+/// asked for `Dtype::I8` and never checked. On the CPU JIT backend
 /// `NumericSupport.int8_dot` is `false` (`backend-cpu`'s own doc: "the
 /// multi-barrier packed-int8 GEMMs are outside the JIT's single-barrier
 /// model, and there is no VNNI fast path yet") - so EVERY prior real-weight
@@ -454,58 +368,45 @@ fn best_linear_dtype() -> gpu_core::select::Dtype {
     }
 }
 
-pub fn build_text_encoder(paths: &Paths) -> Result<(qwen3vl::Qwen3Vl, data::qwen_tokenizer::QwenBpe), String> {
+/// The conditioning one prompt gives: the hidden state after
+/// [`pipeline::TEXT_ENCODER_LAYER`] layers of the Qwen3-VL language tower.
+///
+/// The tokenizer reads the prompt verbatim - `get_qwen3vl_prompt_embeds`'s
+/// own caller (`encoders.py`'s `MiniMaxH3TextEncoderStep`) tokenizes with
+/// `add_special_tokens=False` and no chat template, which is
+/// `data::Tokenizer::encode`'s contract.
+///
+/// The tower ([`qwen3vl::TextTower`]) is built for this prompt alone and
+/// dropped: its layers past the tap are never read, it is placed over as
+/// many cards as its ~27 GB of int8 linears need, and its activations are
+/// sized for the prompt's own length. Its linear tier is
+/// [`best_linear_dtype`]'s.
+pub fn encode_prompt(paths: &Paths, prompt: &str) -> Result<pipeline::TextConditioning, String> {
+    use data::Tokenizer;
     let cfg_path = format!("{}/config.json", paths.text_encoder);
     let cfg_text = std::fs::read_to_string(&cfg_path).map_err(|e| format!("minimaxh3 text encoder: cannot read {cfg_path}: {e}"))?;
     let cfg_json: serde_json::Value = serde_json::from_str(&cfg_text).map_err(|e| format!("minimaxh3 text encoder: cannot parse {cfg_path}: {e}"))?;
     let cfg = qwen3vl::Qwen3VlConfig::from_hf(&cfg_json);
     let tok = data::qwen_tokenizer::QwenBpe::from_dir(&paths.tokenizer).map_err(|e| format!("minimaxh3 text encoder: tokenizer: {e}"))?;
-    let shard = model::Shard { start: 0, end: pipeline::TEXT_ENCODER_LAYER, embed: true, head: false, gpu_index: model::Shard::ANY_GPU };
-    let dt = best_linear_dtype();
-    let qwen = qwen3vl::Qwen3Vl::from_hf_shard(
-        &paths.text_encoder,
-        cfg.vision,
-        cfg.text,
-        TEXT_ENCODER_SEQ_LEN,
-        cfg.image_token_id,
-        0,
-        0,
-        cfg.mrope_section,
-        dt,
-        shard,
-    )?;
-    Ok((qwen, tok))
-}
-
-/// [`pipeline::encode_text`]'s `t2va` case (no keyframe image): tokenize
-/// `prompt` verbatim - `get_qwen3vl_prompt_embeds`'s own real caller
-/// (`encoders.py`'s `MiniMaxH3TextEncoderStep`) tokenizes with
-/// `add_special_tokens=False`, no chat template, and `data::Tokenizer::
-/// encode`'s own contract is exactly that (special tokens recognized WITHIN
-/// the text, none added around it) - so a plain `tok.encode(prompt)` already
-/// matches, no template step needed here unlike `flux2`'s own Qwen3 caption
-/// encoder.
-pub fn encode_text_real(qwen: &qwen3vl::Qwen3Vl, tok: &data::qwen_tokenizer::QwenBpe, prompt: &str) -> pipeline::TextConditioning {
-    use data::Tokenizer;
     let tokens = tok.encode(prompt);
-    let token_tags = vec![crate::config::TAG_TEXT; tokens.len()];
-    pipeline::encode_text(qwen, &tokens, &token_tags, None)
+    if tokens.is_empty() {
+        return Err("minimaxh3 text encoder: the prompt tokenizes to nothing".to_string());
+    }
+    let tower = qwen3vl::TextTower::from_hf_dir(&paths.text_encoder, cfg.text, cfg.mrope_section, best_linear_dtype(), pipeline::TEXT_ENCODER_LAYER, tokens.len() as u32)?;
+    tracing::info!(stages = tower.n_stages(), tokens = tokens.len(), "minimaxh3 text tower placed");
+    Ok(pipeline::TextConditioning { embeds: tower.encode(&tokens), token_tags: vec![crate::config::TAG_TEXT; tokens.len()] })
 }
 
 /// [`text_conditioning_stub`] unless `paths` names a real, present Qwen3-VL
-/// checkout, in which case the real encoder is built and run instead - the
-/// one seam every `t2va`/`fl2va` entry point below shares, so real-weight
-/// availability decides real-vs-stub in exactly one place. Deliberately does
-/// NOT fall back to the stub when a checkout IS present but fails to load -
-/// that would silently swap a real bug for a fake-but-"successful"
-/// generation, exactly the failure mode this crate's own real-weight tests
-/// elsewhere refuse to hide.
+/// checkout, in which case the real encoder runs instead - the one seam every
+/// `t2va`/`fl2va` entry point shares, so real-weight availability decides
+/// real-vs-stub in exactly one place. A checkout that IS present but fails to
+/// load is an error, never a silent fall back to the stub.
 fn text_conditioning(paths: &Paths, prompt: &str, text_dim: u32, seed: u64) -> Result<pipeline::TextConditioning, String> {
     if !has_real_text_encoder(paths) {
         return Ok(text_conditioning_stub(prompt, text_dim, seed));
     }
-    let (qwen, tok) = build_text_encoder(paths)?;
-    Ok(encode_text_real(&qwen, &tok, prompt))
+    encode_prompt(paths, prompt)
 }
 
 // ===================== outcome shaping =====================
@@ -584,7 +485,7 @@ pub struct Paths {
     /// `crate::import::import_audio_vae_decoder` reads.
     pub vocoder: String,
     /// The `text_encoder/` component directory - `config.json` plus the
-    /// sharded Qwen3-VL weights [`build_text_encoder`] loads.
+    /// sharded Qwen3-VL weights [`encode_prompt`] reads.
     pub text_encoder: String,
     /// The `tokenizer/` component directory - `tokenizer.json`/`vocab.json`/
     /// `merges.txt`, separate from `text_encoder/` in the root layout.
@@ -622,20 +523,31 @@ impl Paths {
     /// own pattern; role names match [`Paths`]'s field names, so the mapping
     /// is a straight rename-free read).
     pub fn from_assembly(assembly: &capability::Assembly) -> Result<Paths, String> {
-        let get = |role: &str| {
-            assembly
-                .roles
-                .get(role)
-                .and_then(|p| p.to_str())
-                .map(str::to_string)
-                .ok_or_else(|| format!("minimaxh3: assembly '{}' has no {role} role", assembly.id))
-        };
         Ok(Paths {
-            dit: get("dit")?,
-            video_vae: get("video_vae")?,
-            vocoder: get("vocoder")?,
-            text_encoder: get("text_encoder")?,
-            tokenizer: get("tokenizer")?,
+            dit: Paths::component(assembly, "dit")?,
+            video_vae: Paths::component(assembly, "video_vae")?,
+            vocoder: Paths::component(assembly, "vocoder")?,
+            text_encoder: Paths::component(assembly, "text_encoder")?,
+            tokenizer: Paths::component(assembly, "tokenizer")?,
+        })
+    }
+
+    /// The path one role of `assembly` names. A role satisfied by the
+    /// released pipeline root (`crate::spec`'s `model_index.json` lane) names
+    /// that root, and the component is its fixed subfolder.
+    pub fn component(assembly: &capability::Assembly, role: &str) -> Result<String, String> {
+        let path = assembly.roles.get(role).and_then(|p| p.to_str()).ok_or_else(|| format!("minimaxh3: assembly '{}' has no {role} role", assembly.id))?;
+        if !crate::spec::is_h3_pipeline_root(std::path::Path::new(path)) {
+            return Ok(path.to_string());
+        }
+        let p = Paths::resolve(path);
+        Ok(match role {
+            "dit" => p.dit,
+            "video_vae" => p.video_vae,
+            "vocoder" => p.vocoder,
+            "text_encoder" => p.text_encoder,
+            "tokenizer" => p.tokenizer,
+            other => return Err(format!("minimaxh3: '{other}' is not a role of this architecture")),
         })
     }
 }
@@ -644,7 +556,7 @@ impl Paths {
 /// or a sharded `<name>.safetensors.index.json` directory, no name
 /// remapping (the real checkpoint's own tensor names already match
 /// [`crate::model::H3Transformer::load`]'s naming - see [`Paths::dit`]'s own
-/// doc). `pub` so `crates/cli/src/resident_minimaxh3.rs` can open the DiT
+/// doc). `pub` so `crates/catalog/src/resident_minimaxh3.rs` can open the DiT
 /// reader ONCE (into its own resident [`crate::model::H3Transformer`])
 /// without going through [`LoadedWeights::load`], which would also re-read
 /// the VAEs.
@@ -665,7 +577,7 @@ pub fn open_dit_reader(path: &str) -> Result<checkpoint::weightio::WeightReader,
 /// loaded once and held by the caller - the DiT is deliberately NOT part of
 /// this struct. `wan::caps`'s own VAE deliberately never rides alongside its
 /// hot DiT either; here the split additionally lets
-/// `crates/cli/src/resident_minimaxh3.rs` hold the (33B, expensive-to-reload)
+/// `crates/catalog/src/resident_minimaxh3.rs` hold the (33B, expensive-to-reload)
 /// DiT resident while still re-reading these (hundreds of MB, cheap) VAEs
 /// per call - the same "not everything worth loading is worth CACHING"
 /// judgment `resident_wan.rs`'s own module doc states for its own VAE/T5.
@@ -806,62 +718,74 @@ impl LoadedWeights {
 
 // ===================== execution =====================
 
-/// Run one `t2va` against a caller-held resident [`crate::model::
-/// H3Transformer`] (see [`pipeline::t2va_hot`]'s doc for why one resident
-/// transformer serves every request shape) - the entry point BOTH
-/// [`t2va_on`] (cold: builds `model` fresh) and
-/// `crates/cli/src/resident_minimaxh3.rs` (hot: reuses one across calls)
-/// funnel through, so param decoding, text conditioning and outcome shaping
-/// cannot drift between the two. `paths` decides real-vs-stub text
-/// conditioning (see [`text_conditioning`]'s own doc) - the qwen3vl
-/// checkpoint is reloaded fresh per call when real, matching this crate's
-/// documented not-yet-residency-optimized state (the VAEs already do the
-/// same; see [`VaeWeights`]'s own doc). Neither cancellation nor per-step
-/// progress is threaded through `crate::pipeline`'s denoise loop yet, a
-/// real, tracked gap (`wan::pipeline`/`ltxv::pipeline` both poll
-/// `inv.cancel` and report progress per step; H3's loop does neither yet), so
-/// `inv.cancel` rides along unpolled and `ActionSpec::streaming()` above
-/// currently only means "long-running", not "reports intermediate progress".
-pub fn t2va_hot_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation, p: &GenParams, paths: &Paths, model: &crate::model::H3Transformer) -> capability::ActionResult {
+/// Run one `t2va` (no `keyframes`) or `fl2va` generation and shape its
+/// outcome - the one entry point the direct provider below and the
+/// residency-scheduled adapter (`crates/catalog/src/resident_minimaxh3.rs`)
+/// both funnel through, so param decoding, text conditioning and outcome
+/// shaping cannot drift between them.
+///
+/// `model` is a caller-held resident [`crate::model::H3Transformer`] (see
+/// [`pipeline::t2va_hot`]'s doc for why one serves every request shape).
+/// `None` streams the DiT from `ckpt.dit_tensors` one block at a time
+/// ([`pipeline::t2va`]), which is the only placement a 33B fp32 DiT has on a
+/// machine whose cards cannot hold all of it. `paths` decides real-vs-stub
+/// text conditioning ([`text_conditioning`]). Neither cancellation nor
+/// per-step progress is threaded through `crate::pipeline`'s denoise loop
+/// yet, so `inv.cancel` rides along unpolled.
+pub fn generate_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation, p: &GenParams, paths: &Paths, keyframes: &[pipeline::KeyframeCondition], model: Option<&crate::model::H3Transformer>) -> capability::ActionResult {
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
     let text = text_conditioning(paths, &prompt, ckpt.dit_cfg.text_dim, p.opts.seed)?;
-    let av = pipeline::t2va_hot(ckpt, &text, &p.opts, model)?;
+    let av = match (keyframes.is_empty(), model) {
+        (true, Some(m)) => pipeline::t2va_hot(ckpt, &text, &p.opts, m)?,
+        (true, None) => pipeline::t2va(ckpt, &text, &p.opts)?,
+        (false, Some(m)) => pipeline::fl2va_hot(ckpt, &text, keyframes, &p.opts, m)?,
+        (false, None) => pipeline::fl2va(ckpt, &text, keyframes, &p.opts)?,
+    };
     Ok(av_outcome(&av, p.opts.seed))
 }
 
-/// [`t2va_hot_on`]'s `fl2va` analogue. `keyframes` are already-encoded
-/// (`crate::pipeline::encode_keyframe_condition`, run by the caller once the
-/// still images named by [`fl2va_keyframes_from`] have been loaded and
-/// resized onto the target canvas). Real text conditioning here is still
-/// `t2va`'s own no-image path (see [`text_conditioning`]'s doc and
-/// [`pipeline::TextConditioning`]'s own two-keyframe gap) - the keyframes'
-/// influence on the generation flows entirely through `keyframes` here, not
-/// through the text encoder.
-pub fn fl2va_hot_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation, p: &GenParams, paths: &Paths, keyframes: &[pipeline::KeyframeCondition], model: &crate::model::H3Transformer) -> capability::ActionResult {
-    let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
-    if keyframes.is_empty() {
-        return Err("fl2va: at least one keyframe is required - use t2va for a text-only request".to_string());
+/// The `(height, width)` canvas a request generates at: its own, or
+/// MiniMax-H3's 16:9 default ([`pipeline::resolve_canvas_size`]).
+pub fn canvas_of(opts: &pipeline::GenOpts) -> Result<(u32, u32), String> {
+    match opts.canvas {
+        Some(hw) => Ok(hw),
+        None => {
+            let (dit_cfg, vae_cfg) = real_configs();
+            let multiple = vae_cfg.spatial_compression_ratio() * dit_cfg.patch_size[2];
+            pipeline::resolve_canvas_size(16.0, 9.0, multiple, pipeline::CANVAS_SHORT_EDGE, pipeline::CANVAS_MAX_PIXELS)
+        }
     }
-    let text = text_conditioning(paths, &prompt, ckpt.dit_cfg.text_dim, p.opts.seed)?;
-    let av = pipeline::fl2va_hot(ckpt, &text, keyframes, &p.opts, model)?;
-    Ok(av_outcome(&av, p.opts.seed))
 }
 
-/// [`t2va_hot_on`]'s COLD equivalent: load a fresh [`crate::model::
-/// H3Transformer`] from `weights.dit_reader` and run once. Used by the
-/// direct (non-resident) [`MiniMaxH3Provider`] below - real residency is
-/// `crates/catalog/src/resident_minimaxh3.rs`'s job.
-pub fn t2va_on(weights: &LoadedWeights, inv: &capability::Invocation, p: &GenParams, paths: &Paths) -> capability::ActionResult {
-    let ckpt = weights.as_checkpoint();
-    let model = crate::model::H3Transformer::load(&weights.dit_reader, weights.dit_cfg, p.opts.device.as_deref());
-    t2va_hot_on(&ckpt, inv, p, paths, &model)
+/// Load each `fl2va` still, fit it to the request's canvas and VAE-encode it
+/// into the conditioning rows [`generate_on`] takes.
+pub fn encode_keyframes(vae: &VaeWeights, specs: &[FlKeyframeSpec], opts: &pipeline::GenOpts) -> Result<Vec<pipeline::KeyframeCondition>, String> {
+    let (h, w) = canvas_of(opts)?;
+    let patch_size = H3TransformerConfig::real().patch_size;
+    specs
+        .iter()
+        .map(|spec| {
+            let pixels_rgb = load_keyframe_pixels(&spec.path, w, h)?;
+            Ok(pipeline::encode_keyframe_condition(&vae.video_vae_cfg, &vae.video_vae_tensors, opts.device.as_deref(), &pixels_rgb, h, w, &vae.video_latents_mean, &vae.video_latents_std, patch_size, spec.anchor, opts.seed))
+        })
+        .collect()
 }
 
-/// [`t2va_on`]'s `fl2va` analogue.
-pub fn fl2va_on(weights: &LoadedWeights, inv: &capability::Invocation, p: &GenParams, paths: &Paths, keyframes: &[pipeline::KeyframeCondition]) -> capability::ActionResult {
-    let ckpt = weights.as_checkpoint();
-    let model = crate::model::H3Transformer::load(&weights.dit_reader, weights.dit_cfg, p.opts.device.as_deref());
-    fl2va_hot_on(&ckpt, inv, p, paths, keyframes, &model)
+/// Decode the still at `path` and resample it to `width`x`height`, as the
+/// channel-major `[0,255]` pixels [`pipeline::encode_keyframe_condition`]
+/// reads (the input side of `encode_vae_condition`'s `pixels.div(255.0)`).
+pub fn load_keyframe_pixels(path: &str, width: u32, height: u32) -> Result<Vec<f32>, String> {
+    let img = imaging::load(path).map_err(|e| format!("fl2va: loading {path}: {e}"))?;
+    let hwc = img.to_hwc_unit();
+    let hwc = if (img.w, img.h) != (width, height) { imaging::host::resize_bilinear_hwc(&hwc, 3, img.w, img.h, width, height) } else { hwc };
+    let plane = (width * height) as usize;
+    let mut chw = vec![0f32; 3 * plane];
+    for (i, px) in hwc.as_chunks::<3>().0.iter().enumerate() {
+        for c in 0..3 {
+            chw[c * plane + i] = (px[c] * 255.0).clamp(0.0, 255.0);
+        }
+    }
+    Ok(chw)
 }
 
 // ===================== execution (direct provider) =====================
@@ -925,22 +849,14 @@ impl Action for MiniMaxH3Action {
         // run must not read "you forgot to export BRAIN_MINIMAXH3_DIT" -
         // `wan::caps::WanAction::run`'s own ordering.
         let p = gen_params_from(inv)?;
-        match self.name.as_str() {
-            "t2va" => {
-                let weights = LoadedWeights::load(&self.paths)?;
-                t2va_on(&weights, inv, &p, &self.paths)
-            }
-            "fl2va" => {
-                let _keyframe_specs = fl2va_keyframes_from(inv)?;
-                // Decoding the named stills into pixel buffers needs an
-                // image-decoding dependency this crate deliberately does not
-                // carry; the residency-scheduled path
-                // (`crates/catalog/src/resident_minimaxh3.rs`, which reaches
-                // `brain-imaging`) is `fl2va`'s working entry point.
-                Err("minimaxh3 fl2va: not runnable through the direct provider yet - the residency-scheduled adapter (crates/catalog/src/resident_minimaxh3.rs) loads keyframe stills; a direct-provider path needs the same image-decoding wiring added here".to_string())
-            }
-            other => Err(format!("minimaxh3 '{other}': unknown action")),
-        }
+        let keyframe_specs = match self.name.as_str() {
+            "t2va" => Vec::new(),
+            "fl2va" => fl2va_keyframes_from(inv)?,
+            other => return Err(format!("minimaxh3 '{other}': unknown action")),
+        };
+        let weights = LoadedWeights::load(&self.paths)?;
+        let keyframes = encode_keyframes(&weights.vae, &keyframe_specs, &p.opts)?;
+        generate_on(&weights.as_checkpoint(), inv, &p, &self.paths, &keyframes, None)
     }
 }
 
@@ -1041,6 +957,25 @@ mod tests {
         assert_eq!(j["actions"][0]["params"][0]["required"], true);
     }
 
+    /// A keyframe still on disk reaches the VAE channel-major in `[0,255]`,
+    /// at the canvas the request asked for whatever size the file is.
+    #[test]
+    fn a_keyframe_still_is_loaded_channel_major_and_fitted_to_the_canvas() {
+        let dir = std::env::temp_dir().join(format!("minimaxh3-keyframe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("still.png");
+        // 2x1 RGB: px0 = (255, 0, 128), px1 = (0, 255, 64).
+        imaging::save_png(&path, &imaging::Rgb8 { w: 2, h: 1, px: vec![255, 0, 128, 0, 255, 64] }).unwrap();
+
+        let chw = load_keyframe_pixels(path.to_str().unwrap(), 2, 1).unwrap();
+        assert_eq!(chw, vec![255.0, 0.0, 0.0, 255.0, 128.0, 64.0], "R plane, G plane, B plane");
+
+        let fitted = load_keyframe_pixels(path.to_str().unwrap(), 4, 2).unwrap();
+        assert_eq!(fitted.len(), 3 * 4 * 2, "resampled to the requested canvas");
+        assert!(fitted.iter().all(|v| (0.0..=255.0).contains(v)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The manifest's own advertised defaults must survive `validate` ->
     /// `decode_gen_params` unchanged - the join the two halves can drift at.
     #[test]
@@ -1137,13 +1072,9 @@ mod tests {
             brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to encode from");
             return;
         };
-        // `build_text_encoder`/`Qwen3Vl::from_hf_shard` has no explicit
-        // device parameter - it follows ambient `BRAIN_DEVICE` unconditionally
-        // (`model::Shard::ANY_GPU` "keeps the ambient selection"). Real
-        // generation (`generate_t2va.rs`) sets `BRAIN_DEVICE=cpu` in its own
-        // process for exactly this reason: this 50-layer/hidden=5120 shard is
-        // a genuinely huge, unstreamed load with no business landing on a
-        // consumer GPU by ambient accident.
+        // The text tower places itself over the ambient `BRAIN_DEVICE`
+        // selection; a test pins it to the CPU so a 50-layer/hidden=5120
+        // tower never lands on a GPU some other test is using.
         //
         // `set_var` here is NOT sufficient on its own: `gpu_core::devices`'s
         // ambient resolution is cached in a process-lifetime `OnceLock`

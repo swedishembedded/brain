@@ -51,17 +51,12 @@ fn main() {
 
     let paths = minimaxh3::caps::Paths::from_env().unwrap_or_else(|e| panic!("Paths::from_env: {e}"));
 
-    eprintln!("[1/5] loading real text encoder + tokenizer ...");
+    eprintln!("[1/4] encoding prompt: {prompt:?}");
     let t0 = std::time::Instant::now();
-    let (qwen, tok) = minimaxh3::caps::build_text_encoder(&paths).unwrap_or_else(|e| panic!("build_text_encoder: {e}"));
+    let text = minimaxh3::caps::encode_prompt(&paths, prompt).unwrap_or_else(|e| panic!("encode_prompt: {e}"));
     eprintln!("      done in {:.1}s", t0.elapsed().as_secs_f32());
 
-    eprintln!("[2/5] encoding prompt: {prompt:?}");
-    let text = minimaxh3::caps::encode_text_real(&qwen, &tok, prompt);
-    drop(qwen);
-    drop(tok);
-
-    eprintln!("[3/5] loading DiT (streaming) + VAE weights - this is the ~33B-param checkpoint, expect several minutes ...");
+    eprintln!("[2/4] loading DiT (streaming) + VAE weights - this is the ~33B-param checkpoint, expect several minutes ...");
     let t1 = std::time::Instant::now();
     let weights = minimaxh3::caps::LoadedWeights::load(&paths).unwrap_or_else(|e| panic!("LoadedWeights::load: {e}"));
     eprintln!("      done in {:.1}s", t1.elapsed().as_secs_f32());
@@ -87,14 +82,14 @@ fn main() {
     };
 
     eprintln!(
-        "[4/5] denoising ({} steps, {canvas_px}x{canvas_px}, {num_frames} frames requested) - this runs the real DiT forward pass repeatedly, expect this to be slow ...",
+        "[3/4] denoising ({} steps, {canvas_px}x{canvas_px}, {num_frames} frames requested) - this runs the real DiT forward pass repeatedly, expect this to be slow ...",
         opts.num_inference_steps
     );
     let t2 = std::time::Instant::now();
     let av = minimaxh3::pipeline::t2va(&ckpt, &text, &opts).unwrap_or_else(|e| panic!("t2va: {e}"));
     eprintln!("      done in {:.1}s -> {}x{} video, {} frames, {} audio channels @ {}Hz", t2.elapsed().as_secs_f32(), av.width, av.height, av.num_video_frames, av.audio.len(), av.sample_rate);
 
-    eprintln!("[5/5] muxing to {out_mp4} ...");
+    eprintln!("[4/4] muxing to {out_mp4} ...");
     mux_mp4(&av, out_mp4);
     eprintln!("wrote {out_mp4}");
 }
