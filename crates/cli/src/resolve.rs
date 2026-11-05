@@ -151,13 +151,12 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("horizon", "brain/horizon"),
     ("minimaxmusic3", "brain/minimaxmusic3"),
     ("cosyvoice", "brain/cosyvoice"),
-    // `sdxlunet`/`controlnet` chose no CLI shortcut at all (only `brain do
-    // brain/sdxl …`/the residency-served transports) - SUPIR's own single
-    // action makes a one-line shortcut cheap enough to add here instead,
-    // matching `llava`'s row just above it: `brain supir restore …` reaches
-    // the exact same `supir::caps` this row's model id already serves
-    // through `brain do`/D-Bus.
     ("supir", "brain/supir"),
+    ("sdxlunet", "brain/sdxl"),
+    ("controlnet", "brain/sdxl-controlnet"),
+    ("t5encoder", "brain/t5encoder"),
+    ("moondream3", "brain/moondream3"),
+    ("minimaxh3", "brain/minimaxh3"),
     // Same shape as `supir`: one action each (`flux1::caps`/`pulid::caps`
     // both declare exactly `text2image`), every other registration point
     // (catalog entry, residency adapter, D-Bus) already exists - only this
@@ -401,6 +400,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "t5encoder",
     "cosyvoice",
     "minimaxmusic3",
+    "minimaxh3",
     "ouro",
     "huginn",
 ];
@@ -1091,6 +1091,22 @@ mod tests {
         let _serial = env_lock();
         assert!(brain_arch::by_id("ltxv").expect("ltxv row").weights_env.is_empty());
         assert!(!weights_already_named("ltxv", &s(&["t2v", "--vae", "v", "--prompt", "p"])));
+    }
+
+    /// A served model whose catalog entry resolves its weights through an
+    /// architecture's spec is a finished port: `brain <arch> <verb>` must
+    /// reach it. Without a row the command prints "registered but not
+    /// reachable via the CLI", and nothing else says the wiring was skipped.
+    #[test]
+    fn every_catalog_model_with_an_arch_spec_is_reachable_from_the_cli() {
+        let unreachable: Vec<String> = catalog::models()
+            .iter()
+            .filter_map(|m| m.spec.map(|(arch, _)| arch))
+            .filter(|arch| brain_arch::by_id(arch).is_some())
+            .filter(|arch| !ARCH_HANDLERS.iter().any(|(id, _)| id == arch) && !ARCH_TO_MODEL.iter().any(|(id, _)| id == arch))
+            .map(str::to_string)
+            .collect();
+        assert!(unreachable.is_empty(), "served with a resolver spec but unreachable as `brain <arch> <verb>`: {unreachable:?}");
     }
 
     #[test]

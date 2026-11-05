@@ -137,6 +137,8 @@ fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R
         "t5encoder" => Some(f(&t5encoder::spec::T5encoderSpec)),
         "cosyvoice" => Some(f(&cosyvoice::spec::CosyVoiceSpec)),
         "minimaxmusic3" => Some(f(&minimaxmusic3::spec::MinimaxMusic3Spec)),
+        "minimaxh3" => Some(f(&minimaxh3::spec::H3Spec)),
+        "moondream3" => Some(f(&moondream3::spec::Moondream3Spec)),
         _ => None,
     }
 }

@@ -1010,6 +1010,7 @@ dependencies = [
  "brain-memauth",
  "brain-mimi",
  "brain-minicpmv",
+ "brain-minimaxh3",
  "brain-minimaxmusic3",
  "brain-model",
  "brain-modelcost",
@@ -3062,7 +3063,7 @@ dependencies = [
 
 [[package]]
 name = "brain-videocodec"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "brain-testutil",
  "matroska-demuxer",

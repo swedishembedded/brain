@@ -72,6 +72,7 @@ brain-ouro.workspace = true
 brain-huginn.workspace = true
 brain-qwen3tts.workspace = true
 brain-minimaxmusic3.workspace = true
+brain-minimaxh3.workspace = true
 brain-cosyvoice.workspace = true
 brain-mimi.workspace = true
 brain-ecapatdnn.workspace = true
