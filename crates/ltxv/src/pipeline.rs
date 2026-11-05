@@ -481,6 +481,31 @@ pub struct GenOpts {
     /// The checkpoint's weights are never rewritten: quantized blocks run the
     /// correction beside their packed weights, fp32 weights fold it exactly.
     pub adapters: Vec<model::adapter::AdapterSpec>,
+    /// An IC-LoRA reference video (`--reference-video`): appended to every
+    /// in-context stage as clean tokens at their own positions, for an
+    /// adapter in [`Self::adapters`] trained to read them - see
+    /// [`crate::refcond`]. Needs an adapter: the base checkpoint alone does
+    /// not know what to do with them.
+    pub reference: Option<VideoReference>,
+    /// Keep the adapters and the reference on the refinement stage of a
+    /// two-stage run too (`--stage-2-ic-lora`). Off by default, as in the
+    /// reference's own IC-LoRA recipe: stage 1 runs in context, stage 2 runs
+    /// the bare checkpoint.
+    pub refine_in_context: bool,
+}
+
+/// A reference video for IC-LoRA conditioning: the decoded clip and how
+/// strongly its tokens are held (`1.0` keeps them perfectly clean).
+#[derive(Clone)]
+pub struct VideoReference {
+    pub clip: Video,
+    pub strength: f32,
+}
+
+impl std::fmt::Debug for VideoReference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VideoReference").field("frames", &self.clip.frames.len()).field("width", &self.clip.width).field("height", &self.clip.height).field("strength", &self.strength).finish()
+    }
 }
 
 impl Default for GenOpts {
@@ -513,6 +538,8 @@ impl Default for GenOpts {
             conditioning_strength: 1.0,
             devices: crate::devplan::DevicePlan::default(),
             adapters: Vec::new(),
+            reference: None,
+            refine_in_context: false,
         }
     }
 }
@@ -2823,6 +2850,45 @@ fn encode_still(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, path: &str
     Ok(cond_tokens)
 }
 
+/// Folded into the seed of an IC-LoRA reference's own noise draw, so it never
+/// repeats the base latent's numbers.
+const REFERENCE_SEED_SALT: u64 = 0x52_45_46_56_49_44; // "REFVID"
+
+/// A reference clip's `[f*h*w, channels]` latent tokens and its latent
+/// `(f, h, w)`.
+type ReferenceTokens = (Vec<f32>, (usize, usize, usize));
+
+/// The IC-LoRA reference clip as the conditioning item takes it
+/// (`append_ic_lora_reference_video_conditionings`): its first `frames`
+/// frames, resized to `width/downscale x height/downscale`, temporally
+/// subsampled (frame 0, then every `temporal`-th), VAE-encoded. Returns the
+/// `[f*h*w, channels]` tokens and the latent `(f, h, w)`.
+#[allow(clippy::too_many_arguments)]
+fn encode_reference(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, r: &VideoReference, frames: usize, width: usize, height: usize, downscale: usize, temporal: usize, channels: usize, device: Option<&str>) -> Result<ReferenceTokens, String> {
+    if !width.is_multiple_of(32 * downscale) || !height.is_multiple_of(32 * downscale) {
+        return Err(format!("{width}x{height} at reference_downscale_factor {downscale} gives a {}x{} reference, which is not on the VAE's 32-pixel grid", width / downscale, height / downscale));
+    }
+    if r.clip.frames.len() < frames {
+        return Err(format!("the reference video has {} frames, fewer than the {frames} being generated", r.clip.frames.len()));
+    }
+    let (rw, rh) = (width / downscale, height / downscale);
+    let (sw, sh) = (r.clip.width, r.clip.height);
+    let picked: Vec<usize> = std::iter::once(0).chain((1..frames).step_by(temporal)).collect();
+    let n = picked.len();
+    let lat_f = vcfg.latent_frames(n as u32).ok_or_else(|| format!("the reference keeps {n} frames after temporal_scale_factor {temporal}, which is not of the form 1 + 8k"))? as usize;
+    let resized: Vec<Vec<u8>> = picked
+        .iter()
+        .map(|&i| {
+            let img = image::RgbImage::from_raw(sw, sh, r.clip.frames[i].clone()).ok_or_else(|| format!("reference frame {i} is not {sw}x{sh} RGB8"))?;
+            Ok(image::imageops::resize(&img, rw as u32, rh as u32, image::imageops::FilterType::Lanczos3).into_raw())
+        })
+        .collect::<Result<_, String>>()?;
+    let enc = LtxVaeEncoder::build(vcfg, vweights, n as u32, rh as u32, rw as u32, device);
+    let latent = enc.encode(&rgb8_to_chw(&resized, rh, rw));
+    let (lh, lw) = (rh / 32, rw / 32);
+    Ok((chw_to_tc(&latent, channels, lat_f, lh, lw), (lat_f, lh, lw)))
+}
+
 /// Everything one denoising stage needs that does NOT vary between the two
 /// stages of a two-stage generation: the model, the VAE weights the
 /// conditioning encode needs, the text context, and the clip's frame count.
@@ -2843,7 +2909,16 @@ struct StageCtx<'a> {
     context_valid: &'a [f32],
     context_len: usize,
     cancel: &'a capability::CancelToken,
+    /// The IC-LoRA reference video a stage run with this context appends, with
+    /// the adapters' `(downscale, temporal_scale)` factors. `None` for every
+    /// generation without one, and for a stage that runs out of context (the
+    /// refinement of an IC-LoRA run, by default).
+    reference: Option<StageReference<'a>>,
 }
+
+/// A stage's IC-LoRA reference and the `(downscale, temporal_scale)` factors
+/// its adapter declares.
+type StageReference<'a> = (&'a VideoReference, (usize, usize));
 
 /// Clean latent frames carried in from the PREVIOUS long-form window,
 /// occupying the first [`Self::frames`] latent frames of a stage's own token
@@ -3120,6 +3195,33 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
         }
         (latent, positions_d, keyframes_mask_d, denoise_t_count, frozen)
     };
+    // The IC-LoRA reference, appended LAST - after every other conditioning
+    // item, as `ICLoraPipeline` orders them - at this stage's own resolution.
+    let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = match sc.reference {
+        None => (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen),
+        Some((reference, (downscale, temporal))) => {
+            if st.mask.is_some() {
+                return Err("a masked video-to-video pass cannot also take an IC-LoRA reference video".into());
+            }
+            let (tokens, dims) = encode_reference(sc.vcfg, sc.vweights, reference, o.frames, st.width, st.height, downscale, temporal, c, o.device.as_deref())?;
+            let rc = crate::refcond::append_reference_video_conditioning(denoise_t_count, &positions_d, &keyframes_mask_d, c, o.fps as f64, dims, &tokens, downscale, temporal, reference.strength, None);
+            let total_t = rc.keyframes_mask.len();
+            // `GaussianNoiser`: the appended tokens start at
+            // `lerp(clean, noise, denoise_mask)`, which is exactly the clean
+            // reference at strength 1.
+            let noise = seeded_noise((total_t - denoise_t_count) * c, o.seed ^ st.seed_salt ^ REFERENCE_SEED_SALT);
+            let mut latent = latent0;
+            for (i, n) in noise.iter().enumerate() {
+                let (tok, m) = (denoise_t_count + i / c, rc.denoise_mask[denoise_t_count + i / c]);
+                latent.push((1.0 - m) * rc.clean[tok * c + i % c] + m * n);
+            }
+            let (mut mask, mut clean) = frozen.unwrap_or_else(|| (vec![1f32; denoise_t_count], vec![0f32; denoise_t_count * c]));
+            mask.extend_from_slice(&rc.denoise_mask[denoise_t_count..]);
+            clean.extend_from_slice(&rc.clean[denoise_t_count * c..]);
+            tracing::info!(stage = st.label, reference_tokens = total_t - denoise_t_count, dims = ?dims, downscale, temporal, strength = reference.strength, "IC-LoRA reference video appended");
+            (latent, rc.positions, rc.keyframes_mask, total_t, Some((mask, clean)))
+        }
+    };
     let frozen_ref = frozen.as_ref().map(|(mask, clean)| Frozen { mask, clean, channels: c });
     tracing::info!(stage = st.label, width = st.width, height = st.height, tokens = denoise_t_count, base_tokens = t, steps = st.sigmas.len() - 1, eta = st.eta, seeded = st.seed_chw.is_some(), "stage denoising");
     let done_before = st.done_before;
@@ -3348,8 +3450,11 @@ fn stage2_sigmas(steps: usize) -> Result<Vec<f64>, String> {
 /// Build the denoiser [`generate`] and [`upscale`] both run: the tiny
 /// random-weight config, or the real 22B checkpoint streamed int8-compute
 /// when `GenOpts::dit_config` names it (needs [`Paths::dit`]).
-fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, place: crate::devplan::Placement) -> Result<Box<dyn Denoiser>, String> {
-    let adapter = if o.adapters.is_empty() { None } else { Some(crate::lora::runtime_adapter(&o.adapters)?) };
+///
+/// `adapters` is passed apart from `o` so a stage that runs out of context
+/// (an IC-LoRA run's bare refinement) can build the same model without them.
+fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, adapters: &[model::adapter::AdapterSpec], place: crate::devplan::Placement) -> Result<Box<dyn Denoiser>, String> {
+    let adapter = if adapters.is_empty() { None } else { Some(crate::lora::runtime_adapter(adapters)?) };
     if o.dit_config == "tiny" {
         // Not a real model: random weights, so any output is a wiring proof
         // and nothing else. Worth a warning rather than an info line - a run
@@ -3717,9 +3822,16 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // changed underneath it (see `crate::devplan`).
     let place = o.devices.resolve(o.device.as_deref());
     tracing::info!(cond_gpu = ?place.cond, uncond_gpu = ?place.uncond, text_gpu = ?place.text, cfg_parallel = place.cfg_is_parallel() && o.guidance > 1.0, "device placement resolved");
+    // An IC-LoRA reference is read by the adapter that was trained on it,
+    // with the geometry that adapter declares - checked before any weight.
+    let reference = match &o.reference {
+        None => None,
+        Some(_) if o.adapters.is_empty() => return Err("--reference-video needs the IC-LoRA trained to read it (--adapter): the base checkpoint has no use for reference tokens".into()),
+        Some(r) => Some((r, crate::lora::reference_scale_factors(&o.adapters)?)),
+    };
     progress(0, total, "build transformer");
     let build_t = Instant::now();
-    let dit = build_denoiser(paths, dit_cfg, o, place)?;
+    let dit = build_denoiser(paths, dit_cfg, o, &o.adapters, place)?;
     if o.audio && !dit.has_audio() {
         return Err("ltxv: audio was requested but the built denoiser carries no audio stream".into());
     }
@@ -3766,6 +3878,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         a_ctx_cond: &a_ctx_cond,
         a_ctx_uncond: &a_ctx_uncond,
         cancel,
+        reference,
     };
     let denoise_t = Instant::now();
     let stage_out = if two_stage {
@@ -3811,8 +3924,23 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
             &mut progress,
         )?;
 
+        // An IC-LoRA run refines OUT of context by default, as the
+        // reference's own recipe does: the bare checkpoint, no reference
+        // tokens. Same checkpoint, so the quantized-weight cache is shared and
+        // nothing is re-read; only the adapters are left off.
+        let bare = match (&reference, o.refine_in_context) {
+            (Some(_), false) => {
+                dit.release_devices();
+                Some(build_denoiser(paths, dit_cfg, o, &[], place)?)
+            }
+            _ => None,
+        };
+        let refine_ctx = match &bare {
+            Some(b) => StageCtx { dit: b.as_ref(), reference: None, ..stage_ctx },
+            None => StageCtx { ..stage_ctx },
+        };
         upscale_and_refine(
-            &stage_ctx,
+            &refine_ctx,
             Refine {
                 upsampler: &upsampler,
                 upsampler_path,
@@ -4100,6 +4228,9 @@ const REFINE_SEED_SALT: u64 = 0x5245_4649_4e45_0001;
 /// supply it.
 #[tracing::instrument(level = "info", name = "upscale", skip_all, fields(frames = clip.frames.len(), width = clip.width, height = clip.height, factor = o.factor, seed = o.base.seed))]
 pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
+    if o.base.reference.is_some() {
+        return Err("--reference-video is applied by a single-window generation (`t2v` within one denoising window); upscale does not route a reference".into());
+    }
     if o.factor != 2 {
         return Err(format!(
             "factor {} is not implemented: the official LTX-2.5 latent spatial upscaler is an x2 network and this pipeline runs that network, not a resampler",
@@ -4161,7 +4292,7 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
 
     progress(0, total, "build transformer");
     let build_t = Instant::now();
-    let dit = build_denoiser(paths, dit_cfg, &o.base, place)?;
+    let dit = build_denoiser(paths, dit_cfg, &o.base, &o.base.adapters, place)?;
     timings.build_dit = build_t.elapsed().as_secs_f32();
     if cancel.is_cancelled() {
         return Err("cancelled".into());
@@ -4229,6 +4360,7 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
             context_valid: &context_valid,
             context_len,
             cancel,
+            reference: None,
         };
         // The plan's own context count and what the previous pass could
         // actually supply have to be the same number - the emitted-frame
@@ -4431,6 +4563,9 @@ impl Default for MaskedOpts {
 /// self-attention, and answers to the text context while doing it.
 #[tracing::instrument(level = "info", name = "v2v", skip_all, fields(frames = clip.frames.len(), width = clip.width, height = clip.height, strength = o.strength, seed = o.base.seed))]
 pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
+    if o.base.reference.is_some() {
+        return Err("--reference-video is applied by a single-window generation (`t2v` within one denoising window); a masked video-to-video pass does not route a reference".into());
+    }
     let (w, h) = (clip.width as usize, clip.height as usize);
     let frames = clip.frames.len();
     if w == 0 || h == 0 || frames == 0 {
@@ -4485,7 +4620,7 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
 
     progress(0, total, "build transformer");
     let build_t = Instant::now();
-    let dit = build_denoiser(paths, dit_cfg, &o.base, place)?;
+    let dit = build_denoiser(paths, dit_cfg, &o.base, &o.base.adapters, place)?;
     timings.build_dit = build_t.elapsed().as_secs_f32();
     if cancel.is_cancelled() {
         return Err("cancelled".into());
@@ -4522,6 +4657,7 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
         context_valid: &text.valid,
         context_len: text.len,
         cancel,
+        reference: None,
     };
     let work_t = Instant::now();
     let stage_out = denoise_stage(
@@ -4913,6 +5049,9 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         // spelling it.
         return generate(paths, prompt, &o.base, cancel, progress);
     }
+    if o.base.reference.is_some() {
+        return Err("--reference-video is applied by a single-window generation; a clip this long is generated as several windows, which do not route a reference yet".into());
+    }
     // Stage-major long-form: when the kill switch is enabled (default) and the
     // clip is video-only, route to the stage-major loop which runs stage 1 at
     // half resolution for the whole clip, then stage 2 at full resolution.
@@ -5012,7 +5151,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     let place = o.base.devices.resolve(o.base.device.as_deref());
     progress(0, total, "build transformer");
     let build_t = Instant::now();
-    let dit = build_denoiser(paths, dit_cfg, &o.base, place)?;
+    let dit = build_denoiser(paths, dit_cfg, &o.base, &o.base.adapters, place)?;
     if o.base.audio && !dit.has_audio() {
         return Err("ltxv: audio was requested but the built denoiser carries no audio stream".into());
     }
@@ -5072,6 +5211,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
             context_valid: &context_valid,
             context_len,
             cancel,
+            reference: None,
         };
         // The plan's own context count and what the previous window could
         // actually supply have to be the same number - the emitted-frame
@@ -5366,7 +5506,7 @@ fn run_stage_major(
     let place = o.base.devices.resolve(o.base.device.as_deref());
     progress(0, total, "build transformer");
     let build_t = Instant::now();
-    let dit = build_denoiser(paths, dit_cfg, &o.base, place)?;
+    let dit = build_denoiser(paths, dit_cfg, &o.base, &o.base.adapters, place)?;
     if o.base.audio && !dit.has_audio() {
         return Err("ltxv: audio was requested but the built denoiser carries no audio stream".into());
     }
@@ -5402,6 +5542,7 @@ fn run_stage_major(
             context_valid: &context_valid,
             context_len,
             cancel,
+            reference: None,
         };
         let seed_salt = 0x57_49_4e_44_00_00_00_00u64 ^ wi as u64;
         tracing::info!(window = wi, of = tsp.stage1.len(), latent_frames = lat_t, carried = w.context, new = w.new, tokens = w.tokens(lh1, lw1), "stage1 window starting");
@@ -5483,6 +5624,7 @@ fn run_stage_major(
             context_valid: &context_valid,
             context_len,
             cancel,
+            reference: None,
         };
         let seed_salt = 0x57_49_4e_44_00_00_00_00u64 ^ (tsp.stage1.len() + wi) as u64;
         tracing::info!(window = wi, of = tsp.stage2.len(), latent_frames = lat_t, carried = w.context, new = w.new, tokens = w.tokens(lh, lw), "stage2 window starting");
@@ -5879,6 +6021,9 @@ fn noised_seed(seed_content: &[f32], sigma0: f32, seed: u64) -> Vec<f32> {
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = "info", name = "generate_dfr", skip_all, fields(frames = o.base.frames, width = o.base.width, height = o.base.height, steps = o.base.steps, seed = o.base.seed, temporal_rounds = o.temporal_upsample_rounds))]
 pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
+    if o.base.reference.is_some() {
+        return Err("--reference-video is applied by a single-window generation (`t2v` within one denoising window); DFR does not route a reference".into());
+    }
     let base = &o.base;
     tracing::info!(prompt_chars = prompt.chars().count(), device = base.device.as_deref().unwrap_or("(ambient)"), "DFR generation starting");
     if o.temporal_upsample_rounds > 2 {

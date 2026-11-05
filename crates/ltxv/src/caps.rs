@@ -189,6 +189,8 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         future_anchors: Vec::new(),
         devices: d.devices,
         adapters: adapters_from(inv),
+        reference: None,
+        refine_in_context: false,
     };
     use crate::vae3d::LtxVaeConfig;
     let vcfg = LtxVaeConfig::conv25();
@@ -264,6 +266,8 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
         future_anchors: Vec::new(),
         devices: d.devices,
         adapters: adapters_from(inv),
+        reference: None,
+        refine_in_context: false,
     };
     let temporal_upsample_rounds = inv.get_i64("temporal_upsample_rounds").unwrap_or(0).max(0) as usize;
     let opts = DfrOpts { base, temporal_upsample_rounds };

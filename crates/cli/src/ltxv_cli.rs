@@ -280,6 +280,16 @@ Adapters:
                              the quantized weights, never folded into them.
   --lora-scale <s>           strength of the --adapter it follows (default 1.0,
                              ComfyUI's strength_model)
+  --reference-video <path>   an IC-LoRA's reference clip (pose, depth, edges,
+                             a source to restyle...): its first --frames
+                             frames, at the geometry the --adapter declares,
+                             appended beside the clip as clean tokens. Needs
+                             the IC-LoRA trained to read it; one window only.
+  --reference-strength <s>   how strongly the reference is held, 0..1
+                             (default 1.0: perfectly clean)
+  --stage-2-ic-lora          keep the adapters and the reference on a two-stage
+                             run's refinement too (default: stage 2 runs the
+                             bare checkpoint, as the reference recipe does)
 
 Devices:
   --device <cpu|gpu>         DiT + VAE (default: the ambient BRAIN_DEVICE)
@@ -596,6 +606,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let mut o = GenOpts { seed, ..GenOpts::default() };
     // How many `--adapter`s already carry their `--lora-scale`.
     let mut scaled = 0usize;
+    let mut reference_path: Option<String> = None;
+    let mut reference_strength = 1.0f32;
     let mut context_frames = ltxv::longform::CONTEXT_FRAMES;
     let mut prompt: Option<String> = None;
     let mut scene_specs: Vec<String> = Vec::new();
@@ -633,6 +645,13 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--dit-config" => o.dit_config = need(i)?.clone(),
             "--adapter" => o.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
             "--lora-scale" => crate::args::attach_lora_scale(&mut o.adapters, &mut scaled, flt(i, "--lora-scale")?)?,
+            "--reference-video" => reference_path = Some(need(i)?.clone()),
+            "--reference-strength" => reference_strength = flt(i, "--reference-strength")?,
+            "--stage-2-ic-lora" => {
+                o.refine_in_context = true;
+                i += 1;
+                continue;
+            }
             "--device" => {
                 o.device = Some(need(i)?.clone());
             }
@@ -669,6 +688,12 @@ fn t2v(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown flag {other}\n\n{HELP}")),
         }
         i += 2;
+    }
+    if let Some(path) = &reference_path {
+        if !(0.0..=1.0).contains(&reference_strength) {
+            return Err(format!("--reference-strength {reference_strength} is outside [0, 1]"));
+        }
+        o.reference = Some(ltxv::pipeline::VideoReference { clip: read_clip(path, o.fps)?, strength: reference_strength });
     }
     // One scene is what a `--prompt`/`--frames` run always was, so the whole
     // command below has exactly one shape to handle.
@@ -832,6 +857,18 @@ fn t2v(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Decode a whole video file into the pipeline's RGB8 clip, refusing one
+/// whose frames change size.
+fn read_clip(path: &str, fps: usize) -> Result<ltxv::pipeline::Video, String> {
+    let decoded = imaging::video::decode_frames_rgb8(std::path::Path::new(path), &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0, spread: 0 })?;
+    let first = decoded.first().ok_or_else(|| format!("{path} has no frames"))?;
+    let (w, h) = (first.w, first.h);
+    if let Some(bad) = decoded.iter().position(|f| (f.w, f.h) != (w, h)) {
+        return Err(format!("{path} changes size at frame {bad} ({}x{} after {w}x{h}) - a clip has one resolution", decoded[bad].w, decoded[bad].h));
+    }
+    Ok(ltxv::pipeline::Video { width: w, height: h, fps, frames: decoded.into_iter().map(|f| f.px).collect(), audio: None })
+}
+
 fn upscale(args: &[String]) -> Result<(), String> {
     let (overrides, args) = crate::resolver_cli::extract_role_overrides(&LtxvSpec, args);
     let (seed, args) = crate::args::split_seed(&args, "ltxv upscale");
@@ -893,11 +930,8 @@ fn upscale(args: &[String]) -> Result<(), String> {
     };
 
     let in_path = std::path::Path::new(&input);
-    let decoded = imaging::video::decode_frames_rgb8(in_path, &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0, spread: 0 })?;
-    let (w, h) = (decoded[0].w, decoded[0].h);
-    if let Some(bad) = decoded.iter().position(|f| (f.w, f.h) != (w, h)) {
-        return Err(format!("{input} changes size at frame {bad} ({}x{} after {w}x{h}) - a clip has one resolution", decoded[bad].w, decoded[bad].h));
-    }
+    let decoded = read_clip(&input, 0)?;
+    let (w, h) = (decoded.width, decoded.height);
     // The source's own rate, so an upscale never silently changes playback
     // speed. `--fps` overrides; a missing `ffprobe` is not fatal (see
     // `imaging::video::probe_fps`), it just means the caller has to say.
@@ -906,7 +940,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
     // `upscale` re-renders a finished clip's PICTURE. It never runs the
     // audio-visual DiT, so it has no sound track of its own to carry; any
     // audio the input file had stays in the input file.
-    let clip = ltxv::pipeline::Video { width: w, height: h, fps, frames: decoded.into_iter().map(|f| f.px).collect(), audio: None };
+    let clip = ltxv::pipeline::Video { fps, ..decoded };
 
     let plan = ltxv::pipeline::refine_plan(clip.frames.len(), (h as usize * o.factor) / 32, (w as usize * o.factor) / 32, o.context_latent_frames, o.max_refine_tokens)?;
     let ctx_desc = if paths.text_encoder.is_some() { "real Gemma-4 text encoder" } else { "stub text context (no real encoder)" };
@@ -1021,15 +1055,12 @@ fn v2v(args: &[String]) -> Result<(), String> {
     let paths = resolve_ltxv(&overrides, None)?;
 
     let in_path = std::path::Path::new(&input);
-    let decoded = imaging::video::decode_frames_rgb8(in_path, &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0, spread: 0 })?;
-    let (w, h) = (decoded[0].w, decoded[0].h);
-    if let Some(bad) = decoded.iter().position(|f| (f.w, f.h) != (w, h)) {
-        return Err(format!("{input} changes size at frame {bad} ({}x{} after {w}x{h}) - a clip has one resolution", decoded[bad].w, decoded[bad].h));
-    }
+    let decoded = read_clip(&input, 0)?;
+    let (w, h) = (decoded.width, decoded.height);
     // The source's own rate, so an edit never silently changes playback speed.
     let fps = fps.unwrap_or_else(|| imaging::video::probe_fps(in_path).map(|f| f.round() as usize).filter(|&f| f > 0).unwrap_or(o.base.fps));
     o.base.fps = fps;
-    let clip = ltxv::pipeline::Video { width: w, height: h, fps, frames: decoded.into_iter().map(|f| f.px).collect(), audio: None };
+    let clip = ltxv::pipeline::Video { fps, ..decoded };
 
     let ctx_desc = if paths.text_encoder.is_some() { "real Gemma-4 text encoder" } else { "stub text context (no real encoder)" };
     let dit_desc = if o.base.dit_config == "tiny" { "tiny random-weight DiT" } else { "REAL checkpoint DiT (int8 compute)" };

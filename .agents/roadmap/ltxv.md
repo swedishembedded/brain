@@ -9161,3 +9161,25 @@ actions `adapter`/`lora_scale`) reaches every denoiser `build_denoiser` makes:
 - **Not measured**: no official LTX-2.5 adapter is on this box (the IC-LoRA
   repos are gated), so no real-weight adapted generation has been run; the
   real path differs from the gated tiny one only in its dimensions.
+
+### Phase 42 - an IC-LoRA's reference video reaches generation
+
+`crate::refcond` (Phase 37, golden-gated geometry) had no caller. Now
+`GenOpts::reference` (`--reference-video`, `--reference-strength`) is encoded
+per in-context stage at that stage's resolution (`encode_reference`: first
+`frames` frames, resized by the adapters' `reference_downscale_factor`,
+subsampled by `reference_temporal_scale_factor`, VAE-encoded) and appended
+last by `append_reference_video_conditioning`, after every other conditioning
+item, as `ICLoraPipeline` orders them. The factors come from the adapters'
+safetensors metadata (`lora::reference_scale_factors`, conflicting values
+refused as the reference refuses them). A two-stage run refines OUT of
+context by default (`DEFAULT_IC_LORA_STAGES`): a second denoiser built with
+no adapters (the quantized cache is per checkpoint, so nothing is re-read),
+no reference; `--stage-2-ic-lora` keeps both. Gates: `tests/it/
+reference_video.rs` (tiny DiT, real VAE: the reference changes the output,
+two references differ, the clip shape is unchanged; no adapter / too-short
+reference refused; metadata factors and conflicts). Open: the conditioning
+attention mask (`--conditioning-attention-mask`/`conditioning_attention_strength`
+< 1) needs a per-key attention weight in the flash kernels; multi-window
+routing of a reference; a reference on the capability actions (an input blob,
+the same undesigned shape `upscale` waits on).

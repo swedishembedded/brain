@@ -305,6 +305,28 @@ brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
 * LoKr adapters are refused: their delta has no low-rank form to apply beside
   a quantized weight.
 
+**IC-LoRA reference videos.** An IC-LoRA (the published control, restoration
+and transformation adapters) reads a *reference clip* beside the clip it
+generates. `--reference-video <path>` supplies it: its first `--frames` frames
+are VAE-encoded at the geometry the adapter declares in its own metadata
+(`reference_downscale_factor`, `reference_temporal_scale_factor`) and appended
+as clean tokens at their own positions, which the adapter learned to attend
+across. `--reference-strength` (default 1.0) sets how strongly they are held.
+
+```bash
+brain --device gpu0 ltxv t2v --dit-config ltx25_22b \
+  --prompt "..." --frames 121 --width 1280 --height 704 --output-path out.mp4 \
+  --adapter ltx-2.5-22b-ic-lora-depth.safetensors --reference-video depth.mp4
+```
+
+* It needs the IC-LoRA: the base checkpoint has no use for reference tokens,
+  so a reference without `--adapter` is refused.
+* A two-stage run follows the reference recipe: stage 1 runs in context
+  (adapters and reference), stage 2 refines with the bare checkpoint.
+  `--stage-2-ic-lora` keeps both on stage 2 as well.
+* One window only: a clip long enough to need several windows, `upscale`,
+  `v2v` and `dfr` refuse a reference rather than drop it.
+
 ### Upscaling a clip that already exists
 
 `brain ltxv upscale` takes a rendered video file and re-renders it at twice the

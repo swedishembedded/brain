@@ -252,6 +252,31 @@ pub fn runtime_adapter(specs: &[model::adapter::AdapterSpec]) -> Result<model::l
     Ok(model::lora::RuntimeLora::new(deltas))
 }
 
+/// The IC-LoRA reference geometry a stack of adapters was trained with:
+/// `(reference_downscale_factor, reference_temporal_scale_factor)` from each
+/// file's safetensors metadata (`ltx_pipelines.iclora_utils`), `1` when no
+/// adapter declares one. Two adapters that declare different values cannot
+/// share one reference video, so that is refused - exactly as
+/// `ICLoraPipeline` refuses it.
+pub fn reference_scale_factors(specs: &[model::adapter::AdapterSpec]) -> Result<(usize, usize), String> {
+    let mut factors = (1usize, 1usize);
+    for spec in specs {
+        let meta = checkpoint::st::read_metadata(&spec.path).map_err(|e| format!("ltxv: cannot read adapter {}: {e}", spec.path))?;
+        let read = |key: &str| -> Result<Option<usize>, String> {
+            meta.get(key).map(|v| v.trim().parse::<usize>().map_err(|e| format!("ltxv: {}: {key} {v:?} is not a whole number: {e}", spec.path))).transpose()
+        };
+        for (key, slot) in [("reference_downscale_factor", &mut factors.0), ("reference_temporal_scale_factor", &mut factors.1)] {
+            match read(key)? {
+                Some(0) => return Err(format!("ltxv: {}: {key} is 0", spec.path)),
+                Some(v) if *slot != 1 && *slot != v => return Err(format!("ltxv: conflicting {key} across adapters: {} declares {v}, another declared {}", spec.path, *slot)),
+                Some(v) => *slot = v,
+                None => {}
+            }
+        }
+    }
+    Ok(factors)
+}
+
 /// `alpha/rank` for a file brain's own trainer wrote, 1.0 for anything else.
 fn brain_trained_scale(path: &str) -> Result<f32, String> {
     let meta = checkpoint::st::read_metadata(path).map_err(|e| format!("ltxv: cannot read adapter {path}: {e}"))?;
