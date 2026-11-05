@@ -395,6 +395,16 @@ impl<R: AdapterHost> ResidentModel for AdapterView<R> {
     fn batch_limit(&self) -> Option<usize> {
         self.base.batch_limit()
     }
+    /// The base's replicas: an adapter is served by every instance of its base, each with the adapter in its own bank.
+    fn replicas(&self) -> usize {
+        self.base.replicas()
+    }
+    fn replica_routing(&self) -> Option<residency::affinity::ReplicaRouting> {
+        self.base.replica_routing()
+    }
+    fn prefix_chain(&self, inv: &Invocation) -> residency::affinity::PrefixChain {
+        self.base.prefix_chain(inv)
+    }
     /// Builds the BASE's instance (the executor may claim the view first).
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         self.base.activate(key, device)

@@ -636,7 +636,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     if devices.is_empty() {
         return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
     }
-    let build = |kv, mode, prefix_slots, cap| {
+    let build_on = |devices: &[(Device, u64)], kv, mode, prefix_slots, cap| {
         let hf = ResidentCheckpoint::is_hf_dir(gguf_path);
         let scratch_rows = if hf { HF_SPEC_SCRATCH_ROWS } else { SpecServing::default().scratch_rows };
         // An FP8 directory serving by default speculates up to a few running sequences; `--speculative mtp|auto` asks for no limit.
@@ -644,12 +644,13 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         let spec = SpecServing { mode, scratch_rows, batch_limit, ..SpecServing::default() };
         // Paged KV: sequences hold the blocks their tokens need from one shared pool, so a long context
         // costs only the sequences that use it, and the batch is not multiplied by the context.
-        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(gdn_state).with_linear_activations(cfg.linear_activations.unwrap_or_default()).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS).with_unified_pool(true);
+        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.to_vec(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(gdn_state).with_linear_activations(cfg.linear_activations.unwrap_or_default()).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS).with_unified_pool(true);
         match &bank {
             Some(bank) => r.with_adapter_bank(bank.request()),
             None => r,
         }
     };
+    let build = |kv, mode, prefix_slots, cap| build_on(&devices, kv, mode, prefix_slots, cap);
     // A candidate fits when the operator's context places, or, with the context
     // left to the cards, when it leaves at least the floor.
     let floor = DEFAULT_CONTEXT_FLOOR.min(model_cfg.max_position_embeddings.max(1));
@@ -692,16 +693,42 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
             build(kv, mode, prefix_slots, cap).with_kv_pool_rows(pool)
         }
     };
-    let resident = resident.with_prefill_policy(cfg.prefill_policy_or_default()).with_model_id(id);
+    let finish = |r: Qwen35GgufResident| r.with_prefill_policy(cfg.prefill_policy_or_default()).with_model_id(id);
+    let resident = finish(resident);
     match resident.unified_pool_notice() {
         Some(why) => chosen.push(format!("KV and recurrent-state pools separate: a state row is reserved for each of the {max_batch} slots ({why})")),
         None if resident.unified() => chosen.push("KV and recurrent-state share one pool: a running sequence takes its state row from the KV pool and gives it back, so no slot reserves one".to_string()),
         None => {}
     }
-    match resident.unservable_reason() {
-        Some(reason) => Err(reason),
-        None => Ok(Qwen35GgufServed::new(resident, bank, gguf_path, id, chosen)),
+    if let Some(reason) = resident.unservable_reason() {
+        return Err(reason);
     }
+    // One replica on every group of the offered cards that holds the model again: each is its own instance with its own
+    // KV pool and prefix cache sized for its cards, built when demand needs it (see `ResidentModel::replicas`). Every
+    // replica serves the context the first one fixed, so the manifest is true of all of them.
+    let mut replicas = vec![resident];
+    let mut remaining: Vec<(Device, u64)> = devices.iter().copied().filter(|(d, _)| !replicas[0].placement().iter().any(|(used, ..)| used == d)).collect();
+    let cap = replicas[0].cap();
+    while !remaining.is_empty() {
+        let candidate = build_on(&remaining, kv, mode, prefix_slots, cap);
+        let pool = match cfg.ctx {
+            Some(ctx) => candidate.longest_pool(ctx),
+            None => candidate.pool_rows_for_context(cap),
+        };
+        let Ok(pool) = pool else { break };
+        let replica = finish(build_on(&remaining, kv, mode, prefix_slots, cap).with_kv_pool_rows(pool));
+        if replica.unservable_reason().is_some() {
+            break;
+        }
+        let used: Vec<Device> = replica.placement().iter().map(|(d, ..)| *d).collect();
+        remaining.retain(|(d, _)| !used.contains(d));
+        replicas.push(replica);
+    }
+    if replicas.len() > 1 {
+        let cards: Vec<String> = replicas.iter().map(|r| r.placement().iter().map(|(d, ..)| format!("{d:?}")).collect::<Vec<_>>().join("+")).collect();
+        chosen.push(format!("{} replicas ({}): one per group of cards that holds the model, each with its own KV pool and prefix cache, the next built when the running ones are full", replicas.len(), cards.join(", ")));
+    }
+    Ok(Qwen35GgufServed::new(replicas, bank, gguf_path, id, chosen))
 }
 
 /// The operator's value, else the best-ranked default of `rules` that `fits`,
@@ -723,18 +750,20 @@ fn given_or_chosen<T: Copy + std::fmt::Display>(given: Option<T>, knob: &str, ru
 /// registered with the executor beside this one, sharing its instance, so a
 /// batch mixes base and adapter requests in one batched decode step.
 pub struct Qwen35GgufServed {
-    inner: qwen35::int8_gguf_resident::Qwen35GgufResident,
+    /// One resident per replica, each placed on its own cards (replica 0 first); all share one configuration, so the
+    /// manifest, the slots and the context are the first one's.
+    replicas: Vec<qwen35::int8_gguf_resident::Qwen35GgufResident>,
     adapters: Arc<AdapterRegistry>,
     /// Each serving default taken from the hardware, with why.
     chosen: Vec<String>,
 }
 
 impl Qwen35GgufServed {
-    fn new(inner: qwen35::int8_gguf_resident::Qwen35GgufResident, bank: Option<AdapterBankSettings>, gguf_path: &str, id: &str, chosen: Vec<String>) -> Qwen35GgufServed {
+    fn new(replicas: Vec<qwen35::int8_gguf_resident::Qwen35GgufResident>, bank: Option<AdapterBankSettings>, gguf_path: &str, id: &str, chosen: Vec<String>) -> Qwen35GgufServed {
         // An adapter trains on the full-precision release and serves on its
         // quantisation: the card names the release, not this file.
         let base = ServedBase::of_family(QWEN35_FAMILY, gguf_path, Some(id.to_string())).quantizing(&QWEN35_SOURCES);
-        Qwen35GgufServed { inner, adapters: AdapterRegistry::new(bank, base), chosen }
+        Qwen35GgufServed { replicas, adapters: AdapterRegistry::new(bank, base), chosen }
     }
 
     /// Each setting the operator left unset, as `knob value: why` - what the
@@ -752,8 +781,21 @@ const QWEN35_SOURCES: [&str; 4] = ["Qwen/Qwen3.8-27B-FP8", "Qwen/Qwen3.8-27B", "
 
 impl std::ops::Deref for Qwen35GgufServed {
     type Target = qwen35::int8_gguf_resident::Qwen35GgufResident;
+    /// The first replica: what the serving settings, the manifest and the placement report speak of.
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        &self.replicas[0]
+    }
+}
+
+impl Qwen35GgufServed {
+    /// The resident the replica `key` names.
+    fn replica(&self, key: &InstanceKey) -> &qwen35::int8_gguf_resident::Qwen35GgufResident {
+        &self.replicas[key.replica_index().min(self.replicas.len() - 1)]
+    }
+
+    /// Every replica's placement, as `(replica, device, layers start, layers end, bytes)`.
+    pub fn replica_placements(&self) -> Vec<(usize, Device, usize, usize, u64)> {
+        self.replicas.iter().enumerate().flat_map(|(i, r)| r.placement().into_iter().map(move |(d, start, end, bytes)| (i, d, start, end, bytes))).collect()
     }
 }
 
@@ -770,40 +812,55 @@ impl AdapterHost for Qwen35GgufServed {
 
 impl ResidentModel for Qwen35GgufServed {
     fn manifest(&self) -> Manifest {
-        self.inner.manifest()
+        self.replicas[0].manifest()
     }
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
-        self.inner.instance_key(action, inv)
+        self.replicas[0].instance_key(action, inv)
     }
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        self.inner.estimate(key)
+        self.replica(key).estimate(key)
     }
     fn batch_limit(&self) -> Option<usize> {
-        self.inner.batch_limit()
+        self.replicas[0].batch_limit()
+    }
+    fn replicas(&self) -> usize {
+        self.replicas.len()
+    }
+    /// Requests fill a replica's decode slots before the next replica is built, and follow the prompts each replica's
+    /// prefix cache keeps.
+    fn replica_routing(&self) -> Option<residency::affinity::ReplicaRouting> {
+        let first = &self.replicas[0];
+        Some(residency::affinity::ReplicaRouting { slots: first.max_batch() as usize, cached_prompts: first.prefix_slots() as usize })
+    }
+    /// The request's prompt keyed for the prefix caches, in the namespace of the adapter it names: a prefix cached under
+    /// one adapter is not another's, and the base is the empty namespace.
+    fn prefix_chain(&self, inv: &Invocation) -> residency::affinity::PrefixChain {
+        llmserve::request_prefix_chain(inv, &inv.get_str(crate::adapter_registry::ADAPTER_PARAM).unwrap_or_default())
     }
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        self.inner.activate(key, device)
+        self.replica(key).activate(key, device)
     }
 }
 
 impl MultiDeviceResidentModel for Qwen35GgufServed {
     fn unavailable_reason(&self, key: &InstanceKey) -> Option<String> {
-        self.inner.unavailable_reason(key)
+        self.replica(key).unavailable_reason(key)
     }
     fn estimate_multi(&self, key: &InstanceKey) -> MultiDeviceCost {
-        self.inner.estimate_multi(key)
+        self.replica(key).estimate_multi(key)
     }
 
-    /// The served instance: the checkpoint as a `Qwen35GgufEngine` (with its
-    /// adapter bank, when one was asked for) under the generic
-    /// continuous-batching scheduler, so up to `max_batch` requests of the
-    /// base and of any adapters decode in ONE batched step per iteration.
-    fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
-        let (mut sched, tok, stop) = self.inner.activate_scheduler(devices)?;
-        let capacity = self.inner.max_batch() as usize;
+    /// The served instance of one replica: the checkpoint as a `Qwen35GgufEngine` (with its adapter bank, when one was
+    /// asked for) under the generic continuous-batching scheduler, so up to `max_batch` requests of the base and of any
+    /// adapters decode in ONE batched step per iteration. Every replica builds its own bank and syncs it from the one
+    /// registry, so an adapter is served identically by all of them.
+    fn activate_multi(&self, key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        let replica = self.replica(key);
+        let (mut sched, tok, stop) = replica.activate_scheduler(devices)?;
+        let capacity = replica.max_batch() as usize;
         let text = llmserve::TextFrontend::new(tok, stop, "qwen35", std::sync::Arc::new(qwen35::int8_gguf_resident::parse_request));
         // A checkpoint with a vision tower also reads images.
-        match self.inner.vision_front_end(&mut sched, text)? {
+        match replica.vision_front_end(&mut sched, text)? {
             Ok(front) => Ok(Box::new(AdaptedInstance::new(front, sched, capacity, self.adapters.clone()))),
             Err(text) => Ok(Box::new(AdaptedInstance::new(text, sched, capacity, self.adapters.clone()))),
         }
@@ -887,6 +944,48 @@ mod tests {
 
         let e = gguf_resident("none.gguf", "t/x", &[], 0, &Qwen35GgufServeConfig { exact_decode: true, ..cfg.gguf.clone() }).err().unwrap();
         assert!(e.contains("--gdn-state bf16") && e.contains("--exact-decode"), "{e}");
+    }
+
+    /// A resident of one replica per card, over a checkpoint that is never opened (nothing here places or builds).
+    fn served_over(cards: &[u32], bank: Option<AdapterBankSettings>) -> Qwen35GgufServed {
+        use qwen35::int8_gguf_resident::Qwen35GgufResident;
+        let replicas = cards
+            .iter()
+            .map(|&card| Qwen35GgufResident::new("never-opened.gguf".to_string(), vec![(Device::Gpu(card), 80 << 30)], 4096, model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8)).with_max_batch(6).with_prefix_slots(9).with_model_id("t/x"))
+            .collect();
+        Qwen35GgufServed::new(replicas, bank, "never-opened.gguf", "t/x", Vec::new())
+    }
+
+    /// **One instance per card.** The resident declares a replica per group of cards that holds the model, each estimated and
+    /// placed on its own card by the replica its key names, and asks for requests to fill a replica's decode slots before the
+    /// next is built and to follow the prefix caches (as many prompts as a cache keeps). An adapter view is served by every
+    /// replica of its base, and keys its prompt in the adapter's own namespace.
+    #[test]
+    fn the_resident_runs_one_replica_per_card_and_its_adapters_ride_on_all_of_them() {
+        let served = Arc::new(served_over(&[0, 1, 2, 3], Some(AdapterBankSettings::default())));
+        assert_eq!(served.replicas(), 4);
+        let routing = served.replica_routing().expect("fills its replicas in turn");
+        assert_eq!((routing.slots, routing.cached_prompts), (6, 9), "its decode slots and the prompts its prefix cache keeps");
+        let key = served.instance_key("generate", &Invocation::new());
+        for card in 0..4u32 {
+            let planned: Vec<Device> = served.replica(&key.replica(card as usize)).placement().iter().map(|(d, ..)| *d).collect();
+            assert!(planned.is_empty() || planned == [Device::Gpu(card)], "replica {card} is on its own card, never another's: {planned:?}");
+        }
+
+        let dir = brain_testutil::adapters::scratch_dir("served-replicas");
+        let path = dir.join("adapter.safetensors");
+        let linear = brain_testutil::adapters::Linear { base: "blocks.0.self_attn.q_proj.weight".to_string(), out: 4, inn: 3 };
+        brain_testutil::adapters::write_lora_adapter_of("qwen35", &path, "unsloth/Qwen3.8-27B-GGUF:lab:facts:v1", "Qwen/Qwen3.8-27B-FP8", 2, &[linear], 5);
+        let view = served.adapter_view(crate::adapter_release::load_adapter(&path).unwrap()).expect("an adapter attaches to the base");
+        assert_eq!(view.replicas(), 4, "the view is served by every replica of its base");
+        assert_eq!(view.replica_routing(), served.replica_routing());
+
+        let chat = Invocation::new().set("prompt", serde_json::json!("hello"));
+        let mut as_adapter = chat.clone();
+        view.stamp(&mut as_adapter);
+        let base_chain = served.prefix_chain(&chat);
+        assert_ne!(view.prefix_chain(&as_adapter), base_chain, "a prefix cached under an adapter is not the base's");
+        assert_eq!(view.prefix_chain(&chat), base_chain, "unstamped, the view keys like its base");
     }
 
     /// The sizing knobs are constructor data with the historical defaults,
