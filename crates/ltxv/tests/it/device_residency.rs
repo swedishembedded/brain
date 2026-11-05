@@ -326,14 +326,14 @@ fn the_slot_policy_never_over_promises() {
 /// real embeddings connector, and this phase changes exactly how those bytes
 /// reach the card.
 ///
-/// `#[ignore]`d: needs `BRAIN_LTXV_DIT` and a real card.
+/// `#[ignore]`d: needs the real DiT in the model store and a real card.
 mod real_weight {
     use super::*;
 
     #[test]
-    #[ignore = "needs BRAIN_LTXV_DIT (the real 22B Q8_0 GGUF) and a GPU"]
+    #[ignore = "needs the real 22B Q8_0 GGUF in the model store and a GPU"]
     fn a_resident_real_checkpoint_forward_is_bit_identical_to_the_streaming_one() {
-        let path = std::env::var("BRAIN_LTXV_DIT").expect("set BRAIN_LTXV_DIT to the real 22B distilled Q8_0 GGUF");
+        let path = ltxv::spec::default_store_paths().and_then(|p| p.dit).expect("the real 22B distilled Q8_0 GGUF in the model store");
         let src = ltxv::gguf_src::LtxvGgufSource::open(&path).expect("opening the real DiT GGUF");
         let cfg = LtxDitConfig { num_layers: 2, ..src.config().video };
         let head = load_head_tensors_from_source(&src, &cfg);

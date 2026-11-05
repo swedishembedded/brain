@@ -54,11 +54,11 @@ const REL_L2_CEILING: f64 = 1e-4;
 
 // ---------------------------------------------------------- real fixtures
 
-/// The shipped audio-VAE-and-vocoder weights: `BRAIN_LTXV_AUDIO_VAE`, else the
+/// The shipped audio-VAE-and-vocoder weights: the model store's copy, else the
 /// repo-relative `resources/ltxv/weights/vae/ltx-2.5-audio-vae-bf16.safetensors`.
 fn weights_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_AUDIO_VAE") {
-        return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+    if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/ltx-2.5-audio-vae-bf16.safetensors")).filter(|p| Path::new(p).exists()) {
+        return Some(p);
     }
     let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/ltxv/weights/vae/ltx-2.5-audio-vae-bf16.safetensors");
     Path::new(p).exists().then(|| p.to_string())
@@ -108,7 +108,7 @@ fn setup() -> Option<((&'static Tensors, &'static Tensors), Fixture)> {
         return None;
     }
     let Some(w) = weights() else {
-        brain_testutil::skip("set BRAIN_LTXV_AUDIO_VAE to ltx-2.5-audio-vae-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-audio-vae-bf16.safetensors in the model store");
         return None;
     };
     let t = checkpoint::safetensors::read(&fx).expect("read golden");
@@ -282,7 +282,7 @@ fn the_reconstructed_waveform_has_the_statistics_of_real_audio() {
 #[test]
 fn ltxv_audio_vae_import_covers_the_shipped_checkpoint() {
     let Some((vae_w, _)) = weights() else {
-        brain_testutil::skip("set BRAIN_LTXV_AUDIO_VAE to ltx-2.5-audio-vae-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-audio-vae-bf16.safetensors in the model store");
         return;
     };
     let cfg = AudioVaeConfig::ltx25();
@@ -294,7 +294,7 @@ fn ltxv_audio_vae_import_covers_the_shipped_checkpoint() {
 #[test]
 fn ltxv_vocoder_import_covers_the_shipped_checkpoint() {
     let Some((_, voc_w)) = weights() else {
-        brain_testutil::skip("set BRAIN_LTXV_AUDIO_VAE to ltx-2.5-audio-vae-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-audio-vae-bf16.safetensors in the model store");
         return;
     };
     let cfg = VocoderConfig::ltx25();

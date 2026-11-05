@@ -37,7 +37,7 @@
 //!
 //! # Deliberately NOT using the real text encoder
 //!
-//! `Paths::resolve(None, dit, None, None)` forces the deterministic stub context,
+//! Building `Paths` with the DiT but no text encoder forces the deterministic stub context,
 //! so this test needs the 23.6 GB DiT and the VAE but not the 14 GB Gemma-4
 //! encoder. CFG is still genuinely exercised: the stub's conditional and
 //! unconditional contexts differ (the latter is all-zero), so the two
@@ -49,8 +49,6 @@
 //! explicitly:
 //!
 //! ```text
-//! BRAIN_LTXV_DIT=<...22b-distilled-transformer-Q8_0.gguf> \
-//! BRAIN_LTXV_VAE=<...video-vae-conv-bf16.safetensors> \
 //! cargo test --release -p brain-ltxv --test cfg_parallel -- --ignored --nocapture
 //! ```
 //!
@@ -93,9 +91,8 @@ fn base_opts() -> GenOpts {
 /// The real DiT + VAE, with the text encoder deliberately left out (see this
 /// module's doc), or `None` (SKIP).
 fn real_paths() -> Option<Paths> {
-    let vae = std::env::var("BRAIN_LTXV_VAE").ok().filter(|s| !s.is_empty())?;
-    let dit = std::env::var("BRAIN_LTXV_DIT").ok().filter(|s| !s.is_empty())?;
-    Paths::resolve(Some(&vae), Some(&dit), None, None).ok()
+    let store = ltxv::spec::default_store_paths()?;
+    Some(Paths { dit: Some(store.dit?), ..Paths::new(store.vae) })
 }
 
 fn run(plan: DevicePlan, paths: &Paths, label: &str) -> (Vec<Vec<u8>>, f32) {
@@ -124,10 +121,10 @@ fn run(plan: DevicePlan, paths: &Paths, label: &str) -> (Vec<Vec<u8>>, f32) {
 /// loop alone than end to end; those figures belong in the roadmap ledger,
 /// not in an assertion here.
 #[test]
-#[ignore = "needs the real 22B LTX-2.5 checkpoint (BRAIN_LTXV_DIT) and VAE (BRAIN_LTXV_VAE)"]
+#[ignore = "needs the real 22B LTX-2.5 checkpoint and VAE in the model store, and two cards"]
 fn concurrent_two_card_cfg_is_bit_identical_to_sequential_one_card() {
     let Some(paths) = real_paths() else {
-        eprintln!("SKIP: set BRAIN_LTXV_DIT and BRAIN_LTXV_VAE to run this gate");
+        eprintln!("SKIP: put the real LTX-2.5 DiT and VAE in the model store to run this gate");
         return;
     };
     let n_gpus = gpu_core::devices::ambient_compute_set().gpus.len();
@@ -170,11 +167,11 @@ fn concurrent_two_card_cfg_is_bit_identical_to_sequential_one_card() {
 /// output, or there is nothing for two cards to divide.
 #[test]
 fn the_two_cfg_branches_produce_different_velocities() {
-    let Ok(vae) = std::env::var("BRAIN_LTXV_VAE") else {
-        eprintln!("SKIP: BRAIN_LTXV_VAE is required even for the tiny DiT path (the VAE decode is real)");
+    let Some(store) = ltxv::spec::default_store_paths() else {
+        eprintln!("SKIP: the tiny DiT path still needs the real VAE in the model store (the VAE decode is real)");
         return;
     };
-    let paths = Paths::resolve(Some(&vae), None, None, None).expect("a VAE path resolves");
+    let paths = Paths::new(store.vae);
     let one = GenOpts { guidance: ltxv::guidance::Guidance::cfg(1.0), ..GenOpts::default() };
     let five = GenOpts { guidance: ltxv::guidance::Guidance::cfg(GUIDANCE), ..one.clone() };
     let a = generate(&paths, "harbour", &one, &Default::default(), |_, _, _| {}).expect("tiny generation runs").0;

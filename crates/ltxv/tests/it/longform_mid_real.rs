@@ -51,10 +51,6 @@
 //! `#[ignore]`d: three full real 22B generations. Run explicitly:
 //!
 //! ```text
-//! BRAIN_LTXV_DIT=<...22b-distilled-transformer-Q8_0.gguf> \
-//! BRAIN_LTXV_VAE=<...video-vae-conv-bf16.safetensors> \
-//! BRAIN_LTXV_TEXT_ENCODER=<...gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf> \
-//! BRAIN_LTXV_UPSAMPLER_SPATIAL=<...latent-spatial-upscaler-x2-bf16-1.0.safetensors> \
 //! cargo test -p brain-ltxv --test longform_mid_real -- --ignored --nocapture
 //! ```
 
@@ -75,7 +71,7 @@ fn mean_abs_delta(a: &[u8], b: &[u8]) -> f64 {
 }
 
 fn real_paths() -> Option<Paths> {
-    let p = Paths::resolve(None, None, None, None).ok()?;
+    let p = ltxv::spec::default_store_paths()?;
     p.dit.as_ref()?;
     p.spatial_upsampler.as_ref()?;
     Some(p)
@@ -105,7 +101,7 @@ fn long_opts(base: GenOpts) -> LongOpts {
 #[ignore = "three full real 22B generations"]
 fn the_mid_anchor_is_realised_at_its_instant_in_a_stage_major_run() {
     let Some(paths) = real_paths() else {
-        return brain_testutil::skip("set BRAIN_LTXV_DIT + BRAIN_LTXV_VAE + BRAIN_LTXV_UPSAMPLER_SPATIAL to the real LTX-2.5 checkpoints");
+        return brain_testutil::skip("put the real LTX-2.5 checkpoints in the model store");
     };
     let cancel = capability::CancelToken::default();
 

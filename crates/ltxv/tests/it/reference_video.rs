@@ -88,7 +88,7 @@ fn a_reference_video_reaches_the_in_context_stage() {
         brain_testutil::skip("no ltx-2.5-video-vae-conv-bf16.safetensors in the model store (Lightricks/LTX-2.5)");
         return;
     };
-    let paths = Paths::resolve(Some(&vae), None, None, None).expect("a VAE path resolves");
+    let paths = Paths::new(vae.clone());
     let dir = tempdir("reaches");
     let a = adapter(&dir, "ic.safetensors", &[]);
     let without = run(&paths, &opts(vec![a.clone()], None)).unwrap();
@@ -108,7 +108,7 @@ fn a_reference_without_an_adapter_or_too_short_is_refused() {
         brain_testutil::skip("no ltx-2.5-video-vae-conv-bf16.safetensors in the model store (Lightricks/LTX-2.5)");
         return;
     };
-    let paths = Paths::resolve(Some(&vae), None, None, None).expect("a VAE path resolves");
+    let paths = Paths::new(vae.clone());
     let e = run(&paths, &opts(Vec::new(), Some(VideoReference { clip: clip(9, 64, 3), strength: 1.0 }))).unwrap_err();
     assert!(e.contains("--adapter"), "{e}");
     let dir = tempdir("short");

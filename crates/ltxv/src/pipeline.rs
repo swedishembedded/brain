@@ -23,14 +23,14 @@
 //! no semantic meaning whatsoever.
 //!
 //! Setting `GenOpts::dit_config = "ltx25_22b"` plus [`Paths::dit`]
-//! (`--dit`/`$BRAIN_LTXV_DIT`) switches to the real 22B distilled
+//! (`--dit` or the model store) switches to the real 22B distilled
 //! checkpoint, loaded straight off its GGUF via
 //! [`crate::gguf_src::LtxvGgufSource`] and run at int8 compute
 //! ([`RealDit`], [`crate::dit::forward_q_streamed`]) - real weights were
 //! only ever proven correct at REDUCED DEPTH / one block before this, so
 //! treat a real-weight clip as a wiring proof, not a quality claim, exactly
 //! the framing this module always carried for the tiny path. Setting
-//! [`Paths::text_encoder`] (`--text-encoder`/`$BRAIN_LTXV_TEXT_ENCODER`)
+//! [`Paths::text_encoder`] (`--text-encoder` or the model store)
 //! independently switches [`context_stub`] out for [`real_text_context`]'s
 //! real Gemma-4 encoding. The two switches are independent (a real DiT with
 //! a stub context, or vice versa, both run) but only "real DiT + real text
@@ -160,6 +160,10 @@ pub struct Paths {
     /// carries stage 1's latent up to the requested resolution. Below that
     /// threshold nothing reads it.
     pub spatial_upsampler: Option<String>,
+    /// The real temporal x2 latent upscaler
+    /// (`ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors`), which
+    /// only DFR's temporal rounds read ([`DfrPaths`]).
+    pub temporal_upsampler: Option<String>,
     /// The real audio VAE (`ltx-2.5-audio-vae-bf16.safetensors`), which
     /// carries the audio VAE decoder AND the vocoder as two disjoint tensor
     /// subsets of one file. Required only when `GenOpts::audio` is set;
@@ -173,77 +177,31 @@ pub struct Paths {
     pub duration_head: Option<String>,
 }
 
-/// `(variable, human name)` - kept as a table (one row today) for the same
-/// reason `wan::pipeline::PATH_VARS` is: the env reader and the "you are
-/// missing X" error must never disagree about the spelling. Covers only the
-/// REQUIRED role; see [`OPTIONAL_PATH_VARS`] for the two real-checkpoint
-/// roles that are opt-in, not required.
-pub const PATH_VARS: [(&str, &str); 1] = [("BRAIN_LTXV_VAE", "VAE")];
-
-/// `(variable, human name)` for the two OPTIONAL real-checkpoint roles
-/// [`Paths::resolve`] also reads - kept out of [`PATH_VARS`] (whose own
-/// callers, e.g. `ltxv_cli`'s doc self-check, document every entry as a
-/// REQUIRED weight) since missing either of these is not an error, only a
-/// fallback to this module's tiny-DiT/stub-context path. Spellings match
-/// `crates/arch`'s own `ltxv` row's `weights_env` (`"dit"`/`"text_encoder"`).
-pub const OPTIONAL_PATH_VARS: [(&str, &str); 4] = [
-    ("BRAIN_LTXV_DIT", "real DiT checkpoint"),
-    ("BRAIN_LTXV_TEXT_ENCODER", "real text encoder checkpoint"),
-    ("BRAIN_LTXV_UPSAMPLER_SPATIAL", "spatial x2 latent upscaler (required above SINGLE_STAGE_MAX_TOKENS)"),
-    ("BRAIN_LTXV_AUDIO_VAE", "audio VAE + vocoder (required for audio generation)"),
-];
-
 impl Paths {
-    pub fn from_env() -> Result<Paths, String> {
-        Paths::resolve(None, None, None, None)
-    }
-
-    /// The explicit flag wins over the environment variable, same precedence
-    /// as every other weight path in this workspace. `dit`/`text_encoder`
-    /// are optional in both forms (flag and env) - see this struct's doc.
-    pub fn resolve(vae: Option<&str>, dit: Option<&str>, text_encoder: Option<&str>, spatial_upsampler: Option<&str>) -> Result<Paths, String> {
-        let (var, role) = PATH_VARS[0];
-        let vae = match vae.filter(|s| !s.is_empty()) {
-            Some(v) => v.to_string(),
-            None => match std::env::var(var) {
-                Ok(v) if !v.is_empty() => v,
-                _ => return Err(format!("no {role} weights: pass --vae <path> or set {var}")),
-            },
-        };
-        let optional = |flag: Option<&str>, var: &str| -> Option<String> {
-            flag.filter(|s| !s.is_empty()).map(str::to_string).or_else(|| std::env::var(var).ok().filter(|v| !v.is_empty()))
-        };
-        let dit = optional(dit, OPTIONAL_PATH_VARS[0].0);
-        let text_encoder = optional(text_encoder, OPTIONAL_PATH_VARS[1].0);
-        // `brain ltxv t2v` passes `None` here and reaches the upscaler by
-        // environment only: on that command it is not a choice a caller
-        // makes, only a fixed member of the LTX-2.5 checkpoint set that the
-        // two-stage path requires and the single-stage path never touches.
-        // `brain ltxv upscale`, whose whole subject IS the upscaler, and
-        // `brain ltxv dfr` (through its own `DfrPaths`) take it as a flag.
-        let spatial_upsampler = optional(spatial_upsampler, OPTIONAL_PATH_VARS[2].0);
-        // Environment-only for the same reason as the upscaler above: the
-        // audio VAE is not a per-run choice, it is a fixed member of the
-        // LTX-2.5 checkpoint set that the audio path requires.
-        let audio_vae = optional(None, OPTIONAL_PATH_VARS[3].0);
-        Ok(Paths { vae, dit, text_encoder, spatial_upsampler, audio_vae, duration_head: None })
+    /// Only the VAE, the one required role: every other role absent, which is
+    /// the tiny smoke-test configuration.
+    pub fn new(vae: impl Into<String>) -> Paths {
+        Paths { vae: vae.into(), dit: None, text_encoder: None, spatial_upsampler: None, temporal_upsampler: None, audio_vae: None, duration_head: None }
     }
 
     /// Build `Paths` from an already-resolved [`capability::Assembly`]
-    /// (`crate::spec::LtxvSpec`'s roles) instead of `BRAIN_LTXV_*` - `vae` is
-    /// the only required role (`resolve` never returns `Resolved` without
-    /// it), the rest fall back to `None` exactly as an absent env var/flag
-    /// already does. `spatial_upsampler` is an explicit flag first, then the
-    /// store's own upscaler, then `BRAIN_LTXV_UPSAMPLER_SPATIAL`.
+    /// (`crate::spec::LtxvSpec`'s roles) - `vae` is the only required role
+    /// (the resolver never returns an assembly without it), every other one
+    /// absent when the store holds none. `spatial_upsampler` names one
+    /// outright, ahead of the store's.
     pub fn from_assembly(assembly: &capability::Assembly, spatial_upsampler: Option<&str>) -> Result<Paths, String> {
         let get = |role: &str| -> Option<String> { assembly.roles.get(role).map(|p| p.to_string_lossy().into_owned()) };
         let vae = get("vae").ok_or_else(|| format!("ltxv: assembly '{}' has no vae role", assembly.id))?;
-        let spatial_upsampler = spatial_upsampler
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or_else(|| get("spatial_upsampler"))
-            .or_else(|| std::env::var(OPTIONAL_PATH_VARS[2].0).ok().filter(|v| !v.is_empty()));
-        Ok(Paths { vae, dit: get("dit"), text_encoder: get("text_encoder"), spatial_upsampler, audio_vae: get("audio_vae"), duration_head: get("duration_head") })
+        let spatial_upsampler = spatial_upsampler.filter(|s| !s.is_empty()).map(str::to_string).or_else(|| get("spatial_upsampler"));
+        Ok(Paths {
+            vae,
+            dit: get("dit"),
+            text_encoder: get("text_encoder"),
+            spatial_upsampler,
+            temporal_upsampler: get("temporal_upsampler"),
+            audio_vae: get("audio_vae"),
+            duration_head: get("duration_head"),
+        })
     }
 }
 
@@ -370,7 +328,7 @@ pub fn resolve_defaults(o: &mut GenOpts, paths: &Paths, named: Named) {
 /// Which DiT config to build. `"tiny"` (the default) is the fresh-random-
 /// weight smoke-test config every earlier milestone shipped. `"ltx25_22b"`
 /// is the real 22B checkpoint's own config - selecting it requires
-/// [`Paths::dit`] (`--dit`/`$BRAIN_LTXV_DIT`) to also be set, checked in
+/// [`Paths::dit`] (`--dit` or the model store) to also be set, checked in
 /// [`generate`] itself (this function only maps a name to a shape; it does
 /// not know about weight paths).
 pub fn dit_config_from_name(name: &str) -> Result<LtxDitConfig, String> {
@@ -3869,7 +3827,7 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, adapters: &
     }
     let dit_path = paths.dit.as_ref().ok_or_else(|| {
         tracing::error!(dit_config = %o.dit_config, "no real DiT checkpoint configured for a real dit-config");
-        format!("ltxv dit-config {:?} needs a real checkpoint: pass --dit <path> or set BRAIN_LTXV_DIT", o.dit_config)
+        format!("ltxv dit-config {:?} needs a real checkpoint: put it in the model store or pass --dit <path>", o.dit_config)
     })?;
     tracing::info!(path = %dit_path, "opening the real DiT GGUF");
     let src = crate::gguf_src::LtxvGgufSource::open(dit_path).inspect_err(|e| tracing::error!(path = %dit_path, error = %e, "opening the DiT GGUF failed"))?;
@@ -4044,18 +4002,16 @@ fn check_audio_inputs(paths: &Paths, o: &GenOpts) -> Result<(), String> {
         ));
     }
     if paths.dit.is_none() {
-        let (var, _) = OPTIONAL_PATH_VARS[0];
-        return Err(format!("audio generation needs the real DiT checkpoint: pass --dit <path> or set {var}"));
+        return Err("audio generation needs the real DiT checkpoint: put it in the model store or pass --dit <path>".into());
     }
     if paths.audio_vae.is_none() {
-        let (var, role) = OPTIONAL_PATH_VARS[3];
-        return Err(format!("audio generation needs the {role}: set {var} to ltx-2.5-audio-vae-bf16.safetensors"));
+        return Err("audio generation needs the audio VAE + vocoder (ltx-2.5-audio-vae-bf16.safetensors): put it in the model store or pass --audio-vae <path>".into());
     }
     if paths.text_encoder.is_none() {
-        let (var, _) = OPTIONAL_PATH_VARS[1];
-        return Err(format!(
-            "audio generation needs the real text encoder: the audio stream is conditioned through its OWN text projection (text_embedding_projection.audio_aggregate_embed), which the stub context cannot stand in for - set {var}"
-        ));
+        return Err(
+            "audio generation needs the real text encoder: the audio stream is conditioned through its OWN text projection (text_embedding_projection.audio_aggregate_embed), which the stub context cannot stand in for - put it in the model store or pass --text-encoder <path>"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -4289,10 +4245,9 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         // stage stops working past 4096 video tokens and what it looks like
         // when it does.
         let upsampler_path = paths.spatial_upsampler.as_deref().ok_or_else(|| {
-            let (var, role) = OPTIONAL_PATH_VARS[2];
             tracing::error!(tokens = t, width = o.width, height = o.height, "a two-stage request needs the spatial latent upscaler");
             format!(
-                "{}x{} is {t} video tokens, past the {SINGLE_STAGE_MAX_TOKENS}-token ceiling the distilled schedule holds in ONE stage, so it needs the reference's two-stage path - set {var} to the {role} (ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors). Forcing --two-stage off runs one stage instead and is known to disintegrate the end of the clip at this size.",
+                "{}x{} is {t} video tokens, past the {SINGLE_STAGE_MAX_TOKENS}-token ceiling the distilled schedule holds in ONE stage, so it needs the reference's two-stage path and its spatial x2 latent upscaler (ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors): put it in the model store or pass --spatial-upsampler <path>. Forcing --two-stage off runs one stage instead and is known to disintegrate the end of the clip at this size.",
                 o.width, o.height
             )
         })?;
@@ -4838,9 +4793,8 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
     // [`SpatialUpsampler`]).
     let upsampler = SpatialUpsampler::default();
     let upsampler_path = paths.spatial_upsampler.as_deref().ok_or_else(|| {
-        let (var, role) = OPTIONAL_PATH_VARS[2];
         tracing::error!("upscaling needs the spatial latent upscaler");
-        format!("upscaling IS the spatial latent upscaler: pass --upsampler-spatial <path> or set {var} to the {role} (ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors)")
+        "upscaling IS the spatial latent upscaler (ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors): put it in the model store or pass --upsampler-spatial <path>".to_string()
     })?;
     let carried = plan.get(1).map(|w| w.context).unwrap_or(0);
     tracing::info!(passes = plan.len(), carried_latent_frames = carried, out_width = out_w, out_height = out_h, refine_steps = o.refine_steps, "upscale planned");
@@ -5863,9 +5817,8 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     let widest = plan.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
     let two_stage = should_two_stage(widest, o.base.width, o.base.height, is_real_distilled, o.base.runtime.two_stage);
     if two_stage && paths.spatial_upsampler.is_none() {
-        let (var, role) = OPTIONAL_PATH_VARS[2];
         return Err(format!(
-            "the widest window of this {}x{} plan is {widest} video tokens, past the {SINGLE_STAGE_MAX_TOKENS}-token ceiling the distilled schedule holds in ONE stage, so it needs the reference's two-stage path - set {var} to the {role}",
+            "the widest window of this {}x{} plan is {widest} video tokens, past the {SINGLE_STAGE_MAX_TOKENS}-token ceiling the distilled schedule holds in ONE stage, so it needs the reference's two-stage path and its spatial x2 latent upscaler: put it in the model store or pass --spatial-upsampler <path>",
             o.base.width, o.base.height
         ));
     }
@@ -6750,38 +6703,13 @@ pub struct DfrPaths {
     pub temporal_upsampler: Option<String>,
 }
 
-/// `(variable, human name)` - the DFR analogue of [`PATH_VARS`], one row
-/// added per new weight role this milestone needs.
-pub const DFR_PATH_VARS: [(&str, &str); 3] = [("BRAIN_LTXV_VAE", "VAE"), ("BRAIN_LTXV_UPSAMPLER_SPATIAL", "spatial latent upscaler"), ("BRAIN_LTXV_UPSAMPLER_TEMPORAL", "temporal latent upscaler")];
-
 impl DfrPaths {
-    pub fn from_env() -> Result<DfrPaths, String> {
-        DfrPaths::resolve(None, None, None)
-    }
-
-    /// The explicit flag wins over the environment variable, same precedence
-    /// [`Paths::resolve`] uses. The temporal upscaler path is OPTIONAL (only
-    /// `--temporal-upsample-rounds > 0` requires it) - callers that need it
-    /// check `Option::is_none()` themselves, same as
-    /// [`DfrOpts::temporal_upsample_rounds`]'s own validation in
-    /// [`generate_dfr`].
-    pub fn resolve(vae: Option<&str>, spatial_upsampler: Option<&str>, temporal_upsampler: Option<&str>) -> Result<DfrPaths, String> {
-        let required = |flag: Option<&str>, var: &str, role: &str| -> Result<String, String> {
-            match flag.filter(|s| !s.is_empty()) {
-                Some(v) => Ok(v.to_string()),
-                None => match std::env::var(var) {
-                    Ok(v) if !v.is_empty() => Ok(v),
-                    _ => Err(format!("no {role} weights: pass the matching flag or set {var}")),
-                },
-            }
-        };
-        let vae = required(vae, DFR_PATH_VARS[0].0, DFR_PATH_VARS[0].1)?;
-        let spatial_upsampler = required(spatial_upsampler, DFR_PATH_VARS[1].0, DFR_PATH_VARS[1].1)?;
-        let temporal_upsampler = match temporal_upsampler.filter(|s| !s.is_empty()) {
-            Some(v) => Some(v.to_string()),
-            None => std::env::var(DFR_PATH_VARS[2].0).ok().filter(|v| !v.is_empty()),
-        };
-        Ok(DfrPaths { vae, spatial_upsampler, temporal_upsampler })
+    /// DFR's three roles out of a generation's resolved [`Paths`]: the VAE,
+    /// the spatial upscaler every DFR run needs, and the temporal upscaler
+    /// only temporal rounds read.
+    pub fn from_paths(paths: &Paths) -> Result<DfrPaths, String> {
+        let spatial_upsampler = paths.spatial_upsampler.clone().ok_or("DFR needs the spatial x2 latent upscaler: put it in the model store or pass --spatial-upsampler <path>")?;
+        Ok(DfrPaths { vae: paths.vae.clone(), spatial_upsampler, temporal_upsampler: paths.temporal_upsampler.clone() })
     }
 }
 
@@ -7163,51 +7091,25 @@ mod tests {
         assert_eq!(o.dit_config, "tiny");
     }
 
+    /// Every role comes from the resolved assembly, absent ones as `None`,
+    /// and an explicitly named spatial upscaler outranks the store's.
     #[test]
-    fn an_explicit_vae_path_beats_the_environment_variable() {
-        std::env::set_var("BRAIN_LTXV_VAE", "env-vae");
-        let p = Paths::resolve(None, None, None, None).expect("from env");
-        assert_eq!(p.vae, "env-vae");
-        // Deliberately no assertion about `dit`/`text_encoder` here: this test
-        // sets only `BRAIN_LTXV_VAE`, so asserting those were `None` would be
-        // asserting about variables it never controlled - it failed for anyone
-        // who happened to have a real checkpoint exported. Their resolution is
-        // owned by the sibling test below, which does clear them first.
-        let p = Paths::resolve(Some("/flag/vae"), None, None, None).expect("flag wins");
-        assert_eq!(p.vae, "/flag/vae");
-        let p = Paths::resolve(Some(""), None, None, None).expect("empty flag falls through");
-        assert_eq!(p.vae, "env-vae");
-        std::env::remove_var("BRAIN_LTXV_VAE");
-        let e = Paths::resolve(None, None, None, None).unwrap_err();
-        assert!(e.contains("--vae") && e.contains("BRAIN_LTXV_VAE"), "{e}");
-    }
-
-    /// [`Paths::dit`]/[`Paths::text_encoder`] follow the exact same
-    /// flag-over-env, optional (not error-on-absent) resolution
-    /// [`OPTIONAL_PATH_VARS`] documents.
-    #[test]
-    fn the_optional_real_checkpoint_paths_resolve_flag_over_env_and_are_none_when_absent() {
-        std::env::remove_var("BRAIN_LTXV_DIT");
-        std::env::remove_var("BRAIN_LTXV_TEXT_ENCODER");
-        let p = Paths::resolve(Some("/vae"), None, None, None).expect("vae only");
-        assert_eq!(p.dit, None);
-        assert_eq!(p.text_encoder, None);
-
-        std::env::set_var("BRAIN_LTXV_DIT", "env-dit");
-        std::env::set_var("BRAIN_LTXV_TEXT_ENCODER", "env-te");
-        let p = Paths::resolve(Some("/vae"), None, None, None).expect("from env");
-        assert_eq!(p.dit, Some("env-dit".to_string()));
-        assert_eq!(p.text_encoder, Some("env-te".to_string()));
-        let p = Paths::resolve(Some("/vae"), Some("/flag-dit"), Some("/flag-te"), None).expect("flag wins");
-        assert_eq!(p.dit, Some("/flag-dit".to_string()));
-        assert_eq!(p.text_encoder, Some("/flag-te".to_string()));
-        std::env::remove_var("BRAIN_LTXV_DIT");
-        std::env::remove_var("BRAIN_LTXV_TEXT_ENCODER");
+    fn paths_are_the_assemblys_roles() {
+        let roles: std::collections::BTreeMap<String, std::path::PathBuf> =
+            [("vae", "/s/vae"), ("dit", "/s/dit.gguf"), ("spatial_upsampler", "/s/up.st"), ("temporal_upsampler", "/s/tup.st")].iter().map(|(r, p)| (r.to_string(), p.into())).collect();
+        let a = capability::Assembly { id: "local/ltxv".into(), arch: "ltxv".into(), variant: None, roles, provenance: Vec::new() };
+        let p = Paths::from_assembly(&a, None).unwrap();
+        assert_eq!((p.vae.as_str(), p.dit.as_deref(), p.spatial_upsampler.as_deref(), p.temporal_upsampler.as_deref()), ("/s/vae", Some("/s/dit.gguf"), Some("/s/up.st"), Some("/s/tup.st")));
+        assert_eq!((p.text_encoder, p.audio_vae, p.duration_head), (None, None, None));
+        assert_eq!(Paths::from_assembly(&a, Some("/flag/up.st")).unwrap().spatial_upsampler.as_deref(), Some("/flag/up.st"));
+        let d = DfrPaths::from_paths(&Paths::from_assembly(&a, None).unwrap()).unwrap();
+        assert_eq!((d.spatial_upsampler.as_str(), d.temporal_upsampler.as_deref()), ("/s/up.st", Some("/s/tup.st")));
+        assert!(DfrPaths::from_paths(&Paths::new("/v")).is_err(), "DFR without a spatial upscaler is refused");
     }
 
     #[test]
     fn a_bad_frame_count_is_rejected_before_any_weight_is_read() {
-        let paths = Paths { vae: "/nope".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None };
+        let paths = Paths::new("/nope");
         let o = GenOpts { frames: 8, ..GenOpts::default() };
         let e = generate(&paths, "x", &o, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
         assert!(e.contains("1 + 8k"), "{e}");
@@ -7228,7 +7130,7 @@ mod tests {
     #[test]
     fn an_audio_request_that_cannot_produce_sound_is_refused_before_any_weight_is_read() {
         let audio = GenOpts { audio: true, dit_config: "ltx25_22b".into(), ..GenOpts::default() };
-        let bare = Paths { vae: "/nope".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None };
+        let bare = Paths::new("/nope");
 
         // Wrong config: the tiny DiT's audio stream is random weights.
         let tiny = GenOpts { dit_config: "tiny".into(), ..audio.clone() };
@@ -7237,7 +7139,7 @@ mod tests {
 
         // No DiT checkpoint.
         let e = generate(&bare, "x", &audio, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
-        assert!(e.contains("BRAIN_LTXV_DIT"), "{e}");
+        assert!(e.contains("--dit"), "{e}");
 
         // An audio source is the audio stream: without --audio it has none
         // to be.
@@ -7256,13 +7158,13 @@ mod tests {
         // No audio VAE - the sound would have nothing to decode it.
         let with_dit = Paths { dit: Some("/dit".into()), ..bare.clone() };
         let e = generate(&with_dit, "x", &audio, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
-        assert!(e.contains("BRAIN_LTXV_AUDIO_VAE"), "{e}");
+        assert!(e.contains("--audio-vae"), "{e}");
 
         // No text encoder - the audio stream has its OWN text projection, so
         // the stub context cannot stand in for it the way it can for video.
         let with_av = Paths { audio_vae: Some("/avae".into()), ..with_dit.clone() };
         let e = generate(&with_av, "x", &audio, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
-        assert!(e.contains("BRAIN_LTXV_TEXT_ENCODER"), "{e}");
+        assert!(e.contains("--text-encoder"), "{e}");
         assert!(e.contains("audio_aggregate_embed"), "the message must name WHY the stub cannot stand in: {e}");
 
         // And with every prerequisite named, the refusal is gone: the run
@@ -7270,7 +7172,7 @@ mod tests {
         // a different error entirely.
         let full = Paths { text_encoder: Some("/te".into()), ..with_av };
         let e = generate(&full, "x", &audio, &Default::default(), |_, _, _| {}).err().expect("the fake paths still fail");
-        assert!(!e.contains("BRAIN_LTXV_"), "no prerequisite should still be reported missing: {e}");
+        assert!(!e.contains("put it in the model store"), "no prerequisite should still be reported missing: {e}");
     }
 
     /// [`av_step`] is the ONE place a denoise step's two streams are mapped
@@ -7733,7 +7635,7 @@ mod tests {
     /// missing checkpoint (the paths below name nothing that exists).
     #[test]
     fn a_text_to_audio_request_that_cannot_run_is_refused_up_front() {
-        let paths = Paths { vae: "/missing/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None };
+        let paths = Paths::new("/missing/vae");
         let run = |o: AudioOpts| generate_audio(&paths, "rain", &o, &Default::default(), |_, _, _| {}).map(|_| ()).unwrap_err();
         for seconds in [0.0, -2.0, f64::NAN] {
             assert!(run(AudioOpts { seconds: Some(seconds), ..AudioOpts::default() }).contains("positive number of seconds"));
@@ -7773,7 +7675,7 @@ mod tests {
     /// tiny smoke test only when it is not; whatever a request names is kept.
     #[test]
     fn unnamed_settings_take_the_production_defaults_with_a_real_checkpoint() {
-        let bare = Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None };
+        let bare = Paths::new("/vae");
         let real = Paths { dit: Some("/dit.gguf".into()), ..bare.clone() };
         let mut o = GenOpts::default();
         resolve_defaults(&mut o, &bare, Named::default());

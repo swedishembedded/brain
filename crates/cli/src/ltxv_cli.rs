@@ -15,8 +15,7 @@
 //!
 //! **`--dit-config` decides whether any of this is a quality claim.** The VAE
 //! and the latent upscalers are always real (real weights, `--vae` resolved
-//! from the model store - the only required role - and
-//! `$BRAIN_LTXV_UPSAMPLER_SPATIAL`). With the real checkpoint resolved the
+//! from the model store - the only required role - like every other role). With the real checkpoint resolved the
 //! DiT is the real 22B model and every unnamed setting takes the reference's
 //! own default (`ltxv::pipeline::resolve_defaults`); without it, or with
 //! `--dit-config tiny`, it is the tiny config with FRESH RANDOM WEIGHTS,
@@ -24,7 +23,7 @@
 //! context stub unless a resolved `--text-encoder` names the real Gemma-4
 //! encoder. dit/vae/audio_vae/text_encoder/tokenizer are resolved through
 //! `brain_modelstore::resolve` (`ltxv::spec::LtxvSpec`) rather than
-//! `BRAIN_LTXV_*` - see `resolve_ltxv`. See `ltxv::pipeline`'s module doc for
+//! any environment variable - see `resolve_ltxv`. See `ltxv::pipeline`'s module doc for
 //! the full account of what is real and what is not.
 
 use ltxv::pipeline::{AudioOpts, DfrOpts, DfrPaths, ExtendOpts, GenOpts, LongOpts, MaskedOpts, Named, Paths, Sampler, UpscaleOpts};
@@ -127,7 +126,7 @@ reference pipelines' defaults; without it, a tiny random-weight smoke test):
                              natively audio-visual: without this flag only the
                              model's video half runs and the clip is silent.
                              Needs the real checkpoint, a real
-                             --text-encoder, and $BRAIN_LTXV_AUDIO_VAE. Any
+                             --text-encoder, and the audio VAE. Any
                              clip length; the sound crosses a window seam
                              with the picture. Costs real time and memory -
                              see "Audio" below
@@ -221,9 +220,7 @@ exits - --brain-data-dir/BRAIN_MODELS_DIR names where to look):
   --text-encoder <path>     real Gemma-4 text encoder (optional; the
                              deterministic prompt stub runs without it)
   --spatial-upsampler <path> spatial x2 latent upscaler - REQUIRED above
-                             6144 video tokens, unused below (see Stages);
-                             $BRAIN_LTXV_UPSAMPLER_SPATIAL when the store
-                             holds none
+                             6144 video tokens, unused below (see Stages)
 
 Stages:
   The distilled checkpoint's fixed 8-sigma schedule is only distilled to
@@ -234,8 +231,8 @@ Stages:
   request past that ceiling runs the reference's own two stages: the full
   schedule at half resolution (stage 1, where motion is decided), a real
   x2 latent upscale, then three deterministic refinement steps at the
-  requested size (stage 2, where detail is refined).  That needs
-  $BRAIN_LTXV_UPSAMPLER_SPATIAL, and both --width and --height must be
+  requested size (stage 2, where detail is refined).  That needs the
+  spatial x2 latent upscaler, and both --width and --height must be
   multiples of 64 (not just 32) so halving lands on the VAE's own stride.
   --two-stage on|off forces the choice either way.
 
@@ -248,8 +245,8 @@ Audio:
 
   Needs the real checkpoint, a real --text-encoder (the audio stream is
   conditioned through its own text projection, which the stub context cannot
-  stand in for) and $BRAIN_LTXV_AUDIO_VAE pointing at
-  ltx-2.5-audio-vae-bf16.safetensors, which carries both the audio VAE decoder
+  stand in for) and the audio VAE
+  (ltx-2.5-audio-vae-bf16.safetensors), which carries both the audio VAE decoder
   and the vocoder. All three are checked before any weight is read.
 
   It is opt-in because of COST, not correctness - but it runs on the same
@@ -447,18 +444,16 @@ Weights (resolved from the models directory; a flag names a candidate
 outright, an ambiguous or missing outcome prints every real candidate and
 exits):
   --vae <path>               the causal 3D video VAE (the only required role)
-  --upsampler-spatial <path> $BRAIN_LTXV_UPSAMPLER_SPATIAL  spatial x2 latent
-                                                   upscaler - REQUIRED, it is
-                                                   what this command runs
+  --upsampler-spatial <path> spatial x2 latent upscaler - REQUIRED, it is
+                             what this command runs
   --dit <path>               real 22B DiT GGUF (only read when --dit-config
                              ltx25_22b)
   --text-encoder <path>      real Gemma-4 text encoder (without it --prompt
                              reaches the model only as a stub and cannot
                              guide anything)
 
-  $BRAIN_LTXV_AUDIO_VAE is NOT read here. Upscaling refines the VIDEO latent
-  only: it runs no audio-visual DiT and decodes no audio, so setting that
-  variable changes nothing about this command. Note the consequence - the
+  The audio VAE is NOT read here. Upscaling refines the VIDEO latent
+  only: it runs no audio-visual DiT and decodes no audio. Note the consequence - the
   output has NO sound track at all. Any audio --input carried stays in
   --input, and re-attaching it is a separate ffmpeg mux.
 
@@ -509,10 +504,10 @@ resolution - stage 1 halves it, so both must be a multiple of 64):
   --temporal-upsample-rounds <N> 0, 1, or 2 real temporal x2 refine rounds
                                  (default 0; > 0 needs --temporal-upsampler)
 
-Weights (flag wins over the environment variable):
-  --vae <path>                 $BRAIN_LTXV_VAE       the causal 3D video VAE
-  --spatial-upsampler <path>   $BRAIN_LTXV_UPSAMPLER_SPATIAL
-  --temporal-upsampler <path>  $BRAIN_LTXV_UPSAMPLER_TEMPORAL
+Weights (resolved from the models directory; a flag names one outright):
+  --vae <path>                 the causal 3D video VAE
+  --spatial-upsampler <path>   the spatial x2 latent upscaler
+  --temporal-upsampler <path>  the temporal x2 latent upscaler
 
 Adapters:
   --adapter <path>           a LoRA to apply, repeatable: the official LTX
@@ -716,9 +711,9 @@ exits):
                             names the real model)
   --text-encoder <path>     real Gemma-4 text encoder; without it the
                             prompt reaches a stub
-                            $BRAIN_LTXV_UPSAMPLER_SPATIAL and the audio VAE
-                            role are not read by this command - it never
-                            upscales and never generates sound.
+                            The spatial upscaler and the audio VAE are not
+                            read by this command - it never upscales and
+                            never generates sound.
 
 Adapters:
   --adapter <path>           a LoRA to apply, repeatable: the official LTX
@@ -733,11 +728,11 @@ Placement:
 
 /// Resolve `dit`/`vae`/`audio_vae`/`text_encoder`/`tokenizer` through the
 /// model-store resolver (`brain_modelstore::resolve::resolve` +
-/// [`LtxvSpec`]) instead of `BRAIN_LTXV_*` - `overrides` carries whatever
+/// [`LtxvSpec`]) - `overrides` carries whatever
 /// role flags [`crate::resolver_cli::extract_role_overrides`] already pulled
 /// out of this command's own argv. `vae` is the only role `resolve_or_exit`
 /// can fail to fill; every other role simply stays `None` in the returned
-/// `Paths`, exactly as an unset env var/absent flag already did.
+/// `Paths`.
 fn resolve_ltxv(overrides: &std::collections::BTreeMap<String, String>, spatial_upsampler: Option<&str>) -> Result<Paths, String> {
     let spec = LtxvSpec;
     let assembly = crate::resolver_cli::resolve_or_exit("ltxv", &spec, overrides);
@@ -1586,7 +1581,11 @@ fn dfr(args: &[String]) -> Result<(), String> {
     o.base.eta = o.base.sampler.resolve_eta(eta)?;
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;
-    let paths = DfrPaths::resolve(vae.as_deref(), spatial_upsampler.as_deref(), temporal_upsampler.as_deref())?;
+    // The weight flags name roles outright; every role they leave unnamed
+    // comes from the model store.
+    let overrides: std::collections::BTreeMap<String, String> =
+        [("vae", vae), ("spatial_upsampler", spatial_upsampler), ("temporal_upsampler", temporal_upsampler)].into_iter().filter_map(|(role, p)| p.map(|p| (role.to_string(), p))).collect();
+    let paths = DfrPaths::from_paths(&resolve_ltxv(&overrides, None)?)?;
 
     eprintln!(
         "ltxv dfr (M8c smoke test - tiny random-weight DiT, real VAE + real upscalers): {} frames -> canvas, {}x{}, {} steps, {} temporal round(s), seed {}",
@@ -1737,12 +1736,6 @@ mod tests {
             assert!(super::HELP.contains(&flag), "{flag} is a resolver role flag but not in --help");
             assert!(ltxv::spec::LtxvSpec.roles().contains(&role), "{role} is documented as a role flag but LtxvSpec doesn't declare it");
         }
-        // `BRAIN_LTXV_UPSAMPLER_SPATIAL` is the one `Paths` env var this
-        // command still reads directly, as the fallback when the store holds
-        // no spatial upscaler. The role flags are checked above via the
-        // resolver's own role table instead: `Paths::from_env`'s env vars for
-        // them are read only by the served path (`resident_ltxv.rs`).
-        assert!(super::HELP.contains(ltxv::pipeline::OPTIONAL_PATH_VARS[2].0), "{} is read but not in --help", ltxv::pipeline::OPTIONAL_PATH_VARS[2].0);
     }
 
     /// Same self-check as [`every_flag_the_parser_accepts_is_documented`],
@@ -1766,7 +1759,6 @@ mod tests {
         }
         // See `every_flag_the_parser_accepts_is_documented`'s own comment:
         // this is the one `Paths` env var this command still reads directly.
-        assert!(super::UPSCALE_HELP.contains(ltxv::pipeline::OPTIONAL_PATH_VARS[2].0), "{} is read but not in upscale --help", ltxv::pipeline::OPTIONAL_PATH_VARS[2].0);
         // The one number in the help text that is a real constant rather than
         // prose: a ceiling the help promises and the pipeline enforces must
         // not drift apart.
@@ -1792,7 +1784,6 @@ mod tests {
         }
         // See `every_flag_the_parser_accepts_is_documented`'s own comment:
         // this is the one `Paths` env var this command still reads directly.
-        assert!(super::V2V_HELP.contains(ltxv::pipeline::OPTIONAL_PATH_VARS[2].0), "{} is read but not in v2v --help", ltxv::pipeline::OPTIONAL_PATH_VARS[2].0);
         // The interchange format this command consumes is a contract with a
         // separate producer, so its version string is in the help verbatim
         // rather than paraphrased.
@@ -1841,9 +1832,6 @@ mod tests {
         ] {
             assert!(super::DFR_HELP.contains(flag), "{flag} is parsed but not in dfr --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in dfr --help but not parsed");
-        }
-        for (var, _) in ltxv::pipeline::DFR_PATH_VARS {
-            assert!(super::DFR_HELP.contains(var), "{var} is read but not in dfr --help");
         }
     }
 

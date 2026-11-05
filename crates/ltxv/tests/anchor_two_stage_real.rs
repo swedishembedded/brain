@@ -24,10 +24,6 @@
 //! (384x192, both axes multiples of 64). Run explicitly:
 //!
 //! ```text
-//! BRAIN_LTXV_DIT=<...22b-distilled-transformer-Q8_0.gguf> \
-//! BRAIN_LTXV_VAE=<...video-vae-conv-bf16.safetensors> \
-//! BRAIN_LTXV_TEXT_ENCODER=<...gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf> \
-//! BRAIN_LTXV_UPSAMPLER_SPATIAL=<...latent-spatial-upscaler-x2-bf16-1.0.safetensors> \
 //! cargo test -p brain-ltxv --test anchor_two_stage_real -- --ignored --nocapture
 //! ```
 
@@ -61,7 +57,7 @@ fn mean_abs_delta(a: &[u8], b: &[u8]) -> f64 {
 }
 
 fn real_paths() -> Option<Paths> {
-    let p = Paths::resolve(None, None, None, None).ok()?;
+    let p = ltxv::spec::default_store_paths()?;
     p.dit.as_ref()?;
     Some(p)
 }
@@ -89,10 +85,10 @@ const MAX_FRAME0_DELTA: f64 = 7.0;
 #[ignore = "two full real 22B generations + one spatial upscale, forced two-stage"]
 fn a_start_frame_anchor_survives_the_two_stage_refinement() {
     let Some(paths) = real_paths() else {
-        return brain_testutil::skip("set BRAIN_LTXV_DIT + BRAIN_LTXV_VAE to the real LTX-2.5 checkpoints");
+        return brain_testutil::skip("put the real LTX-2.5 checkpoints in the model store");
     };
     if paths.spatial_upsampler.is_none() {
-        return brain_testutil::skip("set BRAIN_LTXV_UPSAMPLER_SPATIAL to the real spatial x2 latent upscaler - the two-stage path needs it");
+        return brain_testutil::skip("no spatial x2 latent upscaler in the model store - the two-stage path needs it");
     }
     let cancel = capability::CancelToken::default();
 

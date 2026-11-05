@@ -21,9 +21,6 @@
 //! Run explicitly:
 //!
 //! ```text
-//! BRAIN_LTXV_DIT=<...22b-distilled-transformer-Q8_0.gguf> \
-//! BRAIN_LTXV_VAE=<...video-vae-conv-bf16.safetensors> \
-//! BRAIN_LTXV_TEXT_ENCODER=<...gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf> \
 //! cargo test -p brain-ltxv --test anchor_with_mid_real -- --ignored --nocapture
 //! ```
 
@@ -57,7 +54,7 @@ fn mean_abs_delta(a: &[u8], b: &[u8]) -> f64 {
 }
 
 fn real_paths() -> Option<Paths> {
-    let p = Paths::resolve(None, None, None, None).ok()?;
+    let p = ltxv::spec::default_store_paths()?;
     p.dit.as_ref()?;
     Some(p)
 }
@@ -85,7 +82,7 @@ const MAX_FRAME0_DELTA: f64 = 7.0;
 #[ignore = "two full real 22B generations, ~6 minutes on a Tesla P40"]
 fn a_start_frame_anchor_survives_a_mid_frame_anchor_alongside_it() {
     let Some(paths) = real_paths() else {
-        return brain_testutil::skip("set BRAIN_LTXV_DIT + BRAIN_LTXV_VAE to the real LTX-2.5 checkpoints");
+        return brain_testutil::skip("put the real LTX-2.5 checkpoints in the model store");
     };
     let cancel = capability::CancelToken::default();
 

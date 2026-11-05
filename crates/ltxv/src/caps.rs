@@ -46,7 +46,7 @@ const DFR_DIT_CONFIGS: [&str; 1] = ["tiny"];
 /// (fresh random weights, the smoke-test config) and `"ltx25_22b"` (the
 /// real 22B checkpoint via `RealDit`/`crate::dit::forward_q_streamed` - see
 /// `crate::pipeline`'s module doc). Selecting `"ltx25_22b"` also needs
-/// `Paths::dit` (`--dit`/`$BRAIN_LTXV_DIT`) set; that check lives in
+/// `Paths::dit` (the model store or `--dit`) set; that check lives in
 /// `generate` itself since this manifest is built with no weights loaded.
 const T2V_DIT_CONFIGS: [&str; 2] = ["tiny", "ltx25_22b"];
 
@@ -56,7 +56,7 @@ pub fn manifest() -> Manifest {
     let d = GenOpts::default();
     let t2v = ActionSpec::new(
         "t2v",
-        "generate a video clip from a text prompt (rectified-flow ancestral Euler denoise over the LTX-2.5 video DiT with CFG, causal 3D VAE decode). dit_config=tiny (default) uses a random-weight smoke-test DiT and a deterministic stub text context; dit_config=ltx25_22b (needs --dit/$BRAIN_LTXV_DIT) runs the real 22B int8 checkpoint, optionally with the real Gemma-4 text encoder (--text-encoder/$BRAIN_LTXV_TEXT_ENCODER) - see crate::pipeline's module doc.",
+        "generate a video clip from a text prompt (rectified-flow ancestral Euler denoise over the LTX-2.5 video DiT with CFG, causal 3D VAE decode). With the real checkpoint in the model store it runs the real 22B int8 DiT and Gemma-4 text encoder at the reference's defaults; without it, dit_config=tiny's random-weight smoke test with a stub text context - see crate::pipeline's module doc.",
     )
     .streaming()
     .param(ParamSpec::new("prompt", ParamType::Str, "text description; folded into a deterministic noise/context seed only - there is no real text encoder yet (see crate::pipeline::context_stub)").required())
@@ -81,7 +81,7 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new(
         "audio",
         ParamType::Bool,
-        "also generate the clip's SOUND. LTX-2.5 is natively audio-visual: one transformer denoises a video-latent and an audio-latent stream together, coupled every block by cross-attention, and this runs both instead of only the video half. Needs dit_config=ltx25_22b, a real text encoder ($BRAIN_LTXV_TEXT_ENCODER - the audio stream has its OWN text projection the stub cannot stand in for) and $BRAIN_LTXV_AUDIO_VAE; all three are checked before any weight is read. Off by default because of cost: it runs on the same streamed/quantized/device-resident path the video-only stream does, so a joint step costs modestly more than a video-only one at the same shape rather than several times more, but it is still more. Any legal frame count: past one denoising window the audio latent crosses each seam beside the video one, which constrains where a seam may fall (see crate::audio's module doc) and so plans a different window split from the same request without sound.",
+        "also generate the clip's SOUND. LTX-2.5 is natively audio-visual: one transformer denoises a video-latent and an audio-latent stream together, coupled every block by cross-attention, and this runs both instead of only the video half. Needs the real checkpoint, text encoder (the audio stream has its OWN text projection the stub cannot stand in for) and audio VAE in the model store; all three are checked before any weight is read. Off by default because of cost: it runs on the same streamed/quantized/device-resident path the video-only stream does, so a joint step costs modestly more than a video-only one at the same shape rather than several times more, but it is still more. Any legal frame count: past one denoising window the audio latent crosses each seam beside the video one, which constrains where a seam may fall (see crate::audio's module doc) and so plans a different window split from the same request without sound.",
     )
     .default(json!(d.audio)))
     .param(ParamSpec::new("audio_source", ParamType::Str, "server-side path to a WAV soundtrack to generate the video FOR (audio-to-video): encoded through the audio VAE and held as the clip's frozen audio stream while the video denoises against it, then returned as the clip's audio. Needs audio=true; past one denoising window each window holds its own slice of it.").host_resolved())
@@ -129,7 +129,7 @@ pub fn manifest() -> Manifest {
     let a = crate::pipeline::AudioOpts::default();
     let t2a = ActionSpec::new(
         "t2a",
-        "generate a sound clip from a text prompt (ltx_pipelines.t2a_one_stage): the LTX-2.5 checkpoint's audio stream denoised alone - the video half is never read - then the audio VAE and vocoder with bandwidth extension. Needs the real checkpoint ($BRAIN_LTXV_DIT), text encoder ($BRAIN_LTXV_TEXT_ENCODER) and audio VAE ($BRAIN_LTXV_AUDIO_VAE).",
+        "generate a sound clip from a text prompt (ltx_pipelines.t2a_one_stage): the LTX-2.5 checkpoint's audio stream denoised alone - the video half is never read - then the audio VAE and vocoder with bandwidth extension. Needs the real checkpoint, text encoder and audio VAE in the model store.",
     )
     .streaming()
     .param(ParamSpec::new("prompt", ParamType::Str, "what the clip should sound like").required())
@@ -565,22 +565,17 @@ fn audio_outcome(out: Outcome, clip: &crate::audio::AudioClip) -> Outcome {
 
 // ===================== execution (provider) =====================
 
-/// The executable LTX-2.5 model behind the manifest. Unlike `WanProvider`
-/// there is no hot-DiT cache: this milestone's DiT is tiny/random and cheap
-/// to rebuild per call (microseconds, not the seconds and 5.7 GB of upload a real 22B
-/// checkpoint would cost) - caching it would add state for no benefit. Only
-/// the VAE path comes from the environment (`BRAIN_LTXV_VAE`).
-pub struct LtxvProvider;
-
-impl LtxvProvider {
-    pub fn new() -> LtxvProvider {
-        LtxvProvider
-    }
+/// The executable LTX-2.5 model behind the manifest, over the weights the
+/// model store resolved for it ([`Paths::from_assembly`]). Every action
+/// rebuilds what it needs per call; a resident instance that keeps weights
+/// warm across calls is `crates/catalog/src/resident_ltxv.rs`.
+pub struct LtxvProvider {
+    paths: Arc<Paths>,
 }
 
-impl Default for LtxvProvider {
-    fn default() -> Self {
-        LtxvProvider::new()
+impl LtxvProvider {
+    pub fn from_paths(paths: Paths) -> LtxvProvider {
+        LtxvProvider { paths: Arc::new(paths) }
     }
 }
 
@@ -589,13 +584,14 @@ impl Provider for LtxvProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        manifest().actions.iter().any(|a| a.name == name).then(|| Arc::new(LtxvAction { name: name.to_string() }) as Arc<dyn Action>)
+        manifest().actions.iter().any(|a| a.name == name).then(|| Arc::new(LtxvAction { name: name.to_string(), paths: self.paths.clone() }) as Arc<dyn Action>)
     }
 }
 
 /// One LTX-2.5 action, dispatched through the shared helpers above.
 struct LtxvAction {
     name: String,
+    paths: Arc<Paths>,
 }
 
 impl Action for LtxvAction {
@@ -608,28 +604,12 @@ impl Action for LtxvAction {
         // `brain ltxv` CLI: a served request has no terminal to print to, so
         // its start/finish/failure only exist anywhere if they are traced.
         tracing::info!("action invoked");
+        let paths = self.paths.as_ref();
         let result = match self.name.as_str() {
-            "t2v" => {
-                // Params before the weights-env check: a request that could
-                // never run must not read "you forgot to export BRAIN_LTXV_VAE".
-                let p = gen_params_from(inv)?;
-                let paths = Paths::from_env()?;
-                generate_on(&paths, inv, &p, progress)
-            }
-            "dfr" => {
-                let p = dfr_params_from(inv)?;
-                let paths = DfrPaths::from_env()?;
-                dfr_on(&paths, inv, &p, progress)
-            }
-            "t2a" => {
-                let opts = t2a_params_from(inv)?;
-                let paths = Paths::from_env()?;
-                t2a_on(&paths, inv, &opts, progress)
-            }
-            action @ ("v2v" | "extend" | "upscale") => {
-                let paths = Paths::from_env()?;
-                clip_action_on(action, &paths, inv, &|_| {}, progress)
-            }
+            "t2v" => generate_on(paths, inv, &gen_params_from(inv)?, progress),
+            "dfr" => dfr_on(&DfrPaths::from_paths(paths)?, inv, &dfr_params_from(inv)?, progress),
+            "t2a" => t2a_on(paths, inv, &t2a_params_from(inv)?, progress),
+            action @ ("v2v" | "extend" | "upscale") => clip_action_on(action, paths, inv, &|_| {}, progress),
             other => {
                 tracing::error!(action = other, "unknown action");
                 Err(format!("ltxv '{other}': unknown action"))
@@ -642,7 +622,6 @@ impl Action for LtxvAction {
         result
     }
 }
-
 
 /// The sampler parameters every generation action takes ([`Sampler`]).
 fn sampler_params() -> Vec<ParamSpec> {
@@ -755,7 +734,7 @@ mod tests {
     }
 
     /// Weights-free per the serving contract's obligation 5: this must never
-    /// touch `BRAIN_LTXV_VAE` or the filesystem.
+    /// touch the model store or the filesystem.
     #[test]
     fn manifest_declares_the_full_surface() {
         let m = manifest();

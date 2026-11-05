@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! LTX-2.5's [`ArchSpec`]: `dit`/`vae`/`audio_vae`/`text_encoder`/`tokenizer`/
-//! `spatial_upsampler`/`duration_head`.
+//! `spatial_upsampler`/`temporal_upsampler`/`duration_head`.
 //!
 //! `vae` is the only REQUIRED role: every other one is genuinely opt-in
 //! (present, the real weight loads; absent, [`crate::pipeline::generate`]'s
@@ -28,9 +28,9 @@ use capability::Assembly;
 
 pub struct LtxvSpec;
 
-const ROLES: &[&str] = &["dit", "vae", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler", "duration_head"];
+const ROLES: &[&str] = &["dit", "vae", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler", "temporal_upsampler", "duration_head"];
 /// Every role but `vae` is opt-in - see this module's doc.
-const OPTIONAL: &[&str] = &["dit", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler", "duration_head"];
+const OPTIONAL: &[&str] = &["dit", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler", "temporal_upsampler", "duration_head"];
 
 fn classify_gguf(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(g) = checkpoint::gguf::MmapGguf::open(&rec.path.to_string_lossy()) else { return };
@@ -74,8 +74,13 @@ fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, 
     // embedded in the file (the vendor's `config` metadata key) says which
     // axis one scales.
     let config: serde_json::Value = m.metadata().get("config").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
-    if config.get("_class_name").and_then(|v| v.as_str()) == Some("LatentUpsampler") && config.get("spatial_upsample").and_then(|v| v.as_bool()) == Some(true) {
-        out.push((idx, "spatial_upsampler".to_string(), Confidence::Declared));
+    if config.get("_class_name").and_then(|v| v.as_str()) == Some("LatentUpsampler") {
+        let flag = |axis: &str| config.get(axis).and_then(|v| v.as_bool()) == Some(true);
+        if flag("spatial_upsample") {
+            out.push((idx, "spatial_upsampler".to_string(), Confidence::Declared));
+        } else if flag("temporal_upsample") {
+            out.push((idx, "temporal_upsampler".to_string(), Confidence::Declared));
+        }
     }
 }
 
@@ -126,6 +131,25 @@ impl ArchSpec for LtxvSpec {
         // reading tensor bytes, which `ArchSpec::validate` may never do.
         Ok(())
     }
+}
+
+/// LTX-2.5's [`crate::pipeline::Paths`] as the model store under `root`
+/// resolves them - what a real-weight test or bench reads, instead of a
+/// variable naming each file. `Err` names an ambiguous or missing outcome.
+pub fn store_paths(root: &Path) -> Result<crate::pipeline::Paths, String> {
+    let records = brain_modelstore::inventory::scan(root);
+    let specs: [&dyn ArchSpec; 1] = [&LtxvSpec];
+    match brain_modelstore::resolve::resolve_under(root, "ltxv", &records, &specs, &BTreeMap::new()) {
+        brain_modelstore::resolve::Resolution::Resolved(a) => crate::pipeline::Paths::from_assembly(&a, None),
+        brain_modelstore::resolve::Resolution::Ambiguous(a) => Err(format!("ltxv: the model store under {} is ambiguous: {a:?}", root.display())),
+        brain_modelstore::resolve::Resolution::Missing(m) => Err(format!("ltxv: the model store under {} lacks: {m:?}", root.display())),
+    }
+}
+
+/// [`store_paths`] under the default model store, or `None` when there is
+/// none or it does not resolve.
+pub fn default_store_paths() -> Option<crate::pipeline::Paths> {
+    store_paths(&brain_modelstore::default_root()?).ok()
 }
 
 #[cfg(test)]
@@ -302,7 +326,7 @@ mod tests {
             complete(dit_path.clone(), ArtifactKind::Gguf),
             complete(text_encoder_path.clone(), ArtifactKind::Safetensors),
             complete(spatial_path.clone(), ArtifactKind::Safetensors),
-            complete(temporal_path, ArtifactKind::Safetensors),
+            complete(temporal_path.clone(), ArtifactKind::Safetensors),
             complete(duration_path.clone(), ArtifactKind::Safetensors),
         ];
 
@@ -317,6 +341,7 @@ mod tests {
                 assert_eq!(a.roles["dit"], dit_path);
                 assert_eq!(a.roles["text_encoder"], text_encoder_path, "the store's own encoder, so audio needs no flag");
                 assert_eq!(a.roles["spatial_upsampler"], spatial_path, "the temporal upscaler is not a spatial candidate");
+                assert_eq!(a.roles["temporal_upsampler"], temporal_path, "and the spatial one is not a temporal candidate");
             }
             other => panic!("expected Resolved, got {other:?}"),
         }

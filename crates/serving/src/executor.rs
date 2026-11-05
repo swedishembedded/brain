@@ -256,22 +256,15 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     } else {
         residency::log::not_served("brain: wan not served over the scheduler (set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER)");
     }
-    // MiniMax-H3 joint video+audio (BRAIN_MINIMAXH3_DIR):
-    // ONE hot 33B transformer shared across every request shape (no compiled
-    // graph is sized per-extent) - see resident_minimaxh3.rs. The env-var
-    // lane is the out-of-store developer path; a pulled `MiniMaxAI/MiniMax-H3`
-    // reaches the same adapter through `model_dir::resident_for_compound`'s
-    // `"minimaxh3"` arm instead, and is not announced here.
-    if let Some(h) = catalog::resident_minimaxh3::MiniMaxH3Resident::from_env() {
-        models.push(Arc::new(h));
-    }
-    // LTX-2.5 video+audio (BRAIN_LTXV_*, else every checkpoint the model
-    // store resolves, each under its own reference): see resident_ltxv.rs.
-    // One with only its VAE runs the random-weight smoke-test DiT and is not
-    // offered for sale on /videos.
+    // MiniMax-H3 joint video+audio reaches its adapter through
+    // `model_dir::resident_for_compound`'s `"minimaxh3"` arm, from the store.
+    // LTX-2.5 video+audio, from every checkpoint the model store resolves,
+    // each under its own reference: see resident_ltxv.rs. One with only its
+    // VAE runs the random-weight smoke-test DiT and is not offered for sale
+    // on /videos.
     let ltxv_residents = catalog::resident_ltxv::LtxvResident::all_from_store(models_dir);
     if ltxv_residents.is_empty() {
-        residency::log::not_served("brain: ltxv not served over the scheduler (set BRAIN_LTXV_VAE, or pull an LTX-2.5 checkpoint into the model dir)");
+        residency::log::not_served("brain: ltxv not served over the scheduler (pull an LTX-2.5 checkpoint into the model dir)");
     }
     for l in ltxv_residents {
         models.push(Arc::new(l));

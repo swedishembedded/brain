@@ -373,11 +373,6 @@ fn two_contexts_sharing_one_cache_each_get_their_own_connector_routing() {
 const REPO: &str = "Lightricks/LTX-2.5";
 
 fn gguf_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_DIT") {
-        if !p.is_empty() {
-            return Some(p);
-        }
-    }
     let dir = brain_testutil::model_dir(REPO)?;
     let mut found: Vec<String> = std::fs::read_dir(&dir)
         .ok()?
@@ -410,7 +405,7 @@ fn gguf_path() -> Option<String> {
 #[test]
 fn real_checkpoint_cached_forward_is_bit_identical_to_an_uncached_one() {
     let Some(path) = gguf_path() else {
-        brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+        brain_testutil::skip(&format!("no real {REPO} distilled Q8_0 GGUF in the model store"));
         return;
     };
     let cfg = LtxDitConfig { num_layers: 2, use_embeddings_connector: false, ..LtxDitConfig::ltx25_22b() };

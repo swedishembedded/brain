@@ -54,25 +54,25 @@ fn report(label: &str, got: &[f32], want: &[f32], min_cos: f64) {
     assert!(c >= min_cos, "{label}: cosine {c:.9} < {min_cos}");
 }
 
-/// The shipped NA decoder weights: `BRAIN_LTXV_NA_VAE`, else the
+/// The shipped NA decoder weights: the model store's copy, else the
 /// repo-relative
 /// `resources/ltxv/weights/vae/ltx-2.5-video-vae-bf16.safetensors` - the
 /// file paired with the NA decoder (as opposed to `-conv-bf16`, the plain
 /// conv decoder's own file).
 fn weights_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_NA_VAE") {
-        return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+    if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/ltx-2.5-video-vae-bf16.safetensors")).filter(|p| Path::new(p).exists()) {
+        return Some(p);
     }
     let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/ltxv/weights/vae/ltx-2.5-video-vae-bf16.safetensors");
     Path::new(p).exists().then(|| p.to_string())
 }
 
 /// The CONV release, the other half of the "both real files load" gate:
-/// `BRAIN_LTXV_VAE` (the variable `crate::pipeline` itself reads), else the
+/// the model store's copy, else the
 /// repo-relative copy `vae_parity.rs` resolves.
 fn conv_weights_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_VAE") {
-        return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+    if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/ltx-2.5-video-vae-conv-bf16.safetensors")).filter(|p| Path::new(p).exists()) {
+        return Some(p);
     }
     let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/ltxv/weights/vae/ltx-2.5-video-vae-conv-bf16.safetensors");
     Path::new(p).exists().then(|| p.to_string())
@@ -117,7 +117,7 @@ fn setup(fixture_file: &str) -> Option<(&'static Tensors, Fixture)> {
         return None;
     }
     let Some(w) = weights() else {
-        brain_testutil::skip("set BRAIN_LTXV_NA_VAE to ltx-2.5-video-vae-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-video-vae-bf16.safetensors in the model store");
         return None;
     };
     let t = checkpoint::safetensors::read(&fx).expect("read golden");
@@ -156,18 +156,18 @@ fn ltxv_na_diff_matches_reference() {
 
 /// BOTH real Lightricks video-VAE releases go through the ONE loader and
 /// come back usable, each naming the decoder it carries - the property a
-/// user hits when they point `BRAIN_LTXV_VAE` at whichever file they
+/// user hits when they point `--vae` at whichever file they
 /// downloaded. The shared conv encoder and `per_channel_statistics` have to
 /// survive the NA branch too, since the pipeline encodes (image
 /// conditioning) and un-normalizes off the same map it decodes from.
 #[test]
 fn ltxv_video_vae_loader_takes_both_real_releases() {
     let Some(na_path) = weights_path() else {
-        brain_testutil::skip("set BRAIN_LTXV_NA_VAE to ltx-2.5-video-vae-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-video-vae-bf16.safetensors in the model store");
         return;
     };
     let Some(conv_path) = conv_weights_path() else {
-        brain_testutil::skip("set BRAIN_LTXV_VAE to ltx-2.5-video-vae-conv-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-video-vae-conv-bf16.safetensors in the model store");
         return;
     };
     let cfg = ltxv::vae3d::LtxVaeConfig::conv25();
@@ -199,7 +199,7 @@ fn ltxv_video_vae_loader_takes_both_real_releases() {
 #[test]
 fn ltxv_na_decode_composes_end_to_end_on_real_weights() {
     let Some(w) = weights() else {
-        brain_testutil::skip("set BRAIN_LTXV_NA_VAE to ltx-2.5-video-vae-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-video-vae-bf16.safetensors in the model store");
         return;
     };
     let cfg = NaDecoderConfig::ltx25();
@@ -244,7 +244,7 @@ fn ltxv_na_decode_composes_end_to_end_on_real_weights() {
 #[test]
 fn ltxv_na_decoder_import_covers_the_shipped_checkpoint() {
     let Some(w) = weights() else {
-        brain_testutil::skip("set BRAIN_LTXV_NA_VAE to ltx-2.5-video-vae-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-video-vae-bf16.safetensors in the model store");
         return;
     };
     let cfg = NaDecoderConfig::ltx25();

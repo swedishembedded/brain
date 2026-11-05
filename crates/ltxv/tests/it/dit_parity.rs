@@ -266,7 +266,7 @@ fn ltxv_dit_tiny_gated_matches_reference() {
 ///
 /// Two gates, independently skippable: the golden fixture (`dit_real_tiny.
 /// safetensors`, small - inputs + taps only, no weights, see the dumper's
-/// module doc for why) and the real GGUF itself (`BRAIN_LTXV_DIT`, else the
+/// module doc for why) and the real GGUF itself (the model store's copy, else the
 /// first `*Q8_0*.gguf` under the model store - same resolution
 /// `crates/ltxv/tests/it/gguf_quant_real.rs` uses). Either absent skips loudly
 /// (`BRAIN_REQUIRE_FIXTURES=1` upgrades to a failure), matching every other
@@ -286,11 +286,6 @@ mod real_weight {
     const LAYERS: u32 = 2;
 
     fn real_dit_gguf_path() -> Option<String> {
-        if let Ok(p) = std::env::var("BRAIN_LTXV_DIT") {
-            if !p.is_empty() {
-                return Some(p);
-            }
-        }
         let dir = brain_testutil::model_dir(REPO)?;
         let mut found: Vec<String> = std::fs::read_dir(dir)
             .ok()?
@@ -346,7 +341,7 @@ mod real_weight {
             return;
         }
         let Some(gguf_path) = real_dit_gguf_path() else {
-            brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+            brain_testutil::skip(&format!("no real {REPO} distilled Q8_0 GGUF in the model store"));
             return;
         };
 

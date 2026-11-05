@@ -49,8 +49,8 @@
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
-/// LTX-2.5 resident model, gated on `BRAIN_LTXV_VAE` (the one real weight
-/// role this milestone has - see `ltxv::pipeline::PATH_VARS`).
+/// LTX-2.5 resident model over the weights the model store resolves for it
+/// (`ltxv::spec::LtxvSpec`; the VAE is the one required role).
 pub struct LtxvResident {
     /// See `WanResident::id`'s doc for why this is not always the compiled-in
     /// constant: a fetched checkpoint registers under its own reference.
@@ -59,23 +59,15 @@ pub struct LtxvResident {
 }
 
 impl LtxvResident {
-    /// Every LTX checkpoint this machine serves: the one `BRAIN_LTXV_*` names,
-    /// else each the model store resolves (`ltxv::spec::LtxvSpec`), each under
-    /// its own reference - the lane `resident_flux2`'s residents take, so a
-    /// pulled checkpoint is served without any variable set.
+    /// Every LTX checkpoint the model store resolves (`ltxv::spec::LtxvSpec`),
+    /// each under its own reference - the lane `resident_flux2`'s residents
+    /// take. The environment names no weights.
     pub fn all_from_store(models_dir: Option<&std::path::Path>) -> Vec<LtxvResident> {
-        use loader::served::RoleEnv;
         loader::served::served_assemblies(
             models_dir,
             "ltxv",
             &ltxv::spec::LtxvSpec,
-            &[
-                RoleEnv { role: "vae", var: "BRAIN_LTXV_VAE" },
-                RoleEnv { role: "dit", var: "BRAIN_LTXV_DIT" },
-                RoleEnv { role: "text_encoder", var: "BRAIN_LTXV_TEXT_ENCODER" },
-                RoleEnv { role: "spatial_upsampler", var: "BRAIN_LTXV_UPSAMPLER_SPATIAL" },
-                RoleEnv { role: "audio_vae", var: "BRAIN_LTXV_AUDIO_VAE" },
-            ],
+            &[],
             ltxv::caps::MODEL,
         )
         .into_iter()
@@ -92,10 +84,9 @@ impl LtxvResident {
         .collect()
     }
 
-    /// The checkpoint `BRAIN_LTXV_*` names, without looking in a model store;
-    /// `None` unless `BRAIN_LTXV_VAE` is set.
-    pub fn from_env() -> Option<LtxvResident> {
-        Self::all_from_store(None).into_iter().next()
+    /// The first checkpoint the model store resolves, if any.
+    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<LtxvResident> {
+        Self::all_from_store(models_dir).into_iter().next()
     }
 
     /// Whether this checkpoint renders real video: the real DiT and text
@@ -348,14 +339,10 @@ impl LtxvInstance {
                 crate::resident_llm::on_device(device, || ltxv::caps::generate_on(paths, inv, &p, progress))?
             }
             "dfr" => {
-                // DFR needs the two latent-upscaler paths on top of the VAE
-                // `paths` already carries - resolved fresh from the
-                // environment per call, the same "nothing worth caching yet"
-                // reasoning this module's own doc gives for the VAE path.
                 let mut p = ltxv::caps::dfr_params_from(inv)?;
                 p.opts.base.device = device_name(device);
                 p.opts.base.devices = plan;
-                let dfr_paths = ltxv::pipeline::DfrPaths::from_env()?;
+                let dfr_paths = ltxv::pipeline::DfrPaths::from_paths(paths)?;
                 crate::resident_llm::on_device(device, || ltxv::caps::dfr_on(&dfr_paths, inv, &p, progress))?
             }
             action @ ("v2v" | "extend" | "upscale") => {
@@ -488,7 +475,7 @@ mod tests {
     use serde_json::json;
 
     fn resident() -> LtxvResident {
-        LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None } }
+        LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, temporal_upsampler: None, audio_vae: None, duration_head: None } }
     }
 
     /// A checkpoint without its real DiT and text encoder renders from the
@@ -561,7 +548,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ck = dir.join("dit.gguf");
         std::fs::write(&ck, b"stand-in checkpoint").unwrap();
-        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(ck.to_string_lossy().into_owned()), text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None } };
+        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(ck.to_string_lossy().into_owned()), text_encoder: None, spatial_upsampler: None, temporal_upsampler: None, audio_vae: None, duration_head: None } };
 
         let real = r.estimate(&InstanceKey::new(ltxv::caps::MODEL, "ltx25_22b:9:64x64".to_string()));
         let tiny = r.estimate(&InstanceKey::new(ltxv::caps::MODEL, "tiny:9:64x64".to_string()));
@@ -593,7 +580,7 @@ mod tests {
         let ck = dir.join("dit2.gguf");
         std::fs::write(&ck, b"stand-in checkpoint bytes").unwrap();
         let path = ck.to_string_lossy().into_owned();
-        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(path.clone()), text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None } };
+        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(path.clone()), text_encoder: None, spatial_upsampler: None, temporal_upsampler: None, audio_vae: None, duration_head: None } };
         let mut inst = r.activate(&InstanceKey::new(ltxv::caps::MODEL, "ltx25_22b:9:64x64".to_string()), Device::Gpu(0)).expect("activate");
 
         // Populate the store the way a generation does - through the SAME
@@ -610,7 +597,7 @@ mod tests {
         assert!(inst.promote(Device::Gpu(0)).is_ok(), "promote must succeed: refilling is lazy by design");
 
         // No real checkpoint -> nothing resident -> both must refuse.
-        let bare = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None } };
+        let bare = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, temporal_upsampler: None, audio_vae: None, duration_head: None } };
         let mut bare_inst = bare.activate(&InstanceKey::new(ltxv::caps::MODEL, "tiny:9:64x64".to_string()), Device::Cpu).expect("activate");
         assert!(bare_inst.demote(Tier::Warm).is_err(), "a model holding nothing must not report a successful demotion");
         assert!(bare_inst.promote(Device::Cpu).is_err());
@@ -628,8 +615,7 @@ mod tests {
     /// checkpoints, not a unit test. Run it explicitly:
     ///
     /// ```text
-    /// BRAIN_LTXV_VAE=... BRAIN_LTXV_DIT=... BRAIN_LTXV_TEXT_ENCODER=... \
-    ///   cargo test --release -p brain-catalog --lib -- --ignored --nocapture \
+    /// cargo test --release -p brain-catalog --lib -- --ignored --nocapture \
     ///   two_real_generations_share
     /// ```
     ///
@@ -639,11 +625,11 @@ mod tests {
     #[test]
     #[ignore = "real multi-minute generation against real LTX-2.5 checkpoints"]
     fn two_real_generations_share_one_warm_checkpoint_cache() {
-        let Some(r) = LtxvResident::from_env() else {
-            eprintln!("skipped: set BRAIN_LTXV_VAE (and BRAIN_LTXV_DIT) to real LTX-2.5 checkpoints");
+        let Some(r) = LtxvResident::from_store(loader::model_dir::resolve(None).as_deref()) else {
+            eprintln!("skipped: no LTX-2.5 checkpoints in the model store");
             return;
         };
-        assert!(r.paths.dit.is_some(), "this harness needs BRAIN_LTXV_DIT: it is about the real checkpoint's cache");
+        assert!(r.paths.dit.is_some(), "this harness needs the real DiT in the model store: it is about the real checkpoint's cache");
         let key = InstanceKey::new(ltxv::caps::MODEL, "ltx25_22b:9:64x64".to_string());
         let mut inst = r.activate(&key, Device::Gpu(0)).expect("activate");
 
@@ -725,18 +711,17 @@ mod tests {
     /// `#[ignore]`d - real multi-minute generations. Run explicitly:
     ///
     /// ```text
-    /// BRAIN_LTXV_VAE=... BRAIN_LTXV_DIT=... \
     ///   cargo test --release -p brain-catalog --lib -- --ignored --nocapture \
     ///   concurrent_generations_share
     /// ```
     #[test]
     #[ignore = "real multi-minute generations against real LTX-2.5 checkpoints"]
     fn concurrent_generations_share_one_cache_and_overlap_across_the_cards() {
-        let Some(r) = LtxvResident::from_env() else {
-            eprintln!("skipped: set BRAIN_LTXV_VAE (and BRAIN_LTXV_DIT) to real LTX-2.5 checkpoints");
+        let Some(r) = LtxvResident::from_store(loader::model_dir::resolve(None).as_deref()) else {
+            eprintln!("skipped: no LTX-2.5 checkpoints in the model store");
             return;
         };
-        assert!(r.paths.dit.is_some(), "this harness needs BRAIN_LTXV_DIT: it is about the real checkpoint");
+        assert!(r.paths.dit.is_some(), "this harness needs the real DiT in the model store: it is about the real checkpoint");
         let width = ltxv_device_pool(Device::Gpu(0)).width();
         eprintln!("pool width: {width}");
         let key = InstanceKey::new(ltxv::caps::MODEL, "ltx25_22b:9:64x64".to_string());
@@ -798,7 +783,7 @@ mod tests {
         let m = resident().manifest();
         assert_eq!(m.model, ltxv::caps::MODEL);
         assert_eq!(m.actions.len(), ltxv::caps::manifest().actions.len());
-        let fetched = LtxvResident { id: "Lightricks/LTX-2.5".to_string(), paths: ltxv::pipeline::Paths { vae: "v".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None } };
+        let fetched = LtxvResident { id: "Lightricks/LTX-2.5".to_string(), paths: ltxv::pipeline::Paths { vae: "v".into(), dit: None, text_encoder: None, spatial_upsampler: None, temporal_upsampler: None, audio_vae: None, duration_head: None } };
         assert_eq!(fetched.manifest().model, "Lightricks/LTX-2.5");
         assert_eq!(fetched.instance_key("t2v", &Invocation::new()).model, "Lightricks/LTX-2.5");
     }

@@ -44,9 +44,6 @@
 //! `#[ignore]`d: two full real 22B generations. Run explicitly:
 //!
 //! ```text
-//! BRAIN_LTXV_DIT=<...22b-distilled-transformer-Q8_0.gguf> \
-//! BRAIN_LTXV_VAE=<...video-vae-conv-bf16.safetensors> \
-//! BRAIN_LTXV_TEXT_ENCODER=<...gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf> \
 //! cargo test -p brain-ltxv --test prompt_adherence_real -- --ignored --nocapture
 //! ```
 
@@ -83,7 +80,7 @@ fn mean_abs_delta(a: &[Vec<u8>], b: &[Vec<u8>]) -> f64 {
 }
 
 fn real_paths() -> Option<Paths> {
-    let p = Paths::resolve(None, None, None, None).ok()?;
+    let p = ltxv::spec::default_store_paths()?;
     p.dit.as_ref()?;
     p.text_encoder.as_ref()?;
     Some(p)
@@ -141,7 +138,7 @@ const MIN_PROMPT_DELTA: f64 = 20.0;
 #[ignore = "two full real 22B generations"]
 fn two_unrelated_prompts_do_not_produce_the_same_clip() {
     let Some(paths) = real_paths() else {
-        return brain_testutil::skip("set BRAIN_LTXV_DIT + BRAIN_LTXV_VAE + BRAIN_LTXV_TEXT_ENCODER to the real LTX-2.5 checkpoints");
+        return brain_testutil::skip("put the real LTX-2.5 checkpoints in the model store");
     };
     let cancel = capability::CancelToken::default();
 

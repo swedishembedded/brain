@@ -139,11 +139,6 @@ const REPO: &str = "Lightricks/LTX-2.5";
 /// architecture rather than on its name - the store holds a second Q8_0 GGUF
 /// (the quantized Gemma-4 text tower) that a name glob picks up instead.
 fn gguf_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_DIT") {
-        if !p.is_empty() {
-            return Some(p);
-        }
-    }
     let dir = brain_testutil::model_dir(REPO)?;
     let mut found: Vec<String> = std::fs::read_dir(&dir)
         .ok()?
@@ -176,7 +171,7 @@ fn gguf_path() -> Option<String> {
 #[test]
 fn the_scratch_arena_changes_no_bit_of_a_real_weight_forward() {
     let Some(path) = gguf_path() else {
-        brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+        brain_testutil::skip(&format!("no real {REPO} distilled Q8_0 GGUF in the model store"));
         return;
     };
     // Three layers again - block 2 is the first that can be handed a slot

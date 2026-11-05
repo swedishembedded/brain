@@ -227,15 +227,14 @@ brain -v --device gpu0 ltxv t2v \
   so a longer context means fewer new frames per window and more windows. The
   per-window ceiling is `ltxv::longform::LONGFORM_MAX_TOKENS` (13200, the
   largest single-window generation this crate has a recorded real run at),
-  overridable with `BRAIN_LTXV_LONGFORM_MAX_TOKENS`.
+  overridable with `--max-window-tokens`.
 * **A request that fits one window is unchanged.** It is handed straight to the
   single-window path, bit for bit, and none of this runs.
 * **The stage-major loop is the default for video-only clips** (stage 1 at
   half resolution across the whole clip, then stage 2 refines it at full
-  resolution); `BRAIN_LTXV_LONGFORM_STAGE_MAJOR=0` (or `off`/`false`) is the
-  kill switch back to the older window-major loop, e.g. to bisect a
-  regression against it. Audio-visual clips always use the window-major loop
-  regardless of this variable.
+  resolution); `--window-major` goes back to the older window-major loop, e.g.
+  to bisect a regression against it. Audio-visual clips always use the
+  window-major loop.
 * **`--audio` crosses the same seams**, on its own time grid and with its own
   constraint on where a seam may fall - see "Generating sound" below.
 * **`--end-frame` and `--mid-frame` are refused for a multi-window clip** - the
@@ -355,10 +354,6 @@ two-stage generation already runs (see the Stages section of
 `brain ltxv t2v --help`), reached through the same code.
 
 ```bash
-export BRAIN_LTXV_VAE=[path/to/ltx-2.5-video-vae-conv-bf16.safetensors]
-export BRAIN_LTXV_UPSAMPLER_SPATIAL=[path/to/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors]
-export BRAIN_LTXV_DIT=[path/to/ltx-2.5-22b-distilled-transformer-Q8_0.gguf]
-export BRAIN_LTXV_TEXT_ENCODER=[path/to/gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf]
 brain -v --device gpu0 ltxv upscale \
   --input clip.mp4 --output-path clip_upscaled.mp4 \
   --prompt "the prompt the clip was generated from"
@@ -409,12 +404,9 @@ Rendering): a half-res base generation with generated keyframe slots, a REAL
 spatial x2 latent upscale, a full-res re-noised detailing pass (no IC-LoRA -
 none exists in this repo), and 0-2 REAL temporal x2 upsample rounds with
 tile-based stitching, needing the VAE plus both real latent-upscaler
-checkpoints:
+checkpoints from the model store:
 
 ```bash
-export BRAIN_LTXV_VAE=…/ltx-2.5-video-vae-conv-bf16.safetensors
-export BRAIN_LTXV_UPSAMPLER_SPATIAL=…/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors
-export BRAIN_LTXV_UPSAMPLER_TEMPORAL=…/ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors
 brain ltxv dfr --prompt "a cat walking on a beach" --frames 9 --width 64 \
   --height 64 --steps 4 --output-path out.mp4
 ```

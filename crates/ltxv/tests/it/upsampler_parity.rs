@@ -69,7 +69,7 @@ fn report(label: &str, got: &[f32], want: &[f32], min_cos: f64) {
 
 // ---------------------------------------------------------- real fixtures
 
-/// `BRAIN_LTXV_UPSAMPLER_SPATIAL`/`_TEMPORAL`, else the repo-relative
+/// the model store's copy, else the repo-relative
 /// `resources/ltxv/weights/latent_upscale_models/` the real files ship
 /// under - a variable rather than a literal machine path so this test passes
 /// on any checkout that fetched the resource, not just the one it was
@@ -77,16 +77,18 @@ fn report(label: &str, got: &[f32], want: &[f32], min_cos: f64) {
 /// The real conv video VAE, whose `per_channel_statistics` the upscaler
 /// sandwich needs. Same resolution order as the upscaler paths above.
 fn vae_weights_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_VAE") {
-        return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+    if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/ltx-2.5-video-vae-conv-bf16.safetensors")).filter(|p| Path::new(p).exists()) {
+        return Some(p);
     }
     let p = format!("{}/../../resources/ltxv/weights/vae/ltx-2.5-video-vae-conv-bf16.safetensors", env!("CARGO_MANIFEST_DIR"));
     Path::new(&p).exists().then_some(p)
 }
 
-fn weights_path(env: &str, rel: &str) -> Option<String> {
-    if let Ok(p) = std::env::var(env) {
-        return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+fn weights_path(rel: &str) -> Option<String> {
+    // The model store's copy first, by file name; else the repo-relative one.
+    let name = Path::new(rel).file_name()?.to_string_lossy().into_owned();
+    if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/{name}")).filter(|p| Path::new(p).exists()) {
+        return Some(p);
     }
     let p = format!(
         "{}/../../resources/ltxv/weights/latent_upscale_models/{rel}",
@@ -96,11 +98,11 @@ fn weights_path(env: &str, rel: &str) -> Option<String> {
 }
 
 fn spatial_weights_path() -> Option<String> {
-    weights_path("BRAIN_LTXV_UPSAMPLER_SPATIAL", "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors")
+    weights_path("ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors")
 }
 
 fn temporal_weights_path() -> Option<String> {
-    weights_path("BRAIN_LTXV_UPSAMPLER_TEMPORAL", "ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors")
+    weights_path("ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors")
 }
 
 struct Fixture {
@@ -115,7 +117,7 @@ impl Fixture {
 
 fn run(label: &str, cfg: &LatentUpsamplerConfig, weights_path: Option<String>) {
     let Some(wp) = weights_path else {
-        brain_testutil::skip(&format!("{label}: set BRAIN_LTXV_UPSAMPLER_{} to the real checkpoint", label.to_uppercase()));
+        brain_testutil::skip(&format!("{label}: no {label} latent upscaler in the model store"));
         return;
     };
     let fx_path = brain_testutil::testdata(&format!("golden/ltxv/upsampler/{label}.safetensors"));
@@ -182,12 +184,12 @@ fn ltxv_upsampler_temporal_matches_reference() {
 /// The importer against BOTH real shipped files, both directions.
 #[test]
 fn ltxv_upsampler_import_covers_both_shipped_checkpoints() {
-    for (cfg, wp, env) in [
-        (LatentUpsamplerConfig::spatial_x2(), spatial_weights_path(), "BRAIN_LTXV_UPSAMPLER_SPATIAL"),
-        (LatentUpsamplerConfig::temporal_x2(), temporal_weights_path(), "BRAIN_LTXV_UPSAMPLER_TEMPORAL"),
+    for (cfg, wp, axis) in [
+        (LatentUpsamplerConfig::spatial_x2(), spatial_weights_path(), "spatial"),
+        (LatentUpsamplerConfig::temporal_x2(), temporal_weights_path(), "temporal"),
     ] {
         let Some(wp) = wp else {
-            brain_testutil::skip(&format!("set {env} to the real checkpoint"));
+            brain_testutil::skip(&format!("no {axis} latent upscaler in the model store"));
             continue;
         };
         let raw = checkpoint::safetensors::read(&wp).expect("read real upscaler weights");
@@ -222,7 +224,7 @@ fn ltxv_upsampler_import_covers_both_shipped_checkpoints() {
 #[test]
 fn the_upscaler_is_un_normalized_around_exactly_as_the_reference_does_it() {
     let (Some(up_path), Some(vae_path)) = (spatial_weights_path(), vae_weights_path()) else {
-        return brain_testutil::skip("set BRAIN_LTXV_UPSAMPLER_SPATIAL + BRAIN_LTXV_VAE to the real checkpoints");
+        return brain_testutil::skip("put the real VAE and spatial upscaler in the model store");
     };
     let cfg = LatentUpsamplerConfig::spatial_x2();
     let uw = import_upsampler(checkpoint::safetensors::read(&up_path).expect("read upscaler"), &cfg).expect("import upscaler");

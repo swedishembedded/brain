@@ -429,15 +429,17 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("minimaxh3", &minimaxh3::spec::H3Spec)),
             resident: None,
         },
-        // LTX-2.5 text-to-video: a smoke-test pipeline (real VAE +
-        // tiny random-weight DiT, no real text encoder yet - see
-        // `ltxv::pipeline`'s module doc). `BRAIN_LTXV_VAE` lives in the
-        // provider, same shape as `wan`'s four roles above; the residency
-        // adapter is registered directly by `serving::build_executor`, not from here.
+        // LTX-2.5 video+audio. The provider builds its weight paths from the
+        // resolved Assembly (`ltxv::pipeline::Paths::from_assembly`), same
+        // shape as `wan`'s and `minimaxh3`'s above; the residency adapter is
+        // registered directly by `serving::build_executor`, not from here.
         ModelEntry {
             manifest: ltxv::caps::manifest,
-            provider: always!(ltxv::caps::LtxvProvider::new()),
-            spec: None,
+            provider: |assembly: &Assembly| {
+                let paths = ltxv::pipeline::Paths::from_assembly(assembly, None)?;
+                Ok(Arc::new(ltxv::caps::LtxvProvider::from_paths(paths)) as Arc<dyn Provider>)
+            },
+            spec: Some(("ltxv", &ltxv::spec::LtxvSpec)),
             resident: None,
         },
         // `weights`/`tokenizer` are resolved through `qwen3::spec::Qwen3Spec`

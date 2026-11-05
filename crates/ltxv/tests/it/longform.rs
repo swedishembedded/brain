@@ -240,9 +240,11 @@ mod real_weights {
     /// The named environment variable, else the repo-relative
     /// `resources/ltxv/weights/` the real files ship under - never a literal
     /// machine path, the same convention `upscale.rs`/`vae_parity.rs` use.
-    fn weights_path(env: &str, rel: &str) -> Option<String> {
-        if let Ok(p) = std::env::var(env) {
-            return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+    fn weights_path(rel: &str) -> Option<String> {
+        // The model store's copy first, by file name; else the repo-relative one.
+        let name = Path::new(rel).file_name()?.to_string_lossy().into_owned();
+        if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/{name}")).filter(|p| Path::new(p).exists()) {
+            return Some(p);
         }
         let p = format!("{}/../../resources/ltxv/weights/{rel}", env!("CARGO_MANIFEST_DIR"));
         Path::new(&p).exists().then_some(p)
@@ -260,10 +262,10 @@ mod real_weights {
     /// box's cards are not this test's to reserve.
     #[test]
     fn a_multi_window_request_comes_back_as_one_clip_of_the_requested_length() {
-        let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
-            return brain_testutil::skip("set BRAIN_LTXV_VAE to the real VAE checkpoint");
+        let Some(vae) = weights_path("vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
+            return brain_testutil::skip("put the real VAE in the model store");
         };
-        let paths = Paths::resolve(Some(&vae), None, None, None).expect("the configured path resolves");
+        let paths = Paths::new(vae.clone());
         // 64x64 is a 2x2 latent grid, so one latent frame is 4 tokens: the
         // ceiling has to come down for a smoke-sized clip to need splitting.
         let (frames, context, max_tokens) = (41usize, 2usize, 20usize);
@@ -304,10 +306,10 @@ mod real_weights {
     /// same as its sibling above.
     #[test]
     fn a_two_scene_request_is_one_clip_whose_second_scene_owes_nothing_to_its_first() {
-        let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
-            return brain_testutil::skip("set BRAIN_LTXV_VAE to the real VAE checkpoint");
+        let Some(vae) = weights_path("vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
+            return brain_testutil::skip("put the real VAE in the model store");
         };
-        let paths = Paths::resolve(Some(&vae), None, None, None).expect("the configured path resolves");
+        let paths = Paths::new(vae.clone());
         // Same 64x64 / forced-ceiling shape the sibling test uses: 4 tokens
         // per latent frame, so 20 tokens is a 5-latent-frame window.
         let (context, max_tokens) = (2usize, 20usize);
@@ -352,10 +354,10 @@ mod real_weights {
     /// generation despite living beside the ones that do.
     #[test]
     fn an_anchor_a_multi_window_plan_cannot_honour_is_refused_rather_than_ignored() {
-        let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
-            return brain_testutil::skip("set BRAIN_LTXV_VAE to the real VAE checkpoint");
+        let Some(vae) = weights_path("vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
+            return brain_testutil::skip("put the real VAE in the model store");
         };
-        let paths = Paths::resolve(Some(&vae), None, None, None).expect("the configured path resolves");
+        let paths = Paths::new(vae.clone());
         let (frames, context, max_tokens) = (41usize, 2usize, 20usize);
         let base = GenOpts { frames, width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), ..GenOpts::default() };
         // `max_refine_tokens` forced down with the window ceiling so the
@@ -400,13 +402,13 @@ mod real_weights {
     /// broke.
     #[test]
     fn a_stage_major_run_with_three_keyframes_comes_back_as_one_clip() {
-        let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
-            return brain_testutil::skip("set BRAIN_LTXV_VAE to the real VAE checkpoint");
+        let Some(vae) = weights_path("vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
+            return brain_testutil::skip("put the real VAE in the model store");
         };
-        let Some(upsampler) = weights_path("BRAIN_LTXV_UPSAMPLER_SPATIAL", "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors") else {
-            return brain_testutil::skip("set BRAIN_LTXV_UPSAMPLER_SPATIAL to the real spatial upscaler");
+        let Some(upsampler) = weights_path("latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors") else {
+            return brain_testutil::skip("no spatial x2 latent upscaler in the model store");
         };
-        let paths = Paths::resolve(Some(&vae), None, None, Some(&upsampler)).expect("the configured paths resolve");
+        let paths = Paths { spatial_upsampler: Some(upsampler.clone()), ..Paths::new(vae.clone()) };
         let dir = std::env::temp_dir().join(format!("ltxv-stage-major-anchors-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let still = |name: &str, rgb: [u8; 3]| {
@@ -461,13 +463,13 @@ mod real_weights {
     /// hold pixel 36.
     #[test]
     fn a_window_major_run_with_three_keyframes_honours_all_three() {
-        let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
-            return brain_testutil::skip("set BRAIN_LTXV_VAE to the real VAE checkpoint");
+        let Some(vae) = weights_path("vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
+            return brain_testutil::skip("put the real VAE in the model store");
         };
-        let Some(upsampler) = weights_path("BRAIN_LTXV_UPSAMPLER_SPATIAL", "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors") else {
-            return brain_testutil::skip("set BRAIN_LTXV_UPSAMPLER_SPATIAL to the real spatial upscaler");
+        let Some(upsampler) = weights_path("latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors") else {
+            return brain_testutil::skip("no spatial x2 latent upscaler in the model store");
         };
-        let paths = Paths::resolve(Some(&vae), None, None, Some(&upsampler)).expect("the configured paths resolve");
+        let paths = Paths { spatial_upsampler: Some(upsampler.clone()), ..Paths::new(vae.clone()) };
         let dir = std::env::temp_dir().join(format!("ltxv-window-major-anchors-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let still = |name: &str, rgb: [u8; 3]| {
@@ -551,9 +553,6 @@ mod real_weights {
 ///
 /// ```text
 /// BRAIN_DEVICE=gpu1 \
-/// BRAIN_LTXV_DIT=<...22b-distilled-transformer-Q8_0.gguf> \
-/// BRAIN_LTXV_VAE=<...video-vae-conv-bf16.safetensors> \
-/// BRAIN_LTXV_TEXT_ENCODER=<...gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf> \
 /// cargo test --release -p brain-ltxv --test longform -- --ignored --nocapture
 /// ```
 mod seam_real {
@@ -607,7 +606,7 @@ mod seam_real {
     }
 
     fn real_paths() -> Option<Paths> {
-        let p = Paths::resolve(None, None, None, None).ok()?;
+        let p = ltxv::spec::default_store_paths()?;
         p.dit.as_ref()?;
         Some(p)
     }
@@ -620,7 +619,7 @@ mod seam_real {
     #[ignore = "four real 22B generations, ~25 minutes on a Tesla P40"]
     fn a_rolling_latent_context_holds_the_motion_better_than_chaining_on_a_re_encoded_frame() {
         let Some(paths) = real_paths() else {
-            return brain_testutil::skip("set BRAIN_LTXV_DIT + BRAIN_LTXV_VAE to the real LTX-2.5 checkpoints");
+            return brain_testutil::skip("put the real LTX-2.5 checkpoints in the model store");
         };
         let (lh, lw) = (HEIGHT / 32, WIDTH / 32);
         let plan = window_plan(FRAMES, lh, lw, CONTEXT_LATENT_FRAMES, MAX_WINDOW_TOKENS).expect("the plan is legal");

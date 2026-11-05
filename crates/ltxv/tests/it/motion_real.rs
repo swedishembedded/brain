@@ -48,9 +48,6 @@
 //! a P40, weight-streaming bound). Run explicitly:
 //!
 //! ```text
-//! BRAIN_LTXV_DIT=<...22b-distilled-transformer-Q8_0.gguf> \
-//! BRAIN_LTXV_VAE=<...video-vae-conv-bf16.safetensors> \
-//! BRAIN_LTXV_TEXT_ENCODER=<...gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf> \
 //! cargo test -p brain-ltxv --test motion_real -- --ignored --nocapture
 //! ```
 //!
@@ -131,7 +128,7 @@ fn base_opts() -> GenOpts {
 /// The real checkpoints, or `None` (SKIP) - same resolution order the CLI
 /// uses.
 fn real_paths() -> Option<Paths> {
-    let p = Paths::resolve(None, None, None, None).ok()?;
+    let p = ltxv::spec::default_store_paths()?;
     p.dit.as_ref()?;
     Some(p)
 }
@@ -163,7 +160,7 @@ const PEAK_FLOOR: f64 = 12.0;
 #[ignore = "full real 22B generation, ~5 minutes"]
 fn unconditioned_text_to_video_actually_moves() {
     let Some(paths) = real_paths() else {
-        return brain_testutil::skip("set BRAIN_LTXV_DIT + BRAIN_LTXV_VAE to the real LTX-2.5 checkpoints");
+        return brain_testutil::skip("put the real LTX-2.5 checkpoints in the model store");
     };
     let frames = run(&base_opts(), &paths, "t2v");
     let peak = peak_excursion(&frames);
@@ -189,7 +186,7 @@ fn unconditioned_text_to_video_actually_moves() {
 #[ignore = "two full real 22B generations, ~10 minutes"]
 fn keyframe_interpolation_generates_motion_between_two_stills() {
     let Some(paths) = real_paths() else {
-        return brain_testutil::skip("set BRAIN_LTXV_DIT + BRAIN_LTXV_VAE to the real LTX-2.5 checkpoints");
+        return brain_testutil::skip("put the real LTX-2.5 checkpoints in the model store");
     };
     let seed_frames = run(&base_opts(), &paths, "t2v (source of the two anchors)");
     let reference_peak = peak_excursion(&seed_frames);

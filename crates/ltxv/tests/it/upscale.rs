@@ -142,9 +142,11 @@ mod real_weights {
     /// `resources/ltxv/weights/` the real files ship under - never a literal
     /// machine path, the same convention `upsampler_parity.rs`/`vae_parity.rs`
     /// already use, so this passes on any checkout that fetched the resource.
-    fn weights_path(env: &str, rel: &str) -> Option<String> {
-        if let Ok(p) = std::env::var(env) {
-            return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+    fn weights_path(rel: &str) -> Option<String> {
+        // The model store's copy first, by file name; else the repo-relative one.
+        let name = Path::new(rel).file_name()?.to_string_lossy().into_owned();
+        if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/{name}")).filter(|p| Path::new(p).exists()) {
+            return Some(p);
         }
         let p = format!("{}/../../resources/ltxv/weights/{rel}", env!("CARGO_MANIFEST_DIR"));
         Path::new(&p).exists().then_some(p)
@@ -189,12 +191,12 @@ mod real_weights {
     #[test]
     fn a_multi_pass_upscale_is_one_clip_that_carries_its_own_latent_context() {
         let (Some(vae), Some(ups)) = (
-            weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors"),
-            weights_path("BRAIN_LTXV_UPSAMPLER_SPATIAL", "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"),
+            weights_path("vae/ltx-2.5-video-vae-conv-bf16.safetensors"),
+            weights_path("latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"),
         ) else {
-            return brain_testutil::skip("set BRAIN_LTXV_VAE + BRAIN_LTXV_UPSAMPLER_SPATIAL to the real checkpoints");
+            return brain_testutil::skip("put the real VAE and spatial upscaler in the model store");
         };
-        let paths = Paths::resolve(Some(&vae), None, None, Some(&ups)).expect("the two configured paths resolve");
+        let paths = Paths { spatial_upsampler: Some(ups.clone()), ..Paths::new(vae.clone()) };
         // 128x128 out is a 4x4 latent grid, so one latent frame is 16 tokens:
         // the ceiling has to come down for a smoke-sized clip to need splitting.
         let (frames, max_tokens) = (25usize, 48usize);

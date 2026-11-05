@@ -892,8 +892,8 @@ mod tests {
     /// `wan`'s own `zimage`/`wan` arms in `resident_for_compound`), and
     /// wiring a compound residency arm for it is a distinct, later concern
     /// from this converter (this crate's `ltxv_cli`/`crate::pipeline`
-    /// already loads real+random weights through its own `BRAIN_LTXV_*`
-    /// env-var convention, independent of `model_dir`'s residency registry).
+    /// already resolves real+random weights through the model store's
+    /// `ltxv::spec::LtxvSpec`, independent of `model_dir`'s residency registry).
     #[test]
     fn the_ltxv_tag_dispatches_and_converts() {
         assert_eq!(importer_for("ltxv").map(|i| i.architecture()), Some("ltxv"));

@@ -58,9 +58,6 @@
 //! one, and `ltxv::clipmetric`'s unit tests, which pin the metric itself.
 //!
 //! ```text
-//! BRAIN_LTXV_DIT=<...22b-distilled-transformer-Q8_0.gguf> \
-//! BRAIN_LTXV_VAE=<...video-vae-conv-bf16.safetensors> \
-//! BRAIN_LTXV_UPSAMPLER_SPATIAL=<...latent-spatial-upscaler-x2-bf16-1.0.safetensors> \
 //! cargo test --release -p brain-ltxv --test clip_stability_real -- --ignored --nocapture
 //! ```
 //!
@@ -98,7 +95,7 @@ const BOUND: f32 = 4.0;
 const MIN_MEDIAN_MOTION: f32 = 0.5;
 
 fn real_paths() -> Option<Paths> {
-    let p = Paths::resolve(None, None, None, None).ok()?;
+    let p = ltxv::spec::default_store_paths()?;
     p.dit.as_ref()?;
     Some(p)
 }
@@ -112,7 +109,7 @@ fn median(mut v: Vec<f32>) -> f32 {
 #[ignore = "one full real 1080p generation, ~20 minutes on a P40 pair"]
 fn a_real_1080p_clip_does_not_disintegrate_before_it_ends() {
     let Some(paths) = real_paths() else {
-        return brain_testutil::skip("set BRAIN_LTXV_DIT + BRAIN_LTXV_VAE to the real LTX-2.5 checkpoints");
+        return brain_testutil::skip("put the real LTX-2.5 checkpoints in the model store");
     };
     let tokens = (FRAMES.div_ceil(8)) * (HEIGHT / 32) * (WIDTH / 32);
     assert!(
@@ -120,7 +117,7 @@ fn a_real_1080p_clip_does_not_disintegrate_before_it_ends() {
         "this gate exists for the ABOVE-ceiling case; {WIDTH}x{HEIGHT} is {tokens} tokens against a ceiling of {SINGLE_STAGE_MAX_TOKENS}"
     );
     if paths.spatial_upsampler.is_none() {
-        return brain_testutil::skip("set BRAIN_LTXV_UPSAMPLER_SPATIAL to the real spatial x2 latent upscaler");
+        return brain_testutil::skip("no spatial x2 latent upscaler in the model store");
     }
 
     let o = GenOpts {

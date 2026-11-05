@@ -33,9 +33,11 @@ mod real_weights {
     /// The named environment variable, else the repo-relative
     /// `resources/ltxv/weights/` the real files ship under - never a literal
     /// machine path, the same convention `longform.rs`/`upscale.rs` use.
-    fn weights_path(env: &str, rel: &str) -> Option<String> {
-        if let Ok(p) = std::env::var(env) {
-            return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+    fn weights_path(rel: &str) -> Option<String> {
+        // The model store's copy first, by file name; else the repo-relative one.
+        let name = Path::new(rel).file_name()?.to_string_lossy().into_owned();
+        if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/{name}")).filter(|p| Path::new(p).exists()) {
+            return Some(p);
         }
         let p = format!("{}/../../resources/ltxv/weights/{rel}", env!("CARGO_MANIFEST_DIR"));
         Path::new(&p).exists().then_some(p)
@@ -69,10 +71,10 @@ mod real_weights {
     /// observably part of the run.
     #[test]
     fn three_simultaneous_anchors_each_reach_the_denoiser() {
-        let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
-            return brain_testutil::skip("set BRAIN_LTXV_VAE to the real VAE checkpoint");
+        let Some(vae) = weights_path("vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
+            return brain_testutil::skip("put the real VAE in the model store");
         };
-        let paths = Paths::resolve(Some(&vae), None, None, None).expect("the configured path resolves");
+        let paths = Paths::new(vae.clone());
         let dir = std::env::temp_dir().join(format!("ltxv-anchors-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let start = still(&dir, "start.png", [220, 30, 30]);
@@ -105,10 +107,10 @@ mod real_weights {
     /// this one buys only the two runs it needs.
     #[test]
     fn the_default_mid_position_is_the_one_the_reference_would_pick() {
-        let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
-            return brain_testutil::skip("set BRAIN_LTXV_VAE to the real VAE checkpoint");
+        let Some(vae) = weights_path("vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
+            return brain_testutil::skip("put the real VAE in the model store");
         };
-        let paths = Paths::resolve(Some(&vae), None, None, None).expect("the configured path resolves");
+        let paths = Paths::new(vae.clone());
         let dir = std::env::temp_dir().join(format!("ltxv-anchors-default-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let mid = still(&dir, "mid.png", [30, 220, 30]);

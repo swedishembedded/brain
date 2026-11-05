@@ -49,11 +49,6 @@ fn max_abs(got: &[f32], want: &[f32]) -> f32 {
 }
 
 fn real_dit_gguf_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_DIT") {
-        if !p.is_empty() {
-            return Some(p);
-        }
-    }
     let dir = brain_testutil::model_dir(REPO)?;
     let mut found: Vec<String> = std::fs::read_dir(dir)
         .ok()?
@@ -88,7 +83,7 @@ fn load_all_weights(mg: &MmapGguf, cfg: &LtxDitConfig) -> Tensors {
 #[test]
 fn streamed_forward_matches_eager_forward_on_real_weights_with_connector_on() {
     let Some(gguf_path) = real_dit_gguf_path() else {
-        brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+        brain_testutil::skip(&format!("no real {REPO} distilled Q8_0 GGUF in the model store"));
         return;
     };
     if !Path::new(&gguf_path).exists() {

@@ -280,15 +280,10 @@ released `city96/Wan2.1-*-gguf` file for `crates/wan`'s `gguf_import_real`
 suite; falls back to whatever `*.gguf` the model store already holds for that
 repo), `BRAIN_WAN_GGUF_OUT` (where that suite's `#[ignore]`d full conversion
 writes its ~53 GiB checkpoint; a temp dir otherwise).
-`BRAIN_LTXV_VAE`, `BRAIN_LTXV_AUDIO_VAE`, `BRAIN_LTXV_NA_VAE`,
-`BRAIN_LTXV_UPSAMPLER_SPATIAL`, `BRAIN_LTXV_UPSAMPLER_TEMPORAL`,
-`BRAIN_LTXV_DURATION_HEAD` - the real-weight `crates/ltxv` component parity
-suites (`tests/{vae,audio,upsampler,duration_head,na_decoder}_parity.rs`); each
-falls back to `resources/ltxv/weights/<role>/<file>` under
-`CARGO_MANIFEST_DIR/../..` when unset, per that suite's own `setup()`.
-`BRAIN_LTXV_DIT`, `BRAIN_LTXV_TEXT_ENCODER`, `BRAIN_LTXV_TOKENIZER` - the real
-22B DiT and 12B Gemma-4 text encoder, read from the model store entry
-`Lightricks/LTX-2.5` (a released GGUF; see `docs/reference/models/ltxv.md`).
+The real-weight `crates/ltxv` suites read no variable: every LTX-2.5 file comes
+from the model store entry `Lightricks/LTX-2.5` (`ltxv::spec::store_paths` for a
+whole generation, the file by name for a component parity suite, falling back
+to `resources/ltxv/weights/<role>/<file>`).
 
 **`fetch-testdata` mirror paths** (local-mirror source for `make testdata/fetch`;
 the one place a machine-specific path may appear in this repo). Two kinds:
@@ -391,11 +386,11 @@ convolutions to the direct kernels, `force` to the GEMM lowering below its
 `brain --no-flash-cross` (pins text cross-attention to the
 materialized scores/softmax/apply trio instead of the fused flash kernel;
 without it an A/B on a capable device compares the fused path against itself),
-`BRAIN_LTXV_NO_SCRATCH_POOL` (`1` makes an LTX-2.5 block forward create and
-destroy its temporaries per block instead of replaying `gpu_core::scratch`'s
-arena - the un-pooled arm, which is what `crates/ltxv/tests/scratch_pool.rs`
-compares the shipped path against bit for bit, and the only way to A/B the two
-in one binary).
+`ltxv::block::BlockExec` on an LTX-2.5 DiT session (`scratch_pool: false`
+creates and destroys a block's temporaries per block instead of replaying
+`gpu_core::scratch`'s arena, `pipelined: false` runs the block loop strictly
+serially - the losing arms `crates/ltxv/tests/{scratch_pool,block_pipeline}.rs`
+compare the shipped path against bit for bit).
 
 **Profiling / roofline internals:**
 `brain --roof-probe auto|off|on` (whether the roofline probe runs; `auto`
@@ -415,24 +410,15 @@ scratch for every conv lowering - 1D (`audio::conv`), 2D and 3D (`vae::blocks`,
 from the Qwen3-Omni int8 resident), `BRAIN_FLUX2_BENCH_BASELINE`,
 `BRAIN_FLUX2_TIME_FORWARD`, `BRAIN_S3DIT_LAYERS` (truncates the Z-Image DiT
 to N layers in the benchmark binary only), `BRAIN_WAN_VAE_TAPS` (record every
-Wan-VAE block output for parity debugging), `BRAIN_LTXV_VAE_TAPS` (the same tap
-recording for the LTX-Video VAE), `BRAIN_VAE3D_NOPOOL` (disable the
+Wan-VAE block output for parity debugging; the LTX-2.5 VAE's equivalent is
+`LtxVaeDecoder::build_with_taps`), `BRAIN_VAE3D_NOPOOL` (disable the
 3D VAE builder's buffer pooling, which a tap would otherwise read after reuse),
 `BRAIN_VAE3D_SPLIT_NORM` (select the composed permute/norm/permute channel-norm
 form instead of the fused kernel - the losing arm of a bit-identical A/B, kept
 reachable so the comparison can still be run),
-`BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS` (build a fresh device and re-upload the VAE
-decoder's weights per tile SHAPE instead of sharing one, the same
-keep-the-losing-arm-reachable rule),
-`BRAIN_LTXV_NO_PIPELINE` (run the LTX-2.5 block loop strictly serially -
-record, submit, wait - instead of recording the next block while the card runs
-this one; identical submissions in identical order either way, so it is the
-losing arm of another bit-identical A/B),
 `BRAIN_WAN_T5_FORCE_GPU` (run the umT5-XXL parity test on a GPU anyway - it
 skips by default because 22.72 GB of fp32 weights exceed a 24 GB card),
-`BRAIN_LTXV_LATENT_DUMP` (write the final denoised latent to the given path
-before decode, on the real `brain ltxv` generation path; a write failure is
-traced, never fatal), `BRAIN_FLUX2_DUMP_LATENT` (the same shape for FLUX.2:
+`BRAIN_FLUX2_DUMP_LATENT` (the same shape for FLUX.2:
 write the latent the decoder is about to consume, so `flux2_latent stats`/`op`
 can inspect a *generated* latent instead of only ones fed back in; a write
 failure is reported and ignored, never fatal), and, read only by the
@@ -446,19 +432,11 @@ with no refinement pass), `BRAIN_LTXV_DECODE_UPSAMPLE_RAW` (skips the
 upsampled output's un-normalize/statistics step), and `BRAIN_LTXV_PIXEL_DUMP`
 (write the decoded pixel frames to the given path).
 
-**LTX-2.5 dev/debug knobs.** Internal rather than user-facing because
-`ltxv::pipeline` is still a smoke test (real VAE + tiny random-weight DiT, no
-real text encoder), so none of these configure a shippable generation path
-yet; the two LTX-2.5 knobs that DO - `BRAIN_LTXV_TEXT_CACHE` and
-`BRAIN_LTXV_TEXT_PRECISION` - live in `docs/reference/configuration.md` instead.
-Promote a knob there when the pipeline it tunes becomes real.
-- `BRAIN_LTXV_VAE_TILE` - tiling mode for the 3D VAE decode.
-- `BRAIN_LTXV_RESIDENT_BLOCKS` - how many DiT blocks stay resident on the
-  device (`crate::devres`), the memory/reupload tradeoff.
-- `BRAIN_LTXV_CFG_PARALLEL` - run the two CFG branches together where the
-  device plan allows; `0`/`false`/`off` opts out.
-- `BRAIN_LTXV_TWO_STAGE` - forces the two-stage denoise schedule on or off.
-- `BRAIN_LTXV_LATENT_DUMP` - path to dump per-step latents for parity work.
+**LTX-2.5 knobs** are request options, not variables: `GenOpts::runtime`
+(`--resident-blocks`, `--two-stage`, `--vae-tiling`, `--text-precision`,
+`--no-text-cache`, `--text-cache-max-bytes`, `--latent-dump`,
+`--av-fp32-reference`) and `LongOpts` (`--max-window-tokens`,
+`--window-major`). `--device gpu0` keeps a run's CFG pair on one card.
 - `BRAIN_LTXV_PIXEL_DUMP`, `BRAIN_LTXV_DECODE_UPSAMPLE`,
   `BRAIN_LTXV_DECODE_UPSAMPLE_RAW`, `BRAIN_LTXV_DECODE_LF_SUBST` - read only by
   the `ltxv_bench` binary (decoded-pixel dump, upsampler selection, and

@@ -142,11 +142,6 @@ fn int8_compute_holds_across_second_level_passes() {
 const REPO: &str = "Lightricks/LTX-2.5";
 
 fn gguf_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_DIT") {
-        if !p.is_empty() {
-            return Some(p);
-        }
-    }
     let dir = brain_testutil::model_dir(REPO)?;
     let mut found: Vec<String> = std::fs::read_dir(&dir)
         .ok()?
@@ -175,7 +170,7 @@ fn gguf_path() -> Option<String> {
 #[test]
 fn real_q8_0_block0_int8_compute_matches_fp32() {
     let Some(path) = gguf_path() else {
-        brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+        brain_testutil::skip(&format!("no real {REPO} distilled Q8_0 GGUF in the model store"));
         return;
     };
 

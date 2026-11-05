@@ -75,13 +75,13 @@ fn report(label: &str, got: &[f32], want: &[f32], min_cos: f64) {
 
 // ---------------------------------------------------------- real fixtures
 
-/// The shipped VAE weights: `BRAIN_LTXV_VAE`, else the repo-relative
-/// `resources/ltxv/weights/vae/` the arch row's `BRAIN_LTXV_VAE` role names -
+/// The shipped VAE weights: the model store's copy, else the repo-relative
+/// `resources/ltxv/weights/vae/` copy -
 /// a variable rather than a literal machine path so this test passes on any
 /// checkout that fetched the resource, not just the one it was written on.
 fn weights_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_VAE") {
-        return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+    if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/ltx-2.5-video-vae-conv-bf16.safetensors")).filter(|p| Path::new(p).exists()) {
+        return Some(p);
     }
     let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/ltxv/weights/vae/ltx-2.5-video-vae-conv-bf16.safetensors");
     Path::new(p).exists().then(|| p.to_string())
@@ -132,7 +132,7 @@ fn setup(frames: u32) -> Option<(&'static Tensors, Fixture)> {
         return None;
     }
     let Some(w) = weights() else {
-        brain_testutil::skip("set BRAIN_LTXV_VAE to ltx-2.5-video-vae-conv-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-video-vae-conv-bf16.safetensors in the model store");
         return None;
     };
     let t = checkpoint::safetensors::read(&fx).expect("read golden");
@@ -220,7 +220,7 @@ fn ltxv_vae_round_trip() {
 #[test]
 fn ltxv_vae_import_covers_the_shipped_checkpoint() {
     let Some(w) = weights() else {
-        brain_testutil::skip("set BRAIN_LTXV_VAE to ltx-2.5-video-vae-conv-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-video-vae-conv-bf16.safetensors in the model store");
         return;
     };
     let cfg = LtxVaeConfig::conv25();

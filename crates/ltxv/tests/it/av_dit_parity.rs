@@ -861,11 +861,6 @@ const REPO: &str = "Lightricks/LTX-2.5";
 /// store legitimately holds several Q8_0 GGUFs for this repo (the DiT and the
 /// Gemma-4 text encoder), and a name glob picks whichever sorts first.
 fn real_dit_gguf() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_DIT") {
-        if !p.is_empty() {
-            return Some(p);
-        }
-    }
     let dir = brain_testutil::model_dir(REPO)?;
     let mut found: Vec<String> = std::fs::read_dir(dir)
         .ok()?
@@ -907,7 +902,7 @@ fn real_dit_gguf() -> Option<String> {
 #[test]
 fn real_q8_0_av_block0_int8_compute_matches_fp32() {
     let Some(path) = real_dit_gguf() else {
-        brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+        brain_testutil::skip(&format!("no real {REPO} distilled Q8_0 GGUF in the model store"));
         return;
     };
     let cfg = LtxAvDitConfig::ltx25();
@@ -1037,7 +1032,7 @@ fn load_all_av_weights(path: &str, cfg: &LtxAvDitConfig) -> vae::blocks::Tensors
 #[test]
 fn real_q8_0_av_streamed_forward_matches_the_eager_fp32_forward() {
     let Some(path) = real_dit_gguf() else {
-        brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+        brain_testutil::skip(&format!("no real {REPO} distilled Q8_0 GGUF in the model store"));
         return;
     };
     let mut cfg = LtxAvDitConfig::ltx25();
@@ -1195,7 +1190,7 @@ impl AvShape {
 #[test]
 fn a_reused_av_session_is_exact_across_a_window_or_stage_boundary() {
     let Some(path) = real_dit_gguf() else {
-        brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+        brain_testutil::skip(&format!("no real {REPO} distilled Q8_0 GGUF in the model store"));
         return;
     };
     let mut cfg = LtxAvDitConfig::ltx25();
@@ -1278,7 +1273,7 @@ fn a_reused_av_session_is_exact_across_a_window_or_stage_boundary() {
 #[test]
 fn the_audio_stream_alone_is_the_joint_forward_with_the_cross_modal_attention_cut() {
     let Some(path) = real_dit_gguf() else {
-        brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+        brain_testutil::skip(&format!("no real {REPO} distilled Q8_0 GGUF in the model store"));
         return;
     };
     let mut cfg = LtxAvDitConfig::ltx25();

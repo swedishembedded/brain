@@ -29,7 +29,7 @@ fn a_retake_regenerates_its_window_and_holds_the_rest() {
         brain_testutil::skip("no ltx-2.5-video-vae-conv-bf16.safetensors in the model store (Lightricks/LTX-2.5)");
         return;
     };
-    let paths = Paths::resolve(Some(&vae), None, None, None).expect("a VAE path resolves");
+    let paths = Paths::new(vae.clone());
     // A smooth gradient the VAE reconstructs well, 17 frames at 8 fps:
     // latent frames span [0, 1/8), [1/8, 9/8) and [9/8, 17/8) seconds.
     let side = 64usize;

@@ -28,7 +28,7 @@ fn an_extension_keeps_the_clip_and_appends_generated_frames() {
         brain_testutil::skip("no ltx-2.5-video-vae-conv-bf16.safetensors in the model store (Lightricks/LTX-2.5)");
         return;
     };
-    let paths = Paths::resolve(Some(&vae), None, None, None).expect("a VAE path resolves");
+    let paths = Paths::new(vae.clone());
     let side = 64usize;
     let frame = |k: usize| (0..side * side).flat_map(|i| [((i % side) * 4) as u8, ((i / side) * 4) as u8, (k * 8) as u8]).collect::<Vec<u8>>();
     let clip = Video { width: side as u32, height: side as u32, fps: 8, frames: (0..20).map(frame).collect(), audio: None };
@@ -50,7 +50,7 @@ fn the_extend_action_takes_and_returns_a_video_blob() {
         brain_testutil::skip("no ltx-2.5-video-vae-conv-bf16.safetensors in the model store (Lightricks/LTX-2.5)");
         return;
     };
-    let paths = Paths::resolve(Some(&vae), None, None, None).expect("a VAE path resolves");
+    let paths = Paths::new(vae.clone());
     let side = 64u32;
     let frame = |k: usize| ((0..side * side).flat_map(|i| [((i % side) * 4) as f32 / 255.0, ((i / side) * 4) as f32 / 255.0, (k * 8) as f32 / 255.0]).collect::<Vec<f32>>(), side, side);
     let source: Vec<(Vec<f32>, u32, u32)> = (0..9).map(frame).collect();

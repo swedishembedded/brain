@@ -99,8 +99,8 @@ fn report(label: &str, got: &[f32], want: &[f32]) -> (f64, f64, f32) {
 // ----------------------------------------------------------- real fixtures
 
 fn weights_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_VAE") {
-        return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+    if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/ltx-2.5-video-vae-conv-bf16.safetensors")).filter(|p| Path::new(p).exists()) {
+        return Some(p);
     }
     let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/ltxv/weights/vae/ltx-2.5-video-vae-conv-bf16.safetensors");
     Path::new(p).exists().then(|| p.to_string())
@@ -126,7 +126,7 @@ fn weights() -> Option<&'static Tensors> {
 fn require_weights() -> Option<&'static Tensors> {
     let w = weights();
     if w.is_none() {
-        brain_testutil::skip("set BRAIN_LTXV_VAE to ltx-2.5-video-vae-conv-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-video-vae-conv-bf16.safetensors in the model store");
     }
     w
 }

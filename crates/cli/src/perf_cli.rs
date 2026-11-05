@@ -1296,7 +1296,7 @@ fn build_wan(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
 /// (the same `self_attn_and_text_ca`/`attention`/`attn_scores_kt`/
 /// `matmul_reg3` selector this phase's optimization pass touched) without
 /// paying that architectural I/O cost every run. The real config stays
-/// reachable - set `BRAIN_LTXV_DIT` and this target switches to it - for a
+/// reachable - with the real DiT in the model store this target switches to it - for a
 /// deliberate, separately-scheduled measurement, never a default one.
 fn build_ltxv(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     let (frames, w, h, steps) = if rest.is_empty() {
@@ -1319,12 +1319,8 @@ fn build_ltxv(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         return Err(format!("ltxv: width/height must be multiples of 32 (got {w}x{h})"));
     }
     // Fail before the run starts, naming what is missing - not at first activation.
-    let paths = ltxv::pipeline::Paths::from_env().map_err(|e| format!("ltxv target needs BRAIN_LTXV_VAE: {e}"))?;
-    if !std::path::Path::new(&paths.vae).exists() {
-        return Err(format!("ltxv: BRAIN_LTXV_VAE not found: {}", paths.vae));
-    }
-    let dit_config = if paths.dit.as_deref().is_some_and(|p| std::path::Path::new(p).exists()) { "ltx25_22b" } else { "tiny" };
-    let resident = catalog::resident_ltxv::LtxvResident::from_env().ok_or("ltxv: BRAIN_LTXV_VAE not set")?;
+    let resident = catalog::resident_ltxv::LtxvResident::from_store(loader::model_dir::resolve(None).as_deref()).ok_or("ltxv target needs an LTX-2.5 VAE in the model store")?;
+    let dit_config = if resident.has_real_dit() { "ltx25_22b" } else { "tiny" };
     // Budget ONLY the schedulable devices - the same guard `build_wan` carries.
     let set = crate::compute_set();
     let mut budgets = residency::budget::Budgets::new();

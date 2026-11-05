@@ -47,17 +47,12 @@ use checkpoint::TensorSource;
 
 const REPO: &str = "Lightricks/LTX-2.5";
 
-/// The real Q8_0 DiT GGUF's path: `BRAIN_LTXV_DIT` if set, else the first
+/// The real Q8_0 DiT GGUF's path: the model store's copy, else the first
 /// `*Q8_0*.gguf` under the model store's `Lightricks/LTX-2.5/` directory
 /// (deliberately NOT "any `.gguf` lying around" - a `Q4_K_M` sibling may
 /// also be present per this task's own briefing, and this test's from-spec
 /// dequant is written for Q8_0's block layout specifically).
 fn gguf_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_DIT") {
-        if !p.is_empty() {
-            return Some(p);
-        }
-    }
     let dir = brain_testutil::model_dir(REPO)?;
     let mut found: Vec<String> = std::fs::read_dir(&dir)
         .ok()?
@@ -133,7 +128,7 @@ fn assert_q8_0_exact(mg: &MmapGguf, name: &str) {
 #[test]
 fn deq_q8_0_matches_an_independent_from_spec_dequant_on_real_tensors() {
     let Some(path) = gguf_path() else {
-        brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+        brain_testutil::skip(&format!("no real {REPO} distilled Q8_0 GGUF in the model store"));
         return;
     };
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("opening {path}: {e}"));

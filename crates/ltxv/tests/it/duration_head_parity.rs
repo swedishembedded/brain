@@ -46,11 +46,11 @@ fn report(label: &str, got: &[f32], want: &[f32], min_cos: f64) {
     assert!(c >= min_cos, "{label}: cosine {c:.9} < {min_cos}");
 }
 
-/// `BRAIN_LTXV_DURATION_HEAD`, else the repo-relative
+/// the model store's copy, else the repo-relative
 /// `resources/ltxv/weights/model_patches/` the real file ships under.
 fn weights_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_DURATION_HEAD") {
-        return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+    if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/ltx-2.5-duration-head-bf16.safetensors")).filter(|p| Path::new(p).exists()) {
+        return Some(p);
     }
     let p = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -72,7 +72,7 @@ impl Fixture {
 #[test]
 fn ltxv_duration_head_matches_reference() {
     let Some(wp) = weights_path() else {
-        brain_testutil::skip("set BRAIN_LTXV_DURATION_HEAD to ltx-2.5-duration-head-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-duration-head-bf16.safetensors in the model store");
         return;
     };
     let fx_path = brain_testutil::testdata("golden/ltxv/duration_head/duration_head.safetensors");
@@ -105,7 +105,7 @@ fn ltxv_duration_head_matches_reference() {
 #[test]
 fn ltxv_duration_head_import_covers_the_shipped_checkpoint() {
     let Some(wp) = weights_path() else {
-        brain_testutil::skip("set BRAIN_LTXV_DURATION_HEAD to ltx-2.5-duration-head-bf16.safetensors");
+        brain_testutil::skip("no ltx-2.5-duration-head-bf16.safetensors in the model store");
         return;
     };
     let cfg = DurationHeadConfig::ltx25();
