@@ -96,7 +96,7 @@
 use crate::cv3_flow_config::{Cv3FlowConfig, DitConfig};
 use crate::cv3_flow_import::{Cv3FlowWeights, DitBlockW, DitW};
 use crate::flow::{causal_conv1d, conds_from_prompt_feat, conv1d, conv1d_grouped, cosine_t_span, leaky_relu, linear_rows_biased, mish, transpose_cl_to_tc, transpose_tc_to_cl};
-use model::hostmath::{l2_normalize, layernorm_rows, matvec, silu, timestep_embedding};
+use model::hostmath::{gelu_tanh, l2_normalize, layernorm_rows, matvec, silu, timestep_embedding};
 
 /// `torch.manual_seed(0); torch.randn([1, 80, 15000])` - the SAME fixed CFM
 /// noise buffer `crate::flow::rand_noise` already reproduces (same shape,
@@ -324,12 +324,6 @@ fn layernorm_no_affine(x: &[f32], rows: usize, d: usize, eps: f32) -> Vec<f32> {
     layernorm_rows(x, &ones, &zeros, rows, d, eps)
 }
 
-/// `GELU(approximate="tanh")`: `0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))`.
-#[inline]
-fn gelu_tanh(x: f32) -> f32 {
-    const C: f32 = 0.797_884_6; // sqrt(2/pi)
-    0.5 * x * (1.0 + (C * (x + 0.044715 * x * x * x)).tanh())
-}
 
 /// One `DiTBlock.forward(x, t, mask=None, rope)`: `x_tc` is `[t, dim]`;
 /// `t_hidden` is the (already-computed, shared across all blocks) time

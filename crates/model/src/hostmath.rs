@@ -150,6 +150,14 @@ pub fn erf(x: f32) -> f32 {
     s * (1.0 - poly * (-ax * ax).exp())
 }
 
+/// `GELU(approximate="tanh")`: `0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))`.
+#[inline]
+pub fn gelu_tanh(x: f32) -> f32 {
+    // sqrt(2/pi), the shortest literal with this exact f32 value.
+    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
+    0.5 * x * (1.0 + (SQRT_2_OVER_PI * (x + 0.044715 * x * x * x)).tanh())
+}
+
 /// Exact (erf) GELU, matching `torch.nn.GELU()`'s default
 /// (`approximate='none'`) / `F.gelu`'s default - as opposed to `model::block`'s
 /// dispatched `gelu.wgsl`, which is the GPT-2 tanh approximation.

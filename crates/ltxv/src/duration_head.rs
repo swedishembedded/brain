@@ -61,6 +61,7 @@
 //! (`0.5x(1+tanh(sqrt(2/pi)(x+0.044715x^3)))`), not the exact erf form - `F.gelu(...,
 //! approximate="tanh")` in `duration_head.py`.
 
+use model::hostmath::gelu_tanh;
 use vae::blocks::Tensors;
 
 /// Real LTX-2.5 `DurationHead` config - `video_cross_attention_dim`/
@@ -140,12 +141,6 @@ fn linear(x: &[f32], rows: usize, in_dim: usize, out_dim: usize, w: &[f32], b: &
     y
 }
 
-/// `F.gelu(x, approximate="tanh")`.
-fn gelu_tanh(x: f32) -> f32 {
-    // sqrt(2/pi), written as the shortest literal with this exact f32 value.
-    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
-    0.5 * x * (1.0 + (SQRT_2_OVER_PI * (x + 0.044715 * x * x * x)).tanh())
-}
 
 /// The duration head, over an already-imported [`Tensors`] map (see
 /// [`crate::import::import_duration_head`]).
