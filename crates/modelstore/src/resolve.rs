@@ -749,8 +749,15 @@ fn declared_vocab_size(path: &Path, is_gguf: bool) -> Option<usize> {
     } else {
         let bytes = std::fs::read(path.join("config.json")).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        v.get("vocab_size").and_then(serde_json::Value::as_u64).map(|n| n as usize)
+        language_config_field(&v, "vocab_size").and_then(serde_json::Value::as_u64).map(|n| n as usize)
     }
+}
+
+/// `key` of a HF `config.json`'s language model: top-level for a text-only
+/// checkpoint, under `text_config` for a multimodal one (Qwen3-VL and its kin
+/// keep a `vision_config` beside it).
+pub fn language_config_field<'a>(config: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    config.get(key).or_else(|| config.get("text_config")?.get(key))
 }
 
 /// A tokenizer whose own vocabulary is within 5% of a candidate's declared
@@ -931,6 +938,18 @@ mod tests {
         classify_tokenizer_role(&records, &dir, "tokenizer", &dependency_candidates, &mut out);
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(records[out[0].0].path, real_tok);
+    }
+
+    /// A multimodal checkpoint (Qwen3-VL and its kin) declares its language
+    /// tower's sizes under `text_config`, beside a `vision_config`; that is
+    /// the vocabulary its tokenizer pairs with.
+    #[test]
+    fn a_multimodal_checkpoint_declares_its_vocab_under_text_config() {
+        let dir = tmp("text-config-vocab");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = serde_json::json!({"architectures": ["Qwen3VLForConditionalGeneration"], "text_config": {"vocab_size": 151_936}, "vision_config": {"hidden_size": 1152}});
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_eq!(checkpoint_vocab_size(&dir), Some(151_936));
     }
 
     /// Padding tolerance: a real checkpoint's declared vocab_size is
