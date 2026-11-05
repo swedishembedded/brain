@@ -22,10 +22,11 @@
 //! is measured here is therefore ONE block's weights plus one block's
 //! activations, with the attention arm as the only variable.
 //!
-//! Usage: `dit_attn_vram [seq_len] [f32|i8] [reps]` (defaults 4096, f32, 3):
-//! the linears at the given tier, exactly as the DiT holds them, and the
-//! fastest of `reps` timed forwards after a warm-up one. `BRAIN_DEVICE` selects
-//! the backend; `BRAIN_MINIMAXH3_ATTN=flash|trio` forces the attention arm.
+//! Usage: `dit_attn_vram [seq_len] [f32|i8] [reps] [device] [flash|trio]`
+//! (defaults 4096, f32, 3, the ambient device, the device's own pick): the
+//! linears at the given tier, exactly as the DiT holds them, and the fastest
+//! of `reps` timed forwards after a warm-up one. The last argument pins the
+//! attention arm.
 //! Poll `nvidia-smi --query-gpu=memory.used` alongside it for the peak - the
 //! number this prints is the wall time, and the allocation peak lives in the
 //! driver.
@@ -38,7 +39,7 @@
 use std::time::Instant;
 
 use gpu_core::select::Dtype;
-use minimaxh3::block::{attn_mode, refiner_block_forward, Ctx, RefinerBlockWeights};
+use minimaxh3::block::{attn_mode, refiner_block_forward, AttnMode, Ctx, RefinerBlockWeights};
 use minimaxh3::config::H3TransformerConfig;
 use model::ops::Weight;
 
@@ -51,12 +52,18 @@ fn main() {
         other => panic!("tier {other:?}: f32 or i8"),
     };
     let reps: usize = a.get(3).map(|s| s.parse().expect("reps")).unwrap_or(3);
-    let device = std::env::var("BRAIN_DEVICE").ok();
-    let cx = Ctx::new(device.as_deref());
+    let device = a.get(4).cloned();
+    let mut cx = Ctx::new(device.as_deref());
+    cx.attn = match a.get(5).map(String::as_str) {
+        None => None,
+        Some("flash") => Some(AttnMode::Flash),
+        Some("trio") => Some(AttnMode::Materialized),
+        Some(other) => panic!("attention {other:?}: flash or trio"),
+    };
 
     let cfg = H3TransformerConfig::real();
     let (hidden, heads, hd, inner, ffn) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim, cfg.inner_dim(), cfg.ffn_dim);
-    let mode = attn_mode(&cx.gpu, hd);
+    let mode = cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd));
 
     // The two numbers this probe exists to contrast, computed from the shapes
     // alone so the printed prediction can be checked against the driver's own

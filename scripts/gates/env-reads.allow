@@ -691,10 +691,8 @@ crates/memauth/src/limits.rs	<key>
 crates/mimi/src/decode_stream.rs	BRAIN_MIMI_WEIGHTS
 crates/mimi/tests/it/decode_omni_chunked.rs	MOE_SKIP_GPU_TESTS
 crates/mimi/tests/it/decode_stream_parity.rs	BRAIN_QWEN3TTS_WEIGHTS
-crates/minimaxh3/examples/dit_attn_vram.rs	BRAIN_DEVICE
 crates/minimaxh3/examples/generate_t2va.rs	BRAIN_MINIMAXH3_GEN_DEVICE
 crates/minimaxh3/examples/generate_t2va.rs	FFMPEG_BIN
-crates/minimaxh3/src/block.rs	BRAIN_MINIMAXH3_ATTN
 crates/minimaxh3/src/block.rs	BRAIN_MINIMAXH3_TEST_DEVICE
 crates/minimaxh3/src/caps.rs	BRAIN_DEVICE
 crates/minimaxh3/src/caps.rs	BRAIN_MINIMAXH3_ALLOW_COMMUNITY

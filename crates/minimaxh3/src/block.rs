@@ -145,6 +145,9 @@ pub struct Ctx {
     /// crate's other `Ctx` use (eager resident load, video VAE, vocoder)
     /// never touches this field.
     block_slots: std::cell::RefCell<Option<BlockWeights>>,
+    /// The self-attention arm, when pinned: a memory or speed A/B sets it.
+    /// `None` takes [`attn_mode`]'s pick for each call's head width.
+    pub attn: Option<AttnMode>,
 }
 
 impl Ctx {
@@ -155,7 +158,7 @@ impl Ctx {
         // per linear group of every block; holding its freed blocks lets each
         // block take the previous one's (see `Gpu::hold_freed_blocks`).
         ops.gpu().hold_freed_blocks(true);
-        Ctx { gpu, ops, block_slots: std::cell::RefCell::new(None) }
+        Ctx { gpu, ops, block_slots: std::cell::RefCell::new(None), attn: None }
     }
 
     pub fn upload(&self, data: &[f32]) -> DeviceBuffer {
@@ -240,12 +243,26 @@ fn rope_partial(cx: &Ctx, buf: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBu
 /// and differ only in whether the `[heads, seq_len, seq_len]` scores and probs
 /// matrices are ever written to device memory. They are picked by
 /// [`attn_mode`], never by shape.
-fn attention(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
-    match attn_mode(&cx.gpu, head_dim) {
-        AttnMode::Flash => attention_flash(cx, q, k, v, seq_len, heads, head_dim),
-        AttnMode::Materialized => attention_trio(cx, q, k, v, seq_len, heads, head_dim),
+pub(crate) fn attention(gpu: &Gpu, ids: &AttnKernels, mode: AttnMode, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
+    match mode {
+        AttnMode::Flash => attention_flash(gpu, ids, q, k, v, seq_len, heads, head_dim),
+        AttnMode::Materialized => attention_trio(gpu, ids, q, k, v, seq_len, heads, head_dim),
     }
 }
+
+/// Where a device's kernel table holds the attention kernels - each module
+/// that attends (the DiT's blocks, the video VAE's decoder) registers them at
+/// its own indices and runs the one [`attention`].
+pub(crate) struct AttnKernels {
+    pub scores_qk: usize,
+    pub softmax_bidir: usize,
+    pub apply_full: usize,
+    pub pack_qkv: usize,
+    pub flash: model::block::FlashIds,
+}
+
+/// The DiT blocks' own [`AttnKernels`], in [`KERNELS`].
+const DIT_ATTN: AttnKernels = AttnKernels { scores_qk: K_ATTN_SCORES_QK, softmax_bidir: K_ATTN_SOFTMAX_BIDIR, apply_full: K_ATTN_APPLY_FULL, pack_qkv: K_PACK_QKV, flash: FLASH_IDS };
 
 /// The self-attention path for this device.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -285,17 +302,9 @@ pub enum AttnMode {
 /// future variant with a wider head silently takes the trio and must be
 /// re-measured rather than assumed to fit.
 ///
-/// `BRAIN_MINIMAXH3_ATTN=flash|trio` forces either arm. Without it, an A/B on
-/// a device that can run flash compares the fused path against itself and
-/// reports a meaningless parity - which looks like evidence and is not; it is
-/// also how the memory measurement gets its "before" number without checking
-/// out an older commit.
+/// An A/B pins [`Ctx::attn`] instead: on a device that can run flash,
+/// comparing this pick against itself would report a meaningless parity.
 pub fn attn_mode(gpu: &Gpu, head_dim: u32) -> AttnMode {
-    match std::env::var("BRAIN_MINIMAXH3_ATTN").ok().as_deref() {
-        Some("flash") => return AttnMode::Flash,
-        Some("trio") => return AttnMode::Materialized,
-        _ => {}
-    }
     if model::block::flash_gate(&gpu.caps(), head_dim <= 128) {
         AttnMode::Flash
     } else {
@@ -323,7 +332,7 @@ pub fn attn_mode(gpu: &Gpu, head_dim: u32) -> AttnMode {
 /// more than `u32::MAX` elements cannot be dispatched at all in this form.
 /// [`attention_flash`] has no such ceiling - it never builds the matrix - so
 /// on any device that can run it this limit is unreachable.
-fn attention_trio(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
+fn attention_trio(gpu: &Gpu, ids: &AttnKernels, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
     let inner = heads * head_dim;
     let scale = 1.0 / (head_dim as f32).sqrt();
     let n_scores = heads as u64 * seq_len as u64 * seq_len as u64;
@@ -331,14 +340,14 @@ fn attention_trio(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer
         n_scores <= u32::MAX as u64,
         "minimaxh3 attention: materialized scores need {n_scores} elements at seq_len {seq_len} x {heads} heads, \
          past the u32 dispatch ceiling. This shape needs the fused flash path (a device with workgroup reductions, \
-         and BRAIN_MINIMAXH3_ATTN not pinned to \"trio\")."
+         and the attention arm not pinned to the materialized trio)."
     );
-    let scores = cx.gpu.storage(n_scores);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_SCORES_QK, &[q, k, &scores], &[1, heads, seq_len, head_dim, inner, 0, gpu_core::f(scale)], n_scores as u32)]);
-    let probs = cx.gpu.storage(n_scores);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_SOFTMAX_BIDIR, &[&scores, &probs], &[1, heads, seq_len], heads * seq_len)]);
-    let out = cx.gpu.storage((seq_len * inner) as u64);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_APPLY_FULL, &[&probs, v, &out], &[1, heads, seq_len, head_dim, inner, inner], heads * seq_len * head_dim)]);
+    let scores = gpu.storage(n_scores);
+    gpu.submit(&[], &[gpu.step(ids.scores_qk, &[q, k, &scores], &[1, heads, seq_len, head_dim, inner, 0, gpu_core::f(scale)], n_scores as u32)]);
+    let probs = gpu.storage(n_scores);
+    gpu.submit(&[], &[gpu.step(ids.softmax_bidir, &[&scores, &probs], &[1, heads, seq_len], heads * seq_len)]);
+    let out = gpu.storage((seq_len * inner) as u64);
+    gpu.submit(&[], &[gpu.step(ids.apply_full, &[&probs, v, &out], &[1, heads, seq_len, head_dim, inner, inner], heads * seq_len * head_dim)]);
     out
 }
 
@@ -363,12 +372,12 @@ fn attention_trio(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer
 /// RoPE has already been applied to `q`/`k` in place by the caller, so packing
 /// AFTER it (rather than rotating inside the slab, as `minimaxmusic3` does)
 /// keeps the rotation dispatches bit-identical to the trio path's.
-fn attention_flash(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
+fn attention_flash(gpu: &Gpu, ids: &AttnKernels, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
     let inner = heads * head_dim;
-    let qkv = cx.gpu.storage((seq_len * 3 * inner) as u64);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_PACK_QKV, &[q, k, v, &qkv], &[seq_len, inner], seq_len * 3 * inner)]);
-    let out = cx.gpu.storage((seq_len * inner) as u64);
-    cx.gpu.submit(&[], &[model::block::flash_bidir_step(&cx.gpu, FLASH_IDS, 1, heads, seq_len, head_dim, inner, &qkv, &out)]);
+    let qkv = gpu.storage((seq_len * 3 * inner) as u64);
+    gpu.submit(&[], &[gpu.step(ids.pack_qkv, &[q, k, v, &qkv], &[seq_len, inner], seq_len * 3 * inner)]);
+    let out = gpu.storage((seq_len * inner) as u64);
+    gpu.submit(&[], &[model::block::flash_bidir_step(gpu, ids.flash, 1, heads, seq_len, head_dim, inner, &qkv, &out)]);
     out
 }
 
@@ -715,7 +724,8 @@ pub fn refiner_block_forward(cx: &Ctx, w: &RefinerBlockWeights, x: &DeviceBuffer
     let [q, k, v] = linears(cx, &n1, [&w.wq, &w.wk, &w.wv], seq_len);
     let qn = rmsnorm(cx, &q, &w.norm_q, seq_len * heads, hd, cfg.qk_norm_eps);
     let kn = rmsnorm(cx, &k, &w.norm_k, seq_len * heads, hd, cfg.qk_norm_eps);
-    let attn = attention(cx, &qn, &kn, &v, seq_len, heads, hd);
+    let mode = cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd));
+    let attn = attention(&cx.gpu, &DIT_ATTN, mode, &qn, &kn, &v, seq_len, heads, hd);
     let attn_out = linear(cx, &attn, &w.wo, None, seq_len);
     let x1 = add2(cx, x, &attn_out, seq_len * hidden);
 
@@ -792,7 +802,8 @@ pub fn block_forward(
     let kn = rmsnorm(cx, &k, &w.norm_k, seq_len * heads, hd, cfg.qk_norm_eps);
     rope_partial(cx, &qn, cos, sin, seq_len, heads, hd, half);
     rope_partial(cx, &kn, cos, sin, seq_len, heads, hd, half);
-    let attn = attention(cx, &qn, &kn, &v, seq_len, heads, hd);
+    let mode = cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd));
+    let attn = attention(&cx.gpu, &DIT_ATTN, mode, &qn, &kn, &v, seq_len, heads, hd);
     let attn_out = linear(cx, &attn, &w.wo, None, seq_len);
     let h1 = gated_residual(cx, x, &gate_msa, &attn_out, seq_len, hidden);
 
@@ -902,7 +913,7 @@ mod tests {
     fn a_score_matrix_too_large_to_address_is_refused_rather_than_wrapped() {
         let cx = Ctx::new(Some("cpu"));
         let (q, k, v) = (cx.upload(&[0.0]), cx.upload(&[0.0]), cx.upload(&[0.0]));
-        attention_trio(&cx, &q, &k, &v, 9900, 56, 128);
+        attention_trio(&cx.gpu, &DIT_ATTN, &q, &k, &v, 9900, 56, 128);
     }
 
     /// The fused flash path must compute the SAME attention as the
@@ -945,8 +956,8 @@ mod tests {
             let n = (seq_len * inner) as usize;
             let v_host = fill(n, 3);
             let (q, k, v) = (cx.upload(&fill(n, 1)), cx.upload(&fill(n, 2)), cx.upload(&v_host));
-            let want = cx.gpu.read(&attention_trio(&cx, &q, &k, &v, seq_len, heads, head_dim), n);
-            let got = cx.gpu.read(&attention_flash(&cx, &q, &k, &v, seq_len, heads, head_dim), n);
+            let want = cx.gpu.read(&attention_trio(&cx.gpu, &DIT_ATTN, &q, &k, &v, seq_len, heads, head_dim), n);
+            let got = cx.gpu.read(&attention_flash(&cx.gpu, &DIT_ATTN, &q, &k, &v, seq_len, heads, head_dim), n);
             assert_mixing(&want, &v_host, seq_len);
             let (cos, maxabs) = cos_and_maxabs(&want, &got);
             println!("seq_len {seq_len}: cosine {cos:.10}, max_abs {maxabs:.3e}");

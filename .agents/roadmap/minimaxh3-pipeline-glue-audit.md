@@ -345,9 +345,9 @@ kernel body at one barrier where these kernels need two or three. So the
 materialized trio remains the reference definition of the math, and
 `backend_cpu::FastIdx` still routes all three by kernel NAME to native fast
 paths (verified, not assumed - appending kernels to the table cannot disturb a
-name lookup). `BRAIN_MINIMAXH3_ATTN=flash|trio` forces either arm, which is
-how the before/after pair below was taken without checking out an older
-commit.
+name lookup). `block::Ctx::attn` pins either arm (`dit_attn_vram`'s last
+argument), which is how the before/after pair below is taken without checking
+out an older commit.
 
 ## Correctness
 

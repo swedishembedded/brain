@@ -122,6 +122,14 @@ const K_LAYERNORM_ROWS: usize = 18;
 /// back to where the device's own select policy prefers it over the
 /// workgroup-cooperative `layernorm_rows` (the Cranelift CPU JIT does).
 const K_LAYERNORM: usize = 20;
+/// The fused attention path [`crate::block::attention`] takes wherever the
+/// device can run it: `q`/`k`/`v` packed into one slab, then the
+/// `flash_attn_bidir*` rung the device's caps select.
+const K_PACK_QKV: usize = 21;
+const K_FLASH_ATTN_BIDIR: usize = 22;
+const K_FLASH_ATTN_BIDIR_SPLIT: usize = 23;
+const K_FLASH_ATTN_BIDIR_REG: usize = 24;
+const K_FLASH_ATTN_BIDIR_REG2: usize = 25;
 /// The 128x128 register-tiled GEMM `linear` picks via `model::block::
 /// pick_gemm` once a shape clears the measured tile-fill crossover - the
 /// same fix `crate::block::linear`'s own doc explains in full (plain
@@ -133,7 +141,7 @@ const K_LAYERNORM: usize = 20;
 /// fix flash attention was for the DiT's unbounded packed sequence.
 const K_MATMUL_REG3: usize = 19;
 
-pub const KERNELS: [(&str, &str); 21] = [
+pub const KERNELS: [(&str, &str); 26] = [
     ("conv3d", kernels::CONV3D),
     ("silu", kernels::SILU),
     ("add2", kernels::ADD2),
@@ -155,7 +163,22 @@ pub const KERNELS: [(&str, &str); 21] = [
     ("layernorm_rows", kernels::LAYERNORM_ROWS),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("layernorm", kernels::LAYERNORM),
+    ("pack_qkv", kernels::PACK_QKV),
+    ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
+    ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
+    ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
+    ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
 ];
+
+/// The decoder's attention kernels in [`KERNELS`], for the one
+/// [`crate::block::attention`] the DiT runs too.
+const VAE_ATTN: crate::block::AttnKernels = crate::block::AttnKernels {
+    scores_qk: K_ATTN_SCORES_QK,
+    softmax_bidir: K_ATTN_SOFTMAX_BIDIR,
+    apply_full: K_ATTN_APPLY_FULL,
+    pack_qkv: K_PACK_QKV,
+    flash: model::block::FlashIds { bidir: K_FLASH_ATTN_BIDIR, split: Some(K_FLASH_ATTN_BIDIR_SPLIT), reg: Some(K_FLASH_ATTN_BIDIR_REG), reg2: Some(K_FLASH_ATTN_BIDIR_REG2) },
+};
 
 /// The two-stage GroupNorm reduction's threads-per-group - matching
 /// `vae::blocks::GN_P`'s own value (not importable, that constant is
@@ -1108,41 +1131,6 @@ fn rope_partial(cx: &Ctx, buf: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBu
     cx.gpu.submit(&[], &[model::block::rope2d_partial_fwd(&cx.gpu, K_ROPE2D_PARTIAL, buf, cos, sin, rows, heads, half, heads * head_dim, 0, head_dim)]);
 }
 
-/// Full (bidirectional, unmasked) self-attention - `dispatch_attention_fn`
-/// with `attn_mask=None` (`MiniMaxH3VideoAttnProcessor`'s own shape).
-fn attention(cx: &Ctx, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
-    let inner = heads * head_dim;
-    let scale = 1.0 / (head_dim as f32).sqrt();
-    // `heads * seq_len * seq_len` is the score-matrix element count, and it
-    // does not fit in a u32 for a long sequence: at the real config's 32 heads
-    // it wraps past seq_len 11585. Computed in u64 and checked, so an
-    // oversized decode fails with this message instead of silently allocating
-    // a wrapped-around buffer and dispatching a wrapped-around thread count.
-    //
-    // With `use_tiling` on - the reference's own shipped default, and this
-    // port's - every tile is a 16x16 LATENT window whatever the canvas, so
-    // the sequence is `t * 256 + num_register_tokens + 1` (1797 at the real
-    // decoder's 7-latent-frame chunk) and this ceiling is three orders of
-    // magnitude away. Reaching it therefore means tiling was bypassed
-    // (`use_tiling = false`) on a frame the reference would have split, not
-    // that the limit is too low: the fix is to leave tiling on, never to
-    // widen this.
-    let scores_len = heads as u64 * seq_len as u64 * seq_len as u64;
-    assert!(
-        scores_len <= u32::MAX as u64,
-        "video_vae::attention: {heads} heads x {seq_len}^2 attention scores ({scores_len} elements) overflows the u32 \
-         dispatch space. Only the UNTILED decode path can build a sequence this long - with `use_tiling` on, the \
-         reference's own default, `_split_tiles` bounds every tile to a 16x16 latent grid. Set `use_tiling` rather \
-         than raising this limit."
-    );
-    let scores = cx.gpu.storage(scores_len);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_SCORES_QK, &[q, k, &scores], &[1, heads, seq_len, head_dim, inner, 0, f(scale)], heads * seq_len * seq_len)]);
-    let probs = cx.gpu.storage(scores_len);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_SOFTMAX_BIDIR, &[&scores, &probs], &[1, heads, seq_len], heads * seq_len)]);
-    let out = cx.gpu.storage((seq_len * inner) as u64);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_ATTN_APPLY_FULL, &[&probs, v, &out], &[1, heads, seq_len, head_dim, inner, inner], heads * seq_len * head_dim)]);
-    out
-}
 
 /// `SwiGLU.forward`: `(value, gate) = proj(x).chunk(2,-1); value * silu(gate)`.
 /// `value`/`gate` are `fc1`'s two output-feature halves, split at import time
@@ -1208,7 +1196,7 @@ fn decoder_block_forward(cx: &Ctx, tensors: &Tensors, prefix: &str, x: &DeviceBu
     let kn = rmsnorm(cx, &k, ones_hd, seq_len * heads, hd, eps);
     rope_partial(cx, &qn, cos, sin, seq_len, heads, hd, half);
     rope_partial(cx, &kn, cos, sin, seq_len, heads, hd, half);
-    let attn = attention(cx, &qn, &kn, &v, seq_len, heads, hd);
+    let attn = crate::block::attention(&cx.gpu, &VAE_ATTN, crate::block::attn_mode(&cx.gpu, hd), &qn, &kn, &v, seq_len, heads, hd);
     let attn_out = linear(cx, &attn, &wo, Some(&bo), seq_len, dim, dim);
     let h1 = layerscale_residual(cx, x, &scale1, &attn_out, seq_len, dim);
 
@@ -1901,6 +1889,38 @@ mod tests {
         assert!(err < sep / 100.0, "this port's tiled decode ({err:.3e}) is not decisively closer to the tiled reference than the untiled one is ({sep:.3e})");
 
         r.finish("minimaxh3 video vae real-weight tiled decode vs real reference");
+    }
+
+    /// The decoder's attention runs the DiT's one [`crate::block::attention`]
+    /// through this module's own kernel table ([`VAE_ATTN`]): on a device that
+    /// can run the fused flash family, flash and the materialized trio agree
+    /// at the decoder's own shape - 32 heads of 64 over a tiled chunk's
+    /// 1797 tokens. GPU-only for the reason the DiT's own flash test gives;
+    /// point `BRAIN_MINIMAXH3_TEST_DEVICE` at a card to run it.
+    #[test]
+    fn the_decoders_flash_attention_matches_its_materialized_trio() {
+        let Ok(device) = std::env::var("BRAIN_MINIMAXH3_TEST_DEVICE") else {
+            brain_testutil::skip("BRAIN_MINIMAXH3_TEST_DEVICE not set - the flash family is GPU-only");
+            return;
+        };
+        let cfg = VideoVaeConfig::real();
+        let (heads, head_dim) = (cfg.decoder_num_attention_heads, cfg.decoder_attention_head_dim);
+        let cx = Ctx::new(Some(&device));
+        if crate::block::attn_mode(&cx.gpu, head_dim) != crate::block::AttnMode::Flash {
+            brain_testutil::skip(&format!("device {device:?} cannot run the flash-attention family"));
+            return;
+        }
+        let seq_len = 7 * 256 + cfg.decoder_num_register_tokens + 1;
+        let n = (seq_len * heads * head_dim) as usize;
+        let fill = |seed: u32| -> Vec<f32> { (0..n as u32).map(|i| ((i.wrapping_mul(2654435761).wrapping_add(seed * 97)) % 2001) as f32 / 1000.0 - 1.0).collect() };
+        let up = |v: &[f32]| cx.gpu.storage_init("vae attention test", v);
+        let (q, k, v) = (up(&fill(1)), up(&fill(2)), up(&fill(3)));
+        let run = |mode| cx.gpu.read(&crate::block::attention(&cx.gpu, &VAE_ATTN, mode, &q, &k, &v, seq_len, heads, head_dim), n);
+        let (want, got) = (run(crate::block::AttnMode::Materialized), run(crate::block::AttnMode::Flash));
+        let max_abs = want.iter().zip(&got).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        let spread = want.iter().fold(0f32, |m, x| m.max(x.abs()));
+        assert!(spread > 1e-3, "the trio's output is ~0 - the comparison would be vacuous");
+        assert!(max_abs < 1e-4, "flash vs trio at the decoder's shape: max_abs {max_abs:.3e}");
     }
 
     /// `split_tiles` against the REAL reference's own `_split_tiles`, called
