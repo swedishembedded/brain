@@ -1994,6 +1994,14 @@ impl crate::TensorSource for MmapGguf {
     /// every ggml type, quantized or not, since the caller only needs to know
     /// how many f32s a dequantized [`with_tensor`](Self::with_tensor) call
     /// will produce.
+    /// Release `name`'s mapped pages (`MADV_DONTNEED`): they stay in the
+    /// page cache, but no longer count against this process.
+    fn advise_drop(&self, name: &str) {
+        if let Some(&(_part, _ty, _start, nbytes, _numel)) = self.index.get(name) {
+            self.advise_dontneed_range(name, 0..nbytes);
+        }
+    }
+
     fn numel(&self, name: &str) -> Option<usize> {
         self.index.get(name).map(|&(_, _, _, _, numel)| numel)
     }

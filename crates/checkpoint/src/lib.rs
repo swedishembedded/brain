@@ -50,6 +50,53 @@ mod testalloc;
 /// drop it - peak host allocation ≈ one tensor of f32 - without ever holding the
 /// entire model as a map (the second host copy the eager `by_role("")` load kept
 /// alongside the device weights).
+/// Implements [`TensorSource`] for a wrapper type by forwarding EVERY method
+/// to its field `$field` - a source opened under a model's own validation
+/// (`ltxv`'s, `wan`'s, `gemma4`'s GGUF readers) that adds nothing to how
+/// tensors are read. Forwarding by hand let each wrapper silently fall back to
+/// a trait default whenever the trait grew a method: a range read decoded the
+/// whole tensor, and a page-release hint did nothing.
+#[macro_export]
+macro_rules! forward_tensor_source {
+    ($ty:ty, $field:ident) => {
+        impl $crate::TensorSource for $ty {
+            fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+                $crate::TensorSource::with_tensor(&self.$field, name, f)
+            }
+            fn raw_words(&self, name: &str) -> Option<&[u32]> {
+                $crate::TensorSource::raw_words(&self.$field, name)
+            }
+            fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+                $crate::TensorSource::with_tensor_chunks(&self.$field, name, max_elems, f)
+            }
+            fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+                $crate::TensorSource::with_tensor_range(&self.$field, name, start, len, f)
+            }
+            fn with_tensor_u32_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[u32])) -> bool {
+                $crate::TensorSource::with_tensor_u32_chunks(&self.$field, name, max_elems, f)
+            }
+            fn numel(&self, name: &str) -> Option<usize> {
+                $crate::TensorSource::numel(&self.$field, name)
+            }
+            fn raw_blocks(&self, name: &str) -> Option<($crate::gguf::BlockLayout, std::borrow::Cow<'_, [u8]>)> {
+                $crate::TensorSource::raw_blocks(&self.$field, name)
+            }
+            fn raw_block_layout(&self, name: &str) -> Option<$crate::gguf::BlockLayout> {
+                $crate::TensorSource::raw_block_layout(&self.$field, name)
+            }
+            fn advise_drop(&self, name: &str) {
+                $crate::TensorSource::advise_drop(&self.$field, name)
+            }
+            fn packed_descriptor(&self, name: &str) -> Option<$crate::packed::TensorDescriptor> {
+                $crate::TensorSource::packed_descriptor(&self.$field, name)
+            }
+            fn load_packed(&self, names: &[&str], req: &$crate::packed::LoadRequest<'_>, sink: &mut dyn $crate::packed::TensorSink) -> Result<Option<$crate::packed::LoadReport>, String> {
+                $crate::TensorSource::load_packed(&self.$field, names, req, sink)
+            }
+        }
+    };
+}
+
 pub trait TensorSource {
     /// Invoke `f` with tensor `name`'s f32 data if present; returns whether it
     /// was found. The slice is valid only for the call - a `WeightReader`

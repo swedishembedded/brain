@@ -97,6 +97,19 @@ impl TensorSource for GgufSource {
     fn numel(&self, name: &str) -> Option<usize> {
         self.mg.numel(self.source_name(name)?)
     }
+
+    fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.source_name(name) {
+            Some(src) => self.mg.with_tensor_range(src, start, len, f),
+            None => false,
+        }
+    }
+
+    fn advise_drop(&self, name: &str) {
+        if let Some(src) = self.source_name(name) {
+            self.mg.advise_drop(src);
+        }
+    }
 }
 
 #[cfg(test)]

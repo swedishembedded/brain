@@ -22,8 +22,8 @@ crates/fincast/src/model.rs	2	class T: one whole tensor as fp32 on the host, the
 crates/flux2/src/pipeline.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/flux2/src/weights.rs	1	flux2 DitWeights wrapper and fp32 rectangle fallback (knowledge 337 class T)
 crates/gemma4/src/block.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/gemma4/src/gguf_src.rs	2	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
-crates/gemma4/src/model.rs	3	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
+crates/gemma4/src/gguf_src.rs	1	the embedded tokenizer_json blob, read whole because it is bytes, not a weight
+crates/gemma4/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/gguf/src/gdn_order.rs	5	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
 crates/glmdsa/src/caps.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/glmdsa/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
@@ -33,8 +33,7 @@ crates/lfm2/src/import.rs	1	offline importer: one whole tensor per call into a w
 crates/lfm2/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/ltxv/src/audio_vae.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/ltxv/src/av_stream.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/ltxv/src/block.rs	4	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/ltxv/src/gguf_src.rs	1	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
+crates/ltxv/src/block.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/ltxv/src/pipeline.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/mimi/src/decode_stream.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/mimi/src/model.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
@@ -87,7 +86,6 @@ crates/toyautoencoder/src/model.rs	2	class T: one whole tensor as fp32 on the ho
 crates/toymoe/src/train.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/toyseq2seq/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/wan/src/block.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/wan/src/gguf_src.rs	1	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
 crates/wan/src/lora.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/wan/src/pipeline.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/web/src/web.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)

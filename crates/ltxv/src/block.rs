@@ -356,6 +356,7 @@ fn ff_has_bias(w: &dyn checkpoint::TensorSource, prefix: &str) -> bool {
 fn host_tensor(w: &dyn checkpoint::TensorSource, name: &str) -> Vec<f32> {
     let mut out = None;
     assert!(w.with_tensor(name, &mut |d| out = Some(d.to_vec())), "ltxv dit: missing weight {name}");
+    w.advise_drop(name);
     out.expect("with_tensor reported found")
 }
 
@@ -1630,15 +1631,11 @@ impl QLinear {
             QTier::Int4 => {
                 let mut out = None;
                 t.with_tensor(&weight_name, &mut |data| out = Some(model::int4::quantize_weight_q4(data, out_dim, in_dim)));
+                t.advise_drop(&weight_name);
                 out.unwrap_or_else(|| panic!("ltxv dit: missing weight {weight_name}"))
             }
         };
-        let bias_name = format!("{prefix}.bias");
-        let b = has_bias.then(|| {
-            let mut out = None;
-            t.with_tensor(&bias_name, &mut |data| out = Some(data.to_vec()));
-            out.unwrap_or_else(|| panic!("ltxv dit: missing weight {bias_name}"))
-        });
+        let b = has_bias.then(|| host_tensor(t, &format!("{prefix}.bias")));
         CachedQLinear { packed, sw, b }
     }
 
@@ -3276,15 +3273,7 @@ impl LtxAvBlockQ {
 /// time, so only the selected tensors are ever held - one block's, or the
 /// non-block head's - never the whole checkpoint's fp32 expansion.
 pub fn load_manifest_tensors(src: &dyn checkpoint::TensorSource, manifest: Vec<(String, Vec<usize>)>, keep: impl Fn(&str) -> bool) -> Tensors {
-    let mut out = Tensors::new();
-    for (name, shape) in manifest.into_iter().filter(|(name, _)| keep(name)) {
-        let mut data = Vec::new();
-        assert!(src.with_tensor(&name, &mut |d| data = d.to_vec()), "ltxv: the checkpoint is missing {name}");
-        let want: usize = shape.iter().product();
-        assert_eq!(data.len(), want, "ltxv: {name} holds {} values, expected {want}", data.len());
-        out.insert(name, (shape, data));
-    }
-    out
+    checkpoint::coverage::read_manifest(src, manifest.into_iter().filter(|(name, _)| keep(name)), "ltxv").unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// One AV block's own tensors (`prefix`, e.g. `"transformer_blocks.0"`) - the

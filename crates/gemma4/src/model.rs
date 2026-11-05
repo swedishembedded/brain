@@ -221,21 +221,7 @@ pub fn layer_tensor_names(cfg: &Gemma4Config, l: u32) -> Vec<(String, Vec<usize>
 /// or the wrong length - never a zero fill, matching the importer's own
 /// contract for the eager path.
 pub fn load_layer_tensors(src: &dyn checkpoint::TensorSource, cfg: &Gemma4Config, l: u32) -> Result<Tensors, String> {
-    let mut out = Tensors::new();
-    for (name, shape) in layer_tensor_names(cfg, l) {
-        let want: usize = shape.iter().product();
-        let mut got: Option<Vec<f32>> = None;
-        let found = src.with_tensor(&name, &mut |d| got = Some(d.to_vec()));
-        let data = match (found, got) {
-            (true, Some(d)) => d,
-            _ => return Err(format!("gemma4: source has no tensor {name}")),
-        };
-        if data.len() != want {
-            return Err(format!("gemma4: {name} has {} values, expected {want}", data.len()));
-        }
-        out.insert(name, (shape, data));
-    }
-    Ok(out)
+    checkpoint::coverage::read_manifest(src, layer_tensor_names(cfg, l), "gemma4")
 }
 
 /// [`Gemma4Model::forward`] over a checkpoint read on demand, with the

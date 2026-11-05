@@ -53,27 +53,7 @@ impl WanGgufSource {
     }
 }
 
-impl checkpoint::TensorSource for WanGgufSource {
-    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
-        self.src.with_tensor(name, f)
-    }
-
-    fn raw_words(&self, name: &str) -> Option<&[u32]> {
-        self.src.raw_words(name)
-    }
-
-    fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
-        self.src.with_tensor_chunks(name, max_elems, f)
-    }
-
-    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, std::borrow::Cow<'_, [u8]>)> {
-        self.src.raw_blocks(name)
-    }
-
-    fn numel(&self, name: &str) -> Option<usize> {
-        self.src.numel(name)
-    }
-}
+checkpoint::forward_tensor_source!(WanGgufSource, src);
 
 #[cfg(test)]
 mod tests {

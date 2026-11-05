@@ -34,6 +34,31 @@ use std::collections::HashMap;
 /// this same type).
 pub type Tensors = HashMap<String, (Vec<usize>, Vec<f32>)>;
 
+/// Read the `manifest` tensors out of `src` as fp32, checking each holds as
+/// many values as its declared shape.
+///
+/// Each tensor's source pages are released ([`crate::TensorSource::advise_drop`])
+/// as soon as it is copied out, so reading a layer at a time out of a mapped
+/// checkpoint holds that layer, not every layer read so far. `who` prefixes
+/// the error, as in [`validate`].
+pub fn read_manifest(src: &dyn crate::TensorSource, manifest: impl IntoIterator<Item = (String, Vec<usize>)>, who: &str) -> Result<Tensors, String> {
+    let mut out = Tensors::new();
+    for (name, shape) in manifest {
+        let mut data = None;
+        if !src.with_tensor(&name, &mut |d| data = Some(d.to_vec())) {
+            return Err(format!("{who}: missing tensor {name}"));
+        }
+        src.advise_drop(&name);
+        let data = data.expect("with_tensor reported found, so the callback ran");
+        let n: usize = shape.iter().product();
+        if data.len() != n {
+            return Err(format!("{who}: {name} has {} values, expected {n}", data.len()));
+        }
+        out.insert(name, (shape, data));
+    }
+    Ok(out)
+}
+
 /// Everything a manifest declares is present with that exact shape and that
 /// many values, and nothing outside it is present.
 ///

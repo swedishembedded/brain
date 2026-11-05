@@ -78,3 +78,37 @@ fn mapped_and_slurped_reads_agree_bit_for_bit() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+/// This process's resident file-backed bytes (`RssFile`).
+#[cfg(target_os = "linux")]
+fn rss_file_bytes() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let kb: u64 = status.lines().find_map(|l| l.strip_prefix("RssFile:")).and_then(|v| v.trim().trim_end_matches(" kB").trim().parse().ok()).unwrap();
+    kb * 1024
+}
+
+/// A streamed load reads each tensor once and says when it is done with it:
+/// the GGUF source then releases that tensor's mapped pages, so a model's
+/// load keeps only its working set resident instead of the whole file.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_consumed_tensor_leaves_the_resident_set_when_dropped() {
+    use checkpoint::TensorSource;
+    let path = std::env::temp_dir().join(format!("gguf-advise-drop-{}.gguf", std::process::id()));
+    let n = 64 << 20; // 256 MiB of f32
+    let data: Vec<u8> = (0..n as u32).flat_map(|i| (i as f32).to_le_bytes()).collect();
+    let tensor = checkpoint::gguf_write::TensorOut { name: "big".into(), shape: vec![n], ty: checkpoint::gguf::GgmlType::F32.id(), data };
+    checkpoint::gguf_write::write(path.to_str().unwrap(), &[], &[tensor], 32).unwrap();
+    let src = checkpoint::gguf::MmapGguf::open(path.to_str().unwrap()).unwrap();
+
+    let before = rss_file_bytes();
+    assert!(src.with_tensor_chunks("big", 1 << 20, &mut |_, c| assert!(c[0].is_finite())));
+    let read = rss_file_bytes();
+    src.advise_drop("big");
+    let dropped = rss_file_bytes();
+    let _ = std::fs::remove_file(&path);
+
+    let mib = |b: u64| b >> 20;
+    assert!(read >= before + (200 << 20), "reading should map the tensor in: {} -> {} MiB", mib(before), mib(read));
+    assert!(dropped + (200 << 20) <= read, "dropping it should release the pages: {} -> {} MiB", mib(read), mib(dropped));
+}

@@ -372,7 +372,20 @@ fn stored_int8(source: &dyn checkpoint::TensorSource, name: &str, n: usize, k: u
 /// For a caller that stops before the device (a host cache the model
 /// re-uploads from later, e.g. a checkpoint-quantized weight kept resident
 /// as bytes rather than re-read every build).
+///
+/// The source's pages for `name` are released once it is quantized
+/// ([`checkpoint::TensorSource::advise_drop`]), so quantizing a whole model
+/// on the fly out of a mapped checkpoint does not leave the checkpoint
+/// resident beside the int8 copy.
 pub fn quantize_from(source: &dyn checkpoint::TensorSource, name: &str, n: usize, k: usize) -> Option<(Vec<u32>, Vec<f32>)> {
+    let quantized = quantize_whole(source, name, n, k);
+    if quantized.is_some() {
+        source.advise_drop(name);
+    }
+    quantized
+}
+
+fn quantize_whole(source: &dyn checkpoint::TensorSource, name: &str, n: usize, k: usize) -> Option<(Vec<u32>, Vec<f32>)> {
     if let Some(direct) = q8_0_rect(source, name, k, 0, n, 0, k) {
         return Some(direct);
     }
