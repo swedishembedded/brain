@@ -74,10 +74,6 @@ use crate::patchify;
 /// this crate's concern yet).
 pub const PIXEL_NORM_EPS: f32 = 1e-8;
 
-/// `BRAIN_LTXV_VAE_TAPS=1` records every block output for parity debugging.
-fn taps_enabled() -> bool {
-    std::env::var("BRAIN_LTXV_VAE_TAPS").is_ok()
-}
 
 /// A `res_x` down/up-block: `n` stacked `ResnetBlock3D`s at a fixed channel
 /// width (every one in this checkpoint has `in_channels == out_channels` -
@@ -472,7 +468,7 @@ impl LtxVaeEncoder {
         let eps = cfg.pixel_norm_eps;
 
         let gpu = Gpu::open(device, &KERNELS);
-        let mut b = Builder3d::new(&gpu, tensors, taps_enabled());
+        let mut b = Builder3d::new(&gpu, tensors, false);
 
         let p = cfg.patch_size;
         let (pc, ph_, pw_) = (3 * p * p, h / p, w / p);
@@ -556,7 +552,7 @@ impl LtxVaeEncoder {
         read_named(&self.gpu, &self.stages, name)
     }
 
-    /// A per-block tap (only recorded under `BRAIN_LTXV_VAE_TAPS`).
+    /// A per-block tap (only recorded by [`LtxVaeDecoder::build_with_taps`]).
     pub fn read_tap(&self, name: &str) -> Option<Vec<f32>> {
         read_named(&self.gpu, &self.taps, name)
     }
@@ -588,7 +584,15 @@ impl LtxVaeDecoder {
     /// of its own.
     pub fn build(cfg: &LtxVaeConfig, tensors: &Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>) -> LtxVaeDecoder {
         let gpu = Gpu::open(device, &KERNELS);
-        Self::build_on(cfg, tensors, lat_t, lh, lw, &gpu, DeviceWeights::new()).0
+        Self::build_recording(cfg, tensors, lat_t, lh, lw, &gpu, DeviceWeights::new(), false).0
+    }
+
+    /// [`Self::build`], also recording every block's output for
+    /// [`Self::read_tap`] - a parity bisection aid, so it costs the extra
+    /// buffers only where asked for.
+    pub fn build_with_taps(cfg: &LtxVaeConfig, tensors: &Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>) -> LtxVaeDecoder {
+        let gpu = Gpu::open(device, &KERNELS);
+        Self::build_recording(cfg, tensors, lat_t, lh, lw, &gpu, DeviceWeights::new(), true).0
     }
 
     /// [`LtxVaeDecoder::build`] on a device the CALLER owns, reusing weights
@@ -610,13 +614,18 @@ impl LtxVaeDecoder {
         gpu: &Gpu,
         weights: DeviceWeights,
     ) -> (LtxVaeDecoder, DeviceWeights) {
+        Self::build_recording(cfg, tensors, lat_t, lh, lw, gpu, weights, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_recording(cfg: &LtxVaeConfig, tensors: &Tensors, lat_t: u32, lh: u32, lw: u32, gpu: &Gpu, weights: DeviceWeights, taps: bool) -> (LtxVaeDecoder, DeviceWeights) {
         assert!(lat_t >= 1, "a latent needs at least one frame");
         let frames = 1 + 8 * (lat_t - 1);
         let (h, w) = (lh * 32, lw * 32);
         let eps = cfg.pixel_norm_eps;
 
         let gpu = gpu.share();
-        let mut b = Builder3d::with_weights(&gpu, tensors, taps_enabled(), weights);
+        let mut b = Builder3d::with_weights(&gpu, tensors, taps, weights);
         let z_in = gpu.storage(cfg.latent_channels as u64 * lat_t as u64 * lh as u64 * lw as u64);
         let z = T3 { buf: z_in.clone(), c: cfg.latent_channels, t: lat_t, h: lh, w: lw };
 
@@ -714,7 +723,7 @@ impl LtxVaeDecoder {
         read_named(&self.gpu, &self.stages, name)
     }
 
-    /// A per-block tap (only recorded under `BRAIN_LTXV_VAE_TAPS`).
+    /// A per-block tap (only recorded by [`LtxVaeDecoder::build_with_taps`]).
     pub fn read_tap(&self, name: &str) -> Option<Vec<f32>> {
         read_named(&self.gpu, &self.taps, name)
     }
@@ -865,22 +874,17 @@ fn round_half_to_even(v: f64) -> u32 {
 /// with real margin - `24_000_000` keeps every shape this port ships today
 /// (9 frames at 1080p = 18.8 Mpx, 25 at 720p = 22.5 Mpx) on the exact,
 /// un-tiled path and sends 25 frames at 1080p to the tiled one. It is a
-/// P40-sized constant and says so; `BRAIN_LTXV_VAE_TILE` overrides the
-/// decision either way.
+/// P40-sized constant and says so; a request's `Runtime::vae_tiling` overrides
+/// the decision either way.
 pub const WHOLE_DECODE_MAX_PIXELS: u64 = 24_000_000;
 
 /// Whether a decode of this output shape should take the tiled path.
 ///
-/// `BRAIN_LTXV_VAE_TILE=1`/`0` forces tiling on/off; anything else (or unset)
+/// `forced` (a request's `Runtime::vae_tiling`) turns tiling on or off; `None`
 /// is the measured [`WHOLE_DECODE_MAX_PIXELS`] policy. Forcing it ON at a
 /// shape that already fits is the supported way to compare the two paths.
-pub fn should_tile(frames: u32, h: u32, w: u32) -> bool {
-    match std::env::var("BRAIN_LTXV_VAE_TILE").ok().as_deref() {
-        Some("1") | Some("on") | Some("true") => return true,
-        Some("0") | Some("off") | Some("false") => return false,
-        _ => {}
-    }
-    (frames as u64) * (h as u64) * (w as u64) > WHOLE_DECODE_MAX_PIXELS
+pub fn should_tile(frames: u32, h: u32, w: u32, forced: Option<bool>) -> bool {
+    forced.unwrap_or((frames as u64) * (h as u64) * (w as u64) > WHOLE_DECODE_MAX_PIXELS)
 }
 
 /// Decodes a `[128, lat_t, lh, lw]` latent as a cover of **overlapping
@@ -973,7 +977,20 @@ impl<'a> LtxVaeTiledDecoder<'a> {
     ///
     /// `on_tile(done, total)` is called after each tile so a caller can
     /// report progress on what is, at 1080p, a multi-minute stage.
-    pub fn decode_with(&self, latent: &[f32], mut on_tile: impl FnMut(usize, usize)) -> Vec<f32> {
+    pub fn decode_with(&self, latent: &[f32], on_tile: impl FnMut(usize, usize)) -> Vec<f32> {
+        self.decode_tiles(latent, on_tile, true)
+    }
+
+    /// [`Self::decode`] with each tile shape built on a device of its own and
+    /// its own weight upload - the arrangement before one device and one
+    /// weight set were shared across shapes. It changes only WHERE a weight
+    /// buffer comes from, never what a kernel reads, which is what
+    /// `crates/ltxv/tests/vae_tiling.rs` holds the shared arm to.
+    pub fn decode_per_shape_devices(&self, latent: &[f32]) -> Vec<f32> {
+        self.decode_tiles(latent, |_, _| {}, false)
+    }
+
+    fn decode_tiles(&self, latent: &[f32], mut on_tile: impl FnMut(usize, usize), share_weights: bool) -> Vec<f32> {
         let c = self.cfg.latent_channels as usize;
         let want = c * self.lat_t as usize * self.lh as usize * self.lw as usize;
         assert_eq!(latent.len(), want, "tiled decode: {} values, expected {want}", latent.len());
@@ -1000,13 +1017,8 @@ impl<'a> LtxVaeTiledDecoder<'a> {
         // two spatial ones. Peak VRAM is unchanged: the weights and one tile's
         // activations were already co-resident, and the activations are still
         // dropped before the next shape's are allocated.
-        //
-        // `BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS=1` restores the per-shape device.
-        // It changes only WHERE a weight buffer came from, never what any
-        // kernel reads, so the two arms decode to identical bits - which is
-        // what `crates/ltxv/tests/vae_tiling.rs` asserts, and it can only
-        // assert it while the losing arm is still reachable.
-        let shared_gpu = std::env::var("BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS").is_err().then(|| {
+        // [`Self::decode_per_shape_devices`] is the per-shape arm.
+        let shared_gpu = share_weights.then(|| {
             let t = std::time::Instant::now();
             let g = Gpu::open(self.device.as_deref(), &KERNELS);
             gpu_core::profile::stage_time("ltxv vae tiled: device open", t);
@@ -1212,13 +1224,11 @@ mod tests {
     /// out-of-memories does not.
     #[test]
     fn the_tiling_policy_keeps_todays_shapes_on_the_exact_path() {
-        if std::env::var("BRAIN_LTXV_VAE_TILE").is_ok() {
-            return; // an explicit override is being tested elsewhere
-        }
-        assert!(!should_tile(9, 1088, 1920), "9 frames at 1080p fits whole (measured 15186 MiB)");
-        assert!(!should_tile(25, 704, 1280), "25 frames at 720p fits whole (measured 16564 MiB)");
-        assert!(should_tile(25, 1088, 1920), "25 frames at 1080p is a measured out-of-memory");
-        assert!(should_tile(49, 704, 1280), "49 frames at 720p is 44.2 Mpx, past the measured cliff");
+        assert!(!should_tile(9, 1088, 1920, None), "9 frames at 1080p fits whole (measured 15186 MiB)");
+        assert!(!should_tile(25, 704, 1280, None), "25 frames at 720p fits whole (measured 16564 MiB)");
+        assert!(should_tile(25, 1088, 1920, None), "25 frames at 1080p is a measured out-of-memory");
+        assert!(should_tile(49, 704, 1280, None), "49 frames at 720p is 44.2 Mpx, past the measured cliff");
+        assert!(should_tile(9, 64, 64, Some(true)) && !should_tile(49, 704, 1280, Some(false)), "a forced choice overrides the policy");
     }
 
     #[test]

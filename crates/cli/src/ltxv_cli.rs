@@ -57,6 +57,28 @@ macro_rules! guidance_help {
     };
 }
 
+/// The execution flags every generating subcommand takes ([`set_runtime`]):
+/// how a run is placed and computed, carried in `GenOpts::runtime`.
+macro_rules! runtime_help {
+    () => {
+        "  --resident-blocks <N>     DiT blocks kept resident per card (default:
+                            planned from free VRAM; 0 streams every block)
+  --two-stage <on|off>      force the two-stage shape on or off (default:
+                            decided from the size)
+  --vae-tiling <on|off>     force the tiled VAE decode on or off (default:
+                            tiled past the measured whole-decode ceiling)
+  --text-precision <P>      fp32 or int8 text encoder arithmetic (default:
+                            follows the checkpoint)
+  --no-text-cache           neither read nor write the encoded-prompt cache
+  --text-cache-max-bytes <N>  bytes the encoded-prompt cache is pruned to
+  --latent-dump <path>      also write the latent being VAE-decoded to <path>
+                            (ltxv_bench decode replays it)
+  --av-fp32-reference       denoise an --audio run on the eager host-fp32
+                            reference arm (an A/B, not a quality dial)
+"
+    };
+}
+
 const HELP: &str = concat!(r#"brain ltxv t2v - LTX-2.5 text to video
 
   brain ltxv t2v --prompt <text> --output-path <out.mp4> [options]
@@ -84,7 +106,7 @@ reference pipelines' defaults; without it, a tiny random-weight smoke test):
   --width <W> --height <H>  pixels, multiples of 32 (default 768x512; 64x64
                             for the smoke test)
   --steps <N>                denoise steps (default 4)
-"#, guidance_help!(), r#"  --seed <S>                 initial-noise/weight/context seed (default: drawn at random and printed)
+"#, guidance_help!(), runtime_help!(), r#"  --seed <S>                 initial-noise/weight/context seed (default: drawn at random and printed)
   --fps <N>                  frame rate (default 24; 8 for the smoke test)
   --base-shift <F>           LTX2Scheduler shift anchor at 1024 tokens (0.95)
   --max-shift <F>            LTX2Scheduler shift anchor at 4096 tokens (2.05)
@@ -185,12 +207,10 @@ Placement:
   multiplier is quoted here: whatever a denoise step spends on host-side work
   shared by both branches does not move to a second card, and two concurrent
   branches contend for the same cores. Measure your own by running the same
-  request twice, once with BRAIN_LTXV_CFG_PARALLEL=0, or run
+  request twice, once with --device gpu0, or run
   crates/ltxv/tests/it/cfg_parallel.rs, which times both placements and proves
-  the two outputs identical. Set
-  BRAIN_LTXV_CFG_PARALLEL=0 to force the old single-card behaviour; --device
-  gpu0 also confines the run to one card, since placement never leaves the
-  schedulable set --device names.
+  the two outputs identical. --device gpu0 confines the run to one card,
+  since placement never leaves the schedulable set --device names.
 
 Weights (resolved from the models directory; a flag names a candidate
 outright, an ambiguous or missing outcome prints every real candidate and
@@ -217,7 +237,7 @@ Stages:
   requested size (stage 2, where detail is refined).  That needs
   $BRAIN_LTXV_UPSAMPLER_SPATIAL, and both --width and --height must be
   multiples of 64 (not just 32) so halving lands on the VAE's own stride.
-  BRAIN_LTXV_TWO_STAGE=1/0 forces the choice either way.
+  --two-stage on|off forces the choice either way.
 
 Audio:
   LTX-2.5 is one model that denoises a video-latent stream and an audio-latent
@@ -240,7 +260,7 @@ Audio:
   without sound rather than several times more. The command refuses up front,
   with both numbers, if this machine cannot hold what that arm needs.
 
-  BRAIN_LTXV_AV_FP32=1 denoises on the eager host-fp32 REFERENCE arm instead -
+  --av-fp32-reference denoises on the eager host-fp32 REFERENCE arm instead -
   the same math at higher precision, and what the quantized arm is measured
   and gated against. It expands the whole checkpoint to host fp32 and
   re-uploads it per forward, so expect most of a large machine's RAM and
@@ -276,9 +296,10 @@ Long-form clips:
   position but no velocity and is why naively chained clips change or
   reverse their motion at every seam. A request that fits one window is
   generated exactly as it always was, and none of this runs.
-  BRAIN_LTXV_LONGFORM_MAX_TOKENS overrides the per-window token ceiling
-  (default 13200, the largest single-window generation this crate has a
-  recorded real run at). --start-frame conditions the first window as
+  --max-window-tokens <N> sets the per-window token ceiling (default 13200,
+  the largest single-window generation this crate has a recorded real run
+  at); --window-major keeps a video-only clip on the window-by-window loop
+  instead of building its motion stage-major. --start-frame conditions the first window as
   usual; --end-frame conditions the windows that own their instants, and
   every window also receives the anchors still ahead of it as appended
   guides, so each window bends its motion toward the next keyframe instead
@@ -293,7 +314,7 @@ Long-form clips:
   resolution (where refinement detail is carried).  Clip-global anchors
   (--end-frame, --mid-frame) are routed to their owning window via
   window_gen_opts.  Audio-visual clips keep the window-major path.
-  BRAIN_LTXV_LONGFORM_STAGE_MAJOR=0 disables the stage-major path.
+  --window-major disables the stage-major path.
 
 Scenes:
   One --frames/--prompt run is one continuous SHOT: every window shares the
@@ -386,7 +407,7 @@ Refinement:
                              the same span in bigger hops - the schedule's
                              sigma values are baked in by distillation and
                              are not interpolable.
-"#, guidance_help!(), r#"  --seed <S>                 refinement noise seed (default: drawn at random and printed)
+"#, guidance_help!(), runtime_help!(), r#"  --seed <S>                 refinement noise seed (default: drawn at random and printed)
   --context-frames <N>       how much of the previous refinement pass the
                              next one carries, in pixel frames, must be
                              1 + 8k (default 57 = 8 latent frames, the
@@ -474,7 +495,7 @@ resolution - stage 1 halves it, so both must be a multiple of 64):
   --frames <N>                video frames, must be 1 + 8k (default 9)
   --width <W> --height <H>    pixels, multiples of 64 (default 64x64)
   --steps <N>                  denoise steps per stage/tile (default 4)
-"#, guidance_help!(), r#"  --seed <S>                   initial-noise/weight/context seed (default: drawn at random and printed)
+"#, guidance_help!(), runtime_help!(), r#"  --seed <S>                   initial-noise/weight/context seed (default: drawn at random and printed)
   --fps <N>                    stage-1 frame rate; the written fps is this
                                times 2^rounds (default 8)
   --base-shift <F>             LTX2Scheduler shift anchor at 1024 tokens (0.95)
@@ -577,7 +598,7 @@ Options:
   --audio-source <wav>      the clip's own soundtrack
   --fps <N>                 the clip's frame rate (default: read from the file)
   --steps <N>               denoise steps (non-distilled checkpoints)
-"#, guidance_help!(), r#"  --sampler <euler|res2s>   denoising loop (default euler; see t2v)
+"#, guidance_help!(), runtime_help!(), r#"  --sampler <euler|res2s>   denoising loop (default euler; see t2v)
   --eta <F>                 sampler noise strength (default 1.0 euler, 0.5
                             res2s)
   --seed <S>                noise seed (default: drawn at random and printed)
@@ -604,7 +625,7 @@ Options:
                             by the duration head, 1-20 s; 5 s without one)
   --steps <N>               denoise steps for a non-distilled checkpoint; the
                             distilled one has a fixed schedule (default 4)
-"#, guidance_help!(), r#"  --sampler <euler|res2s>   denoising loop (default euler; see t2v)
+"#, guidance_help!(), runtime_help!(), r#"  --sampler <euler|res2s>   denoising loop (default euler; see t2v)
   --eta <F>                 sampler noise strength (default 1.0 euler, 0.5
                             res2s)
   --seed <S>                initial-noise seed (default: drawn at random and
@@ -673,7 +694,7 @@ Sampling:
   --steps <N>               denoise steps (default 4; IGNORED for
                             --dit-config ltx25_22b, whose distilled schedule
                             has a fixed shape)
-"#, guidance_help!(), r#"  --seed <S>                noise seed (default: drawn at random and printed)
+"#, guidance_help!(), runtime_help!(), r#"  --seed <S>                noise seed (default: drawn at random and printed)
   --fps <N>                 frame rate for the output. Default: whatever
                             ffprobe reports for --input
   --dit-config <name>       "ltx25_22b" for the real checkpoint (the default
@@ -748,6 +769,9 @@ fn t2v(args: &[String]) -> Result<(), String> {
     // `--frames` has a default, so "was it given" cannot be read back off the
     // value - and refusing `--scene` alongside it depends on knowing.
     let mut frames_given = false;
+    // The long-form plan's own settings ([`LongOpts`]).
+    let mut max_window_tokens = ltxv::longform::LONGFORM_MAX_TOKENS;
+    let mut stage_major = true;
     // Which settings the command line names; the rest come from what is
     // configured (`ltxv::pipeline::resolve_defaults`).
     let mut named = Named::default();
@@ -784,6 +808,18 @@ fn t2v(args: &[String]) -> Result<(), String> {
                 named.fps = true;
             }
             f if guidance_flag(f) => set_guidance(&mut o.guidance, f, need(i)?)?,
+            f if runtime_switch(f) => {
+                set_runtime_switch(&mut o.runtime, f);
+                i += 1;
+                continue;
+            }
+            f if runtime_flag(f) => set_runtime(&mut o.runtime, f, need(i)?)?,
+            "--max-window-tokens" => max_window_tokens = num(i, "--max-window-tokens")?.max(1),
+            "--window-major" => {
+                stage_major = false;
+                i += 1;
+                continue;
+            }
             "--base-shift" => o.base_shift = dbl(i, "--base-shift")?,
             "--max-shift" => o.max_shift = dbl(i, "--max-shift")?,
             "--terminal" => o.terminal = dbl(i, "--terminal")?,
@@ -873,7 +909,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
         let vcfg = ltxv::LtxVaeConfig::conv25();
         vcfg.latent_frames(context_frames as u32).ok_or_else(|| format!("--context-frames {context_frames} is not of the form 1 + 8k"))? as usize
     };
-    let long = LongOpts { context_latent_frames: context_latents, max_window_tokens: ltxv::longform::max_window_tokens_from_env(), max_refine_tokens: ltxv::pipeline::REFINE_MAX_TOKENS, base: o.clone() };
+    let long = LongOpts { context_latent_frames: context_latents, max_window_tokens, max_refine_tokens: ltxv::pipeline::REFINE_MAX_TOKENS, stage_major, base: o.clone() };
     // The plan decides what this run actually is, so it is resolved before
     // the preview line rather than after: a multi-window clip's per-forward
     // token count is one WINDOW's, and reporting the whole clip's would name
@@ -915,7 +951,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     // the run actually denoises with cannot disagree about which arm ran.
     // That matters because "it should be faster now" is not evidence and this
     // banner is what a reader checks instead.
-    let dit_desc = ltxv::pipeline::av_arm_label(o.dit_config != "tiny", o.audio, ltxv::pipeline::av_fp32_reference());
+    let dit_desc = ltxv::pipeline::av_arm_label(o.dit_config != "tiny", o.audio, o.runtime.av_fp32_reference);
     let ctx_desc = if paths.text_encoder.is_some() { "real Gemma-4 text encoder" } else { "stub text context (no real encoder)" };
     let audio_desc = if o.audio {
         format!(", +{} audio tokens ({:.2}s of 48 kHz stereo, denoised jointly)", ltxv::audio::latent_frames(o.frames, o.fps), o.frames as f32 / o.fps as f32)
@@ -936,7 +972,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     // requested one - say so, since otherwise this line reports a token
     // count no forward in the run actually has (see the Stages section of
     // `--help`).
-    let stage_desc = if ltxv::pipeline::should_two_stage(tokens, o.width, o.height, o.dit_config == "ltx25_22b") {
+    let stage_desc = if ltxv::pipeline::should_two_stage(tokens, o.width, o.height, o.dit_config == "ltx25_22b", o.runtime.two_stage) {
         format!(" [two-stage: {} tokens at {}x{}, then {} refinement steps at {tokens} tokens]", tokens / 4, o.width / 2, o.height / 2, ltxv::pipeline::LTX2_STAGE2_STEPS)
     } else {
         String::new()
@@ -1037,6 +1073,12 @@ fn extend(args: &[String]) -> Result<(), String> {
             "--fps" => fps = Some(num(i, "--fps")?),
             "--steps" => o.base.steps = num(i, "--steps")?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            f if runtime_switch(f) => {
+                set_runtime_switch(&mut o.base.runtime, f);
+                i += 1;
+                continue;
+            }
+            f if runtime_flag(f) => set_runtime(&mut o.base.runtime, f, need(i)?)?,
             "--sampler" => o.base.sampler = Sampler::parse(need(i)?)?,
             "--eta" => eta = Some(dbl(i, "--eta")?),
             "--dit-config" => {
@@ -1106,6 +1148,12 @@ fn t2a(args: &[String]) -> Result<(), String> {
             "--seconds" => o.seconds = Some(dbl(i, "--seconds")?),
             "--steps" => o.base.steps = need(i)?.parse().map_err(|e| format!("--steps: {e}"))?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            f if runtime_switch(f) => {
+                set_runtime_switch(&mut o.base.runtime, f);
+                i += 1;
+                continue;
+            }
+            f if runtime_flag(f) => set_runtime(&mut o.base.runtime, f, need(i)?)?,
             "--sampler" => o.base.sampler = Sampler::parse(need(i)?)?,
             "--eta" => eta = Some(dbl(i, "--eta")?),
             "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
@@ -1219,6 +1267,12 @@ fn upscale(args: &[String]) -> Result<(), String> {
             "--refine-steps" => o.refine_steps = num(i, "--refine-steps")?,
             "--context-frames" => context_frames = num(i, "--context-frames")?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            f if runtime_switch(f) => {
+                set_runtime_switch(&mut o.base.runtime, f);
+                i += 1;
+                continue;
+            }
+            f if runtime_flag(f) => set_runtime(&mut o.base.runtime, f, need(i)?)?,
             "--fps" => fps = Some(num(i, "--fps")?),
             "--dit-config" => {
                 o.base.dit_config = need(i)?.clone();
@@ -1373,6 +1427,12 @@ fn v2v(args: &[String]) -> Result<(), String> {
             "--strength" => o.strength = flt(i, "--strength")?,
             "--steps" => o.base.steps = num(i, "--steps")?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            f if runtime_switch(f) => {
+                set_runtime_switch(&mut o.base.runtime, f);
+                i += 1;
+                continue;
+            }
+            f if runtime_flag(f) => set_runtime(&mut o.base.runtime, f, need(i)?)?,
             "--fps" => fps = Some(num(i, "--fps")?),
             "--dit-config" => {
                 o.base.dit_config = need(i)?.clone();
@@ -1480,6 +1540,12 @@ fn dfr(args: &[String]) -> Result<(), String> {
             "--steps" => o.base.steps = num(i, "--steps")?,
             "--fps" => o.base.fps = num(i, "--fps")?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            f if runtime_switch(f) => {
+                set_runtime_switch(&mut o.base.runtime, f);
+                i += 1;
+                continue;
+            }
+            f if runtime_flag(f) => set_runtime(&mut o.base.runtime, f, need(i)?)?,
             "--base-shift" => o.base.base_shift = dbl(i, "--base-shift")?,
             "--max-shift" => o.base.max_shift = dbl(i, "--max-shift")?,
             "--terminal" => o.base.terminal = dbl(i, "--terminal")?,
@@ -1557,6 +1623,51 @@ fn dfr(args: &[String]) -> Result<(), String> {
         }),
     )?;
     Ok(())
+}
+
+/// Whether `flag` is one of the valued execution flags [`set_runtime`] parses.
+fn runtime_flag(flag: &str) -> bool {
+    matches!(flag, "--resident-blocks" | "--two-stage" | "--vae-tiling" | "--text-precision" | "--text-cache-max-bytes" | "--latent-dump")
+}
+
+/// Whether `flag` is one of the bare execution switches [`set_runtime_switch`] applies.
+fn runtime_switch(flag: &str) -> bool {
+    matches!(flag, "--no-text-cache" | "--av-fp32-reference")
+}
+
+/// Apply one valued execution flag to `rt`.
+fn set_runtime(rt: &mut ltxv::pipeline::Runtime, flag: &str, value: &str) -> Result<(), String> {
+    let on_off = |v: &str| match v {
+        "on" | "1" | "true" => Ok(true),
+        "off" | "0" | "false" => Ok(false),
+        other => Err(format!("{flag}: '{other}' is not on or off")),
+    };
+    let count = |v: &str| v.parse::<u64>().map_err(|e| format!("{flag} '{v}': {e}"));
+    match flag {
+        "--resident-blocks" => rt.resident_blocks = Some(u32::try_from(count(value)?).map_err(|e| format!("{flag}: {e}"))?),
+        "--two-stage" => rt.two_stage = Some(on_off(value)?),
+        "--vae-tiling" => rt.vae_tiling = Some(on_off(value)?),
+        "--text-precision" => {
+            rt.text_precision = Some(match value {
+                "fp32" | "f32" => ltxv::pipeline::TextPrecision::Fp32,
+                "int8" | "i8" => ltxv::pipeline::TextPrecision::Int8,
+                other => return Err(format!("{flag}: '{other}' is not fp32 or int8")),
+            })
+        }
+        "--text-cache-max-bytes" => rt.text_cache.max_bytes = count(value)?.max(1),
+        "--latent-dump" => rt.latent_dump = Some(value.to_string()),
+        other => unreachable!("{other} is not a runtime flag"),
+    }
+    Ok(())
+}
+
+/// Apply one bare execution switch to `rt`.
+fn set_runtime_switch(rt: &mut ltxv::pipeline::Runtime, flag: &str) {
+    match flag {
+        "--no-text-cache" => rt.text_cache.enabled = false,
+        "--av-fp32-reference" => rt.av_fp32_reference = true,
+        other => unreachable!("{other} is not a runtime switch"),
+    }
 }
 
 /// Whether `flag` is one of the guidance flags [`set_guidance`] parses.
@@ -1744,6 +1855,21 @@ mod tests {
             assert!(super::EXTEND_HELP.contains(flag), "{flag} is parsed but not in extend --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in extend --help but not parsed");
         }
+    }
+
+    /// The execution flags every generating subcommand parses through one
+    /// helper are documented in every one of their helps.
+    #[test]
+    fn every_runtime_flag_is_documented_on_every_command() {
+        let src = include_str!("ltxv_cli.rs");
+        for flag in ["--resident-blocks", "--two-stage", "--vae-tiling", "--text-precision", "--text-cache-max-bytes", "--latent-dump", "--no-text-cache", "--av-fp32-reference"] {
+            assert!(super::runtime_flag(flag) || super::runtime_switch(flag), "{flag} is documented but not parsed");
+            assert!(src.contains(&format!("\"{flag}\"")));
+            for (name, help) in [("t2v", super::HELP), ("upscale", super::UPSCALE_HELP), ("v2v", super::V2V_HELP), ("dfr", super::DFR_HELP), ("t2a", super::T2A_HELP), ("extend", super::EXTEND_HELP)] {
+                assert!(help.contains(flag), "{flag} is parsed but not in {name} --help");
+            }
+        }
+        assert!(super::HELP.contains("--max-window-tokens") && super::HELP.contains("--window-major"));
     }
 
     /// The same self-check for `t2a`.

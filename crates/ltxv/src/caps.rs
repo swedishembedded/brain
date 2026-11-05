@@ -295,6 +295,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         adapters: adapters_from(inv),
         reference: None,
         refine_in_context: false,
+        runtime: Default::default(),
     };
     use crate::vae3d::LtxVaeConfig;
     let vcfg = LtxVaeConfig::conv25();
@@ -323,7 +324,7 @@ pub fn generate_on(paths: &Paths, inv: &Invocation, p: &GenParams, progress: &mu
     // simply works instead of failing at buffer creation.
     let base = resolved_opts(paths, &prompt, p)?;
     let seed = base.seed;
-    let o = crate::pipeline::LongOpts { max_window_tokens: crate::longform::max_window_tokens_from_env(), base, ..Default::default() };
+    let o = crate::pipeline::LongOpts { base, ..Default::default() };
     let (video, timings) = crate::pipeline::generate_long(paths, &prompt, &o, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
     Ok(video_outcome(&video, &timings, seed))
 }
@@ -495,6 +496,7 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
         adapters: adapters_from(inv),
         reference: None,
         refine_in_context: false,
+        runtime: Default::default(),
     };
     let temporal_upsample_rounds = inv.get_i64("temporal_upsample_rounds").unwrap_or(0).max(0) as usize;
     let opts = DfrOpts { base, temporal_upsample_rounds };

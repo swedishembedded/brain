@@ -465,7 +465,7 @@ store (see "Getting the weights").
   arms are reproducible side by side with the `ltxv_bench streamed-av` and
   `ltxv_bench av` harnesses. It stays `[~]` and off by default because the
   audio-visual path has no training support.
-* **`BRAIN_LTXV_AV_FP32=1` picks the other arm.** The eager host-fp32
+* **`--av-fp32-reference` picks the other arm.** The eager host-fp32
   audio-visual denoiser is the reference the quantized one is gated and
   measured against, and it is still reachable - the same model at higher
   precision, needing the whole checkpoint expanded to fp32 in host RAM and

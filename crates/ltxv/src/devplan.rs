@@ -72,8 +72,8 @@
 //! that published a ceiling gets a refusal rather than a driver-level
 //! out-of-memory abort. Note that ceiling is a TOTAL across all cards, not a
 //! per-card one, so a concurrent pair charges it twice; an operator who sized
-//! `--limit-vram-total` for one card should either raise it or set
-//! `BRAIN_LTXV_CFG_PARALLEL=0`.
+//! `--limit-vram-total` for one card should either raise it or confine the
+//! run to one card (`--device gpu0`).
 //!
 //! `crates/catalog/src/resident_ltxv.rs` already declines `Auto` for the case it
 //! CAN see: a batch of several concurrent generations gives each request one
@@ -128,16 +128,6 @@ impl Placement {
     }
 }
 
-/// Opt out of concurrent CFG dispatch without changing any code path:
-/// `BRAIN_LTXV_CFG_PARALLEL=0` forces [`DevicePlan::Auto`] to resolve
-/// `Single`. Deliberately an opt-OUT: the concurrent path is gated
-/// bit-identical, so the two-card shape is the right default on hardware that
-/// has two cards, and the escape hatch exists for bisecting a suspected
-/// driver problem, not for routine use.
-fn cfg_parallel_enabled() -> bool {
-    !matches!(std::env::var("BRAIN_LTXV_CFG_PARALLEL").as_deref(), Ok("0") | Ok("false") | Ok("off"))
-}
-
 impl DevicePlan {
     /// Resolve against this machine's schedulable set and this thread's
     /// current selection.
@@ -161,9 +151,6 @@ impl DevicePlan {
     /// `Single`. See this module's doc for why the base card is the CURRENT
     /// selection rather than a hardcoded 0.
     fn auto() -> Placement {
-        if !cfg_parallel_enabled() {
-            return Placement::single();
-        }
         let set = devices::ambient_compute_set();
         if set.backend == devices::Backend::Cpu || set.gpus.len() < 2 {
             return Placement::single();
@@ -233,7 +220,7 @@ mod tests {
     fn auto_stays_inside_the_schedulable_set() {
         let p = DevicePlan::Auto.resolve(None);
         let set = devices::ambient_compute_set();
-        if set.backend == devices::Backend::Cpu || set.gpus.len() < 2 || !cfg_parallel_enabled() {
+        if set.backend == devices::Backend::Cpu || set.gpus.len() < 2 {
             assert_eq!(p, Placement::single(), "fewer than two schedulable cards must resolve Single");
             return;
         }

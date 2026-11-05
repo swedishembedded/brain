@@ -293,18 +293,17 @@ fn the_fused_channel_norm_changes_no_bit_of_a_real_weight_decode() {
     );
 }
 
-/// Temporary bisection aid (`BRAIN_LTXV_VAE_TAPS` regenerated with `--taps`):
+/// Temporary bisection aid (the golden regenerated with `--taps`):
 /// compares every `dec.*` per-block tap against the golden's `tap_dec.*` to
 /// find the first divergent stage. Not part of the permanent suite - `#[ignore]`d.
 #[test]
 #[ignore]
 fn debug_decoder_taps_bisect() {
-    std::env::set_var("BRAIN_LTXV_VAE_TAPS", "1");
     let Some((w, fx)) = setup(9) else { return };
     let cfg = LtxVaeConfig::conv25();
     let ls = fx.shape("latent").to_vec();
     let (lt, lh, lw) = (ls[1] as u32, ls[2] as u32, ls[3] as u32);
-    let dec = LtxVaeDecoder::build(&cfg, w, lt, lh, lw, None);
+    let dec = LtxVaeDecoder::build_with_taps(&cfg, w, lt, lh, lw, None);
     let _ = dec.decode(fx.get("latent"));
     let names = [
         "dec.conv_in",

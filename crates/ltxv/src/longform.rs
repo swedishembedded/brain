@@ -145,25 +145,10 @@ pub const CONTEXT_FRAMES: usize = 1 + 8 * (CONTEXT_LATENT_FRAMES - 1);
 /// takes the reference's two-stage shape exactly as a single-window request
 /// of the same size already does.
 ///
-/// `BRAIN_LTXV_LONGFORM_MAX_TOKENS` overrides it, which is also how a card
-/// with a different binding size gets a usable plan.
+/// A request's `LongOpts::max_window_tokens` (`--max-window-tokens`)
+/// overrides it, which is also how a card with a different binding size gets
+/// a usable plan.
 pub const LONGFORM_MAX_TOKENS: usize = 13200;
-
-/// [`LONGFORM_MAX_TOKENS`], or `BRAIN_LTXV_LONGFORM_MAX_TOKENS` when it names
-/// a usable number. A value that does not parse, or is zero, is ignored with
-/// a warning rather than silently taken as "no windows are legal".
-pub fn max_window_tokens_from_env() -> usize {
-    match std::env::var("BRAIN_LTXV_LONGFORM_MAX_TOKENS").ok().as_deref().map(str::trim) {
-        Some(v) if !v.is_empty() => match v.parse::<usize>() {
-            Ok(n) if n > 0 => n,
-            _ => {
-                tracing::warn!(value = v, "BRAIN_LTXV_LONGFORM_MAX_TOKENS is not a positive integer; using the built-in ceiling");
-                LONGFORM_MAX_TOKENS
-            }
-        },
-        _ => LONGFORM_MAX_TOKENS,
-    }
-}
 
 /// One denoising window of a long-form generation.
 ///

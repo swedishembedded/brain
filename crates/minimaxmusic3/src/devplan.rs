@@ -145,9 +145,6 @@ impl Placement {
 /// that has two cards, and the escape hatch exists for bisecting a
 /// suspected driver problem or for an operator whose
 /// `--limit-vram-total` was sized for one card, not for routine use.
-///
-/// Matches `ltxv::devplan`'s `BRAIN_LTXV_CFG_PARALLEL` convention, spelling
-/// included.
 pub fn cfg_parallel_enabled() -> bool {
     !matches!(std::env::var("BRAIN_MINIMAXMUSIC3_CFG_PARALLEL").as_deref(), Ok("0") | Ok("false") | Ok("off"))
 }

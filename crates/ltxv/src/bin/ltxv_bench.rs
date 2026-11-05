@@ -62,7 +62,7 @@
 //! Usage:
 //!   ltxv_bench dit [reps] [layers] [tokens] [ctx_len]     video DiT block stack (fp32, synthetic weights)
 //!   ltxv_bench vae [reps] [frames] [height] [width]       real video VAE decode, WHOLE-clip path only (past `ltxv::vae3d::should_tile`'s ceiling a generation tiles instead, which this does not measure - it says so and stops rather than reporting a number for a path production would not take)
-//!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache] [resident] [distinct_timesteps] [warm_reps]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape); resident=1 additionally shares ONE device session, so a warm call re-uploads nothing (a real generation's actual shape - see crate::devres); distinct_timesteps sizes the host adaLN stage (1 = plain t2v, 2 = anchored or long-form, tokens = no dedup at all, i.e. what this stage cost before the dedup existed); warm_reps repeats the cache-hit call so a headline is a best-of-N and not one sample (the first warm call is the warm-up and is excluded)
+//!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache] [resident] [distinct_timesteps] [warm_reps] [resident_blocks]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape); resident=1 additionally shares ONE device session, so a warm call re-uploads nothing (a real generation's actual shape - see crate::devres); distinct_timesteps sizes the host adaLN stage (1 = plain t2v, 2 = anchored or long-form, tokens = no dedup at all, i.e. what this stage cost before the dedup existed); warm_reps repeats the cache-hit call so a headline is a best-of-N and not one sample (the first warm call is the warm-up and is excluded); resident_blocks fixes the resident window's size instead of planning it from free VRAM
 //!   ltxv_bench streamed-av [layers] [video_tokens] [ctx_len] [audio_tokens] [reuse_cache] [resident] [distinct_timesteps] [warm_reps]  the same, for the JOINT audio+video forward - read against `streamed` at the same video token count to get what audio costs
 //!   ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]   decode a DUMPED latent (see ltxv::latentdump), optionally a latent-cell crop
 //!
@@ -73,7 +73,7 @@
 //! A generation is two stages that fail in visually identical ways - a bad
 //! latent and a bad decode both look like smeared, warped video. `decode`
 //! separates them: it takes a latent dumped by
-//! `BRAIN_LTXV_LATENT_DUMP=<path>` on a real run and decodes it AGAIN,
+//! `--latent-dump <path>` on a real run and decodes it AGAIN,
 //! through either path, at either a full or a cropped extent, printing the
 //! per-latent-frame latent statistics and the per-pixel-frame
 //! frame-to-frame difference curve. Two `decode` runs over the SAME dump
@@ -223,11 +223,11 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
     // ends in a wgpu out-of-memory panic that leaks the device - a stack
     // trace where the honest answer is one line, and worse, a number from a
     // smaller run that silently reads as production's.
-    if ltxv::vae3d::should_tile(frames, height, width) {
+    if ltxv::vae3d::should_tile(frames, height, width, None) {
         let px = frames as u64 * height as u64 * width as u64;
         println!(
             "this geometry is {:.1} Mpx, past the {:.1} Mpx whole-decode ceiling, so a real generation TILES here and this bench would not measure it.\n\
-             Bench a geometry under the ceiling, or set BRAIN_LTXV_VAE_TILE=0 to force the whole path and measure it anyway (expect an out-of-memory abort if it does not fit).",
+             Bench a geometry under the ceiling.",
             px as f64 / 1e6,
             ltxv::vae3d::WHOLE_DECODE_MAX_PIXELS as f64 / 1e6,
         );
@@ -251,7 +251,7 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
 
 // ---------------------------------------------------------------- decode ---
 
-/// Decode a latent dumped by `BRAIN_LTXV_LATENT_DUMP` (see
+/// Decode a latent dumped by `--latent-dump` (see
 /// [`ltxv::latentdump`]) through an explicitly chosen path, over an optional
 /// latent-cell crop, and print what the two halves of a generation each
 /// contribute to a temporal-stability defect: the per-latent-frame latent
@@ -480,7 +480,7 @@ fn report_call(label: &str, layers: u32, wall: f64, device_ms: Option<f64>, prev
 /// a cheap sanity check this bench had none of before: a degenerate
 /// (all-zero, saturated, or NaN) DiT output is visible here without needing
 /// a full generation + VAE decode to notice.
-fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident: bool, distinct_timesteps: u32, warm_reps: u32) {
+fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident: bool, distinct_timesteps: u32, warm_reps: u32, resident_blocks: Option<u32>) {
     let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
     // stage_time (gpu_core::profile) only prints with profiling on; this
     // bench's whole purpose is that breakdown, so turn it on unconditionally.
@@ -528,7 +528,10 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
     // environment measures exactly what it measured before.
     let dev: Option<&str> = None;
     let session = if resident {
-        ltxv::devres::DitSession::resident(&cfg, ltxv::block::QTier::Int8, dev, t as usize)
+        match resident_blocks {
+            Some(n) => ltxv::devres::DitSession::resident_with_slots(dev, n.min(cfg.num_layers)),
+            None => ltxv::devres::DitSession::resident(&cfg, ltxv::block::QTier::Int8, dev, t as usize),
+        }
     } else {
         ltxv::devres::DitSession::transient(dev)
     };
@@ -853,7 +856,7 @@ fn main() {
         "vae" => bench_vae(arg(2, 2) as usize, arg(3, 17), arg(4, 384), arg(5, 384)),
         "vocoder" => bench_vocoder(arg(2, 3) as usize, arg(3, 100)),
         "av" => bench_av(arg(2, 880), arg(3, 256), arg(4, 25), arg(5, 24)),
-        "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false), a.get(6).map(|s| s == "1").unwrap_or(false), arg(7, 1), arg(8, 1)),
+        "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false), a.get(6).map(|s| s == "1").unwrap_or(false), arg(7, 1), arg(8, 1), a.get(9).map(|s| s.parse().unwrap_or_else(|e| panic!("resident_blocks {s:?}: {e}")))),
         "streamed-av" => bench_streamed_av(arg(2, 4), arg(3, 512), arg(4, 256), arg(5, 128), a.get(6).map(|s| s == "1").unwrap_or(false), a.get(7).map(|s| s == "1").unwrap_or(false), arg(8, 1), arg(9, 1)),
         "decode" => {
             let path = a.get(2).map(|s| s.as_str()).unwrap_or_else(|| panic!("usage: ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]"));

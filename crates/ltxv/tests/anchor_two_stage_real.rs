@@ -74,7 +74,7 @@ fn write_still(dir: &std::path::Path, frame: &[u8]) -> String {
 }
 
 fn base_opts() -> GenOpts {
-    GenOpts { frames: FRAMES, width: WIDTH, height: HEIGHT, seed: SEED, fps: FPS, eta: 1.0, guidance: ltxv::guidance::Guidance::cfg(1.0), dit_config: "ltx25_22b".into(), device: Some("gpu".into()), ..GenOpts::default() } // seed: anchor-versus-source margins were measured on the real 22B checkpoint at this shape and seed (ignored, needs weights; not run)
+    GenOpts { frames: FRAMES, width: WIDTH, height: HEIGHT, seed: SEED, fps: FPS, eta: 1.0, guidance: ltxv::guidance::Guidance::cfg(1.0), dit_config: "ltx25_22b".into(), device: Some("gpu".into()), runtime: ltxv::pipeline::Runtime { two_stage: Some(true), ..Default::default() }, ..GenOpts::default() } // seed: anchor-versus-source margins were measured on the real 22B checkpoint at this shape and seed (ignored, needs weights; not run)
 }
 
 /// Same bounds `anchor_real.rs` calibrated for the single-stage path. Not
@@ -94,9 +94,6 @@ fn a_start_frame_anchor_survives_the_two_stage_refinement() {
     if paths.spatial_upsampler.is_none() {
         return brain_testutil::skip("set BRAIN_LTXV_UPSAMPLER_SPATIAL to the real spatial x2 latent upscaler - the two-stage path needs it");
     }
-    // SAFETY (test-only): this is the only test in this binary that reads or
-    // writes this variable.
-    unsafe { std::env::set_var("BRAIN_LTXV_TWO_STAGE", "1") };
     let cancel = capability::CancelToken::default();
 
     let (seed_video, _) = generate(&paths, PROMPT, &base_opts(), &cancel, |_, _, _| {}).expect("unconditioned run (source of the anchor)");
@@ -107,7 +104,6 @@ fn a_start_frame_anchor_survives_the_two_stage_refinement() {
     let o = GenOpts { start_frame: Some(still), ..base_opts() };
     let (video, timings) = generate(&paths, PROMPT, &o, &cancel, |_, _, _| {}).expect("image-to-video run, forced two-stage");
     let _ = std::fs::remove_dir_all(&dir);
-    unsafe { std::env::remove_var("BRAIN_LTXV_TWO_STAGE") };
     assert_eq!(video.frames.len(), FRAMES);
 
     let anchor_sat = mean_saturation(&anchor);

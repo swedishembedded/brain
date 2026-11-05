@@ -22,8 +22,8 @@
 //! steps.
 //!
 //! What survives here is the arm the quantized path is *measured and gated
-//! against*, reached by setting `BRAIN_LTXV_AV_FP32=1`
-//! (`crate::pipeline::av_fp32_reference`) and by `ltxv_bench av`. Without a
+//! against*, reached by a request's `Runtime::av_fp32_reference`
+//! (`--av-fp32-reference`) and by `ltxv_bench av`. Without a
 //! switch, an A/B compares the quantized path against itself and reports a
 //! meaningless parity - which looks like evidence and is not. It is the same
 //! shape as `model::block::set_flash_cross`, and it exists for the same three reasons:
@@ -86,7 +86,7 @@ impl AvWeights {
         let margin = want / 8;
         if avail < want + margin {
             return Err(format!(
-                "ltxv: BRAIN_LTXV_AV_FP32 asked for the host-fp32 audio+video reference arm, which needs the whole DiT expanded to fp32 ({} GiB, plus headroom); only {} GiB is available. Unset it to denoise on the quantized, device-resident path instead",
+                "ltxv: --av-fp32-reference asked for the host-fp32 audio+video reference arm, which needs the whole DiT expanded to fp32 ({} GiB, plus headroom); only {} GiB is available. Drop it to denoise on the quantized, device-resident path instead",
                 want / (1 << 30),
                 avail / (1 << 30)
             ));

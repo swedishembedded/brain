@@ -88,13 +88,12 @@ pub fn read(path: &str) -> Result<(LatentShape, Vec<f32>), String> {
     Ok((shape, data))
 }
 
-/// If `BRAIN_LTXV_LATENT_DUMP` is set, write the latent about to be decoded to
-/// that path. A dump failure is traced, never fatal: this is diagnostic
-/// plumbing on the path of a 35-minute generation and must not be able to
-/// destroy one.
-pub fn dump_if_requested(shape: LatentShape, data: &[f32]) {
-    let Ok(path) = std::env::var("BRAIN_LTXV_LATENT_DUMP") else { return };
-    match write(&path, shape, data) {
+/// Write the latent about to be decoded to `path` (a request's
+/// `Runtime::latent_dump`). A dump failure is traced, never fatal: this is
+/// diagnostic plumbing on the path of a 35-minute generation and must not be
+/// able to destroy one.
+pub fn dump(path: &str, shape: LatentShape, data: &[f32]) {
+    match write(path, shape, data) {
         Ok(()) => tracing::info!(path, ?shape, "wrote final latent"),
         Err(e) => tracing::warn!(error = %e, "latent dump failed (generation continues)"),
     }

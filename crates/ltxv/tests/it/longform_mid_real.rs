@@ -98,7 +98,7 @@ fn write_still(dir: &std::path::Path, name: &str, frame: &[u8]) -> String {
 /// and decides the motion, the detail is refined across windows, which is
 /// the shape real 720p runs take.
 fn long_opts(base: GenOpts) -> LongOpts {
-    LongOpts { context_latent_frames: 2, max_window_tokens: 512, max_refine_tokens: 640, base }
+    LongOpts { context_latent_frames: 2, max_window_tokens: 512, max_refine_tokens: 640, stage_major: true, base }
 }
 
 #[test]

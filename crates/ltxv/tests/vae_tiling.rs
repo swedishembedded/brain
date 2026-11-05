@@ -289,9 +289,7 @@ fn sharing_one_device_and_one_weight_set_across_tile_shapes_changes_no_bit() {
         dec.plan().tiles().iter().map(|t| (t.t.src_len(), t.h.src_len(), t.w.src_len())).collect();
     assert!(shapes.len() > 1, "this gate needs a plan with more than one distinct tile shape, got {shapes:?}");
 
-    std::env::set_var("BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS", "1");
-    let unshared = dec.decode(&latent);
-    std::env::remove_var("BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS");
+    let unshared = dec.decode_per_shape_devices(&latent);
     let shared = dec.decode(&latent);
 
     let differing = unshared.iter().zip(&shared).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
@@ -483,7 +481,7 @@ mod real_1080p {
         let Some(w) = require_weights() else { return };
         let cfg = LtxVaeConfig::conv25();
         let (f, h, wd) = ((1 + 8 * (lt - 1)) as usize, (lh * 32) as usize, (lw * 32) as usize);
-        assert!(ltxv::vae3d::should_tile(f as u32, h as u32, wd as u32) || std::env::var("BRAIN_LTXV_VAE_TILE").is_ok(), "{f}f at {wd}x{h} is not a shape that needs tiling - this gate would prove nothing");
+        assert!(ltxv::vae3d::should_tile(f as u32, h as u32, wd as u32, None), "{f}f at {wd}x{h} is not a shape that needs tiling - this gate would prove nothing");
         let latent = structured_latent(cfg.latent_channels as usize, lt as usize, lh as usize, lw as usize);
 
         let tiled = LtxVaeTiledDecoder::auto(&cfg, w, lt, lh, lw, Some("gpu"));

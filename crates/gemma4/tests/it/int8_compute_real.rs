@@ -204,7 +204,7 @@ fn int8_is_requested_and_resolved_against_the_device_never_assumed() {
 ///
 /// Both arms read the SAME quantized file, so the only difference is the
 /// arithmetic - which is exactly the comparison wanted, and is why
-/// `BRAIN_LTXV_TEXT_PRECISION` exists on the pipeline side too. Comparing an
+/// `ltxv::pipeline::Runtime::text_precision` (`--text-precision`) exists on the pipeline side too. Comparing an
 /// int8 GGUF forward against a bf16 safetensors forward would confound the
 /// tier with the storage format.
 #[test]

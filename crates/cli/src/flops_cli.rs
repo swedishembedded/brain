@@ -1127,7 +1127,7 @@ fn flux2_vae_stage(lh: usize, lw: usize, real: Option<&str>) -> Stage {
 /// runs nothing.
 fn ltxv_vae_stage(lat_t: usize, lh: usize, lw: usize, frames: u32, h: u32, w: u32) -> Stage {
     let cfg = ltxv::vae3d::LtxVaeConfig::conv25();
-    let tiled = ltxv::vae3d::should_tile(frames, h, w);
+    let tiled = ltxv::vae3d::should_tile(frames, h, w, None);
     let ts: vae::blocks::Tensors = cfg
         .tensor_manifest()
         .into_iter()

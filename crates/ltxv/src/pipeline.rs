@@ -40,7 +40,7 @@
 //! the same forwards, on the same int8/streamed/device-resident path
 //! ([`RealAvDit`], [`crate::dit::av_forward_q_streamed_in`]). The eager
 //! host-fp32 arm that one is gated and measured against is still reachable,
-//! behind `BRAIN_LTXV_AV_FP32` - see [`av_fp32_reference`]; which of the two
+//! behind [`Runtime::av_fp32_reference`]; which of the two
 //! a run took is named in its own banner ([`av_arm_label`]).
 //!
 //! Everything else is real: [`ltx2_sigmas`]'s token-count-dependent shift,
@@ -297,7 +297,7 @@ impl Paths {
 /// from 17.43 to 1.31, which is what makes this the latent's defect rather
 /// than the decoder's.
 ///
-/// `BRAIN_LTXV_TWO_STAGE=1`/`0` forces the choice either way, which is also
+/// [`Runtime::two_stage`] (`--two-stage on|off`) forces the choice either way, which is also
 /// how the two paths get compared at a shape that does not need it.
 pub const SINGLE_STAGE_MAX_TOKENS: usize = 6144;
 
@@ -314,17 +314,13 @@ pub const SINGLE_STAGE_MAX_TOKENS: usize = 6144;
 /// * a real distilled checkpoint is in play at all, since the schedule this
 ///   is about is that checkpoint's.
 ///
-/// `BRAIN_LTXV_TWO_STAGE=1`/`0` overrides the token test (never the
+/// `forced` ([`Runtime::two_stage`]) overrides the token test (never the
 /// divisibility one, which is a hard geometric requirement).
-pub fn should_two_stage(tokens: usize, width: usize, height: usize, real_distilled: bool) -> bool {
+pub fn should_two_stage(tokens: usize, width: usize, height: usize, real_distilled: bool, forced: Option<bool>) -> bool {
     if !width.is_multiple_of(64) || !height.is_multiple_of(64) {
         return false;
     }
-    match std::env::var("BRAIN_LTXV_TWO_STAGE").ok().as_deref() {
-        Some("1") | Some("on") | Some("true") => true,
-        Some("0") | Some("off") | Some("false") => false,
-        _ => real_distilled && tokens > SINGLE_STAGE_MAX_TOKENS,
-    }
+    forced.unwrap_or(real_distilled && tokens > SINGLE_STAGE_MAX_TOKENS)
 }
 
 /// Which settings a request named itself - every other one is
@@ -383,6 +379,39 @@ pub fn dit_config_from_name(name: &str) -> Result<LtxDitConfig, String> {
         "ltx25_22b" => Ok(LtxDitConfig::ltx25_22b()),
         other => Err(format!("unknown ltxv dit-config {other:?} (tiny, ltx25_22b)")),
     }
+}
+
+/// The text encoder's arithmetic tiers, as [`Runtime::text_precision`] names them.
+pub use gemma4::Precision as TextPrecision;
+
+/// How a generation runs, as opposed to what it asks for: placement and
+/// arithmetic choices the caller makes explicitly and that travel with the
+/// request, so nothing about a run is decided by process-global state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Runtime {
+    /// DiT blocks each card holds resident across a generation's forwards;
+    /// `None` plans from the card's free VRAM ([`crate::devres::planned_slots`]),
+    /// `Some(0)` streams every block on every forward.
+    pub resident_blocks: Option<u32>,
+    /// Force the reference's two-stage shape on or off; `None` decides from
+    /// the request ([`should_two_stage`]).
+    pub two_stage: Option<bool>,
+    /// Denoise an audio-visual request on the eager host-fp32 reference arm
+    /// ([`crate::av_stream::AvDenoiser`]) instead of the quantized,
+    /// device-resident one - the same model at higher precision, for A/B
+    /// measurement.
+    pub av_fp32_reference: bool,
+    /// Force the tiled VAE decode on or off; `None` is the measured policy
+    /// ([`crate::vae3d::should_tile`]).
+    pub vae_tiling: Option<bool>,
+    /// The text encoder's arithmetic; `None` follows the checkpoint (int8 for
+    /// a quantized GGUF, fp32 for safetensors).
+    pub text_precision: Option<gemma4::Precision>,
+    /// The encoded-prompt disk cache ([`crate::text_cache`]).
+    pub text_cache: crate::text_cache::Policy,
+    /// Write every latent about to be VAE-decoded to this path
+    /// ([`crate::latentdump`]), so the decode can be rerun on its own.
+    pub latent_dump: Option<String>,
 }
 
 /// Everything a single generation varies.
@@ -551,6 +580,8 @@ pub struct GenOpts {
     /// reference's own IC-LoRA recipe: stage 1 runs in context, stage 2 runs
     /// the bare checkpoint.
     pub refine_in_context: bool,
+    /// How the generation runs ([`Runtime`]).
+    pub runtime: Runtime,
 }
 
 /// A reference video for IC-LoRA conditioning: the decoded clip and how
@@ -601,6 +632,7 @@ impl Default for GenOpts {
             adapters: Vec::new(),
             reference: None,
             refine_in_context: false,
+            runtime: Runtime::default(),
         }
     }
 }
@@ -817,7 +849,7 @@ pub struct TextContext {
 }
 
 #[tracing::instrument(level = "info", name = "text_encode", skip_all, fields(prompt_chars = prompt.len(), negative = negative))]
-fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, negative: bool, device: Option<&str>, want_audio: bool) -> Result<TextContext, String> {
+fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, negative: bool, device: Option<&str>, want_audio: bool, runtime: &Runtime) -> Result<TextContext, String> {
     let cross_attention_dim = dit_cfg.cross_attention_dim as usize;
 
     let cfg = gemma4::Gemma4Config::gemma4_12b();
@@ -830,23 +862,13 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, negative:
     // about half the bytes of the bf16 safetensors and a different tier of
     // arithmetic. A `.safetensors` path keeps the original behaviour exactly.
     let quantized = path.ends_with(".gguf");
-    // `BRAIN_LTXV_TEXT_PRECISION=fp32` forces the portable tier over a
-    // quantized checkpoint. Two real uses: comparing the two tiers' output
-    // on the SAME file (which is the only cheap way to get a whole-encoder
-    // fp32-vs-int8 number, since both reads then hit the same bytes), and a
-    // platform whose fast path is fp32 and which therefore wants the smaller
-    // file without the int8 arithmetic. `Precision::for_device` still has
-    // the last word in the other direction - it can refuse int8, never
-    // impose it.
-    let precision = match std::env::var("BRAIN_LTXV_TEXT_PRECISION").ok().as_deref().map(str::trim) {
-        Some("fp32") | Some("f32") => gemma4::Precision::Fp32,
-        Some("int8") | Some("i8") => gemma4::Precision::Int8,
-        Some(other) if !other.is_empty() => {
-            return Err(format!("ltxv real text encoder: BRAIN_LTXV_TEXT_PRECISION='{other}' is not one of fp32, int8"));
-        }
-        _ if quantized => gemma4::Precision::Int8,
-        _ => gemma4::Precision::Fp32,
-    };
+    // `Runtime::text_precision` forces a tier: fp32 over a quantized
+    // checkpoint compares the two tiers' output on the SAME file (the only
+    // cheap whole-encoder fp32-vs-int8 number, since both reads hit the same
+    // bytes) or serves a platform whose fast path is fp32. `Precision::
+    // for_device` still has the last word in the other direction - it can
+    // refuse int8, never impose it.
+    let precision = runtime.text_precision.unwrap_or(if quantized { gemma4::Precision::Int8 } else { gemma4::Precision::Fp32 });
 
     // The cache is checked BEFORE anything is read. On a hit this whole
     // stage - the largest in the pipeline - costs a few megabytes of file
@@ -865,7 +887,7 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, negative:
         audio: want_audio,
         encode_revision: crate::text_cache::ENCODE_REVISION,
     };
-    if let Some(hit) = crate::text_cache::load(&cache_key) {
+    if let Some(hit) = crate::text_cache::load(&cache_key, runtime.text_cache) {
         return Ok(TextContext { cond: hit.ctx_cond, uncond: hit.ctx_uncond, valid: hit.context_valid, len: hit.context_len, a_cond: hit.a_ctx_cond, a_uncond: hit.a_ctx_uncond });
     }
 
@@ -1009,6 +1031,7 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, negative:
             a_ctx_cond: a_ctx_cond.clone(),
             a_ctx_uncond: a_ctx_uncond.clone(),
         },
+        runtime.text_cache,
     );
     Ok(TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, len: context_len, a_cond: a_ctx_cond, a_uncond: a_ctx_uncond })
 }
@@ -1354,7 +1377,7 @@ pub fn tc_to_chw(x: &[f32], c: usize, t: usize, h: usize, w: usize) -> Vec<f32> 
 ///
 /// [`VideoVaeArch::Conv3d`] picks between the whole and tiled paths by
 /// [`crate::vae3d::should_tile`]'s measured output-pixel-volume policy (with
-/// `BRAIN_LTXV_VAE_TILE` as the override). Every shape this port shipped
+/// [`Runtime::vae_tiling`] as the override). Every shape this port shipped
 /// before that change stays on the exact whole path bit for bit; what the
 /// tiled path adds is the shapes that used to abort with a `wgpu`
 /// out-of-memory - 25 frames at 1080p above all, which is 52.2 Mpx against a
@@ -1372,10 +1395,13 @@ pub fn tc_to_chw(x: &[f32], c: usize, t: usize, h: usize, w: usize) -> Vec<f32> 
 /// one clip against the same weights, so neither can be handed ownership
 /// without a ~3 GB host copy.
 #[allow(clippy::too_many_arguments)]
-fn decode_video(vcfg: &LtxVaeConfig, arch: VideoVaeArch, vweights: &vae::blocks::Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>, latent: &[f32], seed: u64) -> Result<(Vec<f32>, usize), String> {
+fn decode_video(vcfg: &LtxVaeConfig, arch: VideoVaeArch, vweights: &vae::blocks::Tensors, lat_t: u32, lh: u32, lw: u32, latent: &[f32], o: &GenOpts) -> Result<(Vec<f32>, usize), String> {
+    let (device, seed) = (o.device.as_deref(), o.seed ^ VAE_DECODE_SEED_SALT);
     let frames = 1 + 8 * (lat_t - 1);
     let (h, w) = (lh * 32, lw * 32);
-    crate::latentdump::dump_if_requested(crate::latentdump::LatentShape { c: (latent.len() / (lat_t * lh * lw) as usize) as u32, t: lat_t, h: lh, w: lw }, latent);
+    if let Some(path) = &o.runtime.latent_dump {
+        crate::latentdump::dump(path, crate::latentdump::LatentShape { c: (latent.len() / (lat_t * lh * lw) as usize) as u32, t: lat_t, h: lh, w: lw }, latent);
+    }
     if arch == VideoVaeArch::NaDiffusion {
         let cfg = crate::na_decoder::NaDecoderConfig::ltx25();
         let gpu = gpu_core::Gpu::open(device, &crate::na_decoder::KERNELS);
@@ -1383,7 +1409,7 @@ fn decode_video(vcfg: &LtxVaeConfig, arch: VideoVaeArch, vweights: &vae::blocks:
         let px = crate::na_decoder::decode(&gpu, vweights, &cfg, latent, lat_t, lh, lw, seed)?;
         return Ok((px, frames as usize));
     }
-    if crate::vae3d::should_tile(frames, h, w) {
+    if crate::vae3d::should_tile(frames, h, w, o.runtime.vae_tiling) {
         let dec = crate::vae3d::LtxVaeTiledDecoder::auto(vcfg, vweights, lat_t, lh, lw, device);
         let n = dec.plan().tiles().len();
         tracing::info!(tiles = n, waste = dec.plan().overlap_waste(), frames, h, w, "VAE decode: tiled (whole-clip decode would not fit)");
@@ -2361,6 +2387,8 @@ struct RealAvDit {
     sessions: std::sync::Mutex<std::collections::HashMap<Option<u32>, std::sync::Arc<crate::devres::AvDitSession>>>,
     /// Block-linear LoRA corrections every session attaches ([`block_adapter`]).
     adapter: Option<SharedAdapter>,
+    /// [`Runtime::resident_blocks`].
+    resident_blocks: Option<u32>,
 }
 
 impl RealAvDit {
@@ -2379,7 +2407,13 @@ impl RealAvDit {
         let key = gpu_core::devices::current_gpu();
         let mut map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(key)
-            .or_insert_with(|| std::sync::Arc::new(crate::devres::AvDitSession::resident(&self.cfg, crate::block::QTier::Int8, self.device.as_deref(), tv).with_adapter(self.adapter.clone())))
+            .or_insert_with(|| {
+                let session = match self.resident_blocks {
+                    Some(n) => crate::devres::AvDitSession::resident_with_slots(self.device.as_deref(), n.min(self.cfg.video.num_layers)),
+                    None => crate::devres::AvDitSession::resident(&self.cfg, crate::block::QTier::Int8, self.device.as_deref(), tv),
+                };
+                std::sync::Arc::new(session.with_adapter(self.adapter.clone()))
+            })
             .clone()
     }
 }
@@ -2477,6 +2511,8 @@ struct RealDit {
     sessions: std::sync::Mutex<std::collections::HashMap<Option<u32>, std::sync::Arc<crate::devres::DitSession>>>,
     /// Block-linear LoRA corrections every session attaches ([`block_adapter`]).
     adapter: Option<SharedAdapter>,
+    /// [`Runtime::resident_blocks`].
+    resident_blocks: Option<u32>,
 }
 
 impl RealDit {
@@ -2490,7 +2526,13 @@ impl RealDit {
         let key = gpu_core::devices::current_gpu();
         let mut map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(key)
-            .or_insert_with(|| std::sync::Arc::new(crate::devres::DitSession::resident(&self.cfg, crate::block::QTier::Int8, self.device.as_deref(), t).with_adapter(self.adapter.clone())))
+            .or_insert_with(|| {
+                let session = match self.resident_blocks {
+                    Some(n) => crate::devres::DitSession::resident_with_slots(self.device.as_deref(), n.min(self.cfg.num_layers)),
+                    None => crate::devres::DitSession::resident(&self.cfg, crate::block::QTier::Int8, self.device.as_deref(), t),
+                };
+                std::sync::Arc::new(session.with_adapter(self.adapter.clone()))
+            })
             .clone()
     }
 }
@@ -3846,10 +3888,10 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, adapters: &
         // block of the same checkpoint are different entries, so the two
         // arms share one cache without either seeing the other's bytes.
         let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
-        if av_fp32_reference() {
+        if o.runtime.av_fp32_reference {
             tracing::warn!(
                 gib = crate::av_stream::host_floats(&cfg) * 4 / (1 << 30),
-                "BRAIN_LTXV_AV_FP32: denoising on the eager host-fp32 audio-visual REFERENCE arm, expanding the whole checkpoint (unset it for the quantized, device-resident path)"
+                "denoising on the eager host-fp32 audio-visual REFERENCE arm, expanding the whole checkpoint (drop --av-fp32-reference for the quantized, device-resident path)"
             );
             let mut w = crate::av_stream::AvWeights::load(&src, cfg)?;
             if let Some(a) = &adapter {
@@ -3869,7 +3911,7 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, adapters: &
             cached_bytes = cs.bytes,
             "real audio-visual DiT ready (both streams, int8 blocks stream per forward)"
         );
-        return Ok(Box::new(RealAvDit { cfg, src, head, device: o.device.clone(), cache, sessions: Default::default(), adapter }));
+        return Ok(Box::new(RealAvDit { cfg, src, head, device: o.device.clone(), cache, sessions: Default::default(), adapter, resident_blocks: o.runtime.resident_blocks }));
     }
     let mut head = crate::dit::load_head_tensors_from_source(&src, &real_cfg);
     let adapter = adapter.map(|a| block_adapter(a, &src, &mut head)).transpose()?;
@@ -3880,7 +3922,7 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, adapters: &
     let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
     let cs = cache.stats();
     tracing::info!(cached_blocks = cs.blocks, cached_bytes = cs.bytes, "checkpoint weight cache attached");
-    Ok(Box::new(RealDit { stream: crate::config::Stream::Video, cfg: real_cfg, src, head, device: o.device.clone(), cache, place, sessions: Default::default(), adapter }))
+    Ok(Box::new(RealDit { stream: crate::config::Stream::Video, cfg: real_cfg, src, head, device: o.device.clone(), cache, place, sessions: Default::default(), adapter, resident_blocks: o.runtime.resident_blocks }))
 }
 
 /// Fold every correction of `adapter` into the fp32 `weights` - exact at
@@ -3963,7 +4005,7 @@ fn build_context(paths: &Paths, prompt: &str, dit_cfg: LtxDitConfig, o: &GenOpts
     // one to spare: the 12B encoder's own device footprint is then released
     // from a card that is not about to hold the denoise loop's activations.
     // See `crate::devplan`.
-    let r = crate::devplan::on_gpu(place.text, || real_text_context(te_path, prompt, &dit_cfg, o.guidance.needs_uncond(o.audio), o.device.as_deref(), o.audio))?
+    let r = crate::devplan::on_gpu(place.text, || real_text_context(te_path, prompt, &dit_cfg, o.guidance.needs_uncond(o.audio), o.device.as_deref(), o.audio, &o.runtime))?
         .inspect(|c| tracing::info!(context_len = c.len, audio = c.a_cond.is_some(), "prompt encoded"))
         .inspect_err(|e| tracing::error!(path = %te_path, error = %e, "text encoding failed"))?;
     *text_encode_secs = te_t.elapsed().as_secs_f32();
@@ -3980,7 +4022,7 @@ fn build_context(paths: &Paths, prompt: &str, dit_cfg: LtxDitConfig, o: &GenOpts
 fn check_audio_request(paths: &Paths, o: &GenOpts) -> Result<(), String> {
     check_audio_inputs(paths, o)?;
     if o.audio {
-        check_av_host_memory(&LtxAvDitConfig::ltx25(), av_fp32_reference())?;
+        check_av_host_memory(&LtxAvDitConfig::ltx25(), o.runtime.av_fp32_reference)?;
     }
     Ok(())
 }
@@ -4016,28 +4058,6 @@ fn check_audio_inputs(paths: &Paths, o: &GenOpts) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// `BRAIN_LTXV_AV_FP32=1` routes an audio-visual generation through the eager
-/// host-fp32 reference arm ([`crate::av_stream::AvDenoiser`]) instead of the
-/// quantized, device-resident one ([`RealAvDit`]).
-///
-/// Same shape as `model::block::set_flash_cross`, and there for the same three reasons:
-/// the A/B a measurement of the quantized arm needs (without a switch, an A/B
-/// on a capable machine compares the quantized path against itself and reports
-/// a meaningless parity), a reference definition of the math that the
-/// tiny-config parity suite proves against, and a fallback if the quantized
-/// arm ever misbehaves. It is NOT a tuning knob: the two arms compute the same
-/// model at different precisions, and the fp32 one costs several times as much
-/// wall clock and twice the host RAM.
-///
-/// Read once per process, for the reason `no_flash_cross` is: the routing must
-/// be a pure function of its inputs for a given run, or a generation could
-/// build one arm and report the other. Which arm a set of inputs selects is
-/// otherwise pure - see [`av_arm_label`], which is what the CLI banner prints.
-pub fn av_fp32_reference() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("BRAIN_LTXV_AV_FP32").map(|v| v != "0").unwrap_or(false))
 }
 
 /// What a run's banner says its denoiser is, as a pure function of the two
@@ -4165,7 +4185,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // here rather than at the denoise call site because the progress total
     // has to know: a two-stage run reports stage 1's steps, one upscale, then
     // stage 2's.
-    let two_stage = should_two_stage(t, o.width, o.height, is_real_distilled);
+    let two_stage = should_two_stage(t, o.width, o.height, is_real_distilled, o.runtime.two_stage);
     // Phases: build, every stage-1 step, (two-stage only) one upscale and
     // every stage-2 step, decode.
     let stage2_phases = if two_stage { LTX2_STAGE2_STEPS as u32 + 1 } else { 0 };
@@ -4272,7 +4292,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
             let (var, role) = OPTIONAL_PATH_VARS[2];
             tracing::error!(tokens = t, width = o.width, height = o.height, "a two-stage request needs the spatial latent upscaler");
             format!(
-                "{}x{} is {t} video tokens, past the {SINGLE_STAGE_MAX_TOKENS}-token ceiling the distilled schedule holds in ONE stage, so it needs the reference's two-stage path - set {var} to the {role} (ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors). Forcing BRAIN_LTXV_TWO_STAGE=0 runs one stage instead and is known to disintegrate the end of the clip at this size.",
+                "{}x{} is {t} video tokens, past the {SINGLE_STAGE_MAX_TOKENS}-token ceiling the distilled schedule holds in ONE stage, so it needs the reference's two-stage path - set {var} to the {role} (ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors). Forcing --two-stage off runs one stage instead and is known to disintegrate the end of the clip at this size.",
                 o.width, o.height
             )
         })?;
@@ -4387,7 +4407,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // `denoise_stage` already stripped any appended image-conditioning tokens
     // and returned the `[C, lat_t, lh, lw]` video latent - the conditioning
     // frame is the source image itself, not a new frame to render.
-    let (pixels, frames) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, o.device.as_deref(), &final_chw, o.seed ^ VAE_DECODE_SEED_SALT)?;
+    let (pixels, frames) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, &final_chw, o)?;
     let (w, h) = (o.width, o.height);
     if pixels.len() != 3 * frames * h * w {
         return Err(format!("VAE returned {} values, expected {}", pixels.len(), 3 * frames * h * w));
@@ -4566,7 +4586,7 @@ pub fn generate_audio(paths: &Paths, prompt: &str, opts: &AudioOpts, cancel: &ca
     let cfg = av_cfg.audio_stream();
     let mut head = crate::dit::load_av_head_tensors_from_source(&src, &av_cfg);
     let adapter = if o.adapters.is_empty() { None } else { Some(block_adapter(crate::lora::runtime_adapter(&o.adapters)?, &src, &mut head)?) };
-    let dit = RealDit { stream: crate::config::Stream::Audio, cfg, src, head, device: o.device.clone(), cache: crate::block::GenerationCache::for_checkpoint(dit_path), place, sessions: Default::default(), adapter };
+    let dit = RealDit { stream: crate::config::Stream::Audio, cfg, src, head, device: o.device.clone(), cache: crate::block::GenerationCache::for_checkpoint(dit_path), place, sessions: Default::default(), adapter, resident_blocks: o.runtime.resident_blocks };
     timings.build_dit = build_t.elapsed().as_secs_f32();
     tracing::info!(audio_tokens = ta, seconds, layers = cfg.num_layers, inner_dim = cfg.inner_dim, "audio-only DiT ready (the video half is never read)");
 
@@ -4962,7 +4982,7 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
         dit.release_devices();
         progress(done_before + per_pass - 1, total, "vae decode");
         let dec_t = Instant::now();
-        let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &refined, o.base.seed ^ VAE_DECODE_SEED_SALT)?;
+        let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, &refined, &o.base)?;
         vae_secs += dec_t.elapsed().as_secs_f32();
         if got != len || pixels.len() != 3 * got * out_h * out_w {
             return Err(format!("pass {si} decoded to {got} frames / {} values, expected {len} / {}", pixels.len(), 3 * len * out_h * out_w));
@@ -5288,7 +5308,7 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
 
     progress(total - 1, total, "vae decode");
     let dec_t = Instant::now();
-    let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &stage_out.video_chw, o.base.seed ^ VAE_DECODE_SEED_SALT)?;
+    let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, &stage_out.video_chw, &o.base)?;
     vae_secs += dec_t.elapsed().as_secs_f32();
     if got != frames || pixels.len() != 3 * got * h * w {
         return Err(format!("decoded to {got} frames / {} values, expected {frames} / {}", pixels.len(), 3 * frames * h * w));
@@ -5461,6 +5481,10 @@ pub struct LongOpts {
     /// [`crate::pipeline::REFINE_MAX_TOKENS`].  Defaults to
     /// [`crate::pipeline::REFINE_MAX_TOKENS`].
     pub max_refine_tokens: usize,
+    /// Run a video-only clip stage-major (stage 1 across the whole clip at
+    /// half resolution, then stage 2 refining slices of it) when its stage-2
+    /// plan splits; `false` keeps the window-major loop. On by default.
+    pub stage_major: bool,
     /// `frames` is the WHOLE clip's length, not one window's.
     pub base: GenOpts,
 }
@@ -5471,6 +5495,7 @@ impl Default for LongOpts {
             context_latent_frames: crate::longform::CONTEXT_LATENT_FRAMES,
             max_window_tokens: crate::longform::LONGFORM_MAX_TOKENS,
             max_refine_tokens: REFINE_MAX_TOKENS,
+            stage_major: true,
             base: GenOpts::default(),
         }
     }
@@ -5733,8 +5758,8 @@ mod window_gen_opts_tests {
 ///
 /// **Scope (window-major).** This path is what serves audio-visual clips,
 /// clips whose stage-2 refinement plan fits one window (see the stage-major
-/// dispatch below), and anything with `BRAIN_LTXV_LONGFORM_STAGE_MAJOR`
-/// disabled. Clip-global anchors route through [`window_gen_opts`] exactly as
+/// dispatch below), and anything with [`LongOpts::stage_major`]
+/// off. Clip-global anchors route through [`window_gen_opts`] exactly as
 /// they do on the stage-major path: `--start-frame` conditions window 0, the
 /// end and mid stills condition the windows that own their instants, and every
 /// window also receives the anchors still ahead of it as future guides.
@@ -5796,10 +5821,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     // clip is video-only, route to the stage-major loop which runs stage 1 at
     // half resolution for the whole clip, then stage 2 at full resolution.
     // Audio-visual clips keep today's window-major loop (Phase F defers that).
-    let stage_major_enabled = match std::env::var("BRAIN_LTXV_LONGFORM_STAGE_MAJOR").ok().as_deref() {
-        Some("0") | Some("off") | Some("false") => false,
-        _ => !o.base.audio,
-    };
+    let stage_major_enabled = o.stage_major && !o.base.audio;
     // The stage-major loop needs its OWN stage-2 plan to split: it refines the
     // half-res motion across >= 2 full-resolution windows, and a clip whose
     // stage-2 plan fits one window is exactly what the window-major loop below
@@ -5839,7 +5861,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     // windows back. Resolved before the first forward so a plan that needs
     // the upscaler and cannot reach it fails now rather than in an hour.
     let widest = plan.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
-    let two_stage = should_two_stage(widest, o.base.width, o.base.height, is_real_distilled);
+    let two_stage = should_two_stage(widest, o.base.width, o.base.height, is_real_distilled, o.base.runtime.two_stage);
     if two_stage && paths.spatial_upsampler.is_none() {
         let (var, role) = OPTIONAL_PATH_VARS[2];
         return Err(format!(
@@ -6127,7 +6149,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         dit.release_devices();
         progress(done_before, total, "vae decode");
         let dec_t = Instant::now();
-        let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &final_chw, o.base.seed ^ VAE_DECODE_SEED_SALT)?;
+        let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, &final_chw, &o.base)?;
         vae_secs += dec_t.elapsed().as_secs_f32();
         if got != w.decoded_frames() || pixels.len() != 3 * got * o.base.height * o.base.width {
             return Err(format!("window {wi} decoded to {got} frames / {} values, expected {} / {}", pixels.len(), w.decoded_frames(), 3 * w.decoded_frames() * o.base.height * o.base.width));
@@ -6194,8 +6216,8 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
 /// structure at half resolution in as few, as global a pass as possible;
 /// stage 2 refines at full resolution, reading slices of stage 1's output.
 ///
-/// This is the path gated behind `BRAIN_LTXV_LONGFORM_STAGE_MAJOR` (enabled
-/// by default for video-only clips).  Audio-visual clips keep the window-major
+/// This is the path [`LongOpts::stage_major`] selects (on by default for
+/// video-only clips).  Audio-visual clips keep the window-major
 /// loop in [`generate_long`].
 ///
 /// Stage 1's plan is sized by the half-resolution token count, so clips whose
@@ -6432,7 +6454,7 @@ fn run_stage_major(
         dit.release_devices();
         progress(done_before, total, "vae decode");
         let dec_t = Instant::now();
-        let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &final_chw, o.base.seed ^ VAE_DECODE_SEED_SALT)?;
+        let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, &final_chw, &o.base)?;
         vae_secs += dec_t.elapsed().as_secs_f32();
         if got != w.decoded_frames() || pixels.len() != 3 * got * o.base.height * o.base.width {
             return Err(format!("window {wi} decoded to {got} frames / {} values, expected {} / {}", pixels.len(), w.decoded_frames(), 3 * w.decoded_frames() * o.base.height * o.base.width));
@@ -7053,7 +7075,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     // ---- decode -------------------------------------------------------------
     progress(total_phases - 1, total_phases, "vae decode");
     let decode_t = Instant::now();
-    let (pixels, frames) = decode_video(&vcfg, varch, &vweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, base.device.as_deref(), &video_chw, base.seed ^ VAE_DECODE_SEED_SALT)?;
+    let (pixels, frames) = decode_video(&vcfg, varch, &vweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, &video_chw, base)?;
     let (w, h) = (base.width, base.height);
     if pixels.len() != 3 * frames * h * w {
         return Err(format!("VAE returned {} values, expected {}", pixels.len(), 3 * frames * h * w));
@@ -7100,25 +7122,18 @@ mod tests {
     /// [`SINGLE_STAGE_MAX_TOKENS`]'s doc. The three that were measured GOOD
     /// on one stage must keep taking one stage (so nothing this port already
     /// shipped changes), and the one that was measured BROKEN must take two.
-    ///
-    /// Guarded against the environment: `BRAIN_LTXV_TWO_STAGE` would
-    /// otherwise let a stray export make this pass or fail for the wrong
-    /// reason.
     #[test]
     fn the_stage_policy_matches_the_shapes_that_were_measured() {
-        if std::env::var("BRAIN_LTXV_TWO_STAGE").is_ok() {
-            return;
-        }
         let toks = |w: usize, h: usize| 4 * (h / 32) * (w / 32);
         for (w, h) in [(512, 512), (960, 544), (1280, 704), (1600, 896)] {
             let t = toks(w, h);
             assert!(t <= SINGLE_STAGE_MAX_TOKENS, "{w}x{h} is {t} tokens, which the measurement says is a single-stage shape");
-            assert!(!should_two_stage(t, w, h, true), "{w}x{h} ({t} tokens) was measured good on ONE stage and must not change path");
+            assert!(!should_two_stage(t, w, h, true, None), "{w}x{h} ({t} tokens) was measured good on ONE stage and must not change path");
         }
         let (w, h) = (1920, 1088);
         let t = toks(w, h);
         assert_eq!(t, 8160);
-        assert!(should_two_stage(t, w, h, true), "1920x1088 is {t} tokens and was measured to disintegrate on one stage");
+        assert!(should_two_stage(t, w, h, true, None), "1920x1088 is {t} tokens and was measured to disintegrate on one stage");
     }
 
     /// The two conditions that are NOT about the token count: a
@@ -7127,16 +7142,16 @@ mod tests {
     /// 32-pixel stride (upstream asserts the same thing).
     #[test]
     fn the_stage_policy_refuses_a_shape_it_cannot_halve_and_a_config_it_does_not_apply_to() {
-        if std::env::var("BRAIN_LTXV_TWO_STAGE").is_ok() {
-            return;
-        }
         let big = SINGLE_STAGE_MAX_TOKENS + 1;
-        assert!(!should_two_stage(big, 1920, 1088, false), "the tiny random-weight config runs the generic shifted schedule, not the distilled table");
+        assert!(!should_two_stage(big, 1920, 1088, false, None), "the tiny random-weight config runs the generic shifted schedule, not the distilled table");
         // 1088 is a multiple of 64; 1056 is a multiple of 32 but not 64, so
         // halving it lands off the VAE's spatial stride.
         assert!(!1056usize.is_multiple_of(64) && 1056usize.is_multiple_of(32));
-        assert!(!should_two_stage(big, 1920, 1056, true), "an axis that cannot be halved onto the 32-pixel stride must stay single-stage");
-        assert!(!should_two_stage(big, 1888, 1088, true), "the width axis has the same requirement as the height axis");
+        assert!(!should_two_stage(big, 1920, 1056, true, None), "an axis that cannot be halved onto the 32-pixel stride must stay single-stage");
+        assert!(!should_two_stage(big, 1888, 1088, true, None), "the width axis has the same requirement as the height axis");
+        assert!(should_two_stage(64, 1920, 1088, false, Some(true)), "forcing two stages overrides the token test");
+        assert!(!should_two_stage(big, 1920, 1088, true, Some(false)), "forcing one stage overrides it the other way");
+        assert!(!should_two_stage(big, 1920, 1056, true, Some(true)), "no override makes an axis halvable that is not");
     }
 
     #[test]

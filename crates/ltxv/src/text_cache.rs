@@ -48,7 +48,7 @@
 //! `gpu_core::cache_dir()` - the one cache-directory resolution this
 //! workspace already has (`brain --cache-dir`, else
 //! `XDG_CACHE_HOME/brain`, else `~/.cache/brain`), not a second copy of that
-//! ladder. Set `BRAIN_LTXV_TEXT_CACHE=0` to disable.
+//! ladder. A request's [`Policy`] turns it off (`--no-text-cache`).
 //!
 //! # How big it is allowed to get, and what goes first
 //!
@@ -57,8 +57,8 @@
 //! the key includes the PROMPT, so a distinct prompt is a distinct file
 //! forever. An unbounded content-addressed cache on a shared cache directory
 //! is a disk-exhaustion bug with a slow fuse, not a cache, so writes are
-//! bounded by [`DEFAULT_MAX_BYTES`] (overridable with
-//! `BRAIN_LTXV_TEXT_CACHE_MAX_BYTES`) and [`prune`] runs after every store.
+//! bounded by [`DEFAULT_MAX_BYTES`] (a request's [`Policy::max_bytes`]) and
+//! [`prune`] runs after every store.
 //!
 //! **Eviction is least-recently-USED, not oldest-written**, and the
 //! difference is the whole reason this cache exists. The workflow it serves
@@ -82,24 +82,6 @@ use serde_json::json;
 /// far more iteration than one working session does.
 pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// [`DEFAULT_MAX_BYTES`], or `BRAIN_LTXV_TEXT_CACHE_MAX_BYTES` when it names
-/// a usable number. A value that does not parse, or is zero, is ignored with
-/// a warning rather than silently taken as "keep nothing" - the same
-/// convention `crate::longform::max_window_tokens_from_env` uses for the same
-/// class of knob. To turn the cache off, use `BRAIN_LTXV_TEXT_CACHE=0`, which
-/// is the switch that means that.
-pub fn max_bytes() -> u64 {
-    match std::env::var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES").ok().as_deref().map(str::trim) {
-        Some(v) if !v.is_empty() => match v.parse::<u64>() {
-            Ok(n) if n > 0 => n,
-            _ => {
-                tracing::warn!(value = v, "BRAIN_LTXV_TEXT_CACHE_MAX_BYTES is not a positive integer; using the built-in budget");
-                DEFAULT_MAX_BYTES
-            }
-        },
-        _ => DEFAULT_MAX_BYTES,
-    }
-}
 
 /// Every input [`crate::pipeline`]'s real text encode is a function of.
 #[derive(Clone, Debug, PartialEq)]
@@ -207,11 +189,18 @@ pub struct Encoded {
     pub a_ctx_uncond: Option<Vec<f32>>,
 }
 
-/// `false` when `BRAIN_LTXV_TEXT_CACHE` is set to `0`/`off`/`false`.
-pub fn enabled() -> bool {
-    match std::env::var("BRAIN_LTXV_TEXT_CACHE") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "off" | "false" | "no"),
-        Err(_) => true,
+/// Whether the cache is used and how much disk it may keep - part of a
+/// request's [`crate::pipeline::Runtime`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Policy {
+    pub enabled: bool,
+    /// Bytes the cache directory is pruned to after a write.
+    pub max_bytes: u64,
+}
+
+impl Default for Policy {
+    fn default() -> Policy {
+        Policy { enabled: true, max_bytes: DEFAULT_MAX_BYTES }
     }
 }
 
@@ -242,8 +231,8 @@ pub fn encoder_identity(path: &str) -> (u64, i64) {
 /// Look `key` up. `None` on any miss, any unreadable/corrupt entry, and - the
 /// case that matters - any entry whose stored key material does not match
 /// `key` exactly.
-pub fn load(key: &Key) -> Option<Encoded> {
-    if !enabled() {
+pub fn load(key: &Key, policy: Policy) -> Option<Encoded> {
+    if !policy.enabled {
         return None;
     }
     let path = path_for(key)?;
@@ -296,14 +285,13 @@ fn touch(path: &std::path::Path) {
 /// Delete least-recently-used entries from `dir` until it holds at most
 /// `budget` bytes.
 ///
-/// Takes the directory and the budget explicitly rather than reading the
-/// environment, so the policy is testable without a process-wide cache
-/// directory or a process-wide budget.
+/// Takes the directory and the budget explicitly, so the policy is testable
+/// without a process-wide cache directory.
 ///
 /// The single most recently used entry is never evicted, even when it alone
 /// exceeds `budget`: a budget smaller than one encode cannot be honoured by
 /// deleting the entry the caller is about to read back, only by refusing to
-/// cache at all, and `BRAIN_LTXV_TEXT_CACHE=0` is how a caller says that.
+/// cache at all, and a disabled [`Policy`] is how a caller says that.
 ///
 /// Best-effort throughout. An unreadable directory, an entry that vanished
 /// under a concurrent run, a delete that fails: none of them are a reason to
@@ -349,8 +337,8 @@ pub fn prune(dir: &std::path::Path, budget: u64) {
 
 /// Store `enc` under `key`. Best-effort: a cache that cannot be written is
 /// not an error in a generation, so failures are logged and swallowed.
-pub fn store(key: &Key, enc: &Encoded) {
-    if !enabled() {
+pub fn store(key: &Key, enc: &Encoded, policy: Policy) {
+    if !policy.enabled {
         return;
     }
     let Some(path) = path_for(key) else {
@@ -388,7 +376,7 @@ pub fn store(key: &Key, enc: &Encoded) {
     // The only point at which this cache grows, so the only point that has to
     // bring it back under budget.
     if let Some(dir) = path.parent() {
-        prune(dir, max_bytes());
+        prune(dir, policy.max_bytes);
     }
 }
 
@@ -396,13 +384,12 @@ pub fn store(key: &Key, enc: &Encoded) {
 mod tests {
     use super::*;
 
-    /// Several tests below mutate PROCESS-WIDE environment variables this
-    /// module reads (the cache directory, `BRAIN_LTXV_TEXT_CACHE`,
-    /// `BRAIN_LTXV_TEXT_CACHE_MAX_BYTES`), and `cargo test` runs one
-    /// binary's tests on many threads. Without a guard they race: one test's
-    /// cache directory, budget or off-switch lands in the middle of
-    /// another's run, and the failure is intermittent. Holding this for the
-    /// duration of each such test serializes exactly those and nothing else.
+    /// Several tests below set the PROCESS-WIDE cache directory
+    /// (`gpu_core::set_cache_dir`), and `cargo test` runs one binary's tests
+    /// on many threads. Without a guard they race: one test's directory lands
+    /// in the middle of another's run, and the failure is intermittent.
+    /// Holding this for the duration of each such test serializes exactly
+    /// those and nothing else.
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -473,8 +460,9 @@ mod tests {
             context_valid: vec![1.0, 0.0],
             context_len: 2,
         };
-        store(&k, &enc);
-        let got = load(&k).expect("a stored entry must load back");
+        let on = Policy::default();
+        store(&k, &enc, on);
+        let got = load(&k, on).expect("a stored entry must load back");
         assert_eq!(got.ctx_cond, enc.ctx_cond);
         assert_eq!(got.context_valid, enc.context_valid);
         assert_eq!(got.context_len, 2);
@@ -488,7 +476,7 @@ mod tests {
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
             m.tensors.iter().map(|(n, d)| (n.clone(), vec![d.len() as u64], d.clone())).collect();
         checkpoint::st::save_safetensors(&file.to_string_lossy(), &tensors, &json!({ "key": other.to_json() }), None).unwrap();
-        assert!(load(&k).is_none(), "an entry whose key does not match must be a miss");
+        assert!(load(&k, on).is_none(), "an entry whose key does not match must be a miss");
 
         std::fs::remove_dir_all(&tmp).ok();
         gpu_core::set_cache_dir(None);
@@ -537,7 +525,7 @@ mod tests {
         assert!(!paths[3].exists(), "the entry nothing has read must be the one that goes");
 
         // A budget smaller than one entry keeps exactly one - refusing to
-        // cache is spelled BRAIN_LTXV_TEXT_CACHE=0, not "delete what was just
+        // cache is spelled with a disabled `Policy`, not "delete what was just
         // written".
         prune(&dir, 1);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "prune must keep the most recently used entry");
@@ -554,8 +542,6 @@ mod tests {
         let tmp = std::env::temp_dir().join("brain-ltxv-text-cache-budget-test");
         std::fs::remove_dir_all(&tmp).ok();
         gpu_core::set_cache_dir(Some(tmp.clone()));
-        unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE") };
-        unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES") };
         let enc = Encoded { ctx_cond: vec![1.0; 8], ctx_uncond: vec![0.0; 8], context_valid: vec![1.0; 2], context_len: 2, a_ctx_cond: None, a_ctx_uncond: None };
         let base = Key { cross_attention_dim: 4, ..key() };
         let dir = tmp.join("ltxv-text-context");
@@ -569,15 +555,16 @@ mod tests {
         // Each entry is stamped a second after the previous one: the writes
         // land within the filesystem's timestamp granularity of each other, and
         // "least recently used" is only defined between distinct times.
+        let budget = std::cell::Cell::new(Policy::default());
         let store_at = |i: u64, key: Key| {
-            store(&key, &enc);
+            store(&key, &enc, budget.get());
             let f = std::fs::OpenOptions::new().write(true).open(path_for(&key).unwrap()).unwrap();
             f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000 + i)).unwrap();
         };
         store_at(0, Key { prompt: "prompt 0".into(), ..base.clone() });
         let (n, one) = read_total();
         assert_eq!(n, 1, "the first store must produce exactly one entry");
-        unsafe { std::env::set_var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES", (2 * one).to_string()) };
+        budget.set(Policy { max_bytes: 2 * one, ..Policy::default() });
         for i in 1..6 {
             store_at(i, Key { prompt: format!("prompt {i}"), ..base.clone() });
         }
@@ -585,22 +572,29 @@ mod tests {
         assert_eq!(n, 2, "six distinct prompts under a two-entry budget must leave two entries, not {n}");
         assert!(total <= 2 * one, "{n} entries totalling {total} bytes is over the {}-byte budget", 2 * one);
         // And what survived is what was written last, not what was written first.
-        assert!(load(&Key { prompt: "prompt 5".into(), ..base.clone() }).is_some(), "the most recent entry must survive its own prune");
-        assert!(load(&Key { prompt: "prompt 0".into(), ..base.clone() }).is_none(), "the least recently used entry must have been evicted");
+        assert!(load(&Key { prompt: "prompt 5".into(), ..base.clone() }, budget.get()).is_some(), "the most recent entry must survive its own prune");
+        assert!(load(&Key { prompt: "prompt 0".into(), ..base.clone() }, budget.get()).is_none(), "the least recently used entry must have been evicted");
 
         std::fs::remove_dir_all(&tmp).ok();
-        unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES") };
         gpu_core::set_cache_dir(None);
     }
 
+    /// A disabled policy neither writes an entry nor reads one back, even
+    /// one an enabled run stored.
     #[test]
     fn the_cache_can_be_turned_off() {
         let _env = env_guard();
-        unsafe { std::env::set_var("BRAIN_LTXV_TEXT_CACHE", "0") };
-        assert!(!enabled());
-        assert!(load(&key()).is_none());
-        unsafe { std::env::set_var("BRAIN_LTXV_TEXT_CACHE", "1") };
-        assert!(enabled());
-        unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE") };
+        let tmp = std::env::temp_dir().join("brain-ltxv-text-cache-off-test");
+        std::fs::remove_dir_all(&tmp).ok();
+        gpu_core::set_cache_dir(Some(tmp.clone()));
+        let enc = Encoded { ctx_cond: vec![1.0; 8], ctx_uncond: vec![0.0; 8], context_valid: vec![1.0; 2], context_len: 2, a_ctx_cond: None, a_ctx_uncond: None };
+        let off = Policy { enabled: false, ..Policy::default() };
+        store(&key(), &enc, off);
+        assert!(!tmp.join("ltxv-text-context").exists(), "a disabled cache must write nothing");
+        store(&key(), &enc, Policy::default());
+        assert!(load(&key(), off).is_none(), "a disabled cache must read nothing");
+        assert!(load(&key(), Policy::default()).is_some());
+        std::fs::remove_dir_all(&tmp).ok();
+        gpu_core::set_cache_dir(None);
     }
 }

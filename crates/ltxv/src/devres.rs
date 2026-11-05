@@ -63,9 +63,11 @@
 //! exactly the pre-residency behaviour, one upload per block per call, which
 //! is still the reference definition of the math.
 //!
-//! `BRAIN_LTXV_RESIDENT_BLOCKS` overrides the computed count (`0` disables
-//! residency entirely) - the bisect handle a measurement pass needs, and the
-//! way the bit-identity gate runs both arms of the same generation.
+//! A request's `Runtime::resident_blocks` (`--resident-blocks`) overrides the
+//! computed count (`0` disables residency entirely) through
+//! [`DitSession::resident_with_slots`] - the bisect handle a measurement pass
+//! needs, and the way the bit-identity gate runs both arms of the same
+//! generation.
 
 use crate::block::{cached_av_block_bytes, cached_block_bytes, AttachLora, BlockTimings, CachedQAvBlockWeights, CachedQBlockWeights, LtxAvBlockQ, LtxBlockQ, QTier, KERNELS};
 use crate::pipeline::SharedAdapter;
@@ -92,8 +94,7 @@ const PLAN_PASSES: u32 = 2;
 /// `ltx-2.5-22b-distilled-transformer-Q8_0.gguf`, all 48 layers, int8. Peak
 /// VRAM, sampled outside any timed region, at the token count a real
 /// generation actually runs at (T=12320, ctx 1024) - reproduce with
-/// `ltxv_bench streamed 48 12320 1024 1 1 1` under
-/// `BRAIN_LTXV_RESIDENT_BLOCKS=<n>`:
+/// `ltxv_bench streamed 48 12320 1024 1 1 1 1 <n>` (n resident blocks):
 ///
 /// | resident blocks | resident weights | peak VRAM |
 /// |---:|---:|---:|
@@ -229,18 +230,6 @@ fn can_charge_a_block(device: memauth::Device, per_block: u64) -> bool {
     auth.headroom(device) >= per_block.saturating_mul(2)
 }
 
-/// `BRAIN_LTXV_RESIDENT_BLOCKS`, when set to something parseable.
-fn slots_override() -> Option<u32> {
-    let raw = std::env::var("BRAIN_LTXV_RESIDENT_BLOCKS").ok()?;
-    match raw.trim().parse::<u32>() {
-        Ok(v) => Some(v),
-        Err(_) => {
-            tracing::warn!(value = %raw, "BRAIN_LTXV_RESIDENT_BLOCKS is not a number; ignoring");
-            None
-        }
-    }
-}
-
 /// How many of `cfg.num_layers` blocks fit on `device` alongside one forward's
 /// activations - the whole residency policy, in one closed form over numbers
 /// that are each either measured (`cached_block_bytes`,
@@ -256,9 +245,6 @@ pub fn planned_slots(cfg: &LtxDitConfig, tier: QTier, t: usize, device: memauth:
 /// rule, so it gets this function rather than a second copy of the
 /// arithmetic.
 pub fn slots_for(per_block: u64, num_layers: u32, t: usize, device: memauth::Device, backend: &str) -> u32 {
-    if let Some(n) = slots_override() {
-        return n.min(num_layers);
-    }
     if per_block == 0 {
         return 0;
     }
@@ -1204,7 +1190,6 @@ mod tests {
     #[test]
     fn a_card_another_job_is_already_using_affords_fewer_resident_blocks() {
         let cfg = LtxDitConfig::ltx25_22b();
-        std::env::remove_var("BRAIN_LTXV_RESIDENT_BLOCKS");
         let per_block = cached_block_bytes(&cfg, QTier::Int8);
         let (t, dev) = (3520usize, memauth::Device::Gpu(0));
         let slots = |free: u64| {
@@ -1226,7 +1211,6 @@ mod tests {
     #[test]
     fn the_slot_policy_is_bounded_by_the_layer_count_and_shrinks_as_tokens_grow() {
         let cfg = LtxDitConfig::ltx25_22b();
-        std::env::remove_var("BRAIN_LTXV_RESIDENT_BLOCKS");
         // A synthetic 24 GiB card, via the reserve/per-block arithmetic the
         // policy itself uses - no GPU needed to check the shape of the answer.
         let per_block = cached_block_bytes(&cfg, QTier::Int8);

@@ -64,7 +64,7 @@
 //! cargo test --release -p brain-ltxv --test clip_stability_real -- --ignored --nocapture
 //! ```
 //!
-//! Setting `BRAIN_LTXV_TWO_STAGE=0` runs the same shape the broken way and
+//! `--two-stage off` (`Runtime::two_stage`) runs the same shape the broken way and
 //! is how the bound above was calibrated against a real failure rather than
 //! against an assumption.
 
@@ -119,7 +119,7 @@ fn a_real_1080p_clip_does_not_disintegrate_before_it_ends() {
         tokens > SINGLE_STAGE_MAX_TOKENS,
         "this gate exists for the ABOVE-ceiling case; {WIDTH}x{HEIGHT} is {tokens} tokens against a ceiling of {SINGLE_STAGE_MAX_TOKENS}"
     );
-    if paths.spatial_upsampler.is_none() && std::env::var("BRAIN_LTXV_TWO_STAGE").as_deref() != Ok("0") {
+    if paths.spatial_upsampler.is_none() {
         return brain_testutil::skip("set BRAIN_LTXV_UPSAMPLER_SPATIAL to the real spatial x2 latent upscaler");
     }
 
