@@ -43,15 +43,6 @@
 //!   H3Transformer`] is held ONE PER DEVICE, shared across every key -
 //!   switching request shape never forces a reload of the 33B DiT.
 //!
-//! ## Real, tracked gaps
-//!
-//! * **`fl2va`'s two-keyframe text-presentation gap** (`crate::pipeline::
-//!   TextConditioning`'s own doc): the text encoder reads the prompt alone,
-//!   never a keyframe's vision tokens. The DiT-side keyframe conditioning
-//!   rows (`crate::pipeline::build_packed_sequence`/`encode_keyframe_condition`,
-//!   the mechanism that actually anchors the generated video to the
-//!   keyframes) are unaffected - they never touch the text encoder.
-//!
 //! ## Why this gate exists
 //!
 //! The MiniMax H3 Community License Agreement is not Apache-2.0. It carries:
@@ -126,7 +117,7 @@ pub const MODEL: &str = "brain/minimaxh3";
 /// not implemented (`crate::pipeline`'s own module doc, "deliberately not
 /// implemented here"), and advertising an action that cannot run is worse
 /// than not advertising it, the same rule `wan::caps` states for I2V.
-const TASKS: [&str; 2] = ["t2va", "fl2va"];
+const TASKS: [&str; 3] = ["t2va", "fl2va", "ref2va"];
 
 /// `video_latent_num_frames`/`audio_latent_num_frames`/the canvas-multiple
 /// check all need the real DiT/VAE config numbers, and every one of those is
@@ -181,10 +172,24 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("first_frame", ParamType::Str, "server-side path to a PNG/JPEG still the clip's FIRST frame is anchored to. At least one of first_frame/last_frame is required.").host_resolved())
     .param(ParamSpec::new("last_frame", ParamType::Str, "server-side path to a PNG/JPEG still the clip's LAST frame is anchored to. At least one of first_frame/last_frame is required.").host_resolved());
 
+    let ref2va = common(ActionSpec::new(
+        TASKS[2],
+        "t2va conditioned on reference media - images, videos and soundtracks the clip should draw its subjects, look and sound from (MiniMax-H3's separately trained transformer_ref). Each reference is labelled in the Qwen3-VL presentation and packed, at its own resolution, ahead of the generated rows; the prompt can name them as <Picture i>, <Video k> and <Audio j>",
+    ))
+    .param(
+        ParamSpec::new(
+            "references",
+            ParamType::Str,
+            "server-side reference paths, comma-separated, in the order the prompt numbers them: PNG/JPEG/WebP images, video files, WAV soundtracks; a video's soundtrack is attached as video.mp4+track.wav. At most 9 images, 3 videos, 3 soundtracks and 12 in total, and soundtracks never alone.",
+        )
+        .required()
+        .host_resolved(),
+    );
+
     Manifest::new(
         MODEL,
-        "MiniMax-H3 (MiniMax) - a 33B joint video+audio rectified-flow diffusion transformer: one packed self-attention stack denoises video, audio and text-conditioned rows together (not a two-stream architecture like ltxv), under two independent shifted-sigma Euler schedules in one forward, no CFG (guidance-distilled). Qwen3-VL text conditioning truncated to an intermediate hidden layer; causal 3D video VAE + DAC-lineage/BigVGAN audio VAE. t2va: text only. fl2va: text plus a first/last-frame image anchor. ref2va (up to 12 mixed image/video/audio references) is not yet implemented and is not advertised.",
-        vec![t2va, fl2va],
+        "MiniMax-H3 (MiniMax) - a 33B joint video+audio rectified-flow diffusion transformer: one packed self-attention stack denoises video, audio and text-conditioned rows together (not a two-stream architecture like ltxv), under two independent shifted-sigma Euler schedules in one forward, no CFG (guidance-distilled). Qwen3-VL text conditioning truncated to an intermediate hidden layer; causal 3D video VAE + DAC-lineage/BigVGAN audio VAE. t2va: text only. fl2va: text plus a first/last-frame image anchor. ref2va: text plus up to 12 image/video/audio references.",
+        vec![t2va, fl2va, ref2va],
     )
 }
 
@@ -288,49 +293,154 @@ pub fn fl2va_keyframes_from(inv: &capability::Invocation) -> Result<Vec<FlKeyfra
     Ok(out)
 }
 
-// ===================== text conditioning stub =====================
+/// `fl2va`'s stills on the canvas, each with the end of the clip it anchors.
+pub type Keyframes = Vec<(pipeline::Anchor, imaging::Rgb8)>;
 
-/// FNV-1a, matching `ltxv::pipeline`'s own private copy byte-for-byte - the
-/// prompt-to-seed mix [`text_conditioning_stub`] uses.
-fn fnv1a(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+/// What a request conditions on besides its prompt, decoded from disk and
+/// fitted to the request's geometry - no weight is read for it.
+pub enum Conditioning {
+    /// `t2va`: the prompt alone.
+    Prompt,
+    /// `fl2va`'s keyframes on the canvas, in presentation order.
+    Keyframes(Keyframes),
+    /// `ref2va`'s references on the model's own rates and resolutions.
+    References(Vec<crate::references::NormalizedReference>),
+}
+
+/// One decoded request: its options (an `fl2va` canvas resolved from its
+/// first keyframe), its prompt and its conditioning.
+pub struct Request {
+    pub params: GenParams,
+    pub prompt: String,
+    pub conditioning: Conditioning,
+}
+
+/// The canvas multiple of the released checkpoint: the video VAE's spatial
+/// stride times the DiT's spatial patch.
+fn canvas_multiple() -> u32 {
+    let (dit_cfg, vae_cfg) = real_configs();
+    vae_cfg.spatial_compression_ratio() * dit_cfg.patch_size[2]
+}
+
+/// Decode `action`'s request from `inv` and load the media it names,
+/// before any weight is read: a request that cannot run is refused first.
+pub fn request_from(action: &str, inv: &capability::Invocation) -> Result<Request, String> {
+    let mut params = gen_params_from(inv)?;
+    let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
+    let conditioning = match action {
+        "t2va" => Conditioning::Prompt,
+        "fl2va" => {
+            let (canvas, keyframes) = load_keyframes(&fl2va_keyframes_from(inv)?, params.opts.canvas)?;
+            params.opts.canvas = Some(canvas);
+            Conditioning::Keyframes(keyframes)
+        }
+        "ref2va" => {
+            let (_, vae_cfg) = real_configs();
+            let aligned = pipeline::align_num_frames(params.opts.num_frames, vae_cfg.clip_length, vae_cfg.tokens_chunk_size())?;
+            let media = references_from(inv)?;
+            Conditioning::References(crate::references::normalize_references(&media, aligned, &crate::references::ReferenceCanvas::released(canvas_multiple()))?)
+        }
+        other => return Err(format!("minimaxh3: unknown action '{other}'")),
+    };
+    Ok(Request { params, prompt, conditioning })
+}
+
+/// Load `fl2va`'s stills onto the request's canvas (`MiniMaxH3ResizeStep`):
+/// with none given, the canvas follows the first still's own aspect. The
+/// first still is LANCZOS-stretched onto it; a second is cover-cropped -
+/// scaled (rounding half to even) to cover it, then centred.
+pub fn load_keyframes(specs: &[FlKeyframeSpec], canvas: Option<(u32, u32)>) -> Result<((u32, u32), Keyframes), String> {
+    let stills = specs.iter().map(|s| imaging::load(&s.path).map(|img| (s.anchor, img)).map_err(|e| format!("fl2va: loading {}: {e}", s.path))).collect::<Result<Vec<_>, _>>()?;
+    let first = &stills.first().ok_or("fl2va: at least one of first_frame/last_frame is required")?.1;
+    let (h, w) = match canvas {
+        Some(c) => c,
+        None => pipeline::resolve_canvas_size(first.w as f64, first.h as f64, canvas_multiple(), pipeline::CANVAS_SHORT_EDGE, pipeline::CANVAS_MAX_PIXELS)?,
+    };
+    let fitted = stills
+        .into_iter()
+        .enumerate()
+        .map(|(i, (anchor, img))| {
+            let img = if (img.w, img.h) == (w, h) {
+                img
+            } else if i == 0 {
+                imaging::host::resize_lanczos_pil(&img, w as usize, h as usize)
+            } else {
+                let scale = (w as f64 / img.w as f64).max(h as f64 / img.h as f64);
+                let rw = w.max((img.w as f64 * scale).round_ties_even() as u32);
+                let rh = h.max((img.h as f64 * scale).round_ties_even() as u32);
+                let covered = imaging::host::resize_lanczos_pil(&img, rw as usize, rh as usize);
+                let (left, top) = (((rw - w) / 2) as usize, ((rh - h) / 2) as usize);
+                let px = (0..h as usize).flat_map(|y| covered.px[((top + y) * rw as usize + left) * 3..][..w as usize * 3].iter().copied()).collect();
+                imaging::Rgb8 { w, h, px }
+            };
+            (anchor, img)
+        })
+        .collect();
+    Ok(((h, w), fitted))
+}
+
+/// `ref2va`'s `references`: comma-separated server-side paths, kinds read
+/// off the extension - a WAV is a soundtrack, a PNG/JPEG/WebP an image,
+/// anything else a video, whose own soundtrack is attached as
+/// `video+track.wav` (brain decodes WAV, not a container's audio stream).
+pub fn references_from(inv: &capability::Invocation) -> Result<Vec<crate::references::ReferenceMedia>, String> {
+    use crate::references::{ReferenceMedia, Soundtrack};
+    let list = inv.get_str("references").filter(|s| !s.trim().is_empty()).ok_or("ref2va: 'references' is required")?;
+    let soundtrack = |path: &str| -> Result<Soundtrack, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("ref2va: reading {path}: {e}"))?;
+        let (sample_rate, channels) = audio::wav::parse_planar(&bytes).map_err(|e| format!("ref2va: {path}: {e}"))?;
+        Ok(Soundtrack { channels, sample_rate })
+    };
+    let extension = |path: &str| std::path::Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    list.split(',')
+        .map(str::trim)
+        .map(|entry| {
+            let (path, track) = entry.split_once('+').map_or((entry, None), |(v, a)| (v, Some(a)));
+            match extension(path).as_str() {
+                "wav" if track.is_none() => Ok(ReferenceMedia::Audio(soundtrack(path)?)),
+                "png" | "jpg" | "jpeg" | "webp" if track.is_none() => imaging::load(path).map(ReferenceMedia::Image).map_err(|e| format!("ref2va: loading {path}: {e}")),
+                "wav" | "png" | "jpg" | "jpeg" | "webp" => Err(format!("ref2va: only a video takes an attached soundtrack, got '{entry}'")),
+                _ => {
+                    let frames = imaging::video::decode_frames_rgb8(std::path::Path::new(path), &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0, spread: 0 })?;
+                    let fps = imaging::video::probe_fps(std::path::Path::new(path)).ok_or_else(|| format!("ref2va: {path} reports no frame rate"))?;
+                    Ok(ReferenceMedia::Video { frames, fps, soundtrack: track.map(soundtrack).transpose()? })
+                }
+            }
+        })
+        .collect()
+}
+
+/// The most packed rows `ref2va`'s references can take, read off the
+/// `references` list alone (no file is opened): an image at its own 2048
+/// short edge and at the widest 4:1 it is accepted at, a video on a canvas
+/// no larger than the clip's own `target_video_rows`, and every soundtrack
+/// no longer than the clip's `target_audio_rows`. Zero for every other
+/// action. What a resident workspace is sized from before the references
+/// are decoded.
+pub fn reference_rows_bound(action: &str, inv: &capability::Invocation, target_video_rows: u32, target_audio_rows: u32) -> u32 {
+    if action != "ref2va" {
+        return 0;
     }
-    h
+    let (dit_cfg, vae_cfg) = real_configs();
+    let side = |edge: u32| edge / vae_cfg.spatial_compression_ratio() / dit_cfg.patch_size[1];
+    let image_rows = side(pipeline::REFERENCE_IMAGE_SHORT_EDGE) * side(4 * pipeline::REFERENCE_IMAGE_SHORT_EDGE);
+    let list = inv.get_str("references").unwrap_or_default();
+    list.split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(|entry| {
+            let (path, track) = entry.split_once('+').map_or((entry, None), |(v, a)| (v, Some(a)));
+            let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+            match ext.as_str() {
+                "wav" => target_audio_rows,
+                "png" | "jpg" | "jpeg" | "webp" => image_rows,
+                _ => target_video_rows + if track.is_some() { target_audio_rows } else { 0 },
+            }
+        })
+        .sum()
 }
 
-/// A deterministic, prompt-SEEDED placeholder [`pipeline::TextConditioning`],
-/// standing in until a real Qwen3-VL text encoder is wired into this crate's
-/// serving path (this module's own doc - "Real, tracked gaps" - names exactly
-/// what is missing and why). Mirrors `ltxv::pipeline::context_stub`'s own
-/// precedent for the identical class of gap: the same prompt and seed always
-/// produce the same conditioning (so `--seed` runs stay reproducible), and a
-/// different prompt or seed produces a different one (so this is not simply
-/// ignoring the prompt) - but the values carry no real semantic content, so
-/// what the generated video/audio actually DEPICT is not yet driven by the
-/// prompt's real meaning.
-pub fn text_conditioning_stub(prompt: &str, text_dim: u32, seed: u64) -> pipeline::TextConditioning {
-    let num_tokens = prompt.split_whitespace().count().clamp(1, 64);
-    let mix = seed ^ fnv1a(prompt);
-    let mut rng = data::rng::Rng::new(mix);
-    let embeds: Vec<f32> = (0..num_tokens * text_dim as usize).map(|_| 0.5 * rng.next_gaussian() as f32).collect();
-    pipeline::TextConditioning { embeds, token_tags: vec![crate::config::TAG_TEXT; num_tokens] }
-}
-
-/// Whether `paths` names a checkout with a real Qwen3-VL text encoder to
-/// load - `text_encoder/config.json`, `tokenizer/tokenizer.json`, AND (via
-/// [`checkpoint::safetensors::has_model_weights`], which checks every
-/// shard a sharded index names is actually present, not just that the
-/// index exists) the encoder's own weight shards. A cheap, pre-load check
-/// so a caller can fall back to [`text_conditioning_stub`] without paying
-/// for (and failing partway through) a partial checkout.
-pub fn has_real_text_encoder(paths: &Paths) -> bool {
-    std::path::Path::new(&paths.text_encoder).join("config.json").is_file()
-        && std::path::Path::new(&paths.tokenizer).join("tokenizer.json").is_file()
-        && checkpoint::safetensors::has_model_weights(std::path::Path::new(&paths.text_encoder))
-}
+// ===================== text conditioning =====================
 
 /// The best per-layer-linear storage tier the AMBIENT device (`--device`/
 /// `BRAIN_DEVICE`) can actually deliver, cheapest-real-cost first: int8 (if
@@ -368,45 +478,16 @@ fn best_linear_dtype() -> gpu_core::select::Dtype {
     }
 }
 
-/// The conditioning one prompt gives: the hidden state after
-/// [`pipeline::TEXT_ENCODER_LAYER`] layers of the Qwen3-VL language tower.
-///
-/// The tokenizer reads the prompt verbatim - `get_qwen3vl_prompt_embeds`'s
-/// own caller (`encoders.py`'s `MiniMaxH3TextEncoderStep`) tokenizes with
-/// `add_special_tokens=False` and no chat template, which is
-/// `data::Tokenizer::encode`'s contract.
-///
-/// The tower ([`qwen3vl::TextTower`]) is built for this prompt alone and
-/// dropped: its layers past the tap are never read, it is placed over as
-/// many cards as its ~27 GB of int8 linears need, and its activations are
-/// sized for the prompt's own length. Its linear tier is
-/// [`best_linear_dtype`]'s.
-pub fn encode_prompt(paths: &Paths, prompt: &str) -> Result<pipeline::TextConditioning, String> {
-    use data::Tokenizer;
-    let cfg_path = format!("{}/config.json", paths.text_encoder);
-    let cfg_text = std::fs::read_to_string(&cfg_path).map_err(|e| format!("minimaxh3 text encoder: cannot read {cfg_path}: {e}"))?;
-    let cfg_json: serde_json::Value = serde_json::from_str(&cfg_text).map_err(|e| format!("minimaxh3 text encoder: cannot parse {cfg_path}: {e}"))?;
-    let cfg = qwen3vl::Qwen3VlConfig::from_hf(&cfg_json);
-    let tok = data::qwen_tokenizer::QwenBpe::from_dir(&paths.tokenizer).map_err(|e| format!("minimaxh3 text encoder: tokenizer: {e}"))?;
-    let tokens = tok.encode(prompt);
-    if tokens.is_empty() {
-        return Err("minimaxh3 text encoder: the prompt tokenizes to nothing".to_string());
-    }
-    let tower = qwen3vl::TextTower::from_hf_dir(&paths.text_encoder, cfg.text, cfg.mrope_section, best_linear_dtype(), pipeline::TEXT_ENCODER_LAYER, tokens.len() as u32)?;
-    tracing::info!(stages = tower.n_stages(), tokens = tokens.len(), "minimaxh3 text tower placed");
-    Ok(pipeline::TextConditioning { embeds: tower.encode(&tokens), token_tags: vec![crate::config::TAG_TEXT; tokens.len()] })
-}
-
-/// [`text_conditioning_stub`] unless `paths` names a real, present Qwen3-VL
-/// checkout, in which case the real encoder runs instead - the one seam every
-/// `t2va`/`fl2va` entry point shares, so real-weight availability decides
-/// real-vs-stub in exactly one place. A checkout that IS present but fails to
-/// load is an error, never a silent fall back to the stub.
-fn text_conditioning(paths: &Paths, prompt: &str, text_dim: u32, seed: u64) -> Result<pipeline::TextConditioning, String> {
-    if !has_real_text_encoder(paths) {
-        return Ok(text_conditioning_stub(prompt, text_dim, seed));
-    }
-    encode_prompt(paths, prompt)
+/// The conditioning a request's presentation gives: the hidden state after
+/// [`pipeline::TEXT_ENCODER_LAYER`] layers of the Qwen3-VL conditioner, over
+/// the prompt and whatever keyframes or references it carries
+/// ([`crate::presentation`]). The language tower is built for this
+/// presentation alone and dropped, placed over as many cards as its ~27 GB
+/// of int8 linears need at [`best_linear_dtype`]'s tier; the vision tower
+/// runs on `device`.
+pub fn encode_presentation(paths: &Paths, prompt: &str, items: &[crate::presentation::Presented], device: Option<&str>) -> Result<pipeline::TextConditioning, String> {
+    let encoder = crate::presentation::PresentationEncoder::open(&paths.text_encoder, &paths.tokenizer, paths.processor.as_deref(), pipeline::TEXT_ENCODER_LAYER, best_linear_dtype(), device)?;
+    encoder.encode(prompt, items)
 }
 
 // ===================== outcome shaping =====================
@@ -490,6 +571,14 @@ pub struct Paths {
     /// The `tokenizer/` component directory - `tokenizer.json`/`vocab.json`/
     /// `merges.txt`, separate from `text_encoder/` in the root layout.
     pub tokenizer: String,
+    /// The release's `processor/` directory - the Qwen3-VL image and video
+    /// processor configs that present keyframes and references. `None`
+    /// outside a release root, which can still present a prompt alone.
+    pub processor: Option<String>,
+    /// The release's `transformer_ref/` directory - `ref2va`'s separately
+    /// trained DiT, same architecture as [`Self::dit`]. `None` when the
+    /// checkout does not carry it, which refuses `ref2va` alone.
+    pub dit_ref: Option<String>,
 }
 
 impl Paths {
@@ -507,13 +596,24 @@ impl Paths {
     /// [`Paths::from_env`]'s pure half - every sub-path `root` implies,
     /// callable directly by tests without the env var.
     pub fn resolve(root: &str) -> Paths {
+        let (processor, dit_ref) = Paths::release_extras(std::path::Path::new(root));
         Paths {
             dit: format!("{root}/transformer"),
             video_vae: format!("{root}/vae"),
             vocoder: format!("{root}/audio_vae"),
             text_encoder: format!("{root}/text_encoder"),
             tokenizer: format!("{root}/tokenizer"),
+            processor,
+            dit_ref,
         }
+    }
+
+    /// The release root's `processor/` and `transformer_ref/` directories,
+    /// each when present. They are no role of their own: they only exist
+    /// as part of a release, beside its `text_encoder/` and `transformer/`.
+    fn release_extras(root: &std::path::Path) -> (Option<String>, Option<String>) {
+        let dir = |name: &str| Some(root.join(name)).filter(|p| p.is_dir()).and_then(|p| p.to_str().map(str::to_string));
+        (dir("processor"), dir("transformer_ref"))
     }
 
     /// Extract the five component directories from a resolved model-store
@@ -523,13 +623,29 @@ impl Paths {
     /// own pattern; role names match [`Paths`]'s field names, so the mapping
     /// is a straight rename-free read).
     pub fn from_assembly(assembly: &capability::Assembly) -> Result<Paths, String> {
+        let text_encoder = Paths::component(assembly, "text_encoder")?;
+        // `processor/` and `transformer_ref/` sit in the release root the
+        // text encoder came from, whichever lane resolved it.
+        let root = std::path::Path::new(&text_encoder).parent().filter(|p| crate::spec::is_h3_pipeline_root(p));
+        let (processor, dit_ref) = root.map(Paths::release_extras).unwrap_or_default();
         Ok(Paths {
             dit: Paths::component(assembly, "dit")?,
             video_vae: Paths::component(assembly, "video_vae")?,
             vocoder: Paths::component(assembly, "vocoder")?,
-            text_encoder: Paths::component(assembly, "text_encoder")?,
+            text_encoder,
             tokenizer: Paths::component(assembly, "tokenizer")?,
+            processor,
+            dit_ref,
         })
+    }
+
+    /// The DiT `action` runs: `ref2va`'s own `transformer_ref/`, every other
+    /// action's `transformer/`.
+    pub fn dit_for(&self, action: &str) -> Result<&str, String> {
+        if action != "ref2va" {
+            return Ok(&self.dit);
+        }
+        self.dit_ref.as_deref().ok_or_else(|| format!("minimaxh3 ref2va: runs on the release's transformer_ref/, which the checkout beside {} does not carry - fetch it with the rest of MiniMaxAI/MiniMax-H3", self.text_encoder))
     }
 
     /// The path one role of `assembly` names. A role satisfied by the
@@ -703,10 +819,11 @@ pub struct LoadedWeights {
 }
 
 impl LoadedWeights {
-    /// Load every weight from `paths` - a streaming reader for the DiT (see
-    /// [`open_dit_reader`]'s own doc) plus [`VaeWeights::load`].
-    pub fn load(paths: &Paths) -> Result<LoadedWeights, String> {
-        Ok(LoadedWeights { dit_reader: open_dit_reader(&paths.dit)?, dit_cfg: H3TransformerConfig::real(), vae: VaeWeights::load(paths)? })
+    /// Load every weight from `paths` - a streaming reader for the DiT at
+    /// `dit` ([`Paths::dit_for`]; see [`open_dit_reader`]'s own doc) plus
+    /// [`VaeWeights::load`].
+    pub fn load(paths: &Paths, dit: &str) -> Result<LoadedWeights, String> {
+        Ok(LoadedWeights { dit_reader: open_dit_reader(dit)?, dit_cfg: H3TransformerConfig::real(), vae: VaeWeights::load(paths)? })
     }
 
     /// A borrowing [`pipeline::H3Checkpoint`] over these tensors - built fresh
@@ -718,67 +835,83 @@ impl LoadedWeights {
 
 // ===================== execution =====================
 
-/// Run one `t2va` (no `keyframes`) or `fl2va` generation and shape its
-/// outcome - the one entry point the direct provider below and the
-/// residency-scheduled adapter (`crates/catalog/src/resident_minimaxh3.rs`)
-/// both funnel through, so param decoding, text conditioning and outcome
-/// shaping cannot drift between them.
+/// Generate `req` and shape its outcome - the one entry point the direct
+/// provider below and the residency-scheduled adapter
+/// (`crates/catalog/src/resident_minimaxh3.rs`) both funnel through, so the
+/// presentation, the conditioning and the outcome cannot drift between them.
 ///
-/// `model` is a caller-held resident [`crate::model::H3Transformer`] (see
+/// `model` is a caller-held resident [`crate::model::H3Transformer`] - of
+/// the partition [`Paths::dit_for`] names for the request (see
 /// [`pipeline::t2va_hot`]'s doc for why one serves every request shape).
-/// `None` streams the DiT from `ckpt.dit_tensors` one block at a time
-/// ([`pipeline::t2va`]), which is the only placement a 33B fp32 DiT has on a
-/// machine whose cards cannot hold all of it. `paths` decides real-vs-stub
-/// text conditioning ([`text_conditioning`]). `inv.cancel` is polled every
-/// denoise step and `progress` reports each step and decode.
-pub fn generate_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation, p: &GenParams, paths: &Paths, keyframes: &[pipeline::KeyframeCondition], model: Option<&crate::model::H3Transformer>, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
-    let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
-    let text = text_conditioning(paths, &prompt, ckpt.dit_cfg.text_dim, p.opts.seed)?;
-    let report = |done: u32, total: u32, phase: &str| progress(Progress::step(done, total, phase.to_string()));
-    let av = match (keyframes.is_empty(), model) {
-        (true, Some(m)) => pipeline::t2va_hot(ckpt, &text, &p.opts, m, &inv.cancel, report)?,
-        (true, None) => pipeline::t2va(ckpt, &text, &p.opts, &inv.cancel, report)?,
-        (false, Some(m)) => pipeline::fl2va_hot(ckpt, &text, keyframes, &p.opts, m, &inv.cancel, report)?,
-        (false, None) => pipeline::fl2va(ckpt, &text, keyframes, &p.opts, &inv.cancel, report)?,
+/// `None` streams the DiT from `ckpt.dit_tensors` one block at a time.
+/// `cancel` is polled every denoise step and `progress` reports each step
+/// and decode.
+pub fn generate_on(ckpt: &pipeline::H3Checkpoint, req: &Request, paths: &Paths, model: Option<&crate::model::H3Transformer>, cancel: &capability::CancelToken, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
+    use crate::presentation::Presented;
+    let opts = &req.params.opts;
+    let items: Vec<Presented> = match &req.conditioning {
+        Conditioning::Prompt => Vec::new(),
+        Conditioning::Keyframes(keyframes) => keyframes.iter().map(|(_, img)| Presented::Image(img)).collect(),
+        Conditioning::References(references) => references.iter().map(Presented::of_reference).collect(),
     };
-    Ok(av_outcome(&av, p.opts.seed))
-}
-
-/// The `(height, width)` canvas a request generates at: its own, or
-/// MiniMax-H3's 16:9 default ([`pipeline::resolve_canvas_size`]).
-pub fn canvas_of(opts: &pipeline::GenOpts) -> Result<(u32, u32), String> {
-    match opts.canvas {
-        Some(hw) => Ok(hw),
-        None => {
-            let (dit_cfg, vae_cfg) = real_configs();
-            let multiple = vae_cfg.spatial_compression_ratio() * dit_cfg.patch_size[2];
-            pipeline::resolve_canvas_size(16.0, 9.0, multiple, pipeline::CANVAS_SHORT_EDGE, pipeline::CANVAS_MAX_PIXELS)
+    let text = encode_presentation(paths, &req.prompt, &items, opts.device.as_deref())?;
+    let report = |done: u32, total: u32, phase: &str| progress(Progress::step(done, total, phase.to_string()));
+    let av = match &req.conditioning {
+        Conditioning::Prompt => match model {
+            Some(m) => pipeline::t2va_hot(ckpt, &text, opts, m, cancel, report)?,
+            None => pipeline::t2va(ckpt, &text, opts, cancel, report)?,
+        },
+        Conditioning::Keyframes(keyframes) => {
+            let conditions = encode_keyframes(ckpt, keyframes, opts);
+            match model {
+                Some(m) => pipeline::fl2va_hot(ckpt, &text, &conditions, opts, m, cancel, report)?,
+                None => pipeline::fl2va(ckpt, &text, &conditions, opts, cancel, report)?,
+            }
         }
-    }
+        Conditioning::References(references) => {
+            let encoded = encode_references(ckpt, paths, references, opts)?;
+            match model {
+                Some(m) => pipeline::ref2va_hot(ckpt, &text, &encoded, opts, m, cancel, report)?,
+                None => pipeline::ref2va(ckpt, &text, &encoded, opts, cancel, report)?,
+            }
+        }
+    };
+    Ok(av_outcome(&av, opts.seed))
 }
 
-/// Load each `fl2va` still, fit it to the request's canvas and VAE-encode it
-/// into the conditioning rows [`generate_on`] takes.
-pub fn encode_keyframes(vae: &VaeWeights, specs: &[FlKeyframeSpec], opts: &pipeline::GenOpts) -> Result<Vec<pipeline::KeyframeCondition>, String> {
-    let (h, w) = canvas_of(opts)?;
-    let patch_size = H3TransformerConfig::real().patch_size;
-    specs
+/// VAE-encode `fl2va`'s fitted keyframes into the conditioning rows the
+/// pipeline packs.
+pub fn encode_keyframes(ckpt: &pipeline::H3Checkpoint, keyframes: &[(pipeline::Anchor, imaging::Rgb8)], opts: &pipeline::GenOpts) -> Vec<pipeline::KeyframeCondition> {
+    keyframes
         .iter()
-        .map(|spec| {
-            let pixels_rgb = load_keyframe_pixels(&spec.path, w, h)?;
-            Ok(pipeline::encode_keyframe_condition(&vae.video_vae_cfg, &vae.video_vae_tensors, opts.device.as_deref(), &pixels_rgb, h, w, &vae.video_latents_mean, &vae.video_latents_std, patch_size, spec.anchor, opts.seed))
+        .map(|(anchor, img)| {
+            let pixels = crate::references::planar_pixels(&[img]);
+            pipeline::encode_keyframe_condition(&ckpt.video_vae_cfg, ckpt.video_vae_tensors, opts.device.as_deref(), &pixels, img.h, img.w, &ckpt.video_latents_mean, &ckpt.video_latents_std, ckpt.dit_cfg.patch_size, *anchor, opts.seed)
         })
         .collect()
 }
 
-/// Decode the still at `path` and resample it to `width`x`height`, as the
-/// channel-major `[0,255]` pixels [`pipeline::encode_keyframe_condition`]
-/// reads (the input side of `encode_vae_condition`'s `pixels.div(255.0)`).
-pub fn load_keyframe_pixels(path: &str, width: u32, height: u32) -> Result<Vec<f32>, String> {
-    let img = imaging::load(path).map_err(|e| format!("fl2va: loading {path}: {e}"))?;
-    let hwc = img.to_hwc_unit();
-    let hwc = if (img.w, img.h) != (width, height) { imaging::host::resize_bilinear_hwc(&hwc, 3, img.w, img.h, width, height) } else { hwc };
-    Ok(imaging::pixels::hwc_to_chw(&hwc, 3, height as usize, width as usize).into_iter().map(|v| (v * 255.0).clamp(0.0, 255.0)).collect())
+/// Encode `ref2va`'s references: frames through the checkpoint's video VAE,
+/// soundtracks through the audio VAE's encoder half, read from the release's
+/// `audio_vae/` for this request.
+fn encode_references(ckpt: &pipeline::H3Checkpoint, paths: &Paths, references: &[crate::references::NormalizedReference], opts: &pipeline::GenOpts) -> Result<Vec<pipeline::EncodedReference>, String> {
+    let audio_cfg = crate::audio_encoder::AudioEncoderConfig::h3();
+    let audio_tensors = if references.iter().any(|r| !matches!(r, crate::references::NormalizedReference::Image(_) | crate::references::NormalizedReference::Video { soundtrack: None, .. })) {
+        crate::audio_encoder::import_audio_vae_encoder(&paths.vocoder, &audio_cfg)?
+    } else {
+        Default::default()
+    };
+    let visual = pipeline::VisualConditionRequest {
+        video_vae_cfg: &ckpt.video_vae_cfg,
+        video_vae_tensors: ckpt.video_vae_tensors,
+        device: opts.device.as_deref(),
+        video_latents_mean: &ckpt.video_latents_mean,
+        video_latents_std: &ckpt.video_latents_std,
+        patch_size: ckpt.dit_cfg.patch_size,
+        seed: opts.seed,
+    };
+    let audio = crate::references::SoundtrackEncoder { cfg: &audio_cfg, tensors: &audio_tensors, latents_mean: &ckpt.audio_latents_mean, latents_std: &ckpt.audio_latents_std, device: opts.device.as_deref() };
+    Ok(crate::references::encode_references(references, &visual, &audio, ckpt.video_vae_cfg.clip_length, ckpt.video_vae_cfg.tokens_chunk_size()))
 }
 
 // ===================== execution (direct provider) =====================
@@ -838,18 +971,12 @@ impl Action for MiniMaxH3Action {
         manifest().actions.into_iter().find(|a| a.name == self.name).expect("known action")
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        // Params before the weights-env check: a request that could never
-        // run must not read "you forgot to export BRAIN_MINIMAXH3_DIT" -
+        // The request and its media before any weight is read: a request
+        // that could never run must not cost a checkpoint load to refuse -
         // `wan::caps::WanAction::run`'s own ordering.
-        let p = gen_params_from(inv)?;
-        let keyframe_specs = match self.name.as_str() {
-            "t2va" => Vec::new(),
-            "fl2va" => fl2va_keyframes_from(inv)?,
-            other => return Err(format!("minimaxh3 '{other}': unknown action")),
-        };
-        let weights = LoadedWeights::load(&self.paths)?;
-        let keyframes = encode_keyframes(&weights.vae, &keyframe_specs, &p.opts)?;
-        generate_on(&weights.as_checkpoint(), inv, &p, &self.paths, &keyframes, None, progress)
+        let req = request_from(&self.name, inv)?;
+        let weights = LoadedWeights::load(&self.paths, self.paths.dit_for(&self.name)?)?;
+        generate_on(&weights.as_checkpoint(), &req, &self.paths, None, &inv.cancel, progress)
     }
 }
 
@@ -857,23 +984,12 @@ impl Action for MiniMaxH3Action {
 mod tests {
     use super::*;
 
+    /// Generation conditions on the real conditioner or not at all: a
+    /// checkout without it is refused, never handed placeholder embeddings.
     #[test]
-    fn has_real_text_encoder_is_false_for_a_nonexistent_root() {
-        assert!(!has_real_text_encoder(&Paths::resolve("/nonexistent-minimaxh3-root")));
-    }
-
-    /// [`text_conditioning`] must fall back to the stub - not error, not
-    /// hang trying to load anything - when no real text encoder is present,
-    /// so every existing weight-free `t2va`/`fl2va` caller keeps working.
-    #[test]
-    fn text_conditioning_falls_back_to_the_stub_without_a_real_encoder() {
+    fn a_missing_text_encoder_is_refused() {
         let paths = Paths::resolve("/nonexistent-minimaxh3-root");
-        let text = text_conditioning(&paths, "a red fox running through snow", 16, 7).expect("stub path must not error");
-        assert!(!text.embeds.is_empty());
-        assert_eq!(text.token_tags.len(), text.embeds.len() / 16);
-        // Reproducible at the same seed - `text_conditioning_stub`'s own contract.
-        let again = text_conditioning(&paths, "a red fox running through snow", 16, 7).unwrap();
-        assert_eq!(text.embeds, again.embeds);
+        assert!(encode_presentation(&paths, "a red fox running through snow", &[], Some("cpu")).is_err());
     }
 
     #[test]
@@ -938,34 +1054,68 @@ mod tests {
         assert!(fl2va.params.iter().any(|p| p.name == "last_frame" && !p.required));
         assert_eq!(fl2va.outputs.len(), 2);
 
-        // ref2va must not be advertised - it is not implemented.
-        assert!(!names.contains(&"ref2va"));
+        let ref2va = &m.actions[2];
+        let required: Vec<&str> = ref2va.params.iter().filter(|p| p.required).map(|p| p.name.as_str()).collect();
+        assert_eq!(required, ["prompt", "references"]);
+        assert_eq!(ref2va.outputs.len(), 2);
 
         // The whole manifest round-trips to JSON for discovery.
         let j = m.to_json();
         assert_eq!(j["model"], MODEL);
-        assert_eq!(j["actions"].as_array().unwrap().len(), 2);
+        assert_eq!(j["actions"].as_array().unwrap().len(), 3);
         assert_eq!(j["actions"][0]["streaming"], true);
         assert_eq!(j["actions"][0]["params"][0]["name"], "prompt");
         assert_eq!(j["actions"][0]["params"][0]["required"], true);
     }
 
-    /// A keyframe still on disk reaches the VAE channel-major in `[0,255]`,
-    /// at the canvas the request asked for whatever size the file is.
+    /// `fl2va`'s stills reach the canvas as the reference fits them: with no
+    /// canvas asked for it follows the first still's aspect, the first
+    /// still is stretched onto it and a second one cover-cropped - a
+    /// one-pixel-wide red column centred in a 3:1 still survives a crop to
+    /// the canvas's 16:9.
     #[test]
-    fn a_keyframe_still_is_loaded_channel_major_and_fitted_to_the_canvas() {
-        let dir = std::env::temp_dir().join(format!("minimaxh3-keyframe-{}", std::process::id()));
+    fn keyframes_are_fitted_to_the_canvas_as_the_reference_fits_them() {
+        let dir = std::env::temp_dir().join(format!("minimaxh3-keyframes-{}-{}", std::process::id(), data::rng::random_seed()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("still.png");
-        // 2x1 RGB: px0 = (255, 0, 128), px1 = (0, 255, 64).
-        imaging::save_png(&path, &imaging::Rgb8 { w: 2, h: 1, px: vec![255, 0, 128, 0, 255, 64] }).unwrap();
+        let still = |name: &str, w: u32, h: u32, px: Vec<u8>| {
+            let path = dir.join(name);
+            imaging::save_png(&path, &imaging::Rgb8 { w, h, px }).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let first = still("first.png", 1600, 900, vec![90; 1600 * 900 * 3]);
+        let last = still("last.png", 2700, 900, (0..2700 * 900).flat_map(|i| if i % 2700 == 1350 { [255, 0, 0] } else { [0, 0, 0] }).collect());
+        let specs = [FlKeyframeSpec { anchor: pipeline::Anchor::First, path: first }, FlKeyframeSpec { anchor: pipeline::Anchor::Last, path: last }];
 
-        let chw = load_keyframe_pixels(path.to_str().unwrap(), 2, 1).unwrap();
-        assert_eq!(chw, vec![255.0, 0.0, 0.0, 255.0, 128.0, 64.0], "R plane, G plane, B plane");
+        let ((h, w), fitted) = load_keyframes(&specs, None).unwrap();
+        assert_eq!((h, w), pipeline::resolve_canvas_size(16.0, 9.0, canvas_multiple(), pipeline::CANVAS_SHORT_EDGE, pipeline::CANVAS_MAX_PIXELS).unwrap());
+        assert!(fitted.iter().all(|(_, img)| (img.h, img.w) == (h, w)));
+        assert_eq!(fitted[0].0, pipeline::Anchor::First);
+        let crop = &fitted[1].1;
+        let red_column = (0..w as usize).max_by_key(|&x| crop.px[x * 3]).unwrap();
+        assert!((red_column as i64 - w as i64 / 2).abs() <= 1, "the cover crop is centred (red column at {red_column} of {w})");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        let fitted = load_keyframe_pixels(path.to_str().unwrap(), 4, 2).unwrap();
-        assert_eq!(fitted.len(), 3 * 4 * 2, "resampled to the requested canvas");
-        assert!(fitted.iter().all(|v| (0.0..=255.0).contains(v)));
+    /// `ref2va` references are typed by their extension, a soundtrack rides
+    /// on a video only, and the action refuses a checkout without
+    /// `transformer_ref/` before reading any weight.
+    #[test]
+    fn references_are_read_by_kind_and_ref2va_needs_its_own_transformer() {
+        let dir = std::env::temp_dir().join(format!("minimaxh3-refs-{}-{}", std::process::id(), data::rng::random_seed()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("a.png");
+        imaging::save_png(&png, &imaging::Rgb8 { w: 4, h: 4, px: vec![7; 48] }).unwrap();
+        let wav = dir.join("b.wav");
+        audio::wav::write(&wav, &[0.1; 3200], 32000).unwrap();
+        let refs = |list: String| references_from(&Invocation::new().set("references", json!(list)));
+        let media = refs(format!("{},{}", png.display(), wav.display())).unwrap();
+        assert!(matches!(media[0], crate::references::ReferenceMedia::Image(_)));
+        assert!(matches!(media[1], crate::references::ReferenceMedia::Audio(_)));
+        assert!(refs(format!("{}+{}", png.display(), wav.display())).unwrap_err().contains("only a video"));
+        assert!(refs(String::new()).unwrap_err().contains("required"));
+        let paths = Paths::resolve(dir.to_str().unwrap());
+        assert!(paths.dit_for("ref2va").unwrap_err().contains("transformer_ref"));
+        assert_eq!(paths.dit_for("t2va").unwrap(), paths.dit);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1035,82 +1185,38 @@ mod tests {
         assert!(e.contains("at least one"), "{e}");
     }
 
-    /// The stub is deterministic and prompt/seed-sensitive - never a
-    /// no-op, and reproducible across identical calls (so `--seed` runs
-    /// stay reproducible even though the semantics are placeholder).
+    /// The real Qwen3-VL conditioner, loaded from a real `BRAIN_MINIMAXH3_DIR`
+    /// checkout, must produce real, finite, non-trivial conditioning for a
+    /// prompt alone. This is a genuinely large load (tens of GB); skips
+    /// cleanly, like every other real-weight test in this crate, when the
+    /// checkout is not present.
     #[test]
-    fn text_conditioning_stub_is_deterministic_and_prompt_seeded() {
-        let a = text_conditioning_stub("a cat on a skateboard", 12, 7);
-        let b = text_conditioning_stub("a cat on a skateboard", 12, 7);
-        assert_eq!(a.embeds, b.embeds, "same prompt+seed must reproduce exactly");
-        assert_eq!(a.token_tags, b.token_tags);
-        assert!(a.token_tags.iter().all(|&t| t == crate::config::TAG_TEXT));
-        assert_eq!(a.embeds.len(), a.token_tags.len() * 12);
-
-        let c = text_conditioning_stub("a completely different prompt", 12, 7);
-        assert_ne!(a.embeds, c.embeds, "a different prompt must change the stub");
-        let d = text_conditioning_stub("a cat on a skateboard", 12, 8);
-        assert_ne!(a.embeds, d.embeds, "a different seed must change the stub");
-    }
-
-    /// The real Qwen3-VL text encoder, loaded from a real `BRAIN_MINIMAXH3_DIR`
-    /// checkout, must actually produce real, finite, non-trivial conditioning
-    /// -- not the stub, and [`text_conditioning`] must pick the real path over
-    /// the stub automatically once weights exist. This is a genuinely large
-    /// load (tens of GB); skips cleanly, like every other real-weight test in
-    /// this crate, when the checkout is not present.
-    #[test]
-    fn text_conditioning_uses_the_real_encoder_when_weights_are_present() {
+    fn a_prompt_presents_through_the_real_encoder_when_weights_are_present() {
         let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
             brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to encode from");
             return;
         };
         // The text tower places itself over the ambient `BRAIN_DEVICE`
-        // selection; a test pins it to the CPU so a 50-layer/hidden=5120
-        // tower never lands on a GPU some other test is using.
-        //
-        // `set_var` here is NOT sufficient on its own: `gpu_core::devices`'s
-        // ambient resolution is cached in a process-lifetime `OnceLock`
-        // (`ambient_compute_set`'s own doc), so if any EARLIER test in this
-        // same binary already resolved it (with whatever `BRAIN_DEVICE` was
-        // set to at that point), this line changes nothing - the real bug a
-        // prior fix here missed. There is no way to force a fresh resolution
-        // from inside a test (`gpu_core::devices`'s own test suite hits the
-        // identical wall and works around it by testing pure functions
-        // instead - see its `narrowing_nothing_leaves_brain_gpu_index_reachable`
-        // doc). So: set it best-effort for the case nothing has resolved yet,
-        // then verify what actually got cached rather than trust the env var
-        // - and skip cleanly instead of risking a real GPU OOM if some
-        // earlier test already locked in an ambient GPU.
+        // selection, which `gpu_core::devices` caches per process; pin it to
+        // the CPU when nothing has resolved it yet, and skip rather than risk
+        // loading a 50-layer/hidden=5120 tower onto a GPU another test holds.
         std::env::set_var("BRAIN_DEVICE", "cpu");
         if !gpu_core::devices::ambient_compute_set().gpus.is_empty() {
-            brain_testutil::skip(
-                "ambient compute set already resolved to a GPU by an earlier test in this binary \
-                 (gpu_core::devices caches ambient selection per-process) - re-run this test alone, \
-                 or with BRAIN_DEVICE=cpu set in the environment BEFORE invoking cargo test, to avoid \
-                 loading this 50-layer/hidden=5120 shard onto a real GPU",
-            );
+            brain_testutil::skip("ambient compute set already resolved to a GPU by an earlier test in this binary - re-run this test alone, or with BRAIN_DEVICE=cpu set before invoking cargo test");
             return;
         }
         let paths = Paths::resolve(&root);
-        if !has_real_text_encoder(&paths) {
-            brain_testutil::skip(&format!("{}/config.json or {}/tokenizer.json not found - text encoder not (yet) downloaded", paths.text_encoder, paths.tokenizer));
+        if !checkpoint::safetensors::has_model_weights(std::path::Path::new(&paths.text_encoder)) {
+            brain_testutil::skip(&format!("{} has no text encoder weights - not (yet) downloaded", paths.text_encoder));
             return;
         }
-
-        let text = text_conditioning(&paths, "a red fox running through snow at dusk", 5120, 3).unwrap_or_else(|e| panic!("real text conditioning: {e}"));
-        assert!(!text.embeds.is_empty(), "real encoder must produce non-empty embeds");
+        let text = encode_presentation(&paths, "a red fox running through snow at dusk", &[], Some("cpu")).unwrap_or_else(|e| panic!("real text conditioning: {e}"));
         assert_eq!(text.embeds.len() % 5120, 0, "embeds must be a whole number of text_dim=5120 rows");
-        let num_tokens = text.embeds.len() / 5120;
-        assert_eq!(text.token_tags.len(), num_tokens);
-        assert!(text.token_tags.iter().all(|&t| t == crate::config::TAG_TEXT), "a plain t2va prompt has no image rows");
+        assert_eq!(text.token_tags.len(), text.embeds.len() / 5120);
+        assert!(text.token_tags.iter().all(|&t| t == crate::config::TAG_TEXT), "a plain t2va prompt has no vision rows");
         assert!(text.embeds.iter().all(|v| v.is_finite()), "real encoder output must be finite");
-        assert!(text.embeds.iter().any(|&v| v != 0.0), "real encoder output must not be trivially all-zero");
-        // Not the stub's own distribution (mean-0, scale-0.5 Gaussian) -
-        // a real hidden state at this depth has a very different, much
-        // larger-magnitude spread; a loose sanity bound, not a parity check.
         let max_abs = text.embeds.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
-        assert!(max_abs > 1.0, "real hidden state magnitude looks stub-like (max_abs={max_abs})");
+        assert!(max_abs > 1.0, "a hidden state at this depth has a large spread (max_abs={max_abs})");
     }
 
     /// The VAE latent normalization must come from the checkpoint, and must
@@ -1208,7 +1314,7 @@ mod tests {
     #[test]
     fn loaded_weights_load_reports_a_missing_dit_file_cleanly() {
         let paths = Paths::resolve("/nonexistent-minimaxh3-root");
-        assert!(LoadedWeights::load(&paths).is_err());
+        assert!(LoadedWeights::load(&paths, &paths.dit).is_err());
     }
 
     /// [`Paths::resolve`] derives every sub-path from one root, each a fixed,

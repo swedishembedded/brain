@@ -43,16 +43,13 @@
 //!
 //! ## Status
 //!
-//! This crate is a fresh port in progress. Every module through the DiT
-//! core, both VAEs, the vocoder and the dual schedule has a real numeric
-//! parity gate against the actual installed `diffusers==0.40.0` reference at
-//! tiny config, green; the audio VAE additionally has real-checkpoint
-//! numeric parity. `t2va`/`fl2va` run end to end at tiny config, weight-free.
-//! `ref2va` is not implemented. Real-checkpoint import for the DiT itself
-//! (splitting the checkpoint's fused `qkv_proj`) and a real Qwen3-VL text
-//! encoder wired into serving (a deterministic stub stands in today) are
-//! both open - an entry existing in this module does not by itself mean the
-//! capability it names is real-weight-complete.
+//! Every module - the DiT core, both VAEs and the audio encoder, the vocoder,
+//! the dual schedule, the packed layouts, the reference normalizers and the
+//! Qwen3-VL presentation - has a numeric parity gate against the installed
+//! `diffusers==0.40.0`/`transformers` reference; the DiT, the audio VAE and
+//! its encoder also against the real checkpoint. `t2va`, `fl2va` and
+//! `ref2va` are served through [`caps`]; `ref2va` runs on the release's
+//! separately trained `transformer_ref/`, which a checkout must carry.
 
 pub mod adaln;
 pub mod audio_encoder;

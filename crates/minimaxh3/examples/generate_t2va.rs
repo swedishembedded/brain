@@ -53,12 +53,12 @@ fn main() {
 
     eprintln!("[1/4] encoding prompt: {prompt:?}");
     let t0 = std::time::Instant::now();
-    let text = minimaxh3::caps::encode_prompt(&paths, prompt).unwrap_or_else(|e| panic!("encode_prompt: {e}"));
+    let text = minimaxh3::caps::encode_presentation(&paths, prompt, &[], None).unwrap_or_else(|e| panic!("encode_presentation: {e}"));
     eprintln!("      done in {:.1}s", t0.elapsed().as_secs_f32());
 
     eprintln!("[2/4] loading DiT (streaming) + VAE weights - this is the ~33B-param checkpoint, expect several minutes ...");
     let t1 = std::time::Instant::now();
-    let weights = minimaxh3::caps::LoadedWeights::load(&paths).unwrap_or_else(|e| panic!("LoadedWeights::load: {e}"));
+    let weights = minimaxh3::caps::LoadedWeights::load(&paths, &paths.dit).unwrap_or_else(|e| panic!("LoadedWeights::load: {e}"));
     eprintln!("      done in {:.1}s", t1.elapsed().as_secs_f32());
 
     let ckpt = weights.as_checkpoint();

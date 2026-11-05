@@ -239,8 +239,9 @@ impl SoundtrackEncoder<'_> {
     }
 }
 
-/// Channel-major `[3, frames, h, w]` pixels in `[0, 255]`.
-fn planar_pixels(frames: &[&Rgb8]) -> Vec<f32> {
+/// Channel-major `[3, frames, h, w]` pixels in `[0, 255]`, as the video VAE
+/// encodes them.
+pub(crate) fn planar_pixels(frames: &[&Rgb8]) -> Vec<f32> {
     let plane = (frames[0].w * frames[0].h) as usize;
     let mut out = vec![0f32; 3 * frames.len() * plane];
     for (t, frame) in frames.iter().enumerate() {

@@ -64,25 +64,39 @@ impl MiniMaxH3Resident {
     }
 }
 
-/// `(task, video_latent_frames, latent_height, latent_width,
-/// num_audio_latents, dtype)` from an instance key
-/// (`"{task}:{vf}x{vh}x{vw}:{audio}[@{dtype}]"`) - see [`instance_key`]'s own
-/// doc for why the video and audio latent extents are named separately
-/// rather than one being derivable from the other at THIS layer. `dtype` is
-/// the tier the DiT is held at ([`RESIDENT_DTYPE`]), `"f32"` when the
-/// `@{dtype}` suffix is absent - `resident_wan.rs::parse_key`'s own
-/// precedent.
-fn parse_key(config: &str) -> Option<(String, u32, u32, u32, u32, String)> {
+/// One instance key's fields (`"{task}:{vf}x{vh}x{vw}:{audio}[:{refs}][@{dtype}]"`):
+/// the task, both latent extents - see [`instance_key`]'s own doc for why
+/// the video and audio extents are named separately rather than one being
+/// derivable from the other at THIS layer - the packed rows a `ref2va`
+/// request's references may take (`0` when absent) and the tier the DiT is
+/// held at ([`RESIDENT_DTYPE`]), `"f32"` when the `@{dtype}` suffix is
+/// absent - `resident_wan.rs::parse_key`'s own precedent.
+#[derive(Debug, PartialEq)]
+struct Key {
+    task: String,
+    vf: u32,
+    vh: u32,
+    vw: u32,
+    audio: u32,
+    reference_rows: u32,
+    dtype: String,
+}
+
+fn parse_key(config: &str) -> Option<Key> {
     let (rest, dtype) = match config.rsplit_once('@') {
         Some((r, d)) => (r, d.to_string()),
         None => (config, "f32".to_string()),
     };
-    let mut it = rest.splitn(3, ':');
+    let mut it = rest.splitn(4, ':');
     let task = it.next()?.to_string();
     let mut dims = it.next()?.splitn(3, 'x');
     let (vf, vh, vw) = (dims.next()?.parse().ok()?, dims.next()?.parse().ok()?, dims.next()?.parse().ok()?);
     let audio: u32 = it.next()?.parse().ok()?;
-    Some((task, vf, vh, vw, audio, dtype))
+    let reference_rows = match it.next() {
+        Some(r) => r.parse().ok()?,
+        None => 0,
+    };
+    Some(Key { task, vf, vh, vw, audio, reference_rows, dtype })
 }
 
 /// Resolve one invocation's `(video latent extent, audio latent extent)`
@@ -137,9 +151,13 @@ const RESIDENT_DTYPE: &str = "i8";
 /// plus the text prompt at its encoder's longest) - what a forward's
 /// workspace is sized from.
 fn packed_rows(vf: u32, vh: u32, vw: u32, audio: u32) -> u32 {
+    target_video_rows(vf, vh, vw) + audio * minimaxh3::pipeline::AUDIO_CHANNELS + MAX_PROMPT_ROWS
+}
+
+/// The generated clip's video rows.
+fn target_video_rows(vf: u32, vh: u32, vw: u32) -> u32 {
     let dit_cfg = H3TransformerConfig::real();
-    let (ph, pw) = (dit_cfg.patch_size[1], dit_cfg.patch_size[2]);
-    vf * (vh / ph) * (vw / pw) + audio * minimaxh3::pipeline::AUDIO_CHANNELS + MAX_PROMPT_ROWS
+    vf * (vh / dit_cfg.patch_size[1]) * (vw / dit_cfg.patch_size[2])
 }
 
 /// The prompt rows a workspace is reserved for: a caption, never a document.
@@ -170,11 +188,13 @@ impl ResidentModel for MiniMaxH3Resident {
     /// explicitly instead of assuming the omission transfers.
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
         let (vf, vh, vw, audio) = latent_extents(inv);
-        InstanceKey::new(&self.id, format!("{action}:{vf}x{vh}x{vw}:{audio}@{}", RESIDENT_DTYPE))
+        let refs = minimaxh3::caps::reference_rows_bound(action, inv, target_video_rows(vf, vh, vw), audio * minimaxh3::pipeline::AUDIO_CHANNELS);
+        let extent = format!("{action}:{vf}x{vh}x{vw}:{audio}");
+        InstanceKey::new(&self.id, if refs > 0 { format!("{extent}:{refs}@{RESIDENT_DTYPE}") } else { format!("{extent}@{RESIDENT_DTYPE}") })
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        let Some((_, vf, vh, vw, audio, dtype)) = parse_key(&key.config) else {
+        let Some(Key { vf, vh, vw, audio, reference_rows, dtype, .. }) = parse_key(&key.config) else {
             // An unparseable key must not read as "free" - `resident_wan.
             // rs::estimate`'s identical reasoning.
             return MemCost::new(8u64 << 30, 4u64 << 30);
@@ -184,7 +204,7 @@ impl ResidentModel for MiniMaxH3Resident {
         let tier = key_tier(&dtype).unwrap_or(gpu_core::select::Dtype::F32);
         let weights = minimaxh3::model::resident_cost(&dit_cfg, tier).total();
         let vae_weights = manifest_bytes(&VideoVaeConfig::real().tensor_manifest()) + manifest_bytes(&minimaxh3::vocoder::VocoderConfig::h3_32khz().tensor_manifest());
-        let activations = minimaxh3::model::block_workspace_bytes(&dit_cfg, packed_rows(vf, vh, vw, audio));
+        let activations = minimaxh3::model::block_workspace_bytes(&dit_cfg, packed_rows(vf, vh, vw, audio) + reference_rows);
         let (ph, pw) = (dit_cfg.patch_size[1] as u64, dit_cfg.patch_size[2] as u64);
         let pixels = vf as u64 * (vh as u64 * ph) * (vw as u64 * pw) * 3 * 4;
 
@@ -192,9 +212,9 @@ impl ResidentModel for MiniMaxH3Resident {
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let (task, ..) = parse_key(&key.config).ok_or_else(|| format!("minimaxh3: bad instance key {:?}", key.config))?;
-        if task != "t2va" && task != "fl2va" {
-            return Err(format!("minimaxh3: unknown task {task:?} (t2va, fl2va)"));
+        let Key { task, .. } = parse_key(&key.config).ok_or_else(|| format!("minimaxh3: bad instance key {:?}", key.config))?;
+        if !["t2va", "fl2va", "ref2va"].contains(&task.as_str()) {
+            return Err(format!("minimaxh3: unknown task {task:?} (t2va, fl2va, ref2va)"));
         }
         // The DiT itself is built lazily, on the first run against this
         // device (`MiniMaxH3Instance::ensure_hot`) - `activate` only fixes
@@ -243,12 +263,15 @@ impl MiniMaxH3Instance {
     /// the lock for the WHOLE forward - see [`Instance::run_batch`]'s own doc
     /// for why this model's residency is sequential by design, same as
     /// `resident_wan.rs::WanInstance::run_batch`'s reasoning.
-    fn with_hot_dit<R>(&self, rows: u32, body: impl FnOnce(&minimaxh3::model::H3Transformer) -> Result<R, String>) -> Result<R, String> {
-        let want = device_key(self.device);
+    /// The slot is keyed by the partition (`transformer/` or `ref2va`'s
+    /// `transformer_ref/`) as well as the device, so switching between them
+    /// reloads rather than running one's request on the other's weights.
+    fn with_hot_dit<R>(&self, dit: &str, rows: u32, body: impl FnOnce(&minimaxh3::model::H3Transformer) -> Result<R, String>) -> Result<R, String> {
+        let want = format!("{dit}@{}", device_key(self.device));
         self.hot.try_get(
             want,
             || {
-                let dit_reader = minimaxh3::caps::open_dit_reader(&self.paths.dit)?;
+                let dit_reader = minimaxh3::caps::open_dit_reader(dit)?;
                 minimaxh3::model::H3Transformer::load(&dit_reader, H3TransformerConfig::real(), device_name(self.device).as_deref(), minimaxh3::pipeline::RESIDENT_TIER, rows)
             },
             body,
@@ -260,21 +283,16 @@ impl Instance for MiniMaxH3Instance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         // Params (and the license gate they carry) before the weights read -
         // `wan::caps::WanAction::run`'s own ordering.
-        let p = minimaxh3::caps::gen_params_from(inv)?;
-        let keyframe_specs = match action {
-            "t2va" => Vec::new(),
-            "fl2va" => minimaxh3::caps::fl2va_keyframes_from(inv)?,
-            other => return Err(format!("minimaxh3: unknown action '{other}'")),
-        };
+        let mut req = minimaxh3::caps::request_from(action, inv)?;
+        req.params.opts.device = device_name(self.device);
+        let dit = self.paths.dit_for(action)?.to_string();
         let vae = minimaxh3::caps::VaeWeights::load(&self.paths)?;
-        let mut opts = p.opts.clone();
-        opts.device = device_name(self.device);
-        let keyframes = minimaxh3::caps::encode_keyframes(&vae, &keyframe_specs, &opts)?;
         let (vf, vh, vw, audio) = latent_extents(inv);
-        self.with_hot_dit(packed_rows(vf, vh, vw, audio), |model| {
+        let rows = packed_rows(vf, vh, vw, audio) + minimaxh3::caps::reference_rows_bound(action, inv, target_video_rows(vf, vh, vw), audio * minimaxh3::pipeline::AUDIO_CHANNELS);
+        self.with_hot_dit(&dit, rows, |model| {
             let empty = vae::blocks::Tensors::default();
             let ckpt = vae.as_checkpoint(&empty, H3TransformerConfig::real());
-            minimaxh3::caps::generate_on(&ckpt, inv, &p, &self.paths, &keyframes, Some(model), progress)
+            minimaxh3::caps::generate_on(&ckpt, &req, &self.paths, Some(model), &inv.cancel, progress)
         })
     }
 
@@ -304,8 +322,10 @@ mod tests {
 
     #[test]
     fn key_parsing_round_trips_and_a_bad_key_still_costs_something() {
-        assert_eq!(parse_key("t2va:37x32x32:207"), Some(("t2va".to_string(), 37, 32, 32, 207, "f32".to_string())));
-        assert_eq!(parse_key("t2va:37x32x32:207@f32"), Some(("t2va".to_string(), 37, 32, 32, 207, "f32".to_string())));
+        let key = |task: &str, reference_rows: u32, dtype: &str| Some(Key { task: task.to_string(), vf: 37, vh: 32, vw: 32, audio: 207, reference_rows, dtype: dtype.to_string() });
+        assert_eq!(parse_key("t2va:37x32x32:207"), key("t2va", 0, "f32"));
+        assert_eq!(parse_key("t2va:37x32x32:207@f32"), key("t2va", 0, "f32"));
+        assert_eq!(parse_key("ref2va:37x32x32:207:16384@i8"), key("ref2va", 16384, "i8"));
         assert_eq!(parse_key("garbage"), None);
         let cost = resident().estimate(&InstanceKey::new(minimaxh3::caps::MODEL, "garbage".to_string()));
         assert!(cost.vram > 0 && cost.ram > 0, "{cost:?}");
@@ -337,11 +357,25 @@ mod tests {
         let longer = r.instance_key("t2va", &base.clone().set("num_frames", json!(240)));
         assert_ne!(a.config, longer.config);
 
-        let (_, vf, vh, vw, audio, dtype) = parse_key(&a.config).expect("a well-formed key");
+        let Key { vf, vh, vw, audio, dtype, .. } = parse_key(&a.config).expect("a well-formed key");
         assert!(vf > 0 && vh > 0 && vw > 0, "the video latent extent must be real, got {vf}x{vh}x{vw}");
         assert!(audio > 0, "the audio latent extent must be real, got {audio}");
         assert_eq!(dtype, "i8");
         assert_eq!(key_tier(&dtype), Some(minimaxh3::pipeline::RESIDENT_TIER), "the key names the tier the adapter loads");
+    }
+
+    /// A `ref2va` request's references take rows of their own - an image at
+    /// its 2048 short edge far more than the clip - so its key reserves
+    /// them, and a heavier list costs more.
+    #[test]
+    fn a_ref2va_key_reserves_its_references_rows() {
+        let r = resident();
+        let refs = |list: &str| r.instance_key("ref2va", &Invocation::new().set("prompt", json!("a")).set("references", json!(list)));
+        let one = refs("/a.png");
+        let two = refs("/a.png,/b.mp4+/b.wav");
+        assert!(parse_key(&one.config).unwrap().reference_rows > 0);
+        assert!(r.estimate(&two).vram > r.estimate(&one).vram);
+        assert_eq!(parse_key(&r.instance_key("t2va", &Invocation::new().set("prompt", json!("a"))).config).unwrap().reference_rows, 0);
     }
 
     /// The resident DiT is ~20 GB of int8 linears on the cards; on the host
@@ -369,13 +403,13 @@ mod tests {
 
     #[test]
     fn activate_rejects_an_unknown_task() {
-        let e = resident().activate(&InstanceKey::new(minimaxh3::caps::MODEL, "ref2va:1x1x1:1".to_string()), Device::Cpu).err().expect("an unknown task must not activate");
+        let e = resident().activate(&InstanceKey::new(minimaxh3::caps::MODEL, "v2va:1x1x1:1".to_string()), Device::Cpu).err().expect("an unknown task must not activate");
         assert!(e.contains("unknown task"), "{e}");
     }
 
     #[test]
     fn activate_accepts_known_tasks() {
-        for task in ["t2va", "fl2va"] {
+        for task in ["t2va", "fl2va", "ref2va"] {
             assert!(resident().activate(&InstanceKey::new(minimaxh3::caps::MODEL, format!("{task}:1x1x1:1")), Device::Cpu).is_ok());
         }
     }
