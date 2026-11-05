@@ -729,17 +729,17 @@ impl LoadedWeights {
 /// `None` streams the DiT from `ckpt.dit_tensors` one block at a time
 /// ([`pipeline::t2va`]), which is the only placement a 33B fp32 DiT has on a
 /// machine whose cards cannot hold all of it. `paths` decides real-vs-stub
-/// text conditioning ([`text_conditioning`]). Neither cancellation nor
-/// per-step progress is threaded through `crate::pipeline`'s denoise loop
-/// yet, so `inv.cancel` rides along unpolled.
-pub fn generate_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation, p: &GenParams, paths: &Paths, keyframes: &[pipeline::KeyframeCondition], model: Option<&crate::model::H3Transformer>) -> capability::ActionResult {
+/// text conditioning ([`text_conditioning`]). `inv.cancel` is polled every
+/// denoise step and `progress` reports each step and decode.
+pub fn generate_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation, p: &GenParams, paths: &Paths, keyframes: &[pipeline::KeyframeCondition], model: Option<&crate::model::H3Transformer>, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
     let text = text_conditioning(paths, &prompt, ckpt.dit_cfg.text_dim, p.opts.seed)?;
+    let report = |done: u32, total: u32, phase: &str| progress(Progress::step(done, total, phase.to_string()));
     let av = match (keyframes.is_empty(), model) {
-        (true, Some(m)) => pipeline::t2va_hot(ckpt, &text, &p.opts, m)?,
-        (true, None) => pipeline::t2va(ckpt, &text, &p.opts)?,
-        (false, Some(m)) => pipeline::fl2va_hot(ckpt, &text, keyframes, &p.opts, m)?,
-        (false, None) => pipeline::fl2va(ckpt, &text, keyframes, &p.opts)?,
+        (true, Some(m)) => pipeline::t2va_hot(ckpt, &text, &p.opts, m, &inv.cancel, report)?,
+        (true, None) => pipeline::t2va(ckpt, &text, &p.opts, &inv.cancel, report)?,
+        (false, Some(m)) => pipeline::fl2va_hot(ckpt, &text, keyframes, &p.opts, m, &inv.cancel, report)?,
+        (false, None) => pipeline::fl2va(ckpt, &text, keyframes, &p.opts, &inv.cancel, report)?,
     };
     Ok(av_outcome(&av, p.opts.seed))
 }
@@ -837,7 +837,7 @@ impl Action for MiniMaxH3Action {
     fn spec(&self) -> ActionSpec {
         manifest().actions.into_iter().find(|a| a.name == self.name).expect("known action")
     }
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         // Params before the weights-env check: a request that could never
         // run must not read "you forgot to export BRAIN_MINIMAXH3_DIT" -
         // `wan::caps::WanAction::run`'s own ordering.
@@ -849,7 +849,7 @@ impl Action for MiniMaxH3Action {
         };
         let weights = LoadedWeights::load(&self.paths)?;
         let keyframes = encode_keyframes(&weights.vae, &keyframe_specs, &p.opts)?;
-        generate_on(&weights.as_checkpoint(), inv, &p, &self.paths, &keyframes, None)
+        generate_on(&weights.as_checkpoint(), inv, &p, &self.paths, &keyframes, None, progress)
     }
 }
 

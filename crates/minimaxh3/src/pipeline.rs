@@ -642,11 +642,17 @@ pub struct GeneratedAv {
 // ============================================================================
 
 /// `t2va`: text only, no keyframe conditioning rows at all
-/// (`MiniMaxH3NoKeyframeAnchorsStep`'s own `keyframe_anchors = ()`). Loads
+/// (`MiniMaxH3NoKeyframeAnchorsStep`'s own `keyframe_anchors = ()`).
+///
+/// Every entry point takes the caller's `cancel` token, polled before each
+/// denoise step and each decode (a cancelled run returns `Err("cancelled")`
+/// and decodes nothing), and `progress(done, total, phase)`, called once per
+/// denoise step (`"denoise"`) and per decode (`"video decode"`,
+/// `"audio decode"`) against one fixed `total`. Loads
 /// (and drops) its own [`H3Transformer`] - the cold path; see [`t2va_hot`]
 /// for a call that reuses an already-resident one.
-pub fn t2va(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts) -> Result<GeneratedAv, String> {
-    generate(ckpt, text, &[], opts, None)
+pub fn t2va(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
+    generate(ckpt, text, &[], opts, None, cancel, progress)
 }
 
 /// `fl2va`: text plus up to 2 keyframe conditioning rows, one `"first"`-
@@ -654,11 +660,11 @@ pub fn t2va(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts) -> Res
 /// [`encode_keyframe_condition`] in packed order. Cold path - see
 /// [`fl2va_hot`] for a call that reuses an already-resident
 /// [`H3Transformer`].
-pub fn fl2va(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts) -> Result<GeneratedAv, String> {
+pub fn fl2va(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
     if keyframes.is_empty() {
         return Err("fl2va: at least one keyframe is required - use t2va for a text-only request".to_string());
     }
-    generate(ckpt, text, keyframes, opts, None)
+    generate(ckpt, text, keyframes, opts, None, cancel, progress)
 }
 
 /// [`t2va`], against a caller-held resident [`H3Transformer`] instead of a
@@ -666,18 +672,18 @@ pub fn fl2va(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[Keyframe
 /// `model`'s own config must match `ckpt.dit_cfg`; a mismatch is a caller
 /// bug (wrong resident handed to the wrong checkpoint), asserted rather than
 /// silently forwarded into a shape error deep in `forward`.
-pub fn t2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts, model: &H3Transformer) -> Result<GeneratedAv, String> {
+pub fn t2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts, model: &H3Transformer, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
     assert_eq!(model.config(), &ckpt.dit_cfg, "t2va_hot: the resident H3Transformer's config does not match ckpt.dit_cfg");
-    generate(ckpt, text, &[], opts, Some(model))
+    generate(ckpt, text, &[], opts, Some(model), cancel, progress)
 }
 
 /// [`fl2va`]'s [`t2va_hot`] analogue.
-pub fn fl2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts, model: &H3Transformer) -> Result<GeneratedAv, String> {
+pub fn fl2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts, model: &H3Transformer, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
     if keyframes.is_empty() {
         return Err("fl2va: at least one keyframe is required - use t2va for a text-only request".to_string());
     }
     assert_eq!(model.config(), &ckpt.dit_cfg, "fl2va_hot: the resident H3Transformer's config does not match ckpt.dit_cfg");
-    generate(ckpt, text, keyframes, opts, Some(model))
+    generate(ckpt, text, keyframes, opts, Some(model), cancel, progress)
 }
 
 /// The shared `t2va`/`fl2va` body: resolve geometry, build the packed
@@ -689,7 +695,7 @@ pub fn fl2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[Keyf
 /// compiled RoPE/kernel graph genuinely is sized per `(frames,width,height)`),
 /// so one resident transformer serves every request shape at a given
 /// checkpoint/device.
-fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts, model: Option<&H3Transformer>) -> Result<GeneratedAv, String> {
+fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts, model: Option<&H3Transformer>, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
     let device = opts.device.as_deref();
     let dit_cfg = &ckpt.dit_cfg;
     let vae_cfg = &ckpt.video_vae_cfg;
@@ -800,7 +806,12 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
         (None, None) => unreachable!("a streaming context is opened whenever nothing is resident"),
     };
 
+    // Every denoise step, then the two decodes.
+    let total = num_steps as u32 + 2;
     for (i, (unique_ts, ts_idx)) in step_rows.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err("cancelled".to_string());
+        }
         let (video_ts, audio_ts) = sched.current_timesteps(i);
 
         let inp = PackedInputs {
@@ -825,6 +836,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
         let (video_next, audio_next) = (sched.video().step(gen_video_pred, video_ts, gen_video_sample, i), sched.audio().step(&out.audio, audio_ts, &compact_audio, i));
         compact_video[num_condition_video_rows * video_patch_dim..].copy_from_slice(&video_next);
         compact_audio.copy_from_slice(&audio_next);
+        progress(i as u32 + 1, total, "denoise");
     }
 
     // `streaming_ctx` (the DiT's devices) is a local `let` binding, so
@@ -841,6 +853,9 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
     // REACHING decode, not to how much denoising happened first.
     drop(streaming_ctx);
     drop(owned);
+    if cancel.is_cancelled() {
+        return Err("cancelled".to_string());
+    }
 
     // 5. Video decode (`MiniMaxH3AfterDenoiseStep` + `MiniMaxH3VideoDecodeStep`).
     let generated_video_rows = &compact_video[num_condition_video_rows * video_patch_dim..];
@@ -863,6 +878,11 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
         }
     }
 
+    progress(num_steps as u32 + 1, total, "video decode");
+    if cancel.is_cancelled() {
+        return Err("cancelled".to_string());
+    }
+
     // 6. Audio decode (`MiniMaxH3AfterDenoiseStep` + `MiniMaxH3AudioDecodeStep`).
     let generated_audio_rows = &compact_audio[packed.num_condition_audio_rows * audio_in_channels..];
     let num_audio_latents_gen = num_audio_latents as usize;
@@ -883,6 +903,8 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
         let wave = crate::vocoder::decode(&ckpt.vocoder_cfg, ckpt.vocoder_tensors, &z, num_audio_latents, device);
         audio_channels_out.push(wave);
     }
+
+    progress(total, total, "audio decode");
 
     Ok(GeneratedAv { video: pixels, num_video_frames: out_t, height: out_h, width: out_w, audio: audio_channels_out, sample_rate: 32000 })
 }
@@ -1197,7 +1219,7 @@ mod tests {
         let text = tiny_text(3, dit_cfg.text_dim as usize, 4);
         let opts = tiny_gen_opts(5);
 
-        let av = t2va(&ckpt, &text, &opts).expect("t2va");
+        let av = t2va(&ckpt, &text, &opts, &capability::CancelToken::default(), |_, _, _| {}).expect("t2va");
 
         assert_eq!(av.video.len(), (3 * av.num_video_frames * av.height * av.width) as usize);
         assert!(av.video.iter().all(|v| v.is_finite()), "video output must be finite");
@@ -1234,7 +1256,7 @@ mod tests {
         let keyframe_pixels: Vec<f32> = keyframe_pixels.iter().map(|&v| (v + 128.0).clamp(0.0, 255.0)).collect();
         let kf = encode_keyframe_condition(&video_vae_cfg, &video_vae_tensors, Some("cpu"), &keyframe_pixels, 32, 32, &ckpt.video_latents_mean, &ckpt.video_latents_std, dit_cfg.patch_size, Anchor::First, 17);
 
-        let av = fl2va(&ckpt, &text, &[kf], &opts).expect("fl2va");
+        let av = fl2va(&ckpt, &text, &[kf], &opts, &capability::CancelToken::default(), |_, _, _| {}).expect("fl2va");
 
         assert_eq!(av.video.len(), (3 * av.num_video_frames * av.height * av.width) as usize);
         assert!(av.video.iter().all(|v| v.is_finite()), "video output must be finite");
@@ -1243,6 +1265,48 @@ mod tests {
         for ch in &av.audio {
             assert!(ch.iter().all(|v| v.is_finite()), "audio output must be finite");
         }
+    }
+
+    /// A generation reports every denoise step and both decodes, in order,
+    /// against one fixed total, and a cancellation stops it at the next
+    /// step boundary with an error rather than decoding a half-denoised
+    /// clip.
+    #[test]
+    fn a_generation_reports_each_step_and_stops_when_cancelled() {
+        let dit_cfg = tiny_dit_cfg();
+        let video_vae_cfg = tiny_video_vae_cfg();
+        let vocoder_cfg = tiny_vocoder_cfg();
+        let dit_tensors = rand_dit_tensors(&dit_cfg, 31);
+        let video_vae_tensors = rand_manifest_tensors(video_vae_cfg.tensor_manifest(), 32);
+        let vocoder_tensors = rand_manifest_tensors(vocoder_cfg.tensor_manifest(), 33);
+        let ckpt = tiny_checkpoint(&dit_tensors, &video_vae_tensors, &vocoder_tensors);
+        let text = tiny_text(2, dit_cfg.text_dim as usize, 34);
+        let opts = tiny_gen_opts(35);
+
+        let mut seen: Vec<(u32, u32, String)> = Vec::new();
+        t2va(&ckpt, &text, &opts, &capability::CancelToken::default(), |d, t, phase| seen.push((d, t, phase.to_string()))).expect("t2va");
+        let total = seen[0].1;
+        assert!(seen.iter().all(|(_, t, _)| *t == total), "one fixed total: {seen:?}");
+        assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0), "progress never goes backwards: {seen:?}");
+        assert_eq!(seen.last().unwrap().0, total, "the run ends at its total: {seen:?}");
+        let steps = seen.iter().filter(|(_, _, p)| p == "denoise").count();
+        assert!(steps >= 2, "every denoise step reports: {seen:?}");
+        for phase in ["video decode", "audio decode"] {
+            assert!(seen.iter().any(|(_, _, p)| p == phase), "{phase} reports: {seen:?}");
+        }
+
+        let cancel = capability::CancelToken::armed();
+        let mut denoised = 0;
+        let err = t2va(&ckpt, &text, &opts, &cancel, |_, _, phase| {
+            if phase == "denoise" {
+                denoised += 1;
+                cancel.cancel();
+            }
+        })
+        .err()
+        .expect("a cancelled generation is an error");
+        assert_eq!(err, "cancelled");
+        assert!(denoised <= 2, "cancellation stops at the next step boundary, saw {denoised} steps");
     }
 
     #[test]
@@ -1256,7 +1320,7 @@ mod tests {
         let ckpt = tiny_checkpoint(&dit_tensors, &video_vae_tensors, &vocoder_tensors);
         let text = tiny_text(2, dit_cfg.text_dim as usize, 24);
         let opts = tiny_gen_opts(25);
-        assert!(fl2va(&ckpt, &text, &[], &opts).is_err());
+        assert!(fl2va(&ckpt, &text, &[], &opts, &capability::CancelToken::default(), |_, _, _| {}).is_err());
     }
 
     // ------------------------------------------------------------------

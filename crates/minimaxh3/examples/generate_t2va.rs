@@ -86,7 +86,7 @@ fn main() {
         opts.num_inference_steps
     );
     let t2 = std::time::Instant::now();
-    let av = minimaxh3::pipeline::t2va(&ckpt, &text, &opts).unwrap_or_else(|e| panic!("t2va: {e}"));
+    let av = minimaxh3::pipeline::t2va(&ckpt, &text, &opts, &Default::default(), |done, total, phase| eprintln!("      {phase} {done}/{total}")).unwrap_or_else(|e| panic!("t2va: {e}"));
     eprintln!("      done in {:.1}s -> {}x{} video, {} frames, {} audio channels @ {}Hz", t2.elapsed().as_secs_f32(), av.width, av.height, av.num_video_frames, av.audio.len(), av.sample_rate);
 
     eprintln!("[4/4] muxing to {out_mp4} ...");

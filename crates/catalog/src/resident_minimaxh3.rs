@@ -257,7 +257,7 @@ impl MiniMaxH3Instance {
 }
 
 impl Instance for MiniMaxH3Instance {
-    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         // Params (and the license gate they carry) before the weights read -
         // `wan::caps::WanAction::run`'s own ordering.
         let p = minimaxh3::caps::gen_params_from(inv)?;
@@ -274,7 +274,7 @@ impl Instance for MiniMaxH3Instance {
         self.with_hot_dit(packed_rows(vf, vh, vw, audio), |model| {
             let empty = vae::blocks::Tensors::default();
             let ckpt = vae.as_checkpoint(&empty, H3TransformerConfig::real());
-            minimaxh3::caps::generate_on(&ckpt, inv, &p, &self.paths, &keyframes, Some(model))
+            minimaxh3::caps::generate_on(&ckpt, inv, &p, &self.paths, &keyframes, Some(model), progress)
         })
     }
 
