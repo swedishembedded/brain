@@ -38,9 +38,9 @@
 # DiT's own denoise cost is trivial on CPU, so the gate's wall time is
 # dominated by the (also device-independent) VAE decode, not the DiT.
 #
-# Needs BRAIN_LTXV_VAE (the one mandatory weight role - the real VAE
-# checkpoint, `ltx-2.5-video-vae-conv-bf16.safetensors`) - SKIPPED, not
-# failed, when unset. The real 22B int8 checkpoint (BRAIN_LTXV_DIT) is
+# Needs the LTX-2.5 VAE in the model store (the one mandatory weight role -
+# `ltx-2.5-video-vae-conv-bf16.safetensors`) - SKIPPED, not failed, when the
+# store lacks it. The real 22B int8 checkpoint (`ltxv:...@real`) is
 # deliberately NOT exercised here: Phase 8 measured a single real denoise
 # step at ~186 s (dominated by re-reading/re-quantizing every block from
 # the GGUF on every forward call, see this crate's roadmap ledger), far past
@@ -55,13 +55,8 @@ BIN=./target/release/brain
 BASE=scripts/gates/ltxv-perf-baselines
 FLOOR="${LTXV_PERF_FLOOR:-0.5}"
 SHAPE="${LTXV_PERF_SHAPE:-9x64x64x4}" # the M4 smoke shape: 2 latent frames, 2x2 latent grid
-export BRAIN_DEVICE=cpu
 
 [ -x "$BIN" ] || { echo "build first: make build/release"; exit 2; }
-if [ -z "${BRAIN_LTXV_VAE:-}" ]; then
-  echo "SKIP ltxv-perf-gate (set BRAIN_LTXV_VAE to a real ltx-2.5-video-vae-conv-bf16.safetensors)"
-  exit 0
-fi
 
 update=0; [ "${1:-}" = "--update" ] && update=1
 name="ltxv-tiny-${SHAPE}-cpu"
@@ -73,9 +68,13 @@ seed_args=(); [ "$update" -eq 1 ] || baseline_seed_args seed_args "$BASE/$name.j
 # ("not a measurement") - `--requests`/`--warmup` set explicitly instead, to
 # stay fast without tripping that refusal. concurrency 1: sequential-only
 # per this crate's own `LtxvInstance::run_batch` doc.
-if ! "$BIN" perf run latency --target "ltxv:${SHAPE}" \
-    --requests 1 --warmup 0 --concurrency 1 "${seed_args[@]}" --out "$cand" >/dev/null 2>&1; then
-  echo "FAIL $name (perf run itself failed)"; rm -f "$cand"; exit 1
+if ! err="$("$BIN" --device cpu perf run latency --target "ltxv:${SHAPE}" \
+    --requests 1 --warmup 0 --concurrency 1 "${seed_args[@]}" --out "$cand" 2>&1 >/dev/null)"; then
+  rm -f "$cand"
+  if grep -q "needs an LTX-2.5 VAE in the model store" <<<"$err"; then
+    echo "SKIP ltxv-perf-gate (put the LTX-2.5 VAE in the model store)"; exit 0
+  fi
+  echo "FAIL $name (perf run itself failed)"; exit 1
 fi
 
 fail=0

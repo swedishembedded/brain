@@ -35,7 +35,7 @@
 # only reads as a description of sound if the prompt actually describes
 # one (the default placeholder above does; a real prompt should too, or
 # the track comes out close to silent/mono). LTX_AUDIO=0 turns it off
-# (a real video-only DiT forward, cheaper, no BRAIN_LTXV_AUDIO_VAE needed).
+# (a real video-only DiT forward, cheaper, no audio VAE needed).
 #
 # LTX_TRACE=<0-5> (default 4) controls how much of the load/generate is
 # printed as it happens (`brain --trace-ltxv`, an existing, tested
@@ -45,21 +45,26 @@
 # GPU milliseconds), useful when the model's own weight streaming - not
 # generation itself - is what's taking a while. 0 is silent.
 #
-# Weights: point LTX_MODEL_DIR at a folder holding LTX-2.5's files FLAT (no
-# vae/text_encoders/diffusion_models subfolders - see
-# _resolve_ltxv_weights.sh's own header for exactly which filenames and why
-# the DiT is the one file that folder alone will not contain) and this finds
-# BRAIN_LTXV_{DIT,VAE,TEXT_ENCODER} for you; unset, it defaults to
-# $BRAIN_MODELS_DIR/Lightricks/LTX-2.5, brain's own standard model
-# directory (BRAIN_MODELS_DIR, else XDG_DATA_HOME/brain/models, else
-# ~/.local/share/brain/models). Anything not found there is asked for
-# interactively, once. LTX_TINY=1 skips all of this and runs the
+# Weights: every role is resolved from brain's model store (default root
+# ~/.local/share/brain/models, repo Lightricks/LTX-2.5); a missing role makes
+# brain stop with its own message. To use files outside the store, put
+# brain's role flags (--dit, --vae, --audio-vae, --text-encoder, ...) after a
+# literal "--" and they are passed through unchanged. LTX_TINY=1 runs the
 # tiny random-weight DiT instead - a real end-to-end wiring test (the
 # still genuinely conditions the noise), but not a quality claim.
 
 set -euo pipefail
 
 DEFAULT_PROMPT="the scene comes to life with smooth, natural motion and a gently moving camera, with ambient sound matching the setting"
+
+# Arguments after a literal "--" go to brain unchanged (see the Weights note).
+BRAIN_FLAGS=()
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--" ]; then shift; BRAIN_FLAGS=("$@"); break; fi
+  POSITIONAL+=("$1"); shift
+done
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 SRC="${1:?usage: images_to_video.sh <image-or-folder> [\"prompt\"] [seconds]}"
 CLI_PROMPT="${2:-}"
@@ -70,8 +75,6 @@ if [ "${LTX_TINY:-0}" = "1" ]; then
   DIT_CONFIG=tiny
   AUDIO_FLAG=()
 else
-  # shellcheck source=_resolve_ltxv_weights.sh
-  source "$(dirname "${BASH_SOURCE[0]}")/_resolve_ltxv_weights.sh"
   DIT_CONFIG=ltx25_22b
   AUDIO_FLAG=()
   [ "${LTX_AUDIO:-1}" = "1" ] && AUDIO_FLAG=(--audio)
@@ -108,7 +111,8 @@ for IMG in "${IMAGES[@]}"; do
     --prompt "$PROMPT" \
     --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
     --steps "${STEPS:-8}" ${SEED:+--seed "$SEED"} --fps "$FPS" \
-    --dit-config "$DIT_CONFIG" "${AUDIO_FLAG[@]}" \
+    --dit-config "$DIT_CONFIG" ${AUDIO_FLAG[@]+"${AUDIO_FLAG[@]}"} \
     --start-frame "$IMG" \
-    --output-path "$OUT"
+    --output-path "$OUT" \
+    ${BRAIN_FLAGS[@]+"${BRAIN_FLAGS[@]}"}
 done

@@ -221,6 +221,7 @@ exits - --brain-data-dir/BRAIN_MODELS_DIR names where to look):
                              deterministic prompt stub runs without it)
   --spatial-upsampler <path> spatial x2 latent upscaler - REQUIRED above
                              6144 video tokens, unused below (see Stages)
+  --audio-vae <path>        the audio VAE + vocoder (read only with --audio)
 
 Stages:
   The distilled checkpoint's fixed 8-sigma schedule is only distilled to
@@ -1731,7 +1732,7 @@ mod tests {
         // overrides`, matched against `LtxvSpec::roles()` - never a literal
         // match arm in this file), so they're checked against the resolver's
         // own role table instead of a quoted string in source.
-        for role in ["vae", "dit", "text_encoder", "spatial_upsampler"] {
+        for role in ["vae", "dit", "text_encoder", "spatial_upsampler", "audio_vae"] {
             let flag = format!("--{}", role.replace('_', "-"));
             assert!(super::HELP.contains(&flag), "{flag} is a resolver role flag but not in --help");
             assert!(ltxv::spec::LtxvSpec.roles().contains(&role), "{role} is documented as a role flag but LtxvSpec doesn't declare it");
@@ -1740,8 +1741,8 @@ mod tests {
 
     /// Same self-check as [`every_flag_the_parser_accepts_is_documented`],
     /// scoped to `upscale`'s own flags and help text. `--upsampler-spatial`
-    /// is a flag here rather than environment-only (as it is on `t2v`),
-    /// because running that network is what this command is for.
+    /// is a flag of its own here because running that network is what this
+    /// command is for.
     #[test]
     fn every_upscale_flag_the_parser_accepts_is_documented() {
         let src = include_str!("ltxv_cli.rs");
@@ -1757,8 +1758,6 @@ mod tests {
             assert!(super::UPSCALE_HELP.contains(&flag), "{flag} is a resolver role flag but not in upscale --help");
             assert!(ltxv::spec::LtxvSpec.roles().contains(&role), "{role} is documented as a role flag but LtxvSpec doesn't declare it");
         }
-        // See `every_flag_the_parser_accepts_is_documented`'s own comment:
-        // this is the one `Paths` env var this command still reads directly.
         // The one number in the help text that is a real constant rather than
         // prose: a ceiling the help promises and the pipeline enforces must
         // not drift apart.
@@ -1782,8 +1781,6 @@ mod tests {
             assert!(super::V2V_HELP.contains(&flag), "{flag} is a resolver role flag but not in v2v --help");
             assert!(ltxv::spec::LtxvSpec.roles().contains(&role), "{role} is documented as a role flag but LtxvSpec doesn't declare it");
         }
-        // See `every_flag_the_parser_accepts_is_documented`'s own comment:
-        // this is the one `Paths` env var this command still reads directly.
         // The interchange format this command consumes is a contract with a
         // separate producer, so its version string is in the help verbatim
         // rather than paraphrased.

@@ -481,7 +481,6 @@ crates/flybody/tests/it/motor_map.rs	BRAIN_CONNECTOME_DIR
 crates/flybody/tests/it/scene.rs	BRAIN_FLYBODY_FRUITFLY_XML
 crates/gemma4/tests/it/int8_compute_real.rs	BRAIN_GEMMA4_FULL_PARITY
 crates/gemma4/tests/it/int8_compute_real.rs	BRAIN_GEMMA4_GGUF
-crates/gemma4/tests/it/real_weight_parity.rs	BRAIN_LTXV_TEXT_ENCODER
 crates/genieredux/tests/it/blocks.rs	MOE_SKIP_GPU_TESTS
 crates/genieredux/tests/it/gelu_erf.rs	MOE_SKIP_GPU_TESTS
 crates/genieredux/tests/it/patch.rs	MOE_SKIP_GPU_TESTS

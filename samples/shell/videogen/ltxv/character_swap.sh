@@ -38,12 +38,24 @@
 # Optional, all env: STRENGTH (1.0 pins the conditioned region exactly, lower
 # lets it drift), SEED, STEPS, GUIDANCE, BRAIN_DEVICE, BRAIN.
 #
-# Weights: BRAIN_LTXV_{DIT,TEXT_ENCODER,VAE}. Without BRAIN_LTXV_DIT this runs
-# the tiny random-weight DiT instead, which is a real end-to-end test of the
-# conditioning (the preservation check below still passes) but paints noise
-# into the replaced region. The script says which of the two it ran.
+# Weights: every role is resolved from brain's model store; the video VAE is
+# required (the conditioning is defined ON its latent, there is no stand-in)
+# and brain stops with its own message when it is missing. Without a real DiT
+# brain runs the tiny random-weight DiT instead, which is a real end-to-end
+# test of the conditioning (the preservation check below still passes) but
+# paints noise into the replaced region. To use files outside the store, put
+# brain's role flags (--dit, --vae, --text-encoder) after a literal "--".
 
 set -euo pipefail
+
+# Arguments after a literal "--" go to brain unchanged (see the Weights note).
+BRAIN_FLAGS=()
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--" ]; then shift; BRAIN_FLAGS=("$@"); break; fi
+  POSITIONAL+=("$1"); shift
+done
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 CLIP="${1:?usage: character_swap.sh <clip.mp4> <masks/> \"<prompt>\" [out.mp4]}"
 MASKS="${2:?a brain/sam2-maskseq/1 directory is required (brain sam2 writes one)}"
@@ -75,16 +87,9 @@ if [ $(( (NF - 1) % 8 )) -ne 0 ] || [ $(( W % 32 )) -ne 0 ] || [ $(( H % 32 )) -
   exit 1
 fi
 
-[ -n "${BRAIN_LTXV_VAE:-}" ] || { echo "character_swap: BRAIN_LTXV_VAE is not set, so this stops here. The clip has" >&2
-  echo "  to go through the real LTX-2.5 video VAE to reach latent space, and there" >&2
-  echo "  is no stand-in for it: the conditioning is defined ON that latent." >&2; exit 1; }
-
-REAL=(--dit-config ltx25_22b)
-[ -n "${BRAIN_LTXV_DIT:-}" ] || { REAL=(--dit-config tiny); echo "character_swap: no BRAIN_LTXV_DIT - running the tiny random-weight DiT. The" >&2; echo "  preservation check below is still real; the replaced region will be noise." >&2; }
-
 "$BRAIN" ltxv v2v --input "$CLIP" --mask "$MASKS" --prompt "$PROMPT" \
   --strength "${STRENGTH:-1.0}" ${SEED:+--seed "$SEED"} --steps "${STEPS:-8}" \
-  --guidance "${GUIDANCE:-1.0}" --fps "$FPS" "${REAL[@]}" --output-path "$OUT"
+  --guidance "${GUIDANCE:-1.0}" --fps "$FPS" --output-path "$OUT" ${BRAIN_FLAGS[@]+"${BRAIN_FLAGS[@]}"}
 
 # ---- the test: the conditioned region must be preserved, the rest must move.
 # Decoded pixels near a mask boundary bleed (the VAE decoder is convolutional),

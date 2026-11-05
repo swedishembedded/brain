@@ -61,11 +61,6 @@ fn row_prefix(golden_flat: &[f32], t: usize, full_width: usize, half: usize) -> 
 }
 
 fn real_gemma4_path() -> Option<String> {
-    if let Ok(p) = std::env::var("BRAIN_LTXV_TEXT_ENCODER") {
-        if !p.is_empty() && p.ends_with(".safetensors") {
-            return Some(p);
-        }
-    }
     let dir = brain_testutil::model_dir(REPO)?;
     std::fs::read_dir(dir)
         .ok()?
@@ -120,7 +115,7 @@ fn gemma4_real_reduced_layers_matches_reference() {
         return;
     }
     let Some(weights_path) = real_gemma4_path() else {
-        brain_testutil::skip(&format!("set BRAIN_LTXV_TEXT_ENCODER to a real {REPO} Gemma-4 bf16 safetensors (none in the model store)"));
+        brain_testutil::skip(&format!("no {REPO} Gemma-4 bf16 safetensors in the model store"));
         return;
     };
 

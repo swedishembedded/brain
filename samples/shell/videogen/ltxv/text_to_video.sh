@@ -22,11 +22,25 @@
 # Optional, all env: WIDTH, HEIGHT, STEPS, SEED, FPS, START_FRAME (a still to
 # begin from), BRAIN_DEVICE, BRAIN.
 #
-# Weights come from BRAIN_LTXV_{DIT,TEXT_ENCODER,VAE,AUDIO_VAE} and, for the
-# two-stage path, BRAIN_LTXV_UPSAMPLER_{SPATIAL,TEMPORAL}.
+# Weights: every role is resolved from brain's model store (default root
+# ~/.local/share/brain/models, repo Lightricks/LTX-2.5). To use files outside
+# the store, put brain's role flags after a literal "--":
+#
+#   text_to_video.sh "a boat at sunset" out.mp4 5 -- --dit /w/dit.gguf --vae /w/vae.safetensors
+#
+# The flags are --dit, --vae, --audio-vae, --text-encoder, --tokenizer,
+# --spatial-upsampler and --temporal-upsampler.
 
 set -euo pipefail
 
+# Arguments after a literal "--" go to brain unchanged (see the Weights note).
+BRAIN_FLAGS=()
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--" ]; then shift; BRAIN_FLAGS=("$@"); break; fi
+  POSITIONAL+=("$1"); shift
+done
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 PROMPT="${1:?usage: text_to_video.sh \"prompt\" [out.mp4] [seconds]}"
 OUT="${2:-clip.mp4}"
 FPS="${FPS:-24}"
@@ -38,4 +52,5 @@ exec "${BRAIN:-./target/release/brain}" ltxv t2v \
   --steps "${STEPS:-8}" ${SEED:+--seed "$SEED"} --fps "$FPS" \
   --dit-config ltx25_22b --audio \
   ${START_FRAME:+--start-frame "$START_FRAME"} \
-  --output-path "$OUT"
+  --output-path "$OUT" \
+  ${BRAIN_FLAGS[@]+"${BRAIN_FLAGS[@]}"}

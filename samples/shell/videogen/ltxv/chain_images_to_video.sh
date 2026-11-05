@@ -50,16 +50,21 @@
 # prompt; the final `ffmpeg -c copy` concatenation carries audio and
 # video through together, the same way it already does for the picture.
 #
-# Weights: point LTX_MODEL_DIR at a folder holding LTX-2.5's files FLAT (no
-# vae/text_encoders/diffusion_models subfolders); unset, it defaults to
-# $BRAIN_MODELS_DIR/Lightricks/LTX-2.5. Anything missing is asked for
-# interactively, once - see _resolve_ltxv_weights.sh's header for exactly
-# which filenames and why the DiT is the one file that folder alone will
-# not contain. LTX_TINY=1 skips all of this and runs the tiny
-# random-weight DiT instead - see samples/shell/videogen/ltxv/images_to_video.sh's
-# header for what that does and does not prove.
+# Weights: every role is resolved from brain's model store; pass brain's role
+# flags (--dit, --vae, ...) after a literal "--" to use files outside it - see
+# images_to_video.sh's header. LTX_TINY=1 runs the tiny random-weight DiT
+# instead - see that header for what that does and does not prove.
 
 set -euo pipefail
+
+# Arguments after a literal "--" go to brain unchanged (see the Weights note).
+BRAIN_FLAGS=()
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--" ]; then shift; BRAIN_FLAGS=("$@"); break; fi
+  POSITIONAL+=("$1"); shift
+done
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 DIR="${1:?usage: chain_images_to_video.sh <folder/> [out.mp4] [seconds-per-clip]}"
 OUT="${2:-chain.mp4}"
@@ -72,8 +77,6 @@ if [ "${LTX_TINY:-0}" = "1" ]; then
   DIT_CONFIG=tiny
   AUDIO_FLAG=()
 else
-  # shellcheck source=_resolve_ltxv_weights.sh
-  source "$(dirname "${BASH_SOURCE[0]}")/_resolve_ltxv_weights.sh"
   DIT_CONFIG=ltx25_22b
   AUDIO_FLAG=()
   [ "${LTX_AUDIO:-1}" = "1" ] && AUDIO_FLAG=(--audio)
@@ -128,9 +131,10 @@ while [ $(( i + STEP )) -lt "$N" ]; do
     --prompt "$PROMPT" \
     --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
     --steps "${STEPS:-8}" ${SEED:+--seed "$SEED"} --fps "$FPS" \
-    --dit-config "$DIT_CONFIG" "${AUDIO_FLAG[@]}" \
+    --dit-config "$DIT_CONFIG" ${AUDIO_FLAG[@]+"${AUDIO_FLAG[@]}"} \
     "${ANCHORS[@]}" \
-    --output-path "$SEG"
+    --output-path "$SEG" \
+    ${BRAIN_FLAGS[@]+"${BRAIN_FLAGS[@]}"}
 
   printf "file '%s'\n" "$(realpath "$SEG")" >> "$LIST"
   i=$(( i + STEP ))

@@ -2,8 +2,8 @@
 
 Four shell wrappers around `brain ltxv t2v`/`v2v` - LTX-2.5's native
 audio-visual video generation, driven straight from the CLI with no server
-and no D-Bus in the loop. All four share one weight-resolution helper so
-`BRAIN_LTXV_*` only has to be worked out once per machine.
+and no D-Bus in the loop. Weights come from brain's model store with no
+configuration.
 
 ```bash
 samples/shell/videogen/ltxv/text_to_video.sh "a boat sailing at sunset" clip.mp4 5
@@ -104,30 +104,30 @@ replaced value is the conditioning working.
 
 ## What it needs
 
-**Weights.** None of the four asks for `BRAIN_LTXV_{DIT,VAE,TEXT_ENCODER}`
-by hand - `_resolve_ltxv_weights.sh` (sourced, not run directly; internal
-plumbing shared by `images_to_video.sh`, `chain_images_to_video.sh` and
-`character_swap.sh`) finds them under `$BRAIN_MODELS_DIR/Lightricks/LTX-2.5`
-from the official [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5)
-filenames. Put the files there **flat** (no `vae/`/`text_encoders/`/
-`diffusion_models/` subfolders - that repo ships them nested, this expects
-them moved up one level); `LTX_MODEL_DIR` points elsewhere if you keep them
-somewhere else. Whatever isn't found is asked for once, interactively (and
-errors immediately rather than hangs if stdin isn't a terminal).
+**Weights.** Nothing to configure: `brain ltxv` resolves every role from
+the model store (default root `~/.local/share/brain/models`, repo directory
+`Lightricks/LTX-2.5`), and stops with a message naming what is missing when
+the store cannot supply a role. To use files outside the store, put brain's
+role flags after a literal `--` and they are passed to `brain` unchanged:
+
+```bash
+samples/shell/videogen/ltxv/text_to_video.sh "a boat at sunset" out.mp4 5 -- \
+  --dit /w/ltx-2.5-22b-distilled-transformer-Q8_0.gguf --vae /w/ltx-2.5-video-vae-conv-bf16.safetensors
+```
+
+The flags are `--dit`, `--vae`, `--audio-vae`, `--text-encoder`,
+`--tokenizer`, `--spatial-upsampler` and `--temporal-upsampler`; `brain ltxv
+<command> --help` lists the ones each command reads.
 
 **The DiT is the one exception.** Lightricks publishes the 22B transformer
 only as `.safetensors`; brain's loader reads a GGUF quantization of it
 (`ltx-2.5-22b-distilled-transformer-{Q8_0,Q4_K_M}.gguf`), which has to come
-from a community conversion or from running `brain quantize` yourself - it
-will never just appear in that directory from the official repo alone.
-`LTX_TINY=1` skips all of this and runs the tiny random-weight DiT instead:
-a real wiring test (the stills genuinely condition the noise), not a
-quality claim. `character_swap.sh` additionally requires
-`BRAIN_LTXV_VAE` unconditionally - the conditioning is defined on that
-latent and there is no stand-in for it.
-
-`text_to_video.sh` is the one script that does NOT source the resolver - it
-takes `BRAIN_LTXV_{DIT,TEXT_ENCODER,VAE,AUDIO_VAE}` directly.
+from a community conversion or from running `brain quantize` yourself.
+`LTX_TINY=1` runs the tiny random-weight DiT instead: a real wiring test
+(the stills genuinely condition the noise), not a quality claim.
+`character_swap.sh` needs the video VAE unconditionally - the conditioning
+is defined on that latent and there is no stand-in for it - and, with no real
+DiT available, brain runs the tiny random-weight DiT by itself.
 
 ## Options
 
@@ -135,10 +135,9 @@ takes `BRAIN_LTXV_{DIT,TEXT_ENCODER,VAE,AUDIO_VAE}` directly.
 |---|---|---|
 | `WIDTH`, `HEIGHT` | all | output resolution (default 1280x704) |
 | `STEPS`, `SEED`, `FPS` | all | denoise steps / RNG seed (a random one is drawn and printed when unset) / output frame rate |
-| `LTX_TINY=1` | all but `text_to_video.sh` | run the tiny random-weight DiT instead of resolving real weights |
-| `LTX_AUDIO=0` | `images_to_video.sh`, `chain_images_to_video.sh` | disable the audio half (cheaper, no `BRAIN_LTXV_AUDIO_VAE` needed) |
+| `LTX_TINY=1` | `images_to_video.sh`, `chain_images_to_video.sh` | run the tiny random-weight DiT instead of the real one |
+| `LTX_AUDIO=0` | `images_to_video.sh`, `chain_images_to_video.sh` | disable the audio half (cheaper, no audio VAE needed) |
 | `LTX_TRACE=<0-5>` | `images_to_video.sh`, `chain_images_to_video.sh` | `brain --trace-ltxv` verbosity (default 4; 5 adds per-block GPU timings) |
-| `LTX_MODEL_DIR` | scripts sourcing the resolver | folder holding LTX-2.5's files flat (default `$BRAIN_MODELS_DIR/Lightricks/LTX-2.5`) |
 | `MID=1` | `chain_images_to_video.sh` | group stills in triples (start/mid/end) instead of pairs; needs an odd still count |
 | `STRENGTH`, `GUIDANCE` | `character_swap.sh` | conditioning strength (1.0 = pin exactly) / CFG scale |
 | `BRAIN_DEVICE`, `BRAIN` | all | device selector / path to the `brain` binary (default `./target/release/brain`) |
