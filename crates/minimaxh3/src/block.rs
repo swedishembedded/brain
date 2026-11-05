@@ -926,19 +926,14 @@ mod tests {
     /// whole sequence.
     ///
     /// GPU-only by construction: the flash family needs workgroup barriers the
-    /// Cranelift CPU JIT cannot split a kernel body at, so on the default
-    /// `cpu` device both arms would BE the trio and the comparison would be
-    /// vacuous. Point `BRAIN_MINIMAXH3_TEST_DEVICE` at a real device to run
-    /// it; it skips rather than passing silently otherwise.
+    /// Cranelift CPU JIT cannot split a kernel body at, so there both arms
+    /// would BE the trio and the comparison would be vacuous. It runs on the ambient device and skips, rather than passing
+    /// silently, where that device cannot run flash.
     #[test]
     fn flash_attention_matches_the_materialized_trio_numerically() {
-        let Ok(device) = std::env::var("BRAIN_MINIMAXH3_TEST_DEVICE") else {
-            brain_testutil::skip("BRAIN_MINIMAXH3_TEST_DEVICE not set - the flash family is GPU-only, so there is nothing to compare against on the CPU JIT");
-            return;
-        };
-        let cx = Ctx::new(Some(&device));
+        let cx = Ctx::new(None);
         if attn_mode(&cx.gpu, 128) != AttnMode::Flash {
-            brain_testutil::skip(&format!("device {device:?} cannot run the flash-attention family - both arms would be the trio"));
+            brain_testutil::skip("the ambient device cannot run the flash-attention family - both arms would be the trio");
             return;
         }
 

@@ -27,10 +27,9 @@ that region would push the whole network into a regime where any two
 implementations agree trivially (saturated) or disagree meaninglessly.
 
 Usage:
-  BRAIN_MINIMAXH3_DIR=/path/to/MiniMax-H3 \\
   python3 \\
       tools/goldens/minimaxh3_video_vae_real_tiled_dump_reference.py \\
-      --out testdata/golden/minimaxh3/video_vae_real_tiled --seed 7
+      --root /path/to/MiniMax-H3 --out testdata/golden/minimaxh3/video_vae_real_tiled --seed 7
 """
 
 import argparse
@@ -62,10 +61,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, required=True)
-    ap.add_argument("--root", default=os.environ.get("BRAIN_MINIMAXH3_DIR"))
+    ap.add_argument("--root", required=True, help="the MiniMax-H3 checkout root")
     args = ap.parse_args()
-    if not args.root:
-        sys.exit("set BRAIN_MINIMAXH3_DIR (or pass --root) to the MiniMax-H3 checkout")
     os.makedirs(args.out, exist_ok=True)
     torch.set_grad_enabled(False)
 

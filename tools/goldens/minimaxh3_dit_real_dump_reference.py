@@ -31,7 +31,7 @@ only showing up in the final output.
 
 Usage:
   python3 tools/goldens/minimaxh3_dit_real_dump_reference.py \\
-      --checkpoint "$BRAIN_MINIMAXH3_DIR/transformer" \\
+      --checkpoint /path/to/MiniMax-H3/transformer \\
       --out testdata/golden/minimaxh3/dit_real --seed 3
 """
 

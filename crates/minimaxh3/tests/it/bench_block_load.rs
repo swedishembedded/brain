@@ -55,12 +55,9 @@ fn block_tensor_names(i: usize) -> Vec<String> {
 }
 
 fn open() -> Option<checkpoint::weightio::WeightReader> {
-    let root = std::env::var("BRAIN_MINIMAXH3_DIR").ok().unwrap_or_else(|| {
-        format!("{}/.local/share/brain/models/MiniMaxAI/MiniMax-H3", std::env::var("HOME").unwrap_or_default())
-    });
-    let dit = format!("{root}/transformer");
+    let dit = format!("{}/transformer", brain_testutil::model_dir("MiniMaxAI/MiniMax-H3")?);
     if !std::path::Path::new(&dit).join("config.json").exists() {
-        eprintln!("skip: no real DiT checkpoint at {dit}");
+        brain_testutil::skip(&format!("no real DiT checkpoint at {dit}"));
         return None;
     }
     Some(minimaxh3::caps::open_dit_reader(&dit).expect("open dit reader"))

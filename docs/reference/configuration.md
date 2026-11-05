@@ -174,8 +174,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_FLUX2_ALLOW_NC` | `1` opts in to the FLUX Non-Commercial-licensed 9B variants | required, not set |
 | `BRAIN_FLUX2_LORA_FOLD` | `1` puts an INT8 FLUX.2 build back on the old LoRA deployment: the adapter is baked into the weights and the result requantized, instead of being applied beside the base matmul in fp32. Unlike `BRAIN_FLUX2_NO_STREAM` the two are NOT the same bytes - folding into a 256-level grid discards most of a trained delta (measured: 94.8% of adapted weights round back to their base code at a delta 0.5% of the weight magnitude). An A/B instrument, not a tier to ship | off (runtime correction) | <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 | `BRAIN_FLUX1_I8_KEEP_F32` / `BRAIN_FLUX2_I8_KEEP_F32` | keeps a specific sub-layer at fp32 under INT8 inference, trading a little memory for accuracy | off |
-| `BRAIN_MINIMAXH3_ALLOW_COMMUNITY` | `1` confirms you are authorized under the MiniMax H3 Community License Agreement (territorial/revenue-cap/attribution terms apply) | required, not set |
-| `BRAIN_MINIMAXH3_DIR` | the out-of-store MiniMax-H3 checkout: one root holding `transformer/`, `vae/`, `audio_vae/`, `text_encoder/`, `tokenizer/` (see `docs/reference/models/minimaxh3.md`). Set it and the model is served; unset, only a pulled model-store checkout reaches the resident | not set |
 | `BRAIN_YOLOV8_BATCH` | YOLO true-batch forward width | 1 |
 | `BRAIN_SAM2_VARIANT` | SAM 2.1 variant (`tiny`/`large`) | `tiny` |
 | `BRAIN_S3DIT_RETAIN_INT8_CACHE` | `1` retains the int8 DiT cache across demote/promote (trades multi-GB host RAM for faster reactivation) | off |

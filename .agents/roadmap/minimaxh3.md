@@ -67,7 +67,7 @@ supported diffusers API generation:
 | Root (`transformer/`, `transformer_ref/`, `text_encoder/`, `vae/`, `audio_vae/`, `tokenizer/`, `processor/`, `scheduler/`, `audio_scheduler/`) | ~210GB | The `diffusers>=0.36.0.dev0` `MiniMaxH3ModularPipeline` layout (confirmed identical to `modular_model_index.json`) - **one copy of everything**, `transformer`/`transformer_ref` share the same text encoder/VAEs. **This is the layout the port targets and the layout `diffusers==0.40.0` actually loads.** |
 | `FL2VA/` + `Ref2VA/` | ~288GB | The older `diffusers==0.32.2` `MiniMaxH3Pipeline` layout - each partition fully self-contained (duplicates the ~78GB of shared components). **Not used by this port; deleted from disk (see below).** |
 
-**Current local disk state** (`BRAIN_MINIMAXH3_DIR` root, this session's
+**Current local disk state** (the model store's checkout root, this session's
 local checkout - see `[path/to/checkout]` in place of the real machine path):
 - `text_encoder/`: **10 of 14 shards present** (`00001-00009`, `00014` +
   `config.json`) - moved from the now-deleted `FL2VA/text_encoder/`, **verified
@@ -978,8 +978,8 @@ module); the arena (`Gpu::scratch_scope_in`) removed it.
   a subset of its own nine).
 - `crates/cli/src/supply.rs::convert` has no case for recipe id
   `"minimaxh3"` - a completed `brain pull` is not yet turned into a servable
-  manifest that way; `minimaxh3::import` reading `BRAIN_MINIMAXH3_DIR`
-  directly remains the supported path.
+  manifest that way; `minimaxh3::import` reading the checkout's role
+  directories remains the supported path.
 - ~~Real DiT weight import does not exist~~ - **settled from source, not
   needed at all**: the original concern assumed the real checkpoint's QKV
   was fused (`qkv_proj`, the OLD FL2VA legacy layout's own shape) and would
@@ -1134,7 +1134,7 @@ module); the arena (`Gpu::scratch_scope_in`) removed it.
   presents every keyframe or reference to the text tower as the reference
   does.
 - `video_vae/` not yet downloaded; Phase 6's real-checkpoint validation
-  (written, gated on `BRAIN_MINIMAXH3_DIR`) is blocked on it.
+  (written, gated on the model store's checkout) is blocked on it.
 - ~~`crate::caps::read_tensors` (the DiT loader) still uses eager
   `read_model_dir`, will OOM once `transformer/` finishes downloading~~ -
   fixed: `crate::caps::open_dit_reader` replaces it with a lazy, mmap-backed

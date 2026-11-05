@@ -771,7 +771,7 @@ pub const ARCHS: &[Arch] = &[
     //
     // No `default_ref`: `H3Recipe` pins the release repo
     // (`MiniMaxAI/MiniMax-H3`), but the H3 Community License gates serving
-    // behind an explicit acceptance (`BRAIN_MINIMAXH3_ALLOW_COMMUNITY=1`,
+    // behind an explicit acceptance (`--allow-community`,
     // `minimaxh3::caps`'s own gate), so a flagless command must never
     // silently download it - the user pulls and accepts deliberately.
     // No `weights_env` for the same reason all five roles go through the

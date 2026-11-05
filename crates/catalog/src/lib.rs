@@ -413,13 +413,11 @@ pub fn models() -> Vec<ModelEntry> {
         },
         // MiniMax-H3 joint video+audio generation. The provider builds its
         // five weight paths from the resolved Assembly
-        // (`minimaxh3::caps::Paths::from_assembly`) instead of `BRAIN_MINIMAXH3_*`;
-        // there is no default checkpoint (`H3Recipe` pins the release repo,
-        // but the H3 Community License forbids auto-fetch - the arch row
-        // carries no `default_ref` either). The residency adapter is
-        // registered directly by `serving::build_executor`'s env-gated
-        // `from_env` lane and `serving::model_dir`'s compound-model scan,
-        // not from here.
+        // (`minimaxh3::caps::Paths::from_assembly`); there is no default
+        // checkpoint (`H3Recipe` pins the release repo, but the H3 Community
+        // License forbids auto-fetch - the arch row carries no `default_ref`
+        // either). The residency adapter is registered by
+        // `serving::model_dir`'s compound-model scan, not from here.
         ModelEntry {
             manifest: minimaxh3::caps::manifest,
             provider: |assembly: &Assembly| {

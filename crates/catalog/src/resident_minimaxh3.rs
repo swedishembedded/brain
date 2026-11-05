@@ -30,10 +30,8 @@ use minimaxh3::config::H3TransformerConfig;
 use minimaxh3::video_vae::VideoVaeConfig;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-/// MiniMax-H3 resident model family, gated on `BRAIN_MINIMAXH3_DIR`
-/// (`minimaxh3::caps::Paths::from_env`) - the out-of-store
-/// developer lane (`serving::build_executor` registers this directly, the
-/// same shape `WanResident::from_env` is wired there).
+/// MiniMax-H3 resident model family, built from one model-store checkout's
+/// role directories (see [`MiniMaxH3Resident::from_paths`]).
 pub struct MiniMaxH3Resident {
     /// See `WanResident::id`'s doc (`resident_wan.rs`) for why this is not
     /// always the compiled-in constant.
@@ -56,11 +54,6 @@ impl MiniMaxH3Resident {
     /// `"minimaxh3"` arm builds one of these per scanned compound model.
     pub fn from_paths(id: String, paths: minimaxh3::caps::Paths) -> MiniMaxH3Resident {
         MiniMaxH3Resident { id, paths, hot: Arc::new(capability::hot::Hot::new()) }
-    }
-
-    /// `None` (not registered) unless `BRAIN_MINIMAXH3_DIR` is set.
-    pub fn from_env() -> Option<MiniMaxH3Resident> {
-        minimaxh3::caps::Paths::from_env().ok().map(|paths| MiniMaxH3Resident { id: minimaxh3::caps::MODEL.to_string(), paths, hot: Arc::new(capability::hot::Hot::new()) })
     }
 }
 

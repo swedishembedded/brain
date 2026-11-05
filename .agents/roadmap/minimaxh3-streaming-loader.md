@@ -22,7 +22,7 @@ pinned - the signature of a host/driver-side cost, not a compute one.
 ## What the premise turned out to be
 
 **On this branch the pathology does not reproduce.** With the real
-checkpoint, the real golden, and `BRAIN_MINIMAXH3_TEST_DEVICE=vulkan`, the
+checkpoint, the real golden, and the forward on a GPU, the
 50-block streaming forward completes in a time comparable to (in fact below)
 the CPU backend's, with VRAM bounded across the whole run and the reference
 cosine unchanged. The very large figure that motivated the hunt was measured
@@ -110,11 +110,11 @@ not the code.
   comparison, with the `.to_vec()` trap documented in place so the next
   person does not re-dig it.
 * `crates/minimaxh3/src/model.rs`:
-  - `BRAIN_MINIMAXH3_TEST_DEVICE` (default `cpu`) on the real-weight
-    layer-by-layer test. Without it there was **no way to regression-check
-    the streaming forward on an actual card** - which is why a
-    device-specific claim went unchecked for as long as it did. This is the
-    single most useful artifact of the exercise.
+  - the real-weight layer-by-layer test runs on the ambient device, a GPU
+    when there is one. Before, there was **no way to regression-check the
+    streaming forward on an actual card** - which is why a device-specific
+    claim went unchecked for as long as it did. This is the single most
+    useful artifact of the exercise.
   - one `poll_wait()` per block iteration after an explicit `drop(w)`.
     A memory-safety bound, not a speed change: buffers dropped host-side are
     not freed on the card until the commands referencing them retire, so a
@@ -126,8 +126,9 @@ Correctness is unchanged and identical on both devices: worst cosine
 
 ## Where to look next, if the slowdown resurfaces
 
-1. Re-measure on your own tree with `BRAIN_MINIMAXH3_TEST_DEVICE=vulkan`
-   before theorising - the premise did not hold here.
+1. Re-measure on your own tree (`cargo test --release -p brain-minimaxh3 --lib
+   dit_matches_the_real_reference -- --ignored` on a GPU box) before
+   theorising - the premise did not hold here.
 2. `adaln_proj.linear.weight` is 260 M parameters per block, read in full
    every block and never uploaded, so no upload-side change can touch it.
    `precompute_adaln.rs` already exists to fold it into a small gathered

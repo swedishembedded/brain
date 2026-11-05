@@ -687,9 +687,10 @@ mod tests {
     /// expensive part here (~10-20 minutes) - the forward pass itself runs
     /// over a 9-row synthetic sequence, seconds not minutes.
     #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store"]
     fn dit_matches_the_real_reference_numerically_layer_by_layer() {
-        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
-            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to load from");
+        let Some(root) = crate::caps::store_root() else {
+            brain_testutil::skip("no MiniMax-H3 checkout in the model store to load from");
             return;
         };
         let paths = crate::caps::Paths::resolve(&root);
@@ -767,13 +768,7 @@ mod tests {
             text_indices: &text_indices,
         };
 
-        // Defaults to "cpu" (this crate's own CI-safe device) - overridable
-        // via `BRAIN_MINIMAXH3_TEST_DEVICE` (e.g. "vulkan") for a manual
-        // real-weight parity check on an actual GPU, since
-        // `forward_streaming` had never been run on real hardware other than
-        // CPU before `pipeline::generate` started calling it there too.
-        let device_str = std::env::var("BRAIN_MINIMAXH3_TEST_DEVICE").unwrap_or_else(|_| "cpu".to_string());
-        eprintln!("running real DiT one block at a time on device={device_str:?} (never all 50 blocks resident - see H3Transformer::forward_streaming_with_taps's own doc) ...");
+        eprintln!("running real DiT one block at a time on the ambient devices (never all 50 blocks resident - see H3Transformer::forward_streaming_with_taps's own doc) ...");
         let t0 = std::time::Instant::now();
         let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
         // Whatever placement this machine supports - one stage on a one-card
@@ -782,7 +777,7 @@ mod tests {
         // the residual, host-staged, and an f32 round trip is lossless
         // (`model::shard::set_stream_shard(false)` forces the single-stage arm for a
         // side-by-side check).
-        let dit = crate::dit_shard::StreamingDit::open(&cfg, Some(&device_str));
+        let dit = crate::dit_shard::StreamingDit::open(&cfg, None);
         eprintln!("  block placement: {}", dit.plan().describe());
         let (out, taps) = H3Transformer::forward_streaming_with_taps(&reader, &cfg, &dit, &inp);
         eprintln!("  done in {:.1}s", t0.elapsed().as_secs_f32());

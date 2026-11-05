@@ -33,13 +33,13 @@ yourself in the model store, laid out as the release ships it: the root
 `MiniMaxH3ModularPipeline` (`model_index.json` beside `transformer/`, `vae/`,
 `audio_vae/`, `text_encoder/` and `tokenizer/`). `brain minimaxh3` finds every
 component from that root; `--dit`, `--video-vae`, `--vocoder`,
-`--text-encoder` and `--tokenizer` name one outright. The served adapter
-reads `BRAIN_MINIMAXH3_DIR`, the same root.
+`--text-encoder` and `--tokenizer` name one outright. `brain serve` serves
+the same model-store checkout.
 
 ## Running it
 
 ```
-BRAIN_MINIMAXH3_ALLOW_COMMUNITY=1 brain minimaxh3 fl2va \
+brain minimaxh3 fl2va --allow-community \
   --prompt "a red kayak plunges through whitewater rapids, spray everywhere" \
   --first_frame still.png --width 704 --height 384 --num_frames 121 \
   --steps 20 --out video=kayak.mp4
@@ -57,7 +57,7 @@ prompt refers to them as the reference pipeline labels them - `<Picture 1>`,
 `<Video 1>`, `<Audio 1>` in order of kind:
 
 ```
-BRAIN_MINIMAXH3_ALLOW_COMMUNITY=1 brain minimaxh3 ref2va \
+brain minimaxh3 ref2va --allow-community \
   --prompt "the dog from <Picture 1> runs down the street from <Video 1>" \
   --references dog.png,street.mp4+street.wav --width 704 --height 384 \
   --num_frames 121 --steps 20 --out video=dog.mp4
@@ -101,7 +101,8 @@ service. This port's Rust code is Apache-2.0, ported from the Apache-2.0
 `diffusers`/`transformers` reference implementation - MiniMax's own
 (community-licensed) repository is not translated into this crate. The
 weights themselves are never vendored or auto-fetched; running against a
-checkpoint you obtained yourself additionally requires
-`BRAIN_MINIMAXH3_ALLOW_COMMUNITY=1` (`minimaxh3::caps::check_license`),
-confirming you have cleared the license's terms for your own use. See the
+checkpoint you obtained yourself additionally requires `--allow-community`
+(`allow_community: true` on a served request; `minimaxh3::caps::check_license`),
+confirming you have cleared the license's terms for your own use. Every
+request carries its own confirmation, and one without it is refused. See the
 checkpoint's own `LICENSE` file for the authoritative text.

@@ -148,20 +148,20 @@ mod tests {
         checkpoint::safetensors::has_model_weights(std::path::Path::new(dir))
     }
 
-    /// `import_audio_vae_decoder` against the real checkpoint, when
-    /// `BRAIN_MINIMAXH3_DIR` points at one - the two-way coverage check
+    /// `import_audio_vae_decoder` against the model store's real checkpoint -
+    /// the two-way coverage check
     /// (every claimed tensor present, every present-and-claimed tensor
     /// exactly accounted for, nothing outside the known out-of-scope
     /// prefixes left over) IS this test, matching this workspace's
     /// "goldens/import coverage before a forward runs" discipline. No
-    /// MiniMax-H3 weights are vendored or referenced by a baked-in path -
-    /// this test is a no-op skip on any machine without the env var pointed
-    /// at a real local checkout, per this port's license-driven no-auto-fetch
-    /// design (see crate::caps::check_license).
+    /// MiniMax-H3 weights are vendored or fetched - this test skips on any
+    /// machine whose store lacks a checkout, per this port's license-driven
+    /// no-auto-fetch design (see crate::caps::check_license).
     #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store"]
     fn import_covers_the_real_checkpoint_two_way() {
-        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
-            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to import from");
+        let Some(root) = crate::caps::store_root() else {
+            brain_testutil::skip("no MiniMax-H3 checkout in the model store to import from");
             return;
         };
         let dir = format!("{root}/audio_vae");
@@ -197,9 +197,10 @@ mod tests {
     /// same code paths but never at real width, and real width is exactly
     /// where a shape or buffer-sizing bug would first surface.
     #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store"]
     fn decode_runs_at_real_scale_with_real_weights_and_stays_finite() {
-        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
-            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to decode from");
+        let Some(root) = crate::caps::store_root() else {
+            brain_testutil::skip("no MiniMax-H3 checkout in the model store to decode from");
             return;
         };
         let dir = format!("{root}/audio_vae");
@@ -236,9 +237,10 @@ mod tests {
     /// was dumped from, so a bug localizes to the first tap it breaks rather
     /// than hiding behind a coincidentally-passing final cosine.
     #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store"]
     fn decode_matches_the_real_reference_numerically() {
-        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
-            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to decode from");
+        let Some(root) = crate::caps::store_root() else {
+            brain_testutil::skip("no MiniMax-H3 checkout in the model store to decode from");
             return;
         };
         let dir = format!("{root}/audio_vae");
@@ -303,8 +305,8 @@ mod tests {
     }
 
     /// `import_video_vae` against the real checkpoint's `vae/` component
-    /// (the root flat layout - see [`import_video_vae`]'s own doc), when
-    /// `BRAIN_MINIMAXH3_DIR` points at a checkout that has it. The
+    /// (the root flat layout - see [`import_video_vae`]'s own doc), when the
+    /// model store's checkout has it. The
     /// text-encoding checkout this port was written against has `vae/` NOT
     /// fetched (only
     /// `text_encoder/` partially and `FL2VA/audio_vae` were present locally) -
@@ -314,9 +316,10 @@ mod tests {
     /// (compare `import_covers_the_real_checkpoint_two_way` above, which hit
     /// the same state for the audio VAE before its own download completed).
     #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store"]
     fn video_vae_import_covers_the_real_checkpoint_two_way() {
-        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
-            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to import from");
+        let Some(root) = crate::caps::store_root() else {
+            brain_testutil::skip("no MiniMax-H3 checkout in the model store to import from");
             return;
         };
         let dir = format!("{root}/vae");
@@ -347,9 +350,10 @@ mod tests {
     /// reference rather than against a finiteness assertion, by
     /// `video_vae::tests::tiled_decode_matches_the_real_reference_numerically_with_real_weights`.
     #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store"]
     fn video_vae_round_trip_runs_at_real_scale_with_real_weights_and_stays_finite() {
-        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
-            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to decode from");
+        let Some(root) = crate::caps::store_root() else {
+            brain_testutil::skip("no MiniMax-H3 checkout in the model store to decode from");
             return;
         };
         let dir = format!("{root}/vae");

@@ -37,7 +37,7 @@ trusting the manual replay).
 
 Usage:
   python3 tools/goldens/minimaxh3_audio_vae_dump_reference.py \\
-      --audio-vae-dir "$BRAIN_MINIMAXH3_DIR/FL2VA/audio_vae" \\
+      --audio-vae-dir /path/to/MiniMax-H3/FL2VA/audio_vae \\
       --out testdata/golden/minimaxh3/audio_vae --seed 7 [--t 6]
 """
 

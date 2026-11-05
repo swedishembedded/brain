@@ -12,9 +12,8 @@ same summary statistics brain's Rust side prints, so the two can be compared
 directly.
 
 Usage:
-    BRAIN_MINIMAXH3_DIR=/path/to/MiniMax-H3 \\
-        python3 tools/goldens/minimaxh3_text_encoder_real_dump_reference.py \\
-        "A golden retriever puppy playing in a sunlit garden" \\
+    python3 tools/goldens/minimaxh3_text_encoder_real_dump_reference.py \\
+        --root /path/to/MiniMax-H3 "A golden retriever puppy playing in a sunlit garden" \\
         [--dtype bf16|fp32] [--layers 50] [--npz out.npz]
 
 Swedish Embedded AB implements numerical parity harnesses between Python
@@ -27,7 +26,6 @@ to info@swedishembedded.com.
 import argparse
 import json
 import os
-import sys
 
 import numpy as np
 import torch
@@ -45,14 +43,13 @@ def summarize(name, arr):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("prompt")
+    ap.add_argument("--root", required=True, help="the MiniMax-H3 checkout root")
     ap.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
     ap.add_argument("--layers", default="50")
     ap.add_argument("--npz", default=None)
     args = ap.parse_args()
 
-    root = os.environ.get("BRAIN_MINIMAXH3_DIR")
-    if not root:
-        sys.exit("BRAIN_MINIMAXH3_DIR is not set")
+    root = args.root
     te_dir = os.path.join(root, "text_encoder")
     tok_dir = os.path.join(root, "tokenizer")
 

@@ -1833,16 +1833,17 @@ mod tests {
     /// too, purely as a vacuity guard, so this rung cannot pass against an
     /// implementation that quietly decoded the whole frame.
     #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store"]
     fn tiled_decode_matches_the_real_reference_numerically_with_real_weights() {
-        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
-            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to decode from");
+        let Some(root) = crate::caps::store_root() else {
+            brain_testutil::skip("no MiniMax-H3 checkout in the model store to decode from");
             return;
         };
         let fixture_dir = brain_testutil::testdata_path("golden/minimaxh3/video_vae_real_tiled");
         let fixture_file = fixture_dir.join("minimaxh3_video_vae_real_tiled.safetensors");
         if !fixture_file.is_file() {
             brain_testutil::skip(&format!(
-                "{} not found - run BRAIN_MINIMAXH3_DIR={root} tools/goldens/minimaxh3_video_vae_real_tiled_dump_reference.py --out {}",
+                "{} not found - run tools/goldens/minimaxh3_video_vae_real_tiled_dump_reference.py --root {root} --out {}",
                 fixture_file.display(),
                 fixture_dir.display()
             ));
@@ -1867,10 +1868,9 @@ mod tests {
         let (tx, ..) = split_tiles(canvas_w, cfg.tile_sample_min_width, cfg.tile_sample_min_overlap_width, ratio);
         assert!(ty.len() > 1 && tx.len() > 1, "the golden's {canvas_h}x{canvas_w} canvas is not multi-tile ({}x{})", ty.len(), tx.len());
 
-        let device = std::env::var("BRAIN_MINIMAXH3_TEST_DEVICE").unwrap_or_else(|_| "cpu".to_string());
-        eprintln!("decoding a real-weight {canvas_h}x{canvas_w} canvas as a {}x{} tile grid on device={device:?} ...", ty.len(), tx.len());
+        eprintln!("decoding a real-weight {canvas_h}x{canvas_w} canvas as a {}x{} tile grid on the ambient device ...", ty.len(), tx.len());
         let t0 = std::time::Instant::now();
-        let (pixels, pt, ph, pw) = decode_clip(&cfg, &tensors, Some(&device), get("input_z_real_tiled"), zt, zh, zw);
+        let (pixels, pt, ph, pw) = decode_clip(&cfg, &tensors, None, get("input_z_real_tiled"), zt, zh, zw);
         eprintln!("  decoded in {:.1}s", t0.elapsed().as_secs_f32());
         assert_eq!([cfg.out_channels as usize, pt as usize, ph as usize, pw as usize], *shape("tap_real_tiled_pixels"));
 
@@ -1895,19 +1895,15 @@ mod tests {
     /// through this module's own kernel table ([`VAE_ATTN`]): on a device that
     /// can run the fused flash family, flash and the materialized trio agree
     /// at the decoder's own shape - 32 heads of 64 over a tiled chunk's
-    /// 1797 tokens. GPU-only for the reason the DiT's own flash test gives;
-    /// point `BRAIN_MINIMAXH3_TEST_DEVICE` at a card to run it.
+    /// 1797 tokens. GPU-only for the reason the DiT's own flash test gives:
+    /// it runs on the ambient device and skips where that cannot run flash.
     #[test]
     fn the_decoders_flash_attention_matches_its_materialized_trio() {
-        let Ok(device) = std::env::var("BRAIN_MINIMAXH3_TEST_DEVICE") else {
-            brain_testutil::skip("BRAIN_MINIMAXH3_TEST_DEVICE not set - the flash family is GPU-only");
-            return;
-        };
         let cfg = VideoVaeConfig::real();
         let (heads, head_dim) = (cfg.decoder_num_attention_heads, cfg.decoder_attention_head_dim);
-        let cx = Ctx::new(Some(&device));
+        let cx = Ctx::new(None);
         if crate::block::attn_mode(&cx.gpu, head_dim) != crate::block::AttnMode::Flash {
-            brain_testutil::skip(&format!("device {device:?} cannot run the flash-attention family"));
+            brain_testutil::skip("the ambient device cannot run the flash-attention family (the CPU JIT never can)");
             return;
         }
         let seq_len = 7 * 256 + cfg.decoder_num_register_tokens + 1;

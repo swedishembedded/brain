@@ -53,7 +53,7 @@ and the same for audio, with a doc comment claiming the real per-channel values
 was stale: they are in the checkpoint, in `vae/config.json` and
 `audio_vae/config.json`.
 
-This is on the real generation path - `generate_t2va.rs` builds its checkpoint
+This is on the real generation path - every served H3 action builds its checkpoint
 through `caps::LoadedWeights::load`.
 
 Why it matters more than a stale comment suggests: `mean=0`/`std=1` is the
@@ -352,7 +352,7 @@ out an older commit.
 ## Correctness
 
 `model::tests::dit_matches_the_real_reference_numerically_layer_by_layer`,
-real checkpoint, real weights, `BRAIN_MINIMAXH3_TEST_DEVICE=vulkan`, both arms
+real checkpoint, real weights, on the GPU, both arms
 on the same P40, 11 taps each:
 
 | arm | worst cosine | at tap |
