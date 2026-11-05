@@ -772,12 +772,14 @@ pub struct Qwen {
     /// `None` rotates at the analytic `theta` schedule.
     rope_table: Option<RopeTable>,
 
-    // DeepStack (Qwen3-VL): `(row0, n_rows, n_levels)` and one `[n_rows·d]` buffer
-    // per level. When set, level `l`'s features are added into the residual at the
-    // image rows right after decoder layer `l` (for `l < n_levels`). Write each
-    // level via `write_deepstack`.
-    deepstack: Cell<Option<(u32, u32, u32)>>,
-    deepstack_bufs: Vec<DeviceBuffer>,
+    // DeepStack (Qwen3-VL): `(n_rows, n_levels)` over the vision runs in
+    // `deepstack_runs` (`(row0, n_rows)` each), and per level one `[n_rows·d]`
+    // buffer per run. When set, level `l`'s features are added into the
+    // residual at those rows right after decoder layer `l` (for `l <
+    // n_levels`). Write each level via `write_deepstack`.
+    deepstack: Cell<Option<(u32, u32)>>,
+    deepstack_runs: Vec<(u32, u32)>,
+    deepstack_bufs: Vec<Vec<DeviceBuffer>>,
     proj: DeviceBuffer,
     mlp_out: DeviceBuffer,
     scores: DeviceBuffer,
@@ -1728,6 +1730,7 @@ impl Qwen {
             decode_mrope_sin,
             rope_table,
             deepstack: Cell::new(None),
+            deepstack_runs: Vec::new(),
             deepstack_bufs: Vec::new(),
             proj: st(n * d),
             mlp_out: st(n * d),
@@ -2560,9 +2563,11 @@ impl Qwen {
         // DeepStack: add level `l`'s merged vision features into the image rows
         // of this layer's output (level i -> layer i), for l < n_levels. A
         // prefill chunk's rows are not the sequence the image rows index.
-        if let (Some((row0, n_rows, nl)), Attend::Causal) = (self.deepstack.get(), attend) {
+        if let (Some((_, nl)), Attend::Causal) = (self.deepstack.get(), attend) {
             if self.shard.embed && (l as u32) < nl {
-                s.push(self.gpu.step(SPLICE_ADD, &[&self.deepstack_bufs[l], &self.res[l + 1]], &[n_rows * d, row0 * d], n_rows * d));
+                for (&(row0, n_rows), buf) in self.deepstack_runs.iter().zip(&self.deepstack_bufs[l]) {
+                    s.push(self.gpu.step(SPLICE_ADD, &[buf, &self.res[l + 1]], &[n_rows * d, row0 * d], n_rows * d));
+                }
             }
         }
     }
@@ -3182,9 +3187,20 @@ impl Qwen {
     /// unchanged (no backward step is emitted); a full-tower finetune would gather
     /// the residual grad at the image rows for the DeepStack merger grads.
     pub fn enable_deepstack(&mut self, row0: u32, n_rows: u32, n_levels: u32) {
-        let sz = (n_rows * self.cfg.d_model) as u64;
-        self.deepstack_bufs = (0..n_levels).map(|_| self.gpu.storage(sz)).collect();
-        self.deepstack.set(Some((row0, n_rows, n_levels)));
+        self.enable_deepstack_runs(&[(row0, n_rows)], n_levels);
+    }
+
+    /// [`Self::enable_deepstack`] for a prompt with several vision runs: each
+    /// `(row0, n_rows)` run receives its own rows of every level, and
+    /// [`Self::write_deepstack`] takes the runs' rows concatenated in this
+    /// order. The runs must not overlap. KV-cache decode
+    /// ([`Self::decode_steps`]) indexes the concatenated rows directly.
+    pub fn enable_deepstack_runs(&mut self, runs: &[(u32, u32)], n_levels: u32) {
+        let n_rows: u32 = runs.iter().map(|&(_, n)| n).sum();
+        let d = self.cfg.d_model as u64;
+        self.deepstack_bufs = (0..n_levels).map(|_| runs.iter().map(|&(_, n)| self.gpu.storage(n as u64 * d)).collect()).collect();
+        self.deepstack_runs = runs.to_vec();
+        self.deepstack.set(Some((n_rows, n_levels)));
         // See `enable_mm_splice`'s comment: skip the batched-graph rebuild for
         // a decode-only build - `decode_steps` reads `self.deepstack` directly.
         if !self.decode_only {
@@ -3195,7 +3211,15 @@ impl Qwen {
     /// Write DeepStack level `level`'s merged features `[n_rows, d_model]` for the
     /// next forward.
     pub fn write_deepstack(&self, level: usize, data: &[f32]) {
-        self.gpu.write(&self.deepstack_bufs[level], bytemuck::cast_slice(data));
+        let d = self.cfg.d_model as usize;
+        let total: usize = self.deepstack_runs.iter().map(|&(_, n)| n as usize * d).sum();
+        assert_eq!(data.len(), total, "write_deepstack: level {level} needs every run's rows, concatenated");
+        let mut rest = data;
+        for (&(_, n), buf) in self.deepstack_runs.iter().zip(&self.deepstack_bufs[level]) {
+            let (run, tail) = rest.split_at(n as usize * d);
+            self.gpu.write(buf, bytemuck::cast_slice(run));
+            rest = tail;
+        }
     }
     /// Run the backward graph. The head stage refreshes the CE-grad uniform first
     /// (it drives `ce_grad_stats`); other stages consume `dres[end]` written by
@@ -3914,13 +3938,19 @@ impl Qwen {
             // `step_embed_mrope` on an image row) is a pure no-op, bit-for-bit
             // unchanged from before this parameter existed.
             if let Some(local_row) = deepstack_row {
-                if let Some((_row0, n_rows, nl)) = self.deepstack.get() {
+                if let Some((n_rows, nl)) = self.deepstack.get() {
                     if (l as u32) < nl {
                         assert!(
                             local_row < n_rows,
                             "decode_steps: deepstack_row {local_row} out of range for n_rows {n_rows}"
                         );
-                        s.push(g.step(SPLICE_ADD_OFFSET_SRC, &[&self.deepstack_bufs[l], &self.res[l + 1]], &[d, local_row * d, 0], d));
+                        // `local_row` indexes the runs' rows concatenated.
+                        let (mut run, mut row) = (0, local_row);
+                        while row >= self.deepstack_runs[run].1 {
+                            row -= self.deepstack_runs[run].1;
+                            run += 1;
+                        }
+                        s.push(g.step(SPLICE_ADD_OFFSET_SRC, &[&self.deepstack_bufs[l][run], &self.res[l + 1]], &[d, row * d, 0], d));
                     }
                 }
             }
@@ -5669,6 +5699,40 @@ mod kv_tests {
             assert!(err < 2e-3, "position {i} ({:?}): M-RoPE step vs full recompute maxabs={err}", positions[i]);
         }
         println!("mrope_step_matches_full_recompute: worst maxabs over {seq} positions = {worst:e}");
+    }
+
+    /// Several DeepStack runs: after layer 0 each run's rows of level 0 land
+    /// on that run's residual rows and nowhere else, read back in the order
+    /// `write_deepstack` concatenated them.
+    #[test]
+    fn deepstack_runs_add_each_runs_rows_after_their_layer() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let d = cfg.d_model as usize;
+        let mut rng = Rng::new(5);
+        let map: HashMap<String, Vec<f32>> = cfg.param_list().into_iter().map(|(name, count)| (name, (0..count).map(|_| rng.next_gaussian() as f32 * 0.08).collect())).collect();
+        let tokens: Vec<u32> = (0..8u32).map(|i| (i * 7 + 3) % cfg.vocab).collect();
+        let runs = [(1u32, 2u32), (5, 3)];
+        let n_rows: usize = runs.iter().map(|&(_, n)| n as usize).sum();
+        let level0: Vec<f32> = (0..n_rows * d).map(|_| rng.next_gaussian() as f32).collect();
+
+        let plain = Qwen::new(cfg.clone(), 1, tokens.len() as u32, &map).encode_hidden(&tokens, 1);
+        let mut model = Qwen::new(cfg.clone(), 1, tokens.len() as u32, &map);
+        model.enable_deepstack_runs(&runs, 1);
+        model.write_deepstack(0, &level0);
+        let with = model.encode_hidden(&tokens, 1);
+
+        let mut expected = vec![0f32; tokens.len() * d];
+        let mut src = 0;
+        for &(row0, n) in &runs {
+            expected[row0 as usize * d..(row0 + n) as usize * d].copy_from_slice(&level0[src * d..(src + n as usize) * d]);
+            src += n as usize;
+        }
+        for (i, ((w, p), e)) in with.iter().zip(&plain).zip(&expected).enumerate() {
+            assert!((w - p - e).abs() < 1e-4, "row {} col {}: added {} where {e} was expected", i / d, i % d, w - p);
+        }
     }
 
     /// [`mrope_step_matches_full_recompute`], but for DeepStack too:
