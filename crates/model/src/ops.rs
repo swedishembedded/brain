@@ -147,6 +147,24 @@ use crate::dispatch::I8Scratch;
 /// and a binding sized to `m * n` would have started refusing those.
 const WHOLE: (u64, u64) = (0, 0);
 
+/// Rows of a two-level activation's second product per pass
+/// ([`Ops::act_two_level`]): bounds that product's scratch to
+/// `TWO_LEVEL_PASS_ROWS · n` floats whatever the row count. A multiple of 64
+/// rows keeps every sliced binding offset 256-byte aligned.
+pub const TWO_LEVEL_PASS_ROWS: u32 = 1024;
+
+/// The two kernels only a two-level activation dispatches, resolved by name
+/// when one is used rather than required of every `Gpu` an [`Ops`] runs on.
+const QUANT_RESIDUAL_PACK: &str = "quant_residual_pack";
+const ADD: &str = "add";
+
+/// [`kernel_list`] plus what [`Ops::act_two_level`] dispatches.
+#[must_use]
+pub fn two_level_kernel_list() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| kernel_list().iter().copied().chain([(QUANT_RESIDUAL_PACK, kernels::QUANT_RESIDUAL_PACK), (ADD, kernels::ADD)]).collect())
+}
+
 /// The exact kernel-name spellings this façade dispatches by. Defined ONCE so
 /// [`Ops::new`]'s registration check and [`Ops::bind`]'s (variant, dtype) →
 /// name table can never spell one differently from the other.
@@ -1320,6 +1338,10 @@ pub struct Act {
     /// These rows quantised to E4M3 with ONE scale per row (the bytes and the scales): the operand of the NVFP4 tensor-core GEMM, made by the
     /// first NVFP4-weight product that reads it and shared by the rest (the MLP's gate and up).
     e4m3_row: std::cell::RefCell<Option<(DeviceBuffer, DeviceBuffer)>>,
+    /// `Some` for a two-level activation ([`Ops::act_two_level`]): the packed
+    /// second level, made by the first `I8`/`Q4` product that reads these
+    /// rows and shared by the rest.
+    fine: Option<std::cell::RefCell<Option<Arc<I8Scratch>>>>,
 }
 
 thread_local! {
@@ -1765,7 +1787,23 @@ impl Ops {
         // dispatches (and the scratch) are skipped and a stray product that does need them makes them then.
         let deferred = !row_count_invariant_active() && self.providers.runs("cuda") && self.gpu.int8_packed_unneeded(rows, k / 4);
         let quant = (!deferred).then(|| self.quantize_rows(s, x, xr0, rows, k));
-        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None }
+    }
+
+    /// [`Ops::act`] with the activation quantized in two int8 levels:
+    /// `x ≈ s₁·q₁ + s₂·q₂`, the second quantizing what the first rounds away.
+    /// Every `I8`/`Q4` product reading it multiplies both levels by the same
+    /// weight and sums them, so the activation is exact to ~1/(127·254) of
+    /// its group scale instead of half a step - what a model needs when one
+    /// level's error compounds through its depth. Costs a second product per
+    /// linear; other tiers, and a width [`Ops::act`] leaves unpacked, read it
+    /// as they read an [`Ops::act`] one. The `Gpu` must carry
+    /// [`two_level_kernel_list`].
+    pub fn act_two_level(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
+        let act = self.act(s, x, xr0, rows, k);
+        // A width `act` leaves unpacked has no levels to add.
+        let packs = act.quant.borrow().is_some() || act.quant_deferred;
+        Act { fine: packs.then(Default::default), ..act }
     }
 
     /// The packed int8 form of rows `[xr0, xr0 + rows)` of `x`: scratch sized for exactly `[0, xr0 + rows)` and the
@@ -1800,7 +1838,7 @@ impl Ops {
     pub fn act_prequantized(&self, x: &DeviceBuffer, sx: &DeviceBuffer, xq: &DeviceBuffer, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_prequantized: rows must be > 0 (got 0)");
         assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(I8Scratch::from_parts(sx.clone(), k, xq.clone())))), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default() }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(I8Scratch::from_parts(sx.clone(), k, xq.clone())))), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None }
     }
 
     /// [`Ops::act`], plus the affine K-quant group-sum prepass
@@ -1836,7 +1874,7 @@ impl Ops {
             xr0 + rows,
             k,
         ));
-        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(quant))), quant_deferred: false, xgs: std::cell::RefCell::new(Some(xgs)), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(quant))), quant_deferred: false, xgs: std::cell::RefCell::new(Some(xgs)), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None }
     }
 
     /// [`Ops::act`] for a caller whose weights are ALL fp32-family, so the
@@ -1855,7 +1893,7 @@ impl Ops {
     /// whatever a missing buffer would have held.
     pub fn act_f32(&self, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_f32: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None }
     }
 
     /// [`Self::act_f32`] for all `rows` rows of `x` whose bf16 rounding a fused kernel has already produced
@@ -1863,7 +1901,7 @@ impl Ops {
     /// read this activation take it instead of casting it again.
     pub fn act_f32_with_bf16(&self, x: &DeviceBuffer, rows: u32, k: u32, bf16: DeviceBuffer) -> Act {
         assert!(rows > 0, "Ops::act_f32_with_bf16: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)), e4m3: Default::default(), e4m3_row: Default::default() }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)), e4m3: Default::default(), e4m3_row: Default::default(), fine: None }
     }
 
     /// [`Self::act_f32`] for `rows` rows of `x` whose E4M3 quantisation (`xq` bytes, `sx` one scale per row per 128 of K,
@@ -1871,7 +1909,7 @@ impl Ops {
     /// E4M3 take it instead of quantising it again.
     pub fn act_f32_with_e4m3(&self, x: &DeviceBuffer, rows: u32, k: u32, xq: DeviceBuffer, sx: DeviceBuffer) -> Act {
         assert!(rows > 0 && k.is_multiple_of(FP8_BLOCK), "Ops::act_f32_with_e4m3: {rows} rows of {k} (K a multiple of {FP8_BLOCK})");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: std::cell::RefCell::new(Some((xq, sx))), e4m3_row: Default::default() }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: std::cell::RefCell::new(Some((xq, sx))), e4m3_row: Default::default(), fine: None }
     }
 
     /// Whether an FP8-weight product of `rows` rows against `n` outputs of width `k` reads E4M3 activations on this device
@@ -2077,49 +2115,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::I8 { w: wb, s: sw, .. } | Weight::Q4 { w: wb, s: sw, .. } => {
-                // The packed activation BUFFER OFFSET is ALWAYS int8-word
-                // sized (W4A8 - see this module's doc comment), so the
-                // offset divisor is `Dtype::I8.per_word()`, NEVER
-                // `w.dtype().per_word()` - a `Q4` weight's own per_word()
-                // (8) would silently halve this offset instead of
-                // quartering it.
-                let per_word = Dtype::I8.per_word() as u64;
-                let kg = k as u64 / per_word;
-                let xo = (act.xr0 as u64 * kg, m as u64 * kg);
-                let so = crate::int8::act_scale_range(act.xr0, m, k);
-                // The kernel's own `k` PARAM (not a buffer offset) is a
-                // SEPARATE contract per dtype, and the two disagree:
-                // `matmul_i8_{dyn,gemv}.wgsl` take the packed word count
-                // (`kg = k/4`) directly, since x and w share one word
-                // density there - but `matmul_q4_{dyn,gemv}.wgsl` take the
-                // RAW logical `k`, un-divided, because x (int8, 4/word) and
-                // w (int4, 8/word) have DIFFERENT word densities for the
-                // same K (see `matmul_q4_dyn.wgsl`'s own header: "a single
-                // shared `kg` the way the int8 family uses would be
-                // ambiguous about which operand it counts"). Passing `kg`
-                // to the q4 kernels (or raw `k` to the i8 kernels) is
-                // exactly the silently-wrong-arithmetic class this module's
-                // doc comment warns about - caught by this façade's own
-                // parity test before this comment was written.
-                //
-                // `Dtype::Q4K`/`Dtype::Q8K` never reach this arm (they have
-                // their own `Weight::KQuant` arm below), so the `_ => k`
-                // fallback here is exercised ONLY by `Dtype::Q4` today - but
-                // it IS the right answer for the affine kernels too, by the
-                // same reasoning `matmul_q4_{dyn,gemv}` already established:
-                // `matmul_kq_{dyn,gemv}.wgsl`'s own header states their `k`
-                // param is "the RAW LOGICAL reduction length, NOT a packed-
-                // word count" for the identical reason (`xq` and `wq` have
-                // DIFFERENT word densities - 4 codes/word for `xq` always,
-                // `32/CODE_BITS` for `wq`), so a real sixth dtype landing in
-                // this same `I8`/`Q4` arm by mistake would be the only way
-                // this fallback silently mis-derives `param_k` - it does not
-                // today.
-                let param_k = match dt {
-                    Dtype::I8 => kg as u32,
-                    _ => k,
-                };
+            Weight::I8 { .. } | Weight::Q4 { .. } => {
                 if self.dequant_forward(s, w, act, y, yoff) {
                     return;
                 }
@@ -2127,17 +2123,10 @@ impl Ops {
                     "Ops::matmul: this activation was built with Ops::act_f32, which promises no \
                      quantized weight reads it - build it with Ops::act instead",
                 );
-                let attrs = [m, param_k, n];
-                let operands = [
-                    Operand { role: Role::Act, buf: quant.xq_for(k), range: xo, dtype: Dtype::I8 },
-                    Operand { role: Role::Weight, buf: wb, range: (0, 0), dtype: dt },
-                    Operand { role: Role::ActScale, buf: &quant.sx, range: so, dtype: Dtype::F32 },
-                    Operand { role: Role::WeightScale, buf: sw, range: (0, 0), dtype: Dtype::F32 },
-                    Operand { role: Role::Out, buf: y, range: oo, dtype: Dtype::F32 },
-                ];
-                let req = OpRequest { op: Op::MatMul, shape, pass: Pass::Forward, operands: &operands, attrs: &attrs, group, bind: &bind };
-                let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
-                self.providers.dispatch(&mut ctx, &req);
+                self.packed_product(s, w, &quant, act.xr0, m, y, yoff);
+                if let Some(fine) = &act.fine {
+                    self.second_level(s, w, act, &quant, fine, y, yoff);
+                }
             }
             // NF4 is float-read (QLoRA): the kernel decodes each weight load
             // and multiplies it with the raw f32 activation, so this arm never
@@ -2795,6 +2784,112 @@ impl Ops {
     #[must_use]
     pub fn fills_tile(&self, m: u32, n: u32) -> bool {
         self.tiled_gemm(m, n)
+    }
+
+    /// One `I8`/`Q4` product over rows `[xr0, xr0 + m)` of the packed
+    /// activation `quant`, into the `m·n` floats of `y` at `yoff`.
+    #[allow(clippy::too_many_arguments)]
+    fn packed_product(&self, s: &mut Vec<Step>, w: &Weight, quant: &I8Scratch, xr0: u32, m: u32, y: &DeviceBuffer, yoff: u64) {
+        let (Weight::I8 { w: wb, s: sw, .. } | Weight::Q4 { w: wb, s: sw, .. }) = w else {
+            unreachable!("Ops::packed_product: only I8/Q4 weights read packed activations")
+        };
+        let (n, k) = (w.n(), w.k());
+        let shape = OpShape { m, n, k, dtype: w.dtype() };
+        let group = w.group();
+        let dt = w.dtype();
+        let bind = |variant: KernelVariant| -> (usize, &'static str) {
+            let name = Self::bind(variant, dt, group);
+            (self.idx[name], name)
+        };
+        let oo = (yoff, m as u64 * n as u64);
+        // The packed activation BUFFER OFFSET is ALWAYS int8-word
+        // sized (W4A8 - see this module's doc comment), so the
+        // offset divisor is `Dtype::I8.per_word()`, NEVER
+        // `w.dtype().per_word()` - a `Q4` weight's own per_word()
+        // (8) would silently halve this offset instead of
+        // quartering it.
+        let per_word = Dtype::I8.per_word() as u64;
+        let kg = k as u64 / per_word;
+        let xo = (xr0 as u64 * kg, m as u64 * kg);
+        let so = crate::int8::act_scale_range(xr0, m, k);
+        // The kernel's own `k` PARAM (not a buffer offset) is a
+        // SEPARATE contract per dtype, and the two disagree:
+        // `matmul_i8_{dyn,gemv}.wgsl` take the packed word count
+        // (`kg = k/4`) directly, since x and w share one word
+        // density there - but `matmul_q4_{dyn,gemv}.wgsl` take the
+        // RAW logical `k`, un-divided, because x (int8, 4/word) and
+        // w (int4, 8/word) have DIFFERENT word densities for the
+        // same K (see `matmul_q4_dyn.wgsl`'s own header: "a single
+        // shared `kg` the way the int8 family uses would be
+        // ambiguous about which operand it counts"). Passing `kg`
+        // to the q4 kernels (or raw `k` to the i8 kernels) is
+        // exactly the silently-wrong-arithmetic class this module's
+        // doc comment warns about - caught by this façade's own
+        // parity test before this comment was written.
+        //
+        // `Dtype::Q4K`/`Dtype::Q8K` never reach this arm (they have
+        // their own `Weight::KQuant` arm below), so the `_ => k`
+        // fallback here is exercised ONLY by `Dtype::Q4` today - but
+        // it IS the right answer for the affine kernels too, by the
+        // same reasoning `matmul_q4_{dyn,gemv}` already established:
+        // `matmul_kq_{dyn,gemv}.wgsl`'s own header states their `k`
+        // param is "the RAW LOGICAL reduction length, NOT a packed-
+        // word count" for the identical reason (`xq` and `wq` have
+        // DIFFERENT word densities - 4 codes/word for `xq` always,
+        // `32/CODE_BITS` for `wq`), so a real sixth dtype landing in
+        // this same `I8`/`Q4` arm by mistake would be the only way
+        // this fallback silently mis-derives `param_k` - it does not
+        // today.
+        let param_k = match dt {
+            Dtype::I8 => kg as u32,
+            _ => k,
+        };
+        let attrs = [m, param_k, n];
+        let operands = [
+            Operand { role: Role::Act, buf: quant.xq_for(k), range: xo, dtype: Dtype::I8 },
+            Operand { role: Role::Weight, buf: wb, range: (0, 0), dtype: dt },
+            Operand { role: Role::ActScale, buf: &quant.sx, range: so, dtype: Dtype::F32 },
+            Operand { role: Role::WeightScale, buf: sw, range: (0, 0), dtype: Dtype::F32 },
+            Operand { role: Role::Out, buf: y, range: oo, dtype: Dtype::F32 },
+        ];
+        let req = OpRequest { op: Op::MatMul, shape, pass: Pass::Forward, operands: &operands, attrs: &attrs, group, bind: &bind };
+        let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
+        self.providers.dispatch(&mut ctx, &req);
+    }
+
+    /// The second level of a two-level activation ([`Self::act_two_level`]):
+    /// what `quant` rounds away, packed once per activation into `fine`
+    /// (`quant_residual_pack`, no f32 residual), multiplied by the same
+    /// weight and added into `y` in [`TWO_LEVEL_PASS_ROWS`]-row passes, so
+    /// the product's scratch is bounded whatever the row count.
+    #[allow(clippy::too_many_arguments)]
+    fn second_level(&self, s: &mut Vec<Step>, w: &Weight, act: &Act, quant: &I8Scratch, fine: &std::cell::RefCell<Option<Arc<I8Scratch>>>, y: &DeviceBuffer, yoff: u64) {
+        let (n, k, m) = (w.n(), w.k(), act.m);
+        let kernel = |name: &str| {
+            self.gpu.kernel_index(name).unwrap_or_else(|| panic!("Ops: a two-level activation needs kernel '{name}' registered - build the Gpu from model::ops::two_level_kernel_list()"))
+        };
+        let fine = fine
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                let total = (act.xr0 + m) as u64;
+                let fine = I8Scratch::new(&self.gpu, total, total, &[k]);
+                let kg = k as u64 / 4;
+                let xo = (act.xr0 as u64 * k as u64, m as u64 * k as u64);
+                let so = crate::int8::act_scale_range(act.xr0, m, k);
+                let qo = (act.xr0 as u64 * kg, m as u64 * kg);
+                s.push(self.gpu.step_sliced(kernel(QUANT_RESIDUAL_PACK), &[&act.x, &quant.sx, fine.xq_for(k), &fine.sx], &[xo, so, qo, so], &[m, k], m * k / crate::int8::GROUP as u32));
+                Arc::new(fine)
+            })
+            .clone();
+        let add = kernel(ADD);
+        let slab = m.min(TWO_LEVEL_PASS_ROWS);
+        let product = self.gpu.storage(slab as u64 * n as u64);
+        for r0 in (0..m).step_by(TWO_LEVEL_PASS_ROWS as usize) {
+            let rows = (m - r0).min(TWO_LEVEL_PASS_ROWS);
+            self.packed_product(s, w, &fine, act.xr0 + r0, rows, &product, 0);
+            let len = rows as u64 * n as u64;
+            s.push(self.gpu.step_sliced(add, &[&product, y], &[(0, len), (yoff + r0 as u64 * n as u64, len)], &[rows * n], rows * n));
+        }
     }
 
     /// [`Self::matmul`] against the row window `rows = (first, count)` of `w`

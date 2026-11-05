@@ -97,6 +97,7 @@ mod ops_kquant;
 mod ops_matmul_group;
 mod ops_matmul_step_identity;
 mod ops_nf4_weight;
+mod ops_two_level_act;
 mod ops_upload_from;
 mod probe_gemm;
 mod projector;
