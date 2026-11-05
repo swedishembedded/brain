@@ -81,6 +81,12 @@ impl Surface {
         }
     }
 
+    /// The stdout line for a key the operator pinned with `--api-key-file`: the key
+    /// is already in their file, so the line names the file, never the key.
+    pub fn announcement_of_pinned(&self, key_file: &Path) -> String {
+        format!("APIKEY {} read from {}", self.provider, key_file.display())
+    }
+
     /// Print [`Surface::announcement`] on stdout.
     pub fn announce(&self, keys_file: Option<&Path>) {
         println!("{}", self.announcement(keys_file));
@@ -235,6 +241,16 @@ mod tests {
         assert!(!line.contains("sk-brain-secret"), "{line}");
         assert!(line.contains(s.provider.as_str()) && line.contains("/run/keys.json"), "{line}");
         assert_eq!(s.announcement(None), format!("APIKEY {} sk-brain-secret", s.provider));
+    }
+
+    /// A key the operator pinned with `--api-key-file` is already in their file:
+    /// the stdout line names that file and never repeats the key.
+    #[test]
+    fn the_announcement_names_a_pinned_key_file_instead_of_the_key() {
+        let s = Surface::new(Provider::OpenAI, "127.0.0.1:1".parse().unwrap(), "sk-brain-secret");
+        let line = s.announcement_of_pinned(Path::new("/etc/brain/key"));
+        assert!(!line.contains("sk-brain-secret"), "{line}");
+        assert_eq!(line, format!("APIKEY {} read from /etc/brain/key", s.provider));
     }
 
     /// A key file yields its one word; an empty or multi-word file is

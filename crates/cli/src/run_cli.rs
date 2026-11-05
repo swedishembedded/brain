@@ -100,7 +100,8 @@ HTTP INFERENCE APIS  (each behind its own key)
   `APIKEY <provider> <key>`; --api-keys-out writes the keys as JSON, 0600, and the
   lines then name that file instead of repeating the keys.
   --api-key-file FILE pins a fixed key instead (the file's one word) - every
-  dialect then shares that SAME key rather than each getting its own random one.
+  dialect then shares that SAME key rather than each getting its own random one,
+  and the APIKEY lines name the file instead of printing the key.
 
   LOCAL CLIENTS need none of this: once every surface is bound, the server
   writes <runtime dir>/serve-<pid>.json (mode 0600) and removes it on exit:
@@ -622,6 +623,7 @@ pub fn run_serve(args: &[String]) {
     // `--api-key-file FILE`: one fixed key every dialect shares, instead of a
     // fresh one per dialect per launch.
     let mut fixed_key: Option<String> = None;
+    let mut fixed_key_file: Option<PathBuf> = None;
     // `--runtime-dir DIR`: where the lifecycle files and the connection
     // record live (see `serve_daemon::state_dir`); `main` reads it too, for
     // `-d`/`--status`/`--stop`.
@@ -758,6 +760,7 @@ pub fn run_serve(args: &[String]) {
                     eprintln!("brain serve: --api-key-file {e}");
                     std::process::exit(2);
                 }));
+                fixed_key_file = Some(PathBuf::from(file));
             }
             "--runtime-dir" => runtime_dir = Some(PathBuf::from(val(args, &mut i, "--runtime-dir"))),
             "--tokenizer" => qwen_cfg.tokenizer = Some(val(args, &mut i, "--tokenizer")),
@@ -853,6 +856,7 @@ pub fn run_serve(args: &[String]) {
             openrouter,
             api_keys_out,
             fixed_key,
+            fixed_key_file,
             record: serve_daemon_record(runtime_dir.as_deref()),
             ready,
             deadlines,
@@ -1015,6 +1019,9 @@ struct RunApis {
     /// `--api-key-file`'s key, shared by every dialect; `None` draws one per
     /// dialect.
     fixed_key: Option<String>,
+    /// The file `--api-key-file` read the key from: the APIKEY lines name it
+    /// instead of printing the key.
+    fixed_key_file: Option<PathBuf>,
     /// Where the connection record is published once every HTTP surface has
     /// bound (see `apiserve::surface::record_json`).
     record: PathBuf,
@@ -1267,7 +1274,11 @@ fn run_apis(a: RunApis) {
         let mut announced: Vec<apiserve::Provider> = Vec::new();
         for s in &surfaces {
             if !announced.contains(&s.provider) {
-                s.announce(keys_file);
+                // A pinned key is already in the operator's file: name it, never print the key.
+                match &a.fixed_key_file {
+                    Some(file) => println!("{}", s.announcement_of_pinned(file)),
+                    None => s.announce(keys_file),
+                }
                 announced.push(s.provider);
             }
         }

@@ -30,6 +30,7 @@ With no surface flag, `brain serve` serves the OpenAI-compatible API on
   machine do not hold them.
 - `--api-key-file FILE` - serve every dialect with the one key `FILE` holds
   (surrounding whitespace trimmed) instead of a fresh key per dialect per launch.
+  The startup lines then read `APIKEY <provider> read from FILE` and never print the key.
 - `--runtime-dir DIR` - where the pid file, log and connection record live
   (default `$XDG_RUNTIME_DIR/brain`, else `<tmpdir>/brain-<uid>`). A server under
   its own `DIR` is not found by clients looking in the default one.
