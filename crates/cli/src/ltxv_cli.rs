@@ -273,6 +273,14 @@ Scenes:
   last frame, or an interior frame, of a clip whose timeline is a sequence
   of scenes).
 
+Adapters:
+  --adapter <path>           a LoRA to apply, repeatable: the official LTX
+                             trainer's / a published IC-LoRA's ComfyUI
+                             .safetensors, or one brain trained. Runs beside
+                             the quantized weights, never folded into them.
+  --lora-scale <s>           strength of the --adapter it follows (default 1.0,
+                             ComfyUI's strength_model)
+
 Devices:
   --device <cpu|gpu>         DiT + VAE (default: the ambient BRAIN_DEVICE)
 
@@ -374,6 +382,14 @@ exits):
   output has NO sound track at all. Any audio --input carried stays in
   --input, and re-attaching it is a separate ffmpeg mux.
 
+Adapters:
+  --adapter <path>           a LoRA to apply, repeatable: the official LTX
+                             trainer's / a published IC-LoRA's ComfyUI
+                             .safetensors, or one brain trained. Runs beside
+                             the quantized weights, never folded into them.
+  --lora-scale <s>           strength of the --adapter it follows (default 1.0,
+                             ComfyUI's strength_model)
+
 Devices:
   --device <cpu|gpu>         DiT + VAE + upscaler (default: BRAIN_DEVICE)"#;
 
@@ -416,6 +432,14 @@ Weights (flag wins over the environment variable):
   --vae <path>                 $BRAIN_LTXV_VAE       the causal 3D video VAE
   --spatial-upsampler <path>   $BRAIN_LTXV_UPSAMPLER_SPATIAL
   --temporal-upsampler <path>  $BRAIN_LTXV_UPSAMPLER_TEMPORAL
+
+Adapters:
+  --adapter <path>           a LoRA to apply, repeatable: the official LTX
+                             trainer's / a published IC-LoRA's ComfyUI
+                             .safetensors, or one brain trained. Runs beside
+                             the quantized weights, never folded into them.
+  --lora-scale <s>           strength of the --adapter it follows (default 1.0,
+                             ComfyUI's strength_model)
 
 Devices:
   --device <cpu|gpu>            DiT + VAE + upscalers (default: BRAIN_DEVICE)"#;
@@ -533,6 +557,14 @@ exits):
                             role are not read by this command - it never
                             upscales and never generates sound.
 
+Adapters:
+  --adapter <path>           a LoRA to apply, repeatable: the official LTX
+                             trainer's / a published IC-LoRA's ComfyUI
+                             .safetensors, or one brain trained. Runs beside
+                             the quantized weights, never folded into them.
+  --lora-scale <s>           strength of the --adapter it follows (default 1.0,
+                             ComfyUI's strength_model)
+
 Placement:
   --device <cpu|gpu>        DiT + VAE (default: the ambient BRAIN_DEVICE)"#;
 
@@ -562,6 +594,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let (seed, args) = crate::args::split_seed(&args, "ltxv t2v");
     let args = &args[..];
     let mut o = GenOpts { seed, ..GenOpts::default() };
+    // How many `--adapter`s already carry their `--lora-scale`.
+    let mut scaled = 0usize;
     let mut context_frames = ltxv::longform::CONTEXT_FRAMES;
     let mut prompt: Option<String> = None;
     let mut scene_specs: Vec<String> = Vec::new();
@@ -597,6 +631,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--terminal" => o.terminal = dbl(i, "--terminal")?,
             "--eta" => o.eta = dbl(i, "--eta")?,
             "--dit-config" => o.dit_config = need(i)?.clone(),
+            "--adapter" => o.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
+            "--lora-scale" => crate::args::attach_lora_scale(&mut o.adapters, &mut scaled, flt(i, "--lora-scale")?)?,
             "--device" => {
                 o.device = Some(need(i)?.clone());
             }
@@ -801,6 +837,8 @@ fn upscale(args: &[String]) -> Result<(), String> {
     let (seed, args) = crate::args::split_seed(&args, "ltxv upscale");
     let args = &args[..];
     let mut o = UpscaleOpts::default();
+    // How many `--adapter`s already carry their `--lora-scale`.
+    let mut scaled = 0usize;
     o.base.seed = seed;
     let mut prompt: Option<String> = None;
     let mut input: Option<String> = None;
@@ -829,6 +867,8 @@ fn upscale(args: &[String]) -> Result<(), String> {
             "--guidance" => o.base.guidance = flt(i, "--guidance")?,
             "--fps" => fps = Some(num(i, "--fps")?),
             "--dit-config" => o.base.dit_config = need(i)?.clone(),
+            "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
+            "--lora-scale" => crate::args::attach_lora_scale(&mut o.base.adapters, &mut scaled, need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?)?,
             "--device" => {
                 o.base.device = Some(need(i)?.clone());
             }
@@ -939,6 +979,8 @@ fn v2v(args: &[String]) -> Result<(), String> {
     let (seed, args) = crate::args::split_seed(&args, "ltxv v2v");
     let args = &args[..];
     let mut o = MaskedOpts::default();
+    // How many `--adapter`s already carry their `--lora-scale`.
+    let mut scaled = 0usize;
     o.base.seed = seed;
     let mut prompt: Option<String> = None;
     let mut input: Option<String> = None;
@@ -959,6 +1001,8 @@ fn v2v(args: &[String]) -> Result<(), String> {
             "--guidance" => o.base.guidance = flt(i, "--guidance")?,
             "--fps" => fps = Some(num(i, "--fps")?),
             "--dit-config" => o.base.dit_config = need(i)?.clone(),
+            "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
+            "--lora-scale" => crate::args::attach_lora_scale(&mut o.base.adapters, &mut scaled, need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?)?,
             "--device" => o.base.device = Some(need(i)?.clone()),
             "--help" | "-h" => {
                 println!("{V2V_HELP}");
@@ -1037,6 +1081,8 @@ fn dfr(args: &[String]) -> Result<(), String> {
     let (seed, rest) = crate::args::split_seed(args, "ltxv dfr");
     let args = &rest[..];
     let mut o = DfrOpts::default();
+    // How many `--adapter`s already carry their `--lora-scale`.
+    let mut scaled = 0usize;
     o.base.seed = seed;
     let mut prompt: Option<String> = None;
     let mut out: Option<String> = None;
@@ -1067,6 +1113,8 @@ fn dfr(args: &[String]) -> Result<(), String> {
             "--terminal" => o.base.terminal = dbl(i, "--terminal")?,
             "--eta" => o.base.eta = dbl(i, "--eta")?,
             "--dit-config" => o.base.dit_config = need(i)?.clone(),
+            "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
+            "--lora-scale" => crate::args::attach_lora_scale(&mut o.base.adapters, &mut scaled, need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?)?,
             "--temporal-upsample-rounds" => o.temporal_upsample_rounds = num(i, "--temporal-upsample-rounds")?,
             "--device" => {
                 o.base.device = Some(need(i)?.clone());

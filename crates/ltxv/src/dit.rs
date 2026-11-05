@@ -764,6 +764,19 @@ pub struct LtxDit {
     /// output, distinct from `res_out` (which never runs through
     /// `output_stage`). Read by [`LtxDit::take_stage_output`].
     stage_out: RefCell<Option<Vec<f32>>>,
+    /// Runtime LoRA corrections for the block linears ([`Self::with_adapter`]).
+    /// Head targets are already folded into `w`; block targets are applied
+    /// per block - folded into that block's own fp32 copy on the fp32 path,
+    /// attached beside the packed weights on the quantized one - so `w`
+    /// itself stays the checkpoint and is never requantized with a delta in it.
+    adapter: Option<model::lora::RuntimeLora>,
+}
+
+/// Whether `key` is one of the transformer blocks' own tensors, as opposed to
+/// a model-level ("head") tensor such as `patchify_proj` or the embeddings
+/// connector.
+pub(crate) fn is_block_key(key: &str) -> bool {
+    key.starts_with("transformer_blocks.")
 }
 
 impl LtxDit {
@@ -788,7 +801,43 @@ impl LtxDit {
             res_in: RefCell::new(None),
             res_out: RefCell::new(None),
             stage_out: RefCell::new(None),
+            adapter: None,
         }
+    }
+
+    /// Apply `adapter` to every forward of this model.
+    ///
+    /// Every target is checked against the checkpoint's own tensors first, so
+    /// an adapter for another model is refused before anything changes. Head
+    /// targets fold into the fp32 head weights here, exactly; block targets
+    /// are applied per block at forward time (see the `adapter` field).
+    pub fn with_adapter(mut self, adapter: model::lora::RuntimeLora) -> Result<LtxDit, String> {
+        adapter.validate(&|k| self.w.get(k).map(|(_, d)| d.len()))?;
+        for d in adapter.deltas().iter().filter(|d| !is_block_key(&d.key)) {
+            let (out, inn) = (d.pair.out, d.pair.inn);
+            let (_, w) = self.w.get_mut(&d.key).expect("validated above");
+            adapter.claim(&d.key, inn, 0, out, 0, inn).expect("the delta's own rectangle").fold_into(w);
+        }
+        self.adapter = Some(adapter);
+        Ok(self)
+    }
+
+    /// Block `prefix`'s fp32 weights with the adapter's corrections folded in,
+    /// or `w` itself when nothing targets this block. Only the block's own
+    /// tensors are copied - never the whole model.
+    fn block_weights(&self, prefix: &str) -> std::borrow::Cow<'_, Tensors> {
+        let Some(adapter) = &self.adapter else { return std::borrow::Cow::Borrowed(&self.w) };
+        let dot = format!("{prefix}.");
+        if !adapter.deltas().iter().any(|d| d.key.starts_with(&dot)) {
+            return std::borrow::Cow::Borrowed(&self.w);
+        }
+        let mut block: Tensors = self.w.iter().filter(|(k, _)| k.starts_with(&dot)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        for d in adapter.deltas().iter().filter(|d| d.key.starts_with(&dot)) {
+            let (out, inn) = (d.pair.out, d.pair.inn);
+            let (_, w) = block.get_mut(&d.key).expect("validated in with_adapter");
+            adapter.claim(&d.key, inn, 0, out, 0, inn).expect("the delta's own rectangle").fold_into(w);
+        }
+        std::borrow::Cow::Owned(block)
     }
 
     /// Build one pipeline stage from a FLAT checkpoint (`model::Model`/
@@ -938,7 +987,8 @@ impl LtxDit {
             // block's freshly uploaded weights are reclaimed at the end of the
             // iteration without this loop saying anything about it - see
             // `gpu_core::transient` for what accumulates when they are not.
-            let blk = LtxBlock::on(gpu, &self.cfg, &self.w, &format!("transformer_blocks.{l}"), t, context_len);
+            let prefix = format!("transformer_blocks.{l}");
+            let blk = LtxBlock::on(gpu, &self.cfg, &self.block_weights(&prefix), &prefix, t, context_len);
             let (out, tp) = blk.forward(&xx, adaln_table, context, cos_bufs, sin_bufs, t);
             xx = out;
             block_out.push(xx.clone());
@@ -974,7 +1024,11 @@ impl LtxDit {
         let mut block_out = Vec::with_capacity((hi - lo) as usize);
         let mut taps = Vec::with_capacity((hi - lo) as usize);
         for l in lo..hi {
-            let blk = LtxBlockQ::on(gpu, &self.cfg, &self.w, &format!("transformer_blocks.{l}"), t, context_len, tier);
+            let prefix = format!("transformer_blocks.{l}");
+            let mut blk = LtxBlockQ::on(gpu, &self.cfg, &self.w, &prefix, t, context_len, tier);
+            if let Some(adapter) = &self.adapter {
+                crate::block::AttachLora::attach_lora(&mut *blk, adapter, &prefix);
+            }
             let (out, tp) = blk.forward(&xx, adaln_table, context, cos_bufs, sin_bufs, t);
             xx = out;
             block_out.push(xx.clone());

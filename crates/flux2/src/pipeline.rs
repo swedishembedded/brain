@@ -156,27 +156,11 @@ pub fn ref_tokens(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> u32 {
     cond_sizes(refs, opts).into_iter().flatten().map(|(h, w)| (h / 16) * (w / 16)).sum()
 }
 
-/// A LoRA adapter to fold in before the model is built.
-///
-/// `path` selects the family by extension: a `.safetensors` is a third-party
-/// (ai-toolkit / ComfyUI / diffusers) adapter over the fused matrices,
-/// anything else is brain's own trained checkpoint container.
-#[derive(Clone, Debug, PartialEq)]
-pub struct AdapterSpec {
-    pub path: String,
-    /// ComfyUI's `strength_model`: multiplies the whole delta. 1.0 is the
-    /// reference default. Meaningful for third-party adapters, whose files
-    /// carry no alpha; brain's own adapters bake their scale into the
-    /// checkpoint header and ignore this.
-    pub scale: f32,
-}
-
-impl AdapterSpec {
-    /// An adapter at the reference default strength.
-    pub fn new(path: impl Into<String>) -> AdapterSpec {
-        AdapterSpec { path: path.into(), scale: 1.0 }
-    }
-}
+/// A LoRA adapter to fold in before the model is built. `path` selects the
+/// family by extension: a `.safetensors` is a third-party (ai-toolkit /
+/// ComfyUI / diffusers) adapter over the fused matrices, anything else is
+/// brain's own trained checkpoint container.
+pub use model::adapter::AdapterSpec;
 
 #[derive(Clone, Debug)]
 pub struct GenOpts {

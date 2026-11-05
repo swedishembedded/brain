@@ -8,7 +8,7 @@
 //! never `BRAIN_FLUX2_*`; `finetune` still reads those variables directly.
 //! Images in/out are binary PPM P6 (the CLI-wide convention).
 
-use crate::args::strip_out_name_prefix;
+use crate::args::{attach_lora_scale, strip_out_name_prefix};
 use flux2::{AdapterSpec, Flux2Config, GenOpts, Paths, Pipeline};
 
 const HELP: &str = "brain flux2 <cmd>
@@ -381,34 +381,6 @@ fn ref_bound(i: usize, pinned: bool, ref_size: Option<u32>) -> Option<u32> {
     }
 }
 
-/// Attach a `--lora-scale` to the `--adapter` it belongs to.
-///
-/// The two flags are both repeatable and pair POSITIONALLY: the Nth
-/// `--lora-scale` is the Nth `--adapter`'s strength. `scaled` counts the
-/// adapters whose strength has already been claimed, so the next one lands on
-/// the next unscaled adapter - which means a strength must be written after
-/// the adapter it belongs to.
-///
-/// A strength with no adapter of its own is REFUSED rather than guessed at. A
-/// stacked run's whole point is that each adapter folds at its own strength,
-/// and the failure mode of guessing (attaching a strength to the wrong
-/// adapter, or to all of them) produces a plausible image from the wrong
-/// weights - which no error message ever gets written about, because the run
-/// succeeded.
-fn attach_lora_scale(specs: &mut [AdapterSpec], scaled: &mut usize, value: f32) -> Result<(), String> {
-    let Some(spec) = specs.get_mut(*scaled) else {
-        return Err(format!(
-            "--lora-scale {value} has no --adapter of its own ({} adapter(s) given, {} already \
-             carry a strength). Each --lora-scale applies to the --adapter it FOLLOWS: write \
-             `--adapter <path> --lora-scale <S>` once per adapter.",
-            specs.len(),
-            *scaled
-        ));
-    };
-    spec.scale = value;
-    *scaled += 1;
-    Ok(())
-}
 
 /// Resolve FLUX.2's four weight roles through the model-store resolver
 /// (`brain_modelstore::resolve::resolve` + [`flux2::spec::Flux2Spec`])
@@ -992,7 +964,8 @@ fn finetune(args: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 mod adapter_flag_tests {
-    use super::{attach_lora_scale, AdapterSpec};
+    use super::AdapterSpec;
+    use crate::args::attach_lora_scale;
 
     /// Replay a `generate` argument list's `--adapter`/`--lora-scale` flags in
     /// the order they were typed, exactly as `generate`'s own loop does.

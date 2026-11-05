@@ -37,6 +37,7 @@ mod int8_compute;
 mod int8_storage;
 mod longform;
 mod longform_mid_real;
+mod lora_runtime;
 mod lora_train;
 mod maskcond_parity;
 mod motion_real;

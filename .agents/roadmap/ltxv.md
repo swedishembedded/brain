@@ -55,7 +55,8 @@ this port:
 
 ## Not yet done
 
-- [ ] **A trained adapter does not reach inference at all.** Both
+- [x] **A trained adapter reaches inference** - closed in Phase 41 (runtime
+      corrections beside the int8 weights). The original finding: both
       `lora::LoraAdapter::fold_into_tensors` and its A/V twin in `av_lora.rs`
       have NO production call site - only their own tests - so there is no
       `--adapter` path into either generation route. They now state their base
@@ -9122,3 +9123,41 @@ the `t2v` action's `audio` blob and the CLI's muxed Opus are 48 kHz stereo.
   amplifies a 3e-7 log-mel rounding difference ~2500x into it; every
   waveform a listener gets stays at or under 2.5e-4 (-72 dB). The superseded
   16 kHz chain test is gone; the base vocoder's own stage gate stays.
+
+### Phase 41 - a trained adapter reaches inference
+
+Closes the "a trained adapter does not reach inference at all" item at the
+top of this ledger. `GenOpts::adapters` (CLI `--adapter`/`--lora-scale`,
+actions `adapter`/`lora_scale`) reaches every denoiser `build_denoiser` makes:
+
+- **Loading** (`ltxv::lora::runtime_adapter`): `model::lora::read_external_adapter`
+  on the reference's ComfyUI layout, `strength * B @ A` (the reference's
+  `ltx_core.loader.lora` applies no alpha; PEFT exports none), times
+  `alpha/rank` for a brain-trained file's header. LoKr is refused (no
+  low-rank form beside a quantized weight). `model::adapter::AdapterSpec` and
+  the `--lora-scale` pairing rule moved out of flux2 so both models share them.
+- **Quantized blocks** (`QLinear::lora`, `qquant_linear`): the shared
+  `model::dispatch::lora_rows_off` + `lora_delta.wgsl` correction from the
+  fp32 activation, beside the packed weight; `AttachLora` on both block kinds
+  claims each linear's delta (`to_q/k/v/out.0` of `attn1/attn2/audio_attn1/
+  audio_attn2/audio_to_video_attn/video_to_audio_attn`, `ff`/`audio_ff`).
+  Every `devres` session builds blocks through `adapted`, so streaming, full
+  and narrow resident windows all carry it; the shared quantized-weight cache
+  stays adapter-free (keyed by checkpoint), so swapping adapters never
+  re-quantizes the base.
+- **fp32 weights fold exactly**: the real model's head (`block_adapter`), the
+  eager AV reference arm (`fold_adapter`), and `LtxDit` (per-block folded
+  copies, never the whole model).
+- **Gates**: `tests/it/lora_runtime.rs` - each target kind's int8 effect vs
+  the exact fp32 fold (effect cosine 0.9977-0.99998), strength 0 is the base
+  model bit for bit, a missing target is refused, alpha/rank semantics; every
+  `DitSession` residency shape agrees bit for bit across forwards and
+  delivers the fold's effect (0.99977). `av_dit_parity.rs`'s AV block gate
+  covers both cross-modal directions (asymmetric q/kv widths) and the audio
+  stream (effect cosine >= 0.9996). Mutation-checked: dropping the int8
+  correction takes the effect cosine to 0. The tiny fixtures need trained-like
+  q/k norm gains and an identity modulation for a query/key correction to
+  move the output at all (`weights` in `lora_runtime.rs` says why).
+- **Not measured**: no official LTX-2.5 adapter is on this box (the IC-LoRA
+  repos are gated), so no real-weight adapted generation has been run; the
+  real path differs from the gated tiny one only in its dimensions.

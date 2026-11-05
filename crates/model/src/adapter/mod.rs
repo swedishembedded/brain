@@ -28,6 +28,25 @@ pub use kind::{AdapterDefinition, AdapterExecution, AdapterGroups, AdapterOptimi
 
 use std::collections::HashMap;
 
+/// One LoRA adapter a generation applies: a file and its strength.
+///
+/// `scale` is ComfyUI's `strength_model`, multiplying the whole delta; 1.0 is
+/// the reference default. Third-party files carry no alpha, so this is their
+/// only scale; brain's own adapters record `alpha/rank` in their header and
+/// apply it on top.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdapterSpec {
+    pub path: String,
+    pub scale: f32,
+}
+
+impl AdapterSpec {
+    /// An adapter at the reference default strength.
+    pub fn new(path: impl Into<String>) -> AdapterSpec {
+        AdapterSpec { path: path.into(), scale: 1.0 }
+    }
+}
+
 /// Where one adapter's delta lands inside a (possibly FUSED) base tensor.
 /// The whole-tensor case is `row0=0, row_stride=inn, col0=0`, which is
 /// exactly what [`crate::lora::Pair::delta`] already does; a row slice of a

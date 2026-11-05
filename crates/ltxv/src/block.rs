@@ -75,6 +75,8 @@
 
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step, Transient};
+use model::dispatch::LoraW;
+use model::lora::RuntimeLora;
 use vae::blocks::Tensors;
 
 use crate::config::{LtxAudioDitConfig, LtxDitConfig};
@@ -224,11 +226,14 @@ const K_FLASH_CROSS_REG2: usize = 26;
 /// reference. Selected by `model::block::rms_variant`, never dispatched
 /// directly - see [`rmsnorm`]. Appended, so every index above is unchanged.
 const K_RMSNORM_ROWS: usize = 27;
+/// `lora_delta`: the accumulate half of a runtime LoRA correction
+/// (`model::dispatch::lora_rows_off`), `out += (x·Aᵀ)·Bᵀ`.
+const K_LORA_DELTA: usize = 28;
 
 /// Every kernel this block dispatches - all pre-existing except
 /// [`K_ADALN_ROW`] and [`K_FLASH_CROSS_REG2`], all at their documented general
 /// contract.
-pub const KERNELS: [(&str, &str); 28] = [
+pub const KERNELS: [(&str, &str); 29] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm", kernels::RMSNORM),
@@ -260,6 +265,7 @@ pub const KERNELS: [(&str, &str); 28] = [
     ("adaln_row", kernels::ADALN_ROW),
     ("flash_attn_cross_reg2", kernels::FLASH_ATTN_CROSS_REG2),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    ("lora_delta", kernels::LORA_DELTA),
 ];
 
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
@@ -422,13 +428,18 @@ fn wf(gpu: &Gpu, buf: &DeviceBuffer, data: &[f32]) {
 /// device capabilities, not a device round trip), so it is queried per call
 /// rather than threading a precomputed `Sel` through every call site -
 /// simpler for this crate's much shallower call graph than wan's.
-fn linear(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, b: Option<&DeviceBuffer>, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
-    let variant = if gpu.caps().workgroup_reductions {
+/// The fp32 GEMM family this device runs: the register-tiled kernels where
+/// workgroup reductions exist, the reference one otherwise.
+fn gemm_variants(gpu: &Gpu) -> model::block::GemmVariants {
+    if gpu.caps().workgroup_reductions {
         model::block::GemmVariants::Fast { gemv: Some(K_MATMUL_GEMV), tiled: K_MATMUL_REG3 }
     } else {
         model::block::GemmVariants::Reference(K_MATMUL)
-    };
-    let (kind, threads) = model::block::gemm_variant(variant, m, n);
+    }
+}
+
+fn linear(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, b: Option<&DeviceBuffer>, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
+    let (kind, threads) = model::block::gemm_variant(gemm_variants(gpu), m, n);
     s.push(gpu.dispatch(kind, &[x, w, out], &[m, k, n], threads));
     if let Some(b) = b {
         s.push(gpu.step(K_BIAS_ADD, &[out, b], &[m, n], m * n));
@@ -1564,10 +1575,17 @@ pub enum QTier {
 /// One quantized linear: packed weight + its per-output-row fp32 scale, plus
 /// the (never-quantized) fp32 bias - `None` for a bias-free linear (the main
 /// video FFN at `ff_bias=false`, `FfWeights`'s own convention).
+///
+/// `lora` is a runtime adapter correction evaluated beside the packed weight
+/// (`y = dequant(Q(x)·Q(W)ᵀ) + b + B·(A·x)`, from the fp32 activation): never
+/// folded into `W`, because requantizing `W + B·A` rounds a trained delta -
+/// typically a fraction of one int8 level - back onto the base weight's own
+/// grid. See `model::dispatch::LoraW`.
 struct QLinear {
     w: DeviceBuffer,
     sw: DeviceBuffer,
     b: Option<DeviceBuffer>,
+    lora: Option<LoraW>,
 }
 
 /// [`QLinear`]'s host-only, GPU-free form - the CPU-side per-channel
@@ -1636,7 +1654,20 @@ impl QLinear {
             gpu.write_f32(&buf, b);
             buf
         });
-        QLinear { w: wb, sw: swb, b }
+        QLinear { w: wb, sw: swb, b, lora: None }
+    }
+
+    /// Claim `key`'s correction out of `adapter`, if it has one, and upload it
+    /// beside this linear's weights.
+    fn attach(&mut self, gpu: &Gpu, adapter: &RuntimeLora, key: &str, out: usize, inn: usize) {
+        self.lora = adapter.claim(key, inn, 0, out, 0, inn).map(|d| {
+            let a = gpu.storage(d.pair.a.len() as u64);
+            wf(gpu, &a, &d.pair.a);
+            let bt_host = d.b_transposed();
+            let bt = gpu.storage(bt_host.len() as u64);
+            wf(gpu, &bt, &bt_host);
+            LoraW { a, bt, r: d.pair.r as u32 }
+        });
     }
 }
 
@@ -1686,6 +1717,16 @@ impl QAttnWeights {
             k_norm: host_tensor(w, &format!("{prefix}.k_norm.weight")),
             gate: gated.then(|| (host_tensor(w, &format!("{prefix}.to_gate_logits.weight")), host_tensor(w, &format!("{prefix}.to_gate_logits.bias")))),
         }
+    }
+
+    /// Attach `adapter`'s corrections to this attention's four projections.
+    /// The dims are [`Self::quantize_host`]'s: `to_q [inner, q]`, `to_k`/`to_v
+    /// [inner, kv]`, `to_out.0 [q, inner]`.
+    fn attach(&mut self, gpu: &Gpu, adapter: &RuntimeLora, prefix: &str, q_dim: usize, kv_dim: usize, inner_dim: usize) {
+        self.wq.attach(gpu, adapter, &format!("{prefix}.to_q.weight"), inner_dim, q_dim);
+        self.wk.attach(gpu, adapter, &format!("{prefix}.to_k.weight"), inner_dim, kv_dim);
+        self.wv.attach(gpu, adapter, &format!("{prefix}.to_v.weight"), inner_dim, kv_dim);
+        self.wo.attach(gpu, adapter, &format!("{prefix}.to_out.0.weight"), q_dim, inner_dim);
     }
 
     fn from_cached(gpu: &Gpu, c: &CachedQAttnWeights) -> QAttnWeights {
@@ -1742,6 +1783,12 @@ impl QFfWeights {
     fn quantize_host(w: &dyn checkpoint::TensorSource, prefix: &str, tier: QTier, dim: usize, has_bias: bool) -> CachedQFfWeights {
         let ff_dim = dim * 4;
         CachedQFfWeights { w1: QLinear::quantize_host(w, &format!("{prefix}.net.0.proj"), tier, ff_dim, dim, has_bias), w2: QLinear::quantize_host(w, &format!("{prefix}.net.2"), tier, dim, ff_dim, has_bias) }
+    }
+
+    fn attach(&mut self, gpu: &Gpu, adapter: &RuntimeLora, prefix: &str, dim: usize) {
+        let ff_dim = 4 * dim;
+        self.w1.attach(gpu, adapter, &format!("{prefix}.net.0.proj.weight"), ff_dim, dim);
+        self.w2.attach(gpu, adapter, &format!("{prefix}.net.2.weight"), dim, ff_dim);
     }
 
     fn from_cached(gpu: &Gpu, c: &CachedQFfWeights) -> QFfWeights {
@@ -1804,6 +1851,15 @@ impl CachedQBlockWeights {
     pub fn quantize(w: &Tensors, prefix: &str, cfg: &LtxDitConfig, tier: QTier) -> CachedQBlockWeights {
         QBlockWeights::quantize_host(w, prefix, cfg.inner_dim as usize, cfg.apply_gated_attention, tier)
     }
+}
+
+/// A quantized block that takes runtime LoRA corrections beside its packed
+/// weights - the video-only and the audio-visual block alike, so a residency
+/// session attaches an adapter the same way whichever block it holds.
+pub trait AttachLora {
+    /// Claim this block's corrections out of `adapter` (`prefix` is
+    /// `transformer_blocks.{l}`) and upload them beside its weights.
+    fn attach_lora(&mut self, adapter: &RuntimeLora, prefix: &str);
 }
 
 /// The host-side quantized-weight cache `crate::dit::forward_q_streamed`
@@ -1879,6 +1935,14 @@ impl QBlockWeights {
         }
     }
 
+    /// Attach `adapter`'s corrections to ONE stream of block `prefix` - `stream`
+    /// is [`Self::quantize_host_stream`]'s (`""` video, `"audio_"` audio).
+    fn attach(&mut self, gpu: &Gpu, adapter: &RuntimeLora, prefix: &str, stream: &str, dim: usize) {
+        self.attn1.attach(gpu, adapter, &format!("{prefix}.{stream}attn1"), dim, dim, dim);
+        self.attn2.attach(gpu, adapter, &format!("{prefix}.{stream}attn2"), dim, dim, dim);
+        self.ff.attach(gpu, adapter, &format!("{prefix}.{stream}ff"), dim);
+    }
+
     fn from_cached(gpu: &Gpu, c: &CachedQBlockWeights) -> QBlockWeights {
         QBlockWeights { attn1: QAttnWeights::from_cached(gpu, &c.attn1), attn2: QAttnWeights::from_cached(gpu, &c.attn2), ff: QFfWeights::from_cached(gpu, &c.ff), scale_shift_table: c.scale_shift_table.clone(), prompt_scale_shift_table: c.prompt_scale_shift_table.clone() }
     }
@@ -1922,6 +1986,10 @@ fn qquant_linear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, x: &DeviceBuffer, w:
     let sx = gpu.storage(model::int8::act_scale_len(rows as usize, k as usize) as u64);
     qquant(gpu, s, x, &xq, &sx, rows, k);
     qlinear(gpu, s, tier, &xq, &sx, w, out, rows, k, n);
+    if let Some(l) = &w.lora {
+        let tscr = gpu.storage((rows * l.r) as u64);
+        s.extend(model::dispatch::lora_rows_off(gpu, gemm_variants(gpu), K_LORA_DELTA, l, &tscr, x, out, 0, 0, rows, k, n));
+    }
 }
 
 /// [`attention`]'s quantized-compute twin: identical fp32 RMSNorm/RoPE/
@@ -2237,6 +2305,25 @@ impl BlockTimings {
 /// [`LtxBlock`]'s quantized-compute twin: one video-only block, weights
 /// resident in packed int8/int4 form. See this section's module doc for the
 /// tier's exact scope (video-only, ten quantizable linears per block).
+/// The corrections stay resident beside the packed weights for as long as
+/// the block lives; claims are tracked by `adapter`, so a target no block
+/// takes stays visible to [`RuntimeLora::unapplied`].
+impl AttachLora for LtxBlockQ {
+    fn attach_lora(&mut self, adapter: &RuntimeLora, prefix: &str) {
+        let gpu = self.gpu.share();
+        self.w.attach(&gpu, adapter, prefix, "", self.cfg.inner_dim as usize);
+    }
+}
+
+/// Both streams' attention and FFN projections and both cross-modal
+/// attentions.
+impl AttachLora for LtxAvBlockQ {
+    fn attach_lora(&mut self, adapter: &RuntimeLora, prefix: &str) {
+        let gpu = self.gpu.share();
+        self.w.attach(&gpu, adapter, prefix, self.vcfg.inner_dim as usize, self.acfg.inner_dim as usize);
+    }
+}
+
 pub struct LtxBlockQ {
     gpu: Gpu,
     cfg: LtxDitConfig,
@@ -2648,6 +2735,13 @@ impl CachedQAvBlockWeights {
 }
 
 impl QAvBlockWeights {
+    fn attach(&mut self, gpu: &Gpu, adapter: &RuntimeLora, prefix: &str, vdim: usize, adim: usize) {
+        self.vw.attach(gpu, adapter, prefix, "", vdim);
+        self.aw.attach(gpu, adapter, prefix, "audio_", adim);
+        self.avw.a2v.attach(gpu, adapter, &format!("{prefix}.audio_to_video_attn"), vdim, adim, adim);
+        self.avw.v2a.attach(gpu, adapter, &format!("{prefix}.video_to_audio_attn"), adim, vdim, adim);
+    }
+
     fn from_cached(gpu: &Gpu, c: &CachedQAvBlockWeights) -> QAvBlockWeights {
         QAvBlockWeights {
             vw: QBlockWeights::from_cached(gpu, &c.vw),

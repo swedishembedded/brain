@@ -271,3 +271,32 @@ mod split_activations_tests {
         assert_eq!(unset.activations, Some(SavedPolicy::Keep));
     }
 }
+
+/// Attach a `--lora-scale` to the `--adapter` it belongs to.
+///
+/// The two flags are both repeatable and pair POSITIONALLY: the Nth
+/// `--lora-scale` is the Nth `--adapter`'s strength. `scaled` counts the
+/// adapters whose strength has already been claimed, so the next one lands on
+/// the next unscaled adapter - which means a strength must be written after
+/// the adapter it belongs to.
+///
+/// A strength with no adapter of its own is REFUSED rather than guessed at. A
+/// stacked run's whole point is that each adapter folds at its own strength,
+/// and the failure mode of guessing (attaching a strength to the wrong
+/// adapter, or to all of them) produces plausible output from the wrong
+/// weights - which no error message ever gets written about, because the run
+/// succeeded.
+pub(crate) fn attach_lora_scale(specs: &mut [model::adapter::AdapterSpec], scaled: &mut usize, value: f32) -> Result<(), String> {
+    let Some(spec) = specs.get_mut(*scaled) else {
+        return Err(format!(
+            "--lora-scale {value} has no --adapter of its own ({} adapter(s) given, {} already \
+             carry a strength). Each --lora-scale applies to the --adapter it FOLLOWS: write \
+             `--adapter <path> --lora-scale <S>` once per adapter.",
+            specs.len(),
+            *scaled
+        ));
+    };
+    spec.scale = value;
+    *scaled += 1;
+    Ok(())
+}

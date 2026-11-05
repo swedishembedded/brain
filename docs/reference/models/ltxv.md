@@ -43,6 +43,7 @@ Gemma-4 are only tiny-config-parity-proven, not real-weight-proven (see
 | Post-hoc upscale of a finished clip | [x] `brain ltxv upscale` - VAE-encode an existing video file, run the official x2 latent spatial upscaler, refine on the distilled refinement schedule, VAE-decode. Shares the upscale+refine implementation with the internal two-stage generation path. CLI only so far, no capability action (see below) |
 | Inference (text to video+audio) | [~] `brain ltxv t2v --audio` / `audio: true` on the `t2v` action - the real audio+video DiT, both streams denoised jointly, decoded through the real audio VAE + vocoder and muxed into the container. Works, on the same streamed/quantized/device-resident path the video-only stream uses, so a step costs modestly more than the same clip without sound rather than several times more (see "Generating sound" below). It is `[~]` rather than `[x]` because the audio-visual DiT has no training support. 48 kHz stereo, through the vocoder's bandwidth-extension stage. Any `1 + 8k` length: past one denoising window the audio latent crosses each seam beside the video one (see "Generating sound" below). Not for a multi-scene clip |
 | Inference (image to video / keyframe conditioning) | [x] `--start-frame`, `--mid-frame` (+ `--mid-frame-at`) and `--end-frame` - up to three real stills VAE-encoded and held at sigma 0 in ONE generation pass, with `--conditioning-strength` for how hard. Refused for a multi-window or multi-scene clip; see "Anchoring a clip on real images" below |
+| LoRA inference | [x] `--adapter <path>` (repeatable, each with its own `--lora-scale`) / `adapter` + `lora_scale` on the `t2v` and `dfr` actions: the official trainer's and the published IC-LoRAs' ComfyUI `.safetensors`, or an adapter brain trained. Applied to every block linear of both streams and both cross-modal attentions, beside the int8 weights (never folded into them); see "Applying a LoRA adapter" below |
 | LoRA fine-tune | [~] video-only DiT, host-math/gradcheck-proven (FD < 1e-4), single- and whole-batch overfit drives loss to ~0 at tiny-config scale - the audio-extended DiT has no training support |
 | Full fine-tune | [~] same scope/caveat as LoRA fine-tune above |
 | INT8 | [~] storage format only for the video-only DiT's weights (`crate::int8`) - not wired into any checkpoint loader, no compute-time kernel |
@@ -273,6 +274,36 @@ One command, one file, 299 frames.
   reasons they are refused for a multi-window one.
 * **Not exposed on the `t2v` capability action** - `--scene` is a CLI flag; the
   action still takes one prompt.
+
+### Applying a LoRA adapter
+
+`--adapter <path>` applies a LoRA to the transformer for the whole run, at the
+strength set by the `--lora-scale` that follows it (default 1.0, ComfyUI's
+`strength_model`). Repeat the pair to stack adapters; every `t2v`, `upscale`,
+`v2v` and `dfr` run takes them.
+
+```bash
+brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
+  --prompt "..." --frames 121 --width 768 --height 448 --output-path out.mp4 \
+  --adapter my-style.safetensors --lora-scale 0.8
+```
+
+* **The file format is the reference's own**: `diffusion_model.<module>.lora_A.weight`
+  / `.lora_B.weight` pairs, as the official LTX trainer exports them and the
+  published IC-LoRAs ship. The delta is `strength * B @ A`, exactly the
+  reference loader's; an adapter brain trained records `alpha/rank` in its
+  header and that multiplies in on top.
+* **The checkpoint is never rewritten.** The real transformer runs at int8,
+  and folding a trained delta into int8 weights rounds most of it away (it is
+  typically a fraction of one quantization level), so every block linear
+  applies the correction beside its packed weight from the fp32 activation.
+  Targets outside the blocks (such as the embeddings connector's attention)
+  are fp32 and fold exactly.
+* **Every target must exist.** An adapter naming a tensor this model does not
+  have, or one of the wrong shape, is refused before any weight is read - a
+  run that silently skipped part of an adapter would look adapted and not be.
+* LoKr adapters are refused: their delta has no low-rank form to apply beside
+  a quantized weight.
 
 ### Upscaling a clip that already exists
 

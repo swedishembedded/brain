@@ -224,6 +224,49 @@ pub fn load_adapter(path: &str, cfg: &Cfg) -> Result<LoraAdapter, String> {
     LoraAdapter::from_tensors(cfg, LoraCfg::loaded(f.rank, f.alpha), &f.map())
 }
 
+/// The runtime corrections a stack of adapters applies to a generation, as
+/// ONE [`model::lora::RuntimeLora`] keyed by the base tensors they correct
+/// (`transformer_blocks.{l}.attn1.to_q.weight`, ...).
+///
+/// Every file is read by [`model::lora::read_external_adapter`] - the
+/// reference's own ComfyUI key layout (`diffusion_model.<module>.lora_A/B.weight`,
+/// the format both the official LTX trainer and [`save_adapter`] write). The
+/// delta is `strength * B @ A`, exactly `ltx_core.loader.lora`'s; a file
+/// brain trained itself records `alpha/rank` in its header
+/// (`ltxv-lora`/`ltxv-av-lora`), which multiplies in on top. Two adapters on
+/// one linear concatenate along the rank axis into one correction.
+///
+/// A LoKr target has no low-rank form, so a quantized block cannot apply it
+/// beside its packed weight - that is refused by name rather than folded into
+/// int8 weights, where most of it would round away.
+pub fn runtime_adapter(specs: &[model::adapter::AdapterSpec]) -> Result<model::lora::RuntimeLora, String> {
+    let mut deltas = Vec::new();
+    for spec in specs {
+        let pairs = model::lora::read_external_adapter(&spec.path)?;
+        let brain_scale = brain_trained_scale(&spec.path)?;
+        for p in &pairs {
+            let d = p.runtime_delta(spec.scale * brain_scale).ok_or_else(|| format!("ltxv: {}: {} is a {} adapter, which has no low-rank form to apply beside a quantized block", spec.path, p.stem, p.family()))?;
+            deltas.push(d);
+        }
+    }
+    Ok(model::lora::RuntimeLora::new(deltas))
+}
+
+/// `alpha/rank` for a file brain's own trainer wrote, 1.0 for anything else.
+fn brain_trained_scale(path: &str) -> Result<f32, String> {
+    let meta = checkpoint::st::read_metadata(path).map_err(|e| format!("ltxv: cannot read adapter {path}: {e}"))?;
+    let Some(config) = meta.get(checkpoint::st::CONFIG_KEY) else { return Ok(1.0) };
+    let config: serde_json::Value = serde_json::from_str(config).map_err(|e| format!("ltxv: {path}: unreadable config: {e}"))?;
+    match config.get("model").and_then(|m| m.as_str()) {
+        Some("ltxv-lora" | "ltxv-av-lora") => {
+            let rank = config.get("rank").and_then(|v| v.as_f64()).ok_or_else(|| format!("ltxv: {path}: adapter has no rank in its header"))?;
+            let alpha = config.get("alpha").and_then(|v| v.as_f64()).unwrap_or(rank);
+            Ok((alpha / rank) as f32)
+        }
+        _ => Ok(1.0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

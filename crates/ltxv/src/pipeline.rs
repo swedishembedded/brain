@@ -475,6 +475,12 @@ pub struct GenOpts {
     /// velocity is bit-identical either way (gated by
     /// `crates/ltxv/tests/it/cfg_parallel.rs`).
     pub devices: crate::devplan::DevicePlan,
+    /// LoRA adapters every denoiser forward applies, in the reference's own
+    /// ComfyUI layout (the official trainer's and the published IC-LoRAs'
+    /// format), each at its own strength - see [`crate::lora::runtime_adapter`].
+    /// The checkpoint's weights are never rewritten: quantized blocks run the
+    /// correction beside their packed weights, fp32 weights fold it exactly.
+    pub adapters: Vec<model::adapter::AdapterSpec>,
 }
 
 impl Default for GenOpts {
@@ -506,6 +512,7 @@ impl Default for GenOpts {
             future_anchors: Vec::new(),
             conditioning_strength: 1.0,
             devices: crate::devplan::DevicePlan::default(),
+            adapters: Vec::new(),
         }
     }
 }
@@ -2247,6 +2254,8 @@ struct RealAvDit {
     /// the card the calling thread is scoped to - see [`RealDit::sessions`],
     /// whose contract this shares exactly.
     sessions: std::sync::Mutex<std::collections::HashMap<Option<u32>, std::sync::Arc<crate::devres::AvDitSession>>>,
+    /// Block-linear LoRA corrections every session attaches ([`block_adapter`]).
+    adapter: Option<SharedAdapter>,
 }
 
 impl RealAvDit {
@@ -2265,7 +2274,7 @@ impl RealAvDit {
         let key = gpu_core::devices::current_gpu();
         let mut map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(key)
-            .or_insert_with(|| std::sync::Arc::new(crate::devres::AvDitSession::resident(&self.cfg, crate::block::QTier::Int8, self.device.as_deref(), tv)))
+            .or_insert_with(|| std::sync::Arc::new(crate::devres::AvDitSession::resident(&self.cfg, crate::block::QTier::Int8, self.device.as_deref(), tv).with_adapter(self.adapter.clone())))
             .clone()
     }
 }
@@ -2357,6 +2366,8 @@ struct RealDit {
     /// which [`generate`] already does before the VAE decode opens its own
     /// device - releases every card's resident weights.
     sessions: std::sync::Mutex<std::collections::HashMap<Option<u32>, std::sync::Arc<crate::devres::DitSession>>>,
+    /// Block-linear LoRA corrections every session attaches ([`block_adapter`]).
+    adapter: Option<SharedAdapter>,
 }
 
 impl RealDit {
@@ -2370,7 +2381,7 @@ impl RealDit {
         let key = gpu_core::devices::current_gpu();
         let mut map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(key)
-            .or_insert_with(|| std::sync::Arc::new(crate::devres::DitSession::resident(&self.cfg, crate::block::QTier::Int8, self.device.as_deref(), t)))
+            .or_insert_with(|| std::sync::Arc::new(crate::devres::DitSession::resident(&self.cfg, crate::block::QTier::Int8, self.device.as_deref(), t).with_adapter(self.adapter.clone())))
             .clone()
     }
 }
@@ -3338,6 +3349,7 @@ fn stage2_sigmas(steps: usize) -> Result<Vec<f64>, String> {
 /// random-weight config, or the real 22B checkpoint streamed int8-compute
 /// when `GenOpts::dit_config` names it (needs [`Paths::dit`]).
 fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, place: crate::devplan::Placement) -> Result<Box<dyn Denoiser>, String> {
+    let adapter = if o.adapters.is_empty() { None } else { Some(crate::lora::runtime_adapter(&o.adapters)?) };
     if o.dit_config == "tiny" {
         // Not a real model: random weights, so any output is a wiring proof
         // and nothing else. Worth a warning rather than an info line - a run
@@ -3346,7 +3358,11 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, place: crat
         tracing::warn!("--dit-config tiny: building a RANDOM-weight DiT, output is a smoke test and carries no semantics");
         let weight_seed = o.seed ^ 0x4c_54_58_76_44_49_54; // "LTXvDIT" folded into the seed, so the same --seed reproduces the same weights
         let weights: Tensors = random_tiny_weights(&dit_cfg, weight_seed);
-        return Ok(Box::new(LtxDit::new(dit_cfg, weights, o.device.as_deref())));
+        let dit = LtxDit::new(dit_cfg, weights, o.device.as_deref());
+        return Ok(Box::new(match adapter {
+            Some(a) => dit.with_adapter(a)?,
+            None => dit,
+        }));
     }
     let dit_path = paths.dit.as_ref().ok_or_else(|| {
         tracing::error!(dit_config = %o.dit_config, "no real DiT checkpoint configured for a real dit-config");
@@ -3374,10 +3390,14 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, place: crat
                 gib = crate::av_stream::host_floats(&cfg) * 4 / (1 << 30),
                 "BRAIN_LTXV_AV_FP32: denoising on the eager host-fp32 audio-visual REFERENCE arm, expanding the whole checkpoint (unset it for the quantized, device-resident path)"
             );
-            let w = crate::av_stream::AvWeights::load(&src, cfg)?;
+            let mut w = crate::av_stream::AvWeights::load(&src, cfg)?;
+            if let Some(a) = &adapter {
+                fold_adapter(a, &mut w.tensors)?;
+            }
             return Ok(Box::new(crate::av_stream::AvDenoiser::new(w, o.device.as_deref())));
         }
-        let head = crate::dit::load_av_head_tensors_from_source(&src, &cfg);
+        let mut head = crate::dit::load_av_head_tensors_from_source(&src, &cfg);
+        let adapter = adapter.map(|a| block_adapter(a, &src, &mut head)).transpose()?;
         let cs = cache.stats();
         tracing::info!(
             layers = cfg.video.num_layers,
@@ -3388,9 +3408,10 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, place: crat
             cached_bytes = cs.bytes,
             "real audio-visual DiT ready (both streams, int8 blocks stream per forward)"
         );
-        return Ok(Box::new(RealAvDit { cfg, src, head, device: o.device.clone(), cache, sessions: Default::default() }));
+        return Ok(Box::new(RealAvDit { cfg, src, head, device: o.device.clone(), cache, sessions: Default::default(), adapter }));
     }
-    let head = crate::dit::load_head_tensors_from_source(&src, &real_cfg);
+    let mut head = crate::dit::load_head_tensors_from_source(&src, &real_cfg);
+    let adapter = adapter.map(|a| block_adapter(a, &src, &mut head)).transpose()?;
     tracing::info!(layers = real_cfg.num_layers, inner_dim = real_cfg.inner_dim, head_tensors = head.len(), "real DiT ready (blocks stream per forward)");
     // Keyed on the checkpoint, not on this call: the same store is handed to
     // the next generation against the same file (see `RealDit`'s doc and
@@ -3398,8 +3419,42 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, place: crat
     let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
     let cs = cache.stats();
     tracing::info!(cached_blocks = cs.blocks, cached_bytes = cs.bytes, "checkpoint weight cache attached");
-    Ok(Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache, place, sessions: Default::default() }))
+    Ok(Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache, place, sessions: Default::default(), adapter }))
 }
+
+/// Fold every correction of `adapter` into the fp32 `weights` - exact at
+/// fp32, so this is how the eager reference arms apply one. Every target must
+/// exist at the adapter's shape.
+fn fold_adapter(adapter: &model::lora::RuntimeLora, weights: &mut Tensors) -> Result<(), String> {
+    adapter.validate(&|k| weights.get(k).map(|(_, d)| d.len()))?;
+    for d in adapter.deltas() {
+        let (out, inn) = (d.pair.out, d.pair.inn);
+        let (_, w) = weights.get_mut(&d.key).expect("validated above");
+        adapter.claim(&d.key, inn, 0, out, 0, inn).expect("the delta's own rectangle").fold_into(w);
+    }
+    Ok(())
+}
+
+/// Split `adapter` for the real streamed checkpoint: head targets fold into
+/// the fp32 `head` tensors now, block targets ride with the sessions and
+/// attach beside each quantized block as it is built. Every target is checked
+/// against the checkpoint's own tensor sizes first, and a target that is
+/// neither a head tensor this denoiser loads nor a block tensor is refused -
+/// an adapter that silently skipped one would serve the base model.
+fn block_adapter(adapter: model::lora::RuntimeLora, src: &crate::gguf_src::LtxvGgufSource, head: &mut Tensors) -> Result<SharedAdapter, String> {
+    use checkpoint::TensorSource;
+    adapter.validate(&|k| src.numel(k))?;
+    for d in adapter.deltas().iter().filter(|d| !crate::dit::is_block_key(&d.key)) {
+        let (out, inn) = (d.pair.out, d.pair.inn);
+        let (_, w) = head.get_mut(&d.key).ok_or_else(|| format!("ltxv: the adapter targets {}, a model-level tensor this denoiser does not load", d.key))?;
+        adapter.claim(&d.key, inn, 0, out, 0, inn).expect("the delta's own rectangle").fold_into(w);
+    }
+    Ok(std::sync::Arc::new(std::sync::Mutex::new(adapter)))
+}
+
+/// A runtime adapter shared by every card's session: claims are recorded per
+/// block build, so it is locked only while a block attaches its corrections.
+pub type SharedAdapter = std::sync::Arc<std::sync::Mutex<model::lora::RuntimeLora>>;
 
 /// The text conditioning both [`generate`] and [`upscale`] denoise against:
 /// real Gemma-4 when [`Paths::text_encoder`] is set ([`real_text_context`]),
@@ -5873,6 +5928,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let weight_seed = base.seed ^ 0x4c_54_58_76_44_49_54; // "LTXvDIT"
     let weights: Tensors = random_tiny_weights(&dit_cfg, weight_seed);
     let dit = LtxDit::new(dit_cfg, weights, base.device.as_deref());
+    let dit = if base.adapters.is_empty() { dit } else { dit.with_adapter(crate::lora::runtime_adapter(&base.adapters)?)? };
     timings.build_dit = build_t.elapsed().as_secs_f32();
     tracing::info!(secs = timings.build_dit, canvas_frames, keyframe_slots = k, "DFR transformer built (random tiny weights)");
     if cancel.is_cancelled() {

@@ -544,6 +544,101 @@ fn av_int8_block_tracks_the_fp32_av_block() {
     report_lossy("av int8 audio attn1_out", &tq.a_attn1_out, &tf.a_attn1_out, 0.999, 5e-2);
 }
 
+/// A runtime LoRA on the audio-visual int8 block delivers the effect the
+/// exact fp32 fold does, for each kind of target the official trainer
+/// adapts: both cross-modal attentions (whose query and key widths differ -
+/// video queries against audio keys, and the mirror) and the audio stream's
+/// own attention and FFN. One target per run, at a strength whose fp32 effect
+/// clears the int8 noise, so a correction that never reaches one linear
+/// cannot hide behind another's.
+#[test]
+fn a_runtime_adapter_on_the_av_int8_block_delivers_the_exact_fp32_fold() {
+    use ltxv::block::AttachLora;
+    let mut c = AvBlockCase::tiny(0x00A0_1A7A);
+    // Trained-model q/k norm gains: the fixture's N(0, 0.02) draws make every
+    // attention logit ~0, a uniform softmax no query or key correction can
+    // move (see `lora_runtime.rs`'s `weights`).
+    for (k, (_, v)) in c.w.iter_mut() {
+        if k.ends_with("q_norm.weight") || k.ends_with("k_norm.weight") {
+            v.iter_mut().for_each(|x| *x = 2.0);
+        }
+    }
+    let (vcfg, acfg) = (&c.cfg.video, &c.cfg.audio);
+    let (vd, ad) = (vcfg.inner_dim as usize, acfg.inner_dim as usize);
+    let p = "transformer_blocks.0";
+    let targets = [
+        (format!("{p}.audio_to_video_attn.to_q.weight"), ad, vd),
+        (format!("{p}.audio_to_video_attn.to_k.weight"), ad, ad),
+        (format!("{p}.video_to_audio_attn.to_k.weight"), ad, vd),
+        (format!("{p}.video_to_audio_attn.to_out.0.weight"), ad, ad),
+        (format!("{p}.audio_attn1.to_v.weight"), ad, ad),
+        (format!("{p}.audio_ff.net.0.proj.weight"), 4 * ad, ad),
+    ];
+    let fp32 = |w: &vae::blocks::Tensors| {
+        let gpu = Gpu::open(None, &KERNELS);
+        let r = c.rope(&gpu);
+        let blk = LtxAvBlock::on(&gpu, vcfg, acfg, w, p, c.v_ctx_len, c.a_ctx_len);
+        #[rustfmt::skip]
+        let (v, a, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context,
+            &r.0, &r.1, &r.2, &r.3, &r.4, &r.5, &r.6, &r.7,
+            &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, true);
+        [v, a].concat()
+    };
+    let int8 = |adapter: Option<&model::lora::RuntimeLora>| {
+        let gpu = Gpu::open(None, &KERNELS);
+        let r = c.rope(&gpu);
+        let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7 };
+        let mut blk = LtxAvBlockQ::on(&gpu, vcfg, acfg, &c.w, p, c.v_ctx_len, c.a_ctx_len, QTier::Int8);
+        if let Some(a) = adapter {
+            blk.attach_lora(a, p);
+            assert!(a.unapplied().is_empty(), "the block must claim every correction: {:?}", a.unapplied());
+        }
+        #[rustfmt::skip]
+        let (v, a, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
+            &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta);
+        [v, a].concat()
+    };
+    let rel = |a: &[f32], b: &[f32]| -> f64 {
+        let n: f64 = a.iter().zip(b).map(|(x, y)| ((x - y) as f64).powi(2)).sum();
+        (n / b.iter().map(|y| (*y as f64).powi(2)).sum::<f64>().max(1e-30)).sqrt()
+    };
+    let diff = |a: &[f32], b: &[f32]| -> Vec<f32> { a.iter().zip(b).map(|(x, y)| x - y).collect() };
+    let (b32, b8) = (fp32(&c.w), int8(None));
+    let dir = std::env::temp_dir().join(format!("ltxv-av-lora-{}-{}", std::process::id(), data::rng::random_seed()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (n, (key, out, inn)) in targets.iter().enumerate() {
+        let file = dir.join(format!("a{n}.safetensors"));
+        let mut rng = data::rng::Lcg::new(70 + n as u64);
+        let stem = key.strip_suffix(".weight").unwrap();
+        let r = 4usize;
+        let tensors = vec![
+            (format!("diffusion_model.{stem}.lora_A.weight"), vec![r as u64, *inn as u64], rng.vec_scaled(r * inn, 0.5)),
+            (format!("diffusion_model.{stem}.lora_B.weight"), vec![*out as u64, r as u64], rng.vec_scaled(out * r, 0.5)),
+        ];
+        checkpoint::st::save_safetensors(file.to_str().unwrap(), &tensors, &serde_json::json!({}), None).unwrap();
+        let load = |scale: f32| ltxv::lora::runtime_adapter(&[model::adapter::AdapterSpec { path: file.to_string_lossy().into_owned(), scale }]).unwrap();
+        let (scale, a32) = [0.1f32, 1.0, 10.0, 100.0]
+            .into_iter()
+            .map(|scale| {
+                let lora = load(scale);
+                let mut w = c.w.clone();
+                let d = lora.claim(key, *inn, 0, *out, 0, *inn).expect("the file's own target");
+                d.fold_into(&mut w.get_mut(key.as_str()).unwrap().1);
+                (scale, fp32(&w))
+            })
+            // 0.5%, not more: a query or key correction saturates near 1%
+            // here, because the RMSNorm after the projection bounds how far
+            // any delta can move a query - and 0.5% is still ~150x this
+            // block's own int8 noise (rel_l2 ~3e-5, see the test above).
+            .find(|(_, a32)| rel(a32, &b32) > 5e-3)
+            .unwrap_or_else(|| panic!("{key}: no strength up to 100 moves the fp32 block by 0.5%"));
+        let a8 = int8(Some(&load(scale)));
+        let agree = cosine(&diff(&a8, &b8), &diff(&a32, &b32));
+        println!("{key} @ {scale}: effect rel {:.4}, int8-vs-fp32 effect cosine {agree:.6}", rel(&a32, &b32));
+        assert!(agree > 0.99, "{key}: the int8 AV block must deliver the fp32 fold's effect, cosine {agree}");
+    }
+}
+
 /// Deriving every modulation vector ON the card (the production path) must be
 /// BIT-IDENTICAL to combining and uploading it from the host (the reference
 /// path). This is a routing change - `adaln_row` reproduces `add_table`'s

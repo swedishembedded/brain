@@ -84,6 +84,8 @@ pub fn manifest() -> Manifest {
         "also generate the clip's SOUND. LTX-2.5 is natively audio-visual: one transformer denoises a video-latent and an audio-latent stream together, coupled every block by cross-attention, and this runs both instead of only the video half. Needs dit_config=ltx25_22b, a real text encoder ($BRAIN_LTXV_TEXT_ENCODER - the audio stream has its OWN text projection the stub cannot stand in for) and $BRAIN_LTXV_AUDIO_VAE; all three are checked before any weight is read. Off by default because of cost: it runs on the same streamed/quantized/device-resident path the video-only stream does, so a joint step costs modestly more than a video-only one at the same shape rather than several times more, but it is still more. Any legal frame count: past one denoising window the audio latent crosses each seam beside the video one, which constrains where a seam may fall (see crate::audio's module doc) and so plans a different window split from the same request without sound.",
     )
     .default(json!(d.audio)))
+    .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter to apply: the official LTX trainer's / a published IC-LoRA's ComfyUI .safetensors, or one brain trained. Runs beside the quantized weights, never folded into them.").host_resolved())
+    .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier (ComfyUI strength_model); 1.0 = the reference default. Only read when adapter is set.").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
     .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required())
     // Not `.required()`: a silent generation is the default, and an output a
     // caller can legitimately not receive must not be declared as one that
@@ -114,6 +116,8 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("eta", ParamType::Float, "ancestral-Euler eta; 0 = deterministic Euler, 1 = fully ancestral").default(json!(d.eta)))
     .param(ParamSpec::new("dit_config", ParamType::Enum(DFR_DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "DiT size; only tiny (random weights) is implemented for dfr - the real 22B checkpoint is wired for t2v only, see this crate's roadmap").default(json!("tiny")))
     .param(ParamSpec::new("temporal_upsample_rounds", ParamType::Int, "0, 1, or 2 real temporal x2 refine rounds").default(json!(0)))
+    .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter to apply: the official LTX trainer's / a published IC-LoRA's ComfyUI .safetensors, or one brain trained. Runs beside the quantized weights, never folded into them.").host_resolved())
+    .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier (ComfyUI strength_model); 1.0 = the reference default. Only read when adapter is set.").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
     .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required());
 
     Manifest::new(
@@ -137,6 +141,12 @@ use capability::{Action, ActionResult, Invocation, Outcome, Progress, Provider};
 #[derive(Debug)]
 pub struct GenParams {
     pub opts: GenOpts,
+}
+
+/// The invocation's LoRA adapter (`adapter` at `lora_scale`), if it names one.
+fn adapters_from(inv: &Invocation) -> Vec<model::adapter::AdapterSpec> {
+    let scale = inv.get_f64("lora_scale").unwrap_or(1.0) as f32;
+    inv.get_str("adapter").map(|path| model::adapter::AdapterSpec { path, scale }).into_iter().collect()
 }
 
 /// Decode + validate `t2v`'s params from an invocation. Every geometric
@@ -178,6 +188,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         // default, which uses both cards for one generation's CFG pair.
         future_anchors: Vec::new(),
         devices: d.devices,
+        adapters: adapters_from(inv),
     };
     use crate::vae3d::LtxVaeConfig;
     let vcfg = LtxVaeConfig::conv25();
@@ -252,6 +263,7 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
         conditioning_strength: d.conditioning_strength,
         future_anchors: Vec::new(),
         devices: d.devices,
+        adapters: adapters_from(inv),
     };
     let temporal_upsample_rounds = inv.get_i64("temporal_upsample_rounds").unwrap_or(0).max(0) as usize;
     let opts = DfrOpts { base, temporal_upsample_rounds };
