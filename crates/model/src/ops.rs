@@ -962,7 +962,7 @@ impl Weight {
 }
 
 impl Weight {
-    /// [`Weight::upload`] for the dense tiers (`F32`, `BF16`, `F16`; `I8` through
+    /// [`Weight::upload`] for the dense tiers (`F32`, `BF16`, `F16`) and `I8` (through
     /// [`crate::int8::quantize_from`]'s own bounded reader) straight from a checkpoint, without ever
     /// holding the tensor on the host in full: the source is read in bounded chunks (at most
     /// `paramstore::UPLOAD_CHUNK_WORDS` values) and each is packed and written at its place in the
@@ -1000,7 +1000,19 @@ impl Weight {
                 assert!(numel.is_multiple_of(2), "Weight::upload_from: a half-precision tensor needs an even element count");
                 Ok(Weight::F16 { w: stream(numel / 2, &|g, b, off, part| g.write_at(b, off / 2, &crate::half::pack_f16(part)))?, n: n as u32, k: k as u32 })
             }
-            other => Err(format!("Weight::upload_from: {other:?} has no bounded loader (F32, BF16 and F16 do; int8 banks go through model::int8::quantize_from)")),
+            Dtype::I8 => {
+                // `int8::quantize_from` is the bounded route: a stored Q8_0 or int8 tensor repacks
+                // without fp32, anything else is quantized a row block at a time.
+                let (packed, scales) = crate::int8::quantize_from(source, name, n, k).ok_or_else(|| format!("Weight::upload_from: the checkpoint has no tensor '{name}'"))?;
+                if packed.len() * 4 != numel {
+                    return Err(format!("Weight::upload_from: tensor '{name}' does not hold {n}x{k} values"));
+                }
+                let w = gpu.storage(packed.len() as u64);
+                gpu.write(&w, &packed);
+                let s = gpu.storage_init("weight_scale_i8", &scales);
+                Ok(Weight::I8 { w, s, n: n as u32, k: k as u32 })
+            }
+            other => Err(format!("Weight::upload_from: {other:?} has no bounded loader (F32, BF16, F16 and I8 do)")),
         }
     }
 }
