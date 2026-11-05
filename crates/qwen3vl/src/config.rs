@@ -203,9 +203,11 @@ impl Qwen3VlConfig {
         let u = |v: &Value, k: &str| -> u32 {
             v[k].as_u64().unwrap_or_else(|| panic!("qwen3-vl config: missing/!u64 field {k}")) as u32
         };
-        let ms = tc["rope_scaling"]["mrope_section"]
-            .as_array()
-            .expect("text_config.rope_scaling.mrope_section");
+        // transformers 4 writes the rotary settings as `rope_scaling` beside a
+        // top-level `rope_theta`; transformers 5 folds both into
+        // `rope_parameters`.
+        let rope = if tc["rope_parameters"].is_object() { &tc["rope_parameters"] } else { &tc["rope_scaling"] };
+        let ms = rope["mrope_section"].as_array().expect("text_config.rope_scaling.mrope_section (or rope_parameters.mrope_section)");
         let mrope_section = [ms[0].as_u64().unwrap() as u32, ms[1].as_u64().unwrap() as u32, ms[2].as_u64().unwrap() as u32];
         Qwen3VlConfig {
             vision: VisionConfig::from_hf(vc),
@@ -218,7 +220,7 @@ impl Qwen3VlConfig {
                 n_kv_heads: u(tc, "num_key_value_heads"),
                 head_dim: u(tc, "head_dim"),
                 d_ff: u(tc, "intermediate_size"),
-                rope_theta: tc["rope_theta"].as_f64().expect("text_config.rope_theta") as f32,
+                rope_theta: tc["rope_theta"].as_f64().or_else(|| rope["rope_theta"].as_f64()).expect("text_config.rope_theta (or rope_parameters.rope_theta)") as f32,
                 rms_eps: tc["rms_norm_eps"].as_f64().expect("text_config.rms_norm_eps") as f32,
                 // Falls back to `block_size` (below) when the source HF config
                 // lacks the key, for backward compatibility.
@@ -296,6 +298,20 @@ mod tests {
         assert_eq!(parsed.text.vocab, 151936);
         assert_eq!(parsed.text.rope_theta, 5_000_000.0);
         assert!(parsed.text.tie_embeddings);
+    }
+
+    /// transformers 5 writes the same rotary settings as `rope_parameters`,
+    /// `rope_theta` included.
+    #[test]
+    fn from_hf_reads_transformers_5_rope_parameters() {
+        let mut c = hf_4b_json();
+        let tc = c["text_config"].as_object_mut().unwrap();
+        tc.remove("rope_scaling");
+        tc.remove("rope_theta");
+        tc.insert("rope_parameters".into(), serde_json::json!({ "mrope_interleaved": true, "mrope_section": [24, 20, 20], "rope_theta": 5000000, "rope_type": "default" }));
+        let parsed = Qwen3VlConfig::from_hf(&c);
+        assert_eq!(parsed.mrope_section, [24, 20, 20]);
+        assert_eq!(parsed.text.rope_theta, 5_000_000.0);
     }
 
     #[test]
