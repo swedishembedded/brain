@@ -113,8 +113,9 @@ reference pipelines' defaults; without it, a tiny random-weight smoke test):
                              (audio-to-video): it is encoded through the audio
                              VAE, held frozen as the clip's audio stream while
                              the video denoises against it, and muxed as the
-                             clip's sound. Needs --audio and a clip that fits
-                             one denoising window
+                             clip's sound. Needs --audio; past one
+                             denoising window each window holds its own
+                             slice of it
   --dit-config <name>         DiT config; "ltx25_22b" (the real 22B
                              checkpoint - the default when it is resolved)
                              or "tiny" (fresh random weights, a smoke test -

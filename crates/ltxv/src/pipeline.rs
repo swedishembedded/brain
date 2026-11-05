@@ -5789,9 +5789,6 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         // spelling it.
         return generate(paths, prompt, &o.base, cancel, progress);
     }
-    if o.base.audio_source.is_some() {
-        return Err("an audio source conditions a single-window generation; a clip this long is generated as several windows, which do not route one yet".into());
-    }
     if o.base.reference.is_some() {
         return Err("--reference-video is applied by a single-window generation; a clip this long is generated as several windows, which do not route a reference yet".into());
     }
@@ -5922,6 +5919,19 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     // in the waveform, which is exactly the click this design avoids by never
     // creating it.
     let mut audio_latent: Vec<f32> = Vec::new();
+    // An audio source is the whole clip's audio stream, encoded once: each
+    // window holds its own slice of it frozen - clean, at timestep 0 - while
+    // the picture denoises against it, the single-window audio-to-video
+    // conditioning cut along the same seams the generated audio would cross.
+    let source_latent: Option<Vec<f32>> = match (&o.base.audio_source, &aplan) {
+        (Some(source), Some(a)) => {
+            let path = paths.audio_vae.as_deref().ok_or("ltxv: an audio source is encoded through the audio VAE, and no audio VAE path is set")?;
+            let (_, vae_raw): (Vec<_>, Vec<_>) = checkpoint::safetensors::read(path)?.into_iter().partition(|t| t.name.starts_with("vocoder."));
+            let vae_w = crate::import::import_audio_vae(vae_raw, &crate::audio_vae::AudioVaeConfig::ltx25())?;
+            Some(crate::audio::encode(&vae_w, source, a.total, o.base.device.as_deref())?)
+        }
+        _ => None,
+    };
     let mut vae_secs = 0.0f32;
     let work_t = Instant::now();
     let mut done_before = 1u32;
@@ -5972,6 +5982,17 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         // tokens go at the head of it inside the stage, exactly as the video
         // half's carried latent frames do.
         let audio_noise = aplan.as_ref().map(|a| seeded_noise(a.per_window[wi] * crate::audio::TOKEN_DIM as usize, o.base.seed ^ AUDIO_SEED_SALT ^ seed_salt));
+        // This window's slice of the source soundtrack: it starts where the
+        // window's audio sequence does, `context` tokens before the window's
+        // own first new token.
+        let held_audio: Option<(Vec<f32>, Vec<f32>)> = match (&source_latent, &aplan) {
+            (Some(src), Some(a)) => {
+                let dim = crate::audio::TOKEN_DIM as usize;
+                let start = audio_latent.len() / dim - if wi == 0 { 0 } else { a.context };
+                Some((vec![0.0; a.per_window[wi]], src[start * dim..(start + a.per_window[wi]) * dim].to_vec()))
+            }
+            _ => None,
+        };
         // The same agreement the video context is held to, on the other
         // stream: what the plan says this window carries and what the previous
         // window actually handed over have to be the same number, or the two
@@ -6013,7 +6034,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
                     seed_salt,
                     done_before,
                     label: "stage1",
-                    audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_half), frozen: None }),
+                    audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_half), frozen: held_audio.clone() }),
                 },
                 total,
                 &mut progress,
@@ -6057,7 +6078,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
                     // above, and for the same reason: what a continuation
                     // window is pinned to is the previous window's own final
                     // output, at this stage's own place in the schedule.
-                    audio: stage1.audio.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_full), frozen: None }),
+                    audio: stage1.audio.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_full), frozen: held_audio.clone() }),
                 },
                 total,
                 &mut progress,
@@ -6078,7 +6099,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
                     seed_salt,
                     done_before,
                     label: "single",
-                    audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_full), frozen: None }),
+                    audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_full), frozen: held_audio.clone() }),
                 },
                 total,
                 &mut progress,
@@ -6137,6 +6158,16 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     // token count is the clip's own, so this is the same arithmetic - and the
     // same sample count - a single-window clip of this length produces.
     let audio = match &aplan {
+        // The source soundtrack IS the clip's audio: every window held it
+        // frozen, so decoding its latent would only add the VAE's loss.
+        Some(_) if o.base.audio_source.is_some() => {
+            let mut clip = o.base.audio_source.clone().expect("checked by the guard");
+            let video_seconds = out_frames.len() as f32 / o.base.fps as f32;
+            let keep = (video_seconds * clip.sample_rate as f32).round() as usize;
+            clip.channels.iter_mut().for_each(|c| c.truncate(keep));
+            clip.pad_to_seconds(video_seconds);
+            Some(clip)
+        }
         Some(a) => {
             let dim = crate::audio::TOKEN_DIM as usize;
             if audio_latent.len() != a.total * dim {

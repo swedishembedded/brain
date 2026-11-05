@@ -28,7 +28,7 @@ per component and the open gaps.
 | Text to video | [x] `brain ltxv t2v` / the `t2v` action. Unnamed settings take the reference defaults (768x512, 121 frames, 24 fps) when the checkpoint is configured; a clip past one denoising window rolls a latent context across windows, past the single-stage ceiling it runs the reference's two stages |
 | Text to video + audio | [x] `--audio` / `audio: true`: both streams denoised jointly, 48 kHz stereo through the vocoder's bandwidth extension, any length (see "Generating sound") |
 | Text to audio | [x] `brain ltxv t2a` / the `t2a` action: the audio stream alone, the video half never read |
-| Audio to video | [x] `--audio-source <wav>`: the soundtrack held frozen while the picture denoises against it (one denoising window) |
+| Audio to video | [x] `--audio-source <wav>`: the soundtrack held frozen while the picture denoises against it, any length (each window holds its own slice) |
 | Retake, video to audio | [x] `brain ltxv v2v --window S:E` / the `v2v` action: regenerate a time window of the picture, the sound or both; `--hold-video --audio` generates sound for a picture |
 | Extension | [x] `brain ltxv extend` / the `extend` action: continue a clip from its last 57 frames, with its soundtrack |
 | Image / keyframe conditioning | [x] `--start-frame`, `--mid-frame`, `--end-frame` (see "Anchoring a clip on real images") |

@@ -81,9 +81,10 @@ this port:
       temporal rounds.
 - [ ] **IC-LoRA attention mask** - reference tokens need a per-key weight in
       the flash attention kernel.
-- [ ] **Audio to video past one window** - `audio_source` is refused for a
-      multi-window clip; the frozen soundtrack has to be sliced per window the
-      way the carried audio prefix is.
+- [x] **Audio to video past one window** - the soundtrack is encoded once and
+      each window holds its own slice frozen, starting where the window's audio
+      sequence does (its carried prefix included); the clip returns the source
+      soundtrack itself. Not yet run on real weights.
 - [x] **HQ preset** - `LTX_2_3_HQ_PARAMS`'s guidance (STG off, rescale
       0.45/1.0) as `--guidance-preset hq`, run with `--sampler res2s`.
 
