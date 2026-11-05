@@ -22,8 +22,10 @@ fn u32le(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
-/// Parse a WAV byte buffer into mono f32 samples.
-pub fn parse(bytes: &[u8]) -> io::Result<Wav> {
+/// Parse a RIFF/WAVE byte stream into its sample rate and one plane per
+/// channel, each in `[-1, 1]` - the channels kept apart, for a caller that
+/// carries the sound on rather than analysing it.
+pub fn parse_planar(bytes: &[u8]) -> io::Result<(u32, Vec<Vec<f32>>)> {
     let err = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(err("not a RIFF/WAVE file"));
@@ -54,10 +56,9 @@ pub fn parse(bytes: &[u8]) -> io::Result<Wav> {
         return Err(err("zero bit depth"));
     }
     let frames = data.len() / (bytes_per * ch);
-    let mut samples = Vec::with_capacity(frames);
+    let mut planes = vec![Vec::with_capacity(frames); ch];
     for f in 0..frames {
-        let mut acc = 0.0f32;
-        for c in 0..ch {
+        for (c, plane) in planes.iter_mut().enumerate() {
             let o = (f * ch + c) * bytes_per;
             let s = &data[o..o + bytes_per];
             let v = match (format, bits) {
@@ -71,14 +72,21 @@ pub fn parse(bytes: &[u8]) -> io::Result<Wav> {
                 (1, 8) => (s[0] as f32 - 128.0) / 128.0,
                 _ => return Err(err("unsupported PCM format/bit depth")),
             };
-            acc += v;
+            plane.push(v);
         }
-        samples.push(acc / ch as f32);
     }
-    Ok(Wav { sample_rate: rate, samples })
+    Ok((rate, planes))
 }
 
 /// Read a WAV file into mono f32 samples.
+/// [`parse_planar`], downmixed to mono by averaging the channels.
+pub fn parse(bytes: &[u8]) -> io::Result<Wav> {
+    let (sample_rate, planes) = parse_planar(bytes)?;
+    let ch = planes.len() as f32;
+    let samples = (0..planes[0].len()).map(|f| planes.iter().map(|p| p[f]).sum::<f32>() / ch).collect();
+    Ok(Wav { sample_rate, samples })
+}
+
 pub fn read(path: impl AsRef<Path>) -> io::Result<Wav> {
     let mut f = std::fs::File::open(path)?;
     let mut bytes = Vec::new();

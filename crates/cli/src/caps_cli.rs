@@ -274,11 +274,12 @@ fn run_do_impl(argv: &[String], assembly: Option<&capability::Assembly>) -> i32 
     };
     eprintln!();
 
-    // write output blobs
+    // write output blobs; a clip carries the outcome's own sound track
     for (name, path) in &out_paths {
         match outcome.blobs.get(name) {
             Some(b) => {
-                if let Err(e) = save_blob(b, path) {
+                let sound = (b.media == Media::Video).then(|| outcome.blobs.get("audio")).flatten();
+                if let Err(e) = save_blob(b, path, sound) {
                     eprintln!("brain: writing {path}: {e}");
                     return 1;
                 }
@@ -431,8 +432,9 @@ fn load_audio_bytes(bytes: Vec<u8>) -> Result<Blob, String> {
 /// Write a [`Blob`] to a file: images (raw HWC f32 + `{w,h,c}` meta) → binary PPM
 /// (P6, the brain image convention) or PNG (see [`imaging::save`]); audio →
 /// a WAV file; video (raw HWC f32 frames + `{frames,w,h,c}` meta) → a
-/// container via `imaging::video::encode_frames`; everything else → raw bytes.
-fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
+/// container via `imaging::video::encode_frames`, carrying `sound` as its
+/// track when the action made one; everything else → raw bytes.
+fn save_blob(b: &Blob, path: &str, sound: Option<&Blob>) -> Result<(), String> {
     match b.media {
         // A clip, not bytes: writing the raw f32 frames out would produce a
         // file no player opens, which is the same class of bug the audio arm
@@ -446,7 +448,8 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
                 .iter()
                 .map(|(hwc, w, h)| imaging::pixels::hwc_to_rgb8(hwc, *w, *h, 3, imaging::ChannelPolicy::ReplicateFirst))
                 .collect::<Result<_, _>>()?;
-            imaging::video::encode_frames(&rgb, std::path::Path::new(path), fps, &Default::default())?;
+            let audio = sound.map(sound_track).transpose()?;
+            imaging::video::encode_frames(&rgb, std::path::Path::new(path), fps, &imaging::video::VideoEncodeOpts { audio, ..Default::default() })?;
             Ok(())
         }
         Media::Image | Media::Mask => {
@@ -478,6 +481,19 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
         }
         _ => std::fs::write(path, &b.bytes).map_err(|e| e.to_string()),
     }
+}
+
+/// An audio blob as the sound track of a clip: a WAV keeps its channels, a
+/// headerless one is the mono f32 PCM at `meta.sample_rate` [`save_blob`]
+/// writes for it.
+fn sound_track(b: &Blob) -> Result<imaging::video::AudioTrack, String> {
+    let (sample_rate, channels) = if audio::asr_caps::is_wav(&b.bytes) {
+        audio::wav::parse_planar(&b.bytes).map_err(|e| format!("the sound track: {e}"))?
+    } else {
+        let rate = b.meta.get("sample_rate").and_then(|v| v.as_u64()).ok_or("the sound track has no sample_rate and is not a WAV")? as u32;
+        (rate, vec![b.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes(*q)).collect()])
+    };
+    Ok(imaging::video::AudioTrack { channels, sample_rate })
 }
 
 // ---------------------------------------------------------------- built-in demo provider
@@ -625,5 +641,26 @@ mod tests {
             out
         };
         assert_eq!(stripped, plain);
+    }
+
+    /// An action that makes its picture and its sound in one forward (an
+    /// audio-visual diffusion model) is written as ONE clip that carries both:
+    /// the `audio` blob rides in the video file as its sound track, stereo
+    /// kept stereo, rather than leaving a silent video beside a loose WAV.
+    #[test]
+    fn a_joint_video_and_audio_outcome_writes_one_clip_with_its_sound() {
+        let frames: Vec<(Vec<f32>, u32, u32)> = (0..4).map(|i| (vec![i as f32 / 4.0; 32 * 16 * 3], 32, 16)).collect();
+        let video = capability::blob::video_blob(&frames).unwrap();
+        let left = vec![0.25f32; 3200];
+        let right = vec![-0.25f32; 3200];
+        let wav = audio::wav::encode_multi(&[&left, &right], 32_000);
+        let sound = Blob::new(Media::Audio, wav).with_meta(serde_json::json!({"format": "wav", "sample_rate": 32_000}));
+
+        let path = std::env::temp_dir().join(format!("brain-caps-cli-av-{}.mkv", std::process::id()));
+        save_blob(&video, path.to_str().unwrap(), Some(&sound)).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let head = bytes.windows(8).position(|w| w == b"OpusHead").expect("the clip carries an Opus sound track");
+        assert_eq!(bytes[head + 9], 2, "both channels of the track are kept");
     }
 }
