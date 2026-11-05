@@ -14,5 +14,6 @@ mod bias_ncl_kernels;
 mod conv1d_gemm_lowering;
 mod conv_kernels;
 mod resample_rational;
+mod resample_torchaudio;
 mod snake_kernels;
 mod weight_norm;

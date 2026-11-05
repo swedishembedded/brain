@@ -9,7 +9,9 @@
 //! technique `crates/ltxv/src/vocoder.rs`'s anti-aliasing filters are BUILT
 //! from - that filter ships pre-computed inside the checkpoint and is only
 //! ever loaded there, never derived; the `kaiser_sinc_lowpass` helper below is
-//! this workspace's first from-scratch derivation of one.
+//! this workspace's first from-scratch derivation of one. [`sinc_hann`] is
+//! torchaudio's own Hann-windowed resampler, for references that resample
+//! with it.
 
 use std::f64::consts::PI;
 
@@ -155,4 +157,55 @@ mod tests {
     fn gcd_reduces_ratio() {
         assert_eq!(gcd(16000, 24000), 8000);
     }
+}
+
+/// `torchaudio.transforms.Resample(orig_rate, new_rate)` with its defaults,
+/// to float rounding: a Hann-windowed sinc (`lowpass_filter_width = 6`,
+/// `rolloff = 0.99`), one polyphase filter per output phase of the reduced
+/// ratio, applied as a stride-`orig` convolution over the zero-padded input
+/// and cut to `ceil(new * len / orig)` samples. Use it where a reference
+/// resamples with torchaudio and parity matters; [`rational`] is the
+/// workspace's own higher-attenuation design.
+///
+/// The kernel is built in f64 and narrowed to f32 as torchaudio caches it -
+/// except the per-phase offset `-j / new`, which torchaudio divides as an
+/// integer tensor and so computes in f32 before promoting it.
+pub fn sinc_hann(samples: &[f32], orig_rate: u32, new_rate: u32) -> Vec<f32> {
+    const LOWPASS_WIDTH: f64 = 6.0;
+    const ROLLOFF: f64 = 0.99;
+    let g = gcd(orig_rate, new_rate);
+    let (orig, new) = ((orig_rate / g) as usize, (new_rate / g) as usize);
+    if orig == new {
+        return samples.to_vec();
+    }
+    let base = orig.min(new) as f64 * ROLLOFF;
+    let width = (LOWPASS_WIDTH * orig as f64 / base).ceil() as usize;
+    let taps = 2 * width + orig;
+    let kernels: Vec<f32> = (0..new)
+        .flat_map(|j| {
+            let phase = (-(j as f32) / new as f32) as f64;
+            (0..taps).map(move |k| {
+                let t = ((phase + (k as f64 - width as f64) / orig as f64) * base).clamp(-LOWPASS_WIDTH, LOWPASS_WIDTH);
+                let window = (t * PI / LOWPASS_WIDTH / 2.0).cos().powi(2);
+                let t = t * PI;
+                let sinc = if t == 0.0 { 1.0 } else { t.sin() / t };
+                (sinc * window * base / orig as f64) as f32
+            })
+        })
+        .collect();
+
+    let len = samples.len();
+    let mut padded = vec![0f32; width + len + width + orig];
+    padded[width..width + len].copy_from_slice(samples);
+    let frames = (padded.len() - taps) / orig + 1;
+    let target = ((new as f64 * len as f64 / orig as f64) as f32).ceil() as usize;
+    let mut out = Vec::with_capacity(frames * new);
+    for m in 0..frames {
+        let window = &padded[m * orig..m * orig + taps];
+        for kernel in kernels.chunks_exact(taps) {
+            out.push(window.iter().zip(kernel).map(|(&x, &k)| x as f64 * k as f64).sum::<f64>() as f32);
+        }
+    }
+    out.truncate(target);
+    out
 }
