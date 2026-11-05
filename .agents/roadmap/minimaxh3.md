@@ -360,18 +360,20 @@ port is real-weight-parity-gated.
   DiT to ~20.2B params, both memory pressure AND the load-time-dominated
   wall-clock) - the precompute transform itself is only verified against
   extrapolated dimensions today, never run against these real weights.
-- [ ] **The int8 resident DiT's end-result precision** - on the real
-      checkpoint at the real-weight golden's inputs, the int8 model's output
-      against the reference is video cosine 0.974 / rel_l2 0.23 and audio
-      cosine 0.89 / rel_l2 0.46, where the fp32 streaming forward matches the
-      same golden at cosine 0.9999+. Two activation levels
-      (`int8_activation_levels: 2`) leave it at video 0.973 / audio 0.911, so
-      the activation side is not the source: localize it per block with the
-      golden's block-0/25/49 taps (weight rounding, the refiner/embed
-      linears, or the packed arm), then gate the int8 model at a fp32-like
-      floor. Measured by
-      `model::tests::int8_activation_levels_against_the_real_reference_output`
-      (two cards).
+- [x] **The int8 resident DiT's end-result precision** - on real
+      generation inputs (a prompt through the real text encoder, Gaussian
+      latents on a 256x256 five-second canvas, the dual schedule's first and
+      middle steps) the int8 tier's weights hold the forward at cosine
+      0.99987-0.99996 against fp32, video and audio
+      (`model::tests::int8_weight_rounding_on_real_generation_inputs`, CPU).
+      The real-weight golden's synthetic inputs (Gaussian x 0.3, text
+      embeddings included) read 0.973 video / 0.911 audio for the same
+      rounding, spread over every block (bisected,
+      `int8_weight_rounding_bisected_over_the_blocks`) and linear kind
+      (`int8_weight_rounding_by_linear_kind_and_group`), barely moved by
+      group-16 scales or a second activation level: the network amplifying
+      any weight perturbation off its input distribution, not an int8
+      defect. That golden stays the fp32 parity gate it was made for.
 - [ ] Phase 12 - streaming-overlap engine (separate, measured perf phase) -
       `_cp_plan` in the real transformer source is a useful blueprint,
       not yet studied in detail. Deliberately not attempted this session:

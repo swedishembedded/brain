@@ -791,13 +791,20 @@ mod tests {
     struct Int8RoundedWeights<'a> {
         inner: &'a dyn checkpoint::TensorSource,
         cfg: H3TransformerConfig,
+        /// The DiT blocks whose linears are rounded (the refiner's always are).
+        blocks: std::ops::Range<usize>,
+        /// Name suffixes of the linears rounded; empty rounds every kind.
+        kinds: &'static [&'static str],
+        /// Weights per scale group.
+        group: usize,
     }
 
     impl Int8RoundedWeights<'_> {
         /// The input width of a linear the int8 tier quantizes, or `None`.
         fn linear_k(&self, name: &str) -> Option<usize> {
             let c = &self.cfg;
-            let in_stack = name.starts_with("transformer_blocks.") || name.starts_with("token_refiner.refiner_blocks.");
+            let block = name.strip_prefix("transformer_blocks.").and_then(|r| r.split('.').next()).and_then(|i| i.parse::<usize>().ok());
+            let in_stack = block.map_or(name.starts_with("token_refiner.refiner_blocks."), |b| self.blocks.contains(&b));
             let k = if name.ends_with(".to_q.weight") || name.ends_with(".to_k.weight") || name.ends_with(".to_v.weight") || name.ends_with(".ff.net.0.proj.weight") {
                 c.hidden_size
             } else if name.ends_with(".to_out.0.weight") {
@@ -807,14 +814,29 @@ mod tests {
             } else {
                 return None;
             };
-            in_stack.then_some(k as usize)
+            (in_stack && (self.kinds.is_empty() || self.kinds.iter().any(|kind| name.ends_with(kind)))).then_some(k as usize)
         }
+    }
+
+    /// `w` (`[n, k]`) rounded to symmetric int8 in `group`-wide scale groups
+    /// along `k`, and back - the int8 tier's own rounding at
+    /// `model::int8::GROUP`, its group-16 (Q6_K-layout) variant otherwise.
+    fn int8_round_trip(w: &[f32], k: usize, group: usize) -> Vec<f32> {
+        if group == model::int8::GROUP {
+            return Weight::round_trip(w, w.len() / k, k, Dtype::I8);
+        }
+        w.chunks(group)
+            .flat_map(|g| {
+                let scale = g.iter().fold(0f32, |m, v| m.max(v.abs())) / 127.0;
+                g.iter().map(move |v| if scale > 0.0 { (v / scale).round().clamp(-127.0, 127.0) * scale } else { 0.0 })
+            })
+            .collect()
     }
 
     impl checkpoint::TensorSource for Int8RoundedWeights<'_> {
         fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
             match self.linear_k(name) {
-                Some(k) => self.inner.with_tensor(name, &mut |w| f(&Weight::round_trip(w, w.len() / k, k, Dtype::I8))),
+                Some(k) => self.inner.with_tensor(name, &mut |w| f(&int8_round_trip(w, k, self.group))),
                 None => self.inner.with_tensor(name, f),
             }
         }
@@ -841,7 +863,7 @@ mod tests {
         let want = |name: &str| fx.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("golden fixture tap {name:?} missing")).data.clone();
         let golden = GoldenInputs::read(&fx);
         let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
-        let rounded = Int8RoundedWeights { inner: &reader, cfg };
+        let rounded = Int8RoundedWeights { inner: &reader, cfg, blocks: 0..cfg.num_layers as usize, kinds: &[], group: model::int8::GROUP };
         let dit = crate::dit_shard::StreamingDit::open(&cfg, Some("cpu"));
         let t0 = std::time::Instant::now();
         let (out, taps) = H3Transformer::forward_streaming_with_taps(&rounded, &cfg, &dit, &golden.inputs(block::ActLevels::One));
@@ -855,6 +877,130 @@ mod tests {
         table.check("output_audio", &out.audio, &want("output_audio"));
         table.print();
         assert!(out.video.iter().chain(&out.audio).all(|x| x.is_finite()), "non-finite output");
+    }
+
+    /// Which DiT blocks' int8 weight rounding moves the end result: the fp32
+    /// streaming forward with only a range of blocks rounded, halving toward
+    /// the half that costs the video output more, printing every range.
+    #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store; streams the whole checkpoint on the CPU once per range"]
+    fn int8_weight_rounding_bisected_over_the_blocks() {
+        let Some((paths, fx)) = real_dit_golden() else {
+            return;
+        };
+        let cfg = H3TransformerConfig::real();
+        let want_video = fx.iter().find(|t| t.name == "output_video").expect("output_video").data.clone();
+        let golden = GoldenInputs::read(&fx);
+        let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
+        let dit = crate::dit_shard::StreamingDit::open(&cfg, Some("cpu"));
+        let cosine = |blocks: std::ops::Range<usize>| {
+            let rounded = Int8RoundedWeights { inner: &reader, cfg, blocks: blocks.clone(), kinds: &[], group: model::int8::GROUP };
+            let out = H3Transformer::forward_streaming(&rounded, &cfg, &dit, &golden.inputs(block::ActLevels::One));
+            let c = brain_testutil::parity::compare(&out.video, &want_video).0;
+            eprintln!("blocks {blocks:?} rounded: output_video cosine {c:.6}");
+            c
+        };
+        let mut range = 26..cfg.num_layers as usize;
+        while range.len() > 1 {
+            let mid = range.start + range.len() / 2;
+            let (lo, hi) = (range.start..mid, mid..range.end);
+            range = if cosine(lo.clone()) < cosine(hi.clone()) { lo } else { hi };
+        }
+        eprintln!("the most damaging single block: {}", range.start);
+    }
+
+    /// Which linear kind's int8 weight rounding moves the end result, and
+    /// whether group-16 scales hold it: the fp32 streaming forward with one
+    /// kind rounded across every block, then every kind at group 16.
+    #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store; streams the whole checkpoint on the CPU once per case"]
+    fn int8_weight_rounding_by_linear_kind_and_group() {
+        let Some((paths, fx)) = real_dit_golden() else {
+            return;
+        };
+        let cfg = H3TransformerConfig::real();
+        let want = |name: &str| fx.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("golden fixture tap {name:?} missing")).data.clone();
+        let (want_video, want_audio) = (want("output_video"), want("output_audio"));
+        let golden = GoldenInputs::read(&fx);
+        let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
+        let dit = crate::dit_shard::StreamingDit::open(&cfg, Some("cpu"));
+        let cases: [(&str, &'static [&'static str], usize); 7] = [
+            ("to_q", &[".to_q.weight"], 32),
+            ("to_k", &[".to_k.weight"], 32),
+            ("to_v", &[".to_v.weight"], 32),
+            ("to_out", &[".to_out.0.weight"], 32),
+            ("fc1 (value+gate)", &[".ff.net.0.proj.weight"], 32),
+            ("fc2", &[".ff.net.2.weight"], 32),
+            ("every kind, group 16", &[], 16),
+        ];
+        for (label, kinds, group) in cases {
+            let rounded = Int8RoundedWeights { inner: &reader, cfg, blocks: 0..cfg.num_layers as usize, kinds, group };
+            let out = H3Transformer::forward_streaming(&rounded, &cfg, &dit, &golden.inputs(block::ActLevels::One));
+            let (v, a) = (brain_testutil::parity::compare(&out.video, &want_video).0, brain_testutil::parity::compare(&out.audio, &want_audio).0);
+            eprintln!("{label}: output_video cosine {v:.6}, output_audio cosine {a:.6}");
+        }
+    }
+
+    /// What int8 weight rounding costs a REAL generation's forward: a prompt
+    /// through the real text encoder, a 256x256 five-second canvas of
+    /// Gaussian latents, and the dual schedule's own timesteps at its first
+    /// and middle steps - the fp32 forward over the checkpoint against the
+    /// fp32 forward over it as the int8 tier stores it. CPU only.
+    ///
+    /// Measured 0.99987-0.99996 cosine across both streams and steps. The
+    /// real-weight golden's synthetic inputs (Gaussian x 0.3 text embeddings
+    /// and latents) are not the yardstick for this: there the same rounding
+    /// lands at 0.973 video / 0.911 audio, spread evenly over every block and
+    /// linear kind and barely moved by group-16 scales - the network
+    /// amplifying any weight perturbation off its input distribution, which
+    /// the tests above measure.
+    #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store; runs the text encoder and four full forwards on the CPU"]
+    fn int8_weight_rounding_on_real_generation_inputs() {
+        let Some((paths, _)) = real_dit_golden() else {
+            return;
+        };
+        let cfg = H3TransformerConfig::real();
+        let vae = crate::video_vae::VideoVaeConfig::real();
+        let text = crate::caps::encode_presentation(&paths, "a red fox trots through fresh snow at dawn, its breath steaming", &[], Some("cpu")).expect("real text conditioning");
+        let frames = crate::pipeline::align_num_frames((crate::pipeline::MIN_DURATION_S * crate::pipeline::FPS) as u32, vae.clip_length, vae.tokens_chunk_size()).expect("frames");
+        let lat_f = crate::pipeline::video_latent_num_frames(frames, vae.clip_length, vae.tokens_chunk_size());
+        let audio = crate::pipeline::audio_latent_num_frames(frames, crate::pipeline::FPS, crate::pipeline::AUDIO_LATENTS_PER_SECOND);
+        let side = 256 / vae.spatial_compression_ratio();
+        let packed = crate::pipeline::build_packed_sequence(&text.token_tags, lat_f, side, side, audio, cfg.patch_size, crate::pipeline::AUDIO_CHANNELS, &[]);
+        let mut rng = data::rng::Rng::new(20261105); // seed: the int8 rounding comparison's one noise draw
+        let mut noise = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.next_gaussian() as f32).collect() };
+        let video = noise(packed.video_indices.len() * cfg.video_patch_dim() as usize);
+        let audio_noise = noise(packed.audio_indices.len() * cfg.audio_in_channels as usize);
+        let mut sched = crate::schedule::DualSchedule::new();
+        sched.set_timesteps(20);
+        let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
+        let rounded = Int8RoundedWeights { inner: &reader, cfg, blocks: 0..cfg.num_layers as usize, kinds: &[], group: model::int8::GROUP };
+        let dit = crate::dit_shard::StreamingDit::open(&cfg, Some("cpu"));
+        eprintln!("{} packed rows ({} video, {} audio, {} text)", packed.position_ids.len() / 3, packed.video_indices.len(), packed.audio_indices.len(), packed.text_indices.len());
+        for step in [0, sched.num_steps() / 2] {
+            let (vt, at) = sched.current_timesteps(step);
+            let (timestep, timestep_indices) = crate::pipeline::build_row_timesteps(&packed.video_indices, &packed.audio_indices, 0, 0, packed.text_indices.len(), vt, at, vt.max(crate::pipeline::KEYFRAME_NOISE_AUG), 1.0);
+            let inp = PackedInputs {
+                hidden_states: &video,
+                audio_hidden_states: &audio_noise,
+                encoder_hidden_states: &text.embeds,
+                timestep: &timestep,
+                timestep_indices: &timestep_indices,
+                token_tags: &packed.token_tags,
+                position_ids: &packed.position_ids,
+                video_indices: &packed.video_indices,
+                audio_indices: &packed.audio_indices,
+                text_indices: &packed.text_indices,
+                act_levels: block::ActLevels::One,
+            };
+            let t = std::time::Instant::now();
+            let exact = H3Transformer::forward_streaming(&reader, &cfg, &dit, &inp);
+            let int8 = H3Transformer::forward_streaming(&rounded, &cfg, &dit, &inp);
+            let (v, a) = (brain_testutil::parity::compare(&int8.video, &exact.video), brain_testutil::parity::compare(&int8.audio, &exact.audio));
+            eprintln!("step {step} (video t {vt:.3}, audio t {at:.3}): video (cosine, max_abs) {v:?}, audio {a:?}; {:.0}s", t.elapsed().as_secs_f32());
+            assert!(v.0 > 0.9995 && a.0 > 0.9995, "step {step}: the int8 tier's weights move a real forward: video cosine {:.6}, audio {:.6}", v.0, a.0);
+        }
     }
 
     /// What the int8 tier costs the end result, measured on the real

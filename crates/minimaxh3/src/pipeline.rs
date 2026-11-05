@@ -527,7 +527,7 @@ fn unique_sorted_with_inverse(values: &[f32]) -> (Vec<f32>, Vec<u32>) {
 /// level; TEXT rows (never touched by either `video_indices`/`audio_indices`
 /// assignment) inherit the default `video_timestep`.
 #[allow(clippy::too_many_arguments)]
-fn build_row_timesteps(video_indices: &[u32], audio_indices: &[u32], num_condition_video_rows: usize, num_condition_audio_rows: usize, num_text_tokens: usize, video_timestep: f32, audio_timestep: f32, condition_video_timestep: f32, condition_audio_timestep: f32) -> (Vec<f32>, Vec<u32>) {
+pub(crate) fn build_row_timesteps(video_indices: &[u32], audio_indices: &[u32], num_condition_video_rows: usize, num_condition_audio_rows: usize, num_text_tokens: usize, video_timestep: f32, audio_timestep: f32, condition_video_timestep: f32, condition_audio_timestep: f32) -> (Vec<f32>, Vec<u32>) {
     let seq_len = video_indices.len() + audio_indices.len() + num_text_tokens;
     let mut row_timesteps = vec![video_timestep; seq_len];
     for &row in &video_indices[..num_condition_video_rows] {
