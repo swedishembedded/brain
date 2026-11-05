@@ -24,6 +24,7 @@ use std::time::Instant;
 use capability::{ActionResult, Invocation, Manifest, Progress};
 
 use crate::adapter::{AdapterIdentity, ServedAdapters};
+use crate::affinity::{choose_replica, PrefixDirectory, ReplicaView};
 use crate::manager::{ClaimError, Claimed, ClaimedMulti, InstanceHandle};
 use crate::scheduler::{choose_next, Group, Policy};
 use crate::{Device, InstanceKey, MultiDeviceResidentModel, ResidencyManager, ResidentModel};
@@ -151,12 +152,22 @@ pub struct Stats {
     /// the dispatcher after every `assign()` pass. Empty for any instance that
     /// doesn't override `metrics()` - most models.
     pub metrics: HashMap<InstanceKey, Vec<(String, serde_json::Value)>>,
+    /// Jobs queued and running per instance, for every instance with work (a replica of a model appears under its
+    /// own key). Refreshed with `metrics`.
+    pub load: HashMap<InstanceKey, InstanceLoad>,
     /// Models this server cannot serve right now, with the reason: their last claim was
     /// refused for memory the device no longer has (see [`ClaimError::Starved`]) or
     /// for exceeding every device. Empty means every model that was asked for is
     /// servable. An entry is logged when it appears and again when it clears, and
     /// goes when a later claim for the key succeeds.
     pub unservable: HashMap<InstanceKey, String>,
+}
+
+/// The work one instance holds: jobs waiting for it and jobs running on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InstanceLoad {
+    pub queued: usize,
+    pub running: usize,
 }
 
 /// A message to the dispatcher: a new job, a lane adopting a freshly built
@@ -678,6 +689,8 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
     let mut running_jobs: Vec<RunningJob> = Vec::new();
     // Running groups that still take late jobs of their instance, by key.
     let mut open_groups: HashMap<InstanceKey, OpenGroup> = HashMap::new();
+    // What was routed to each replica of the models that run several: the dispatcher's record of their prefix caches.
+    let mut replica_routes = ReplicaRoutes::default();
     // Monotonic job-id source; each submitted job gets the next value.
     let mut next_id: u64 = 0;
     // Best-effort observability refreshes on a TICK, not per message: rebuilding
@@ -740,7 +753,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         // queued this round.
         for msg in msgs {
             if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut open_groups, &mut next_id);
+                on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut open_groups, &mut replica_routes, &mut next_id);
             })) {
                 eprintln!("[residency] dispatcher: panic processing a message: {} -- continuing", panic_message(p.as_ref()));
             }
@@ -782,6 +795,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         if last_metrics.is_none_or(|t| t.elapsed() >= METRICS_REFRESH) {
             if let Ok(mut s) = stats.lock() {
                 s.metrics = mgr.all_metrics();
+                s.load = instance_loads(&queue, &running_jobs);
             }
             last_metrics = Some(Instant::now());
         }
@@ -789,12 +803,12 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
 }
 
 #[allow(clippy::too_many_arguments)]
-fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, open_groups: &mut HashMap<InstanceKey, OpenGroup>, next_id: &mut u64) {
+fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, open_groups: &mut HashMap<InstanceKey, OpenGroup>, replica_routes: &mut ReplicaRoutes, next_id: &mut u64) {
     match msg {
         Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
             Some(key) => {
-                let key = least_loaded_replica(mgr.replicas(&job.model), key, queue, running_jobs, &|k| mgr.replica_can_run(k, &job.model));
                 mgr.stamp(&job.model, &mut job.inv);
+                let key = replica_routes.route(mgr, &job.model, &job.inv, key, queue, running_jobs);
                 let id = *next_id;
                 *next_id += 1;
                 queue.push(Pending {
@@ -960,22 +974,72 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
 
 /// Assign as many runnable groups as there are free device lanes.
 #[allow(clippy::too_many_arguments)]
-/// The replica of `key`'s build with the fewest jobs queued or running (the lowest index on a tie): a model
+/// Jobs queued and running per instance key.
+fn instance_loads(queue: &[Pending], running_jobs: &[RunningJob]) -> HashMap<InstanceKey, InstanceLoad> {
+    let mut loads: HashMap<InstanceKey, InstanceLoad> = HashMap::new();
+    for p in queue {
+        loads.entry(p.key.clone()).or_default().queued += 1;
+    }
+    for r in running_jobs {
+        loads.entry(r.key.clone()).or_default().running += 1;
+    }
+    loads
+}
+
+/// The record the dispatcher keeps to route a job to one replica of a model that runs several: what it routed to each, by
+/// the model's base instance key (a base model and its adapters share one set of instances, so one record).
+#[derive(Default)]
+struct ReplicaRoutes {
+    directories: HashMap<InstanceKey, Vec<PrefixDirectory>>,
+}
+
+impl ReplicaRoutes {
+    /// The instance key `key`'s job runs on. A model with one replica keeps `key`. A model that declares no routing
+    /// ([`ResidentModel::replica_routing`]) gets its jobs spread by load ([`least_loaded_replica`]); one that does fills
+    /// its replicas in turn and follows its prefix caches ([`choose_replica`]).
+    fn route(&mut self, mgr: &ResidencyManager, model: &str, inv: &Invocation, key: InstanceKey, queue: &[Pending], running_jobs: &[RunningJob]) -> InstanceKey {
+        let replicas = mgr.replicas(model);
+        if replicas <= 1 {
+            return key;
+        }
+        let base = key.base();
+        let loads = instance_loads(queue, running_jobs);
+        let load_of = |k: &InstanceKey| loads.get(k).map_or(0, |l| l.queued + l.running);
+        let Some(routing) = mgr.replica_routing(model) else {
+            return least_loaded_replica(replicas, key, &load_of, &|k| mgr.replica_can_run(k, model));
+        };
+        let chain = mgr.prefix_chain(model, inv);
+        let directories = self.directories.entry(base.clone()).or_insert_with(|| (0..replicas).map(|_| PrefixDirectory::new(routing.cached_prompts)).collect());
+        let views: Vec<ReplicaView> = (0..replicas)
+            .map(|i| {
+                let k = base.replica(i);
+                let load = load_of(&k);
+                let active = load > 0 || mgr.is_resident(&k);
+                // A replica that is not built holds no cache: whatever was routed to it before is gone with it.
+                if !active {
+                    directories[i].clear();
+                }
+                ReplicaView { load, active, can_run: mgr.replica_can_run(&k, model), matched: directories[i].matched(&chain) }
+            })
+            .collect();
+        let chosen = choose_replica(&views, routing.slots);
+        directories[chosen].record(&chain);
+        base.replica(chosen)
+    }
+}
+
+/// The replica of a build with the fewest jobs queued or running (the lowest index on a tie): a model
 /// that can run `replicas` instances at once gets its jobs spread over them, so spare capacity is used
 /// without the model, or the caller, choosing.
 ///
 /// Only replicas that can run now are candidates (`can_run`): one whose card is held by another process is routed around until the capacity
 /// probe sees the card free, and a model with no replica that can run takes them all (its jobs then fail with the budget's reason).
-fn least_loaded_replica(replicas: usize, key: InstanceKey, queue: &[Pending], running_jobs: &[RunningJob], can_run: &dyn Fn(&InstanceKey) -> bool) -> InstanceKey {
-    if replicas <= 1 {
-        return key;
-    }
+fn least_loaded_replica(replicas: usize, key: InstanceKey, load: &dyn Fn(&InstanceKey) -> usize, can_run: &dyn Fn(&InstanceKey) -> bool) -> InstanceKey {
     let base = key.base();
-    let load = |k: &InstanceKey| queue.iter().filter(|p| &p.key == k).count() + running_jobs.iter().filter(|r| &r.key == k).count();
     let all: Vec<InstanceKey> = (0..replicas).map(|i| base.replica(i)).collect();
     let live: Vec<InstanceKey> = all.iter().filter(|k| can_run(k)).cloned().collect();
     let candidates = if live.is_empty() { all } else { live };
-    candidates.into_iter().min_by_key(load).unwrap_or(base)
+    candidates.into_iter().min_by_key(|k| load(k)).unwrap_or(base)
 }
 
 /// Record (`Some(reason)`) or clear (`None`) that `key` cannot be served, logging only
@@ -1778,13 +1842,15 @@ mod tests {
     #[test]
     fn jobs_avoid_a_replica_that_cannot_run() {
         let key = InstanceKey::new("rep", "default");
+        let idle = |_: &InstanceKey| 0;
         let only_first = |k: &InstanceKey| k.replica_index() == 0;
-        assert_eq!(least_loaded_replica(2, key.clone(), &[], &[], &only_first).replica_index(), 0);
-        let queue: Vec<Pending> = Vec::new();
-        assert_eq!(least_loaded_replica(2, key.clone(), &queue, &[], &|_| true).replica_index(), 0, "a tie goes to the lowest index");
-        assert_eq!(least_loaded_replica(2, key.clone(), &queue, &[], &|_| false).replica_index(), 0, "none can run: the first, so the refusal is the budget's");
+        assert_eq!(least_loaded_replica(2, key.clone(), &idle, &only_first).replica_index(), 0);
+        assert_eq!(least_loaded_replica(2, key.clone(), &idle, &|_| true).replica_index(), 0, "a tie goes to the lowest index");
+        assert_eq!(least_loaded_replica(2, key.clone(), &idle, &|_| false).replica_index(), 0, "none can run: the first, so the refusal is the budget's");
         let second_only = |k: &InstanceKey| k.replica_index() == 1;
-        assert_eq!(least_loaded_replica(2, key, &queue, &[], &second_only).replica_index(), 1, "the first is held: the second takes it");
+        assert_eq!(least_loaded_replica(2, key.clone(), &idle, &second_only).replica_index(), 1, "the first is held: the second takes it");
+        let first_busy = |k: &InstanceKey| usize::from(k.replica_index() == 0);
+        assert_eq!(least_loaded_replica(2, key, &first_busy, &|_| true).replica_index(), 1, "the fewest jobs");
     }
 
     /// A model that can run two replicas at once gets its concurrent jobs spread over both: each
@@ -1829,6 +1895,206 @@ mod tests {
         built.sort_unstable();
         assert_eq!(built, vec![0, 1], "both replicas are built, one per job");
         assert!(elapsed < Duration::from_millis(280), "the two jobs ran one after the other ({elapsed:?}), not on two replicas");
+    }
+
+    /// A model of three replicas, one per card, that fills its replicas in turn (two requests each) and follows its prefix
+    /// caches. A request is `prompt`, split at `|` into segments; the instances hold each request until released.
+    struct Routed {
+        built: Mutex<Sender<usize>>,
+        gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+    struct RoutedInst {
+        gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+    impl ResidentModel for Routed {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("routed", "routed", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("routed", "default")
+        }
+        fn replicas(&self) -> usize {
+            3
+        }
+        fn replica_routing(&self) -> Option<crate::affinity::ReplicaRouting> {
+            Some(crate::affinity::ReplicaRouting { slots: 2, cached_prompts: 8 })
+        }
+        fn prefix_chain(&self, inv: &Invocation) -> crate::affinity::PrefixChain {
+            let mut chain = crate::affinity::PrefixChain::default();
+            for segment in inv.get_str("prompt").unwrap_or_default().split('|') {
+                chain.push(segment.as_bytes());
+            }
+            chain
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(14 * GB, 0)
+        }
+        fn activate(&self, k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+            // The bench that never listens drops its receiver; a build is still a build.
+            let _ = self.built.lock().unwrap().send(k.replica_index());
+            Ok(Box::new(RoutedInst { gate: self.gate.clone() }))
+        }
+    }
+    impl Instance for RoutedInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            let (open, cv) = &*self.gate;
+            let _held = cv.wait_while(open.lock().unwrap(), |open| !*open).unwrap();
+            Ok(Outcome::new())
+        }
+    }
+
+    /// **Replicas are built on demand.** A model that fills its replicas in turn builds the second card's instance only when
+    /// the first one's slots are taken, and the third only when both are.
+    #[test]
+    fn a_replica_is_built_only_when_the_active_ones_are_full() {
+        let (built_tx, built_rx) = channel();
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let mut budgets = Budgets::new();
+        for i in 0..3 {
+            budgets.set(Device::Gpu(i), 16 * GB, 0);
+        }
+        let exec = Executor::start(vec![Arc::new(Routed { built: Mutex::new(built_tx), gate: gate.clone() })], budgets, Policy::default());
+        let (done_tx, done_rx) = channel();
+        let submit = |prompt: &str| {
+            let done = done_tx.clone();
+            exec.submit(Job::new("routed", "run", Invocation::new().set("prompt", serde_json::json!(prompt))).reply(move |r| done.send(r).unwrap()));
+        };
+        let wait = Duration::from_secs(10);
+        submit("a");
+        submit("b");
+        assert_eq!(built_rx.recv_timeout(wait).unwrap(), 0);
+        assert!(built_rx.recv_timeout(Duration::from_millis(300)).is_err(), "two requests fit the two slots of replica 0: nothing else is built");
+        submit("c");
+        assert_eq!(built_rx.recv_timeout(wait).unwrap(), 1, "the third request needs a second replica");
+        submit("d");
+        submit("e");
+        assert_eq!(built_rx.recv_timeout(wait).unwrap(), 2, "the fifth request needs a third");
+        // Each replica is its own instance with its own load, which the stats report.
+        let loads = || exec.stats().load.iter().map(|(k, l)| (k.replica_index(), l.queued + l.running)).collect::<std::collections::BTreeMap<_, _>>();
+        let t = Instant::now();
+        while loads().values().sum::<usize>() < 5 && t.elapsed() < wait {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(loads(), [(0, 2), (1, 2), (2, 1)].into_iter().collect());
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        for _ in 0..5 {
+            done_rx.recv_timeout(wait).unwrap().unwrap();
+        }
+    }
+
+    /// A routing test bench: the dispatcher's own routing over a manager holding [`Routed`], with the queue the dispatcher
+    /// would hold.
+    struct Bench {
+        mgr: ResidencyManager,
+        routes: ReplicaRoutes,
+        queue: Vec<Pending>,
+        key: InstanceKey,
+    }
+
+    impl Bench {
+        fn new() -> Bench {
+            let mut budgets = Budgets::new();
+            for i in 0..3 {
+                budgets.set(Device::Gpu(i), 16 * GB, 0);
+            }
+            let mut mgr = ResidencyManager::new(budgets);
+            let (built, _) = channel();
+            mgr.register(Arc::new(Routed { built: Mutex::new(built), gate: Arc::new((Mutex::new(true), std::sync::Condvar::new())) }));
+            Bench { mgr, routes: ReplicaRoutes::default(), queue: Vec::new(), key: InstanceKey::new("routed", "default") }
+        }
+
+        /// Route a request and queue it on the replica chosen, as the dispatcher does.
+        fn submit(&mut self, prompt: &str) -> usize {
+            let inv = Invocation::new().set("prompt", serde_json::json!(prompt));
+            let key = self.routes.route(&self.mgr, "routed", &inv, self.key.clone(), &self.queue, &[]);
+            self.queue_on(key.replica_index());
+            key.replica_index()
+        }
+
+        fn queue_on(&mut self, replica: usize) {
+            self.queue.push(Pending {
+                id: self.queue.len() as u64,
+                model: "routed".into(),
+                action: "run".into(),
+                inv: Invocation::new(),
+                key: self.key.replica(replica),
+                enqueued: Instant::now(),
+                on_progress: Box::new(|_| {}),
+                reply: Box::new(|_| {}),
+                on_admit: None,
+                screened: false,
+            });
+        }
+
+        /// The requests on `replica` finish.
+        fn finish(&mut self, replica: usize) {
+            let key = self.key.replica(replica);
+            self.queue.retain(|p| p.key != key);
+        }
+
+        /// Build `replica` and leave it idle, as a request that ran there would.
+        fn build(&mut self, replica: usize) {
+            let claim = self.mgr.claim("routed", "run", &Invocation::new(), replica, &HashSet::new()).unwrap_or_else(|e| panic!("no room for the replica: {e}"));
+            let (Claimed::Build(model), key) = (claim.0, claim.2) else { panic!("built already") };
+            let inst = model.activate(&key, claim.1).unwrap();
+            self.mgr.adopt(&key, Arc::new(Mutex::new(inst)));
+            self.mgr.release(&key);
+        }
+    }
+
+    fn conversation(system: &str, turn: usize) -> String {
+        std::iter::once(system.to_string()).chain((0..=turn).map(|t| format!("message {t}"))).collect::<Vec<_>>().join("|")
+    }
+
+    /// **A conversation returns to the replica that holds its history, however busy that replica is, while it has a slot.**
+    #[test]
+    fn a_request_goes_to_the_replica_holding_its_prefix_not_the_least_loaded() {
+        let system = "s".repeat(4096);
+        let mut bench = Bench::new();
+        assert_eq!(bench.submit(&conversation(&system, 0)), 0, "the first request: replica 0");
+        // Replica 0 fills, so another conversation lands on replica 1.
+        bench.queue_on(0);
+        let other = "o".repeat(4096);
+        assert_eq!(bench.submit(&conversation(&other, 0)), 1);
+        bench.build(0);
+        // Replica 0 has one request again; replica 1 two. The least loaded is replica 0 either way, so a request
+        // that continues the conversation on replica 1 is the one that tells affinity from balance.
+        bench.finish(0);
+        bench.queue_on(0);
+        assert_eq!(bench.submit(&conversation(&other, 1)), 1, "turn two of the conversation held by replica 1, though replica 0 is less loaded");
+        assert_eq!(bench.submit(&conversation(&"n".repeat(4096), 0)), 0, "a new conversation goes to the least loaded");
+    }
+
+    /// A system prompt every conversation shares must not pin them all to one card: a replica with no free slot is passed over
+    /// and the request builds its own copy of the shared prefix elsewhere.
+    #[test]
+    fn a_shared_prefix_does_not_pin_every_conversation_to_one_replica() {
+        let system = "s".repeat(4096);
+        let mut bench = Bench::new();
+        assert_eq!(bench.submit(&format!("{system}|first")), 0);
+        assert_eq!(bench.submit(&format!("{system}|second")), 0, "a free slot on the replica holding the system prompt");
+        assert_eq!(bench.submit(&format!("{system}|third")), 1, "replica 0 is full");
+        assert_eq!(bench.submit(&format!("{system}|fourth")), 1, "replica 1 now holds the shared prefix too");
+    }
+
+    /// **An idle extra replica that the manager releases under memory pressure is forgotten.** What was routed to it is gone with
+    /// its cache, so the next turn of that conversation goes where a prefill is cheapest, not to a replica that must be rebuilt.
+    #[test]
+    fn a_released_replica_no_longer_attracts_its_conversations() {
+        let system = "s".repeat(4096);
+        let mut bench = Bench::new();
+        bench.build(0);
+        assert_eq!(bench.submit("a"), 0);
+        assert_eq!(bench.submit("b"), 0);
+        assert_eq!(bench.submit(&conversation(&system, 0)), 1, "replica 0 is full: replica 1 takes the conversation");
+        bench.build(1);
+        bench.queue.clear();
+        assert_eq!(bench.submit(&conversation(&system, 1)), 1, "idle but built: its cache holds the conversation");
+        bench.queue.clear();
+        // Another model needs the card: the manager releases the idle replica.
+        assert!(bench.mgr.evict(&bench.key.replica(1)));
+        assert_eq!(bench.submit(&conversation(&system, 2)), 0, "replica 1 is gone, and so is what it held");
     }
 
     /// Regression test for a real deadlock in an earlier version of

@@ -39,6 +39,21 @@ pub trait ResidentModel: Send + Sync {
         1
     }
 
+    /// How jobs are spread over the replicas of a model that runs several ([`Self::replicas`]). `None`, the default,
+    /// spreads them by load: each job goes to the replica with the fewest. `Some` fills the replicas in turn, builds
+    /// the next only when the active ones are full, and sends a request to the replica whose prefix cache holds its
+    /// prompt ([`Self::prefix_chain`]); see [`crate::affinity`].
+    fn replica_routing(&self) -> Option<crate::affinity::ReplicaRouting> {
+        None
+    }
+
+    /// The request's prompt as a chain of cumulative digests, for the replica whose prefix cache holds the most of it
+    /// to be chosen ([`Self::replica_routing`]). Called once per request on the dispatcher thread, so it hashes the
+    /// request text in one pass and never tokenizes or renders. Empty, the default, routes by load alone.
+    fn prefix_chain(&self, _inv: &Invocation) -> crate::affinity::PrefixChain {
+        crate::affinity::PrefixChain::default()
+    }
+
     /// The most queued jobs one [`Instance::run_batch`] call of this model
     /// should receive, when that differs from the scheduler policy's
     /// `max_batch`. A model that decodes many requests per step (a
@@ -130,6 +145,12 @@ impl<M: ResidentModel + ?Sized> ResidentModel for Alias<M> {
     }
     fn replicas(&self) -> usize {
         self.inner.replicas()
+    }
+    fn replica_routing(&self) -> Option<crate::affinity::ReplicaRouting> {
+        self.inner.replica_routing()
+    }
+    fn prefix_chain(&self, inv: &Invocation) -> crate::affinity::PrefixChain {
+        self.inner.prefix_chain(inv)
     }
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         self.inner.activate(key, device)

@@ -386,11 +386,29 @@ impl ResidencyManager {
         self.models.get(model).map(|m| m.replicas()).or_else(|| self.multi_models.get(model).map(|m| m.replicas())).unwrap_or(1).max(1)
     }
 
+    /// How `model` wants its jobs spread over its replicas ([`ResidentModel::replica_routing`]), under either registry.
+    pub fn replica_routing(&self, model: &str) -> Option<crate::affinity::ReplicaRouting> {
+        self.models.get(model).map(|m| m.replica_routing()).or_else(|| self.multi_models.get(model).map(|m| m.replica_routing())).flatten()
+    }
+
+    /// `inv`'s prompt as a prefix chain ([`ResidentModel::prefix_chain`]); empty for an unknown model.
+    pub fn prefix_chain(&self, model: &str, inv: &Invocation) -> crate::affinity::PrefixChain {
+        match self.models.get(model) {
+            Some(m) => m.prefix_chain(inv),
+            None => self.multi_models.get(model).map(|m| m.prefix_chain(inv)).unwrap_or_default(),
+        }
+    }
+
+    /// Whether the instance `key` names is built or being built, on any device: its caches exist or are about to.
+    pub fn is_resident(&self, key: &InstanceKey) -> bool {
+        self.residents.contains(key) || self.multi_residents.contains_key(key)
+    }
+
     /// Whether the replica `key` names can run on this machine as its devices are budgeted now: it is hot, or every device it needs has
     /// a budget that holds its share with nothing else resident. A replica whose card another process holds is not one: its jobs would
     /// be refused for the budget, so the executor routes around it until the capacity probe sees the card free again.
     pub fn replica_can_run(&self, key: &InstanceKey, model: &str) -> bool {
-        if self.residents.contains(key) || self.multi_residents.contains_key(key) {
+        if self.is_resident(key) {
             return true;
         }
         if let Some(m) = self.multi_models.get(model) {

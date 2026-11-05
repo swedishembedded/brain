@@ -25,6 +25,7 @@
 //! GPU or model dependency, so it is fully unit-testable.
 
 pub mod adapter;
+pub mod affinity;
 pub mod admission;
 pub mod bridge;
 pub mod budget;
