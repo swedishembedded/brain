@@ -68,7 +68,10 @@ Required (one of):
                            sound) or .gif, written by brain itself
 
 Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
-  --frames <N>              video frames, must be 1 + 8k (default 9). Any
+  --frames <N>              video frames, must be 1 + 8k (default: predicted
+                            from the prompt by the duration head, 1-20 s,
+                            with the real checkpoint and text encoder;
+                            otherwise 9). Any
                             length is accepted: past what one denoising
                             window holds the clip is generated as several
                             windows with a rolling latent context (see
@@ -546,7 +549,8 @@ the real text encoder and the audio VAE (resolved like t2v --audio).
 Options:
   --prompt <text>           what the clip should sound like (required)
   --output-path <out.wav>   where to write the clip (required)
-  --seconds <S>             clip length (default 5)
+  --seconds <S>             clip length (default: predicted from the prompt
+                            by the duration head, 1-20 s; 5 s without one)
   --steps <N>               denoise steps for a non-distilled checkpoint; the
                             distilled one has a fixed schedule (default 4)
 "#, guidance_help!(), r#"  --sampler <euler|res2s>   denoising loop (default euler; see t2v)
@@ -776,10 +780,18 @@ fn t2v(args: &[String]) -> Result<(), String> {
         }
         o.reference = Some(ltxv::pipeline::VideoReference { clip: read_clip(path, o.fps)?, strength: reference_strength });
     }
+    let out = out.ok_or("--output-path is required")?;
+    let paths = resolve_ltxv(&overrides, None)?;
     // One scene is what a `--prompt`/`--frames` run always was, so the whole
-    // command below has exactly one shape to handle.
+    // command below has exactly one shape to handle. Without `--frames` its
+    // length is the duration head's prediction when the store has one.
     let scenes: Vec<ltxv::longform::Scene> = if scene_specs.is_empty() {
-        vec![ltxv::longform::Scene { frames: o.frames, prompt: prompt.ok_or("--prompt is required (or one --scene <frames>:<prompt> per scene)")? }]
+        let prompt = prompt.ok_or("--prompt is required (or one --scene <frames>:<prompt> per scene)")?;
+        if !frames_given && ltxv::pipeline::can_predict_frames(&paths, &o) {
+            o.frames = ltxv::pipeline::predict_frames(&paths, &prompt, &o, ltxv::pipeline::prediction_streams(&o))?;
+            eprintln!("ltxv: the duration head predicts {} frames ({:.2}s at {} fps) for this prompt", o.frames, o.frames as f64 / o.fps as f64, o.fps);
+        }
+        vec![ltxv::longform::Scene { frames: o.frames, prompt }]
     } else {
         if prompt.is_some() || frames_given {
             return Err("--scene already carries its own frame count and prompt, so it cannot be combined with --prompt/--frames - write every scene as its own --scene <frames>:<prompt>".into());
@@ -787,8 +799,6 @@ fn t2v(args: &[String]) -> Result<(), String> {
         scene_specs.iter().map(|s| ltxv::longform::Scene::parse(s)).collect::<Result<_, _>>()?
     };
     o.frames = scenes.iter().map(|s| s.frames).sum();
-    let out = out.ok_or("--output-path is required")?;
-    let paths = resolve_ltxv(&overrides, None)?;
 
     let (lh, lw) = (o.height / 32, o.width / 32);
     let context_latents = {
@@ -955,7 +965,7 @@ fn t2a(args: &[String]) -> Result<(), String> {
         match args[i].as_str() {
             "--prompt" => prompt = Some(need(i)?.clone()),
             "--output-path" | "--out" => out = Some(crate::args::strip_out_name_prefix(need(i)?, "audio").to_string()),
-            "--seconds" => o.seconds = dbl(i, "--seconds")?,
+            "--seconds" => o.seconds = Some(dbl(i, "--seconds")?),
             "--steps" => o.base.steps = need(i)?.parse().map_err(|e| format!("--steps: {e}"))?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
             "--sampler" => o.base.sampler = Sampler::parse(need(i)?)?,
@@ -975,7 +985,12 @@ fn t2a(args: &[String]) -> Result<(), String> {
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;
     let paths = resolve_ltxv(&overrides, None)?;
-    eprintln!("ltxv t2a: {:.2}s of audio, sampler {:?} eta {}, guidance {:?}, seed {}", o.seconds, o.base.sampler, o.base.eta, o.base.guidance.audio, o.base.seed);
+    let length = match o.seconds {
+        Some(s) => format!("{s:.2}s of audio"),
+        None if ltxv::pipeline::can_predict_frames(&paths, &o.base) => "audio of the length the duration head predicts".to_string(),
+        None => format!("{:.2}s of audio (no duration head to predict the length)", AudioOpts::DEFAULT_SECONDS),
+    };
+    eprintln!("ltxv t2a: {length}, sampler {:?} eta {}, guidance {:?}, seed {}", o.base.sampler, o.base.eta, o.base.guidance.audio, o.base.seed);
     let t0 = std::time::Instant::now();
     // A one-shot CLI run has no second party to cancel it - see `t2v`.
     let cancel = capability::CancelToken::default();
@@ -995,7 +1010,7 @@ fn t2a(args: &[String]) -> Result<(), String> {
     let planes: Vec<&[f32]> = clip.channels.iter().map(Vec::as_slice).collect();
     std::fs::write(&out, audio::wav::encode_multi(&planes, clip.sample_rate)).map_err(|e| format!("writing {out}: {e}"))?;
     eprintln!("ltxv t2a: wrote {out} ({:.2}s of {} Hz audio in {} channels)", clip.seconds(), clip.sample_rate, clip.channels.len());
-    crate::run_record::write_run_record(&out, "ltxv t2a", o.base.seed, serde_json::json!({ "prompt": prompt, "seconds": o.seconds, "steps": o.base.steps, "sampler": format!("{:?}", o.base.sampler), "eta": o.base.eta, "guidance": format!("{:?}", o.base.guidance.audio) }))?;
+    crate::run_record::write_run_record(&out, "ltxv t2a", o.base.seed, serde_json::json!({ "prompt": prompt, "seconds": clip.seconds(), "steps": o.base.steps, "sampler": format!("{:?}", o.base.sampler), "eta": o.base.eta, "guidance": format!("{:?}", o.base.guidance.audio) }))?;
     Ok(())
 }
 

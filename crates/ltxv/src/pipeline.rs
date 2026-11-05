@@ -166,6 +166,11 @@ pub struct Paths {
     /// without it a request for sound is refused before any weight is read,
     /// rather than generating an audio latent nothing can decode.
     pub audio_vae: Option<String>,
+    /// The duration head (`ltx-2.5-duration-head-bf16.safetensors`), which
+    /// predicts a clip's natural length from its prompt when the request
+    /// names none ([`predict_frames`]). Resolved from the model store only;
+    /// without it a request that names no length takes the default.
+    pub duration_head: Option<String>,
 }
 
 /// `(variable, human name)` - kept as a table (one row today) for the same
@@ -221,7 +226,7 @@ impl Paths {
         // audio VAE is not a per-run choice, it is a fixed member of the
         // LTX-2.5 checkpoint set that the audio path requires.
         let audio_vae = optional(None, OPTIONAL_PATH_VARS[3].0);
-        Ok(Paths { vae, dit, text_encoder, spatial_upsampler, audio_vae })
+        Ok(Paths { vae, dit, text_encoder, spatial_upsampler, audio_vae, duration_head: None })
     }
 
     /// Build `Paths` from an already-resolved [`capability::Assembly`]
@@ -238,7 +243,7 @@ impl Paths {
             .map(str::to_string)
             .or_else(|| get("spatial_upsampler"))
             .or_else(|| std::env::var(OPTIONAL_PATH_VARS[2].0).ok().filter(|v| !v.is_empty()));
-        Ok(Paths { vae, dit: get("dit"), text_encoder: get("text_encoder"), spatial_upsampler, audio_vae: get("audio_vae") })
+        Ok(Paths { vae, dit: get("dit"), text_encoder: get("text_encoder"), spatial_upsampler, audio_vae: get("audio_vae"), duration_head: get("duration_head") })
     }
 }
 
@@ -4383,20 +4388,93 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     Ok((Video { width: w as u32, height: h as u32, fps: o.fps, frames: out, audio }, timings))
 }
 
+/// Whether [`predict_frames`] can run for a request: the duration head, the
+/// real checkpoint whose connectors it reads, and the text encoder are all
+/// configured. A request that names no length takes its default otherwise.
+pub fn can_predict_frames(paths: &Paths, o: &GenOpts) -> bool {
+    paths.duration_head.is_some() && paths.dit.is_some() && paths.text_encoder.is_some() && o.dit_config == "ltx25_22b"
+}
+
+/// The streams whose connector outputs a generation's duration prediction
+/// pools: both for a clip with sound, the video stream's for a silent one.
+pub fn prediction_streams(o: &GenOpts) -> &'static [crate::config::Stream] {
+    use crate::config::Stream;
+    if o.audio {
+        &[Stream::Video, Stream::Audio]
+    } else {
+        &[Stream::Video]
+    }
+}
+
+/// The clip length the duration head predicts for `prompt`, in frames at
+/// `o.fps` - `resolve_num_frames` with the default `AutoDuration`: one to
+/// twenty seconds, on the causal VAE's `8k + 1` grid.
+///
+/// The head pools the prompt's connector outputs, the DiT's own view of it.
+/// So the prompt is encoded with exactly the flags the generation will use
+/// (the text cache then answers the generation's own encode), and routed
+/// through the checkpoint's connectors into the checkpoint cache the first
+/// forward reads - the prediction costs the head itself and nothing twice.
+/// A sound generation's head sees both streams' routing, a silent one the
+/// video stream's, and text-to-audio ([`Stream::Audio`] alone) the audio
+/// stream's, as the reference's pipelines pass them.
+///
+/// [`Stream::Audio`]: crate::config::Stream::Audio
+pub fn predict_frames(paths: &Paths, prompt: &str, o: &GenOpts, streams: &[crate::config::Stream]) -> Result<usize, String> {
+    if !can_predict_frames(paths, o) {
+        return Err("predicting the clip length needs the duration head, the real DiT checkpoint (dit_config ltx25_22b) and the real text encoder".into());
+    }
+    use crate::config::Stream;
+    let (head_path, dit_path) = (paths.duration_head.as_deref().unwrap_or_default(), paths.dit.as_deref().unwrap_or_default());
+    let head_cfg = crate::duration_head::DurationHeadConfig::ltx25();
+    let head_w = crate::import::import_duration_head(checkpoint::safetensors::read(head_path)?, &head_cfg)?;
+    let src = crate::gguf_src::LtxvGgufSource::open(dit_path)?;
+    let av_cfg = *src.config();
+    let place = o.devices.resolve(o.device.as_deref());
+    let mut encode_secs = 0.0;
+    let text = build_context(paths, prompt, av_cfg.video, o, place, &mut encode_secs)?;
+    let gpu = gpu_core::Gpu::open(o.device.as_deref(), &crate::block::KERNELS);
+    let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
+    let route = |stream: Stream| -> Result<Vec<f32>, String> {
+        let (cfg, context) = match stream {
+            Stream::Video => (av_cfg.video, &text.cond),
+            Stream::Audio => (av_cfg.audio_stream(), text.a_cond.as_ref().ok_or("predicting a clip length from the audio stream needs the prompt's audio projection")?),
+        };
+        Ok(crate::dit::routed_context(&gpu, &src, &cfg, stream, context, &text.valid, text.len, &cache, None))
+    };
+    let video = streams.contains(&Stream::Video).then(|| route(Stream::Video)).transpose()?;
+    let audio = streams.contains(&Stream::Audio).then(|| route(Stream::Audio)).transpose()?;
+    let seconds = crate::duration_head::DurationHead::new(head_cfg, &head_w).forward(video.as_deref(), audio.as_deref()) as f64;
+    let frames = crate::duration_head::frames_for_seconds(seconds, o.fps as f64, crate::duration_head::MIN_SECONDS, crate::duration_head::MAX_SECONDS);
+    tracing::info!(predicted_seconds = seconds, frames, fps = o.fps, "duration head predicted the clip length");
+    Ok(frames)
+}
+
 /// Text-to-audio options.
 #[derive(Clone, Debug)]
 pub struct AudioOpts {
     /// The clip's length; the audio latent runs at
-    /// [`crate::audio::LATENTS_PER_SECOND`].
-    pub seconds: f64,
+    /// [`crate::audio::LATENTS_PER_SECOND`]. `None` lets the duration head
+    /// predict it from the prompt ([`predict_frames`], on `base.fps`'s frame
+    /// grid as the reference snaps it), or takes [`Self::DEFAULT_SECONDS`]
+    /// when no duration head is configured.
+    pub seconds: Option<f64>,
     /// Everything a generation shares. Only the audio stream's guidance
     /// (`guidance.audio`) applies; the video-only fields go unread.
     pub base: GenOpts,
 }
 
+impl AudioOpts {
+    /// The length a request that names none takes without a duration head.
+    pub const DEFAULT_SECONDS: f64 = 5.0;
+    /// The frame rate a predicted length snaps on - the reference pipelines'
+    /// own `--frame-rate` default.
+    pub const FRAME_RATE: usize = 24;
+}
+
 impl Default for AudioOpts {
     fn default() -> AudioOpts {
-        AudioOpts { seconds: 5.0, base: GenOpts { dit_config: "ltx25_22b".into(), audio: true, ..GenOpts::default() } }
+        AudioOpts { seconds: None, base: GenOpts { dit_config: "ltx25_22b".into(), audio: true, fps: AudioOpts::FRAME_RATE, ..GenOpts::default() } }
     }
 }
 
@@ -4413,15 +4491,20 @@ impl Default for AudioOpts {
 /// token count (`MAX_SHIFT_ANCHOR`, since an audio latent has no spatial
 /// size to shift by).
 pub fn generate_audio(paths: &Paths, prompt: &str, opts: &AudioOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(crate::audio::AudioClip, Timings), String> {
-    if !(opts.seconds.is_finite() && opts.seconds > 0.0) {
-        return Err(format!("the clip length must be a positive number of seconds, got {}", opts.seconds));
+    if let Some(seconds) = opts.seconds.filter(|s| !(s.is_finite() && *s > 0.0)) {
+        return Err(format!("the clip length must be a positive number of seconds, got {seconds}"));
     }
-    let ta = (opts.seconds * crate::audio::LATENTS_PER_SECOND).round().max(1.0) as usize;
     let o = GenOpts { audio: true, ..opts.base.clone() };
     if o.audio_source.is_some() {
         return Err("text-to-audio generates the soundtrack; an audio source has nothing left to generate".into());
     }
     check_audio_inputs(paths, &o)?;
+    let seconds = match opts.seconds {
+        Some(s) => s,
+        None if can_predict_frames(paths, &o) => predict_frames(paths, prompt, &o, &[crate::config::Stream::Audio])? as f64 / o.fps as f64,
+        None => AudioOpts::DEFAULT_SECONDS,
+    };
+    let ta = (seconds * crate::audio::LATENTS_PER_SECOND).round().max(1.0) as usize;
     let sigmas: Vec<f64> = if o.dit_config == "ltx25_22b" {
         LTX2_DISTILLED_SIGMAS.iter().map(|&s| s as f64).collect()
     } else {
@@ -4441,7 +4524,7 @@ pub fn generate_audio(paths: &Paths, prompt: &str, opts: &AudioOpts, cancel: &ca
     let adapter = if o.adapters.is_empty() { None } else { Some(block_adapter(crate::lora::runtime_adapter(&o.adapters)?, &src, &mut head)?) };
     let dit = RealDit { stream: crate::config::Stream::Audio, cfg, src, head, device: o.device.clone(), cache: crate::block::GenerationCache::for_checkpoint(dit_path), place, sessions: Default::default(), adapter };
     timings.build_dit = build_t.elapsed().as_secs_f32();
-    tracing::info!(audio_tokens = ta, seconds = opts.seconds, layers = cfg.num_layers, inner_dim = cfg.inner_dim, "audio-only DiT ready (the video half is never read)");
+    tracing::info!(audio_tokens = ta, seconds, layers = cfg.num_layers, inner_dim = cfg.inner_dim, "audio-only DiT ready (the video half is never read)");
 
     let TextContext { valid: context_valid, len: context_len, a_cond, a_uncond, .. } = build_context(paths, prompt, av_cfg.video, &o, place, &mut timings.text_encode)?;
     let a_cond = a_cond.ok_or("text-to-audio needs the text encoder's audio projection")?;
@@ -4465,7 +4548,7 @@ pub fn generate_audio(paths: &Paths, prompt: &str, opts: &AudioOpts, cancel: &ca
     // The causal VAE's first latent frame decodes to one mel frame rather
     // than four (see `crate::audio`'s doc); hold the last sample over the gap
     // so the clip is the length asked for.
-    clip.pad_to_seconds(opts.seconds as f32);
+    clip.pad_to_seconds(seconds as f32);
     timings.audio_decode = audio_t.elapsed().as_secs_f32();
     progress(total, total, "done");
     tracing::info!(seconds = clip.seconds(), rate = clip.sample_rate, total_secs = timings.total(), "text-to-audio done");
@@ -6908,7 +6991,7 @@ mod tests {
 
     #[test]
     fn a_bad_frame_count_is_rejected_before_any_weight_is_read() {
-        let paths = Paths { vae: "/nope".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None };
+        let paths = Paths { vae: "/nope".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None };
         let o = GenOpts { frames: 8, ..GenOpts::default() };
         let e = generate(&paths, "x", &o, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
         assert!(e.contains("1 + 8k"), "{e}");
@@ -6929,7 +7012,7 @@ mod tests {
     #[test]
     fn an_audio_request_that_cannot_produce_sound_is_refused_before_any_weight_is_read() {
         let audio = GenOpts { audio: true, dit_config: "ltx25_22b".into(), ..GenOpts::default() };
-        let bare = Paths { vae: "/nope".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None };
+        let bare = Paths { vae: "/nope".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None };
 
         // Wrong config: the tiny DiT's audio stream is random weights.
         let tiny = GenOpts { dit_config: "tiny".into(), ..audio.clone() };
@@ -7434,10 +7517,10 @@ mod tests {
     /// missing checkpoint (the paths below name nothing that exists).
     #[test]
     fn a_text_to_audio_request_that_cannot_run_is_refused_up_front() {
-        let paths = Paths { vae: "/missing/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None };
+        let paths = Paths { vae: "/missing/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None };
         let run = |o: AudioOpts| generate_audio(&paths, "rain", &o, &Default::default(), |_, _, _| {}).map(|_| ()).unwrap_err();
         for seconds in [0.0, -2.0, f64::NAN] {
-            assert!(run(AudioOpts { seconds, ..AudioOpts::default() }).contains("positive number of seconds"));
+            assert!(run(AudioOpts { seconds: Some(seconds), ..AudioOpts::default() }).contains("positive number of seconds"));
         }
         let held = AudioOpts { base: GenOpts { audio_source: Some(crate::audio::AudioClip { channels: vec![vec![0.0; 16]], sample_rate: 16_000 }), ..AudioOpts::default().base }, ..AudioOpts::default() };
         assert!(run(held).contains("nothing left to generate"));

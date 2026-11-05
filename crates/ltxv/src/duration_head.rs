@@ -288,6 +288,30 @@ impl<'a> DurationHead<'a> {
     }
 }
 
+/// `AutoDuration`'s default bounds (`ltx_pipelines.utils.types`): a
+/// prediction is clamped to between one and twenty seconds, so a misbehaving
+/// head cannot ask for a degenerate or an out-of-memory clip.
+pub const MIN_SECONDS: f64 = 1.0;
+pub const MAX_SECONDS: f64 = 20.0;
+
+/// `seconds_to_clamped_num_frames` (`ltx_pipelines.utils.helpers`), with
+/// `DurationPredictor`'s bounds `round(min_seconds * fps)` and
+/// `round(max_seconds * fps)`: the duration in frames, clamped, then floored
+/// onto the causal VAE's `8k + 1` grid - and lifted to the next grid point
+/// instead when flooring fell below the lower bound. Python's `round`, so
+/// halves go to even.
+pub fn frames_for_seconds(seconds: f64, fps: f64, min_seconds: f64, max_seconds: f64) -> usize {
+    let step = crate::pipeline::VAE_TEMPORAL_SCALE as i64;
+    let round = |x: f64| x.round_ties_even() as i64;
+    let (min_frames, max_frames) = (round(min_seconds * fps).max(1), round(max_seconds * fps).max(1));
+    let raw = round(seconds * fps).clamp(min_frames, max_frames.max(min_frames));
+    let mut frames = (raw - 1) / step * step + 1;
+    if frames < min_frames {
+        frames = ((min_frames - 1 + step - 1) / step * step + 1).min(max_frames);
+    }
+    frames as usize
+}
+
 /// Every intermediate of one [`DurationHead::forward_taps`] call - see that
 /// method's doc.
 pub struct DurationHeadTaps {
@@ -303,6 +327,20 @@ pub struct DurationHeadTaps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `seconds_to_clamped_num_frames` at the predictor's 1-20 s bounds:
+    /// floored onto the `8k + 1` grid, a too-short prediction lifted to the
+    /// first grid point at or past one second, a too-long one clamped to
+    /// twenty, and a half frame rounded to even as Python's `round` does.
+    #[test]
+    fn a_predicted_duration_snaps_like_the_reference() {
+        let at = |s: f64, fps: f64| frames_for_seconds(s, fps, MIN_SECONDS, MAX_SECONDS);
+        assert_eq!(at(5.0, 24.0), 113, "120 frames floor to 113");
+        assert_eq!(at(0.2, 24.0), 25, "below one second: 24 frames, floored to 17, lifted to 25");
+        assert_eq!(at(100.0, 24.0), 473, "clamped to 480 frames, floored to 473");
+        assert_eq!(at(2.5, 25.0), 57, "62.5 frames rounds to 62, floored to 57");
+        assert_eq!(at(1.0, 25.0), 25);
+    }
 
     #[test]
     fn manifest_counts_the_shipped_checkpoint() {

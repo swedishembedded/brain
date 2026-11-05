@@ -66,7 +66,7 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("mid_frame", ParamType::Str, "optional path to a PNG/JPEG still: the same appended image-guidance latent end_frame uses, anchored at ONE INTERIOR instant of the clip, so a single generation can be guided at its start, its middle and its end at once. Same eta/dit_config requirements as start_frame.").host_resolved())
     .param(ParamSpec::new("mid_frame_at", ParamType::Int, "which pixel frame mid_frame anchors, strictly between 0 and frames-1. Unset takes the reference's own position for a single interior keyframe (evenly_spaced_keyframe_positions), (frames-1)/2. Only read when mid_frame is set."))
     .param(ParamSpec::new("conditioning_strength", ParamType::Float, "ImageConditioningInput.strength for every given still: 1.0 pins the conditioned tokens to the encoded image exactly, lower values (the reference's own CLI example is 0.8) leave the model room to move. Only read when one of start_frame/mid_frame/end_frame is set.").default(json!(d.conditioning_strength)))
-    .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)").default(json!(d.frames)))
+    .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame). Unset, the duration head predicts the length from the prompt (1-20 s) when the real checkpoint, text encoder and duration head are configured; otherwise the default").default(json!(d.frames)))
     .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 32)").default(json!(d.width)))
     .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 32)").default(json!(d.height)))
     .param(ParamSpec::new("steps", ParamType::Int, "denoise steps").default(json!(d.steps)))
@@ -128,7 +128,7 @@ pub fn manifest() -> Manifest {
     )
     .streaming()
     .param(ParamSpec::new("prompt", ParamType::Str, "what the clip should sound like").required())
-    .param(ParamSpec::new("seconds", ParamType::Float, "clip length in seconds").default(json!(a.seconds)).min(0.04))
+    .param(ParamSpec::new("seconds", ParamType::Float, "clip length in seconds; unset, the duration head predicts it from the prompt (1-20 s), or 5 s without one").min(0.04))
     .params(guidance_params())
     .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (a non-distilled checkpoint's; the distilled one has a fixed schedule)").default(json!(a.base.steps)))
     .param(ParamSpec::new("seed", ParamType::Int, "initial-noise seed (omit for random)"))
@@ -158,6 +158,10 @@ use capability::{Action, ActionResult, Invocation, Outcome, Progress, Provider};
 #[derive(Debug)]
 pub struct GenParams {
     pub opts: GenOpts,
+    /// The request named no `frames`: the duration head predicts the length
+    /// when it can run ([`crate::pipeline::can_predict_frames`]), else
+    /// `opts.frames` keeps its default.
+    pub predict_frames: bool,
 }
 
 /// The invocation's LoRA adapter (`adapter` at `lora_scale`), if it names one.
@@ -223,7 +227,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     if opts.mid_frame.is_some() {
         crate::pipeline::mid_anchor_frame(opts.frames, opts.mid_frame_at)?;
     }
-    Ok(GenParams { opts })
+    Ok(GenParams { opts, predict_frames: inv.get_i64("frames").is_none() })
 }
 
 /// Run one generation and wrap the result as a video-output [`Outcome`].
@@ -237,7 +241,11 @@ pub fn generate_on(paths: &Paths, inv: &Invocation, p: &GenParams, progress: &mu
     // reference's own default (`crate::longform::CONTEXT_LATENT_FRAMES`) and
     // the per-window ceiling comes from the environment, so a long `frames`
     // simply works instead of failing at buffer creation.
-    let o = crate::pipeline::LongOpts { max_window_tokens: crate::longform::max_window_tokens_from_env(), base: p.opts.clone(), ..Default::default() };
+    let mut base = p.opts.clone();
+    if p.predict_frames && crate::pipeline::can_predict_frames(paths, &base) {
+        base.frames = crate::pipeline::predict_frames(paths, &prompt, &base, crate::pipeline::prediction_streams(&base))?;
+    }
+    let o = crate::pipeline::LongOpts { max_window_tokens: crate::longform::max_window_tokens_from_env(), base, ..Default::default() };
     let (video, timings) = crate::pipeline::generate_long(paths, &prompt, &o, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
     Ok(video_outcome(&video, &timings, p.opts.seed))
 }
@@ -247,9 +255,9 @@ pub fn generate_on(paths: &Paths, inv: &Invocation, p: &GenParams, progress: &mu
 pub fn t2a_params_from(inv: &Invocation) -> Result<crate::pipeline::AudioOpts, String> {
     let d = crate::pipeline::AudioOpts::default();
     let (sampler, eta) = sampler_from(inv)?;
-    let seconds = inv.get_f64("seconds").unwrap_or(d.seconds);
-    if !(seconds.is_finite() && seconds > 0.0) {
-        return Err(format!("seconds must be a positive number, got {seconds}"));
+    let seconds = inv.get_f64("seconds");
+    if let Some(s) = seconds.filter(|s| !(s.is_finite() && *s > 0.0)) {
+        return Err(format!("seconds must be a positive number, got {s}"));
     }
     let base = GenOpts {
         steps: inv.get_i64("steps").unwrap_or(d.base.steps as i64).max(1) as usize,
@@ -518,6 +526,17 @@ fn guidance_from(inv: &Invocation) -> Result<crate::guidance::Guidance, String> 
 mod tests {
     use super::*;
 
+    /// A `t2v` request that names no `frames` asks for the duration head's
+    /// length; one that names them keeps them.
+    #[test]
+    fn an_unnamed_length_is_the_duration_heads_to_predict() {
+        let base = Invocation::new().set("prompt", json!("a lighthouse in a storm"));
+        assert!(gen_params_from(&base).unwrap().predict_frames);
+        let named = gen_params_from(&base.clone().set("frames", json!(17))).unwrap();
+        assert!(!named.predict_frames);
+        assert_eq!(named.opts.frames, 17);
+    }
+
     /// `t2a` takes a prompt and a length and returns a WAV; its sampler's
     /// eta defaults to the chosen loop's reference value, and a length that
     /// is not a positive number is refused before any weight is read.
@@ -531,7 +550,8 @@ mod tests {
         assert!(t2a.outputs.iter().any(|o| o.name == "audio" && o.required));
         let inv = |pairs: &[(&str, serde_json::Value)]| pairs.iter().fold(Invocation::new().set("prompt", json!("rain on a tin roof")), |inv, (k, v)| inv.set(k, v.clone()));
         let o = t2a_params_from(&inv(&[("seconds", json!(2.5)), ("sampler", json!("res2s")), ("seed", json!(3))])).unwrap();
-        assert_eq!((o.seconds, o.base.sampler, o.base.eta, o.base.seed), (2.5, Sampler::Res2s, 0.5, 3));
+        assert_eq!((o.seconds, o.base.sampler, o.base.eta, o.base.seed), (Some(2.5), Sampler::Res2s, 0.5, 3));
+        assert_eq!(t2a_params_from(&inv(&[])).unwrap().seconds, None, "unset, the length is the duration head's to predict");
         assert_eq!(o.base.dit_config, "ltx25_22b");
         assert!(o.base.audio);
         for bad in [json!(0.0), json!(-1.0)] {

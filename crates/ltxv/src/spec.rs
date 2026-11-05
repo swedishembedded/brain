@@ -2,19 +2,20 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! LTX-2.5's [`ArchSpec`]: `dit`/`vae`/`audio_vae`/`text_encoder`/`tokenizer`/
-//! `spatial_upsampler`.
+//! `spatial_upsampler`/`duration_head`.
 //!
 //! `vae` is the only REQUIRED role: every other one is genuinely opt-in
 //! (present, the real weight loads; absent, [`crate::pipeline::generate`]'s
 //! own documented fallback runs - the tiny smoke-test DiT, the prompt stub
-//! context, a single-stage clip).
+//! context, a single-stage clip, the default clip length).
 //!
 //! Every check here reads real content, never a filename: the video VAE's
 //! own `encoder.conv_in.conv.weight`/`decoder.conv_in.conv.weight` tensor
 //! names (the `.conv.` infix is what tells it apart from an unrelated
 //! architecture's own `encoder.conv_in.weight`/`decoder.conv_in.weight`
 //! naming - see `crate::import::detect_video_vae_arch`), the audio VAE's own
-//! `audio_vae.*` tensor namespace, and a GGUF DiT's `general.architecture ==
+//! `audio_vae.*` tensor namespace, the duration head's `duration_head.*`
+//! namespace, and a GGUF DiT's `general.architecture ==
 //! "ltxv"` KV (confirmed unique to this architecture - see
 //! `crates/arch/src/lib.rs`'s own `ltxv` row comment).
 
@@ -27,9 +28,9 @@ use capability::Assembly;
 
 pub struct LtxvSpec;
 
-const ROLES: &[&str] = &["dit", "vae", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler"];
+const ROLES: &[&str] = &["dit", "vae", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler", "duration_head"];
 /// Every role but `vae` is opt-in - see this module's doc.
-const OPTIONAL: &[&str] = &["dit", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler"];
+const OPTIONAL: &[&str] = &["dit", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler", "duration_head"];
 
 fn classify_gguf(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(g) = checkpoint::gguf::MmapGguf::open(&rec.path.to_string_lossy()) else { return };
@@ -61,6 +62,12 @@ fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, 
     // the per-stream projection each DiT stream reads its context through.
     if has("text_embedding_projection.video_aggregate_embed.weight") && has("text_embedding_projection.audio_aggregate_embed.weight") {
         out.push((idx, "text_encoder".to_string(), Confidence::Declared));
+        return;
+    }
+    // The duration head ships as a model patch whose tensors all live under
+    // `duration_head.*`.
+    if has("duration_head.attention_pooler.query_tokens") && has("duration_head.mlp_out.weight") {
+        out.push((idx, "duration_head".to_string(), Confidence::Declared));
         return;
     }
     // Both latent upscalers carry the same tensor names; only the config
@@ -112,7 +119,7 @@ impl ArchSpec for LtxvSpec {
     }
 
     fn validate(&self, _assembly: &Assembly) -> Result<(), String> {
-        // Every optional role classified here (dit/audio_vae) is already
+        // Every optional role classified here is already
         // unambiguous from its own header alone (a GGUF's declared
         // architecture, a safetensors file's own tensor namespace) - there
         // is no further cross-role compatibility this can check without
@@ -144,6 +151,19 @@ mod tests {
             &[
                 ("decoder.conv_in.conv.weight".to_string(), vec![512, 128, 3, 3, 3], vec![0.0f32; 512 * 128 * 3 * 3 * 3]),
                 ("encoder.conv_in.conv.weight".to_string(), vec![128, 3, 3, 3, 3], vec![0.0f32; 128 * 3 * 3 * 3 * 3]),
+            ],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+    }
+
+    fn write_duration_head(path: &Path) {
+        checkpoint::st::save_safetensors(
+            path.to_str().unwrap(),
+            &[
+                ("duration_head.attention_pooler.query_tokens".to_string(), vec![1, 8], vec![0.0f32; 8]),
+                ("duration_head.mlp_out.weight".to_string(), vec![1, 8], vec![0.0f32; 8]),
             ],
             &serde_json::json!({}),
             None,
@@ -238,7 +258,7 @@ mod tests {
     }
 
     /// With NO vae candidate at all, the required role still goes `Missing`
-    /// -- `optional_roles` narrows the exemption to exactly the four roles it
+    /// -- `optional_roles` narrows the exemption to exactly the roles it
     /// names, not every declared role.
     #[test]
     fn missing_without_a_vae_even_though_every_other_role_is_optional() {
@@ -268,8 +288,10 @@ mod tests {
         let text_encoder_path = dir.join("gemma4-12b-with-proj-ltx-2.5-bf16.safetensors");
         let spatial_path = dir.join("ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors");
         let temporal_path = dir.join("ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors");
+        let duration_path = dir.join("ltx-2.5-duration-head-bf16.safetensors");
         write_video_vae(&vae_path);
         write_audio_vae(&audio_vae_path);
+        write_duration_head(&duration_path);
         write_dit_gguf(&dit_path);
         write_text_encoder(&text_encoder_path);
         write_upsampler(&spatial_path, true);
@@ -281,6 +303,7 @@ mod tests {
             complete(text_encoder_path.clone(), ArtifactKind::Safetensors),
             complete(spatial_path.clone(), ArtifactKind::Safetensors),
             complete(temporal_path, ArtifactKind::Safetensors),
+            complete(duration_path.clone(), ArtifactKind::Safetensors),
         ];
 
         let spec = LtxvSpec;
@@ -289,6 +312,7 @@ mod tests {
         match out {
             Resolution::Resolved(a) => {
                 assert_eq!(a.roles["vae"], vae_path);
+                assert_eq!(a.roles["duration_head"], duration_path);
                 assert_eq!(a.roles["audio_vae"], audio_vae_path);
                 assert_eq!(a.roles["dit"], dit_path);
                 assert_eq!(a.roles["text_encoder"], text_encoder_path, "the store's own encoder, so audio needs no flag");

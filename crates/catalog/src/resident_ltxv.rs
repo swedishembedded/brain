@@ -155,7 +155,13 @@ impl ResidentModel for LtxvResident {
         }
         let d = ltxv::pipeline::GenOpts::default();
         let dit_config = inv.get_str("dit_config").unwrap_or_else(|| "tiny".into());
-        let frames = inv.get_i64("frames").unwrap_or(d.frames as i64);
+        // A request without `frames` gets the duration head's prediction
+        // when it can run, which is not known before the prompt is encoded:
+        // place it for the longest clip the head may ask for.
+        let predicted = ltxv::pipeline::can_predict_frames(&self.paths, &ltxv::pipeline::GenOpts { dit_config: dit_config.clone(), ..d.clone() });
+        let fps = inv.get_i64("fps").unwrap_or(d.fps as i64) as f64;
+        let longest = ltxv::duration_head::frames_for_seconds(ltxv::duration_head::MAX_SECONDS, fps, ltxv::duration_head::MIN_SECONDS, ltxv::duration_head::MAX_SECONDS) as i64;
+        let frames = inv.get_i64("frames").unwrap_or(if predicted { longest } else { d.frames as i64 });
         let w = inv.get_i64("width").unwrap_or(d.width as i64);
         let h = inv.get_i64("height").unwrap_or(d.height as i64);
         InstanceKey::new(&self.id, format!("{dit_config}:{frames}:{w}x{h}"))
@@ -407,7 +413,7 @@ mod tests {
     use serde_json::json;
 
     fn resident() -> LtxvResident {
-        LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None } }
+        LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None } }
     }
 
     /// The key must fix exactly the fields that would size a real DiT's
@@ -466,7 +472,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ck = dir.join("dit.gguf");
         std::fs::write(&ck, b"stand-in checkpoint").unwrap();
-        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(ck.to_string_lossy().into_owned()), text_encoder: None, spatial_upsampler: None, audio_vae: None } };
+        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(ck.to_string_lossy().into_owned()), text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None } };
 
         let real = r.estimate(&InstanceKey::new(ltxv::caps::MODEL, "ltx25_22b:9:64x64".to_string()));
         let tiny = r.estimate(&InstanceKey::new(ltxv::caps::MODEL, "tiny:9:64x64".to_string()));
@@ -498,7 +504,7 @@ mod tests {
         let ck = dir.join("dit2.gguf");
         std::fs::write(&ck, b"stand-in checkpoint bytes").unwrap();
         let path = ck.to_string_lossy().into_owned();
-        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(path.clone()), text_encoder: None, spatial_upsampler: None, audio_vae: None } };
+        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(path.clone()), text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None } };
         let mut inst = r.activate(&InstanceKey::new(ltxv::caps::MODEL, "ltx25_22b:9:64x64".to_string()), Device::Gpu(0)).expect("activate");
 
         // Populate the store the way a generation does - through the SAME
@@ -515,7 +521,7 @@ mod tests {
         assert!(inst.promote(Device::Gpu(0)).is_ok(), "promote must succeed: refilling is lazy by design");
 
         // No real checkpoint -> nothing resident -> both must refuse.
-        let bare = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None } };
+        let bare = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None } };
         let mut bare_inst = bare.activate(&InstanceKey::new(ltxv::caps::MODEL, "tiny:9:64x64".to_string()), Device::Cpu).expect("activate");
         assert!(bare_inst.demote(Tier::Warm).is_err(), "a model holding nothing must not report a successful demotion");
         assert!(bare_inst.promote(Device::Cpu).is_err());
@@ -703,7 +709,7 @@ mod tests {
         let m = resident().manifest();
         assert_eq!(m.model, ltxv::caps::MODEL);
         assert_eq!(m.actions.len(), ltxv::caps::manifest().actions.len());
-        let fetched = LtxvResident { id: "Lightricks/LTX-2.5".to_string(), paths: ltxv::pipeline::Paths { vae: "v".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None } };
+        let fetched = LtxvResident { id: "Lightricks/LTX-2.5".to_string(), paths: ltxv::pipeline::Paths { vae: "v".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None } };
         assert_eq!(fetched.manifest().model, "Lightricks/LTX-2.5");
         assert_eq!(fetched.instance_key("t2v", &Invocation::new()).model, "Lightricks/LTX-2.5");
     }
