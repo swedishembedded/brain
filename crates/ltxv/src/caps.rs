@@ -27,7 +27,7 @@
 use capability::{ActionSpec, BlobSpec, Manifest, Media, ParamSpec, ParamType};
 use serde_json::json;
 
-use crate::pipeline::{dit_config_from_name, DfrOpts, DfrPaths, GenOpts, Paths};
+use crate::pipeline::{dit_config_from_name, DfrOpts, DfrPaths, GenOpts, Paths, Sampler};
 
 /// The model id advertised on the capability surface (`brain caps
 /// brain/ltxv`) and the event API - NOT reachable as a CLI verb of its own,
@@ -76,7 +76,7 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("max_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 4096 tokens").default(json!(d.max_shift)))
     .param(ParamSpec::new("stretch", ParamType::Bool, "stretch the schedule's terminal sigma to `terminal`").default(json!(d.stretch)))
     .param(ParamSpec::new("terminal", ParamType::Float, "terminal sigma the stretch targets").default(json!(d.terminal)))
-    .param(ParamSpec::new("eta", ParamType::Float, "ancestral-Euler eta; 0 = deterministic Euler, 1 = fully ancestral").default(json!(d.eta)))
+    .params(sampler_params())
     .param(ParamSpec::new("dit_config", ParamType::Enum(T2V_DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "DiT size: tiny (random weights) or ltx25_22b (the real checkpoint, needs --dit/$BRAIN_LTXV_DIT)").default(json!("tiny")))
     .param(ParamSpec::new(
         "audio",
@@ -114,7 +114,7 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("max_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 4096 tokens").default(json!(d.max_shift)))
     .param(ParamSpec::new("stretch", ParamType::Bool, "stretch the schedule's terminal sigma to `terminal`").default(json!(d.stretch)))
     .param(ParamSpec::new("terminal", ParamType::Float, "terminal sigma the stretch targets").default(json!(d.terminal)))
-    .param(ParamSpec::new("eta", ParamType::Float, "ancestral-Euler eta; 0 = deterministic Euler, 1 = fully ancestral").default(json!(d.eta)))
+    .params(sampler_params())
     .param(ParamSpec::new("dit_config", ParamType::Enum(DFR_DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "DiT size; only tiny (random weights) is implemented for dfr - the real 22B checkpoint is wired for t2v only, see this crate's roadmap").default(json!("tiny")))
     .param(ParamSpec::new("temporal_upsample_rounds", ParamType::Int, "0, 1, or 2 real temporal x2 refine rounds").default(json!(0)))
     .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter to apply: the official LTX trainer's / a published IC-LoRA's ComfyUI .safetensors, or one brain trained. Runs beside the quantized weights, never folded into them.").host_resolved())
@@ -159,6 +159,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     let dit_config = inv.get_str("dit_config").unwrap_or_else(|| "tiny".into());
     dit_config_from_name(&dit_config)?; // validated here so a bad name is rejected before any weight load
     let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
+    let (sampler, eta) = sampler_from(inv)?;
     let opts = GenOpts {
         frames: inv.get_i64("frames").unwrap_or(d.frames as i64).max(1) as usize,
         width: inv.get_i64("width").unwrap_or(d.width as i64).max(32) as usize,
@@ -171,7 +172,8 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         max_shift: inv.get_f64("max_shift").unwrap_or(d.max_shift),
         stretch: inv.get_bool("stretch").unwrap_or(d.stretch),
         terminal: inv.get_f64("terminal").unwrap_or(d.terminal),
-        eta: inv.get_f64("eta").unwrap_or(d.eta),
+        sampler,
+        eta,
         s_noise: d.s_noise,
         context_len: d.context_len,
         dit_config,
@@ -239,6 +241,7 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
     let dit_config = inv.get_str("dit_config").unwrap_or_else(|| "tiny".into());
     dit_config_from_name(&dit_config)?; // validated here so a bad name is rejected before any weight load
     let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
+    let (sampler, eta) = sampler_from(inv)?;
     let base = GenOpts {
         frames: inv.get_i64("frames").unwrap_or(d.frames as i64).max(1) as usize,
         width: inv.get_i64("width").unwrap_or(d.width as i64).max(64) as usize,
@@ -251,7 +254,8 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
         max_shift: inv.get_f64("max_shift").unwrap_or(d.max_shift),
         stretch: inv.get_bool("stretch").unwrap_or(d.stretch),
         terminal: inv.get_f64("terminal").unwrap_or(d.terminal),
-        eta: inv.get_f64("eta").unwrap_or(d.eta),
+        sampler,
+        eta,
         s_noise: d.s_noise,
         context_len: d.context_len,
         dit_config,
@@ -406,6 +410,21 @@ impl Action for LtxvAction {
     }
 }
 
+
+/// The sampler parameters every generation action takes ([`Sampler`]).
+fn sampler_params() -> Vec<ParamSpec> {
+    vec![
+        ParamSpec::new("sampler", ParamType::Enum(vec!["euler".into(), "res2s".into()]), "denoising loop: euler (one guided evaluation per step, ancestral when eta > 0 - the distilled pipeline's) or res2s (second-order, two guided evaluations per step with SDE noise - the reference's high-quality pipeline's)").default(json!("euler")),
+        ParamSpec::new("eta", ParamType::Float, "sampler noise strength: euler 0 = deterministic, 1 = fully ancestral (default 1); res2s step-level SDE strength (default 0.5)"),
+    ]
+}
+
+/// The sampler and its eta: an explicit `eta` wins, otherwise the sampler's
+/// own reference default.
+fn sampler_from(inv: &Invocation) -> Result<(Sampler, f64), String> {
+    let sampler = inv.get_str("sampler").map(|s| Sampler::parse(&s)).transpose()?.unwrap_or_default();
+    Ok((sampler, sampler.resolve_eta(inv.get_f64("eta"))?))
+}
 
 /// The guidance parameters both generation actions take
 /// ([`crate::guidance`]): `guidance_preset` picks a starting point, every

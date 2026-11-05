@@ -365,6 +365,69 @@ pub fn euler_ancestral_step(x: &[f32], denoised: &[f32], sigma: f64, sigma_next:
     out
 }
 
+/// `phi_j(z) = (e^z - sum_{k<j} z^k/k!) / z^j`, the exponential-integrator
+/// weights (`ltx_pipelines.utils.res2s.phi`), with the reference's own
+/// `phi_j(0) = 1/j!` branch for `|z| < 1e-10`.
+fn phi(j: u32, z: f64) -> f64 {
+    let factorial = |n: u32| (1..=n).map(f64::from).product::<f64>();
+    if z.abs() < 1e-10 {
+        return 1.0 / factorial(j);
+    }
+    let remainder: f64 = (0..j).map(|k| z.powi(k as i32) / factorial(k)).sum();
+    (z.exp() - remainder) / z.powi(j as i32)
+}
+
+/// The res_2s Runge-Kutta weights for one step of log-sigma size `h`, at the
+/// midpoint substep `c2 = 0.5` the reference fixes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Res2sCoefficients {
+    /// How much of the first evaluation's `eps` moves the anchor to the
+    /// substep point.
+    pub a21: f64,
+    /// The final combination's weights on the two evaluations' `eps`.
+    pub b1: f64,
+    pub b2: f64,
+}
+
+/// `get_res2s_coefficients(h, cache, c2=0.5)` (`ltx_pipelines.utils.
+/// res2s`): `a21 = c2*phi1(-h*c2)`, `b2 = phi2(-h)/c2`, `b1 = phi1(-h) - b2`.
+pub fn res2s_coefficients(h: f64) -> Res2sCoefficients {
+    const C2: f64 = 0.5;
+    let b2 = phi(2, -h) / C2;
+    Res2sCoefficients { a21: C2 * phi(1, -h * C2), b1: phi(1, -h) - b2, b2 }
+}
+
+/// `Res2sDiffusionStep.step` (`ltx_core.components.diffusion_steps`): move
+/// `sample` at `sigma` to `sigma_next` along the line through `denoised`,
+/// then inject `sigma_up = eta*sigma_next` of `noise` with the
+/// variance-preserving coefficients `get_sde_coeff` derives (`sigma_max =
+/// 1`, `sigma_up` clamped to `0.9999*sigma_next`).
+///
+/// Returns `denoised` itself when nothing is injected (`eta = 0`) or the
+/// step is terminal (`sigma_next = 0`), exactly as the reference's
+/// `torch.where(return_denoised, ...)`. All of it in f64: the res_2s loop
+/// keeps its anchors at the highest precision the device has.
+pub fn res2s_sde_step(sample: &[f64], denoised: &[f64], sigma: f64, sigma_next: f64, eta: f64, noise: &[f64]) -> Vec<f64> {
+    assert_eq!(sample.len(), denoised.len(), "res2s_sde_step: sample/denoised length mismatch");
+    assert_eq!(sample.len(), noise.len(), "res2s_sde_step: noise length mismatch");
+    let sigma_up = (sigma_next * eta).min(sigma_next * 0.9999);
+    if sigma_up == 0.0 || sigma_next == 0.0 {
+        return denoised.to_vec();
+    }
+    let sigma_residual = (sigma_next * sigma_next - sigma_up * sigma_up).max(0.0).sqrt();
+    let alpha_ratio = (1.0 - sigma_next) + sigma_residual;
+    let sigma_down = sigma_residual / alpha_ratio;
+    sample
+        .iter()
+        .zip(denoised)
+        .zip(noise)
+        .map(|((&x, &d), &n)| {
+            let eps = (x - d) / (sigma - sigma_next);
+            alpha_ratio * (x - sigma * eps + sigma_down * eps) + sigma_up * n
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod ltx2_tests {
     use super::*;
@@ -433,5 +496,44 @@ mod ltx2_tests {
                 assert!(w[0] >= w[1] - 1e-12, "not monotone: {w:?}");
             }
         }
+    }
+
+    /// `get_res2s_coefficients(h, {}, c2=0.5)` (`ltx_pipelines.utils.res2s`)
+    /// at a zero step (its Taylor branch), small and large steps.
+    #[test]
+    fn res2s_coefficients_match_the_reference() {
+        let cases = [
+            (0.0, [0.5, 0.0, 1.0]),
+            (0.1, [0.48770575499285984, -0.01585778755149403, 0.9674836071918989]),
+            (std::f64::consts::LN_2, [0.4225555942921739, -0.08267358032783734, 0.804021100772319]),
+            (2.0, [0.31606027941427883, -0.13533528323661276, 0.5676676416183064]),
+        ];
+        for (h, want) in cases {
+            let got = res2s_coefficients(h);
+            for (g, w) in [got.a21, got.b1, got.b2].iter().zip(want) {
+                assert!((g - w).abs() < 1e-14, "h={h}: {got:?} vs {want:?}");
+            }
+        }
+    }
+
+    /// `Res2sDiffusionStep.step` with `sigma_max = 1`: the SDE coefficients
+    /// for `sigma_up = eta*sigma_next`, including the `0.9999*sigma_next`
+    /// clamp at `eta = 1`, and the terminal/`eta = 0` short-circuit to the
+    /// denoised sample.
+    #[test]
+    fn res2s_sde_step_matches_the_reference() {
+        let (x, d, n) = ([1.0, -2.0, 0.5], [0.25, 0.5, -1.0], [0.3, -0.7, 1.1]);
+        let cases = [
+            (0.5, [0.2363139720814414, 0.5341669750802295, -0.8469872981077804]),
+            (1.0, [-0.17223401986374223, 1.5016436833142999, -1.0529731089670382]),
+        ];
+        for (eta, want) in cases {
+            let got = res2s_sde_step(&x, &d, 0.8, 0.4, eta, &n);
+            for (g, w) in got.iter().zip(want) {
+                assert!((g - w).abs() < 1e-12, "eta={eta}: {got:?} vs {want:?}");
+            }
+        }
+        assert_eq!(res2s_sde_step(&x, &d, 0.8, 0.4, 0.0, &n), d.to_vec(), "eta = 0 injects nothing and returns the denoised sample");
+        assert_eq!(res2s_sde_step(&x, &d, 0.0011, 0.0, 0.5, &n), d.to_vec(), "the terminal step returns the denoised sample");
     }
 }

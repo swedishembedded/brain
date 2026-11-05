@@ -25,7 +25,7 @@
 //! `BRAIN_LTXV_*` - see `resolve_ltxv`. See `ltxv::pipeline`'s module doc for
 //! the full account of what is real and what is not.
 
-use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, LongOpts, MaskedOpts, Paths, UpscaleOpts};
+use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, LongOpts, MaskedOpts, Paths, Sampler, UpscaleOpts};
 use ltxv::spec::LtxvSpec;
 
 /// The guidance flags every generating subcommand takes ([`set_guidance`]).
@@ -80,8 +80,15 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
   --max-shift <F>            LTX2Scheduler shift anchor at 4096 tokens (2.05)
   --no-stretch                skip the terminal-sigma stretch (on by default)
   --terminal <F>              stretch target sigma (default 0.1)
-  --eta <F>                   ancestral-Euler eta: 0 deterministic, 1 fully
-                             ancestral (default 1.0)
+  --sampler <euler|res2s>     denoising loop (default euler): euler takes one
+                             guided evaluation per step, ancestral when
+                             --eta > 0 (the distilled pipeline's); res2s is
+                             second-order, two guided evaluations per step
+                             with SDE noise (the reference's high-quality
+                             pipeline's) and also refines stage 2 with it
+  --eta <F>                   sampler noise strength, 0..1: euler 0 is
+                             deterministic, 1 fully ancestral (default 1.0);
+                             res2s step-level SDE strength (default 0.5)
   --audio                     ALSO generate the clip's sound, from the same
                              prompt and the same forwards as the picture, and
                              mux it into the output container. LTX-2.5 is
@@ -459,7 +466,9 @@ resolution - stage 1 halves it, so both must be a multiple of 64):
   --max-shift <F>              LTX2Scheduler shift anchor at 4096 tokens (2.05)
   --no-stretch                  skip the terminal-sigma stretch (on by default)
   --terminal <F>                stretch target sigma (default 0.1)
-  --eta <F>                     ancestral-Euler eta (default 1.0)
+  --sampler <euler|res2s>       denoising loop (default euler; see t2v)
+  --eta <F>                     sampler noise strength (default 1.0 euler,
+                                0.5 res2s)
   --dit-config <name>           DiT size; only "tiny" is implemented (default)
   --temporal-upsample-rounds <N> 0, 1, or 2 real temporal x2 refine rounds
                                  (default 0; > 0 needs --temporal-upsampler)
@@ -638,6 +647,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let (seed, args) = crate::args::split_seed(&args, "ltxv t2v");
     let args = &args[..];
     let mut o = GenOpts { seed, ..GenOpts::default() };
+    // `--eta`'s default depends on `--sampler`, which may come after it.
+    let mut eta: Option<f64> = None;
     // How many `--adapter`s already carry their `--lora-scale`.
     let mut scaled = 0usize;
     let mut reference_path: Option<String> = None;
@@ -675,7 +686,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--base-shift" => o.base_shift = dbl(i, "--base-shift")?,
             "--max-shift" => o.max_shift = dbl(i, "--max-shift")?,
             "--terminal" => o.terminal = dbl(i, "--terminal")?,
-            "--eta" => o.eta = dbl(i, "--eta")?,
+            "--sampler" => o.sampler = Sampler::parse(need(i)?)?,
+            "--eta" => eta = Some(dbl(i, "--eta")?),
             "--dit-config" => o.dit_config = need(i)?.clone(),
             "--adapter" => o.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
             "--lora-scale" => crate::args::attach_lora_scale(&mut o.adapters, &mut scaled, flt(i, "--lora-scale")?)?,
@@ -724,6 +736,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
         }
         i += 2;
     }
+    o.eta = o.sampler.resolve_eta(eta)?;
     if let Some(path) = &reference_path {
         if !(0.0..=1.0).contains(&reference_strength) {
             return Err(format!("--reference-strength {reference_strength} is outside [0, 1]"));
@@ -1162,6 +1175,7 @@ fn dfr(args: &[String]) -> Result<(), String> {
     let (seed, rest) = crate::args::split_seed(args, "ltxv dfr");
     let args = &rest[..];
     let mut o = DfrOpts::default();
+    let mut eta: Option<f64> = None;
     // How many `--adapter`s already carry their `--lora-scale`.
     let mut scaled = 0usize;
     o.base.seed = seed;
@@ -1191,7 +1205,8 @@ fn dfr(args: &[String]) -> Result<(), String> {
             "--base-shift" => o.base.base_shift = dbl(i, "--base-shift")?,
             "--max-shift" => o.base.max_shift = dbl(i, "--max-shift")?,
             "--terminal" => o.base.terminal = dbl(i, "--terminal")?,
-            "--eta" => o.base.eta = dbl(i, "--eta")?,
+            "--sampler" => o.base.sampler = Sampler::parse(need(i)?)?,
+            "--eta" => eta = Some(dbl(i, "--eta")?),
             "--dit-config" => o.base.dit_config = need(i)?.clone(),
             "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
             "--lora-scale" => crate::args::attach_lora_scale(&mut o.base.adapters, &mut scaled, need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?)?,
@@ -1224,6 +1239,7 @@ fn dfr(args: &[String]) -> Result<(), String> {
         }
         i += 2;
     }
+    o.base.eta = o.base.sampler.resolve_eta(eta)?;
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;
     let paths = DfrPaths::resolve(vae.as_deref(), spatial_upsampler.as_deref(), temporal_upsampler.as_deref())?;
@@ -1308,6 +1324,7 @@ mod tests {
             "--no-stretch",
             "--terminal",
             "--eta",
+            "--sampler",
             "--dit-config",
             "--device",
             "--scene",
@@ -1425,6 +1442,7 @@ mod tests {
             "--no-stretch",
             "--terminal",
             "--eta",
+            "--sampler",
             "--dit-config",
             "--temporal-upsample-rounds",
             "--device",
