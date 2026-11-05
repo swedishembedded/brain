@@ -13,7 +13,10 @@
 //!   every NPU), with total/used/reserved memory. The set adapts to whatever the
 //!   machine budgeted; nothing is hardcoded.
 //! - **models** — the manifest catalog joined with per-instance placement, so each
-//!   model shows where (if anywhere) it is resident.
+//!   model shows where (if anywhere) it is resident. A model that runs several
+//!   replicas shows one instance per replica (a replica that spans devices is
+//!   one row per device) carrying its replica index, queued and running jobs
+//!   and the metrics it reports, such as its prefix-cache counters.
 //! - **executor** — the scheduler counters.
 //! - **requests** — the executor's in-flight jobs ([`Executor::in_flight`]), each
 //!   queued or running, mapped to a `RequestStat` (model/action/phase/since_ms).
@@ -22,7 +25,7 @@
 //! is a front-end concern, not something the executor sees.
 
 use capability::Manifest;
-use residency::{Device, DeviceBudget, Executor, InFlightJob, InstancePlacement, ResidencyReport, Tier};
+use residency::{Device, DeviceBudget, Executor, InFlightJob, ResidencyReport, Tier};
 
 use crate::snapshot::{Accelerator, ExecutorStat, Instance, ModelStat, RequestStat, StatsSnapshot};
 use crate::source::{Assembler, StatsSource};
@@ -131,16 +134,30 @@ fn intel_card_dir() -> Option<std::path::PathBuf> {
     })
 }
 
-/// Join the manifest catalog with per-instance placement into `ModelStat`s.
-pub fn models_from(manifests: &[Manifest], placements: &[InstancePlacement]) -> Vec<ModelStat> {
+/// One resident instance as a snapshot row: its device and bytes, which replica of its model it is, the jobs queued and
+/// running on it, and whatever metrics the instance reports (a serving engine's prefix-cache counters among them), so a
+/// model that runs one instance per card shows each card's load and cache.
+fn instance_row(device: Device, tier: Tier, mem: u64, key: &residency::InstanceKey, stats: &residency::executor::Stats) -> Instance {
+    let mut extra = std::collections::BTreeMap::new();
+    extra.insert("replica".to_string(), serde_json::json!(key.replica_index()));
+    let load = stats.load.get(key).copied().unwrap_or_default();
+    extra.insert("queued".to_string(), serde_json::json!(load.queued));
+    extra.insert("running".to_string(), serde_json::json!(load.running));
+    for (name, value) in stats.metrics.get(key).into_iter().flatten() {
+        extra.insert(name.clone(), value.clone());
+    }
+    Instance { device: device_id(device), tier: tier_name(tier).to_string(), mem, extra }
+}
+
+/// Join the manifest catalog with per-instance placement into `ModelStat`s. An instance that spans several devices is one
+/// row per device, all carrying its replica index, so the rows of a replica group by it.
+pub fn models_from(manifests: &[Manifest], report: &ResidencyReport, stats: &residency::executor::Stats) -> Vec<ModelStat> {
     let mut models: Vec<ModelStat> = manifests
         .iter()
         .map(|m| {
-            let instances: Vec<Instance> = placements
-                .iter()
-                .filter(|p| p.key.model == m.model)
-                .map(|p| Instance { device: device_id(p.device), tier: tier_name(p.tier).to_string(), mem: p.mem, extra: Default::default() })
-                .collect();
+            let single = report.placements.iter().filter(|p| p.key.model == m.model).map(|p| instance_row(p.device, p.tier, p.mem, &p.key, stats));
+            let spanning = report.multi_placements.iter().filter(|p| p.key.model == m.model).flat_map(|p| p.devices.iter().map(move |&(device, bytes)| instance_row(device, p.tier, bytes, &p.key, stats)));
+            let instances: Vec<Instance> = single.chain(spanning).collect();
             ModelStat {
                 id: m.model.clone(),
                 family: m.summary.clone(),
@@ -201,22 +218,12 @@ impl ExecutorSource {
 impl StatsSource for ExecutorSource {
     fn contribute(&self, snap: &mut StatsSnapshot) {
         let stats = self.exec.stats();
-        // multi_placements (multi-device resident instances) is not yet
-        // rendered here -- `ModelStat`/`Instance`'s stats schema is
-        // single-device by construction (one `device` field), same as
-        // `InstancePlacement`; showing a multi-device instance for real
-        // needs a schema change (a device LIST per instance), not just
-        // reading this field. A multi-device model IS now reachable through
-        // `Executor` (the int8 dual-GPU Thinker, `crates/omni/src/
-        // int8_thinker_resident.rs`), so this is a real, live gap, not a
-        // hypothetical one -- this is an honest, documented observability
-        // gap (not a correctness issue), still open.
-        let ResidencyReport { placements, budgets, multi_placements: _ } = self.exec.residency();
+        let report = self.exec.residency();
         snap.executor = executor_stat(&stats);
         // Accelerators come straight from the device budgets — one row per
         // budgeted device, so the set adapts to any machine (0..N GPUs/NPUs).
-        snap.accelerators.extend(budgets.iter().map(accelerator_from_budget));
-        snap.models.extend(models_from(&self.exec.manifests(), &placements));
+        snap.accelerators.extend(report.budgets.iter().map(accelerator_from_budget));
+        snap.models.extend(models_from(&self.exec.manifests(), &report, &stats));
         // In-flight work → `requests`, straight from the executor's live queue +
         // running set. `connections` stays empty: per-transport socket tracking is a
         // front-end concern, out of scope for this executor-backed source.
@@ -291,6 +298,40 @@ mod tests {
     fn only_gpu0_gets_sysfs_extra_a_second_gpu_is_left_alone() {
         let gpu1 = accelerator_from_budget(&DeviceBudget { device: Device::Gpu(1), total: 24 * GB, reserved: 0, used: 0 });
         assert!(gpu1.extra.is_empty(), "a second GPU must not get gpu0's sysfs data attributed to it");
+    }
+
+    /// **A model that runs one instance per card shows each card's instance, with its load and cache counters.** Replica 0 and
+    /// replica 2 are resident (replica 1 was never built or was released); the instances are the rows of the model, each
+    /// carrying the replica it is, the jobs queued and running on it, and the metrics the instance reports.
+    #[test]
+    fn replicas_are_instances_with_their_device_load_and_metrics() {
+        use residency::executor::{InstanceLoad, Stats};
+        use residency::manager::MultiInstancePlacement;
+
+        let key = InstanceKey::new("llm", "default");
+        let report = ResidencyReport {
+            placements: Vec::new(),
+            multi_placements: vec![
+                MultiInstancePlacement { key: key.replica(2), devices: vec![(Device::Gpu(2), 30 * GB)], tier: Tier::Hot },
+                MultiInstancePlacement { key: key.clone(), devices: vec![(Device::Gpu(0), 30 * GB)], tier: Tier::Hot },
+            ],
+            budgets: Vec::new(),
+        };
+        let mut stats = Stats::default();
+        stats.load.insert(key.clone(), InstanceLoad { queued: 3, running: 8 });
+        stats.metrics.insert(key.replica(2), vec![("kv_prefix_hit_tokens".to_string(), serde_json::json!(1234))]);
+        let manifests = [Manifest::new("llm", "a chat model", vec![ActionSpec::new("generate", "generate")]), Manifest::new("other", "another", vec![])];
+
+        let models = models_from(&manifests, &report, &stats);
+        let llm = models.iter().find(|m| m.id == "llm").unwrap();
+        assert!(llm.resident);
+        let mut rows: Vec<(String, u64, u64, u64)> = llm.instances.iter().map(|i| (i.device.clone(), i.extra["replica"].as_u64().unwrap(), i.extra["queued"].as_u64().unwrap(), i.extra["running"].as_u64().unwrap())).collect();
+        rows.sort();
+        assert_eq!(rows, vec![("gpu0".to_string(), 0, 3, 8), ("gpu2".to_string(), 2, 0, 0)]);
+        let second = llm.instances.iter().find(|i| i.device == "gpu2").unwrap();
+        assert_eq!(second.extra["kv_prefix_hit_tokens"], serde_json::json!(1234), "an instance's own metrics ride on its row");
+        assert_eq!(second.mem, 30 * GB);
+        assert!(!models.iter().find(|m| m.id == "other").unwrap().resident);
     }
 
     fn stub_executor() -> Executor {

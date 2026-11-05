@@ -416,9 +416,12 @@ fn log_request_tokens(exec: &residency::Executor, model: &str, outcome: &Outcome
         line += &format!(", completion_tokens={c}");
     }
     let metrics = exec.stats().metrics;
-    if let Some((_, m)) = metrics.iter().find(|(k, _)| k.model == model) {
+    // A model that runs one instance per card has one set of counters per instance: the cache totals are their sum.
+    let instances: Vec<&Vec<(String, serde_json::Value)>> = metrics.iter().filter(|(k, _)| k.model == model).map(|(_, m)| m).collect();
+    if let Some(m) = instances.first() {
         let get = |name: &str| m.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone());
-        if let (Some(hit), Some(looked)) = (get("kv_prefix_hit_tokens"), get("kv_prefix_lookup_tokens")) {
+        let total = |name: &str| instances.iter().filter_map(|m| m.iter().find(|(n, _)| n == name)).map(|(_, v)| v.as_u64()).sum::<Option<u64>>();
+        if let (Some(hit), Some(looked)) = (total("kv_prefix_hit_tokens"), total("kv_prefix_lookup_tokens")) {
             line += &format!(", kv_cache_hit_tokens={hit} (cumulative), kv_cache_lookup_tokens={looked} (cumulative)");
         }
         if let (Some(rounds), Some(accept), Some(per_round)) = (get("spec_rounds"), get("spec_accept_rate"), get("spec_tokens_per_round")) {
