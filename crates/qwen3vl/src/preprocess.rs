@@ -54,6 +54,36 @@ pub fn smart_resize(height: u32, width: u32, factor: u32, min_pixels: u32, max_p
     (h_bar, w_bar)
 }
 
+/// The video processor's `smart_resize`: [`smart_resize`]'s rule over the
+/// clip's whole volume - the frame count rounded to `temporal_factor` times
+/// both sides - so a longer clip is sized down per frame. A side under
+/// `factor` is first scaled up to it. Panics on fewer frames than
+/// `temporal_factor` or an aspect beyond 200:1, which the reference refuses.
+pub fn smart_resize_video(num_frames: u32, height: u32, width: u32, temporal_factor: u32, factor: u32, min_pixels: u32, max_pixels: u32) -> (u32, u32) {
+    assert!(num_frames >= temporal_factor, "video smart_resize: {num_frames} frames is fewer than the temporal factor {temporal_factor}");
+    let (mut h, mut w) = (height as f64, width as f64);
+    if height < factor || width < factor {
+        let scale = (factor as f64 / h).max(factor as f64 / w);
+        h = (h * scale).trunc();
+        w = (w * scale).trunc();
+    }
+    assert!(h.max(w) / h.min(w) <= 200.0, "video smart_resize: aspect ratio beyond 200:1");
+    let mut h_bar = round_by_factor(h, factor);
+    let mut w_bar = round_by_factor(w, factor);
+    let t_bar = round_by_factor(num_frames as f64, temporal_factor) as u64;
+    let volume = num_frames as f64 * h * w;
+    if t_bar * h_bar as u64 * w_bar as u64 > max_pixels as u64 {
+        let beta = (volume / max_pixels as f64).sqrt();
+        h_bar = factor.max(floor_by_factor(h / beta, factor));
+        w_bar = factor.max(floor_by_factor(w / beta, factor));
+    } else if t_bar * (h_bar as u64) * (w_bar as u64) < min_pixels as u64 {
+        let beta = (min_pixels as f64 / volume).sqrt();
+        h_bar = ceil_by_factor(h * beta, factor);
+        w_bar = ceil_by_factor(w * beta, factor);
+    }
+    (h_bar, w_bar)
+}
+
 /// Convenience wrapper using the 4B defaults.
 pub fn smart_resize_default(height: u32, width: u32) -> (u32, u32) {
     smart_resize(height, width, DEFAULT_FACTOR, DEFAULT_MIN_PIXELS, DEFAULT_MAX_PIXELS)
@@ -212,6 +242,18 @@ pub struct ImageGeometry {
     pub std: [f32; 3],
 }
 
+/// A clip cut into the vision tower's patches: `grid_t` temporal groups of
+/// `temporal_patch_size` frames, each group a block of `(h_bar /
+/// patch_size) x (w_bar / patch_size)` patches.
+pub struct VideoPatches {
+    pub h_bar: u32,
+    pub w_bar: u32,
+    pub grid_t: u32,
+    /// `[grid_t * patches_per_group, 3 * temporal * patch^2]`, group-major
+    /// ([`pack_patches_temporal`]).
+    pub pixels: Vec<f32>,
+}
+
 /// An image cut into the vision tower's patches.
 pub struct ImagePatches {
     /// The image's size after the resize: both sides multiples of `patch_size * merge_size`.
@@ -298,6 +340,41 @@ impl ImageGeometry {
             }
         }
         ImagePatches { h_bar, w_bar, pixels: pack_patches(&chw, 3, h_bar, w_bar, self.patch_size, self.merge_size, self.temporal_patch_size) }
+    }
+
+    /// A video processor's view of `frames` (already sampled, all one size,
+    /// these bounds read from a `video_preprocessor_config.json`): resized
+    /// as one volume ([`smart_resize_video`]) with torch's antialiased
+    /// bicubic on the 8-bit pixels, normalized, the last frame repeated up
+    /// to a multiple of the temporal patch, and cut into patches.
+    pub fn video_patches(&self, frames: &[&imaging::pixels::Rgb8]) -> VideoPatches {
+        let first = frames.first().expect("a video has at least one frame");
+        let (h_bar, w_bar) = smart_resize_video(frames.len() as u32, first.h, first.w, self.temporal_patch_size, self.factor(), self.min_pixels, self.max_pixels);
+        let (h, w) = (h_bar as usize, w_bar as usize);
+        let chw: Vec<Vec<f32>> = frames
+            .iter()
+            .map(|frame| {
+                assert_eq!((frame.w, frame.h), (first.w, first.h), "a video's frames share one size");
+                let resized;
+                let frame = if (frame.h, frame.w) == (h_bar, w_bar) {
+                    *frame
+                } else {
+                    resized = imaging::host::resize_bicubic_torch_u8(frame, w, h);
+                    &resized
+                };
+                let mut out = vec![0f32; 3 * h * w];
+                for (i, px) in frame.px.as_chunks::<3>().0.iter().enumerate() {
+                    for (c, &v) in px.iter().enumerate() {
+                        out[c * h * w + i] = (v as f32 / 255.0 - self.mean[c]) / self.std[c];
+                    }
+                }
+                out
+            })
+            .collect();
+        let refs: Vec<&[f32]> = chw.iter().map(Vec::as_slice).collect();
+        let padded = pad_frames_to_temporal_multiple(&refs, self.temporal_patch_size);
+        let grid_t = padded.len() as u32 / self.temporal_patch_size;
+        VideoPatches { h_bar, w_bar, grid_t, pixels: pack_patches_temporal(&padded, 3, h_bar, w_bar, self.patch_size, self.merge_size, self.temporal_patch_size) }
     }
 }
 

@@ -34,6 +34,16 @@ use crate::mrope::mrope_tables;
 /// forward's transient buffers beyond the per-layer activations it prices.
 const CARD_RESERVE_BYTES: u64 = 1 << 30;
 
+/// The vision blocks of one multimodal prompt, already through the vision
+/// tower ([`crate::encoder::VisionTower`]): `(row0, n_rows)` per block in
+/// prompt order, the blocks' visual rows concatenated in that order, and per
+/// DeepStack level the blocks' rows concatenated the same way.
+pub struct VisionSplice<'a> {
+    pub runs: &'a [(u32, u32)],
+    pub visual: &'a [f32],
+    pub deepstack: &'a [Vec<f32>],
+}
+
 /// The language tower's first `depth` layers, one [`Qwen`] stage per card.
 pub struct TextTower {
     stages: Vec<Qwen>,
@@ -101,7 +111,40 @@ impl TextTower {
         // A pure-text stream's M-RoPE position is `[i, i, i]` - see
         // `Qwen3Vl::write_text_mrope_tables` for why the table must be written.
         let positions: Vec<[u32; 3]> = (0..tokens.len() as u32).map(|i| [i; 3]).collect();
-        let (cos, sin) = mrope_tables(&positions, self.mrope_section, self.cfg.head_dim, self.cfg.rope_theta);
+        self.encode_at(tokens, &positions)
+    }
+
+    /// [`Self::encode`] for a prompt that carries vision blocks: each block's
+    /// placeholder rows are overwritten by its visual tokens, its DeepStack
+    /// levels are added after the first layers, and every row rotates by
+    /// its 3-axis `positions` (`get_rope_index_multi` over the blocks'
+    /// merged grids). The DeepStack layers must sit on the first stage,
+    /// which a placement of any real tower satisfies, and the tower must
+    /// reach past them: transformers records `hidden_states[l]` as layer
+    /// `l - 1`'s output before that layer's DeepStack add, so only past the
+    /// last add is the stream the same quantity.
+    pub fn encode_multimodal(&mut self, tokens: &[u32], positions: &[[u32; 3]], vision: &VisionSplice) -> Vec<f32> {
+        assert_eq!(positions.len(), tokens.len(), "text tower: one 3-axis position per token");
+        let depth = self.stages.last().expect("a tower has at least one stage").shard.end;
+        assert!(depth > vision.deepstack.len(), "text tower: a tap at layer {depth} does not reach past the {} DeepStack adds", vision.deepstack.len());
+        let d = self.cfg.d_model as usize;
+        let n_rows: usize = vision.runs.iter().map(|&(_, n)| n as usize).sum();
+        assert_eq!(vision.visual.len(), n_rows * d, "text tower: the visual rows must cover every run");
+        let first = &mut self.stages[0];
+        assert!(first.shard.end >= vision.deepstack.len(), "text tower: DeepStack adds after layers 0..{} but the first stage ends at layer {}", vision.deepstack.len(), first.shard.end);
+        first.enable_mm_splices(vision.runs);
+        first.write_img_embeds(vision.visual);
+        if !vision.deepstack.is_empty() {
+            first.enable_deepstack_runs(vision.runs, vision.deepstack.len() as u32);
+            for (level, rows) in vision.deepstack.iter().enumerate() {
+                first.write_deepstack(level, rows);
+            }
+        }
+        self.encode_at(tokens, positions)
+    }
+
+    fn encode_at(&self, tokens: &[u32], positions: &[[u32; 3]]) -> Vec<f32> {
+        let (cos, sin) = mrope_tables(positions, self.mrope_section, self.cfg.head_dim, self.cfg.rope_theta);
         let mut stream: Option<Vec<f32>> = None;
         for stage in &self.stages {
             stage.write_mrope_tables(&cos, &sin);
