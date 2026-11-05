@@ -82,28 +82,25 @@
 //! start = clamp(i - half, 0, lo)
 //! ```
 //! and the window is ALWAYS the full `K` positions `[start, start+K)` - never
-//! shrunk, never masked. `crates/kernels/wgsl/na3d_scores.wgsl`/
-//! `na3d_apply.wgsl` implement exactly this per-axis formula in all three
-//! axes independently (this repo's own kernel-checklist worked example of
+//! shrunk, never masked. `crates/kernels/wgsl/na3d_attn.wgsl` implements
+//! exactly this per-axis formula in all three axes independently (this repo's own kernel-checklist worked example of
 //! this exact bug class: an off-by-one here degrades quality without
 //! crashing). [`na_decoder::tests::window_bounds_matches_the_eager_oracle`]
 //! pins the formula against hand-computed tables at several `(length,
 //! kernel, query)` triples, independent of any real-weight run.
 //!
 //! ## Existing kernels checked and refuted before writing
-//! ## `na3d_scores`/`na3d_apply`
+//! ## `na3d_attn`
 //!
 //! `gqa_scores_win`/`attn_decode_scores_win` are 1-D SEQUENCE-POSITION
 //! windows (`key j lives iff i-window < j <= i`, a causal band along one
 //! axis) - fundamentally different semantics from a 3-axis SPATIAL
 //! neighborhood with a symmetric, non-causal, inward-shifting window on
-//! every axis independently. Neither kernel's `Params` (nor any masked-
-//! attention kernel in this repo) can express NATTEN's per-axis shift
-//! without a full rewrite, so a genuinely new kernel pair was warranted -
-//! `attn_softmax_cross` (a layout-generic `[rows, cols]` row softmax) is
-//! reused UNCHANGED for the softmax step in between, since NATTEN's window
-//! is always fully dense (no masking, see above), which is exactly what a
-//! plain row softmax computes.
+//! every axis independently, so this needed a kernel of its own. It is
+//! fused - scores, softmax and apply in one pass with an online softmax -
+//! because the gather-then-dense form materialized a `[heads, nq, window]`
+//! score buffer, and with stage 5's 11x11x11 window that buffer, not the
+//! activations, bounded the decodable clip.
 //!
 //! ## Channel sub-order traps (both checked against source, not precedent)
 //!
@@ -150,25 +147,20 @@ const K_RMSNORM: usize = 2;
 const K_SILU_MUL: usize = 3;
 const K_MUL: usize = 4;
 const K_ADD2: usize = 5;
-const K_NA3D_SCORES: usize = 6;
-const K_ATTN_SOFTMAX_CROSS: usize = 7;
-const K_NA3D_APPLY: usize = 8;
-const K_ROPE_INTERLEAVE_TABLE: usize = 9;
-const K_PIXEL_SHUFFLE3D_CL: usize = 10;
+const K_NA3D_ATTN: usize = 6;
+const K_ROPE_INTERLEAVE_TABLE: usize = 7;
+const K_PIXEL_SHUFFLE3D_CL: usize = 8;
 
-/// Every kernel this module dispatches - all pre-existing except the three
-/// documented in this module's header (`na3d_scores`/`na3d_apply`/
-/// `pixel_shuffle3d_cl`).
-pub const KERNELS: [(&str, &str); 11] = [
+/// Every kernel this module dispatches - all pre-existing except the two
+/// documented in this module's header (`na3d_attn`/`pixel_shuffle3d_cl`).
+pub const KERNELS: [(&str, &str); 9] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm", kernels::RMSNORM),
     ("silu_mul", kernels::SILU_MUL),
     ("mul", kernels::MUL),
     ("add2", kernels::ADD2),
-    ("na3d_scores", kernels::NA3D_SCORES),
-    ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
-    ("na3d_apply", kernels::NA3D_APPLY),
+    ("na3d_attn", kernels::NA3D_ATTN),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
     ("pixel_shuffle3d_cl", kernels::PIXEL_SHUFFLE3D_CL),
 ];
@@ -399,7 +391,7 @@ fn rope_inv_freqs(dim: u32, base: f64) -> Vec<f32> {
 }
 
 /// Shared (head-independent) `[nq, head_dim/2]` interleaved-pair RoPE table,
-/// query-flat-index-major (matching `na3d_scores.wgsl`'s own query decode:
+/// query-flat-index-major (matching `na3d_attn.wgsl`'s own query decode:
 /// `qi = (qt*h+qh)*w+qw`) - the per-axis absolute-RoPE construction
 /// `rope_math.rot_abs_axis_impl`/`_apply_nested_full_volume_rope` compute,
 /// with `num_tiles` collapsed to its mathematically-equivalent direct form
@@ -531,8 +523,8 @@ fn upload_attn(gpu: &Gpu, w: &Tensors, prefix: &str, head_dim: u32) -> NaAttnWei
 
 /// One windowed self-attention call: QKV projections, per-head RMSNorm
 /// (`q_norm`'s weight already carries the `scale` fold), shared
-/// interleaved-pair RoPE (identical across heads), the windowed
-/// scores/softmax/apply trio, output projection. `x` is `[nq, dim]`
+/// interleaved-pair RoPE (identical across heads), the fused windowed
+/// attention (`na3d_attn`), output projection. `x` is `[nq, dim]`
 /// channels-last (query-flat-index-major); returns the same shape.
 #[allow(clippy::too_many_arguments)]
 fn na_attention(
@@ -575,13 +567,8 @@ fn na_attention(
     s.push(gpu.step(K_ROPE_INTERLEAVE_TABLE, &[&q, cos, sin, &q_rot], &[nq, heads, head_dim, half], nq * heads * half));
     s.push(gpu.step(K_ROPE_INTERLEAVE_TABLE, &[&k, cos, sin, &k_rot], &[nq, heads, head_dim, half], nq * heads * half));
 
-    let window = kt * kh * kw;
-    let scores = gpu.storage((heads * nq * window) as u64);
-    s.push(gpu.step(K_NA3D_SCORES, &[&q_rot, &k_rot, &scores], &[t, h, wd, heads, head_dim, kt, kh, kw], heads * nq * window));
-    let probs = gpu.storage((heads * nq * window) as u64);
-    s.push(gpu.step(K_ATTN_SOFTMAX_CROSS, &[&scores, &probs], &[1, heads, nq, window], heads * nq));
     let ctx = gpu.storage(dimtot as u64);
-    s.push(gpu.step(K_NA3D_APPLY, &[&probs, &v, &ctx], &[t, h, wd, heads, head_dim, kt, kh, kw], nq * heads * head_dim));
+    s.push(gpu.step(K_NA3D_ATTN, &[&q_rot, &k_rot, &v, &ctx], &[t, h, wd, heads, head_dim, kt, kh, kw], nq * heads));
 
     let out = gpu.storage(dimtot as u64);
     linear_step(gpu, s, &ctx, &w.wo, Some(&w.bo), &out, nq, dim, dim);
@@ -1088,24 +1075,20 @@ pub fn output_shape(cfg: &NaDecoderConfig, lat_t: u32, lh: u32, lw: u32) -> (u32
     (t, h * cfg.patch_size, w * cfg.patch_size)
 }
 
-/// Bytes in the LARGEST single attention `scores`/`probs` buffer [`decode`]
-/// allocates, and the stage that allocates it.
-///
-/// [`na_attention`] materialises a dense `[heads, nq, window]` f32 score
-/// volume per attention call, so this grows with the OUTPUT volume, not the
-/// latent: stage 5 runs at the full `1 + 8*(lat_t-1)` x `lh*8` x `lw*8`
-/// context with an `11x11x11` = 1331-wide window, which is where every
-/// realistic clip's ceiling comes from. Reported as a number rather than
-/// discovered as a driver allocation failure, because a decode that dies
-/// inside wgpu tells a user nothing about which knob moves it.
-pub fn max_scores_bytes(cfg: &NaDecoderConfig, lat_t: u32, lh: u32, lw: u32) -> (u64, usize) {
+/// Bytes in the LARGEST single buffer [`decode`] allocates, and the stage
+/// that allocates it: the SwiGLU's `[nq, hidden]` gate, up and product
+/// buffers, `hidden = 4*dim` rounded (every other per-stage buffer is
+/// `[nq, dim]`, or an upsample projection no wider than `hidden`). The fused
+/// neighborhood attention ([`na_attention`]) keeps no score buffer, so this
+/// grows with the volume times the width, not times the attention window.
+/// Reported as a number rather than discovered as a driver allocation
+/// failure, because a decode that dies inside wgpu tells a user nothing
+/// about which knob moves it.
+pub fn max_buffer_bytes(cfg: &NaDecoderConfig, lat_t: u32, lh: u32, lw: u32) -> (u64, usize) {
     let vols = stage_volumes(cfg, lat_t, lh, lw);
     let mut worst = (0u64, 0usize);
     for (stage, &(t, h, w)) in vols.iter().enumerate() {
-        let kernel = if stage == 4 { cfg.stage5_kernel } else { cfg.stage_kernels[stage] };
-        let heads = cfg.stage_channels[stage] / cfg.head_dim;
-        let window = kernel[0] as u64 * kernel[1] as u64 * kernel[2] as u64;
-        let bytes = heads as u64 * t as u64 * h as u64 * w as u64 * window * 4;
+        let bytes = t as u64 * h as u64 * w as u64 * NaDecoderConfig::hidden(cfg.stage_channels[stage]) as u64 * 4;
         if bytes > worst.0 {
             worst = (bytes, stage);
         }
@@ -1123,12 +1106,12 @@ pub fn max_scores_bytes(cfg: &NaDecoderConfig, lat_t: u32, lh: u32, lw: u32) -> 
 ///   `(3,7,7)` puts a hard floor on the LATENT (`lat_t>=3`, `lh,lw>=7`);
 ///   stage 5's `(11,11,11)` puts one on the context, which for the real
 ///   config the latent floor already satisfies.
-/// * **Score-volume ceiling.** [`max_scores_bytes`] against the device's own
-///   `max_storage_binding_bytes`. Upstream clears this with
-///   `diffusion_tiling.py`'s overlapping-tile trapezoidal blend, which this
-///   module does not implement (see its header) - so above the ceiling the
-///   honest answer is a named refusal, not a driver-level allocation
-///   failure or a silently wrong decode.
+/// * **Buffer ceiling.** [`max_buffer_bytes`] against the device's own
+///   `max_storage_binding_bytes`. Upstream decodes past any such limit with
+///   `diffusion_tiling.py`'s overlapping-tile blend, which this module does
+///   not implement - so above the ceiling the honest answer is a named
+///   refusal, not a driver-level allocation failure or a silently wrong
+///   decode.
 pub fn check_decode(gpu: &Gpu, cfg: &NaDecoderConfig, lat_t: u32, lh: u32, lw: u32) -> Result<(), String> {
     let vols = stage_volumes(cfg, lat_t, lh, lw);
     for (stage, &(t, h, w)) in vols.iter().enumerate() {
@@ -1145,13 +1128,13 @@ pub fn check_decode(gpu: &Gpu, cfg: &NaDecoderConfig, lat_t: u32, lh: u32, lw: u
             ));
         }
     }
-    let (bytes, stage) = max_scores_bytes(cfg, lat_t, lh, lw);
+    let (bytes, stage) = max_buffer_bytes(cfg, lat_t, lh, lw);
     let cap = gpu.max_storage_binding_bytes();
     if bytes > cap {
         let (frames, h, w) = output_shape(cfg, lat_t, lh, lw);
         let what = if stage == 4 { "stage 5".to_string() } else { format!("stage {stage}") };
         return Err(format!(
-            "ltxv NA video vae decode: {frames} frames at {w}x{h} needs a {} MiB attention-score buffer in {what}, \
+            "ltxv NA video vae decode: {frames} frames at {w}x{h} needs a {} MiB activation buffer in {what}, \
              over this device's {} MiB single-binding limit. This decoder runs the full volume in one pass - \
              upstream's overlapping-tile chunked decode (diffusion_tiling.py) is not ported, so there is no tiled \
              fallback here the way crate::vae3d has one. Decode through the conv decoder release \
@@ -1178,7 +1161,7 @@ pub fn check_decode(gpu: &Gpu, cfg: &NaDecoderConfig, lat_t: u32, lh: u32, lw: u
 /// decode seed, not as a sampling trajectory.
 ///
 /// Refuses, by name, any latent [`check_decode`] cannot run - both the
-/// window floor and the score-buffer ceiling.
+/// window floor and the buffer ceiling.
 pub fn decode(gpu: &Gpu, weights: &Tensors, cfg: &NaDecoderConfig, latent: &[f32], lat_t: u32, lh: u32, lw: u32, seed: u64) -> Result<Vec<f32>, String> {
     check_decode(gpu, cfg, lat_t, lh, lw)?;
     let want = (cfg.in_channels * lat_t * lh * lw) as usize;
@@ -1232,26 +1215,21 @@ mod tests {
 
     /// Neither structural limit on this decoder may present as a driver
     /// crash or a wrong picture: a clip below stage 0's own `(3,7,7)` window
-    /// and a clip whose stage-5 score volume exceeds the device binding
-    /// limit both have to be named, with the reason and the way out.
+    /// and a clip whose largest buffer exceeds the device binding limit both
+    /// have to be named, with the reason and the way out.
     ///
-    /// The ceiling is real, not hypothetical: stage 5 materialises a dense
-    /// `[heads, nq, 11*11*11]` f32 score volume over the FULL output
-    /// context, so it grows with the clip, and a 512x512 17-frame clip
-    /// already needs several GiB in one binding.
+    /// The largest buffer is stage 5's SwiGLU over the full output context.
+    /// With the attention fused there is no `[heads, nq, 11*11*11]` score
+    /// volume (over 4 GiB at 512x512), so a 17-frame 512x512 clip fits the
+    /// 2 GiB single binding a Tesla P40 reports.
     #[test]
     fn the_decode_volume_limits_are_named_numbers_not_crashes() {
         let cfg = NaDecoderConfig::ltx25();
-        // Stage 5 dominates at every real shape: 1331-wide window over the
-        // full context, against 147/75 over much smaller volumes earlier.
-        let (bytes, stage) = max_scores_bytes(&cfg, 3, 7, 7);
+        let (bytes, stage) = max_buffer_bytes(&cfg, 3, 7, 7);
         assert_eq!(stage, 4, "stage 5 is the ceiling");
-        assert_eq!(bytes, 4 * 17 * 56 * 56 * 1331 * 4, "smallest legal clip's score buffer");
-        // A realistic 512x512 clip is an order of magnitude past a 4 GiB
-        // single-binding limit - the reason the tiled decode upstream has
-        // (diffusion_tiling.py) is a tracked gap and not an optimisation.
-        let (big, _) = max_scores_bytes(&cfg, 3, 16, 16);
-        assert!(big > 4 * 1024 * 1024 * 1024, "512x512 needs {big} bytes");
+        assert_eq!(bytes, 17 * 56 * 56 * 1024 * 4, "smallest legal clip's stage-5 SwiGLU buffer");
+        let (big, _) = max_buffer_bytes(&cfg, 3, 16, 16);
+        assert!(big < 2047 * 1024 * 1024, "512x512 needs {big} bytes");
     }
 
     #[test]
@@ -1366,6 +1344,51 @@ mod tests {
         let half = kernel / 2;
         let lo = length - kernel;
         (query - half).clamp(0, lo)
+    }
+
+    /// The fused neighborhood attention is the windowed softmax attention,
+    /// window for window: against a host f64 oracle over every axis's
+    /// inward-shifted window, at volumes where each axis shifts at both
+    /// borders, with an odd and an even kernel and two head widths.
+    #[test]
+    fn fused_neighborhood_attention_matches_the_host_oracle() {
+        let gpu = Gpu::open(Some("cpu"), &KERNELS);
+        let mut rng = data::rng::Lcg::new(0x0a77_3d01); // seed: host-oracle parity of the fused NA kernel
+        for &((t, h, w), (kt, kh, kw), heads, hd) in &[((5u32, 9u32, 7u32), (3u32, 7u32, 5u32), 2u32, 64u32), ((4, 6, 6), (2, 4, 3), 3, 16)] {
+            let nq = (t * h * w) as usize;
+            let len = nq * (heads * hd) as usize;
+            let mut randn = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.unit() * 2.0 - 1.0).collect() };
+            let (q, k, v) = (randn(len), randn(len), randn(len));
+            let up = |d: &[f32]| {
+                let b = gpu.storage(d.len() as u64);
+                gpu.write_f32(&b, d);
+                b
+            };
+            let (qb, kb, vb) = (up(&q), up(&k), up(&v));
+            let out = gpu.storage(len as u64);
+            gpu.submit(&[], &[gpu.step(K_NA3D_ATTN, &[&qb, &kb, &vb, &out], &[t, h, w, heads, hd, kt, kh, kw], nq as u32 * heads)]);
+            let got = gpu.read(&out, len);
+
+            let (heads, hd) = (heads as usize, hd as usize);
+            let mut worst = 0f64;
+            for qi in 0..nq {
+                let (qt, qh, qw) = ((qi / (h * w) as usize) as i32, ((qi / w as usize) % h as usize) as i32, (qi % w as usize) as i32);
+                let (st, sh, sw) = (window_start(t as i32, kt as i32, qt), window_start(h as i32, kh as i32, qh), window_start(w as i32, kw as i32, qw));
+                let keys: Vec<usize> = (0..kt as i32).flat_map(|dt| (0..kh as i32).flat_map(move |dh| (0..kw as i32).map(move |dw| (((st + dt) * h as i32 + sh + dh) * w as i32 + sw + dw) as usize))).collect();
+                for head in 0..heads {
+                    let at = |x: &[f32], i: usize, d: usize| x[(i * heads + head) * hd + d] as f64;
+                    let scores: Vec<f64> = keys.iter().map(|&ki| (0..hd).map(|d| at(&q, qi, d) * at(&k, ki, d)).sum()).collect();
+                    let m = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let e: Vec<f64> = scores.iter().map(|s| (s - m).exp()).collect();
+                    let z: f64 = e.iter().sum();
+                    for d in 0..hd {
+                        let want = keys.iter().zip(&e).map(|(&ki, p)| p * at(&v, ki, d)).sum::<f64>() / z;
+                        worst = worst.max((got[(qi * heads + head) * hd + d] as f64 - want).abs());
+                    }
+                }
+            }
+            assert!(worst < 1e-5, "fused NA attention vs host oracle: max_abs {worst:.3e} at ({t},{h},{w}) kernel ({kt},{kh},{kw})");
+        }
     }
 
     #[test]

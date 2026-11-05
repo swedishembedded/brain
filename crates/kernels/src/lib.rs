@@ -945,10 +945,8 @@ pub const MVS_UPSAMPLE: &str = concat!(
     include_str!("../wgsl/lib/mvs.wgsl"),
     include_str!("../wgsl/mvs_upsample.wgsl"),
 );
-/// `wgsl/na3d_apply.wgsl`
-pub const NA3D_APPLY: &str = include_str!("../wgsl/na3d_apply.wgsl");
-/// `wgsl/na3d_scores.wgsl`
-pub const NA3D_SCORES: &str = include_str!("../wgsl/na3d_scores.wgsl");
+/// `wgsl/na3d_attn.wgsl`
+pub const NA3D_ATTN: &str = include_str!("../wgsl/na3d_attn.wgsl");
 /// `wgsl/nchw_nlc.wgsl`
 pub const NCHW_NLC: &str = include_str!("../wgsl/nchw_nlc.wgsl");
 /// `wgsl/nchw_nlc_at.wgsl`
@@ -1851,8 +1849,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mvs_quad", MVS_QUAD),
     ("mvs_rays", MVS_RAYS),
     ("mvs_upsample", MVS_UPSAMPLE),
-    ("na3d_apply", NA3D_APPLY),
-    ("na3d_scores", NA3D_SCORES),
+    ("na3d_attn", NA3D_ATTN),
     ("nchw_nlc", NCHW_NLC),
     ("nchw_nlc_at", NCHW_NLC_AT),
     ("neuro_elig", NEURO_ELIG),

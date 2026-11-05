@@ -1682,29 +1682,17 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (t, h, w, cout, p1, p2, p3) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(6)?);
             f(0, 8 * t * h * w * cout * p1 * p2 * p3)
         }
-        // 3D neighborhood-attention (NATTEN-style windowed self-attention)
-        // scores: params [t,h,w,heads,head_dim,kt,kh,kw]. One thread per
-        // (head,query,window-slot), serial hd-deep dot product. q/k are the
-        // SAME [t*h*w,heads,head_dim] volume (self-attention).
-        "na3d_scores" => {
+        // 3D neighborhood attention (NATTEN-style windowed self-attention),
+        // fused: params [t,h,w,heads,head_dim,kt,kh,kw]. One thread per
+        // (query,head) streams its window once: a q.k dot and a p.v update
+        // per window slot. q/k/v are the SAME [t*h*w,heads,head_dim] volume;
+        // the ideal traffic reads each once and writes the output once.
+        "na3d_attn" => {
             let (t, h, w, heads, hd, kt, kh, kw) = (
                 p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(6)?, p(7)?,
             );
-            let nq = t * h * w;
-            let window = kt * kh * kw;
-            let total = heads * nq * window;
-            f(2 * hd * total, 4 * (2 * nq * heads * hd + total))
-        }
-        // na3d_scores' twin: probs*V apply. params identical; one thread per
-        // (query,head,dim), serial window-deep reduction.
-        "na3d_apply" => {
-            let (t, h, w, heads, hd, kt, kh, kw) = (
-                p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(6)?, p(7)?,
-            );
-            let nq = t * h * w;
-            let window = kt * kh * kw;
-            let total_out = nq * heads * hd;
-            f(2 * window * total_out, 4 * (heads * nq * window + 2 * nq * heads * hd))
+            let pairs = t * h * w * heads * kt * kh * kw;
+            f(4 * hd * pairs, 4 * (4 * t * h * w * heads * hd))
         }
         // NLC -> NCHW transpose with a fused per-channel bias (64x64 tiled,
         // the conv-lowering epilogue). Params [total(unused), c, l]; x/y are
@@ -2129,13 +2117,12 @@ mod tests {
         assert_eq!(cost("conv3d_dw", &p3d, 1).flops, 6);
         assert_eq!(cost("conv3d_dw", &p3d, 1).bytes, 40);
 
-        // na3d_scores/apply [t=2,h=1,w=1,heads=1,head_dim=2,kt=2,kh=1,kw=1]:
-        // nq=2, window=2, total=4 -> 2*hd*total = 16 flops each.
+        // na3d_attn [t=2,h=1,w=1,heads=1,head_dim=2,kt=2,kh=1,kw=1]:
+        // 4 query/key pairs -> 4*hd*pairs = 32 flops; q, k, v and out of
+        // 2x1x2 floats each -> 64 bytes.
         let pna = [2u32, 1, 1, 1, 2, 2, 1, 1];
-        assert_eq!(cost("na3d_scores", &pna, 4).flops, 16);
-        assert_eq!(cost("na3d_scores", &pna, 4).bytes, 48);
-        assert_eq!(cost("na3d_apply", &pna, 4).flops, 16);
-        assert_eq!(cost("na3d_apply", &pna, 4).bytes, 48);
+        assert_eq!(cost("na3d_attn", &pna, 2).flops, 32);
+        assert_eq!(cost("na3d_attn", &pna, 2).bytes, 64);
 
         // rope [seq_len=2,n_heads=1,head_dim=4,row_stride=4,base_off=0]:
         // 5*rows*h*hd = 40 flops, 8*rows*h*hd = 64 bytes - the rope_base
@@ -2206,7 +2193,7 @@ mod tests {
         assert_eq!(cost("kv_k_headt", &[4, 8, 16, 0], 32).bytes, 256);
 
         for k in [
-            "na3d_scores", "na3d_apply", "conv3d", "conv3d_dx", "conv3d_dw", "im2col3d_at",
+            "na3d_attn", "conv3d", "conv3d_dx", "conv3d_dw", "im2col3d_at",
             "space_to_depth3d", "depth_to_space3d", "pixel_shuffle3d_cl", "l2norm_scale",
             "l2norm_scale2d",
             "nlc_bias_nchw", "add_chan_bcast", "rope", "rope_neox", "rope_train",

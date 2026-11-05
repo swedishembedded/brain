@@ -394,7 +394,7 @@ this port:
 - [x] **Both real video-VAE releases load, and generation decodes through
       whichever one the user downloaded** (`crate::import::{VideoVaeArch,
       VideoVae, detect_video_vae_arch}`, `na_decoder::{decode, output_shape,
-      check_decode, max_scores_bytes}`, `pipeline::decode_video`) - the
+      check_decode, max_buffer_bytes}`, `pipeline::decode_video`) - the
       official Lightricks repo ships the video VAE as TWO files and only the
       `-conv-` one was usable, which a real user hit running
       `examples/videogen/images_to_video.sh` against a complete, correctly
@@ -420,26 +420,15 @@ this port:
       golden fixture's own latent (17 frames at 224x224, every pixel finite,
       range [-1.198, 1.198], mean -0.297), on top of M8b's existing cosine
       1.000000000 stage-1-4 and stage-5 taps.
-      **The remaining gap is a VOLUME ceiling, not a correctness one.**
-      `na_attention` materialises a dense `[heads, nq, window]` f32 score
-      buffer per attention call, and stage 5's window is `11x11x11` = 1331
-      over the FULL output context, so the requirement grows with the clip:
-      1082 MiB for the smallest clip this decoder can run at all (a `(3,7,7)`
-      latent, i.e. 17 frames at 224x224 - stage 0's own `(3,7,7)` window is a
-      hard floor) and 5928 MiB for 512x512, against a MEASURED 2047 MiB
-      `max_storage_buffer_binding_size` on a Tesla P40. So on that card the
-      NA decoder is usable to roughly 17 frames at 288x288 and refused above
-      it, by name, with the number and the way out (`check_decode`) rather
-      than by a driver allocation failure or a plausible-looking wrong
-      picture. Closing that needs upstream's `diffusion_tiling.py`
-      overlapping-tile trapezoidal blend ported - the same already-tracked
-      M8b gap, now with a concrete number attached - and, independently, a
-      scores-free fused NA attention kernel would remove the buffer rather
-      than tile around it (`na3d_scores`/`na3d_apply` are a deliberate
-      gather-then-dense pair; a flash-style fusion is the standard fix and
-      this repo already has that shape in `block.rs`). Until one of those
-      lands, `examples/videogen`'s resolver preferring the `-conv-` file is
-      CORRECT for realistic resolutions, not a leftover workaround.
+      **The remaining limit is a VOLUME ceiling, not a correctness one.**
+      The neighborhood attention is fused (`na3d_attn.wgsl`: scores,
+      softmax and apply with an online softmax, no `[heads, nq, window]`
+      score buffer), so the largest single buffer is stage 5's SwiGLU over
+      the full output context (`max_buffer_bytes`): about 1.1 GiB for 17
+      frames at 512x512, within the 2047 MiB single binding a Tesla P40
+      reports. Above the ceiling `check_decode` refuses by name; going past
+      it needs upstream's `diffusion_tiling.py` overlapping-tile blend
+      ported, which is not.
 - [x] **DFR geometry + a smoke-level multi-stage pipeline** (`crates/ltxv/src/
       dfr.rs`, `pipeline::generate_dfr`, `brain ltxv dfr`, plus a `dfr`
       `capability::Action` in `caps.rs`/`resident_ltxv.rs` alongside `t2v` -
