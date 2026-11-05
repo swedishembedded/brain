@@ -138,7 +138,7 @@ fn base_opts() -> GenOpts {
         // `data::rng::Rng` seeded from `GenOpts::seed`, so `eta = 1` is
         // exactly as run-to-run deterministic as `eta = 0`.
         eta: 1.0,
-        guidance: 1.0,
+        guidance: ltxv::guidance::Guidance::cfg(1.0),
         dit_config: "ltx25_22b".into(),
         device: Some("gpu".into()),
         ..GenOpts::default()

@@ -28,7 +28,31 @@
 use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, LongOpts, MaskedOpts, Paths, UpscaleOpts};
 use ltxv::spec::LtxvSpec;
 
-const HELP: &str = r#"brain ltxv t2v - LTX-2.5 text to video (M4 smoke test: real VAE + tiny random-weight DiT, no real text encoder yet)
+/// The guidance flags every generating subcommand takes ([`set_guidance`]).
+macro_rules! guidance_help {
+    () => {
+        "  --guidance-preset <P>     none (one conditional forward per step - the
+                            distilled checkpoint; the default) or reference (the
+                            reference pipeline's non-distilled guidance: CFG 3
+                            video / 7 audio, STG 1 on block 28, rescale 0.7,
+                            modality guidance 3). The flags below override it.
+  --guidance <G>            classifier-free guidance on both streams (1 = off)
+  --audio-guidance <G>      classifier-free guidance on the audio stream
+  --stg <S>                 spatio-temporal guidance: self-attention bypassed in
+                            --stg-blocks (0 = off)
+  --audio-stg <S>           spatio-temporal guidance on the audio stream
+  --stg-blocks <L>          comma-separated blocks STG perturbs, e.g. 28
+  --rescale <R>             scale the guided prediction back toward the
+                            conditional one's standard deviation, 0..1
+  --audio-rescale <R>       rescale on the audio stream
+  --modality-guidance <M>   guidance against the pass with audio<->video
+                            cross-attention cut, video stream (1 = off)
+  --audio-modality-guidance <M>  the same for the audio stream
+"
+    };
+}
+
+const HELP: &str = concat!(r#"brain ltxv t2v - LTX-2.5 text to video (M4 smoke test: real VAE + tiny random-weight DiT, no real text encoder yet)
 
   brain ltxv t2v --prompt <text> --output-path <out.mp4> [options]
 
@@ -50,9 +74,7 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
                             Long-form clips)
   --width <W> --height <H>  pixels, multiples of 32 (default 64x64)
   --steps <N>                denoise steps (default 4)
-  --guidance <G>             classifier-free guidance (default 1.0; <= 1.0
-                             runs ONE forward per step instead of two)
-  --seed <S>                 initial-noise/weight/context seed (default: drawn at random and printed)
+"#, guidance_help!(), r#"  --seed <S>                 initial-noise/weight/context seed (default: drawn at random and printed)
   --fps <N>                  frame rate written into the container (default 8)
   --base-shift <F>           LTX2Scheduler shift anchor at 1024 tokens (0.95)
   --max-shift <F>            LTX2Scheduler shift anchor at 4096 tokens (2.05)
@@ -128,7 +150,7 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
 
 Placement:
   On a box with two or more schedulable cards (see --device) and
-  --guidance > 1.0, the conditional and unconditional forwards of every
+  a CFG scale other than 1, the conditional and unconditional forwards of every
   denoise step run CONCURRENTLY, one per card, and the text encoder runs on
   the card the conditional forward will not use. The result is bit-identical
   to running them one after another (the two forwards are independent, so no
@@ -298,9 +320,9 @@ Subcommands:
   brain ltxv t2v --help       text to video (this command)
   brain ltxv upscale --help   re-render a finished clip at 2x
   brain ltxv v2v --help       regenerate a masked region of an existing clip
-  brain ltxv dfr --help       DFR (Diffusion Fidelity Rendering) smoke test"#;
+  brain ltxv dfr --help       DFR (Diffusion Fidelity Rendering) smoke test"#);
 
-const UPSCALE_HELP: &str = r#"brain ltxv upscale - re-render a finished clip at twice its resolution
+const UPSCALE_HELP: &str = concat!(r#"brain ltxv upscale - re-render a finished clip at twice its resolution
 
   brain ltxv upscale --input <clip.mp4> --output-path <out.mp4> [options]
 
@@ -337,8 +359,7 @@ Refinement:
                              the same span in bigger hops - the schedule's
                              sigma values are baked in by distillation and
                              are not interpolable.
-  --guidance <G>             classifier-free guidance (default 1.0)
-  --seed <S>                 refinement noise seed (default: drawn at random and printed)
+"#, guidance_help!(), r#"  --seed <S>                 refinement noise seed (default: drawn at random and printed)
   --context-frames <N>       how much of the previous refinement pass the
                              next one carries, in pixel frames, must be
                              1 + 8k (default 57 = 8 latent frames, the
@@ -401,9 +422,9 @@ Adapters:
                              ComfyUI's strength_model)
 
 Devices:
-  --device <cpu|gpu>         DiT + VAE + upscaler (default: BRAIN_DEVICE)"#;
+  --device <cpu|gpu>         DiT + VAE + upscaler (default: BRAIN_DEVICE)"#);
 
-const DFR_HELP: &str = r#"brain ltxv dfr - LTX-2.5 DFR (Diffusion Fidelity Rendering) smoke test
+const DFR_HELP: &str = concat!(r#"brain ltxv dfr - LTX-2.5 DFR (Diffusion Fidelity Rendering) smoke test
 
   brain ltxv dfr --prompt <text> --output-path <out.mp4> [options]
 
@@ -425,8 +446,7 @@ resolution - stage 1 halves it, so both must be a multiple of 64):
   --frames <N>                video frames, must be 1 + 8k (default 9)
   --width <W> --height <H>    pixels, multiples of 64 (default 64x64)
   --steps <N>                  denoise steps per stage/tile (default 4)
-  --guidance <G>               classifier-free guidance (default 1.0)
-  --seed <S>                   initial-noise/weight/context seed (default: drawn at random and printed)
+"#, guidance_help!(), r#"  --seed <S>                   initial-noise/weight/context seed (default: drawn at random and printed)
   --fps <N>                    stage-1 frame rate; the written fps is this
                                times 2^rounds (default 8)
   --base-shift <F>             LTX2Scheduler shift anchor at 1024 tokens (0.95)
@@ -452,7 +472,7 @@ Adapters:
                              ComfyUI's strength_model)
 
 Devices:
-  --device <cpu|gpu>            DiT + VAE + upscalers (default: BRAIN_DEVICE)"#;
+  --device <cpu|gpu>            DiT + VAE + upscalers (default: BRAIN_DEVICE)"#);
 
 pub fn run_ltxv(args: &[String]) {
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
@@ -491,7 +511,7 @@ pub fn run_ltxv(args: &[String]) {
     }
 }
 
-const V2V_HELP: &str = r#"brain ltxv v2v - regenerate a masked region of an existing clip
+const V2V_HELP: &str = concat!(r#"brain ltxv v2v - regenerate a masked region of an existing clip
 
 Usage:
   brain ltxv v2v --input <clip.mp4> --mask <dir> --prompt <text> --output-path <out.mp4>
@@ -540,9 +560,7 @@ Sampling:
   --steps <N>               denoise steps (default 4; IGNORED for
                             --dit-config ltx25_22b, whose distilled schedule
                             has a fixed shape)
-  --guidance <G>            classifier-free guidance (default 1.0; <= 1.0
-                            skips the unconditional forward entirely)
-  --seed <S>                noise seed (default: drawn at random and printed)
+"#, guidance_help!(), r#"  --seed <S>                noise seed (default: drawn at random and printed)
   --fps <N>                 frame rate for the output. Default: whatever
                             ffprobe reports for --input
   --dit-config <name>       "tiny" (default, fresh random weights - a wiring
@@ -576,7 +594,7 @@ Adapters:
                              ComfyUI's strength_model)
 
 Placement:
-  --device <cpu|gpu>        DiT + VAE (default: the ambient BRAIN_DEVICE)"#;
+  --device <cpu|gpu>        DiT + VAE (default: the ambient BRAIN_DEVICE)"#);
 
 /// Resolve `dit`/`vae`/`audio_vae`/`text_encoder`/`tokenizer` through the
 /// model-store resolver (`brain_modelstore::resolve::resolve` +
@@ -595,7 +613,7 @@ fn resolve_ltxv(overrides: &std::collections::BTreeMap<String, String>, spatial_
 fn base_params(o: &GenOpts) -> serde_json::Value {
     serde_json::json!({
         "frames": o.frames, "width": o.width, "height": o.height, "steps": o.steps,
-        "guidance": o.guidance, "fps": o.fps,
+        "guidance": format!("{:?}", o.guidance), "fps": o.fps,
     })
 }
 
@@ -637,7 +655,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--height" => o.height = num(i, "--height")?,
             "--steps" => o.steps = num(i, "--steps")?,
             "--fps" => o.fps = num(i, "--fps")?,
-            "--guidance" => o.guidance = flt(i, "--guidance")?,
+            f if guidance_flag(f) => set_guidance(&mut o.guidance, f, need(i)?)?,
             "--base-shift" => o.base_shift = dbl(i, "--base-shift")?,
             "--max-shift" => o.max_shift = dbl(i, "--max-shift")?,
             "--terminal" => o.terminal = dbl(i, "--terminal")?,
@@ -750,7 +768,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     } else {
         String::new()
     };
-    let forwards = if o.guidance > 1.0 { 2 } else { 1 };
+    let forwards = o.guidance.forwards_per_step(o.audio);
     // Not spelled out here: `av_arm_label` is the same pure function
     // `ltxv::pipeline::build_denoiser` routes on, so this line and the object
     // the run actually denoises with cannot disagree about which arm ran.
@@ -797,7 +815,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
         None => String::new(),
     };
     eprintln!(
-        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}{img_desc}{mid_desc}{stage_desc}{window_desc}{audio_desc}",
+        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {:?}, seed {}{img_desc}{mid_desc}{stage_desc}{window_desc}{audio_desc}",
         o.frames, o.width, o.height, o.eta, o.guidance, o.seed
     );
     if scenes.len() > 1 {
@@ -887,7 +905,6 @@ fn upscale(args: &[String]) -> Result<(), String> {
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
         let num = |i: usize, what: &str| -> Result<usize, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
-        let flt = |i: usize, what: &str| -> Result<f32, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
         match args[i].as_str() {
             "--prompt" => {
                 prompt = Some(need(i)?.clone());
@@ -901,7 +918,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
             "--factor" => o.factor = num(i, "--factor")?,
             "--refine-steps" => o.refine_steps = num(i, "--refine-steps")?,
             "--context-frames" => context_frames = num(i, "--context-frames")?,
-            "--guidance" => o.base.guidance = flt(i, "--guidance")?,
+            f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
             "--fps" => fps = Some(num(i, "--fps")?),
             "--dit-config" => o.base.dit_config = need(i)?.clone(),
             "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
@@ -955,7 +972,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
         eprintln!("ltxv upscale: no --prompt, so the refinement pass denoises against an empty context - pass the clip's original prompt for better detail");
     }
     eprintln!(
-        "ltxv upscale ({dit_desc}, real VAE + real x2 latent spatial upscaler, {ctx_desc}): {} frames, {w}x{h} -> {}x{} at {fps} fps, {} refinement steps, guidance {}, seed {}{plan_desc}",
+        "ltxv upscale ({dit_desc}, real VAE + real x2 latent spatial upscaler, {ctx_desc}): {} frames, {w}x{h} -> {}x{} at {fps} fps, {} refinement steps, guidance {:?}, seed {}{plan_desc}",
         clip.frames.len(),
         w as usize * o.factor,
         h as usize * o.factor,
@@ -1032,7 +1049,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
             "--output-path" | "--out" => out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string()),
             "--strength" => o.strength = flt(i, "--strength")?,
             "--steps" => o.base.steps = num(i, "--steps")?,
-            "--guidance" => o.base.guidance = flt(i, "--guidance")?,
+            f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
             "--fps" => fps = Some(num(i, "--fps")?),
             "--dit-config" => o.base.dit_config = need(i)?.clone(),
             "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
@@ -1065,7 +1082,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
     let ctx_desc = if paths.text_encoder.is_some() { "real Gemma-4 text encoder" } else { "stub text context (no real encoder)" };
     let dit_desc = if o.base.dit_config == "tiny" { "tiny random-weight DiT" } else { "REAL checkpoint DiT (int8 compute)" };
     eprintln!(
-        "ltxv v2v ({dit_desc}, real VAE, {ctx_desc}): {} frames, {w}x{h} at {fps} fps, mask {}, strength {}, guidance {}, seed {}",
+        "ltxv v2v ({dit_desc}, real VAE, {ctx_desc}): {} frames, {w}x{h} at {fps} fps, mask {}, strength {}, guidance {:?}, seed {}",
         clip.frames.len(),
         o.mask_dir,
         o.strength,
@@ -1124,7 +1141,6 @@ fn dfr(args: &[String]) -> Result<(), String> {
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
         let num = |i: usize, what: &str| -> Result<usize, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
-        let flt = |i: usize, what: &str| -> Result<f32, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
         let dbl = |i: usize, what: &str| -> Result<f64, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
         match args[i].as_str() {
             "--prompt" => {
@@ -1138,7 +1154,7 @@ fn dfr(args: &[String]) -> Result<(), String> {
             "--height" => o.base.height = num(i, "--height")?,
             "--steps" => o.base.steps = num(i, "--steps")?,
             "--fps" => o.base.fps = num(i, "--fps")?,
-            "--guidance" => o.base.guidance = flt(i, "--guidance")?,
+            f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
             "--base-shift" => o.base.base_shift = dbl(i, "--base-shift")?,
             "--max-shift" => o.base.max_shift = dbl(i, "--max-shift")?,
             "--terminal" => o.base.terminal = dbl(i, "--terminal")?,
@@ -1216,6 +1232,24 @@ fn dfr(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `flag` is one of the guidance flags [`set_guidance`] parses.
+fn guidance_flag(flag: &str) -> bool {
+    flag == "--guidance-preset" || GUIDANCE_TERMS.contains(&flag.trim_start_matches("--").replace('-', "_").as_str())
+}
+
+/// The terms [`ltxv::guidance::Guidance::set`] names, as their flags spell them with `_`.
+const GUIDANCE_TERMS: [&str; 9] = ["guidance", "audio_guidance", "stg", "audio_stg", "stg_blocks", "rescale", "audio_rescale", "modality_guidance", "audio_modality_guidance"];
+
+/// Apply one guidance flag. `--guidance-preset` replaces the whole guidance,
+/// so it must come before the flags that override its terms.
+fn set_guidance(g: &mut ltxv::guidance::Guidance, flag: &str, value: &str) -> Result<(), String> {
+    if flag == "--guidance-preset" {
+        *g = ltxv::guidance::Guidance::preset(value)?;
+        return Ok(());
+    }
+    g.set(&flag.trim_start_matches("--").replace('-', "_"), value).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use brain_modelstore::resolve::ArchSpec;
@@ -1252,7 +1286,7 @@ mod tests {
             "--context-frames",
         ] {
             assert!(super::HELP.contains(flag), "{flag} is parsed but not in --help");
-            assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in --help but not parsed");
+            assert!(src.contains(&format!("\"{flag}\"")) || super::guidance_flag(flag), "{flag} is in --help but not parsed");
         }
         // `--vae`/`--dit`/`--text-encoder` are the model-store resolver's own
         // role-override flags now (`crate::resolver_cli::extract_role_
@@ -1307,7 +1341,7 @@ mod tests {
         let src = include_str!("ltxv_cli.rs");
         for flag in ["--prompt", "--input", "--mask", "--output-path", "--strength", "--steps", "--guidance", "--seed", "--fps", "--dit-config", "--device"] {
             assert!(super::V2V_HELP.contains(flag), "{flag} is parsed but not in v2v --help");
-            assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in v2v --help but not parsed");
+            assert!(src.contains(&format!("\"{flag}\"")) || super::guidance_flag(flag), "{flag} is in v2v --help but not parsed");
         }
         // See `every_flag_the_parser_accepts_is_documented`'s own comment:
         // these three are the resolver's role-override flags, not literal

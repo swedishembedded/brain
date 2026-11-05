@@ -117,7 +117,7 @@ pub struct Key {
     pub cross_attention_dim: usize,
     pub connector_registers: u32,
     pub use_connector: bool,
-    /// Whether the unconditional branch was really encoded (`guidance > 1.0`)
+    /// Whether the unconditional branch was really encoded (some stream guides against the negative prompt)
     /// or is the all-zero stand-in.
     pub uncond_encoded: bool,
     /// Whether the AUDIO stream's own projection was built. An entry without

@@ -121,7 +121,7 @@ fn base_opts() -> GenOpts {
         // cases are reproducible run to run, which is what a threshold
         // needs.
         eta: 0.0,
-        guidance: 1.0,
+        guidance: ltxv::guidance::Guidance::cfg(1.0),
         dit_config: "ltx25_22b".into(),
         device: Some("gpu".into()),
         ..GenOpts::default()

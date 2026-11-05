@@ -111,7 +111,7 @@ fn the_mid_anchor_is_realised_at_its_instant_in_a_stage_major_run() {
 
     // The reference run is the source of all three stills, so an ignored mid
     // cannot be excused as an out-of-distribution anchor.
-    let (reference, _) = generate(&paths, PROMPT, &GenOpts { frames: FRAMES, width: WIDTH, height: HEIGHT, seed: SEED, fps: FPS, eta: 1.0, guidance: 1.0, dit_config: "ltx25_22b".into(), device: Some("gpu".into()), ..GenOpts::default() }, &cancel, |_, _, _| {}).expect("reference run"); // seed: the mid-anchor realisation margin was measured on the real 22B checkpoint at this seed (ignored, needs weights; not run)
+    let (reference, _) = generate(&paths, PROMPT, &GenOpts { frames: FRAMES, width: WIDTH, height: HEIGHT, seed: SEED, fps: FPS, eta: 1.0, guidance: ltxv::guidance::Guidance::cfg(1.0), dit_config: "ltx25_22b".into(), device: Some("gpu".into()), ..GenOpts::default() }, &cancel, |_, _, _| {}).expect("reference run"); // seed: the mid-anchor realisation margin was measured on the real 22B checkpoint at this seed (ignored, needs weights; not run)
     let dir = std::env::temp_dir().join(format!("ltxv-longform-mid-{}", std::process::id()));
     let start_path = write_still(&dir, "start.png", &reference.frames[0]);
     let mid_path = write_still(&dir, "mid.png", &reference.frames[MID]);
@@ -124,7 +124,7 @@ fn the_mid_anchor_is_realised_at_its_instant_in_a_stage_major_run() {
         seed: SEED, // seed: the mid-anchor realisation margin was measured on the real 22B checkpoint at this seed (ignored, needs weights; not run)
         fps: FPS,
         eta: 1.0,
-        guidance: 1.0,
+        guidance: ltxv::guidance::Guidance::cfg(1.0),
         dit_config: "ltx25_22b".into(),
         device: Some("gpu".into()),
         start_frame: Some(start_path),

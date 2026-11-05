@@ -266,6 +266,11 @@ impl ActionSpec {
         self.params.push(p);
         self
     }
+    /// [`Self::param`] for a group of parameters several actions share.
+    pub fn params(mut self, ps: impl IntoIterator<Item = ParamSpec>) -> ActionSpec {
+        self.params.extend(ps);
+        self
+    }
     pub fn input(mut self, b: BlobSpec) -> ActionSpec {
         self.inputs.push(b);
         self

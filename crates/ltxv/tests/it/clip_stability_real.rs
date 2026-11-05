@@ -129,7 +129,7 @@ fn a_real_1080p_clip_does_not_disintegrate_before_it_ends() {
         height: HEIGHT,
         fps: FPS,
         seed: SEED, // seed: the disintegration thresholds were measured on the real 1080p clip at this seed (ignored, needs weights; not run)
-        guidance: 3.0,
+        guidance: ltxv::guidance::Guidance::cfg(3.0),
         dit_config: "ltx25_22b".into(),
         ..GenOpts::default()
     };

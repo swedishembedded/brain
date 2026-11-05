@@ -60,6 +60,7 @@ pub fn manifest() -> Manifest {
     )
     .streaming()
     .param(ParamSpec::new("prompt", ParamType::Str, "text description; folded into a deterministic noise/context seed only - there is no real text encoder yet (see crate::pipeline::context_stub)").required())
+    .params(guidance_params())
     .param(ParamSpec::new("start_frame", ParamType::Str, "optional path to a PNG/JPEG still: encoded through the real video VAE and used as frame-0 conditioning while the rest of the clip denoises around it (VideoConditionByLatentIndex on its own, VideoConditionByKeyframeIndex when end_frame is also given - see crate::pipeline::conditioned_latent). Needs dit_config=ltx25_22b (the real VAE). Runs under either sampler: eta>0 follows the reference's ancestral loop (LTX-2.5 distilled's own stage-1 sampler), eta=0 the deterministic one.").host_resolved())
     .param(ParamSpec::new("end_frame", ParamType::Str, "optional path to a PNG/JPEG still: a clean image-guidance latent appended at the clip's LAST pixel frame's timestamp, not a replacement of it - the generated token there still denoises freely, only strongly guided toward the still via attention (start_frame given alone is the one case that IS a literal replacement; combined with end_frame/mid_frame it switches to this same appended-guide mechanism too). Same image as start_frame for a clip that loops seamlessly (the generated content in between connects the still to itself); a different image for a clip that morphs from one still to another. Same eta/dit_config requirements as start_frame.").host_resolved())
     .param(ParamSpec::new("mid_frame", ParamType::Str, "optional path to a PNG/JPEG still: the same appended image-guidance latent end_frame uses, anchored at ONE INTERIOR instant of the clip, so a single generation can be guided at its start, its middle and its end at once. Same eta/dit_config requirements as start_frame.").host_resolved())
@@ -69,7 +70,6 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 32)").default(json!(d.width)))
     .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 32)").default(json!(d.height)))
     .param(ParamSpec::new("steps", ParamType::Int, "denoise steps").default(json!(d.steps)))
-    .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance; <= 1.0 runs ONE forward per step instead of two").default(json!(d.guidance)))
     .param(ParamSpec::new("seed", ParamType::Int, "initial-noise/weight/context seed (omit for random)"))
     .param(ParamSpec::new("fps", ParamType::Int, "frame rate reported with the clip").default(json!(d.fps)))
     .param(ParamSpec::new("base_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 1024 tokens").default(json!(d.base_shift)))
@@ -102,11 +102,11 @@ pub fn manifest() -> Manifest {
     )
     .streaming()
     .param(ParamSpec::new("prompt", ParamType::Str, "text description; folded into a deterministic noise/context seed only - there is no real text encoder yet (see crate::pipeline::context_stub)").required())
+    .params(guidance_params())
     .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)").default(json!(d.frames)))
     .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 64: stage 1 halves it, and the half must still be a multiple of the VAE's 32 spatial stride)").default(json!(d.width)))
     .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 64)").default(json!(d.height)))
     .param(ParamSpec::new("steps", ParamType::Int, "denoise steps per stage/tile").default(json!(d.steps)))
-    .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance; <= 1.0 runs ONE forward per step instead of two").default(json!(d.guidance)))
     .param(ParamSpec::new("seed", ParamType::Int, "initial-noise/weight/context seed (omit for random)"))
     .param(ParamSpec::new("fps", ParamType::Int, "stage-1 frame rate; the reported fps is this times 2^temporal_upsample_rounds").default(json!(d.fps)))
     .param(ParamSpec::new("base_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 1024 tokens").default(json!(d.base_shift)))
@@ -163,7 +163,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         width: inv.get_i64("width").unwrap_or(d.width as i64).max(32) as usize,
         height: inv.get_i64("height").unwrap_or(d.height as i64).max(32) as usize,
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
-        guidance: inv.get_f64("guidance").unwrap_or(d.guidance as f64) as f32,
+        guidance: guidance_from(inv)?,
         seed,
         fps: inv.get_i64("fps").unwrap_or(d.fps as i64).max(1) as usize,
         base_shift: inv.get_f64("base_shift").unwrap_or(d.base_shift),
@@ -242,7 +242,7 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
         width: inv.get_i64("width").unwrap_or(d.width as i64).max(64) as usize,
         height: inv.get_i64("height").unwrap_or(d.height as i64).max(64) as usize,
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
-        guidance: inv.get_f64("guidance").unwrap_or(d.guidance as f64) as f32,
+        guidance: guidance_from(inv)?,
         seed,
         fps: inv.get_i64("fps").unwrap_or(d.fps as i64).max(1) as usize,
         base_shift: inv.get_f64("base_shift").unwrap_or(d.base_shift),
@@ -403,6 +403,42 @@ impl Action for LtxvAction {
     }
 }
 
+
+/// The guidance parameters both generation actions take
+/// ([`crate::guidance`]): `guidance_preset` picks a starting point, every
+/// other parameter overrides its own term. Unset, every stream runs a single
+/// conditional forward per step - what the distilled checkpoint denoises with.
+fn guidance_params() -> Vec<ParamSpec> {
+    vec![
+        ParamSpec::new("guidance_preset", ParamType::Enum(vec!["none".into(), "reference".into()]), "starting guidance: none (one conditional forward per step - the distilled checkpoint) or reference (the reference pipeline's non-distilled guidance: CFG 3 video / 7 audio, STG 1 on block 28, rescale 0.7, modality guidance 3)").default(json!("none")),
+        ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance scale on both streams; 1 is off (overrides the preset)"),
+        ParamSpec::new("audio_guidance", ParamType::Float, "classifier-free guidance scale on the audio stream alone (overrides guidance)"),
+        ParamSpec::new("stg", ParamType::Float, "spatio-temporal guidance scale (self-attention bypassed in stg_blocks); 0 is off"),
+        ParamSpec::new("audio_stg", ParamType::Float, "spatio-temporal guidance scale on the audio stream (overrides stg)"),
+        ParamSpec::new("stg_blocks", ParamType::Str, "comma-separated transformer blocks the STG pass perturbs, e.g. 28"),
+        ParamSpec::new("rescale", ParamType::Float, "how far the guided prediction is scaled back to the conditional one's standard deviation, 0..1"),
+        ParamSpec::new("audio_rescale", ParamType::Float, "rescale on the audio stream (overrides rescale)"),
+        ParamSpec::new("modality_guidance", ParamType::Float, "guidance against the pass with audio<->video cross-attention cut, video stream (a2v); 1 is off"),
+        ParamSpec::new("audio_modality_guidance", ParamType::Float, "the same for the audio stream (v2a); 1 is off"),
+    ]
+}
+
+/// Decode [`guidance_params`] into both streams' guidance.
+fn guidance_from(inv: &Invocation) -> Result<crate::guidance::Guidance, String> {
+    let mut g = crate::guidance::Guidance::preset(inv.get_str("guidance_preset").as_deref().unwrap_or("none"))?;
+    // The broad terms first, so a per-stream one overrides them.
+    for name in ["guidance", "stg", "rescale", "stg_blocks", "modality_guidance", "audio_guidance", "audio_stg", "audio_rescale", "audio_modality_guidance"] {
+        let value = match inv.params.get(name) {
+            Some(serde_json::Value::String(v)) => v.clone(),
+            Some(v) => v.to_string(),
+            None => continue,
+        };
+        g.set(name, &value)?;
+    }
+    g.validate()?;
+    Ok(g)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,7 +460,8 @@ mod tests {
         assert_eq!(def("width"), Some(json!(64)));
         assert_eq!(def("height"), Some(json!(64)));
         assert_eq!(def("steps"), Some(json!(4)));
-        assert_eq!(def("guidance"), Some(json!(1.0)));
+        assert_eq!(def("guidance_preset"), Some(json!("none")));
+        assert_eq!(def("guidance"), None, "unset, the preset decides");
         // No declared default any more: an omitted seed resolves to a random
         // value at the resolver (`data::rng::random_seed`), not a fixed 0 -
         // see `gen_params_from`.

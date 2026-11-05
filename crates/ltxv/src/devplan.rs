@@ -14,7 +14,7 @@
 //! A generation is three sequential stages - text encode, denoise, VAE
 //! decode - and every one of them is single-device today. On a two-card box
 //! that leaves one card completely idle for the entire run. The denoise loop is ~all of
-//! the wall clock, and when classifier-free guidance is on (`guidance > 1.0`)
+//! the wall clock, and when classifier-free guidance is on (a CFG scale other than 1)
 //! it runs **two independent forwards per step** at the same latent: one
 //! against the prompt's context, one against the empty prompt's. They share
 //! no intermediate value at all - the only thing that reads both is the fold

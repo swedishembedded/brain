@@ -74,7 +74,7 @@ fn write_still(dir: &std::path::Path, name: &str, frame: &[u8]) -> String {
 }
 
 fn base_opts() -> GenOpts {
-    GenOpts { frames: FRAMES, width: WIDTH, height: HEIGHT, seed: SEED, fps: FPS, eta: 1.0, guidance: 1.0, dit_config: "ltx25_22b".into(), device: Some("gpu".into()), ..GenOpts::default() } // seed: anchor-versus-source margins were measured on the real 22B checkpoint at this shape and seed (ignored, needs weights; not run)
+    GenOpts { frames: FRAMES, width: WIDTH, height: HEIGHT, seed: SEED, fps: FPS, eta: 1.0, guidance: ltxv::guidance::Guidance::cfg(1.0), dit_config: "ltx25_22b".into(), device: Some("gpu".into()), ..GenOpts::default() } // seed: anchor-versus-source margins were measured on the real 22B checkpoint at this shape and seed (ignored, needs weights; not run)
 }
 
 const MAX_SATURATION_RATIO: f64 = 1.08;

@@ -83,7 +83,7 @@ fn base_opts() -> GenOpts {
         // (the noise draw is seeded), but a gate on bit-identity should not
         // depend on that being true.
         eta: 0.0,
-        guidance: GUIDANCE,
+        guidance: ltxv::guidance::Guidance::cfg(GUIDANCE),
         dit_config: "ltx25_22b".into(),
         device: Some("gpu".into()),
         ..GenOpts::default()
@@ -175,8 +175,8 @@ fn the_two_cfg_branches_produce_different_velocities() {
         return;
     };
     let paths = Paths::resolve(Some(&vae), None, None, None).expect("a VAE path resolves");
-    let one = GenOpts { guidance: 1.0, ..GenOpts::default() };
-    let five = GenOpts { guidance: GUIDANCE, ..one.clone() };
+    let one = GenOpts { guidance: ltxv::guidance::Guidance::cfg(1.0), ..GenOpts::default() };
+    let five = GenOpts { guidance: ltxv::guidance::Guidance::cfg(GUIDANCE), ..one.clone() };
     let a = generate(&paths, "harbour", &one, &Default::default(), |_, _, _| {}).expect("tiny generation runs").0;
     let b = generate(&paths, "harbour", &five, &Default::default(), |_, _, _| {}).expect("tiny generation runs").0;
     assert_ne!(a.frames, b.frames, "guidance 1.0 and 5.0 must differ, or the unconditional branch contributes nothing and the concurrency gate proves nothing");

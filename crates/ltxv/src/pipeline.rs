@@ -104,7 +104,6 @@ use crate::longform::Scene;
 use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
 use crate::vae3d::{LtxVaeConfig, LtxVaeDecoder, LtxVaeEncoder};
 use diffusion::scheduler::{euler_ancestral_step, ltx2_sigmas, LTX2_DISTILLED_SIGMAS, LTX2_STAGE2_DISTILLED_SIGMAS};
-use model::hostmath::cfg_blend;
 
 /// The real distilled schedule's own step count (`LTX2_DISTILLED_SIGMAS.len() -
 /// 1`), exposed so a caller (e.g. `crates/cli/src/ltxv_cli.rs`'s own
@@ -348,9 +347,10 @@ pub struct GenOpts {
     pub width: usize,
     pub height: usize,
     pub steps: usize,
-    /// Classifier-free guidance. `<= 1.0` skips the unconditional forward
-    /// entirely (exact, see this module's doc).
-    pub guidance: f32,
+    /// Each stream's guidance ([`crate::guidance`]): classifier-free, STG,
+    /// isolated-modality and rescale. The default is a single conditional
+    /// forward per step - what the distilled checkpoint denoises with.
+    pub guidance: crate::guidance::Guidance,
     pub seed: u64,
     pub fps: usize,
     /// [`ltx2_sigmas`]'s four shape parameters. Defaults are `LTX2Scheduler.
@@ -517,7 +517,7 @@ impl Default for GenOpts {
             width: 64,
             height: 64,
             steps: 4,
-            guidance: 1.0,
+            guidance: crate::guidance::Guidance::default(),
             seed: data::rng::random_seed(),
             fps: 8,
             base_shift: 0.95,
@@ -691,7 +691,7 @@ fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
 /// [`Paths::text_encoder`] is set: open the checkpoint for streaming, extract
 /// its embedded tokenizer (`gemma4::tokenizer`'s doc - it is the checkpoint's
 /// own `tokenizer_json` tensor, not a separate file), tokenize `prompt`
-/// (and, only if `guidance > 1.0`, the empty string for the unconditional
+/// (and, only when some stream guides against the negative prompt, the empty string for the unconditional
 /// branch), run `gemma4::forward_streamed`, and project the full
 /// `hidden_states` tuple through `gemma4::AggregateEmbed`'s video head -
 /// the real `[t, cross_attention_dim]` context `LtxDit::forward`/
@@ -726,7 +726,7 @@ fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
 /// step 1).
 ///
 /// `denoise`'s own CFG fold shares ONE `context_len`/`context_valid` pair
-/// across both branches, so when `guidance > 1.0` the empty-prompt
+/// across both branches, so when the negative prompt is encoded the empty-prompt
 /// encoding is zero-padded/truncated to match `ctx_cond`'s length - a
 /// documented simplification real per-branch attention masking would
 /// avoid, not exercised by this pipeline's own default (`guidance <= 1.0`
@@ -755,8 +755,8 @@ pub struct TextContext {
     pub a_uncond: Option<Vec<f32>>,
 }
 
-#[tracing::instrument(level = "info", name = "text_encode", skip_all, fields(prompt_chars = prompt.len(), guidance = guidance))]
-fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance: f32, device: Option<&str>, want_audio: bool) -> Result<TextContext, String> {
+#[tracing::instrument(level = "info", name = "text_encode", skip_all, fields(prompt_chars = prompt.len(), negative = negative))]
+fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, negative: bool, device: Option<&str>, want_audio: bool) -> Result<TextContext, String> {
     let cross_attention_dim = dit_cfg.cross_attention_dim as usize;
 
     let cfg = gemma4::Gemma4Config::gemma4_12b();
@@ -800,7 +800,7 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
         cross_attention_dim,
         connector_registers: dit_cfg.connector_num_learnable_registers,
         use_connector: dit_cfg.use_embeddings_connector,
-        uncond_encoded: guidance > 1.0,
+        uncond_encoded: negative,
         audio: want_audio,
         encode_revision: crate::text_cache::ENCODE_REVISION,
     };
@@ -924,7 +924,7 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
     let mut context_valid = vec![0f32; context_len];
     context_valid[..n_cond].fill(1.0);
 
-    let (ctx_uncond, a_ctx_uncond) = if guidance > 1.0 {
+    let (ctx_uncond, a_ctx_uncond) = if negative {
         let ids_u = tokenize("");
         let (raw_u, raw_u_a) = encode(&ids_u)?;
         let v = framed(&raw_u, ids_u.len(), cross_attention_dim);
@@ -2135,6 +2135,7 @@ trait Denoiser {
 /// between them, so it stays a separate argument; grouping the rest is what
 /// makes "run this pair, wherever" expressible as one call instead of a
 /// nine-argument closure repeated twice.
+#[derive(Clone, Copy)]
 struct StepInputs<'a> {
     latent: &'a [f32],
     timesteps: &'a [f32],
@@ -2151,6 +2152,17 @@ struct StepInputs<'a> {
     /// What this forward's guidance pass perturbs (STG, isolated modality) -
     /// [`crate::block::NO_PERTURBATIONS`] for the conditional pass.
     perturbations: &'a crate::block::Perturbations,
+}
+
+impl<'a> StepInputs<'a> {
+    /// The same step under one guidance pass's perturbations.
+    fn with_perturbations<'b>(self, perturbations: &'b crate::block::Perturbations) -> StepInputs<'b>
+    where
+        'a: 'b,
+    {
+        let shorter: StepInputs<'b> = self;
+        StepInputs { perturbations, ..shorter }
+    }
 }
 
 /// The audio stream's own half of one joint forward.
@@ -2615,7 +2627,7 @@ fn post_process_latent(denoised: &mut [f32], frozen: &Frozen) {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(level = "info", name = "denoise", skip_all, fields(steps = sigmas.len().saturating_sub(1), tokens = t, guidance = guidance, eta = eta))]
+#[tracing::instrument(level = "info", name = "denoise", skip_all, fields(steps = sigmas.len().saturating_sub(1), tokens = t, eta = eta))]
 fn denoise(
     dit: &dyn Denoiser,
     sigmas: &[f64],
@@ -2627,7 +2639,7 @@ fn denoise(
     context_len: usize,
     context_valid: &[f32],
     t: usize,
-    guidance: f32,
+    guidance: &crate::guidance::Guidance,
     eta: f64,
     s_noise: f64,
     noise_seed: u64,
@@ -2660,15 +2672,16 @@ fn denoise(
     // `post_process_latent` to the STEPPED result, which needs no per-token
     // sigma at all. See [`Frozen`]'s doc for the two orderings.
     let ancestral = eta > 0.0;
-    let cfg_on = guidance > 1.0;
     // Both streams step ONE schedule in lockstep - the reference's own
     // `euler_denoising_loop` advances `video_state` and `audio_state` off the
     // same `sigmas` tensor at the same `step_idx`. That lockstep is not a
     // simplification: it is what keeps the two streams' sigmas consistent
     // with the cross-modality gates each block computes from the OTHER
     // stream's sigma.
+    guidance.validate()?;
     let mut audio = audio;
     let audio_on = audio.is_some();
+    let passes = guidance.passes(audio_on);
     if audio_on && !dit.has_audio() {
         return Err("ltxv: an audio stream was supplied to a denoiser that does not generate audio".into());
     }
@@ -2678,7 +2691,7 @@ fn denoise(
     let steps = sigmas.len().saturating_sub(1);
     let mut noise_rng = data::rng::Rng::new(noise_seed);
     let t0 = Instant::now();
-    tracing::info!(steps, cfg = cfg_on, forwards_per_step = if cfg_on { 2 } else { 1 }, sigma_first = sigmas.first().copied().unwrap_or(0.0), sigma_last = sigmas.last().copied().unwrap_or(0.0), frozen_tokens = frozen.map(|f| f.mask.iter().filter(|&&m| m == 0.0).count()), "denoise loop starting");
+    tracing::info!(steps, forwards_per_step = 1 + passes.len(), sigma_first = sigmas.first().copied().unwrap_or(0.0), sigma_last = sigmas.last().copied().unwrap_or(0.0), frozen_tokens = frozen.map(|f| f.mask.iter().filter(|&&m| m == 0.0).count()), "denoise loop starting");
     for i in 0..steps {
         // Once per step: a forward is one submit of the whole block stack
         // and is not interruptible from inside, same reasoning as
@@ -2707,7 +2720,7 @@ fn denoise(
             Some(f) => f.mask.iter().map(|&m| m * sigma as f32).collect(),
             None => vec![sigma as f32; t],
         };
-        let inputs = StepInputs { latent: &latent, timesteps: &timesteps, positions, keyframes_mask, context_len, context_valid, t, sigma: sigma as f32, perturbations: &crate::block::NO_PERTURBATIONS };
+        let base = StepInputs { latent: &latent, timesteps: &timesteps, positions, keyframes_mask, context_len, context_valid, t, sigma: sigma as f32, perturbations: &crate::block::NO_PERTURBATIONS };
         // A single-window clip's audio stream has no conditioning items and
         // nothing frozen, so every one of its tokens carries the schedule's
         // own sigma. A long-form continuation window's carried prefix is
@@ -2723,47 +2736,68 @@ fn denoise(
             },
             None => Vec::new(),
         };
-        let (velocity, a_velocity) = match audio.as_deref() {
+        // Every guidance pass of this step ([`crate::guidance`]), each turned
+        // into its x0 estimate against the SAME per-token timesteps the model
+        // was told about, then combined per stream. The conditional pass
+        // first; the others only when some stream's guidance needs them.
+        let a_channels = audio.as_deref().map(|a| a.latent.len().checked_div(a.ta).unwrap_or(1)).unwrap_or(1);
+        let x0 = |v: Vec<f32>| to_denoised(&latent, &v, &timesteps, channels);
+        let (cond, others): ((Vec<f32>, Option<Vec<f32>>), Vec<(Vec<f32>, Option<Vec<f32>>)>) = match audio.as_deref() {
             Some(a) => {
                 let ai = AudioInputs { latent: &a.latent, timesteps: &a_timesteps, positions: &a.positions, ta: a.ta };
-                if cfg_on {
-                    tracing::trace!(step = i + 1, branch = "cond+uncond", sigma, "joint audio+video forward pair starting");
-                    // Sequentially, never the parallel-card pair: the pair
-                    // seam is `Denoiser::forward_cfg_pair`, and a joint
-                    // forward does not go through it - both streams' inputs
-                    // and both outputs would have to cross it. Placing the AV
-                    // pair on two cards is a change to that trait method's
-                    // shape, not to this call site.
-                    let (vc, ac) = dit.forward_av(&inputs, &ai, ctx_cond, a.ctx_cond);
-                    let (vu, au) = dit.forward_av(&inputs, &ai, ctx_uncond, a.ctx_uncond);
-                    (cfg_blend(&vc, &vu, guidance), Some(cfg_blend(&ac, &au, guidance)))
-                } else {
-                    tracing::trace!(step = i + 1, branch = "cond", sigma, "joint audio+video forward starting");
-                    let (v, aa) = dit.forward_av(&inputs, &ai, ctx_cond, a.ctx_cond);
-                    (v, Some(aa))
-                }
+                let a_x0 = |v: Vec<f32>| to_denoised(&a.latent, &v, &a_timesteps, a_channels);
+                let run = |ptb: &crate::block::Perturbations, v_ctx: &[f32], a_ctx: &[f32]| {
+                    let (v, av) = dit.forward_av(&base.with_perturbations(ptb), &ai, v_ctx, a_ctx);
+                    (x0(v), Some(a_x0(av)))
+                };
+                tracing::trace!(step = i + 1, forwards = 1 + passes.len(), sigma, "joint audio+video guidance passes starting");
+                let cond = run(&crate::block::NO_PERTURBATIONS, ctx_cond, a.ctx_cond);
+                let others = passes
+                    .iter()
+                    .map(|p| match p {
+                        crate::guidance::Pass::Uncond => run(&crate::block::NO_PERTURBATIONS, ctx_uncond, a.ctx_uncond),
+                        crate::guidance::Pass::Perturbed(ptb) | crate::guidance::Pass::Isolated(ptb) => run(ptb, ctx_cond, a.ctx_cond),
+                    })
+                    .collect();
+                (cond, others)
             }
-            None if cfg_on => {
+            None if passes == [crate::guidance::Pass::Uncond] => {
+                // CFG alone keeps its two-card pair seam.
                 tracing::trace!(step = i + 1, branch = "cond+uncond", sigma, "forward pair starting");
-                let (cond, uncond) = dit.forward_cfg_pair(&inputs, ctx_cond, ctx_uncond)?;
-                (cfg_blend(&cond, &uncond, guidance), None)
+                let (cond, uncond) = dit.forward_cfg_pair(&base.with_perturbations(&crate::block::NO_PERTURBATIONS), ctx_cond, ctx_uncond)?;
+                ((x0(cond), None), vec![(x0(uncond), None)])
             }
             None => {
-                tracing::trace!(step = i + 1, branch = "cond", sigma, "forward starting");
-                (dit.forward(&inputs, ctx_cond), None)
+                tracing::trace!(step = i + 1, forwards = 1 + passes.len(), sigma, "guidance passes starting");
+                let cond = (x0(dit.forward(&base.with_perturbations(&crate::block::NO_PERTURBATIONS), ctx_cond)), None);
+                let others = passes
+                    .iter()
+                    .map(|p| match p {
+                        crate::guidance::Pass::Uncond => (x0(dit.forward(&base.with_perturbations(&crate::block::NO_PERTURBATIONS), ctx_uncond)), None),
+                        crate::guidance::Pass::Perturbed(ptb) | crate::guidance::Pass::Isolated(ptb) => (x0(dit.forward(&base.with_perturbations(ptb), ctx_cond)), None),
+                    })
+                    .collect();
+                (cond, others)
             }
         };
-        if !velocity.iter().all(|v| v.is_finite()) {
-            let bad = velocity.iter().filter(|v| !v.is_finite()).count();
-            tracing::error!(step = i + 1, sigma, non_finite = bad, of = velocity.len(), "the denoiser produced non-finite values");
+        let pass_of = |want: fn(&crate::guidance::Pass) -> bool| passes.iter().position(want);
+        let (uncond_at, ptb_at, iso_at) = (pass_of(|p| matches!(p, crate::guidance::Pass::Uncond)), pass_of(|p| matches!(p, crate::guidance::Pass::Perturbed(_))), pass_of(|p| matches!(p, crate::guidance::Pass::Isolated(_))));
+        let video_pass = |at: Option<usize>| at.map(|k| others[k].0.as_slice());
+        // Without an audio stream there is nothing to cut, so the isolated
+        // pass would be the conditional one itself and the modality term is
+        // zero - which is what passing `cond` for it says, without the forward.
+        let video_isolated = if audio_on { video_pass(iso_at) } else { Some(cond.0.as_slice()) };
+        let mut denoised = guidance.video.combine(&cond.0, video_pass(uncond_at), video_pass(ptb_at), video_isolated, frozen.map(|f| f.mask), channels);
+        let audio_denoised = cond.1.as_ref().map(|a_cond| {
+            let audio_pass = |at: Option<usize>| at.map(|k| others[k].1.as_deref().expect("a joint pass carries the audio stream"));
+            let a_mask = audio.as_deref().and_then(|a| a.frozen.as_ref().map(|(m, _)| m.as_slice()));
+            guidance.audio.combine(a_cond, audio_pass(uncond_at), audio_pass(ptb_at), audio_pass(iso_at), a_mask, a_channels)
+        });
+        if !denoised.iter().all(|v| v.is_finite()) {
+            let bad = denoised.iter().filter(|v| !v.is_finite()).count();
+            tracing::error!(step = i + 1, sigma, non_finite = bad, of = denoised.len(), "the denoiser produced non-finite values");
             return Err(format!("the denoiser produced non-finite values at step {} (sigma = {sigma:.4})", i + 1));
         }
-        // The SAME per-token `timesteps` the model was just told about, not
-        // the schedule's scalar sigma - `X0Model.forward` converts against
-        // `Modality.timesteps` (see [`to_denoised`]), which makes the
-        // conversion the identity on a frozen token instead of scaling it by
-        // `1 + sigma`.
-        let mut denoised = to_denoised(&latent, &velocity, &timesteps, channels);
         // Mask the x0 estimate before it is stepped - `_step_state` for the
         // deterministic loop, `_ModalityStep.from_modality_result` for the
         // ancestral one, which does it for every step including the terminal
@@ -2779,12 +2813,10 @@ fn denoise(
         // comes from the same generator, after the video's, so a seed still
         // reproduces the whole run exactly - and the two streams never share
         // numbers, which they would if one draw were reused.
-        if let (Some(a), Some(av)) = (audio.as_deref_mut(), a_velocity) {
-            if !av.iter().all(|v| v.is_finite()) {
+        if let (Some(a), Some(mut a_denoised)) = (audio.as_deref_mut(), audio_denoised) {
+            if !a_denoised.iter().all(|v| v.is_finite()) {
                 return Err(format!("the denoiser produced non-finite audio values at step {} (sigma = {sigma:.4})", i + 1));
             }
-            let a_channels = a.latent.len().checked_div(a.ta).unwrap_or(1);
-            let mut a_denoised = to_denoised(&a.latent, &av, &a_timesteps, a_channels);
             // Both applications the video half takes, for the same reasons -
             // once on the x0 estimate before the step, and again on the
             // stepped latent after the ancestral renoise term, which would
@@ -3283,7 +3315,7 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
         sc.context_len,
         sc.context_valid,
         denoise_t_count,
-        o.guidance,
+        &o.guidance,
         st.eta,
         o.s_noise,
         o.seed ^ 0x4e_4f_49_53_45 ^ st.seed_salt,
@@ -3613,7 +3645,7 @@ fn build_context(paths: &Paths, prompt: &str, dit_cfg: LtxDitConfig, o: &GenOpts
     // one to spare: the 12B encoder's own device footprint is then released
     // from a card that is not about to hold the denoise loop's activations.
     // See `crate::devplan`.
-    let r = crate::devplan::on_gpu(place.text, || real_text_context(te_path, prompt, &dit_cfg, o.guidance, o.device.as_deref(), o.audio))?
+    let r = crate::devplan::on_gpu(place.text, || real_text_context(te_path, prompt, &dit_cfg, o.guidance.needs_uncond(o.audio), o.device.as_deref(), o.audio))?
         .inspect(|c| tracing::info!(context_len = c.len, audio = c.a_cond.is_some(), "prompt encoded"))
         .inspect_err(|e| tracing::error!(path = %te_path, error = %e, "text encoding failed"))?;
     *text_encode_secs = te_t.elapsed().as_secs_f32();
@@ -3736,7 +3768,7 @@ fn quantized_av_host_bytes(cfg: &LtxAvDitConfig) -> u64 {
 
 /// Text to video. `progress(done, total, phase)` mirrors `wan::pipeline::
 /// generate`'s contract; `cancel` is polled once per denoise step.
-#[tracing::instrument(level = "info", name = "generate", skip_all, fields(frames = o.frames, width = o.width, height = o.height, steps = o.steps, seed = o.seed, guidance = o.guidance, dit_config = %o.dit_config))]
+#[tracing::instrument(level = "info", name = "generate", skip_all, fields(frames = o.frames, width = o.width, height = o.height, steps = o.steps, seed = o.seed, guidance = ?o.guidance, dit_config = %o.dit_config))]
 pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
     tracing::info!(
         prompt_chars = prompt.chars().count(),
@@ -3823,7 +3855,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // re-resolved per step could drift if the thread's ambient selection
     // changed underneath it (see `crate::devplan`).
     let place = o.devices.resolve(o.device.as_deref());
-    tracing::info!(cond_gpu = ?place.cond, uncond_gpu = ?place.uncond, text_gpu = ?place.text, cfg_parallel = place.cfg_is_parallel() && o.guidance > 1.0, "device placement resolved");
+    tracing::info!(cond_gpu = ?place.cond, uncond_gpu = ?place.uncond, text_gpu = ?place.text, cfg_parallel = place.cfg_is_parallel() && o.guidance.needs_uncond(o.audio), "device placement resolved");
     // An IC-LoRA reference is read by the adapter that was trained on it,
     // with the geometry that adapter declares - checked before any weight.
     let reference = match &o.reference {
@@ -3996,7 +4028,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // would make `secs_per_forward` a fiction.
     timings.steps = sigmas.len() - 1 + if two_stage { LTX2_STAGE2_DISTILLED_SIGMAS.len() - 1 } else { 0 };
     timings.tokens = t;
-    timings.forwards_per_step = if o.guidance > 1.0 { 2 } else { 1 };
+    timings.forwards_per_step = o.guidance.forwards_per_step(o.audio);
     tracing::info!(secs = timings.denoise, steps = timings.steps, secs_per_forward = timings.secs_per_forward(), "denoise done");
 
     if cancel.is_cancelled() {
@@ -4422,7 +4454,7 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
     timings.denoise = (work_t.elapsed().as_secs_f32() - vae_secs).max(0.0);
     timings.steps = o.refine_steps * plan.len();
     timings.tokens = plan.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
-    timings.forwards_per_step = if o.base.guidance > 1.0 { 2 } else { 1 };
+    timings.forwards_per_step = o.base.guidance.forwards_per_step(o.base.audio);
 
     if out_frames.len() != frames {
         return Err(format!("reassembled {} frames from {} passes, expected {frames}", out_frames.len(), plan.len()));
@@ -4696,7 +4728,7 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
     timings.decode = vae_secs;
     timings.steps = sigmas.len() - 1;
     timings.tokens = t;
-    timings.forwards_per_step = if o.base.guidance > 1.0 { 2 } else { 1 };
+    timings.forwards_per_step = o.base.guidance.forwards_per_step(o.base.audio);
 
     progress(total, total, "done");
     tracing::info!(frames, width = w, height = h, total_secs = timings.total(), "masked video-to-video done");
@@ -5387,7 +5419,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     timings.denoise = (work_t.elapsed().as_secs_f32() - vae_secs).max(0.0);
     timings.steps = plan.len() * (steps + if two_stage { LTX2_STAGE2_STEPS } else { 0 });
     timings.tokens = plan.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
-    timings.forwards_per_step = if o.base.guidance > 1.0 { 2 } else { 1 };
+    timings.forwards_per_step = o.base.guidance.forwards_per_step(o.base.audio);
 
     // ---- decode the sound, ONCE over the whole clip ------------------------
     // The windows contributed tokens to one latent, not waveforms to be butted
@@ -5678,7 +5710,7 @@ fn run_stage_major(
     timings.denoise = (work_t.elapsed().as_secs_f32() - vae_secs).max(0.0);
     timings.steps = tsp.stage1.len() * steps + tsp.stage2.len() * LTX2_STAGE2_STEPS;
     timings.tokens = tsp.stage2.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
-    timings.forwards_per_step = if o.base.guidance > 1.0 { 2 } else { 1 };
+    timings.forwards_per_step = o.base.guidance.forwards_per_step(o.base.audio);
     progress(total, total, "done");
     tracing::info!(frames = out_frames.len(), stage1_windows = tsp.stage1.len(), stage2_windows = tsp.stage2.len(), total_secs = timings.total(), "stage-major long-form generation done");
     Ok((Video { width: o.base.width as u32, height: o.base.height as u32, fps: o.base.fps, frames: out_frames, audio: None }, timings))
@@ -6101,7 +6133,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let sigmas1 = ltx2_sigmas(t1, base.steps, base.base_shift, base.max_shift, base.stretch, base.terminal);
     let latent1_0 = seeded_noise(t1 * in_channels, base.seed ^ 0x53_31);
     let ctx_valid = vec![1.0f32; base.context_len]; // DFR's DiT is always tiny-config (connector disabled) - see this section's doc.
-    let final1 = denoise(&dit, &sigmas1, latent1_0, &layout1.positions, &layout1.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t1, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e_31, base.steps as u32, None, cancel, None, &mut |_, _, _: &str| {})?;
+    let final1 = denoise(&dit, &sigmas1, latent1_0, &layout1.positions, &layout1.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t1, &base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e_31, base.steps as u32, None, cancel, None, &mut |_, _, _: &str| {})?;
     if cancel.is_cancelled() {
         tracing::warn!(stage = "stage1", "cancelled");
         return Err("cancelled".into());
@@ -6156,7 +6188,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     // The per-stage seed tags are ASCII ("S2", "N2"), written unsplit because
     // `0x53_32` reads to clippy as `0x53` with a mistyped `i32` suffix.
     let latent2_0 = noised_seed(&seed2, sigma2_0, base.seed ^ 0x5332);
-    let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t2, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e32, base.steps as u32, None, cancel, None, &mut |_, _, _: &str| {})?;
+    let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t2, &base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e32, base.steps as u32, None, cancel, None, &mut |_, _, _: &str| {})?;
     if cancel.is_cancelled() {
         tracing::warn!(stage = "stage2", "cancelled");
         return Err("cancelled".into());
@@ -6240,7 +6272,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
                     base.context_len,
                     &ctx_valid,
                     t_tile,
-                    base.guidance,
+                    &base.guidance,
                     base.eta,
                     base.s_noise,
                     noise_seed_tile,
@@ -6278,7 +6310,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     timings.denoise = denoise_t.elapsed().as_secs_f32();
     timings.steps = base.steps;
     timings.tokens = t2;
-    timings.forwards_per_step = if base.guidance > 1.0 { 2 } else { 1 };
+    timings.forwards_per_step = base.guidance.forwards_per_step(base.audio);
 
     // ---- decode -------------------------------------------------------------
     progress(total_phases - 1, total_phases, "vae decode");
@@ -6637,7 +6669,7 @@ mod tests {
         // content, never at noise.
         let latent0 = vec![0.0f32, 5.0];
 
-        let out = denoise(&dit, &sigmas, latent0, &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, 1.0, 1.0, 1.0, 7, 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("eta > 0 with conditioned tokens must run, not be refused");
+        let out = denoise(&dit, &sigmas, latent0, &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), 1.0, 1.0, 7, 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("eta > 0 with conditioned tokens must run, not be refused");
 
         let latents = dit.latents_seen.borrow().clone();
         assert_eq!(latents.len(), 2, "one forward per step");
@@ -6690,7 +6722,7 @@ mod tests {
 
         for eta in [0.0f64, 1.0] {
             let dit = FakeDit::default();
-            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, 1.0, eta, 1.0, 7, 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), eta, 1.0, 7, 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
             assert_eq!(out[1], want, "eta={eta}: a half-conditioned token must end half way between its x0 estimate and its clean content");
         }
     }
@@ -6736,7 +6768,7 @@ mod tests {
         let latent0 = vec![0.0f32, 5.0];
 
         for eta in [0.0f64, 1.0] {
-            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, 1.0, eta, 1.0, 7, 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), eta, 1.0, 7, 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
             assert_eq!(out[1], 5.0, "eta={eta}: the frozen anchor must end at exactly its clean content, not at clean - velocity*sigma_terminal ({})", 5.0 - 0.421875);
             assert_ne!(out[0], 0.0, "eta={eta}: the free token really was denoised (guards against a fix that froze everything)");
         }
@@ -6811,7 +6843,7 @@ mod tests {
 
         let dit = FakeDit::default();
         for eta in [0.0f64, 1.0] {
-            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, 1.0, eta, 1.0, 7, 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), eta, 1.0, 7, 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
             for &(lo, hi) in &frozen_ranges {
                 assert_eq!(&out[lo * channels..hi * channels], &clean[lo * channels..hi * channels], "eta={eta}: the frozen range [{lo}, {hi}) must come out exactly as it went in");
             }
@@ -6871,7 +6903,7 @@ mod tests {
         let mask = vec![1.0f32, 1.0, 0.0, 0.0];
         let clean = vec![0.0f32; t * channels];
         let frozen = Frozen { mask: &mask, clean: &clean, channels };
-        denoise(&dit, &sigmas, vec![0.0; t * channels], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, 1.0, 0.0, 1.0, 7, 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+        denoise(&dit, &sigmas, vec![0.0; t * channels], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), 0.0, 1.0, 7, 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
 
         let seen = dit.timesteps_seen.borrow().clone();
         assert_eq!(seen.len(), 2, "one forward per step at guidance <= 1");
@@ -6891,7 +6923,7 @@ mod tests {
         let keyframes_mask = vec![0.0f32; t];
         let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
         let context_valid = vec![1.0f32; 1];
-        denoise(&dit, &sigmas, vec![0.0; t], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, 1.0, 0.0, 1.0, 7, 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+        denoise(&dit, &sigmas, vec![0.0; t], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), 0.0, 1.0, 7, 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
         assert_eq!(*dit.timesteps_seen.borrow(), vec![vec![1.0f32; t], vec![0.5f32; t]]);
     }
 
@@ -6902,7 +6934,7 @@ mod tests {
         let keyframes_mask = vec![0.0f32];
         let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
         let context_valid = vec![1.0f32; 1];
-        let out = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, guidance, eta, 1.0, 7, 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+        let out = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, &crate::guidance::Guidance::cfg(guidance), eta, 1.0, 7, 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
         let seen = dit.seen.borrow().clone();
         (seen, out)
     }
@@ -6923,6 +6955,29 @@ mod tests {
     fn guidance_of_one_runs_a_single_forward_per_step() {
         let (seen, _) = run_loop(1.0, 0.0);
         assert_eq!(seen, vec![1.0, 1.0], "one forward per step, always conditional");
+    }
+
+    /// Under the reference guidance a video-only step runs the conditional
+    /// forward, the negative-prompt one and the STG one - in that order, the
+    /// STG pass alone perturbed, on the configured block - and the isolated-
+    /// modality pass not at all, since there is no audio stream to cut.
+    #[test]
+    fn reference_guidance_runs_each_pass_once_per_step() {
+        struct Recorder(std::cell::RefCell<Vec<(f32, crate::block::Perturbations)>>);
+        impl Denoiser for Recorder {
+            fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
+                self.0.borrow_mut().push((context[0], i.perturbations.clone()));
+                (0..i.latent.len()).map(|k| 0.1 * context[0] * (k + 1) as f32).collect()
+            }
+        }
+        let dit = Recorder(Default::default());
+        let (positions, keyframes_mask, context_valid) = (vec![0.0f32; 6], vec![0.0f32; 1], vec![1.0f32; 1]);
+        let guidance = crate::guidance::Guidance::reference();
+        #[rustfmt::skip]
+        denoise(&dit, &[1.0, 0.0], vec![0.3; 2], &positions, &keyframes_mask, &[1.0], &[2.0], 1, &context_valid, 1, &guidance, 0.0, 1.0, 7, 1, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("a guided step runs");
+        let seen = dit.0.borrow();
+        let stg = crate::block::Perturbations { video_self_attn_blocks: vec![28], audio_self_attn_blocks: vec![], cross_modal: false };
+        assert_eq!(*seen, vec![(1.0, crate::block::Perturbations::default()), (2.0, crate::block::Perturbations::default()), (1.0, stg)]);
     }
 
     /// The last step's `sigma_next == 0`, so [`euler_ancestral_step`] returns
@@ -6949,7 +7004,7 @@ mod tests {
         let context_valid = vec![1.0f32; 1];
         let cancel = capability::CancelToken::armed();
         let handle = cancel.clone();
-        let err = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, 1.0, 0.0, 1.0, 7, 6, None, &cancel, None, &mut |step, _, _: &str| {
+        let err = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, &crate::guidance::Guidance::cfg(1.0), 0.0, 1.0, 7, 6, None, &cancel, None, &mut |step, _, _: &str| {
             if step == 2 {
                 handle.cancel();
             }
@@ -7067,7 +7122,7 @@ mod tests {
         let dit = PairCounter::default();
         let sigmas = vec![1.0, 0.5, 0.0];
         let positions = grid_positions(1, 1, 1);
-        denoise(&dit, &sigmas, vec![0.0; 1], &positions, &[0.0f32], &[1.0f32], &[0.0f32], 1, &[1.0f32], 1, 5.0, 0.0, 1.0, 7, 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+        denoise(&dit, &sigmas, vec![0.0; 1], &positions, &[0.0f32], &[1.0f32], &[0.0f32], 1, &[1.0f32], 1, &crate::guidance::Guidance::cfg(5.0), 0.0, 1.0, 7, 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
         assert_eq!(dit.pairs.load(std::sync::atomic::Ordering::Relaxed), 2, "one pair dispatch per CFG step");
     }
 }

@@ -104,7 +104,7 @@ fn base_opts() -> GenOpts {
         // masked by the unconditional one being subtracted from it; one
         // forward per step means the clip below is the conditional branch's
         // own answer and nothing else.
-        guidance: 1.0,
+        guidance: ltxv::guidance::Guidance::cfg(1.0),
         dit_config: "ltx25_22b".into(),
         device: Some("gpu".into()),
         // Explicitly no image conditioning - the whole point is that the text

@@ -612,7 +612,7 @@ mod seam_real {
     }
 
     fn base_opts(frames: usize) -> GenOpts {
-        GenOpts { frames, width: WIDTH, height: HEIGHT, fps: FPS, seed: SEED, guidance: 1.0, dit_config: "ltx25_22b".into(), ..GenOpts::default() } // seed: the seam metrics were measured on the real 22B checkpoint at this seed (ignored, needs weights; not run)
+        GenOpts { frames, width: WIDTH, height: HEIGHT, fps: FPS, seed: SEED, guidance: ltxv::guidance::Guidance::cfg(1.0), dit_config: "ltx25_22b".into(), ..GenOpts::default() } // seed: the seam metrics were measured on the real 22B checkpoint at this seed (ignored, needs weights; not run)
     }
 
     #[test]
