@@ -178,13 +178,13 @@ fn real_q8_0_block0_int8_compute_matches_fp32() {
 
     let c = cosine(&out_f32, &out_i8);
     println!("real Q8_0 block-0 int8-compute vs fp32: cosine = {c:.9}, t={t}, context_len={context_len}, dim={}", cfg.inner_dim);
-    // Measured on the real checkpoint: 0.996303655 (dim=4096, t=8,
-    // context_len=6, block 0). Lower than the synthetic tiny-config number
-    // above because these are the checkpoint's own real weight
-    // distributions (real per-channel dynamic range), not i.i.d. Gaussian
-    // noise - a floor with a sane margin below the measured value, per this
-    // file's own doc.
-    assert!(c >= 0.99, "real-weight int8-compute block output diverged too far from fp32: cosine {c:.9}");
+    // Measured on the real checkpoint (dim=4096, t=8, context_len=6, block
+    // 0): 1.000000000 with the two-level activation quantization, against
+    // 0.996303655 when activations were rounded onto one int8 grid - the
+    // checkpoint's real per-channel dynamic range is what one level lost.
+    // The floor keeps a margin below the measurement and far above the
+    // single-level value, so losing the second level fails here.
+    assert!(c >= 0.99999, "real-weight int8-compute block output diverged too far from fp32: cosine {c:.9}");
 }
 
 /// [`LtxBlock::forward`]/[`LtxBlockQ::forward`] both take the block's own

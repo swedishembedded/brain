@@ -143,7 +143,7 @@ const K_MATMUL_Q4_DYN: usize = 14;
 /// precedent, which this mirrors). Only the fp32 reference path
 /// ([`LtxBlock`]/[`LtxAvBlock`], used by `LtxDit::forward`/gradcheck/
 /// `ltxv_bench dit`) needed this - the quantized path ([`LtxBlockQ`]'s
-/// `qlinear`) already dispatches `matmul_i8_dyn`/`matmul_q4_dyn`
+/// `qgemm`) already dispatches `matmul_i8_dyn`/`matmul_q4_dyn`
 /// unconditionally, which for DP4A has no naive sibling to fall back to.
 const K_MATMUL_REG3: usize = 15;
 const K_MATMUL_GEMV: usize = 16;
@@ -229,11 +229,14 @@ const K_RMSNORM_ROWS: usize = 27;
 /// `lora_delta`: the accumulate half of a runtime LoRA correction
 /// (`model::dispatch::lora_rows_off`), `out += (x·Aᵀ)·Bᵀ`.
 const K_LORA_DELTA: usize = 28;
+/// `quant_residual`: what an int8 activation's first level drops - the input
+/// of [`qquant_linear`]'s second pass.
+const K_QUANT_RESIDUAL: usize = 29;
 
 /// Every kernel this block dispatches - all pre-existing except
 /// [`K_ADALN_ROW`] and [`K_FLASH_CROSS_REG2`], all at their documented general
 /// contract.
-pub const KERNELS: [(&str, &str); 29] = [
+pub const KERNELS: [(&str, &str); 30] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm", kernels::RMSNORM),
@@ -266,6 +269,7 @@ pub const KERNELS: [(&str, &str); 29] = [
     ("flash_attn_cross_reg2", kernels::FLASH_ATTN_CROSS_REG2),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("lora_delta", kernels::LORA_DELTA),
+    ("quant_residual", kernels::QUANT_RESIDUAL),
 ];
 
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
@@ -1999,11 +2003,11 @@ fn qquant(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, sx:
     s.push(gpu.step(K_QUANT_PACK, &[x, sx, xq], &[rows, k], rows * k / 4));
 }
 
-/// `out = dequant(xq @ Wᵀ) + b`: one quantized linear, tier-dispatched -
-/// `xq`/`sx` must already hold `x`'s quantization at this `(rows, k)` shape
-/// (from [`qquant`]).
+/// `out = dequant(xq @ Wᵀ)`: one quantized GEMM, tier-dispatched, no bias -
+/// `xq`/`sx` must already hold an activation's quantization at this `(rows,
+/// k)` shape (from [`qquant`]).
 #[allow(clippy::too_many_arguments)]
-fn qlinear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
+fn qgemm(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
     match tier {
         QTier::Int8 => s.push(gpu.dispatch(
             K_MATMUL_I8_DYN,
@@ -2015,19 +2019,35 @@ fn qlinear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &De
         // own doc, `crates/wan/src/block.rs::qlinear`'s int4 branch.
         QTier::Int4 => s.push(gpu.step(K_MATMUL_Q4_DYN, &[xq, &w.w, sx, &w.sw, out], &[rows, k, n], rows * n)),
     }
-    if let Some(b) = &w.b {
-        s.push(gpu.step(K_BIAS_ADD, &[out, b], &[rows, n], rows * n));
-    }
 }
 
-/// [`qquant`] + [`qlinear`] in one call, for the common case of a fresh
-/// `(rows, k)` activation with no reuse across multiple linears.
+/// [`qquant`] + [`qgemm`] in one call, with the activation quantized in two
+/// int8 levels: `x ≈ s₁·q₁ + s₂·q₂`, the second level quantizing what the
+/// first rounds away (`quant_residual`), each multiplied by the same packed
+/// weight and summed. One level alone leaves each group's rounding error at
+/// up to half its step - enough to hold one real LTX-2.5 block at cosine
+/// 0.996 against fp32 - and that error compounds through 48 blocks and every
+/// step. Two levels bring it to ~1/(127·254) of the group scale, so the
+/// quantized linear computes what the checkpoint's own weights do. The bias
+/// and any runtime adapter are added once.
 #[allow(clippy::too_many_arguments)]
 fn qquant_linear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, x: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
     let xq = gpu.storage((rows * k / 4) as u64);
     let sx = gpu.storage(model::int8::act_scale_len(rows as usize, k as usize) as u64);
     qquant(gpu, s, x, &xq, &sx, rows, k);
-    qlinear(gpu, s, tier, &xq, &sx, w, out, rows, k, n);
+    let residual = gpu.storage((rows * k) as u64);
+    s.push(gpu.step(K_QUANT_RESIDUAL, &[x, &sx, &residual], &[rows, k], rows * k));
+    let rq = gpu.storage((rows * k / 4) as u64);
+    let rs = gpu.storage(model::int8::act_scale_len(rows as usize, k as usize) as u64);
+    qquant(gpu, s, &residual, &rq, &rs, rows, k);
+    let coarse = gpu.storage((rows * n) as u64);
+    qgemm(gpu, s, tier, &xq, &sx, w, &coarse, rows, k, n);
+    let fine = gpu.storage((rows * n) as u64);
+    qgemm(gpu, s, tier, &rq, &rs, w, &fine, rows, k, n);
+    add2(gpu, s, &coarse, &fine, out, rows * n);
+    if let Some(b) = &w.b {
+        s.push(gpu.step(K_BIAS_ADD, &[out, b], &[rows, n], rows * n));
+    }
     if let Some(l) = &w.lora {
         let tscr = gpu.storage((rows * l.r) as u64);
         s.extend(model::dispatch::lora_rows_off(gpu, gemm_variants(gpu), K_LORA_DELTA, l, &tscr, x, out, 0, 0, rows, k, n));

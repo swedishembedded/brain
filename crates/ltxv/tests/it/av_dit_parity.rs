@@ -962,10 +962,13 @@ fn real_q8_0_av_block0_int8_compute_matches_fp32() {
     let (vq, aq, tq) = blkq.forward(&vx, &ax, &v_adaln, &a_adaln, &v_context, &a_context, rope,
         &v_ss, &a_ss, &a2v_gate, &v2a_gate, tv, ta, Default::default());
 
-    report_lossy("real Q8_0 AV block-0 int8 video out", &vq, &vf, 0.99, 1.5e-1);
-    report_lossy("real Q8_0 AV block-0 int8 audio out", &aq, &af, 0.99, 1.5e-1);
-    report_lossy("real Q8_0 AV block-0 int8 a2v_out (raw, pre-gate)", &tq.a2v_out, &tf.a2v_out, 0.98, 2e-1);
-    report_lossy("real Q8_0 AV block-0 int8 v2a_out (raw, pre-gate)", &tq.v2a_out, &tf.v2a_out, 0.98, 2e-1);
+    // Two-level int8 activations measure at cosine >= 0.999999999 and
+    // relative L2 <= 8e-5 on every output here; the floors leave a margin
+    // and still fail a single-level (one int8 grid) activation path.
+    report_lossy("real Q8_0 AV block-0 int8 video out", &vq, &vf, 0.99999, 1e-3);
+    report_lossy("real Q8_0 AV block-0 int8 audio out", &aq, &af, 0.99999, 1e-3);
+    report_lossy("real Q8_0 AV block-0 int8 a2v_out (raw, pre-gate)", &tq.a2v_out, &tf.a2v_out, 0.99999, 1e-3);
+    report_lossy("real Q8_0 AV block-0 int8 v2a_out (raw, pre-gate)", &tq.v2a_out, &tf.v2a_out, 0.99999, 1e-3);
 }
 
 // ------------------------------------ the real-weight AV FORWARD, streamed --
@@ -1104,8 +1107,8 @@ fn real_q8_0_av_streamed_forward_matches_the_eager_fp32_forward() {
     let rs = session.stats();
     assert!(rs.slots == 1 && rs.uploads >= u64::from(cfg.video.num_layers), "the narrow resident window must have rotated: {rs:?}");
 
-    report_lossy("real Q8_0 AV streamed-vs-eager video out", &v_streamed, &taps.video.out, 0.99, 1.5e-1);
-    report_lossy("real Q8_0 AV streamed-vs-eager audio out", &a_streamed, &taps.audio.out, 0.99, 1.5e-1);
+    report_lossy("real Q8_0 AV streamed-vs-eager video out", &v_streamed, &taps.video.out, 0.99999, 1e-3);
+    report_lossy("real Q8_0 AV streamed-vs-eager audio out", &a_streamed, &taps.audio.out, 0.99999, 1e-3);
 
     // A second forward on the SAME session and cache is the shape a denoise
     // loop actually runs (every block resident or re-uploaded from the host
