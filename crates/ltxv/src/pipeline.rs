@@ -226,19 +226,18 @@ impl Paths {
     }
 
     /// Build `Paths` from an already-resolved [`capability::Assembly`]
-    /// (`crate::spec::LtxvSpec`'s `dit`/`vae`/`audio_vae`/`text_encoder`/
-    /// `tokenizer` roles) instead of `BRAIN_LTXV_*` - `vae` is the only
-    /// required role (`resolve` never returns `Resolved` without it), the
-    /// rest fall back to `None` exactly as an absent env var/flag already
-    /// does. `spatial_upsampler` is not one of this architecture's declared
-    /// roles (see [`OPTIONAL_PATH_VARS`]'s own doc) and is resolved the same
-    /// way it always was: an explicit flag, else `BRAIN_LTXV_UPSAMPLER_SPATIAL`.
+    /// (`crate::spec::LtxvSpec`'s roles) instead of `BRAIN_LTXV_*` - `vae` is
+    /// the only required role (`resolve` never returns `Resolved` without
+    /// it), the rest fall back to `None` exactly as an absent env var/flag
+    /// already does. `spatial_upsampler` is an explicit flag first, then the
+    /// store's own upscaler, then `BRAIN_LTXV_UPSAMPLER_SPATIAL`.
     pub fn from_assembly(assembly: &capability::Assembly, spatial_upsampler: Option<&str>) -> Result<Paths, String> {
         let get = |role: &str| -> Option<String> { assembly.roles.get(role).map(|p| p.to_string_lossy().into_owned()) };
         let vae = get("vae").ok_or_else(|| format!("ltxv: assembly '{}' has no vae role", assembly.id))?;
         let spatial_upsampler = spatial_upsampler
             .filter(|s| !s.is_empty())
             .map(str::to_string)
+            .or_else(|| get("spatial_upsampler"))
             .or_else(|| std::env::var(OPTIONAL_PATH_VARS[2].0).ok().filter(|v| !v.is_empty()));
         Ok(Paths { vae, dit: get("dit"), text_encoder: get("text_encoder"), spatial_upsampler, audio_vae: get("audio_vae") })
     }

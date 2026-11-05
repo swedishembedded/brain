@@ -89,14 +89,19 @@ and the current gap list.
 Model id (once served): `brain/ltxv`. The default checkpoint is
 `Lightricks/LTX-2.5` on Hugging Face, gated - fetching it requires a Hugging
 Face account with access accepted and `hf auth login` run first. It ships as
-several independent files rather than one directory-style checkpoint:
+several independent files rather than one directory-style checkpoint. Put
+them in the model store and `brain ltxv` finds each one by its content: the
+DiT GGUF, the video and audio VAEs, the Gemma-4 text encoder (the file that
+carries LTX's `text_embedding_projection`; its tokenizer is embedded in it) and
+the spatial x2 latent upscaler. A role flag names a file outright when the
+store holds more than one candidate:
 
 ```bash
-export BRAIN_LTXV_DIT=…/ltx-2.5-22b-distilled-transformer-bf16.safetensors
-export BRAIN_LTXV_VAE=…/ltx-2.5-video-vae-bf16.safetensors
-export BRAIN_LTXV_AUDIO_VAE=…/ltx-2.5-audio-vae-bf16.safetensors
-export BRAIN_LTXV_TEXT_ENCODER=…/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors
-export BRAIN_LTXV_TOKENIZER=…                # extracted from the text-encoder file
+brain ltxv t2v --dit-config ltx25_22b \
+  --dit …/ltx-2.5-22b-distilled-transformer-Q8_0.gguf \
+  --vae …/ltx-2.5-video-vae-conv-bf16.safetensors \
+  --text-encoder …/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors \
+  --spatial-upsampler …/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors ...
 ```
 
 The DiT alone is 42 GB at bf16 and the text encoder 26 GB - together they need
@@ -350,12 +355,13 @@ stream **together**, coupled every block by cross-attention. `--audio` runs
 both; without it only the model's video half runs and the clip is silent.
 
 ```bash
-export BRAIN_LTXV_VAE=[path/to/ltx-2.5-video-vae-conv-bf16.safetensors]
-export BRAIN_LTXV_DIT=[path/to/ltx-2.5-22b-distilled-transformer-Q8_0.gguf]
-export BRAIN_LTXV_TEXT_ENCODER=[path/to/gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf]
-export BRAIN_LTXV_AUDIO_VAE=[path/to/ltx-2.5-audio-vae-bf16.safetensors]
-brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b --audio   --prompt "a blacksmith hammers glowing steel on an anvil, rhythmic clangs"   --frames 57 --width 1280 --height 704 --fps 24 --output-path forge.mp4
+brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b --audio \
+  --prompt "a blacksmith hammers glowing steel on an anvil, rhythmic clangs" \
+  --frames 57 --width 1280 --height 704 --fps 24 --output-path forge.mp4
 ```
+
+Every weight, the audio VAE and the text encoder included, comes from the model
+store (see "Getting the weights").
 
 * **The distilled checkpoint carries the whole model.** Two thirds of its
   tensors are the audio stream and the bidirectional A<->V cross-attention

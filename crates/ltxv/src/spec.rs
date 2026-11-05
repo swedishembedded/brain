@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! LTX-2.5's [`ArchSpec`]: `dit`/`vae`/`audio_vae`/`text_encoder`/`tokenizer`.
+//! LTX-2.5's [`ArchSpec`]: `dit`/`vae`/`audio_vae`/`text_encoder`/`tokenizer`/
+//! `spatial_upsampler`.
 //!
-//! `vae` is the only REQUIRED role - see `crate::pipeline`'s module doc for
-//! why: today's DiT is a tiny random-weight smoke-test pipeline and the real
-//! 12B Gemma-4 text encoder is not imported in this workspace yet, so `dit`/
-//! `text_encoder`/`audio_vae`/`tokenizer` are genuinely opt-in (present, the
-//! real weight loads; absent, [`crate::pipeline::generate`]'s own documented
-//! fallback runs) - never a placeholder for "not implemented".
+//! `vae` is the only REQUIRED role: every other one is genuinely opt-in
+//! (present, the real weight loads; absent, [`crate::pipeline::generate`]'s
+//! own documented fallback runs - the tiny smoke-test DiT, the prompt stub
+//! context, a single-stage clip).
 //!
 //! Every check here reads real content, never a filename: the video VAE's
 //! own `encoder.conv_in.conv.weight`/`decoder.conv_in.conv.weight` tensor
@@ -28,9 +27,9 @@ use capability::Assembly;
 
 pub struct LtxvSpec;
 
-const ROLES: &[&str] = &["dit", "vae", "audio_vae", "text_encoder", "tokenizer"];
+const ROLES: &[&str] = &["dit", "vae", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler"];
 /// Every role but `vae` is opt-in - see this module's doc.
-const OPTIONAL: &[&str] = &["dit", "audio_vae", "text_encoder", "tokenizer"];
+const OPTIONAL: &[&str] = &["dit", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler"];
 
 fn classify_gguf(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(g) = checkpoint::gguf::MmapGguf::open(&rec.path.to_string_lossy()) else { return };
@@ -56,6 +55,19 @@ fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, 
     }
     if has("encoder.conv_in.conv.weight") && has("decoder.conv_in.conv.weight") {
         out.push((idx, "vae".to_string(), Confidence::Declared));
+        return;
+    }
+    // The text tower is a stock Gemma-4 checkpoint; what makes it LTX's is
+    // the per-stream projection each DiT stream reads its context through.
+    if has("text_embedding_projection.video_aggregate_embed.weight") && has("text_embedding_projection.audio_aggregate_embed.weight") {
+        out.push((idx, "text_encoder".to_string(), Confidence::Declared));
+        return;
+    }
+    // Both latent upscalers carry the same tensor names; only the config
+    // embedded in the file says which axis one scales.
+    let config = m.config();
+    if config.get("_class_name").and_then(|v| v.as_str()) == Some("LatentUpsampler") && config.get("spatial_upsample").and_then(|v| v.as_bool()) == Some(true) {
+        out.push((idx, "spatial_upsampler".to_string(), Confidence::Declared));
     }
 }
 
@@ -152,6 +164,34 @@ mod tests {
         .unwrap();
     }
 
+    /// The Gemma-4 tower with LTX's own per-stream text projections beside it,
+    /// as `gemma4-12b-with-proj-ltx-2.5-*.safetensors` ships.
+    fn write_text_encoder(path: &Path) {
+        checkpoint::st::save_safetensors(
+            path.to_str().unwrap(),
+            &[
+                ("model.language_model.embed_tokens.weight".to_string(), vec![4, 2], vec![0.0f32; 8]),
+                ("text_embedding_projection.video_aggregate_embed.weight".to_string(), vec![2, 2], vec![0.0f32; 4]),
+                ("text_embedding_projection.audio_aggregate_embed.weight".to_string(), vec![2, 2], vec![0.0f32; 4]),
+            ],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+    }
+
+    /// A `LatentUpsampler`: the same tensor names for both directions, told
+    /// apart only by the config embedded in the file.
+    fn write_upsampler(path: &Path, spatial: bool) {
+        checkpoint::st::save_safetensors(
+            path.to_str().unwrap(),
+            &[("initial_conv.weight".to_string(), vec![2, 2], vec![0.0f32; 4]), ("final_conv.weight".to_string(), vec![2, 2], vec![0.0f32; 4])],
+            &serde_json::json!({"_class_name": "LatentUpsampler", "spatial_upsample": spatial, "temporal_upsample": !spatial}),
+            None,
+        )
+        .unwrap();
+    }
+
     fn write_dit_gguf(path: &Path) {
         checkpoint::gguf_write::write(
             path.to_str().unwrap(),
@@ -217,13 +257,22 @@ mod tests {
         let vae_path = dir.join("ltx-2.5-video-vae-conv-bf16.safetensors");
         let audio_vae_path = dir.join("ltx-2.5-audio-vae-bf16.safetensors");
         let dit_path = dir.join("ltx-2.5-22b-distilled-transformer-Q8_0.gguf");
+        let text_encoder_path = dir.join("gemma4-12b-with-proj-ltx-2.5-bf16.safetensors");
+        let spatial_path = dir.join("ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors");
+        let temporal_path = dir.join("ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors");
         write_video_vae(&vae_path);
         write_audio_vae(&audio_vae_path);
         write_dit_gguf(&dit_path);
+        write_text_encoder(&text_encoder_path);
+        write_upsampler(&spatial_path, true);
+        write_upsampler(&temporal_path, false);
         let records = vec![
             complete(vae_path.clone(), ArtifactKind::Safetensors),
             complete(audio_vae_path.clone(), ArtifactKind::Safetensors),
             complete(dit_path.clone(), ArtifactKind::Gguf),
+            complete(text_encoder_path.clone(), ArtifactKind::Safetensors),
+            complete(spatial_path.clone(), ArtifactKind::Safetensors),
+            complete(temporal_path, ArtifactKind::Safetensors),
         ];
 
         let spec = LtxvSpec;
@@ -234,6 +283,8 @@ mod tests {
                 assert_eq!(a.roles["vae"], vae_path);
                 assert_eq!(a.roles["audio_vae"], audio_vae_path);
                 assert_eq!(a.roles["dit"], dit_path);
+                assert_eq!(a.roles["text_encoder"], text_encoder_path, "the store's own encoder, so audio needs no flag");
+                assert_eq!(a.roles["spatial_upsampler"], spatial_path, "the temporal upscaler is not a spatial candidate");
             }
             other => panic!("expected Resolved, got {other:?}"),
         }

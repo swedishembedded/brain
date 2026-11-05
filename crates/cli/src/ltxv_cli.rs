@@ -153,12 +153,10 @@ exits - --brain-data-dir/BRAIN_MODELS_DIR names where to look):
                              ltx25_22b)
   --text-encoder <path>     real Gemma-4 text encoder (optional; the
                              deterministic prompt stub runs without it)
-                            $BRAIN_LTXV_UPSAMPLER_SPATIAL  spatial x2 latent
-                                                   upscaler - REQUIRED above
-                                                   6144 video tokens, unused
-                                                   below (see Stages). Not a
-                                                   resolver role - env/flag
-                                                   only, same as always.
+  --spatial-upsampler <path> spatial x2 latent upscaler - REQUIRED above
+                             6144 video tokens, unused below (see Stages);
+                             $BRAIN_LTXV_UPSAMPLER_SPATIAL when the store
+                             holds none
 
 Stages:
   The distilled checkpoint's fixed 8-sigma schedule is only distilled to
@@ -1182,17 +1180,16 @@ mod tests {
         // overrides`, matched against `LtxvSpec::roles()` - never a literal
         // match arm in this file), so they're checked against the resolver's
         // own role table instead of a quoted string in source.
-        for role in ["vae", "dit", "text_encoder"] {
+        for role in ["vae", "dit", "text_encoder", "spatial_upsampler"] {
             let flag = format!("--{}", role.replace('_', "-"));
             assert!(super::HELP.contains(&flag), "{flag} is a resolver role flag but not in --help");
             assert!(ltxv::spec::LtxvSpec.roles().contains(&role), "{role} is documented as a role flag but LtxvSpec doesn't declare it");
         }
         // `BRAIN_LTXV_UPSAMPLER_SPATIAL` is the one `Paths` env var this
-        // command still reads directly - it names no resolver role (see
-        // `ltxv::pipeline::OPTIONAL_PATH_VARS`'s own doc). The other three
-        // (`vae`/`dit`/`text_encoder`) are checked above via the resolver's
-        // own role table instead: `Paths::from_env`'s env vars for them are
-        // read only by the served path (`resident_ltxv.rs`), not this CLI.
+        // command still reads directly, as the fallback when the store holds
+        // no spatial upscaler. The role flags are checked above via the
+        // resolver's own role table instead: `Paths::from_env`'s env vars for
+        // them are read only by the served path (`resident_ltxv.rs`).
         assert!(super::HELP.contains(ltxv::pipeline::OPTIONAL_PATH_VARS[2].0), "{} is read but not in --help", ltxv::pipeline::OPTIONAL_PATH_VARS[2].0);
     }
 
