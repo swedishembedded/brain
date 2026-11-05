@@ -115,7 +115,8 @@ pub fn resolve_canvas_size(aspect_width: f64, aspect_height: f64, canvas_multipl
         height *= scale;
     }
     let m = canvas_multiple as f64;
-    let round_to_multiple = |v: f64| -> u32 { (canvas_multiple.max((v / m).round() as u32 * canvas_multiple)).max(canvas_multiple) };
+    // Python's `round`: ties go to the even multiple.
+    let round_to_multiple = |v: f64| -> u32 { canvas_multiple.max((v / m).round_ties_even() as u32 * canvas_multiple) };
     Ok((round_to_multiple(height), round_to_multiple(width)))
 }
 
@@ -1156,6 +1157,13 @@ mod tests {
         assert!(h > 0 && w > 0);
         // 16:9 at a 32-multiple must keep w > h.
         assert!(w > h);
+    }
+
+    /// A side that lands exactly between two multiples rounds to the even
+    /// one, as the reference's Python `round` does: 784 / 32 = 24.5 -> 768.
+    #[test]
+    fn resolve_canvas_size_rounds_a_tie_to_the_even_multiple() {
+        assert_eq!(resolve_canvas_size(784.0, 768.0, 32, 768, 768 * 1344).unwrap(), (768, 768));
     }
 
     #[test]
