@@ -35,6 +35,25 @@ make build/release          # build the optimized ./target/release/brain
 is what you want for anything performance-sensitive — training and inference
 both.
 
+### Windows
+
+The video stack (`brain-videocodec`, `brain-imaging`) builds and links for
+`x86_64-pc-windows-msvc`, including its tests: the AV1 coders are pure Rust
+and libopus builds with CMake and the MSVC (or clang-cl) compiler. From Linux,
+[cargo-xwin](https://github.com/rust-cross/cargo-xwin) cross-builds it
+against the Microsoft CRT and SDK it downloads:
+
+```bash
+rustup target add x86_64-pc-windows-msvc
+cargo install cargo-xwin
+cargo xwin build -p brain-imaging --target x86_64-pc-windows-msvc
+```
+
+The whole `brain` CLI does not build for Windows yet: `brain-dbus` (D-Bus) and
+`brain-server` (Unix domain sockets) do not compile there, and the CLI's TTS
+server and daemon use Unix sockets and descriptors as well. The window and
+the viewport recorder link SDL2, which a Windows build has to be given.
+
 ## Test
 
 ```bash
