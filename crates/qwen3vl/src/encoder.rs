@@ -611,6 +611,104 @@ impl PatchMerger {
     }
 }
 
+/// The vision half of an HF Qwen3-VL checkpoint - the ViT, the main merger
+/// and one merger per DeepStack tap - in this crate's own names, materialized
+/// eagerly (it is the small half of the model).
+pub struct VisionWeights {
+    pub vision: HashMap<String, Vec<f32>>,
+    pub main_merger: HashMap<String, Vec<f32>>,
+    pub deepstack: Vec<HashMap<String, Vec<f32>>>,
+}
+
+impl VisionWeights {
+    pub fn read(reader: &checkpoint::weightio::WeightReader, cfg: &VisionConfig) -> Result<VisionWeights, String> {
+        use checkpoint::TensorSource;
+        let mut w = VisionWeights { vision: HashMap::new(), main_merger: HashMap::new(), deepstack: (0..cfg.deepstack_indexes.len()).map(|_| HashMap::new()).collect() };
+        for name in reader.names().map(str::to_string).collect::<Vec<_>>() {
+            let slot = if let Some(m) = crate::import::map_vision(&name) {
+                Some((&mut w.vision, m))
+            } else if let Some(m) = crate::import::map_main_merger(&name) {
+                Some((&mut w.main_merger, m))
+            } else {
+                crate::import::map_deepstack(&name).and_then(|(k, m)| w.deepstack.get_mut(k).map(|d| (d, m)))
+            };
+            if let Some((weights, mapped)) = slot {
+                weights.insert(mapped, reader.tensor(&name).ok_or_else(|| format!("qwen3vl: '{name}' vanished mid-read"))?);
+                reader.advise_drop(&name);
+            }
+        }
+        Ok(w)
+    }
+}
+
+/// One vision block's features at the decoder width: the main merger's
+/// `[n/merge², d_model]` visual tokens and one `[n/merge², d_model]` buffer
+/// per DeepStack level.
+pub struct VisionFeatures {
+    pub visual: Vec<f32>,
+    pub deepstack: Vec<Vec<f32>>,
+}
+
+/// The whole Qwen3-VL vision side - ViT, main merger and DeepStack mergers -
+/// built once on its own kernel set, mapping one block of packed patches to
+/// the rows the language tower splices in.
+pub struct VisionTower {
+    gpu: Gpu,
+    cfg: VisionConfig,
+    encoder: VisionEncoder,
+    merger: PatchMerger,
+    /// One postshuffle-norm merger per DeepStack tap (empty = no DeepStack).
+    ds_mergers: Vec<PatchMerger>,
+}
+
+impl VisionTower {
+    /// The tower on `gpu` (a vision kernel set, e.g. `Gpu::new_like(vision_pipelines())`
+    /// on the decoder's own card), projecting to `d_model`.
+    pub fn new(gpu: Gpu, cfg: VisionConfig, vision: &HashMap<String, Vec<f32>>, main_merger: &HashMap<String, Vec<f32>>, deepstack: &[HashMap<String, Vec<f32>>], d_model: u32) -> VisionTower {
+        assert_eq!(deepstack.len(), cfg.deepstack_indexes.len(), "one merger per DeepStack tap");
+        let merge = cfg.spatial_merge_size;
+        let encoder = VisionEncoder::new(&gpu, cfg.clone(), vision);
+        let merger = PatchMerger::new(&gpu, main_merger, cfg.hidden, merge, d_model, false);
+        let ds_mergers = deepstack.iter().map(|w| PatchMerger::new(&gpu, w, cfg.hidden, merge, d_model, true)).collect();
+        VisionTower { gpu, cfg, encoder, merger, ds_mergers }
+    }
+
+    /// The tower from an HF Qwen3-VL checkpoint's `model.visual.*` tensors.
+    pub fn from_reader(reader: &checkpoint::weightio::WeightReader, gpu: Gpu, cfg: VisionConfig, d_model: u32) -> Result<VisionTower, String> {
+        let w = VisionWeights::read(reader, &cfg)?;
+        Ok(VisionTower::new(gpu, cfg, &w.vision, &w.main_merger, &w.deepstack, d_model))
+    }
+
+    pub fn config(&self) -> &VisionConfig {
+        &self.cfg
+    }
+
+    /// Features of one block of `grid_h x grid_w` packed patches
+    /// (`[grid_h * grid_w, patch_vec]`, merge-block order): an image, or one
+    /// temporal-patch group of a video.
+    pub fn features(&self, grid_h: u32, grid_w: u32, pixels: &[f32]) -> VisionFeatures {
+        self.features_timed(grid_h, grid_w, pixels).0
+    }
+
+    /// [`Self::features`] plus the seconds spent in the ViT and in the
+    /// mergers.
+    pub fn features_timed(&self, grid_h: u32, grid_w: u32, pixels: &[f32]) -> (VisionFeatures, f64, f64) {
+        let n = grid_h * grid_w;
+        let t_vision = std::time::Instant::now();
+        let (feats, taps) = self.encoder.encode_with_taps(&self.gpu, grid_h, grid_w, pixels, &self.cfg.deepstack_indexes);
+        let vision_s = t_vision.elapsed().as_secs_f64();
+        let t_merge = std::time::Instant::now();
+        let visual = self.merger.merge(&self.gpu, &feats, n);
+        let deepstack = taps.iter().zip(&self.ds_mergers).map(|(tap, ds)| ds.merge(&self.gpu, tap, n)).collect();
+        (VisionFeatures { visual, deepstack }, vision_s, t_merge.elapsed().as_secs_f64())
+    }
+
+    /// DeepStack levels the tower taps.
+    pub fn n_deepstack(&self) -> usize {
+        self.ds_mergers.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

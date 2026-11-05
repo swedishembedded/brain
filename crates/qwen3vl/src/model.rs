@@ -14,14 +14,13 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use checkpoint::TensorSource;
 use gpu_core::Gpu;
 use qwen3::{Dtype, Qwen, QwenConfig, Shard};
 
 use data::rng::Rng;
 
 use crate::config::VisionConfig;
-use crate::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
+use crate::encoder::{vision_pipelines, VisionFeatures, VisionTower};
 use crate::mrope::{get_rope_index, get_rope_index_multi, mrope_tables};
 
 /// One image's host-packed input to [`Qwen3Vl::generate`]/[`Qwen3Vl::generate_cb`]/
@@ -67,17 +66,13 @@ impl Default for SampleParams {
 /// An assembled Qwen3-VL model (forward path). Image tokens occupy a contiguous
 /// run of `image_token_id` in the text stream starting at `image_row0`.
 pub struct Qwen3Vl {
-    vgpu: Gpu,
     vcfg: VisionConfig,
     /// The tower, built ONCE. It used to be assembled inside every forward
     /// from host `Vec<f32>` weights, which re-uploaded the ViT and all four
     /// mergers - about 1.7 GB - per image, and held that much host RAM for the
     /// life of the model on top of the device copy. The cost is a fixed one
     /// per image, so it dominated a small image entirely.
-    encoder: VisionEncoder,
-    merger: PatchMerger,
-    /// One postshuffle-norm merger per DeepStack tap (empty = no DeepStack).
-    ds_mergers: Vec<PatchMerger>,
+    vision: VisionTower,
     decoder: Qwen,
     merge: u32,
     image_token_id: u32,
@@ -298,12 +293,8 @@ impl Qwen3Vl {
         // On a CPU-only build `new_like` still lands on the CPU backend, so
         // placement follows the decoder rather than being asserted here.
         let vgpu = decoder.gpu().new_like(vision_pipelines());
-        let d_model = decoder.cfg.d_model;
-        let encoder = VisionEncoder::new(&vgpu, vcfg.clone(), &vweights);
-        let merger = PatchMerger::new(&vgpu, &merger_weights, vcfg.hidden, merge, d_model, false);
-        let ds_mergers =
-            ds_merger_weights.iter().map(|mw| PatchMerger::new(&vgpu, mw, vcfg.hidden, merge, d_model, true)).collect();
-        Qwen3Vl { vgpu, vcfg, encoder, merger, ds_mergers, decoder, merge, image_token_id, mrope_section }
+        let vision = VisionTower::new(vgpu, vcfg.clone(), &vweights, &merger_weights, &ds_merger_weights, decoder.cfg.d_model);
+        Qwen3Vl { vcfg, vision, decoder, merge, image_token_id, mrope_section }
     }
 
     /// Assemble a TRAINING build (`DecoderBuild::Batched`, decoder config
@@ -527,34 +518,14 @@ impl Qwen3Vl {
     ) -> Result<Qwen3Vl, String> {
         let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(dir))
             .map_err(|e| format!("qwen3vl: open {dir}: {e}"))?;
-        let n_deepstack = vcfg.deepstack_indexes.len();
-        let mut vweights = HashMap::new();
-        let mut merger_weights = HashMap::new();
-        let mut ds_merger_weights: Vec<HashMap<String, Vec<f32>>> = (0..n_deepstack).map(|_| HashMap::new()).collect();
-        for name in reader.names().map(str::to_string).collect::<Vec<_>>() {
-            if let Some(m) = crate::import::map_vision(&name) {
-                let t = reader.tensor(&name).ok_or_else(|| format!("qwen3vl: '{name}' vanished mid-read"))?;
-                vweights.insert(m, t);
-                reader.advise_drop(&name);
-            } else if let Some(m) = crate::import::map_main_merger(&name) {
-                let t = reader.tensor(&name).ok_or_else(|| format!("qwen3vl: '{name}' vanished mid-read"))?;
-                merger_weights.insert(m, t);
-                reader.advise_drop(&name);
-            } else if let Some((k, m)) = crate::import::map_deepstack(&name) {
-                if k < ds_merger_weights.len() {
-                    let t = reader.tensor(&name).ok_or_else(|| format!("qwen3vl: '{name}' vanished mid-read"))?;
-                    ds_merger_weights[k].insert(m, t);
-                    reader.advise_drop(&name);
-                }
-            }
-        }
+        let w = crate::encoder::VisionWeights::read(&reader, &vcfg)?;
         let dsource = crate::import::decoder_source(&reader);
         Ok(Self::from_streamed_decoder(
             vcfg,
             dcfg,
-            vweights,
-            merger_weights,
-            ds_merger_weights,
+            w.vision,
+            w.main_merger,
+            w.deepstack,
             &dsource,
             seq_len,
             image_token_id,
@@ -582,13 +553,12 @@ impl Qwen3Vl {
         let d_model = self.decoder.cfg.d_model;
 
         // Vision tower → visual tokens at the decoder width (+ DeepStack taps).
-        let (feats, tap_feats) = self.encoder.encode_with_taps(&self.vgpu, gh, gw, pixels, &self.vcfg.deepstack_indexes);
-        let visual = self.merger.merge(&self.vgpu, &feats, n);
+        let VisionFeatures { visual, deepstack } = self.vision.features(gh, gw, pixels);
         assert_eq!(visual.len(), (n_visual * d_model) as usize);
 
         // DeepStack: each tap → its own postshuffle merger → decoder level buffer.
-        for (level, (tap, ds)) in tap_feats.iter().zip(&self.ds_mergers).enumerate() {
-            self.decoder.write_deepstack(level, &ds.merge(&self.vgpu, tap, n));
+        for (level, data) in deepstack.iter().enumerate() {
+            self.decoder.write_deepstack(level, data);
         }
 
         // M-RoPE tables from the 3-axis position ids for this stream.
@@ -848,21 +818,17 @@ impl Qwen3Vl {
         // addresses that buffer by a `deepstack_row` that walks the WHOLE
         // request's image rows, not a per-image index.
         let mut visual: Vec<f32> = Vec::new();
-        let mut ds_levels: Vec<Vec<f32>> = vec![Vec::new(); self.ds_mergers.len()];
+        let mut ds_levels: Vec<Vec<f32>> = vec![Vec::new(); self.vision.n_deepstack()];
         let mut grids_llm: Vec<(u32, u32, u32)> = Vec::with_capacity(images.len());
         for img in images {
             let (gh, gw) = img.grid;
-            let n = gh * gw;
-            let t_vision = Instant::now();
-            let (feats, tap_feats) = self.encoder.encode_with_taps(&self.vgpu, gh, gw, img.pixels, &self.vcfg.deepstack_indexes);
-            st.vision_s += t_vision.elapsed().as_secs_f64();
-
-            let t_merge = Instant::now();
-            visual.extend(self.merger.merge(&self.vgpu, &feats, n));
-            for (level, (tap, ds)) in tap_feats.iter().zip(&self.ds_mergers).enumerate() {
-                ds_levels[level].extend(ds.merge(&self.vgpu, tap, n));
+            let (features, vision_s, merge_s) = self.vision.features_timed(gh, gw, img.pixels);
+            st.vision_s += vision_s;
+            st.merge_s += merge_s;
+            visual.extend(features.visual);
+            for (level, data) in features.deepstack.into_iter().enumerate() {
+                ds_levels[level].extend(data);
             }
-            st.merge_s += t_merge.elapsed().as_secs_f64();
 
             grids_llm.push((1, gh / self.merge, gw / self.merge));
         }
@@ -959,18 +925,15 @@ impl Qwen3Vl {
         // interleaved per group here, unlike generate_timed's split stages,
         // so both fold into `vision_s`.
         let t_vision = Instant::now();
-        let n_levels = self.vcfg.deepstack_indexes.len();
         let mut visual = Vec::with_capacity(n_frames as usize * n_visual_per_frame as usize * d_model);
-        let mut ds_levels: Vec<Vec<f32>> = vec![Vec::new(); n_levels];
+        let mut ds_levels: Vec<Vec<f32>> = vec![Vec::new(); self.vision.n_deepstack()];
         let group_len = n_per_frame as usize * pv;
         for g in 0..n_frames as usize {
-            let group_pixels = &pixels[g * group_len..(g + 1) * group_len];
-            let (feats, tap_feats) = self.encoder.encode_with_taps(&self.vgpu, gh, gw, group_pixels, &self.vcfg.deepstack_indexes);
-            let group_visual = self.merger.merge(&self.vgpu, &feats, n_per_frame);
-            assert_eq!(group_visual.len(), (n_visual_per_frame as usize) * d_model);
-            visual.extend_from_slice(&group_visual);
-            for (level, (tap, ds)) in tap_feats.iter().zip(&self.ds_mergers).enumerate() {
-                ds_levels[level].extend(ds.merge(&self.vgpu, tap, n_per_frame));
+            let features = self.vision.features(gh, gw, &pixels[g * group_len..(g + 1) * group_len]);
+            assert_eq!(features.visual.len(), (n_visual_per_frame as usize) * d_model);
+            visual.extend(features.visual);
+            for (level, data) in features.deepstack.into_iter().enumerate() {
+                ds_levels[level].extend(data);
             }
         }
         for (level, data) in ds_levels.iter().enumerate() {
