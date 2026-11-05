@@ -612,6 +612,24 @@ async fn model_card_derives_capabilities_and_output_limit_from_the_manifest() {
     }
 }
 
+/// brain keeps nothing of a request: no prompt, answer or upload is written
+/// anywhere or logged. Every card says so, so a client that routes by data
+/// retention can tell this server apart from one that does not say.
+#[tokio::test]
+async fn model_card_says_the_server_keeps_no_data() {
+    for (provider, uri_prefix, model_schema) in [
+        (Provider::OpenAI, "/v1/models", ("openai.json", "Model")),
+        (Provider::OpenRouter, "/models", ("openrouter.json", "Model")),
+    ] {
+        let (app, _exec, key) = app_over(vec![agent_chat_manifest(), chat_manifest(), embed_manifest()], provider);
+        for model in ["brain-agent", "brain-chat", "brain-embed"] {
+            let card = get_json(&app, provider, &format!("{uri_prefix}/{model}"), &key).await;
+            assert_valid(model_schema.0, model_schema.1, &card);
+            assert_eq!(card["zero_data_retention"], json!(true), "{provider}: {card}");
+        }
+    }
+}
+
 /// A single model card is as key-gated as the list: it now names what is attached.
 #[tokio::test]
 async fn model_card_route_requires_the_key() {

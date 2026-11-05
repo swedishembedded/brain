@@ -242,6 +242,7 @@ The Anthropic entry is unchanged.
 | `architecture.input_modalities` | On a chat model: `["text", "image"]` for a `vision` model, else `["text"]` (the field an agent runtime reads to decide whether it may attach images). |
 | `max_output_tokens` | The most new tokens one request may ask for, when the model's `generate` action declares an upper bound. On OpenRouter it is also `top_provider.max_completion_tokens`. |
 | `adapter` | Present on an entry that IS a LoRA adapter: `{ "id": "<adapter card id>", "digest": "sha256:<hex>" }`. The id is the adapter's name and the digest is that of its file; no file path is ever included. A release that replaces an adapter under the same id changes the digest on the next read. |
+| `zero_data_retention` | Always `true`: the server keeps nothing of a request (no prompt, answer or upload is written anywhere or logged). A client that routes by data retention reads it to tell this server from one that does not say. |
 
 ### Adapters are models
 

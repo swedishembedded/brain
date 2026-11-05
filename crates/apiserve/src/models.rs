@@ -82,8 +82,8 @@ const FALLBACK_CONTEXT_LENGTH: u64 = 4096;
 /// builds a prompt within it should never be rejected by the actual engine.
 ///
 /// OpenAI and OpenRouter cards also carry the additive, optional fields
-/// `capabilities`, `max_output_tokens` and `adapter` (see [`add_discovery`]);
-/// the Anthropic card is unchanged.
+/// `capabilities`, `max_output_tokens`, `adapter` and `zero_data_retention`
+/// (see [`add_discovery`]); the Anthropic card is unchanged.
 pub fn card(provider: Provider, info: &ModelInfo, adapter: Option<&AdapterIdentity>) -> Value {
     let name = info.name.as_str();
     let mut card = match provider {
@@ -143,6 +143,10 @@ fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIde
     if let Some(adapter) = adapter {
         card["adapter"] = json!({ "id": adapter.id, "digest": adapter.digest });
     }
+    // The server keeps nothing of a request: no prompt, answer or upload is
+    // written anywhere or logged. Said on every card, so a client that routes
+    // by data retention can tell it from a server that does not say.
+    card["zero_data_retention"] = json!(true);
 }
 
 /// What a model takes in and gives out, in OpenRouter's modality names: text
