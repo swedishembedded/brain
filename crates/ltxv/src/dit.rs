@@ -38,7 +38,7 @@ use model::Shard;
 use vae::blocks::Tensors;
 
 use crate::block::{AvBlockTaps, BlockTaps, EmbeddingsConnector, GenerationCache, LtxAvBlock, LtxBlock, LtxBlockQ, QBlockWeights, QTier, KERNELS};
-use crate::config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
+use crate::config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig, Stream};
 use crate::rope::{ltx_rope_tables, LtxRopeTables};
 
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
@@ -1326,7 +1326,29 @@ pub fn forward_q_streamed(
     cache: &GenerationCache,
 ) -> Vec<f32> {
     let session = crate::devres::DitSession::transient(device);
-    forward_q_streamed_in(&session, cfg, src, head, tier, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, cache, &crate::block::NO_PERTURBATIONS)
+    let step = StreamedStep { stream: Stream::Video, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, perturbations: &crate::block::NO_PERTURBATIONS };
+    forward_q_streamed_in(&session, cfg, src, head, tier, &step, cache)
+}
+
+/// One single-stream forward's inputs - [`forward_q_streamed_in`]'s step,
+/// the single-stream counterpart of [`AvStreamedStep`].
+pub struct StreamedStep<'a> {
+    /// Which of the checkpoint's streams runs: a video-only checkpoint's
+    /// video stream, or an AV checkpoint's audio stream alone (`cfg` is then
+    /// [`crate::config::LtxAvDitConfig::audio_stream`]).
+    pub stream: Stream,
+    pub latent: &'a [f32],
+    pub timesteps: &'a [f32],
+    pub positions: &'a [f32],
+    pub keyframes_mask: &'a [f32],
+    pub context: &'a [f32],
+    pub context_len: usize,
+    pub t: usize,
+    pub context_valid: &'a [f32],
+    /// What this forward's guidance pass perturbs. A single-stream forward's
+    /// self-attention bypass is the `video_self_attn_blocks` set whichever
+    /// stream runs: it names the stream being denoised.
+    pub perturbations: &'a crate::block::Perturbations,
 }
 
 /// [`forward_q_streamed`] against a caller-owned [`crate::devres::DitSession`]
@@ -1346,25 +1368,9 @@ pub fn forward_q_streamed(
 /// same kernels with the same operands whether a block's weights arrived on
 /// the card one microsecond ago or eight denoise steps ago. Residency changes
 /// WHEN bytes move, never what any kernel reads.
-#[allow(clippy::too_many_arguments)]
-#[tracing::instrument(level = "info", name = "dit_forward_streamed", skip_all, fields(t = t, context_len = context_len, layers = cfg.num_layers, tier = ?tier))]
-pub fn forward_q_streamed_in(
-    session: &crate::devres::DitSession,
-    cfg: &LtxDitConfig,
-    src: &(dyn TensorSource + Sync),
-    head: &Tensors,
-    tier: QTier,
-    latent: &[f32],
-    timesteps: &[f32],
-    positions: &[f32],
-    keyframes_mask: &[f32],
-    context: &[f32],
-    context_len: usize,
-    t: usize,
-    context_valid: &[f32],
-    cache: &GenerationCache,
-    perturbations: &crate::block::Perturbations,
-) -> Vec<f32> {
+#[tracing::instrument(level = "info", name = "dit_forward_streamed", skip_all, fields(stream = ?step.stream, t = step.t, context_len = step.context_len, layers = cfg.num_layers, tier = ?tier))]
+pub fn forward_q_streamed_in(session: &crate::devres::DitSession, cfg: &LtxDitConfig, src: &(dyn TensorSource + Sync), head: &Tensors, tier: QTier, step: &StreamedStep, cache: &GenerationCache) -> Vec<f32> {
+    let StreamedStep { stream, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, perturbations } = *step;
     let dim = cfg.inner_dim as usize;
     assert_eq!(latent.len(), t * cfg.in_channels as usize);
     assert_eq!(timesteps.len(), t);
@@ -1372,8 +1378,8 @@ pub fn forward_q_streamed_in(
     assert_eq!(context.len(), context_len * cfg.cross_attention_dim as usize);
 
     let s_patch = std::time::Instant::now();
-    let pw = tget(head, "patchify_proj.weight");
-    let pb = tget(head, "patchify_proj.bias");
+    let pw = tget(head, &stream.key("patchify_proj.weight"));
+    let pb = tget(head, &stream.key("patchify_proj.bias"));
     let mut x = linear(latent, t, cfg.in_channels as usize, pw, Some(pb), dim);
     if cfg.use_keyframes_abs_pos_embedding {
         let kf = tget(head, "keyframes_abs_pos_embedding");
@@ -1390,7 +1396,7 @@ pub fn forward_q_streamed_in(
 
     let s_adaln = std::time::Instant::now();
     let ts_scaled: Vec<f32> = timesteps.iter().map(|&x| x * cfg.timestep_scale_multiplier as f32).collect();
-    let (adaln_table, embedded_timestep) = ada_layer_norm_single(head, "adaln_single", &ts_scaled, dim, cfg.adaln_rows() as usize);
+    let (adaln_table, embedded_timestep) = ada_layer_norm_single(head, &stream.key("adaln_single"), &ts_scaled, dim, cfg.adaln_rows() as usize);
     // NESTS the two `ada_layer_norm_single: ...` stages printed just above:
     // this bracket is the whole stage, they are its two halves. Adding all
     // three double-counts, which is the reading that reports this stage at
@@ -1417,7 +1423,8 @@ pub fn forward_q_streamed_in(
     // a miss - a generation holds `positions`/`t`/the config fixed across
     // every denoise step, so past the first step this stage is a hash and a
     // pair of `Arc` bumps. See `crate::devres::RopeCache`.
-    let rope_id = crate::devres::rope_key("video", cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
+    let rope_max_pos = stream.rope_max_pos(cfg);
+    let rope_id = crate::devres::rope_key(stream.rope_tag(), cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, rope_max_pos, positions, t);
 
     let mut t_quant = std::time::Duration::ZERO;
     let mut t_upload = std::time::Duration::ZERO;
@@ -1437,10 +1444,10 @@ pub fn forward_q_streamed_in(
     // quantized again; only the norms and tables are read as f32. The repack
     // runs one block ahead (`crate::devres::Lookahead`), so `t_quant` is the
     // time the forward actually waited for it.
-    let quantize = |l: usize| QBlockWeights::quantize_host(src, &format!("transformer_blocks.{l}"), dim, cfg.apply_gated_attention, tier);
-    let uncached = |l: usize| !cache.is_cached(l, tier);
+    let quantize = |l: usize| QBlockWeights::quantize_host_stream(src, &format!("transformer_blocks.{l}"), stream, dim, cfg.apply_gated_attention, tier);
+    let uncached = |l: usize| !cache.is_cached(stream, l, tier);
     let mut weights = |l: usize, host: crate::devres::HostCopy, fetch: &mut dyn FnMut(usize) -> crate::block::CachedQBlockWeights| -> std::sync::Arc<crate::block::CachedQBlockWeights> {
-        if let Some(c) = cache.block(l, tier) {
+        if let Some(c) = cache.block(stream, l, tier) {
             return c;
         }
         misses += 1;
@@ -1448,7 +1455,7 @@ pub fn forward_q_streamed_in(
         let quantized = fetch(l);
         t_quant += s1.elapsed();
         match host {
-            crate::devres::HostCopy::Keep => cache.store_block(l, tier, quantized),
+            crate::devres::HostCopy::Keep => cache.store_block(stream, l, tier, quantized),
             crate::devres::HostCopy::Release => std::sync::Arc::new(quantized),
         }
     };
@@ -1475,7 +1482,7 @@ pub fn forward_q_streamed_in(
 
     let s_rope = std::time::Instant::now();
     let (cos_bufs, sin_bufs) = session.rope_tables(rope_id, &mut || {
-        let r = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
+        let r = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, rope_max_pos, positions, t);
         upload_rope_tables(&gpu, &r)
     });
     gpu_core::profile::stage_time("forward_q_streamed: RoPE tables (host f64 build + upload, cached per generation)", s_rope);
@@ -1485,20 +1492,23 @@ pub fn forward_q_streamed_in(
     // The connector's inputs (`context`, `context_valid`, `context_len`) are
     // fixed for a whole generation, so its answer is too - see this function's
     // `cache` doc. Ask the cache first; only a genuinely new context pays.
-    let conn_hit = cache.connector_hit("video_embeddings_connector", context, context_valid, context_len);
+    let connector = stream.connector();
+    let conn_hit = cache.connector_hit(connector, context, context_valid, context_len);
     let conn_was_hit = conn_hit.is_some();
     let connector_context = match conn_hit {
         Some(out) => out,
         None => {
-            let w = load_connector_tensors(src, dit_tensor_manifest(cfg), "video_embeddings_connector", session.adapter());
+            let mut manifest = Vec::new();
+            push_connector(&mut manifest, connector, cfg.connector_num_learnable_registers as usize, cfg.connector_inner_dim() as usize, cfg.connector_num_layers, 4);
+            let w = load_connector_tensors(src, manifest, connector, session.adapter());
             #[rustfmt::skip]
             let (out, _connector_out) = route_context_through_connector(
-                &gpu, &w, "video_embeddings_connector", cfg.use_embeddings_connector, context, context_valid, context_len as u32,
+                &gpu, &w, connector, cfg.use_embeddings_connector, context, context_valid, context_len as u32,
                 cfg.connector_inner_dim(), cfg.connector_num_attention_heads, cfg.connector_attention_head_dim,
                 cfg.connector_num_layers, cfg.connector_num_learnable_registers, cfg.connector_apply_gated_attention,
                 cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
             );
-            cache.connector_store("video_embeddings_connector", context, context_valid, context_len, &out);
+            cache.connector_store(connector, context, context_valid, context_len, &out);
             out
         }
     };
@@ -1583,7 +1593,7 @@ pub fn forward_q_streamed_in(
     );
 
     let s_out = std::time::Instant::now();
-    let r = output_stage(head, "scale_shift_table", "proj_out", &x, &embedded_timestep, t, dim, cfg.out_channels as usize, cfg.norm_eps);
+    let r = output_stage(head, &stream.key("scale_shift_table"), &stream.key("proj_out"), &x, &embedded_timestep, t, dim, cfg.out_channels as usize, cfg.norm_eps);
     gpu_core::profile::stage_time("forward_q_streamed: output stage (host LayerNorm + modulate + proj_out)", s_out);
     r
 }

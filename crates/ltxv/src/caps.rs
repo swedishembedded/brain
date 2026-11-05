@@ -121,10 +121,26 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier (ComfyUI strength_model); 1.0 = the reference default. Only read when adapter is set.").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
     .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required());
 
+    let a = crate::pipeline::AudioOpts::default();
+    let t2a = ActionSpec::new(
+        "t2a",
+        "generate a sound clip from a text prompt (ltx_pipelines.t2a_one_stage): the LTX-2.5 checkpoint's audio stream denoised alone - the video half is never read - then the audio VAE and vocoder with bandwidth extension. Needs the real checkpoint ($BRAIN_LTXV_DIT), text encoder ($BRAIN_LTXV_TEXT_ENCODER) and audio VAE ($BRAIN_LTXV_AUDIO_VAE).",
+    )
+    .streaming()
+    .param(ParamSpec::new("prompt", ParamType::Str, "what the clip should sound like").required())
+    .param(ParamSpec::new("seconds", ParamType::Float, "clip length in seconds").default(json!(a.seconds)).min(0.04))
+    .params(guidance_params())
+    .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (a non-distilled checkpoint's; the distilled one has a fixed schedule)").default(json!(a.base.steps)))
+    .param(ParamSpec::new("seed", ParamType::Int, "initial-noise seed (omit for random)"))
+    .params(sampler_params())
+    .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter to apply beside the quantized weights").host_resolved())
+    .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier; 1.0 = the reference default. Only read when adapter is set.").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
+    .output(BlobSpec::new("audio", Media::Audio, "the generated clip: a complete 48 kHz stereo WAV").required());
+
     Manifest::new(
         MODEL,
         "LTX-2.5 (Lightricks) - text-to-video diffusion transformer, rectified-flow ancestral Euler sampling with CFG, causal 3D VAE at (8, 32, 32) stride. t2v: real VAE + real scheduler, with the real 22B int8 checkpoint and real Gemma-4 text encoder available via dit_config=ltx25_22b (default stays the tiny random-weight smoke config). dfr: multi-stage pipeline with real latent upscalers, still tiny-random-weight-DiT/stub-context only - real-weight DFR is a tracked gap.",
-        vec![t2v, dfr],
+        vec![t2v, dfr, t2a],
     )
 }
 
@@ -226,6 +242,36 @@ pub fn generate_on(paths: &Paths, inv: &Invocation, p: &GenParams, progress: &mu
     Ok(video_outcome(&video, &timings, p.opts.seed))
 }
 
+/// Decode + validate `t2a`'s params from an invocation, before any weight is
+/// read.
+pub fn t2a_params_from(inv: &Invocation) -> Result<crate::pipeline::AudioOpts, String> {
+    let d = crate::pipeline::AudioOpts::default();
+    let (sampler, eta) = sampler_from(inv)?;
+    let seconds = inv.get_f64("seconds").unwrap_or(d.seconds);
+    if !(seconds.is_finite() && seconds > 0.0) {
+        return Err(format!("seconds must be a positive number, got {seconds}"));
+    }
+    let base = GenOpts {
+        steps: inv.get_i64("steps").unwrap_or(d.base.steps as i64).max(1) as usize,
+        guidance: guidance_from(inv)?,
+        seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
+        sampler,
+        eta,
+        adapters: adapters_from(inv),
+        ..d.base
+    };
+    Ok(crate::pipeline::AudioOpts { seconds, base })
+}
+
+/// Run one text-to-audio generation and wrap the clip as an audio-output
+/// [`Outcome`].
+pub fn t2a_on(paths: &Paths, inv: &Invocation, opts: &crate::pipeline::AudioOpts, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
+    let (clip, timings) = crate::pipeline::generate_audio(paths, &prompt, opts, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
+    let out = Outcome::new().set("seed", json!(opts.base.seed)).set("seconds_per_forward", json!(timings.secs_per_forward()));
+    Ok(audio_outcome(out, &clip))
+}
+
 /// A decoded `dfr` request - [`GenParams`]'s DFR analogue.
 #[derive(Debug)]
 pub struct DfrParams {
@@ -320,23 +366,25 @@ pub fn video_outcome(video: &crate::pipeline::Video, timings: &crate::pipeline::
         .set("seconds_per_forward", json!(timings.secs_per_forward()))
         .set("seed", json!(seed))
         .blob("video", blob);
-    // A complete WAV rather than raw samples, matching every other audio
-    // output on this workspace's capability surface (`cosyvoice::caps`): the
-    // container carries the rate and the channel count with the bytes, so a
-    // consumer cannot reconstruct the wrong signal from correct samples.
     if let Some(a) = &video.audio {
-        let planes: Vec<&[f32]> = a.channels.iter().map(Vec::as_slice).collect();
-        let bytes = audio::wav::encode_multi(&planes, a.sample_rate);
-        out = out
-            .set("audio_samples", json!(a.samples_per_channel()))
-            .set("audio_sample_rate", json!(a.sample_rate))
-            .set("audio_seconds", json!(a.seconds()))
-            .blob(
-                "audio",
-                capability::Blob::new(Media::Audio, bytes).with_meta(json!({"format": "wav", "sample_rate": a.sample_rate, "channels": a.channels.len()})),
-            );
+        out = audio_outcome(out, a);
     }
     out
+}
+
+/// `out` with `clip` attached as its `audio` blob.
+///
+/// A complete WAV rather than raw samples, matching every other audio output
+/// on this workspace's capability surface (`cosyvoice::caps`): the container
+/// carries the rate and the channel count with the bytes, so a consumer
+/// cannot reconstruct the wrong signal from correct samples.
+fn audio_outcome(out: Outcome, clip: &crate::audio::AudioClip) -> Outcome {
+    let planes: Vec<&[f32]> = clip.channels.iter().map(Vec::as_slice).collect();
+    let bytes = audio::wav::encode_multi(&planes, clip.sample_rate);
+    out.set("audio_samples", json!(clip.samples_per_channel()))
+        .set("audio_sample_rate", json!(clip.sample_rate))
+        .set("audio_seconds", json!(clip.seconds()))
+        .blob("audio", capability::Blob::new(Media::Audio, bytes).with_meta(json!({"format": "wav", "sample_rate": clip.sample_rate, "channels": clip.channels.len()})))
 }
 
 // ===================== execution (provider) =====================
@@ -396,6 +444,11 @@ impl Action for LtxvAction {
                 let p = dfr_params_from(inv)?;
                 let paths = DfrPaths::from_env()?;
                 dfr_on(&paths, inv, &p, progress)
+            }
+            "t2a" => {
+                let opts = t2a_params_from(inv)?;
+                let paths = Paths::from_env()?;
+                t2a_on(&paths, inv, &opts, progress)
             }
             other => {
                 tracing::error!(action = other, "unknown action");
@@ -465,6 +518,27 @@ fn guidance_from(inv: &Invocation) -> Result<crate::guidance::Guidance, String> 
 mod tests {
     use super::*;
 
+    /// `t2a` takes a prompt and a length and returns a WAV; its sampler's
+    /// eta defaults to the chosen loop's reference value, and a length that
+    /// is not a positive number is refused before any weight is read.
+    #[test]
+    fn t2a_is_declared_and_decoded() {
+        let m = manifest();
+        let t2a = m.actions.iter().find(|a| a.name == "t2a").expect("t2a is declared");
+        assert!(t2a.streaming);
+        let required: Vec<&str> = t2a.params.iter().filter(|p| p.required).map(|p| p.name.as_str()).collect();
+        assert_eq!(required, ["prompt"]);
+        assert!(t2a.outputs.iter().any(|o| o.name == "audio" && o.required));
+        let inv = |pairs: &[(&str, serde_json::Value)]| pairs.iter().fold(Invocation::new().set("prompt", json!("rain on a tin roof")), |inv, (k, v)| inv.set(k, v.clone()));
+        let o = t2a_params_from(&inv(&[("seconds", json!(2.5)), ("sampler", json!("res2s")), ("seed", json!(3))])).unwrap();
+        assert_eq!((o.seconds, o.base.sampler, o.base.eta, o.base.seed), (2.5, Sampler::Res2s, 0.5, 3));
+        assert_eq!(o.base.dit_config, "ltx25_22b");
+        assert!(o.base.audio);
+        for bad in [json!(0.0), json!(-1.0)] {
+            assert!(t2a_params_from(&inv(&[("seconds", bad.clone())])).is_err(), "seconds {bad} must be refused");
+        }
+    }
+
     /// Weights-free per the serving contract's obligation 5: this must never
     /// touch `BRAIN_LTXV_VAE` or the filesystem.
     #[test]
@@ -472,7 +546,7 @@ mod tests {
         let m = manifest();
         assert_eq!(m.model, MODEL);
         let names: Vec<_> = m.actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["t2v", "dfr"]);
+        assert_eq!(names, ["t2v", "dfr", "t2a"]);
         let t2v = &m.actions[0];
         assert!(t2v.streaming, "a multi-step denoise run without progress reads as a hang");
         let required: Vec<&str> = t2v.params.iter().filter(|p| p.required).map(|p| p.name.as_str()).collect();

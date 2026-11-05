@@ -535,23 +535,19 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
     let prev_device = std::cell::Cell::new(0f64);
     let call = |label: &str, cache: &ltxv::block::GenerationCache| -> f64 {
         let t1 = Instant::now();
-        let out = ltxv::dit::forward_q_streamed_in(
-            &session,
-            &cfg,
-            &src,
-            &head,
-            ltxv::block::QTier::Int8,
-            &latent,
-            &timesteps,
-            &positions,
-            &keyframes_mask,
-            &context,
-            ctx_len as usize,
-            t as usize,
-            &context_valid,
-            cache,
-            &ltxv::block::NO_PERTURBATIONS,
-        );
+        let step = ltxv::dit::StreamedStep {
+            stream: ltxv::config::Stream::Video,
+            latent: &latent,
+            timesteps: &timesteps,
+            positions: &positions,
+            keyframes_mask: &keyframes_mask,
+            context: &context,
+            context_len: ctx_len as usize,
+            t: t as usize,
+            context_valid: &context_valid,
+            perturbations: &ltxv::block::NO_PERTURBATIONS,
+        };
+        let out = ltxv::dit::forward_q_streamed_in(&session, &cfg, &src, &head, ltxv::block::QTier::Int8, &step, cache);
         let wall = t1.elapsed().as_secs_f64();
         // Only a RESIDENT session can be asked: a transient one's
         // `device_for_call` OPENS a device, which would both cost seconds and

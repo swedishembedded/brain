@@ -23,7 +23,8 @@
 
 use ltxv::block::{GenerationCache, QTier};
 use ltxv::devres::DitSession;
-use ltxv::dit::{forward_q_streamed_in, load_head_tensors_from_source, random_tiny_weights};
+use ltxv::config::Stream;
+use ltxv::dit::{forward_q_streamed_in, load_head_tensors_from_source, random_tiny_weights, StreamedStep};
 use ltxv::modelgrad::Cfg;
 use ltxv::LtxDitConfig;
 
@@ -87,7 +88,19 @@ fn bits_differ(a: &[f32], b: &[f32]) -> Option<(usize, f32, f32)> {
 
 #[allow(clippy::too_many_arguments)]
 fn run(session: &DitSession, cfg: &LtxDitConfig, src: &(dyn checkpoint::TensorSource + Sync), head: &std::collections::HashMap<String, (Vec<usize>, Vec<f32>)>, i: &Inputs, cache: &GenerationCache) -> Vec<f32> {
-    forward_q_streamed_in(session, cfg, src, head, QTier::Int8, &i.latent, &i.timesteps, &i.positions, &i.keyframes_mask, &i.context, i.context_len, i.t, &i.context_valid, cache, &ltxv::block::NO_PERTURBATIONS)
+    let step = StreamedStep {
+        stream: Stream::Video,
+        latent: &i.latent,
+        timesteps: &i.timesteps,
+        positions: &i.positions,
+        keyframes_mask: &i.keyframes_mask,
+        context: &i.context,
+        context_len: i.context_len,
+        t: i.t,
+        context_valid: &i.context_valid,
+        perturbations: &ltxv::block::NO_PERTURBATIONS,
+    };
+    forward_q_streamed_in(session, cfg, src, head, QTier::Int8, &step, cache)
 }
 
 /// The core claim, at a full window: N forwards through ONE resident session
@@ -178,7 +191,7 @@ fn a_narrow_window_is_bit_identical_and_still_uploads_less_than_streaming() {
     // The card holds the pinned blocks for the whole generation, so a host
     // copy of them is resident memory nothing reads: only the rotating tail,
     // which re-uploads every pass, is worth keeping quantized on the host.
-    let host_held = (0..cfg.num_layers as usize).filter(|&l| cache_b.is_cached(l, QTier::Int8)).count() as u64;
+    let host_held = (0..cfg.num_layers as usize).filter(|&l| cache_b.is_cached(Stream::Video, l, QTier::Int8)).count() as u64;
     assert_eq!(host_held, tail, "the host cache must hold exactly the rotating tail, not the blocks the card already pins");
 }
 

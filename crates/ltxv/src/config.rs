@@ -498,6 +498,40 @@ impl LtxAvDitConfig {
         self.video.positional_embedding_max_pos[0].max(self.audio.positional_embedding_max_pos[0])
     }
 
+    /// The audio half as a single-stream DiT - `LTXModelType::AudioOnly`
+    /// (`LTXAudioOnlyModelConfigurator`), what text-to-audio runs.
+    ///
+    /// With no video stream a block's cross-modal attentions have nothing to
+    /// attend (`BasicAVTransformerBlock` runs them only when both streams are
+    /// present), so each block is the audio stream's self-attention, text
+    /// cross-attention and FFN - the same per-stream body a video-only block
+    /// is, at audio's widths. Everything the audio stream shares with the
+    /// video one in the AV forward stays shared: depth, norm epsilon, RoPE
+    /// theta, the timestep multiplier, the adaLN layout, gating and the
+    /// connector's depth and registers.
+    ///
+    /// Audio positions have a single time axis, so only
+    /// `positional_embedding_max_pos[0]` is a normalizer here
+    /// ([`crate::dit::Stream::rope_max_pos`]); the other two slots repeat it
+    /// so no axis can ever divide by a placeholder.
+    pub fn audio_stream(&self) -> LtxDitConfig {
+        let (v, a) = (&self.video, &self.audio);
+        let max_pos = a.positional_embedding_max_pos[0];
+        LtxDitConfig {
+            inner_dim: a.inner_dim,
+            num_heads: a.num_heads,
+            in_channels: a.in_channels,
+            out_channels: a.out_channels,
+            cross_attention_dim: a.cross_attention_dim,
+            ff_bias: a.ff_bias,
+            use_keyframes_abs_pos_embedding: false,
+            positional_embedding_max_pos: [max_pos; 3],
+            connector_num_attention_heads: a.connector_num_attention_heads,
+            connector_attention_head_dim: a.connector_attention_head_dim,
+            ..*v
+        }
+    }
+
     /// Panics if this config is outside what this milestone's op sequence
     /// implements: every [`LtxDitConfig::assert_supported`] video invariant,
     /// plus the two AV-specific geometry invariants the block/RoPE forward
@@ -557,9 +591,85 @@ impl LtxAvDitConfig {
     }
 }
 
+/// Which of a checkpoint's two streams a single-stream forward runs.
+///
+/// The audio and video halves of an AV checkpoint name their per-stream
+/// tensors with a prefix (`audio_attn1` beside `attn1`, `audio_patchify_proj`
+/// beside `patchify_proj`, ...) and are otherwise structurally the same
+/// transformer, so one single-stream forward serves both: a video-only
+/// checkpoint's video stream, and an AV checkpoint's audio stream alone
+/// ([`LtxAvDitConfig::audio_stream`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Stream {
+    Video,
+    Audio,
+}
+
+impl Stream {
+    /// The tensor-name prefix of this stream's own tensors, at the model level
+    /// and inside a block.
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Stream::Video => "",
+            Stream::Audio => "audio_",
+        }
+    }
+
+    /// This stream's model-level tensor called `name` in the video stream.
+    pub fn key(self, name: &str) -> String {
+        format!("{}{name}", self.prefix())
+    }
+
+    /// The embeddings connector this stream's context is routed through.
+    pub fn connector(self) -> &'static str {
+        match self {
+            Stream::Video => "video_embeddings_connector",
+            Stream::Audio => "audio_embeddings_connector",
+        }
+    }
+
+    /// The RoPE max-position normalizers of this stream's position axes:
+    /// three (time, height, width) for video, time alone for audio.
+    pub fn rope_max_pos(self, cfg: &LtxDitConfig) -> &[u32] {
+        match self {
+            Stream::Video => &cfg.positional_embedding_max_pos,
+            Stream::Audio => &cfg.positional_embedding_max_pos[..1],
+        }
+    }
+
+    /// The RoPE cache's tag for this stream's self-attention table.
+    pub fn rope_tag(self) -> &'static str {
+        match self {
+            Stream::Video => "video",
+            Stream::Audio => "audio",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `LTXAudioOnlyModelConfigurator` on the real config: the audio
+    /// stream's 32 heads of 64 over a 2048-wide stream and 2048-wide text
+    /// context, 48 layers, its own 32x64 connector, and a single time axis
+    /// normalized by `audio_positional_embedding_max_pos = [20]`. Every
+    /// shared setting is the video stream's.
+    #[test]
+    fn the_audio_stream_alone_is_the_reference_audio_only_model() {
+        let av = LtxAvDitConfig::ltx25();
+        let a = av.audio_stream();
+        assert_eq!((a.inner_dim, a.num_heads, a.head_dim()), (2048, 32, 64));
+        assert_eq!((a.cross_attention_dim, a.in_channels, a.out_channels), (2048, 128, 128));
+        assert_eq!((a.num_layers, a.connector_inner_dim()), (48, 2048));
+        assert_eq!(Stream::Audio.rope_max_pos(&a), &[20]);
+        assert!(!a.use_keyframes_abs_pos_embedding);
+        assert_eq!(a.norm_eps, av.video.norm_eps);
+        assert_eq!(a.timestep_scale_multiplier, av.video.timestep_scale_multiplier);
+        assert_eq!(a.apply_gated_attention, av.video.apply_gated_attention);
+        assert_eq!(a.connector_num_layers, av.video.connector_num_layers);
+        a.assert_supported();
+    }
 
     #[test]
     fn tiny_config_matches_the_golden_manifest() {

@@ -89,7 +89,7 @@ fn cached_forward_is_bit_identical_to_an_uncached_one() {
     // Structural check that caching actually happened, not vacuously: every
     // layer's slot is populated after call 1, before call 2 ever runs.
     assert_eq!(shared.stats().blocks, cfg.num_layers as usize);
-    assert!((0..cfg.num_layers as usize).all(|l| shared.is_cached(l, QTier::Int8)), "every layer must be cached after the first (cache-miss) forward");
+    assert!((0..cfg.num_layers as usize).all(|l| shared.is_cached(ltxv::config::Stream::Video, l, QTier::Int8)), "every layer must be cached after the first (cache-miss) forward");
 
     let out_shared_2 = forward_q_streamed(&cfg, &w, &head, None, QTier::Int8, &inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &inputs.context_valid, &shared);
     assert_eq!(max_abs_diff(&out_shared_2, &out_fresh_a), 0.0, "a cache-HIT forward must be bit-identical to the cache-free reference - the cache must change no math");

@@ -79,7 +79,7 @@ use model::dispatch::LoraW;
 use model::lora::RuntimeLora;
 use vae::blocks::Tensors;
 
-use crate::config::{LtxAudioDitConfig, LtxDitConfig};
+use crate::config::{LtxAudioDitConfig, LtxDitConfig, Stream};
 use crate::dit::upload_rope_tables;
 use crate::rope::{apply_rope_step, ltx_rope_tables};
 
@@ -1847,6 +1847,9 @@ impl QFfWeights {
 /// call [`QBlockWeights::quantize_host`] directly when populating its
 /// per-generation block-weight cache.
 pub(crate) struct QBlockWeights {
+    /// Which stream's tensors these are - what an adapter's corrections are
+    /// claimed under ([`Self::attach`]).
+    stream: Stream,
     attn1: QAttnWeights,
     attn2: QAttnWeights,
     ff: QFfWeights,
@@ -1871,6 +1874,7 @@ pub(crate) struct QBlockWeights {
 /// [`QBlockWeights::from_cached`] construct or read one, so nothing outside
 /// this module can inspect or forge cached weight bytes.
 pub struct CachedQBlockWeights {
+    stream: Stream,
     attn1: CachedQAttnWeights,
     attn2: CachedQAttnWeights,
     ff: CachedQFfWeights,
@@ -1895,7 +1899,7 @@ impl CachedQBlockWeights {
     /// GenerationCache`] without going through a full forward (the residency
     /// adapter's own demote/promote gate does exactly that).
     pub fn quantize(w: &Tensors, prefix: &str, cfg: &LtxDitConfig, tier: QTier) -> CachedQBlockWeights {
-        QBlockWeights::quantize_host(w, prefix, cfg.inner_dim as usize, cfg.apply_gated_attention, tier)
+        QBlockWeights::quantize_host_stream(w, prefix, Stream::Video, cfg.inner_dim as usize, cfg.apply_gated_attention, tier)
     }
 }
 
@@ -1956,16 +1960,12 @@ pub fn cached_block_bytes(cfg: &LtxDitConfig, tier: QTier) -> u64 {
 }
 
 impl QBlockWeights {
-    pub(crate) fn quantize_host(w: &dyn checkpoint::TensorSource, prefix: &str, dim: usize, gated: bool, tier: QTier) -> CachedQBlockWeights {
-        QBlockWeights::quantize_host_stream(w, prefix, "", dim, gated, tier)
-    }
-
-    /// [`Self::quantize_host`] for ONE stream of a block - `stream` is `""`
-    /// for video's own weights and `"audio_"` for audio's, exactly
-    /// [`BlockWeights::upload`]'s convention and for the same reason (both
-    /// streams' per-block state is structurally identical; only the tensor
-    /// name prefix, the dims and the FFN's bias differ).
-    pub(crate) fn quantize_host_stream(w: &dyn checkpoint::TensorSource, prefix: &str, stream: &str, dim: usize, gated: bool, tier: QTier) -> CachedQBlockWeights {
+    /// Quantize ONE stream of block `prefix` - [`Stream::prefix`] names its
+    /// tensors, exactly [`BlockWeights::upload`]'s convention and for the
+    /// same reason (both streams' per-block state is structurally identical;
+    /// only the tensor name prefix, the dims and the FFN's bias differ).
+    pub(crate) fn quantize_host_stream(w: &dyn checkpoint::TensorSource, prefix: &str, stream_id: Stream, dim: usize, gated: bool, tier: QTier) -> CachedQBlockWeights {
+        let stream = stream_id.prefix();
         let sst = host_tensor(w, &format!("{prefix}.{stream}scale_shift_table"));
         assert_eq!(sst.len(), 9 * dim, "{prefix}.{stream}scale_shift_table must be [9, dim]");
         let pst = host_tensor(w, &format!("{prefix}.{stream}prompt_scale_shift_table"));
@@ -1973,6 +1973,7 @@ impl QBlockWeights {
         let ffp = format!("{prefix}.{stream}ff");
         let ff_bias = ff_has_bias(w, &ffp);
         CachedQBlockWeights {
+            stream: stream_id,
             attn1: QAttnWeights::quantize_host(w, &format!("{prefix}.{stream}attn1"), gated, tier, dim, dim, dim),
             attn2: QAttnWeights::quantize_host(w, &format!("{prefix}.{stream}attn2"), gated, tier, dim, dim, dim),
             ff: QFfWeights::quantize_host(w, &ffp, tier, dim, ff_bias),
@@ -1981,16 +1982,16 @@ impl QBlockWeights {
         }
     }
 
-    /// Attach `adapter`'s corrections to ONE stream of block `prefix` - `stream`
-    /// is [`Self::quantize_host_stream`]'s (`""` video, `"audio_"` audio).
-    fn attach(&mut self, gpu: &Gpu, adapter: &RuntimeLora, prefix: &str, stream: &str, dim: usize) {
+    /// Attach `adapter`'s corrections to this stream of block `prefix`.
+    fn attach(&mut self, gpu: &Gpu, adapter: &RuntimeLora, prefix: &str, dim: usize) {
+        let stream = self.stream.prefix();
         self.attn1.attach(gpu, adapter, &format!("{prefix}.{stream}attn1"), dim, dim, dim);
         self.attn2.attach(gpu, adapter, &format!("{prefix}.{stream}attn2"), dim, dim, dim);
         self.ff.attach(gpu, adapter, &format!("{prefix}.{stream}ff"), dim);
     }
 
     fn from_cached(gpu: &Gpu, c: &CachedQBlockWeights) -> QBlockWeights {
-        QBlockWeights { attn1: QAttnWeights::from_cached(gpu, &c.attn1), attn2: QAttnWeights::from_cached(gpu, &c.attn2), ff: QFfWeights::from_cached(gpu, &c.ff), scale_shift_table: c.scale_shift_table.clone(), prompt_scale_shift_table: c.prompt_scale_shift_table.clone() }
+        QBlockWeights { stream: c.stream, attn1: QAttnWeights::from_cached(gpu, &c.attn1), attn2: QAttnWeights::from_cached(gpu, &c.attn2), ff: QFfWeights::from_cached(gpu, &c.ff), scale_shift_table: c.scale_shift_table.clone(), prompt_scale_shift_table: c.prompt_scale_shift_table.clone() }
     }
 }
 
@@ -2382,7 +2383,7 @@ impl BlockTimings {
 impl AttachLora for LtxBlockQ {
     fn attach_lora(&mut self, adapter: &RuntimeLora, prefix: &str) {
         let gpu = self.gpu.share();
-        self.w.attach(&gpu, adapter, prefix, "", self.cfg.inner_dim as usize);
+        self.w.attach(&gpu, adapter, prefix, self.cfg.inner_dim as usize);
     }
 }
 
@@ -2419,7 +2420,7 @@ impl LtxBlockQ {
     pub fn on<'g>(gpu: &'g Gpu, cfg: &LtxDitConfig, weights: &Tensors, prefix: &str, tokens: u32, context_len: u32, tier: QTier) -> Transient<'g, LtxBlockQ> {
         cfg.assert_supported();
         let dim = cfg.inner_dim as usize;
-        let cached = QBlockWeights::quantize_host(weights, prefix, dim, cfg.apply_gated_attention, tier);
+        let cached = QBlockWeights::quantize_host_stream(weights, prefix, Stream::Video, dim, cfg.apply_gated_attention, tier);
         Self::on_cached(gpu, cfg, &cached, tokens, context_len, tier)
     }
 
@@ -2790,8 +2791,8 @@ impl CachedQAvBlockWeights {
         let table_audio = host_tensor(w, &format!("{prefix}.scale_shift_table_a2v_ca_audio"));
         assert_eq!(table_audio.len(), 5 * adim, "{prefix}.scale_shift_table_a2v_ca_audio must be [5, audio.dim]");
         CachedQAvBlockWeights {
-            vw: QBlockWeights::quantize_host_stream(w, prefix, "", vdim, gated, tier),
-            aw: QBlockWeights::quantize_host_stream(w, prefix, "audio_", adim, gated, tier),
+            vw: QBlockWeights::quantize_host_stream(w, prefix, Stream::Video, vdim, gated, tier),
+            aw: QBlockWeights::quantize_host_stream(w, prefix, Stream::Audio, adim, gated, tier),
             avw: CachedQAvCrossWeights {
                 // A2V's query is VIDEO (`q_dim = vdim`), its keys/values are
                 // AUDIO (`kv_dim = adim`), and it runs at AUDIO's head
@@ -2809,8 +2810,8 @@ impl CachedQAvBlockWeights {
 
 impl QAvBlockWeights {
     fn attach(&mut self, gpu: &Gpu, adapter: &RuntimeLora, prefix: &str, vdim: usize, adim: usize) {
-        self.vw.attach(gpu, adapter, prefix, "", vdim);
-        self.aw.attach(gpu, adapter, prefix, "audio_", adim);
+        self.vw.attach(gpu, adapter, prefix, vdim);
+        self.aw.attach(gpu, adapter, prefix, adim);
         self.avw.a2v.attach(gpu, adapter, &format!("{prefix}.audio_to_video_attn"), vdim, adim, adim);
         self.avw.v2a.attach(gpu, adapter, &format!("{prefix}.video_to_audio_attn"), adim, vdim, adim);
     }

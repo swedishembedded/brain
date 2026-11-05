@@ -1266,3 +1266,68 @@ fn a_reused_av_session_is_exact_across_a_window_or_stage_boundary() {
     let (v1, _) = redo(1);
     assert!(bits(&v0) != bits(&v1), "re-basing every position must change the video output, or the RoPE tables are not reaching the forward");
 }
+
+/// Text-to-audio runs an AV checkpoint's audio stream alone
+/// (`LTXAudioOnlyModelConfigurator`): every block is the audio stream's
+/// self-attention, text cross-attention and FFN, with no cross-modal
+/// attention at all. That is exactly what the joint forward computes for the
+/// audio stream when both cross-modal directions are cut (the isolated-
+/// modality pass adds them under a zero gate), so the single-stream forward
+/// at [`LtxAvDitConfig::audio_stream`] must reproduce the joint forward's
+/// audio output bit for bit - while reading none of the video half.
+#[test]
+fn the_audio_stream_alone_is_the_joint_forward_with_the_cross_modal_attention_cut() {
+    let Some(path) = real_dit_gguf() else {
+        brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+        return;
+    };
+    let mut cfg = LtxAvDitConfig::ltx25();
+    cfg.video.num_layers = 2;
+    cfg.assert_supported();
+    let (vcfg, acfg) = (cfg.video, cfg.audio);
+    let (tv, ta, ctx_len) = (8usize, 6usize, 128usize);
+    let shape = AvShape {
+        tv,
+        ta,
+        v_latent: ramp(tv * vcfg.in_channels as usize, 23, 1.1),
+        a_latent: ramp(ta * acfg.in_channels as usize, 29, 0.9),
+        v_timesteps: vec![0.7; tv],
+        a_timesteps: (0..ta).map(|i| if i % 2 == 0 { 0.0 } else { 0.7 }).collect(),
+        v_positions: positions(3, tv),
+        a_positions: positions(1, ta),
+        v_keyframes_mask: vec![0f32; tv],
+    };
+    let v_context = ramp(ctx_len * vcfg.cross_attention_dim as usize, 7, 1.4);
+    let a_context = ramp(ctx_len * acfg.connector_inner_dim() as usize, 11, 1.2);
+    let mut context_valid = vec![0f32; ctx_len];
+    context_valid[..20].fill(1.0);
+
+    let src = ltxv::gguf_src::LtxvGgufSource::open(&path).unwrap_or_else(|e| panic!("opening {path}: {e}"));
+    let head = ltxv::dit::load_av_head_tensors_from_source(&src, &cfg);
+    let cut = Perturbations { video_self_attn_blocks: vec![], audio_self_attn_blocks: vec![], cross_modal: true };
+    let joint = ltxv::dit::AvStreamedStep { perturbations: &cut, ..shape.step(&v_context, &a_context, &context_valid, ctx_len) };
+    let (_, a_joint) = ltxv::dit::av_forward_q_streamed_in(&ltxv::devres::AvDitSession::resident_with_slots(None, 1), &cfg, &src, &head, QTier::Int8, &joint, &ltxv::block::GenerationCache::default());
+
+    let audio_cfg = cfg.audio_stream();
+    let alone = ltxv::dit::StreamedStep {
+        stream: ltxv::config::Stream::Audio,
+        latent: &shape.a_latent,
+        timesteps: &shape.a_timesteps,
+        positions: &shape.a_positions,
+        keyframes_mask: &vec![0f32; ta],
+        context: &a_context,
+        context_len: ctx_len,
+        t: ta,
+        context_valid: &context_valid,
+        perturbations: &ltxv::block::NO_PERTURBATIONS,
+    };
+    let cache = ltxv::block::GenerationCache::default();
+    // Streaming, so every block it reads passes through the host cache and
+    // the cache shows which stream's blocks were read.
+    let session = ltxv::devres::DitSession::transient(None);
+    let a_alone = ltxv::dit::forward_q_streamed_in(&session, &audio_cfg, &src, &head, QTier::Int8, &alone, &cache);
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+    assert!(bits(&a_alone) == bits(&a_joint), "the audio stream alone differs from the cut joint forward (max_abs {:.3e})", max_abs(&a_alone, &a_joint));
+    assert!(cache.block(ltxv::config::Stream::Video, 0, QTier::Int8).is_none(), "the audio-only forward must not have read a video block");
+    assert!(cache.block(ltxv::config::Stream::Audio, 0, QTier::Int8).is_some());
+}

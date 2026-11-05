@@ -147,7 +147,12 @@ impl ResidentModel for LtxvResident {
         Manifest { model: self.id.clone(), ..ltxv::caps::manifest() }
     }
 
-    fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
+    fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
+        // Text-to-audio runs the real checkpoint's audio stream and renders
+        // no frames: no picture to size the key by, and never the tiny DiT.
+        if action == "t2a" {
+            return InstanceKey::new(&self.id, "ltx25_22b:0:0x0".to_string());
+        }
         let d = ltxv::pipeline::GenOpts::default();
         let dit_config = inv.get_str("dit_config").unwrap_or_else(|| "tiny".into());
         let frames = inv.get_i64("frames").unwrap_or(d.frames as i64);
@@ -278,6 +283,12 @@ impl LtxvInstance {
                 p.opts.base.devices = plan;
                 let dfr_paths = ltxv::pipeline::DfrPaths::from_env()?;
                 crate::resident_llm::on_device(device, || ltxv::caps::dfr_on(&dfr_paths, inv, &p, progress))?
+            }
+            "t2a" => {
+                let mut opts = ltxv::caps::t2a_params_from(inv)?;
+                opts.base.device = device_name(device);
+                opts.base.devices = plan;
+                crate::resident_llm::on_device(device, || ltxv::caps::t2a_on(paths, inv, &opts, progress))?
             }
             other => Err(format!("ltxv: unknown action '{other}'")),
         }
@@ -496,7 +507,7 @@ mod tests {
         let cfg = ltxv::LtxDitConfig { num_layers: 1, ..ltxv::LtxDitConfig::tiny() };
         let w = ltxv::dit::random_tiny_weights(&cfg, 0xD0D0);
         let quantized = ltxv::block::CachedQBlockWeights::quantize(&w, "transformer_blocks.0", &cfg, ltxv::block::QTier::Int8);
-        pipeline_side.store_block(0, ltxv::block::QTier::Int8, quantized);
+        pipeline_side.store_block(ltxv::config::Stream::Video, 0, ltxv::block::QTier::Int8, quantized);
         assert_eq!(pipeline_side.stats().blocks, 1, "test setup: the shared store must be populated");
 
         assert!(inst.demote(Tier::Warm).is_ok());

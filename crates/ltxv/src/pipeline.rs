@@ -2400,6 +2400,10 @@ impl Denoiser for RealAvDit {
 /// whole type `Sync` - so a later phase can dispatch the two CFG branches
 /// concurrently on two cards without redesigning this.
 struct RealDit {
+    /// The checkpoint stream this denoiser runs: a video-only checkpoint's
+    /// video, or an AV checkpoint's audio alone (`cfg` then being
+    /// [`LtxAvDitConfig::audio_stream`]).
+    stream: crate::config::Stream,
     cfg: LtxDitConfig,
     src: crate::gguf_src::LtxvGgufSource,
     head: Tensors,
@@ -2445,23 +2449,19 @@ impl RealDit {
 impl Denoiser for RealDit {
     fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
         let session = self.session(i.t);
-        crate::dit::forward_q_streamed_in(
-            &session,
-            &self.cfg,
-            &self.src,
-            &self.head,
-            crate::block::QTier::Int8,
-            i.latent,
-            i.timesteps,
-            i.positions,
-            i.keyframes_mask,
+        let step = crate::dit::StreamedStep {
+            stream: self.stream,
+            latent: i.latent,
+            timesteps: i.timesteps,
+            positions: i.positions,
+            keyframes_mask: i.keyframes_mask,
             context,
-            i.context_len,
-            i.t,
-            i.context_valid,
-            &self.cache,
-            i.perturbations,
-        )
+            context_len: i.context_len,
+            t: i.t,
+            context_valid: i.context_valid,
+            perturbations: i.perturbations,
+        };
+        crate::dit::forward_q_streamed_in(&session, &self.cfg, &self.src, &self.head, crate::block::QTier::Int8, &step, &self.cache)
     }
 
     /// The two forwards, one per card, at the same time.
@@ -3831,7 +3831,7 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, adapters: &
     let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
     let cs = cache.stats();
     tracing::info!(cached_blocks = cs.blocks, cached_bytes = cs.bytes, "checkpoint weight cache attached");
-    Ok(Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache, place, sessions: Default::default(), adapter }))
+    Ok(Box::new(RealDit { stream: crate::config::Stream::Video, cfg: real_cfg, src, head, device: o.device.clone(), cache, place, sessions: Default::default(), adapter }))
 }
 
 /// Fold every correction of `adapter` into the fp32 `weights` - exact at
@@ -3929,6 +3929,17 @@ fn build_context(paths: &Paths, prompt: &str, dit_cfg: LtxDitConfig, o: &GenOpts
 /// them would let the other produce an audio latent nothing can decode - or
 /// fill a host weight cache first and fail after it.
 fn check_audio_request(paths: &Paths, o: &GenOpts) -> Result<(), String> {
+    check_audio_inputs(paths, o)?;
+    if o.audio {
+        check_av_host_memory(&LtxAvDitConfig::ltx25(), av_fp32_reference())?;
+    }
+    Ok(())
+}
+
+/// [`check_audio_request`]'s checkpoint and option half - all of it that
+/// text-to-audio needs, since it holds only the audio stream's blocks rather
+/// than the joint model's.
+fn check_audio_inputs(paths: &Paths, o: &GenOpts) -> Result<(), String> {
     if !o.audio {
         return match o.audio_source {
             Some(_) => Err("an audio source is the clip's audio stream: it needs --audio".into()),
@@ -3955,7 +3966,7 @@ fn check_audio_request(paths: &Paths, o: &GenOpts) -> Result<(), String> {
             "audio generation needs the real text encoder: the audio stream is conditioned through its OWN text projection (text_embedding_projection.audio_aggregate_embed), which the stub context cannot stand in for - set {var}"
         ));
     }
-    check_av_host_memory(&LtxAvDitConfig::ltx25(), av_fp32_reference())
+    Ok(())
 }
 
 /// `BRAIN_LTXV_AV_FP32=1` routes an audio-visual generation through the eager
@@ -4370,6 +4381,95 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     progress(total, total, "done");
     tracing::info!(frames, width = w, height = h, fps = o.fps, audio = audio.is_some(), total_secs = timings.total(), "generation done");
     Ok((Video { width: w as u32, height: h as u32, fps: o.fps, frames: out, audio }, timings))
+}
+
+/// Text-to-audio options.
+#[derive(Clone, Debug)]
+pub struct AudioOpts {
+    /// The clip's length; the audio latent runs at
+    /// [`crate::audio::LATENTS_PER_SECOND`].
+    pub seconds: f64,
+    /// Everything a generation shares. Only the audio stream's guidance
+    /// (`guidance.audio`) applies; the video-only fields go unread.
+    pub base: GenOpts,
+}
+
+impl Default for AudioOpts {
+    fn default() -> AudioOpts {
+        AudioOpts { seconds: 5.0, base: GenOpts { dit_config: "ltx25_22b".into(), audio: true, ..GenOpts::default() } }
+    }
+}
+
+/// Text-to-audio: an AV checkpoint's audio stream denoised ALONE
+/// (`ltx_pipelines.t2a_one_stage`), then decoded to a waveform.
+///
+/// The video half is never read: the denoiser is the single-stream forward
+/// at [`LtxAvDitConfig::audio_stream`], whose blocks are the audio stream's
+/// own (`LTXAudioOnlyModelConfigurator`). The stream takes the audio
+/// guidance ([`crate::guidance::Guidance::audio`]) with the cross-modal term
+/// off, as the reference's `modality_scale=1.0` sets it - there is no video
+/// to guide against. The schedule is the checkpoint's: the distilled table
+/// for the distilled checkpoint, otherwise `LTX2Scheduler` at its default
+/// token count (`MAX_SHIFT_ANCHOR`, since an audio latent has no spatial
+/// size to shift by).
+pub fn generate_audio(paths: &Paths, prompt: &str, opts: &AudioOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(crate::audio::AudioClip, Timings), String> {
+    if !(opts.seconds.is_finite() && opts.seconds > 0.0) {
+        return Err(format!("the clip length must be a positive number of seconds, got {}", opts.seconds));
+    }
+    let ta = (opts.seconds * crate::audio::LATENTS_PER_SECOND).round().max(1.0) as usize;
+    let o = GenOpts { audio: true, ..opts.base.clone() };
+    if o.audio_source.is_some() {
+        return Err("text-to-audio generates the soundtrack; an audio source has nothing left to generate".into());
+    }
+    check_audio_inputs(paths, &o)?;
+    let sigmas: Vec<f64> = if o.dit_config == "ltx25_22b" {
+        LTX2_DISTILLED_SIGMAS.iter().map(|&s| s as f64).collect()
+    } else {
+        ltx2_sigmas(diffusion::scheduler::LTX2_MAX_SHIFT_ANCHOR as usize, o.steps, o.base_shift, o.max_shift, o.stretch, o.terminal)
+    };
+    let total = sigmas.len() as u32 - 1 + 2;
+    let mut timings = Timings::default();
+    let place = o.devices.resolve(o.device.as_deref());
+
+    progress(0, total, "build transformer");
+    let build_t = Instant::now();
+    let dit_path = paths.dit.as_deref().expect("check_audio_inputs refuses a request without a DiT path");
+    let src = crate::gguf_src::LtxvGgufSource::open(dit_path)?;
+    let av_cfg = *src.config();
+    let cfg = av_cfg.audio_stream();
+    let mut head = crate::dit::load_av_head_tensors_from_source(&src, &av_cfg);
+    let adapter = if o.adapters.is_empty() { None } else { Some(block_adapter(crate::lora::runtime_adapter(&o.adapters)?, &src, &mut head)?) };
+    let dit = RealDit { stream: crate::config::Stream::Audio, cfg, src, head, device: o.device.clone(), cache: crate::block::GenerationCache::for_checkpoint(dit_path), place, sessions: Default::default(), adapter };
+    timings.build_dit = build_t.elapsed().as_secs_f32();
+    tracing::info!(audio_tokens = ta, seconds = opts.seconds, layers = cfg.num_layers, inner_dim = cfg.inner_dim, "audio-only DiT ready (the video half is never read)");
+
+    let TextContext { valid: context_valid, len: context_len, a_cond, a_uncond, .. } = build_context(paths, prompt, av_cfg.video, &o, place, &mut timings.text_encode)?;
+    let a_cond = a_cond.ok_or("text-to-audio needs the text encoder's audio projection")?;
+    let a_uncond = a_uncond.unwrap_or_default();
+    let audio_guidance = crate::guidance::GuiderParams { modality: 1.0, ..o.guidance.audio.clone() };
+    let guidance = crate::guidance::Guidance { video: audio_guidance.clone(), audio: audio_guidance };
+
+    let latent0 = seeded_noise(ta * crate::audio::TOKEN_DIM as usize, o.seed ^ AUDIO_SEED_SALT);
+    let positions = crate::audio::positions(ta);
+    let denoise_t = Instant::now();
+    let sampling = Sampling { sampler: o.sampler, eta: o.eta, s_noise: o.s_noise, seed: o.seed ^ 0x4e_4f_49_53_45 ^ AUDIO_SEED_SALT };
+    #[rustfmt::skip]
+    let latent = denoise(&dit, &sigmas, latent0, &positions, &vec![0.0; ta], &a_cond, &a_uncond, context_len, &context_valid, ta,
+        &guidance, sampling, total, None, cancel, None, &mut |done, tot, phase| progress(1 + done, tot, phase))?;
+    timings.denoise = denoise_t.elapsed().as_secs_f32();
+    drop(dit);
+
+    let path = paths.audio_vae.as_deref().expect("check_audio_inputs refuses a request without an audio VAE path");
+    let audio_t = Instant::now();
+    let mut clip = decode_audio_latent(path, &latent, ta, o.device.as_deref())?;
+    // The causal VAE's first latent frame decodes to one mel frame rather
+    // than four (see `crate::audio`'s doc); hold the last sample over the gap
+    // so the clip is the length asked for.
+    clip.pad_to_seconds(opts.seconds as f32);
+    timings.audio_decode = audio_t.elapsed().as_secs_f32();
+    progress(total, total, "done");
+    tracing::info!(seconds = clip.seconds(), rate = clip.sample_rate, total_secs = timings.total(), "text-to-audio done");
+    Ok((clip, timings))
 }
 
 /// Read the audio VAE + vocoder from one checkpoint and decode an audio
@@ -7326,6 +7426,22 @@ mod tests {
             self.timesteps_seen.borrow_mut().push(i.sigma);
             (Self::velocity(i.latent, i.timesteps, self.target), Self::velocity(a.latent, a.timesteps, -self.target))
         }
+    }
+
+    /// A text-to-audio request that cannot run is refused before any weight
+    /// is read: a length that is not a positive number of seconds, a
+    /// soundtrack to hold when the soundtrack is what is asked for, and any
+    /// missing checkpoint (the paths below name nothing that exists).
+    #[test]
+    fn a_text_to_audio_request_that_cannot_run_is_refused_up_front() {
+        let paths = Paths { vae: "/missing/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None };
+        let run = |o: AudioOpts| generate_audio(&paths, "rain", &o, &Default::default(), |_, _, _| {}).map(|_| ()).unwrap_err();
+        for seconds in [0.0, -2.0, f64::NAN] {
+            assert!(run(AudioOpts { seconds, ..AudioOpts::default() }).contains("positive number of seconds"));
+        }
+        let held = AudioOpts { base: GenOpts { audio_source: Some(crate::audio::AudioClip { channels: vec![vec![0.0; 16]], sample_rate: 16_000 }), ..AudioOpts::default().base }, ..AudioOpts::default() };
+        assert!(run(held).contains("nothing left to generate"));
+        assert!(run(AudioOpts::default()).contains("real DiT checkpoint"));
     }
 
     fn res2s(eta: f64, seed: u64) -> Sampling {

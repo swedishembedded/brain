@@ -63,6 +63,7 @@ use residency::place::{CostAware, EvictionPolicy};
 use residency::{Device, MemCost, Tier};
 
 use crate::block::{CachedQAvBlockWeights, CachedQBlockWeights, QTier};
+use crate::config::Stream;
 
 /// A checkpoint's identity, without reading its contents: path plus the two
 /// stat fields that change when the file does. Deliberately the SAME identity
@@ -145,7 +146,10 @@ pub struct CacheStats {
 
 #[derive(Default)]
 struct Inner {
-    blocks: HashMap<(u32, QTier), Slot<CachedQBlockWeights>>,
+    /// Single-stream blocks, keyed by the stream they are a block of: an AV
+    /// checkpoint's audio stream run alone and its video stream are two
+    /// different weight sets under the same layer index.
+    blocks: HashMap<(Stream, u32, QTier), Slot<CachedQBlockWeights>>,
     /// The audio+video blocks, under their own key space - see [`Slot`]'s doc
     /// for why they are not merged with `blocks`. Their bytes DO count
     /// against the same `bytes` total and the same budget.
@@ -297,11 +301,11 @@ impl GenerationCache {
     /// This layer's cached weights at `tier`, if held. Returns an `Arc` and
     /// releases the lock, so the (multi-hundred-millisecond) device upload
     /// that follows blocks no other reader.
-    pub fn block(&self, layer: usize, tier: QTier) -> Option<Arc<CachedQBlockWeights>> {
+    pub fn block(&self, stream: Stream, layer: usize, tier: QTier) -> Option<Arc<CachedQBlockWeights>> {
         let mut inner = self.store.inner.write().unwrap();
         inner.tick += 1;
         let now = inner.tick;
-        let Some(slot) = inner.blocks.get_mut(&(layer as u32, tier)) else {
+        let Some(slot) = inner.blocks.get_mut(&(stream, layer as u32, tier)) else {
             inner.misses += 1;
             return None;
         };
@@ -319,7 +323,7 @@ impl GenerationCache {
     /// budget the entry is simply not retained - the forward still runs, it
     /// just re-reads next time. A cache that refused to hand back weights it
     /// could not keep would turn a memory ceiling into a failure.
-    pub fn store_block(&self, layer: usize, tier: QTier, weights: CachedQBlockWeights) -> Arc<CachedQBlockWeights> {
+    pub fn store_block(&self, stream: Stream, layer: usize, tier: QTier, weights: CachedQBlockWeights) -> Arc<CachedQBlockWeights> {
         let bytes = weights.byte_len() as u64;
         let w = Arc::new(weights);
         let mut inner = self.store.inner.write().unwrap();
@@ -331,7 +335,7 @@ impl GenerationCache {
             }
             evict_until_fits(&mut inner, budget, bytes, now);
         }
-        if let Some(old) = inner.blocks.insert((layer as u32, tier), Slot { weights: w.clone(), bytes, uses: 1, last_use: now }) {
+        if let Some(old) = inner.blocks.insert((stream, layer as u32, tier), Slot { weights: w.clone(), bytes, uses: 1, last_use: now }) {
             inner.bytes -= old.bytes;
         }
         inner.bytes += bytes;
@@ -340,8 +344,8 @@ impl GenerationCache {
 
     /// True when `layer` is held at `tier` - a structural check for a test,
     /// with no effect on the hit/miss counters or the recency stamps.
-    pub fn is_cached(&self, layer: usize, tier: QTier) -> bool {
-        self.store.inner.read().unwrap().blocks.contains_key(&(layer as u32, tier))
+    pub fn is_cached(&self, stream: Stream, layer: usize, tier: QTier) -> bool {
+        self.store.inner.read().unwrap().blocks.contains_key(&(stream, layer as u32, tier))
     }
 
     /// [`Self::block`] for an AUDIO+VIDEO block. Same contract, same
@@ -468,7 +472,7 @@ fn evict_until_fits(inner: &mut Inner, budget: u64, incoming: u64, now: u64) {
             _ => false,
         }
     };
-    fn cheapest<W>(m: &HashMap<(u32, QTier), Slot<W>>, now: u64) -> Option<((u32, QTier), f64)> {
+    fn cheapest<K: Copy + Eq + std::hash::Hash, W>(m: &HashMap<K, Slot<W>>, now: u64) -> Option<(K, f64)> {
         m.iter().map(|(k, s)| (*k, score(s, now))).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
     }
     while inner.bytes + incoming > budget && !(inner.blocks.is_empty() && inner.av_blocks.is_empty()) {
@@ -492,6 +496,24 @@ fn evict_until_fits(inner: &mut Inner, budget: u64, incoming: u64, now: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An AV checkpoint's audio stream run alone and its video stream are two
+    /// weight sets under one layer index: each is cached and found under its
+    /// own stream, and neither ever answers for the other.
+    #[test]
+    fn a_layer_of_each_stream_is_its_own_entry() {
+        let cfg = crate::config::LtxAvDitConfig { video: crate::config::LtxDitConfig { num_layers: 1, ..crate::config::LtxDitConfig::tiny() }, ..crate::config::LtxAvDitConfig::tiny() };
+        let w = crate::dit::random_av_tiny_weights(&cfg, 0xA0D1);
+        let quantize = |stream: Stream, dim: u32| crate::block::QBlockWeights::quantize_host_stream(&w, "transformer_blocks.0", stream, dim as usize, cfg.video.apply_gated_attention, QTier::Int8);
+        let cache = GenerationCache::with_budget(None);
+        let video = cache.store_block(Stream::Video, 0, QTier::Int8, quantize(Stream::Video, cfg.video.inner_dim));
+        assert!(cache.block(Stream::Audio, 0, QTier::Int8).is_none(), "a cached video block must not answer for the audio stream");
+        let audio = cache.store_block(Stream::Audio, 0, QTier::Int8, quantize(Stream::Audio, cfg.audio.inner_dim));
+        assert_eq!(cache.stats().blocks, 2);
+        assert!(Arc::ptr_eq(&cache.block(Stream::Video, 0, QTier::Int8).unwrap(), &video));
+        assert!(Arc::ptr_eq(&cache.block(Stream::Audio, 0, QTier::Int8).unwrap(), &audio));
+        assert_ne!(video.byte_len(), audio.byte_len(), "the two streams are different widths");
+    }
 
     /// Two handles for the same path are the same store; a different path is
     /// a different store. This is what makes generation B reuse generation
@@ -561,12 +583,12 @@ mod tests {
                 let c = cache.clone();
                 sc.spawn(move || {
                     for l in 0..16 {
-                        if c.block(l, QTier::Int8).is_none() {
+                        if c.block(Stream::Video, l, QTier::Int8).is_none() {
                             // A real block is expensive to build; the
                             // accounting under test does not care what the
                             // bytes are, only that they are consistently
                             // charged and released.
-                            c.block(l, QTier::Int4);
+                            c.block(Stream::Video, l, QTier::Int4);
                         }
                         c.connector_store("video_embeddings_connector", &[l as f32], &[1.0], 1, &[l as f32; 4]);
                         let _ = c.connector_hit("video_embeddings_connector", &[l as f32], &[1.0], 1);

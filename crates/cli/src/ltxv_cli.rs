@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain ltxv {t2v,upscale,dfr}` - LTX-2.5 video generation, post-hoc
-//! upscaling of a clip that already exists, and the DFR smoke test.
+//! `brain ltxv {t2v,upscale,v2v,dfr,t2a}` - LTX-2.5 video generation, post-hoc
+//! upscaling of a clip that already exists, masked regeneration, the DFR
+//! smoke test, and text-to-audio.
 //!
 //! One command, one playable file:
 //!
@@ -25,7 +26,7 @@
 //! `BRAIN_LTXV_*` - see `resolve_ltxv`. See `ltxv::pipeline`'s module doc for
 //! the full account of what is real and what is not.
 
-use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, LongOpts, MaskedOpts, Paths, Sampler, UpscaleOpts};
+use ltxv::pipeline::{AudioOpts, DfrOpts, DfrPaths, GenOpts, LongOpts, MaskedOpts, Paths, Sampler, UpscaleOpts};
 use ltxv::spec::LtxvSpec;
 
 /// The guidance flags every generating subcommand takes ([`set_guidance`]).
@@ -333,7 +334,8 @@ Subcommands:
   brain ltxv t2v --help       text to video (this command)
   brain ltxv upscale --help   re-render a finished clip at 2x
   brain ltxv v2v --help       regenerate a masked region of an existing clip
-  brain ltxv dfr --help       DFR (Diffusion Fidelity Rendering) smoke test"#);
+  brain ltxv dfr --help       DFR (Diffusion Fidelity Rendering) smoke test
+  brain ltxv t2a --help       text to audio (the audio stream alone)"#);
 
 const UPSCALE_HELP: &str = concat!(r#"brain ltxv upscale - re-render a finished clip at twice its resolution
 
@@ -519,12 +521,43 @@ pub fn run_ltxv(args: &[String]) {
                 std::process::exit(1);
             }
         }
+        "t2a" => {
+            if let Err(e) = t2a(&args[1..]) {
+                eprintln!("ltxv t2a: {e}");
+                std::process::exit(1);
+            }
+        }
         other => {
             eprintln!("ltxv: unknown subcommand {other}\n\n{HELP}");
             std::process::exit(2);
         }
     }
 }
+
+const T2A_HELP: &str = concat!(r#"brain ltxv t2a - LTX-2.5 text to audio
+
+  brain ltxv t2a --prompt <text> --output-path <out.wav> [options]
+
+Generates sound alone: the checkpoint's audio stream denoises without a video
+stream beside it, reading none of the video half's weights, then the audio
+VAE and the vocoder render a 48 kHz stereo WAV. Needs the real checkpoint,
+the real text encoder and the audio VAE (resolved like t2v --audio).
+
+Options:
+  --prompt <text>           what the clip should sound like (required)
+  --output-path <out.wav>   where to write the clip (required)
+  --seconds <S>             clip length (default 5)
+  --steps <N>               denoise steps for a non-distilled checkpoint; the
+                            distilled one has a fixed schedule (default 4)
+"#, guidance_help!(), r#"  --sampler <euler|res2s>   denoising loop (default euler; see t2v)
+  --eta <F>                 sampler noise strength (default 1.0 euler, 0.5
+                            res2s)
+  --seed <S>                initial-noise seed (default: drawn at random and
+                            printed)
+  --adapter <path>          a LoRA adapter, applied beside the quantized
+                            weights (repeatable)
+  --lora-scale <F>          strength of the preceding --adapter (default 1.0)
+  --device <cpu|gpu>        DiT + audio decode (default: BRAIN_DEVICE)"#);
 
 const V2V_HELP: &str = concat!(r#"brain ltxv v2v - regenerate a masked region of an existing clip
 
@@ -902,6 +935,67 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "settings": base_params(&o),
         }),
     )?;
+    Ok(())
+}
+
+fn t2a(args: &[String]) -> Result<(), String> {
+    let (overrides, args) = crate::resolver_cli::extract_role_overrides(&LtxvSpec, args);
+    let (seed, args) = crate::args::split_seed(&args, "ltxv t2a");
+    let args = &args[..];
+    let mut o = AudioOpts::default();
+    o.base.seed = seed;
+    let mut eta: Option<f64> = None;
+    let mut scaled = 0usize;
+    let mut prompt: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
+        let dbl = |i: usize, what: &str| -> Result<f64, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
+        match args[i].as_str() {
+            "--prompt" => prompt = Some(need(i)?.clone()),
+            "--output-path" | "--out" => out = Some(crate::args::strip_out_name_prefix(need(i)?, "audio").to_string()),
+            "--seconds" => o.seconds = dbl(i, "--seconds")?,
+            "--steps" => o.base.steps = need(i)?.parse().map_err(|e| format!("--steps: {e}"))?,
+            f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            "--sampler" => o.base.sampler = Sampler::parse(need(i)?)?,
+            "--eta" => eta = Some(dbl(i, "--eta")?),
+            "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
+            "--lora-scale" => crate::args::attach_lora_scale(&mut o.base.adapters, &mut scaled, need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?)?,
+            "--device" => o.base.device = Some(need(i)?.clone()),
+            "--help" | "-h" => {
+                println!("{T2A_HELP}");
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown flag {other}\n\n{T2A_HELP}")),
+        }
+        i += 2;
+    }
+    o.base.eta = o.base.sampler.resolve_eta(eta)?;
+    let prompt = prompt.ok_or("--prompt is required")?;
+    let out = out.ok_or("--output-path is required")?;
+    let paths = resolve_ltxv(&overrides, None)?;
+    eprintln!("ltxv t2a: {:.2}s of audio, sampler {:?} eta {}, guidance {:?}, seed {}", o.seconds, o.base.sampler, o.base.eta, o.base.guidance.audio, o.base.seed);
+    let t0 = std::time::Instant::now();
+    // A one-shot CLI run has no second party to cancel it - see `t2v`.
+    let cancel = capability::CancelToken::default();
+    let (clip, timings) = ltxv::pipeline::generate_audio(&paths, &prompt, &o, &cancel, |done, total, phase| {
+        eprint!("\rltxv t2a [{done}/{total}] {phase}                    ");
+    })?;
+    eprintln!();
+    let wall = t0.elapsed().as_secs_f32();
+    eprintln!(
+        "ltxv t2a: {wall:.1}s total  (build {:.2}s, text encode {:.1}s, denoise {:.1}s, audio decode {:.1}s, other {:.1}s)",
+        timings.build_dit,
+        timings.text_encode,
+        timings.denoise,
+        timings.audio_decode,
+        timings.unattributed(wall)
+    );
+    let planes: Vec<&[f32]> = clip.channels.iter().map(Vec::as_slice).collect();
+    std::fs::write(&out, audio::wav::encode_multi(&planes, clip.sample_rate)).map_err(|e| format!("writing {out}: {e}"))?;
+    eprintln!("ltxv t2a: wrote {out} ({:.2}s of {} Hz audio in {} channels)", clip.seconds(), clip.sample_rate, clip.channels.len());
+    crate::run_record::write_run_record(&out, "ltxv t2a", o.base.seed, serde_json::json!({ "prompt": prompt, "seconds": o.seconds, "steps": o.base.steps, "sampler": format!("{:?}", o.base.sampler), "eta": o.base.eta, "guidance": format!("{:?}", o.base.guidance.audio) }))?;
     Ok(())
 }
 
@@ -1416,7 +1510,7 @@ mod tests {
     #[test]
     fn every_subcommand_is_listed() {
         let src = include_str!("ltxv_cli.rs");
-        for sub in ["t2v", "upscale", "v2v", "dfr"] {
+        for sub in ["t2v", "upscale", "v2v", "dfr", "t2a"] {
             assert!(src.contains(&format!("\"{sub}\"")), "{sub} is listed but not dispatched");
             assert!(super::HELP.contains(&format!("brain ltxv {sub}")), "{sub} is dispatched but not in --help");
         }
@@ -1455,6 +1549,16 @@ mod tests {
         }
         for (var, _) in ltxv::pipeline::DFR_PATH_VARS {
             assert!(super::DFR_HELP.contains(var), "{var} is read but not in dfr --help");
+        }
+    }
+
+    /// The same self-check for `t2a`.
+    #[test]
+    fn every_t2a_flag_the_parser_accepts_is_documented() {
+        let src = include_str!("ltxv_cli.rs");
+        for flag in ["--prompt", "--output-path", "--seconds", "--steps", "--guidance", "--sampler", "--eta", "--seed", "--adapter", "--lora-scale", "--device"] {
+            assert!(super::T2A_HELP.contains(flag), "{flag} is parsed but not in t2a --help");
+            assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in t2a --help but not parsed");
         }
     }
 }
