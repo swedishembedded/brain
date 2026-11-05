@@ -5272,6 +5272,132 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
 }
 
 // ============================================================================
+// Extension: more of an existing clip
+// ============================================================================
+
+/// What [`extend`] adds to a clip.
+#[derive(Clone, Debug)]
+pub struct ExtendOpts {
+    /// Frames to add after the clip's last one. Rounded up to a whole latent
+    /// frame ([`VAE_TEMPORAL_SCALE`]), which is the unit a continuation is
+    /// generated in.
+    pub frames: usize,
+    /// How much of the clip's end the continuation is conditioned on, in
+    /// pixel frames - the reference extension recipe's prefix
+    /// ([`crate::longform::CONTEXT_FRAMES`]), shortened to the clip when the
+    /// clip is shorter and snapped down onto the `8k + 1` grid.
+    pub context_frames: usize,
+    /// The generation settings. `audio` extends the soundtrack too, which
+    /// needs the clip's own soundtrack as `audio_source`.
+    pub base: GenOpts,
+}
+
+impl Default for ExtendOpts {
+    fn default() -> ExtendOpts {
+        ExtendOpts { frames: 8 * VAE_TEMPORAL_SCALE, context_frames: crate::longform::CONTEXT_FRAMES, base: GenOpts::default() }
+    }
+}
+
+/// The clip [`extend`] regenerates: how many of the source's last frames it
+/// holds, how many it adds, and the time window it generates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ExtensionPlan {
+    context: usize,
+    added: usize,
+    window: (f32, f32),
+}
+
+fn extension_plan(clip_frames: usize, o: &ExtendOpts, fps: usize) -> Result<ExtensionPlan, String> {
+    if clip_frames == 0 {
+        return Err("the input clip is empty".into());
+    }
+    if o.frames == 0 {
+        return Err("an extension adds at least one frame".into());
+    }
+    if o.context_frames == 0 || fps == 0 {
+        return Err("an extension is conditioned on at least one frame of the clip, at a nonzero frame rate".into());
+    }
+    let step = VAE_TEMPORAL_SCALE;
+    let context = (o.context_frames.min(clip_frames) - 1) / step * step + 1;
+    let added = o.frames.div_ceil(step) * step;
+    Ok(ExtensionPlan { context, added, window: (context as f32 / fps as f32, (context + added) as f32 / fps as f32) })
+}
+
+/// Continue `clip` for `o.frames` more frames (`video_extend_lora`'s
+/// forward extension): the clip's last `context` frames are held as a clean
+/// prefix while the frames after them denoise from noise, guided by
+/// `prompt`.
+///
+/// That is a retake ([`generate_masked`]) of a time window lying past the
+/// clip's end: the source is the clip's tail followed by placeholder frames
+/// the window regenerates entirely, so the held prefix reaches the model
+/// exactly as the reference's `prefix` condition puts it - frozen tokens at
+/// timestep 0 at the front of the sequence. The returned clip is the
+/// original, untouched, followed by the new frames; with `audio`, the
+/// original soundtrack followed by the sound generated for them.
+pub fn extend(paths: &Paths, prompt: &str, clip: &Video, o: &ExtendOpts, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
+    let plan = extension_plan(clip.frames.len(), o, clip.fps)?;
+    let tail_start = clip.frames.len() - plan.context;
+    let mut source = Video { width: clip.width, height: clip.height, fps: clip.fps, frames: clip.frames[tail_start..].to_vec(), audio: None };
+    let last = source.frames.last().expect("the context holds at least one frame").clone();
+    source.frames.resize(plan.context + plan.added, last);
+    let clip_seconds = clip.frames.len() as f32 / clip.fps as f32;
+    let tail_seconds = tail_start as f32 / clip.fps as f32;
+    let audio_source = match (o.base.audio, &o.base.audio_source) {
+        (false, _) => None,
+        (true, None) => return Err("extending the soundtrack too needs the clip's own soundtrack as the audio source".into()),
+        (true, Some(sound)) => {
+            let mut held = sound.clone();
+            held.channels.iter_mut().for_each(|c| {
+                c.truncate((clip_seconds * sound.sample_rate as f32).round() as usize);
+                c.drain(..((tail_seconds * sound.sample_rate as f32).round() as usize).min(c.len()));
+            });
+            // Silence over the added span: the window regenerates it, so only
+            // its length matters.
+            held.channels.iter_mut().for_each(|c| c.resize(((plan.window.1) * sound.sample_rate as f32).round() as usize, 0.0));
+            Some(held)
+        }
+    };
+    let masked = MaskedOpts {
+        mask_dir: String::new(),
+        window: Some(plan.window),
+        regenerate_video: true,
+        regenerate_audio: true,
+        strength: 1.0,
+        base: GenOpts { audio_source, ..o.base.clone() },
+    };
+    tracing::info!(clip_frames = clip.frames.len(), context = plan.context, added = plan.added, window_start = plan.window.0, window_end = plan.window.1, "extending the clip");
+    let (generated, timings) = generate_masked(paths, prompt, &source, &masked, cancel, progress)?;
+    let mut out = Video { width: clip.width, height: clip.height, fps: clip.fps, frames: clip.frames.clone(), audio: None };
+    out.frames.extend(generated.frames.into_iter().skip(plan.context));
+    if let (Some(original), Some(mut new)) = (o.base.audio_source.as_ref(), generated.audio) {
+        // The generated sound covers the held tail too; keep it only from the
+        // clip's own end on, after the original soundtrack.
+        let mut sound = if original.sample_rate == new.sample_rate {
+            original.clone()
+        } else {
+            crate::audio::AudioClip { channels: original.channels.iter().map(|c| audio::resample::sinc_hann(c, original.sample_rate, new.sample_rate)).collect(), sample_rate: new.sample_rate }
+        };
+        let rate = new.sample_rate as f32;
+        // A mono original is spread over the generated channels; otherwise
+        // the two share the channels both have.
+        if let [mono] = sound.channels.as_slice() {
+            sound.channels = vec![mono.clone(); new.channels.len()];
+        }
+        let channels = sound.channels.len().min(new.channels.len());
+        sound.channels.truncate(channels);
+        sound.pad_to_seconds(clip_seconds);
+        let skip = ((clip_seconds - tail_seconds) * rate).round() as usize;
+        for (held, fresh) in sound.channels.iter_mut().zip(&mut new.channels) {
+            held.truncate((clip_seconds * rate).round() as usize);
+            held.extend(fresh.drain(skip.min(fresh.len())..));
+        }
+        out.audio = Some(sound);
+    }
+    Ok((out, timings))
+}
+
+// ============================================================================
 // Long-form generation: several denoising windows, one rolling latent context
 // ============================================================================
 
@@ -7525,6 +7651,31 @@ mod tests {
         let held = AudioOpts { base: GenOpts { audio_source: Some(crate::audio::AudioClip { channels: vec![vec![0.0; 16]], sample_rate: 16_000 }), ..AudioOpts::default().base }, ..AudioOpts::default() };
         assert!(run(held).contains("nothing left to generate"));
         assert!(run(AudioOpts::default()).contains("real DiT checkpoint"));
+    }
+
+    /// An extension holds the clip's last 57 frames (the reference recipe's
+    /// 8 latent frames, fewer for a shorter clip, always on the `8k + 1`
+    /// grid), adds whole latent frames, and regenerates exactly the latent
+    /// frames past the held ones: the window's start is the first added
+    /// frame's time, so no held latent frame overlaps it.
+    #[test]
+    fn an_extension_regenerates_exactly_the_latent_frames_past_the_held_tail() {
+        let o = |frames, context_frames| ExtendOpts { frames, context_frames, ..ExtendOpts::default() };
+        let plan = extension_plan(121, &o(20, crate::longform::CONTEXT_FRAMES), 24).unwrap();
+        assert_eq!((plan.context, plan.added), (57, 24), "20 frames round up to three latent frames");
+        assert_eq!(extension_plan(30, &o(8, 57), 24).unwrap().context, 25, "a 30-frame clip holds its last 25");
+        assert!(extension_plan(0, &o(8, 57), 24).is_err());
+        assert!(extension_plan(30, &o(0, 57), 24).is_err());
+
+        let (lh, lw) = (2, 3);
+        let lat_t = (plan.context + plan.added - 1) / VAE_TEMPORAL_SCALE + 1;
+        let t = lat_t * lh * lw;
+        let region = crate::maskcond::temporal_region(&real_pixel_positions(lat_t, lh, lw, 24.0), t, plan.window.0, plan.window.1);
+        let held_latents = (plan.context - 1) / VAE_TEMPORAL_SCALE + 1;
+        for (tok, &m) in region.iter().enumerate() {
+            let latent_frame = tok / (lh * lw);
+            assert_eq!(m, if latent_frame < held_latents { 0.0 } else { 1.0 }, "latent frame {latent_frame}");
+        }
     }
 
     fn res2s(eta: f64, seed: u64) -> Sampling {

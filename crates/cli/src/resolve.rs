@@ -306,7 +306,7 @@ const ARCH_HANDLER_VERBS: &[(&str, &[&str])] = &[
     // canonicalizes from `generate`/`gen`/`sample`, which would inject a
     // single `--weights` flag onto a command that takes four weight roles.
     ("wan", &["t2v", "text2video", "finetune"]),
-    ("ltxv", &["t2v", "text2video", "upscale", "v2v", "dfr", "t2a"]),
+    ("ltxv", &["t2v", "text2video", "upscale", "v2v", "dfr", "t2a", "extend"]),
 ];
 
 /// Whether `verb` is one `arch` is known to accept, checked before any

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain ltxv {t2v,upscale,v2v,dfr,t2a}` - LTX-2.5 video generation, post-hoc
+//! `brain ltxv {t2v,upscale,v2v,dfr,t2a,extend}` - LTX-2.5 video generation, post-hoc
 //! upscaling of a clip that already exists, masked regeneration, the DFR
-//! smoke test, and text-to-audio.
+//! smoke test, text-to-audio, and the continuation of an existing clip.
 //!
 //! One command, one playable file:
 //!
@@ -26,7 +26,7 @@
 //! `BRAIN_LTXV_*` - see `resolve_ltxv`. See `ltxv::pipeline`'s module doc for
 //! the full account of what is real and what is not.
 
-use ltxv::pipeline::{AudioOpts, DfrOpts, DfrPaths, GenOpts, LongOpts, MaskedOpts, Paths, Sampler, UpscaleOpts};
+use ltxv::pipeline::{AudioOpts, DfrOpts, DfrPaths, ExtendOpts, GenOpts, LongOpts, MaskedOpts, Paths, Sampler, UpscaleOpts};
 use ltxv::spec::LtxvSpec;
 
 /// The guidance flags every generating subcommand takes ([`set_guidance`]).
@@ -338,7 +338,8 @@ Subcommands:
   brain ltxv upscale --help   re-render a finished clip at 2x
   brain ltxv v2v --help       regenerate a masked region of an existing clip
   brain ltxv dfr --help       DFR (Diffusion Fidelity Rendering) smoke test
-  brain ltxv t2a --help       text to audio (the audio stream alone)"#);
+  brain ltxv t2a --help       text to audio (the audio stream alone)
+  brain ltxv extend --help    continue an existing clip"#);
 
 const UPSCALE_HELP: &str = concat!(r#"brain ltxv upscale - re-render a finished clip at twice its resolution
 
@@ -530,12 +531,52 @@ pub fn run_ltxv(args: &[String]) {
                 std::process::exit(1);
             }
         }
+        "extend" => {
+            if let Err(e) = extend(&args[1..]) {
+                eprintln!("ltxv extend: {e}");
+                std::process::exit(1);
+            }
+        }
         other => {
             eprintln!("ltxv: unknown subcommand {other}\n\n{HELP}");
             std::process::exit(2);
         }
     }
 }
+
+const EXTEND_HELP: &str = concat!(r#"brain ltxv extend - continue an existing clip
+
+  brain ltxv extend --input <clip.mp4> --prompt <text> --output-path <out.mp4> [options]
+
+The clip's last --context-frames frames are held as a clean prefix while new
+frames after them denoise from noise, the reference's forward-extension
+recipe (video_extend_lora's prefix condition). The output is the input clip,
+untouched, followed by the new frames.
+
+Options:
+  --input <clip>            the clip to continue (required)
+  --prompt <text>           what the continuation shows (required)
+  --output-path <file>      where to write the extended clip (required)
+  --frames <N>              frames to add, rounded up to a multiple of 8
+                            (default 64)
+  --seconds <S>             ...or the time to add, at the clip's frame rate
+  --context-frames <N>      how much of the clip's end the continuation sees
+                            (default 57, the recipe's 8 latent frames)
+  --audio                   extend the soundtrack too, jointly with the
+                            picture (needs the same checkpoints as t2v
+                            --audio, and --audio-source)
+  --audio-source <wav>      the clip's own soundtrack
+  --fps <N>                 the clip's frame rate (default: read from the file)
+  --steps <N>               denoise steps (non-distilled checkpoints)
+"#, guidance_help!(), r#"  --sampler <euler|res2s>   denoising loop (default euler; see t2v)
+  --eta <F>                 sampler noise strength (default 1.0 euler, 0.5
+                            res2s)
+  --seed <S>                noise seed (default: drawn at random and printed)
+  --dit-config <name>       tiny (random-weight smoke test) or ltx25_22b
+  --adapter <path>          a LoRA adapter (repeatable), e.g. an extension
+                            LoRA trained with video_extend_lora
+  --lora-scale <F>          strength of the preceding --adapter (default 1.0)
+  --device <cpu|gpu>        DiT + VAE (default: BRAIN_DEVICE)"#);
 
 const T2A_HELP: &str = concat!(r#"brain ltxv t2a - LTX-2.5 text to audio
 
@@ -931,6 +972,83 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "settings": base_params(&o),
         }),
     )?;
+    Ok(())
+}
+
+fn extend(args: &[String]) -> Result<(), String> {
+    let (overrides, args) = crate::resolver_cli::extract_role_overrides(&LtxvSpec, args);
+    let (seed, args) = crate::args::split_seed(&args, "ltxv extend");
+    let args = &args[..];
+    let mut o = ExtendOpts::default();
+    o.base.seed = seed;
+    let mut eta: Option<f64> = None;
+    let mut scaled = 0usize;
+    let mut seconds: Option<f64> = None;
+    let mut fps: Option<usize> = None;
+    let (mut prompt, mut input, mut out) = (None::<String>, None::<String>, None::<String>);
+    let mut i = 0;
+    while i < args.len() {
+        let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
+        let num = |i: usize, what: &str| -> Result<usize, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
+        let dbl = |i: usize, what: &str| -> Result<f64, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
+        match args[i].as_str() {
+            "--prompt" => prompt = Some(need(i)?.clone()),
+            "--input" | "--in" => input = Some(need(i)?.clone()),
+            "--output-path" | "--out" => out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string()),
+            "--frames" => o.frames = num(i, "--frames")?,
+            "--seconds" => seconds = Some(dbl(i, "--seconds")?),
+            "--context-frames" => o.context_frames = num(i, "--context-frames")?,
+            "--audio" => {
+                o.base.audio = true;
+                i += 1;
+                continue;
+            }
+            "--audio-source" => o.base.audio_source = Some(ltxv::audio::read_wav(need(i)?)?),
+            "--fps" => fps = Some(num(i, "--fps")?),
+            "--steps" => o.base.steps = num(i, "--steps")?,
+            f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            "--sampler" => o.base.sampler = Sampler::parse(need(i)?)?,
+            "--eta" => eta = Some(dbl(i, "--eta")?),
+            "--dit-config" => o.base.dit_config = need(i)?.clone(),
+            "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
+            "--lora-scale" => crate::args::attach_lora_scale(&mut o.base.adapters, &mut scaled, need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?)?,
+            "--device" => o.base.device = Some(need(i)?.clone()),
+            "--help" | "-h" => {
+                println!("{EXTEND_HELP}");
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown flag {other}\n\n{EXTEND_HELP}")),
+        }
+        i += 2;
+    }
+    o.base.eta = o.base.sampler.resolve_eta(eta)?;
+    let input = input.ok_or("--input is required")?;
+    let out = out.ok_or("--output-path is required")?;
+    let prompt = prompt.ok_or("--prompt is required: the continuation is generated against it")?;
+    let paths = resolve_ltxv(&overrides, None)?;
+    let decoded = read_clip(&input, 0)?;
+    // The source's own rate, so the continuation plays at the clip's speed.
+    let fps = fps.unwrap_or_else(|| imaging::video::probe_fps(std::path::Path::new(&input)).map(|f| f.round() as usize).filter(|&f| f > 0).unwrap_or(o.base.fps));
+    o.base.fps = fps;
+    if let Some(s) = seconds {
+        if !(s.is_finite() && s > 0.0) {
+            return Err(format!("--seconds must be a positive number, got {s}"));
+        }
+        o.frames = (s * fps as f64).round().max(1.0) as usize;
+    }
+    let clip = ltxv::pipeline::Video { fps, ..decoded };
+    eprintln!("ltxv extend: {} frames at {fps} fps, adding {} (in whole latent frames) against the last {} - guidance {:?}, seed {}", clip.frames.len(), o.frames, o.context_frames.min(clip.frames.len()), o.base.guidance, o.base.seed);
+    let t0 = std::time::Instant::now();
+    // A one-shot CLI run has no second party to cancel it - see `t2v`.
+    let cancel = capability::CancelToken::default();
+    let (video, timings) = ltxv::pipeline::extend(&paths, &prompt, &clip, &o, &cancel, |done, total, phase| {
+        eprint!("\rltxv extend [{done}/{total}] {phase}                    ");
+    })?;
+    eprintln!();
+    let wall = t0.elapsed().as_secs_f32();
+    eprintln!("ltxv extend: {wall:.1}s total  (build {:.2}s, text encode {:.1}s, denoise {:.1}s, vae {:.1}s, other {:.1}s)", timings.build_dit, timings.text_encode, timings.denoise, timings.decode, timings.unattributed(wall));
+    eprintln!("ltxv extend: wrote {}", write_clip(video, &out)?);
+    crate::run_record::write_run_record(&out, "ltxv extend", o.base.seed, serde_json::json!({ "prompt": prompt, "input": input, "frames": o.frames, "context_frames": o.context_frames, "settings": base_params(&o.base) }))?;
     Ok(())
 }
 
@@ -1528,7 +1646,7 @@ mod tests {
     #[test]
     fn every_subcommand_is_listed() {
         let src = include_str!("ltxv_cli.rs");
-        for sub in ["t2v", "upscale", "v2v", "dfr", "t2a"] {
+        for sub in ["t2v", "upscale", "v2v", "dfr", "t2a", "extend"] {
             assert!(src.contains(&format!("\"{sub}\"")), "{sub} is listed but not dispatched");
             assert!(super::HELP.contains(&format!("brain ltxv {sub}")), "{sub} is dispatched but not in --help");
         }
@@ -1567,6 +1685,16 @@ mod tests {
         }
         for (var, _) in ltxv::pipeline::DFR_PATH_VARS {
             assert!(super::DFR_HELP.contains(var), "{var} is read but not in dfr --help");
+        }
+    }
+
+    /// The same self-check for `extend`.
+    #[test]
+    fn every_extend_flag_the_parser_accepts_is_documented() {
+        let src = include_str!("ltxv_cli.rs");
+        for flag in ["--input", "--prompt", "--output-path", "--frames", "--seconds", "--context-frames", "--audio", "--audio-source", "--fps", "--steps", "--guidance", "--sampler", "--eta", "--seed", "--dit-config", "--adapter", "--lora-scale", "--device"] {
+            assert!(super::EXTEND_HELP.contains(flag), "{flag} is parsed but not in extend --help");
+            assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in extend --help but not parsed");
         }
     }
 

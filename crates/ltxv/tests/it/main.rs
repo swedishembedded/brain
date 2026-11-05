@@ -31,6 +31,7 @@ mod device_bytes_real;
 mod device_residency;
 mod dit_parity;
 mod duration_head_parity;
+mod extend;
 mod gguf_quant_real;
 mod host_forward_parity;
 mod int8_compute;
