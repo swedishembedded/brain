@@ -37,7 +37,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 use model::Shard;
 use vae::blocks::Tensors;
 
-use crate::block::{load_block_tensors_from_source, AvBlockTaps, BlockTaps, EmbeddingsConnector, GenerationCache, LtxAvBlock, LtxBlock, LtxBlockQ, QBlockWeights, QTier, KERNELS};
+use crate::block::{AvBlockTaps, BlockTaps, EmbeddingsConnector, GenerationCache, LtxAvBlock, LtxBlock, LtxBlockQ, QBlockWeights, QTier, KERNELS};
 use crate::config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
 use crate::rope::{ltx_rope_tables, LtxRopeTables};
 
@@ -1158,20 +1158,7 @@ impl LtxDit {
 /// 48/49ths streams in one block at a time inside [`forward_q_streamed`]
 /// itself via [`load_block_tensors_from_source`].
 pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig) -> Tensors {
-    let manifest = dit_tensor_manifest(cfg);
-    let mut out = Tensors::new();
-    for (name, shape) in manifest {
-        if name.starts_with("transformer_blocks.") {
-            continue;
-        }
-        let mut data = Vec::new();
-        let found = src.with_tensor(&name, &mut |d| data = d.to_vec());
-        assert!(found, "load_head_tensors_from_source: missing {name}");
-        let want: usize = shape.iter().product();
-        assert_eq!(data.len(), want, "load_head_tensors_from_source: {name} wrong length ({} vs {want})", data.len());
-        out.insert(name, (shape, data));
-    }
-    out
+    crate::block::load_manifest_tensors(src, dit_tensor_manifest(cfg), |name| !name.starts_with("transformer_blocks."))
 }
 
 /// [`LtxDit::forward_q`]'s streamed twin: identical op sequence and output
@@ -1353,7 +1340,6 @@ pub fn forward_q_streamed_in(
     // pair of `Arc` bumps. See `crate::devres::RopeCache`.
     let rope_id = crate::devres::rope_key("video", cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
 
-    let mut t_load = std::time::Duration::ZERO;
     let mut t_quant = std::time::Duration::ZERO;
     let mut t_upload = std::time::Duration::ZERO;
     let mut t_gpu = std::time::Duration::ZERO;
@@ -1372,11 +1358,11 @@ pub fn forward_q_streamed_in(
         }
         misses += 1;
         let prefix = format!("transformer_blocks.{l}");
-        let s0 = std::time::Instant::now();
-        let block_tensors = load_block_tensors_from_source(src, cfg, &prefix);
-        t_load += s0.elapsed();
+        // Straight off the checkpoint: a Q8_0 linear repacks to the int8 tier
+        // byte for byte (`model::int8::quantize_from`), never decoded to f32
+        // and quantized again; only the norms and tables are read as f32.
         let s1 = std::time::Instant::now();
-        let quantized = QBlockWeights::quantize_host(&block_tensors, &prefix, dim, cfg.apply_gated_attention, tier);
+        let quantized = QBlockWeights::quantize_host(src, &prefix, dim, cfg.apply_gated_attention, tier);
         t_quant += s1.elapsed();
         cache.store_block(l, tier, quantized)
     };
@@ -1476,8 +1462,7 @@ pub fn forward_q_streamed_in(
         &gpu, cfg, tier, t, context_len, x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, &mut weights, &mut after_block,
     );
     t_block.add(&forward_timings);
-    gpu_core::profile::stage_time("forward_q_streamed: block GGUF read+dequant (sum over all layers, cache misses only)", std::time::Instant::now() - t_load);
-    gpu_core::profile::stage_time("forward_q_streamed: block int8 quantize (sum over all layers, cache misses only)", std::time::Instant::now() - t_quant);
+    gpu_core::profile::stage_time("forward_q_streamed: block read + int8 quantize (sum over all layers, cache misses only)", std::time::Instant::now() - t_quant);
     gpu_core::profile::stage_time("forward_q_streamed: block weight upload to device (sum over all layers, non-resident blocks only)", std::time::Instant::now() - t_upload);
     gpu_core::profile::stage_time("forward_q_streamed: block adaLN combine+slice (host, sum over all layers)", std::time::Instant::now() - t_block.modulation_host);
     gpu_core::profile::stage_time("forward_q_streamed: activation/context/adaLN upload to device (per forward)", std::time::Instant::now() - t_block.record_upload);
@@ -1493,7 +1478,6 @@ pub fn forward_q_streamed_in(
         cache_hits = cfg.num_layers - misses,
         device_uploads = uploads,
         device_resident = cfg.num_layers - uploads,
-        load_ms = t_load.as_secs_f32() * 1e3,
         quant_ms = t_quant.as_secs_f32() * 1e3,
         upload_ms = t_upload.as_secs_f32() * 1e3,
         modulation_ms = t_block.modulation_host.as_secs_f32() * 1e3,
@@ -1515,19 +1499,7 @@ pub fn forward_q_streamed_in(
 /// embeddings connectors. Bounded the same way: one tensor decoded into a
 /// temporary at a time, never the whole source.
 pub fn load_av_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxAvDitConfig) -> Tensors {
-    let mut out = Tensors::new();
-    for (name, shape) in av_dit_tensor_manifest(cfg) {
-        if name.starts_with("transformer_blocks.") {
-            continue;
-        }
-        let mut data = Vec::new();
-        let found = src.with_tensor(&name, &mut |d| data = d.to_vec());
-        assert!(found, "load_av_head_tensors_from_source: missing {name}");
-        let want: usize = shape.iter().product();
-        assert_eq!(data.len(), want, "load_av_head_tensors_from_source: {name} wrong length ({} vs {want})", data.len());
-        out.insert(name, (shape, data));
-    }
-    out
+    crate::block::load_manifest_tensors(src, av_dit_tensor_manifest(cfg), |name| !name.starts_with("transformer_blocks."))
 }
 
 /// One joint audio+video denoise step's inputs - the AV counterpart of
@@ -1664,7 +1636,6 @@ pub fn av_forward_q_streamed_in(
     // cross-modal RoPE lives in.
     let cross_max_pos = [cfg.cross_pe_max_pos()];
 
-    let mut t_load = std::time::Duration::ZERO;
     let mut t_quant = std::time::Duration::ZERO;
     let mut t_upload = std::time::Duration::ZERO;
     let mut misses = 0u32;
@@ -1675,11 +1646,9 @@ pub fn av_forward_q_streamed_in(
         }
         misses += 1;
         let prefix = format!("transformer_blocks.{l}");
-        let s0 = std::time::Instant::now();
-        let block_tensors = crate::block::load_av_block_tensors_from_source(src, cfg, &prefix);
-        t_load += s0.elapsed();
+        // See the video-only loader above: read and repacked in one pass.
         let s1 = std::time::Instant::now();
-        let quantized = crate::block::CachedQAvBlockWeights::quantize(&block_tensors, &prefix, vcfg, acfg, tier);
+        let quantized = crate::block::CachedQAvBlockWeights::quantize(src, &prefix, vcfg, acfg, tier);
         t_quant += s1.elapsed();
         cache.store_av_block(l, tier, quantized)
     };
@@ -1767,8 +1736,7 @@ pub fn av_forward_q_streamed_in(
     };
     let (vx, ax, forward_timings) = session.run_blocks(&gpu, cfg, tier, vx, ax, &inp, &mut weights, &mut after_block);
     t_block.add(&forward_timings);
-    gpu_core::profile::stage_time("av_forward_q_streamed: block GGUF read+dequant (sum over all layers, cache misses only)", std::time::Instant::now() - t_load);
-    gpu_core::profile::stage_time("av_forward_q_streamed: block int8 quantize (sum over all layers, cache misses only)", std::time::Instant::now() - t_quant);
+    gpu_core::profile::stage_time("av_forward_q_streamed: block read + int8 quantize (sum over all layers, cache misses only)", std::time::Instant::now() - t_quant);
     gpu_core::profile::stage_time("av_forward_q_streamed: block weight upload to device (sum over all layers, non-resident blocks only)", std::time::Instant::now() - t_upload);
     gpu_core::profile::stage_time("av_forward_q_streamed: activation/context/adaLN upload to device (per forward)", std::time::Instant::now() - t_block.record_upload);
     gpu_core::profile::stage_time("av_forward_q_streamed: block submit+wait (sum over all layers)", std::time::Instant::now() - t_block.compute);
@@ -1779,7 +1747,6 @@ pub fn av_forward_q_streamed_in(
         readback_ms = t_block.readback.as_secs_f32() * 1e3,
         device_uploads = uploads,
         device_resident = cfg.video.num_layers - uploads,
-        load_ms = t_load.as_secs_f32() * 1e3,
         quant_ms = t_quant.as_secs_f32() * 1e3,
         upload_ms = t_upload.as_secs_f32() * 1e3,
         record_upload_ms = t_block.record_upload.as_secs_f32() * 1e3,

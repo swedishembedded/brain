@@ -341,8 +341,16 @@ struct FfWeights {
 /// both streams. The tiny AV golden's own `audio_ff` is bias-free, so a config
 /// flag cannot describe both fixtures either. Presence in the map is the one
 /// statement that is true of every checkpoint and every fixture at once.
-fn ff_has_bias(w: &Tensors, prefix: &str) -> bool {
-    w.contains_key(&format!("{prefix}.net.0.proj.bias"))
+fn ff_has_bias(w: &dyn checkpoint::TensorSource, prefix: &str) -> bool {
+    w.numel(&format!("{prefix}.net.0.proj.bias")).is_some()
+}
+
+/// One small tensor (a norm, a modulation table, a gate) read whole onto the
+/// host - the quantized linears around it never take this route.
+fn host_tensor(w: &dyn checkpoint::TensorSource, name: &str) -> Vec<f32> {
+    let mut out = None;
+    assert!(w.with_tensor(name, &mut |d| out = Some(d.to_vec())), "ltxv dit: missing weight {name}");
+    out.expect("with_tensor reported found")
 }
 
 impl FfWeights {
@@ -1668,15 +1676,15 @@ impl CachedQAttnWeights {
 }
 
 impl QAttnWeights {
-    fn quantize_host(w: &Tensors, prefix: &str, gated: bool, tier: QTier, q_dim: usize, kv_dim: usize, inner_dim: usize) -> CachedQAttnWeights {
+    fn quantize_host(w: &dyn checkpoint::TensorSource, prefix: &str, gated: bool, tier: QTier, q_dim: usize, kv_dim: usize, inner_dim: usize) -> CachedQAttnWeights {
         CachedQAttnWeights {
             wq: QLinear::quantize_host(w, &format!("{prefix}.to_q"), tier, inner_dim, q_dim, true),
             wk: QLinear::quantize_host(w, &format!("{prefix}.to_k"), tier, inner_dim, kv_dim, true),
             wv: QLinear::quantize_host(w, &format!("{prefix}.to_v"), tier, inner_dim, kv_dim, true),
             wo: QLinear::quantize_host(w, &format!("{prefix}.to_out.0"), tier, q_dim, inner_dim, true),
-            q_norm: tget(w, &format!("{prefix}.q_norm.weight")).to_vec(),
-            k_norm: tget(w, &format!("{prefix}.k_norm.weight")).to_vec(),
-            gate: gated.then(|| (tget(w, &format!("{prefix}.to_gate_logits.weight")).to_vec(), tget(w, &format!("{prefix}.to_gate_logits.bias")).to_vec())),
+            q_norm: host_tensor(w, &format!("{prefix}.q_norm.weight")),
+            k_norm: host_tensor(w, &format!("{prefix}.k_norm.weight")),
+            gate: gated.then(|| (host_tensor(w, &format!("{prefix}.to_gate_logits.weight")), host_tensor(w, &format!("{prefix}.to_gate_logits.bias")))),
         }
     }
 
@@ -1731,7 +1739,7 @@ impl CachedQFfWeights {
 }
 
 impl QFfWeights {
-    fn quantize_host(w: &Tensors, prefix: &str, tier: QTier, dim: usize, has_bias: bool) -> CachedQFfWeights {
+    fn quantize_host(w: &dyn checkpoint::TensorSource, prefix: &str, tier: QTier, dim: usize, has_bias: bool) -> CachedQFfWeights {
         let ff_dim = dim * 4;
         CachedQFfWeights { w1: QLinear::quantize_host(w, &format!("{prefix}.net.0.proj"), tier, ff_dim, dim, has_bias), w2: QLinear::quantize_host(w, &format!("{prefix}.net.2"), tier, dim, ff_dim, has_bias) }
     }
@@ -1846,7 +1854,7 @@ pub fn cached_block_bytes(cfg: &LtxDitConfig, tier: QTier) -> u64 {
 }
 
 impl QBlockWeights {
-    pub(crate) fn quantize_host(w: &Tensors, prefix: &str, dim: usize, gated: bool, tier: QTier) -> CachedQBlockWeights {
+    pub(crate) fn quantize_host(w: &dyn checkpoint::TensorSource, prefix: &str, dim: usize, gated: bool, tier: QTier) -> CachedQBlockWeights {
         QBlockWeights::quantize_host_stream(w, prefix, "", dim, gated, tier)
     }
 
@@ -1855,10 +1863,10 @@ impl QBlockWeights {
     /// [`BlockWeights::upload`]'s convention and for the same reason (both
     /// streams' per-block state is structurally identical; only the tensor
     /// name prefix, the dims and the FFN's bias differ).
-    pub(crate) fn quantize_host_stream(w: &Tensors, prefix: &str, stream: &str, dim: usize, gated: bool, tier: QTier) -> CachedQBlockWeights {
-        let sst = tget(w, &format!("{prefix}.{stream}scale_shift_table")).to_vec();
+    pub(crate) fn quantize_host_stream(w: &dyn checkpoint::TensorSource, prefix: &str, stream: &str, dim: usize, gated: bool, tier: QTier) -> CachedQBlockWeights {
+        let sst = host_tensor(w, &format!("{prefix}.{stream}scale_shift_table"));
         assert_eq!(sst.len(), 9 * dim, "{prefix}.{stream}scale_shift_table must be [9, dim]");
-        let pst = tget(w, &format!("{prefix}.{stream}prompt_scale_shift_table")).to_vec();
+        let pst = host_tensor(w, &format!("{prefix}.{stream}prompt_scale_shift_table"));
         assert_eq!(pst.len(), 2 * dim, "{prefix}.{stream}prompt_scale_shift_table must be [2, dim]");
         let ffp = format!("{prefix}.{stream}ff");
         let ff_bias = ff_has_bias(w, &ffp);
@@ -2614,12 +2622,12 @@ impl CachedQAvBlockWeights {
     }
 
     /// Quantize one AV block's weights into the cache's host form.
-    pub fn quantize(w: &Tensors, prefix: &str, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, tier: QTier) -> CachedQAvBlockWeights {
+    pub fn quantize(w: &dyn checkpoint::TensorSource, prefix: &str, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, tier: QTier) -> CachedQAvBlockWeights {
         let (vdim, adim) = (vcfg.inner_dim as usize, acfg.inner_dim as usize);
         let gated = vcfg.apply_gated_attention;
-        let table_video = tget(w, &format!("{prefix}.scale_shift_table_a2v_ca_video")).to_vec();
+        let table_video = host_tensor(w, &format!("{prefix}.scale_shift_table_a2v_ca_video"));
         assert_eq!(table_video.len(), 5 * vdim, "{prefix}.scale_shift_table_a2v_ca_video must be [5, video.dim]");
-        let table_audio = tget(w, &format!("{prefix}.scale_shift_table_a2v_ca_audio")).to_vec();
+        let table_audio = host_tensor(w, &format!("{prefix}.scale_shift_table_a2v_ca_audio"));
         assert_eq!(table_audio.len(), 5 * adim, "{prefix}.scale_shift_table_a2v_ca_audio must be [5, audio.dim]");
         CachedQAvBlockWeights {
             vw: QBlockWeights::quantize_host_stream(w, prefix, "", vdim, gated, tier),
@@ -3168,56 +3176,36 @@ impl LtxAvBlockQ {
     }
 }
 
-/// [`load_block_tensors_from_source`]'s AV twin - exactly one AV block's own
-/// tensors off a real GGUF `checkpoint::TensorSource`, never the whole 22B
-/// checkpoint's fp32 expansion. Same bound, same reason; only the manifest
-/// differs (`crate::dit::av_dit_tensor_manifest`, which carries both streams
-/// and the two cross-modal modules).
-pub fn load_av_block_tensors_from_source(src: &dyn checkpoint::TensorSource, cfg: &crate::config::LtxAvDitConfig, prefix: &str) -> Tensors {
-    let manifest = crate::dit::av_dit_tensor_manifest(cfg);
-    let want_prefix = format!("{prefix}.");
+/// The `manifest` entries `keep` selects, read from `src` into a [`Tensors`]
+/// map, each checked against its declared shape. Bounded the way a real
+/// 22B GGUF needs: `with_tensor` decodes one tensor into a temporary at a
+/// time, so only the selected tensors are ever held - one block's, or the
+/// non-block head's - never the whole checkpoint's fp32 expansion.
+pub fn load_manifest_tensors(src: &dyn checkpoint::TensorSource, manifest: Vec<(String, Vec<usize>)>, keep: impl Fn(&str) -> bool) -> Tensors {
     let mut out = Tensors::new();
-    for (name, shape) in manifest {
-        if !name.starts_with(&want_prefix) {
-            continue;
-        }
+    for (name, shape) in manifest.into_iter().filter(|(name, _)| keep(name)) {
         let mut data = Vec::new();
-        let found = src.with_tensor(&name, &mut |d| data = d.to_vec());
-        assert!(found, "load_av_block_tensors_from_source: missing {name}");
+        assert!(src.with_tensor(&name, &mut |d| data = d.to_vec()), "ltxv: the checkpoint is missing {name}");
         let want: usize = shape.iter().product();
-        assert_eq!(data.len(), want, "load_av_block_tensors_from_source: {name} wrong length ({} vs {want})", data.len());
+        assert_eq!(data.len(), want, "ltxv: {name} holds {} values, expected {want}", data.len());
         out.insert(name, (shape, data));
     }
     out
 }
 
-/// Read exactly one block's real tensors from `src` into a [`Tensors`] map -
-/// the bounded loader path [`LtxBlockQ::on`] uses to build straight off a
-/// real GGUF `checkpoint::TensorSource` (`crate::gguf_src::LtxvGgufSource`)
-/// WITHOUT ever materializing the whole 22B checkpoint's fp32 expansion in
-/// host RAM: only this one block's own tensors (a couple hundred MB at
-/// most, once packed to int8) are read, each via `with_tensor` - which,
-/// per `checkpoint::TensorSource`'s own contract, decodes at most one
-/// tensor into a temporary at a time, never the whole source. This is the
-/// same bound `model::int8::upload_dequantized`'s doc documents for the
-/// general case, applied here at "one block" granularity instead of "one
-/// tensor". `prefix`: e.g. `"transformer_blocks.0"`, matching
-/// `crate::dit::dit_tensor_manifest`'s own naming.
+/// One AV block's own tensors (`prefix`, e.g. `"transformer_blocks.0"`) - the
+/// audio+video manifest's twin of [`load_block_tensors_from_source`].
+pub fn load_av_block_tensors_from_source(src: &dyn checkpoint::TensorSource, cfg: &crate::config::LtxAvDitConfig, prefix: &str) -> Tensors {
+    let want = format!("{prefix}.");
+    load_manifest_tensors(src, crate::dit::av_dit_tensor_manifest(cfg), |name| name.starts_with(&want))
+}
+
+/// One block's own tensors (`prefix`, e.g. `"transformer_blocks.0"`, matching
+/// `crate::dit::dit_tensor_manifest`'s naming) - what [`LtxBlockQ::on`] builds
+/// from without materializing the whole checkpoint.
 pub fn load_block_tensors_from_source(src: &dyn checkpoint::TensorSource, cfg: &LtxDitConfig, prefix: &str) -> Tensors {
-    let manifest = crate::dit::dit_tensor_manifest(cfg);
-    let want_prefix = format!("{prefix}.");
-    let mut out = Tensors::new();
-    for (name, shape) in manifest {
-        if !name.starts_with(&want_prefix) {
-            continue;
-        }
-        let mut data = Vec::new();
-        let found = src.with_tensor(&name, &mut |d| data = d.to_vec());
-        assert!(found, "load_block_tensors_from_source: missing {name}");
-        let want: usize = shape.iter().product();
-        assert_eq!(data.len(), want, "load_block_tensors_from_source: {name} wrong length ({} vs {want})", data.len());
-        out.insert(name, (shape, data));
-    }
+    let want = format!("{prefix}.");
+    let out = load_manifest_tensors(src, crate::dit::dit_tensor_manifest(cfg), |name| name.starts_with(&want));
     assert!(!out.is_empty(), "load_block_tensors_from_source: prefix {prefix} matched nothing in the manifest");
     out
 }
