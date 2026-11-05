@@ -175,6 +175,11 @@ fn a_narrow_window_is_bit_identical_and_still_uploads_less_than_streaming() {
     let pinned = (slots - 1) as u64;
     let tail = cfg.num_layers as u64 - pinned;
     assert_eq!(rs.uploads, pinned + tail * steps.len() as u64, "the pinned prefix must upload once and only the tail reload per pass");
+    // The card holds the pinned blocks for the whole generation, so a host
+    // copy of them is resident memory nothing reads: only the rotating tail,
+    // which re-uploads every pass, is worth keeping quantized on the host.
+    let host_held = (0..cfg.num_layers as usize).filter(|&l| cache_b.is_cached(l, QTier::Int8)).count() as u64;
+    assert_eq!(host_held, tail, "the host cache must hold exactly the rotating tail, not the blocks the card already pins");
 }
 
 /// Zero slots is the terminal fallback a tight `--limit-vram-total`, a huge

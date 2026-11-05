@@ -529,6 +529,21 @@ impl<B> BlockWindow<B> {
     }
 }
 
+/// Whether the host should keep a block's quantized bytes after the card has
+/// them - the second argument of every `weights` callback here.
+///
+/// A window's pinned blocks stay on the card until the window is rebuilt, so
+/// a host copy of one is resident memory nothing reads; its rotating tail
+/// (and every block of a session with no window) uploads again on the next
+/// pass, which is what the host cache exists to make cheap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostCopy {
+    /// The block uploads again later: keep the host bytes.
+    Keep,
+    /// The card pins the block: release the host bytes once uploaded.
+    Release,
+}
+
 /// One card, for one generation: an open device plus whatever weights are
 /// resident on it. See this module's doc for the lifecycle.
 pub struct DitSession {
@@ -659,7 +674,7 @@ impl DitSession {
     /// Idempotent: a second call on a warm session with an unchanged shape
     /// finds every pinned slot occupied and does nothing.
     #[allow(clippy::too_many_arguments)]
-    pub fn prefill(&self, scratch: &Gpu, cfg: &LtxDitConfig, tier: QTier, t: usize, context_len: usize, weights: &mut dyn FnMut(usize) -> std::sync::Arc<CachedQBlockWeights>) {
+    pub fn prefill(&self, scratch: &Gpu, cfg: &LtxDitConfig, tier: QTier, t: usize, context_len: usize, weights: &mut dyn FnMut(usize, HostCopy) -> std::sync::Arc<CachedQBlockWeights>) {
         if self.slots == 0 {
             return;
         }
@@ -701,7 +716,7 @@ impl DitSession {
                 w.refusals += 1;
                 break;
             }
-            let cached = weights(g as usize);
+            let cached = weights(g as usize, HostCopy::Release);
             let mut blk = LtxBlockQ::resident_on_cached(scratch.share(), cfg, &cached, t as u32, context_len as u32, tier);
             adapted(&self.adapter, &mut blk, g as usize);
             w.slots[idx] = Some((g, blk));
@@ -730,7 +745,7 @@ impl DitSession {
     /// per-forward uploads and the single readback); the per-BLOCK costs go to
     /// `after_block`.
     ///
-    /// `weights(layer)` is called ONLY for a layer whose bytes are not already
+    /// `weights(layer, host)` is called ONLY for a layer whose bytes are not already
     /// on the card, which is what turns the host-RAM weight cache's `Arc` clone
     /// plus a ~270 MB device upload into work paid once per generation instead
     /// of once per step. `after_block` gets each layer's index, whether it had
@@ -752,7 +767,7 @@ impl DitSession {
         connector_context: &[f32],
         cos_bufs: &[gpu_core::DeviceBuffer],
         sin_bufs: &[gpu_core::DeviceBuffer],
-        weights: &mut dyn FnMut(usize) -> std::sync::Arc<CachedQBlockWeights>,
+        weights: &mut dyn FnMut(usize, HostCopy) -> std::sync::Arc<CachedQBlockWeights>,
         after_block: &mut dyn FnMut(usize, bool, std::time::Duration, &BlockTimings),
     ) -> (Vec<f32>, BlockTimings) {
         let per_block = cached_block_bytes(cfg, tier);
@@ -810,7 +825,7 @@ impl DitSession {
             // cannot leave the window's cursor out of step with the stack.
             let (slot_idx, uploaded, mut up_ms) = match guard.as_mut() {
                 Some(w) => w.acquire(scratch, l, per_block, scratch.memory_device(), || {
-                    let mut blk = LtxBlockQ::resident_on_cached(scratch.share(), cfg, &weights(l), t as u32, context_len as u32, tier);
+                    let mut blk = LtxBlockQ::resident_on_cached(scratch.share(), cfg, &weights(l, HostCopy::Keep), t as u32, context_len as u32, tier);
                     adapted(&self.adapter, &mut blk, l);
                     blk
                 }),
@@ -840,7 +855,7 @@ impl DitSession {
                     // zero exactly when it is the bottleneck is worse than no
                     // stage at all.
                     let s = std::time::Instant::now();
-                    let cached = weights(l);
+                    let cached = weights(l, HostCopy::Keep);
                     let mut blk = LtxBlockQ::on_cached(scratch, cfg, &cached, t as u32, context_len as u32, tier);
                     adapted(&self.adapter, &mut *blk, l);
                     up_ms += s.elapsed();
@@ -972,7 +987,7 @@ impl AvDitSession {
     /// matters, which is a property of wgpu's allocator and not of the stream
     /// count.
     #[allow(clippy::too_many_arguments)]
-    pub fn prefill(&self, scratch: &Gpu, cfg: &LtxAvDitConfig, tier: QTier, tv: usize, v_context_len: usize, a_context_len: usize, weights: &mut dyn FnMut(usize) -> std::sync::Arc<CachedQAvBlockWeights>) {
+    pub fn prefill(&self, scratch: &Gpu, cfg: &LtxAvDitConfig, tier: QTier, tv: usize, v_context_len: usize, a_context_len: usize, weights: &mut dyn FnMut(usize, HostCopy) -> std::sync::Arc<CachedQAvBlockWeights>) {
         if self.slots == 0 {
             return;
         }
@@ -1005,7 +1020,7 @@ impl AvDitSession {
                 w.refusals += 1;
                 break;
             }
-            let cached = weights(g as usize);
+            let cached = weights(g as usize, HostCopy::Release);
             let mut blk = LtxAvBlockQ::resident_on_cached(scratch.share(), &cfg.video, &cfg.audio, &cached, v_context_len as u32, a_context_len as u32, tier);
             adapted(&self.adapter, &mut blk, g as usize);
             w.slots[idx] = Some((g, blk));
@@ -1028,7 +1043,7 @@ impl AvDitSession {
         vx: Vec<f32>,
         ax: Vec<f32>,
         inp: &AvForwardInputs,
-        weights: &mut dyn FnMut(usize) -> std::sync::Arc<CachedQAvBlockWeights>,
+        weights: &mut dyn FnMut(usize, HostCopy) -> std::sync::Arc<CachedQAvBlockWeights>,
         after_block: &mut dyn FnMut(usize, bool, std::time::Duration, &BlockTimings),
     ) -> (Vec<f32>, Vec<f32>, BlockTimings) {
         let per_block = cached_av_block_bytes(&cfg.video, &cfg.audio, tier);
@@ -1088,7 +1103,7 @@ impl AvDitSession {
         };
         for l in 0..cfg.video.num_layers as usize {
             let (slot_idx, uploaded, mut up_ms) = match guard.as_mut() {
-                Some(w) => w.acquire(scratch, l, per_block, scratch.memory_device(), || resident_build(scratch, &weights(l), l)),
+                Some(w) => w.acquire(scratch, l, per_block, scratch.memory_device(), || resident_build(scratch, &weights(l, HostCopy::Keep), l)),
                 None => (None, true, std::time::Duration::ZERO),
             };
             let mut bt = BlockTimings::default();
@@ -1106,7 +1121,7 @@ impl AvDitSession {
                     // states: an untimed upload on the arm that does nothing
                     // BUT upload reads as zero exactly when it dominates.
                     let s = std::time::Instant::now();
-                    let mut blk = LtxAvBlockQ::on_cached(scratch, &cfg.video, &cfg.audio, &weights(l), inp.v_context_len as u32, inp.a_context_len as u32, tier);
+                    let mut blk = LtxAvBlockQ::on_cached(scratch, &cfg.video, &cfg.audio, &weights(l, HostCopy::Keep), inp.v_context_len as u32, inp.a_context_len as u32, tier);
                     adapted(&self.adapter, &mut *blk, l);
                     up_ms += s.elapsed();
                     blk.forward_prod_dev(scratch, &vx_dev, &ax_dev, &v_adaln_buf, &v_adaln_map, &a_adaln_buf, &a_adaln_map, &av, &v_ctx, &a_ctx, inp.rope, tv, ta, &mut bt)

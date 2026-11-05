@@ -1257,17 +1257,16 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// `model::int4::quantize_weight_q4` are pure functions of the checkpoint's
 /// own (immutable) weight bytes, so a cached result and a freshly recomputed
 /// one are bit-identical by construction - recomputing on every step was
-/// always redundant work, never a source of any different number. Peak EXTRA
-/// host memory beyond `head` is now the WHOLE cache once every layer has
-/// been visited once, rather than one block's fp32 expansion - measured at
-/// the real 22B/Q8_0 width via [`crate::block::CachedQBlockWeights::
-/// byte_len`] at ~270 MB/block, ~13 GB for all 48 - a deliberate trade of
-/// host RAM for skipping the dominant real cost Phase 8 measured (most of one
-/// real denoise step was GGUF re-read + re-quantize of the SAME immutable
-/// weights, over and over, every single step). That trade is now
-/// GOVERNED rather than merely affordable: the cache runs under the byte
-/// budget `--limit-ram-total` publishes and evicts by the residency layer's
-/// own cost-aware policy when it is tight - see [`crate::weightcache`].
+/// always redundant work, never a source of any different number.
+///
+/// Only blocks that upload again are kept: a block the session's device
+/// window pins ([`crate::devres::HostCopy::Release`]) lives on the card for
+/// the window's lifetime, so its host bytes are dropped once uploaded and the
+/// cache holds just the rotating tail (or every block, for a session with no
+/// window) - ~270 MB/block at the real 22B/Q8_0 width
+/// ([`crate::block::CachedQBlockWeights::byte_len`]). What it holds runs
+/// under the byte budget `--limit-ram-total` publishes and evicts by the
+/// residency layer's own cost-aware policy - see [`crate::weightcache`].
 ///
 /// The second is the embeddings-connector routing below. `context`,
 /// `context_valid` and `context_len` are fixed for a whole generation once the
@@ -1406,7 +1405,7 @@ pub fn forward_q_streamed_in(
     // GENERATION rather than per forward. The cache hands back an `Arc` and
     // holds no lock while the upload runs, which is what lets two CFG branches
     // read one checkpoint's cache concurrently (see `crate::weightcache`).
-    let mut weights = |l: usize| -> std::sync::Arc<crate::block::CachedQBlockWeights> {
+    let mut weights = |l: usize, host: crate::devres::HostCopy| -> std::sync::Arc<crate::block::CachedQBlockWeights> {
         if let Some(c) = cache.block(l, tier) {
             return c;
         }
@@ -1418,7 +1417,10 @@ pub fn forward_q_streamed_in(
         let s1 = std::time::Instant::now();
         let quantized = QBlockWeights::quantize_host(src, &prefix, dim, cfg.apply_gated_attention, tier);
         t_quant += s1.elapsed();
-        cache.store_block(l, tier, quantized)
+        match host {
+            crate::devres::HostCopy::Keep => cache.store_block(l, tier, quantized),
+            crate::devres::HostCopy::Release => std::sync::Arc::new(quantized),
+        }
     };
 
     let s_open = std::time::Instant::now();
@@ -1585,8 +1587,8 @@ pub struct AvStreamedStep<'a> {
 
 /// [`forward_q_streamed`]'s audio+video twin: one joint forward at the real
 /// 22B AV config, streaming each block off the checkpoint, quantized to
-/// `tier`, cached per checkpoint in host RAM and left resident on the card
-/// between steps.
+/// `tier`, left resident on the card between steps, and cached per
+/// checkpoint in host RAM for the blocks the card does not pin.
 ///
 /// This is what an `--audio` generation denoises through
 /// (`crate::pipeline`'s `RealAvDit`). Its alternative is the eager host-fp32
@@ -1694,7 +1696,7 @@ pub fn av_forward_q_streamed_in(
     let mut t_upload = std::time::Duration::ZERO;
     let mut misses = 0u32;
     let mut uploads = 0u32;
-    let mut weights = |l: usize| -> std::sync::Arc<crate::block::CachedQAvBlockWeights> {
+    let mut weights = |l: usize, host: crate::devres::HostCopy| -> std::sync::Arc<crate::block::CachedQAvBlockWeights> {
         if let Some(c) = cache.av_block(l, tier) {
             return c;
         }
@@ -1704,7 +1706,10 @@ pub fn av_forward_q_streamed_in(
         let s1 = std::time::Instant::now();
         let quantized = crate::block::CachedQAvBlockWeights::quantize(src, &prefix, vcfg, acfg, tier);
         t_quant += s1.elapsed();
-        cache.store_av_block(l, tier, quantized)
+        match host {
+            crate::devres::HostCopy::Keep => cache.store_av_block(l, tier, quantized),
+            crate::devres::HostCopy::Release => std::sync::Arc::new(quantized),
+        }
     };
 
     let s_open = std::time::Instant::now();
