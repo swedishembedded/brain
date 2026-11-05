@@ -268,7 +268,7 @@ fn every_residency_shape_applies_the_adapter_and_agrees_bit_for_bit() {
     let ctx_valid = vec![1.0f32; run.context_len];
     let forward = |s: &DitSession, cache: &GenerationCache, salt: f32| -> Vec<f32> {
         let latent: Vec<f32> = run.latent.iter().map(|v| v + salt).collect();
-        forward_q_streamed_in(s, &cfg, &w, &head, QTier::Int8, &latent, &run.timesteps, &run.positions, &run.mask, &run.context, run.context_len, run.t, &ctx_valid, cache)
+        forward_q_streamed_in(s, &cfg, &w, &head, QTier::Int8, &latent, &run.timesteps, &run.positions, &run.mask, &run.context, run.context_len, run.t, &ctx_valid, cache, &ltxv::block::NO_PERTURBATIONS)
     };
 
     let arms = [
@@ -330,7 +330,7 @@ fn a_connector_correction_reaches_the_connector_read_on_demand() {
     let run = Run::new(&cfg);
     let ctx_valid = vec![1.0f32; run.context_len];
     let forward = |s: &DitSession| -> Vec<f32> {
-        forward_q_streamed_in(s, &cfg, &w, &head, QTier::Int8, &run.latent, &run.timesteps, &run.positions, &run.mask, &run.context, run.context_len, run.t, &ctx_valid, &GenerationCache::default())
+        forward_q_streamed_in(s, &cfg, &w, &head, QTier::Int8, &run.latent, &run.timesteps, &run.positions, &run.mask, &run.context, run.context_len, run.t, &ctx_valid, &GenerationCache::default(), &ltxv::block::NO_PERTURBATIONS)
     };
     let base = forward(&DitSession::transient(None));
     let adapter: ltxv::pipeline::SharedAdapter = std::sync::Arc::new(std::sync::Mutex::new(runtime_adapter(std::slice::from_ref(&spec)).unwrap()));

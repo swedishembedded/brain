@@ -2148,6 +2148,9 @@ struct StepInputs<'a> {
     /// stream's sigma, which is a per-request scalar rather than the
     /// per-token `timesteps` above.
     sigma: f32,
+    /// What this forward's guidance pass perturbs (STG, isolated modality) -
+    /// [`crate::block::NO_PERTURBATIONS`] for the conditional pass.
+    perturbations: &'a crate::block::Perturbations,
 }
 
 /// The audio stream's own half of one joint forward.
@@ -2185,6 +2188,7 @@ struct AudioState<'a> {
 
 impl Denoiser for LtxDit {
     fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
+        assert_eq!(i.perturbations, &crate::block::NO_PERTURBATIONS, "the tiny host DiT runs no perturbed guidance pass");
         LtxDit::forward(self, i.latent, i.timesteps, i.positions, i.keyframes_mask, context, i.context_len, i.t, i.context_valid).out
     }
 }
@@ -2225,6 +2229,7 @@ fn av_step<'a>(i: &StepInputs<'a>, a: &AudioInputs<'a>, v_context: &'a [f32], a_
         ta: a.ta,
         a_sigma: i.sigma,
         a_context_valid: i.context_valid,
+        perturbations: i.perturbations,
     }
 }
 
@@ -2431,6 +2436,7 @@ impl Denoiser for RealDit {
             i.t,
             i.context_valid,
             &self.cache,
+            i.perturbations,
         )
     }
 
@@ -2701,7 +2707,7 @@ fn denoise(
             Some(f) => f.mask.iter().map(|&m| m * sigma as f32).collect(),
             None => vec![sigma as f32; t],
         };
-        let inputs = StepInputs { latent: &latent, timesteps: &timesteps, positions, keyframes_mask, context_len, context_valid, t, sigma: sigma as f32 };
+        let inputs = StepInputs { latent: &latent, timesteps: &timesteps, positions, keyframes_mask, context_len, context_valid, t, sigma: sigma as f32, perturbations: &crate::block::NO_PERTURBATIONS };
         // A single-window clip's audio stream has no conditioning items and
         // nothing frozen, so every one of its tokens carries the schedule's
         // own sigma. A long-form continuation window's carried prefix is
@@ -6486,7 +6492,7 @@ mod tests {
         let kf = vec![7.0f32, 7.5];
         let valid = vec![8.0f32; 4];
         let (v_ctx, a_ctx) = (vec![9.0f32; 4], vec![10.0f32; 3]);
-        let i = StepInputs { latent: &v_latent, timesteps: &v_ts, positions: &v_pos, keyframes_mask: &kf, context_len: 4, context_valid: &valid, t: 2, sigma: 0.25 };
+        let i = StepInputs { latent: &v_latent, timesteps: &v_ts, positions: &v_pos, keyframes_mask: &kf, context_len: 4, context_valid: &valid, t: 2, sigma: 0.25, perturbations: &crate::block::NO_PERTURBATIONS };
         let a = AudioInputs { latent: &a_latent, timesteps: &a_ts, positions: &a_pos, ta: 1 };
         let s = av_step(&i, &a, &v_ctx, &a_ctx);
 
@@ -7017,6 +7023,7 @@ mod tests {
             context_len: ctx_len,
             context_valid: &inputs_owned.4,
             t,
+            perturbations: &crate::block::NO_PERTURBATIONS,
         };
         let d = cfg.cross_attention_dim as usize;
         let cond: Vec<f32> = (0..ctx_len * d).map(|k| (k as f32 * 0.021).cos()).collect();

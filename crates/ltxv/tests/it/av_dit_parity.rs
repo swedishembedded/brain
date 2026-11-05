@@ -332,7 +332,7 @@ fn ltxv_av_dit_tiny_gated_matches_reference() {
 // compare two implementations that would carry the same mistake.
 // ---------------------------------------------------------------------------
 
-use ltxv::block::{AvRope, LtxAvBlock, LtxAvBlockQ, QTier};
+use ltxv::block::{AvRope, LtxAvBlock, LtxAvBlockQ, Perturbation, Perturbations, QTier};
 use ltxv::dit::random_av_tiny_weights;
 
 /// Relative L2, `||got - want|| / ||want||` - the metric cosine cannot see.
@@ -526,7 +526,7 @@ fn av_int8_block_tracks_the_fp32_av_block() {
     #[rustfmt::skip]
     let (vf, af, tf) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context,
         &r.0, &r.1, &r.2, &r.3, &r.4, &r.5, &r.6, &r.7,
-        &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, true);
+        &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, true, Default::default());
 
     let gpu_q = Gpu::open(None, &KERNELS);
     let rq = c.rope(&gpu_q);
@@ -534,7 +534,7 @@ fn av_int8_block_tracks_the_fp32_av_block() {
     let blkq = LtxAvBlockQ::on(&gpu_q, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
     #[rustfmt::skip]
     let (vq, aq, tq) = blkq.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
-        &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta);
+        &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, Default::default());
 
     report_lossy("av int8 video out", &vq, &vf, 0.9995, 3e-2);
     report_lossy("av int8 audio out", &aq, &af, 0.9995, 3e-2);
@@ -542,6 +542,75 @@ fn av_int8_block_tracks_the_fp32_av_block() {
     report_lossy("av int8 v2a_out (raw, pre-gate)", &tq.v2a_out, &tf.v2a_out, 0.999, 5e-2);
     report_lossy("av int8 video attn1_out", &tq.v_attn1_out, &tf.v_attn1_out, 0.999, 5e-2);
     report_lossy("av int8 audio attn1_out", &tq.a_attn1_out, &tf.a_attn1_out, 0.999, 5e-2);
+}
+
+/// Under each guidance perturbation the int8 AV block still tracks the fp32
+/// one - STG bypassing both streams' self-attention, and the isolated-
+/// modality pass cutting both audio<->video directions - and each
+/// perturbation actually changes what the block computes.
+#[test]
+fn av_int8_block_tracks_the_fp32_av_block_under_every_perturbation() {
+    let c = AvBlockCase::tiny(0x00A0_D10C);
+    let (vcfg, acfg) = (&c.cfg.video, &c.cfg.audio);
+    let gpu = Gpu::open(None, &KERNELS);
+    let r = c.rope(&gpu);
+    let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7 };
+    let f = LtxAvBlock::on(&gpu, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len);
+    let q = LtxAvBlockQ::on(&gpu, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
+    let fp32 = |ptb: Perturbation| {
+        #[rustfmt::skip]
+        let (v, a, _) = f.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context,
+            &r.0, &r.1, &r.2, &r.3, &r.4, &r.5, &r.6, &r.7, &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, false, ptb);
+        (v, a)
+    };
+    let (v0, a0) = fp32(Perturbation::default());
+    let stg = Perturbation { video_self_attn: true, audio_self_attn: true, ..Default::default() };
+    let cut = Perturbation { a2v: true, v2a: true, ..Default::default() };
+    for (name, ptb) in [("stg", stg), ("cross-modal cut", cut)] {
+        let (vf, af) = fp32(ptb);
+        #[rustfmt::skip]
+        let (vq, aq, _) = q.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
+            &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, ptb);
+        report_lossy(&format!("{name}: av int8 video out"), &vq, &vf, 0.9995, 3e-2);
+        report_lossy(&format!("{name}: av int8 audio out"), &aq, &af, 0.9995, 3e-2);
+        assert!(max_abs(&vf, &v0) > 1e-3 && max_abs(&af, &a0) > 1e-3, "{name} must change both streams");
+    }
+}
+
+/// The STG and isolated-modality guidance passes of the tiny AV DiT match
+/// the reference transformer run with the same `BatchedPerturbationConfig`
+/// (`tools/goldens/ltxv_perturbation_dump_reference.py`): STG bypasses both
+/// streams' self-attention in block 1, the isolated-modality pass cuts both
+/// audio<->video directions in every block.
+#[test]
+fn perturbed_guidance_passes_match_the_reference() {
+    let Some((fx, w)) = setup() else { return };
+    let p_path = brain_testutil::testdata("golden/ltxv/perturbation/ltxv_perturbation.safetensors");
+    if !Path::new(&p_path).exists() {
+        brain_testutil::skip(&format!("fixture {p_path} absent - run tools/goldens/ltxv_perturbation_dump_reference.py"));
+        return;
+    }
+    let pfx = Fixture { t: checkpoint::safetensors::read(&p_path).expect("read perturbation golden") };
+    let cfg = LtxAvDitConfig::tiny();
+    let (tv, ta) = (fx.shape("video.latent")[0], fx.shape("audio.latent")[0]);
+    let (v_context_len, a_context_len) = (fx.shape("video.context")[0], fx.shape("audio.context")[0]);
+    let (v_valid, a_valid) = (vec![1.0f32; v_context_len], vec![1.0f32; a_context_len]);
+    let model = LtxAvDit::new(cfg, w, None);
+    let passes = [
+        ("stg", Perturbations { video_self_attn_blocks: vec![1], audio_self_attn_blocks: vec![1], cross_modal: false }),
+        ("mod", Perturbations { cross_modal: true, ..Default::default() }),
+    ];
+    for (name, perturbations) in passes {
+        #[rustfmt::skip]
+        let taps = model.forward_perturbed(
+            fx.get("video.latent"), fx.get("video.timesteps"), fx.get("video.positions"), fx.get("video.keyframes_mask"), fx.get("video.context"), v_context_len, tv, fx.get("video.sigma")[0], &v_valid,
+            fx.get("audio.latent"), fx.get("audio.timesteps"), fx.get("audio.positions"), fx.get("audio.context"), a_context_len, ta, fx.get("audio.sigma")[0], &a_valid,
+            &perturbations,
+        );
+        let (v, a) = (&taps.video.out, &taps.audio.out);
+        report(&format!("{name}.video.out"), v, pfx.get(&format!("{name}.video.out")), MIN_COS);
+        report(&format!("{name}.audio.out"), a, pfx.get(&format!("{name}.audio.out")), MIN_COS);
+    }
 }
 
 /// A runtime LoRA on the audio-visual int8 block delivers the effect the
@@ -581,7 +650,7 @@ fn a_runtime_adapter_on_the_av_int8_block_delivers_the_exact_fp32_fold() {
         #[rustfmt::skip]
         let (v, a, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context,
             &r.0, &r.1, &r.2, &r.3, &r.4, &r.5, &r.6, &r.7,
-            &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, true);
+            &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, true, Default::default());
         [v, a].concat()
     };
     let int8 = |adapter: Option<&model::lora::RuntimeLora>| {
@@ -595,7 +664,7 @@ fn a_runtime_adapter_on_the_av_int8_block_delivers_the_exact_fp32_fold() {
         }
         #[rustfmt::skip]
         let (v, a, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
-            &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta);
+            &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, Default::default());
         [v, a].concat()
     };
     let rel = |a: &[f32], b: &[f32]| -> f64 {
@@ -662,7 +731,7 @@ fn device_derived_av_modulation_is_bit_identical_to_the_host_uploaded_form() {
 
     #[rustfmt::skip]
     let (v_host, a_host, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
-        &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta);
+        &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, Default::default());
 
     // The production path's inputs: the same tables, as DENSE `RowTable`s
     // (one row per token, i.e. the dedup finds nothing) plus their row maps.
@@ -693,7 +762,7 @@ fn device_derived_av_modulation_is_bit_identical_to_the_host_uploaded_form() {
     let mut timings = ltxv::block::BlockTimings::default();
     #[rustfmt::skip]
     let (v_dev, a_dev) = blk.forward_prod(&gpu, &c.vx, &c.ax, &v_adaln_b, &v_adaln_m, &a_adaln_b, &a_adaln_m, &av,
-        &v_ctx_b, &a_ctx_b, rope, c.tv, c.ta, &mut timings);
+        &v_ctx_b, &a_ctx_b, rope, c.tv, c.ta, &mut timings, Default::default());
 
     let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
     assert_eq!(bits(&v_dev), bits(&v_host), "device-derived video modulation changed a bit (max_abs {:.3e})", max_abs(&v_dev, &v_host));
@@ -754,12 +823,12 @@ fn a_closed_cross_modal_gate_makes_the_gated_stream_independent_of_the_other() {
         let q = LtxAvBlockQ::on(&gpu, &vcfg, &acfg, w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
         #[rustfmt::skip]
         let (vq, aq, _) = q.forward(&c.vx, ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
-            &c.v_ss, &c.a_ss, a2v_gate, v2a_gate, c.tv, c.ta);
+            &c.v_ss, &c.a_ss, a2v_gate, v2a_gate, c.tv, c.ta, Default::default());
         let f = LtxAvBlock::on(&gpu, &vcfg, &acfg, w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len);
         #[rustfmt::skip]
         let (vf, af, _) = f.forward(&c.vx, ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context,
             &r.0, &r.1, &r.2, &r.3, &r.4, &r.5, &r.6, &r.7,
-            &c.v_ss, &c.a_ss, a2v_gate, v2a_gate, c.tv, c.ta, false);
+            &c.v_ss, &c.a_ss, a2v_gate, v2a_gate, c.tv, c.ta, false, Default::default());
         (vq, aq, vf, af)
     };
 
@@ -879,7 +948,7 @@ fn real_q8_0_av_block0_int8_compute_matches_fp32() {
     let blk = LtxAvBlock::on(&gpu_f32, &vcfg, &acfg, &w, "transformer_blocks.0", v_ctx_len, a_ctx_len);
     #[rustfmt::skip]
     let (vf, af, tf) = blk.forward(&vx, &ax, &v_adaln, &a_adaln, &v_context, &a_context,
-        &vc, &vs, &ac, &as_, &vcc, &vcs, &acc, &acs, &v_ss, &a_ss, &a2v_gate, &v2a_gate, tv, ta, true);
+        &vc, &vs, &ac, &as_, &vcc, &vcs, &acc, &acs, &v_ss, &a_ss, &a2v_gate, &v2a_gate, tv, ta, true, Default::default());
     drop(blk);
 
     let gpu_q = Gpu::open(None, &KERNELS);
@@ -891,7 +960,7 @@ fn real_q8_0_av_block0_int8_compute_matches_fp32() {
     let blkq = LtxAvBlockQ::on(&gpu_q, &vcfg, &acfg, &w, "transformer_blocks.0", v_ctx_len, a_ctx_len, QTier::Int8);
     #[rustfmt::skip]
     let (vq, aq, tq) = blkq.forward(&vx, &ax, &v_adaln, &a_adaln, &v_context, &a_context, rope,
-        &v_ss, &a_ss, &a2v_gate, &v2a_gate, tv, ta);
+        &v_ss, &a_ss, &a2v_gate, &v2a_gate, tv, ta, Default::default());
 
     report_lossy("real Q8_0 AV block-0 int8 video out", &vq, &vf, 0.99, 1.5e-1);
     report_lossy("real Q8_0 AV block-0 int8 audio out", &aq, &af, 0.99, 1.5e-1);
@@ -1008,6 +1077,7 @@ fn real_q8_0_av_streamed_forward_matches_the_eager_fp32_forward() {
     let src = ltxv::gguf_src::LtxvGgufSource::open(&path).unwrap_or_else(|e| panic!("opening {path}: {e}"));
     let head = ltxv::dit::load_av_head_tensors_from_source(&src, &cfg);
     let step = ltxv::dit::AvStreamedStep {
+        perturbations: &ltxv::block::NO_PERTURBATIONS,
         v_latent: &v_latent,
         v_timesteps: &v_timesteps,
         v_positions: &v_positions,
@@ -1073,6 +1143,7 @@ struct AvShape {
 impl AvShape {
     fn step<'a>(&'a self, v_context: &'a [f32], a_context: &'a [f32], context_valid: &'a [f32], ctx_len: usize) -> ltxv::dit::AvStreamedStep<'a> {
         ltxv::dit::AvStreamedStep {
+        perturbations: &ltxv::block::NO_PERTURBATIONS,
             v_latent: &self.v_latent,
             v_timesteps: &self.v_timesteps,
             v_positions: &self.v_positions,

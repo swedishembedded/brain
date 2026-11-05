@@ -121,6 +121,7 @@ fn build_inputs(cfg: &LtxAvDitConfig, seed: u64) -> TestInputs {
 
 fn batch_for(inp: &TestInputs, v_target: Option<Vec<f32>>, a_target: Option<Vec<f32>>) -> AvDitBatch {
     AvDitBatch {
+        perturbations: Default::default(),
         v_latent: inp.v_latent.clone(),
         v_timesteps: inp.v_timesteps.clone(),
         v_positions: inp.v_positions.clone(),

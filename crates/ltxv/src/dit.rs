@@ -1326,7 +1326,7 @@ pub fn forward_q_streamed(
     cache: &GenerationCache,
 ) -> Vec<f32> {
     let session = crate::devres::DitSession::transient(device);
-    forward_q_streamed_in(&session, cfg, src, head, tier, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, cache)
+    forward_q_streamed_in(&session, cfg, src, head, tier, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, cache, &crate::block::NO_PERTURBATIONS)
 }
 
 /// [`forward_q_streamed`] against a caller-owned [`crate::devres::DitSession`]
@@ -1363,6 +1363,7 @@ pub fn forward_q_streamed_in(
     t: usize,
     context_valid: &[f32],
     cache: &GenerationCache,
+    perturbations: &crate::block::Perturbations,
 ) -> Vec<f32> {
     let dim = cfg.inner_dim as usize;
     assert_eq!(latent.len(), t * cfg.in_channels as usize);
@@ -1550,7 +1551,7 @@ pub fn forward_q_streamed_in(
         let mut ahead = crate::devres::Lookahead::new(scope, cfg.num_layers as usize, &quantize, &uncached);
         #[rustfmt::skip]
         let out = session.run_blocks(
-            &gpu, cfg, tier, t, context_len, x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs,
+            &gpu, cfg, tier, t, context_len, x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, perturbations,
             &mut |l, host| weights(l, host, &mut |l| ahead.take(l)), &mut after_block,
         );
         out
@@ -1622,6 +1623,9 @@ pub struct AvStreamedStep<'a> {
     pub ta: usize,
     pub a_sigma: f32,
     pub a_context_valid: &'a [f32],
+    /// What this forward's guidance pass perturbs - [`crate::block::NO_PERTURBATIONS`]
+    /// for a plain forward.
+    pub perturbations: &'a crate::block::Perturbations,
 }
 
 /// [`forward_q_streamed`]'s audio+video twin: one joint forward at the real
@@ -1837,6 +1841,7 @@ pub fn av_forward_q_streamed_in(
         ta,
         v_context_len: step.v_context_len,
         a_context_len: step.a_context_len,
+        perturbations: step.perturbations,
     };
     let (vx, ax, forward_timings) = std::thread::scope(|scope| {
         let mut ahead = crate::devres::Lookahead::new(scope, cfg.video.num_layers as usize, &quantize, &uncached);
@@ -1927,6 +1932,9 @@ pub struct AvDitBatch {
     /// `[ta, audio.out_channels]` training target; `None` for a forward-only
     /// run.
     pub a_target: Option<Vec<f32>>,
+    /// What this forward's guidance pass perturbs - empty for a plain
+    /// forward or a training step.
+    pub perturbations: crate::block::Perturbations,
 }
 
 /// The tiny audio+video DiT, weights resident on the host (device residency
@@ -2140,7 +2148,7 @@ impl LtxAvDit {
             &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
             &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
             &av_video_ss_table.expand(), &av_audio_ss_table.expand(), &av_a2v_gate_table.expand(), &av_v2a_gate_table.expand(),
-            batch.tv as u32, batch.ta as u32, self.shard.start as u32, self.shard.end as u32, false,
+            batch.tv as u32, batch.ta as u32, self.shard.start as u32, self.shard.end as u32, false, &batch.perturbations,
         );
         *self.res_out_v.borrow_mut() = Some(vx_final.clone());
         *self.res_out_a.borrow_mut() = Some(ax_final.clone());
@@ -2225,6 +2233,7 @@ impl LtxAvDit {
         lo: u32,
         hi: u32,
         taps: bool,
+        perturbations: &crate::block::Perturbations,
     ) -> (Vec<f32>, Vec<f32>, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<AvBlockTaps>) {
         let vcfg = &self.cfg.video;
         let acfg = &self.cfg.audio;
@@ -2242,7 +2251,7 @@ impl LtxAvDit {
                 v_cos_bufs, v_sin_bufs, a_cos_bufs, a_sin_bufs,
                 v_cross_cos_bufs, v_cross_sin_bufs, a_cross_cos_bufs, a_cross_sin_bufs,
                 av_video_ss_table, av_audio_ss_table, av_a2v_gate_table, av_v2a_gate_table,
-                tv, ta, taps,
+                tv, ta, taps, perturbations.block(l as usize),
             );
             vxx = vout;
             axx = aout;
@@ -2275,6 +2284,36 @@ impl LtxAvDit {
         ta: usize,
         a_sigma: f32,
         a_context_valid: &[f32],
+    ) -> AvDitTaps {
+        #[rustfmt::skip]
+        let taps = self.forward_perturbed(v_latent, v_timesteps, v_positions, v_keyframes_mask, v_context, v_context_len, tv, v_sigma, v_context_valid,
+            a_latent, a_timesteps, a_positions, a_context, a_context_len, ta, a_sigma, a_context_valid, &crate::block::NO_PERTURBATIONS);
+        taps
+    }
+
+    /// [`Self::forward`] for one guidance pass that perturbs the stack
+    /// ([`crate::block::Perturbations`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_perturbed(
+        &self,
+        v_latent: &[f32],
+        v_timesteps: &[f32],
+        v_positions: &[f32],
+        v_keyframes_mask: &[f32],
+        v_context: &[f32],
+        v_context_len: usize,
+        tv: usize,
+        v_sigma: f32,
+        v_context_valid: &[f32],
+        a_latent: &[f32],
+        a_timesteps: &[f32],
+        a_positions: &[f32],
+        a_context: &[f32],
+        a_context_len: usize,
+        ta: usize,
+        a_sigma: f32,
+        a_context_valid: &[f32],
+        perturbations: &crate::block::Perturbations,
     ) -> AvDitTaps {
         let cfg = &self.cfg;
         let vcfg = &cfg.video;
@@ -2371,7 +2410,7 @@ impl LtxAvDit {
             &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
             &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
             &av_video_ss_table.expand(), &av_audio_ss_table.expand(), &av_a2v_gate_table.expand(), &av_v2a_gate_table.expand(),
-            tv as u32, ta as u32, 0, vcfg.num_layers, true,
+            tv as u32, ta as u32, 0, vcfg.num_layers, true, perturbations,
         );
         vx = vx_final;
         ax = ax_final;

@@ -188,6 +188,7 @@ impl AvDenoiser {
             a_context_valid: i.a_context_valid.to_vec(),
             v_target: None,
             a_target: None,
+            perturbations: i.perturbations.clone(),
         });
         self.dit.run_stage_forward();
         self.dit.take_stage_output()

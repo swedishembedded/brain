@@ -965,6 +965,39 @@ fn av_gate(gate_mlp_out: &[f32], table5: &[f32], dim: usize) -> Vec<f32> {
     dit::adaln::add_table(gate_mlp_out, &table5[4 * dim..5 * dim], 1, dim)
 }
 
+/// What one block forward bypasses for a guidance pass
+/// (`ltx_core.guidance.perturbations`). A perturbed self-attention hands its
+/// value projection straight to its output projection - no query/key path,
+/// no per-head gate (`Attention.forward` with `all_perturbed`); a perturbed
+/// audio<->video direction adds nothing to its query stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Perturbation {
+    pub video_self_attn: bool,
+    pub audio_self_attn: bool,
+    pub a2v: bool,
+    pub v2a: bool,
+}
+
+/// One guidance pass's perturbations over the whole stack: the blocks whose
+/// self-attention STG bypasses, per stream, and whether both audio<->video
+/// directions are cut everywhere (the isolated-modality pass).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Perturbations {
+    pub video_self_attn_blocks: Vec<usize>,
+    pub audio_self_attn_blocks: Vec<usize>,
+    pub cross_modal: bool,
+}
+
+/// The unperturbed forward - a `static`, so every step can borrow it.
+pub static NO_PERTURBATIONS: Perturbations = Perturbations { video_self_attn_blocks: Vec::new(), audio_self_attn_blocks: Vec::new(), cross_modal: false };
+
+impl Perturbations {
+    /// What block `l` bypasses.
+    pub fn block(&self, l: usize) -> Perturbation {
+        Perturbation { video_self_attn: self.video_self_attn_blocks.contains(&l), audio_self_attn: self.audio_self_attn_blocks.contains(&l), a2v: self.cross_modal, v2a: self.cross_modal }
+    }
+}
+
 /// The internal taps a parity test bisects with - the golden's
 /// `b0_attn1_out`/`b0_attn2_out`/`b0_ff_out` (module HOOK outputs, i.e.
 /// `b0_attn2_out` is the RAW cross-attention output before the `*gate_q`
@@ -1025,6 +1058,7 @@ fn self_attn_and_text_ca(
     head_dim: u32,
     t: u32,
     eps: f32,
+    bypass_self_attn: bool,
 ) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer) {
     let td = t * dim;
     let up = |v: &[f32]| -> DeviceBuffer {
@@ -1060,7 +1094,15 @@ fn self_attn_and_text_ca(
     let tmp2 = gpu.storage(td as u64);
     let norm_x = gpu.storage(td as u64);
     ada_zero(gpu, s, ones, x_buf, &one_plus_scale_msa, &shift_msa, &tmp1, &tmp2, &norm_x, dim, t, eps);
-    let attn1_out = attention(gpu, s, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((cos_bufs, sin_bufs)), Some((cos_bufs, sin_bufs)), K_ROPE2D, eps, true);
+    let attn1_out = if bypass_self_attn {
+        let v = gpu.storage(td as u64);
+        linear(gpu, s, &norm_x, &w.attn1.wv, Some(&w.attn1.bv), &v, t, dim, dim);
+        let out = gpu.storage(td as u64);
+        linear(gpu, s, &v, &w.attn1.wo, Some(&w.attn1.bo), &out, t, dim, dim);
+        out
+    } else {
+        attention(gpu, s, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((cos_bufs, sin_bufs)), Some((cos_bufs, sin_bufs)), K_ROPE2D, eps, true)
+    };
     let x_fma = gpu.storage(td as u64);
     gate_row(gpu, s, x_buf, &gate_msa, &attn1_out, &x_fma, t, dim, 1);
 
@@ -1187,7 +1229,7 @@ impl LtxBlock {
         let mut s: Vec<Step> = Vec::new();
         let td = t * dim;
 
-        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, &x_buf, &m, &ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
+        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, &x_buf, &m, &ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps, false);
         let (x3, ff_out) = mlp_sublayer(gpu, &mut s, &self.w.ff, &self.ones_t, &x2, &m.shift_mlp, &m.one_plus_scale_mlp, &m.gate_mlp, dim, t, eps);
 
         gpu.submit(&[], &s);
@@ -1228,7 +1270,7 @@ impl LtxBlock {
         let m = slice_mod(&combined, t as usize, dim as usize);
 
         let mut s: Vec<Step> = Vec::new();
-        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, x_buf, &m, ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
+        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, x_buf, &m, ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps, false);
         let (x3, _ff_out) = mlp_sublayer(gpu, &mut s, &self.w.ff, &self.ones_t, &x2, &m.shift_mlp, &m.one_plus_scale_mlp, &m.gate_mlp, dim, t, eps);
         (s, x3)
     }
@@ -1404,6 +1446,7 @@ impl LtxAvBlock {
         tv: u32,
         ta: u32,
         taps: bool,
+        ptb: Perturbation,
     ) -> (Vec<f32>, Vec<f32>, AvBlockTaps) {
         let gpu = &self.gpu;
         let vdim = self.vcfg.inner_dim;
@@ -1441,8 +1484,8 @@ impl LtxAvBlock {
         // ---- 1-2: video, then audio - self-attn + text-CA, each stream run
         // to completion before the AV step touches either (this struct's
         // doc, steps 1-2).
-        let (vx1, v_attn1_out, v_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.vw, &self.ones_v, &vx_buf, &vm, &v_ctx_buf, self.v_ctx_len, v_cos, v_sin, vdim, vheads, vhd, tv, eps);
-        let (ax1, a_attn1_out, a_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.aw, &self.ones_a, &ax_buf, &am, &a_ctx_buf, self.a_ctx_len, a_cos, a_sin, adim, aheads, ahd, ta, eps);
+        let (vx1, v_attn1_out, v_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.vw, &self.ones_v, &vx_buf, &vm, &v_ctx_buf, self.v_ctx_len, v_cos, v_sin, vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
+        let (ax1, a_attn1_out, a_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.aw, &self.ones_a, &ax_buf, &am, &a_ctx_buf, self.a_ctx_len, a_cos, a_sin, adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
 
         // ---- 3: audio<->video cross-attention - vx1/ax1 are the pre-AV
         // snapshot BOTH directions read (this struct's doc, step 3).
@@ -1467,8 +1510,10 @@ impl LtxAvBlock {
         let shift_v2a_a_buf = up(&shift_v2a_a);
         let scale_v2a_v_buf = up(&scale_v2a_v);
         let shift_v2a_v_buf = up(&shift_v2a_v);
-        let gate_a2v_buf = up(&gate_a2v);
-        let gate_v2a_buf = up(&gate_v2a);
+        // A cut direction (the isolated-modality pass) adds its attention
+        // under a zero gate: exactly `x + 0`.
+        let gate_a2v_buf = up(&if ptb.a2v { vec![0.0; gate_a2v.len()] } else { gate_a2v });
+        let gate_v2a_buf = up(&if ptb.v2a { vec![0.0; gate_v2a.len()] } else { gate_v2a });
 
         let vtd = tv * vdim;
         let atd = ta * adim;
@@ -2084,6 +2129,7 @@ fn self_attn_and_text_ca_q(
     head_dim: u32,
     t: u32,
     eps: f32,
+    bypass_self_attn: bool,
 ) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer) {
     let td = t * dim;
     let (shift_msa, one_plus_scale_msa, gate_msa) = (&m.shift_msa, &m.one_plus_scale_msa, &m.gate_msa);
@@ -2122,7 +2168,15 @@ fn self_attn_and_text_ca_q(
     let tmp2 = gpu.storage(td as u64);
     let norm_x = gpu.storage(td as u64);
     ada_zero(gpu, s, ones, x_buf, one_plus_scale_msa, shift_msa, &tmp1, &tmp2, &norm_x, dim, t, eps);
-    let attn1_out = attention_q(gpu, s, tier, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((cos_bufs, sin_bufs)), Some((cos_bufs, sin_bufs)), K_ROPE2D, eps, true);
+    let attn1_out = if bypass_self_attn {
+        let v = gpu.storage(td as u64);
+        qquant_linear(gpu, s, tier, &norm_x, &w.attn1.wv, &v, t, dim, dim);
+        let out = gpu.storage(td as u64);
+        qquant_linear(gpu, s, tier, &v, &w.attn1.wo, &out, t, dim, dim);
+        out
+    } else {
+        attention_q(gpu, s, tier, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((cos_bufs, sin_bufs)), Some((cos_bufs, sin_bufs)), K_ROPE2D, eps, true)
+    };
     let x_fma = gpu.storage(td as u64);
     gate_row(gpu, s, x_buf, gate_msa, &attn1_out, &x_fma, t, dim, 1);
 
@@ -2453,7 +2507,7 @@ impl LtxBlockQ {
         let mut s: Vec<Step> = Vec::new();
         let td = t * dim;
 
-        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca_q(gpu, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, &ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
+        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca_q(gpu, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, &ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps, false);
         let (x3, ff_out) = mlp_sublayer_q(gpu, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
         // Every `wf` above is a synchronous `queue.write_buffer` and NOTHING
         // computes until `submit`, so the span this closes is exactly the
@@ -2508,6 +2562,7 @@ impl LtxBlockQ {
         sin_bufs: &[DeviceBuffer],
         t: u32,
         timings: &mut BlockTimings,
+        ptb: Perturbation,
     ) -> Vec<f32> {
         let dim = self.cfg.inner_dim;
         assert_eq!(x.len(), (t * dim) as usize);
@@ -2515,7 +2570,7 @@ impl LtxBlockQ {
         let x_buf = scratch.storage((t * dim) as u64);
         wf(scratch, &x_buf, x);
         timings.record_upload += s_rec.elapsed();
-        let x3 = self.forward_prod_dev(scratch, &x_buf, adaln_buf, adaln_map_buf, ctx_buf, cos_bufs, sin_bufs, t, timings);
+        let x3 = self.forward_prod_dev(scratch, &x_buf, adaln_buf, adaln_map_buf, ctx_buf, cos_bufs, sin_bufs, t, timings, ptb);
         let s_back = std::time::Instant::now();
         let out = scratch.read(&x3, (t * dim) as usize);
         timings.readback += s_back.elapsed();
@@ -2567,6 +2622,7 @@ impl LtxBlockQ {
         sin_bufs: &[DeviceBuffer],
         t: u32,
         timings: &mut BlockTimings,
+        ptb: Perturbation,
     ) -> DeviceBuffer {
         let cfg = &self.cfg;
         let (dim, heads, head_dim, eps, ctx_len) = (cfg.inner_dim, cfg.num_heads, cfg.head_dim(), cfg.norm_eps, self.context_len);
@@ -2586,7 +2642,7 @@ impl LtxBlockQ {
         let s_rec = std::time::Instant::now();
         let mut s: Vec<Step> = Vec::new();
         let mb = ModBufs::derive(scratch, &mut s, adaln_buf, adaln_map_buf, &self.sst_buf, t, dim);
-        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(scratch, &mut s, self.tier, &self.w, &self.ones_t, x_buf, &mb, ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
+        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(scratch, &mut s, self.tier, &self.w, &self.ones_t, x_buf, &mb, ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps, ptb.video_self_attn);
         let (x3, _ff_out) = mlp_sublayer_q(scratch, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
         timings.record_upload += s_rec.elapsed();
         let s_sub = std::time::Instant::now();
@@ -2971,6 +3027,7 @@ fn av_block_body_q(
     acfg: &LtxAudioDitConfig,
     tv: u32,
     ta: u32,
+    ptb: Perturbation,
 ) -> AvQBody {
     let (vdim, vheads, vhd) = (vcfg.inner_dim, vcfg.num_heads, vcfg.head_dim());
     let (adim, aheads, ahd) = (acfg.inner_dim, acfg.num_heads, acfg.head_dim());
@@ -2983,12 +3040,20 @@ fn av_block_body_q(
     // ---- 1-2: each stream's self-attention + text cross-attention, run to
     // completion before the AV step touches either.
     #[rustfmt::skip]
-    let (vx1, v_attn1, v_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.vw, ones_v, vx_buf, vm, v_ctx, v_ctx_len, rope.v_cos, rope.v_sin, vdim, vheads, vhd, tv, eps);
+    let (vx1, v_attn1, v_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.vw, ones_v, vx_buf, vm, v_ctx, v_ctx_len, rope.v_cos, rope.v_sin, vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
     #[rustfmt::skip]
-    let (ax1, a_attn1, a_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.aw, ones_a, ax_buf, am, a_ctx, a_ctx_len, rope.a_cos, rope.a_sin, adim, aheads, ahd, ta, eps);
+    let (ax1, a_attn1, a_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.aw, ones_a, ax_buf, am, a_ctx, a_ctx_len, rope.a_cos, rope.a_sin, adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
 
     // ---- 3: audio<->video cross-attention. `vx1`/`ax1` are the pre-AV
-    // snapshot BOTH directions read.
+    // snapshot BOTH directions read. A cut direction (the isolated-modality
+    // pass) adds its attention under a zero gate: exactly `x + 0`.
+    let zero_gate = |n: u32| {
+        let b = gpu.storage(n as u64);
+        wf(gpu, &b, &vec![0.0; n as usize]);
+        b
+    };
+    let cut_a2v = ptb.a2v.then(|| zero_gate(vdim));
+    let cut_v2a = ptb.v2a.then(|| zero_gate(adim));
     let v_tmp1 = gpu.storage(vtd as u64);
     let v_tmp2 = gpu.storage(vtd as u64);
     let a2v_vx_scaled = gpu.storage(vtd as u64);
@@ -3001,7 +3066,7 @@ fn av_block_body_q(
     let a2v = attention_q(gpu, s, tier, &w.avw.a2v, vdim, adim, adim, aheads, ahd, &a2v_vx_scaled, &a2v_ax_scaled, tv, ta, Some((rope.v_cross_cos, rope.v_cross_sin)), Some((rope.a_cross_cos, rope.a_cross_sin)), K_ROPE2D, eps, false);
     let vx2 = gpu.storage(vtd as u64);
     // `rows_per_cond = rows`: ONE gate row, broadcast across every token.
-    gate_row(gpu, s, &vx1, &avm.gate_a2v, &a2v, &vx2, tv, vdim, tv);
+    gate_row(gpu, s, &vx1, cut_a2v.as_ref().unwrap_or(&avm.gate_a2v), &a2v, &vx2, tv, vdim, tv);
 
     let v_tmp3 = gpu.storage(vtd as u64);
     let v_tmp4 = gpu.storage(vtd as u64);
@@ -3014,7 +3079,7 @@ fn av_block_body_q(
     #[rustfmt::skip]
     let v2a = attention_q(gpu, s, tier, &w.avw.v2a, adim, vdim, adim, aheads, ahd, &v2a_ax_scaled, &v2a_vx_scaled, ta, tv, Some((rope.a_cross_cos, rope.a_cross_sin)), Some((rope.v_cross_cos, rope.v_cross_sin)), K_ROPE2D, eps, false);
     let ax2 = gpu.storage(atd as u64);
-    gate_row(gpu, s, &ax1, &avm.gate_v2a, &v2a, &ax2, ta, adim, ta);
+    gate_row(gpu, s, &ax1, cut_v2a.as_ref().unwrap_or(&avm.gate_v2a), &v2a, &ax2, ta, adim, ta);
 
     // ---- 4: video MLP (on the post-A2V state), then audio MLP.
     let (vx3, v_ff) = mlp_sublayer_q(gpu, s, &w.vw.ff, tier, ones_v, &vx2, &vm.shift_mlp, &vm.one_plus_scale_mlp, &vm.gate_mlp, vdim, tv, eps);
@@ -3107,6 +3172,7 @@ impl LtxAvBlockQ {
         av_v2a_gate_table: &[f32],
         tv: u32,
         ta: u32,
+        ptb: Perturbation,
     ) -> (Vec<f32>, Vec<f32>, AvBlockTaps) {
         let gpu = &self.gpu;
         let (vdim, adim) = (self.vcfg.inner_dim, self.acfg.inner_dim);
@@ -3136,7 +3202,7 @@ impl LtxAvBlockQ {
         let mut s: Vec<Step> = Vec::new();
         #[rustfmt::skip]
         let b = av_block_body_q(gpu, &mut s, self.tier, &self.w, &self.ones_v, &self.ones_a, &vx_buf, &ax_buf, &vm, &am, &avm,
-            &v_ctx, self.v_ctx_len, &a_ctx, self.a_ctx_len, rope, &self.vcfg, &self.acfg, tv, ta);
+            &v_ctx, self.v_ctx_len, &a_ctx, self.a_ctx_len, rope, &self.vcfg, &self.acfg, tv, ta, ptb);
         gpu.submit(&[], &s);
         let (vtd, atd) = ((tv * vdim) as usize, (ta * adim) as usize);
         let taps = AvBlockTaps {
@@ -3184,6 +3250,7 @@ impl LtxAvBlockQ {
         tv: u32,
         ta: u32,
         timings: &mut BlockTimings,
+        ptb: Perturbation,
     ) -> (Vec<f32>, Vec<f32>) {
         let (vdim, adim) = (self.vcfg.inner_dim, self.acfg.inner_dim);
         assert_eq!(vx.len(), (tv * vdim) as usize);
@@ -3195,7 +3262,7 @@ impl LtxAvBlockQ {
         wf(scratch, &ax_buf, ax);
         timings.record_upload += s_rec.elapsed();
         #[rustfmt::skip]
-        let (vx3, ax3) = self.forward_prod_dev(scratch, &vx_buf, &ax_buf, v_adaln_buf, v_adaln_map, a_adaln_buf, a_adaln_map, av, v_ctx, a_ctx, rope, tv, ta, timings);
+        let (vx3, ax3) = self.forward_prod_dev(scratch, &vx_buf, &ax_buf, v_adaln_buf, v_adaln_map, a_adaln_buf, a_adaln_map, av, v_ctx, a_ctx, rope, tv, ta, timings, ptb);
         let s_back = std::time::Instant::now();
         let vout = scratch.read(&vx3, (tv * vdim) as usize);
         let aout = scratch.read(&ax3, (ta * adim) as usize);
@@ -3226,6 +3293,7 @@ impl LtxAvBlockQ {
         tv: u32,
         ta: u32,
         timings: &mut BlockTimings,
+        ptb: Perturbation,
     ) -> (DeviceBuffer, DeviceBuffer) {
         let (vdim, adim) = (self.vcfg.inner_dim, self.acfg.inner_dim);
         // The video block's argument, unchanged for two streams: the shape
@@ -3242,7 +3310,7 @@ impl LtxAvBlockQ {
         let avm = AvModBufs::derive(scratch, &mut s, av, &self.av, tv, vdim, ta, adim);
         #[rustfmt::skip]
         let b = av_block_body_q(scratch, &mut s, self.tier, &self.w, &self.ones_v, &self.ones_a, vx_buf, ax_buf, &vm, &am, &avm,
-            v_ctx, self.v_ctx_len, a_ctx, self.a_ctx_len, rope, &self.vcfg, &self.acfg, tv, ta);
+            v_ctx, self.v_ctx_len, a_ctx, self.a_ctx_len, rope, &self.vcfg, &self.acfg, tv, ta, ptb);
         timings.record_upload += s_rec.elapsed();
         let s_sub = std::time::Instant::now();
         if block_pipeline() {

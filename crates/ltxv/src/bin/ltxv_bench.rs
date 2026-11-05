@@ -550,6 +550,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
             t as usize,
             &context_valid,
             cache,
+            &ltxv::block::NO_PERTURBATIONS,
         );
         let wall = t1.elapsed().as_secs_f64();
         // Only a RESIDENT session can be asked: a transient one's
@@ -676,6 +677,7 @@ fn bench_av(tokens: u32, ctx_len: u32, frames: u32, fps: u32) {
     // The SAME step struct `streamed-av` hands the quantized arm, which is
     // what makes the two rows of this comparison a comparison.
     let step = ltxv::dit::AvStreamedStep {
+        perturbations: &ltxv::block::NO_PERTURBATIONS,
         v_latent: &v_latent,
         v_timesteps: &v_timesteps,
         v_positions: &v_positions,
@@ -771,6 +773,7 @@ fn bench_streamed_av(layers: u32, tv: u32, ctx_len: u32, ta: u32, reuse_cache: b
         ltxv::devres::AvDitSession::transient(dev)
     };
     let step = ltxv::dit::AvStreamedStep {
+        perturbations: &ltxv::block::NO_PERTURBATIONS,
         v_latent: &v_latent,
         v_timesteps: &v_timesteps,
         v_positions: &v_positions,

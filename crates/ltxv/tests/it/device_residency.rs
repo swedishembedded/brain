@@ -87,7 +87,7 @@ fn bits_differ(a: &[f32], b: &[f32]) -> Option<(usize, f32, f32)> {
 
 #[allow(clippy::too_many_arguments)]
 fn run(session: &DitSession, cfg: &LtxDitConfig, src: &(dyn checkpoint::TensorSource + Sync), head: &std::collections::HashMap<String, (Vec<usize>, Vec<f32>)>, i: &Inputs, cache: &GenerationCache) -> Vec<f32> {
-    forward_q_streamed_in(session, cfg, src, head, QTier::Int8, &i.latent, &i.timesteps, &i.positions, &i.keyframes_mask, &i.context, i.context_len, i.t, &i.context_valid, cache)
+    forward_q_streamed_in(session, cfg, src, head, QTier::Int8, &i.latent, &i.timesteps, &i.positions, &i.keyframes_mask, &i.context, i.context_len, i.t, &i.context_valid, cache, &ltxv::block::NO_PERTURBATIONS)
 }
 
 /// The core claim, at a full window: N forwards through ONE resident session
