@@ -12,47 +12,38 @@ timesteps, and a 12B text encoder rather than an 11 GB one.
 one Hugging Face class (`AVTransformer3DModel`) and one GGUF architecture tag
 (`ltxv`); which release you have is a configuration, not a different model.
 
-**Status: in progress - `brain ltxv t2v`/`brain ltxv dfr` run end to end as
-SMOKE TESTS, not a quality claim yet.** This page describes the target shape;
-see `.agents/roadmap/ltxv.md` for the live, milestone-by-milestone checklist
-of what has actually landed (it goes into far more numeric detail - exact
-cosine parity per component, exact gaps - than this page tries to). The 22B
-transformer and the 12B Gemma-4 text encoder are large enough that real-weight
-validation needs a machine this port was not built on, and neither exists in
-this repo yet - what runs today is the real scheduler (`LTX2Scheduler` + the
-rectified-flow ancestral Euler step), the real causal 3D video VAE decode
-(plus, for `dfr`, real latent upscalers), and the real CLI/capability/
-residency wiring, composed with a **tiny, random-weight** DiT and a **stub**
-text context (no real Gemma-4 encoder in the pipeline yet, even though a
-tiny-config-parity-proven `crates/gemma4` crate exists on its own). See
-`crates/ltxv/src/pipeline.rs`'s module doc for exactly what is real and what
-is a placeholder in each command. What has real-weight parity coverage is
-every small, self-contained piece this port has ported so far - both video
-VAE decoders (the conv mirror and the 3D neighborhood-attention "diffusion
-decoder"), the audio VAE, the vocoder, both latent upscalers, the duration
-head - plus the schedule math; the DiT (video-only and audio+video) and
-Gemma-4 are only tiny-config-parity-proven, not real-weight-proven (see
-"Getting the weights" below for why).
+**Status: the real 22B checkpoint generates video, sound, or both, from
+text, stills, a soundtrack or an existing clip.** With the checkpoint in the
+model store, `brain ltxv t2v --prompt ...` runs the real distilled DiT
+(streamed, int8, device-resident), the real Gemma-4 text encoder and the real
+VAEs at the reference pipelines' own defaults; without it, the same command
+falls back to a tiny random-weight DiT that proves the wiring and nothing
+else. `.agents/roadmap/ltxv.md` is the milestone ledger, with parity numbers
+per component and the open gaps.
 
 ## Support
 
 | Capability | Supported |
 |---|---|
-| Inference (text to video) | [~] smoke test - tiny random-weight DiT, stub text context (`brain ltxv t2v`), see above |
-| Inference (DFR, higher-res multi-stage) | [~] smoke test - real spatial/temporal upscalers and VAE decode, still the tiny DiT (`brain ltxv dfr`) |
-| Post-hoc upscale of a finished clip | [x] `brain ltxv upscale` - VAE-encode an existing video file, run the official x2 latent spatial upscaler, refine on the distilled refinement schedule, VAE-decode. Shares the upscale+refine implementation with the internal two-stage generation path. CLI only so far, no capability action (see below) |
-| Inference (text to video+audio) | [~] `brain ltxv t2v --audio` / `audio: true` on the `t2v` action - the real audio+video DiT, both streams denoised jointly, decoded through the real audio VAE + vocoder and muxed into the container. Works, on the same streamed/quantized/device-resident path the video-only stream uses, so a step costs modestly more than the same clip without sound rather than several times more (see "Generating sound" below). It is `[~]` rather than `[x]` because the audio-visual DiT has no training support. 48 kHz stereo, through the vocoder's bandwidth-extension stage. Any `1 + 8k` length: past one denoising window the audio latent crosses each seam beside the video one (see "Generating sound" below). Not for a multi-scene clip |
-| Inference (image to video / keyframe conditioning) | [x] `--start-frame`, `--mid-frame` (+ `--mid-frame-at`) and `--end-frame` - up to three real stills VAE-encoded and held at sigma 0 in ONE generation pass, with `--conditioning-strength` for how hard. Refused for a multi-window or multi-scene clip; see "Anchoring a clip on real images" below |
-| LoRA inference | [x] `--adapter <path>` (repeatable, each with its own `--lora-scale`) / `adapter` + `lora_scale` on the `t2v` and `dfr` actions: the official trainer's and the published IC-LoRAs' ComfyUI `.safetensors`, or an adapter brain trained. Applied to every block linear of both streams and both cross-modal attentions, beside the int8 weights (never folded into them); see "Applying a LoRA adapter" below |
-| LoRA fine-tune | [~] video-only DiT, host-math/gradcheck-proven (FD < 1e-4), single- and whole-batch overfit drives loss to ~0 at tiny-config scale - the audio-extended DiT has no training support |
-| Full fine-tune | [~] same scope/caveat as LoRA fine-tune above |
-| INT8 | [~] storage format only for the video-only DiT's weights (`crate::int8`) - not wired into any checkpoint loader, no compute-time kernel |
-| CLI (`brain ltxv {t2v,upscale,dfr}`) | [x] |
-| HTTP API | [ ] the OpenAI/Anthropic routes cover chat, embeddings and text-to-IMAGE; there is no video route, and `api_caps` derives exposure from action shape, so a video action is simply not advertised |
-| D-Bus | [~] `t2v` and `dfr` are reachable as actions, not just CLI subcommands, via the generalized `capability::Provider`/residency surface - `upscale` is **not**: it takes a whole video file as INPUT, which is the first action in this model that would need an input blob rather than parameters alone, and that action shape has not been designed. Recorded rather than quietly skipped, because "a bespoke CLI subcommand is never the only entry point" is this repo's serving contract |
-| Batched serving | [ ] nothing resident to batch yet - see `crates/catalog/src/resident_ltxv.rs`'s module doc |
-| Multi-device sharding | [~] `model::Shardable` plumbing for the video-only DiT is implemented and tested (partition planning, weight-subset loading, the single-shard and sequential-two-stage cases) - no real multi-device execution has been run against two physical accelerators yet |
-| NPU | [ ] deliberate scope exclusion, not a gap expected to close later: no existing `NpuModel` implementation pattern fits a model this large, and this model's realistic deployment target is GPU/CPU |
+| Text to video | [x] `brain ltxv t2v` / the `t2v` action. Unnamed settings take the reference defaults (768x512, 121 frames, 24 fps) when the checkpoint is configured; a clip past one denoising window rolls a latent context across windows, past the single-stage ceiling it runs the reference's two stages |
+| Text to video + audio | [x] `--audio` / `audio: true`: both streams denoised jointly, 48 kHz stereo through the vocoder's bandwidth extension, any length (see "Generating sound") |
+| Text to audio | [x] `brain ltxv t2a` / the `t2a` action: the audio stream alone, the video half never read |
+| Audio to video | [x] `--audio-source <wav>`: the soundtrack held frozen while the picture denoises against it (one denoising window) |
+| Retake, video to audio | [x] `brain ltxv v2v --window S:E` / the `v2v` action: regenerate a time window of the picture, the sound or both; `--hold-video --audio` generates sound for a picture |
+| Extension | [x] `brain ltxv extend` / the `extend` action: continue a clip from its last 57 frames, with its soundtrack |
+| Image / keyframe conditioning | [x] `--start-frame`, `--mid-frame`, `--end-frame` (see "Anchoring a clip on real images") |
+| Clip length from the prompt | [x] the duration head, when it is in the model store (see "Clip length") |
+| Guidance | [x] the reference's multimodal guider: CFG, STG, rescale and isolated-modality guidance per stream, `--guidance-preset reference` (see "Guidance and samplers") |
+| Samplers | [x] ancestral Euler (the distilled pipeline's) and res_2s (the reference's high-quality pipeline's), `--sampler` |
+| Post-hoc upscale | [x] `brain ltxv upscale` / the `upscale` action |
+| DFR | [~] `brain ltxv dfr` runs the reference's stage layout with the real upscalers and VAE but still the tiny DiT and a stub context; real-weight DFR with the detailing IC-LoRA is open |
+| LoRA inference | [x] `--adapter <path>` (repeatable): ComfyUI/PEFT `.safetensors` from the official trainer, published IC-LoRAs (with `--reference-video`), or brain-trained adapters, applied beside the int8 weights |
+| LoRA / full fine-tune | [~] video-only DiT; the audio-visual DiT has no training support |
+| CLI | [x] `brain ltxv {t2v,t2a,v2v,extend,upscale,dfr}` |
+| Capability actions (D-Bus, `brain do`) | [x] `t2v`, `t2a`, `v2v`, `extend`, `upscale`, `dfr`; the clip actions take the source as a `video` input blob and its sound as a `soundtrack` WAV blob |
+| HTTP API | [ ] the OpenAI/Anthropic routes have no video route |
+| Multi-device | [~] the CFG pair runs on two cards concurrently; block sharding across cards is implemented for the video-only DiT |
+| NPU | [ ] out of scope for a model this large |
 
 ## Architecture, in brief
 
@@ -87,7 +78,7 @@ and the current gap list.
 
 ## Getting the weights
 
-Model id (once served): `brain/ltxv`. The default checkpoint is
+Model id: `brain/ltxv`. The default checkpoint is
 `Lightricks/LTX-2.5` on Hugging Face, gated - fetching it requires a Hugging
 Face account with access accepted and `hf auth login` run first. It ships as
 several independent files rather than one directory-style checkpoint. Put
@@ -98,7 +89,7 @@ the spatial x2 latent upscaler. A role flag names a file outright when the
 store holds more than one candidate:
 
 ```bash
-brain ltxv t2v --dit-config ltx25_22b \
+brain ltxv t2v \
   --dit …/ltx-2.5-22b-distilled-transformer-Q8_0.gguf \
   --vae …/ltx-2.5-video-vae-conv-bf16.safetensors \
   --text-encoder …/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors \
@@ -116,18 +107,43 @@ from the repository above.
 
 ## Running it
 
-The smoke-test path runs today, needing only the real VAE (no DiT/text-encoder
-weights - the DiT is always tiny-config with fresh random weights):
-
 ```bash
-export BRAIN_LTXV_VAE=…/ltx-2.5-video-vae-conv-bf16.safetensors
-brain ltxv t2v --prompt "a cat walking on a beach" --frames 9 --width 64 \
-  --height 64 --steps 4 --output-path out.mp4
+brain ltxv t2v --prompt "a cat walking along the shoreline at dusk" --output-path cat.mp4
 ```
 
-This proves the pipeline WIRING - real scheduler, real VAE decode, a real mp4
-out the other end - not generation quality; see `crates/ltxv/src/pipeline.rs`'s
-module doc.
+Every weight comes from the model store. Settings the command leaves unnamed
+take the reference pipelines' defaults when the real checkpoint is
+configured; `--dit-config tiny` (or a store without the checkpoint) runs the
+random-weight smoke test instead, which proves the wiring and carries no
+semantics. `--steps` and the schedule flags apply to a non-distilled
+checkpoint; the distilled one has a fixed schedule.
+
+### Guidance and samplers
+
+The distilled checkpoint denoises with one conditional forward per step,
+which is the default. `--guidance-preset reference` selects the reference
+pipeline's non-distilled guidance (CFG 3 video / 7 audio, STG 1 on block 28,
+rescale 0.7, isolated-modality guidance 3), and each term has its own flag
+per stream (`--guidance`, `--stg`, `--stg-blocks`, `--rescale`,
+`--modality-guidance`, and their `--audio-*` counterparts). The terms combine
+on the x0 estimate exactly as `MultiModalGuider` does: STG bypasses
+self-attention in the named blocks, the isolated-modality pass cuts the
+audio/video cross-attention.
+
+`--sampler res2s` runs the reference's second-order res_2s loop: two guided
+evaluations per step (the second at the geometric-midpoint sigma), SDE noise
+at both, and a final evaluation that removes the last noise. `--eta` is each
+sampler's noise strength, 1.0 for ancestral Euler and 0.5 for res_2s by
+default.
+
+### Clip length
+
+When the request names no length and the duration head
+(`ltx-2.5-duration-head-bf16.safetensors`) is in the model store, the head
+predicts it from the prompt: it pools the prompt's connector outputs into a
+length between one and twenty seconds, snapped onto the VAE's `8k + 1` frame
+grid. `t2v` without `--frames` and `t2a` without `--seconds` both use it; the
+prompt is encoded once either way.
 
 ### Anchoring a clip on real images
 
@@ -137,7 +153,7 @@ held at sigma 0 (`denoise_mask = 0`, per-token timestep 0, re-pinned every step)
 while the rest of the clip denoises around it.
 
 ```bash
-brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
+brain -v --device gpu0 ltxv t2v \
   --prompt "a fishing boat crosses the harbour mouth, camera tracking left" \
   --frames 121 --width 768 --height 448 --fps 24 --output-path boat.mp4 \
   --start-frame dawn.png --mid-frame midway.png --end-frame open-sea.png
@@ -184,7 +200,7 @@ schedule. It is the same freezing mechanism `--start-frame` uses for latent
 frame 0, over N latent frames instead of one.
 
 ```bash
-brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
+brain -v --device gpu0 ltxv t2v \
   --prompt "..." --frames 481 --width 1280 --height 704 --fps 24 \
   --output-path long.mp4
 ```
@@ -238,7 +254,7 @@ content before it. Repeat `--scene <frames>:<prompt>` to write a clip that
 changes.
 
 ```bash
-brain --device gpu0 ltxv t2v --dit-config ltx25_22b \
+brain --device gpu0 ltxv t2v \
   --width 768 --height 448 --fps 24 --output-path story.mp4 \
   --scene 121:"a fishing boat leaves a harbour at dawn, camera tracking" \
   --scene 121:"the open sea under heavy rain, waves breaking over the bow" \
@@ -283,7 +299,7 @@ strength set by the `--lora-scale` that follows it (default 1.0, ComfyUI's
 `v2v` and `dfr` run takes them.
 
 ```bash
-brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
+brain -v --device gpu0 ltxv t2v \
   --prompt "..." --frames 121 --width 768 --height 448 --output-path out.mp4 \
   --adapter my-style.safetensors --lora-scale 0.8
 ```
@@ -314,7 +330,7 @@ as clean tokens at their own positions, which the adapter learned to attend
 across. `--reference-strength` (default 1.0) sets how strongly they are held.
 
 ```bash
-brain --device gpu0 ltxv t2v --dit-config ltx25_22b \
+brain --device gpu0 ltxv t2v \
   --prompt "..." --frames 121 --width 1280 --height 704 --output-path out.mp4 \
   --adapter ltx-2.5-22b-ic-lora-depth.safetensors --reference-video depth.mp4
 ```
@@ -341,7 +357,7 @@ export BRAIN_LTXV_VAE=[path/to/ltx-2.5-video-vae-conv-bf16.safetensors]
 export BRAIN_LTXV_UPSAMPLER_SPATIAL=[path/to/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors]
 export BRAIN_LTXV_DIT=[path/to/ltx-2.5-22b-distilled-transformer-Q8_0.gguf]
 export BRAIN_LTXV_TEXT_ENCODER=[path/to/gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf]
-brain -v --device gpu0 ltxv upscale --dit-config ltx25_22b \
+brain -v --device gpu0 ltxv upscale \
   --input clip.mp4 --output-path clip_upscaled.mp4 \
   --prompt "the prompt the clip was generated from"
 ```
@@ -408,7 +424,7 @@ stream **together**, coupled every block by cross-attention. `--audio` runs
 both; without it only the model's video half runs and the clip is silent.
 
 ```bash
-brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b --audio \
+brain -v --device gpu0 ltxv t2v --audio \
   --prompt "a blacksmith hammers glowing steel on an anvil, rhythmic clangs" \
   --frames 57 --width 1280 --height 704 --fps 24 --output-path forge.mp4
 ```
@@ -498,6 +514,41 @@ The same `audio` switch is a parameter on the `t2v` capability action, and the
 action declares an `audio` output blob (a complete 48 kHz stereo WAV), so the
 D-Bus/served surface returns the sound too rather than only the CLI.
 
+### Text to audio
+
+```bash
+brain ltxv t2a --prompt "rain on a tin roof, distant thunder" --output-path rain.wav
+```
+
+The audio stream runs alone, as the reference's `t2a_one_stage` builds it:
+every block is the audio stream's self-attention, text cross-attention and
+feed-forward, and none of the video half's weights is read. The audio
+guidance flags apply; the cross-modal term is off, as there is no picture to
+guide against.
+
+### Retakes, sound for a picture, and a picture for a sound
+
+`brain ltxv v2v --window S:E` regenerates the seconds between `S` and `E` of
+an existing clip against `--prompt` and holds the rest. With `--audio` and the
+clip's soundtrack as `--audio-source`, the sound in the window is regenerated
+with the picture; `--hold-video` keeps every frame and generates sound for
+them (video to audio), `--hold-audio` keeps the soundtrack. `t2v --audio
+--audio-source <wav>` goes the other way: the soundtrack is held frozen and
+the picture denoises against it.
+
+### Extending a clip
+
+```bash
+brain ltxv extend --input clip.mp4 --seconds 3 --prompt "the cat turns and walks away" \
+  --output-path longer.mp4
+```
+
+The clip's last 57 frames (the reference extension recipe's 8 latent frames)
+are held as a clean prefix while new frames after them denoise; the output is
+the clip itself, untouched, followed by the new frames. `--audio` with the
+clip's soundtrack extends the sound too. An extension LoRA trained with the
+reference's `video_extend_lora` recipe applies with `--adapter`.
+
 ### Seeing what it did
 
 Any of these runs takes `--trace-ltxv <0-5>` (see `brain help` for the shared
@@ -519,13 +570,8 @@ random-weight DiT, a stub text context, a `--steps` the distilled schedule
 ignores).
 
 `ltxv` has a dedicated CLI module, so the resolver gives it precedence over
-generic capability dispatch (`brain ltxv {t2v,upscale,dfr}` runs that module, not a
-generic action call) - the same routing `wan` uses. Both actions are still
-reachable the same way every model in this repo is over other transports:
-discovery (`brain caps brain/ltxv`), `brain do brain/ltxv {t2v,dfr}` (not
-`upscale` - see the Support table), and a
-cancellable streaming job over D-Bus (`brain serve --dbus`) - a bespoke CLI
-subcommand is never the only entry point, per this repo's serving contract. A
-real 22B DiT and the Gemma-4 text encoder are tracked gaps (see the roadmap) -
-once they land, this same CLI/capability surface serves them with no shape
-change, only `--dit-config`/`dit_config` growing a second value.
+generic capability dispatch - the same routing `wan` uses. Every command is
+also a capability action, discoverable with `brain caps brain/ltxv`, callable
+with `brain do`, and served as a cancellable streaming job over D-Bus
+(`brain serve --dbus`); the clip actions take their source as a `video` input
+blob.
