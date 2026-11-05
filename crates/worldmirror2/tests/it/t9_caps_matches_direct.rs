@@ -35,7 +35,7 @@ use capability::{Blob, Invocation, Media, Outcome, Provider as _};
 use data::rng::Lcg;
 use serde_json::json;
 use splat::types::{Camera, Splats};
-use worldmirror2::caps::{self, Session, WorldMirror2Provider};
+use worldmirror2::caps::{Session, WorldMirror2Provider};
 use worldmirror2::config::MirrorConfig;
 use worldmirror2::gaussians::{assemble, AssembleOpts};
 use worldmirror2::model::Mirror;
@@ -118,7 +118,7 @@ fn run_direct(cfg: MirrorConfig, init: &HashMap<String, Vec<f32>>, frames: &[(Ve
     let (w, h) = ((wp * cfg.patch) as u32, (hp * cfg.patch) as u32);
     let gpu = gpu_core::Gpu::new_cpu(worldmirror2::model::PIPELINES);
     let mut model = Mirror::new(gpu, cfg, init, 0);
-    let chw: Vec<f32> = frames.iter().flat_map(|(hwc, fw, fh)| caps::hwc_to_chw(hwc, *fw, *fh)).collect();
+    let chw: Vec<f32> = frames.iter().flat_map(|(hwc, fw, fh)| imaging::pixels::hwc_to_chw(hwc, 3, *fh as usize, *fw as usize)).collect();
     model.forward(&chw, s, hp, wp);
     let (splats, cams, _weights) = assemble(model.gpu(), &model, &chw, s, w, h, &AssembleOpts::default(), None);
     (splats, cams)

@@ -778,14 +778,7 @@ pub fn load_keyframe_pixels(path: &str, width: u32, height: u32) -> Result<Vec<f
     let img = imaging::load(path).map_err(|e| format!("fl2va: loading {path}: {e}"))?;
     let hwc = img.to_hwc_unit();
     let hwc = if (img.w, img.h) != (width, height) { imaging::host::resize_bilinear_hwc(&hwc, 3, img.w, img.h, width, height) } else { hwc };
-    let plane = (width * height) as usize;
-    let mut chw = vec![0f32; 3 * plane];
-    for (i, px) in hwc.as_chunks::<3>().0.iter().enumerate() {
-        for c in 0..3 {
-            chw[c * plane + i] = (px[c] * 255.0).clamp(0.0, 255.0);
-        }
-    }
-    Ok(chw)
+    Ok(imaging::pixels::hwc_to_chw(&hwc, 3, height as usize, width as usize).into_iter().map(|v| (v * 255.0).clamp(0.0, 255.0)).collect())
 }
 
 // ===================== execution (direct provider) =====================

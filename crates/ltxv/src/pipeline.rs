@@ -2776,19 +2776,13 @@ fn denoise(
 /// encodes that does not care how many frames the VAE will be fed.
 fn load_still_chw(path: &str, width: usize, height: usize) -> Result<Vec<f32>, String> {
     let img = image::open(path).map_err(|e| format!("{path}: {e}"))?.resize_exact(width as u32, height as u32, image::imageops::FilterType::Lanczos3).to_rgb8();
-    let mut img_chw = vec![0f32; 3 * height * width];
-    for y in 0..height {
-        for x in 0..width {
-            let p = img.get_pixel(x as u32, y as u32).0;
-            let idx = y * width + x;
-            for c in 0..3 {
-                // `[0,255] -> [-1,1]`, the VAE's own input range (see
-                // `LtxVaeEncoder::encode`'s doc).
-                img_chw[c * height * width + idx] = (p[c] as f32 / 127.5) - 1.0;
-            }
-        }
-    }
-    Ok(img_chw)
+    Ok(imaging::pixels::hwc_to_chw(img.as_raw(), 3, height, width).into_iter().map(vae_input).collect())
+}
+
+/// `[0,255] -> [-1,1]`, the video VAE's own input range (see
+/// `LtxVaeEncoder::encode`'s doc).
+fn vae_input(v: u8) -> f32 {
+    v as f32 / 127.5 - 1.0
 }
 
 /// Encode one still through the real video VAE at `width`x`height`, as the
@@ -3919,16 +3913,9 @@ fn chw_to_rgb8(pixels: &[f32], frames: usize, h: usize, w: usize) -> Vec<Vec<u8>
 /// takes. Same `[0,255] -> [-1,1]` map [`encode_still`] uses for a single
 /// conditioning image.
 fn rgb8_to_chw(frames: &[Vec<u8>], h: usize, w: usize) -> Vec<f32> {
-    let plane = frames.len() * h * w;
-    let mut out = vec![0f32; 3 * plane];
-    for (f, px) in frames.iter().enumerate() {
-        for i in 0..h * w {
-            for c in 0..3 {
-                out[c * plane + f * h * w + i] = (px[i * 3 + c] as f32 / 127.5) - 1.0;
-            }
-        }
-    }
-    out
+    // The frames stacked as one `frames * h`-row image: its planar layout IS
+    // the `[3, frames, h, w]` volume.
+    imaging::pixels::hwc_to_chw(&frames.concat(), 3, frames.len() * h, w).into_iter().map(vae_input).collect()
 }
 
 /// The largest video-token count [`upscale`] will put through ONE refinement

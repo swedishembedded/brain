@@ -102,24 +102,6 @@ pub fn manifest_resident() -> Manifest {
 }
 
 
-/// Interleaved HWC f32 (the video-blob wire layout) to concatenated CHW - the
-/// layout [`Mirror::forward`] expects. `pub` so
-/// `tests/t9_caps_matches_direct.rs`'s own "direct" comparison path builds
-/// its `Mirror::forward` input through the identical conversion this action
-/// uses, rather than a second bespoke copy that could silently drift.
-pub fn hwc_to_chw(hwc: &[f32], w: u32, h: u32) -> Vec<f32> {
-    let (w, h) = (w as usize, h as usize);
-    let mut chw = vec![0.0f32; 3 * w * h];
-    for y in 0..h {
-        for x in 0..w {
-            for c in 0..3 {
-                chw[c * w * h + y * w + x] = hwc[(y * w + x) * 3 + c];
-            }
-        }
-    }
-    chw
-}
-
 /// One frame's depth map, min-max normalized over ITS OWN pixels and
 /// replicated to RGB - the same visualization
 /// `mirror_cli.rs::write_maps` writes to a PPM, in `[0,1]` f32 rather than
@@ -211,7 +193,7 @@ pub fn run_reconstruct(session: &mut Session, inv: &Invocation) -> ActionResult 
     let mut frames_chw = Vec::with_capacity(s * 3 * h as usize * w as usize);
     for (hwc, fw, fh) in &frames {
         debug_assert_eq!((*fw, *fh), (w, h), "decode_video guarantees one shared (w,h)");
-        frames_chw.extend(hwc_to_chw(hwc, w, h));
+        frames_chw.extend(imaging::pixels::hwc_to_chw(hwc, 3, h as usize, w as usize));
     }
 
     let model = &mut session.model;

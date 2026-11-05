@@ -48,6 +48,8 @@ serde_json.workspace = true
 # likely to arrive in; no `pnm` (that's `brain-data`'s own synthetic-dataset
 # concern, not a real photo's).
 image = { workspace = true, features = ["jpeg", "png"] }
+# `imaging::pixels::hwc_to_chw`: the one HWC -> planar permutation.
+brain-imaging.workspace = true
 # The `tracing` FACADE only - never a subscriber. `--trace-ltxv <0-5>` (the
 # `brain` CLI installs the one subscriber) turns these events on; with none
 # installed every macro below is a predictable-branch no-op, so instrumenting

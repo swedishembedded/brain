@@ -142,14 +142,7 @@ fn run() -> Result<(), String> {
 
 /// Interleaved RGB u8 → CHW f32 in `[-1, 1]`, the VAE's input convention.
 fn to_chw(px: &[u8], h: usize, w: usize) -> Vec<f32> {
-    let n = h * w;
-    let mut out = vec![0.0f32; 3 * n];
-    for c in 0..3 {
-        for i in 0..n {
-            out[c * n + i] = px[i * 3 + c] as f32 / 127.5 - 1.0;
-        }
-    }
-    out
+    imaging::pixels::hwc_to_chw(px, 3, h, w).into_iter().map(|v| v as f32 / 127.5 - 1.0).collect()
 }
 
 /// CHW f32 in `[-1, 1]` → interleaved RGB u8. Clamp first, then rescale - the
