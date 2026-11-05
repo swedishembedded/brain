@@ -16,7 +16,7 @@
 //!
 //! ## Why this is a FOUR-arm test and not a two-arm one
 //!
-//! The pipelining and the scratch arena (`BRAIN_LTXV_NO_SCRATCH_POOL`,
+//! The pipelining and the scratch arena (`BlockExec::scratch_pool`,
 //! `crates/ltxv/tests/scratch_pool.rs`) interact, and the interaction is the
 //! whole risk. The arena hands block `l+1` the buffers block `l` just used; the
 //! pipelining lets block `l` still be running when block `l+1` asks for them.
@@ -27,42 +27,29 @@
 //!
 //! ## What has to be true for this file to mean anything
 //!
-//! * both switches are read per block forward, never cached, so setting one
-//!   between two calls really does select the other arm - a `OnceLock` in
-//!   either would make this file compare one arm against itself and pass
-//!   forever;
+//! * every arm runs on its own session built with that arm
+//!   (`DitSession::with_block_exec`), so the calls really do take the arms
+//!   they name rather than one arm repeatedly;
 //! * the stack has to be deep enough for the overlap to have somewhere to go
 //!   wrong. Three layers is the minimum: block 2 is the first that is handed a
 //!   slot block 0 retired, and it is also the first recorded while a block
 //!   other than the immediately preceding one could still be in flight.
 
-use ltxv::block::{GenerationCache, QTier};
-use ltxv::dit::{forward_q_streamed, load_head_tensors_from_source, random_tiny_weights};
+use ltxv::block::{BlockExec, GenerationCache, QTier};
+use ltxv::devres::DitSession;
+use ltxv::dit::{forward_q_streamed_in, load_head_tensors_from_source, random_tiny_weights, StreamedStep};
 use ltxv::modelgrad::Cfg;
 use ltxv::LtxDitConfig;
 
-const NO_PIPELINE: &str = "BRAIN_LTXV_NO_PIPELINE";
-const NO_ARENA: &str = "BRAIN_LTXV_NO_SCRATCH_POOL";
+/// Run one streamed forward of `i` on a fresh session whose blocks execute
+/// as `exec` says - one arm of the A/B.
+fn forward(exec: BlockExec, cfg: &LtxDitConfig, src: &(dyn checkpoint::TensorSource + Sync), head: &vae::blocks::Tensors, i: &Inputs) -> Vec<f32> {
+    let session = DitSession::transient(None).with_block_exec(exec);
+    forward_q_streamed_in(&session, cfg, src, head, QTier::Int8, &i.step(), &GenerationCache::default())
+}
 
-/// Both switches are process-wide, so the tests in this binary must not be in
-/// different arms at the same time - the suite runs a binary's tests in
-/// parallel by default, and one test clearing a variable while another relies
-/// on it would silently compare an arm against itself.
-static ARM: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Run `f` with the two switches forced to the given arm, restoring the
-/// ambient setting afterwards. Callers hold [`ARM`].
-fn arm<T>(pipeline: bool, arena: bool, f: impl FnOnce() -> T) -> T {
-    let set = |k: &str, on: bool| match on {
-        true => std::env::remove_var(k),
-        false => std::env::set_var(k, "1"),
-    };
-    set(NO_PIPELINE, pipeline);
-    set(NO_ARENA, arena);
-    let out = f();
-    std::env::remove_var(NO_PIPELINE);
-    std::env::remove_var(NO_ARENA);
-    out
+fn arm(pipelined: bool, scratch_pool: bool) -> BlockExec {
+    BlockExec { pipelined, scratch_pool }
 }
 
 /// Bits, not values: `0.0 == -0.0` is true for two different results and
@@ -84,6 +71,23 @@ struct Inputs {
     t: usize,
 }
 
+impl Inputs {
+    fn step(&self) -> StreamedStep<'_> {
+        StreamedStep {
+            stream: ltxv::config::Stream::Video,
+            latent: &self.latent,
+            timesteps: &self.timesteps,
+            positions: &self.positions,
+            keyframes_mask: &self.keyframes_mask,
+            context: &self.context,
+            context_len: self.context_len,
+            t: self.t,
+            context_valid: &self.context_valid,
+            perturbations: &ltxv::block::NO_PERTURBATIONS,
+        }
+    }
+}
+
 fn synthetic_inputs(cfg: &LtxDitConfig, t: usize, context_len: usize) -> Inputs {
     let mcfg = Cfg::from_ltx(cfg, t, context_len);
     let positions = mcfg.simple_positions();
@@ -98,23 +102,18 @@ fn synthetic_inputs(cfg: &LtxDitConfig, t: usize, context_len: usize) -> Inputs 
 
 #[test]
 fn pipelining_changes_no_bit_of_a_streamed_forward_with_or_without_the_arena() {
-    let _arm = ARM.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = LtxDitConfig { num_layers: 3, ..LtxDitConfig::tiny() };
     let w = random_tiny_weights(&cfg, 0x9B_31_04_7F);
     let head = load_head_tensors_from_source(&w, &cfg);
     let i = synthetic_inputs(&cfg, 7, 5);
 
-    #[rustfmt::skip]
-    let run = || {
-        let cache = GenerationCache::default();
-        forward_q_streamed(&cfg, &w, &head, None, QTier::Int8, &i.latent, &i.timesteps, &i.positions, &i.keyframes_mask, &i.context, i.context_len, i.t, &i.context_valid, &cache)
-    };
+    let run = |exec: BlockExec| forward(exec, &cfg, &w, &head, &i);
 
     // The reference arm: no overlap, no recycling. Run twice first, because a
     // file that cannot tell a pipelining bug from ordinary nondeterminism is
     // not a gate.
-    let reference = arm(false, false, run);
-    let reference_again = arm(false, false, run);
+    let reference = run(arm(false, false));
+    let reference_again = run(arm(false, false));
     assert_eq!(
         differing_bits(&reference, &reference_again),
         0,
@@ -122,7 +121,7 @@ fn pipelining_changes_no_bit_of_a_streamed_forward_with_or_without_the_arena() {
     );
 
     for (pipeline, arena) in [(false, true), (true, false), (true, true)] {
-        let got = arm(pipeline, arena, run);
+        let got = run(arm(pipeline, arena));
         assert!(got.iter().all(|v| v.is_finite()), "arm (pipeline={pipeline}, arena={arena}) produced non-finite output");
         assert_eq!(
             differing_bits(&reference, &got),
@@ -177,7 +176,6 @@ fn gguf_path() -> Option<String> {
 /// magnitude in size.
 #[test]
 fn pipelining_changes_no_bit_of_a_real_weight_forward() {
-    let _arm = ARM.lock().unwrap_or_else(|e| e.into_inner());
     let Some(path) = gguf_path() else {
         brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
         return;
@@ -190,14 +188,10 @@ fn pipelining_changes_no_bit_of_a_real_weight_forward() {
     // registers, so a token-budget-minimal context is not a legal input here.
     let i = synthetic_inputs(&cfg, 16, 128);
 
-    #[rustfmt::skip]
-    let run = || {
-        let cache = GenerationCache::default();
-        forward_q_streamed(&cfg, &src, &head, None, QTier::Int8, &i.latent, &i.timesteps, &i.positions, &i.keyframes_mask, &i.context, i.context_len, i.t, &i.context_valid, &cache)
-    };
+    let run = |exec: BlockExec| forward(exec, &cfg, &src, &head, &i);
 
-    let reference = arm(false, false, run);
-    let shipped = arm(true, true, run);
+    let reference = run(arm(false, false));
+    let shipped = run(arm(true, true));
     assert!(shipped.iter().all(|v| v.is_finite()), "the pipelined arm produced non-finite output on real weights");
     println!("real-weight pipelining parity: {} of {} output words differ", differing_bits(&reference, &shipped), reference.len());
     assert_eq!(

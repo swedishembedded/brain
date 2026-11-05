@@ -22,10 +22,9 @@
 //! Two things the arms have to differ in for this to be a real comparison, and
 //! both are checked rather than assumed:
 //!
-//! * the switch (`BRAIN_LTXV_NO_SCRATCH_POOL`) is read per block forward, not
-//!   cached, so setting it between the two calls really does select the other
-//!   arm - a `OnceLock` here would make this file compare one arm against
-//!   itself and pass forever;
+//! * each arm runs on its own session built with that arm
+//!   (`DitSession::with_block_exec`), so the two calls really do take
+//!   different arms rather than one arm twice;
 //! * the reuse has to actually happen. A three-layer stack is the smallest
 //!   depth at which a slot retired by block 0 is handed back to block 2, which
 //!   is the case a two-layer stack cannot reach.
@@ -40,27 +39,17 @@
 //! The guard is defending a property this model does not currently depend on;
 //! `crates/gpu-core/tests/it/scratch_arena.rs` is what holds it.
 
-use ltxv::block::{GenerationCache, QTier};
-use ltxv::dit::{forward_q_streamed, load_head_tensors_from_source, random_tiny_weights};
+use ltxv::block::{BlockExec, GenerationCache, QTier};
+use ltxv::devres::DitSession;
+use ltxv::dit::{forward_q_streamed_in, load_head_tensors_from_source, random_tiny_weights, StreamedStep};
 use ltxv::modelgrad::Cfg;
 use ltxv::LtxDitConfig;
 
-const SWITCH: &str = "BRAIN_LTXV_NO_SCRATCH_POOL";
-
-/// The switch is process-wide, so the two tests in this binary must not be in
-/// their un-pooled arm at the same time - the suite runs a test binary's tests
-/// in parallel by default (`--test-threads`), and one test clearing the
-/// variable while the other is relying on it would silently compare an arm
-/// against itself. Each test holds this for its whole body.
-static ARM: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Run `f` with the arena disabled, restoring the ambient setting afterwards.
-/// Callers hold [`ARM`].
-fn without_arena<T>(f: impl FnOnce() -> T) -> T {
-    std::env::set_var(SWITCH, "1");
-    let out = f();
-    std::env::remove_var(SWITCH);
-    out
+/// Run one streamed forward of `i` on a fresh session, its block temporaries
+/// drawn from the scratch arena or not.
+fn forward(scratch_pool: bool, cfg: &LtxDitConfig, src: &(dyn checkpoint::TensorSource + Sync), head: &vae::blocks::Tensors, i: &Inputs) -> Vec<f32> {
+    let session = DitSession::transient(None).with_block_exec(BlockExec { scratch_pool, ..BlockExec::default() });
+    forward_q_streamed_in(&session, cfg, src, head, QTier::Int8, &i.step(), &GenerationCache::default())
 }
 
 struct Inputs {
@@ -72,6 +61,23 @@ struct Inputs {
     context_valid: Vec<f32>,
     context_len: usize,
     t: usize,
+}
+
+impl Inputs {
+    fn step(&self) -> StreamedStep<'_> {
+        StreamedStep {
+            stream: ltxv::config::Stream::Video,
+            latent: &self.latent,
+            timesteps: &self.timesteps,
+            positions: &self.positions,
+            keyframes_mask: &self.keyframes_mask,
+            context: &self.context,
+            context_len: self.context_len,
+            t: self.t,
+            context_valid: &self.context_valid,
+            perturbations: &ltxv::block::NO_PERTURBATIONS,
+        }
+    }
 }
 
 fn synthetic_inputs(cfg: &LtxDitConfig, t: usize, context_len: usize) -> Inputs {
@@ -96,7 +102,6 @@ fn differing_bits(a: &[f32], b: &[f32]) -> usize {
 
 #[test]
 fn the_scratch_arena_changes_no_bit_of_a_streamed_forward() {
-    let _arm = ARM.lock().unwrap_or_else(|e| e.into_inner());
     // Three layers, so block 2 is handed slots block 0 retired - the reuse the
     // arena exists for, and the depth at which a wrongly recycled chained
     // activation first has somewhere to go wrong.
@@ -105,21 +110,17 @@ fn the_scratch_arena_changes_no_bit_of_a_streamed_forward() {
     let head = load_head_tensors_from_source(&w, &cfg);
     let i = synthetic_inputs(&cfg, 7, 5);
 
-    #[rustfmt::skip]
-    let run = || {
-        let cache = GenerationCache::default();
-        forward_q_streamed(&cfg, &w, &head, None, QTier::Int8, &i.latent, &i.timesteps, &i.positions, &i.keyframes_mask, &i.context, i.context_len, i.t, &i.context_valid, &cache)
-    };
+    let run = |pooled: bool| forward(pooled, &cfg, &w, &head, &i);
 
-    let plain = without_arena(run);
-    let plain_again = without_arena(run);
+    let plain = run(false);
+    let plain_again = run(false);
     assert_eq!(
         differing_bits(&plain, &plain_again),
         0,
         "test setup: two forwards of the same weights and inputs on the un-pooled arm must already agree bit for bit, or this file cannot tell an arena bug from ordinary nondeterminism"
     );
 
-    let pooled = run();
+    let pooled = run(true);
     assert!(pooled.iter().all(|v| v.is_finite()), "the pooled arm produced non-finite output");
     assert_eq!(
         differing_bits(&plain, &pooled),
@@ -174,7 +175,6 @@ fn gguf_path() -> Option<String> {
 /// convention), real width, real weights.
 #[test]
 fn the_scratch_arena_changes_no_bit_of_a_real_weight_forward() {
-    let _arm = ARM.lock().unwrap_or_else(|e| e.into_inner());
     let Some(path) = gguf_path() else {
         brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
         return;
@@ -189,14 +189,10 @@ fn the_scratch_arena_changes_no_bit_of_a_real_weight_forward() {
     // registers, so a token-budget-minimal context is not a legal input here.
     let i = synthetic_inputs(&cfg, 16, 128);
 
-    #[rustfmt::skip]
-    let run = || {
-        let cache = GenerationCache::default();
-        forward_q_streamed(&cfg, &src, &head, None, QTier::Int8, &i.latent, &i.timesteps, &i.positions, &i.keyframes_mask, &i.context, i.context_len, i.t, &i.context_valid, &cache)
-    };
+    let run = |pooled: bool| forward(pooled, &cfg, &src, &head, &i);
 
-    let plain = without_arena(run);
-    let pooled = run();
+    let plain = run(false);
+    let pooled = run(true);
     assert!(pooled.iter().all(|v| v.is_finite()), "the pooled arm produced non-finite output on real weights");
     println!("real-weight scratch-arena parity: {} of {} output words differ", differing_bits(&plain, &pooled), plain.len());
     assert_eq!(

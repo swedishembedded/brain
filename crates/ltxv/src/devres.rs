@@ -69,7 +69,7 @@
 //! needs, and the way the bit-identity gate runs both arms of the same
 //! generation.
 
-use crate::block::{cached_av_block_bytes, cached_block_bytes, AttachLora, BlockTimings, CachedQAvBlockWeights, CachedQBlockWeights, LtxAvBlockQ, LtxBlockQ, QTier, KERNELS};
+use crate::block::{cached_av_block_bytes, cached_block_bytes, AttachLora, BlockExec, BlockTimings, CachedQAvBlockWeights, CachedQBlockWeights, LtxAvBlockQ, LtxBlockQ, QTier, KERNELS};
 use crate::pipeline::SharedAdapter;
 use crate::config::{LtxAvDitConfig, LtxDitConfig};
 use gpu_core::{reclaiming, Gpu};
@@ -591,6 +591,8 @@ pub struct DitSession {
     /// LoRA corrections every block this session builds carries
     /// ([`Self::with_adapter`]).
     adapter: Option<SharedAdapter>,
+    /// How each block forward executes ([`BlockExec`]).
+    exec: BlockExec,
 }
 
 /// Attach `adapter`'s corrections to block `l` (no-op without one) - the one
@@ -609,6 +611,13 @@ impl DitSession {
         self
     }
 
+    /// Execute every block forward this session runs as `exec` says - the
+    /// seam an A/B of the arena or the pipelining runs both arms through.
+    pub fn with_block_exec(mut self, exec: BlockExec) -> DitSession {
+        self.exec = exec;
+        self
+    }
+
     /// The runtime adapter this session's builds apply, if any.
     pub fn adapter(&self) -> Option<&SharedAdapter> {
         self.adapter.as_ref()
@@ -619,7 +628,7 @@ impl DitSession {
     /// residency existed, kept as the fallback and as the arm a bit-identity
     /// gate compares against.
     pub fn transient(device: Option<&str>) -> DitSession {
-        DitSession { gpu: None, device: device.map(str::to_string), window: Mutex::new(None), slots: 0, rope: RopeCache::default(), adapter: None }
+        DitSession { gpu: None, device: device.map(str::to_string), window: Mutex::new(None), slots: 0, rope: RopeCache::default(), adapter: None, exec: BlockExec::default() }
     }
 
     /// A session that holds its device open and keeps up to
@@ -641,7 +650,7 @@ impl DitSession {
             device = ?gpu.memory_device(),
             "device residency planned"
         );
-        DitSession { gpu: Some(gpu), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default(), adapter: None }
+        DitSession { gpu: Some(gpu), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default(), adapter: None, exec: BlockExec::default() }
     }
 
     /// [`Self::resident`] at an EXPLICIT slot count, bypassing the VRAM
@@ -653,7 +662,7 @@ impl DitSession {
     /// under test. `slots = 0` is the no-window fallback, which is a legal
     /// answer here rather than an error.
     pub fn resident_with_slots(device: Option<&str>, slots: u32) -> DitSession {
-        DitSession { gpu: Some(Gpu::open(device, &KERNELS)), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default(), adapter: None }
+        DitSession { gpu: Some(Gpu::open(device, &KERNELS)), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default(), adapter: None, exec: BlockExec::default() }
     }
 
     /// This session's device handle for one forward call. A transient session
@@ -868,7 +877,7 @@ impl DitSession {
                 Some(idx) => {
                     let w = guard.as_ref().expect("a slot index implies a window");
                     let blk = &w.slots[idx].as_ref().expect("the slot was just filled").1;
-                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt, perturbations.block(l))
+                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt, perturbations.block(l), self.exec)
                 }
                 None => {
                     // No window (or a slot the budget refused): upload, run,
@@ -890,7 +899,7 @@ impl DitSession {
                     let mut blk = LtxBlockQ::on_cached(scratch, cfg, &cached, t as u32, context_len as u32, tier);
                     adapted(&self.adapter, &mut *blk, l);
                     up_ms += s.elapsed();
-                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt, perturbations.block(l))
+                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt, perturbations.block(l), self.exec)
                 }
             };
             after_block(l, uploaded, up_ms, &bt);
@@ -951,12 +960,20 @@ pub struct AvDitSession {
     slots: u32,
     rope: RopeCache,
     adapter: Option<SharedAdapter>,
+    /// How each block forward executes ([`BlockExec`]).
+    exec: BlockExec,
 }
 
 impl AvDitSession {
     /// [`DitSession::with_adapter`] for the audio-visual blocks.
     pub fn with_adapter(mut self, adapter: Option<SharedAdapter>) -> AvDitSession {
         self.adapter = adapter;
+        self
+    }
+
+    /// [`DitSession::with_block_exec`] for the audio-visual blocks.
+    pub fn with_block_exec(mut self, exec: BlockExec) -> AvDitSession {
+        self.exec = exec;
         self
     }
 
@@ -969,7 +986,7 @@ impl AvDitSession {
     /// block re-uploaded. The fallback, and the arm a bit-identity gate
     /// compares a resident run against.
     pub fn transient(device: Option<&str>) -> AvDitSession {
-        AvDitSession { gpu: None, device: device.map(str::to_string), window: Mutex::new(None), slots: 0, rope: RopeCache::default(), adapter: None }
+        AvDitSession { gpu: None, device: device.map(str::to_string), window: Mutex::new(None), slots: 0, rope: RopeCache::default(), adapter: None, exec: BlockExec::default() }
     }
 
     /// A session that holds its device open and keeps up to
@@ -987,14 +1004,14 @@ impl AvDitSession {
             device = ?gpu.memory_device(),
             "audio+video device residency planned"
         );
-        AvDitSession { gpu: Some(gpu), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default(), adapter: None }
+        AvDitSession { gpu: Some(gpu), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default(), adapter: None, exec: BlockExec::default() }
     }
 
     /// [`Self::resident`] at an EXPLICIT slot count, bypassing the VRAM
     /// policy - what a gate uses to drive the partial-residency path
     /// deliberately at a config small enough to run in milliseconds.
     pub fn resident_with_slots(device: Option<&str>, slots: u32) -> AvDitSession {
-        AvDitSession { gpu: Some(Gpu::open(device, &KERNELS)), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default(), adapter: None }
+        AvDitSession { gpu: Some(Gpu::open(device, &KERNELS)), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default(), adapter: None, exec: BlockExec::default() }
     }
 
     pub fn device_for_call(&self) -> CallDevice<'_> {
@@ -1149,7 +1166,7 @@ impl AvDitSession {
                 Some(idx) => {
                     let w = guard.as_ref().expect("a slot index implies a window");
                     let blk = &w.slots[idx].as_ref().expect("the slot was just filled").1;
-                    blk.forward_prod_dev(scratch, &vx_dev, &ax_dev, &v_adaln_buf, &v_adaln_map, &a_adaln_buf, &a_adaln_map, &av, &v_ctx, &a_ctx, inp.rope, tv, ta, &mut bt, inp.perturbations.block(l))
+                    blk.forward_prod_dev(scratch, &vx_dev, &ax_dev, &v_adaln_buf, &v_adaln_map, &a_adaln_buf, &a_adaln_map, &av, &v_ctx, &a_ctx, inp.rope, tv, ta, &mut bt, inp.perturbations.block(l), self.exec)
                 }
                 None => {
                     // No window (or a slot the budget refused): upload, run,
@@ -1162,7 +1179,7 @@ impl AvDitSession {
                     let mut blk = LtxAvBlockQ::on_cached(scratch, &cfg.video, &cfg.audio, &weights(l, HostCopy::Keep), inp.v_context_len as u32, inp.a_context_len as u32, tier);
                     adapted(&self.adapter, &mut *blk, l);
                     up_ms += s.elapsed();
-                    blk.forward_prod_dev(scratch, &vx_dev, &ax_dev, &v_adaln_buf, &v_adaln_map, &a_adaln_buf, &a_adaln_map, &av, &v_ctx, &a_ctx, inp.rope, tv, ta, &mut bt, inp.perturbations.block(l))
+                    blk.forward_prod_dev(scratch, &vx_dev, &ax_dev, &v_adaln_buf, &v_adaln_map, &a_adaln_buf, &a_adaln_map, &av, &v_ctx, &a_ctx, inp.rope, tv, ta, &mut bt, inp.perturbations.block(l), self.exec)
                 }
             };
             vx_dev = v;

@@ -621,8 +621,6 @@ crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_DECODE_UPSAMPLE_RAW
 crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_DIT
 crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_PIXEL_DUMP
 crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_VAE
-crates/ltxv/src/block.rs	BRAIN_LTXV_NO_PIPELINE
-crates/ltxv/src/block.rs	BRAIN_LTXV_NO_SCRATCH_POOL
 crates/ltxv/src/pipeline.rs	<DFR_PATH_VARS[2].0>
 crates/ltxv/src/pipeline.rs	<OPTIONAL_PATH_VARS[2].0>
 crates/ltxv/src/pipeline.rs	<var>
