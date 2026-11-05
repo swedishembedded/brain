@@ -38,9 +38,9 @@ use residency::budget::Budgets;
 use residency::plan::{self, Part};
 // The headroom automatic placement keeps free on every card is the ONE margin
 // between a byte estimate and a real allocation, so it is defined beside the
-// probe it is subtracted from - see `gpu_core::capacity::HEADROOM` for why it
-// is 2 GiB and what it covers.
-use gpu_core::capacity::HEADROOM;
+// probe it is subtracted from - see `gpu_core::capacity::headroom` for how it
+// is sized and what it covers.
+use gpu_core::capacity::headroom;
 use residency::{Device, MemCost};
 
 /// How long a capacity snapshot is reused before the machine is re-probed.
@@ -77,7 +77,7 @@ pub fn host_ram_available() -> u64 {
 }
 
 /// Budgets for automatic placement: one per schedulable GPU sized to its FREE
-/// bytes less [`HEADROOM`], plus the host tier when `cpu_allowed`.
+/// bytes less [`headroom`], plus the host tier when `cpu_allowed`.
 ///
 /// The host tier, when declared, is a real execution tier (the CPU backend),
 /// and `residency::plan::plan` falls back to it whenever no card can hold a
@@ -95,7 +95,7 @@ pub fn budgets(gpus: &[(u32, u64)], ram: u64, cpu_allowed: bool) -> Budgets {
     let mut b = Budgets::new();
     let limits = memauth::limits();
     for &(i, free) in gpus {
-        b.set(Device::Gpu(i), limits.clamp(Device::Gpu(i), free), HEADROOM.min(free));
+        b.set(Device::Gpu(i), limits.clamp(Device::Gpu(i), free), headroom(free).min(free));
     }
     if cpu_allowed {
         b.set(Device::Cpu, limits.clamp(Device::Cpu, ram), 0);
@@ -288,7 +288,7 @@ mod tests {
     /// The 9B-diffusion shape that motivated phases: a denoiser and a decode
     /// graph that cannot co-reside take turns on ONE card, because the
     /// pipeline evicts the denoiser before it builds the decode graph. The
-    /// same declaration without phases - 31 GiB simultaneously resident on a
+    /// same declaration without phases - 28 GiB simultaneously resident on a
     /// 23 GiB card - must NOT all fit on that card. (It no longer fails
     /// outright: what does not fit a card now takes the host tier, slowly,
     /// rather than killing the run. What is being pinned here is that the
@@ -298,17 +298,17 @@ mod tests {
     fn phased_parts_take_turns_on_one_card() {
         let p = BudgetPlacer::new(budgets(&[(0, 23 * GIB)], 128 * GIB, true));
         let needs = [
-            Need::sized("dit", 13 * GIB, 0).apart().phase(1),
-            Need::sized("te", 7 * GIB, 0).apart(),
-            Need::sized("vae_dec", 11 * GIB, 0).with("dit").phase(2),
+            Need::sized("dit", 12 * GIB, 0).apart().phase(1),
+            Need::sized("te", 6 * GIB, 0).apart(),
+            Need::sized("vae_dec", 10 * GIB, 0).with("dit").phase(2),
         ];
         assert_eq!(
-            p.place(&needs).expect("peak = 7 + max(13, 11) = 20 GiB: fits"),
+            p.place(&needs).expect("peak = 6 + max(12, 10) = 18 GiB: fits"),
             vec![Home::Gpu(0), Home::Gpu(0), Home::Gpu(0)]
         );
         let unphased: Vec<Need> = needs.iter().cloned().map(|n| Need { phase: None, ..n }).collect();
         let homes = p.place(&unphased).expect("the host tier absorbs what the card cannot hold");
-        assert!(homes.contains(&Home::Cpu), "13 + 7 + 11 = 31 GiB live at once does not fit 23: {homes:?}");
+        assert!(homes.contains(&Home::Cpu), "12 + 6 + 10 = 28 GiB live at once does not fit 23: {homes:?}");
     }
 
     /// The real failure this headroom exists to catch: FLUX.2 klein-9b's
@@ -316,7 +316,7 @@ mod tests {
     /// checkpoint: 13,154,417,928 + 2,220,175,360) landed on a card reporting
     /// 15.4 GiB free. At the old 1 GiB headroom the plan judged that a fit
     /// (14.32 GiB needed vs 14.4 GiB budget - 0.08 GiB to spare) and the real
-    /// wgpu allocation then OOM'd, because HEADROOM's own doc says it covers
+    /// wgpu allocation then OOM'd, because the headroom's own doc says it covers
     /// exactly this gap (driver/context allocation, transient scratch a
     /// weights-only estimate omits) and 1 GiB was not enough margin for a
     /// ~14 GiB combined load. The card must be refused, not accepted on a

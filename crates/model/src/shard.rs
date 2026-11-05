@@ -507,7 +507,7 @@ impl StreamPlan {
     ///
     /// Free, not total: the driver keeps part of every card and another
     /// process may hold more, so a plan against a card's size overfills it
-    /// (`gpu_core::capacity` is the one probe; [`gpu_core::capacity::HEADROOM`]
+    /// (`gpu_core::capacity` is the one probe; [`gpu_core::capacity::headroom`]
     /// is already off its figure). A card whose free bytes cannot be measured
     /// is budgeted at the probe's conservative assumption instead.
     pub fn cards(device: Option<&str>, reserve: u64) -> Vec<(usize, u64)> {
@@ -516,7 +516,7 @@ impl StreamPlan {
         schedulable_gpus(device)
             .into_iter()
             .filter_map(|i| {
-                let free = capacity::available_for(i as u32).or_else(|| assumed().into_iter().find(|&(g, _)| g as usize == i).map(|(_, b)| b.saturating_sub(capacity::HEADROOM)))?;
+                let free = capacity::available_for(i as u32).or_else(|| assumed().into_iter().find(|&(g, _)| g as usize == i).map(|(_, b)| b.saturating_sub(capacity::headroom(b))))?;
                 Some((i, free.saturating_sub(reserve)))
             })
             .filter(|&(_, usable)| usable > 0)

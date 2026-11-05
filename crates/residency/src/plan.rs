@@ -91,7 +91,7 @@ pub struct Part {
 /// unsized groups are placed LAST (nothing follows them to distort - see the
 /// sort in [`plan`]) and only onto a card with real slack left. This constant
 /// is what "real slack" means: the same order of magnitude as
-/// `crates/cli`'s own `HEADROOM`, and for the same reason - a fresh `Gpu`
+/// `gpu_core::capacity::HEADROOM`, and for the same reason - a fresh `Gpu`
 /// handle's driver/context allocation plus a minimal activation scratch is
 /// already about this big before any weights are read. A card below it is
 /// full for practical purposes, and the part goes to the host tier instead.

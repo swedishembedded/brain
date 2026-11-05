@@ -74,7 +74,7 @@ impl GpuMem {
     /// The bytes a budget may be built from on this card: what is free, less
     /// a conservative margin when `free` was assumed rather than measured.
     ///
-    /// The consumer's own reserve (the one-shot placer's `HEADROOM`, the
+    /// The consumer's own reserve (the one-shot placer's [`headroom`], the
     /// daemon's `--reserve-gb`) is applied ON TOP of this, by whoever calls
     /// `Budgets::set` - this function reports the machine, not the policy.
     pub fn available(&self) -> u64 {
@@ -183,25 +183,42 @@ pub fn gpu_totals() -> Vec<(u32, u64)> {
 /// Budgets here are built from **free** VRAM, not total, so this is not the
 /// serving path's `--reserve-gb` (which carves a slice out of a whole card so
 /// resident models never pack it to the brim). It covers what a model's own
-/// figure does not: the driver/context allocation a fresh `Gpu` makes, and
-/// transient activation scratch a weights-only estimate omits.
+/// figure does not: the driver/context allocation a fresh `Gpu` makes
+/// ([`CONTEXT_RESERVE`]), the allocator's own overhead, which grows with what
+/// is allocated (block granularity, alignment, bind group padding:
+/// [`ALLOC_OVERHEAD_PERCENT`] of it), and transient scratch a weights-only
+/// estimate omits ([`HEADROOM`], the floor). A budget `b` of the `free`
+/// bytes then holds when `b * (1 + overhead) + context <= free`.
 ///
-/// 1 GiB measured too thin for a real large model: FLUX.2 klein-9B's
-/// `dit`+`vae_enc` (13,154,417,928 + 2,220,175,360 bytes, measured off this
-/// repo's own checkpoint) landed on a card reporting 15.4 GiB free - the plan
-/// judged that a fit at 1 GiB headroom (14.32 GiB needed vs 14.4 GiB budget,
-/// 0.08 GiB to spare) and the real wgpu allocation then hit an actual
-/// out-of-memory panic, because real allocator overhead (alignment, bind
-/// group padding, the scratch this estimate approximates rather than derives
-/// exactly) exceeded 0.08 GiB. 2 GiB gives a real, measured model room to be
-/// wrong by more than a rounding error without turning into a driver panic -
-/// see `a_near_ceiling_plan_does_not_ride_the_edge_of_a_single_card` in
-/// `crates/cli/src/placement.rs` for the regression this closes.
+/// Three measured cases on a Tesla P40 set the terms:
+///
+/// * FLUX.2 klein-9B's `dit`+`vae_enc` (13,154,417,928 + 2,220,175,360 bytes)
+///   on a card reporting 15.4 GiB free: judged a fit at 1 GiB headroom with
+///   0.08 GiB to spare, then failed - hence the 2 GiB floor
+///   (`a_near_ceiling_plan_does_not_ride_the_edge_of_a_single_card` in
+///   `crates/loader/src/placement.rs`).
+/// * MiniMax-H3's int8 DiT on an idle card reporting 24,433 MiB free: wgpu
+///   failed with 21,232 MiB of buffers requested, where a 2 GiB headroom
+///   budgeted 22,385 MiB - about 3.2 GiB of the free memory never reached a
+///   buffer. The overhead terms budget 20,983 MiB, so the plan splits the
+///   model over two cards instead.
+pub fn headroom(free: u64) -> u64 {
+    let budget = free.saturating_sub(CONTEXT_RESERVE) / (100 + ALLOC_OVERHEAD_PERCENT) * 100;
+    HEADROOM.max(free.saturating_sub(budget))
+}
+
+/// [`headroom`]'s floor.
 pub const HEADROOM: u64 = 2 << 30;
+
+/// [`headroom`]'s fixed driver/context share.
+pub const CONTEXT_RESERVE: u64 = 512 << 20;
+
+/// [`headroom`]'s allocator overhead, as a share of what is allocated.
+pub const ALLOC_OVERHEAD_PERCENT: u64 = 14;
 
 /// What a graph built on THIS thread's device may spend right now: the card a
 /// `Gpu::new` here would land on ([`crate::devices::selected_device`]), less
-/// [`HEADROOM`] - or `None` when there is no card whose free bytes were really
+/// [`headroom`] - or `None` when there is no card whose free bytes were really
 /// measured.
 ///
 /// `None` is the honest answer in three cases, and every one of them means
@@ -237,7 +254,8 @@ pub fn available_for(index: u32) -> Option<u64> {
     if !card.measured {
         return None;
     }
-    Some(card.available().saturating_sub(HEADROOM))
+    let free = card.available();
+    Some(free.saturating_sub(headroom(free)))
 }
 
 thread_local! {
@@ -278,6 +296,21 @@ pub fn with_available<R>(bytes: Option<u64>, f: impl FnOnce() -> R) -> R {
 
 #[cfg(test)]
 mod tests {
+
+    /// The measured points [`headroom`] is set from: a budget must land
+    /// below what the allocator actually delivered, and a load well inside
+    /// it must still fit.
+    #[test]
+    fn the_headroom_keeps_a_budget_below_both_measured_failures() {
+        const MIB: u64 = 1 << 20;
+        let free = 24_433 * MIB;
+        assert!(free - headroom(free) < 21_232 * MIB, "an idle P40's budget must sit below the 21,232 MiB the H3 int8 load failed at");
+        let flux_free = 15 * 1024 * MIB + 410 * MIB;
+        assert!(flux_free - headroom(flux_free) < 13_154_417_928 + 2_220_175_360, "FLUX.2 klein-9B's dit+vae_enc must not fit the card it failed on");
+        assert!(23 * 1024 * MIB - headroom(23 * 1024 * MIB) >= 18 * 1024 * MIB, "an 18 GiB peak stays a fit on a 23 GiB card");
+        assert_eq!(headroom(4 << 30), HEADROOM, "small cards keep the floor");
+    }
+
     use super::*;
 
     const GIB: u64 = 1 << 30;

@@ -48,8 +48,8 @@
 //! Not counted: `tokens`/`targets` (`[n]` id buffers), the `[n·r]` LoRA
 //! rank scratch, and the handful of `[1]`-sized dummies every non-owned
 //! stage carries - all a rounding error next to the terms above, and what
-//! `crates/cli/src/placement.rs::HEADROOM` (1 GiB, reserved on top of every
-//! automatic placement) exists to absorb, the same way it already does for
+//! `gpu_core::capacity::headroom` (reserved on top of every automatic
+//! placement) exists to absorb, the same way it already does for
 //! every other model that declares a sized [`gpu_core::devices::Need`].
 
 use gpu_core::select::Dtype;

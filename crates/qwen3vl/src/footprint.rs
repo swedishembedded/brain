@@ -41,8 +41,8 @@
 //! Not counted: biases and norm vectors (`[d]`/`[hidden]` vectors, a
 //! rounding error next to the GEMM weights above) and the handful of host
 //! transient buffers a real build also touches - both are what
-//! `crates/cli/src/placement.rs::HEADROOM` (1 GiB, reserved on top of every
-//! automatic placement) exists to absorb, the same way it already does for
+//! `gpu_core::capacity::headroom` (reserved on top of every automatic
+//! placement) exists to absorb, the same way it already does for
 //! every other model that declares a sized [`gpu_core::devices::Need`].
 
 use gpu_core::select::Dtype;
