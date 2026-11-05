@@ -204,7 +204,7 @@ impl ResidentModel for MiniMaxH3Resident {
         let tier = key_tier(&dtype).unwrap_or(gpu_core::select::Dtype::F32);
         let weights = minimaxh3::model::resident_cost(&dit_cfg, tier).total();
         let vae_weights = manifest_bytes(&VideoVaeConfig::real().tensor_manifest()) + manifest_bytes(&minimaxh3::vocoder::VocoderConfig::h3_32khz().tensor_manifest());
-        let activations = minimaxh3::model::block_workspace_bytes(&dit_cfg, packed_rows(vf, vh, vw, audio) + reference_rows);
+        let activations = minimaxh3::model::forward_workspace_bytes(&dit_cfg, packed_rows(vf, vh, vw, audio) + reference_rows);
         let (ph, pw) = (dit_cfg.patch_size[1] as u64, dit_cfg.patch_size[2] as u64);
         let pixels = vf as u64 * (vh as u64 * ph) * (vw as u64 * pw) * 3 * 4;
 

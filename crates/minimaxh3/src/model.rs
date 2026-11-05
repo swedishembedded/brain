@@ -314,6 +314,15 @@ pub fn block_workspace_bytes(cfg: &H3TransformerConfig, rows: u32) -> u64 {
     rows as u64 * (12 * hidden + 6 * inner + 3 * ffn) * 4
 }
 
+/// Peak transient device bytes one card's share of a forward allocates over
+/// `rows` packed rows: [`block_workspace_bytes`] plus what the stage holds
+/// beside its blocks - the packed sequence the embed stage builds and its
+/// fill staging, and the residual a block reads while the next one's is
+/// written.
+pub fn forward_workspace_bytes(cfg: &H3TransformerConfig, rows: u32) -> u64 {
+    block_workspace_bytes(cfg, rows) + rows as u64 * 3 * cfg.hidden_size as u64 * 4
+}
+
 /// The resident model's per-card cost at `tier`: the block stack, the embed
 /// stage's projections and refiner, and the head stage's output projections.
 pub fn resident_cost(cfg: &H3TransformerConfig, tier: Dtype) -> LayerBytes {
@@ -331,7 +340,7 @@ impl H3Transformer {
     /// does, or when the cards cannot run `tier` - the caller streams instead
     /// ([`Self::forward_streaming`]).
     pub fn load(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, device: Option<&str>, tier: Dtype, rows: u32) -> Result<H3Transformer, String> {
-        let cards = StreamPlan::cards(device, block_workspace_bytes(&cfg, rows));
+        let cards = StreamPlan::cards(device, forward_workspace_bytes(&cfg, rows));
         let cost = resident_cost(&cfg, tier);
         let plan = StreamPlan::fit(&cost, &cards).ok_or_else(|| format!("minimaxh3: the DiT at {tier:?} is {} bytes, which no combination of the schedulable cards holds with {rows}-row workspace free (usable bytes {cards:?})", cost.total()))?;
         H3Transformer::load_on(tensors, cfg, plan, device, tier)
@@ -384,7 +393,7 @@ impl H3Transformer {
     /// `MiniMaxH3Transformer3DModel.forward`, at batch size 1 (see this
     /// module's own doc).
     pub fn forward(&self, inp: &PackedInputs) -> H3Output {
-        self.forward_with_taps(inp).0
+        forward_core(&self.cfg, &self.plan, &|s| &self.stages[s], self, inp, false).0
     }
 
     /// [`Self::forward`], plus the intermediate parity taps
@@ -394,7 +403,7 @@ impl H3Transformer {
     /// own entry point, so a mismatch localizes to the first tap it breaks
     /// rather than only showing up in the final output.
     pub fn forward_with_taps(&self, inp: &PackedInputs) -> (H3Output, H3Taps) {
-        forward_core(&self.cfg, &self.plan, &|s| &self.stages[s], self, inp)
+        forward_core(&self.cfg, &self.plan, &|s| &self.stages[s], self, inp, true)
     }
 
     /// One forward WITHOUT a resident model: each stage of `dit`'s plan
@@ -410,12 +419,12 @@ impl H3Transformer {
     /// device per step: wgpu gives no guarantee the previous one's resources
     /// are reclaimed before the next opens.
     pub fn forward_streaming(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, dit: &StreamingDit, inp: &PackedInputs) -> H3Output {
-        Self::forward_streaming_with_taps(tensors, cfg, dit, inp).0
+        forward_core(cfg, dit.plan(), &|s| dit.stage(s), &Streamed { tensors, cfg, dit }, inp, false).0
     }
 
     /// [`Self::forward_streaming`] with [`Self::forward_with_taps`]'s taps.
     pub fn forward_streaming_with_taps(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, dit: &StreamingDit, inp: &PackedInputs) -> (H3Output, H3Taps) {
-        forward_core(cfg, dit.plan(), &|s| dit.stage(s), &Streamed { tensors, cfg, dit }, inp)
+        forward_core(cfg, dit.plan(), &|s| dit.stage(s), &Streamed { tensors, cfg, dit }, inp, true)
     }
 }
 
@@ -430,7 +439,11 @@ const REFINER_ARENA: &str = "minimaxh3 refiner";
 /// next): an f32 round trip through host memory is lossless, so a split plan
 /// computes bit-identical numbers to the single-stage one and changes only
 /// where the work happens.
-fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn(usize) -> &'c Ctx, weights: &dyn StageWeights, inp: &PackedInputs) -> (H3Output, H3Taps) {
+///
+/// `taps` reads the parity taps back ([`H3Taps`]); a production forward
+/// passes `false` and gets them empty, since each is a full-sequence
+/// readback that holds its block's buffers past the block.
+fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn(usize) -> &'c Ctx, weights: &dyn StageWeights, inp: &PackedInputs, taps: bool) -> (H3Output, H3Taps) {
     let hidden = cfg.hidden_size;
     let seq_len = (inp.position_ids.len() / 3) as u32;
     assert_eq!(inp.token_tags.len(), seq_len as usize, "forward: token_tags must be [seq_len]");
@@ -494,7 +507,9 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
                 cx.gpu.poll_wait();
             }
             let text_embeds = block::rmsnorm(cx, &text_embeds, &e.refiner_final_norm, num_text, hidden, cfg.final_norm_eps);
-            tap_refiner_out = cx.gpu.read(&text_embeds, (num_text * hidden) as usize);
+            if taps {
+                tap_refiner_out = cx.gpu.read(&text_embeds, (num_text * hidden) as usize);
+            }
 
             // 2. Scatter every modality's projected rows into the packed
             // sequence buffer (`index_copy` in the reference).
@@ -511,7 +526,7 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
         };
 
         // 3. This stage's own slice of the block stack.
-        if shard.owns(0) {
+        if taps && shard.owns(0) {
             tap_block0_input = cx.gpu.read(&h, (seq_len * hidden) as usize);
         }
         for i in shard.start..shard.end {
@@ -521,19 +536,20 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
             // the arena hands each block the previous block's buffers instead
             // of a fresh multi-hundred-MB driver allocation per op. The
             // `poll_wait` below drains the block before the next scope opens.
-            let (out, attn_out) = {
+            let out = {
                 let _arena = cx.gpu.scratch_scope_in(BLOCK_ARENA);
                 let rows = modulation.block_rows(i, inp.timestep).unwrap_or_else(|e| panic!("minimaxh3 forward: {e}"));
-                block::block_forward(cx, &w, &h, adaln_idx_dev, cos, sin, &rows, cfg, seq_len)
+                let (out, attn_out) = block::block_forward(cx, &w, &h, adaln_idx_dev, cos, sin, &rows, cfg, seq_len);
+                if taps && i == 0 {
+                    tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
+                    tap_block0_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
+                }
+                out
             };
-            if i == 0 {
-                tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
-                tap_block0_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
-            }
-            if i == mid_block_index {
+            if taps && i == mid_block_index {
                 tap_mid_block_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
             }
-            if i == last_block_index {
+            if taps && i == last_block_index {
                 tap_last_block_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
             }
             h = out;
