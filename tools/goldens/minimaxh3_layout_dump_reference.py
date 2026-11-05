@@ -29,7 +29,11 @@ i.e. the shape an actual generation runs, not a toy - a layout bug that only
 appears once the sequence is long enough to wrap the `(1,4,4,4,4)` rotary
 spacing or to collapse a duplicate sigma cannot hide at this size. A second
 case adds `("first", "last")` keyframe anchors so the conditioning rows and
-the pairwise-summed `"last"` anchor time are covered too.
+the pairwise-summed `"last"` anchor time are covered too, and a `ref2va` case
+(`MiniMaxH3Ref2VAPrepareLayoutStep.build_ref2va_packed_sequence`) packs one
+reference of every kind - a video with a soundtrack long enough (17 latent
+frames) for its sequentially summed rotary span to differ from a pairwise one,
+an image, a lone soundtrack and a silent video - ahead of the same target.
 
 Usage:
   python3 tools/goldens/minimaxh3_layout_dump_reference.py \\
@@ -50,6 +54,7 @@ from golden_source import source_block  # noqa: E402
 
 from diffusers.modular_pipelines.minimax_h3.before_denoise import (  # noqa: E402
     MiniMaxH3PrepareLayoutStep,
+    MiniMaxH3Ref2VAPrepareLayoutStep,
     MiniMaxH3SetTimestepsStep,
     patchify_video_latents,
 )
@@ -74,6 +79,16 @@ NUM_INFERENCE_STEPS = 20
 VIDEO_SHIFT = 12.0
 AUDIO_SHIFT = 3.0
 KEYFRAME_NOISE_AUG = 0.999
+# `ref2va` references in packed order: (kind, latent frames, latent height,
+# latent width, soundtrack latents per channel). The kind codes are the ones
+# the Rust test reads back: 0 image, 1 video, 2 audio.
+REF2VA_REFERENCES = (
+    ("video", 17, 6, 10, 120),
+    ("image", 1, 8, 12, 0),
+    ("audio", 0, 0, 0, 50),
+    ("video", 2, 4, 4, 0),
+)
+KIND_CODES = {"image": 0, "video": 1, "audio": 2}
 
 
 def layout_case(tensors, prefix, keyframe_anchors):
@@ -105,6 +120,25 @@ def layout_case(tensors, prefix, keyframe_anchors):
         keyframe_anchors,
     )
 
+    dump_layout(
+        tensors,
+        prefix,
+        text_token_tags,
+        (position_ids, token_tags, video_indices, audio_indices, text_indices, num_condition_video_rows, num_condition_audio_rows),
+    )
+
+
+def dump_layout(tensors, prefix, text_token_tags, layout):
+    """One packed layout plus its full `build_row_timesteps` plan."""
+    (
+        position_ids,
+        token_tags,
+        video_indices,
+        audio_indices,
+        text_indices,
+        num_condition_video_rows,
+        num_condition_audio_rows,
+    ) = layout
     # The rotary grid is built in float64, but the transformer's own rope
     # casts it to float32 before it is ever used
     # (`MiniMaxH3RotaryPosEmbed.forward`: `position_ids.to(torch.float32)`),
@@ -156,6 +190,48 @@ def layout_case(tensors, prefix, keyframe_anchors):
         [int(u.numel()) for u in unique_rows], dtype=torch.int32
     )
     tensors[f"{prefix}_row_timestep_indices"] = torch.stack(index_rows).contiguous()
+
+
+class _Reference:
+    """What `build_ref2va_packed_sequence` reads of a reference: its kind and
+    whether it carries a soundtrack. The geometry comes from the latents."""
+
+    def __init__(self, kind, has_audio):
+        self.kind = kind
+        self.has_audio = has_audio
+
+
+def ref2va_case(tensors):
+    """`build_ref2va_packed_sequence` over one reference of every kind."""
+    prefix = "ref2va"
+    text_token_tags = torch.full((NUM_TEXT_TOKENS,), MINIMAX_H3_TEXT_TAG, dtype=torch.long)
+    text_token_tags[3:9] = MINIMAX_H3_VIDEO_TAG
+    references, condition_latents, audio_condition_latents = [], [], []
+    for kind, frames, height, width, audio_latents in REF2VA_REFERENCES:
+        references.append(_Reference(kind, audio_latents > 0))
+        if kind != "audio":
+            condition_latents.append(torch.zeros(1, LATENT_CHANNELS, frames, height, width))
+        if audio_latents:
+            audio_condition_latents.append(torch.zeros(audio_latents * AUDIO_CHANNELS, AUDIO_LATENT_CHANNELS))
+    layout = MiniMaxH3Ref2VAPrepareLayoutStep.build_ref2va_packed_sequence(
+        text_token_tags,
+        references,
+        condition_latents,
+        audio_condition_latents,
+        NUM_LATENT_FRAMES,
+        LATENT_HEIGHT,
+        LATENT_WIDTH,
+        NUM_AUDIO_LATENTS,
+        PATCH_SIZE,
+        AUDIO_CHANNELS,
+        MINIMAX_H3_AUDIO_TAG,
+        MINIMAX_H3_VIDEO_TAG,
+    )
+    tensors[f"{prefix}_references"] = torch.tensor(
+        [[KIND_CODES[kind], frames, height, width, audio] for kind, frames, height, width, audio in REF2VA_REFERENCES],
+        dtype=torch.int32,
+    )
+    dump_layout(tensors, prefix, text_token_tags, layout)
 
 
 def schedule_case(tensors, seed):
@@ -255,6 +331,7 @@ def main():
     tensors = {}
     layout_case(tensors, "t2va", ())
     layout_case(tensors, "fl2va", ("first", "last"))
+    ref2va_case(tensors)
     schedule_case(tensors, args.seed)
     patchify_case(tensors, args.seed)
 

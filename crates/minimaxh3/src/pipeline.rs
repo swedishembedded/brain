@@ -321,55 +321,173 @@ pub fn build_packed_sequence(text_token_tags: &[u32], num_latent_frames: u32, la
         }
     }
 
-    // Audio rows: channel-major, `audio_time.repeat(audio_channels)` (torch
-    // `repeat` on a 1D tensor TILES, it does not repeat-each), pinned to the
-    // width grid's extremes - the first `num_audio_latents` rows (channel 0)
-    // at `width_grid[0]`, every remaining row (every other channel) at
-    // `width_grid[-1]`.
-    let w_first = width_grid[0];
-    let w_last = width_grid[width_grid.len() - 1];
-    for c in 0..audio_channels {
-        for k in 0..num_audio_latents {
-            let row = (audio_start + c * num_audio_latents + k) as usize;
-            position_ids[row * 3] = num_text_tokens as f64 + k as f64;
-            position_ids[row * 3 + 2] = if c == 0 { w_first } else { w_last };
-        }
-    }
-
-    let temporal = temporal_position_grid(num_latent_frames as usize, num_text_tokens as f64);
-    for f in 0..num_latent_frames {
-        for r in 0..rows_per_frame {
-            let row = (video_start + f * rows_per_frame + r) as usize;
-            position_ids[row * 3] = temporal[f as usize];
-            position_ids[row * 3 + 1] = frame_grid[r as usize][0];
-            position_ids[row * 3 + 2] = frame_grid[r as usize][1];
-        }
-    }
+    fill_audio_positions(&mut position_ids, audio_start, num_audio_latents, num_text_tokens as f64, &width_grid, audio_channels);
+    fill_video_positions(&mut position_ids, video_start, num_latent_frames, num_text_tokens as f64, &frame_grid);
 
     let video_indices: Vec<u32> = (condition_start..audio_start).chain(video_start..sequence_length).collect();
     let audio_indices: Vec<u32> = (audio_start..video_start).collect();
-    let text_indices: Vec<u32> = (0..num_text_tokens).collect();
+    finish_packed_sequence(position_ids, text_token_tags, video_indices, audio_indices, num_condition_rows as usize, 0)
+}
 
-    let mut token_tags = vec![0u32; sequence_length as usize];
-    for (row, &tag) in text_indices.iter().zip(text_token_tags) {
-        token_tags[*row as usize] = tag;
+/// `_fill_audio_positions`: one channel-major audio block of `num_latents`
+/// rows per channel starting at row `start`. Its time is
+/// `origin + arange(num_latents)` tiled over the channels (torch `repeat` on
+/// a 1D tensor TILES, it does not repeat-each); audio rows carry no height
+/// coordinate and pin channel 0 to `width_grid[0]` and every other channel to
+/// `width_grid[-1]` - the width grid of the block's OWN visual partner (the
+/// target grid for the generated audio and a lone reference soundtrack, the
+/// video's grid for a reference video's soundtrack).
+fn fill_audio_positions(position_ids: &mut [f64], start: u32, num_latents: u32, origin: f64, width_grid: &[f64], audio_channels: u32) {
+    let w_first = width_grid[0];
+    let w_last = width_grid[width_grid.len() - 1];
+    for c in 0..audio_channels {
+        for k in 0..num_latents {
+            let row = (start + c * num_latents + k) as usize;
+            position_ids[row * 3] = origin + k as f64;
+            position_ids[row * 3 + 2] = if c == 0 { w_first } else { w_last };
+        }
     }
+}
+
+/// `num_latent_frames` frames of `frame_grid` rows starting at row `start`,
+/// on the rotary clock from `origin` ([`temporal_position_grid`]).
+fn fill_video_positions(position_ids: &mut [f64], start: u32, num_latent_frames: u32, origin: f64, frame_grid: &[[f64; 2]]) {
+    let temporal = temporal_position_grid(num_latent_frames as usize, origin);
+    let rows_per_frame = frame_grid.len();
+    for (f, &time) in temporal.iter().enumerate() {
+        for (r, hw) in frame_grid.iter().enumerate() {
+            let row = start as usize + f * rows_per_frame + r;
+            position_ids[row * 3] = time;
+            position_ids[row * 3 + 1] = hw[0];
+            position_ids[row * 3 + 2] = hw[1];
+        }
+    }
+}
+
+/// The modality tags of a finished layout plus its narrowing to the f32 grid
+/// the transformer's rope reads (`position_ids.to(torch.float32)`).
+fn finish_packed_sequence(position_ids: Vec<f64>, text_token_tags: &[u32], video_indices: Vec<u32>, audio_indices: Vec<u32>, num_condition_video_rows: usize, num_condition_audio_rows: usize) -> PackedSequence {
+    let text_indices: Vec<u32> = (0..text_token_tags.len() as u32).collect();
+    let mut token_tags = vec![0u32; position_ids.len() / 3];
+    token_tags[..text_token_tags.len()].copy_from_slice(text_token_tags);
     for &row in &audio_indices {
         token_tags[row as usize] = TAG_AUDIO;
     }
     for &row in &video_indices {
         token_tags[row as usize] = TAG_VIDEO;
     }
-
     PackedSequence {
         position_ids: position_ids.iter().map(|&v| v as f32).collect(),
         token_tags,
         video_indices,
         audio_indices,
         text_indices,
-        num_condition_video_rows: num_condition_rows as usize,
-        num_condition_audio_rows: 0,
+        num_condition_video_rows,
+        num_condition_audio_rows,
     }
+}
+
+/// The latent geometry of one `ref2va` reference, in packed order - the
+/// shape its encoding produced, so the layout and the encoded rows can never
+/// disagree. Image references are always a single latent frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReferenceGeometry {
+    Image { latent_height: u32, latent_width: u32 },
+    /// `soundtrack_latents` is the per-channel latent count of the video's
+    /// own soundtrack, `0` for a silent video.
+    Video { latent_frames: u32, latent_height: u32, latent_width: u32, soundtrack_latents: u32 },
+    Audio { latents: u32 },
+}
+
+impl ReferenceGeometry {
+    fn video_rows(&self, patch_h: u32, patch_w: u32) -> u32 {
+        match *self {
+            ReferenceGeometry::Image { latent_height, latent_width } => (latent_height / patch_h) * (latent_width / patch_w),
+            ReferenceGeometry::Video { latent_frames, latent_height, latent_width, .. } => latent_frames * (latent_height / patch_h) * (latent_width / patch_w),
+            ReferenceGeometry::Audio { .. } => 0,
+        }
+    }
+
+    fn audio_latents(&self) -> u32 {
+        match *self {
+            ReferenceGeometry::Image { .. } => 0,
+            ReferenceGeometry::Video { soundtrack_latents, .. } => soundtrack_latents,
+            ReferenceGeometry::Audio { latents } => latents,
+        }
+    }
+}
+
+/// `MiniMaxH3Ref2VAPrepareLayoutStep.build_ref2va_packed_sequence`, ported
+/// exactly: `[text | reference blocks | target audio | target video]`.
+///
+/// The reference blocks advance one shared audio/video rotary clock, starting
+/// where the text rows end, in request order - so the order of `references`
+/// is part of the request, not a presentation detail. An image takes one
+/// integer slot; a lone soundtrack its latent count; a video (its soundtrack
+/// packed immediately before its frames, on the same origin) the longer of
+/// its soundtrack and its frames' rotary span. The generated audio and video
+/// then share the origin the references left behind.
+///
+/// A video's span is summed SEQUENTIALLY here, unlike the `"last"` keyframe
+/// anchor's pairwise sum in [`build_packed_sequence`]: the reference
+/// implementation keeps both orders, one per call site, and the two differ
+/// in the last ulp from 16 latent frames onward.
+#[allow(clippy::too_many_arguments)]
+pub fn build_ref2va_packed_sequence(text_token_tags: &[u32], references: &[ReferenceGeometry], num_latent_frames: u32, latent_height: u32, latent_width: u32, num_audio_latents: u32, patch_size: [u32; 3], audio_channels: u32) -> PackedSequence {
+    let (patch_h, patch_w) = (patch_size[1], patch_size[2]);
+    let num_text_tokens = text_token_tags.len() as u32;
+    let num_reference_video_rows: u32 = references.iter().map(|r| r.video_rows(patch_h, patch_w)).sum();
+    let num_reference_audio_rows: u32 = references.iter().map(|r| r.audio_latents() * audio_channels).sum();
+    let (target_frame_grid, target_width_grid) = frame_position_grid(latent_height, latent_width, patch_h, patch_w);
+    let num_target_audio_rows = num_audio_latents * audio_channels;
+    let num_target_video_rows = num_latent_frames * target_frame_grid.len() as u32;
+    let sequence_length = num_text_tokens + num_reference_video_rows + num_reference_audio_rows + num_target_audio_rows + num_target_video_rows;
+
+    let mut position_ids = vec![0f64; sequence_length as usize * 3];
+    for i in 0..num_text_tokens {
+        position_ids[(i * 3) as usize] = i as f64;
+    }
+
+    let (mut video_indices, mut audio_indices) = (Vec::new(), Vec::new());
+    let mut cursor = num_text_tokens;
+    let mut rotary_time = num_text_tokens as f64;
+    for reference in references {
+        match *reference {
+            ReferenceGeometry::Image { latent_height, latent_width } => {
+                let (frame_grid, _) = frame_position_grid(latent_height, latent_width, patch_h, patch_w);
+                fill_video_positions(&mut position_ids, cursor, 1, rotary_time, &frame_grid);
+                video_indices.extend(cursor..cursor + frame_grid.len() as u32);
+                cursor += frame_grid.len() as u32;
+                rotary_time += 1.0;
+            }
+            ReferenceGeometry::Audio { latents } => {
+                fill_audio_positions(&mut position_ids, cursor, latents, rotary_time, &target_width_grid, audio_channels);
+                audio_indices.extend(cursor..cursor + latents * audio_channels);
+                cursor += latents * audio_channels;
+                rotary_time += latents as f64;
+            }
+            ReferenceGeometry::Video { latent_frames, latent_height, latent_width, soundtrack_latents } => {
+                let (frame_grid, width_grid) = frame_position_grid(latent_height, latent_width, patch_h, patch_w);
+                fill_audio_positions(&mut position_ids, cursor, soundtrack_latents, rotary_time, &width_grid, audio_channels);
+                audio_indices.extend(cursor..cursor + soundtrack_latents * audio_channels);
+                cursor += soundtrack_latents * audio_channels;
+                fill_video_positions(&mut position_ids, cursor, latent_frames, rotary_time, &frame_grid);
+                let video_rows = latent_frames * frame_grid.len() as u32;
+                video_indices.extend(cursor..cursor + video_rows);
+                cursor += video_rows;
+                let video_span: f64 = (0..latent_frames as usize).map(|i| ROPE_FRAME_RESCALE * ROPE_FRAMES_PER_LATENT[i % ROPE_FRAMES_PER_LATENT.len()]).fold(0.0, |acc, v| acc + v);
+                rotary_time += (soundtrack_latents as f64).max(video_span);
+            }
+        }
+    }
+
+    let audio_start = cursor;
+    let video_start = audio_start + num_target_audio_rows;
+    fill_audio_positions(&mut position_ids, audio_start, num_audio_latents, rotary_time, &target_width_grid, audio_channels);
+    fill_video_positions(&mut position_ids, video_start, num_latent_frames, rotary_time, &target_frame_grid);
+    video_indices.extend(video_start..sequence_length);
+    audio_indices.extend(audio_start..video_start);
+    finish_packed_sequence(position_ids, text_token_tags, video_indices, audio_indices, num_reference_video_rows as usize, num_reference_audio_rows as usize)
 }
 
 // ============================================================================
@@ -544,35 +662,67 @@ pub struct KeyframeCondition {
 /// (small, VAE-regularized) variance, not a different quantity in kind.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_keyframe_condition(video_vae_cfg: &VideoVaeConfig, video_vae_tensors: &Tensors, device: Option<&str>, pixels_rgb: &[f32], height: u32, width: u32, video_latents_mean: &[f32], video_latents_std: &[f32], patch_size: [u32; 3], anchor: Anchor, seed: u64) -> KeyframeCondition {
-    let c = video_vae_cfg.in_channels;
-    assert_eq!(pixels_rgb.len(), (c * height * width) as usize, "encode_keyframe_condition: pixels_rgb length mismatch");
-    let mut px = vec![0f32; pixels_rgb.len()];
-    for cc in 0..c as usize {
-        let (mean, std) = (PIXEL_MEAN[cc], PIXEL_STD[cc]);
-        for i in 0..(height * width) as usize {
-            px[cc * (height * width) as usize + i] = (pixels_rgb[cc * (height * width) as usize + i] / 255.0 - mean) / std;
-        }
-    }
+    let visual = encode_visual_condition(&VisualConditionRequest { video_vae_cfg, video_vae_tensors, device, video_latents_mean, video_latents_std, patch_size, seed }, pixels_rgb, 1, height, width);
+    KeyframeCondition { anchor, rows: visual.rows }
+}
 
-    let (moments, t1, h1, w1) = crate::video_vae::encode(video_vae_cfg, video_vae_tensors, device, &px, 1, height, width);
-    let latent_channels = video_vae_cfg.latent_channels;
+/// What [`encode_visual_condition`] needs besides the pixels: the video VAE,
+/// its latent normalization, the DiT patch, and the conditioning noise seed.
+pub struct VisualConditionRequest<'a> {
+    pub video_vae_cfg: &'a VideoVaeConfig,
+    pub video_vae_tensors: &'a Tensors,
+    pub device: Option<&'a str>,
+    pub video_latents_mean: &'a [f32],
+    pub video_latents_std: &'a [f32],
+    pub patch_size: [u32; 3],
+    pub seed: u64,
+}
+
+/// One encoded visual condition: noised, patchified rows plus the latent
+/// geometry they were patchified from.
+pub struct VisualCondition {
+    pub rows: Vec<f32>,
+    pub latent_frames: u32,
+    pub latent_height: u32,
+    pub latent_width: u32,
+}
+
+/// `encode_vae_condition` + `scale_noise` + `patchify_video_latents` for
+/// any visual condition - a keyframe, an image reference (`num_frames == 1`,
+/// the spatial encoder alone) or a video reference (`17 * n + 5` frames,
+/// through the temporal chunking). `pixels_rgb` is `[3, num_frames, height,
+/// width]` channel-major in `[0, 255]`. See [`encode_keyframe_condition`]
+/// for the posterior-mode deviation and why the latent statistics are a
+/// required input.
+pub fn encode_visual_condition(req: &VisualConditionRequest, pixels_rgb: &[f32], num_frames: u32, height: u32, width: u32) -> VisualCondition {
+    let c = req.video_vae_cfg.in_channels as usize;
+    let plane_px = (num_frames * height * width) as usize;
+    assert_eq!(pixels_rgb.len(), c * plane_px, "encode_visual_condition: pixels_rgb length mismatch");
+    let px: Vec<f32> = pixels_rgb.iter().enumerate().map(|(i, &v)| (v / 255.0 - PIXEL_MEAN[i / plane_px]) / PIXEL_STD[i / plane_px]).collect();
+
+    let (moments, t1, h1, w1) = crate::video_vae::encode(req.video_vae_cfg, req.video_vae_tensors, req.device, &px, num_frames, height, width);
+    let latent_channels = req.video_vae_cfg.latent_channels;
     let mean_latent = crate::video_vae::posterior_mode(&moments, latent_channels, t1, h1, w1);
-    assert_eq!(video_latents_mean.len(), latent_channels as usize, "encode_keyframe_condition: video_latents_mean length must equal latent_channels");
-    assert_eq!(video_latents_std.len(), latent_channels as usize, "encode_keyframe_condition: video_latents_std length must equal latent_channels");
+    assert_eq!(req.video_latents_mean.len(), latent_channels as usize, "encode_visual_condition: video_latents_mean length must equal latent_channels");
+    assert_eq!(req.video_latents_std.len(), latent_channels as usize, "encode_visual_condition: video_latents_std length must equal latent_channels");
 
     let plane = (t1 * h1 * w1) as usize;
-    let mut normalized = vec![0f32; mean_latent.len()];
-    for cc in 0..latent_channels as usize {
-        for i in 0..plane {
-            normalized[cc * plane + i] = (mean_latent[cc * plane + i] - video_latents_mean[cc]) / video_latents_std[cc];
-        }
-    }
+    let normalized: Vec<f32> = mean_latent.iter().enumerate().map(|(i, &v)| (v - req.video_latents_mean[i / plane]) / req.video_latents_std[i / plane]).collect();
 
-    let mut rng = data::rng::Rng::new(seed);
+    let mut rng = data::rng::Rng::new(req.seed);
     let noise: Vec<f32> = (0..normalized.len()).map(|_| rng.next_gaussian() as f32).collect();
     let noised = H3Scheduler::scale_noise(&normalized, KEYFRAME_NOISE_AUG, &noise);
-    let rows = patchify_video(&noised, latent_channels, t1, h1, w1, patch_size);
-    KeyframeCondition { anchor, rows }
+    VisualCondition { rows: patchify_video(&noised, latent_channels, t1, h1, w1, req.patch_size), latent_frames: t1, latent_height: h1, latent_width: w1 }
+}
+
+/// One encoded `ref2va` reference, in packed order: its latent geometry, the
+/// noised patchified rows of its frames (empty for a lone soundtrack) and
+/// the clean, normalized rows of its soundtrack - channel-major `[channels *
+/// latents, audio_in_channels]`, empty for an image or a silent video.
+pub struct EncodedReference {
+    pub geometry: ReferenceGeometry,
+    pub video_rows: Vec<f32>,
+    pub audio_rows: Vec<f32>,
 }
 
 // ============================================================================
@@ -652,7 +802,7 @@ pub struct GeneratedAv {
 /// (and drops) its own [`H3Transformer`] - the cold path; see [`t2va_hot`]
 /// for a call that reuses an already-resident one.
 pub fn t2va(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
-    generate(ckpt, text, &[], opts, None, cancel, progress)
+    generate(ckpt, text, Conditioning::Keyframes(&[]), opts, None, cancel, progress)
 }
 
 /// `fl2va`: text plus up to 2 keyframe conditioning rows, one `"first"`-
@@ -664,7 +814,7 @@ pub fn fl2va(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[Keyframe
     if keyframes.is_empty() {
         return Err("fl2va: at least one keyframe is required - use t2va for a text-only request".to_string());
     }
-    generate(ckpt, text, keyframes, opts, None, cancel, progress)
+    generate(ckpt, text, Conditioning::Keyframes(keyframes), opts, None, cancel, progress)
 }
 
 /// [`t2va`], against a caller-held resident [`H3Transformer`] instead of a
@@ -674,7 +824,7 @@ pub fn fl2va(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[Keyframe
 /// silently forwarded into a shape error deep in `forward`.
 pub fn t2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts, model: &H3Transformer, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
     assert_eq!(model.config(), &ckpt.dit_cfg, "t2va_hot: the resident H3Transformer's config does not match ckpt.dit_cfg");
-    generate(ckpt, text, &[], opts, Some(model), cancel, progress)
+    generate(ckpt, text, Conditioning::Keyframes(&[]), opts, Some(model), cancel, progress)
 }
 
 /// [`fl2va`]'s [`t2va_hot`] analogue.
@@ -683,11 +833,78 @@ pub fn fl2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[Keyf
         return Err("fl2va: at least one keyframe is required - use t2va for a text-only request".to_string());
     }
     assert_eq!(model.config(), &ckpt.dit_cfg, "fl2va_hot: the resident H3Transformer's config does not match ckpt.dit_cfg");
-    generate(ckpt, text, keyframes, opts, Some(model), cancel, progress)
+    generate(ckpt, text, Conditioning::Keyframes(keyframes), opts, Some(model), cancel, progress)
+}
+
+/// `ref2va`: text plus 1..=12 references ([`EncodedReference`], in the
+/// order the presentation labels them), against the `transformer_ref`
+/// checkpoint partition - `ckpt.dit_tensors` must be that partition, which
+/// shares `transformer`'s architecture but not its weights. Cold path - see
+/// [`ref2va_hot`] for a call that reuses a resident [`H3Transformer`].
+pub fn ref2va(ckpt: &H3Checkpoint, text: &TextConditioning, references: &[EncodedReference], opts: &GenOpts, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
+    check_references(references)?;
+    generate(ckpt, text, Conditioning::References(references), opts, None, cancel, progress)
+}
+
+/// [`ref2va`]'s [`t2va_hot`] analogue; `model` must hold the
+/// `transformer_ref` partition.
+pub fn ref2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, references: &[EncodedReference], opts: &GenOpts, model: &H3Transformer, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
+    check_references(references)?;
+    assert_eq!(model.config(), &ckpt.dit_cfg, "ref2va_hot: the resident H3Transformer's config does not match ckpt.dit_cfg");
+    generate(ckpt, text, Conditioning::References(references), opts, Some(model), cancel, progress)
+}
+
+/// The released checkpoint's reference limits (`MiniMaxH3Ref2VASetupStep`).
+pub const MAX_IMAGE_REFERENCES: usize = 9;
+pub const MAX_VIDEO_REFERENCES: usize = 3;
+pub const MAX_AUDIO_REFERENCES: usize = 3;
+pub const MAX_REFERENCES: usize = 12;
+
+/// `MiniMaxH3Ref2VASetupStep`'s request validation: at least one reference,
+/// the per-modality and total limits, and no request made of soundtracks
+/// alone. A video's own soundtrack counts as a video reference, not an audio
+/// one.
+pub fn check_reference_kinds(geometry: impl IntoIterator<Item = ReferenceGeometry>) -> Result<(), String> {
+    let (mut images, mut videos, mut audios) = (0usize, 0usize, 0usize);
+    for g in geometry {
+        match g {
+            ReferenceGeometry::Image { .. } => images += 1,
+            ReferenceGeometry::Video { .. } => videos += 1,
+            ReferenceGeometry::Audio { .. } => audios += 1,
+        }
+    }
+    let total = images + videos + audios;
+    if total == 0 {
+        return Err("ref2va needs at least one reference; use t2va for a text-only request".to_string());
+    }
+    for (kind, count, limit) in [("image", images, MAX_IMAGE_REFERENCES), ("video", videos, MAX_VIDEO_REFERENCES), ("audio", audios, MAX_AUDIO_REFERENCES)] {
+        if count > limit {
+            return Err(format!("MiniMax-H3 accepts at most {limit} {kind} references, got {count}"));
+        }
+    }
+    if total > MAX_REFERENCES {
+        return Err(format!("MiniMax-H3 accepts at most {MAX_REFERENCES} references in total, got {total}"));
+    }
+    if images + videos == 0 {
+        return Err("an audio reference has to be paired with at least one image or video reference and cannot be used on its own".to_string());
+    }
+    Ok(())
+}
+
+fn check_references(references: &[EncodedReference]) -> Result<(), String> {
+    check_reference_kinds(references.iter().map(|r| r.geometry))
+}
+
+/// What conditions one generation besides the prompt: `fl2va`'s keyframes
+/// (empty for `t2va`) or `ref2va`'s references.
+#[derive(Clone, Copy)]
+enum Conditioning<'a> {
+    Keyframes(&'a [KeyframeCondition]),
+    References(&'a [EncodedReference]),
 }
 
 /// The shared `t2va`/`fl2va` body: resolve geometry, build the packed
-/// layout, denoise, decode. `keyframes` is empty for `t2va`. `model`, when
+/// layout, denoise, decode. `model`, when
 /// given, is used in place of a freshly loaded one - [`H3Transformer::
 /// forward`] takes an explicit packed sequence of ANY length per call (no
 /// latent-extent-sized graph is baked in at `load` time, unlike this
@@ -695,7 +912,7 @@ pub fn fl2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[Keyf
 /// compiled RoPE/kernel graph genuinely is sized per `(frames,width,height)`),
 /// so one resident transformer serves every request shape at a given
 /// checkpoint/device.
-fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts, model: Option<&H3Transformer>, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
+fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditioning<'_>, opts: &GenOpts, model: Option<&H3Transformer>, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
     let device = opts.device.as_deref();
     let dit_cfg = &ckpt.dit_cfg;
     let vae_cfg = &ckpt.video_vae_cfg;
@@ -723,38 +940,45 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
     let (latent_height, latent_width) = (height / ratio, width / ratio);
     let num_audio_latents = audio_latent_num_frames(aligned_num_frames, FPS, AUDIO_LATENTS_PER_SECOND);
 
-    // 2. The packed layout.
-    let anchors: Vec<Anchor> = keyframes.iter().map(|k| k.anchor).collect();
-    let packed = build_packed_sequence(&text.token_tags, num_latent_frames, latent_height, latent_width, num_audio_latents, dit_cfg.patch_size, AUDIO_CHANNELS, &anchors);
-
-    let rows_per_frame = (latent_height / dit_cfg.patch_size[1]) * (latent_width / dit_cfg.patch_size[2]);
+    // 2. The packed layout, and the conditioning rows it reserved in front
+    // of the generated ones: noised keyframe or reference frames on the video
+    // side, clean reference soundtracks on the audio side.
     let video_patch_dim = dit_cfg.video_patch_dim() as usize;
-    for k in keyframes {
-        if k.rows.len() != rows_per_frame as usize * video_patch_dim {
-            return Err(format!("generate: keyframe condition has {} values, expected {} (rows_per_frame {rows_per_frame} * video_patch_dim {video_patch_dim})", k.rows.len(), rows_per_frame as usize * video_patch_dim));
+    let audio_in_channels = dit_cfg.audio_in_channels as usize;
+    let (packed, condition_video, condition_audio): (PackedSequence, Vec<&[f32]>, Vec<&[f32]>) = match conditioning {
+        Conditioning::Keyframes(keyframes) => {
+            let anchors: Vec<Anchor> = keyframes.iter().map(|k| k.anchor).collect();
+            let packed = build_packed_sequence(&text.token_tags, num_latent_frames, latent_height, latent_width, num_audio_latents, dit_cfg.patch_size, AUDIO_CHANNELS, &anchors);
+            (packed, keyframes.iter().map(|k| k.rows.as_slice()).collect(), Vec::new())
         }
+        Conditioning::References(references) => {
+            let geometry: Vec<ReferenceGeometry> = references.iter().map(|r| r.geometry).collect();
+            let packed = build_ref2va_packed_sequence(&text.token_tags, &geometry, num_latent_frames, latent_height, latent_width, num_audio_latents, dit_cfg.patch_size, AUDIO_CHANNELS);
+            (packed, references.iter().map(|r| r.video_rows.as_slice()).collect(), references.iter().map(|r| r.audio_rows.as_slice()).collect())
+        }
+    };
+    let num_condition_video_rows = packed.num_condition_video_rows;
+    let num_condition_audio_rows = packed.num_condition_audio_rows;
+    let condition_video_values: usize = condition_video.iter().map(|rows| rows.len()).sum();
+    if condition_video_values != num_condition_video_rows * video_patch_dim {
+        return Err(format!("generate: the layout reserved {num_condition_video_rows} conditioning video rows ({video_patch_dim} values each) but the encoded conditioning holds {condition_video_values} values"));
+    }
+    let condition_audio_values: usize = condition_audio.iter().map(|rows| rows.len()).sum();
+    if condition_audio_values != num_condition_audio_rows * audio_in_channels {
+        return Err(format!("generate: the layout reserved {num_condition_audio_rows} reference audio rows ({audio_in_channels} values each) but the encoded soundtracks hold {condition_audio_values} values"));
     }
 
     // 3. Compact video/audio rows: conditioning first (unchanged all loop
     // long), then the drawn noise of the generated rows
     // (`MiniMaxH3PrepareConditionLatentsStep` + `MiniMaxH3PrepareLatentsStep`
-    // + `MiniMaxH3FL2VAPrepareLatentsStep`).
+    // + `MiniMaxH3FL2VAPrepareLatentsStep` / `MiniMaxH3Ref2VAPrepareLatentsStep`).
     let mut rng = data::rng::Rng::new(opts.seed);
-    let num_condition_video_rows = packed.num_condition_video_rows;
     let num_generated_video_rows = packed.video_indices.len() - num_condition_video_rows;
-    let mut compact_video = Vec::with_capacity(packed.video_indices.len() * video_patch_dim);
-    for k in keyframes {
-        compact_video.extend_from_slice(&k.rows);
-    }
-    for _ in 0..(num_generated_video_rows * video_patch_dim) {
-        compact_video.push(rng.next_gaussian() as f32);
-    }
-
-    let audio_in_channels = dit_cfg.audio_in_channels as usize;
-    let mut compact_audio = Vec::with_capacity(packed.audio_indices.len() * audio_in_channels);
-    for _ in 0..(packed.audio_indices.len() * audio_in_channels) {
-        compact_audio.push(rng.next_gaussian() as f32);
-    }
+    let mut compact_video = condition_video.concat();
+    compact_video.extend((0..num_generated_video_rows * video_patch_dim).map(|_| rng.next_gaussian() as f32));
+    let num_generated_audio_rows = packed.audio_indices.len() - num_condition_audio_rows;
+    let mut compact_audio = condition_audio.concat();
+    compact_audio.extend((0..num_generated_audio_rows * audio_in_channels).map(|_| rng.next_gaussian() as f32));
 
     // 4. Denoise, both VAEs still unopened. A caller-supplied `model` (the
     // "hot"/resident serving path, `t2va_hot`/`fl2va_hot`) is reused as is.
@@ -796,7 +1020,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
         .map(|i| {
             let (video_ts, audio_ts) = sched.current_timesteps(i);
             let condition_video_ts = video_ts.max(KEYFRAME_NOISE_AUG);
-            build_row_timesteps(&packed.video_indices, &packed.audio_indices, num_condition_video_rows, packed.num_condition_audio_rows, num_text_tokens, video_ts, audio_ts, condition_video_ts, 1.0)
+            build_row_timesteps(&packed.video_indices, &packed.audio_indices, num_condition_video_rows, num_condition_audio_rows, num_text_tokens, video_ts, audio_ts, condition_video_ts, 1.0)
         })
         .collect();
     let schedule_values: Vec<f32> = step_rows.iter().flat_map(|(ts, _)| ts.iter().copied()).collect();
@@ -831,11 +1055,13 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
             None => H3Transformer::forward_streaming(ckpt.dit_tensors, dit_cfg, streaming_ctx.as_ref().expect("streamed whenever nothing is resident"), &inp),
         };
 
-        let gen_video_pred = &out.video[num_condition_video_rows * video_patch_dim..];
-        let gen_video_sample = &compact_video[num_condition_video_rows * video_patch_dim..];
-        let (video_next, audio_next) = (sched.video().step(gen_video_pred, video_ts, gen_video_sample, i), sched.audio().step(&out.audio, audio_ts, &compact_audio, i));
-        compact_video[num_condition_video_rows * video_patch_dim..].copy_from_slice(&video_next);
-        compact_audio.copy_from_slice(&audio_next);
+        // Only the generated rows are ever written, so the conditioning rows
+        // ride through every step unchanged (`MiniMaxH3LoopSchedulerStep`).
+        let (video_gen, audio_gen) = (num_condition_video_rows * video_patch_dim, num_condition_audio_rows * audio_in_channels);
+        let video_next = sched.video().step(&out.video[video_gen..], video_ts, &compact_video[video_gen..], i);
+        let audio_next = sched.audio().step(&out.audio[audio_gen..], audio_ts, &compact_audio[audio_gen..], i);
+        compact_video[video_gen..].copy_from_slice(&video_next);
+        compact_audio[audio_gen..].copy_from_slice(&audio_next);
         progress(i as u32 + 1, total, "denoise");
     }
 
@@ -884,7 +1110,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
     }
 
     // 6. Audio decode (`MiniMaxH3AfterDenoiseStep` + `MiniMaxH3AudioDecodeStep`).
-    let generated_audio_rows = &compact_audio[packed.num_condition_audio_rows * audio_in_channels..];
+    let generated_audio_rows = &compact_audio[num_condition_audio_rows * audio_in_channels..];
     let num_audio_latents_gen = num_audio_latents as usize;
     assert_eq!(ckpt.audio_latents_mean.len(), audio_in_channels, "generate: audio_latents_mean length must equal audio_in_channels");
     assert_eq!(ckpt.audio_latents_std.len(), audio_in_channels, "generate: audio_latents_std length must equal audio_in_channels");
@@ -1267,6 +1493,66 @@ mod tests {
         }
     }
 
+    /// `ref2va` end to end at the tiny config: an image at its own (non-
+    /// canvas) resolution, a video with a soundtrack and a lone soundtrack
+    /// pack ahead of the generated rows, the clip comes out at the canvas,
+    /// and the soundtrack rows reach the model - a different soundtrack under
+    /// the same seed gives a different clip.
+    #[test]
+    fn ref2va_tiny_config_conditions_on_every_kind_of_reference() {
+        let dit_cfg = tiny_dit_cfg();
+        let video_vae_cfg = tiny_video_vae_cfg();
+        let vocoder_cfg = tiny_vocoder_cfg();
+        let dit_tensors = rand_dit_tensors(&dit_cfg, 41);
+        let video_vae_tensors = rand_manifest_tensors(video_vae_cfg.tensor_manifest(), 42);
+        let vocoder_tensors = rand_manifest_tensors(vocoder_cfg.tensor_manifest(), 43);
+        let ckpt = tiny_checkpoint(&dit_tensors, &video_vae_tensors, &vocoder_tensors);
+        let text = tiny_text(3, dit_cfg.text_dim as usize, 44);
+        let opts = tiny_gen_opts(45);
+        let req = VisualConditionRequest { video_vae_cfg: &video_vae_cfg, video_vae_tensors: &video_vae_tensors, device: Some("cpu"), video_latents_mean: &ckpt.video_latents_mean, video_latents_std: &ckpt.video_latents_std, patch_size: dit_cfg.patch_size, seed: 46 };
+        let mut rng = data::rng::Lcg::new(47);
+        let mut pixels = |n: usize| -> Vec<f32> { rng.vec_scaled(n, 127.0).iter().map(|v| v + 128.0).collect() };
+        let image = encode_visual_condition(&req, &pixels(3 * 64 * 32), 1, 64, 32);
+        let video = encode_visual_condition(&req, &pixels(3 * 22 * 32 * 32), 22, 32, 32);
+        let audio_in = dit_cfg.audio_in_channels as usize;
+        let soundtrack = |latents: u32, seed: u64| data::rng::Lcg::new(seed).vec_scaled(AUDIO_CHANNELS as usize * latents as usize * audio_in, 1.0);
+        let references = |soundtrack_seed: u64| {
+            vec![
+                EncodedReference { geometry: ReferenceGeometry::Image { latent_height: image.latent_height, latent_width: image.latent_width }, video_rows: image.rows.clone(), audio_rows: Vec::new() },
+                EncodedReference { geometry: ReferenceGeometry::Video { latent_frames: video.latent_frames, latent_height: video.latent_height, latent_width: video.latent_width, soundtrack_latents: 30 }, video_rows: video.rows.clone(), audio_rows: soundtrack(30, soundtrack_seed) },
+                EncodedReference { geometry: ReferenceGeometry::Audio { latents: 12 }, video_rows: Vec::new(), audio_rows: soundtrack(12, 48) },
+            ]
+        };
+        let run = |refs: &[EncodedReference]| ref2va(&ckpt, &text, refs, &opts, &capability::CancelToken::default(), |_, _, _| {}).expect("ref2va");
+        let a = run(&references(49));
+        assert_eq!((a.height, a.width), (32, 32), "the clip is generated at the canvas, not at any reference's size");
+        assert_eq!(a.video.len(), (3 * a.num_video_frames * a.height * a.width) as usize);
+        assert!(a.video.iter().chain(a.audio.iter().flatten()).all(|v| v.is_finite()), "outputs must be finite");
+        let b = run(&references(50));
+        assert_ne!(a.video, b.video, "the reference soundtrack rows must reach the model");
+
+        // A soundtrack whose rows disagree with its declared geometry is
+        // refused before anything is denoised.
+        let mut bad = references(49);
+        bad[2].audio_rows.truncate(audio_in);
+        assert!(ref2va(&ckpt, &text, &bad, &opts, &capability::CancelToken::default(), |_, _, _| {}).is_err());
+    }
+
+    /// The released checkpoint's reference limits, and that soundtracks
+    /// alone are not a request.
+    #[test]
+    fn reference_kinds_are_validated_against_the_released_limits() {
+        let image = ReferenceGeometry::Image { latent_height: 2, latent_width: 2 };
+        let audio = ReferenceGeometry::Audio { latents: 4 };
+        assert!(check_reference_kinds([image, audio]).is_ok());
+        assert!(check_reference_kinds([]).unwrap_err().contains("at least one"));
+        assert!(check_reference_kinds([audio]).unwrap_err().contains("paired"));
+        assert!(check_reference_kinds([image; MAX_IMAGE_REFERENCES + 1]).unwrap_err().contains("image"));
+        let video = ReferenceGeometry::Video { latent_frames: 2, latent_height: 2, latent_width: 2, soundtrack_latents: 0 };
+        let thirteen = std::iter::repeat_n(image, MAX_IMAGE_REFERENCES).chain(std::iter::repeat_n(video, MAX_VIDEO_REFERENCES)).chain([audio]);
+        assert!(check_reference_kinds(thirteen).unwrap_err().contains("in total"));
+    }
+
     /// A generation reports every denoise step and both decodes, in order,
     /// against one fixed total, and a cancellation stops it at the next
     /// step boundary with an error rather than decoding a half-denoised
@@ -1357,7 +1643,9 @@ mod tests {
     ///
     /// Both the `t2va` (no keyframes) and the `fl2va` (`first`+`last` anchors,
     /// which is what exercises the pairwise-summed `"last"` anchor time and
-    /// the conditioning-row pinning) layouts are covered.
+    /// the conditioning-row pinning) layouts are covered, and so is a `ref2va`
+    /// layout packing one reference of every kind - reference soundtrack rows
+    /// interleaved with reference video rows, both ahead of the target.
     #[test]
     fn pipeline_layout_matches_the_real_reference_numerically() {
         let fixture_dir = brain_testutil::testdata_path("golden/minimaxh3/layout");
@@ -1395,10 +1683,28 @@ mod tests {
 
         let mut r = brain_testutil::parity::Report::new(0.9999);
 
-        for (prefix, anchors) in [("t2va", &[][..]), ("fl2va", &[Anchor::First, Anchor::Last][..])] {
+        for prefix in ["t2va", "fl2va", "ref2va"] {
             let text_tags = get_u32(&format!("{prefix}_text_token_tags"));
             assert_eq!(text_tags.len(), GOLDEN_TEXT_TOKENS, "{prefix}: golden text-tag count");
-            let packed = build_packed_sequence(&text_tags, GOLDEN_LATENT_FRAMES, GOLDEN_LATENT_H, GOLDEN_LATENT_W, GOLDEN_AUDIO_LATENTS, GOLDEN_PATCH, AUDIO_CHANNELS, anchors);
+            let packed = match prefix {
+                "t2va" => build_packed_sequence(&text_tags, GOLDEN_LATENT_FRAMES, GOLDEN_LATENT_H, GOLDEN_LATENT_W, GOLDEN_AUDIO_LATENTS, GOLDEN_PATCH, AUDIO_CHANNELS, &[]),
+                "fl2va" => build_packed_sequence(&text_tags, GOLDEN_LATENT_FRAMES, GOLDEN_LATENT_H, GOLDEN_LATENT_W, GOLDEN_AUDIO_LATENTS, GOLDEN_PATCH, AUDIO_CHANNELS, &[Anchor::First, Anchor::Last]),
+                _ => {
+                    // `[kind, latent frames, latent height, latent width,
+                    // soundtrack latents]` per reference; kinds 0 image, 1
+                    // video, 2 audio.
+                    let spec = get_u32("ref2va_references");
+                    let references: Vec<ReferenceGeometry> = spec
+                        .chunks(5)
+                        .map(|r| match r[0] {
+                            0 => ReferenceGeometry::Image { latent_height: r[2], latent_width: r[3] },
+                            1 => ReferenceGeometry::Video { latent_frames: r[1], latent_height: r[2], latent_width: r[3], soundtrack_latents: r[4] },
+                            _ => ReferenceGeometry::Audio { latents: r[4] },
+                        })
+                        .collect();
+                    build_ref2va_packed_sequence(&text_tags, &references, GOLDEN_LATENT_FRAMES, GOLDEN_LATENT_H, GOLDEN_LATENT_W, GOLDEN_AUDIO_LATENTS, GOLDEN_PATCH, AUDIO_CHANNELS)
+                }
+            };
 
             // The rotary grid is the highest-value comparison here: it is
             // per-token, and lesson #49's own generalizable point is that a
