@@ -623,17 +623,23 @@ impl Paths {
     /// own pattern; role names match [`Paths`]'s field names, so the mapping
     /// is a straight rename-free read).
     pub fn from_assembly(assembly: &capability::Assembly) -> Result<Paths, String> {
-        let text_encoder = Paths::component(assembly, "text_encoder")?;
-        // `processor/` and `transformer_ref/` sit in the release root the
-        // text encoder came from, whichever lane resolved it.
+        Paths::from_roles(&|role| Paths::component(assembly, role))
+    }
+
+    /// [`Paths`] from the five roles `role` resolves, whichever lane they
+    /// came from (a store assembly, a served compound manifest). The
+    /// `processor/` and `transformer_ref/` extras sit in the release root the
+    /// text encoder came from, so they are found there rather than resolved.
+    pub fn from_roles(role: &dyn Fn(&str) -> Result<String, String>) -> Result<Paths, String> {
+        let text_encoder = role("text_encoder")?;
         let root = std::path::Path::new(&text_encoder).parent().filter(|p| crate::spec::is_h3_pipeline_root(p));
         let (processor, dit_ref) = root.map(Paths::release_extras).unwrap_or_default();
         Ok(Paths {
-            dit: Paths::component(assembly, "dit")?,
-            video_vae: Paths::component(assembly, "video_vae")?,
-            vocoder: Paths::component(assembly, "vocoder")?,
+            dit: role("dit")?,
+            video_vae: role("video_vae")?,
+            vocoder: role("vocoder")?,
             text_encoder,
-            tokenizer: Paths::component(assembly, "tokenizer")?,
+            tokenizer: role("tokenizer")?,
             processor,
             dit_ref,
         })

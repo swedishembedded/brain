@@ -854,7 +854,7 @@ fn wan_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) -> 
 /// (`transformer`/`vae`/`audio_vae`/`text_encoder`/`tokenizer`).
 fn minimaxh3_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) -> Result<minimaxh3::caps::Paths, String> {
     let get = |role: &str| roles.get(role).and_then(|p| p.to_str()).map(str::to_string).ok_or_else(|| format!("compound manifest missing role {role:?}"));
-    Ok(minimaxh3::caps::Paths { dit: get("dit")?, video_vae: get("video_vae")?, vocoder: get("vocoder")?, text_encoder: get("text_encoder")?, tokenizer: get("tokenizer")? })
+    minimaxh3::caps::Paths::from_roles(&get)
 }
 
 #[cfg(test)]
