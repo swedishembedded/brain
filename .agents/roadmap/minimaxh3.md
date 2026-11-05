@@ -360,6 +360,18 @@ port is real-weight-parity-gated.
   DiT to ~20.2B params, both memory pressure AND the load-time-dominated
   wall-clock) - the precompute transform itself is only verified against
   extrapolated dimensions today, never run against these real weights.
+- [ ] **The int8 resident DiT's end-result precision** - on the real
+      checkpoint at the real-weight golden's inputs, the int8 model's output
+      against the reference is video cosine 0.974 / rel_l2 0.23 and audio
+      cosine 0.89 / rel_l2 0.46, where the fp32 streaming forward matches the
+      same golden at cosine 0.9999+. Two activation levels
+      (`int8_activation_levels: 2`) leave it at video 0.973 / audio 0.911, so
+      the activation side is not the source: localize it per block with the
+      golden's block-0/25/49 taps (weight rounding, the refiner/embed
+      linears, or the packed arm), then gate the int8 model at a fp32-like
+      floor. Measured by
+      `model::tests::int8_activation_levels_against_the_real_reference_output`
+      (two cards).
 - [ ] Phase 12 - streaming-overlap engine (separate, measured perf phase) -
       `_cp_plan` in the real transformer source is a useful blueprint,
       not yet studied in detail. Deliberately not attempted this session:

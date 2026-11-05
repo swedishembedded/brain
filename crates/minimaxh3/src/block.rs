@@ -124,7 +124,7 @@ const FLASH_IDS: model::block::FlashIds = model::block::FlashIds {
 /// take them from the same `kernels` catalogue).
 pub fn pipelines() -> Vec<(&'static str, &'static str)> {
     let mut v = KERNELS.to_vec();
-    for &entry in model::ops::kernel_list() {
+    for &entry in model::ops::two_level_kernel_list() {
         if !v.iter().any(|(name, _)| *name == entry.0) {
             v.push(entry);
         }
@@ -174,12 +174,26 @@ impl Ctx {
 
 // ---------------- eager device ops ----------------
 
-/// `y = x @ w^T (+ bias)` for `m` rows of `x`. `w` is `[n, k]` (PyTorch
-/// `nn.Linear` convention) at whatever tier it was loaded at; `bias` is `[n]`
-/// or `None` for the attention/FFN linears, which the reference builds with
+/// How many int8 levels the DiT's linears quantize their activations to
+/// when they multiply a quantized weight. One is the int8 tier's ordinary
+/// arithmetic. Two ([`Ops::act_two_level`]) also quantizes what the first
+/// level rounds away, so the activation side is exact to ~1/(127·254) of its
+/// group scale and the 50-block stack computes what its int8 weights do -
+/// at the cost of a second product on the packed int8 arm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ActLevels {
+    #[default]
+    One,
+    Two,
+}
+
+/// `y = x @ w^T (+ bias)` for `m` rows of `x`, the activation quantized to
+/// `levels` against a quantized weight. `w` is `[n, k]` (PyTorch `nn.Linear`
+/// convention) at whatever tier it was loaded at; `bias` is `[n]` or `None`
+/// for the attention/FFN linears, which the reference builds with
 /// `bias=False` throughout.
-pub(crate) fn linear(cx: &Ctx, x: &DeviceBuffer, w: &Weight, bias: Option<&DeviceBuffer>, m: u32) -> DeviceBuffer {
-    let [y] = linears(cx, x, [w], m);
+pub(crate) fn linear(cx: &Ctx, levels: ActLevels, x: &DeviceBuffer, w: &Weight, bias: Option<&DeviceBuffer>, m: u32) -> DeviceBuffer {
+    let [y] = linears(cx, levels, x, [w], m);
     if let Some(b) = bias {
         cx.gpu.submit(&[], &[cx.gpu.step(K_BIAS_ADD, &[&y, b], &[m, w.n()], m * w.n())]);
     }
@@ -189,12 +203,18 @@ pub(crate) fn linear(cx: &Ctx, x: &DeviceBuffer, w: &Weight, bias: Option<&Devic
 /// Every linear in `ws` over the same `[m, k]` input - q/k/v over one
 /// modulated row block, the SwiGLU halves over another. `model::ops` picks
 /// each product's kernel from its weight's tier and the shape; the input is
-/// quantized once for all of them when any weight is quantized, and read as
-/// f32 when none is.
-pub(crate) fn linears<const N: usize>(cx: &Ctx, x: &DeviceBuffer, ws: [&Weight; N], m: u32) -> [DeviceBuffer; N] {
+/// quantized once for all of them, to `levels`, when any weight is quantized,
+/// and read as f32 when none is.
+pub(crate) fn linears<const N: usize>(cx: &Ctx, levels: ActLevels, x: &DeviceBuffer, ws: [&Weight; N], m: u32) -> [DeviceBuffer; N] {
     let k = ws[0].k();
     let mut steps = Vec::new();
-    let act = if ws.iter().all(|w| w.reads_f32_activations()) { cx.ops.act_f32(x, 0, m, k) } else { cx.ops.act(&mut steps, x, 0, m, k) };
+    let act = if ws.iter().all(|w| w.reads_f32_activations()) {
+        cx.ops.act_f32(x, 0, m, k)
+    } else if levels == ActLevels::Two {
+        cx.ops.act_two_level(&mut steps, x, 0, m, k)
+    } else {
+        cx.ops.act(&mut steps, x, 0, m, k)
+    };
     let ys = ws.map(|w| {
         assert_eq!(w.k(), k, "minimaxh3 linears: every weight must read the same input width");
         let y = cx.gpu.storage((m * w.n()) as u64);
@@ -711,22 +731,22 @@ pub fn load_refiner_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, ind
 
 /// `MiniMaxH3TokenRefinerBlock.forward`: plain pre-norm attention (no RoPE)
 /// + plain pre-norm SwiGLU FFN, both residual. `x`: `[seq_len, hidden]`.
-pub fn refiner_block_forward(cx: &Ctx, w: &RefinerBlockWeights, x: &DeviceBuffer, cfg: &H3TransformerConfig, seq_len: u32) -> DeviceBuffer {
+pub fn refiner_block_forward(cx: &Ctx, levels: ActLevels, w: &RefinerBlockWeights, x: &DeviceBuffer, cfg: &H3TransformerConfig, seq_len: u32) -> DeviceBuffer {
     let (hidden, heads, hd, ffn) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim, cfg.ffn_dim);
 
     let n1 = rmsnorm(cx, x, &w.norm1, seq_len, hidden, cfg.norm_eps);
-    let [q, k, v] = linears(cx, &n1, [&w.wq, &w.wk, &w.wv], seq_len);
+    let [q, k, v] = linears(cx, levels, &n1, [&w.wq, &w.wk, &w.wv], seq_len);
     let qn = rmsnorm(cx, &q, &w.norm_q, seq_len * heads, hd, cfg.qk_norm_eps);
     let kn = rmsnorm(cx, &k, &w.norm_k, seq_len * heads, hd, cfg.qk_norm_eps);
     let mode = cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd));
     let attn = attention(&cx.gpu, &DIT_ATTN, mode, &qn, &kn, &v, seq_len, heads, hd);
-    let attn_out = linear(cx, &attn, &w.wo, None, seq_len);
+    let attn_out = linear(cx, levels, &attn, &w.wo, None, seq_len);
     let x1 = add2(cx, x, &attn_out, seq_len * hidden);
 
     let n2 = rmsnorm(cx, &x1, &w.norm2, seq_len, hidden, cfg.norm_eps);
-    let [value, gate] = linears(cx, &n2, [&w.fc1_value, &w.fc1_gate], seq_len);
+    let [value, gate] = linears(cx, levels, &n2, [&w.fc1_value, &w.fc1_gate], seq_len);
     let act = swiglu(cx, &value, &gate, seq_len * ffn);
-    let ff_out = linear(cx, &act, &w.fc2, None, seq_len);
+    let ff_out = linear(cx, levels, &act, &w.fc2, None, seq_len);
     add2(cx, &x1, &ff_out, seq_len * hidden)
 }
 
@@ -753,32 +773,36 @@ fn adaln_tables(rows: &[&[f32]], hidden: usize) -> [Vec<f32>; 6] {
     tables
 }
 
+/// What one [`block_forward`] reads besides the block's weights.
+#[derive(Clone, Copy)]
+pub struct BlockInputs<'a> {
+    /// `[seq_len, hidden]`.
+    pub x: &'a DeviceBuffer,
+    /// `[seq_len]` u32 (`crate::model::adaln_indices` - THIS port's row
+    /// convention, not the reference's, see this module's own doc).
+    pub adaln_indices: &'a DeviceBuffer,
+    /// `[seq_len, half]` rotary tables (`crate::rope::build_tables`).
+    pub cos: &'a DeviceBuffer,
+    pub sin: &'a DeviceBuffer,
+    /// This block's cached `adaln_proj` row for each of the forward's
+    /// distinct timesteps, in `timestep` order
+    /// ([`crate::adaln::AdalnPlan::block_rows`]).
+    pub modulation: &'a [&'a [f32]],
+    pub seq_len: u32,
+    /// The request's activation quantization for the block's linears.
+    pub levels: ActLevels,
+}
+
 /// `MiniMaxH3TransformerBlock.forward`: RoPE'd, AdaLN-Zero modulated
 /// pre-norm attention + pre-norm SwiGLU FFN, both residual-gated per row.
-/// `x`: `[seq_len, hidden]`; `adaln_indices`: `[seq_len]` u32 device buffer
-/// (`crate::model::adaln_indices` - THIS port's row convention, not the
-/// reference's, see this module's own doc); `cos`/`sin`: `[seq_len, half]`
-/// (`crate::rope::build_tables`); `modulation`: this block's cached
-/// `adaln_proj` row for each of the forward's distinct timesteps, in
-/// `timestep` order ([`crate::adaln::AdalnPlan::block_rows`]).
 ///
 /// Returns `(output, attn_out)` - `attn_out` is the attention sub-block's own
 /// output (post `to_out`, pre gated residual), exposed as a parity tap
 /// (`crate::model`'s numeric parity test reads it for block 0) rather than
 /// only the block's final output, so a bug localizes to whichever half of
 /// the block introduced it.
-#[allow(clippy::too_many_arguments)]
-pub fn block_forward(
-    cx: &Ctx,
-    w: &BlockWeights,
-    x: &DeviceBuffer,
-    adaln_indices: &DeviceBuffer,
-    cos: &DeviceBuffer,
-    sin: &DeviceBuffer,
-    modulation: &[&[f32]],
-    cfg: &H3TransformerConfig,
-    seq_len: u32,
-) -> (DeviceBuffer, DeviceBuffer) {
+pub fn block_forward(cx: &Ctx, w: &BlockWeights, inp: &BlockInputs, cfg: &H3TransformerConfig) -> (DeviceBuffer, DeviceBuffer) {
+    let BlockInputs { x, adaln_indices, cos, sin, modulation, seq_len, levels } = *inp;
     let (hidden, heads, hd, ffn) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim, cfg.ffn_dim);
     let half = 3 * cfg.rope_freq_dim;
 
@@ -789,22 +813,22 @@ pub fn block_forward(
     // attention sub-block
     let n1 = rmsnorm(cx, x, &w.norm1, seq_len, hidden, cfg.norm_eps);
     let mod1 = modulate(cx, &n1, adaln_indices, &scale_msa, &shift_msa, seq_len, hidden);
-    let [q, k, v] = linears(cx, &mod1, [&w.wq, &w.wk, &w.wv], seq_len);
+    let [q, k, v] = linears(cx, levels, &mod1, [&w.wq, &w.wk, &w.wv], seq_len);
     let qn = rmsnorm(cx, &q, &w.norm_q, seq_len * heads, hd, cfg.qk_norm_eps);
     let kn = rmsnorm(cx, &k, &w.norm_k, seq_len * heads, hd, cfg.qk_norm_eps);
     rope_partial(cx, &qn, cos, sin, seq_len, heads, hd, half);
     rope_partial(cx, &kn, cos, sin, seq_len, heads, hd, half);
     let mode = cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd));
     let attn = attention(&cx.gpu, &DIT_ATTN, mode, &qn, &kn, &v, seq_len, heads, hd);
-    let attn_out = linear(cx, &attn, &w.wo, None, seq_len);
+    let attn_out = linear(cx, levels, &attn, &w.wo, None, seq_len);
     let h1 = gated_residual(cx, x, adaln_indices, &gate_msa, &attn_out, seq_len, hidden);
 
     // FFN sub-block
     let n2 = rmsnorm(cx, &h1, &w.norm2, seq_len, hidden, cfg.norm_eps);
     let mod2 = modulate(cx, &n2, adaln_indices, &scale_mlp, &shift_mlp, seq_len, hidden);
-    let [value, gate] = linears(cx, &mod2, [&w.fc1_value, &w.fc1_gate], seq_len);
+    let [value, gate] = linears(cx, levels, &mod2, [&w.fc1_value, &w.fc1_gate], seq_len);
     let act = swiglu(cx, &value, &gate, seq_len * ffn);
-    let ff_out = linear(cx, &act, &w.fc2, None, seq_len);
+    let ff_out = linear(cx, levels, &act, &w.fc2, None, seq_len);
     let out = gated_residual(cx, &h1, adaln_indices, &gate_mlp, &ff_out, seq_len, hidden);
     (out, attn_out)
 }

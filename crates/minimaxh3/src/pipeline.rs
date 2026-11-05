@@ -787,6 +787,9 @@ pub struct GenOpts {
     pub num_inference_steps: usize,
     pub seed: u64,
     pub device: Option<String>,
+    /// How the DiT's linears quantize their activations against its int8
+    /// weights ([`crate::block::ActLevels`]).
+    pub act_levels: crate::block::ActLevels,
 }
 
 /// One decoded `t2va`/`fl2va` result: RGB video in `[0, 1]` plus a stereo
@@ -1020,7 +1023,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     let seq_len = (packed.position_ids.len() / 3) as u32;
     let owned = match model {
         Some(_) => None,
-        None => match H3Transformer::load(ckpt.dit_tensors, *dit_cfg, device, RESIDENT_TIER, seq_len) {
+        None => match H3Transformer::load(ckpt.dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels)) {
             Ok(m) => Some(m),
             Err(reason) => {
                 tracing::info!(%reason, "minimaxh3 DiT streamed one block at a time");
@@ -1073,6 +1076,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
             video_indices: &packed.video_indices,
             audio_indices: &packed.audio_indices,
             text_indices: &packed.text_indices,
+            act_levels: opts.act_levels,
         };
         let out = match resident {
             Some(m) => m.forward(&inp),
@@ -1457,7 +1461,7 @@ pub(crate) mod tests {
     /// request-level business rule this pipeline enforces for a real
     /// caller too.
     pub(crate) fn tiny_gen_opts(seed: u64) -> GenOpts {
-        GenOpts { canvas: Some((32, 32)), num_frames: 124, num_inference_steps: 3, seed, device: Some("cpu".to_string()) }
+        GenOpts { canvas: Some((32, 32)), num_frames: 124, num_inference_steps: 3, seed, device: Some("cpu".to_string()), act_levels: Default::default() }
     }
 
     /// The end-to-end gate: encode (pre-built) -> pack -> denoise

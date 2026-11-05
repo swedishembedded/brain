@@ -38,7 +38,7 @@
 use std::time::Instant;
 
 use gpu_core::select::Dtype;
-use minimaxh3::block::{attn_mode, block_forward, AttnMode, BlockWeights, Ctx};
+use minimaxh3::block::{attn_mode, block_forward, ActLevels, AttnMode, BlockInputs, BlockWeights, Ctx};
 use minimaxh3::config::{H3TransformerConfig, MODALITY_NUM};
 use model::ops::Weight;
 
@@ -108,7 +108,7 @@ fn main() {
         // The arena the model's own forward replays its blocks in.
         let out = {
             let _arena = cx.gpu.scratch_scope_in("minimaxh3 block");
-            block_forward(&cx, &w, &x, &adaln_idx, &cos, &sin, &[&modulation], &cfg, seq).0
+            block_forward(&cx, &w, &BlockInputs { x: &x, adaln_indices: &adaln_idx, cos: &cos, sin: &sin, modulation: &[&modulation], seq_len: seq, levels: ActLevels::One }, &cfg).0
         };
         let probe = cx.gpu.read(&out, 1);
         assert!(probe[0].is_finite(), "non-finite block output");

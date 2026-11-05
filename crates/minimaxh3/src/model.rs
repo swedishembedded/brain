@@ -76,6 +76,9 @@ pub struct PackedInputs<'a> {
     pub video_indices: &'a [u32],
     pub audio_indices: &'a [u32],
     pub text_indices: &'a [u32],
+    /// How this forward's linears quantize their activations against
+    /// quantized weights - the request's choice, see [`block::ActLevels`].
+    pub act_levels: block::ActLevels,
 }
 
 /// `MiniMaxH3TransformerOutput`, minus the batch axis.
@@ -312,13 +315,23 @@ fn block_bytes(cfg: &H3TransformerConfig, tier: Dtype) -> u64 {
 /// FFN output; at `inner`, q/k/v, the normed q/k, the flash path's packed
 /// qkv slab and the attention result; at `ffn`, the SwiGLU's value, gate and
 /// product - all fp32 - plus the int8 copy of each linear's input. Measured
-/// at 13312 rows on a P40: 8.24 GB beside the block's weights, against 8.45
-/// GB modelled.
-pub fn block_workspace_bytes(cfg: &H3TransformerConfig, rows: u32) -> u64 {
+/// at 13312 rows on a P40 with one activation level: 8.24 GB beside the
+/// block's weights, against 8.45 GB modelled. Two levels
+/// ([`block::ActLevels::Two`]) add a second int8 copy of each input and, per
+/// linear, one fp32 slab of `model::ops::TWO_LEVEL_PASS_ROWS` rows its second
+/// product is folded through.
+pub fn block_workspace_bytes(cfg: &H3TransformerConfig, rows: u32, levels: block::ActLevels) -> u64 {
     let (hidden, inner, ffn) = (cfg.hidden_size as u64, cfg.inner_dim() as u64, cfg.ffn_dim as u64);
     let fp32 = (8 * hidden + 9 * inner + 3 * ffn) * 4;
     let int8_inputs = 2 * hidden + inner + ffn;
-    rows as u64 * (fp32 + int8_inputs)
+    let one = rows as u64 * (fp32 + int8_inputs);
+    match levels {
+        block::ActLevels::One => one,
+        block::ActLevels::Two => {
+            let slab_rows = rows.min(model::ops::TWO_LEVEL_PASS_ROWS) as u64;
+            one + rows as u64 * int8_inputs + slab_rows * (3 * inner + 2 * hidden + 2 * ffn) * 4
+        }
+    }
 }
 
 /// Peak transient device bytes one card's share of a forward allocates over
@@ -326,8 +339,8 @@ pub fn block_workspace_bytes(cfg: &H3TransformerConfig, rows: u32) -> u64 {
 /// beside its blocks - the packed sequence the embed stage builds and its
 /// fill staging, and the residual a block reads while the next one's is
 /// written.
-pub fn forward_workspace_bytes(cfg: &H3TransformerConfig, rows: u32) -> u64 {
-    block_workspace_bytes(cfg, rows) + rows as u64 * 3 * cfg.hidden_size as u64 * 4
+pub fn forward_workspace_bytes(cfg: &H3TransformerConfig, rows: u32, levels: block::ActLevels) -> u64 {
+    block_workspace_bytes(cfg, rows, levels) + rows as u64 * 3 * cfg.hidden_size as u64 * 4
 }
 
 /// The resident model's per-card cost at `tier`: the block stack, the embed
@@ -343,11 +356,11 @@ pub fn resident_cost(cfg: &H3TransformerConfig, tier: Dtype) -> LayerBytes {
 impl H3Transformer {
     /// Hold the DiT resident at linear tier `tier`, over the fewest cards
     /// `device` may schedule that hold it while keeping `rows` packed rows of
-    /// forward workspace free on each. `Err` when no combination of them
-    /// does, or when the cards cannot run `tier` - the caller streams instead
-    /// ([`Self::forward_streaming`]).
-    pub fn load(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, device: Option<&str>, tier: Dtype, rows: u32) -> Result<H3Transformer, String> {
-        let cards = StreamPlan::cards(device, forward_workspace_bytes(&cfg, rows));
+    /// forward workspace at `levels` free on each. `Err` when no combination
+    /// of them does, or when the cards cannot run `tier` - the caller streams
+    /// instead ([`Self::forward_streaming`]).
+    pub fn load(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, device: Option<&str>, tier: Dtype, (rows, levels): (u32, block::ActLevels)) -> Result<H3Transformer, String> {
+        let cards = StreamPlan::cards(device, forward_workspace_bytes(&cfg, rows, levels));
         let cost = resident_cost(&cfg, tier);
         let plan = StreamPlan::fit(&cost, &cards).ok_or_else(|| format!("minimaxh3: the DiT at {tier:?} is {} bytes, which no combination of the schedulable cards holds with {rows}-row workspace free (usable bytes {cards:?})", cost.total()))?;
         H3Transformer::load_on(tensors, cfg, plan, device, tier)
@@ -501,15 +514,15 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
             // through the token refiner).
             let e = weights.embed(cx);
             let video_in = cx.upload(inp.hidden_states);
-            let video_embeds = block::linear(cx, &video_in, &e.proj_in_w, Some(&e.proj_in_b), num_video);
+            let video_embeds = block::linear(cx, inp.act_levels, &video_in, &e.proj_in_w, Some(&e.proj_in_b), num_video);
             let audio_in = cx.upload(inp.audio_hidden_states);
-            let audio_embeds = block::linear(cx, &audio_in, &e.audio_proj_in_w, Some(&e.audio_proj_in_b), num_audio);
+            let audio_embeds = block::linear(cx, inp.act_levels, &audio_in, &e.audio_proj_in_w, Some(&e.audio_proj_in_b), num_audio);
             let text_in = cx.upload(inp.encoder_hidden_states);
-            let mut text_embeds = block::linear(cx, &text_in, &e.context_embedder_w, Some(&e.context_embedder_b), num_text);
+            let mut text_embeds = block::linear(cx, inp.act_levels, &text_in, &e.context_embedder_w, Some(&e.context_embedder_b), num_text);
             for w in &e.refiner_blocks {
                 text_embeds = {
                     let _arena = cx.gpu.scratch_scope_in(REFINER_ARENA);
-                    block::refiner_block_forward(cx, w, &text_embeds, cfg, num_text)
+                    block::refiner_block_forward(cx, inp.act_levels, w, &text_embeds, cfg, num_text)
                 };
                 cx.gpu.poll_wait();
             }
@@ -546,7 +559,7 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
             let out = {
                 let _arena = cx.gpu.scratch_scope_in(BLOCK_ARENA);
                 let rows = modulation.block_rows(i, inp.timestep).unwrap_or_else(|e| panic!("minimaxh3 forward: {e}"));
-                let (out, attn_out) = block::block_forward(cx, &w, &h, adaln_idx_dev, cos, sin, &rows, cfg, seq_len);
+                let (out, attn_out) = block::block_forward(cx, &w, &block::BlockInputs { x: &h, adaln_indices: adaln_idx_dev, cos, sin, modulation: &rows, seq_len, levels: inp.act_levels }, cfg);
                 if taps && i == 0 {
                     tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
                     tap_block0_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
@@ -592,8 +605,8 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
         let modulated = block::modulate(cx, &normed, &ts_idx_dev, &scale_dev, &shift_dev, seq_len, hidden);
 
         let video_patch_dim = cfg.video_patch_dim();
-        let video_full = block::linear(cx, &modulated, &head.proj_out_w, Some(&head.proj_out_b), seq_len);
-        let audio_full = block::linear(cx, &modulated, &head.audio_proj_out_w, Some(&head.audio_proj_out_b), seq_len);
+        let video_full = block::linear(cx, inp.act_levels, &modulated, &head.proj_out_w, Some(&head.proj_out_b), seq_len);
+        let audio_full = block::linear(cx, inp.act_levels, &modulated, &head.audio_proj_out_w, Some(&head.audio_proj_out_b), seq_len);
         let (video_idx, audio_idx) = modality_idx.as_ref().expect("the head stage uploads the modality indices");
         let video_out = block::gather_rows(cx, video_idx, &video_full, num_video, video_patch_dim);
         let audio_out = block::gather_rows(cx, audio_idx, &audio_full, num_audio, cfg.audio_in_channels);
@@ -671,6 +684,231 @@ mod tests {
     use super::*;
     use crate::config::{TAG_AUDIO, TAG_TEXT, TAG_VIDEO};
 
+    /// The real checkpoint and its real-weight golden
+    /// (`tools/goldens/minimaxh3_dit_real_dump_reference.py`), with the
+    /// golden's provenance proven against this config - or `None` (skipped,
+    /// saying why).
+    fn real_dit_golden() -> Option<(crate::caps::Paths, Vec<checkpoint::safetensors::StTensor>)> {
+        let Some(root) = crate::caps::store_root() else {
+            brain_testutil::skip("no MiniMax-H3 checkout in the model store to load from");
+            return None;
+        };
+        let paths = crate::caps::Paths::resolve(&root);
+        if !checkpoint::safetensors::has_model_weights(std::path::Path::new(&paths.dit)) {
+            brain_testutil::skip(&format!("{} has no complete weight set yet - checkpoint not (yet) downloaded", paths.dit));
+            return None;
+        }
+        let fixture_dir = brain_testutil::testdata_path("golden/minimaxh3/dit_real");
+        let fixture_file = fixture_dir.join("minimaxh3_dit_real.safetensors");
+        if !fixture_file.is_file() {
+            brain_testutil::skip(&format!(
+                "{} not found - run tools/goldens/minimaxh3_dit_real_dump_reference.py --checkpoint {} --out {}",
+                fixture_file.display(),
+                paths.dit,
+                fixture_dir.display()
+            ));
+            return None;
+        }
+        let cfg = H3TransformerConfig::real();
+        // Golden/checkpoint pairing, proven rather than assumed - see
+        // brain_testutil::golden's own module doc.
+        let src = brain_testutil::golden::Source::open(&fixture_dir, "tools/goldens/minimaxh3_dit_real_dump_reference.py")?;
+        let ok = src.require(&[
+            ("num_attention_heads", cfg.num_attention_heads as i64),
+            ("attention_head_dim", cfg.attention_head_dim as i64),
+            ("hidden_size", cfg.hidden_size as i64),
+            ("num_layers", cfg.num_layers as i64),
+            ("num_refiner_layers", cfg.num_refiner_layers as i64),
+            ("ffn_dim", cfg.ffn_dim as i64),
+            ("in_channels", cfg.in_channels as i64),
+            ("audio_in_channels", cfg.audio_in_channels as i64),
+            ("text_dim", cfg.text_dim as i64),
+            ("freq_dim", cfg.freq_dim as i64),
+            ("time_embed_hidden_dim", cfg.time_embed_hidden_dim as i64),
+            ("time_embed_dim", cfg.time_embed_dim as i64),
+            ("rope_freq_dim", cfg.rope_freq_dim as i64),
+            ("rope_theta_x1000", (cfg.rope_theta * 1000.0) as i64),
+        ]);
+        if !ok {
+            return None;
+        }
+        let fx = checkpoint::safetensors::read(fixture_file.to_str().expect("fixture path is valid UTF-8")).expect("read golden fixture");
+        Some((paths, fx))
+    }
+
+    /// The real-weight golden's packed inputs, owned.
+    struct GoldenInputs {
+        hidden_states: Vec<f32>,
+        audio_hidden_states: Vec<f32>,
+        encoder_hidden_states: Vec<f32>,
+        timestep: Vec<f32>,
+        timestep_indices: Vec<u32>,
+        token_tags: Vec<u32>,
+        position_ids: Vec<f32>,
+        video_indices: Vec<u32>,
+        audio_indices: Vec<u32>,
+        text_indices: Vec<u32>,
+    }
+
+    impl GoldenInputs {
+        fn read(fx: &[checkpoint::safetensors::StTensor]) -> GoldenInputs {
+            let get = |name: &str| -> Vec<f32> { fx.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("golden fixture tap {name:?} missing")).data.clone() };
+            let get_u32 = |name: &str| -> Vec<u32> { get(name).iter().map(|&f| f.round() as u32).collect() };
+            GoldenInputs {
+                hidden_states: get("input_hidden_states"),
+                audio_hidden_states: get("input_audio_hidden_states"),
+                encoder_hidden_states: get("input_encoder_hidden_states"),
+                timestep: get("input_timestep"),
+                timestep_indices: get_u32("input_timestep_indices"),
+                token_tags: get_u32("input_token_tags"),
+                position_ids: get("input_position_ids"),
+                video_indices: get_u32("input_video_indices"),
+                audio_indices: get_u32("input_audio_indices"),
+                text_indices: get_u32("input_text_indices"),
+            }
+        }
+
+        fn inputs(&self, act_levels: block::ActLevels) -> PackedInputs<'_> {
+            PackedInputs {
+                hidden_states: &self.hidden_states,
+                audio_hidden_states: &self.audio_hidden_states,
+                encoder_hidden_states: &self.encoder_hidden_states,
+                timestep: &self.timestep,
+                timestep_indices: &self.timestep_indices,
+                token_tags: &self.token_tags,
+                position_ids: &self.position_ids,
+                video_indices: &self.video_indices,
+                audio_indices: &self.audio_indices,
+                text_indices: &self.text_indices,
+                act_levels,
+            }
+        }
+    }
+
+    /// The checkpoint as the int8 tier stores it: every block and refiner
+    /// linear weight rounded to its int8 groups and back, everything else
+    /// as read.
+    struct Int8RoundedWeights<'a> {
+        inner: &'a dyn checkpoint::TensorSource,
+        cfg: H3TransformerConfig,
+    }
+
+    impl Int8RoundedWeights<'_> {
+        /// The input width of a linear the int8 tier quantizes, or `None`.
+        fn linear_k(&self, name: &str) -> Option<usize> {
+            let c = &self.cfg;
+            let in_stack = name.starts_with("transformer_blocks.") || name.starts_with("token_refiner.refiner_blocks.");
+            let k = if name.ends_with(".to_q.weight") || name.ends_with(".to_k.weight") || name.ends_with(".to_v.weight") || name.ends_with(".ff.net.0.proj.weight") {
+                c.hidden_size
+            } else if name.ends_with(".to_out.0.weight") {
+                c.inner_dim()
+            } else if name.ends_with(".ff.net.2.weight") {
+                c.ffn_dim
+            } else {
+                return None;
+            };
+            in_stack.then_some(k as usize)
+        }
+    }
+
+    impl checkpoint::TensorSource for Int8RoundedWeights<'_> {
+        fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+            match self.linear_k(name) {
+                Some(k) => self.inner.with_tensor(name, &mut |w| f(&Weight::round_trip(w, w.len() / k, k, Dtype::I8))),
+                None => self.inner.with_tensor(name, f),
+            }
+        }
+        fn numel(&self, name: &str) -> Option<usize> {
+            self.inner.numel(name)
+        }
+        fn advise_drop(&self, name: &str) {
+            self.inner.advise_drop(name)
+        }
+    }
+
+    /// Whether the int8 tier's WEIGHT rounding alone moves the end result:
+    /// the fp32 streaming forward over the checkpoint as the int8 tier
+    /// stores it, against the reference, every golden tap. Runs on the CPU
+    /// device, so it separates weight rounding from the int8 compute arm
+    /// without a card.
+    #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store; streams the whole checkpoint on the CPU"]
+    fn int8_weight_rounding_alone_against_the_real_reference() {
+        let Some((paths, fx)) = real_dit_golden() else {
+            return;
+        };
+        let cfg = H3TransformerConfig::real();
+        let want = |name: &str| fx.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("golden fixture tap {name:?} missing")).data.clone();
+        let golden = GoldenInputs::read(&fx);
+        let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
+        let rounded = Int8RoundedWeights { inner: &reader, cfg };
+        let dit = crate::dit_shard::StreamingDit::open(&cfg, Some("cpu"));
+        let t0 = std::time::Instant::now();
+        let (out, taps) = H3Transformer::forward_streaming_with_taps(&rounded, &cfg, &dit, &golden.inputs(block::ActLevels::One));
+        eprintln!("fp32 forward over int8-rounded weights in {:.0}s", t0.elapsed().as_secs_f32());
+        let mut table = brain_testutil::parity::Table::new(0.0, f64::INFINITY);
+        table.check("refiner_out", &taps.refiner_out, &want("tap_refiner_out"));
+        table.check("block0_out", &taps.block0_out, &want("tap_block0_out"));
+        table.check("block25_out (mid)", &taps.mid_block_out, &want("tap_block25_out"));
+        table.check("block49_out (last)", &taps.last_block_out, &want("tap_block49_out"));
+        table.check("output_video", &out.video, &want("output_video"));
+        table.check("output_audio", &out.audio, &want("output_audio"));
+        table.print();
+        assert!(out.video.iter().chain(&out.audio).all(|x| x.is_finite()), "non-finite output");
+    }
+
+    /// What the int8 tier costs the end result, measured on the real
+    /// checkpoint at the golden's own inputs, all 50 blocks: every golden tap
+    /// of the int8 model against the reference's, then the output at one
+    /// activation level and at two, printed for both streams. Needs cards with the packed int8 dot product
+    /// (the CPU JIT has none), two of them for the ~21 GiB int8 model.
+    #[test]
+    #[ignore = "needs the real MiniMax-H3 checkout in the model store and two cards for the int8 model"]
+    fn int8_activation_levels_against_the_real_reference_output() {
+        let Some((paths, fx)) = real_dit_golden() else {
+            return;
+        };
+        let cfg = H3TransformerConfig::real();
+        let want = |name: &str| fx.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("golden fixture tap {name:?} missing")).data.clone();
+        let golden = GoldenInputs::read(&fx);
+        let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
+        let t0 = std::time::Instant::now();
+        // Split over two cards, as a generation's own workspace makes the
+        // placement do: the model alone sits within a GiB of one P40's
+        // allocatable memory, too close to share it with this measurement.
+        let rows = (golden.position_ids.len() / 3) as u32;
+        let cost = resident_cost(&cfg, Dtype::I8);
+        let cards: Vec<(usize, u64)> = StreamPlan::cards(None, forward_workspace_bytes(&cfg, rows, block::ActLevels::Two)).into_iter().map(|(i, b)| (i, b.min(cost.total() * 3 / 5))).collect();
+        let plan = StreamPlan::fit(&cost, &cards).expect("two cards hold the int8 model");
+        let m = H3Transformer::load_on(&reader, cfg, plan, None, Dtype::I8).expect("the int8 model on two cards");
+        let _plan = m.prepare(&reader, &golden.timestep).expect("prepare");
+        eprintln!("int8 model loaded in {:.0}s", t0.elapsed().as_secs_f32());
+        let err = |got: &[f32], want: &[f32]| (brain_testutil::parity::compare(got, want), brain_testutil::parity::rel_l2(got, want));
+        // Where the int8 model leaves the reference: every tap the golden
+        // carries, in forward order - the first that drops names the stage.
+        let (_, taps) = m.forward_with_taps(&golden.inputs(block::ActLevels::One));
+        let seq_len = golden.position_ids.len() / 3;
+        let half = taps.rope_cos.len() / seq_len;
+        let first_half_cols = |full: &[f32]| -> Vec<f32> { (0..seq_len).flat_map(|r| full[r * 2 * half..r * 2 * half + half].to_vec()).collect() };
+        let mut table = brain_testutil::parity::Table::new(0.0, f64::INFINITY);
+        table.check("refiner_out", &taps.refiner_out, &want("tap_refiner_out"));
+        table.check("rope_cos", &taps.rope_cos, &first_half_cols(&want("tap_rope_cos")));
+        table.check("temb", &taps.temb, &want("tap_temb"));
+        table.check("block0_input", &taps.block0_input, &want("tap_block0_input"));
+        table.check("block0_attn_out", &taps.block0_attn_out, &want("tap_block0_attn_out"));
+        table.check("block0_out", &taps.block0_out, &want("tap_block0_out"));
+        table.check("block25_out (mid)", &taps.mid_block_out, &want("tap_block25_out"));
+        table.check("block49_out (last)", &taps.last_block_out, &want("tap_block49_out"));
+        table.print();
+        for levels in [block::ActLevels::One, block::ActLevels::Two] {
+            let t = std::time::Instant::now();
+            let out = m.forward(&golden.inputs(levels));
+            let (v, a) = (err(&out.video, &want("output_video")), err(&out.audio, &want("output_audio")));
+            eprintln!("{levels:?}: video (cosine, max_abs) {:?} rel_l2 {:.3e}; audio {:?} rel_l2 {:.3e}; forward {:.1}s", v.0, v.1, a.0, a.1, t.elapsed().as_secs_f32());
+            assert!(out.video.iter().chain(&out.audio).all(|x| x.is_finite()), "{levels:?}: non-finite int8 output");
+        }
+    }
+
     /// The REAL checkpoint's DiT, real weights, against a live real-weight
     /// `diffusers` reference run - `tools/goldens/minimaxh3_dit_real_dump_reference.py`,
     /// NOT `minimaxh3_dit_dump_reference.py` (that one uses tiny dims and
@@ -689,84 +927,16 @@ mod tests {
     #[test]
     #[ignore = "needs the real MiniMax-H3 checkout in the model store"]
     fn dit_matches_the_real_reference_numerically_layer_by_layer() {
-        let Some(root) = crate::caps::store_root() else {
-            brain_testutil::skip("no MiniMax-H3 checkout in the model store to load from");
+        let Some((paths, fx)) = real_dit_golden() else {
             return;
         };
-        let paths = crate::caps::Paths::resolve(&root);
-        if !checkpoint::safetensors::has_model_weights(std::path::Path::new(&paths.dit)) {
-            brain_testutil::skip(&format!("{} has no complete weight set yet - checkpoint not (yet) downloaded", paths.dit));
-            return;
-        }
-
-        let fixture_dir = brain_testutil::testdata_path("golden/minimaxh3/dit_real");
-        let fixture_file = fixture_dir.join("minimaxh3_dit_real.safetensors");
-        if !fixture_file.is_file() {
-            brain_testutil::skip(&format!(
-                "{} not found - run tools/goldens/minimaxh3_dit_real_dump_reference.py --checkpoint {} --out {}",
-                fixture_file.display(),
-                paths.dit,
-                fixture_dir.display()
-            ));
-            return;
-        }
-
         let cfg = H3TransformerConfig::real();
-
-        // Golden/checkpoint pairing, proven rather than assumed - see
-        // brain_testutil::golden's own module doc.
-        let Some(src) = brain_testutil::golden::Source::open(&fixture_dir, "tools/goldens/minimaxh3_dit_real_dump_reference.py") else {
-            return;
-        };
-        let ok = src.require(&[
-            ("num_attention_heads", cfg.num_attention_heads as i64),
-            ("attention_head_dim", cfg.attention_head_dim as i64),
-            ("hidden_size", cfg.hidden_size as i64),
-            ("num_layers", cfg.num_layers as i64),
-            ("num_refiner_layers", cfg.num_refiner_layers as i64),
-            ("ffn_dim", cfg.ffn_dim as i64),
-            ("in_channels", cfg.in_channels as i64),
-            ("audio_in_channels", cfg.audio_in_channels as i64),
-            ("text_dim", cfg.text_dim as i64),
-            ("freq_dim", cfg.freq_dim as i64),
-            ("time_embed_hidden_dim", cfg.time_embed_hidden_dim as i64),
-            ("time_embed_dim", cfg.time_embed_dim as i64),
-            ("rope_freq_dim", cfg.rope_freq_dim as i64),
-            ("rope_theta_x1000", (cfg.rope_theta * 1000.0) as i64),
-        ]);
-        if !ok {
-            return;
-        }
-
-        let fx = checkpoint::safetensors::read(fixture_file.to_str().expect("fixture path is valid UTF-8")).expect("read golden fixture");
         let get = |name: &str| -> &checkpoint::safetensors::StTensor {
             fx.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("golden fixture tap {name:?} missing"))
         };
-        let get_u32 = |name: &str| -> Vec<u32> { get(name).data.iter().map(|&f| f.round() as u32).collect() };
-
-        let hidden_states = get("input_hidden_states").data.clone();
-        let audio_hidden_states = get("input_audio_hidden_states").data.clone();
-        let encoder_hidden_states = get("input_encoder_hidden_states").data.clone();
-        let timestep = get("input_timestep").data.clone();
-        let timestep_indices = get_u32("input_timestep_indices");
-        let token_tags = get_u32("input_token_tags");
-        let position_ids = get("input_position_ids").data.clone();
-        let video_indices = get_u32("input_video_indices");
-        let audio_indices = get_u32("input_audio_indices");
-        let text_indices = get_u32("input_text_indices");
-
-        let inp = PackedInputs {
-            hidden_states: &hidden_states,
-            audio_hidden_states: &audio_hidden_states,
-            encoder_hidden_states: &encoder_hidden_states,
-            timestep: &timestep,
-            timestep_indices: &timestep_indices,
-            token_tags: &token_tags,
-            position_ids: &position_ids,
-            video_indices: &video_indices,
-            audio_indices: &audio_indices,
-            text_indices: &text_indices,
-        };
+        let golden = GoldenInputs::read(&fx);
+        let inp = golden.inputs(block::ActLevels::One);
+        let position_ids = &golden.position_ids;
 
         eprintln!("running real DiT one block at a time on the ambient devices (never all 50 blocks resident - see H3Transformer::forward_streaming_with_taps's own doc) ...");
         let t0 = std::time::Instant::now();
@@ -944,6 +1114,7 @@ mod tests {
             video_indices: &video_indices,
             audio_indices: &audio_indices,
             text_indices: &text_indices,
+            act_levels: block::ActLevels::One,
         };
 
         let _plan = model.prepare(&tensors, &timestep).expect("prepare");
@@ -1025,6 +1196,7 @@ mod tests {
                 video_indices: &self.video_indices,
                 audio_indices: &self.audio_indices,
                 text_indices: &self.text_indices,
+                act_levels: block::ActLevels::One,
             }
         }
     }
@@ -1087,19 +1259,27 @@ mod tests {
         let tensors = rand_tensors(&cfg, data::rng::random_seed());
         let packed = Packed::random(&cfg);
         let plan = || StreamPlan::single(cfg.num_layers as usize);
-        let run = |tier: Dtype| {
+        let run = |tier: Dtype, act_levels: block::ActLevels| {
             let m = H3Transformer::load_on(&tensors, cfg, plan(), None, tier).expect("a resident tiny model");
             let _plan = m.prepare(&tensors, packed.inputs().timestep).expect("prepare");
-            m.forward(&packed.inputs())
+            m.forward(&PackedInputs { act_levels, ..packed.inputs() })
         };
-        let (fp32, int8) = (run(Dtype::F32), run(Dtype::I8));
+        let fp32 = run(Dtype::F32, block::ActLevels::One);
         let cosine = |a: &[f32], b: &[f32]| {
             let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
             let norm = |v: &[f32]| v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
             dot / (norm(a) * norm(b))
         };
-        assert!(cosine(&int8.video, &fp32.video) > 0.99, "video cosine {}", cosine(&int8.video, &fp32.video));
-        assert!(cosine(&int8.audio, &fp32.audio) > 0.99, "audio cosine {}", cosine(&int8.audio, &fp32.audio));
+        // 1 - cosine measured on this config across seeds: up to ~1.6e-6
+        // with one activation level, near 1e-7 with two, where what is left
+        // is the int8 weights' own rounding. The floors hold each with a
+        // margin; `model`'s `ops_two_level_act` gates the activation side
+        // exactly.
+        for (levels, floor) in [(block::ActLevels::One, 0.999_99), (block::ActLevels::Two, 0.999_999_5)] {
+            let int8 = run(Dtype::I8, levels);
+            assert!(cosine(&int8.video, &fp32.video) > floor, "{levels:?}: video cosine {}", cosine(&int8.video, &fp32.video));
+            assert!(cosine(&int8.audio, &fp32.audio) > floor, "{levels:?}: audio cosine {}", cosine(&int8.audio, &fp32.audio));
+        }
     }
 
     /// Splitting the block stack over two stages must change WHERE the work
@@ -1210,6 +1390,7 @@ mod tests {
             video_indices: &get_u32("input_video_indices"),
             audio_indices: &get_u32("input_audio_indices"),
             text_indices: &get_u32("input_text_indices"),
+            act_levels: block::ActLevels::One,
         };
 
         let _plan = model.prepare(&tensors, inp.timestep).expect("prepare");

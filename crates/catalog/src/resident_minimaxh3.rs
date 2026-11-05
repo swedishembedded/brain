@@ -26,6 +26,7 @@
 use std::sync::Arc;
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
+use minimaxh3::block::ActLevels;
 use minimaxh3::config::H3TransformerConfig;
 use minimaxh3::video_vae::VideoVaeConfig;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
@@ -57,13 +58,15 @@ impl MiniMaxH3Resident {
     }
 }
 
-/// One instance key's fields (`"{task}:{vf}x{vh}x{vw}:{audio}[:{refs}][@{dtype}]"`):
+/// One instance key's fields (`"{task}:{vf}x{vh}x{vw}:{audio}[:{refs}][@{dtype}[/a2]]"`):
 /// the task, both latent extents - see [`instance_key`]'s own doc for why
 /// the video and audio extents are named separately rather than one being
 /// derivable from the other at THIS layer - the packed rows a `ref2va`
 /// request's references may take (`0` when absent) and the tier the DiT is
 /// held at ([`RESIDENT_DTYPE`]), `"f32"` when the `@{dtype}` suffix is
-/// absent - `resident_wan.rs::parse_key`'s own precedent.
+/// absent - `resident_wan.rs::parse_key`'s own precedent - and, with `/a2`,
+/// that the request quantizes its activations in two int8 levels, whose
+/// forward needs more workspace.
 #[derive(Debug, PartialEq)]
 struct Key {
     task: String,
@@ -73,12 +76,18 @@ struct Key {
     audio: u32,
     reference_rows: u32,
     dtype: String,
+    act_levels: ActLevels,
 }
 
 fn parse_key(config: &str) -> Option<Key> {
     let (rest, dtype) = match config.rsplit_once('@') {
-        Some((r, d)) => (r, d.to_string()),
-        None => (config, "f32".to_string()),
+        Some((r, d)) => (r, d),
+        None => (config, "f32"),
+    };
+    let (dtype, act_levels) = match dtype.split_once('/') {
+        Some((d, "a2")) => (d.to_string(), ActLevels::Two),
+        Some(_) => return None,
+        None => (dtype.to_string(), ActLevels::One),
     };
     let mut it = rest.splitn(4, ':');
     let task = it.next()?.to_string();
@@ -89,7 +98,7 @@ fn parse_key(config: &str) -> Option<Key> {
         Some(r) => r.parse().ok()?,
         None => 0,
     };
-    Some(Key { task, vf, vh, vw, audio, reference_rows, dtype })
+    Some(Key { task, vf, vh, vw, audio, reference_rows, dtype, act_levels })
 }
 
 /// Resolve one invocation's `(video latent extent, audio latent extent)`
@@ -183,11 +192,15 @@ impl ResidentModel for MiniMaxH3Resident {
         let (vf, vh, vw, audio) = latent_extents(inv);
         let refs = minimaxh3::caps::reference_rows_bound(action, inv, target_video_rows(vf, vh, vw), audio * minimaxh3::pipeline::AUDIO_CHANNELS);
         let extent = format!("{action}:{vf}x{vh}x{vw}:{audio}");
-        InstanceKey::new(&self.id, if refs > 0 { format!("{extent}:{refs}@{RESIDENT_DTYPE}") } else { format!("{extent}@{RESIDENT_DTYPE}") })
+        let extent = if refs > 0 { format!("{extent}:{refs}") } else { extent };
+        // An unparseable level count keys as one level; the request itself is
+        // refused once `gen_params_from` runs.
+        let levels = if inv.get_i64("int8_activation_levels") == Some(2) { "/a2" } else { "" };
+        InstanceKey::new(&self.id, format!("{extent}@{RESIDENT_DTYPE}{levels}"))
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        let Some(Key { vf, vh, vw, audio, reference_rows, dtype, .. }) = parse_key(&key.config) else {
+        let Some(Key { vf, vh, vw, audio, reference_rows, dtype, act_levels, .. }) = parse_key(&key.config) else {
             // An unparseable key must not read as "free" - `resident_wan.
             // rs::estimate`'s identical reasoning.
             return MemCost::new(8u64 << 30, 4u64 << 30);
@@ -197,7 +210,7 @@ impl ResidentModel for MiniMaxH3Resident {
         let tier = key_tier(&dtype).unwrap_or(gpu_core::select::Dtype::F32);
         let weights = minimaxh3::model::resident_cost(&dit_cfg, tier).total();
         let vae_weights = manifest_bytes(&VideoVaeConfig::real().tensor_manifest()) + manifest_bytes(&minimaxh3::vocoder::VocoderConfig::h3_32khz().tensor_manifest());
-        let activations = minimaxh3::model::forward_workspace_bytes(&dit_cfg, packed_rows(vf, vh, vw, audio) + reference_rows);
+        let activations = minimaxh3::model::forward_workspace_bytes(&dit_cfg, packed_rows(vf, vh, vw, audio) + reference_rows, act_levels);
         let (ph, pw) = (dit_cfg.patch_size[1] as u64, dit_cfg.patch_size[2] as u64);
         let pixels = vf as u64 * (vh as u64 * ph) * (vw as u64 * pw) * 3 * 4;
 
@@ -259,13 +272,13 @@ impl MiniMaxH3Instance {
     /// The slot is keyed by the partition (`transformer/` or `ref2va`'s
     /// `transformer_ref/`) as well as the device, so switching between them
     /// reloads rather than running one's request on the other's weights.
-    fn with_hot_dit<R>(&self, dit: &str, rows: u32, body: impl FnOnce(&minimaxh3::model::H3Transformer) -> Result<R, String>) -> Result<R, String> {
+    fn with_hot_dit<R>(&self, dit: &str, workspace: (u32, ActLevels), body: impl FnOnce(&minimaxh3::model::H3Transformer) -> Result<R, String>) -> Result<R, String> {
         let want = format!("{dit}@{}", device_key(self.device));
         self.hot.try_get(
             want,
             || {
                 let dit_reader = minimaxh3::caps::open_dit_reader(dit)?;
-                minimaxh3::model::H3Transformer::load(&dit_reader, H3TransformerConfig::real(), device_name(self.device).as_deref(), minimaxh3::pipeline::RESIDENT_TIER, rows)
+                minimaxh3::model::H3Transformer::load(&dit_reader, H3TransformerConfig::real(), device_name(self.device).as_deref(), minimaxh3::pipeline::RESIDENT_TIER, workspace)
             },
             body,
         )
@@ -282,7 +295,7 @@ impl Instance for MiniMaxH3Instance {
         let vae = minimaxh3::caps::VaeWeights::load(&self.paths)?;
         let (vf, vh, vw, audio) = latent_extents(inv);
         let rows = packed_rows(vf, vh, vw, audio) + minimaxh3::caps::reference_rows_bound(action, inv, target_video_rows(vf, vh, vw), audio * minimaxh3::pipeline::AUDIO_CHANNELS);
-        self.with_hot_dit(&dit, rows, |model| {
+        self.with_hot_dit(&dit, (rows, req.params.opts.act_levels), |model| {
             let empty = vae::blocks::Tensors::default();
             let ckpt = vae.as_checkpoint(&empty, H3TransformerConfig::real());
             minimaxh3::caps::generate_on(&ckpt, &req, &self.paths, Some(model), &inv.cancel, progress)
@@ -315,10 +328,12 @@ mod tests {
 
     #[test]
     fn key_parsing_round_trips_and_a_bad_key_still_costs_something() {
-        let key = |task: &str, reference_rows: u32, dtype: &str| Some(Key { task: task.to_string(), vf: 37, vh: 32, vw: 32, audio: 207, reference_rows, dtype: dtype.to_string() });
-        assert_eq!(parse_key("t2va:37x32x32:207"), key("t2va", 0, "f32"));
-        assert_eq!(parse_key("t2va:37x32x32:207@f32"), key("t2va", 0, "f32"));
-        assert_eq!(parse_key("ref2va:37x32x32:207:16384@i8"), key("ref2va", 16384, "i8"));
+        let key = |task: &str, reference_rows: u32, dtype: &str, act_levels| Some(Key { task: task.to_string(), vf: 37, vh: 32, vw: 32, audio: 207, reference_rows, dtype: dtype.to_string(), act_levels });
+        assert_eq!(parse_key("t2va:37x32x32:207"), key("t2va", 0, "f32", ActLevels::One));
+        assert_eq!(parse_key("t2va:37x32x32:207@f32"), key("t2va", 0, "f32", ActLevels::One));
+        assert_eq!(parse_key("ref2va:37x32x32:207:16384@i8"), key("ref2va", 16384, "i8", ActLevels::One));
+        assert_eq!(parse_key("t2va:37x32x32:207@i8/a2"), key("t2va", 0, "i8", ActLevels::Two));
+        assert_eq!(parse_key("t2va:37x32x32:207@i8/a3"), None);
         assert_eq!(parse_key("garbage"), None);
         let cost = resident().estimate(&InstanceKey::new(minimaxh3::caps::MODEL, "garbage".to_string()));
         assert!(cost.vram > 0 && cost.ram > 0, "{cost:?}");
@@ -392,6 +407,20 @@ mod tests {
         let big_key = r.instance_key("t2va", &Invocation::new().set("prompt", json!("a")).set("width", json!(512)).set("height", json!(512)));
         let (small_cost, big_cost) = (r.estimate(&small_key), r.estimate(&big_key));
         assert!(big_cost.vram > small_cost.vram, "a bigger canvas must cost more ({} vs {})", big_cost.vram, small_cost.vram);
+    }
+
+    /// Two activation levels are the request's choice, and they cost a
+    /// second int8 copy of every linear's input: the key carries them, so a
+    /// two-level request is placed with the workspace it will use.
+    #[test]
+    fn a_two_level_request_keys_and_costs_its_own_workspace() {
+        let r = resident();
+        let base = Invocation::new().set("prompt", json!("a"));
+        let one = r.instance_key("t2va", &base);
+        let two = r.instance_key("t2va", &base.clone().set("int8_activation_levels", json!(2)));
+        assert_eq!(parse_key(&two.config).expect("a well-formed key").act_levels, ActLevels::Two);
+        assert_eq!(one.config, r.instance_key("t2va", &base.clone().set("int8_activation_levels", json!(1))).config);
+        assert!(r.estimate(&two).vram > r.estimate(&one).vram);
     }
 
     #[test]

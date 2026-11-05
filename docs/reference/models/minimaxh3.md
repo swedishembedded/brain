@@ -81,6 +81,13 @@ reports per-step progress and stops at the next step boundary when cancelled.
   21.9 GiB free each, 704x384 x 121 frames (~11k packed rows) holds resident
   and peaks at ~21.9 GB per card; 768x448 (~13.6k rows) does not - its first
   step needs ~10.9 GB of workspace beside ~12.5 GB of weights per card.
+* **`--int8-activation-levels 2`** (`int8_activation_levels: 2` on a
+  request) quantizes each int8 linear's input in two levels: the second
+  quantizes what the first rounds away, so the activation side is exact to
+  ~1/(127·254) of its group scale and the DiT computes what its int8 weights
+  do. It costs a second product per linear and a second int8 copy of every
+  linear's input in the workspace, which the placement reserves. The default,
+  1, is the int8 tier's ordinary arithmetic.
 
 ## Hardware and limits
 
