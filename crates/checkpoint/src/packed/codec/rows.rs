@@ -30,7 +30,8 @@ pub fn int8_block_scales(row: &[f32], group: usize, out: &mut [f32]) {
 }
 
 /// Pack one row to int8 words (4 lanes per word, low byte first) given its
-/// block scales. `group` must be a multiple of 4.
+/// block scales. `group` must be a multiple of 4. Each code is the scaled
+/// value rounded half away from zero and saturated at ±127 (`Q8_0`'s rule).
 #[inline]
 pub fn int8_pack_row(row: &[f32], group: usize, scales: &[f32], out: &mut [u32]) {
     let words_per_group = group / 4;
@@ -39,11 +40,23 @@ pub fn int8_pack_row(row: &[f32], group: usize, scales: &[f32], out: &mut [u32])
         let inv = 1.0 / scales[g / words_per_group];
         let mut word = 0u32;
         for b in 0..4 {
-            let q = (row[g * 4 + b] * inv).round().clamp(-127.0, 127.0) as i32;
-            word |= ((q as u8) as u32) << (8 * b);
+            word |= (round_half_away_i8(row[g * 4 + b] * inv) as u8 as u32) << (8 * b);
         }
         *word_out = word;
     }
+}
+
+/// `v.round().clamp(-127.0, 127.0) as i8`, bit for bit, without `f32::round`:
+/// on the x86-64 baseline that is a `roundf` call per element, which kept
+/// this loop scalar. Truncation and the exact remainder (`v - trunc(v)`, exact
+/// for every clamped value) are plain SSE2, so the loop vectorizes. NaN stays
+/// 0 through both the cast and the comparison.
+#[inline(always)]
+fn round_half_away_i8(v: f32) -> i8 {
+    let v = v.clamp(-127.0, 127.0);
+    let t = v as i32;
+    let away = ((v - t as f32).abs() >= 0.5) as i32;
+    (t + away * if v < 0.0 { -1 } else { 1 }) as i8
 }
 
 /// Quantize one row to a 16-entry codebook: per block scale
@@ -399,4 +412,33 @@ fn encode_mxfp4(values: &[f32], out: &mut TileBuf) {
         codes.extend(blk.iter().map(|&v| nearest(g2, v / s)));
     }
     pack_nibbles(codes.into_iter(), values.len(), &mut out.payload);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pack rounds half away from zero and saturates at ±127 - the
+    /// `Q8_0` convention a byte-level repack of a stored tensor relies on -
+    /// bit for bit, at every tie, both sides of every tie, the clamp edges
+    /// and the values that have no integer.
+    #[test]
+    fn int8_pack_rounds_half_away_from_zero_and_saturates() {
+        let reference = |v: f32| (v.round().clamp(-127.0, 127.0) as i32) as u8;
+        let mut values: Vec<f32> = vec![0.0, -0.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 127.0, -127.0, 127.4, 127.5, 128.0, -127.6, 1e9, -1e9];
+        for k in -128..=128 {
+            let tie = k as f32 + 0.5;
+            values.extend([tie, -tie, f32::from_bits(tie.to_bits() - 1), f32::from_bits(tie.to_bits() + 1), -f32::from_bits(tie.to_bits() - 1), -f32::from_bits(tie.to_bits() + 1)]);
+        }
+        let mut rng = data::rng::Lcg::random();
+        values.extend((0..4096).map(|_| rng.signed() * 140.0));
+        values.resize(values.len().div_ceil(32) * 32, 0.0);
+        let scales = vec![1.0f32; values.len() / 32];
+        let mut words = vec![0u32; values.len() / 4];
+        int8_pack_row(&values, 32, &scales, &mut words);
+        for (i, &v) in values.iter().enumerate() {
+            let got = (words[i / 4] >> (8 * (i % 4))) as u8;
+            assert_eq!(got, reference(v), "value {v} ({:#x})", v.to_bits());
+        }
+    }
 }
