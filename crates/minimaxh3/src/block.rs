@@ -59,7 +59,6 @@
 
 use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
-use model::hostmath::linear_rows;
 use model::ops::{Ops, Weight};
 
 use crate::config::{H3TransformerConfig, MODALITY_NUM};
@@ -443,10 +442,10 @@ pub fn row_scatter(cx: &Ctx, idx: &DeviceBuffer, src: &DeviceBuffer, out: &Devic
 /// `to_v` tensors (this port's golden dump does not call the reference's
 /// optional `fuse_projections()`) - splitting the real checkpoint's own
 /// fused `qkv_proj` tensor the same way is deferred until real-checkpoint
-/// import is wired up; the forward math is identical either way. `adaln_w`/`adaln_b` stay HOST-side (never uploaded as-is): they are
-/// read fresh every forward by [`block_forward`] to build this block's small
-/// per-timestep modulation tables (see this module's own doc on the
-/// row-order deviation).
+/// import is wired up; the forward math is identical either way.
+/// `adaln_proj` is not here at all: its output for a timestep is a constant
+/// row, cached by [`crate::adaln::AdalnCache`] and handed to
+/// [`block_forward`] per forward.
 #[derive(Clone)]
 pub struct BlockWeights {
     pub wq: Weight,
@@ -460,11 +459,6 @@ pub struct BlockWeights {
     pub fc1_value: Weight,
     pub fc1_gate: Weight,
     pub fc2: Weight,
-    /// `adaln_proj.linear.weight`, `[6*hidden*MODALITY_NUM, time_embed_dim]`
-    /// row-major, untouched (host).
-    pub adaln_w: Vec<f32>,
-    /// `adaln_proj.linear.bias`, `[6*hidden*MODALITY_NUM]` (host).
-    pub adaln_b: Vec<f32>,
 }
 
 /// One `MiniMaxH3TokenRefinerBlock`'s weights - the same attention/FFN
@@ -601,8 +595,6 @@ pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usiz
         fc1_value,
         fc1_gate,
         fc2: load_linear(tensors, ctx, &format!("{p}.ff.net.2.weight"), hidden, ffn, tier),
-        adaln_w: load_host(tensors, &format!("{p}.adaln_proj.linear.weight")),
-        adaln_b: load_host(tensors, &format!("{p}.adaln_proj.linear.bias")),
     }
 }
 
@@ -670,9 +662,6 @@ fn write_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, p: &str, hidde
 /// alive at once.
 pub fn load_block_streaming(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig) -> BlockWeights {
     let p = format!("transformer_blocks.{index}");
-    let adaln_w = load_host(tensors, &format!("{p}.adaln_proj.linear.weight"));
-    let adaln_b = load_host(tensors, &format!("{p}.adaln_proj.linear.bias"));
-
     let mut slots = ctx.block_slots.borrow_mut();
     match slots.as_ref() {
         None => *slots = Some(load_block(tensors, ctx, index, cfg, Dtype::F32)),
@@ -691,8 +680,6 @@ pub fn load_block_streaming(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, i
         fc1_value: s.fc1_value.clone(),
         fc1_gate: s.fc1_gate.clone(),
         fc2: s.fc2.clone(),
-        adaln_w,
-        adaln_b,
     }
 }
 
@@ -739,27 +726,23 @@ pub fn refiner_block_forward(cx: &Ctx, w: &RefinerBlockWeights, x: &DeviceBuffer
     add2(cx, &x1, &ff_out, seq_len * hidden)
 }
 
-/// Build this block's six per-(modality, timestep) modulation tables, each
-/// row-major `[MODALITY_NUM*num_timesteps, hidden]` in this port's own
-/// modality-major row order (see this module's own doc). `temb_silu` is
-/// `silu(temb)`, `[num_timesteps, time_embed_dim]` - the reference applies
-/// `silu` before every AdaLN projection, never once up front.
-fn adaln_tables(w: &BlockWeights, temb_silu: &[f32], num_timesteps: usize, hidden: usize, time_embed_dim: usize) -> [Vec<f32>; 6] {
+/// The six per-forward AdaLN-Zero tables `[MODALITY_NUM*num_timesteps,
+/// hidden]` (shift/scale/gate for attention, then for the FFN), addressed by
+/// [`crate::model::adaln_indices`] (modality-major, timestep-minor), each a
+/// contiguous slice of a timestep's cached `adaln_proj` row
+/// ([`crate::adaln`]).
+fn adaln_tables(rows: &[&[f32]], hidden: usize) -> [Vec<f32>; 6] {
+    let num_timesteps = rows.len();
     let mut tables: [Vec<f32>; 6] = Default::default();
     for t in tables.iter_mut() {
         *t = vec![0f32; MODALITY_NUM as usize * num_timesteps * hidden];
     }
     for modality in 0..MODALITY_NUM as usize {
         for (param, table) in tables.iter_mut().enumerate() {
-            let feat_row0 = (modality * 6 + param) * hidden;
-            let w_slice = &w.adaln_w[feat_row0 * time_embed_dim..(feat_row0 + hidden) * time_embed_dim];
-            let b_slice = &w.adaln_b[feat_row0..feat_row0 + hidden];
-            let out = linear_rows(temb_silu, w_slice, num_timesteps, time_embed_dim, hidden);
-            for t_idx in 0..num_timesteps {
-                let dst = &mut table[(modality * num_timesteps + t_idx) * hidden..(modality * num_timesteps + t_idx + 1) * hidden];
-                for c in 0..hidden {
-                    dst[c] = out[t_idx * hidden + c] + b_slice[c];
-                }
+            let feat0 = (modality * 6 + param) * hidden;
+            for (t_idx, row) in rows.iter().enumerate() {
+                let dst = (modality * num_timesteps + t_idx) * hidden;
+                table[dst..dst + hidden].copy_from_slice(&row[feat0..feat0 + hidden]);
             }
         }
     }
@@ -771,9 +754,9 @@ fn adaln_tables(w: &BlockWeights, temb_silu: &[f32], num_timesteps: usize, hidde
 /// `x`: `[seq_len, hidden]`; `adaln_indices`: `[seq_len]` u32 device buffer
 /// (`crate::model::adaln_indices` - THIS port's row convention, not the
 /// reference's, see this module's own doc); `cos`/`sin`: `[seq_len, half]`
-/// (`crate::rope::build_tables`); `temb_silu`/`num_timesteps`: this
-/// forward's shared timestep conditioning, `silu`'d once by the caller
-/// (every block reads the identical `temb`, only the projection differs).
+/// (`crate::rope::build_tables`); `modulation`: this block's cached
+/// `adaln_proj` row for each of the forward's distinct timesteps, in
+/// `timestep` order ([`crate::adaln::AdalnPlan::block_rows`]).
 ///
 /// Returns `(output, attn_out)` - `attn_out` is the attention sub-block's own
 /// output (post `to_out`, pre gated residual), exposed as a parity tap
@@ -788,20 +771,18 @@ pub fn block_forward(
     adaln_indices: &DeviceBuffer,
     cos: &DeviceBuffer,
     sin: &DeviceBuffer,
-    temb_silu: &[f32],
-    num_timesteps: usize,
+    modulation: &[&[f32]],
     cfg: &H3TransformerConfig,
     seq_len: u32,
 ) -> (DeviceBuffer, DeviceBuffer) {
     let (hidden, heads, hd, ffn) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim, cfg.ffn_dim);
     let half = 3 * cfg.rope_freq_dim;
 
-    let tables = adaln_tables(w, temb_silu, num_timesteps, hidden as usize, cfg.time_embed_dim as usize);
+    assert!(!modulation.is_empty(), "block_forward: at least one timestep's modulation is required");
+    let tables = adaln_tables(modulation, hidden as usize);
     let table_dev: Vec<DeviceBuffer> = tables.iter().map(|t| cx.upload(t)).collect();
-    let rows = MODALITY_NUM * num_timesteps as u32;
     let g = |i: usize| gather_rows(cx, adaln_indices, &table_dev[i], seq_len, hidden);
     let (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp) = (g(0), g(1), g(2), g(3), g(4), g(5));
-    debug_assert!(rows > 0, "at least one (modality, timestep) row must exist");
 
     // attention sub-block
     let n1 = rmsnorm(cx, x, &w.norm1, seq_len, hidden, cfg.norm_eps);

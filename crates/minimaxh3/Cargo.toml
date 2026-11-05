@@ -3,7 +3,7 @@ name = "brain-minimaxh3"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "MiniMax-H3 joint video+audio rectified-flow diffusion transformer (33B): one packed self-attention stack over video+audio+condition rows (not a two-stream architecture like ltxv), dual video/audio Euler schedules in one forward, AdaLN-precomputable to a ~19.3B resident backbone. Qwen3-VL text conditioning via brain-qwen3vl's truncated hidden-state encoder; causal-3D video VAE + DAC-lineage audio VAE, built on brain-model / brain-audio / brain-vae / brain-checkpoint / brain-gpu-core / brain-kernels."
+description = "MiniMax-H3 joint video+audio rectified-flow diffusion transformer (33B): one packed self-attention stack over video+audio+condition rows (not a two-stream architecture like ltxv), dual video/audio Euler schedules in one forward, AdaLN cached per timestep for a ~20B resident backbone. Qwen3-VL text conditioning via brain-qwen3vl's truncated hidden-state encoder; causal-3D video VAE + DAC-lineage audio VAE, built on brain-model / brain-audio / brain-vae / brain-checkpoint / brain-gpu-core / brain-kernels."
 
 [lib]
 name = "minimaxh3"

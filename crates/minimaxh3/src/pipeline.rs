@@ -392,9 +392,7 @@ fn unique_sorted_with_inverse(values: &[f32]) -> (Vec<f32>, Vec<u32>) {
 /// `(timestep, timestep_indices)` pair. Generated video/audio rows step down
 /// their own schedule; conditioning rows stay pinned at their own noise
 /// level; TEXT rows (never touched by either `video_indices`/`audio_indices`
-/// assignment) inherit the default `video_timestep` - matching
-/// `crate::precompute_adaln::timestep_grid`'s own documented choice, now
-/// confirmed from source rather than assumed.
+/// assignment) inherit the default `video_timestep`.
 #[allow(clippy::too_many_arguments)]
 fn build_row_timesteps(video_indices: &[u32], audio_indices: &[u32], num_condition_video_rows: usize, num_condition_audio_rows: usize, num_text_tokens: usize, video_timestep: f32, audio_timestep: f32, condition_video_timestep: f32, condition_audio_timestep: f32) -> (Vec<f32>, Vec<u32>) {
     let seq_len = video_indices.len() + audio_indices.len() + num_text_tokens;
@@ -783,17 +781,34 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
     let num_steps = sched.num_steps();
     let num_text_tokens = packed.text_indices.len();
 
-    for i in 0..num_steps {
+    // Every step's row-timestep plan, known before the first forward, so the
+    // whole schedule's AdaLN modulation is computed in one pass over the
+    // checkpoint's `adaln_proj` (`crate::adaln`) instead of per step. The
+    // plan is held to the end of the loop: it pins its rows in the model's
+    // cache against a concurrent request's eviction.
+    let step_rows: Vec<(Vec<f32>, Vec<u32>)> = (0..num_steps)
+        .map(|i| {
+            let (video_ts, audio_ts) = sched.current_timesteps(i);
+            let condition_video_ts = video_ts.max(KEYFRAME_NOISE_AUG);
+            build_row_timesteps(&packed.video_indices, &packed.audio_indices, num_condition_video_rows, packed.num_condition_audio_rows, num_text_tokens, video_ts, audio_ts, condition_video_ts, 1.0)
+        })
+        .collect();
+    let schedule_values: Vec<f32> = step_rows.iter().flat_map(|(ts, _)| ts.iter().copied()).collect();
+    let _modulation = match (resident, streaming_ctx.as_ref()) {
+        (Some(m), _) => m.prepare(ckpt.dit_tensors, &schedule_values)?,
+        (None, Some(s)) => s.prepare(ckpt.dit_tensors, dit_cfg, &schedule_values)?,
+        (None, None) => unreachable!("a streaming context is opened whenever nothing is resident"),
+    };
+
+    for (i, (unique_ts, ts_idx)) in step_rows.iter().enumerate() {
         let (video_ts, audio_ts) = sched.current_timesteps(i);
-        let condition_video_ts = video_ts.max(KEYFRAME_NOISE_AUG);
-        let (unique_ts, ts_idx) = build_row_timesteps(&packed.video_indices, &packed.audio_indices, num_condition_video_rows, packed.num_condition_audio_rows, num_text_tokens, video_ts, audio_ts, condition_video_ts, 1.0);
 
         let inp = PackedInputs {
             hidden_states: &compact_video,
             audio_hidden_states: &compact_audio,
             encoder_hidden_states: &text.embeds,
-            timestep: &unique_ts,
-            timestep_indices: &ts_idx,
+            timestep: unique_ts,
+            timestep_indices: ts_idx,
             token_tags: &packed.token_tags,
             position_ids: &packed.position_ids,
             video_indices: &packed.video_indices,

@@ -32,6 +32,7 @@
 //! an email to info@swedishembedded.com.
 
 use std::borrow::Cow;
+use std::sync::Mutex;
 
 use gpu_core::select::Dtype;
 use gpu_core::DeviceBuffer;
@@ -42,6 +43,7 @@ use model::StreamPlan;
 #[cfg(test)]
 use vae::blocks::Tensors;
 
+use crate::adaln::{AdalnCache, AdalnPlan};
 use crate::block::{self, BlockWeights, Ctx, RefinerBlockWeights};
 use crate::config::H3TransformerConfig;
 use crate::dit_shard::StreamingDit;
@@ -97,8 +99,7 @@ pub fn adaln_indices(token_tags: &[u32], timestep_indices: &[u32], num_timesteps
 }
 
 /// `Linear(in,out).forward` on a SINGLE row, host-side: `y = w @ x + b`,
-/// `w` is `[out, in]` row-major. `pub(crate)`: `precompute_adaln`'s own table
-/// build walks the same two-linears-plus-SiLU path per grid row.
+/// `w` is `[out, in]` row-major.
 pub(crate) fn linear1(x: &[f32], w: &[f32], b: &[f32], inn: usize, out: usize) -> Vec<f32> {
     let mut y = linear_rows(x, w, 1, inn, out);
     for (yi, bi) in y.iter_mut().zip(b) {
@@ -114,8 +115,7 @@ pub(crate) fn linear1(x: &[f32], w: &[f32], b: &[f32], inn: usize, out: usize) -
 /// the SiLU every consumer wants belongs to the consumer - the AdaLN
 /// projections apply `silu(temb)` themselves, exactly once. Applying it here
 /// as well double-activated every block's modulation. `pub(crate)`:
-/// [`precompute_adaln`] evaluates the same function at every `(modality,
-/// step)` grid row when it folds the per-block AdaLN tables.
+/// [`crate::adaln`] evaluates it at every timestep value it caches.
 pub(crate) fn temb_row(cfg: &H3TransformerConfig, t: f32, w0: &[f32], b0: &[f32], w2: &[f32], b2: &[f32]) -> Vec<f32> {
     let sinusoid = timestep_embedding(t, cfg.freq_dim as usize, true, 0.0, TIME_MAX_PERIOD);
     let h0 = silu_slice(&linear1(&sinusoid, w0, b0, cfg.freq_dim as usize, cfg.time_embed_hidden_dim as usize));
@@ -210,9 +210,14 @@ pub struct TimeWeights {
 }
 
 impl TimeWeights {
-    fn load(tensors: &dyn checkpoint::TensorSource) -> TimeWeights {
+    pub(crate) fn load(tensors: &dyn checkpoint::TensorSource) -> TimeWeights {
         let host = |name: &str| block::load_host(tensors, name);
         TimeWeights { w0: host("time_embedder.linear_1.weight"), b0: host("time_embedder.linear_1.bias"), w2: host("time_embedder.linear_2.weight"), b2: host("time_embedder.linear_2.bias") }
+    }
+
+    /// `time_embedder(time_proj(t))` for one timestep (pre-SiLU).
+    pub(crate) fn temb(&self, cfg: &H3TransformerConfig, t: f32) -> Vec<f32> {
+        temb_row(cfg, t, &self.w0, &self.b0, &self.w2, &self.b2)
     }
 }
 
@@ -221,6 +226,9 @@ impl TimeWeights {
 /// at most one block's weights are on a card at a time.
 trait StageWeights {
     fn time(&self) -> Cow<'_, TimeWeights>;
+    /// Every block's AdaLN modulation at each of `timesteps`
+    /// ([`crate::adaln`]): the projection itself is never a block weight.
+    fn adaln(&self, time: &TimeWeights, timesteps: &[f32]) -> Result<AdalnPlan, String>;
     fn embed(&self, cx: &Ctx) -> Cow<'_, EmbedWeights>;
     fn block(&self, i: usize, cx: &Ctx) -> Cow<'_, BlockWeights>;
     fn head(&self, cx: &Ctx) -> Cow<'_, HeadWeights>;
@@ -230,11 +238,19 @@ trait StageWeights {
 struct Streamed<'a> {
     tensors: &'a dyn checkpoint::TensorSource,
     cfg: &'a H3TransformerConfig,
+    dit: &'a StreamingDit,
 }
 
 impl StageWeights for Streamed<'_> {
     fn time(&self) -> Cow<'_, TimeWeights> {
         Cow::Owned(TimeWeights::load(self.tensors))
+    }
+    /// A generation prepared its whole schedule up front
+    /// ([`StreamingDit::prepare`]), so this is a cache hit that reads no
+    /// tensor; a caller that did not still gets the right rows, at the cost
+    /// of reading each block's `adaln_proj` here.
+    fn adaln(&self, time: &TimeWeights, timesteps: &[f32]) -> Result<AdalnPlan, String> {
+        self.dit.prepare_with(self.tensors, self.cfg, time, timesteps)
     }
     fn embed(&self, cx: &Ctx) -> Cow<'_, EmbedWeights> {
         Cow::Owned(EmbedWeights::load(self.tensors, cx, self.cfg, Dtype::F32))
@@ -256,6 +272,9 @@ pub struct H3Transformer {
     plan: StreamPlan,
     stages: Vec<Ctx>,
     time: TimeWeights,
+    /// Every block's `adaln_proj` output by timestep value - the projection
+    /// itself is never held ([`crate::adaln`]). Filled by [`Self::prepare`].
+    adaln: Mutex<AdalnCache>,
     embed: EmbedWeights,
     blocks: Vec<BlockWeights>,
     head: HeadWeights,
@@ -264,6 +283,9 @@ pub struct H3Transformer {
 impl StageWeights for H3Transformer {
     fn time(&self) -> Cow<'_, TimeWeights> {
         Cow::Borrowed(&self.time)
+    }
+    fn adaln(&self, _time: &TimeWeights, timesteps: &[f32]) -> Result<AdalnPlan, String> {
+        self.adaln.lock().unwrap_or_else(|p| p.into_inner()).cached(timesteps)
     }
     fn embed(&self, _cx: &Ctx) -> Cow<'_, EmbedWeights> {
         Cow::Borrowed(&self.embed)
@@ -343,11 +365,21 @@ impl H3Transformer {
         }
         let embed = embed.ok_or("minimaxh3: the plan has no embed stage")?;
         let head = head.ok_or("minimaxh3: the plan has no head stage")?;
-        Ok(H3Transformer { time: TimeWeights::load(tensors), cfg, plan, stages, embed, blocks, head })
+        Ok(H3Transformer { time: TimeWeights::load(tensors), adaln: Mutex::new(AdalnCache::new(crate::adaln::DEFAULT_CAPACITY)), cfg, plan, stages, embed, blocks, head })
     }
 
     pub fn config(&self) -> &H3TransformerConfig {
         &self.cfg
+    }
+
+    /// Cache the AdaLN modulation for every timestep in `values` from
+    /// `tensors`' `adaln_proj` - the checkpoint [`Self::load`] read, which
+    /// never holds the projection. A generation prepares its whole schedule
+    /// before the first step and keeps the returned plan alive for the
+    /// request: the cache never evicts a row a live plan holds, so every
+    /// forward of that request finds its rows.
+    pub fn prepare(&self, tensors: &dyn checkpoint::TensorSource, values: &[f32]) -> Result<AdalnPlan, String> {
+        self.adaln.lock().unwrap_or_else(|p| p.into_inner()).prepare(tensors, &self.cfg, &self.time, values)
     }
 
     /// `MiniMaxH3Transformer3DModel.forward`, at batch size 1 (see this
@@ -384,7 +416,7 @@ impl H3Transformer {
 
     /// [`Self::forward_streaming`] with [`Self::forward_with_taps`]'s taps.
     pub fn forward_streaming_with_taps(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, dit: &StreamingDit, inp: &PackedInputs) -> (H3Output, H3Taps) {
-        forward_core(cfg, dit.plan(), &|s| dit.stage(s), &Streamed { tensors, cfg }, inp)
+        forward_core(cfg, dit.plan(), &|s| dit.stage(s), &Streamed { tensors, cfg, dit }, inp)
     }
 }
 
@@ -421,6 +453,7 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
     let time = weights.time();
     let temb = build_temb(cfg, inp.timestep, &time.w0, &time.b0, &time.w2, &time.b2);
     let temb_silu = silu_slice(&temb);
+    let modulation = weights.adaln(&time, inp.timestep).unwrap_or_else(|e| panic!("minimaxh3 forward: {e}"));
     // Row -> this port's own AdaLN table address.
     let adaln_idx = adaln_indices(inp.token_tags, inp.timestep_indices, num_timesteps);
 
@@ -495,7 +528,8 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
             // `poll_wait` below drains the block before the next scope opens.
             let (out, attn_out) = {
                 let _arena = cx.gpu.scratch_scope_in(BLOCK_ARENA);
-                block::block_forward(cx, &w, &h, adaln_idx_dev, cos, sin, &temb_silu, num_timesteps, cfg, seq_len)
+                let rows = modulation.block_rows(i, inp.timestep).unwrap_or_else(|e| panic!("minimaxh3 forward: {e}"));
+                block::block_forward(cx, &w, &h, adaln_idx_dev, cos, sin, &rows, cfg, seq_len)
             };
             if i == 0 {
                 tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
@@ -901,6 +935,7 @@ mod tests {
             text_indices: &text_indices,
         };
 
+        let _plan = model.prepare(&tensors, &timestep).expect("prepare");
         let out = model.forward(&inp);
         assert_eq!(out.video.len(), (num_video * cfg.video_patch_dim()) as usize);
         assert_eq!(out.audio.len(), (num_audio * cfg.audio_in_channels) as usize);
@@ -986,6 +1021,33 @@ mod tests {
     /// A model held resident runs the same forward as one streamed block by
     /// block - the same weights, the same arithmetic, the same bits.
     #[test]
+    fn adaln_proj_is_read_once_per_schedule_and_never_held_by_a_forward() {
+        use crate::adaln::Counting;
+        use crate::dit_shard::StreamingDit;
+
+        let cfg = H3TransformerConfig::tiny();
+        let src = Counting::new(rand_tensors(&cfg, 23));
+        let model = H3Transformer::load_on(&src, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32).expect("a resident tiny model");
+        assert!(src.take_matching("adaln_proj").is_empty(), "loading the resident model must not read adaln_proj");
+        let packed = Packed::random(&cfg);
+        let inp = packed.inputs();
+        let plan = model.prepare(&src, inp.timestep).expect("prepare");
+        assert_eq!(src.take_matching("adaln_proj").len(), 2 * cfg.num_layers as usize, "one weight + one bias read per block for the whole schedule");
+
+        let dit = StreamingDit::open_single(&cfg, Some("cpu"));
+        let _streamed_plan = dit.prepare(&src, &cfg, inp.timestep).expect("prepare the streaming DiT");
+        src.take_matching("");
+        for _ in 0..2 {
+            let resident = model.forward(&inp);
+            let streamed = H3Transformer::forward_streaming(&src, &cfg, &dit, &inp);
+            assert!(src.take_matching("adaln_proj").is_empty(), "a prepared step must not re-read adaln_proj");
+            assert_eq!(resident.video, streamed.video, "resident and streaming forwards must agree");
+            assert_eq!(resident.audio, streamed.audio);
+        }
+        drop(plan);
+    }
+
+    #[test]
     fn a_resident_model_computes_what_the_streamed_forward_computes() {
         use crate::dit_shard::StreamingDit;
 
@@ -994,6 +1056,7 @@ mod tests {
         let packed = Packed::random(&cfg);
         let streamed = H3Transformer::forward_streaming(&tensors, &cfg, &StreamingDit::open_single(&cfg, Some("cpu")), &packed.inputs());
         let resident = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32).expect("a resident tiny model");
+        let _plan = resident.prepare(&tensors, packed.inputs().timestep).expect("prepare");
         let out = resident.forward(&packed.inputs());
         assert_eq!(out.video, streamed.video);
         assert_eq!(out.audio, streamed.audio);
@@ -1013,8 +1076,12 @@ mod tests {
         let tensors = rand_tensors(&cfg, data::rng::random_seed());
         let packed = Packed::random(&cfg);
         let plan = || StreamPlan::single(cfg.num_layers as usize);
-        let fp32 = H3Transformer::load_on(&tensors, cfg, plan(), None, Dtype::F32).expect("fp32").forward(&packed.inputs());
-        let int8 = H3Transformer::load_on(&tensors, cfg, plan(), None, Dtype::I8).expect("int8").forward(&packed.inputs());
+        let run = |tier: Dtype| {
+            let m = H3Transformer::load_on(&tensors, cfg, plan(), None, tier).expect("a resident tiny model");
+            let _plan = m.prepare(&tensors, packed.inputs().timestep).expect("prepare");
+            m.forward(&packed.inputs())
+        };
+        let (fp32, int8) = (run(Dtype::F32), run(Dtype::I8));
         let cosine = |a: &[f32], b: &[f32]| {
             let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
             let norm = |v: &[f32]| v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
@@ -1134,6 +1201,7 @@ mod tests {
             text_indices: &get_u32("input_text_indices"),
         };
 
+        let _plan = model.prepare(&tensors, inp.timestep).expect("prepare");
         let (out, taps) = model.forward_with_taps(&inp);
 
         // The reference's own `rope.forward` doubles each row's `half`

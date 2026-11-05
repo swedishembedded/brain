@@ -112,12 +112,12 @@ fn latent_extents(inv: &Invocation) -> (u32, u32, u32, u32) {
     (num_latent_frames, h / ratio, w / ratio, num_audio_latents)
 }
 
-/// Host bytes the resident DiT keeps beside its cards: every block's
-/// `adaln_proj` (fp32, projected on the host per forward - 13.0B of the 33B
-/// parameters) plus `norm_out`'s projection.
+/// Host bytes the resident DiT keeps beside its cards: its AdaLN row cache
+/// at full capacity (`minimaxh3::adaln` - `adaln_proj` itself, 13.0B of the
+/// 33B parameters, is never held) plus `norm_out`'s projection.
 fn dit_host_bytes(cfg: &H3TransformerConfig) -> u64 {
-    let te = cfg.time_embed_dim as u64 + 1;
-    (cfg.num_layers as u64 * cfg.adaln_out_features() as u64 + cfg.final_adaln_out_features() as u64) * te * 4
+    let rows = minimaxh3::adaln::DEFAULT_CAPACITY as u64 * cfg.num_layers as u64 * cfg.adaln_out_features() as u64 * 4;
+    rows + cfg.final_adaln_out_features() as u64 * (cfg.time_embed_dim as u64 + 1) * 4
 }
 
 /// The tier a key names (`@i8`), or `None` for one this adapter never builds.
@@ -344,8 +344,9 @@ mod tests {
         assert_eq!(key_tier(&dtype), Some(minimaxh3::pipeline::RESIDENT_TIER), "the key names the tier the adapter loads");
     }
 
-    /// The resident DiT is ~20 GB of int8 linears on the cards, with its
-    /// ~52 GB of fp32 AdaLN projections held on the host.
+    /// The resident DiT is ~20 GB of int8 linears on the cards; on the host
+    /// it keeps only its AdaLN row cache (~10 GB at full capacity), never the
+    /// 52 GB of fp32 `adaln_proj` the rows are computed from.
     #[test]
     fn the_estimate_is_nonzero_and_dominated_by_the_dit_weights() {
         let r = resident();
@@ -353,7 +354,7 @@ mod tests {
         let cost = r.estimate(&key);
         let gb = 1u64 << 30;
         assert!((18 * gb..60 * gb).contains(&cost.vram), "int8 linears plus the workspace, got {} GB", cost.vram / gb);
-        assert!(cost.ram > 45 * gb, "the host-side AdaLN projections dominate host RAM, got {} GB", cost.ram / gb);
+        assert!((9 * gb..30 * gb).contains(&cost.ram), "the AdaLN row cache plus the VAEs, never the projections, got {} GB", cost.ram / gb);
 
         // A bigger request costs more (bigger activations/pixel buffer) on
         // top of the same fixed DiT-weight floor - two EXPLICIT canvases,

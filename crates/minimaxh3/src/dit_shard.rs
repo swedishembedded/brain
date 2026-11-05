@@ -51,8 +51,12 @@
 
 use model::{ShardCost, StreamPlan};
 
+use std::sync::Mutex;
+
+use crate::adaln::{AdalnCache, AdalnPlan};
 use crate::block::Ctx;
-use crate::config::{H3TransformerConfig, MODALITY_NUM};
+use crate::model::TimeWeights;
+use crate::config::H3TransformerConfig;
 
 /// Parameters in one `MiniMaxH3TransformerBlock` - `crate::block::
 /// BlockWeights`' own tensor list, counted rather than measured (the shapes
@@ -64,11 +68,9 @@ fn block_params(cfg: &H3TransformerConfig) -> f64 {
     let ffn = cfg.ffn_dim as f64;
     let attn = 3.0 * inner * hidden + hidden * inner + 2.0 * cfg.attention_head_dim as f64;
     let ff = 2.0 * ffn * hidden + hidden * ffn;
-    // `adaln_proj.linear`: `[MODALITY_NUM*6*hidden, time_embed_dim]` + bias.
-    // 260M params per block at the real config - the single largest tensor in
-    // a block, and the reason `crate::precompute_adaln` exists.
-    let adaln = MODALITY_NUM as f64 * 6.0 * hidden * (cfg.time_embed_dim as f64 + 1.0);
-    attn + ff + 2.0 * hidden + adaln
+    // `adaln_proj` is absent: a block's modulation comes from the cached rows
+    // (`crate::adaln`), so a stage never holds or streams the projection.
+    attn + ff + 2.0 * hidden
 }
 
 /// One token-refiner block: [`block_params`]'s attention+FFN without AdaLN.
@@ -121,6 +123,10 @@ pub fn shard_cost(cfg: &H3TransformerConfig) -> ShardCost {
 pub struct StreamingDit {
     plan: StreamPlan,
     stages: Vec<Ctx>,
+    /// The AdaLN rows of every timestep this generation has seen, so a step
+    /// streams each block's attention/FFN weights but never its
+    /// `adaln_proj` - 40% of a block's bytes ([`crate::adaln`]).
+    adaln: Mutex<AdalnCache>,
 }
 
 impl StreamingDit {
@@ -143,7 +149,19 @@ impl StreamingDit {
             .map(|s| plan.open_stage(s, || Ctx::new(device)).unwrap_or_else(|e| panic!("minimaxh3 DiT stage {s} placement: {e}")))
             .collect();
         tracing::info!(plan = %plan.describe(), "minimaxh3 DiT block placement");
-        StreamingDit { plan, stages }
+        StreamingDit { plan, stages, adaln: Mutex::new(AdalnCache::new(crate::adaln::DEFAULT_CAPACITY)) }
+    }
+
+    /// Cache the AdaLN modulation of every timestep a generation will
+    /// evaluate - its whole schedule, once, before the first step - so no
+    /// step re-reads `adaln_proj` from `tensors`. Keep the plan for the
+    /// generation: it pins its rows against eviction.
+    pub fn prepare(&self, tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, values: &[f32]) -> Result<AdalnPlan, String> {
+        self.prepare_with(tensors, cfg, &TimeWeights::load(tensors), values)
+    }
+
+    pub(crate) fn prepare_with(&self, tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, time: &TimeWeights, values: &[f32]) -> Result<AdalnPlan, String> {
+        self.adaln.lock().unwrap_or_else(|p| p.into_inner()).prepare(tensors, cfg, time, values)
     }
 
     /// One stage on the ambient device - the un-sharded path, byte for byte.
@@ -195,10 +213,9 @@ mod tests {
         let cost = shard_cost(&cfg);
         assert!(cost.embed > cost.head * 10.0, "the token refiner makes the embed stage far heavier than the head stage: {} vs {}", cost.embed, cost.head);
         assert!(cost.embed < cost.per_layer * 5.0, "the endpoint weights must not dwarf the block stack: {} vs {}", cost.embed, cost.per_layer);
-        // adaln_proj is the largest tensor in a block - the roadmap's
-        // "260M params/block" line, recomputed here from `cfg` alone.
-        let adaln = MODALITY_NUM as f64 * 6.0 * cfg.hidden_size as f64 * (cfg.time_embed_dim as f64 + 1.0);
-        assert!(adaln > 0.35 * cost.per_layer, "adaln_proj should be a large share of a block: {adaln} of {}", cost.per_layer);
+        // A block costs its attention and FFN only: ~395M params at the
+        // real config, `adaln_proj`'s 260M never placed on a stage.
+        assert!((3.5e8..4.5e8).contains(&cost.per_layer), "a block without adaln_proj is ~395M params, got {}", cost.per_layer);
     }
 
     /// More cards than blocks (the tiny config has two) must not open a

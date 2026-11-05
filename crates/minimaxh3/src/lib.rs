@@ -35,11 +35,11 @@
 //! ## Hardware fit
 //!
 //! `adaln_proj` is 260M params/block x 50 blocks = 13.0B of the 33B total
-//! (confirmed from the real shard-0 safetensors header). Folding it into
-//! small precomputed per-(step,modality) modulation tables
-//! ([`precompute_adaln`]) turns the DiT into a ~20.2B backbone (measured at
-//! the tiny-config scale and extrapolated to the real config's dimensions -
-//! see that module) that fits resident at int8 across two 24GB cards.
+//! (confirmed from the real shard-0 safetensors header). Its output depends
+//! on the timestep alone, so [`adaln`] caches it per timestep value and the
+//! DiT never holds the projection: a ~20B backbone that fits resident at
+//! int8 across two 24GB cards, the projection read once per generation's
+//! schedule.
 //!
 //! ## Status
 //!
@@ -54,6 +54,7 @@
 //! both open - an entry existing in this module does not by itself mean the
 //! capability it names is real-weight-complete.
 
+pub mod adaln;
 pub mod block;
 pub mod caps;
 pub mod config;
@@ -62,7 +63,6 @@ pub mod grad;
 pub mod import;
 pub mod model;
 pub mod pipeline;
-pub mod precompute_adaln;
 pub mod rope;
 pub mod schedule;
 pub mod spec;
