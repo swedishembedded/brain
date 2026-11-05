@@ -30,10 +30,6 @@ use qwen3::{Qwen, QwenConfig};
 
 use crate::mrope::mrope_tables;
 
-/// Per card, what placement keeps free for the driver and the batched
-/// forward's transient buffers beyond the per-layer activations it prices.
-const CARD_RESERVE_BYTES: u64 = 1 << 30;
-
 /// The vision blocks of one multimodal prompt, already through the vision
 /// tower ([`crate::encoder::VisionTower`]): `(row0, n_rows)` per block in
 /// prompt order, the blocks' visual rows concatenated in that order, and per
@@ -72,7 +68,7 @@ impl TextTower {
         assert!(depth <= cfg.n_layers as usize, "text tower: depth {depth} past the checkpoint's {} layers", cfg.n_layers);
         let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(dir)).map_err(|e| format!("qwen3vl text tower: open {dir}: {e}"))?;
         let source = crate::import::decoder_source(&reader);
-        let cards: Vec<(usize, u64)> = gpu_core::devices::schedulable_gpus().iter().map(|d| (d.index as usize, d.identity.vram_bytes.saturating_sub(CARD_RESERVE_BYTES))).collect();
+        let cards = model::shard::StreamPlan::cards(None, 0);
         let shards: Vec<Shard> = if cards.is_empty() {
             vec![Shard { start: 0, end: depth, embed: true, head: false, gpu_index: Shard::ANY_GPU }]
         } else {

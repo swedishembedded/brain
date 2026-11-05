@@ -331,8 +331,7 @@ impl H3Transformer {
     /// does, or when the cards cannot run `tier` - the caller streams instead
     /// ([`Self::forward_streaming`]).
     pub fn load(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, device: Option<&str>, tier: Dtype, rows: u32) -> Result<H3Transformer, String> {
-        let reserve = block_workspace_bytes(&cfg, rows) + CARD_RESERVE_BYTES;
-        let cards = StreamPlan::cards(device, reserve);
+        let cards = StreamPlan::cards(device, block_workspace_bytes(&cfg, rows));
         let cost = resident_cost(&cfg, tier);
         let plan = StreamPlan::fit(&cost, &cards).ok_or_else(|| format!("minimaxh3: the DiT at {tier:?} is {} bytes, which no combination of the schedulable cards holds with {rows}-row workspace free (usable bytes {cards:?})", cost.total()))?;
         H3Transformer::load_on(tensors, cfg, plan, device, tier)
@@ -424,10 +423,6 @@ impl H3Transformer {
 /// stack's and the token refiner's (a different row count, so its own slots).
 const BLOCK_ARENA: &str = "minimaxh3 block";
 const REFINER_ARENA: &str = "minimaxh3 refiner";
-
-/// Per card, what resident placement keeps free beyond a forward's workspace:
-/// the driver's own allocations and the allocator's slack.
-const CARD_RESERVE_BYTES: u64 = 1 << 30;
 
 /// The one forward body: the block stack runs across `plan`'s stages, one
 /// contiguous block range per card. Only the residual stream crosses a stage

@@ -502,13 +502,23 @@ impl StreamPlan {
     }
 
     /// The cards `device` (the `--device` grammar, ambient when `None`) may
-    /// schedule, each with its VRAM less `reserve` - what [`Self::fit`]
-    /// places over. Empty on a CPU-only selection.
+    /// schedule, each with what it has free right now less `reserve` - what
+    /// [`Self::fit`] places over. Empty on a CPU-only selection.
+    ///
+    /// Free, not total: the driver keeps part of every card and another
+    /// process may hold more, so a plan against a card's size overfills it
+    /// (`gpu_core::capacity` is the one probe; [`gpu_core::capacity::HEADROOM`]
+    /// is already off its figure). A card whose free bytes cannot be measured
+    /// is budgeted at the probe's conservative assumption instead.
     pub fn cards(device: Option<&str>, reserve: u64) -> Vec<(usize, u64)> {
-        let all = gpu_core::devices::gpus();
+        use gpu_core::capacity;
+        let assumed = || capacity::available_gpus();
         schedulable_gpus(device)
             .into_iter()
-            .filter_map(|i| all.iter().find(|d| d.index as usize == i).map(|d| (i, d.identity.vram_bytes.saturating_sub(reserve))))
+            .filter_map(|i| {
+                let free = capacity::available_for(i as u32).or_else(|| assumed().into_iter().find(|&(g, _)| g as usize == i).map(|(_, b)| b.saturating_sub(capacity::HEADROOM)))?;
+                Some((i, free.saturating_sub(reserve)))
+            })
             .filter(|&(_, usable)| usable > 0)
             .collect()
     }
@@ -1467,6 +1477,19 @@ mod tests {
             let s = p.stage_of(l);
             assert!(st[s].owns(l), "stage_of({l}) = {s} does not own it");
         }
+    }
+
+    /// A resident plan budgets each card from what is free on it right now
+    /// (`gpu_core::capacity`), never from its size: a card whose total was
+    /// planned against, with the driver's own share and another process's
+    /// allocations ignored, is a card the plan overfills.
+    #[test]
+    fn cards_offer_their_available_bytes_less_the_reserve_not_their_size() {
+        const GIB: u64 = 1 << 30;
+        let cards = gpu_core::capacity::with_available(Some(10 * GIB), || StreamPlan::cards(Some("gpu"), 3 * GIB));
+        assert!(cards.iter().all(|&(_, usable)| usable == 7 * GIB), "{cards:?}");
+        let full = gpu_core::capacity::with_available(Some(2 * GIB), || StreamPlan::cards(Some("gpu"), 3 * GIB));
+        assert!(full.is_empty(), "a card with less free than the reserve offers nothing: {full:?}");
     }
 
     /// The concrete case this exists for: MiniMax-H3's 50 blocks over two
