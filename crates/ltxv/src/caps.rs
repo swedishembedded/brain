@@ -27,7 +27,7 @@
 use capability::{ActionSpec, BlobSpec, Manifest, Media, ParamSpec, ParamType};
 use serde_json::json;
 
-use crate::pipeline::{dit_config_from_name, DfrOpts, DfrPaths, GenOpts, Paths, Sampler};
+use crate::pipeline::{dit_config_from_name, DfrOpts, DfrPaths, GenOpts, Named, Paths, Sampler};
 
 /// The model id advertised on the capability surface (`brain caps
 /// brain/ltxv`) and the event API - NOT reachable as a CLI verb of its own,
@@ -66,18 +66,18 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("mid_frame", ParamType::Str, "optional path to a PNG/JPEG still: the same appended image-guidance latent end_frame uses, anchored at ONE INTERIOR instant of the clip, so a single generation can be guided at its start, its middle and its end at once. Same eta/dit_config requirements as start_frame.").host_resolved())
     .param(ParamSpec::new("mid_frame_at", ParamType::Int, "which pixel frame mid_frame anchors, strictly between 0 and frames-1. Unset takes the reference's own position for a single interior keyframe (evenly_spaced_keyframe_positions), (frames-1)/2. Only read when mid_frame is set."))
     .param(ParamSpec::new("conditioning_strength", ParamType::Float, "ImageConditioningInput.strength for every given still: 1.0 pins the conditioned tokens to the encoded image exactly, lower values (the reference's own CLI example is 0.8) leave the model room to move. Only read when one of start_frame/mid_frame/end_frame is set.").default(json!(d.conditioning_strength)))
-    .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame). Unset, the duration head predicts the length from the prompt (1-20 s) when the real checkpoint, text encoder and duration head are configured; otherwise the default").default(json!(d.frames)))
-    .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 32)").default(json!(d.width)))
-    .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 32)").default(json!(d.height)))
+    .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame). Unset, the duration head predicts the length from the prompt (1-20 s) when the real checkpoint, text encoder and duration head are configured; otherwise 121 with the real checkpoint, 9 for the tiny smoke test"))
+    .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 32); unset, 768 with the real checkpoint, 64 for the smoke test"))
+    .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 32); unset, 512 with the real checkpoint, 64 for the smoke test"))
     .param(ParamSpec::new("steps", ParamType::Int, "denoise steps").default(json!(d.steps)))
     .param(ParamSpec::new("seed", ParamType::Int, "initial-noise/weight/context seed (omit for random)"))
-    .param(ParamSpec::new("fps", ParamType::Int, "frame rate reported with the clip").default(json!(d.fps)))
+    .param(ParamSpec::new("fps", ParamType::Int, "frame rate; unset, 24 with the real checkpoint, 8 for the smoke test"))
     .param(ParamSpec::new("base_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 1024 tokens").default(json!(d.base_shift)))
     .param(ParamSpec::new("max_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 4096 tokens").default(json!(d.max_shift)))
     .param(ParamSpec::new("stretch", ParamType::Bool, "stretch the schedule's terminal sigma to `terminal`").default(json!(d.stretch)))
     .param(ParamSpec::new("terminal", ParamType::Float, "terminal sigma the stretch targets").default(json!(d.terminal)))
     .params(sampler_params())
-    .param(ParamSpec::new("dit_config", ParamType::Enum(T2V_DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "DiT size: tiny (random weights) or ltx25_22b (the real checkpoint, needs --dit/$BRAIN_LTXV_DIT)").default(json!("tiny")))
+    .param(ParamSpec::new("dit_config", ParamType::Enum(T2V_DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "DiT size: ltx25_22b (the real checkpoint - the default when it is configured) or tiny (random weights, a smoke test - the default without it)"))
     .param(ParamSpec::new(
         "audio",
         ParamType::Bool,
@@ -158,10 +158,30 @@ use capability::{Action, ActionResult, Invocation, Outcome, Progress, Provider};
 #[derive(Debug)]
 pub struct GenParams {
     pub opts: GenOpts,
-    /// The request named no `frames`: the duration head predicts the length
-    /// when it can run ([`crate::pipeline::can_predict_frames`]), else
-    /// `opts.frames` keeps its default.
-    pub predict_frames: bool,
+    /// Which settings the request named. The rest are resolved against the
+    /// configured checkpoints when it runs ([`crate::pipeline::resolve_defaults`]),
+    /// and an unnamed length is the duration head's to predict when it can
+    /// run ([`crate::pipeline::can_predict_frames`]).
+    pub named: Named,
+}
+
+/// Which of the settings [`crate::pipeline::resolve_defaults`] fills an
+/// invocation names itself.
+pub fn named_in(inv: &Invocation) -> Named {
+    let has = |k: &str| inv.params.get(k).is_some_and(|v| !v.is_null());
+    Named { dit_config: has("dit_config"), frames: has("frames"), size: has("width") || has("height"), fps: has("fps") }
+}
+
+/// The generation `p` describes, with every setting it left unnamed
+/// resolved against `paths` - and an unnamed length predicted by the
+/// duration head when it can run.
+pub fn resolved_opts(paths: &Paths, prompt: &str, p: &GenParams) -> Result<GenOpts, String> {
+    let mut o = p.opts.clone();
+    crate::pipeline::resolve_defaults(&mut o, paths, p.named);
+    if !p.named.frames && crate::pipeline::can_predict_frames(paths, &o) {
+        o.frames = crate::pipeline::predict_frames(paths, prompt, &o, crate::pipeline::prediction_streams(&o))?;
+    }
+    Ok(o)
 }
 
 /// The invocation's LoRA adapter (`adapter` at `lora_scale`), if it names one.
@@ -227,7 +247,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     if opts.mid_frame.is_some() {
         crate::pipeline::mid_anchor_frame(opts.frames, opts.mid_frame_at)?;
     }
-    Ok(GenParams { opts, predict_frames: inv.get_i64("frames").is_none() })
+    Ok(GenParams { opts, named: named_in(inv) })
 }
 
 /// Run one generation and wrap the result as a video-output [`Outcome`].
@@ -241,13 +261,11 @@ pub fn generate_on(paths: &Paths, inv: &Invocation, p: &GenParams, progress: &mu
     // reference's own default (`crate::longform::CONTEXT_LATENT_FRAMES`) and
     // the per-window ceiling comes from the environment, so a long `frames`
     // simply works instead of failing at buffer creation.
-    let mut base = p.opts.clone();
-    if p.predict_frames && crate::pipeline::can_predict_frames(paths, &base) {
-        base.frames = crate::pipeline::predict_frames(paths, &prompt, &base, crate::pipeline::prediction_streams(&base))?;
-    }
+    let base = resolved_opts(paths, &prompt, p)?;
+    let seed = base.seed;
     let o = crate::pipeline::LongOpts { max_window_tokens: crate::longform::max_window_tokens_from_env(), base, ..Default::default() };
     let (video, timings) = crate::pipeline::generate_long(paths, &prompt, &o, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
-    Ok(video_outcome(&video, &timings, p.opts.seed))
+    Ok(video_outcome(&video, &timings, seed))
 }
 
 /// Decode + validate `t2a`'s params from an invocation, before any weight is
@@ -531,9 +549,9 @@ mod tests {
     #[test]
     fn an_unnamed_length_is_the_duration_heads_to_predict() {
         let base = Invocation::new().set("prompt", json!("a lighthouse in a storm"));
-        assert!(gen_params_from(&base).unwrap().predict_frames);
+        assert!(!gen_params_from(&base).unwrap().named.frames);
         let named = gen_params_from(&base.clone().set("frames", json!(17))).unwrap();
-        assert!(!named.predict_frames);
+        assert!(named.named.frames);
         assert_eq!(named.opts.frames, 17);
     }
 
@@ -572,9 +590,12 @@ mod tests {
         let required: Vec<&str> = t2v.params.iter().filter(|p| p.required).map(|p| p.name.as_str()).collect();
         assert_eq!(required, ["prompt"]);
         let def = |name: &str| t2v.params.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("no param {name}")).default.clone();
-        assert_eq!(def("frames"), Some(json!(9)));
-        assert_eq!(def("width"), Some(json!(64)));
-        assert_eq!(def("height"), Some(json!(64)));
+        // The clip's shape and the DiT have no static default: they depend
+        // on whether the real checkpoint is configured
+        // (`crate::pipeline::resolve_defaults`).
+        for name in ["frames", "width", "height", "fps", "dit_config"] {
+            assert_eq!(def(name), None, "{name}");
+        }
         assert_eq!(def("steps"), Some(json!(4)));
         assert_eq!(def("guidance_preset"), Some(json!("none")));
         assert_eq!(def("guidance"), None, "unset, the preset decides");
@@ -582,8 +603,6 @@ mod tests {
         // value at the resolver (`data::rng::random_seed`), not a fixed 0 -
         // see `gen_params_from`.
         assert_eq!(def("seed"), None);
-        assert_eq!(def("fps"), Some(json!(8)));
-        assert_eq!(def("dit_config"), Some(json!("tiny")));
         let ty = |name: &str| t2v.params.iter().find(|p| p.name == name).unwrap().ty.clone();
         assert!(matches!(ty("dit_config"), ParamType::Enum(v) if v == T2V_DIT_CONFIGS.map(String::from).to_vec()));
         // Two: the picture, always, and the sound when `audio` is set.

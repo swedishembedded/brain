@@ -16,17 +16,18 @@
 //! **`--dit-config` decides whether any of this is a quality claim.** The VAE
 //! and the latent upscalers are always real (real weights, `--vae` resolved
 //! from the model store - the only required role - and
-//! `$BRAIN_LTXV_UPSAMPLER_SPATIAL`). The DiT is the tiny config with FRESH
-//! RANDOM WEIGHTS by default, which makes every output a wiring proof and
-//! nothing else; `--dit-config ltx25_22b` with a resolved `--dit` loads the
-//! real checkpoint. The prompt likewise only folds into a deterministic
+//! `$BRAIN_LTXV_UPSAMPLER_SPATIAL`). With the real checkpoint resolved the
+//! DiT is the real 22B model and every unnamed setting takes the reference's
+//! own default (`ltxv::pipeline::resolve_defaults`); without it, or with
+//! `--dit-config tiny`, it is the tiny config with FRESH RANDOM WEIGHTS,
+//! which makes every output a wiring proof and nothing else. The prompt likewise only folds into a deterministic
 //! context stub unless a resolved `--text-encoder` names the real Gemma-4
 //! encoder. dit/vae/audio_vae/text_encoder/tokenizer are resolved through
 //! `brain_modelstore::resolve` (`ltxv::spec::LtxvSpec`) rather than
 //! `BRAIN_LTXV_*` - see `resolve_ltxv`. See `ltxv::pipeline`'s module doc for
 //! the full account of what is real and what is not.
 
-use ltxv::pipeline::{AudioOpts, DfrOpts, DfrPaths, ExtendOpts, GenOpts, LongOpts, MaskedOpts, Paths, Sampler, UpscaleOpts};
+use ltxv::pipeline::{AudioOpts, DfrOpts, DfrPaths, ExtendOpts, GenOpts, LongOpts, MaskedOpts, Named, Paths, Sampler, UpscaleOpts};
 use ltxv::spec::LtxvSpec;
 
 /// The guidance flags every generating subcommand takes ([`set_guidance`]).
@@ -53,7 +54,7 @@ macro_rules! guidance_help {
     };
 }
 
-const HELP: &str = concat!(r#"brain ltxv t2v - LTX-2.5 text to video (M4 smoke test: real VAE + tiny random-weight DiT, no real text encoder yet)
+const HELP: &str = concat!(r#"brain ltxv t2v - LTX-2.5 text to video
 
   brain ltxv t2v --prompt <text> --output-path <out.mp4> [options]
 
@@ -67,19 +68,21 @@ Required (one of):
   --output-path <file>     .mp4 / .mov / .mkv / .webm (AV1 video, Opus
                            sound) or .gif, written by brain itself
 
-Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
+Sampling (with the real checkpoint resolved, unnamed settings take the
+reference pipelines' defaults; without it, a tiny random-weight smoke test):
   --frames <N>              video frames, must be 1 + 8k (default: predicted
                             from the prompt by the duration head, 1-20 s,
-                            with the real checkpoint and text encoder;
-                            otherwise 9). Any
+                            when it is in the store; else 121, or 9 for the
+                            smoke test). Any
                             length is accepted: past what one denoising
                             window holds the clip is generated as several
                             windows with a rolling latent context (see
                             Long-form clips)
-  --width <W> --height <H>  pixels, multiples of 32 (default 64x64)
+  --width <W> --height <H>  pixels, multiples of 32 (default 768x512; 64x64
+                            for the smoke test)
   --steps <N>                denoise steps (default 4)
 "#, guidance_help!(), r#"  --seed <S>                 initial-noise/weight/context seed (default: drawn at random and printed)
-  --fps <N>                  frame rate written into the container (default 8)
+  --fps <N>                  frame rate (default 24; 8 for the smoke test)
   --base-shift <F>           LTX2Scheduler shift anchor at 1024 tokens (0.95)
   --max-shift <F>            LTX2Scheduler shift anchor at 4096 tokens (2.05)
   --no-stretch                skip the terminal-sigma stretch (on by default)
@@ -98,7 +101,7 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
                              mux it into the output container. LTX-2.5 is
                              natively audio-visual: without this flag only the
                              model's video half runs and the clip is silent.
-                             Needs --dit-config ltx25_22b, a real
+                             Needs the real checkpoint, a real
                              --text-encoder, and $BRAIN_LTXV_AUDIO_VAE. Any
                              clip length; the sound crosses a window seam
                              with the picture. Costs real time and memory -
@@ -109,9 +112,10 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
                              the video denoises against it, and muxed as the
                              clip's sound. Needs --audio and a clip that fits
                              one denoising window
-  --dit-config <name>         DiT config; "tiny" (default, fresh random
-                             weights) or "ltx25_22b" (the real 22B
-                             checkpoint, needs --dit/$BRAIN_LTXV_DIT)
+  --dit-config <name>         DiT config; "ltx25_22b" (the real 22B
+                             checkpoint - the default when it is resolved)
+                             or "tiny" (fresh random weights, a smoke test -
+                             the default without it)
   --start-frame <path>         PNG/JPEG still, encoded through the real VAE.
                              Given ALONE, it overwrites the clip's own
                              frame 0 outright (the generated video IS the
@@ -218,7 +222,7 @@ Audio:
   is generated by the same forwards, from the same prompt, over the same time
   window as the frames - not synthesized separately and lined up afterwards.
 
-  Needs --dit-config ltx25_22b, a real --text-encoder (the audio stream is
+  Needs the real checkpoint, a real --text-encoder (the audio stream is
   conditioned through its own text projection, which the stub context cannot
   stand in for) and $BRAIN_LTXV_AUDIO_VAE pointing at
   ltx-2.5-audio-vae-bf16.safetensors, which carries both the audio VAE decoder
@@ -391,9 +395,10 @@ Refinement:
                              ffprobe reports for --input, and only if that
                              fails does this fall back to the pipeline
                              default.
-  --dit-config <name>        "tiny" (default, fresh random weights - a wiring
-                             smoke test) or "ltx25_22b" (the real checkpoint,
-                             needs --dit/$BRAIN_LTXV_DIT)
+  --dit-config <name>        "ltx25_22b" (the real checkpoint - the default
+                             when it is resolved) or "tiny" (fresh random
+                             weights, a wiring smoke test - the default
+                             without it)
 
 Length:
   An upscaled clip has FOUR times the video tokens per frame of its input, so
@@ -572,7 +577,8 @@ Options:
   --eta <F>                 sampler noise strength (default 1.0 euler, 0.5
                             res2s)
   --seed <S>                noise seed (default: drawn at random and printed)
-  --dit-config <name>       tiny (random-weight smoke test) or ltx25_22b
+  --dit-config <name>       ltx25_22b (default when the checkpoint is
+                            resolved) or tiny (random-weight smoke test)
   --adapter <path>          a LoRA adapter (repeatable), e.g. an extension
                             LoRA trained with video_extend_lora
   --lora-scale <F>          strength of the preceding --adapter (default 1.0)
@@ -666,10 +672,11 @@ Sampling:
 "#, guidance_help!(), r#"  --seed <S>                noise seed (default: drawn at random and printed)
   --fps <N>                 frame rate for the output. Default: whatever
                             ffprobe reports for --input
-  --dit-config <name>       "tiny" (default, fresh random weights - a wiring
-                            proof, and enough to verify that the carried
-                            region really is carried) or "ltx25_22b" for the
-                            real checkpoint (needs --dit/$BRAIN_LTXV_DIT)
+  --dit-config <name>       "ltx25_22b" for the real checkpoint (the default
+                            when it is resolved) or "tiny" (fresh random
+                            weights - a wiring proof, and enough to verify
+                            that the carried region really is carried; the
+                            default without it)
 
 Sound:
   This pass conditions a VIDEO latent and never runs the audio stream, so the
@@ -737,6 +744,9 @@ fn t2v(args: &[String]) -> Result<(), String> {
     // `--frames` has a default, so "was it given" cannot be read back off the
     // value - and refusing `--scene` alongside it depends on knowing.
     let mut frames_given = false;
+    // Which settings the command line names; the rest come from what is
+    // configured (`ltxv::pipeline::resolve_defaults`).
+    let mut named = Named::default();
     let mut out: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -756,17 +766,29 @@ fn t2v(args: &[String]) -> Result<(), String> {
                 o.frames = num(i, "--frames")?;
                 frames_given = true;
             }
-            "--width" => o.width = num(i, "--width")?,
-            "--height" => o.height = num(i, "--height")?,
+            "--width" => {
+                o.width = num(i, "--width")?;
+                named.size = true;
+            }
+            "--height" => {
+                o.height = num(i, "--height")?;
+                named.size = true;
+            }
             "--steps" => o.steps = num(i, "--steps")?,
-            "--fps" => o.fps = num(i, "--fps")?,
+            "--fps" => {
+                o.fps = num(i, "--fps")?;
+                named.fps = true;
+            }
             f if guidance_flag(f) => set_guidance(&mut o.guidance, f, need(i)?)?,
             "--base-shift" => o.base_shift = dbl(i, "--base-shift")?,
             "--max-shift" => o.max_shift = dbl(i, "--max-shift")?,
             "--terminal" => o.terminal = dbl(i, "--terminal")?,
             "--sampler" => o.sampler = Sampler::parse(need(i)?)?,
             "--eta" => eta = Some(dbl(i, "--eta")?),
-            "--dit-config" => o.dit_config = need(i)?.clone(),
+            "--dit-config" => {
+                o.dit_config = need(i)?.clone();
+                named.dit_config = true;
+            }
             "--adapter" => o.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
             "--lora-scale" => crate::args::attach_lora_scale(&mut o.adapters, &mut scaled, flt(i, "--lora-scale")?)?,
             "--reference-video" => reference_path = Some(need(i)?.clone()),
@@ -815,14 +837,15 @@ fn t2v(args: &[String]) -> Result<(), String> {
         i += 2;
     }
     o.eta = o.sampler.resolve_eta(eta)?;
+    let out = out.ok_or("--output-path is required")?;
+    let paths = resolve_ltxv(&overrides, None)?;
+    ltxv::pipeline::resolve_defaults(&mut o, &paths, Named { frames: frames_given || !scene_specs.is_empty(), ..named });
     if let Some(path) = &reference_path {
         if !(0.0..=1.0).contains(&reference_strength) {
             return Err(format!("--reference-strength {reference_strength} is outside [0, 1]"));
         }
         o.reference = Some(ltxv::pipeline::VideoReference { clip: read_clip(path, o.fps)?, strength: reference_strength });
     }
-    let out = out.ok_or("--output-path is required")?;
-    let paths = resolve_ltxv(&overrides, None)?;
     // One scene is what a `--prompt`/`--frames` run always was, so the whole
     // command below has exactly one shape to handle. Without `--frames` its
     // length is the duration head's prediction when the store has one.
@@ -986,6 +1009,9 @@ fn extend(args: &[String]) -> Result<(), String> {
     let mut seconds: Option<f64> = None;
     let mut fps: Option<usize> = None;
     let (mut prompt, mut input, mut out) = (None::<String>, None::<String>, None::<String>);
+    // Whether --dit-config was given; unnamed, the real checkpoint runs when
+    // it is configured (`ltxv::pipeline::resolve_defaults`).
+    let mut dit_named = false;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
@@ -1009,7 +1035,10 @@ fn extend(args: &[String]) -> Result<(), String> {
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
             "--sampler" => o.base.sampler = Sampler::parse(need(i)?)?,
             "--eta" => eta = Some(dbl(i, "--eta")?),
-            "--dit-config" => o.base.dit_config = need(i)?.clone(),
+            "--dit-config" => {
+                o.base.dit_config = need(i)?.clone();
+                dit_named = true;
+            }
             "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
             "--lora-scale" => crate::args::attach_lora_scale(&mut o.base.adapters, &mut scaled, need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?)?,
             "--device" => o.base.device = Some(need(i)?.clone()),
@@ -1026,6 +1055,7 @@ fn extend(args: &[String]) -> Result<(), String> {
     let out = out.ok_or("--output-path is required")?;
     let prompt = prompt.ok_or("--prompt is required: the continuation is generated against it")?;
     let paths = resolve_ltxv(&overrides, None)?;
+    ltxv::pipeline::resolve_defaults(&mut o.base, &paths, Named { dit_config: dit_named, frames: true, size: true, fps: true });
     let decoded = read_clip(&input, 0)?;
     // The source's own rate, so the continuation plays at the clip's speed.
     let fps = fps.unwrap_or_else(|| imaging::video::probe_fps(std::path::Path::new(&input)).map(|f| f.round() as usize).filter(|&f| f > 0).unwrap_or(o.base.fps));
@@ -1164,6 +1194,9 @@ fn upscale(args: &[String]) -> Result<(), String> {
     let mut upsampler_spatial: Option<String> = None;
     let mut fps: Option<usize> = None;
     let mut context_frames = ltxv::longform::CONTEXT_FRAMES;
+    // Whether --dit-config was given; unnamed, the real checkpoint runs when
+    // it is configured (`ltxv::pipeline::resolve_defaults`).
+    let mut dit_named = false;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
@@ -1183,7 +1216,10 @@ fn upscale(args: &[String]) -> Result<(), String> {
             "--context-frames" => context_frames = num(i, "--context-frames")?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
             "--fps" => fps = Some(num(i, "--fps")?),
-            "--dit-config" => o.base.dit_config = need(i)?.clone(),
+            "--dit-config" => {
+                o.base.dit_config = need(i)?.clone();
+                dit_named = true;
+            }
             "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
             "--lora-scale" => crate::args::attach_lora_scale(&mut o.base.adapters, &mut scaled, need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?)?,
             "--device" => {
@@ -1203,6 +1239,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
     let input = input.ok_or("--input is required")?;
     let out = out.ok_or("--output-path is required")?;
     let paths = resolve_ltxv(&overrides, upsampler_spatial.as_deref())?;
+    ltxv::pipeline::resolve_defaults(&mut o.base, &paths, Named { dit_config: dit_named, frames: true, size: true, fps: true });
     let prompt = prompt.unwrap_or_default();
     o.context_latent_frames = {
         let vcfg = ltxv::LtxVaeConfig::conv25();
@@ -1300,6 +1337,9 @@ fn v2v(args: &[String]) -> Result<(), String> {
     let mut input: Option<String> = None;
     let mut out: Option<String> = None;
     let mut fps: Option<usize> = None;
+    // Whether --dit-config was given; unnamed, the real checkpoint runs when
+    // it is configured (`ltxv::pipeline::resolve_defaults`).
+    let mut dit_named = false;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
@@ -1330,7 +1370,10 @@ fn v2v(args: &[String]) -> Result<(), String> {
             "--steps" => o.base.steps = num(i, "--steps")?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
             "--fps" => fps = Some(num(i, "--fps")?),
-            "--dit-config" => o.base.dit_config = need(i)?.clone(),
+            "--dit-config" => {
+                o.base.dit_config = need(i)?.clone();
+                dit_named = true;
+            }
             "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
             "--lora-scale" => crate::args::attach_lora_scale(&mut o.base.adapters, &mut scaled, need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?)?,
             "--device" => o.base.device = Some(need(i)?.clone()),
@@ -1349,6 +1392,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
         return Err("--mask or --window is required: without one this command has nothing to regenerate and would return the input clip".into());
     }
     let paths = resolve_ltxv(&overrides, None)?;
+    ltxv::pipeline::resolve_defaults(&mut o.base, &paths, Named { dit_config: dit_named, frames: true, size: true, fps: true });
 
     let in_path = std::path::Path::new(&input);
     let decoded = read_clip(&input, 0)?;

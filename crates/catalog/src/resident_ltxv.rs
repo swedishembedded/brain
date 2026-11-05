@@ -153,17 +153,25 @@ impl ResidentModel for LtxvResident {
         if action == "t2a" {
             return InstanceKey::new(&self.id, "ltx25_22b:0:0x0".to_string());
         }
-        let d = ltxv::pipeline::GenOpts::default();
-        let dit_config = inv.get_str("dit_config").unwrap_or_else(|| "tiny".into());
+        // The settings the request leaves unnamed resolve as the generation
+        // will resolve them (`ltxv::pipeline::resolve_defaults`).
+        let named = ltxv::caps::named_in(inv);
+        let mut o = ltxv::pipeline::GenOpts::default();
+        if let Some(c) = inv.get_str("dit_config") {
+            o.dit_config = c;
+        }
+        o.frames = inv.get_i64("frames").map_or(o.frames, |n| n.max(1) as usize);
+        o.width = inv.get_i64("width").map_or(o.width, |n| n.max(1) as usize);
+        o.height = inv.get_i64("height").map_or(o.height, |n| n.max(1) as usize);
+        o.fps = inv.get_i64("fps").map_or(o.fps, |n| n.max(1) as usize);
+        ltxv::pipeline::resolve_defaults(&mut o, &self.paths, named);
         // A request without `frames` gets the duration head's prediction
         // when it can run, which is not known before the prompt is encoded:
         // place it for the longest clip the head may ask for.
-        let predicted = ltxv::pipeline::can_predict_frames(&self.paths, &ltxv::pipeline::GenOpts { dit_config: dit_config.clone(), ..d.clone() });
-        let fps = inv.get_i64("fps").unwrap_or(d.fps as i64) as f64;
-        let longest = ltxv::duration_head::frames_for_seconds(ltxv::duration_head::MAX_SECONDS, fps, ltxv::duration_head::MIN_SECONDS, ltxv::duration_head::MAX_SECONDS) as i64;
-        let frames = inv.get_i64("frames").unwrap_or(if predicted { longest } else { d.frames as i64 });
-        let w = inv.get_i64("width").unwrap_or(d.width as i64);
-        let h = inv.get_i64("height").unwrap_or(d.height as i64);
+        if !named.frames && ltxv::pipeline::can_predict_frames(&self.paths, &o) {
+            o.frames = ltxv::duration_head::frames_for_seconds(ltxv::duration_head::MAX_SECONDS, o.fps as f64, ltxv::duration_head::MIN_SECONDS, ltxv::duration_head::MAX_SECONDS);
+        }
+        let (dit_config, frames, w, h) = (o.dit_config, o.frames, o.width, o.height);
         InstanceKey::new(&self.id, format!("{dit_config}:{frames}:{w}x{h}"))
     }
 

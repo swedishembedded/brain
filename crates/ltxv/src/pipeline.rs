@@ -327,6 +327,50 @@ pub fn should_two_stage(tokens: usize, width: usize, height: usize, real_distill
     }
 }
 
+/// Which settings a request named itself - every other one is
+/// [`resolve_defaults`]'s to fill.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Named {
+    pub dit_config: bool,
+    pub frames: bool,
+    pub size: bool,
+    pub fps: bool,
+}
+
+/// The reference pipelines' own defaults (`PipelineParams`): a 768x512
+/// clip of 121 frames at 24 fps.
+pub const PRODUCTION_WIDTH: usize = 768;
+pub const PRODUCTION_HEIGHT: usize = 512;
+pub const PRODUCTION_FRAMES: usize = 121;
+pub const PRODUCTION_FPS: usize = 24;
+
+/// Fill what a request left unnamed from what is configured: with the real
+/// checkpoint resolved, the real DiT and the reference's own clip size,
+/// length and frame rate; without it, [`GenOpts::default`]'s tiny smoke test
+/// stays, which is the only thing that can run.
+///
+/// [`GenOpts::default`] is the smoke-test configuration every unit test
+/// builds on; a production request goes through this instead, so a plain
+/// command with the real weights in the store renders the real model rather
+/// than random weights.
+pub fn resolve_defaults(o: &mut GenOpts, paths: &Paths, named: Named) {
+    if !named.dit_config && paths.dit.is_some() {
+        o.dit_config = "ltx25_22b".into();
+    }
+    if o.dit_config == "tiny" {
+        return;
+    }
+    if !named.size {
+        (o.width, o.height) = (PRODUCTION_WIDTH, PRODUCTION_HEIGHT);
+    }
+    if !named.fps {
+        o.fps = PRODUCTION_FPS;
+    }
+    if !named.frames {
+        o.frames = PRODUCTION_FRAMES;
+    }
+}
+
 /// Which DiT config to build. `"tiny"` (the default) is the fresh-random-
 /// weight smoke-test config every earlier milestone shipped. `"ltx25_22b"`
 /// is the real 22B checkpoint's own config - selecting it requires
@@ -7676,6 +7720,27 @@ mod tests {
             let latent_frame = tok / (lh * lw);
             assert_eq!(m, if latent_frame < held_latents { 0.0 } else { 1.0 }, "latent frame {latent_frame}");
         }
+    }
+
+    /// A request that names nothing runs the real model at the reference's
+    /// own size, length and rate when the checkpoint is configured, and the
+    /// tiny smoke test only when it is not; whatever a request names is kept.
+    #[test]
+    fn unnamed_settings_take_the_production_defaults_with_a_real_checkpoint() {
+        let bare = Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None };
+        let real = Paths { dit: Some("/dit.gguf".into()), ..bare.clone() };
+        let mut o = GenOpts::default();
+        resolve_defaults(&mut o, &bare, Named::default());
+        assert_eq!((o.dit_config.as_str(), o.frames, o.width), ("tiny", GenOpts::default().frames, GenOpts::default().width));
+        let mut o = GenOpts::default();
+        resolve_defaults(&mut o, &real, Named::default());
+        assert_eq!((o.dit_config.as_str(), o.width, o.height, o.frames, o.fps), ("ltx25_22b", 768, 512, 121, 24));
+        let mut o = GenOpts { frames: 17, width: 256, height: 192, ..GenOpts::default() };
+        resolve_defaults(&mut o, &real, Named { frames: true, size: true, ..Named::default() });
+        assert_eq!((o.frames, o.width, o.height, o.fps), (17, 256, 192, 24));
+        let mut o = GenOpts::default();
+        resolve_defaults(&mut o, &real, Named { dit_config: true, ..Named::default() });
+        assert_eq!(o.dit_config, "tiny", "an explicit --dit-config tiny stays the smoke test");
     }
 
     fn res2s(eta: f64, seed: u64) -> Sampling {
