@@ -41,3 +41,32 @@ fn an_extension_keeps_the_clip_and_appends_generated_frames() {
     eprintln!("mean |new - last source frame|: {new:.2}");
     assert!(new > 10.0, "the added frames must be generated, not a copy of the last frame (diff {new:.2})");
 }
+
+/// The same extension through the capability surface: the clip arrives as a
+/// video blob and comes back as one, the source frames first.
+#[test]
+fn the_extend_action_takes_and_returns_a_video_blob() {
+    let Some(vae) = vae_path() else {
+        brain_testutil::skip("no ltx-2.5-video-vae-conv-bf16.safetensors in the model store (Lightricks/LTX-2.5)");
+        return;
+    };
+    let paths = Paths::resolve(Some(&vae), None, None, None).expect("a VAE path resolves");
+    let side = 64u32;
+    let frame = |k: usize| ((0..side * side).flat_map(|i| [((i % side) * 4) as f32 / 255.0, ((i / side) * 4) as f32 / 255.0, (k * 8) as f32 / 255.0]).collect::<Vec<f32>>(), side, side);
+    let source: Vec<(Vec<f32>, u32, u32)> = (0..9).map(frame).collect();
+    let inv = capability::Invocation::new()
+        .blob("video", capability::blob::video_blob(&source).unwrap())
+        .set("prompt", serde_json::json!("a gradient"))
+        .set("fps", serde_json::json!(8))
+        .set("frames", serde_json::json!(8))
+        .set("seed", serde_json::json!(3))
+        .set("eta", serde_json::json!(0.0));
+    let cpu = |o: &mut GenOpts| o.device = Some("cpu".into());
+    let out = ltxv::caps::clip_action_on("extend", &paths, &inv, &cpu, &mut |_| {}).expect("the action runs");
+    let got = capability::blob::decode_video(&capability::Invocation::new().blob("video", out.blobs["video"].clone()), "video").expect("a video blob comes back");
+    assert_eq!(got.len(), 17);
+    for (k, (px, _, _)) in got.iter().take(9).enumerate() {
+        let want: Vec<f32> = source[k].0.iter().map(|v| (v * 255.0).round() / 255.0).collect();
+        assert!(px.iter().zip(&want).all(|(a, b)| (a - b).abs() < 1e-6), "source frame {k} must come back unchanged");
+    }
+}

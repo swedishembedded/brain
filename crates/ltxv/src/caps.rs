@@ -137,10 +137,48 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier; 1.0 = the reference default. Only read when adapter is set.").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
     .output(BlobSpec::new("audio", Media::Audio, "the generated clip: a complete 48 kHz stereo WAV").required());
 
+    let clip_in = |spec: ActionSpec| -> ActionSpec {
+        spec.streaming()
+            .input(BlobSpec::new("video", Media::Video, "the source clip, in the standard video wire convention (capability::blob::decode_video): every frame one (w,h), each a multiple of 32").required())
+            .input(BlobSpec::new("soundtrack", Media::Audio, "the clip's own soundtrack, a WAV container; needed when audio=true"))
+            .param(ParamSpec::new("fps", ParamType::Int, "the clip's frame rate; unset, the video blob's meta.fps, else 24"))
+            .param(ParamSpec::new("prompt", ParamType::Str, "what the generated part shows").required())
+            .params(guidance_params())
+            .params(sampler_params())
+            .param(ParamSpec::new("seed", ParamType::Int, "noise seed (omit for random)"))
+            .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (non-distilled checkpoints)").default(json!(d.steps)))
+            .param(ParamSpec::new("dit_config", ParamType::Enum(T2V_DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "ltx25_22b (default when the checkpoint is configured) or tiny (random-weight smoke test)"))
+            .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter to apply beside the quantized weights").host_resolved())
+            .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier; 1.0 = the reference default").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
+            .output(BlobSpec::new("video", Media::Video, "the resulting clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required())
+            .output(BlobSpec::new("audio", Media::Audio, "the resulting soundtrack when audio=true: a complete WAV"))
+    };
+    let v2v = clip_in(ActionSpec::new(
+        "v2v",
+        "retake part of a clip (ltx_pipelines.retake): a time window is regenerated against the prompt while the rest is held, the picture, the sound or both",
+    ))
+    .param(ParamSpec::new("start", ParamType::Float, "the window's start, seconds").required().min(0.0))
+    .param(ParamSpec::new("end", ParamType::Float, "the window's end, seconds").required().min(0.0))
+    .param(ParamSpec::new("audio", ParamType::Bool, "also run the clip's sound through the same forwards").default(json!(false)))
+    .param(ParamSpec::new("hold_video", ParamType::Bool, "regenerate no frame (with audio: video-to-audio)").default(json!(false)))
+    .param(ParamSpec::new("hold_audio", ParamType::Bool, "keep the soundtrack everywhere").default(json!(false)));
+    let extend = clip_in(ActionSpec::new(
+        "extend",
+        "continue a clip (video_extend_lora's forward extension): its last frames held as a clean prefix while new frames after them denoise; returns the clip followed by the new frames",
+    ))
+    .param(ParamSpec::new("frames", ParamType::Int, "frames to add, rounded up to a multiple of 8").default(json!(crate::pipeline::ExtendOpts::default().frames)).min(1.0))
+    .param(ParamSpec::new("context_frames", ParamType::Int, "how much of the clip's end the continuation sees").default(json!(crate::longform::CONTEXT_FRAMES)).min(1.0))
+    .param(ParamSpec::new("audio", ParamType::Bool, "extend the soundtrack too (needs the soundtrack input)").default(json!(false)));
+    let upscale = clip_in(ActionSpec::new(
+        "upscale",
+        "re-render a finished clip at twice its resolution: the real latent x2 upscaler, then the distilled refinement pass against the prompt",
+    ))
+    .param(ParamSpec::new("refine_steps", ParamType::Int, "refinement steps, a suffix of the distilled stage-2 schedule").default(json!(crate::pipeline::UpscaleOpts::default().refine_steps)).min(1.0));
+
     Manifest::new(
         MODEL,
         "LTX-2.5 (Lightricks) - text-to-video diffusion transformer, rectified-flow ancestral Euler sampling with CFG, causal 3D VAE at (8, 32, 32) stride. t2v: real VAE + real scheduler, with the real 22B int8 checkpoint and real Gemma-4 text encoder available via dit_config=ltx25_22b (default stays the tiny random-weight smoke config). dfr: multi-stage pipeline with real latent upscalers, still tiny-random-weight-DiT/stub-context only - real-weight DFR is a tracked gap.",
-        vec![t2v, dfr, t2a],
+        vec![t2v, dfr, t2a, v2v, extend, upscale],
     )
 }
 
@@ -296,6 +334,94 @@ pub fn t2a_on(paths: &Paths, inv: &Invocation, opts: &crate::pipeline::AudioOpts
     let (clip, timings) = crate::pipeline::generate_audio(paths, &prompt, opts, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
     let out = Outcome::new().set("seed", json!(opts.base.seed)).set("seconds_per_forward", json!(timings.secs_per_forward()));
     Ok(audio_outcome(out, &clip))
+}
+
+/// The source clip of a video-input action: its frames as RGB8 at the
+/// request's frame rate, and its soundtrack when one was sent.
+pub fn clip_from(inv: &Invocation) -> Result<crate::pipeline::Video, String> {
+    let frames = capability::blob::decode_video(inv, "video")?;
+    let (w, h) = (frames[0].1, frames[0].2);
+    let meta_fps = inv.get_blob("video").and_then(|b| b.meta.get("fps")).and_then(|v| v.as_u64());
+    let fps = inv.get_i64("fps").map(|f| f as u64).or(meta_fps).unwrap_or(crate::pipeline::PRODUCTION_FPS as u64);
+    if fps == 0 {
+        return Err("fps must be at least 1".into());
+    }
+    let audio = match inv.get_blob("soundtrack") {
+        Some(b) => {
+            let (sample_rate, channels) = audio::wav::parse_planar(&b.bytes).map_err(|e| format!("'soundtrack': {e}"))?;
+            Some(crate::audio::AudioClip { channels, sample_rate })
+        }
+        None => None,
+    };
+    let to_u8 = |px: Vec<f32>| px.into_iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
+    Ok(crate::pipeline::Video { width: w, height: h, fps: fps as usize, frames: frames.into_iter().map(|(px, _, _)| to_u8(px)).collect(), audio })
+}
+
+/// The generation settings every video-input action shares, resolved
+/// against `paths`: the clip fixes the shape, the request the rest.
+fn clip_gen_opts(paths: &Paths, inv: &Invocation, clip: &crate::pipeline::Video) -> Result<GenOpts, String> {
+    let d = GenOpts::default();
+    let (sampler, eta) = sampler_from(inv)?;
+    let mut o = GenOpts {
+        width: clip.width as usize,
+        height: clip.height as usize,
+        frames: clip.frames.len(),
+        fps: clip.fps,
+        steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
+        guidance: guidance_from(inv)?,
+        seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
+        sampler,
+        eta,
+        dit_config: inv.get_str("dit_config").unwrap_or(d.dit_config.clone()),
+        audio: inv.get_bool("audio").unwrap_or(false),
+        audio_source: clip.audio.clone(),
+        adapters: adapters_from(inv),
+        ..d
+    };
+    dit_config_from_name(&o.dit_config)?;
+    crate::pipeline::resolve_defaults(&mut o, paths, Named { dit_config: named_in(inv).dit_config, frames: true, size: true, fps: true });
+    Ok(o)
+}
+
+/// Run one video-input action (`v2v`, `extend`, `upscale`) and wrap the
+/// resulting clip as an [`Outcome`]. `place` applies the server's own
+/// placement decision (device, device plan) - a request does not make it.
+pub fn clip_action_on(action: &str, paths: &Paths, inv: &Invocation, place: &dyn Fn(&mut GenOpts), progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
+    let clip = clip_from(inv)?;
+    let mut base = clip_gen_opts(paths, inv, &clip)?;
+    place(&mut base);
+    let seed = base.seed;
+    let mut report = |done: u32, total: u32, phase: &str| progress(Progress::step(done, total, phase.to_string()));
+    let (video, timings) = match action {
+        "v2v" => {
+            let window = (inv.get_f64("start").ok_or("'start' is required")? as f32, inv.get_f64("end").ok_or("'end' is required")? as f32);
+            let o = crate::pipeline::MaskedOpts {
+                window: Some(window),
+                regenerate_video: !inv.get_bool("hold_video").unwrap_or(false),
+                regenerate_audio: !inv.get_bool("hold_audio").unwrap_or(false),
+                base,
+                ..Default::default()
+            };
+            crate::pipeline::generate_masked(paths, &prompt, &clip, &o, &inv.cancel, &mut report)?
+        }
+        "extend" => {
+            let d = crate::pipeline::ExtendOpts::default();
+            let o = crate::pipeline::ExtendOpts {
+                frames: inv.get_i64("frames").map_or(d.frames, |n| n.max(1) as usize),
+                context_frames: inv.get_i64("context_frames").map_or(d.context_frames, |n| n.max(1) as usize),
+                base,
+            };
+            crate::pipeline::extend(paths, &prompt, &clip, &o, &inv.cancel, &mut report)?
+        }
+        "upscale" => {
+            let d = crate::pipeline::UpscaleOpts::default();
+            let o = crate::pipeline::UpscaleOpts { refine_steps: inv.get_i64("refine_steps").map_or(d.refine_steps, |n| n.max(1) as usize), base, ..d };
+            crate::pipeline::upscale(paths, &prompt, &clip, &o, &inv.cancel, &mut report)?
+        }
+        other => return Err(format!("ltxv '{other}' takes no source clip")),
+    };
+    Ok(video_outcome(&video, &timings, seed))
 }
 
 /// A decoded `dfr` request - [`GenParams`]'s DFR analogue.
@@ -476,6 +602,10 @@ impl Action for LtxvAction {
                 let paths = Paths::from_env()?;
                 t2a_on(&paths, inv, &opts, progress)
             }
+            action @ ("v2v" | "extend" | "upscale") => {
+                let paths = Paths::from_env()?;
+                clip_action_on(action, &paths, inv, &|_| {}, progress)
+            }
             other => {
                 tracing::error!(action = other, "unknown action");
                 Err(format!("ltxv '{other}': unknown action"))
@@ -544,6 +674,29 @@ fn guidance_from(inv: &Invocation) -> Result<crate::guidance::Guidance, String> 
 mod tests {
     use super::*;
 
+    /// A video-input action reads its clip off the wire: RGB8 frames from the
+    /// f32 blob, the rate from `fps` over the blob's own `meta.fps`, and the
+    /// soundtrack from its WAV; a request without a clip is refused.
+    #[test]
+    fn a_clip_action_decodes_its_source_clip() {
+        let frames: Vec<(Vec<f32>, u32, u32)> = (0..3).map(|k| (vec![k as f32 / 2.0; 2 * 2 * 3], 2, 2)).collect();
+        let mut blob = capability::blob::video_blob(&frames).unwrap();
+        blob.meta["fps"] = json!(12);
+        let wav = audio::wav::encode_multi(&[&[0.0f32, 0.5, -0.5][..]], 16_000);
+        let inv = Invocation::new().blob("video", blob).blob("soundtrack", capability::Blob::new(Media::Audio, wav));
+        let clip = clip_from(&inv).unwrap();
+        assert_eq!((clip.width, clip.height, clip.fps, clip.frames.len()), (2, 2, 12, 3));
+        assert_eq!(clip.frames[1][0], 128, "0.5 maps to the nearest byte");
+        assert_eq!(clip.audio.as_ref().map(|a| (a.sample_rate, a.samples_per_channel())), Some((16_000, 3)));
+        assert_eq!(clip_from(&inv.clone().set("fps", json!(30))).unwrap().fps, 30);
+        assert!(clip_from(&Invocation::new()).is_err());
+        let m = manifest();
+        for name in ["v2v", "extend", "upscale"] {
+            let a = m.actions.iter().find(|a| a.name == name).unwrap_or_else(|| panic!("{name} is declared"));
+            assert!(a.inputs.iter().any(|i| i.name == "video" && i.required), "{name} takes a source clip");
+        }
+    }
+
     /// A `t2v` request that names no `frames` asks for the duration head's
     /// length; one that names them keeps them.
     #[test]
@@ -584,7 +737,7 @@ mod tests {
         let m = manifest();
         assert_eq!(m.model, MODEL);
         let names: Vec<_> = m.actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["t2v", "dfr", "t2a"]);
+        assert_eq!(names, ["t2v", "dfr", "t2a", "v2v", "extend", "upscale"]);
         let t2v = &m.actions[0];
         assert!(t2v.streaming, "a multi-step denoise run without progress reads as a hang");
         let required: Vec<&str> = t2v.params.iter().filter(|p| p.required).map(|p| p.name.as_str()).collect();

@@ -153,6 +153,19 @@ impl ResidentModel for LtxvResident {
         if action == "t2a" {
             return InstanceKey::new(&self.id, "ltx25_22b:0:0x0".to_string());
         }
+        // A clip action's shape is its source clip's (an extension's grows by
+        // what it adds, an upscale's doubles); its DiT resolves as t2v's does.
+        if let Some(meta) = inv.get_blob("video").map(|b| &b.meta) {
+            let dim = |k: &str| meta.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+            let factor = if action == "upscale" { 2 } else { 1 };
+            let added = if action == "extend" { inv.get_i64("frames").unwrap_or(ltxv::pipeline::ExtendOpts::default().frames as i64).max(0) as u64 } else { 0 };
+            let mut o = ltxv::pipeline::GenOpts::default();
+            if let Some(c) = inv.get_str("dit_config") {
+                o.dit_config = c;
+            }
+            ltxv::pipeline::resolve_defaults(&mut o, &self.paths, ltxv::pipeline::Named { dit_config: inv.get_str("dit_config").is_some(), frames: true, size: true, fps: true });
+            return InstanceKey::new(&self.id, format!("{}:{}:{}x{}", o.dit_config, dim("frames") + added, dim("w") * factor, dim("h") * factor));
+        }
         // The settings the request leaves unnamed resolve as the generation
         // will resolve them (`ltxv::pipeline::resolve_defaults`).
         let named = ltxv::caps::named_in(inv);
@@ -297,6 +310,13 @@ impl LtxvInstance {
                 p.opts.base.devices = plan;
                 let dfr_paths = ltxv::pipeline::DfrPaths::from_env()?;
                 crate::resident_llm::on_device(device, || ltxv::caps::dfr_on(&dfr_paths, inv, &p, progress))?
+            }
+            action @ ("v2v" | "extend" | "upscale") => {
+                let place = |o: &mut ltxv::pipeline::GenOpts| {
+                    o.device = device_name(device);
+                    o.devices = plan;
+                };
+                crate::resident_llm::on_device(device, || ltxv::caps::clip_action_on(action, paths, inv, &place, progress))?
             }
             "t2a" => {
                 let mut opts = ltxv::caps::t2a_params_from(inv)?;
