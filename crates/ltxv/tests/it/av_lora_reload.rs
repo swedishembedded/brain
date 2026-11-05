@@ -136,7 +136,9 @@ fn av_lora_reload_survives_a_fresh_process() {
     assert!(live_vs_base_before_reload > 1e-4, "training did not move the live AV model's output away from base: {live_vs_base_before_reload}");
 
     let exe = std::env::current_exe().expect("current_exe");
-    let out = std::process::Command::new(&exe).arg("--nocapture").env(CHILD_ENV, "1").env(PATH_ENV, &path_str).env(SEED_ENV, seed.to_string()).output().expect("spawn fresh-process child");
+    // Only this test in the child: the bare binary would run the whole
+    // suite again, two-card and real-weight tests included.
+    let out = std::process::Command::new(&exe).args(["--exact", "av_lora_reload::av_lora_reload_survives_a_fresh_process", "--nocapture"]).env(CHILD_ENV, "1").env(PATH_ENV, &path_str).env(SEED_ENV, seed.to_string()).output().expect("spawn fresh-process child");
     assert!(out.status.success(), "child process failed (status {:?}):\nstdout:\n{}\nstderr:\n{}", out.status, String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let line = stdout.lines().find(|l| l.starts_with(MARKER)).unwrap_or_else(|| panic!("child produced no {MARKER} line; stdout was:\n{stdout}"));
