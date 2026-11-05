@@ -64,6 +64,7 @@ pub mod grad;
 pub mod import;
 pub mod model;
 pub mod pipeline;
+pub mod presentation;
 pub mod references;
 pub mod rope;
 pub mod schedule;
