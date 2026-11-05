@@ -64,8 +64,9 @@ fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, 
         return;
     }
     // Both latent upscalers carry the same tensor names; only the config
-    // embedded in the file says which axis one scales.
-    let config = m.config();
+    // embedded in the file (the vendor's `config` metadata key) says which
+    // axis one scales.
+    let config: serde_json::Value = m.metadata().get("config").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
     if config.get("_class_name").and_then(|v| v.as_str()) == Some("LatentUpsampler") && config.get("spatial_upsample").and_then(|v| v.as_bool()) == Some(true) {
         out.push((idx, "spatial_upsampler".to_string(), Confidence::Declared));
     }
@@ -182,14 +183,21 @@ mod tests {
 
     /// A `LatentUpsampler`: the same tensor names for both directions, told
     /// apart only by the config embedded in the file.
+    /// The real upscalers carry their config under the vendor's own
+    /// `config` metadata key, not brain's `brain.config` - written by hand
+    /// so the fixture has the real file's layout.
     fn write_upsampler(path: &Path, spatial: bool) {
-        checkpoint::st::save_safetensors(
-            path.to_str().unwrap(),
-            &[("initial_conv.weight".to_string(), vec![2, 2], vec![0.0f32; 4]), ("final_conv.weight".to_string(), vec![2, 2], vec![0.0f32; 4])],
-            &serde_json::json!({"_class_name": "LatentUpsampler", "spatial_upsample": spatial, "temporal_upsample": !spatial}),
-            None,
-        )
-        .unwrap();
+        let config = serde_json::json!({"_class_name": "LatentUpsampler", "spatial_upsample": spatial, "temporal_upsample": !spatial});
+        let header = serde_json::json!({
+            "__metadata__": {"config": config.to_string()},
+            "initial_conv.weight": {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]},
+            "final_conv.weight": {"dtype": "F32", "shape": [2, 2], "data_offsets": [16, 32]},
+        })
+        .to_string();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&[0u8; 32]);
+        std::fs::write(path, bytes).unwrap();
     }
 
     fn write_dit_gguf(path: &Path) {
