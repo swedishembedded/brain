@@ -98,6 +98,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`throughput-27b`](throughput-27b.md) | 27B LoRA / QLoRA training throughput - plan to 1,000-2,000 trained tokens/s | Qwen3.8-27B LoRA/QLoRA training throughput. |
 | [`timesfm3`](timesfm3.md) | timesfm3 | TimesFM-3 forecaster (`crates/timesfm3`). |
 | [`training-27b`](training-27b.md) | Training the 27B on one card, generically | Training Qwen3.8-27B on one card. |
+| [`video-api`](video-api.md) | video-api | Serving video generation and editing over the OpenRouter `/videos` contract, with encoded output (`crates/apiserve/src/video.rs`, `capability::video`). |
 | [`visualclick`](visualclick.md) | visualclick | Validation experiment: splicing rendered-scene rows into the decision encoder. |
 | [`vlm`](vlm.md) | vlm | Vision-language models: Qwen3-VL, FastVLM, Moondream 3 (`crates/qwen3vl`, `fastvlm`, `moondream3`). |
 | [`vqgan`](vqgan.md) | vqgan | VQGAN / LlamaGen VQ autoencoder (`crates/vqgan`). |
