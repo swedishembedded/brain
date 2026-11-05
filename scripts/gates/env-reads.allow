@@ -614,13 +614,6 @@ crates/llava/src/caps.rs	BRAIN_LLAVA_WEIGHTS
 crates/llava/src/captioner.rs	BRAIN_LLAVA_WEIGHTS
 crates/loader/src/served.rs	<b.var>
 crates/loader/src/served.rs	BRAIN_SERVEDTEST_WEIGHTS
-crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_AUDIO_VAE
-crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_DECODE_LF_SUBST
-crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_DECODE_UPSAMPLE
-crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_DECODE_UPSAMPLE_RAW
-crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_DIT
-crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_PIXEL_DUMP
-crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_VAE
 crates/ltxv/tests/it/av_lora_reload.rs	<CHILD_ENV>
 crates/ltxv/tests/it/av_lora_reload.rs	<PATH_ENV>
 crates/ltxv/tests/it/av_lora_reload.rs	<SEED_ENV>

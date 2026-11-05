@@ -747,21 +747,17 @@ pub const ARCHS: &[Arch] = &[
     // `id` IS the GGUF spelling: `general.architecture = "ltxv"` on every
     // LTX-2.x GGUF observed (confirmed by range-reading the header of both
     // `unsloth/LTX-2.3-GGUF` and `city96/LTX-Video-gguf`), so `gguf: None`.
-    // `default_ref` names the split, Comfy-aligned HF repo directly -- brain's
-    // `weights_env` resolution reads one role per file, which is exactly how
-    // that repo is laid out (no single-file/monolith option exists upstream).
-    // `BRAIN_LTXV_AUDIO_VAE` is a role separate from `_VAE` (video) because
-    // upstream ships them as two independent checkpoints with unrelated
-    // shapes, unlike Wan's single VAE role. The vocoder ships bundled inside
-    // the audio-VAE checkpoint's own metadata, not as a fourth file.
-    // No `weights_env`: t2v/upscale/v2v resolve dit/vae/audio_vae/
-    // text_encoder/tokenizer through `brain_modelstore::resolve`
-    // (`ltxv::spec::LtxvSpec`, wired into `crates/cli/src/ltxv_cli.rs`'s
-    // `resolve_ltxv`) - `vae` is the only required role there, matching
+    // `default_ref` names the split, Comfy-aligned HF repo directly, one role
+    // per file - which is exactly how that repo is laid out (no
+    // single-file/monolith option exists upstream). The audio VAE is a role
+    // separate from the video VAE because upstream ships them as two
+    // independent checkpoints with unrelated shapes, unlike Wan's single VAE
+    // role. The vocoder ships bundled inside the audio-VAE checkpoint, not as
+    // a file of its own. No `weights_env`: every command, the served provider
+    // and the resident resolve their roles through `brain_modelstore::resolve`
+    // (`ltxv::spec::LtxvSpec`) - `vae` is the only required role, matching
     // this pipeline's own real/optional weight split (see `ltxv::pipeline`'s
-    // module doc). `dfr`'s own `DfrPaths` (vae/spatial_upsampler/temporal_
-    // upsampler) is a separate, still env/flag-driven struct, not part of
-    // this row's roles either way.
+    // module doc).
     arch!("ltxv", "LTX-2.5 two-stream audio+video diffusion transformer", Video, Brain, "brain-ltxv",
           hf: &["AVTransformer3DModel"],
           default_ref: Some("Lightricks/LTX-2.5")),

@@ -64,9 +64,10 @@
 //!   ltxv_bench vae [reps] [frames] [height] [width]       real video VAE decode, WHOLE-clip path only (past `ltxv::vae3d::should_tile`'s ceiling a generation tiles instead, which this does not measure - it says so and stops rather than reporting a number for a path production would not take)
 //!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache] [resident] [distinct_timesteps] [warm_reps] [resident_blocks]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape); resident=1 additionally shares ONE device session, so a warm call re-uploads nothing (a real generation's actual shape - see crate::devres); distinct_timesteps sizes the host adaLN stage (1 = plain t2v, 2 = anchored or long-form, tokens = no dedup at all, i.e. what this stage cost before the dedup existed); warm_reps repeats the cache-hit call so a headline is a best-of-N and not one sample (the first warm call is the warm-up and is excluded); resident_blocks fixes the resident window's size instead of planning it from free VRAM
 //!   ltxv_bench streamed-av [layers] [video_tokens] [ctx_len] [audio_tokens] [reuse_cache] [resident] [distinct_timesteps] [warm_reps]  the same, for the JOINT audio+video forward - read against `streamed` at the same video token count to get what audio costs
-//!   ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]   decode a DUMPED latent (see ltxv::latentdump), optionally a latent-cell crop
+//!   ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1] [--lf-subst d=s] [--upsample] [--upsample-raw] [--pixel-dump <path>]   decode a DUMPED latent (see ltxv::latentdump), optionally a latent-cell crop
 //!
-//! `vae` and `decode` need `BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>`.
+//! Every mode that reads a real checkpoint takes it from the model store
+//! (`ltxv::spec::default_store_paths`).
 //!
 //! ## What `decode` is for
 //!
@@ -208,7 +209,7 @@ fn report(gpu: &Gpu, label: &str, steps: &[Step], reps: usize, roofs: Option<roo
 // ------------------------------------------------------------------ vae ---
 
 fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
-    let path = std::env::var("BRAIN_LTXV_VAE").unwrap_or_else(|_| panic!("set BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>"));
+    let path = store().vae;
     let cfg = LtxVaeConfig::conv25();
     let lat_t = cfg.latent_frames(frames).unwrap_or_else(|| panic!("{frames} frames must be 1 + 8k"));
     let (lh, lw) = (height / 32, width / 32);
@@ -257,8 +258,8 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
 /// contribute to a temporal-stability defect: the per-latent-frame latent
 /// statistics (the DiT's output, before any decoder touches it) and the
 /// per-pixel-frame frame-to-frame difference curve (the decoded result).
-fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
-    let vae = std::env::var("BRAIN_LTXV_VAE").unwrap_or_else(|_| panic!("set BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>"));
+fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>, probe: &DecodeProbe) {
+    let vae = store().vae;
     let (shape, data) = ltxv::latentdump::read(path).unwrap_or_else(|e| panic!("{e}"));
     let cfg = LtxVaeConfig::conv25();
 
@@ -296,7 +297,7 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
         println!("  latent frames {} -> {ti}: mean |delta| {:.5}", ti - 1, acc / n as f64);
     }
 
-    // `BRAIN_LTXV_DECODE_LF_SUBST=dst=src` overwrites latent frame `dst` with
+    // `--lf-subst dst=src` overwrites latent frame `dst` with
     // latent frame `src` before decoding. Decoding once with and once without
     // it, and differencing the two results per pixel frame, measures which
     // pixel frames a given latent frame actually controls - the decoder's
@@ -304,9 +305,7 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
     // `1 + 8k` rule. That is the measurement that tells a defect confined to
     // one latent frame apart from one confined to a range of pixel frames.
     let mut data = data;
-    if let Ok(spec) = std::env::var("BRAIN_LTXV_DECODE_LF_SUBST") {
-        let (d, s) = spec.split_once('=').unwrap_or_else(|| panic!("BRAIN_LTXV_DECODE_LF_SUBST wants dst=src, got {spec}"));
-        let (d, s): (usize, usize) = (d.trim().parse().unwrap(), s.trim().parse().unwrap());
+    if let Some((d, s)) = probe.lf_subst {
         assert!(d < shape.t as usize && s < shape.t as usize, "latent frames {d}/{s} out of range for t={}", shape.t);
         for ci in 0..shape.c as usize {
             let (dst, src) = ((ci * shape.t as usize + d) * plane, (ci * shape.t as usize + s) * plane);
@@ -316,21 +315,22 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
         println!("  substituted latent frame {d} <- {s}");
     }
 
-    // `BRAIN_LTXV_DECODE_UPSAMPLE=<spatial upscaler path>` runs the real x2
+    // `--upsample` runs the store's real x2
     // latent upscaler over the latent before decoding, with NO refinement
     // pass. That isolates the upscaler: whatever the decoded result looks
     // like is what the two-stage path hands its stage 2 as a seed, before
     // any denoising has had a chance to help or hurt it.
     let (mut shape, mut data) = (shape, data);
-    if let Ok(up) = std::env::var("BRAIN_LTXV_DECODE_UPSAMPLE") {
+    if probe.upsample {
+        let up = store().spatial_upsampler.unwrap_or_else(|| panic!("--upsample needs the spatial x2 latent upscaler in the model store"));
         let raw = checkpoint::safetensors::read(&up).unwrap_or_else(|e| panic!("reading {up}: {e}"));
         let ucfg = ltxv::upsampler::LatentUpsamplerConfig::spatial_x2();
         let uw = ltxv::import::import_upsampler(raw, &ucfg).unwrap_or_else(|e| panic!("importing {up}: {e}"));
         let ups = ltxv::upsampler::LatentUpsampler::build(&ucfg, &uw, shape.t, shape.h, shape.w, Some("gpu"));
-        // The same `upsample_video` sandwich production takes; set
-        // `BRAIN_LTXV_DECODE_UPSAMPLE_RAW=1` to skip it, which is how the
-        // "no un-normalize" row of that function's own table was measured.
-        data = if std::env::var("BRAIN_LTXV_DECODE_UPSAMPLE_RAW").is_ok() {
+        // The same `upsample_video` sandwich production takes;
+        // `--upsample-raw` skips it, which is how the "no un-normalize" row
+        // of that function's own table was measured.
+        data = if probe.upsample_raw {
             ups.upsample(&data)
         } else {
             let vraw2 = checkpoint::safetensors::read(&vae).unwrap_or_else(|e| panic!("reading {vae}: {e}"));
@@ -402,8 +402,8 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
     }
     println!("blowup ratio (max/median) = {:.2}", ltxv::clipmetric::blowup_ratio(&diffs));
 
-    if let Ok(out) = std::env::var("BRAIN_LTXV_PIXEL_DUMP") {
-        ltxv::latentdump::write(&out, ltxv::latentdump::LatentShape { c: 3, t: frames, h: ph, w: pw }, &pixels).unwrap_or_else(|e| panic!("{e}"));
+    if let Some(out) = &probe.pixel_dump {
+        ltxv::latentdump::write(out, ltxv::latentdump::LatentShape { c: 3, t: frames, h: ph, w: pw }, &pixels).unwrap_or_else(|e| panic!("{e}"));
         println!("wrote decoded pixels to {out}");
     }
 }
@@ -457,8 +457,8 @@ fn report_call(label: &str, layers: u32, wall: f64, device_ms: Option<f64>, prev
 /// goes, and scales linearly to the full 48 (each block streams/quantizes/
 /// runs independently, so per-block cost does not change with layer count).
 ///
-/// Needs `BRAIN_LTXV_DIT=<path to the real distilled Q8_0 or Q4_K_M GGUF>`,
-/// the same env var `crate::pipeline::Paths::dit` resolves.
+/// Needs the real distilled Q8_0 or Q4_K_M GGUF in the model store, the same
+/// file `crate::pipeline::Paths::dit` resolves.
 ///
 /// The `reuse_cache` argument controls whether a fresh cache is used per
 /// call (the pre-Phase-9 behavior, `reuse_cache=false`) or one cache is
@@ -481,7 +481,7 @@ fn report_call(label: &str, layers: u32, wall: f64, device_ms: Option<f64>, prev
 /// (all-zero, saturated, or NaN) DiT output is visible here without needing
 /// a full generation + VAE decode to notice.
 fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident: bool, distinct_timesteps: u32, warm_reps: u32, resident_blocks: Option<u32>) {
-    let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
+    let path = store_dit();
     // stage_time (gpu_core::profile) only prints with profiling on; this
     // bench's whole purpose is that breakdown, so turn it on unconditionally.
     gpu_core::profile::set_profile(true);
@@ -603,10 +603,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
 /// Reports wall time and the audio seconds it produced, so a run can be read
 /// as a real-time factor without the harness asserting one.
 fn bench_vocoder(reps: usize, t: u32) {
-    let path = std::env::var("BRAIN_LTXV_AUDIO_VAE").unwrap_or_else(|_| {
-        eprintln!("ltxv_bench vocoder: set BRAIN_LTXV_AUDIO_VAE to the audio VAE safetensors");
-        std::process::exit(1);
-    });
+    let path = store().audio_vae.unwrap_or_else(|| panic!("ltxv_bench vocoder: put the audio VAE safetensors in the model store"));
     let cfg = ltxv::vocoder::VocoderConfig::ltx25();
     let bwe = ltxv::vocoder::BweConfig::ltx25();
     let voc: Vec<_> = checkpoint::safetensors::read(&path).expect("read audio vae").into_iter().filter(|t| t.name.starts_with("vocoder.")).collect();
@@ -637,10 +634,7 @@ fn bench_vocoder(reps: usize, t: u32) {
 /// separately, because they are paid at completely different rates - the load
 /// once per process, the forward once per denoise step per CFG branch.
 fn bench_av(tokens: u32, ctx_len: u32, frames: u32, fps: u32) {
-    let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| {
-        eprintln!("ltxv_bench av: set BRAIN_LTXV_DIT to the 22B AV transformer GGUF");
-        std::process::exit(1);
-    });
+    let path = store_dit();
     let cfg = ltxv::LtxAvDitConfig::ltx25();
     println!("[av] host fp32 expansion: {} GiB", ltxv::av_stream::host_floats(&cfg) * 4 / (1 << 30));
     let src = ltxv::gguf_src::LtxvGgufSource::open(&path).expect("open the AV GGUF");
@@ -727,7 +721,7 @@ fn bench_av(tokens: u32, ctx_len: u32, frames: u32, fps: u32) {
 /// explicitly keeps this harness from having to reconstruct a clip geometry it
 /// does not otherwise need.
 fn bench_streamed_av(layers: u32, tv: u32, ctx_len: u32, ta: u32, reuse_cache: bool, resident: bool, distinct_timesteps: u32, warm_reps: u32) {
-    let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
+    let path = store_dit();
     gpu_core::profile::set_profile(true);
 
     let mut cfg = ltxv::LtxAvDitConfig::ltx25();
@@ -847,6 +841,56 @@ fn peak_rss_mib() -> Option<u64> {
     Some(kb / 1024)
 }
 
+/// The LTX-2.5 weights the model store resolves - every mode that reads a
+/// real checkpoint takes it from here.
+fn store() -> ltxv::pipeline::Paths {
+    ltxv::spec::default_store_paths().unwrap_or_else(|| panic!("put the LTX-2.5 weights in the model store (Lightricks/LTX-2.5)"))
+}
+
+/// The real DiT GGUF from the model store.
+fn store_dit() -> String {
+    store().dit.unwrap_or_else(|| panic!("put the real ltx-2.5-22b-distilled-transformer GGUF in the model store (Lightricks/LTX-2.5)"))
+}
+
+/// `decode`'s optional instruments, given as `--name value` after its
+/// positional arguments.
+#[derive(Default)]
+struct DecodeProbe {
+    /// `--lf-subst dst=src`: overwrite latent frame `dst` with `src`.
+    lf_subst: Option<(usize, usize)>,
+    /// `--upsample`: run the store's spatial x2 latent upscaler first.
+    upsample: bool,
+    /// `--upsample-raw`: skip the upscaler's un-normalize/statistics sandwich.
+    upsample_raw: bool,
+    /// `--pixel-dump <path>`: write the decoded pixels there.
+    pixel_dump: Option<String>,
+}
+
+fn decode_probe(args: &[String]) -> DecodeProbe {
+    let mut p = DecodeProbe::default();
+    let mut i = 0;
+    while i < args.len() {
+        let value = |i: usize| args.get(i + 1).cloned().unwrap_or_else(|| panic!("{} needs a value", args[i]));
+        match args[i].as_str() {
+            "--lf-subst" => {
+                let spec = value(i);
+                let (d, s) = spec.split_once('=').unwrap_or_else(|| panic!("--lf-subst wants dst=src, got {spec}"));
+                p.lf_subst = Some((d.trim().parse().unwrap(), s.trim().parse().unwrap()));
+                i += 1;
+            }
+            "--upsample" => p.upsample = true,
+            "--upsample-raw" => p.upsample_raw = true,
+            "--pixel-dump" => {
+                p.pixel_dump = Some(value(i));
+                i += 1;
+            }
+            other => panic!("decode: unknown option {other}"),
+        }
+        i += 1;
+    }
+    p
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mode = a.get(1).map(|s| s.as_str()).unwrap_or("dit");
@@ -859,9 +903,10 @@ fn main() {
         "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false), a.get(6).map(|s| s == "1").unwrap_or(false), arg(7, 1), arg(8, 1), a.get(9).map(|s| s.parse().unwrap_or_else(|e| panic!("resident_blocks {s:?}: {e}")))),
         "streamed-av" => bench_streamed_av(arg(2, 4), arg(3, 512), arg(4, 256), arg(5, 128), a.get(6).map(|s| s == "1").unwrap_or(false), a.get(7).map(|s| s == "1").unwrap_or(false), arg(8, 1), arg(9, 1)),
         "decode" => {
-            let path = a.get(2).map(|s| s.as_str()).unwrap_or_else(|| panic!("usage: ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]"));
-            let crop = (a.len() >= 8).then(|| (arg(4, 0), arg(5, 0), arg(6, 0), arg(7, 0)));
-            bench_decode(path, a.get(3).map(|s| s.as_str()).unwrap_or("tiled"), crop);
+            let path = a.get(2).map(|s| s.as_str()).unwrap_or_else(|| panic!("usage: ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1] [--lf-subst d=s] [--upsample] [--upsample-raw] [--pixel-dump <path>]"));
+            let positional = a.iter().skip(4).take_while(|s| !s.starts_with("--")).count();
+            let crop = (positional >= 4).then(|| (arg(4, 0), arg(5, 0), arg(6, 0), arg(7, 0)));
+            bench_decode(path, a.get(3).map(|s| s.as_str()).unwrap_or("tiled"), crop, &decode_probe(&a[(4 + positional).min(a.len())..]));
         }
         other => {
             eprintln!("unknown mode {other} (dit|vae|vocoder|av|streamed|streamed-av|decode)");

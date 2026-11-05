@@ -96,14 +96,6 @@ fn every_model_declares_how_it_finds_its_weights() {
             "no vendor-published GGUF exists; community conversions vary in layout and carry no \
              declaration to classify on, so there is nothing stable for an ArchSpec to key off yet",
         ),
-        (
-            "brain/ltxv",
-            "`ltxv::spec` exists and the CLI resolves through it, but the served manifest declares no \
-             weights param at all - t2v's default is the tiny random-weight smoke config, and the real \
-             22B path is reached by `--dit`/$BRAIN_LTXV_DIT on the dedicated CLI only. Registering it \
-             here means giving `LtxvProvider` the roles first, which belongs with making the real-weight \
-             path servable rather than with this gate",
-        ),
     ];
 
     /// Models whose weights the model library finds: their resident is built

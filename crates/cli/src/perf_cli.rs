@@ -81,10 +81,10 @@ OPTIONS
                           ltxv[:<frames>x<W>x<H>x<steps>]
                                                    LTX-2.5 text-to-video behind the
                                                    residency executor; needs
-                                                   BRAIN_LTXV_VAE. Default
-                                                   9x64x64x4, the tiny random-weight
-                                                   smoke config; setting
-                                                   BRAIN_LTXV_DIT switches to the
+                                                   the VAE in the model store.
+                                                   Default 9x64x64x4, the tiny
+                                                   random-weight smoke config;
+                                                   an @real suffix switches to the
                                                    real 22B int8 checkpoint (~186s/
                                                    denoise step measured - a
                                                    deliberate choice, not a
@@ -191,10 +191,10 @@ targets (--target):
                                      81x832x480x50 is about an hour a request. Requests at
                                      one key share the resident transformer but denoise in
                                      turn; each also pays a fixed umT5-XXL CPU text encode)
-  ltxv[:<frames>x<W>x<H>x<steps>]    LTX-2.5 text-to-video via the residency executor (unit:
-                                     denoise_step; needs BRAIN_LTXV_VAE; default 9x64x64x4,
-                                     the tiny random-weight smoke config; BRAIN_LTXV_DIT
-                                     switches to the real 22B int8 checkpoint)
+  ltxv[:<frames>x<W>x<H>x<steps>][@real]  LTX-2.5 text-to-video via the residency executor
+                                     (unit: denoise_step; needs the VAE in the model store;
+                                     default 9x64x64x4, the tiny random-weight smoke config;
+                                     @real runs the store's real 22B int8 checkpoint)
   gpt:<weights>                      dense char-level GPT via the residency executor (unit: token)
   glm:<weights>                      GLM-5.2-shaped decoder (MLA + sigmoid MoE) via the residency
                                      executor (unit: token)
@@ -1280,10 +1280,10 @@ fn build_wan(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
 /// `ltxv:<frames>x<W>x<H>x<steps>` - LTX-2.5 text-to-video (unit:
 /// `denoise_step`), `build_wan`'s exact pattern adapted to ltxv's own shape
 /// rules (causal VAE: `frames = 1 + 8k`, stride-32 spatial, not wan's
-/// stride-16). Needs `BRAIN_LTXV_VAE` (the one mandatory weight role -
-/// `ltxv::pipeline::Paths::from_env`'s doc); `BRAIN_LTXV_DIT` is OPTIONAL
-/// and switches the measured config from the fast `tiny` (random weights,
-/// this target's default) to the real `ltx25_22b` int8 checkpoint.
+/// stride-16). Needs the LTX-2.5 VAE in the model store (the one mandatory
+/// weight role); an `@real` suffix switches the measured config from the
+/// fast `tiny` (random weights, this target's default) to the real
+/// `ltx25_22b` int8 checkpoint, which the store must then hold too.
 ///
 /// Defaulting to `tiny` rather than the real config is a deliberate choice,
 /// not an oversight: Phase 8's own `ltxv_bench streamed` profiling measured
@@ -1296,9 +1296,13 @@ fn build_wan(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
 /// (the same `self_attn_and_text_ca`/`attention`/`attn_scores_kt`/
 /// `matmul_reg3` selector this phase's optimization pass touched) without
 /// paying that architectural I/O cost every run. The real config stays
-/// reachable - with the real DiT in the model store this target switches to it - for a
+/// reachable - `ltxv:...@real` switches this target to it - for a
 /// deliberate, separately-scheduled measurement, never a default one.
 fn build_ltxv(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (rest, real) = match rest.strip_suffix("@real") {
+        Some(r) => (r.trim_end_matches(':'), true),
+        None => (rest, false),
+    };
     let (frames, w, h, steps) = if rest.is_empty() {
         (9u32, 64u32, 64u32, 4u32)
     } else {
@@ -1320,7 +1324,10 @@ fn build_ltxv(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     }
     // Fail before the run starts, naming what is missing - not at first activation.
     let resident = catalog::resident_ltxv::LtxvResident::from_store(loader::model_dir::resolve(None).as_deref()).ok_or("ltxv target needs an LTX-2.5 VAE in the model store")?;
-    let dit_config = if resident.has_real_dit() { "ltx25_22b" } else { "tiny" };
+    if real && !resident.has_real_dit() {
+        return Err("ltxv@real needs the real LTX-2.5 DiT in the model store".into());
+    }
+    let dit_config = if real { "ltx25_22b" } else { "tiny" };
     // Budget ONLY the schedulable devices - the same guard `build_wan` carries.
     let set = crate::compute_set();
     let mut budgets = residency::budget::Budgets::new();

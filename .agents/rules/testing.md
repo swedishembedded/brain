@@ -421,26 +421,18 @@ skips by default because 22.72 GB of fp32 weights exceed a 24 GB card),
 `BRAIN_FLUX2_DUMP_LATENT` (the same shape for FLUX.2:
 write the latent the decoder is about to consume, so `flux2_latent stats`/`op`
 can inspect a *generated* latent instead of only ones fed back in; a write
-failure is reported and ignored, never fatal), and, read only by the
-`ltxv_bench` profiling binary
-(`crates/ltxv/src/bin/ltxv_bench.rs`, not the production pipeline):
-`BRAIN_LTXV_DECODE_LF_SUBST` (`dst=src` overwrites latent frame `dst` with
-latent frame `src` before decoding, to isolate a latent frame's temporal
-receptive field), `BRAIN_LTXV_DECODE_UPSAMPLE` (path to a spatial-upscaler
-checkpoint; runs the real x2 latent upscaler over the latent before decoding,
-with no refinement pass), `BRAIN_LTXV_DECODE_UPSAMPLE_RAW` (skips the
-upsampled output's un-normalize/statistics step), and `BRAIN_LTXV_PIXEL_DUMP`
-(write the decoded pixel frames to the given path).
+failure is reported and ignored, never fatal). `ltxv_bench decode` takes its
+instruments as options: `--lf-subst dst=src` (overwrite latent frame `dst` with
+`src` before decoding, to isolate a latent frame's temporal receptive field),
+`--upsample` (run the store's x2 latent upscaler first, no refinement),
+`--upsample-raw` (skip its un-normalize/statistics step) and `--pixel-dump
+<path>` (write the decoded pixel frames).
 
 **LTX-2.5 knobs** are request options, not variables: `GenOpts::runtime`
 (`--resident-blocks`, `--two-stage`, `--vae-tiling`, `--text-precision`,
 `--no-text-cache`, `--text-cache-max-bytes`, `--latent-dump`,
 `--av-fp32-reference`) and `LongOpts` (`--max-window-tokens`,
 `--window-major`). `--device gpu0` keeps a run's CFG pair on one card.
-- `BRAIN_LTXV_PIXEL_DUMP`, `BRAIN_LTXV_DECODE_UPSAMPLE`,
-  `BRAIN_LTXV_DECODE_UPSAMPLE_RAW`, `BRAIN_LTXV_DECODE_LF_SUBST` - read only by
-  the `ltxv_bench` binary (decoded-pixel dump, upsampler selection, and
-  low-frequency substitution for isolating decode error).
 
 **CUDA memory and profiling knobs:** `brain --block-cache-mb <MiB>` (size of the
 held-freed-block cache; `0` turns it off, unset sizes it from device memory
