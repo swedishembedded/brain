@@ -3,8 +3,8 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 """Print the reference resizes `crates/imaging/tests/it/resize_reference.rs`
-embeds: PIL's fixed-point bicubic on uint8 RGB (what torchvision's resize does
-to a PIL image), torch's antialiased bicubic on a uint8 tensor (what
+embeds: PIL's fixed-point bicubic and LANCZOS on uint8 RGB (what torchvision's
+resize, and diffusers' `VaeImageProcessor.resize`, do to a PIL image), torch's antialiased bicubic on a uint8 tensor (what
 torchvision's resize does to a tensor image), and torch's antialiased
 bilinear and bicubic on a float tensor (`F.interpolate(..., antialias=True,
 align_corners=False)`), at odd sizes, downscales and upscales.
@@ -37,9 +37,12 @@ def rust(name: str, values, ty: str) -> None:
 
 def main() -> None:
     img = rgb()
-    for (w, h) in [(3, 4), (11, 9)]:
+    for (w, h) in [(3, 4), (11, 9), (23, 2)]:
         out = np.asarray(Image.fromarray(img).resize((w, h), Image.BICUBIC))
         rust(f"PIL_BICUBIC_{w}X{h}", out, "u8")
+    for (w, h) in [(3, 4), (11, 9), (23, 2)]:
+        out = np.asarray(Image.fromarray(img).resize((w, h), Image.LANCZOS))
+        rust(f"PIL_LANCZOS_{w}X{h}", out, "u8")
 
     # torch's uint8 path: int16 weights, so it can differ from PIL by one.
     u8 = torch.tensor(img.transpose(2, 0, 1).tolist(), dtype=torch.uint8)[None]

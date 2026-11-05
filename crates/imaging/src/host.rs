@@ -33,6 +33,8 @@
 //! reproduce it exactly, and Pillow's is fixed-point integer arithmetic. They
 //! run once per input image, before any model buffer exists.
 //!
+//! * [`resize_lanczos_pil`] - Pillow's `Image.resize(LANCZOS)` on uint8 RGB,
+//!   byte-exact.
 //! * [`resize_bicubic_pil`] - Pillow's `Image.resize(BICUBIC)` on uint8 RGB
 //!   (what torchvision's `resize` does to a PIL image), byte for byte.
 //! * [`resize_aa_planar`] - torch's `F.interpolate(..., antialias=True,
@@ -143,6 +145,46 @@ fn cubic(x: f64) -> f64 {
     }
 }
 
+/// Pillow's `lanczos_filter`: a 3-lobe windowed sinc, support 3, over the
+/// half-open `[-3, 3)` Pillow evaluates it on.
+fn lanczos3(x: f64) -> f64 {
+    fn sinc(x: f64) -> f64 {
+        if x == 0.0 {
+            return 1.0;
+        }
+        let x = x * std::f64::consts::PI;
+        x.sin() / x
+    }
+    if (-3.0..3.0).contains(&x) {
+        sinc(x) * sinc(x / 3.0)
+    } else {
+        0.0
+    }
+}
+
+/// A Pillow 8bpc resampling filter and its support.
+#[derive(Clone, Copy)]
+enum PilFilter {
+    Bicubic,
+    Lanczos,
+}
+
+impl PilFilter {
+    fn support(self) -> f64 {
+        match self {
+            PilFilter::Bicubic => 2.0,
+            PilFilter::Lanczos => 3.0,
+        }
+    }
+
+    fn eval(self, x: f64) -> f64 {
+        match self {
+            PilFilter::Bicubic => cubic(x),
+            PilFilter::Lanczos => lanczos3(x),
+        }
+    }
+}
+
 /// How normalized resampling weights become fixed point.
 #[derive(Clone, Copy)]
 enum FixedPoint {
@@ -158,11 +200,10 @@ enum FixedPoint {
 /// `[xmin, xmin + n)` and its normalized fixed-point weights, plus the number
 /// of fraction bits. Pillow's `precompute_coeffs` windowing, which torch's
 /// uint8 path ports verbatim; they differ only in [`FixedPoint`].
-fn fixed_coeffs(in_size: usize, out_size: usize, fixed: FixedPoint) -> (usize, Vec<(usize, usize)>, Vec<i32>, i32) {
-    const SUPPORT: f64 = 2.0;
+fn fixed_coeffs(in_size: usize, out_size: usize, filter: PilFilter, fixed: FixedPoint) -> (usize, Vec<(usize, usize)>, Vec<i32>, i32) {
     let scale = in_size as f64 / out_size as f64;
     let filterscale = scale.max(1.0);
-    let support = SUPPORT * filterscale;
+    let support = filter.support() * filterscale;
     let ksize = support.ceil() as usize * 2 + 1;
     let inv = 1.0 / filterscale;
     let mut bounds = Vec::with_capacity(out_size);
@@ -171,7 +212,7 @@ fn fixed_coeffs(in_size: usize, out_size: usize, fixed: FixedPoint) -> (usize, V
         let center = (xx as f64 + 0.5) * scale;
         let xmin = ((center - support + 0.5) as i64).max(0) as usize;
         let xmax = (((center + support + 0.5) as i64) as usize).min(in_size) - xmin;
-        let w: Vec<f64> = (0..xmax).map(|x| cubic((x as f64 + xmin as f64 - center + 0.5) * inv)).collect();
+        let w: Vec<f64> = (0..xmax).map(|x| filter.eval((x as f64 + xmin as f64 - center + 0.5) * inv)).collect();
         let ww: f64 = w.iter().sum();
         for (x, &wx) in w.iter().enumerate() {
             weights[xx * ksize + x] = if ww != 0.0 { wx / ww } else { wx };
@@ -192,8 +233,8 @@ fn fixed_coeffs(in_size: usize, out_size: usize, fixed: FixedPoint) -> (usize, V
 
 /// The horizontal 8bpc pass over interleaved RGB8: every row of `src` (`w` x `h`) resampled to `nw` positions. Rows are
 /// independent, so they are spread over the cores.
-fn fixed_horizontal(fixed: FixedPoint, src: &[u8], w: usize, nw: usize, h: usize) -> Vec<u8> {
-    let (ksize, bounds, kk, bits) = fixed_coeffs(w, nw, fixed);
+fn fixed_horizontal(filter: PilFilter, fixed: FixedPoint, src: &[u8], w: usize, nw: usize, h: usize) -> Vec<u8> {
+    let (ksize, bounds, kk, bits) = fixed_coeffs(w, nw, filter, fixed);
     let mut out = vec![0u8; nw * h * 3];
     backend_cpu::par::chunks_mut(&mut out, nw * 3, |y, row| {
         let line = &src[y * w * 3..][..w * 3];
@@ -215,8 +256,8 @@ fn fixed_horizontal(fixed: FixedPoint, src: &[u8], w: usize, nw: usize, h: usize
 
 /// The vertical 8bpc pass: `src` (`nw` x `h`) resampled to `nh` rows. One output row accumulates whole source rows, so the
 /// inner loop walks contiguous memory; output rows are independent and spread over the cores.
-fn fixed_vertical(fixed: FixedPoint, src: &[u8], h: usize, nh: usize, nw: usize) -> Vec<u8> {
-    let (ksize, bounds, kk, bits) = fixed_coeffs(h, nh, fixed);
+fn fixed_vertical(filter: PilFilter, fixed: FixedPoint, src: &[u8], h: usize, nh: usize, nw: usize) -> Vec<u8> {
+    let (ksize, bounds, kk, bits) = fixed_coeffs(h, nh, filter, fixed);
     let mut out = vec![0u8; nw * nh * 3];
     backend_cpu::par::chunks_mut(&mut out, nw * 3, |oy, row| {
         let (min, n) = bounds[oy];
@@ -234,13 +275,24 @@ fn fixed_vertical(fixed: FixedPoint, src: &[u8], h: usize, nh: usize, nw: usize)
     out
 }
 
-/// A horizontal then a vertical 8bpc pass, each skipped when its axis keeps
-/// its size - the pass order Pillow and torch share.
-fn resize_fixed(img: &Rgb8, nw: usize, nh: usize, fixed: FixedPoint) -> Rgb8 {
+/// Two separable 8bpc passes, each skipped when its axis keeps its size.
+/// The intermediate is clipped to 8 bits, so the pass order is observable:
+/// Pillow (`ImagingResampleInner`) runs the vertical pass first only when the
+/// height shrinks by more than twice what the width shrinks by, and the
+/// horizontal pass first otherwise. torch's uint8 path always runs the
+/// horizontal pass first.
+fn resize_fixed(img: &Rgb8, nw: usize, nh: usize, filter: PilFilter, fixed: FixedPoint) -> Rgb8 {
     let (w, h) = (img.w as usize, img.h as usize);
     assert!(w > 0 && h > 0 && nw > 0 && nh > 0, "resize: empty extent");
-    let horiz = if nw != w { fixed_horizontal(fixed, &img.px, w, nw, h) } else { img.px.clone() };
-    let px = if nh != h { fixed_vertical(fixed, &horiz, h, nh, nw) } else { horiz };
+    let (height_cut, width_cut) = (h as i64 - nh as i64, w as i64 - nw as i64);
+    let vertical_first = matches!(fixed, FixedPoint::Pillow) && height_cut > 0 && height_cut > width_cut * 2;
+    let px = if vertical_first {
+        let vert = if nh != h { fixed_vertical(filter, fixed, &img.px, h, nh, w) } else { img.px.clone() };
+        if nw != w { fixed_horizontal(filter, fixed, &vert, w, nw, nh) } else { vert }
+    } else {
+        let horiz = if nw != w { fixed_horizontal(filter, fixed, &img.px, w, nw, h) } else { img.px.clone() };
+        if nh != h { fixed_vertical(filter, fixed, &horiz, h, nh, nw) } else { horiz }
+    };
     Rgb8 { w: nw as u32, h: nh as u32, px }
 }
 
@@ -248,7 +300,14 @@ fn resize_fixed(img: &Rgb8, nw: usize, nh: usize, fixed: FixedPoint) -> Rgb8 {
 /// byte: a horizontal then a vertical fixed-point pass, antialiased when
 /// shrinking, each skipped when its axis keeps its size.
 pub fn resize_bicubic_pil(img: &Rgb8, nw: usize, nh: usize) -> Rgb8 {
-    resize_fixed(img, nw, nh, FixedPoint::Pillow)
+    resize_fixed(img, nw, nh, PilFilter::Bicubic, FixedPoint::Pillow)
+}
+
+/// Pillow's `Image.resize((nw, nh), LANCZOS)` on interleaved RGB8, byte for
+/// byte - the resampler diffusers' `VaeImageProcessor.resize` applies to a
+/// PIL image. Same passes as [`resize_bicubic_pil`], 3-lobe windowed sinc.
+pub fn resize_lanczos_pil(img: &Rgb8, nw: usize, nh: usize) -> Rgb8 {
+    resize_fixed(img, nw, nh, PilFilter::Lanczos, FixedPoint::Pillow)
 }
 
 /// torch's antialiased bicubic resize of a `uint8` image
@@ -257,7 +316,7 @@ pub fn resize_bicubic_pil(img: &Rgb8, nw: usize, nh: usize) -> Rgb8 {
 /// fewer fraction bits than Pillow, so a pixel can differ from
 /// [`resize_bicubic_pil`] by one.
 pub fn resize_bicubic_torch_u8(img: &Rgb8, nw: usize, nh: usize) -> Rgb8 {
-    resize_fixed(img, nw, nh, FixedPoint::TorchInt16)
+    resize_fixed(img, nw, nh, PilFilter::Bicubic, FixedPoint::TorchInt16)
 }
 
 // ---- torch antialiased resampling (UpSampleKernel.cpp, `_upsample_*_aa`) ----
