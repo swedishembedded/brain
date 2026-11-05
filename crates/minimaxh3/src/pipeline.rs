@@ -58,6 +58,12 @@ pub const FPS: f32 = 24.0;
 pub const AUDIO_LATENTS_PER_SECOND: f32 = 40.0;
 /// `MINIMAX_H3_AUDIO_CHANNELS` - stereo, packed channel-major.
 pub const AUDIO_CHANNELS: u32 = 2;
+/// The audio VAE's sample rate: what the vocoder emits and what a reference
+/// soundtrack is resampled onto before it is encoded.
+pub const AUDIO_SAMPLE_RATE: u32 = 32000;
+/// The short edge an image reference is encoded at, upscaling included and
+/// with no area cap (`reference_image_short_edge`).
+pub const REFERENCE_IMAGE_SHORT_EDGE: u32 = 2048;
 /// `MINIMAX_H3_MIN_ASPECT_RATIO`.
 pub const MIN_ASPECT_RATIO: f64 = 0.25;
 /// `MINIMAX_H3_MAX_ASPECT_RATIO`.
@@ -401,6 +407,14 @@ pub enum ReferenceGeometry {
 }
 
 impl ReferenceGeometry {
+    pub fn kind(&self) -> ReferenceKind {
+        match self {
+            ReferenceGeometry::Image { .. } => ReferenceKind::Image,
+            ReferenceGeometry::Video { .. } => ReferenceKind::Video,
+            ReferenceGeometry::Audio { .. } => ReferenceKind::Audio,
+        }
+    }
+
     fn video_rows(&self, patch_h: u32, patch_w: u32) -> u32 {
         match *self {
             ReferenceGeometry::Image { latent_height, latent_width } => (latent_height / patch_h) * (latent_width / patch_w),
@@ -669,6 +683,7 @@ pub fn encode_keyframe_condition(video_vae_cfg: &VideoVaeConfig, video_vae_tenso
 
 /// What [`encode_visual_condition`] needs besides the pixels: the video VAE,
 /// its latent normalization, the DiT patch, and the conditioning noise seed.
+#[derive(Clone, Copy)]
 pub struct VisualConditionRequest<'a> {
     pub video_vae_cfg: &'a VideoVaeConfig,
     pub video_vae_tensors: &'a Tensors,
@@ -861,17 +876,25 @@ pub const MAX_VIDEO_REFERENCES: usize = 3;
 pub const MAX_AUDIO_REFERENCES: usize = 3;
 pub const MAX_REFERENCES: usize = 12;
 
+/// The modality of one `ref2va` reference. A video's own soundtrack does
+/// not make it an audio reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReferenceKind {
+    Image,
+    Video,
+    Audio,
+}
+
 /// `MiniMaxH3Ref2VASetupStep`'s request validation: at least one reference,
 /// the per-modality and total limits, and no request made of soundtracks
-/// alone. A video's own soundtrack counts as a video reference, not an audio
-/// one.
-pub fn check_reference_kinds(geometry: impl IntoIterator<Item = ReferenceGeometry>) -> Result<(), String> {
+/// alone.
+pub fn check_reference_kinds(kinds: impl IntoIterator<Item = ReferenceKind>) -> Result<(), String> {
     let (mut images, mut videos, mut audios) = (0usize, 0usize, 0usize);
-    for g in geometry {
-        match g {
-            ReferenceGeometry::Image { .. } => images += 1,
-            ReferenceGeometry::Video { .. } => videos += 1,
-            ReferenceGeometry::Audio { .. } => audios += 1,
+    for kind in kinds {
+        match kind {
+            ReferenceKind::Image => images += 1,
+            ReferenceKind::Video => videos += 1,
+            ReferenceKind::Audio => audios += 1,
         }
     }
     let total = images + videos + audios;
@@ -893,7 +916,7 @@ pub fn check_reference_kinds(geometry: impl IntoIterator<Item = ReferenceGeometr
 }
 
 fn check_references(references: &[EncodedReference]) -> Result<(), String> {
-    check_reference_kinds(references.iter().map(|r| r.geometry))
+    check_reference_kinds(references.iter().map(|r| r.geometry.kind()))
 }
 
 /// What conditions one generation besides the prompt: `fl2va`'s keyframes
@@ -1133,11 +1156,11 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
 
     progress(total, total, "audio decode");
 
-    Ok(GeneratedAv { video: pixels, num_video_frames: out_t, height: out_h, width: out_w, audio: audio_channels_out, sample_rate: 32000 })
+    Ok(GeneratedAv { video: pixels, num_video_frames: out_t, height: out_h, width: out_w, audio: audio_channels_out, sample_rate: AUDIO_SAMPLE_RATE })
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::TAG_TEXT;
 
@@ -1285,7 +1308,7 @@ mod tests {
     /// pipeline. This module's own end-to-end test is the first one that
     /// does, so it builds its own mutually-consistent trio rather than
     /// reusing those three `tiny()` presets as-is.
-    fn tiny_dit_cfg() -> H3TransformerConfig {
+    pub(crate) fn tiny_dit_cfg() -> H3TransformerConfig {
         H3TransformerConfig {
             num_attention_heads: 4,
             attention_head_dim: 32,
@@ -1311,11 +1334,11 @@ mod tests {
     /// `VideoVaeConfig::tiny()` itself - this was a field-for-field copy of
     /// it, which silently went stale every time that constructor gained a
     /// field.
-    fn tiny_video_vae_cfg() -> VideoVaeConfig {
+    pub(crate) fn tiny_video_vae_cfg() -> VideoVaeConfig {
         VideoVaeConfig::tiny()
     }
 
-    fn tiny_vocoder_cfg() -> VocoderConfig {
+    pub(crate) fn tiny_vocoder_cfg() -> VocoderConfig {
         VocoderConfig {
             vae_latent_channels: 4,
             upsample_initial_channel: 128,
@@ -1332,7 +1355,7 @@ mod tests {
     /// reusable from here: it is `#[cfg(test)]`-private to that module) -
     /// the exact tensor names `H3Transformer::load` reads, seeded random
     /// values.
-    fn rand_dit_tensors(cfg: &H3TransformerConfig, seed: u64) -> Tensors {
+    pub(crate) fn rand_dit_tensors(cfg: &H3TransformerConfig, seed: u64) -> Tensors {
         let mut rng = data::rng::Lcg::new(seed);
         let mut t: Tensors = std::collections::HashMap::new();
         let mut put = |name: &str, shape: Vec<usize>| {
@@ -1393,7 +1416,7 @@ mod tests {
         t
     }
 
-    fn rand_manifest_tensors(manifest: Vec<(String, Vec<usize>)>, seed: u64) -> Tensors {
+    pub(crate) fn rand_manifest_tensors(manifest: Vec<(String, Vec<usize>)>, seed: u64) -> Tensors {
         let mut rng = data::rng::Lcg::new(seed);
         manifest
             .into_iter()
@@ -1405,7 +1428,7 @@ mod tests {
             .collect()
     }
 
-    fn tiny_checkpoint<'a>(dit_tensors: &'a Tensors, video_vae_tensors: &'a Tensors, vocoder_tensors: &'a Tensors) -> H3Checkpoint<'a> {
+    pub(crate) fn tiny_checkpoint<'a>(dit_tensors: &'a Tensors, video_vae_tensors: &'a Tensors, vocoder_tensors: &'a Tensors) -> H3Checkpoint<'a> {
         let video_vae_cfg = tiny_video_vae_cfg();
         let vocoder_cfg = tiny_vocoder_cfg();
         H3Checkpoint {
@@ -1422,7 +1445,7 @@ mod tests {
         }
     }
 
-    fn tiny_text(num_tokens: usize, text_dim: usize, seed: u64) -> TextConditioning {
+    pub(crate) fn tiny_text(num_tokens: usize, text_dim: usize, seed: u64) -> TextConditioning {
         let mut rng = data::rng::Lcg::new(seed);
         TextConditioning { embeds: rng.vec_scaled(num_tokens * text_dim, 0.3), token_tags: vec![TAG_TEXT; num_tokens] }
     }
@@ -1433,7 +1456,7 @@ mod tests {
     /// scale, not the frame count, since the duration bound is a genuine
     /// request-level business rule this pipeline enforces for a real
     /// caller too.
-    fn tiny_gen_opts(seed: u64) -> GenOpts {
+    pub(crate) fn tiny_gen_opts(seed: u64) -> GenOpts {
         GenOpts { canvas: Some((32, 32)), num_frames: 124, num_inference_steps: 3, seed, device: Some("cpu".to_string()) }
     }
 
@@ -1550,13 +1573,11 @@ mod tests {
     /// alone are not a request.
     #[test]
     fn reference_kinds_are_validated_against_the_released_limits() {
-        let image = ReferenceGeometry::Image { latent_height: 2, latent_width: 2 };
-        let audio = ReferenceGeometry::Audio { latents: 4 };
+        let (image, video, audio) = (ReferenceKind::Image, ReferenceKind::Video, ReferenceKind::Audio);
         assert!(check_reference_kinds([image, audio]).is_ok());
         assert!(check_reference_kinds([]).unwrap_err().contains("at least one"));
         assert!(check_reference_kinds([audio]).unwrap_err().contains("paired"));
         assert!(check_reference_kinds([image; MAX_IMAGE_REFERENCES + 1]).unwrap_err().contains("image"));
-        let video = ReferenceGeometry::Video { latent_frames: 2, latent_height: 2, latent_width: 2, soundtrack_latents: 0 };
         let thirteen = std::iter::repeat_n(image, MAX_IMAGE_REFERENCES).chain(std::iter::repeat_n(video, MAX_VIDEO_REFERENCES)).chain([audio]);
         assert!(check_reference_kinds(thirteen).unwrap_err().contains("in total"));
     }
