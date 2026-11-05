@@ -255,13 +255,16 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     if let Some(h) = catalog::resident_minimaxh3::MiniMaxH3Resident::from_env() {
         models.push(Arc::new(h));
     }
-    // LTX-2.5 text-to-video (BRAIN_LTXV_VAE): a smoke-test pipeline (real VAE,
-    // tiny random-weight DiT, no real text encoder yet) with nothing worth
-    // caching resident - see resident_ltxv.rs's module doc.
-    if let Some(l) = catalog::resident_ltxv::LtxvResident::from_env() {
+    // LTX-2.5 video+audio (BRAIN_LTXV_*, else every checkpoint the model
+    // store resolves, each under its own reference): see resident_ltxv.rs.
+    // One with only its VAE runs the random-weight smoke-test DiT and is not
+    // offered for sale on /videos.
+    let ltxv_residents = catalog::resident_ltxv::LtxvResident::all_from_store(models_dir);
+    if ltxv_residents.is_empty() {
+        residency::log::not_served("brain: ltxv not served over the scheduler (set BRAIN_LTXV_VAE, or pull an LTX-2.5 checkpoint into the model dir)");
+    }
+    for l in ltxv_residents {
         models.push(Arc::new(l));
-    } else {
-        residency::log::not_served("brain: ltxv not served over the scheduler (set BRAIN_LTXV_VAE)");
     }
     // Monocular depth (BRAIN_ZIPDEPTH_WEIGHTS).
     if let Some(d) = catalog::resident_depth::DepthResident::from_env() {

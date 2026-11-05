@@ -59,9 +59,50 @@ pub struct LtxvResident {
 }
 
 impl LtxvResident {
-    /// `None` (not registered) unless `BRAIN_LTXV_VAE` is set.
+    /// Every LTX checkpoint this machine serves: the one `BRAIN_LTXV_*` names,
+    /// else each the model store resolves (`ltxv::spec::LtxvSpec`), each under
+    /// its own reference - the lane `resident_flux2`'s residents take, so a
+    /// pulled checkpoint is served without any variable set.
+    pub fn all_from_store(models_dir: Option<&std::path::Path>) -> Vec<LtxvResident> {
+        use loader::served::RoleEnv;
+        loader::served::served_assemblies(
+            models_dir,
+            "ltxv",
+            &ltxv::spec::LtxvSpec,
+            &[
+                RoleEnv { role: "vae", var: "BRAIN_LTXV_VAE" },
+                RoleEnv { role: "dit", var: "BRAIN_LTXV_DIT" },
+                RoleEnv { role: "text_encoder", var: "BRAIN_LTXV_TEXT_ENCODER" },
+                RoleEnv { role: "spatial_upsampler", var: "BRAIN_LTXV_UPSAMPLER_SPATIAL" },
+                RoleEnv { role: "audio_vae", var: "BRAIN_LTXV_AUDIO_VAE" },
+            ],
+            ltxv::caps::MODEL,
+        )
+        .into_iter()
+        .filter_map(|assembly| {
+            let id = assembly.id.clone();
+            match ltxv::pipeline::Paths::from_assembly(&assembly, None) {
+                Ok(paths) => Some(LtxvResident { id, paths }),
+                Err(e) => {
+                    residency::log::not_served(&format!("brain: {id} not served over the scheduler ({e})"));
+                    None
+                }
+            }
+        })
+        .collect()
+    }
+
+    /// The checkpoint `BRAIN_LTXV_*` names, without looking in a model store;
+    /// `None` unless `BRAIN_LTXV_VAE` is set.
     pub fn from_env() -> Option<LtxvResident> {
-        ltxv::pipeline::Paths::from_env().ok().map(|paths| LtxvResident { id: ltxv::caps::MODEL.to_string(), paths })
+        Self::all_from_store(None).into_iter().next()
+    }
+
+    /// Whether this checkpoint renders real video: the real DiT and text
+    /// encoder resolved. Without them every clip comes from the random-weight
+    /// smoke-test DiT, which may run but is never offered as a product.
+    fn real(&self) -> bool {
+        self.paths.dit.is_some() && self.paths.text_encoder.is_some()
     }
 }
 
@@ -144,7 +185,13 @@ fn dit_host_bytes(dit_config: &str, paths: &ltxv::pipeline::Paths) -> u64 {
 
 impl ResidentModel for LtxvResident {
     fn manifest(&self) -> Manifest {
-        Manifest { model: self.id.clone(), ..ltxv::caps::manifest() }
+        let mut manifest = Manifest { model: self.id.clone(), ..ltxv::caps::manifest() };
+        if !self.real() {
+            for contract in manifest.actions.iter_mut().filter_map(|action| action.video.as_mut()) {
+                contract.sellable = false;
+            }
+        }
+        manifest
     }
 
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
@@ -442,6 +489,20 @@ mod tests {
 
     fn resident() -> LtxvResident {
         LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None, duration_head: None } }
+    }
+
+    /// A checkpoint without its real DiT and text encoder renders from the
+    /// random-weight smoke-test DiT: it may run, but `/videos` never offers
+    /// it for sale; with both, its video actions are offered.
+    #[test]
+    fn only_a_real_checkpoint_is_offered_for_sale() {
+        let video = |r: &LtxvResident| r.manifest().actions.into_iter().filter_map(|a| a.video).map(|c| c.sellable).collect::<Vec<_>>();
+        let smoke = resident();
+        assert!(!video(&smoke).is_empty() && video(&smoke).iter().all(|s| !s));
+        let mut real = resident();
+        real.paths.dit = Some("/dit.gguf".into());
+        real.paths.text_encoder = Some("/te.safetensors".into());
+        assert!(video(&real).iter().all(|s| *s));
     }
 
     /// The key must fix exactly the fields that would size a real DiT's

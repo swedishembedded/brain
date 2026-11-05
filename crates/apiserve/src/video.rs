@@ -70,8 +70,6 @@ pub const MAX_JOBS: usize = 1024;
 pub const RESULT_TTL: Duration = Duration::from_secs(60 * 60);
 /// The most bytes of finished clips the spool keeps by default.
 pub const DEFAULT_SPOOL_BYTES: u64 = 20 * 1024 * 1024 * 1024;
-/// The longest input clip an edit may carry, in frames.
-pub const MAX_INPUT_FRAMES: u32 = 2_000;
 /// The chunk the content route streams the file in.
 const CHUNK: usize = 256 * 1024;
 
@@ -267,7 +265,7 @@ async fn clip_from_data_url(url: &str) -> Result<capability::Blob, String> {
     tokio::task::spawn_blocking(move || {
         let dir = private_temp_dir()?;
         let path = dir.join(format!("{}.{ext}", Uuid::new_v4()));
-        let result = std::fs::write(&path, &bytes).map_err(|e| format!("input_video: {e}")).and_then(|()| imaging::video::clip_from_file(&path, MAX_INPUT_FRAMES).map_err(|e| format!("input_video: {e}")));
+        let result = std::fs::write(&path, &bytes).map_err(|e| format!("input_video: {e}")).and_then(|()| imaging::video::clip_from_file(&path, capability::video::MAX_EDIT_CLIP_FRAMES).map_err(|e| format!("input_video: {e}")));
         let _ = std::fs::remove_file(&path);
         result
     })

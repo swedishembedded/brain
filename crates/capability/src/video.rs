@@ -21,6 +21,9 @@
 
 use serde_json::{json, Map, Value};
 
+/// The longest clip an edit takes as its input, in frames.
+pub const MAX_EDIT_CLIP_FRAMES: u32 = 2_000;
+
 /// Named resolution tiers and the length of the frame's SHORT side they mean.
 pub const RESOLUTIONS: [(&str, u32); 4] = [("480p", 480), ("720p", 720), ("1080p", 1080), ("2K", 1440)];
 

@@ -116,12 +116,41 @@ pool if real-weight runs show it dominating.
 
 Open:
 
+Also done: a served LTX-2.5 now comes from the model store
+(`LtxvResident::all_from_store`, the `served_assemblies` lane flux2 takes),
+not only from `BRAIN_LTXV_*`; one without its real DiT and text encoder runs
+the random-weight smoke-test DiT and is marked not sellable, so `/videos`
+never offers it. The generic CLI decodes an edit's input clip whole, at its
+own rate (it used to take 1 fps, 32 frames at most, which is right only for a
+multimodal prompt).
+
 6. Retire `ltxv_cli.rs` and `wan_cli.rs` (agreed: every per-model video
-   verb). First an audit mapping each flag to a capability param, because some
-   have none yet: masked v2v (`--mask` folder), several `--adapter`s each with
-   its `--lora-scale`, `--stage-2-ic-lora`, long-form generation, and
-   `wan finetune` (used by `wan_report.rs`). Each gets a param or a generic
-   verb before its file goes.
+   verb). **Audited 2026-11-06: not yet.** The generic path
+   (`brain <model> <action>`, `caps_cli::run_do`) covers about 60% of the
+   flags. Before the files can go, each of these needs a capability param or
+   a generic verb, or nothing a person does today survives:
+   - the generic LTX provider resolves weights from the environment only:
+     catalog `spec: Some(LtxvSpec)` and an assembly-built provider, plus the
+     `--vae/--dit/--text-encoder/--spatial-upsampler/--audio-vae` role
+     overrides through `resolver_cli::extract_role_overrides` (Wan too);
+   - v2v: a `mask` input (a mask sequence, or a host-resolved folder) and
+     `strength`, with `start`/`end` optional when a mask is given;
+   - several adapters, each with its own scale (one `adapter` today);
+   - the IC-LoRA `reference` video input and `reference_strength`, and
+     `stage_2_ic_lora`;
+   - t2v `context_frames` and `scenes`; extend `seconds`; upscale
+     `context_frames`;
+   - the soundtrack input: `caps_cli` downmixes a WAV to 16 kHz mono, but
+     `clip_from` wants the 48 kHz stereo container;
+   - Wan: declare `dit_dtype` (read but undeclared, so `validate` refuses it),
+     `te_device` on t2v, the 1200 s wait for one large forward, and
+     `wan finetune --report` (`wan_report.rs`, its only caller) as a
+     `lora_train` param or a post-step with per-step losses in progress;
+   - the run record (`<out>.json` with the seed and params) the verbs write;
+   - then `resolve.rs` handler rows, `seed_flag.rs`'s `SEEDED_VERBS`,
+     `quickstart.sh`/`quickstart.bats`, the `wan` make target, and the docs
+     and samples that call `brain ltxv`/`brain wan` (`character_swap.sh` is
+     masked v2v, `chain_images_to_video.sh` mid-frame keyframes).
 
 ## Later
 
