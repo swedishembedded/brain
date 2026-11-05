@@ -545,16 +545,13 @@ impl crate::TensorSource for WeightReader {
         }
     }
 
-    /// `MADV_DONTNEED` on `name`'s own byte range (single-file safetensors)
-    /// or the owning shard's (sharded HF checkpoint) - see the trait doc for
-    /// why a streaming caller should call this once per tensor. A no-op for
-    /// GGUF: `MmapGguf` does not expose a per-tensor advise (its blocks are
-    /// packed too densely for a whole-tensor `DONTNEED` to be worth the
-    /// bookkeeping today), and for a name this reader does not have.
+    /// `MADV_DONTNEED` on `name`'s own byte range, in whichever file holds
+    /// it - see the trait doc for why a streaming caller should call this
+    /// once per tensor. A no-op for a name this reader does not have.
     fn advise_drop(&self, name: &str) {
         match &self.inner {
             Inner::St(m) => m.advise_dontneed_tensor(name),
-            Inner::Gguf(_) => {}
+            Inner::Gguf(m) => crate::TensorSource::advise_drop(m, name),
             Inner::StSharded(readers, owner) => {
                 if let Some(&si) = owner.get(name) {
                     readers[si].advise_dontneed_tensor(name);

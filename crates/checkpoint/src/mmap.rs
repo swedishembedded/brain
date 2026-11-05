@@ -454,6 +454,9 @@ impl crate::TensorSource for MmapSafetensors {
     fn numel(&self, name: &str) -> Option<usize> {
         MmapSafetensors::numel(self, name)
     }
+    fn advise_drop(&self, name: &str) {
+        self.advise_dontneed_tensor(name)
+    }
 }
 
 /// On-disk byte width of one element for a safetensors dtype string, or `None`

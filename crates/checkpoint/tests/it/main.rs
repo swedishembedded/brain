@@ -7,6 +7,7 @@
 //! process-wide state (the current directory, environment variables): the
 //! others run beside it.
 
+mod advise_drop;
 mod corrupt_header;
 mod e4m3_decode_bench;
 mod gguf_read_mapped;
