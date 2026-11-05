@@ -921,21 +921,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
         timings.unattributed(wall)
     );
 
-    // The sound track first, then the frames MOVED rather than cloned: a
-    // long clip's pixels are the largest buffer this command ever holds, and
-    // copying all of them to hand them to the encoder is a copy nothing reads
-    // twice.
-    let audio_desc = video
-        .audio
-        .as_ref()
-        .map(|a| format!(", {:.2}s of {} Hz audio in {} channels", a.seconds(), a.sample_rate, a.channels.len()))
-        .unwrap_or_default();
-    let track = video.audio.map(|a| imaging::video::AudioTrack { channels: a.channels, sample_rate: a.sample_rate });
-    let (width, height) = (video.width, video.height);
-    let frames: Vec<imaging::Rgb8> = video.frames.into_iter().map(|px| imaging::Rgb8::new(width, height, px)).collect::<Result<_, _>>()?;
-    let enc_opts = imaging::video::VideoEncodeOpts { audio: track, ..Default::default() };
-    let written = imaging::video::encode_frames(&frames, std::path::Path::new(&out), video.fps as f64, &enc_opts)?;
-    eprintln!("ltxv: wrote {} ({}x{}, {} frames at {} fps{audio_desc})", written.display(), video.width, video.height, frames.len(), video.fps);
+    eprintln!("ltxv: wrote {}", write_clip(video, &out)?);
     crate::run_record::write_run_record(
         &out,
         "ltxv t2v",
@@ -1012,6 +998,26 @@ fn t2a(args: &[String]) -> Result<(), String> {
     eprintln!("ltxv t2a: wrote {out} ({:.2}s of {} Hz audio in {} channels)", clip.seconds(), clip.sample_rate, clip.channels.len());
     crate::run_record::write_run_record(&out, "ltxv t2a", o.base.seed, serde_json::json!({ "prompt": prompt, "seconds": clip.seconds(), "steps": o.base.steps, "sampler": format!("{:?}", o.base.sampler), "eta": o.base.eta, "guidance": format!("{:?}", o.base.guidance.audio) }))?;
     Ok(())
+}
+
+/// Write `video` - its frames and, when it has one, its sound track - to
+/// `out`, and say what was written.
+///
+/// The frames are MOVED rather than cloned: a long clip's pixels are the
+/// largest buffer a command ever holds, and copying all of them to hand them
+/// to the encoder is a copy nothing reads twice.
+fn write_clip(video: ltxv::pipeline::Video, out: &str) -> Result<String, String> {
+    let audio_desc = video
+        .audio
+        .as_ref()
+        .map(|a| format!(", {:.2}s of {} Hz audio in {} channels", a.seconds(), a.sample_rate, a.channels.len()))
+        .unwrap_or_else(|| ", no sound".to_string());
+    let track = video.audio.map(|a| imaging::video::AudioTrack { channels: a.channels, sample_rate: a.sample_rate });
+    let (width, height, fps) = (video.width, video.height, video.fps);
+    let frames: Vec<imaging::Rgb8> = video.frames.into_iter().map(|px| imaging::Rgb8::new(width, height, px)).collect::<Result<_, _>>()?;
+    let enc_opts = imaging::video::VideoEncodeOpts { audio: track, ..Default::default() };
+    let written = imaging::video::encode_frames(&frames, std::path::Path::new(out), fps as f64, &enc_opts)?;
+    Ok(format!("{} ({width}x{height}, {} frames at {fps} fps{audio_desc})", written.display(), frames.len()))
 }
 
 /// Decode a whole video file into the pipeline's RGB8 clip, refusing one
@@ -1264,10 +1270,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
         timings.unattributed(wall)
     );
 
-    let (out_w, out_h, out_fps) = (video.width, video.height, video.fps);
-    let frames: Vec<imaging::Rgb8> = video.frames.into_iter().map(|px| imaging::Rgb8::new(out_w, out_h, px)).collect::<Result<_, _>>()?;
-    let written = imaging::video::encode_frames(&frames, std::path::Path::new(&out), out_fps as f64, &Default::default())?;
-    eprintln!("ltxv v2v: wrote {} ({out_w}x{out_h}, {} frames at {out_fps} fps, no sound - see --help)", written.display(), frames.len());
+    eprintln!("ltxv v2v: wrote {}", write_clip(video, &out)?);
     crate::run_record::write_run_record(
         &out,
         "ltxv v2v",
