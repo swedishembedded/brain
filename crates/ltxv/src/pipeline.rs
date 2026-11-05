@@ -655,11 +655,11 @@ fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
 }
 
 /// Real Gemma-4 text conditioning, replacing [`context_stub`] when
-/// [`Paths::text_encoder`] is set: read the checkpoint, extract its
-/// embedded tokenizer (`gemma4::tokenizer`'s doc - it is the checkpoint's
+/// [`Paths::text_encoder`] is set: open the checkpoint for streaming, extract
+/// its embedded tokenizer (`gemma4::tokenizer`'s doc - it is the checkpoint's
 /// own `tokenizer_json` tensor, not a separate file), tokenize `prompt`
 /// (and, only if `guidance > 1.0`, the empty string for the unconditional
-/// branch), run `gemma4::Gemma4Model::forward`, and project the full
+/// branch), run `gemma4::forward_streamed`, and project the full
 /// `hidden_states` tuple through `gemma4::AggregateEmbed`'s video head -
 /// the real `[t, cross_attention_dim]` context `LtxDit::forward`/
 /// `crate::dit::forward_q_streamed` expect.
@@ -783,40 +783,27 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
     let source_bytes: u64 = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let t_read = std::time::Instant::now();
 
-    // Two loaders, one downstream shape: both end up as "something that can
-    // run a forward" plus the aggregate-embed head plus the checkpoint's own
-    // tokenizer, so everything past this point is identical.
+    // Both file types are read on demand, one layer at a time, through the
+    // same streamed forward: a `.gguf` (`brain quantize`'s output) and the
+    // `.safetensors` the release ships, memory-mapped in place. Neither is
+    // ever materialized whole, so a text encode reads each layer once and
+    // holds one layer at a time.
     //
-    // Both are built ONCE, before the closure below, and neither the weight
-    // map nor the 770-million-parameter head is ever copied per call. The
-    // eager map is the whole model as f32; cloning it to encode a second
-    // prompt would double the largest allocation in the process.
-    enum Encoder {
-        Gguf(gemma4::Gemma4GgufSource),
-        Eager(gemma4::Gemma4Model),
-    }
     // The AUDIO head is loaded only when it will be used: it is a second
     // projection of the same width class as the video one, so building it
     // unconditionally would add its whole parameter count to every silent
     // generation's peak for nothing.
-    let (encoder, agg, agg_a, tok) = if quantized {
+    let (encoder, tok): (Box<dyn checkpoint::TensorSource>, _) = if quantized {
         let src = gemma4::Gemma4GgufSource::open(path, &cfg)?;
         let tok = src.tokenizer()?;
-        let t_agg_load = std::time::Instant::now();
-        let agg = aggregate_head_from_source(&src, hidden, n_states, "video")?;
-        let agg_a = want_audio.then(|| aggregate_head_from_source(&src, hidden, n_states, "audio")).transpose()?;
-        tracing::info!(secs = t_agg_load.elapsed().as_secs_f32(), audio = want_audio, "aggregate-embed head(s) loaded");
-        (Encoder::Gguf(src), agg, agg_a, tok)
+        (Box::new(src), tok)
     } else {
-        let raw = checkpoint::safetensors::read(path)?;
-        let tok = gemma4::load_tokenizer(&raw)?;
-        let weights = gemma4::import_gemma4(raw, &cfg)?;
-        // Built by reference BEFORE `Gemma4Model::new` takes ownership of the
-        // map - the head's own two tensors are cloned out, not borrowed.
-        let agg = gemma4::AggregateEmbed::from_weights(&weights, hidden, n_states);
-        let agg_a = want_audio.then(|| gemma4::AggregateEmbed::from_weights_audio(&weights, hidden, n_states));
-        (Encoder::Eager(gemma4::Gemma4Model::new(cfg, weights, device)), agg, agg_a, tok)
+        (Box::new(gemma4::open_safetensors(path, &cfg)?), gemma4::safetensors_tokenizer(path)?)
     };
+    let t_agg_load = std::time::Instant::now();
+    let agg = aggregate_head_from_source(encoder.as_ref(), hidden, n_states, "video")?;
+    let agg_a = want_audio.then(|| aggregate_head_from_source(encoder.as_ref(), hidden, n_states, "audio")).transpose()?;
+    tracing::info!(secs = t_agg_load.elapsed().as_secs_f32(), audio = want_audio, "aggregate-embed head(s) loaded");
     let read_s = t_read.elapsed().as_secs_f32();
     tracing::info!(
         secs = read_s,
@@ -862,10 +849,7 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
     let encode = |ids: &[u32]| -> Result<(Vec<f32>, Option<Vec<f32>>), String> {
         let n = ids.len();
         let t_fwd = std::time::Instant::now();
-        let hidden_states = match &encoder {
-            Encoder::Gguf(src) => gemma4::forward_streamed(&cfg, src, device, precision, ids)?.hidden_states,
-            Encoder::Eager(model) => model.forward(ids).hidden_states,
-        };
+        let hidden_states = gemma4::forward_streamed(&cfg, encoder.as_ref(), device, precision, ids)?.hidden_states;
         tracing::info!(secs = t_fwd.elapsed().as_secs_f32(), tokens = n, layers = cfg.num_hidden_layers, ?precision, "text tower forward");
         let t_agg = std::time::Instant::now();
         let out = agg.forward(&hidden_states, n, hidden);

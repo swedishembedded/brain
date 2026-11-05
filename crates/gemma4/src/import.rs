@@ -178,6 +178,33 @@ fn validate_manifest(map: Tensors, manifest: &[(String, Vec<usize>)], who: &str)
     checkpoint::coverage::validate(&map, manifest, &format!("gemma4 {who} import")).map(|()| map)
 }
 
+/// Validate a checkpoint's tensor names and sizes against the text tower,
+/// both ways, before a single tensor byte is decoded: every manifest tensor
+/// present (at its checkpoint name) with the right element count, and every
+/// tensor the file carries recognized - a weight, a deliberately unused
+/// sibling tower, or an asset blob. Shared by every on-demand source
+/// (`crate::gguf_src`, `crate::st_src`) so a wrong or truncated file is
+/// refused at open, never three layers into a forward pass.
+pub fn check_checkpoint_names<'a>(path: &str, cfg: &Gemma4Config, names: impl Iterator<Item = &'a str>, numel: impl Fn(&str) -> Option<usize>) -> Result<(), String> {
+    let mut expected = std::collections::BTreeSet::new();
+    for (name, shape) in gemma4_tensor_manifest(cfg) {
+        let src = crate::gguf_src::source_name(&name);
+        let want: usize = shape.iter().product();
+        match numel(&src) {
+            None => return Err(format!("gemma4: {path} is missing tensor {src}")),
+            Some(got) if got != want => return Err(format!("gemma4: {src} holds {got} elements, expected {want} (shape {shape:?})")),
+            Some(_) => {}
+        }
+        expected.insert(src);
+    }
+    let mut unknown: Vec<&str> = names.filter(|n| !expected.contains(*n) && !is_recognized_non_weight(n)).collect();
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        return Err(format!("gemma4: {path} carries unrecognized tensors: {unknown:?}"));
+    }
+    Ok(())
+}
+
 /// Import the Gemma-4 text tower from the real (or a synthetic, same-shape)
 /// checkpoint's full flat tensor list: route every tensor through
 /// [`classify`] (strip `model.`, pass `text_embedding_projection.*`

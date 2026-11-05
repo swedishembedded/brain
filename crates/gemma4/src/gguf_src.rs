@@ -33,7 +33,7 @@
 //! names an `import_gemma4` map would have given it. Nothing downstream
 //! needs to know which of the two loaders it is talking to.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use checkpoint::gguf::MmapGguf;
 use checkpoint::gguf_src::GgufSource;
@@ -57,7 +57,7 @@ pub struct Gemma4GgufSource {
 /// The exact inverse of `crate::import::classify`'s `Weight` arm: everything
 /// the text tower owns is `model.`-prefixed in the checkpoint except the
 /// `text_embedding_projection.*` head, which LTX adds at the top level.
-fn source_name(canonical: &str) -> String {
+pub(crate) fn source_name(canonical: &str) -> String {
     if canonical.starts_with("text_embedding_projection.") {
         canonical.to_string()
     } else {
@@ -84,42 +84,9 @@ impl Gemma4GgufSource {
             return Err(format!("gemma4 gguf: {path} declares general.architecture '{arch}', expected '{GGUF_ARCHITECTURE}'"));
         }
 
-        let manifest = gemma4_tensor_manifest(cfg);
-        let mut expected: BTreeSet<String> = BTreeSet::new();
-        for (name, shape) in &manifest {
-            let src = source_name(name);
-            let want: usize = shape.iter().product();
-            match mg.shape(&src) {
-                None => return Err(format!("gemma4 gguf: {path} is missing tensor {src}")),
-                Some(s) => {
-                    let got: usize = s.iter().product();
-                    if got != want {
-                        return Err(format!("gemma4 gguf: {src} holds {got} elements, expected {want} (shape {s:?} vs {shape:?})"));
-                    }
-                }
-            }
-            expected.insert(src);
-        }
+        crate::import::check_checkpoint_names(path, cfg, mg.names().iter().map(String::as_str), |name| mg.shape(name).map(|s| s.iter().product()))?;
 
-        // The reverse direction. `classify` owns which non-manifest names are
-        // legitimately present (the vision/audio/multi-modal towers this
-        // text-only path never reads, and the embedded asset blobs).
-        let mut unknown: Vec<&str> = Vec::new();
-        for name in mg.names() {
-            if expected.contains(name) {
-                continue;
-            }
-            if crate::import::is_recognized_non_weight(name) {
-                continue;
-            }
-            unknown.push(name);
-        }
-        if !unknown.is_empty() {
-            unknown.sort_unstable();
-            return Err(format!("gemma4 gguf: {path} carries unrecognized tensors: {unknown:?}"));
-        }
-
-        let plan: HashMap<String, String> = manifest.into_iter().map(|(name, _)| { let src = source_name(&name); (name, src) }).collect();
+        let plan: HashMap<String, String> = gemma4_tensor_manifest(cfg).into_iter().map(|(name, _)| { let src = source_name(&name); (name, src) }).collect();
         Ok(Gemma4GgufSource { src: GgufSource::renaming(mg, plan) })
     }
 

@@ -10,3 +10,4 @@
 mod int8_compute_real;
 mod parity;
 mod real_weight_parity;
+mod st_source;
