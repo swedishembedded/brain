@@ -56,6 +56,12 @@ use crate::config::{Qwen3VlConfig, VisionConfig};
 /// [`qwen3::Weight`]s: `elems.div_ceil(per_word) * 4` plus the `[n, k/32]`
 /// f32 group scale the `I8`/`Q4` tiers carry.
 fn decoder_linear_bytes(text: &QwenConfig, dt: Dtype) -> u64 {
+    decoder_layer_linear_bytes(text, dt) * text.n_layers as u64
+}
+
+/// [`decoder_linear_bytes`] for ONE decoder layer - what a layer-range
+/// placement (`crate::text_tower`) prices each layer at.
+pub(crate) fn decoder_layer_linear_bytes(text: &QwenConfig, dt: Dtype) -> u64 {
     let per_word = dt.per_word() as u64;
     let quantized = matches!(dt, Dtype::I8 | Dtype::Q4);
     let pack = |n: u64, k: u64| -> u64 {
@@ -67,23 +73,27 @@ fn decoder_linear_bytes(text: &QwenConfig, dt: Dtype) -> u64 {
     let q_n = (text.n_heads * text.head_dim) as u64;
     let kv_n = (text.n_kv_heads * text.head_dim) as u64;
     let ff = text.d_ff as u64;
-    let per_layer = pack(q_n, d) // q_proj
+    pack(q_n, d) // q_proj
         + pack(kv_n, d) * 2 // k_proj, v_proj
         + pack(d, q_n) // o_proj
         + pack(ff, d) * 2 // gate_proj, up_proj
-        + pack(d, ff); // down_proj
-    per_layer * text.n_layers as u64
+        + pack(d, ff) // down_proj
 }
 
 /// Bytes the token embedding / `lm_head` occupy - always fp32, one copy when
 /// tied, two when not (see this module's doc).
 fn embed_head_bytes(text: &QwenConfig) -> u64 {
-    let one = text.vocab as u64 * text.d_model as u64 * 4;
+    let one = embed_bytes(text);
     if text.tie_embeddings {
         one
     } else {
         one * 2
     }
+}
+
+/// Bytes the fp32 token embedding alone occupies.
+pub(crate) fn embed_bytes(text: &QwenConfig) -> u64 {
+    text.vocab as u64 * text.d_model as u64 * 4
 }
 
 /// Bytes the plain (non-paged) fp32 KV cache occupies at `seq_len`:

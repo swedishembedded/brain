@@ -23,6 +23,7 @@ pub mod config;
 /// accepts is not yet resolver-discoverable, and must still be named
 /// explicitly (`--weights <dir>`) until a future pass adds it.
 pub mod spec;
+pub mod text_tower;
 pub mod encoder;
 pub mod finetune;
 pub mod footprint;
@@ -39,5 +40,6 @@ mod train_smoke;
 pub mod vision;
 
 pub use model::Qwen3Vl;
+pub use text_tower::TextTower;
 
 pub use config::{Qwen3VlConfig, VisionConfig};
