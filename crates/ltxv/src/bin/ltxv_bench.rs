@@ -594,7 +594,8 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
     println!("(the `stage forward_q_streamed: block ...` lines above split GGUF read+dequant / int8 quantize / GPU upload+forward+wait, summed over these {layers} layers - the first two are `cache misses only`: on a cache-hit call they are near-zero by construction, not merely small)");
 }
 
-/// Wall time of the REAL base vocoder over `t` mel frames, best of `reps`.
+/// Wall time of the REAL vocoder (base + 48 kHz bandwidth extension) over `t`
+/// mel frames, best of `reps`.
 ///
 /// Real weights, because this stage's cost is dominated by how its boundary
 /// handling and its convolutions are dispatched rather than by any shape the
@@ -607,7 +608,9 @@ fn bench_vocoder(reps: usize, t: u32) {
         std::process::exit(1);
     });
     let cfg = ltxv::vocoder::VocoderConfig::ltx25();
-    let w = ltxv::import::import_vocoder(checkpoint::safetensors::read(&path).expect("read audio vae"), &cfg).expect("import vocoder");
+    let bwe = ltxv::vocoder::BweConfig::ltx25();
+    let voc: Vec<_> = checkpoint::safetensors::read(&path).expect("read audio vae").into_iter().filter(|t| t.name.starts_with("vocoder.")).collect();
+    let w = ltxv::import::import_vocoder_with_bwe(voc).expect("import vocoder");
     let (channels, mel_bins) = (2u32, 64u32);
     // Shape-correct scratch: the timing is a function of the dispatch shapes,
     // not of the values (the same argument `random_tiny_weights`'s own doc
@@ -616,13 +619,13 @@ fn bench_vocoder(reps: usize, t: u32) {
     let mut best = f64::MAX;
     for r in 0..reps.max(1) {
         let t0 = Instant::now();
-        let wave = ltxv::vocoder::synthesize(&cfg, &w, &mel, channels, t, mel_bins, None);
+        let wave = ltxv::vocoder::synthesize_with_bwe(&cfg, &w, &bwe, &mel, channels, t, mel_bins, None);
         let wall = t0.elapsed().as_secs_f64();
         best = best.min(wall);
         println!("[rep {r}] {wall:.3} s for {t} mel frames -> {} samples", wave.len());
     }
-    let seconds_of_audio = f64::from(t) / 100.0; // 16 kHz / hop 160
-    println!("[vocoder] best of {reps}: {best:.3} s wall for {seconds_of_audio:.2} s of 16 kHz stereo audio (RTF {:.2})", best / seconds_of_audio);
+    let seconds_of_audio = f64::from(t) / 100.0; // 100 mel frames per second (16 kHz / hop 160)
+    println!("[vocoder] best of {reps}: {best:.3} s wall for {seconds_of_audio:.2} s of 48 kHz stereo audio (RTF {:.2})", best / seconds_of_audio);
 }
 
 /// One JOINT audio+video forward at the real 22B config, off the real GGUF.

@@ -199,7 +199,7 @@ Audio:
   re-uploads it per forward, so expect most of a large machine's RAM and
   several times the wall clock. The banner names whichever arm is running.
 
-  Output is 16 kHz stereo, coded as Opus in .mp4/.mov/.mkv/.webm. A .gif is
+  Output is 48 kHz stereo, coded as Opus in .mp4/.mov/.mkv/.webm. A .gif is
   written silent with a line on stderr, since the container holds no audio
   stream.
 
@@ -698,7 +698,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let dit_desc = ltxv::pipeline::av_arm_label(o.dit_config != "tiny", o.audio, ltxv::pipeline::av_fp32_reference());
     let ctx_desc = if paths.text_encoder.is_some() { "real Gemma-4 text encoder" } else { "stub text context (no real encoder)" };
     let audio_desc = if o.audio {
-        format!(", +{} audio tokens ({:.2}s of 16 kHz stereo, denoised jointly)", ltxv::audio::latent_frames(o.frames, o.fps), o.frames as f32 / o.fps as f32)
+        format!(", +{} audio tokens ({:.2}s of 48 kHz stereo, denoised jointly)", ltxv::audio::latent_frames(o.frames, o.fps), o.frames as f32 / o.fps as f32)
     } else {
         String::new()
     };

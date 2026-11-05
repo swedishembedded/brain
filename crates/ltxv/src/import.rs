@@ -61,7 +61,7 @@ use crate::duration_head::DurationHeadConfig;
 use crate::na_decoder::NaDecoderConfig;
 use crate::upsampler::LatentUpsamplerConfig;
 use crate::vae3d::LtxVaeConfig;
-use crate::vocoder::VocoderConfig;
+use crate::vocoder::{Bwe, BweConfig, VocoderConfig};
 
 /// Check a name→tensor map against a manifest in both directions. Generic
 /// over the manifest slice (not `LtxVaeConfig` specifically) so
@@ -289,6 +289,45 @@ pub fn import_vocoder(tensors: Vec<StTensor>, cfg: &VocoderConfig) -> Result<Ten
         .filter_map(|t| t.name.strip_prefix("vocoder.vocoder.").map(|n| (n.to_string(), (t.shape, t.data))))
         .collect();
     validate_manifest(map, &cfg.tensor_manifest(), "vocoder")
+}
+
+/// Import the whole vocoder - the base generator and the bandwidth-extension
+/// stage (`vocoder.bwe_generator.*` against [`BweConfig::generator`]'s
+/// manifest, `vocoder.mel_stft.{mel_basis,stft_fn.forward_basis}` by exact
+/// shape) - from the `vocoder.*` tensors of `ltx-2.5-audio-vae-bf16.safetensors`.
+/// `mel_stft.stft_fn.inverse_basis` is the only `vocoder.*` tensor not taken:
+/// nothing in the forward reads it.
+pub fn import_vocoder_with_bwe(tensors: Vec<StTensor>) -> Result<crate::audio::VocoderWeights, String> {
+    let cfg = BweConfig::ltx25();
+    let (freqs, n_fft, mels) = (cfg.freqs() as usize, cfg.n_fft as usize, cfg.num_mels as usize);
+    let mut base = Vec::new();
+    let mut generator = Tensors::new();
+    let (mut mel_basis, mut forward_basis) = (None, None);
+    for t in tensors {
+        if let Some(n) = t.name.strip_prefix("vocoder.bwe_generator.") {
+            generator.insert(n.to_string(), (t.shape, t.data));
+        } else if t.name == "vocoder.mel_stft.mel_basis" {
+            if t.shape != [mels, freqs] {
+                return Err(format!("vocoder.mel_stft.mel_basis: shape {:?}, expected [{mels}, {freqs}]", t.shape));
+            }
+            mel_basis = Some(t.data);
+        } else if t.name == "vocoder.mel_stft.stft_fn.forward_basis" {
+            if t.shape != [2 * freqs, 1, n_fft] {
+                return Err(format!("vocoder.mel_stft.stft_fn.forward_basis: shape {:?}, expected [{}, 1, {n_fft}]", t.shape, 2 * freqs));
+            }
+            forward_basis = Some(t.data);
+        } else {
+            base.push(t);
+        }
+    }
+    let base = import_vocoder(base, &VocoderConfig::ltx25())?;
+    let generator = validate_manifest(generator, &cfg.generator.tensor_manifest(), "vocoder bwe_generator")?;
+    let bwe = Bwe {
+        generator,
+        mel_basis: mel_basis.ok_or("vocoder.mel_stft.mel_basis missing: the checkpoint has no bandwidth-extension stage")?,
+        forward_basis: forward_basis.ok_or("vocoder.mel_stft.stft_fn.forward_basis missing: the checkpoint has no bandwidth-extension stage")?,
+    };
+    Ok(crate::audio::VocoderWeights { base, bwe })
 }
 
 /// Import a latent upscaler (spatial or temporal x2, `cfg` selects which)

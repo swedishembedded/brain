@@ -9082,3 +9082,43 @@ identity preservation would be discovered on the first real run.
    or the token layout, not at the conditioning algebra.
 5. Long-form and audio are the two scope lines in section 5 to reconsider only
    after the above is real.
+
+### Phase 40 - the sound reaches 48 kHz
+
+LTX-2.5's audio is 48 kHz; brain delivered the base vocoder's 16 kHz. The
+reference's `VocoderWithBWE` is now ported (`ltxv::vocoder::{BweConfig, Bwe,
+extend_bandwidth, synthesize_with_bwe}`) and `ltxv::audio::decode` - the one
+function every generation decodes sound through - runs it, so a clip's track,
+the `t2v` action's `audio` blob and the CLI's muxed Opus are 48 kHz stereo.
+
+- **No ISTFT, as the convention note above already said.** The BWE generator
+  predicts a residual WAVEFORM; the only transform is a forward STFT, done as
+  one strided `conv1d` against the checkpoint's own `[514, 1, 512]` DFT x Hann
+  bases (`vocoder.mel_stft.stft_fn.forward_basis`, causal: `n_fft - hop` zeros
+  on the left), magnitude, the checkpoint's `[64, 257]` mel filterbank,
+  `log(clamp(mel, 1e-5))`. The skip is `UpSample1d(3, window_type="hann")`,
+  whose filter is not in the checkpoint and is computed from the reference
+  formula, run as the same replicate-pad + depthwise `convtr1d` the
+  antialiasing filters use.
+- **One generator implementation.** `VocoderConfig` now takes any number of
+  upsample stages and an `apply_final_activation` flag; the BWE generator
+  (512 channels, rates `[6,5,2,2,2]`, raw output) is the same `synthesize`
+  code under `BweConfig::ltx25().generator`, on the same device context as
+  the base pass.
+- **Gates** (`tests/it/bwe_parity.rs`, golden from
+  `tools/goldens/ltxv_bwe_dump_reference.py`: the official `VocoderWithBWE`
+  and `decode_audio` on the real `ltx-2.5-audio-vae-bf16.safetensors`):
+  | tap | CPU rel_l2 | P40 rel_l2 | ceiling |
+  |---|---|---|---|
+  | bwe_mel | 3.3e-7 | 2.6e-8 | 1e-4 |
+  | skip | 1.3e-7 | 1.3e-7 | 1e-4 |
+  | residual, golden mel in | 9.8e-5 | 1.5e-4 | 5e-3 |
+  | residual, composed | 8.3e-4 | 1.3e-4 | 5e-3 |
+  | out (48 kHz) | 3.0e-5 | 4.7e-6 | 1e-4 |
+  | mel -> 48 kHz | 1.7e-5 | 6.3e-5 | 1e-4 |
+  | latent -> 48 kHz (whole decode) | 7.4e-5 | 2.5e-4 | 1e-3 |
+  The residual and the whole-chain ceilings are wider by measurement: the
+  residual is a high-band signal ~40 dB under the output, and the generator
+  amplifies a 3e-7 log-mel rounding difference ~2500x into it; every
+  waveform a listener gets stays at or under 2.5e-4 (-72 dB). The superseded
+  16 kHz chain test is gone; the base vocoder's own stage gate stays.

@@ -41,7 +41,7 @@ Gemma-4 are only tiny-config-parity-proven, not real-weight-proven (see
 | Inference (text to video) | [~] smoke test - tiny random-weight DiT, stub text context (`brain ltxv t2v`), see above |
 | Inference (DFR, higher-res multi-stage) | [~] smoke test - real spatial/temporal upscalers and VAE decode, still the tiny DiT (`brain ltxv dfr`) |
 | Post-hoc upscale of a finished clip | [x] `brain ltxv upscale` - VAE-encode an existing video file, run the official x2 latent spatial upscaler, refine on the distilled refinement schedule, VAE-decode. Shares the upscale+refine implementation with the internal two-stage generation path. CLI only so far, no capability action (see below) |
-| Inference (text to video+audio) | [~] `brain ltxv t2v --audio` / `audio: true` on the `t2v` action - the real audio+video DiT, both streams denoised jointly, decoded through the real audio VAE + vocoder and muxed into the container. Works, on the same streamed/quantized/device-resident path the video-only stream uses, so a step costs modestly more than the same clip without sound rather than several times more (see "Generating sound" below). It is `[~]` rather than `[x]` because the audio-visual DiT has no training support. 16 kHz stereo (no bandwidth extension). Any `1 + 8k` length: past one denoising window the audio latent crosses each seam beside the video one (see "Generating sound" below). Not for a multi-scene clip |
+| Inference (text to video+audio) | [~] `brain ltxv t2v --audio` / `audio: true` on the `t2v` action - the real audio+video DiT, both streams denoised jointly, decoded through the real audio VAE + vocoder and muxed into the container. Works, on the same streamed/quantized/device-resident path the video-only stream uses, so a step costs modestly more than the same clip without sound rather than several times more (see "Generating sound" below). It is `[~]` rather than `[x]` because the audio-visual DiT has no training support. 48 kHz stereo, through the vocoder's bandwidth-extension stage. Any `1 + 8k` length: past one denoising window the audio latent crosses each seam beside the video one (see "Generating sound" below). Not for a multi-scene clip |
 | Inference (image to video / keyframe conditioning) | [x] `--start-frame`, `--mid-frame` (+ `--mid-frame-at`) and `--end-frame` - up to three real stills VAE-encoded and held at sigma 0 in ONE generation pass, with `--conditioning-strength` for how hard. Refused for a multi-window or multi-scene clip; see "Anchoring a clip on real images" below |
 | LoRA fine-tune | [~] video-only DiT, host-math/gradcheck-proven (FD < 1e-4), single- and whole-batch overfit drives loss to ~0 at tiny-config scale - the audio-extended DiT has no training support |
 | Full fine-tune | [~] same scope/caveat as LoRA fine-tune above |
@@ -393,16 +393,18 @@ store (see "Getting the weights").
   rather than several times, and holds roughly half the host RAM; the two
   arms are reproducible side by side with the `ltxv_bench streamed-av` and
   `ltxv_bench av` harnesses. It stays `[~]` and off by default because the
-  audio-visual path has no training support and no bandwidth extension.
+  audio-visual path has no training support.
 * **`BRAIN_LTXV_AV_FP32=1` picks the other arm.** The eager host-fp32
   audio-visual denoiser is the reference the quantized one is gated and
   measured against, and it is still reachable - the same model at higher
   precision, needing the whole checkpoint expanded to fp32 in host RAM and
   several times the wall clock. It is an A/B switch, not a quality dial; each
   run's own opening line names whichever arm it is on.
-* **16 kHz stereo.** The bandwidth-extension stage that lifts the base
-  vocoder to 48 kHz (`vocoder.bwe_generator.*`) is present in the checkpoint
-  and not implemented - it needs an ISTFT this port does not have.
+* **48 kHz stereo.** The base vocoder synthesizes 16 kHz; the checkpoint's
+  own bandwidth-extension stage (`vocoder.bwe_generator.*`, driven by a
+  causal log-mel of the base waveform through `vocoder.mel_stft.*`) adds the
+  upper band on top of a x3 resample, exactly as the reference's
+  `VocoderWithBWE` does.
 * **Muxed in process.** brain writes the clip itself: AV1 video and an Opus
   sound track in `.mp4`, `.mov`, `.mkv` or `.webm`. A `.gif` is written
   silent with a line on stderr, since the container holds no audio stream.
@@ -440,7 +442,7 @@ store (see "Getting the weights").
   refused rather than guessed. A long SINGLE-scene clip has no such limit.
 
 The same `audio` switch is a parameter on the `t2v` capability action, and the
-action declares an `audio` output blob (a complete 16 kHz stereo WAV), so the
+action declares an `audio` output blob (a complete 48 kHz stereo WAV), so the
 D-Bus/served surface returns the sound too rather than only the CLI.
 
 ### Seeing what it did

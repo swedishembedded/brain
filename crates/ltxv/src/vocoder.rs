@@ -8,11 +8,18 @@
 //! Ported from `ltx_core.model.audio_vae.vocoder.{Vocoder,AMPBlock1,
 //! Activation1d,UpSample1d,DownSample1d,LowPassFilter1d,SnakeBeta}`, real
 //! weights (`ltx-2.5-audio-vae-bf16.safetensors`'s `vocoder.vocoder.*` keys -
-//! same file as [`crate::audio_vae`], a DIFFERENT tensor subset). The
-//! bandwidth-extension stage (`VocoderWithBWE`/`vocoder.bwe_generator.*`/
-//! `vocoder.mel_stft.*`) is explicitly OUT OF SCOPE for this milestone - see
-//! `tools/goldens/ltxv_audio_dump_reference.py`'s own module doc for why (no
-//! ISTFT anywhere in scope, deliberately).
+//! same file as [`crate::audio_vae`], a DIFFERENT tensor subset).
+//!
+//! The base vocoder speaks 16 kHz; LTX-2.5's audio is 48 kHz. The
+//! bandwidth-extension stage (`VocoderWithBWE`, [`extend_bandwidth`]) lifts
+//! it: the base waveform's causal log-mel - an STFT done as one strided
+//! convolution against the checkpoint's own DFT x Hann bases
+//! (`vocoder.mel_stft.*`), projected onto the checkpoint's mel filterbank -
+//! drives a SECOND, smaller BigVGAN (`vocoder.bwe_generator.*`, the same
+//! [`synthesize`] code under [`BweConfig::generator`], no final activation)
+//! that predicts a residual, added to a Hann-windowed sinc x3 resample of the
+//! base waveform and clamped. No inverse STFT is involved: the residual is a
+//! waveform, never a spectrum.
 //!
 //! Conventions pinned by reading `vocoder.py` directly rather than guessed
 //! from the topology name:
@@ -165,12 +172,16 @@ const AA_RATIO: u32 = 2;
 #[derive(Clone, Debug, PartialEq)]
 pub struct VocoderConfig {
     pub upsample_initial_channel: u32,
-    pub upsample_rates: [u32; 6],
-    pub upsample_kernel_sizes: [u32; 6],
+    pub upsample_rates: Vec<u32>,
+    pub upsample_kernel_sizes: Vec<u32>,
     pub resblock_kernel_sizes: [u32; 3],
     pub resblock_dilations: [[u32; 3]; 3],
     pub mel_channels: u32,
     pub out_channels: u32,
+    /// `apply_final_activation`: clamp to `[-1, 1]` at the end (the base
+    /// vocoder), or hand back the raw `conv_post` output (the BWE generator,
+    /// whose output is a residual summed before any clamp).
+    pub apply_final_activation: bool,
 }
 
 impl Default for VocoderConfig {
@@ -183,12 +194,13 @@ impl VocoderConfig {
     pub fn ltx25() -> VocoderConfig {
         VocoderConfig {
             upsample_initial_channel: 1536,
-            upsample_rates: [5, 2, 2, 2, 2, 2],
-            upsample_kernel_sizes: [11, 4, 4, 4, 4, 4],
+            upsample_rates: vec![5, 2, 2, 2, 2, 2],
+            upsample_kernel_sizes: vec![11, 4, 4, 4, 4, 4],
             resblock_kernel_sizes: [3, 7, 11],
             resblock_dilations: [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
             mel_channels: 128,
             out_channels: 2,
+            apply_final_activation: true,
         }
     }
 
@@ -292,6 +304,8 @@ fn weight<'a>(t: &'a Tensors, name: &str) -> &'a [f32] {
 /// order, which is exactly the contract that type documents.
 struct Ctx<'a> {
     gpu: Gpu,
+    /// The generator currently running (the base vocoder, then the BWE
+    /// generator on the same device).
     t: &'a Tensors,
     scratch: ConvScratch,
     /// `(channels, the filter's 12 taps as bits) -> the depthwise weight`.
@@ -496,8 +510,27 @@ fn axpy_into(gpu: &Gpu, acc: &DeviceBuffer, s: f32, y: &DeviceBuffer, n: u32) {
 /// Returns `[out_channels, t*upsample_product]` row-major (`t*160` samples at
 /// the real config, matching `mel_hop_length`).
 pub fn synthesize(cfg: &VocoderConfig, tensors: &Tensors, mel: &[f32], channels: u32, t: u32, mel_bins: u32, device: Option<&str>) -> Vec<f32> {
+    let mut cx = Ctx::new(device, tensors);
+    let (h, l) = generate(&mut cx, cfg, mel, channels, t, mel_bins);
+    finish(cfg, cx.gpu.read(&h, (cfg.out_channels * l) as usize))
+}
+
+/// `apply_final_activation=True, use_tanh_at_final=False` -> clamp, not tanh.
+fn finish(cfg: &VocoderConfig, mut wave: Vec<f32>) -> Vec<f32> {
+    if cfg.apply_final_activation {
+        for v in &mut wave {
+            *v = v.clamp(-1.0, 1.0);
+        }
+    }
+    wave
+}
+
+/// [`synthesize`]'s device body over `cx`'s current tensors: the
+/// `[out_channels, l]` output, still on the device, and `l`.
+fn generate(cx: &mut Ctx, cfg: &VocoderConfig, mel: &[f32], channels: u32, t: u32, mel_bins: u32) -> (DeviceBuffer, u32) {
     assert_eq!(mel.len(), (channels * t * mel_bins) as usize, "synthesize: {} values, expected {}", mel.len(), channels * t * mel_bins);
     assert_eq!(channels * mel_bins, cfg.mel_channels, "channels*mel_bins {} != mel_channels {}", channels * mel_bins, cfg.mel_channels);
+    assert_eq!(cfg.upsample_rates.len(), cfg.upsample_kernel_sizes.len(), "one kernel size per upsample stage");
 
     // (channels, t, mel_bins) -> (channels*mel_bins, t), stereo outer / freq inner.
     let mut nc = vec![0.0f32; (cfg.mel_channels * t) as usize];
@@ -510,35 +543,256 @@ pub fn synthesize(cfg: &VocoderConfig, tensors: &Tensors, mel: &[f32], channels:
         }
     }
 
-    let mut cx = Ctx::new(device, tensors);
     let x_in = cx.gpu.storage_init("vocoder.mel_in", &nc);
-    let mut h = conv1d_k7(&mut cx, "conv_pre", cfg.mel_channels, cfg.upsample_initial_channel, t, true, &x_in);
+    let mut h = conv1d_k7(cx, "conv_pre", cfg.mel_channels, cfg.upsample_initial_channel, t, true, &x_in);
     let mut l = t;
 
     for i in 0..cfg.num_upsamples() {
         let (cin, cout) = (cfg.stage_cin(i), cfg.stage_cout(i));
-        let (up, lo) = convtr1d(&mut cx, &format!("ups.{i}"), cin, cout, cfg.upsample_kernel_sizes[i], cfg.upsample_rates[i], l, &h);
+        let (up, lo) = convtr1d(cx, &format!("ups.{i}"), cin, cout, cfg.upsample_kernel_sizes[i], cfg.upsample_rates[i], l, &h);
         l = lo;
         let acc = cx.gpu.storage((cout * l) as u64);
         cx.gpu.write_f32(&acc, &vec![0.0f32; (cout * l) as usize]);
         for r in 0..cfg.resblock_kernel_sizes.len() {
             let idx = i * cfg.resblock_kernel_sizes.len() + r;
-            let y = amp_block(&mut cx, &format!("resblocks.{idx}"), cout, l, cfg.resblock_kernel_sizes[r], cfg.resblock_dilations[r], &up);
+            let y = amp_block(cx, &format!("resblocks.{idx}"), cout, l, cfg.resblock_kernel_sizes[r], cfg.resblock_dilations[r], &up);
             axpy_into(&cx.gpu, &acc, 1.0 / 3.0, &y, cout * l);
         }
         h = acc;
     }
 
     let fin = cfg.final_channels();
-    h = activation1d(&mut cx, "act_post", fin, l, &h);
-    h = conv1d_k7(&mut cx, "conv_post", fin, cfg.out_channels, l, false, &h);
+    h = activation1d(cx, "act_post", fin, l, &h);
+    h = conv1d_k7(cx, "conv_post", fin, cfg.out_channels, l, false, &h);
+    (h, l)
+}
 
-    let mut wave = cx.gpu.read(&h, (cfg.out_channels * l) as usize);
-    // `apply_final_activation=True, use_tanh_at_final=False` -> clamp, not tanh.
-    for v in &mut wave {
-        *v = v.clamp(-1.0, 1.0);
+// ============================================================================
+// Bandwidth extension (`VocoderWithBWE`)
+// ============================================================================
+
+/// `config.vocoder.bwe` of the real checkpoint: the BWE generator's own
+/// BigVGAN shape and the causal STFT it reads the base waveform through.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BweConfig {
+    /// `upsample_initial_channel=512`, `upsample_rates=[6,5,2,2,2]` (product
+    /// 240 = `output_rate / (input_rate / hop)`), `upsample_kernel_sizes=
+    /// [12,11,4,4,4]`, the base vocoder's resblocks, stereo, no bias and NO
+    /// final activation on `conv_post`.
+    pub generator: VocoderConfig,
+    pub input_rate: u32,
+    pub output_rate: u32,
+    /// The STFT hop, in input-rate samples.
+    pub hop: u32,
+    /// `n_fft` = `win_size` = the DFT basis length.
+    pub n_fft: u32,
+    pub num_mels: u32,
+}
+
+impl BweConfig {
+    pub fn ltx25() -> BweConfig {
+        BweConfig {
+            generator: VocoderConfig {
+                upsample_initial_channel: 512,
+                upsample_rates: vec![6, 5, 2, 2, 2],
+                upsample_kernel_sizes: vec![12, 11, 4, 4, 4],
+                resblock_kernel_sizes: [3, 7, 11],
+                resblock_dilations: [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                mel_channels: 128,
+                out_channels: 2,
+                apply_final_activation: false,
+            },
+            input_rate: 16_000,
+            output_rate: 48_000,
+            hop: 80,
+            n_fft: 512,
+            num_mels: 64,
+        }
     }
-    wave
+
+    /// The integer resampling ratio (3).
+    pub fn ratio(&self) -> u32 {
+        assert!(self.output_rate.is_multiple_of(self.input_rate), "BWE: {} Hz is not a whole multiple of {} Hz", self.output_rate, self.input_rate);
+        self.output_rate / self.input_rate
+    }
+
+    /// `n_fft / 2 + 1` frequency bins.
+    pub fn freqs(&self) -> u32 {
+        self.n_fft / 2 + 1
+    }
+}
+
+/// The BWE stage's weights: the generator, plus the checkpoint's own causal
+/// STFT bases and mel filterbank (`vocoder.mel_stft.*`). The bases are
+/// loaded, never derived, so the mel the generator sees is the one it was
+/// trained on.
+#[derive(Clone, Debug)]
+pub struct Bwe {
+    pub generator: Tensors,
+    /// `mel_stft.mel_basis`, `[num_mels, n_fft/2+1]`.
+    pub mel_basis: Vec<f32>,
+    /// `mel_stft.stft_fn.forward_basis`, `[2*(n_fft/2+1), 1, n_fft]`: the real
+    /// rows then the imaginary rows, Hann window folded in.
+    pub forward_basis: Vec<f32>,
+}
+
+/// The intermediate values of one [`extend_bandwidth`] run, for parity.
+pub struct BweTaps {
+    /// `[channels, num_mels, frames]`, the generator's input before the
+    /// transpose.
+    pub mel: Vec<f32>,
+    /// `[channels, ratio*padded]`, the generator's raw output.
+    pub residual: Vec<f32>,
+    /// `[channels, ratio*padded]`, the resampled base waveform.
+    pub skip: Vec<f32>,
+}
+
+/// The base vocoder then the BWE stage on ONE device: log-mel `[channels, t,
+/// mel_bins]` to `[channels, t*hop*ratio]` samples at `bwe.output_rate`.
+#[allow(clippy::too_many_arguments)]
+pub fn synthesize_with_bwe(base_cfg: &VocoderConfig, weights: &crate::audio::VocoderWeights, bwe_cfg: &BweConfig, mel: &[f32], channels: u32, t: u32, mel_bins: u32, device: Option<&str>) -> Vec<f32> {
+    let mut cx = Ctx::new(device, &weights.base);
+    let (h, l) = generate(&mut cx, base_cfg, mel, channels, t, mel_bins);
+    let base = finish(base_cfg, cx.gpu.read(&h, (base_cfg.out_channels * l) as usize));
+    extend_on(&mut cx, bwe_cfg, &weights.bwe, &base, channels).0
+}
+
+/// `VocoderWithBWE.forward` past the base vocoder: `base` is `[channels, l]`
+/// at `input_rate`; the result is `[channels, ratio*l]` at `output_rate`.
+pub fn extend_bandwidth(cfg: &BweConfig, bwe: &Bwe, base: &[f32], channels: u32, device: Option<&str>) -> (Vec<f32>, BweTaps) {
+    let mut cx = Ctx::new(device, &bwe.generator);
+    extend_on(&mut cx, cfg, bwe, base, channels)
+}
+
+fn extend_on<'a>(cx: &mut Ctx<'a>, cfg: &BweConfig, bwe: &'a Bwe, base: &[f32], channels: u32) -> (Vec<f32>, BweTaps) {
+    assert!(channels > 0 && base.len().is_multiple_of(channels as usize), "extend_bandwidth: {} samples do not split into {channels} channels", base.len());
+    let l = (base.len() / channels as usize) as u32;
+    let (hop, ratio) = (cfg.hop, cfg.ratio());
+    // Pad to a whole number of hops for an exact frame count (zeros).
+    let lp = l.div_ceil(hop) * hop;
+    let mut padded = vec![0f32; (channels * lp) as usize];
+    for c in 0..channels as usize {
+        padded[c * lp as usize..c * lp as usize + l as usize].copy_from_slice(&base[c * l as usize..(c + 1) * l as usize]);
+    }
+
+    let mel = causal_log_mel(cx, cfg, bwe, &padded, channels, lp);
+    let frames = lp / hop;
+    // `[c, mels, frames]` -> the generator's `[c, frames, mels]`.
+    let (m, f) = (cfg.num_mels as usize, frames as usize);
+    let mut mel_t = vec![0f32; mel.len()];
+    for c in 0..channels as usize {
+        for mi in 0..m {
+            for fi in 0..f {
+                mel_t[(c * f + fi) * m + mi] = mel[(c * m + mi) * f + fi];
+            }
+        }
+    }
+    cx.t = &bwe.generator;
+    let (r, rl) = generate(cx, &cfg.generator, &mel_t, channels, frames, cfg.num_mels);
+    assert_eq!(rl, ratio * lp, "BWE: the generator produced {rl} samples per channel, the skip has {}", ratio * lp);
+    let residual = cx.gpu.read(&r, (channels * rl) as usize);
+    let skip = hann_resample(cx, &padded, channels, lp, ratio);
+
+    let out_len = (l * ratio) as usize;
+    let mut out = Vec::with_capacity(channels as usize * out_len);
+    for c in 0..channels as usize {
+        let row = c * rl as usize;
+        out.extend((0..out_len).map(|i| (residual[row + i] + skip[row + i]).clamp(-1.0, 1.0)));
+    }
+    (out, BweTaps { mel, residual, skip })
+}
+
+/// `MelSTFT.mel_spectrogram`: a causal STFT (left padding of `n_fft - hop`
+/// zeros, no lookahead) computed as one strided convolution against the
+/// checkpoint's `[2*freqs, 1, n_fft]` DFT x window bases, magnitude
+/// `sqrt(re^2 + im^2)`, the mel filterbank, `log(clamp(mel, 1e-5))`.
+/// `x` is `[channels, l]`; the result is `[channels, num_mels, l/hop]`.
+fn causal_log_mel(cx: &mut Ctx, cfg: &BweConfig, bwe: &Bwe, x: &[f32], channels: u32, l: u32) -> Vec<f32> {
+    let (n_fft, hop, freqs, mels) = (cfg.n_fft, cfg.hop, cfg.freqs(), cfg.num_mels);
+    assert_eq!(bwe.forward_basis.len(), (2 * freqs * n_fft) as usize, "BWE: forward_basis is {} values, expected [{}, 1, {n_fft}]", bwe.forward_basis.len(), 2 * freqs);
+    assert_eq!(bwe.mel_basis.len(), (mels * freqs) as usize, "BWE: mel_basis is {} values, expected [{mels}, {freqs}]", bwe.mel_basis.len());
+    let left = n_fft - hop;
+    let lp = l + left;
+    let mut xp = vec![0f32; (channels * lp) as usize];
+    for c in 0..channels as usize {
+        xp[c * lp as usize + left as usize..(c + 1) * lp as usize].copy_from_slice(&x[c * l as usize..(c + 1) * l as usize]);
+    }
+    let frames = (lp - n_fft) / hop + 1;
+    debug_assert_eq!(frames, l / hop);
+    let cfg1 = audio::conv::Conv1d { n: channels, cin: 1, l: lp, cout: 2 * freqs, k: n_fft, stride: hop, pad: 0, dilation: 1, groups: 1, lo: frames };
+    let input = cx.gpu.storage_init("bwe.stft_in", &xp);
+    let basis = cx.gpu.storage_init("bwe.forward_basis", &bwe.forward_basis);
+    let bias = cx.zero_bias_for(2 * freqs);
+    let spec = cx.gpu.storage((channels * 2 * freqs * frames) as u64);
+    let steps = audio::conv::conv1d_bias_fwd(&cx.gpu, &gemm_kernels(kernels_id()), &cfg1, &input, &basis, &bias, &spec, &mut cx.scratch);
+    cx.gpu.submit(&[], &steps);
+    let spec = cx.gpu.read(&spec, (channels * 2 * freqs * frames) as usize);
+
+    // Magnitude as `[frames, freqs]` rows per channel, so the filterbank is
+    // one `linear_rows` per channel, landing `[frames, mels]`.
+    let (fq, fr) = (freqs as usize, frames as usize);
+    let mut out = vec![0f32; channels as usize * mels as usize * fr];
+    for c in 0..channels as usize {
+        let base = c * 2 * fq * fr;
+        let mut mag = vec![0f32; fr * fq];
+        for k in 0..fq {
+            let (re, im) = (&spec[base + k * fr..base + (k + 1) * fr], &spec[base + (fq + k) * fr..base + (fq + k + 1) * fr]);
+            for t in 0..fr {
+                mag[t * fq + k] = (re[t] * re[t] + im[t] * im[t]).sqrt();
+            }
+        }
+        let mel = model::hostmath::linear_rows(&mag, &bwe.mel_basis, fr, fq, mels as usize);
+        for t in 0..fr {
+            for mi in 0..mels as usize {
+                out[(c * mels as usize + mi) * fr + t] = mel[t * mels as usize + mi].max(1e-5).ln();
+            }
+        }
+    }
+    out
+}
+
+/// `UpSample1d(ratio, window_type="hann")`'s filter: a Hann-windowed sinc
+/// equivalent to `torchaudio.functional.resample` (`rolloff=0.99`,
+/// `lowpass_filter_width=6`). Not stored in the checkpoint
+/// (`persistent=False`), so it is computed from the reference's own formula.
+fn hann_sinc_filter(ratio: u32) -> (Vec<f32>, u32) {
+    const ROLLOFF: f64 = 0.99;
+    const LOWPASS_WIDTH: f64 = 6.0;
+    let width = (LOWPASS_WIDTH / ROLLOFF).ceil() as u32;
+    let k = 2 * width * ratio + 1;
+    let taps = (0..k)
+        .map(|i| {
+            let t = (i as f64 / ratio as f64 - width as f64) * ROLLOFF;
+            let tc = t.clamp(-LOWPASS_WIDTH, LOWPASS_WIDTH);
+            let window = (tc * std::f64::consts::PI / LOWPASS_WIDTH / 2.0).cos().powi(2);
+            let sinc = if t == 0.0 { 1.0 } else { (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t) };
+            (sinc * window * ROLLOFF / ratio as f64) as f32
+        })
+        .collect();
+    (taps, width)
+}
+
+/// `UpSample1d.forward` with the Hann filter: replicate-pad `width` each
+/// side, depthwise `ConvTranspose1d(stride=ratio)`, times `ratio`, cropped to
+/// exactly `ratio * l` samples per channel. `x` is `[channels, l]` on the
+/// host; the result is `[channels, ratio*l]`.
+fn hann_resample(cx: &mut Ctx, x: &[f32], channels: u32, l: u32, ratio: u32) -> Vec<f32> {
+    let (taps, width) = hann_sinc_filter(ratio);
+    let k = taps.len() as u32;
+    let crop = 2 * width * ratio;
+    let input = cx.gpu.storage_init("bwe.skip_in", x);
+    let (padded, lp) = cx.pad_edge(&input, channels, l, width, width);
+    let mut weight = Vec::with_capacity((channels * k) as usize);
+    for _ in 0..channels {
+        weight.extend(taps.iter().map(|t| t * ratio as f32));
+    }
+    let filter = cx.gpu.storage_init("bwe.hann_filter", &weight);
+    let lo = ratio * l;
+    debug_assert_eq!((lp - 1) * ratio + k - crop - (k - ratio), lo, "the Hann resample crop must leave exactly ratio*l samples");
+    let cfg = audio::conv::Conv1d { n: 1, cin: channels, l: lp, cout: channels, k, stride: ratio, pad: crop, dilation: 1, groups: channels, lo };
+    let y = cx.gpu.storage((channels * lo) as u64);
+    cx.gpu.submit(&[], &[audio::conv::convtr1d_fwd(&cx.gpu, &kernels_id_tr(), &cfg, &padded, &filter, &y)]);
+    cx.gpu.read(&y, (channels * lo) as usize)
 }
 
 #[cfg(test)]

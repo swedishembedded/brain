@@ -181,57 +181,6 @@ fn ltxv_vocoder_matches_reference() {
     tab.assert_clean();
 }
 
-/// The whole audio decode chain composed the way a generation composes it -
-/// `latent -> audio VAE decoder -> vocoder -> waveform` through
-/// [`ltxv::audio::decode`], the exact function `ltxv::pipeline::generate`
-/// calls - against the golden's own end-of-chain waveform.
-///
-/// The two stage-parity tests above cannot replace this one: each is fed the
-/// GOLDEN's input, so a mistake in how this crate JOINS them (the
-/// `b t (c f) -> b c t f` unpatchify, the mel channel/bin order the vocoder
-/// expects, the sample count) is invisible to both and lands in exactly the
-/// place a listener would hear as noise.
-///
-/// Also gated on cosine and `rel_l2` together.
-#[test]
-fn ltxv_audio_decode_chain_matches_reference() {
-    let Some(((vae_w, voc_w), fx)) = setup() else { return };
-    let lshape = fx.shape("latent").to_vec();
-    let (lt, lf) = (lshape[1], lshape[2]);
-    assert_eq!(lf, ltxv::audio::LATENT_MEL_BINS as usize, "the golden latent's freq width must be the audio stream's own");
-    assert_eq!(lshape[0], ltxv::audio::LATENT_CHANNELS as usize);
-
-    // The golden latent is CHANNEL-major `[c, t, f]`; a generation's audio
-    // latent arrives TOKEN-major `[t, c*f]` straight off the DiT. Repack it
-    // into the DiT's own layout so this test drives the real entry point
-    // rather than a shortcut around its transpose.
-    let g = fx.get("latent");
-    let (c, f) = (ltxv::audio::LATENT_CHANNELS as usize, lf);
-    let mut tokens = vec![0f32; lt * c * f];
-    for t in 0..lt {
-        for ci in 0..c {
-            for fi in 0..f {
-                tokens[t * c * f + ci * f + fi] = g[ci * lt * f + t * f + fi];
-            }
-        }
-    }
-
-    let clip = ltxv::audio::decode(vae_w, voc_w, &tokens, lt, None);
-    assert_eq!(clip.channels.len(), ltxv::audio::CHANNELS as usize, "the model generates stereo");
-    assert_eq!(clip.sample_rate, ltxv::audio::SAMPLE_RATE);
-
-    // The golden's `recon_wave` is `[channels, samples]` row-major, the same
-    // planar order `AudioClip` holds.
-    let want = fx.get("recon_wave");
-    let got: Vec<f32> = clip.channels.concat();
-    assert_eq!(got.len(), want.len(), "the composed chain produced {} samples, the golden has {}", got.len(), want.len());
-
-    let mut tab = Table::new(FLOOR, REL_L2_CEILING);
-    tab.check("decode chain waveform", &got, want);
-    tab.print();
-    tab.assert_clean();
-}
-
 /// A uniform GAIN change and a TIME SHIFT are the two ways an audio pipeline
 /// fails while still sounding like something, and neither is a crash. This
 /// proves the gate above catches both - so a green run on it means the

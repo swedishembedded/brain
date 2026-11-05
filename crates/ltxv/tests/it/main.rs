@@ -23,6 +23,7 @@ mod av_shard_2gpu_real;
 mod av_shard_parity;
 mod block_grad;
 mod block_weight_cache;
+mod bwe_parity;
 mod cfg_parallel;
 mod clip_stability_real;
 mod connector_real_parity;

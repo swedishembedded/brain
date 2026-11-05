@@ -102,10 +102,12 @@ use crate::vocoder::{self, VocoderConfig};
 /// comes from.
 pub const LATENTS_PER_SECOND: f64 = SAMPLE_RATE as f64 / HOP_LENGTH as f64 / LATENT_DOWNSAMPLE as f64;
 
-/// The base vocoder's output rate. The 48 kHz bandwidth-extension stage
-/// (`vocoder.bwe_generator.*`) is present in the checkpoint but not
-/// implemented - see [`crate::vocoder`]'s module doc.
+/// The rate the audio latent, the mel spectrogram and the base vocoder all
+/// live at - every alignment number below is in these samples.
 pub const SAMPLE_RATE: u32 = 16_000;
+/// The rate a decoded clip is delivered at: the base vocoder's output lifted
+/// by the bandwidth-extension stage ([`crate::vocoder::extend_bandwidth`]).
+pub const OUTPUT_SAMPLE_RATE: u32 = 48_000;
 /// The mel spectrogram's hop, in samples - also the vocoder's own total
 /// upsample ratio (`product([5,2,2,2,2,2]) == 160`), which is why one mel
 /// frame becomes exactly this many samples.
@@ -404,20 +406,26 @@ pub fn unpatchify(tokens: &[f32], ta: usize) -> Vec<f32> {
     out
 }
 
+/// The vocoder half of the audio checkpoint: the 16 kHz base vocoder and the
+/// 48 kHz bandwidth-extension stage ([`crate::import::import_vocoder_with_bwe`]).
+pub struct VocoderWeights {
+    pub base: vae::blocks::Tensors,
+    pub bwe: vocoder::Bwe,
+}
+
 /// Decode a denoised audio latent all the way to a waveform: unpatchify ->
-/// audio VAE decoder (latent -> log-mel) -> base vocoder (log-mel -> 16 kHz
-/// stereo samples).
+/// audio VAE decoder (latent -> log-mel) -> base vocoder (log-mel -> 16 kHz)
+/// -> bandwidth extension (48 kHz stereo samples), the reference's own
+/// `decode_audio(latent, AudioDecoder, VocoderWithBWE)`.
 ///
 /// `tokens` is the DiT's own `[ta, TOKEN_DIM]` output. `vae_weights` and
-/// `vocoder_weights` both come from the SAME `ltx-2.5-audio-vae-*` file - two
-/// disjoint tensor subsets of one checkpoint, see [`crate::import`]'s module
-/// doc.
+/// `vocoder` both come from the SAME `ltx-2.5-audio-vae-*` file - disjoint
+/// tensor subsets of one checkpoint, see [`crate::import`]'s module doc.
 ///
-/// Both stages are the real-weight, real-parity implementations this crate
-/// already gates ([`crate::audio_vae`], [`crate::vocoder`]); nothing here
-/// re-derives their math, it only composes them and states the shapes that
-/// connect them.
-pub fn decode(vae_weights: &vae::blocks::Tensors, vocoder_weights: &vae::blocks::Tensors, tokens: &[f32], ta: usize, device: Option<&str>) -> AudioClip {
+/// Every stage is a real-weight, parity-gated implementation
+/// ([`crate::audio_vae`], [`crate::vocoder`]); this only composes them and
+/// states the shapes that connect them.
+pub fn decode(vae_weights: &vae::blocks::Tensors, vocoder: &VocoderWeights, tokens: &[f32], ta: usize, device: Option<&str>) -> AudioClip {
     let vcfg = AudioVaeConfig::ltx25();
     let latent = unpatchify(tokens, ta);
     let mel = audio_vae::decode(&vcfg, vae_weights, &latent, ta as u32, LATENT_MEL_BINS, device);
@@ -426,12 +434,12 @@ pub fn decode(vae_weights: &vae::blocks::Tensors, vocoder_weights: &vae::blocks:
     let mel_bins = LATENT_MEL_BINS * 4;
     assert_eq!(mel.len(), (CHANNELS * mel_frames * mel_bins) as usize, "ltxv audio decode: mel is {} values, expected {}", mel.len(), CHANNELS * mel_frames * mel_bins);
 
-    let ccfg = VocoderConfig::ltx25();
-    let wave = vocoder::synthesize(&ccfg, vocoder_weights, &mel, CHANNELS, mel_frames, mel_bins, device);
-    let n = (mel_frames * HOP_LENGTH) as usize;
+    let bwe = vocoder::BweConfig::ltx25();
+    let wave = vocoder::synthesize_with_bwe(&VocoderConfig::ltx25(), vocoder, &bwe, &mel, CHANNELS, mel_frames, mel_bins, device);
+    let n = (mel_frames * HOP_LENGTH * bwe.ratio()) as usize;
     assert_eq!(wave.len(), CHANNELS as usize * n, "ltxv audio decode: waveform is {} values, expected {}", wave.len(), CHANNELS as usize * n);
 
-    AudioClip { channels: wave.chunks(n).map(<[f32]>::to_vec).collect(), sample_rate: SAMPLE_RATE }
+    AudioClip { channels: wave.chunks(n).map(<[f32]>::to_vec).collect(), sample_rate: bwe.output_rate }
 }
 
 #[cfg(test)]

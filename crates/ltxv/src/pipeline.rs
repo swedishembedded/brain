@@ -3870,16 +3870,12 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
 /// holding the fp32 AV DiT until the loop ends anyway.
 fn decode_audio_latent(path: &str, latent: &[f32], ta: usize, device: Option<&str>) -> Result<crate::audio::AudioClip, String> {
     let acfg = crate::audio_vae::AudioVaeConfig::ltx25();
-    let vcfg = crate::vocoder::VocoderConfig::ltx25();
-    // ONE read, split by prefix. The two importers want disjoint subsets of
-    // one file and `StTensor` is not `Clone`, which is why the parity suite
-    // reads it twice - but a `partition` on the prefix each importer already
-    // selects by hands each of them its own half with no clone and no second
-    // pass over the checkpoint. `vocoder.bwe_generator.*`/`vocoder.mel_stft.*`
-    // land on the vocoder side and are skipped there exactly as before.
+    // ONE read, split by prefix: the audio VAE and the vocoder (base and
+    // bandwidth extension) are disjoint subsets of one file, and `StTensor`
+    // is not `Clone`.
     let (voc_raw, vae_raw): (Vec<_>, Vec<_>) = checkpoint::safetensors::read(path)?.into_iter().partition(|t| t.name.starts_with("vocoder."));
     let vae_w = crate::import::import_audio_vae(vae_raw, &acfg)?;
-    let voc_w = crate::import::import_vocoder(voc_raw, &vcfg)?;
+    let voc_w = crate::import::import_vocoder_with_bwe(voc_raw)?;
     Ok(crate::audio::decode(&vae_w, &voc_w, latent, ta, device))
 }
 
