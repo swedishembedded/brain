@@ -1,0 +1,1017 @@
+# SPDX-License-Identifier: CC-BY-4.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# The specification of the book: every volume and chapter in reading order,
+# the concepts each chapter introduces, the concepts it relies on, and the
+# brain crates it explains. `scripts/book/check.py` holds the book to it:
+#
+#   - a concept is introduced by exactly one chapter;
+#   - a chapter only requires concepts introduced by an earlier chapter (or
+#     earlier in its own `introduces` list), so the reading order is a valid
+#     topological order of the concept graph;
+#   - every crate under crates/ is explained by at least one chapter;
+#   - a chapter file, once written, sits at <volume dir>/<NN>-<chapter id>.md.
+#
+# A chapter listed here but not yet written is planned work; which chapters
+# are written is tracked in the book ledger, not here. The book's navigation
+# (the PDF and the published docs) contains only the chapters that exist.
+#
+# Fields:
+#   question    the question the chapter answers, in the reader's words
+#   introduces  concept ids defined here (kebab-case, unique book-wide)
+#   requires    concept ids the chapter builds on
+#   brain       crates under crates/ whose implementation the chapter explains
+
+title: "From First Principles to Intelligent Machines"
+subtitle: "The mathematics, algorithms and engineering of machine learning, told through the building of brain"
+author: "Martin Schröder"
+
+front:
+  - preface.md
+  - how-to-read.md
+  - notation.md
+  - pseudocode.md
+
+back:
+  - history/chronology.md
+
+volumes:
+  - id: v01
+    dir: v01-mathematics
+    title: "Thinking in Mathematics"
+    chapters:
+      - id: numbers
+        title: "Numbers, Quantities and Notation"
+        question: "What are the numbers a machine learns with, and how do we write about them precisely?"
+        introduces: [integer, real-number, exponent, logarithm, summation-notation, product-notation, set, function-notation]
+        requires: []
+        brain: []
+      - id: functions
+        title: "Functions and Their Shapes"
+        question: "How do we describe a rule that turns inputs into outputs, and what shapes can such rules take?"
+        introduces: [function, composition, inverse-function, polynomial, exponential-function, monotonic-function, piecewise-function]
+        requires: [real-number, exponent, logarithm, function-notation]
+        brain: []
+      - id: vectors
+        title: "Vectors: Lists of Numbers with Geometry"
+        question: "How can a list of numbers have a length and a direction, and how do we measure how alike two lists are?"
+        introduces: [vector, vector-addition, scalar-multiplication, dot-product, norm, cosine-similarity, orthogonality, projection]
+        requires: [real-number, summation-notation]
+        brain: []
+      - id: matrices
+        title: "Matrices as Linear Maps"
+        question: "What does it mean to multiply a matrix by a vector, and why is that the central operation of machine learning?"
+        introduces: [matrix, linear-map, matrix-vector-product, matrix-multiplication, transpose, identity-matrix, matrix-inverse, rank]
+        requires: [vector, dot-product, function, composition]
+        brain: []
+      - id: arrays
+        title: "Arrays, Shapes, Strides and Broadcasting"
+        question: "How are vectors, matrices and higher-dimensional arrays actually laid out in memory and indexed?"
+        introduces: [tensor, shape, row-major-layout, stride, broadcasting, reshape-and-view, batch-dimension]
+        requires: [matrix, vector]
+        brain: []
+      - id: decompositions
+        title: "Eigenvalues, Rotations and Low-Rank Structure"
+        question: "What hidden structure does a matrix have, and how can a big matrix be approximated by small ones?"
+        introduces: [determinant, eigenvalue, eigenvector, orthogonal-matrix, rotation-matrix, singular-value-decomposition, low-rank-approximation]
+        requires: [matrix-multiplication, transpose, matrix-inverse, rank, norm, orthogonality]
+        brain: []
+      - id: derivatives
+        title: "Derivatives: The Mathematics of Change"
+        question: "How do we measure how fast a function's output changes when its input moves a tiny bit?"
+        introduces: [limit, derivative, differentiation-rules, chain-rule, critical-point, convexity]
+        requires: [function, composition, polynomial, exponential-function]
+        brain: []
+      - id: multivariable-calculus
+        title: "Gradients, Jacobians and Many Variables"
+        question: "When a quantity depends on millions of numbers, which way should we move them all to make it smaller?"
+        introduces: [partial-derivative, gradient, directional-derivative, jacobian, hessian, taylor-expansion, multivariable-chain-rule]
+        requires: [derivative, chain-rule, vector, matrix, dot-product]
+        brain: []
+      - id: integrals-and-odes
+        title: "Integrals and Differential Equations"
+        question: "How do we add up infinitely many small pieces, and how do we follow a system that changes continuously?"
+        introduces: [integral, fundamental-theorem-of-calculus, ordinary-differential-equation, euler-method, numerical-integration]
+        requires: [derivative, limit, summation-notation, gradient]
+        brain: []
+      - id: probability
+        title: "Probability: Reasoning Under Uncertainty"
+        question: "How do we put numbers on uncertainty and update them when we see evidence?"
+        introduces: [random-variable, probability-distribution, joint-distribution, conditional-probability, independence, bayes-rule, expectation, variance]
+        requires: [set, function, summation-notation, integral]
+        brain: []
+      - id: distributions
+        title: "The Distributions Machine Learning Uses"
+        question: "Which few probability distributions keep appearing, and why?"
+        introduces: [bernoulli-distribution, categorical-distribution, gaussian-distribution, multivariate-gaussian, law-of-large-numbers, central-limit-theorem, covariance]
+        requires: [probability-distribution, expectation, variance, exponential-function, vector, matrix]
+        brain: []
+      - id: statistics
+        title: "Statistics: Learning Facts from Samples"
+        question: "How much can a finite sample tell us, and how do we know whether a difference is real?"
+        introduces: [estimator, sample-mean, standard-error, confidence-interval, hypothesis-test, paired-test, bootstrap, multiple-comparisons]
+        requires: [expectation, variance, central-limit-theorem, gaussian-distribution]
+        brain: [stats]
+      - id: information-theory
+        title: "Information, Entropy and Surprise"
+        question: "How many bits does it take to describe what we expect to see, and what does it cost to expect the wrong thing?"
+        introduces: [information-content, entropy, cross-entropy, kl-divergence, mutual-information, perplexity]
+        requires: [logarithm, expectation, categorical-distribution, conditional-probability]
+        brain: []
+      - id: fourier
+        title: "Complex Numbers, Frequencies and the Fourier Transform"
+        question: "How can any signal be written as a sum of waves, and why does that make convolution cheap?"
+        introduces: [complex-number, eulers-formula, sinusoid, discrete-fourier-transform, fast-fourier-transform, convolution-theorem]
+        requires: [exponential-function, rotation-matrix, vector, summation-notation]
+        brain: []
+      - id: floating-point
+        title: "Floating Point and Numerical Error"
+        question: "Why does a computer get arithmetic slightly wrong, and when does slightly wrong become completely wrong?"
+        introduces: [floating-point-number, machine-epsilon, rounding-error, catastrophic-cancellation, overflow-and-underflow, log-sum-exp, compensated-summation, condition-number]
+        requires: [real-number, exponent, logarithm, derivative]
+        brain: []
+      - id: algorithms
+        title: "Algorithms, Cost and Complexity"
+        question: "How do we predict how long a computation will take and how much memory it needs before we run it?"
+        introduces: [algorithm, asymptotic-complexity, memory-complexity, reduction-algorithm, prefix-sum, sorting, hashing]
+        requires: [function, summation-notation, tensor]
+        brain: []
+      - id: randomness
+        title: "Randomness on a Deterministic Machine"
+        question: "How does a deterministic computer produce random numbers, and how do we make random experiments repeatable?"
+        introduces: [pseudo-random-generator, seed, reproducibility, sampling-from-distribution, rejection-sampling, shuffling]
+        requires: [integer, probability-distribution, gaussian-distribution, algorithm]
+        brain: [seed]
+
+  - id: v02
+    dir: v02-learning
+    title: "What Does It Mean to Learn?"
+    chapters:
+      - id: learning-problem
+        title: "The Learning Problem"
+        question: "What exactly is a model, what is it learning, and from what?"
+        introduces: [dataset, feature, label, model, parameter, prediction, hypothesis-space, supervised-learning, unsupervised-learning, reinforcement-learning-overview]
+        requires: [function, vector, probability-distribution]
+        brain: []
+      - id: linear-regression
+        title: "Linear Regression and the First Descent"
+        question: "How do we find the straight line that best explains our measurements, and what does 'best' mean?"
+        introduces: [loss-function, mean-squared-error, least-squares, normal-equations, gradient-descent, learning-rate, convergence]
+        requires: [model, parameter, gradient, matrix-inverse, transpose, convexity]
+        brain: []
+      - id: logistic-regression
+        title: "Classification and Logistic Regression"
+        question: "How does a model output a probability for a yes-or-no question, and how do we train it?"
+        introduces: [classification, logit, sigmoid, decision-boundary, binary-cross-entropy]
+        requires: [gradient-descent, bernoulli-distribution, logarithm, cross-entropy, dot-product]
+        brain: []
+      - id: likelihood
+        title: "Maximum Likelihood, Priors and Regularization"
+        question: "Why are the losses we use the right ones, and what does it mean to prefer simple explanations?"
+        introduces: [likelihood, maximum-likelihood-estimation, negative-log-likelihood, prior, maximum-a-posteriori, l2-regularization, l1-regularization]
+        requires: [bayes-rule, gaussian-distribution, mean-squared-error, binary-cross-entropy, loss-function]
+        brain: []
+      - id: generalization
+        title: "Generalization, Overfitting and Honest Evaluation"
+        question: "How do we know a model has learned the pattern rather than memorized the examples?"
+        introduces: [training-set, validation-set, test-set, overfitting, underfitting, bias-variance-tradeoff, cross-validation, data-leakage, distribution-shift]
+        requires: [dataset, loss-function, estimator, variance]
+        brain: []
+      - id: metrics
+        title: "Measuring Models: Metrics and Calibration"
+        question: "Which number tells us whether a model is good, and why is accuracy so often the wrong one?"
+        introduces: [accuracy, precision-and-recall, f1-score, roc-curve, calibration, exact-match, metric-selection]
+        requires: [classification, validation-set, perplexity, conditional-probability]
+        brain: [eval]
+      - id: classical-methods
+        title: "Machine Learning Before Deep Learning"
+        question: "What did the field know before neural networks took over, and when are those methods still the right tool?"
+        introduces: [nearest-neighbors, k-means, principal-component-analysis, decision-tree, ensemble, kernel-method, naive-bayes]
+        requires: [norm, eigenvector, singular-value-decomposition, conditional-probability, entropy, overfitting]
+        brain: []
+      - id: experiments
+        title: "Experiments, Baselines and Claims"
+        question: "How do we run an experiment whose result we can believe and someone else can repeat?"
+        introduces: [baseline, ablation, controlled-experiment, effect-size, reporting-uncertainty]
+        requires: [hypothesis-test, paired-test, seed, reproducibility, test-set]
+        brain: [bench]
+
+  - id: v03
+    dir: v03-neural-networks
+    title: "Building Neural Networks from Nothing"
+    chapters:
+      - id: perceptron
+        title: "The Neuron and the Perceptron"
+        question: "What is an artificial neuron, and what can a single one never learn?"
+        introduces: [artificial-neuron, perceptron, activation-function, linear-separability, xor-problem]
+        requires: [dot-product, decision-boundary, sigmoid]
+        brain: []
+      - id: mlp
+        title: "Multilayer Networks"
+        question: "Why does stacking layers with a nonlinearity between them let a network represent almost anything?"
+        introduces: [hidden-layer, multilayer-perceptron, relu, gelu, silu, tanh-activation, universal-approximation, depth-vs-width]
+        requires: [artificial-neuron, activation-function, matrix-vector-product, composition]
+        brain: []
+      - id: softmax
+        title: "Softmax, Logits and Cross-Entropy"
+        question: "How does a network choose among many classes, and why is its gradient so simple?"
+        introduces: [softmax, stable-softmax, softmax-cross-entropy, one-hot-encoding, label-smoothing]
+        requires: [logit, categorical-distribution, cross-entropy, log-sum-exp, jacobian]
+        brain: []
+      - id: backpropagation
+        title: "Backpropagation Derived from Scratch"
+        question: "How do we compute the gradient of one loss with respect to millions of parameters in about the cost of one forward pass?"
+        introduces: [computational-graph, forward-pass, backward-pass, reverse-mode-differentiation, forward-mode-differentiation, vector-jacobian-product, saved-activations]
+        requires: [multivariable-chain-rule, jacobian, multilayer-perceptron, loss-function]
+        brain: [model]
+      - id: layer-gradients
+        title: "The Backward Pass of Every Layer"
+        question: "What is the backward pass of a matrix multiply, a sum, a broadcast and an elementwise function, written out exactly?"
+        introduces: [linear-layer-backward, matmul-backward, elementwise-backward, reduction-backward, broadcast-backward, gradient-accumulation]
+        requires: [backward-pass, vector-jacobian-product, matrix-multiplication, broadcasting, transpose]
+        brain: [model]
+      - id: gradient-checking
+        title: "Proving Gradients Correct"
+        question: "How do we know a backward pass is right without trusting the person who wrote it?"
+        introduces: [finite-difference, central-difference, relative-error, gradient-check, test-dimension-choice]
+        requires: [backward-pass, derivative, rounding-error, catastrophic-cancellation, taylor-expansion]
+        brain: [gradcheck]
+      - id: optimizers
+        title: "Optimizers: From SGD to AdamW"
+        question: "Once we have a gradient, what is the smartest way to use it?"
+        introduces: [stochastic-gradient-descent, minibatch, momentum, rmsprop, adam, bias-correction, decoupled-weight-decay, adamw, lion]
+        requires: [gradient-descent, learning-rate, expectation, variance, l2-regularization]
+        brain: [optim, paramstore]
+      - id: schedules-and-clipping
+        title: "Learning-Rate Schedules and Gradient Clipping"
+        question: "Why should the step size change during training, and what do we do when a gradient explodes?"
+        introduces: [learning-rate-warmup, cosine-schedule, gradient-clipping, global-gradient-norm]
+        requires: [adamw, learning-rate, norm]
+        brain: [optim]
+      - id: initialization
+        title: "Initialization: Where Training Starts"
+        question: "Why does the random starting point decide whether a deep network trains at all?"
+        introduces: [symmetry-breaking, variance-preservation, xavier-initialization, he-initialization]
+        requires: [variance, multilayer-perceptron, relu, pseudo-random-generator]
+        brain: []
+      - id: normalization
+        title: "Normalization Layers"
+        question: "How does rescaling activations inside a network make it train faster and more stably?"
+        introduces: [batch-normalization, layer-normalization, rms-normalization, group-normalization, train-vs-eval-mode]
+        requires: [sample-mean, variance, backward-pass, batch-dimension]
+        brain: []
+      - id: regularization
+        title: "Regularization in Neural Networks"
+        question: "How do we stop a network with millions of parameters from memorizing its training set?"
+        introduces: [dropout, data-augmentation, early-stopping, weight-decay]
+        requires: [overfitting, l2-regularization, validation-set, decoupled-weight-decay]
+        brain: []
+      - id: training-dynamics
+        title: "Training Dynamics and Debugging"
+        question: "When a loss curve looks wrong, how do we find out why?"
+        introduces: [loss-curve, vanishing-gradient, exploding-gradient, residual-connection, overfit-one-batch, dead-units]
+        requires: [backward-pass, gradient-clipping, layer-normalization, he-initialization]
+        brain: []
+      - id: first-models
+        title: "First Complete Models"
+        question: "What does it take to build, train and verify a small network end to end?"
+        introduces: [autoencoder, reconstruction-loss, learned-controller, end-to-end-training-loop]
+        requires: [multilayer-perceptron, adamw, gradient-check, mean-squared-error, training-set]
+        brain: [toyautoencoder, toypid, web]
+
+  - id: v04
+    dir: v04-computation
+    title: "How Computers Actually Execute Machine Learning"
+    chapters:
+      - id: number-formats
+        title: "Bits and Number Formats"
+        question: "How many bits does a number need, and what do we lose with each bit we remove?"
+        introduces: [binary-representation, twos-complement, fp32-format, fp16-format, bf16-format, fp8-format, integer-quantized-format]
+        requires: [floating-point-number, machine-epsilon, integer]
+        brain: []
+      - id: cpu
+        title: "The CPU: Cores, Caches and Vectors"
+        question: "Why does the same arithmetic run ten times faster when the data is arranged differently?"
+        introduces: [cpu-core, cache-hierarchy, cache-line, simd, thread-parallelism, data-parallel-loop]
+        requires: [row-major-layout, stride, algorithm]
+        brain: [backend-cpu]
+      - id: roofline
+        title: "Memory Bandwidth, Compute and the Roofline"
+        question: "Is a computation limited by arithmetic or by moving data, and how do we tell?"
+        introduces: [memory-bandwidth, arithmetic-intensity, roofline-model, bandwidth-bound, compute-bound]
+        requires: [cache-hierarchy, matrix-multiplication, asymptotic-complexity]
+        brain: [perf]
+      - id: gpu
+        title: "The GPU: Thousands of Small Workers"
+        question: "How does a GPU organize its thousands of threads, and what does that demand of our algorithms?"
+        introduces: [gpu-architecture, simt-execution, workgroup, subgroup, shared-memory, occupancy, memory-coalescing]
+        requires: [thread-parallelism, simd, memory-bandwidth]
+        brain: [gpu-core]
+      - id: compute-kernels
+        title: "Writing Compute Kernels"
+        question: "How do we express one parallel computation so a GPU can run it?"
+        introduces: [compute-kernel, kernel-dispatch, storage-buffer, uniform-parameters, buffer-alignment, wgsl]
+        requires: [workgroup, shared-memory, tensor, stride]
+        brain: [kernels, vulkan]
+      - id: matmul
+        title: "Making Matrix Multiplication Fast"
+        question: "How does a matrix multiply go from a three-line loop to running near the hardware's peak?"
+        introduces: [naive-matmul, tiled-matmul, register-blocking, tensor-core, cooperative-matrix]
+        requires: [compute-kernel, matrix-multiplication, arithmetic-intensity, shared-memory, cache-line]
+        brain: [kernels]
+      - id: reductions
+        title: "Parallel Reductions, Scans and Sorting"
+        question: "How do thousands of threads add up one array, and why is the obvious way slow?"
+        introduces: [parallel-reduction, tree-reduction, two-pass-reduction, parallel-scan, radix-sort]
+        requires: [reduction-algorithm, prefix-sum, sorting, workgroup, occupancy]
+        brain: [kernels]
+      - id: fusion
+        title: "Kernel Fusion and Memory Traffic"
+        question: "Why is the cheapest computation the one whose intermediate result never touches memory?"
+        introduces: [kernel-fusion, launch-overhead, command-recording, memory-traffic-accounting]
+        requires: [compute-kernel, bandwidth-bound, kernel-dispatch]
+        brain: [kernels-cuda]
+      - id: backends
+        title: "One Program, Many Devices"
+        question: "How can one set of kernels run on CPUs, Vulkan GPUs and CUDA GPUs with the same results?"
+        introduces: [backend-abstraction, shader-translation, jit-compilation, ahead-of-time-compilation, cross-backend-parity]
+        requires: [wgsl, compute-kernel, cpu-core, gpu-architecture]
+        brain: [backend-api, backend-wgpu, backend-vulkan, backend-cuda, wgsl-cpu, wgsl-cuda, cuda-aot]
+      - id: kernel-selection
+        title: "Choosing the Fastest Correct Kernel"
+        question: "How does an engine run near the roofline on hardware nobody tuned it for?"
+        introduces: [implementation-candidate, capability-declaration, measured-roofline, reference-gated-selection, selection-cache]
+        requires: [roofline-model, cross-backend-parity, backend-abstraction, tiled-matmul]
+        brain: [gpu-core, kernels-cuda]
+      - id: profiling
+        title: "Measuring Performance Honestly"
+        question: "Why do most performance numbers lie, and how do we produce ones that do not?"
+        introduces: [device-synchronized-timing, warmup-runs, per-kernel-profile, whole-pass-measurement, amdahls-law]
+        requires: [kernel-dispatch, standard-error, roofline-model]
+        brain: [perf, trace]
+      - id: quantization
+        title: "Quantization: Fewer Bits per Weight"
+        question: "How can a model's weights be stored in four bits each and still work?"
+        introduces: [affine-quantization, scale-and-zero-point, group-wise-quantization, weight-only-quantization, k-quantization, quantization-error, mixed-precision-weight-search]
+        requires: [integer-quantized-format, fp8-format, rounding-error, mean-squared-error]
+        brain: [gguf, modelopt]
+      - id: npu
+        title: "Neural Processing Units and Graph Compilers"
+        question: "How does a whole network become one compiled program for a fixed-function accelerator?"
+        introduces: [graph-export, onnx-graph, post-training-quantization, calibration-set, graph-compiler]
+        requires: [affine-quantization, computational-graph, backend-abstraction]
+        brain: [onnx, npu, rknpu]
+
+  - id: v05
+    dir: v05-sequences
+    title: "Language, Sequences and Transformers"
+    chapters:
+      - id: text
+        title: "Text as Data"
+        question: "What is text to a computer, byte by byte?"
+        introduces: [character-encoding, unicode, utf8, normalization-of-text]
+        requires: [binary-representation, integer]
+        brain: []
+      - id: tokenization
+        title: "Tokenization"
+        question: "How do we cut text into pieces a model can count, and why does the choice matter so much?"
+        introduces: [token, vocabulary, byte-pair-encoding, byte-level-bpe, wordpiece, unigram-tokenizer, pretokenization, special-tokens, chat-template]
+        requires: [utf8, hashing, entropy]
+        brain: [data]
+      - id: embeddings
+        title: "Embeddings"
+        question: "How does a model turn a token id into numbers it can compute with, and how do those numbers come to mean something?"
+        introduces: [embedding-table, embedding-gradient, tied-embeddings, distributional-hypothesis]
+        requires: [token, one-hot-encoding, matrix-vector-product, reduction-backward]
+        brain: []
+      - id: language-modeling
+        title: "Language Modeling"
+        question: "How can predicting the next token teach a model about language?"
+        introduces: [autoregressive-factorization, n-gram-model, next-token-prediction, teacher-forcing, causal-language-model]
+        requires: [conditional-probability, softmax-cross-entropy, perplexity, token]
+        brain: []
+      - id: recurrent-networks
+        title: "Recurrent Networks"
+        question: "How can a network carry memory from one step of a sequence to the next, and why does that memory fade?"
+        introduces: [recurrent-neural-network, backpropagation-through-time, lstm, gru, gating]
+        requires: [multilayer-perceptron, backward-pass, vanishing-gradient, sigmoid]
+        brain: []
+      - id: seq2seq
+        title: "Encoder-Decoder Models and the Birth of Attention"
+        question: "How can a model read one sequence and write another, and why did a fixed-size summary fail?"
+        introduces: [encoder-decoder, context-vector, additive-attention, cross-attention]
+        requires: [recurrent-neural-network, softmax, embedding-table, teacher-forcing]
+        brain: [toyseq2seq]
+      - id: self-attention
+        title: "Self-Attention"
+        question: "How can every position in a sequence look at every other position in parallel?"
+        introduces: [query-key-value, scaled-dot-product-attention, causal-mask, multi-head-attention, attention-backward]
+        requires: [cross-attention, softmax, matrix-multiplication, softmax-cross-entropy, matmul-backward]
+        brain: [model]
+      - id: positions
+        title: "Positional Information"
+        question: "Attention ignores order; how do we tell it where each token is?"
+        introduces: [absolute-position-embedding, sinusoidal-encoding, rotary-position-embedding, relative-position, multi-axis-rope]
+        requires: [scaled-dot-product-attention, rotation-matrix, sinusoid, complex-number]
+        brain: []
+      - id: transformer-block
+        title: "The Transformer Block"
+        question: "How do attention, a feed-forward network, residuals and normalization fit together into one repeating unit?"
+        introduces: [residual-stream, pre-norm, feed-forward-network, gated-linear-unit, swiglu, transformer-block]
+        requires: [multi-head-attention, residual-connection, layer-normalization, rms-normalization, gelu, silu]
+        brain: [model]
+      - id: training-gpt
+        title: "Training a GPT from Scratch"
+        question: "What does the full pipeline from raw text to a trained generative model look like?"
+        introduces: [gpt-architecture, sequence-packing, loss-masking, training-throughput]
+        requires: [transformer-block, causal-language-model, adamw, cosine-schedule, byte-pair-encoding]
+        brain: [gpt2, data, eval]
+      - id: decoding
+        title: "Decoding: Turning Probabilities into Text"
+        question: "Given next-token probabilities, how do we choose what to say?"
+        introduces: [greedy-decoding, temperature, top-k-sampling, top-p-sampling, repetition-penalty, beam-search, log-probabilities]
+        requires: [softmax, sampling-from-distribution, autoregressive-factorization]
+        brain: []
+      - id: kv-cache
+        title: "The KV Cache"
+        question: "Why recompute the past at every step when we could remember it, and what does remembering cost?"
+        introduces: [kv-cache, prefill-phase, decode-phase, cache-equivalence]
+        requires: [causal-mask, query-key-value, greedy-decoding, memory-complexity]
+        brain: []
+      - id: flash-attention
+        title: "Attention Without the Quadratic Memory"
+        question: "How can attention over long sequences be computed exactly without ever storing the full attention matrix?"
+        introduces: [online-softmax, tiled-attention, flash-attention, flash-attention-backward]
+        requires: [stable-softmax, attention-backward, tiled-matmul, parallel-reduction, shared-memory]
+        brain: [kernels]
+      - id: encoders
+        title: "Bidirectional Encoders and Embedding Models"
+        question: "How do models that read a whole text at once learn representations for search and classification?"
+        introduces: [bidirectional-encoder, masked-language-modeling, sentence-embedding, contrastive-loss, retrieval]
+        requires: [transformer-block, cosine-similarity, softmax-cross-entropy, wordpiece]
+        brain: [modernbert, t5encoder]
+
+  - id: v06
+    dir: v06-language-models
+    title: "Advanced Language Model Architectures"
+    chapters:
+      - id: modern-decoder
+        title: "Anatomy of a Modern Decoder"
+        question: "What changed between the first GPT and today's open-weight language models, and why?"
+        introduces: [grouped-query-attention, qk-normalization, untied-output-head, modern-decoder-recipe]
+        requires: [gpt-architecture, rotary-position-embedding, swiglu, rms-normalization, kv-cache]
+        brain: [qwen3]
+      - id: importing-models
+        title: "Importing Pretrained Models and Proving Parity"
+        question: "How do we load someone else's trained weights into our own implementation and prove it computes the same thing?"
+        introduces: [checkpoint-format, safetensors, weight-name-mapping, reference-golden, parity-tolerance, config-defaults]
+        requires: [modern-decoder-recipe, relative-error, cosine-similarity, tensor]
+        brain: [checkpoint, arch, weightset]
+      - id: attention-variants
+        title: "Attention Variants: Sharing and Compressing Keys"
+        question: "How do we shrink the KV cache without losing what attention needs?"
+        introduces: [multi-query-attention, multi-latent-attention, sliding-window-attention, attention-sink]
+        requires: [grouped-query-attention, kv-cache, low-rank-approximation]
+        brain: [deepseek2]
+      - id: mixture-of-experts
+        title: "Mixture of Experts"
+        question: "How can a model have a trillion parameters yet use only a few billion per token?"
+        introduces: [expert, router, top-k-gating, load-balancing, shared-expert, expert-parallelism]
+        requires: [feed-forward-network, softmax, sigmoid, transformer-block]
+        brain: [toymoe, qwen35moe, glmdsa]
+      - id: linear-attention
+        title: "Linear Attention, Recurrence and Hybrid Models"
+        question: "Can attention be computed in time linear in the sequence length, and what is lost?"
+        introduces: [linear-attention, delta-rule, gated-delta-network, chunked-recurrence, short-convolution, hybrid-architecture, state-space-model]
+        requires: [scaled-dot-product-attention, recurrent-neural-network, parallel-scan, gating]
+        brain: [qwen35, lfm2]
+      - id: sparse-attention
+        title: "Sparse Attention"
+        question: "If each token only needs a few others, how do we find them cheaply?"
+        introduces: [sparse-attention-pattern, learned-index-selection, latent-sparse-attention, paged-sparse-layout]
+        requires: [flash-attention, kv-cache, top-k-gating]
+        brain: []
+      - id: recurrent-depth
+        title: "Looped and Recurrent-Depth Transformers"
+        question: "What if a model could think longer by reusing the same layers more times?"
+        introduces: [weight-shared-depth, looped-transformer, adaptive-computation, recurrent-depth]
+        requires: [transformer-block, residual-stream]
+        brain: [ouro, huginn]
+      - id: long-context
+        title: "Long Context"
+        question: "How do models trained on short texts read long ones?"
+        introduces: [rope-scaling, yarn, context-extension, kv-offload]
+        requires: [rotary-position-embedding, kv-cache, sliding-window-attention]
+        brain: []
+      - id: spectral-lm
+        title: "A Research Architecture: The Spectral Language Model"
+        question: "How does a new architecture idea go from hypothesis to evidence?"
+        introduces: [fourier-residual-stream, architecture-hypothesis-testing]
+        requires: [discrete-fourier-transform, residual-stream, ablation, causal-language-model]
+        brain: [spectrallm]
+      - id: model-cost
+        title: "Counting Parameters, FLOPs and Memory"
+        question: "Before running a model, how do we know what it will cost?"
+        introduces: [parameter-count, flops-per-token, inference-memory-formula, training-memory-formula, scaling-laws]
+        requires: [transformer-block, router, kv-cache, bf16-format]
+        brain: [modelcost, gemma4, minimaxh3]
+
+  - id: v07
+    dir: v07-vision
+    title: "Vision and Understanding Images"
+    chapters:
+      - id: images
+        title: "Images as Data"
+        question: "What is an image to a model, and how many ways can preprocessing quietly go wrong?"
+        introduces: [pixel, color-space, gamma-encoding, image-resampling, input-normalization, shared-preprocessing]
+        requires: [tensor, shape, floating-point-number]
+        brain: [imaging, capture]
+      - id: convolution
+        title: "Convolution"
+        question: "How does a small filter slid across an image find edges, textures and eventually objects?"
+        introduces: [convolution-2d, kernel-size-stride-padding, receptive-field, im2col, depthwise-convolution, transposed-convolution, convolution-backward]
+        requires: [pixel, dot-product, matmul-backward, convolution-theorem]
+        brain: [vision]
+      - id: cnns
+        title: "Convolutional Networks and Residual Learning"
+        question: "How do stacks of convolutions become image classifiers, and why did residual connections let them go deep?"
+        introduces: [pooling, convolutional-network, resnet, feature-pyramid]
+        requires: [convolution-2d, residual-connection, batch-normalization, softmax-cross-entropy]
+        brain: [vision]
+      - id: detection
+        title: "Object Detection"
+        question: "How does a network say not just what is in an image but where?"
+        introduces: [bounding-box, intersection-over-union, anchor-free-detection, non-maximum-suppression, box-regression-loss, distribution-focal-loss]
+        requires: [convolutional-network, feature-pyramid, classification]
+        brain: [yolov8, yolov5]
+      - id: dense-prediction
+        title: "Dense Prediction: Segmentation and Depth"
+        question: "How does a network label every pixel or estimate how far away it is?"
+        introduces: [semantic-segmentation, monocular-depth, encoder-decoder-cnn, upsampling]
+        requires: [convolutional-network, transposed-convolution, image-resampling]
+        brain: [zipdepth, bisenet]
+      - id: vision-transformers
+        title: "Vision Transformers"
+        question: "Can attention replace convolution for images?"
+        introduces: [patch-embedding, vision-transformer, windowed-attention, hierarchical-vision-transformer]
+        requires: [transformer-block, convolution-2d, multi-axis-rope]
+        brain: [fastvlm]
+      - id: segment-anything
+        title: "Promptable Segmentation and Video Tracking"
+        question: "How can one model segment any object you point at, and follow it through a video?"
+        introduces: [promptable-segmentation, mask-decoder, prompt-encoder, memory-attention]
+        requires: [vision-transformer, cross-attention, semantic-segmentation]
+        brain: [sam1, sam2]
+      - id: clip
+        title: "Contrastive Vision-Language Learning"
+        question: "How can images and texts be placed in one space where matching pairs land close together?"
+        introduces: [contrastive-pretraining, info-nce, zero-shot-classification, perceptual-distance]
+        requires: [contrastive-loss, vision-transformer, sentence-embedding, temperature]
+        brain: [clip, lpips]
+      - id: vlms
+        title: "Vision-Language Models"
+        question: "How do we give a language model eyes?"
+        introduces: [vision-projector, image-token-splicing, dynamic-resolution, multimodal-position-encoding]
+        requires: [vision-transformer, modern-decoder-recipe, contrastive-pretraining, multi-axis-rope]
+        brain: [llava, qwen3vl, qwen3vlmoe, minicpmv, moondream3, deepseekvl, januspro, florence2, captioner]
+      - id: ocr
+        title: "Reading Documents"
+        question: "How does a model read a page of text from pixels, and how few tokens can a page be squeezed into?"
+        introduces: [optical-character-recognition, vision-token-compression, document-layout]
+        requires: [vision-projector, sliding-window-attention, multi-latent-attention]
+        brain: [deepseek2ocr, deepseekocr2, ocrserve]
+      - id: faces
+        title: "Faces: Detection, Identity and Parsing"
+        question: "How does a model find faces and recognize the same person across photos?"
+        introduces: [face-detection, angular-margin-loss, identity-embedding, face-parsing]
+        requires: [anchor-free-detection, cosine-similarity, softmax-cross-entropy, semantic-segmentation]
+        brain: [scrfd, arcface]
+
+  - id: v08
+    dir: v08-image-generation
+    title: "Generating Images"
+    chapters:
+      - id: generative-modeling
+        title: "What It Means to Generate"
+        question: "What does it mean for a model to learn a distribution over images, and how can we sample from it?"
+        introduces: [generative-model, density-estimation, latent-variable, ancestral-sampling]
+        requires: [probability-distribution, maximum-likelihood-estimation, sampling-from-distribution]
+        brain: []
+      - id: vae
+        title: "Variational Autoencoders"
+        question: "How can an autoencoder be made into a generator, and why does that need a bound on likelihood?"
+        introduces: [evidence-lower-bound, reparameterization-trick, variational-autoencoder, latent-space]
+        requires: [autoencoder, kl-divergence, gaussian-distribution, latent-variable]
+        brain: [vae]
+      - id: vector-quantization
+        title: "Discrete Latents and Vector Quantization"
+        question: "How can an image be turned into a short sequence of discrete codes?"
+        introduces: [codebook, vector-quantization, straight-through-estimator, perceptual-loss]
+        requires: [variational-autoencoder, nearest-neighbors, perceptual-distance]
+        brain: [vqgan]
+      - id: gans
+        title: "Adversarial Training"
+        question: "What happens when the loss itself is a network trained to catch the generator?"
+        introduces: [generator-network, discriminator, adversarial-loss, mode-collapse]
+        requires: [generative-model, binary-cross-entropy, convolutional-network]
+        brain: []
+      - id: diffusion
+        title: "Diffusion Models"
+        question: "How can a model learn to create an image by learning to remove noise?"
+        introduces: [forward-noising-process, noise-schedule, denoising-objective, score-function, epsilon-prediction, v-prediction]
+        requires: [gaussian-distribution, generative-model, mean-squared-error, ordinary-differential-equation]
+        brain: [diffusion]
+      - id: flow-matching
+        title: "Flow Matching and Rectified Flow"
+        question: "Can generation be a straight path from noise to data, followed by an ordinary differential equation?"
+        introduces: [probability-path, velocity-field, flow-matching, rectified-flow, timestep-shift]
+        requires: [denoising-objective, ordinary-differential-equation, euler-method]
+        brain: [diffusion]
+      - id: samplers-and-guidance
+        title: "Samplers and Guidance"
+        question: "How many steps does sampling need, and how do we make a model follow its prompt more closely?"
+        introduces: [deterministic-sampler, ode-solver, classifier-free-guidance, guidance-distillation]
+        requires: [flow-matching, euler-method, conditional-probability]
+        brain: [diffusion]
+      - id: denoiser-architectures
+        title: "Denoiser Architectures: U-Nets and Diffusion Transformers"
+        question: "What network shapes are good at predicting noise, and how do they take in the prompt?"
+        introduces: [u-net, timestep-embedding, adaptive-layer-norm, diffusion-transformer, joint-attention-dit]
+        requires: [encoder-decoder-cnn, cross-attention, transformer-block, sinusoidal-encoding]
+        brain: [sdxlunet, dit, s3dit]
+      - id: text-conditioning
+        title: "Conditioning on Text"
+        question: "How does a sentence become the signal that steers image generation?"
+        introduces: [text-encoder-conditioning, pooled-text-embedding, prompt-embedding-sequence]
+        requires: [bidirectional-encoder, contrastive-pretraining, cross-attention, modern-decoder-recipe]
+        brain: [t5encoder]
+      - id: latent-diffusion-systems
+        title: "Latent Diffusion Systems End to End"
+        question: "How do the encoder, denoiser, sampler and decoder combine into a working image generator?"
+        introduces: [latent-diffusion, image-generation-pipeline, weight-streaming]
+        requires: [variational-autoencoder, joint-attention-dit, text-encoder-conditioning, classifier-free-guidance]
+        brain: [flux1, flux2, imgpipe]
+      - id: control-and-identity
+        title: "Control, Identity and Adapters"
+        question: "How do we steer a generator with a pose, an edge map or a particular person's face?"
+        introduces: [controlnet, zero-convolution, identity-adapter, attention-injection]
+        requires: [latent-diffusion, identity-embedding, u-net]
+        brain: [controlnet, pulid, instantid]
+      - id: restoration
+        title: "Restoration and Super-Resolution"
+        question: "How can a network recover detail that is not in the input?"
+        introduces: [super-resolution, blind-restoration, codebook-prior, diffusion-restoration]
+        requires: [adversarial-loss, codebook, latent-diffusion, convolutional-network]
+        brain: [rrdbnet, codeformer, supir]
+
+  - id: v09
+    dir: v09-audio
+    title: "Audio, Speech and Music"
+    chapters:
+      - id: sound
+        title: "Sound and Sampling"
+        question: "How is a sound wave turned into numbers without losing what we hear?"
+        introduces: [waveform, sampling-theorem, aliasing, pcm-audio, resampling-audio]
+        requires: [sinusoid, discrete-fourier-transform, integer-quantized-format]
+        brain: [audio]
+      - id: spectrograms
+        title: "Spectrograms and the Mel Scale"
+        question: "How do we see which frequencies are present at each moment, the way an ear does?"
+        introduces: [short-time-fourier-transform, window-function, mel-scale, mel-filterbank, log-mel-spectrogram]
+        requires: [waveform, fast-fourier-transform, logarithm]
+        brain: [audio]
+      - id: audio-codecs
+        title: "Neural Audio Codecs"
+        question: "How can audio become a stream of discrete tokens a language model can predict?"
+        introduces: [residual-vector-quantization, neural-audio-codec, audio-token]
+        requires: [vector-quantization, convolution-2d, transposed-convolution, waveform]
+        brain: [mimi]
+      - id: speech-recognition
+        title: "Speech Recognition"
+        question: "How does a model turn speech into text when it does not know where each word starts?"
+        introduces: [connectionist-temporal-classification, transducer, conformer, speech-encoder]
+        requires: [log-mel-spectrogram, encoder-decoder, lstm, convolution-2d, multi-head-attention]
+        brain: [qwen3asr, nemotronasr]
+      - id: speaker-embeddings
+        title: "Who Is Speaking"
+        question: "How does a model capture the identity of a voice in a single vector?"
+        introduces: [speaker-embedding, attentive-statistics-pooling, time-delay-network]
+        requires: [log-mel-spectrogram, identity-embedding, convolution-2d]
+        brain: [ecapatdnn, campplus]
+      - id: speech-synthesis
+        title: "Speech Synthesis"
+        question: "How does a model speak a sentence in a given voice?"
+        introduces: [text-to-speech, codec-language-model, speech-tokenizer, vocoder, voice-cloning]
+        requires: [audio-token, causal-language-model, flow-matching, speaker-embedding]
+        brain: [qwen3tts, cosyvoice, s3tokenizer]
+      - id: music
+        title: "Music Generation"
+        question: "What changes when the target is minutes of structured music rather than a sentence of speech?"
+        introduces: [music-generation, long-form-audio-generation]
+        requires: [codec-language-model, latent-diffusion, neural-audio-codec]
+        brain: [minimaxmusic3]
+      - id: omni-models
+        title: "Models That Listen, See and Speak"
+        question: "How is one model built to take in audio, images and text and answer in speech?"
+        introduces: [omni-model, thinker-talker-split, streaming-speech-output]
+        requires: [speech-encoder, vision-projector, text-to-speech, router]
+        brain: [qwen3omnimoe]
+
+  - id: v10
+    dir: v10-video-and-3d
+    title: "Video, Space and World Models"
+    chapters:
+      - id: video
+        title: "Video as Data"
+        question: "How do we represent and compress a sequence of frames?"
+        introduces: [frame-sequence, video-codec, causal-3d-convolution, video-autoencoder]
+        requires: [variational-autoencoder, convolution-2d, pixel]
+        brain: [videocodec, ltxv]
+      - id: video-generation
+        title: "Generating Video"
+        question: "How do diffusion models keep motion consistent across hundreds of frames?"
+        introduces: [spatiotemporal-attention, video-diffusion, joint-audio-video-generation]
+        requires: [video-autoencoder, diffusion-transformer, flow-matching, multi-axis-rope]
+        brain: [ltxv, wan, gemma4]
+      - id: camera-geometry
+        title: "Cameras and Projective Geometry"
+        question: "How does a 3D point become a pixel, and how do we undo that?"
+        introduces: [pinhole-camera, camera-intrinsics, camera-extrinsics, homogeneous-coordinates, lens-distortion]
+        requires: [matrix, rotation-matrix, vector]
+        brain: [camera]
+      - id: structure-from-motion
+        title: "Structure from Motion and Multi-View Stereo"
+        question: "How can we recover a 3D scene and the camera positions from ordinary photographs?"
+        introduces: [feature-matching, epipolar-geometry, triangulation, bundle-adjustment, patch-match-stereo]
+        requires: [pinhole-camera, camera-extrinsics, least-squares, gradient-descent]
+        brain: [sfm, mvs, recon]
+      - id: feed-forward-3d
+        title: "Learning 3D Directly"
+        question: "Can one network look at a few images and output the scene's geometry in a single pass?"
+        introduces: [pointmap, feed-forward-reconstruction]
+        requires: [vision-transformer, monocular-depth, camera-intrinsics]
+        brain: [worldmirror2]
+      - id: gaussian-splatting
+        title: "3D Gaussian Splatting"
+        question: "How do millions of small, differentiable blobs render a photorealistic scene?"
+        introduces: [gaussian-primitive, splat-projection, tiled-rasterization, alpha-compositing, differentiable-rendering, densification]
+        requires: [multivariate-gaussian, pinhole-camera, radix-sort, backward-pass]
+        brain: [splat, viewport]
+      - id: world-models
+        title: "World Models"
+        question: "Can a network learn to simulate an environment well enough to be played?"
+        introduces: [world-model, latent-action, masked-token-prediction, diffusion-world-model, interactive-generation]
+        requires: [video-autoencoder, codebook, denoising-objective, transformer-block]
+        brain: [wm-core, wm-display, genieredux, diamond]
+      - id: neural-simulation
+        title: "Simulating Brains and Bodies"
+        question: "What can we learn by running a real animal's wiring diagram inside a simulated body?"
+        introduces: [spiking-neuron, leaky-integrate-and-fire, connectome-model, physics-simulation, closed-loop-control]
+        requires: [ordinary-differential-equation, euler-method, learned-controller]
+        brain: [neuro, connectome, mujoco, flybody, fly]
+
+  - id: v11
+    dir: v11-forecasting
+    title: "Forecasting, Decisions and Uncertainty"
+    chapters:
+      - id: time-series
+        title: "Time Series Fundamentals"
+        question: "What makes data ordered in time different, and how do we avoid cheating with the future?"
+        introduces: [time-series, stationarity, autocorrelation, seasonality, autoregressive-model, leakage-safe-window]
+        requires: [data-leakage, covariance, least-squares]
+        brain: [timeseries]
+      - id: probabilistic-forecasting
+        title: "Probabilistic Forecasts"
+        question: "How should a forecast express what it does not know?"
+        introduces: [quantile-forecast, pinball-loss, continuous-ranked-probability-score, forecast-calibration]
+        requires: [time-series, calibration, probability-distribution]
+        brain: [forecast]
+      - id: foundation-forecasters
+        title: "Foundation Models for Time Series"
+        question: "Can one pretrained model forecast any series it has never seen?"
+        introduces: [patch-tokenization-of-series, series-tokenizer, covariate-conditioning, zero-shot-forecasting]
+        requires: [quantile-forecast, transformer-block, patch-embedding, vector-quantization]
+        brain: [timesfm3, chronos2, kronos, fincast]
+      - id: evaluating-forecasts
+        title: "Evaluating Forecasters Honestly"
+        question: "How do we tell a forecaster with real skill from one that got lucky?"
+        introduces: [walk-forward-evaluation, out-of-sample-test, forecast-skill-score]
+        requires: [leakage-safe-window, paired-test, multiple-comparisons]
+        brain: [fcbench]
+      - id: survival-analysis
+        title: "Survival Analysis and Competing Risks"
+        question: "How do we predict when something will happen when many examples have not happened yet?"
+        introduces: [hazard-function, censoring, kaplan-meier-estimator, competing-risks, time-to-event-model]
+        requires: [probability-distribution, integral, maximum-likelihood-estimation]
+        brain: [survival, horizon]
+      - id: calibrated-decisions
+        title: "Scoring Rules and Calibrated Decisions"
+        question: "How do we reward a model for honest probabilities rather than confident guesses?"
+        introduces: [proper-scoring-rule, brier-score, log-score, decision-threshold]
+        requires: [calibration, cross-entropy, expectation]
+        brain: [rlcd]
+
+  - id: v12
+    dir: v12-reinforcement-learning
+    title: "Reinforcement Learning and Continuous Improvement"
+    chapters:
+      - id: mdps
+        title: "Markov Decision Processes"
+        question: "How do we describe an agent that acts, sees consequences and wants long-term reward?"
+        introduces: [markov-decision-process, policy, return, discount-factor, value-function, bellman-equation, value-iteration]
+        requires: [reinforcement-learning-overview, expectation, conditional-probability]
+        brain: []
+      - id: value-learning
+        title: "Learning Values from Experience"
+        question: "How can an agent learn what states are worth without a model of the world?"
+        introduces: [temporal-difference-learning, q-learning, exploration-exploitation, function-approximation-in-rl]
+        requires: [bellman-equation, value-function, stochastic-gradient-descent]
+        brain: []
+      - id: policy-gradients
+        title: "Policy Gradients"
+        question: "How do we directly adjust a policy so that good actions become more likely?"
+        introduces: [policy-gradient-theorem, reinforce, baseline-subtraction, advantage, actor-critic, ppo]
+        requires: [policy, return, log-probabilities, variance, kl-divergence]
+        brain: [rl]
+      - id: llm-alignment
+        title: "Reinforcement and Preference Learning for Language Models"
+        question: "How is a pretrained language model taught to follow instructions and prefer good answers?"
+        introduces: [supervised-fine-tuning, preference-data, reward-model, direct-preference-optimization, grpo, verifiable-reward, kl-penalty]
+        requires: [ppo, causal-language-model, loss-masking, chat-template]
+        brain: [rl, atif, trainjob]
+      - id: search
+        title: "Search, Planning and Discovery"
+        question: "When should an agent search instead of learn, and how do the two help each other?"
+        introduces: [state-space-search, quality-diversity-archive, goal-conditioned-policy, hindsight-relabeling]
+        requires: [markov-decision-process, multilayer-perceptron, random-variable]
+        brain: [search, solve]
+      - id: decision-models
+        title: "Decision Models in Practice"
+        question: "How is a small learned model used to make fast, auditable decisions inside an application?"
+        introduces: [state-encoder, decision-head, intent-classification]
+        requires: [sentence-embedding, policy, calibration]
+        brain: [decide, decisions]
+      - id: continual-learning
+        title: "Continual Learning and Promotion"
+        question: "How can a model keep learning from new experience without forgetting, and how do we decide a new version is better?"
+        introduces: [catastrophic-forgetting, experience-replay, promotion-gate, probe-bank, continual-reader]
+        requires: [supervised-fine-tuning, paired-test, validation-set]
+        brain: [promote, audit]
+
+  - id: v13
+    dir: v13-training-at-scale
+    title: "Training Large Models Efficiently"
+    chapters:
+      - id: training-data
+        title: "Data Pipelines for Large Models"
+        question: "How is training data prepared, mixed and fed at scale?"
+        introduces: [data-mixture, deduplication, sequence-length-bucketing, sft-data-format]
+        requires: [sequence-packing, loss-masking, chat-template, data-leakage]
+        brain: [data]
+      - id: mixed-precision
+        title: "Mixed-Precision Training"
+        question: "How do we train in 16 or 8 bits without the model falling apart?"
+        introduces: [master-weights, loss-scaling, stochastic-rounding, fp8-training]
+        requires: [bf16-format, fp8-format, adamw, rounding-error]
+        brain: [paramstore]
+      - id: training-memory
+        title: "Where Training Memory Goes"
+        question: "Why does training a model need several times the memory of running it, and how do we get it back?"
+        introduces: [activation-memory, optimizer-state-memory, activation-checkpointing, saved-activation-policy, optimizer-state-quantization, streamed-optimizer]
+        requires: [saved-activations, adam, training-memory-formula, affine-quantization]
+        brain: [optim, paramstore, model]
+      - id: peft
+        title: "Parameter-Efficient Fine-Tuning"
+        question: "How can we adapt a billion-parameter model by training only a few million numbers?"
+        introduces: [lora, quantized-base-finetuning, adapter-merging, adapter-serving]
+        requires: [low-rank-approximation, supervised-fine-tuning, weight-only-quantization]
+        brain: [model]
+      - id: parallelism
+        title: "Parallel and Distributed Training"
+        question: "How is one training run spread across many devices without changing its result?"
+        introduces: [data-parallelism, tensor-parallelism, pipeline-parallelism, collective-communication, all-reduce, sharded-optimizer]
+        requires: [minibatch, matrix-multiplication, expert-parallelism, gradient-accumulation]
+        brain: [model, federated]
+      - id: distillation
+        title: "Distillation"
+        question: "How does a small model learn from a large one?"
+        introduces: [knowledge-distillation, soft-targets, on-policy-distillation]
+        requires: [kl-divergence, temperature, supervised-fine-tuning]
+        brain: [rl]
+      - id: checkpoints-and-recovery
+        title: "Checkpoints, Determinism and Recovery"
+        question: "How does a long training run survive a crash and still produce the same model?"
+        introduces: [transactional-checkpoint, training-resumption, determinism-in-training]
+        requires: [checkpoint-format, seed, reproducibility, adamw]
+        brain: [checkpoint, paramstore]
+
+  - id: v14
+    dir: v14-inference-and-serving
+    title: "Inference Engines and Production Serving"
+    chapters:
+      - id: loading
+        title: "Loading Models"
+        question: "How do gigabytes of weights get from disk to the device quickly and safely?"
+        introduces: [memory-mapping, streaming-loader, packed-tensor, model-store, model-reference]
+        requires: [checkpoint-format, k-quantization, safetensors]
+        brain: [loader, modelstore, modelref]
+      - id: residency
+        title: "Memory Budgets and Model Residency"
+        question: "How does a server decide which models live on which device when they do not all fit?"
+        introduces: [memory-budget, residency-placement, eviction-policy, lifetime-based-fitting, memory-authority]
+        requires: [inference-memory-formula, memory-mapping]
+        brain: [residency, memauth, weightset]
+      - id: paged-kv
+        title: "Managing the KV Cache"
+        question: "How do many conversations share one device's memory for their caches?"
+        introduces: [paged-kv-cache, prefix-caching, kv-quantization, kv-tiering]
+        requires: [kv-cache, kv-offload, affine-quantization, memory-budget]
+        brain: [model]
+      - id: batching
+        title: "Batching and Scheduling Requests"
+        question: "How does a server keep the device busy while answering many users at once?"
+        introduces: [static-batching, continuous-batching, chunked-prefill, admission-control, request-scheduling]
+        requires: [prefill-phase, decode-phase, paged-kv-cache, memory-budget]
+        brain: [llmserve, serving]
+      - id: speculative-decoding
+        title: "Speculative Decoding"
+        question: "How can a small model's guesses make a large model generate faster without changing its output?"
+        introduces: [draft-model, speculative-verification, acceptance-rate]
+        requires: [decode-phase, rejection-sampling, top-p-sampling]
+        brain: []
+      - id: capabilities-and-apis
+        title: "Capabilities, Providers and APIs"
+        question: "How does an engine present hundreds of models through a few stable interfaces?"
+        introduces: [capability, provider, model-catalog, http-inference-api, ipc-interface, public-sdk]
+        requires: [model-reference, continuous-batching]
+        brain: [capability, capability-mock, catalog, apiserve, dbus, server, events, sdk, cli, appopts]
+      - id: security
+        title: "Security of Machine Learning Services"
+        question: "What can a hostile request or a malicious model file do to a server, and how do we stop it?"
+        introduces: [hostile-input, resource-exhaustion, input-bounds, model-file-attack-surface, tenant-isolation, transport-security]
+        requires: [http-inference-api, admission-control, checkpoint-format]
+        brain: [apiserve, dbus]
+      - id: operations
+        title: "Running and Observing an Engine"
+        question: "How do we see what a running engine is doing, control it, and shut it down cleanly?"
+        introduces: [structured-tracing, runtime-statistics, hierarchical-state-machine, graceful-shutdown, event-driven-runtime]
+        requires: [capability, request-scheduling]
+        brain: [trace, stats, braintop, hfsm, runtime, shutdown]
+
+  - id: v15
+    dir: v15-methods
+    title: "Scientific and Engineering Methods"
+    chapters:
+      - id: porting
+        title: "Porting a Model from Its Reference"
+        question: "What is the disciplined way to reimplement a published model and prove it correct?"
+        introduces: [porting-workflow, layer-by-layer-parity, golden-generation]
+        requires: [reference-golden, parity-tolerance, weight-name-mapping, gradient-check]
+        brain: [testutil]
+      - id: testing-numerical-code
+        title: "Testing Numerical Code"
+        question: "Why do tests of numerical code pass while the code is wrong, and how do we write tests that cannot be fooled?"
+        introduces: [degenerate-dimension-trap, scale-invariant-metric-trap, gate-that-never-runs, conformance-suite]
+        requires: [gradient-check, cosine-similarity, parity-tolerance, test-dimension-choice]
+        brain: [gradcheck, testutil]
+      - id: benchmarking
+        title: "Benchmarking and Performance Claims"
+        question: "What makes a benchmark trustworthy, and what are the classic ways it lies?"
+        introduces: [benchmark-validity, measured-versus-nominal-peak, end-to-end-benchmark]
+        requires: [device-synchronized-timing, whole-pass-measurement, amdahls-law, effect-size]
+        brain: [perf, bench]
+      - id: research
+        title: "From Hypothesis to Paper"
+        question: "How does an idea become a result others can trust, check and build on?"
+        introduces: [falsifiable-hypothesis, reproducibility-package, research-paper-structure]
+        requires: [architecture-hypothesis-testing, ablation, reporting-uncertainty]
+        brain: [spectrallm]
+      - id: failure-catalogue
+        title: "A Catalogue of Expensive Mistakes"
+        question: "What went wrong while building a real engine, and what general lesson does each failure teach?"
+        introduces: [defect-class, root-cause-analysis, regression-gate]
+        requires: [gate-that-never-runs, benchmark-validity, porting-workflow]
+        brain: []
+
+  - id: v16
+    dir: v16-systems
+    title: "Constructing a Complete Machine Learning System"
+    chapters:
+      - id: engine-architecture
+        title: "The Architecture of a Machine Learning Engine"
+        question: "How should the parts of an engine be divided so that it can grow to hundreds of models without collapsing?"
+        introduces: [layered-architecture, architecture-registry, single-implementation-rule, dependency-direction]
+        requires: [backend-abstraction, capability, model-catalog]
+        brain: [arch, sdk]
+      - id: capstone
+        title: "Capstone: From Raw Data to a Served Model"
+        question: "Can you build the whole path yourself, in the language of your choice?"
+        introduces: [end-to-end-ml-system]
+        requires: [layered-architecture, continuous-batching, lora, gradient-check, transactional-checkpoint]
+        brain: []
+      - id: evolution
+        title: "How brain Grew"
+        question: "What does the history of one real engine teach about how machine learning systems evolve?"
+        introduces: [system-evolution]
+        requires: [end-to-end-ml-system, defect-class]
+        brain: []

@@ -26,6 +26,9 @@ os.makedirs(OUT, exist_ok=True)
 # deterministic instead of depending on the wall clock.
 FALLBACK_DATE = "Unreleased"
 
+# The navigation part that holds the book (see manifest()).
+BOOK_PART = "Book"
+
 
 def source_date():
     """Month and year of the last commit that touched docs/ (stable per commit)."""
@@ -73,6 +76,10 @@ def manifest():
                 yield ("doc", item["source"])
 
     for group in nav:
+        # The book is published with the docs but typeset as its own volume
+        # (scripts/book/pdf.py); the engineering manual leaves it out.
+        if group["title"] == BOOK_PART:
+            continue
         yield ("part", group["title"])
         yield from pages(group["pages"])
 
@@ -111,24 +118,27 @@ def build_markdown():
     print(f"wrote {md} ({os.path.getsize(md)//1024} KiB)")
     return md
 
-def build_pdf(md):
-    pdf = os.path.join(OUT, "brain-docs.pdf")
-    log = os.path.join(OUT, "pandoc.log")
+def build_pdf(md, pdf=None, header=None, extra=()):
+    """Typeset `md` with pandoc + xelatex. Shared with the book's PDF build,
+    which passes its own output, header and document-class options."""
+    pdf = pdf or os.path.join(OUT, "brain-docs.pdf")
+    out_dir = os.path.dirname(pdf)
+    os.makedirs(out_dir, exist_ok=True)
+    log = os.path.splitext(pdf)[0] + ".pandoc.log"
     cmd = [
         "pandoc", md, "-o", pdf,
         "--pdf-engine=xelatex",
-        "--toc", "--toc-depth=2", "--number-sections",
-        "--top-level-division=chapter",
+        "--toc", "--number-sections",
         "--highlight-style=tango",
-        "-H", os.path.join(DOCS, "pandoc", "header.tex"),
+        "-H", header or os.path.join(DOCS, "pandoc", "header.tex"),
         "--resource-path", f"{ROOT}:{DOCS}",
-        "-V", "documentclass=report",
         "-V", "geometry:margin=1in",
         "-V", "fontsize=10pt",
         "-V", "colorlinks=true", "-V", "linkcolor=blue", "-V", "urlcolor=blue", "-V", "toccolor=black",
         "--pdf-engine-opt=-interaction=nonstopmode",
+        *(extra or ("--toc-depth=2", "--top-level-division=chapter", "-V", "documentclass=report")),
     ]
-    env = dict(os.environ, TEXMFVAR=os.path.join(OUT, "texmf"))
+    env = dict(os.environ, TEXMFVAR=os.path.join(out_dir, "texmf"))
     r = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
     open(log, "w").write(r.stdout + "\n---STDERR---\n" + r.stderr)
     if r.returncode != 0:
@@ -146,4 +156,4 @@ if __name__ == "__main__":
     md = build_markdown()
     pdf, bad = build_pdf(md)
     if bad:
-        print("WARNING: some content overflows the page; see build/pdf/pandoc.log", file=sys.stderr)
+        print("WARNING: some content overflows the page; see build/pdf/brain-docs.pandoc.log", file=sys.stderr)

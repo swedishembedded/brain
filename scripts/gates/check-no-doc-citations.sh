@@ -30,6 +30,10 @@
 #     stale silently. That's the actual distinction this gate exists to
 #     enforce, so this small tree is the one place doing the opposite is
 #     correct;
+#   - it exempts scripts/book/, the textbook's tooling, for the same reason:
+#     its inputs and outputs ARE docs/book and the knowledge directory (it
+#     builds, checks and navigates them), and every path it names is one it
+#     opens and fails on loudly if missing;
 #   - and it exempts scripts/build/gen-knowledge-index.py and
 #     gen-roadmap-index.py by name, for that same reason one step further:
 #     each one's INPUT is an .agents/ directory and its OUTPUT is a file
@@ -49,13 +53,13 @@ set -u
 cd "$(dirname "$0")/../.."
 
 PATTERN='\.agents/|docs/[A-Za-z0-9_./-]+\.md'
-EXEMPT_RE='^scripts/(gates|hooks)/|^scripts/build/gen-(knowledge|roadmap)-index\.py:'
+EXEMPT_RE='^scripts/(gates|hooks|book)/|^scripts/build/gen-(knowledge|roadmap)-index\.py:'
 
 if [ "$#" -gt 0 ]; then
   files=()
   for f in "$@"; do
     case "$f" in
-      scripts/gates/*|scripts/hooks/*|scripts/build/gen-knowledge-index.py|scripts/build/gen-roadmap-index.py) continue ;;
+      scripts/gates/*|scripts/hooks/*|scripts/book/*|scripts/build/gen-knowledge-index.py|scripts/build/gen-roadmap-index.py) continue ;;
       crates/*|scripts/*|tools/*|samples/*|brain-py/*) files+=("$f") ;;
     esac
   done

@@ -422,7 +422,7 @@ test/slow:
 # "green because skipped" risk.
 ## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + test/rl + test/gradcheck + test/package + every check/* gate
 ##   + test/parity + test/parity/strict (needs make testdata/fetch) + test/perf
-test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck test/package check/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/copyright check/paths check/scope check/saved-policy check/agents-md check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict test/perf
+test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck test/package check/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/copyright check/paths check/scope check/saved-policy check/agents-md check/files check/samples check/sdk-features check/make-targets check/generated check/book test/parity test/parity/strict test/perf
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -972,7 +972,7 @@ check/make-targets:
 # target fails when the file has drifted from what its `generate/*` twin would
 # write; a stale table is wrong silently, which no accuracy metric shows.
 ## check/generated - default: every generated-file drift check below (read-only)
-check/generated: check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest check/generated/knowledge-index check/generated/roadmap-index
+check/generated: check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest check/generated/knowledge-index check/generated/roadmap-index check/generated/book
 
 # Every column of docs/reference/kernels/index.md is derived from the sources, so the
 # table cannot be edited by hand - and this check is what stops it drifting
@@ -998,6 +998,20 @@ check/generated/knowledge-index:
 ## check/generated/roadmap-index - .agents/roadmap/index.md matches the ledgers beside it
 check/generated/roadmap-index:
 	scripts/build/gen-roadmap-index.py --check
+
+## check/generated/book - the book's figures, worked examples, chronology and navigation are fresh
+check/generated/book:
+	scripts/book/figures.py --check
+	scripts/book/worked.py --check
+	scripts/book/chronology.py --check
+	scripts/book/manifest.py --check
+
+# The book against its specification (docs/book/book.yaml) and its evidence:
+# concepts are taught before they are used, every crate has a chapter, and
+# every cited commit, knowledge entry, crate path and figure exists.
+## check/book - the book follows its specification and every citation in it resolves
+check/book:
+	scripts/book/check.py
 
 # ---------------------------------------------------------------------------
 ##@ Models and datasets
@@ -1896,7 +1910,7 @@ docs/build: _docs/publisher-pin
 # and run offline) and the quick documentation gates. The slower prose scan for
 # unreviewed performance numbers stays in `check/scripts`.
 ## docs/check - the publication builds reproducibly and the docs gates pass
-docs/check: _docs/publisher-pin check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest
+docs/check: _docs/publisher-pin check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest check/generated/book check/book
 	$(NODE) $(DOCS_PUBLISHER) check --root . --manifest docs/manifest.yaml
 	bash scripts/gates/check-doc-links.sh
 	bash scripts/gates/check-arch-names.sh
@@ -1911,6 +1925,16 @@ docs/clean:
 ## docs/pdf - build the manual (pandoc + xelatex) -> build/pdf/brain-docs.{md,pdf}
 docs/pdf:
 	python3 docs/pandoc/build-docs.py
+
+# The textbook under docs/book: published with the docs (its own part of
+# docs/manifest.yaml) and typeset as its own PDF, in the reading order of
+# docs/book/book.yaml. Requires pandoc, xelatex and rsvg-convert.
+## book - default: book/pdf (the textbook -> build/book/brain-book.pdf)
+book: book/pdf
+
+## book/pdf - typeset the textbook (pandoc + xelatex) -> build/book/brain-book.{md,pdf}
+book/pdf:
+	scripts/book/pdf.py
 
 # Research papers: one directory per paper under papers/, each with its own
 # Makefile over papers/paper.mk. Adding a directory adds its targets.
@@ -1999,6 +2023,31 @@ generate/knowledge:
 ## generate/knowledge/index - regenerate .agents/knowledge/index.md from the findings beside it
 generate/knowledge/index:
 	scripts/build/gen-knowledge-index.py
+
+## generate/book - lists the book's generators; writes nothing
+generate/book:
+	$(LIST_CHILDREN)
+
+# The book's figures are rendered from sources under scripts/book/figures/
+# (Graphviz for structure, Python for anything that plots numbers), never drawn
+# by hand; each SVG records its source's hash so staleness is detectable.
+## generate/book/figures - render the book's SVG figures from scripts/book/figures/
+generate/book/figures:
+	scripts/book/figures.py
+
+# Every number in a worked example is computed by the plain-Python reference
+# implementations under scripts/book/worked/, not typed.
+## generate/book/worked - recompute the worked-example blocks in docs/book
+generate/book/worked:
+	scripts/book/worked.py
+
+## generate/book/chronology - regenerate docs/book/history/chronology.md from git history
+generate/book/chronology:
+	scripts/book/chronology.py
+
+## generate/book/navigation - regenerate the Book part of docs/manifest.yaml and the book's contents page
+generate/book/navigation:
+	scripts/book/manifest.py
 
 ## generate/roadmap - lists the roadmap generators; writes nothing
 generate/roadmap:
@@ -2183,7 +2232,7 @@ help:
         check/files check/samples check/sdk-features check/make-targets \
         check/generated check/generated/kernels-wgsl-table check/generated/kernels-cuda-table \
         check/generated/samples-manifest \
-        check/generated/knowledge-index \
+        check/generated/knowledge-index check/generated/book check/book \
         gpt $(GPT_DATASET_TARGETS) $(GPT_SYNTHETIC_DATA_TARGETS) gpt/timeseries/data \
         gpt/shakespeare-char/data gpt/gpt/data $(GPT_TRAIN_TARGETS) $(GPT_EVAL_TARGETS) \
         yolo yolo/data yolo/train yolo/eval yolo/detect \
@@ -2202,10 +2251,12 @@ help:
         crates $(EXAMPLE_CRATE_TARGETS) $(EXAMPLE_GROUP_TARGETS) $(EXAMPLE_NAME_TARGETS) \
         $(EXAMPLE_BUILD_TARGETS) $(EXAMPLE_RUN_TARGETS) \
         docs docs/build docs/check docs/clean docs/pdf docs/quickstart \
-        papers papers/pdf $(PAPER_DIRS) $(PAPER_TARGETS) \
+        papers papers/pdf $(PAPER_DIRS) $(PAPER_TARGETS) book book/pdf \
         generate generate/kernels generate/kernels/registry generate/kernels/wgsl-table \
         generate/kernels/cuda-table generate/samples generate/samples/manifest \
         generate/knowledge generate/knowledge/index \
+        generate/book generate/book/figures generate/book/worked generate/book/chronology \
+        generate/book/navigation \
         testdata testdata/fetch hooks hooks/install \
         release release/patch release/minor release/major release/changelog release/notes \
         release/publish _release/preflight _release/finalize \

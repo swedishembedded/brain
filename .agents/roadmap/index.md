@@ -19,6 +19,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 |---|---|---|
 | [`asr`](asr.md) | asr | Speech-to-text: Nemotron 3.5 ASR streaming and Qwen3-ASR (`crates/nemotronasr`, `crates/qwen3asr`, `audio::asr_caps`). |
 | [`backend-vulkan`](backend-vulkan.md) | backend-vulkan | The native Vulkan backend (`crates/backend-vulkan`). |
+| [`book`](book.md) | book | The textbook under `docs/book` (*From First Principles to Intelligent Machines*): its specification, tooling, chapters and their verification. |
 | [`cancellation`](cancellation.md) | cancellation | Cooperative cancellation of every served action (`CancelToken`, `ActionSpec::cancellable`). |
 | [`chronos2`](chronos2.md) | chronos2 | Chronos-2 time-series forecaster (`crates/chronos2`). |
 | [`codeformer`](codeformer.md) | codeformer | CodeFormer blind face restoration (`crates/codeformer`). |

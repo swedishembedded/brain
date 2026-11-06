@@ -58,6 +58,7 @@ Enforced by `make check/scope`; `CHANGELOG.md` is exempt.
 | `tests/` | bats suites: `tests/e2e` (real sockets and processes), `tests/gates` (gate specs) |
 | `brain-py/` | Python client driving the `brain` binary as a subprocess |
 | `papers/` | research papers, one scope each (`papers/README.md`); `make papers/<name>/pdf` builds one into `build/papers/` |
+| `docs/book/` | the textbook: machine learning from first principles, brain as its case study; `make book/pdf` |
 
 ## Rules to read before you start
 
@@ -72,6 +73,7 @@ Enforced by `make check/scope`; `CHANGELOG.md` is exempt.
 | touch `crates/apiserve` or `crates/dbus` | `.agents/rules/api-security.md` |
 | bring in third-party code or weights | `.agents/rules/licensing.md` |
 | write or change a paper, or change a finding one states | `.agents/rules/papers.md` |
+| write or change the book (`docs/book/`, `scripts/book/`) | `.agents/rules/book.md` |
 | design a gate, or call a number an architecture's ceiling | `.agents/knowledge/index.md` |
 
 ## Commands
@@ -120,8 +122,8 @@ enforces it.
   one model into the test that asserts it, open work into that model's roadmap
   ledger. A commit message is not a home for a finding.
 - **`docs/` is user-facing product documentation.** It changes only when a
-  public contract (command, flag, variable, supported capability) changes:
-  never a status ledger, plan, measurement log or "known gaps" section there.
+  public contract changes: never a ledger, plan, measurement log or "known
+  gaps" there. `docs/book/` is the textbook, under `.agents/rules/book.md`.
 - **Status lives in `.agents/roadmap/`, nowhere else.** Guides and rules point
   at a ledger; they do not restate it.
 - **Zero compile warnings,** including ones your change did not cause. Fix them
@@ -136,8 +138,7 @@ enforces it.
   path validated against WGSL, each saying why in a comment.
 - **One GPU device per process.** Share it (`Gpu::share`, `Gpu::new_like`,
   `share_or_new`); tests use `gpu_core::testgpu::dev`.
-- **Host math does not run on the accelerator.** It ignores `--device`; a hot
-  path needs a kernel.
+- **Host math does not run on the accelerator:** it ignores `--device`; a hot path needs a kernel.
 - **WGSL is the source of truth and the reference provider.** Kernels live only
   in `crates/kernels/wgsl/`, declare their catalogue row in their own header,
   stay core-compute (fp32 arithmetic, at most 8 storage buffers, no atomics,
@@ -203,8 +204,7 @@ enforces it.
   (`make check/saved-policy`).
 - **Never skip a test silently:** `brain_testutil::skip` or `skip_unavailable`,
   never `eprintln!` plus `return` (`make check/test-skips`).
-- **Gitignored:** `scratchpad/`, generated `data/`, `out/`, `build/`,
-  `results/`, `testdata/`.
+- **Gitignored:** `scratchpad/`, `data/`, `out/`, `build/`, `results/`, `testdata/`.
 
 ## Local task management
 
