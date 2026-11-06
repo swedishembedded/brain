@@ -36,7 +36,7 @@ needs no weights of its own.
 
 The failure body of every call carries a machine-readable `code`
 (`not_installed`, `failed_to_load`, `unsupported_capability`, `timeout`,
-`invalid_request`, `backend_failure`).
+`invalid_request`, `backend_failure`, `unavailable`).
 
 ---
 

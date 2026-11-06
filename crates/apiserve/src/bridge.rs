@@ -770,6 +770,7 @@ mod tests {
             (FailureClass::Timeout, 504, "timeout"),
             (FailureClass::InvalidRequest, 422, "invalid_request"),
             (FailureClass::BackendFailure, 500, "backend_failure"),
+            (FailureClass::Unavailable, 503, "unavailable"),
         ];
         for (class, status, code) in cases {
             let e = map_reply_err(Provider::OpenAI, "m", &tag(class, "the message"));
@@ -778,6 +779,16 @@ mod tests {
             assert_eq!(body["error"]["code"], code);
             assert_eq!(body["error"]["message"], "the message");
         }
+    }
+
+    #[test]
+    fn a_full_card_is_a_503_that_tells_the_client_when_to_retry() {
+        use axum::response::IntoResponse;
+        use capability::{tag, FailureClass};
+        let e = map_reply_err(Provider::OpenAI, "m", &tag(FailureClass::Unavailable, "qwen35: the device ran out of memory"));
+        let response = e.into_response();
+        assert_eq!(response.status().as_u16(), 503);
+        assert!(response.headers().contains_key(axum::http::header::RETRY_AFTER), "a retryable refusal says so");
     }
 
     #[test]

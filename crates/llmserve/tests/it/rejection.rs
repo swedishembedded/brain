@@ -5,8 +5,8 @@
 // expertise in error contracts for inference services, you can procure our services by sending an email to
 // info@swedishembedded.com.
 
-//! Spec: a prompt refused because the card ran out of memory reaches the caller with a failure class, so a client
-//! can tell "retry later or shorten the prompt" from a malformed request.
+//! Spec: a prompt refused because the card ran out of memory reaches the caller with a retryable failure class, so a
+//! client can tell "retry later or shorten the prompt" from a malformed request and from a fault of the server.
 
 use capability::failure::{classify, FailureClass};
 use capability::Invocation;
@@ -48,10 +48,10 @@ fn front() -> Plain {
 }
 
 #[test]
-fn a_full_card_is_a_classed_backend_failure() {
+fn a_full_card_is_a_retryable_unavailable_failure() {
     let msg = front().rejection(&Invocation::new(), &RejectReason::DeviceOutOfMemory { bytes: 48 << 20 });
     let (class, text) = classify(&msg).expect("the refusal carries a class");
-    assert_eq!(class, FailureClass::BackendFailure);
+    assert_eq!(class, FailureClass::Unavailable);
     assert!(text.contains("out of memory"), "{text}");
     let invalid = front().rejection(&Invocation::new(), &RejectReason::ExceedsCapacity { need: 9, capacity: 8 });
     assert!(classify(&invalid).is_none(), "other refusals keep their wording: {invalid}");

@@ -144,6 +144,7 @@ HTTP it is the error `code`, with the status below; over D-Bus it is the
 | `timeout` | 504 | `deadline_ms` passed; no partial answers are returned |
 | `invalid-request` | 422 | malformed, or outside the published limits (255 options, 2 to 10 levels, 64 questions, 1 MiB) |
 | `backend-failure` | 500 | the backend faulted while running a valid request |
+| `unavailable` | 503 | the host has no room for the request right now (carries `Retry-After`); retry later |
 
 The deadline is cooperative: it is checked before the model runs and, for Laya,
 between questions. A forward pass already on the device is not interrupted, so a

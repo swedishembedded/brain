@@ -41,17 +41,22 @@ pub enum FailureClass {
     InvalidRequest,
     /// The model was loaded and the request was valid, but inference failed.
     BackendFailure,
+    /// The model was loaded and the request was valid, but the host has no room for it right now (a device
+    /// out of memory with nothing else left to give back). Nothing is wrong with the request or the server:
+    /// retrying later, or with a shorter prompt, can succeed.
+    Unavailable,
 }
 
 impl FailureClass {
     /// Every class, in documentation order.
-    pub const ALL: [FailureClass; 6] = [
+    pub const ALL: [FailureClass; 7] = [
         FailureClass::NotInstalled,
         FailureClass::FailedToLoad,
         FailureClass::UnsupportedCapability,
         FailureClass::Timeout,
         FailureClass::InvalidRequest,
         FailureClass::BackendFailure,
+        FailureClass::Unavailable,
     ];
 
     /// The class's stable wire name.
@@ -63,6 +68,7 @@ impl FailureClass {
             FailureClass::Timeout => "timeout",
             FailureClass::InvalidRequest => "invalid-request",
             FailureClass::BackendFailure => "backend-failure",
+            FailureClass::Unavailable => "unavailable",
         }
     }
 
@@ -119,7 +125,7 @@ mod tests {
     #[test]
     fn slugs_are_the_documented_wire_names() {
         let slugs: Vec<&str> = FailureClass::ALL.iter().map(|c| c.slug()).collect();
-        assert_eq!(slugs, ["not-installed", "failed-to-load", "unsupported-capability", "timeout", "invalid-request", "backend-failure"]);
+        assert_eq!(slugs, ["not-installed", "failed-to-load", "unsupported-capability", "timeout", "invalid-request", "backend-failure", "unavailable"]);
     }
 
     #[test]

@@ -80,12 +80,13 @@ impl Kind {
                 FailureClass::FailedToLoad | FailureClass::BackendFailure => StatusCode::INTERNAL_SERVER_ERROR,
                 FailureClass::UnsupportedCapability | FailureClass::InvalidRequest => StatusCode::UNPROCESSABLE_ENTITY,
                 FailureClass::Timeout => StatusCode::GATEWAY_TIMEOUT,
+                FailureClass::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             },
         }
     }
     /// `true` when the client should back off and retry — surfaced as `Retry-After`.
     fn retryable(&self) -> bool {
-        matches!(self, Kind::Overloaded | Kind::Saturated | Kind::RateLimited | Kind::Failure(FailureClass::Timeout))
+        matches!(self, Kind::Overloaded | Kind::Saturated | Kind::RateLimited | Kind::Failure(FailureClass::Timeout | FailureClass::Unavailable))
     }
     /// Anthropic's `error.type` value (one of its discriminated error variants).
     fn anthropic_type(&self) -> &'static str {
@@ -105,6 +106,7 @@ impl Kind {
             Kind::Overloaded | Kind::Saturated => "overloaded_error",
             Kind::Failure(FailureClass::NotInstalled) => "not_found_error",
             Kind::Failure(FailureClass::UnsupportedCapability | FailureClass::InvalidRequest) => "invalid_request_error",
+            Kind::Failure(FailureClass::Unavailable) => "overloaded_error",
             Kind::Failure(FailureClass::FailedToLoad | FailureClass::BackendFailure | FailureClass::Timeout) => "api_error",
         }
     }
@@ -123,7 +125,7 @@ impl Kind {
             Kind::Overloaded => "rate_limit_exceeded",
             Kind::Saturated => "server_error",
             Kind::Failure(FailureClass::NotInstalled | FailureClass::UnsupportedCapability | FailureClass::InvalidRequest) => "invalid_request_error",
-            Kind::Failure(FailureClass::FailedToLoad | FailureClass::BackendFailure | FailureClass::Timeout) => "server_error",
+            Kind::Failure(FailureClass::FailedToLoad | FailureClass::BackendFailure | FailureClass::Timeout | FailureClass::Unavailable) => "server_error",
         }
     }
     /// OpenAI's short `error.code` slug.
@@ -156,6 +158,7 @@ fn failure_code(class: FailureClass) -> &'static str {
         FailureClass::Timeout => "timeout",
         FailureClass::InvalidRequest => "invalid_request",
         FailureClass::BackendFailure => "backend_failure",
+        FailureClass::Unavailable => "unavailable",
     }
 }
 
