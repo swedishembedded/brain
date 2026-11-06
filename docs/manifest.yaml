@@ -29,6 +29,7 @@ navigation:
         pages:
           - docs/guides/training/labeling.md
           - docs/guides/training/lora.md
+          - docs/guides/training/optimizer-state.md
           - docs/guides/training/served-training.md
           - docs/guides/training/forecast-finetune.md
           - docs/guides/training/federated-experts.md
@@ -58,6 +59,7 @@ navigation:
       - docs/reference/sdk.md
       - docs/reference/configuration.md
       - docs/reference/training-capabilities.md
+      - docs/reference/quantized-loading.md
       - title: API
         pages:
           - docs/reference/api/http.md
