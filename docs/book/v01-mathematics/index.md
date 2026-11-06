@@ -46,8 +46,8 @@ in the curriculum and appear here when they are written.
 1. [Numbers, Quantities and Notation](01-numbers.md): the numbers a machine
    learns with, and the notation (exponents, logarithms, sums, products, sets,
    function notation) for writing about them precisely.
-2. Functions and Their Shapes: how to describe a rule that turns inputs into
-   outputs, and what shapes such rules can take.
+2. [Functions and Their Shapes](02-functions.md): how to describe a rule that
+   turns inputs into outputs, and what shapes such rules can take.
 3. Vectors: Lists of Numbers with Geometry: how a list of numbers gains a
    length and a direction, and how to measure how alike two lists are.
 4. Matrices as Linear Maps: what multiplying a matrix by a vector means, and

@@ -28,6 +28,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume I: Thinking in Mathematics](v01-mathematics/index.md)
 
 1. [Numbers, Quantities and Notation](v01-mathematics/01-numbers.md): What are the numbers a machine learns with, and how do we write about them precisely?
+2. [Functions and Their Shapes](v01-mathematics/02-functions.md): How do we describe a rule that turns inputs into outputs, and what shapes can such rules take?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 
