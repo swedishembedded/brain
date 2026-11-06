@@ -950,8 +950,8 @@ pub enum RejectReason {
     /// The embedding rows do not fit the request or the decoder (see
     /// [`PromptEmbeds::refusal`]).
     InvalidEmbeds { why: String },
-    /// The card had no memory left for the step that was reading this prompt in.
-    /// Retrying later, or with a shorter prompt, can succeed.
+    /// The card had no memory left for this request even with nothing else on it, after the prefix cache was given
+    /// back. Retrying later, or with a shorter prompt, can succeed.
     DeviceOutOfMemory { bytes: u64 },
 }
 
@@ -969,7 +969,55 @@ impl std::fmt::Display for RejectReason {
                 write!(f, "adapter {} is not available", adapter.kv_namespace())
             }
             RejectReason::InvalidEmbeds { why } => write!(f, "invalid embedding rows: {why}"),
-            RejectReason::DeviceOutOfMemory { bytes } => write!(f, "the device ran out of memory ({bytes} bytes refused) while the prompt was read in"),
+            RejectReason::DeviceOutOfMemory { bytes } => write!(f, "the device ran out of memory ({bytes} bytes refused) and the request does not fit it even alone"),
+        }
+    }
+}
+
+/// How the scheduler answers a device allocation failure: activation scratch and recurrent state live beside the KV
+/// pool, so the pool's block count cannot say how many sequences the card holds. A failure is the card telling the
+/// scheduler its real limit, so the scheduler admits fewer sequences at once ([`Self::limit`]) and gives the card
+/// the batch back one sequence at a time, after [`Self::GROW_AFTER_STEPS`] iterations that ran without a failure.
+#[derive(Debug, Default)]
+struct MemoryPressure {
+    /// Most sequences (decoding and prefilling) in flight while the card has shown it cannot hold more; `None` until a
+    /// failure.
+    limit: Option<usize>,
+    /// Iterations with work in flight since the last failure.
+    calm_steps: u32,
+    /// Whether the iteration now running has had a failure.
+    failed_this_step: bool,
+    /// Consecutive failures of a call that carried the only sequence in the scheduler.
+    lone_failures: u32,
+}
+
+impl MemoryPressure {
+    /// Iterations without a failure after which the limit grows by one sequence. A growth the card cannot hold costs
+    /// a recompute of what was in flight, so it is tried rarely: the cost is at most one failure per this many
+    /// iterations.
+    const GROW_AFTER_STEPS: u32 = 32;
+    /// Failures of a sequence that is alone on the card after which it is refused: nothing else holds memory it could
+    /// be waiting for. The prefix cache is given back before the last attempt.
+    const LONE_ATTEMPTS: u32 = 3;
+
+    fn fail(&mut self, in_flight: usize) {
+        self.failed_this_step = true;
+        self.calm_steps = 0;
+        let halved = (in_flight / 2).max(1);
+        self.limit = Some(self.limit.map_or(halved, |l| l.min(halved)));
+    }
+
+    /// An iteration that had `in_flight` sequences ended; `max` is the scheduler's own ceiling.
+    fn end_step(&mut self, in_flight: usize, max: usize) {
+        if std::mem::take(&mut self.failed_this_step) || in_flight == 0 {
+            return;
+        }
+        self.lone_failures = 0;
+        let Some(limit) = self.limit else { return };
+        self.calm_steps += 1;
+        if self.calm_steps >= Self::GROW_AFTER_STEPS {
+            self.calm_steps = 0;
+            self.limit = (limit + 1 < max).then_some(limit + 1);
         }
     }
 }
@@ -1303,6 +1351,8 @@ pub struct Scheduler<D: PagedDecoder> {
     clock: Box<dyn Fn() -> f64 + Send>,
     /// What a mixed iteration of a given number of rows costs - see [`StepCost`].
     step_cost: StepCost,
+    /// How many sequences the card has shown it can hold - see [`MemoryPressure`].
+    pressure: MemoryPressure,
 }
 
 impl<D: PagedDecoder> Scheduler<D> {
@@ -1336,6 +1386,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 Box::new(move || start.elapsed().as_secs_f64())
             },
             step_cost: StepCost::default(),
+            pressure: MemoryPressure::default(),
         }
     }
 
@@ -2097,7 +2148,7 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// A request that can never be admitted (see `next_admissible`) is rejected on the
     /// way and one whose adapter is still loading is stepped over.
     fn admit_one(&mut self, report: &mut StepReport, allow: impl FnOnce(usize) -> bool) -> bool {
-        if !self.swapped.is_empty() || self.running.len() + self.prefilling.len() >= self.max_running {
+        if !self.swapped.is_empty() || self.running.len() + self.prefilling.len() >= self.pressure.limit.map_or(self.max_running, |l| l.min(self.max_running)) {
             return false;
         }
         let Some(pos) = self.next_admissible(report) else { return false };
@@ -2167,7 +2218,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         drop(jobs);
         match progress {
             Ok(progress) => self.settle_prefill(&takes, progress, Vec::new(), report),
-            Err(oom) => self.refuse_prefilling(report, oom),
+            Err(oom) => self.recover_from_oom(report, oom, &[]),
         }
     }
 
@@ -2261,7 +2312,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         drop(jobs);
         let progress = match progress {
             Ok(progress) => progress,
-            Err(oom) => return self.refuse_prefilling(report, oom),
+            Err(oom) => return self.recover_from_oom(report, oom, &[]),
         };
         assert_eq!(progress.len(), self.prefilling.len(), "prefill_background answers every job");
         let mut finished = Vec::new();
@@ -2281,23 +2332,68 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
     }
 
-    /// A prefill call ran the card out of memory: the prompts being read in are
-    /// refused (their blocks and adapter pins returned) and the decoder drops its
-    /// prefill work, while everything already decoding goes on. All of them, not
-    /// only the one that hit the wall: the call's answers for the others are lost
-    /// with its unwind, and a prompt half read in cannot be resumed from a state
-    /// nobody reported.
-    fn refuse_prefilling(&mut self, report: &mut StepReport, oom: gpu_core::DeviceOutOfMemory) {
-        let bytes = oom.bytes;
+    /// A call ran the card out of memory. `decoding` are the positions in `running` of the sequences it carried
+    /// (the call's answers for them are lost with its unwind); the prompts being read in are carried too, and a
+    /// prompt half read in cannot be resumed from a state nobody reported. All of them go back to the head of the
+    /// queue, oldest first, to be read in again ([`Self::requeue_for_recompute`], [`Self::requeue_prefilling`]), the
+    /// decoder drops its prefill work, and the scheduler admits fewer sequences at once ([`MemoryPressure`]), so the
+    /// retry finds the card with less on it. Sequences not carried by the call go on.
+    ///
+    /// A request fails only when it is the only sequence in the scheduler and has failed [`MemoryPressure::LONE_ATTEMPTS`]
+    /// times: nothing else holds memory it could wait for, and the prefix cache has been given back already.
+    fn recover_from_oom(&mut self, report: &mut StepReport, oom: gpu_core::DeviceOutOfMemory, decoding: &[usize]) {
         self.dec.abandon_prefill();
-        for mut p in std::mem::take(&mut self.prefilling) {
-            self.dec.release_table(&mut p.table);
-            self.unpin(p.adapter);
-            report.rejected.push((p.id, RejectReason::DeviceOutOfMemory { bytes }));
+        let carried = decoding.len() + self.prefilling.len();
+        let in_flight = self.running.len() + self.prefilling.len();
+        self.pressure.fail(in_flight);
+        eprintln!("[warn] scheduler: the device ran out of memory ({} bytes refused); {carried} sequence(s) go back to the queue and at most {} run at once until the card holds more", oom.bytes, self.pressure.limit.unwrap_or(0));
+        let lone = in_flight == 1;
+        if lone {
+            self.pressure.lone_failures += 1;
+            if self.pressure.lone_failures == MemoryPressure::LONE_ATTEMPTS - 1 {
+                self.dec.reclaim_prefix(u32::MAX);
+            }
+        }
+        let refuse = lone && self.pressure.lone_failures >= MemoryPressure::LONE_ATTEMPTS;
+        // Newest first, each at the head of the queue, so the oldest sequence ends up in front.
+        while let Some(p) = self.prefilling.pop_back() {
+            if refuse {
+                self.refuse_oom(p.id, p.table, p.adapter, oom.bytes, report);
+            } else {
+                self.requeue_prefilling(p);
+            }
+        }
+        for &i in decoding.iter().rev() {
+            let r = self.running.remove(i);
+            if refuse {
+                self.refuse_oom(r.id, r.table, r.adapter, oom.bytes, report);
+            } else {
+                self.requeue_for_recompute(r);
+            }
+        }
+        if refuse {
+            self.pressure.lone_failures = 0;
         }
     }
 
+    /// Refuse a request the card cannot hold even alone: its blocks and adapter pin are returned.
+    fn refuse_oom(&mut self, id: u64, mut table: BlockTable, adapter: Option<AdapterId>, bytes: u64, report: &mut StepReport) {
+        self.dec.release_table(&mut table);
+        self.unpin(adapter);
+        self.started.remove(&id);
+        report.rejected.push((id, RejectReason::DeviceOutOfMemory { bytes }));
+    }
+
+    /// One iteration ([`Self::iterate`]) and what it says about the card: an iteration that carried work and ran
+    /// without a device allocation failure counts towards giving the batch back ([`MemoryPressure`]).
     fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
+        let completed = self.iterate(report);
+        let in_flight = self.running.len() + self.prefilling.len() + completed.len();
+        self.pressure.end_step(in_flight, self.max_running);
+        completed
+    }
+
+    fn iterate(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
         // Named ranges on the driver-native profiler's timeline (NVTX under Nsight): one per iteration, one per phase.
         let _step = gpu_core::markers::range(c"serve.step");
         // 0. Resume preempted sequences before anything else touches the pool:
@@ -2346,7 +2442,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                     let progress = match progress {
                         Ok(progress) => progress,
                         Err(oom) => {
-                            self.refuse_prefilling(report, oom);
+                            self.recover_from_oom(report, oom, &[]);
                             break;
                         }
                     };
@@ -2408,7 +2504,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             self.mixed_iteration(limits, &active, &in_batch, report);
             break 'decode;
         }
-        if active.is_empty() || self.speculative_step(&active) {
+        if active.is_empty() || self.speculative_step(&active, report) {
             break 'decode;
         }
         {
@@ -2463,15 +2559,9 @@ impl<D: PagedDecoder> Scheduler<D> {
             let window = match decoded {
                 Ok(window) => window,
                 Err(oom) => {
-                    // The step ran the card out of memory: the sequences it carried are refused with a classed
-                    // error (their blocks returned) and the rest of the server goes on. All of them, since the
-                    // step's answers for the others are lost with its unwind.
-                    for &i in active.iter().rev() {
-                        let mut r = self.running.remove(i);
-                        self.dec.release_table(&mut r.table);
-                        self.unpin(r.adapter);
-                        report.rejected.push((r.id, RejectReason::DeviceOutOfMemory { bytes: oom.bytes }));
-                    }
+                    // The step ran the card out of memory: the sequences it carried go back to the queue to be
+                    // recomputed, since the step's answers for all of them are lost with its unwind.
+                    self.recover_from_oom(report, oom, &active);
                     break 'decode;
                 }
             };
@@ -2605,15 +2695,8 @@ impl<D: PagedDecoder> Scheduler<D> {
         let (scored, decoded, prefilled, first) = match outcome {
             Ok(outcome) => outcome,
             Err(oom) => {
-                // The forward carried every sequence and prompt in flight and its answers are lost with the unwind:
-                // all are refused with a classed error (blocks returned), and the server goes on.
-                for &i in active.iter().rev() {
-                    let mut r = self.running.remove(i);
-                    self.dec.release_table(&mut r.table);
-                    self.unpin(r.adapter);
-                    report.rejected.push((r.id, RejectReason::DeviceOutOfMemory { bytes: oom.bytes }));
-                }
-                return self.refuse_prefilling(report, oom);
+                // The forward carried every sequence and prompt in flight and its answers are lost with the unwind.
+                return self.recover_from_oom(report, oom, active);
             }
         };
         let rows = decode_rows + takes.iter().sum::<usize>();

@@ -239,7 +239,14 @@ See [Decision models](../models/decision.md) for the full contract.
 Any model that classes its own failure reaches a client as that class, in the
 error `code`: `not_installed` (404), `failed_to_load` (500),
 `unsupported_capability` (422), `timeout` (504), `invalid_request` (422) or
-`backend_failure` (500).
+`backend_failure` (500) or `unavailable` (503, with `Retry-After`).
+
+A language model whose card runs out of memory does not fail the requests it
+admitted: the sequences of the failing step go back to the queue and run again
+once the card has shown it can hold them, so they complete with the same tokens.
+Only a request that fails again while it is alone on the card, after the prefix
+cache has been given back, is answered `unavailable` (503): retry later, or with
+a shorter prompt.
 
 ## Which models each provider exposes
 

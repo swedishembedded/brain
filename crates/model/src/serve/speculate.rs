@@ -741,13 +741,20 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// `self.running`) if speculation is on, the batch is small enough, and
     /// the drafter proposed anything. Returns whether it did; `false` leaves
     /// every sequence untouched for the plain step.
-    pub(super) fn speculative_step(&mut self, active: &[usize]) -> bool {
+    pub(super) fn speculative_step(&mut self, active: &[usize], report: &mut StepReport) -> bool {
         let Some(proposals) = self.propose(active, false) else { return false };
         let (scored, verify_secs) = {
             let _verify = gpu_core::markers::range(c"spec.verify");
             let started = (self.clock)();
-            let scored = self.dec.forward_batched_verify(&mut active_tables(&mut self.running, active), &proposals.rows, proposals.cands);
-            (scored, (self.clock)() - started)
+            let verified = super::catch_device_oom(|| self.dec.forward_batched_verify(&mut active_tables(&mut self.running, active), &proposals.rows, proposals.cands));
+            match verified {
+                Ok(scored) => (scored, (self.clock)() - started),
+                Err(oom) => {
+                    // The verify step ran the card out of memory: its sequences go back to the queue like a plain step's.
+                    self.recover_from_oom(report, oom, active);
+                    return true;
+                }
+            }
         };
         self.spec_costs.observe_verify(proposals.rows.iter().map(Vec::len).sum(), active.len(), verify_secs, self.gate.plain_secs(CostGate::bucket(active.len())));
         self.settle_verified(active, proposals, scored);

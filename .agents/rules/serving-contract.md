@@ -164,6 +164,14 @@ decode), batch what you can and say why in a comment.
   BlockTable}`) and implement `PagedDecoder` over it — admission, prefix
   cache, batching, cancellation and streaming then come from `model::serve`
   for free, rather than each decoder growing its own copy of this machinery.
+- **A full card is a scheduling signal, never a request outcome.** Memory a
+  decoder allocates outside its block pool (scratch, state) can run out
+  whatever the pool's free count says. Let it unwind as `gpu_core::DeviceOutOfMemory`
+  (the CUDA backend raises it) and implement `PagedDecoder::abandon_prefill` if
+  the decoder keeps prefill work: the scheduler then sends the carried sequences
+  back to the queue and admits fewer at once (knowledge #435). A request is
+  refused (`unavailable`, 503) only when it fails alone on the card. Do not
+  catch the failure in the engine or turn it into a string.
 
 ### 4. D-Bus surface - reachable over the bus, with a runnable sample
 The actions MUST be callable over `crates/dbus` (`com.swedishembedded.Brain1`) and
