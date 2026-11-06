@@ -1,0 +1,186 @@
+<!-- source-sha256: 2bb1f32adae83168a33c9db3b6c36708800b2e1d341841c8ef642396e89a68a6 -->
+<svg width="379pt" height="878pt"
+viewBox="0.00 0.00 379.00 878.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(10.8 867.1)">
+<polygon fill="white" stroke="none" points="-10.8,10.8 -10.8,-867.1 368.14,-867.1 368.14,10.8 -10.8,10.8"/>
+<g id="node1" class="node">
+<ellipse fill="#fefcbf" stroke="#4a5568" cx="28.81" cy="-834.73" rx="28.81" ry="21.57"/>
+<text xml:space="preserve" text-anchor="middle" x="28.81" y="-835.53" font-family="Helvetica,sans-Serif" font-size="11.00">X</text>
+<text xml:space="preserve" text-anchor="middle" x="28.81" y="-824.28" font-family="Helvetica,sans-Serif" font-size="11.00">[B,D]</text>
+</g>
+<g id="node12" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M106.44,-766.67C106.44,-766.67 25.19,-766.67 25.19,-766.67 19.19,-766.67 13.19,-760.67 13.19,-754.67 13.19,-754.67 13.19,-742.67 13.19,-742.67 13.19,-736.67 19.19,-730.67 25.19,-730.67 25.19,-730.67 106.44,-730.67 106.44,-730.67 112.44,-730.67 118.44,-736.67 118.44,-742.67 118.44,-742.67 118.44,-754.67 118.44,-754.67 118.44,-760.67 112.44,-766.67 106.44,-766.67"/>
+<text xml:space="preserve" text-anchor="middle" x="65.81" y="-749.47" font-family="Helvetica,sans-Serif" font-size="11.00">linear</text>
+<text xml:space="preserve" text-anchor="middle" x="65.81" y="-738.22" font-family="Helvetica,sans-Serif" font-size="11.00">Z1 = X W1^T + b1</text>
+</g>
+<g id="edge1" class="edge">
+<path fill="none" stroke="#1a202c" d="M35.52,-813.42C38.66,-804.48 42.63,-793.93 46.81,-784.67 48.24,-781.52 49.83,-778.27 51.47,-775.08"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="53.84,-776.58 55.12,-768.2 48.89,-773.95 53.84,-776.58"/>
+</g>
+<g id="node2" class="node">
+<ellipse fill="#fefcbf" stroke="#4a5568" cx="65.81" cy="-509.47" rx="28.81" ry="21.57"/>
+<text xml:space="preserve" text-anchor="middle" x="65.81" y="-510.27" font-family="Helvetica,sans-Serif" font-size="11.00">A</text>
+<text xml:space="preserve" text-anchor="middle" x="65.81" y="-499.02" font-family="Helvetica,sans-Serif" font-size="11.00">[B,H]</text>
+</g>
+<g id="node14" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M218.81,-441.4C218.81,-441.4 142.81,-441.4 142.81,-441.4 136.81,-441.4 130.81,-435.4 130.81,-429.4 130.81,-429.4 130.81,-417.4 130.81,-417.4 130.81,-411.4 136.81,-405.4 142.81,-405.4 142.81,-405.4 218.81,-405.4 218.81,-405.4 224.81,-405.4 230.81,-411.4 230.81,-417.4 230.81,-417.4 230.81,-429.4 230.81,-429.4 230.81,-435.4 224.81,-441.4 218.81,-441.4"/>
+<text xml:space="preserve" text-anchor="middle" x="180.81" y="-424.2" font-family="Helvetica,sans-Serif" font-size="11.00">linear</text>
+<text xml:space="preserve" text-anchor="middle" x="180.81" y="-412.95" font-family="Helvetica,sans-Serif" font-size="11.00">Y = A W2^T + b2</text>
+</g>
+<g id="edge7" class="edge">
+<path fill="none" stroke="#1a202c" d="M68.78,-487.65C71.13,-477.97 75.33,-466.96 82.81,-459.4 93.4,-448.72 107.46,-441.28 121.61,-436.11"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="122.27,-438.84 128.97,-433.65 120.5,-433.53 122.27,-438.84"/>
+</g>
+<g id="node3" class="node">
+<ellipse fill="#fefcbf" stroke="#4a5568" cx="201.81" cy="-184.2" rx="28.81" ry="21.57"/>
+<text xml:space="preserve" text-anchor="middle" x="201.81" y="-185" font-family="Helvetica,sans-Serif" font-size="11.00">E</text>
+<text xml:space="preserve" text-anchor="middle" x="201.81" y="-173.75" font-family="Helvetica,sans-Serif" font-size="11.00">[B,O]</text>
+</g>
+<g id="node16" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M237.94,-116.13C237.94,-116.13 165.69,-116.13 165.69,-116.13 159.69,-116.13 153.69,-110.13 153.69,-104.13 153.69,-104.13 153.69,-92.13 153.69,-92.13 153.69,-86.13 159.69,-80.13 165.69,-80.13 165.69,-80.13 237.94,-80.13 237.94,-80.13 243.94,-80.13 249.94,-86.13 249.94,-92.13 249.94,-92.13 249.94,-104.13 249.94,-104.13 249.94,-110.13 243.94,-116.13 237.94,-116.13"/>
+<text xml:space="preserve" text-anchor="middle" x="201.81" y="-98.93" font-family="Helvetica,sans-Serif" font-size="11.00">mean of squares</text>
+<text xml:space="preserve" text-anchor="middle" x="201.81" y="-87.68" font-family="Helvetica,sans-Serif" font-size="11.00">L = ΣE² / (B·O)</text>
+</g>
+<g id="edge14" class="edge">
+<path fill="none" stroke="#1a202c" d="M201.81,-162.42C201.81,-151.4 201.81,-137.74 201.81,-125.94"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="204.61,-126.07 201.81,-118.07 199.01,-126.07 204.61,-126.07"/>
+</g>
+<g id="node4" class="node">
+<ellipse fill="#fefcbf" stroke="#4a5568" cx="180.81" cy="-509.47" rx="29.34" ry="21.57"/>
+<text xml:space="preserve" text-anchor="middle" x="180.81" y="-510.27" font-family="Helvetica,sans-Serif" font-size="11.00">W2</text>
+<text xml:space="preserve" text-anchor="middle" x="180.81" y="-499.02" font-family="Helvetica,sans-Serif" font-size="11.00">[O,H]</text>
+</g>
+<g id="edge8" class="edge">
+<path fill="none" stroke="#1a202c" d="M180.81,-487.69C180.81,-476.67 180.81,-463.01 180.81,-451.21"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="183.61,-451.34 180.81,-443.34 178.01,-451.34 183.61,-451.34"/>
+</g>
+<g id="node5" class="node">
+<ellipse fill="#ffffff" stroke="#4a5568" cx="111.81" cy="-834.73" rx="29.34" ry="21.57"/>
+<text xml:space="preserve" text-anchor="middle" x="111.81" y="-835.53" font-family="Helvetica,sans-Serif" font-size="11.00">W1</text>
+<text xml:space="preserve" text-anchor="middle" x="111.81" y="-824.28" font-family="Helvetica,sans-Serif" font-size="11.00">[H,D]</text>
+</g>
+<g id="edge2" class="edge">
+<path fill="none" stroke="#1a202c" d="M96.82,-816.02C91.93,-809.71 86.76,-802.37 82.81,-795.17 79.47,-789.07 76.52,-782.17 74.05,-775.63"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="76.82,-775.06 71.5,-768.46 71.54,-776.94 76.82,-775.06"/>
+</g>
+<g id="node6" class="node">
+<ellipse fill="#ffffff" stroke="#4a5568" cx="195.81" cy="-834.73" rx="27" ry="21.57"/>
+<text xml:space="preserve" text-anchor="middle" x="195.81" y="-835.53" font-family="Helvetica,sans-Serif" font-size="11.00">b1</text>
+<text xml:space="preserve" text-anchor="middle" x="195.81" y="-824.28" font-family="Helvetica,sans-Serif" font-size="11.00">[H]</text>
+</g>
+<g id="edge3" class="edge">
+<path fill="none" stroke="#1a202c" d="M187.38,-814.27C182.16,-804.22 174.58,-792.46 164.81,-784.67 153.89,-775.95 140.62,-769.31 127.4,-764.29"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="128.64,-761.76 120.17,-761.73 126.77,-767.04 128.64,-761.76"/>
+</g>
+<g id="node7" class="node">
+<ellipse fill="#ffffff" stroke="#4a5568" cx="306.81" cy="-509.47" rx="27" ry="21.57"/>
+<text xml:space="preserve" text-anchor="middle" x="306.81" y="-510.27" font-family="Helvetica,sans-Serif" font-size="11.00">b2</text>
+<text xml:space="preserve" text-anchor="middle" x="306.81" y="-499.02" font-family="Helvetica,sans-Serif" font-size="11.00">[O]</text>
+</g>
+<g id="edge9" class="edge">
+<path fill="none" stroke="#1a202c" d="M294.56,-489.76C287.2,-479.69 277.09,-467.67 265.81,-459.4 257.83,-453.55 248.73,-448.48 239.52,-444.15"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="240.89,-441.7 232.44,-441.01 238.61,-446.81 240.89,-441.7"/>
+</g>
+<g id="node8" class="node">
+<ellipse fill="#ffffff" stroke="#4a5568" cx="277.81" cy="-346.83" rx="28.81" ry="21.57"/>
+<text xml:space="preserve" text-anchor="middle" x="277.81" y="-347.63" font-family="Helvetica,sans-Serif" font-size="11.00">T</text>
+<text xml:space="preserve" text-anchor="middle" x="277.81" y="-336.38" font-family="Helvetica,sans-Serif" font-size="11.00">[B,O]</text>
+</g>
+<g id="node15" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M221.44,-278.77C221.44,-278.77 182.19,-278.77 182.19,-278.77 176.19,-278.77 170.19,-272.77 170.19,-266.77 170.19,-266.77 170.19,-254.77 170.19,-254.77 170.19,-248.77 176.19,-242.77 182.19,-242.77 182.19,-242.77 221.44,-242.77 221.44,-242.77 227.44,-242.77 233.44,-248.77 233.44,-254.77 233.44,-254.77 233.44,-266.77 233.44,-266.77 233.44,-272.77 227.44,-278.77 221.44,-278.77"/>
+<text xml:space="preserve" text-anchor="middle" x="201.81" y="-261.57" font-family="Helvetica,sans-Serif" font-size="11.00">subtract</text>
+<text xml:space="preserve" text-anchor="middle" x="201.81" y="-250.32" font-family="Helvetica,sans-Serif" font-size="11.00">E = Y − T</text>
+</g>
+<g id="edge12" class="edge">
+<path fill="none" stroke="#1a202c" d="M264.32,-327.62C257.07,-318.15 247.79,-306.55 238.81,-296.77 235.38,-293.02 231.62,-289.19 227.85,-285.51"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="229.95,-283.64 222.24,-280.12 226.07,-287.68 229.95,-283.64"/>
+</g>
+<g id="node9" class="node">
+<ellipse fill="#ffffff" stroke="#4a5568" cx="65.81" cy="-672.1" rx="28.81" ry="21.57"/>
+<text xml:space="preserve" text-anchor="middle" x="65.81" y="-672.9" font-family="Helvetica,sans-Serif" font-size="11.00">Z1</text>
+<text xml:space="preserve" text-anchor="middle" x="65.81" y="-661.65" font-family="Helvetica,sans-Serif" font-size="11.00">[B,H]</text>
+</g>
+<g id="node13" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M80.81,-604.03C80.81,-604.03 50.81,-604.03 50.81,-604.03 44.81,-604.03 38.81,-598.03 38.81,-592.03 38.81,-592.03 38.81,-580.03 38.81,-580.03 38.81,-574.03 44.81,-568.03 50.81,-568.03 50.81,-568.03 80.81,-568.03 80.81,-568.03 86.81,-568.03 92.81,-574.03 92.81,-580.03 92.81,-580.03 92.81,-592.03 92.81,-592.03 92.81,-598.03 86.81,-604.03 80.81,-604.03"/>
+<text xml:space="preserve" text-anchor="middle" x="65.81" y="-581.21" font-family="Helvetica,sans-Serif" font-size="11.00">tanh</text>
+</g>
+<g id="edge5" class="edge">
+<path fill="none" stroke="#1a202c" d="M65.81,-650.32C65.81,-639.3 65.81,-625.65 65.81,-613.84"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="68.61,-613.97 65.81,-605.97 63.01,-613.97 68.61,-613.97"/>
+</g>
+<g id="node10" class="node">
+<ellipse fill="#ffffff" stroke="#4a5568" cx="180.81" cy="-346.83" rx="28.81" ry="21.57"/>
+<text xml:space="preserve" text-anchor="middle" x="180.81" y="-347.63" font-family="Helvetica,sans-Serif" font-size="11.00">Y</text>
+<text xml:space="preserve" text-anchor="middle" x="180.81" y="-336.38" font-family="Helvetica,sans-Serif" font-size="11.00">[B,O]</text>
+</g>
+<g id="edge11" class="edge">
+<path fill="none" stroke="#1a202c" d="M185.9,-325.48C188.69,-314.29 192.2,-300.26 195.2,-288.23"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="197.9,-289 197.12,-280.56 192.47,-287.64 197.9,-289"/>
+</g>
+<g id="node11" class="node">
+<ellipse fill="#ffffff" stroke="#4a5568" cx="201.81" cy="-21.57" rx="31.47" ry="21.57"/>
+<text xml:space="preserve" text-anchor="middle" x="201.81" y="-22.37" font-family="Helvetica,sans-Serif" font-size="11.00">L</text>
+<text xml:space="preserve" text-anchor="middle" x="201.81" y="-11.12" font-family="Helvetica,sans-Serif" font-size="11.00">scalar</text>
+</g>
+<g id="edge22" class="edge">
+<path fill="none" stroke="#c53030" stroke-dasharray="5,2" d="M75.33,-767.06C81.5,-778.33 89.67,-793.26 96.71,-806.13"/>
+<polygon fill="#c53030" stroke="#c53030" points="94.12,-807.23 100.42,-812.91 99.04,-804.55 94.12,-807.23"/>
+<text xml:space="preserve" text-anchor="middle" x="124.69" y="-785.67" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#c53030">dW1 = dZ1^T X</text>
+</g>
+<g id="edge23" class="edge">
+<path fill="none" stroke="#c53030" stroke-dasharray="5,2" d="M118.86,-751.91C143.64,-755.8 171.44,-764.76 188.81,-784.67 193.41,-789.93 195.79,-796.78 196.9,-803.69"/>
+<polygon fill="#c53030" stroke="#c53030" points="194.1,-803.77 197.59,-811.49 199.68,-803.28 194.1,-803.77"/>
+<text xml:space="preserve" text-anchor="middle" x="226.55" y="-785.67" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#c53030">db1 = Σ_b dZ1</text>
+</g>
+<g id="edge4" class="edge">
+<path fill="none" stroke="#1a202c" d="M65.81,-730.37C65.81,-722.33 65.81,-712.52 65.81,-703.3"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="68.61,-703.53 65.81,-695.53 63.01,-703.53 68.61,-703.53"/>
+</g>
+<g id="edge6" class="edge">
+<path fill="none" stroke="#1a202c" d="M65.81,-567.74C65.81,-559.69 65.81,-549.88 65.81,-540.67"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="68.61,-540.9 65.81,-532.9 63.01,-540.9 68.61,-540.9"/>
+</g>
+<g id="edge21" class="edge">
+<path fill="none" stroke="#c53030" stroke-dasharray="5,2" d="M74.29,-604.44C76.55,-609.94 78.68,-616.12 79.81,-622.03 81.13,-628.85 80.32,-636.09 78.58,-642.86"/>
+<polygon fill="#c53030" stroke="#c53030" points="75.98,-641.8 76.19,-650.27 81.31,-643.52 75.98,-641.8"/>
+<text xml:space="preserve" text-anchor="middle" x="125.09" y="-623.03" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#c53030">dZ1 = dA ⊙ (1 − A²)</text>
+</g>
+<g id="edge18" class="edge">
+<path fill="none" stroke="#c53030" stroke-dasharray="5,2" d="M148.3,-441.78C139.17,-447.08 129.4,-453.16 120.81,-459.4 110.09,-467.19 99.04,-476.71 89.68,-485.29"/>
+<polygon fill="#c53030" stroke="#c53030" points="87.94,-483.08 84,-490.58 91.76,-487.18 87.94,-483.08"/>
+<text xml:space="preserve" text-anchor="middle" x="147.81" y="-460.4" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#c53030">dA = dY W2</text>
+</g>
+<g id="edge19" class="edge">
+<path fill="none" stroke="#c53030" stroke-dasharray="5,2" d="M189.29,-441.81C191.55,-447.31 193.68,-453.49 194.81,-459.4 196.13,-466.22 195.32,-473.46 193.58,-480.23"/>
+<polygon fill="#c53030" stroke="#c53030" points="190.98,-479.16 191.19,-487.64 196.31,-480.88 190.98,-479.16"/>
+<text xml:space="preserve" text-anchor="middle" x="227.71" y="-460.4" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#c53030">dW2 = dY^T A</text>
+</g>
+<g id="edge20" class="edge">
+<path fill="none" stroke="#c53030" stroke-dasharray="5,2" d="M231.23,-430.22C252.05,-434.99 274.96,-443.66 290.81,-459.4 296.09,-464.64 299.63,-471.63 302,-478.7"/>
+<polygon fill="#c53030" stroke="#c53030" points="299.21,-479.12 304.02,-486.1 304.61,-477.64 299.21,-479.12"/>
+<text xml:space="preserve" text-anchor="middle" x="327.72" y="-460.4" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#c53030">db2 = Σ_b dY</text>
+</g>
+<g id="edge10" class="edge">
+<path fill="none" stroke="#1a202c" d="M180.81,-405.11C180.81,-397.06 180.81,-387.25 180.81,-378.04"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="183.61,-378.27 180.81,-370.27 178.01,-378.27 183.61,-378.27"/>
+</g>
+<g id="edge13" class="edge">
+<path fill="none" stroke="#1a202c" d="M201.81,-242.47C201.81,-234.43 201.81,-224.62 201.81,-215.4"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="204.61,-215.63 201.81,-207.63 199.01,-215.63 204.61,-215.63"/>
+</g>
+<g id="edge17" class="edge">
+<path fill="none" stroke="#c53030" stroke-dasharray="5,2" d="M199.94,-279.21C198.82,-287.75 197.15,-298.13 194.81,-307.27 194.01,-310.4 193.06,-313.63 192.02,-316.83"/>
+<polygon fill="#c53030" stroke="#c53030" points="189.44,-315.74 189.48,-324.22 194.73,-317.57 189.44,-315.74"/>
+<text xml:space="preserve" text-anchor="middle" x="215.01" y="-297.77" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#c53030">dY = dE</text>
+</g>
+<g id="edge16" class="edge">
+<path fill="none" stroke="#c53030" stroke-dasharray="5,2" d="M210.29,-116.54C212.55,-122.04 214.68,-128.22 215.81,-134.13 217.13,-140.95 216.32,-148.19 214.58,-154.96"/>
+<polygon fill="#c53030" stroke="#c53030" points="211.98,-153.9 212.19,-162.37 217.31,-155.62 211.98,-153.9"/>
+<text xml:space="preserve" text-anchor="middle" x="247.59" y="-135.13" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#c53030">dE = 2E/(B·O)</text>
+</g>
+<g id="edge15" class="edge">
+<path fill="none" stroke="#1a202c" d="M201.81,-79.84C201.81,-71.79 201.81,-61.98 201.81,-52.77"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="204.61,-53 201.81,-45 199.01,-53 204.61,-53"/>
+</g>
+</g>
+</svg>

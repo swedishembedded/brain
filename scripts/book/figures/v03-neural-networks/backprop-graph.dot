@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+//
+// The computational graph of the chapter's two-layer network. Black arrows are
+// the forward pass, red dashed arrows are the backward pass; each red arrow is
+// labelled with the gradient it carries. Shaded values are the ones the
+// backward pass reads again, so the forward pass must save them.
+//
+// Swedish Embedded AB implements solutions for explaining and verifying
+// gradient computation in neural network training. If your team needs
+// expertise in backpropagation, you can procure our services by sending an
+// email to info@swedishembedded.com.
+digraph backprop {
+  rankdir=TB;
+  nodesep=0.35; ranksep=0.5;
+  node [shape=ellipse, style=filled, fillcolor="#ffffff", color="#4a5568"];
+  edge [color="#1a202c", arrowsize=0.8];
+
+  // saved values
+  X  [label="X\n[B,D]", fillcolor="#fefcbf"];
+  A  [label="A\n[B,H]", fillcolor="#fefcbf"];
+  E  [label="E\n[B,O]", fillcolor="#fefcbf"];
+  W2 [label="W2\n[O,H]", fillcolor="#fefcbf"];
+
+  // other values
+  W1 [label="W1\n[H,D]"];
+  b1 [label="b1\n[H]"];
+  b2 [label="b2\n[O]"];
+  T  [label="T\n[B,O]"];
+  Z1 [label="Z1\n[B,H]"];
+  Y  [label="Y\n[B,O]"];
+  L  [label="L\nscalar"];
+
+  // operations
+  node [shape=box, style="rounded,filled", fillcolor="#e2e8f0"];
+  lin1 [label="linear\nZ1 = X W1^T + b1"];
+  act  [label="tanh"];
+  lin2 [label="linear\nY = A W2^T + b2"];
+  sub  [label="subtract\nE = Y − T"];
+  mse  [label="mean of squares\nL = ΣE² / (B·O)"];
+
+  // forward pass
+  X -> lin1; W1 -> lin1; b1 -> lin1; lin1 -> Z1; Z1 -> act; act -> A;
+  A -> lin2; W2 -> lin2; b2 -> lin2; lin2 -> Y; Y -> sub; T -> sub;
+  sub -> E; E -> mse; mse -> L;
+
+  // backward pass
+  edge [color="#c53030", fontcolor="#c53030", style=dashed, fontsize=9, constraint=false];
+  mse  -> E  [label="dE = 2E/(B·O)"];
+  sub  -> Y  [label="dY = dE"];
+  lin2 -> A  [label="dA = dY W2"];
+  lin2 -> W2 [label="dW2 = dY^T A"];
+  lin2 -> b2 [label="db2 = Σ_b dY"];
+  act  -> Z1 [label="dZ1 = dA ⊙ (1 − A²)"];
+  lin1 -> W1 [label="dW1 = dZ1^T X"];
+  lin1 -> b1 [label="db1 = Σ_b dZ1"];
+}

@@ -1,0 +1,31 @@
+<!-- source-sha256: 36683b8fed2d9233daa65926316fdc0b5f4f80b21cc40a4b391e5c1c589d4de8 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 340" width="560" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="340" fill="#ffffff"/>
+<line x1="86.47" y1="294" x2="86.47" y2="30" stroke="#edf2f7"/>
+<text x="86.47" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="228.82" y1="294" x2="228.82" y2="30" stroke="#edf2f7"/>
+<text x="228.82" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="371.18" y1="294" x2="371.18" y2="30" stroke="#edf2f7"/>
+<text x="371.18" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="513.53" y1="294" x2="513.53" y2="30" stroke="#edf2f7"/>
+<text x="513.53" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="58" y1="273.69" x2="542" y2="273.69" stroke="#edf2f7"/>
+<text x="52" y="277.69" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="172.15" x2="542" y2="172.15" stroke="#edf2f7"/>
+<text x="52" y="176.15" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<line x1="58" y1="70.62" x2="542" y2="70.62" stroke="#edf2f7"/>
+<text x="52" y="74.62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<rect x="58" y="30" width="484" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,38.94 60.85,44.43 63.69,49.85 66.54,55.21 69.39,60.51 72.24,65.74 75.08,70.91 77.93,76.01 80.78,81.05 83.62,86.02 86.47,90.92 89.32,95.76 92.16,100.54 95.01,105.25 97.86,109.9 100.71,114.48 103.55,119 106.4,123.45 109.25,127.83 112.09,132.16 114.94,136.41 117.79,140.6 120.64,144.73 123.48,148.79 126.33,152.79 129.18,156.72 132.02,160.59 134.87,164.39 137.72,168.12 140.56,171.8 143.41,175.4 146.26,178.94 149.11,182.42 151.95,185.83 154.8,189.18 157.65,192.46 160.49,195.68 163.34,198.83 166.19,201.92 169.04,204.94 171.88,207.9 174.73,210.79 177.58,213.61 180.42,216.38 183.27,219.07 186.12,221.7 188.96,224.27 191.81,226.77 194.66,229.21 197.51,231.58 200.35,233.89 203.2,236.13 206.05,238.31 208.89,240.42 211.74,242.47 214.59,244.45 217.44,246.37 220.28,248.22 223.13,250.01 225.98,251.73 228.82,253.38 231.67,254.98 234.52,256.5 237.36,257.97 240.21,259.36 243.06,260.7 245.91,261.96 248.75,263.16 251.6,264.3 254.45,265.37 257.29,266.38 260.14,267.32 262.99,268.2 265.84,269.01 268.68,269.76 271.53,270.44 274.38,271.06 277.22,271.61 280.07,272.1 282.92,272.52 285.76,272.88 288.61,273.17 291.46,273.4 294.31,273.56 297.15,273.66 300,273.69 302.85,273.66 305.69,273.56 308.54,273.4 311.39,273.17 314.24,272.88 317.08,272.52 319.93,272.1 322.78,271.61 325.62,271.06 328.47,270.44 331.32,269.76 334.16,269.01 337.01,268.2 339.86,267.32 342.71,266.38 345.55,265.37 348.4,264.3 351.25,263.16 354.09,261.96 356.94,260.7 359.79,259.36 362.64,257.97 365.48,256.5 368.33,254.98 371.18,253.38 374.02,251.73 376.87,250.01 379.72,248.22 382.56,246.37 385.41,244.45 388.26,242.47 391.11,240.42 393.95,238.31 396.8,236.13 399.65,233.89 402.49,231.58 405.34,229.21 408.19,226.77 411.04,224.27 413.88,221.7 416.73,219.07 419.58,216.38 422.42,213.61 425.27,210.79 428.12,207.9 430.96,204.94 433.81,201.92 436.66,198.83 439.51,195.68 442.35,192.46 445.2,189.18 448.05,185.83 450.89,182.42 453.74,178.94 456.59,175.4 459.44,171.8 462.28,168.12 465.13,164.39 467.98,160.59 470.82,156.72 473.67,152.79 476.52,148.79 479.36,144.73 482.21,140.6 485.06,136.41 487.91,132.16 490.75,127.83 493.6,123.45 496.45,119 499.29,114.48 502.14,109.9 504.99,105.25 507.84,100.54 510.68,95.76 513.53,90.92 516.38,86.02 519.22,81.05 522.07,76.01 524.92,70.91 527.76,65.74 530.61,60.51 533.46,55.21 536.31,49.85 539.15,44.43 542,38.94 544.85,33.38 547.69,27.76 550.54,22.07 553.39,16.32"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="86.47,111.23 257.29,306.18"/><circle cx="157.65" cy="192.46" r="3.5" fill="#2f855a"/><circle cx="214.59" cy="244.45" r="3.5" fill="#2f855a"/><circle cx="248.75" cy="263.16" r="3.5" fill="#2f855a"/><circle cx="269.25" cy="269.9" r="3.5" fill="#2f855a"/><circle cx="281.55" cy="272.33" r="3.5" fill="#2f855a"/><circle cx="288.93" cy="273.2" r="3.5" fill="#2f855a"/><text x="171.88" y="180.28" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" text-anchor="start">start</text><line x1="300" y1="294" x2="300" y2="30" stroke="#2f855a" stroke-dasharray="4 4"/><text x="307.12" y="60.46" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#2f855a" text-anchor="start">w* = 1.5</text></g>
+<text x="300" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">w</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">L(w)</text>
+<text x="280" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Loss of y = w x, and the slope at w = 0.5</text>
+<line x1="372" y1="40" x2="392" y2="40" stroke="#2b6cb0" stroke-width="2"/>
+<text x="398" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">L(w)</text>
+<line x1="372" y1="58" x2="392" y2="58" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="398" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">tangent, slope -8</text>
+<circle cx="382" cy="76" r="3.5" fill="#2f855a"/>
+<text x="398" y="80" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">gradient descent steps</text>
+</svg>
