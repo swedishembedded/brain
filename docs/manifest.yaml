@@ -332,6 +332,7 @@ navigation:
           - docs/book/v01-mathematics/index.md
           - docs/book/v01-mathematics/01-numbers.md
           - docs/book/v01-mathematics/02-functions.md
+          - docs/book/v01-mathematics/03-vectors.md
       - title: "Volume III: Building Neural Networks from Nothing"
         pages:
           - docs/book/v03-neural-networks/index.md
