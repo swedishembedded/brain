@@ -65,12 +65,24 @@ this port:
       the duration head driving an unnamed clip length (`predict_frames`),
       real-checkpoint defaults (`resolve_defaults`), and `v2v`/`extend`/
       `upscale` capability actions with video input blobs.
-- [ ] **GPU gates written but not yet run** - `av_dit_parity::the_audio_stream_
-      alone_is_the_joint_forward_with_the_cross_modal_attention_cut` (bit
-      equality), `lora_runtime`'s shared-cache connector adapter check, the
-      perturbation int8 test, and the precision of the two-level int8
-      activation quantization (`quant_residual_pack.wgsl`) against single-level,
-      per block and end to end, with its speed cost.
+- [x] **GPU gates** - run on two P40s: the audio-alone gate is bit-identical
+      to the joint forward with the cross-modal attention cut,
+      `lora_runtime`'s shared-cache connector adapter check, the perturbation
+      int8 tests, `block_pipeline`/`scratch_pool` and the real-checkpoint
+      residency bit-identity all pass, and the two-level int8 activation
+      raises a real block from cosine 0.9963 to 1.000000000 against fp32.
+      1280x704 x 121 frames with audio, two-stage with a start frame, runs to
+      completion on one card with its second level bounded in 1024-row passes.
+      Classifier-free guidance's two branches on two cards decode
+      bit-identically to both on one (`cfg_parallel`, real 22B checkpoint, 9
+      frames at 64x64): 39.8 s concurrent against 68.0 s sequential, warm
+      block cache.
+- [x] **Placement headroom priced in proportion to what a card holds**
+      (`gpu_core::capacity::headroom`): about 1.4 GiB less budget on a 24 GB
+      card. The same 1280x704 x 121-frame audio two-stage generation on one
+      P40, before and after: denoise 1225.8 s (55.7 s per forward) and
+      1154.8 s (52.5 s per forward) - no slowdown, the difference within run
+      noise (both runs shared the host with work on the other card).
 - [ ] **Duration head on real weights** - the head's parity test and the
       prediction path exist; the weights (`model_patches/ltx-2.5-duration-
       head-bf16.safetensors`) are not in the store here, so no prediction has
