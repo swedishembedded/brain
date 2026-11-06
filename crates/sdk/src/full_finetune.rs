@@ -279,7 +279,7 @@ impl ChatFullFineTune {
         let base_digest = base_digest(&open)?;
         model::finetune::stage_time("sdk: digest the base weights", digest_clock);
         let mut on_step = |s: &model::StepReport| {
-            on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
+            on_progress(&FineTuneProgress::of(s));
             !cancel.is_cancelled()
         };
         let control = model::FitControl { on_step: Some(&mut on_step), ..Default::default() };

@@ -191,3 +191,25 @@ fn records_with_a_teacher_context_train_on_the_teachers_per_token_advantage() {
     let record: serde_json::Value = serde_json::from_slice(&std::fs::read(outcome.record.unwrap()).unwrap()).unwrap();
     assert_eq!(record["policy_gradient"]["teacher"], "start");
 }
+
+#[test]
+fn every_step_reports_what_the_objective_measured_while_the_run_is_still_going() {
+    let model = qwen35_model_dir("pg-progress");
+    let dataset = rollouts(&model);
+    let mut frames: Vec<brain::FineTuneProgress> = Vec::new();
+    let outcome = policy_gradient(&model, &dataset, &model.join("run"), PolicyGradientConfig::default())
+        .run_with(&brain::CancelToken::default(), |p| frames.push(p.clone()))
+        .expect("the run");
+    let stats = outcome.policy_gradient.expect("statistics").stats;
+    assert_eq!(frames.len(), 10, "one frame per optimiser step");
+    for (frame, step) in frames.iter().zip(&stats.steps) {
+        let metric = |name: &str| frame.metrics.iter().find(|(n, _)| n == name).map(|(_, v)| *v).unwrap_or_else(|| panic!("step {}: no metric {name}: {:?}", frame.step, frame.metrics));
+        // The frame is the step's own statistics, not the run's final ones.
+        assert_eq!(metric("pg_loss"), step.loss);
+        assert_eq!(metric("pg_clip_fraction"), step.clip_fraction);
+        assert_eq!(metric("pg_ratio_mean"), step.ratio_mean);
+        assert_eq!(metric("pg_mean_advantage"), step.mean_advantage);
+        assert_eq!(Some(metric("pg_kl")), step.kl);
+        assert_eq!(metric("pg_scoring_seconds"), step.scoring_seconds);
+    }
+}

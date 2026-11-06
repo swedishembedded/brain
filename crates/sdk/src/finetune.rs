@@ -987,7 +987,7 @@ impl ChatFineTune {
         let mut step_work: Vec<model::StepWork> = Vec::new();
         let mut on_step = |s: &model::StepReport| {
             step_work.push(s.work);
-            on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
+            on_progress(&FineTuneProgress::of(s));
             !cancel.is_cancelled()
         };
         let snapshot_card = format!("{base_id}:local:chat:step");
@@ -1122,7 +1122,7 @@ impl ChatFineTune {
 }
 
 /// One completed optimizer step.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FineTuneProgress {
     /// Steps completed in the whole run (a resumed run continues the count).
     pub step: u32,
@@ -1130,7 +1130,22 @@ pub struct FineTuneProgress {
     /// This step's training loss.
     pub loss: f32,
     pub lr: f32,
+    /// The global gradient norm of the step, when the model reports it.
+    pub grad_norm: Option<f32>,
+    /// What the objective measured in this step, by name: a policy-gradient run's `pg_loss`, `pg_clip_fraction`,
+    /// `pg_kl`, `pg_ratio_mean`/`min`/`max`, `pg_mean_advantage`, the teacher-advantage statistics of a
+    /// self-distillation run and `pg_scoring_seconds` (the time the step spent scoring examples it drew for the
+    /// first time). Empty for a supervised run.
+    pub metrics: Vec<(String, f32)>,
 }
+
+impl FineTuneProgress {
+    /// The progress of the optimiser step `s` just completed.
+    pub(crate) fn of(s: &model::StepReport) -> FineTuneProgress {
+        FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr, grad_norm: s.grad_norm, metrics: s.metrics.iter().map(|(name, value)| (name.to_string(), *value)).collect() }
+    }
+}
+
 
 /// How a fine-tune ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

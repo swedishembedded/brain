@@ -356,7 +356,7 @@ impl PreferenceFineTune {
         });
         std::fs::create_dir_all(out_dir).map_err(|e| Error::Backend(format!("{}: {e}", out_dir.display())))?;
         let mut on_step = |s: &model::StepReport| {
-            on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
+            on_progress(&FineTuneProgress::of(s));
             !cancel.is_cancelled()
         };
         let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None, grad_sync: None };

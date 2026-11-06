@@ -1236,7 +1236,7 @@ fn rate(tokens: u64, secs: f64) -> f64 {
 
 /// One completed optimizer step, as [`fit_controlled`] hands it to
 /// [`FitControl::on_step`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StepReport {
     /// Steps completed so far in the whole run, this one included (1-based,
     /// and global: a resumed run continues the count).
@@ -1252,6 +1252,9 @@ pub struct StepReport {
     pub grad_norm: Option<f32>,
     /// What the step measured: its phases' seconds, its token accounting and its device memory.
     pub work: StepWork,
+    /// What the objective measured in the step, by name ([`Objective::metrics`]): the policy-gradient
+    /// objective's clip fraction, KL and importance ratio, for example. Empty for an objective with none.
+    pub metrics: Vec<(&'static str, f32)>,
 }
 
 /// What a caller controls about a [`fit_controlled`] run beyond [`FitOpts`].
@@ -1944,7 +1947,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         }
 
         let keep_going = match control.on_step.as_mut() {
-            Some(on_step) => on_step(&StepReport { step: completed, steps: opts.steps, loss, lr, grad_norm, work }),
+            Some(on_step) => on_step(&StepReport { step: completed, steps: opts.steps, loss, lr, grad_norm, work, metrics: obj.metrics() }),
             None => true,
         };
         if let Some(state) = control.state {

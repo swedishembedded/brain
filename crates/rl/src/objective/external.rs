@@ -818,7 +818,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
 
     fn metrics(&self) -> Vec<(&'static str, f32)> {
         let Some(last) = self.stats.steps.last() else { return Vec::new() };
-        let mut m = vec![("pg_loss", last.loss), ("pg_clip_fraction", last.clip_fraction), ("pg_ratio_mean", last.ratio_mean), ("pg_ratio_min", last.ratio_min), ("pg_ratio_max", last.ratio_max), ("pg_mean_advantage", last.mean_advantage)];
+        let mut m = vec![("pg_loss", last.loss), ("pg_clip_fraction", last.clip_fraction), ("pg_ratio_mean", last.ratio_mean), ("pg_ratio_min", last.ratio_min), ("pg_ratio_max", last.ratio_max), ("pg_mean_advantage", last.mean_advantage), ("pg_scoring_seconds", last.scoring_seconds)];
         if let Some(kl) = last.kl {
             m.push(("pg_kl", kl));
         }
