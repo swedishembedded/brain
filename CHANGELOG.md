@@ -20,6 +20,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 - An idle, slow-header or slowly uploading connection is closed (10 s for a request head, 5 min for a body), each surface holds at most 1024 connections, and media in requests is decoded off the async runtime, at most four at a time, within the request's pixel budget checked from each image's header
 - A video sent for editing is read by brain's own demuxers and decoder only, never `ffmpeg`, within a pixel budget; the MP4 reader no longer loops forever or allocates by the counts a file declares, and the AV1 decoder refuses frames over 36 megapixels before allocating them
 - The event socket of `brain forecast serve` is owner-only and refuses lines over 64 MiB; a `camera_frame` path is read only when a detector is loaded
+- Overflow checks are on in release builds of every crate that parses bytes brain did not write
 
 ## [5.1.0] - 2026-11-06
 

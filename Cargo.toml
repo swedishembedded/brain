@@ -565,6 +565,41 @@ lto = "thin"
 # 1-3 % host throughput on the FP8 27B serving sweep (c=4/16), so binaries that
 # are measured or served stay on `release`; correctness tests do not need it.
 # `make test` and its lanes build here (target/fast).
+# Overflow checks stay on in the crates that read bytes brain did not write:
+# requests (`apiserve`, `dbus`, `events`, `server`, `capability`), media
+# (`videocodec`, `audio`, `imaging`) and files fetched or handed over
+# (`checkpoint`, `modelstore`, `modelref`, `trainjob`, `data`). A size a
+# client or a file chose that wraps a sum or a product would otherwise slip
+# past the bound it was checked against; with the checks it panics, inside
+# the request that sent it. Compute kernels and model code are not listed:
+# their arithmetic is on sizes brain derived itself.
+[profile.release.package.brain-apiserve]
+overflow-checks = true
+[profile.release.package.brain-dbus]
+overflow-checks = true
+[profile.release.package.brain-events]
+overflow-checks = true
+[profile.release.package.brain-server]
+overflow-checks = true
+[profile.release.package.brain-capability]
+overflow-checks = true
+[profile.release.package.brain-videocodec]
+overflow-checks = true
+[profile.release.package.brain-audio]
+overflow-checks = true
+[profile.release.package.brain-imaging]
+overflow-checks = true
+[profile.release.package.brain-checkpoint]
+overflow-checks = true
+[profile.release.package.brain-modelstore]
+overflow-checks = true
+[profile.release.package.brain-modelref]
+overflow-checks = true
+[profile.release.package.brain-trainjob]
+overflow-checks = true
+[profile.release.package.brain-data]
+overflow-checks = true
+
 [profile.fast]
 inherits = "release"
 lto = "off"
