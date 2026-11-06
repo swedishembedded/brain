@@ -260,7 +260,7 @@ const WGPU_MAX_REPORTABLE_BINDING_BYTES: u64 = 2047 * (1 << 20);
 /// host tier double-booked the GPU it was falling back FROM instead of
 /// relieving it, and panicked with a `wgpu` OOM on a thread literally named
 /// `brain-lane-Cpu`.
-pub(crate) fn on_device<R>(device: Device, f: impl FnOnce() -> R) -> Result<R, String> {
+pub fn on_device<R>(device: Device, f: impl FnOnce() -> R) -> Result<R, String> {
     match device {
         Device::Gpu(i) => gpu_core::devices::with_gpu(i, f),
         Device::Cpu => Ok(gpu_core::devices::with_host_tier(f)),

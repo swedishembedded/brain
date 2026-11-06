@@ -25,5 +25,5 @@ pub mod gguf_import;
 pub mod machine;
 pub mod model_dir;
 
-pub use executor::{build_executor, ServeKnobs, Serving};
+pub use executor::{build_executor, ServeKnobs, Serving, TrainKnobs};
 pub use machine::Machine;

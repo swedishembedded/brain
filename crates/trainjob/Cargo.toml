@@ -1,0 +1,37 @@
+[package]
+name = "brain-trainjob"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Training as a served workload: a chat fine-tune (supervised or policy-gradient) that runs inside the serving process as a residency-managed job, its dataset and trained adapter moved by file descriptor or by digest in a content-addressed artifact store the operator configures."
+
+[lib]
+name = "trainjob"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+brain-residency.workspace = true
+brain-modelref.workspace = true
+brain-modelstore.workspace = true
+brain-catalog.workspace = true
+brain = { workspace = true, features = ["study"] }
+blake3.workspace = true
+libc.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+brain-qwen35.workspace = true
+brain-checkpoint.workspace = true
+brain-data.workspace = true
+brain-dbus.workspace = true
+nix = { version = "0.29", features = ["socket", "uio"] }
+zbus = { workspace = true }
+tokio = { workspace = true }
+brain-testutil.workspace = true
+brain-apiserve.workspace = true
+axum.workspace = true
+tower.workspace = true

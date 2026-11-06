@@ -66,7 +66,10 @@ and a stream you read progress/blob/done frames from as they happen, e.g.:
 ```
 
 A slow subscriber's frames are dropped rather than stalling inference for everyone
-else.
+else. A `progress` frame carries the action's structured frame in `event`: the training
+job (`brain/train`, see [Training as a served job](../../guides/training/served-training.md))
+reports each optimiser step there, takes its datasets as input descriptors and returns
+the adapter as an output descriptor.
 
 ### `Cancel` — cooperative cancellation
 

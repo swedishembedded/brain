@@ -179,6 +179,30 @@ them, so treat all request input as hostile.
       verifier learns to emit whatever the verifier rewards, including code
       that escapes a weak sandbox - treat every completion as hostile code.
 
+## The training job surface (`brain/train`, `--training`)
+
+Training is a model of the same server, so every item above applies to it; these are the parts specific to it.
+`crates/trainjob/tests/it/{door,http,dbus}.rs` and `tests/e2e/api_conformance.bats` pin each.
+
+- [ ] A caller names no path. The base is a `<vendor>/<repo>` parsed by `ModelRef::parse` (separators, dot
+      segments and adapter suffixes refused) and resolved in the model store; a dataset is a blob of the call or a
+      digest, which parses from exactly 64 lowercase hex digits and so cannot spell a path.
+- [ ] The artifact store is the one place a client puts bytes the server reads. A file is opened by digest with
+      `O_NOFOLLOW | O_NONBLOCK`, must be a regular file, is size-bounded, and is copied into the job's private
+      directory while it is hashed; one that does not hash to its name is removed and refused. What a remote
+      caller is told never names a path of this machine.
+- [ ] Every scalar is bounded by the action's spec (steps, rank, row length, accumulation...), the `data` document
+      is at most 64 KiB, parsed with unknown fields refused, at most 8 replay sets, and the evaluations of a run
+      are bounded so the report fits one datagram.
+- [ ] A request that could never run (unknown base, digest not in the store, objective-specific settings on the
+      wrong objective, a run larger than the largest card) is refused at the door (`ResidentModel::check_job`, a 400
+      or a bus error) before a job exists or a card is claimed; a run never evicts a serving instance to make room
+      for something that then fails.
+- [ ] The event stream is a per-caller view of the job like its status and result (another caller gets 404), is
+      bounded (4096 frames kept, 8 followers a job) and carries the run's statistics and refusals, not data.
+- [ ] Anyone holding the key can occupy a card with a run: training is off unless the operator passes
+      `--training`, and its admission obeys the surface's deadline (429), but there is no per-caller quota.
+
 ## When to run
 - Adding/removing/altering any route, handler, auth path, error shape, admission
   policy, or D-Bus method.

@@ -157,6 +157,25 @@ PROCESS LIFECYCLE
 SERVING OPTIONS
   --models-dir DIR       the model store every served model is resolved from
                          (else $BRAIN_MODELS_DIR, else $XDG_DATA_HOME/brain/models)
+  --training             serve training as a job: the model `brain/train`, action
+                         `train`, fine-tunes a chat model's LoRA adapter (supervised, or
+                         by the clipped policy gradient on rollout records, with teacher
+                         contexts for self-distillation) in this process, on the cards
+                         serving shares. Reached like any action: D-Bus `Subscribe`
+                         (step frames, `Cancel`) and HTTP `POST /v1/jobs` with
+                         `GET /v1/jobs/{id}/events`, behind the same keys. The base is
+                         named by model id in --models-dir. It takes a card by evicting
+                         idle serving instances, never one a request is running on: with
+                         every candidate card busy it waits for the admit deadline and is
+                         then refused (HTTP 429), and a run needing more than the
+                         largest card holds is refused at once. OFF unless given.
+  --artifact-store DIR   (with --training) the content-addressed store datasets are named
+                         in and trained adapters are published to: files named by the
+                         blake3 of their bytes, 64 lowercase hex digits, verified when a
+                         job reads them. DIR must exist; it may be on a filesystem other
+                         nodes share, which is how a dataset reaches this node. Without
+                         it a job takes its datasets and returns its adapter by file
+                         descriptor over D-Bus only.
   --api-keys-out FILE    write {\"openai\":\"sk-brain-…\", …} as JSON, mode 0600
   --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2)
   --admit-deadline-ms N  how long a request may wait to START (be claimed onto a
@@ -581,6 +600,9 @@ pub fn run_serve(args: &[String]) {
     // and every architecture resolver (`--models-dir`, else BRAIN_MODELS_DIR /
     // XDG default; see model_dir::resolve).
     let mut models_dir: Option<String> = None;
+    // `--training` / `--artifact-store DIR`: serve the training workload, and the store it exchanges bulk data through.
+    let mut training = false;
+    let mut artifact_store: Option<String> = None;
     // Opt-in continuous-learning hot swap (`--watch-adapters DIR`): watch DIR
     // for a promoted LoRA adapter and point the served Qwen3 at it without a
     // restart. `None` (the default) spawns no watcher at all -- a server that
@@ -684,6 +706,8 @@ pub fn run_serve(args: &[String]) {
             "--status" => do_status = true,
             "--reserve-gb" => dbus_reserve_gb = parsed(args, &mut i, "--reserve-gb"),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
+            "--training" => training = true,
+            "--artifact-store" => artifact_store = Some(val(args, &mut i, "--artifact-store")),
             "--watch-adapters" => watch_adapters = Some(val(args, &mut i, "--watch-adapters")),
             "--adapter" => adapter = Some(val(args, &mut i, "--adapter")),
             "--adapter-manifest" => adapter_manifest = Some(val(args, &mut i, "--adapter-manifest")),
@@ -841,6 +865,29 @@ pub fn run_serve(args: &[String]) {
         None => brain_shutdown::ready::Gate::disabled(),
     };
 
+    // The training workload, with its artifact store opened now: a mistyped directory ends the start, it is not
+    // discovered by the first job.
+    let train = match (training, artifact_store) {
+        (false, Some(_)) => {
+            eprintln!("brain serve: --artifact-store is the store of the training workload; add --training");
+            std::process::exit(2);
+        }
+        (false, None) => None,
+        (true, dir) => {
+            if stdio {
+                eprintln!("brain serve: --training applies to the HTTP and D-Bus surfaces; the stdio controller serves none. Add --openai, --anthropic, --openrouter or --dbus.");
+                std::process::exit(2);
+            }
+            let artifact_store = dir.map(|dir| {
+                trainjob::ArtifactStore::open(Path::new(&dir)).unwrap_or_else(|e| {
+                    eprintln!("brain serve: --artifact-store {dir}: {e}");
+                    std::process::exit(2);
+                })
+            });
+            Some(serving::TrainKnobs { artifact_store })
+        }
+    };
+
     // Any surface replaces the stdio loop: it serves every registered model
     // over HTTP and/or `com.swedishembedded.Brain1` until Ctrl-C.
     if !stdio {
@@ -861,7 +908,7 @@ pub fn run_serve(args: &[String]) {
             ready,
             deadlines,
             adapter_mode,
-            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, decision: decision_cfg, ocr: ocr_cfg },
+            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, decision: decision_cfg, ocr: ocr_cfg, train },
         });
     }
 

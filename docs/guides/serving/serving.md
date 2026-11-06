@@ -9,7 +9,8 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
             [--dbus] [--models-dir DIR] [--api-keys-out FILE] \
             [--api-key-file FILE] [--runtime-dir DIR] [--ready-file PATH] \
             [--checkpoint PATH [--tokenizer PATH]] \
-            [--adapter FILE | --adapter-manifest FILE | --watch-adapters DIR]
+            [--adapter FILE | --adapter-manifest FILE | --watch-adapters DIR] \
+            [--training [--artifact-store DIR]]
 ```
 
 With no surface flag, `brain serve` serves the OpenAI-compatible API on
@@ -37,6 +38,10 @@ With no surface flag, `brain serve` serves the OpenAI-compatible API on
 - `--checkpoint PATH`, `--tokenizer PATH` - also serve this Qwen3 checkpoint
   (file or repo directory), with this `tokenizer.json` when none is beside it.
 - `--ready-file PATH` - see **Readiness** below.
+- `--training`, `--artifact-store DIR` - also serve training as a job (`brain/train`)
+  on the cards serving shares, with datasets and adapters moved by file
+  descriptor or by digest in `DIR`. Off unless given. See
+  [Training as a served job](../training/served-training.md).
 - `--adapter FILE`, `--adapter-manifest FILE`, `--watch-adapters DIR`,
   `--adapter-slots N`, `--adapter-rank-cap R`, `--adapter-targets LIST` - see
   **Serving LoRA adapters** below. At most one of the first three may be given.

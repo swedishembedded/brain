@@ -94,6 +94,16 @@ pub struct ServeKnobs {
     pub decision: catalog::resident_decision::DecisionServeConfig,
     /// The DeepSeek-OCR generations: the model-agnostic policy flags they honour (`--max-batch`, `--ctx`, `--kv-cache`, `--gemm`).
     pub ocr: ocrserve::OcrServeConfig,
+    /// Serve training (`brain/train`) beside the models; `None` serves none.
+    pub train: Option<TrainKnobs>,
+}
+
+/// What `brain serve --training` decides about the training workload.
+#[derive(Clone, Debug, Default)]
+pub struct TrainKnobs {
+    /// The content-addressed store datasets are named in and adapters are published to
+    /// (`--artifact-store`); `None` serves a training workload that takes and returns data by descriptor only.
+    pub artifact_store: Option<trainjob::ArtifactStore>,
 }
 
 /// Build the shared executor with every model registered, sized to the given per-GPU
@@ -130,7 +140,7 @@ pub struct ServeKnobs {
 /// resident, and `knobs.decision` naming the decision models served beyond
 /// those the store holds.
 pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std::path::Path>, policy: Policy, knobs: ServeKnobs) -> Serving {
-    let ServeKnobs { qwen: qwen_cfg, qwen35, decision, ocr } = knobs;
+    let ServeKnobs { qwen: qwen_cfg, qwen35, decision, ocr, train } = knobs;
     // Process-wide, before any OCR model is built: the models read it when they load.
     ocrserve::configure(ocr);
     let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
@@ -499,6 +509,12 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     }
     if let Some(id) = qwen35_discovered_pick {
         qwen35_discovered.retain(|q| q.manifest().model == id);
+    }
+    // Training is a workload of this same executor, so it takes cards from the models above and gives them back:
+    // see `trainjob::resident` for the policy. One run per card that serving may use.
+    if let Some(train) = train {
+        let largest = gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max();
+        exec.register(trainjob::resident(trainjob::TrainConfig { models_dir: models_dir.map(std::path::Path::to_path_buf), store: train.artifact_store, work_root: trainjob::job::default_work_root(), largest_card_bytes: largest, devices: gpus.len().max(1) }));
     }
     Serving { executor: exec, qwen, qwen35: qwen35_discovered }
 }

@@ -35,6 +35,7 @@ brain-gguf.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
 brain-apiserve.workspace = true
+brain-trainjob.workspace = true
 brain-residency.workspace = true
 brain-memauth.workspace = true
 brain-gpu-core.workspace = true

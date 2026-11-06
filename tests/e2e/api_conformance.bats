@@ -54,10 +54,14 @@ setup_file() {
   # whatever an operator has downloaded would only make startup slower.
   export MODELS_DIR="$CONF_DIR/models"
   mkdir -p "$MODELS_DIR"
+  # The training workload and its artifact store: served beside the mock so the job surface is audited with the rest.
+  export ARTIFACTS="$CONF_DIR/artifacts"
+  mkdir -p "$ARTIFACTS"
 
   # ONE server, all three surfaces, CPU-only, backed by the mock. Record its PID.
   BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve \
     --models-dir "$MODELS_DIR" \
+    --training --artifact-store "$ARTIFACTS" \
     --openai "$OPENAI_PORT" \
     --anthropic "$ANTHROPIC_PORT" \
     --openrouter "$OPENROUTER_PORT" \
@@ -663,6 +667,66 @@ get_url() {
   # A chat body carrying it is answered by the model the caller named, as if it were absent.
   post_json openai /v1/chat/completions '{"model":"brain/mock","__adapter":"Qwen/Qwen3-0.6B:lab:canary:v1","messages":[{"role":"user","content":"hi"}]}'
   [ "$STATUS" -eq 200 ]
+}
+
+# ----------------------------------------------------------- training jobs
+# `brain/train` is a model of the same server: its job surface (`/v1/jobs`, `.../events`) is behind the same
+# key, takes no field it does not define and no path, and refuses what could never run before it starts.
+
+TRAIN_DIGEST=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+train_body() { # train_body <extra params json fragment, with a leading comma or empty>
+  printf '{"model":"brain/train","action":"train","params":{"base":"nobody/nothing","data":"{\\"train\\":{\\"digest\\":\\"%s\\"}}"%s}}' "$TRAIN_DIGEST" "$1"
+}
+
+@test "training: it is offered like any model, with no param that names a path" {
+  get_url openai /v1/capabilities
+  [ "$STATUS" -eq 200 ]
+  jq -e '[.data[] | select(.model=="brain/train")] | length == 1' "$RESP"
+  jq -e '[.data[] | select(.model=="brain/train") | .params[].name] | all(. != "weights" and . != "out_dir" and . != "path" and . != "models_dir" and . != "save")' "$RESP"
+}
+
+@test "security: the job event stream needs the key, and another id is a 404 not a hint" {
+  local id=00000000-0000-0000-0000-000000000000 st
+  for path in "/v1/jobs/$id/events" "/v1/jobs/nope/events" "/v1/jobs/$id"; do
+    st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$(base openai)$path")
+    [ "$st" -eq 401 ]
+    st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" "$(base openai)$path")
+    [ "$st" -eq 401 ]
+  done
+  get_url openai "/v1/jobs/$id/events"
+  [ "$STATUS" -eq 404 ]
+  get_url openai "/v1/jobs/nope/events"
+  [ "$STATUS" -eq 404 ]
+}
+
+@test "security: a training job is refused, before it starts, for a field, a path or a digest the API does not define" {
+  post_json openai /v1/jobs "$(train_body ',"out_dir":"/tmp/evil"')"
+  [ "$STATUS" -eq 400 ]; grep -q "unknown param" "$RESP"
+  post_json openai /v1/jobs '{"model":"brain/train","action":"train","params":{},"path":"/etc/passwd"}'
+  [ "$STATUS" -eq 400 ]
+  post_json openai /v1/jobs '{"model":"brain/train","action":"train","params":{"base":"x/y","data":"{\"train\":{\"digest\":\"../../etc/passwd\"}}"}}'
+  [ "$STATUS" -eq 400 ]; grep -q "64 lowercase hexadecimal" "$RESP"
+  post_json openai /v1/jobs '{"model":"brain/train","action":"train","params":{"base":"x/y","data":"{\"train\":{\"path\":\"/etc/passwd\"}}"}}'
+  [ "$STATUS" -eq 400 ]
+  # A well-formed digest the store does not hold, and a base the model store does not hold.
+  post_json openai /v1/jobs "$(train_body '')"
+  [ "$STATUS" -eq 400 ]; grep -q "not in the artifact store" "$RESP"
+  ! grep -q "$ARTIFACTS" "$RESP"
+  # An oversized parameter is refused by the spec, not allocated.
+  post_json openai /v1/jobs "$(train_body ',"steps":99999999999')"
+  [ "$STATUS" -eq 400 ]
+  post_json openai /v1/jobs '{"model":"brain/train","action":"train","params":{"base":"x/y","data":"'"$(head -c 70000 /dev/zero | tr '\0' 'a')"'"}}'
+  [ "$STATUS" -eq 400 ]
+}
+
+@test "training: the artifact store flag needs --training, and an absent directory ends the start" {
+  run "$BRAIN" serve --models-dir "$MODELS_DIR" --artifact-store "$ARTIFACTS" --openai 0
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"add --training"* ]]
+  run "$BRAIN" serve --models-dir "$MODELS_DIR" --training --artifact-store "$CONF_DIR/typo" --openai 0
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--artifact-store"* ]]
 }
 
 # ============================================================ security audit

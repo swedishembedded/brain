@@ -29,6 +29,7 @@ navigation:
         pages:
           - docs/guides/training/labeling.md
           - docs/guides/training/lora.md
+          - docs/guides/training/served-training.md
           - docs/guides/training/forecast-finetune.md
           - docs/guides/training/federated-experts.md
       - title: Hardware

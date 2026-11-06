@@ -117,6 +117,7 @@ default-members = [
     "crates/capability",
     "crates/capability-mock",
     "crates/catalog",
+    "crates/trainjob",
     "crates/events",
     "crates/hfsm",
     "crates/wm-core",
@@ -285,6 +286,7 @@ brain-capability = { path = "crates/capability" }
 brain-capability-mock = { path = "crates/capability-mock" }
 brain-catalog = { path = "crates/catalog" }
 brain-serving = { path = "crates/serving" }
+brain-trainjob = { path = "crates/trainjob" }
 brain-loader = { path = "crates/loader" }
 # `brain` (crates/sdk), not `brain-sdk`: the public SDK facade package is
 # named literally `brain` on purpose -- see crates/sdk/Cargo.toml.
@@ -478,6 +480,8 @@ rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8", "
 futures = "0.3"
 async-stream = "0.3"
 uuid = { version = "1", features = ["v4"] }
+# Content digests of the artifact store `brain serve --artifact-store` resolves (`brain-trainjob`).
+blake3 = "1"
 rand = "0.8"
 subtle = "2"
 bytes = "1"
