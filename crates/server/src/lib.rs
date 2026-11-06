@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! One protocol, three transports.
+//! One protocol, two transports.
 //!
 //! brain has, historically, spoken two divergent JSONL dialects: the runtime's
 //! [`events::Event`] protocol on stdio, and an ad-hoc dialect on the TTS Unix
-//! socket. This crate unifies them: **every** transport — stdio, TCP, Unix
-//! socket — carries the identical `events::Event` frames, so a client's demux
+//! socket. This crate unifies them: **every** transport - stdio and the Unix
+//! socket - carries the identical `events::Event` frames, so a client's demux
 //! logic is transport-agnostic and `brain-py` can swap the underlying stream
 //! without touching its request methods.
 //!
@@ -17,19 +17,19 @@
 //! - [`pump_connection`] is the transport-independent core: greet, then read
 //!   lines and write responses until EOF, with **`catch_unwind` panic
 //!   isolation** so a panicking model closes only its own connection.
-//! - [`serve_unix`] / [`serve_tcp`] accept connections, cap concurrency, and run
-//!   one [`Session`] per connection on its own thread. Each connection builds
+//! - [`serve_unix`] accepts connections, caps concurrency, and runs one
+//!   [`Session`] per connection on its own thread. Each connection builds
 //!   its own session via a factory, so per-instance model state never crosses
 //!   threads (throughput later comes from N replicas, one per worker).
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub mod controller_session;
 pub mod transport;
 
 pub use controller_session::ControllerSession;
-pub use transport::{serve_tcp, serve_unix, ServeOpts};
+pub use transport::{serve_unix, ServeOpts};
 
 /// A sink for one already-encoded protocol line, written to the transport and
 /// **flushed immediately** — so a session that streams (one chunk per model step)
@@ -79,7 +79,8 @@ pub trait Session {
 
 /// The transport-independent connection loop: emit the greeting, then read
 /// newline-delimited lines and write the response lines for each, flushing per
-/// line. Blank lines are ignored. Returns when the reader hits EOF.
+/// line. Blank lines are ignored. Returns when the reader hits EOF. A line over
+/// [`MAX_LINE_BYTES`] gets a `line_too_long` error and closes the connection.
 ///
 /// A panic inside [`Session::on_line`] is caught: an `error` line is written and
 /// the connection is closed (rather than continuing with a possibly-poisoned
@@ -94,8 +95,27 @@ pub fn pump_connection<R: BufRead, W: Write>(
     }
     writer.flush()?;
 
-    for line in reader.lines() {
-        let line = line?;
+    let mut reader = reader;
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        // `take` bounds what one line may make the server buffer: a peer that
+        // never sends a newline is refused at the limit instead of growing
+        // memory until the process dies.
+        let read = (&mut reader).take(MAX_LINE_BYTES as u64 + 1).read_until(b'\n', &mut buf)?;
+        if read == 0 {
+            break;
+        }
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+        }
+        if buf.len() > MAX_LINE_BYTES {
+            let _ = writeln!(writer, "{}", line_too_long_line());
+            let _ = writer.flush();
+            break; // the rest of the stream is mid-line: there is no safe resync point
+        }
+        let line = String::from_utf8(std::mem::take(&mut buf))
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8"))?;
         if line.trim().is_empty() {
             continue;
         }
@@ -117,6 +137,24 @@ pub fn pump_connection<R: BufRead, W: Write>(
         }
     }
     Ok(())
+}
+
+/// The longest line a connection may send, in bytes, newline excluded. A
+/// camera frame inlined as base64 is the largest legitimate line (a 4K RGB8
+/// frame is about 33 MB encoded); a longer line is refused and the connection
+/// closed.
+pub const MAX_LINE_BYTES: usize = 64 << 20;
+
+/// The `error` line a connection receives when it sends a line over
+/// [`MAX_LINE_BYTES`].
+fn line_too_long_line() -> String {
+    serde_json::json!({
+        "event": "error",
+        "code": "line_too_long",
+        "message": format!("line exceeds {MAX_LINE_BYTES} bytes"),
+        "retryable": false,
+    })
+    .to_string()
 }
 
 /// A structured `error` line emitted when a handler panics.

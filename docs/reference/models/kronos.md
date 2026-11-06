@@ -97,7 +97,7 @@ BRAIN_KRONOS_TOKENIZER=<tok-dir> BRAIN_KRONOS_DECODER=<dec-dir> \
   `--gnuplot` needs the `gnuplot` CLI on `PATH`; the command says so and exits
   before loading any weights if it is missing.
 - `compare`: `--windows <n>` (default 24), `--seed <n>` (default: drawn at random and printed).
-- `serve`: `--socket <path>` or `--listen <addr>`.
+- `serve`: `--socket <path>` (owner-only; stdio when omitted).
 - D-Bus `forecast` action: `horizon` (default 64), `temperature` (default
   1.0), `argmax` (default true), `seed`, `samples` (default 1), `checkpoint`
   (override the decoder path for a single request).

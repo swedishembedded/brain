@@ -829,6 +829,13 @@ impl Brain {
     /// `object_detected`, then request the completion Tick back to Idle.
     fn run_detection(&mut self) {
         let frame = self.pending_frame.take();
+        // No detector, no decode: a frame may name a file of this machine, and
+        // nothing may be read for a request that cannot be served.
+        if self.registry.detect.is_none() {
+            self.emit(Event::Error { message: "no detector loaded".into() });
+            self.want_idle = true;
+            return;
+        }
         let result = frame.as_ref().map(events::decode_frame);
         match (result, self.registry.detect.as_deref()) {
             (Some(Ok(rgb)), Some(det)) => {

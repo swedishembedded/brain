@@ -61,7 +61,7 @@ BRAIN_CHRONOS2=/path/to/chronos2.safetensors dbus-run-session -- bash -c '
 
 - `compare`: `--windows <n>` (default 24), `--seed <n>` (default: drawn at random and printed),
   `--html <path>` to write a report.
-- `serve`: `--socket <path>` or `--listen <addr>`.
+- `serve`: `--socket <path>` (owner-only; stdio when omitted).
 - D-Bus `forecast` action: `horizon` (default 64).
 
 ## Hardware and limits

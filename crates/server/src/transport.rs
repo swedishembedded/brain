@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Listening transports: TCP and Unix-socket accept loops, thread-per-connection
-//! with a concurrency cap. Both drive [`pump_connection`](crate::pump_connection)
+//! The listening transport: a Unix-socket accept loop, thread-per-connection
+//! with a concurrency cap, driving [`pump_connection`](crate::pump_connection)
 //! with a fresh [`Session`](crate::Session) per connection, built by a factory so
 //! per-instance model state never crosses threads.
+//!
+//! There is deliberately no TCP listener. The protocol carries no credential
+//! and a frame may name a file of the serving machine, so it is served only to
+//! processes of the serving user; the network surface is the authenticated
+//! HTTP API.
 
 use crate::{pump_connection, Session};
 use std::io::{self, BufReader};
-use std::net::{TcpListener, ToSocketAddrs};
 #[cfg(unix)]
-use std::os::unix::net::UnixListener;
+use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -37,6 +41,7 @@ impl Default for ServeOpts {
 
 /// The over-capacity rejection line (a structured error the client can read
 /// before the socket closes).
+#[cfg(unix)]
 fn busy_line() -> String {
     serde_json::json!({
         "event": "error",
@@ -47,9 +52,10 @@ fn busy_line() -> String {
     .to_string()
 }
 
-/// Accept + dispatch loop shared by both listeners. `accept` yields streams that
+/// The accept + dispatch loop. `accept` yields streams that
 /// can be split into an independent writer; each gets a thread and a fresh
 /// session.
+#[cfg(unix)]
 fn accept_loop<S, A>(mut accept: A, make: SessionFactory, opts: ServeOpts) -> io::Result<()>
 where
     S: CloneStream,
@@ -86,18 +92,14 @@ where
     }
 }
 
-/// A duplex stream we can split into an independent writer. TCP and Unix streams
-/// both support `try_clone`; this trait unifies them.
+/// A duplex stream we can split into an independent writer. Unix streams
+/// support `try_clone`; the trait keeps the accept loop independent of the
+/// stream type its tests use.
+#[cfg(unix)]
 trait CloneStream: io::Read + io::Write + Send + 'static {
     fn dup(&self) -> io::Result<Box<dyn io::Write + Send>>;
 }
 
-impl CloneStream for std::net::TcpStream {
-    fn dup(&self) -> io::Result<Box<dyn io::Write + Send>> {
-        Ok(Box::new(self.try_clone()?))
-    }
-}
-#[cfg(unix)]
 impl CloneStream for std::os::unix::net::UnixStream {
     fn dup(&self) -> io::Result<Box<dyn io::Write + Send>> {
         Ok(Box::new(self.try_clone()?))
@@ -105,7 +107,9 @@ impl CloneStream for std::os::unix::net::UnixStream {
 }
 
 /// Serve the `events::Event` protocol over a Unix domain socket. Removes a stale
-/// socket file at `path` first. Blocks forever (run on its own thread).
+/// socket file at `path` first and makes the new one `0600` before the first
+/// accept, so only the serving user can connect. Blocks forever (run on its
+/// own thread).
 #[cfg(unix)]
 pub fn serve_unix<P: AsRef<std::path::Path>>(
     path: P,
@@ -115,10 +119,11 @@ pub fn serve_unix<P: AsRef<std::path::Path>>(
     let path = path.as_ref();
     let _ = std::fs::remove_file(path); // clear a stale socket
     let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     accept_loop(move || listener.accept().map(|(s, _)| s), make, opts)
 }
 
-/// Refuses: Unix domain sockets are a Unix transport; serve over TCP here.
+/// Refuses: Unix domain sockets are a Unix transport; serve over stdio here.
 ///
 /// # Errors
 ///
@@ -129,17 +134,7 @@ pub fn serve_unix<P: AsRef<std::path::Path>>(
     _make: SessionFactory,
     _opts: ServeOpts,
 ) -> io::Result<()> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "Unix domain sockets are not available on this system; serve over TCP"))
-}
-
-/// Serve the `events::Event` protocol over TCP. Blocks forever.
-pub fn serve_tcp<A: ToSocketAddrs>(
-    addr: A,
-    make: SessionFactory,
-    opts: ServeOpts,
-) -> io::Result<()> {
-    let listener = TcpListener::bind(addr)?;
-    accept_loop(move || listener.accept().map(|(s, _)| s), make, opts)
+    Err(io::Error::new(io::ErrorKind::Unsupported, "Unix domain sockets are not available on this system; serve over stdio"))
 }
 
 #[cfg(all(test, unix))]

@@ -95,6 +95,26 @@ fn camera_frame_via_ppm_path() {
     assert!(out.iter().any(|e| matches!(e, Event::ObjectDetected { .. })), "{out:?}");
 }
 
+/// A frame names a file on the serving machine; a controller with no detector
+/// must refuse it without opening that file, or any peer of a frame-carrying
+/// socket gets a file-existence oracle and a way to make the server read
+/// `/dev/zero` or block on a FIFO.
+#[test]
+fn camera_frame_without_a_detector_never_reads_its_path() {
+    let mut ctrl = Controller::new(Registry::new());
+    let frame = Event::CameraFrame {
+        format: "rgb8".into(),
+        w: 2,
+        h: 1,
+        data: None,
+        path: Some("/nonexistent/brain-frame.ppm".into()),
+    };
+    let out = events_of(&ctrl.feed_line(&events::encode_line(&frame)));
+    let messages: Vec<&str> =
+        out.iter().filter_map(|e| if let Event::Error { message } = e { Some(message.as_str()) } else { None }).collect();
+    assert_eq!(messages, ["no detector loaded"], "{out:?}");
+}
+
 #[test]
 fn cancel_is_recoverable_not_terminal() {
     let mut ctrl = controller_with("hi");

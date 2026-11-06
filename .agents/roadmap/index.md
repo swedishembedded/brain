@@ -91,6 +91,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`sdxlunet`](sdxlunet.md) | sdxlunet | SDXL UNet and the discrete diffusion schedulers (`crates/sdxlunet`, `diffusion::discrete`). |
 | [`self-improve`](self-improve.md) | self-improve | Self-improvement and training regimes over agent trajectories (`crates/rl`, `crates/atif`). |
 | [`served-training`](served-training.md) | served-training | Training as a job of the serving process (`crates/trainjob`): `brain/train`, its artifact store, scheduling with serving residents, the job event stream. |
+| [`service-security`](service-security.md) | service-security | Every socket brain listens on, hardened for a network where other hosts are hostile (HTTP, D-Bus, the event-protocol socket, the training collective, the serve daemon's state). |
 | [`serving-runtime`](serving-runtime.md) | serving-runtime - one shared inference runtime for long context and high concurrency | The shared LLM serving runtime (`model::serve`, `model::paged`, `model::kv_offload`, `llmserve`) and the engines that plug into it, for 128K-1M contexts at high concurrency. |
 | [`spectrallm`](spectrallm.md) | spectrallm | SpectralLM, the decoder with a truncated real-Fourier residual stream and per-mode spectral mixers (`crates/spectrallm`), its operators, and the comparisons its paper reports (`papers/spectral-lm`). |
 | [`splat`](splat.md) | splat | Gaussian splatting, structure from motion and multi-view stereo (`crates/splat`, `sfm`, `mvs`, `recon`). |

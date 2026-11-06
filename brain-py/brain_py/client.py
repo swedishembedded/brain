@@ -208,9 +208,7 @@ class BrainStdio(BrainBase):
     @classmethod
     def connect(
         cls,
-        socket_path: Optional[str] = None,
-        host: Optional[str] = None,
-        port: Optional[int] = None,
+        socket_path: str,
         ready_timeout: float = 30.0,
     ) -> "BrainStdio":
         """Connect to an ALREADY-RUNNING ``brain forecast serve`` over a socket.
@@ -218,9 +216,9 @@ class BrainStdio(BrainBase):
         Unlike the constructor (which spawns its own stdio subprocess), this
         attaches to a long-lived server that keeps the models warm across many
         requests — the right shape for a batch job that forecasts a whole
-        universe. Pass either ``socket_path`` (a Unix socket, matching
-        ``brain forecast serve --socket <path>``) or ``host``+``port`` (matching
-        ``--listen <host:port>``).
+        universe. ``socket_path`` is the Unix socket of
+        ``brain forecast serve --socket <path>``; it admits only the serving
+        user, and there is no network listener.
 
         The same :meth:`forecast` / :meth:`capabilities` / :meth:`backtest` API
         works over the socket exactly as over stdio.
@@ -228,13 +226,8 @@ class BrainStdio(BrainBase):
         self = cls.__new__(cls)
         self._binary = None
         self._proc = None
-        if socket_path is not None:
-            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-            sock.connect(socket_path)
-        elif host is not None and port is not None:
-            sock = _socket.create_connection((host, port))
-        else:
-            raise ValueError("connect() needs socket_path=... or host=...+port=...")
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.connect(socket_path)
         self._sock = sock
         # Text line streams over the socket (mirrors the stdio pipes).
         self._rfile = sock.makefile("r", encoding="utf-8", newline="\n")

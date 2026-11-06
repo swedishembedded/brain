@@ -60,13 +60,16 @@ See each model's page for its exact import command.
     [--tokenizer-dir <dir> --decoder-dir <dir>]
   ```
 - **`serve`** - start a resident forecast server (stdio by default, or a
-  Unix socket / TCP listener), loaded with whichever models' weight flags
-  you pass:
+  Unix socket only the serving user can connect to), loaded with whichever
+  models' weight flags you pass:
   ```bash
   brain forecast serve --socket /tmp/forecast.sock --max-connections 64 \
     [--chronos2 <weights>] [--fincast <weights>] [--timesfm3 <weights>] \
     [--tokenizer-dir <dir> --decoder-dir <dir>]
   ```
+  This socket carries no credential, so it has no network listener; a
+  remote caller uses the `forecast` action of `brain serve`, which is
+  key-gated.
 - **`import`** - convert an upstream checkpoint into the brain
   `.safetensors` format Chronos-2, FinCast and TimesFM-3 serve from (see
   their pages for the exact form).
@@ -101,7 +104,7 @@ full runnable invocations per model.
 
 - `compare`: `--windows <n>` (default 24), `--seed <n>` (default: drawn at random and printed),
   `--html <path>`.
-- `serve`: `--socket <path>` or `--listen <addr>`, `--max-connections <n>`
+- `serve`: `--socket <path>`, `--max-connections <n>`
   (default 64).
 - D-Bus `forecast` action: `horizon` (default 64), plus model-specific
   parameters described on each model's page.

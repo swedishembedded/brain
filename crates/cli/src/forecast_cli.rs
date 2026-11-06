@@ -7,10 +7,10 @@
 //!   renders the model × scenario × metric report (markdown to stdout, optional
 //!   self-contained HTML to `--html <path>`). This is the P0 "definition of
 //!   done" deliverable; foundation models join the same battery once imported.
-//! - `serve` starts the unified JSONL server (stdio, or a `--socket`/`--listen`
-//!   TCP endpoint) with the baselines registered (and Chronos-2 via
-//!   `--chronos2 <weights>`), so a Python client can drive forecasts over any
-//!   transport.
+//! - `serve` starts the unified JSONL server (stdio, or an owner-only
+//!   `--socket`) with the baselines registered (and Chronos-2 via
+//!   `--chronos2 <weights>`), so a local Python client can drive forecasts
+//!   over either transport.
 //! - `import --hf <dir> --out chronos2.safetensors` converts an `amazon/chronos-2`
 //!   checkpoint into a brain `.safetensors` container.
 
@@ -651,7 +651,6 @@ fn compare(args: &[String]) {
 fn serve(args: &[String]) {
     let mut a = Args::new(args);
     let socket = a.take_str("--socket");
-    let listen = a.take_str("--listen");
     let chronos2 = a.take_str("--chronos2");
     let kronos_tok = a.take_str("--tokenizer-dir");
     let kronos_dec = a.take_str("--decoder-dir");
@@ -683,12 +682,6 @@ fn serve(args: &[String]) {
         eprintln!("brain forecast: serving on unix socket {path}");
         if let Err(e) = server::serve_unix(&path, make, opts) {
             eprintln!("serve_unix failed: {e}");
-            std::process::exit(1);
-        }
-    } else if let Some(addr) = listen {
-        eprintln!("brain forecast: serving on tcp {addr}");
-        if let Err(e) = server::serve_tcp(&addr, make, opts) {
-            eprintln!("serve_tcp failed: {e}");
             std::process::exit(1);
         }
     } else {
