@@ -787,6 +787,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         // goes back to blocking, since no MORE messages are coming just
         // because scheduling stalled. Own catch_unwind too: `assign`'s
         // eviction fallback can ALSO drop a Hot instance.
+        shed_cancelled(&mut queue, &stats);
         refill_open_groups(&mut queue, &open_groups, &mut running_jobs, &stats);
         if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs, &mut open_groups);
@@ -1307,6 +1308,23 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
 /// How many jobs beyond its free slots a running group may hold in its inbox, waiting.
 const INBOX_LOOKAHEAD: usize = 32;
 
+/// Answers and removes every queued job whose caller has cancelled it. It has not started, so there is
+/// nothing to wind down, and claiming a device for it would evict residents to make room for nobody (a
+/// fine-tune whose client hung up while it waited for a card is the case that matters).
+fn shed_cancelled(queue: &mut Vec<Pending>, stats: &Arc<Mutex<Stats>>) {
+    if !queue.iter().any(|p| p.inv.cancel.is_cancelled()) {
+        return;
+    }
+    let (gone, kept): (Vec<Pending>, Vec<Pending>) = std::mem::take(queue).into_iter().partition(|p| p.inv.cancel.is_cancelled());
+    *queue = kept;
+    for pending in gone {
+        (pending.reply)(Err("cancelled".to_string()));
+    }
+    if let Ok(mut s) = stats.lock() {
+        s.queue_depth = queue.len();
+    }
+}
+
 fn refill_open_groups(queue: &mut Vec<Pending>, open_groups: &HashMap<InstanceKey, OpenGroup>, running_jobs: &mut Vec<RunningJob>, stats: &Arc<Mutex<Stats>>) {
     for (key, group) in open_groups {
         if !queue.iter().any(|p| &p.key == key && p.action == group.action) {
@@ -1819,7 +1837,91 @@ mod tests {
             exec.run_blocking("gate", "run", Invocation::new().set("base", serde_json::json!("known")), |_| {}).expect("an accepted job");
         }
         assert_eq!(built.load(std::sync::atomic::Ordering::SeqCst), 2, "each run of a workload builds its own instance");
-        assert!(exec.residency().placements.is_empty(), "and none is left resident");
+        // A run replies before the dispatcher has processed its end, so wait (bounded) for the reservation to come back.
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while !exec.residency().placements.is_empty() {
+            assert!(Instant::now() < deadline, "a finished workload is still resident");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        exec.shutdown();
+    }
+
+    /// A job that is cancelled while it waits for a device is answered at once and never claims one: it would
+    /// evict residents for a caller that is gone.
+    #[test]
+    fn a_job_cancelled_while_queued_is_answered_without_claiming_a_device() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        struct Holder(Arc<Mutex<std::sync::mpsc::Receiver<()>>>);
+        struct HolderInst(Arc<Mutex<std::sync::mpsc::Receiver<()>>>);
+        impl ResidentModel for Holder {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("holder", "holds the device", vec![capability::ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("holder", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(0, 1 << 20)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(HolderInst(Arc::clone(&self.0))))
+            }
+        }
+        impl Instance for HolderInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                let _ = self.0.lock().unwrap().recv_timeout(std::time::Duration::from_secs(30));
+                Ok(capability::Outcome::new())
+            }
+        }
+        struct Late(Arc<AtomicU32>);
+        struct LateInst;
+        impl ResidentModel for Late {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("late", "waits its turn", vec![capability::ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("late", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(0, 1 << 20)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(LateInst))
+            }
+        }
+        impl Instance for LateInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                Ok(capability::Outcome::new())
+            }
+        }
+        let (release, gate) = std::sync::mpsc::channel();
+        let built = Arc::new(AtomicU32::new(0));
+        let mut budgets = crate::budget::Budgets::new();
+        budgets.set(Device::Cpu, 8 << 30, 0);
+        let exec = Executor::start(vec![Arc::new(Holder(Arc::new(Mutex::new(gate)))), Arc::new(Late(built.clone()))], budgets, Policy::default());
+        let holding = {
+            let exec = exec.clone();
+            std::thread::spawn(move || exec.run_blocking("holder", "run", Invocation::new(), |_| {}))
+        };
+        while exec.in_flight().iter().all(|j| j.model != "holder" || j.phase != "running") {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let mut inv = Invocation::new();
+        inv.cancel = capability::CancelToken::armed();
+        let token = inv.cancel.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        exec.submit(Job::new("late", "run", inv).reply(move |r| {
+            let _ = tx.send(r);
+        }));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(rx.try_recv().is_err(), "the device is held: the job waits");
+        token.cancel();
+        let answer = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("a cancelled job is answered while the device is still held");
+        assert_eq!(answer.unwrap_err(), "cancelled");
+        assert_eq!(built.load(Ordering::SeqCst), 0, "and it never claimed or built anything");
+        release.send(()).unwrap();
+        holding.join().unwrap().unwrap();
         exec.shutdown();
     }
 

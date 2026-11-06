@@ -151,8 +151,8 @@ impl Instance for SlowInst {
 
 /// `train(steps)`: emits a structured frame per step, as a fine-tune reports its loss and statistics, and a
 /// plain tick before the first.
-struct Trainer;
-struct TrainerInst;
+struct Trainer(Arc<AtomicUsize>);
+struct TrainerInst(Arc<AtomicUsize>);
 
 impl ResidentModel for Trainer {
     fn manifest(&self) -> Manifest {
@@ -169,12 +169,13 @@ impl ResidentModel for Trainer {
         MemCost::default()
     }
     fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
-        Ok(Box::new(TrainerInst))
+        Ok(Box::new(TrainerInst(Arc::clone(&self.0))))
     }
 }
 
 impl Instance for TrainerInst {
     fn run(&mut self, _a: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        self.0.fetch_add(1, Ordering::SeqCst);
         let steps = inv.params["steps"].as_u64().unwrap_or(3) as u32;
         progress(Progress::step(0, steps, "loading"));
         for step in 1..=steps {
@@ -247,18 +248,19 @@ struct Rig {
     app: Router,
     ledger: Arc<Mutex<Ledger>>,
     saw_cancel: Arc<AtomicBool>,
-    _runs: Arc<AtomicUsize>,
+    trainer_runs: Arc<AtomicUsize>,
 }
 
 fn rig() -> Rig {
     let saw_cancel = Arc::new(AtomicBool::new(false));
-    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Echo), Arc::new(Slow(Arc::clone(&saw_cancel))), Arc::new(Hosted), Arc::new(Trainer)];
+    let trainertrainer_runs = Arc::new(AtomicUsize::new(0));
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Echo), Arc::new(Slow(Arc::clone(&saw_cancel))), Arc::new(Hosted), Arc::new(Trainer(Arc::clone(&trainertrainer_runs)))];
     let mut budgets = Budgets::new();
     budgets.set(Device::Cpu, 8 << 30, 0);
     let exec = Executor::start(models, budgets, Policy::default());
     let ledger = Arc::new(Mutex::new(Ledger::default()));
     let state = AppState::new(exec, "unused", Provider::OpenAI).with_authenticator(Arc::new(ByName)).with_hooks(Arc::new(Meter(Arc::clone(&ledger))));
-    Rig { app: router(state), ledger, saw_cancel, _runs: Arc::new(AtomicUsize::new(0)) }
+    Rig { app: router(state), ledger, saw_cancel, trainer_runs: trainertrainer_runs }
 }
 
 async fn call(app: &Router, method: Method, uri: &str, key: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -385,7 +387,7 @@ async fn run_executes_any_action_with_blobs_in_and_blobs_out() {
 }
 
 #[tokio::test]
-async fn run_refuses_what_the_action_does_not_accept_before_anything_runs() {
+async fn run_refuses_what_the_action_does_not_accept_before_anythingtrainer_runs() {
     let rig = rig();
     let cases = [
         (run_body("brain-echo", "transcribe", json!({"lang": "sv", "nope": 1}), audio_blob()), StatusCode::BAD_REQUEST, "an unknown param"),
@@ -403,7 +405,7 @@ async fn run_refuses_what_the_action_does_not_accept_before_anything_runs() {
 }
 
 #[tokio::test]
-async fn a_job_runs_in_the_background_and_its_result_is_fetched_later() {
+async fn a_jobtrainer_runs_in_the_background_and_its_result_is_fetched_later() {
     let rig = rig();
     let (status, created) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-slow", "render", json!({"steps": 5}), json!({})))).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{created}");
@@ -577,4 +579,18 @@ async fn the_event_stream_is_not_reachable_without_a_key() {
     let rig = rig();
     let response = rig.app.clone().oneshot(Request::builder().method(Method::GET).uri("/v1/jobs/00000000-0000-0000-0000-000000000000/events").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_client_that_hangs_up_while_its_job_waits_for_a_lane_takes_the_job_with_it() {
+    let rig = rig();
+    // The lane is held by a long render, so the training job can only wait.
+    let (_, held) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-slow", "render", json!({"steps": 1000}), json!({})))).await;
+    let held = held["id"].as_str().unwrap().to_string();
+    let waiting = tokio::time::timeout(Duration::from_millis(400), call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-trainer", "train", json!({"steps": 3}), json!({})))));
+    assert!(waiting.await.is_err(), "the job was admitted while the lane was held: the premise of the test is gone");
+    // The client is gone. Free the lane: the abandoned job must not run.
+    let _ = call(&rig.app, Method::DELETE, &format!("/v1/jobs/{held}"), "alice", None).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(rig.trainer_runs.load(Ordering::SeqCst), 0, "a job whose client hung up while it was queued ran anyway");
 }

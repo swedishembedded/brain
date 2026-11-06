@@ -117,3 +117,17 @@ pub fn run(rig: &Rig, params: Value, blobs: &[(&str, Vec<u8>)], frames: &Frames)
 pub fn work_is_clean(work_root: &Path) -> bool {
     std::fs::read_dir(work_root).map(|d| d.count() == 0).unwrap_or(true)
 }
+
+/// Waits (bounded) until nothing is placed and no device is charged: a run replies before the dispatcher has
+/// processed its end and returned the reservation, so a check made at once would race it.
+pub fn assert_reservation_returned(rig: &Rig) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let placed = rig.exec.residency();
+        if placed.placements.is_empty() && placed.budgets.iter().all(|b| b.used == 0) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "a finished run still holds its reservation: {placed:?}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}

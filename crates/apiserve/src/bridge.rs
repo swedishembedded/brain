@@ -580,6 +580,9 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
     let model_owned = model.to_string();
     let (id, token) = state.register();
     inv.cancel = token.clone();
+    // Held from here, not from admission: a client that hangs up while its job is still waiting for a lane
+    // drops this future, and the guard then cancels the queued job instead of leaving it to run, later, for nobody.
+    let guard = CancelGuard { token: token.clone(), jobs: state.jobs.clone(), id };
     let (tx, rx) = mpsc::unbounded_channel::<StreamMsg>();
     let (admit_tx, mut admit_rx) = oneshot::channel::<()>();
     let tx_progress = tx.clone();
@@ -620,12 +623,11 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
     // Admission race BEFORE returning the SSE body: a shed request yields a plain
     // 429, never an event-stream that immediately errors.
     if let Err(refusal) = wait_for_admission(&state.exec, state.deadlines(), model, &mut admit_rx).await {
-        token.cancel();
-        state.finish(&id);
+        // Dropping the guard cancels the queued job and unregisters it.
         return Err(refused(provider, &refusal));
     }
 
-    Ok(EventStream { rx, _guard: CancelGuard { token, jobs: state.jobs.clone(), id }, head: None })
+    Ok(EventStream { rx, _guard: guard, head: None })
 }
 
 /// Like [`stream`]/[`stream_progress`], but for a `model` that is NOT already

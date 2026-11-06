@@ -103,8 +103,7 @@ fn an_idle_serving_resident_gives_way_to_a_run_and_is_rebuilt_when_asked_for_aga
     // The run does not fit beside it, so it takes its place.
     let (done, _) = submit_train(&rig);
     done.recv_timeout(Duration::from_secs(600)).expect("the run ended").expect("the run");
-    let placed = rig.inner.exec.residency();
-    assert!(placed.placements.is_empty(), "the run gave its memory back, and the evicted resident has not been rebuilt for nothing: {placed:?}");
+    crate::support::assert_reservation_returned(&rig.inner);
     assert!(rig.inner.exec.stats().evictions >= 1);
 
     // The next request for the served model rebuilds it where there is room.

@@ -8,7 +8,7 @@ use capability::CancelToken;
 use residency::Job;
 use serde_json::{json, Value};
 
-use crate::support::{data_digest, invocation, plain, rig, rollouts, run, work_is_clean, Frames, BASE};
+use crate::support::{assert_reservation_returned, data_digest, invocation, plain, rig, rollouts, run, work_is_clean, Frames, BASE};
 
 fn hex64(v: &Value) -> bool {
     v.as_str().is_some_and(|s| trainjob::Digest::parse(s).is_ok())
@@ -61,8 +61,7 @@ fn a_policy_gradient_job_streams_each_step_and_hands_back_the_adapter_by_digest_
 
     // The run is over: its files are gone and its reservation is back.
     assert!(work_is_clean(&rig.work_root));
-    let placed = rig.exec.residency();
-    assert!(placed.placements.is_empty() && placed.budgets.iter().all(|b| b.used == 0), "{placed:?}");
+    assert_reservation_returned(&rig);
 
     // The adapter is the starting point of the next run, named by its digest.
     let mut next = params;
@@ -130,6 +129,5 @@ fn cancelling_a_run_stops_it_at_a_step_boundary_and_frees_everything() {
     assert_eq!(reply.unwrap_err(), "cancelled");
     assert!(steps_seen.load(std::sync::atomic::Ordering::SeqCst) <= 2, "it stopped at the next step boundary, not at step 1000");
     assert!(work_is_clean(&rig.work_root), "a cancelled run leaves no state behind");
-    let placed = rig.exec.residency();
-    assert!(placed.placements.is_empty() && placed.budgets.iter().all(|b| b.used == 0));
+    assert_reservation_returned(&rig);
 }
