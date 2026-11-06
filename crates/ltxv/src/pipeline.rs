@@ -2295,6 +2295,19 @@ struct AudioInputs<'a> {
     timesteps: &'a [f32],
     positions: &'a [f32],
     ta: usize,
+    /// The audio stream's scalar sigma - see [`stream_sigma`].
+    sigma: f32,
+}
+
+/// A stream's scalar sigma for one step: the schedule's, or `0` when every
+/// token of the stream is held (`modality_from_latent_state`: a frozen
+/// state's `Modality.sigma` is forced to 0, so its prompt AdaLN and the
+/// other stream's cross-modal gate read a clean stream as clean).
+fn stream_sigma(sigma: f64, mask: Option<&[f32]>) -> f32 {
+    match mask {
+        Some(m) if !m.is_empty() && m.iter().all(|&v| v == 0.0) => 0.0,
+        _ => sigma as f32,
+    }
 }
 
 /// The audio stream's state across a denoising stage - what [`denoise`]
@@ -2342,11 +2355,11 @@ impl Denoiser for LtxDit {
 /// produces a plausible clip rather than an error. Gated by
 /// `an_av_step_carries_each_streams_own_inputs`.
 ///
-/// One scalar sigma serves both `v_sigma` and `a_sigma`: each stream's
-/// cross-modal gate is keyed on the OTHER stream's sigma, and both streams
-/// run one schedule in lockstep
-/// (`ltx_pipelines.utils.samplers.euler_denoising_loop` steps them together
-/// off one `sigmas` tensor), so the two values are equal by construction.
+/// Each stream carries its own scalar sigma: both run one schedule in
+/// lockstep (`ltx_pipelines.utils.samplers.euler_denoising_loop` steps them
+/// together off one `sigmas` tensor), so the two are equal - unless one
+/// stream is wholly frozen, which reads as sigma 0 ([`stream_sigma`]). Each
+/// stream's cross-modal gate is keyed on the OTHER stream's sigma.
 fn av_step<'a>(i: &StepInputs<'a>, a: &AudioInputs<'a>, v_context: Caption<'a>, a_context: Caption<'a>) -> crate::dit::AvStreamedStep<'a> {
     crate::dit::AvStreamedStep {
         v_latent: i.latent,
@@ -2364,7 +2377,7 @@ fn av_step<'a>(i: &StepInputs<'a>, a: &AudioInputs<'a>, v_context: Caption<'a>, 
         a_context: a_context.rows,
         a_context_len: i.context_len,
         ta: a.ta,
-        a_sigma: i.sigma,
+        a_sigma: a.sigma,
         a_context_valid: a_context.valid,
         perturbations: i.perturbations,
         reference_attention: i.reference_attention,
@@ -2902,7 +2915,7 @@ impl GuidedModel<'_> {
             keyframes_mask: self.keyframes_mask,
             context_len: self.context_len,
             t: self.t,
-            sigma: sigma as f32,
+            sigma: stream_sigma(sigma, self.frozen.map(|f| f.mask)),
             perturbations: &NO_PERTURBATIONS,
             reference_attention: self.frozen.and_then(|f| f.attention),
         };
@@ -2913,7 +2926,7 @@ impl GuidedModel<'_> {
         let (cond, others): (Latents, Vec<Latents>) = match (self.audio, audio_latent) {
             (Some(a), Some(a_latent)) => {
                 let a_timesteps = Self::timesteps(self.audio_mask(), a.ta, sigma);
-                let ai = AudioInputs { latent: a_latent, timesteps: &a_timesteps, positions: &a.positions, ta: a.ta };
+                let ai = AudioInputs { latent: a_latent, timesteps: &a_timesteps, positions: &a.positions, ta: a.ta, sigma: stream_sigma(sigma, self.audio_mask()) };
                 let a_x0 = |v: Vec<f32>| to_denoised(a_latent, &v, &a_timesteps, self.a_channels);
                 let run = |ptb: &crate::block::Perturbations, v_ctx: Caption, a_ctx: Caption| {
                     let (v, av) = self.dit.forward_av(&base.with_perturbations(ptb), &ai, v_ctx, a_ctx);
@@ -3621,18 +3634,19 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
     let blocks = conditioning_block_count(o.start_frame.is_some(), o.mid_frame.is_some(), o.end_frame.is_some(), o.future_anchors.len());
     let mut latent0 = seeded_noise((t + blocks * lh * lw) * c, o.seed ^ st.seed_salt);
     if let Some(seed_chw) = st.seed_chw {
-        // `GaussianNoiser.__call__`'s partial re-noise, `lerp(seed, noise,
+        // `GaussianNoiser.__call__`'s partial re-noise, `lerp(latent, noise,
         // sigma0)` - upstream's `ModalitySpec::noise_scale`, set to
-        // `stage_2_sigmas[0]`. Only the BASE video range is seeded; any
-        // appended conditioning block stays pure noise here and is
-        // overwritten by its own clean content below, exactly as upstream's
-        // conditioning items are applied after the noiser.
+        // `stage_2_sigmas[0]` - over the whole sequence. The base video's
+        // latent is the seed; an appended conditioning block's is the item's
+        // zero placeholder, so its noise is scaled by `sigma0` too before its
+        // clean content is mixed in below at `1 - strength`.
         let seed_tc = chw_to_tc(seed_chw, c, sc.lat_t, lh, lw);
         assert_eq!(seed_tc.len(), t * c, "stage seed is {} values, expected {}", seed_tc.len(), t * c);
         let s0 = st.sigmas[0] as f32;
         for (dst, &s) in latent0[..t * c].iter_mut().zip(&seed_tc) {
             *dst = (1.0 - s0) * s + s0 * *dst;
         }
+        latent0[t * c..].iter_mut().for_each(|n| *n *= s0);
     }
 
     let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = if let Some(ms) = &st.mask {
@@ -7279,7 +7293,7 @@ mod tests {
         let (v_valid, a_valid) = (vec![8.0f32; 4], vec![8.5f32; 4]);
         let (v_ctx, a_ctx) = (vec![9.0f32; 4], vec![10.0f32; 3]);
         let i = StepInputs { latent: &v_latent, timesteps: &v_ts, positions: &v_pos, keyframes_mask: &kf, context_len: 4, t: 2, sigma: 0.25, perturbations: &crate::block::NO_PERTURBATIONS, reference_attention: None };
-        let a = AudioInputs { latent: &a_latent, timesteps: &a_ts, positions: &a_pos, ta: 1 };
+        let a = AudioInputs { latent: &a_latent, timesteps: &a_ts, positions: &a_pos, ta: 1, sigma: 0.0 };
         let s = av_step(&i, &a, Caption::of(&v_ctx, &v_valid), Caption::of(&a_ctx, &a_valid));
 
         assert_eq!(s.v_latent, &v_latent[..], "the video stream must carry the VIDEO latent");
@@ -7295,10 +7309,19 @@ mod tests {
         assert_eq!(s.a_context_valid, &a_valid[..]);
         assert_eq!((s.tv, s.ta), (2, 1));
         assert_eq!((s.v_context_len, s.a_context_len), (4, 4));
-        // One schedule steps both streams, so the two sigmas are the same
-        // number by construction - and each stream's cross-modal gate reads
-        // the OTHER one's, which is why both are carried rather than one.
-        assert_eq!((s.v_sigma, s.a_sigma), (0.25, 0.25));
+        // Each stream carries its own sigma: each stream's cross-modal gate
+        // reads the OTHER one's, and a frozen stream's is 0.
+        assert_eq!((s.v_sigma, s.a_sigma), (0.25, 0.0));
+    }
+
+    /// A wholly held stream reads as clean (`Modality.sigma = 0` for a frozen
+    /// state); a partly held one, or one with nothing held, keeps the
+    /// schedule's sigma.
+    #[test]
+    fn a_wholly_frozen_stream_reads_as_sigma_zero() {
+        assert_eq!(stream_sigma(0.7, Some(&[0.0, 0.0])), 0.0);
+        assert_eq!(stream_sigma(0.7, Some(&[0.0, 1.0])), 0.7f64 as f32);
+        assert_eq!(stream_sigma(0.7, None), 0.7f64 as f32);
     }
 
     /// The banner a run prints and the object `build_denoiser` returns must
