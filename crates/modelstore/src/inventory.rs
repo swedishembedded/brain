@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// The on-disk shape one artifact record describes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ArtifactKind {
     Gguf,
     Safetensors,
@@ -179,7 +179,7 @@ fn save_cache(root: &Path, entries: &[CacheEntry]) {
 /// trusts. Never a content hash: this crate's stores run 50+ GB, and hashing
 /// them on every CLI invocation would be a serious, pointless regression.
 fn stat(path: &Path) -> std::io::Result<(u64, u64)> {
-    let m = std::fs::symlink_metadata(path)?;
+    let m = std::fs::metadata(path)?;
     let mtime_ns = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos() as u64).unwrap_or(0);
     Ok((m.len(), mtime_ns))
 }
@@ -273,7 +273,9 @@ fn kind_of_extension(fname: &str) -> Option<ArtifactKind> {
 /// (`<root>/*.gguf`/`*.safetensors`) files, in one flat list. Reuses
 /// `<root>/.brain-inventory.json` when present and matching this root,
 /// re-probing only entries whose `(size, mtime_ns)` changed, are new, or
-/// whose path no longer exists (dropped). Never follows symlinks.
+/// whose path no longer exists (dropped). Links are followed: a checkpoint
+/// kept elsewhere and linked into the store is in it, under the link's path,
+/// and one reached twice (an alias, a cycle) is recorded once.
 pub fn scan(root: &Path) -> Vec<ArtifactRecord> {
     scan_with_probe_hook(root, &mut |_| {})
 }
@@ -300,6 +302,7 @@ fn scan_with_probe_hook(root: &Path, probed: &mut dyn FnMut(&Path)) -> Vec<Artif
     let cache = load_cache(root);
     let mut out = Vec::new();
     walk_root(root, root, &cache, probed, &mut out);
+    let out = once_per_target(root, out);
 
     let entries: Vec<CacheEntry> = out
         .iter()
@@ -313,8 +316,31 @@ fn scan_with_probe_hook(root: &Path, probed: &mut dyn FnMut(&Path)) -> Vec<Artif
     out
 }
 
-fn is_symlink(entry: &std::fs::DirEntry) -> bool {
-    entry.file_type().map(|t| t.is_symlink()).unwrap_or(false)
+/// `records` with each artifact kept once, however many paths reach it: a
+/// link aliasing a checkpoint is not a second candidate for its role (the
+/// resolver refuses two as ambiguous). The record at the artifact's own path
+/// under `root` wins, else the first path in order.
+fn once_per_target(root: &Path, records: Vec<ArtifactRecord>) -> Vec<ArtifactRecord> {
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let target = |r: &ArtifactRecord| std::fs::canonicalize(&r.path).unwrap_or_else(|_| r.path.clone());
+    let is_own_path = |r: &ArtifactRecord, t: &Path| r.path.strip_prefix(root).is_ok_and(|rel| canonical_root.join(rel) == t);
+    let mut chosen: BTreeMap<(PathBuf, ArtifactKind), usize> = BTreeMap::new();
+    for (i, r) in records.iter().enumerate() {
+        let t = target(r);
+        match chosen.entry((t.clone(), r.kind)) {
+            std::collections::btree_map::Entry::Vacant(v) => {
+                v.insert(i);
+            }
+            std::collections::btree_map::Entry::Occupied(mut o) => {
+                let held = &records[*o.get()];
+                if is_own_path(r, &t) && !is_own_path(held, &t) || is_own_path(r, &t) == is_own_path(held, &t) && r.path < held.path {
+                    o.insert(i);
+                }
+            }
+        }
+    }
+    let keep: std::collections::BTreeSet<usize> = chosen.into_values().collect();
+    records.into_iter().enumerate().filter(|(i, _)| keep.contains(i)).map(|(_, r)| r).collect()
 }
 
 /// Top level: each entry under `root` is either a vendor directory
@@ -323,9 +349,6 @@ fn is_symlink(entry: &std::fs::DirEntry) -> bool {
 fn walk_root(root: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEntry>, probed: &mut dyn FnMut(&Path), out: &mut Vec<ArtifactRecord>) {
     let Ok(entries) = std::fs::read_dir(root) else { return };
     for entry in entries.flatten() {
-        if is_symlink(&entry) {
-            continue;
-        }
         let path = entry.path();
         if path.is_dir() {
             walk_vendor_dir(&path, scan_root, cache, probed, out);
@@ -343,9 +366,6 @@ fn walk_root(root: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEntry
 fn walk_vendor_dir(vendor_dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEntry>, probed: &mut dyn FnMut(&Path), out: &mut Vec<ArtifactRecord>) {
     let Ok(entries) = std::fs::read_dir(vendor_dir) else { return };
     for entry in entries.flatten() {
-        if is_symlink(&entry) {
-            continue;
-        }
         let path = entry.path();
         if path.is_dir() {
             walk_repo_dir(&path, scan_root, cache, probed, out, 0);
@@ -402,7 +422,7 @@ fn walk_repo_dir(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEn
         let shards = shard_filenames(dir);
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
-            if is_symlink(&entry) || entry.path().is_dir() {
+            if entry.path().is_dir() {
                 continue;
             }
             let path = entry.path();
@@ -427,9 +447,6 @@ fn walk_repo_dir(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEn
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut is_pipeline_root = false;
     for entry in entries.flatten() {
-        if is_symlink(&entry) {
-            continue;
-        }
         let path = entry.path();
         if path.is_dir() {
             walk_repo_dir(&path, scan_root, cache, probed, out, depth + 1);
@@ -657,6 +674,46 @@ mod tests {
         assert_eq!(found[0].kind, ArtifactKind::Gguf);
         assert_eq!(found[0].completeness, Completeness::Complete);
         assert_eq!(found[0].path, root.join("unsloth").join("foo.gguf"));
+    }
+
+    /// A checkpoint kept on another disk and linked into the store - a
+    /// linked repo directory, vendor directory or single file - is in the
+    /// store, under the path the link gives it.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkpoint_linked_into_the_store_is_inventoried() {
+        let root = scratch_root("linked");
+        let elsewhere = scratch_root("linked-target");
+        tiny_gguf(&elsewhere.join("repo").join("model.gguf"));
+        tiny_gguf(&elsewhere.join("vendor").join("repo2").join("model.gguf"));
+        tiny_gguf(&elsewhere.join("loose.gguf"));
+        std::fs::create_dir_all(root.join("Lightricks")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("repo"), root.join("Lightricks").join("LTX-2.5")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("vendor"), root.join("Wan-AI")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("loose.gguf"), root.join("Lightricks").join("loose.gguf")).unwrap();
+
+        let mut paths: Vec<PathBuf> = scan(&root).into_iter().map(|r| r.path).collect();
+        paths.sort();
+        let mut want = vec![root.join("Lightricks/LTX-2.5/model.gguf"), root.join("Lightricks/loose.gguf"), root.join("Wan-AI/repo2/model.gguf")];
+        want.sort();
+        assert_eq!(paths, want);
+    }
+
+    /// A link that aliases a checkpoint the store already holds (a `latest`
+    /// name, a link cycle) is not a second candidate for it: the resolver
+    /// would refuse two candidates for one role as ambiguous. The real
+    /// entry is the one kept.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_checkpoint_already_in_the_store_is_not_a_second_one() {
+        let root = scratch_root("linked-alias");
+        let real = root.join("Qwen").join("Qwen3-8B");
+        tiny_gguf(&real.join("model.gguf"));
+        std::os::unix::fs::symlink(&real, root.join("Qwen").join("latest")).unwrap();
+        std::os::unix::fs::symlink(&real, real.join("again")).unwrap();
+
+        let found = scan(&root);
+        assert_eq!(found.iter().map(|r| r.path.clone()).collect::<Vec<_>>(), vec![real.join("model.gguf")], "{found:?}");
     }
 
     /// A real `tokenizer.json`/`model_index.json` sitting inside a repo
