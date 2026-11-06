@@ -161,7 +161,9 @@ pub fn manifest() -> Manifest {
 
     // What `/videos` maps onto t2va: the VAE's chunk grid at a fixed 24 fps,
     // the released canvas multiple and pixel budget, 5-15 s, sound always.
-    // fl2va and ref2va take server paths, so they have no contract yet.
+    // fl2va and ref2va render the same clips; the server writes a request's
+    // frame images and references to private files and fills their path
+    // params, so a caller never names a path.
     let (_, vae_cfg) = real_configs();
     let contract = capability::video::VideoContract::new(
         "num_frames",
@@ -178,7 +180,7 @@ pub fn manifest() -> Manifest {
         TASKS[0],
         "generate a video clip AND its own soundtrack from a text prompt (Qwen3-VL text conditioning, one packed self-attention DiT denoising video and audio rows together under two independent shifted-sigma Euler schedules in the SAME forward, causal 3D video VAE + DAC/BigVGAN audio VAE decode)",
     ))
-    .video(contract);
+    .video(contract.clone());
 
     let fl2va = common(ActionSpec::new(
         TASKS[1],
@@ -190,7 +192,8 @@ pub fn manifest() -> Manifest {
     // surface refuses them and would take the still's content as a blob
     // instead.
     .param(ParamSpec::new("first_frame", ParamType::Str, "server-side path to a PNG/JPEG still the clip's FIRST frame is anchored to. At least one of first_frame/last_frame is required.").host_resolved())
-    .param(ParamSpec::new("last_frame", ParamType::Str, "server-side path to a PNG/JPEG still the clip's LAST frame is anchored to. At least one of first_frame/last_frame is required.").host_resolved());
+    .param(ParamSpec::new("last_frame", ParamType::Str, "server-side path to a PNG/JPEG still the clip's LAST frame is anchored to. At least one of first_frame/last_frame is required.").host_resolved())
+    .video(contract.clone().frame_images(Some("first_frame"), Some("last_frame")));
 
     let ref2va = common(ActionSpec::new(
         TASKS[2],
@@ -204,7 +207,8 @@ pub fn manifest() -> Manifest {
         )
         .required()
         .host_resolved(),
-    );
+    )
+    .video(contract.clone().references("references", ',', &[Media::Image, Media::Video, Media::Audio], pipeline::MAX_REFERENCES));
 
     Manifest::new(
         MODEL,

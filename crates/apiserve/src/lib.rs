@@ -59,6 +59,7 @@ pub mod state;
 pub mod surface;
 pub mod systemone;
 pub mod video;
+pub mod video_inputs;
 
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, State};

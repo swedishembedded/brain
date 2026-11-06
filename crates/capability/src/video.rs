@@ -21,6 +21,8 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::Media;
+
 /// The longest clip an edit takes as its input, in frames.
 pub const MAX_EDIT_CLIP_FRAMES: u32 = 2_000;
 
@@ -50,6 +52,33 @@ pub enum Audio {
     Param { name: String, default: bool },
 }
 
+/// The frame image types a request may anchor a clip with, in OpenRouter's names.
+pub const FRAME_TYPES: [&str; 2] = ["first_frame", "last_frame"];
+
+/// The param a request's reference media fill (see
+/// [`VideoContract::references`]): the server writes each reference to a
+/// private file of its own and lists the paths, in the request's order,
+/// joined by `separator`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct References {
+    pub param: String,
+    pub separator: char,
+    /// The media kinds the action takes as references.
+    pub media: Vec<Media>,
+    /// The most references one request may carry.
+    pub max: usize,
+}
+
+/// The name a model listing gives a reference media kind.
+pub fn reference_type(media: Media) -> &'static str {
+    match media {
+        Media::Image => "image",
+        Media::Video => "video",
+        Media::Audio => "audio",
+        _ => "other",
+    }
+}
+
 /// The facts a video action declares. See the module doc.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VideoContract {
@@ -70,6 +99,13 @@ pub struct VideoContract {
     pub seed_param: Option<String>,
     /// The `video` blob input an edit action takes (`None` for generation).
     pub clip_input: Option<String>,
+    /// The host-resolved still params a request's `first_frame` and
+    /// `last_frame` images fill. The server writes each image to a private
+    /// file and sets the param to its path; a caller never names a path.
+    pub first_frame: Option<String>,
+    pub last_frame: Option<String>,
+    /// The host-resolved param a request's reference media fill.
+    pub references: Option<References>,
     /// False for a configuration that is only a smoke test (random weights):
     /// it may be run, but must not be offered as a product.
     pub sellable: bool,
@@ -103,6 +139,9 @@ impl VideoContract {
             audio: Audio::None,
             seed_param: None,
             clip_input: None,
+            first_frame: None,
+            last_frame: None,
+            references: None,
             sellable: true,
         }
     }
@@ -117,6 +156,33 @@ impl VideoContract {
     pub fn clip_input(mut self, blob: &str) -> VideoContract {
         self.clip_input = Some(blob.into());
         self
+    }
+    /// The host-resolved still params a request's first and last frame images fill.
+    pub fn frame_images(mut self, first: Option<&str>, last: Option<&str>) -> VideoContract {
+        self.first_frame = first.map(Into::into);
+        self.last_frame = last.map(Into::into);
+        self
+    }
+    /// The host-resolved param a request's reference media fill; see [`References`].
+    pub fn references(mut self, param: &str, separator: char, media: &[Media], max: usize) -> VideoContract {
+        self.references = Some(References { param: param.into(), separator, media: media.to_vec(), max });
+        self
+    }
+    /// The param a frame image of `frame_type` fills, if the action takes one.
+    pub fn frame_param(&self, frame_type: &str) -> Option<&str> {
+        match frame_type {
+            "first_frame" => self.first_frame.as_deref(),
+            "last_frame" => self.last_frame.as_deref(),
+            _ => None,
+        }
+    }
+    /// The frame image types the action takes, in [`FRAME_TYPES`] order.
+    pub fn frame_types(&self) -> Vec<&'static str> {
+        FRAME_TYPES.into_iter().filter(|t| self.frame_param(t).is_some()).collect()
+    }
+    /// The reference media kinds the action takes, by their listing names.
+    pub fn reference_types(&self) -> Vec<&'static str> {
+        self.references.as_ref().map(|r| r.media.iter().map(|m| reference_type(*m)).collect()).unwrap_or_default()
     }
     pub fn sellable(mut self, sellable: bool) -> VideoContract {
         self.sellable = sellable;
@@ -279,6 +345,8 @@ impl VideoContract {
             "supported_sizes": if editing { json!(null) } else { json!(sizes.iter().map(|(.., w, h)| format!("{w}x{h}")).collect::<Vec<_>>()) },
             "generate_audio": match self.audio { Audio::None => json!(false), Audio::Always => json!(true), Audio::Param { default, .. } => json!(default) },
             "seed": self.seed_param.is_some(),
+            "supported_frame_images": self.frame_types(),
+            "supported_reference_types": self.reference_types(),
         })
     }
 
@@ -298,6 +366,16 @@ impl VideoContract {
         }
         named.extend(self.seed_param.as_deref());
         let mut out: Vec<String> = named.into_iter().filter(|n| !spec.params.iter().any(|p| p.name == *n)).map(|n| format!("{}: no param '{n}'", spec.name)).collect();
+        // A param the server fills with a path it wrote must be a string the
+        // host resolves: a remote caller can never set it directly.
+        let host_paths = self.first_frame.iter().chain(&self.last_frame).chain(self.references.as_ref().map(|r| &r.param));
+        for name in host_paths {
+            match spec.params.iter().find(|p| &p.name == name) {
+                None => out.push(format!("{}: no param '{name}'", spec.name)),
+                Some(p) if !p.host_resolved || p.ty != crate::ParamType::Str => out.push(format!("{}: '{name}' is not a host-resolved string param", spec.name)),
+                Some(_) => {}
+            }
+        }
         if let Some(clip) = &self.clip_input {
             if !spec.inputs.iter().any(|b| &b.name == clip && b.media == crate::Media::Video) {
                 out.push(format!("{}: no video input '{clip}'", spec.name));
@@ -318,6 +396,9 @@ impl VideoContract {
             "audio": match &self.audio { Audio::None => json!(false), Audio::Always => json!(true), Audio::Param { name, default } => json!({"param": name, "default": default}) },
             "seed_param": self.seed_param,
             "clip_input": self.clip_input,
+            "first_frame": self.first_frame,
+            "last_frame": self.last_frame,
+            "references": self.references.as_ref().map(|r| json!({"param": r.param, "separator": r.separator.to_string(), "media": r.media.iter().map(|m| reference_type(*m)).collect::<Vec<_>>(), "max": r.max})),
             "sellable": self.sellable,
         })
     }
@@ -434,4 +515,30 @@ mod tests {
         }
         assert!(!l["supported_resolutions"].as_array().unwrap().contains(&json!("1080p")));
     }
+
+    #[test]
+    fn frame_images_and_references_are_listed_and_must_be_host_paths() {
+        use crate::{ActionSpec, ParamSpec, ParamType};
+        let c = ltx().frame_images(Some("start"), None).references("refs", ',', &[Media::Image, Media::Audio], 4);
+        assert_eq!(c.frame_types(), ["first_frame"]);
+        assert_eq!(c.frame_param("last_frame"), None);
+        assert_eq!(c.listing()["supported_frame_images"], json!(["first_frame"]));
+        assert_eq!(c.listing()["supported_reference_types"], json!(["image", "audio"]));
+        let base = |start: ParamSpec| {
+            ActionSpec::new("t2v", "")
+                .param(ParamSpec::new("frames", ParamType::Int, ""))
+                .param(ParamSpec::new("width", ParamType::Int, ""))
+                .param(ParamSpec::new("height", ParamType::Int, ""))
+                .param(ParamSpec::new("fps", ParamType::Int, ""))
+                .param(ParamSpec::new("audio", ParamType::Bool, ""))
+                .param(ParamSpec::new("seed", ParamType::Int, ""))
+                .param(start)
+        };
+        // A param a remote caller could set itself would let it name a path.
+        let open = base(ParamSpec::new("start", ParamType::Str, ""));
+        assert_eq!(c.problems(&open), ["t2v: 'start' is not a host-resolved string param", "t2v: no param 'refs'"]);
+        let host = base(ParamSpec::new("start", ParamType::Str, "").host_resolved()).param(ParamSpec::new("refs", ParamType::Str, "").host_resolved());
+        assert!(c.problems(&host).is_empty(), "{:?}", c.problems(&host));
+    }
+
 }

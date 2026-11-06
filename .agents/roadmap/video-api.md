@@ -77,11 +77,19 @@ surfaces, at `/videos` and `/v1/videos`):
 (created private, emptied at start), bounded in bytes (`--video-spool-bytes`,
 oldest finished first), and a job's file is removed with the job.
 
-**Inputs.** `frame_images`/`input_references` image `data:` URLs and the
-`input_video` extension (`{"type":"video_url","video_url":{"url":"data:video/mp4;base64,..."}}`)
-are decoded at the boundary (PNG/JPEG via `imaging`, AV1 MP4/WebM via
-`videocodec`) into the action's blobs. A remote URL is refused: the server
-never fetches.
+**Inputs.** The `input_video` extension
+(`{"type":"video_url","video_url":{"url":"data:video/mp4;base64,..."}}`) is
+decoded at the boundary into the edit action's `video` blob. `frame_images`
+(`first_frame`, `last_frame`) and `input_references` (image, video, audio)
+fill the host-resolved path params the action's contract names
+(`VideoContract::frame_images`, `::references`): `apiserve::video_inputs`
+decodes each `data:` URL (images within `MAX_IMAGE_PIXELS`, re-encoded as
+PNG; WAV parsed and written again; MP4/WebM kept once it decodes), writes it
+to a private directory of the job's own, sets the param, and removes the
+directory when the job ends. A request with frames or references goes to the
+model's first generation action that takes them (MiniMax-H3's `fl2va` or
+`ref2va`, LTX-2.5's `t2v`). A remote URL is refused: the server never
+fetches. A caller can still never name a path itself.
 
 **Choosing an edit.** `provider.options.brain.action` names an action declaring
 `clip_input`; its other params go in `provider.options.brain.params`, checked

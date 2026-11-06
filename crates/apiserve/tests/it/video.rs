@@ -3,11 +3,11 @@
 
 //! The OpenRouter `/videos` contract against a fake video model: listing,
 //! submit, poll, download (whole and by range), idempotent resubmission, an
-//! edit fed the previous result, cancellation, and every refusal a client can
-//! provoke, each before the model runs.
+//! edit fed the previous result, frame images and references, cancellation,
+//! and every refusal a client can provoke, each before the model runs.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apiserve::{router, AppState, Provider};
@@ -39,8 +39,11 @@ fn clip(first: usize, n: usize, w: u32, h: u32) -> Vec<(Vec<f32>, u32, u32)> {
     (first..first + n).map(|i| ([f32::from(red(i)) / 255.0, 0.5, 0.25].into_iter().cycle().take((w * h * 3) as usize).collect(), w, h)).collect()
 }
 
-struct FakeVideo(Arc<AtomicUsize>);
-struct FakeVideoInst(Arc<AtomicUsize>);
+/// What the fake model was handed: every host path the server filled in.
+type Seen = Arc<Mutex<Vec<String>>>;
+
+struct FakeVideo(Arc<AtomicUsize>, Seen);
+struct FakeVideoInst(Arc<AtomicUsize>, Seen);
 
 impl ResidentModel for FakeVideo {
     fn manifest(&self) -> Manifest {
@@ -54,8 +57,22 @@ impl ResidentModel for FakeVideo {
             .param(ParamSpec::new("seed", ParamType::Int, "seed"))
             .param(ParamSpec::new("audio", ParamType::Bool, "sound").default(json!(false)))
             .param(ParamSpec::new("hold", ParamType::Bool, "run until cancelled").default(json!(false)))
+            .param(ParamSpec::new("start_image", ParamType::Str, "a still the first frame takes its colour from").host_resolved())
+            .param(ParamSpec::new("end_image", ParamType::Str, "a still the last frame takes its colour from").host_resolved())
             .output(BlobSpec::new("video", Media::Video, "the clip").required())
-            .video(contract());
+            .video(contract().frame_images(Some("start_image"), Some("end_image")));
+        let r2v = ActionSpec::new("r2v", "video from references")
+            .streaming()
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
+            .param(ParamSpec::new("frames", ParamType::Int, "frames").default(json!(5)))
+            .param(ParamSpec::new("width", ParamType::Int, "width").default(json!(32)))
+            .param(ParamSpec::new("height", ParamType::Int, "height").default(json!(32)))
+            .param(ParamSpec::new("fps", ParamType::Int, "rate").default(json!(8)))
+            .param(ParamSpec::new("seed", ParamType::Int, "seed"))
+            .param(ParamSpec::new("audio", ParamType::Bool, "sound").default(json!(false)))
+            .param(ParamSpec::new("refs", ParamType::Str, "reference paths").required().host_resolved())
+            .output(BlobSpec::new("video", Media::Video, "the clip").required())
+            .video(contract().references("refs", ',', &[Media::Image, Media::Audio], 3));
         let extend = ActionSpec::new("extend", "continue a clip")
             .streaming()
             .input(BlobSpec::new("video", Media::Video, "the clip").required())
@@ -64,7 +81,7 @@ impl ResidentModel for FakeVideo {
             .output(BlobSpec::new("video", Media::Video, "the longer clip").required())
             .video(contract().clip_input("video"));
         let smoke = ActionSpec::new("smoke", "a random-weight smoke test").streaming().param(ParamSpec::new("prompt", ParamType::Str, "p")).output(BlobSpec::new("video", Media::Video, "v")).video(contract().sellable(false));
-        Manifest::new(MODEL, "a fake video model", vec![t2v, extend, smoke])
+        Manifest::new(MODEL, "a fake video model", vec![t2v, r2v, extend, smoke])
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
         InstanceKey::new(MODEL, "default")
@@ -73,7 +90,7 @@ impl ResidentModel for FakeVideo {
         MemCost::default()
     }
     fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
-        Ok(Box::new(FakeVideoInst(self.0.clone())))
+        Ok(Box::new(FakeVideoInst(self.0.clone(), self.1.clone())))
     }
 }
 
@@ -92,7 +109,23 @@ impl Instance for FakeVideoInst {
                     }
                 }
                 let (n, w, h) = (inv.get_i64("frames").unwrap() as usize, inv.get_i64("width").unwrap() as u32, inv.get_i64("height").unwrap() as u32);
-                clip(0, n, w, h)
+                let mut c = clip(0, n, w, h);
+                for (param, at) in [("start_image", 0), ("end_image", n - 1)] {
+                    if let Some(path) = inv.get_str(param) {
+                        let still = imaging::load(&path)?;
+                        let red = f32::from(still.px[0]) / 255.0;
+                        c[at].0.iter_mut().step_by(3).for_each(|v| *v = red);
+                        self.1.lock().unwrap().push(path);
+                    }
+                }
+                c
+            }
+            "r2v" => {
+                for path in inv.get_str("refs").unwrap().split(',') {
+                    std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+                    self.1.lock().unwrap().push(path.to_string());
+                }
+                clip(0, inv.get_i64("frames").unwrap() as usize, inv.get_i64("width").unwrap() as u32, inv.get_i64("height").unwrap() as u32)
             }
             "extend" => {
                 let mut c = capability::blob::decode_video(inv, "video")?;
@@ -111,13 +144,19 @@ impl Instance for FakeVideoInst {
 }
 
 fn app_counting(provider: Provider) -> (Router, Arc<AtomicUsize>) {
+    let (app, runs, _) = app_seeing(provider);
+    (app, runs)
+}
+
+fn app_seeing(provider: Provider) -> (Router, Arc<AtomicUsize>, Seen) {
     let runs = Arc::new(AtomicUsize::new(0));
-    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeVideo(runs.clone()))];
+    let seen = Seen::default();
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeVideo(runs.clone(), seen.clone()))];
     let mut budgets = Budgets::new();
     budgets.set(Device::Cpu, 8 << 30, 0);
     let spool = std::env::temp_dir().join(format!("brain-video-test-{}", uuid::Uuid::new_v4()));
     let state = AppState::new(Executor::start(models, budgets, Policy::default()), KEY.to_string(), provider).with_video_spool(spool, 1 << 30);
-    (router(state), runs)
+    (router(state), runs, seen)
 }
 
 async fn call(app: &Router, method: &str, uri: &str, body: Option<Value>, headers: &[(&str, &str)]) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
@@ -159,6 +198,23 @@ async fn submit(app: &Router, body: Value) -> String {
     v["id"].as_str().unwrap().to_string()
 }
 
+/// A 32x16 still of one flat red level, as a PNG `data:` URL.
+fn png_url(red: u8) -> String {
+    let path = std::env::temp_dir().join(format!("brain-video-test-{}.png", uuid::Uuid::new_v4()));
+    imaging::save_png(&path, &imaging::Rgb8 { w: 32, h: 16, px: [red, 128, 64].repeat(32 * 16) }).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).ok();
+    format!("data:image/png;base64,{}", events::base64::encode(&bytes))
+}
+
+fn frame(url: &str, frame_type: &str) -> Value {
+    json!({"type": "image_url", "image_url": {"url": url}, "frame_type": frame_type})
+}
+
+fn image_ref(url: &str) -> Value {
+    json!({"type": "image_url", "image_url": {"url": url}})
+}
+
 /// Decode an MP4 back into frames through brain's own reader.
 fn frames_of(mp4: &[u8]) -> Vec<(Vec<f32>, u32, u32)> {
     let path = std::env::temp_dir().join(format!("brain-video-test-{}.mp4", uuid::Uuid::new_v4()));
@@ -184,7 +240,12 @@ async fn a_video_model_is_listed_with_what_it_accepts() {
     assert_eq!(m["seed"], json!(true));
     // The smoke-test action is runnable but never offered.
     let actions: Vec<&str> = m["actions"].as_array().unwrap().iter().map(|a| a["action"].as_str().unwrap()).collect();
-    assert_eq!(actions, ["t2v", "extend"]);
+    assert_eq!(actions, ["t2v", "r2v", "extend"]);
+    // What any of its generation actions takes, and never a host path param.
+    assert_eq!(m["supported_frame_images"], json!(["first_frame", "last_frame"]));
+    assert_eq!(m["supported_reference_types"], json!(["image", "audio"]));
+    let params: Vec<&str> = m["actions"].as_array().unwrap().iter().flat_map(|a| a["params"].as_array().unwrap()).map(|p| p["name"].as_str().unwrap()).collect();
+    assert!(!params.iter().any(|p| ["start_image", "end_image", "refs"].contains(p)), "{params:?}");
 
     let (_, cards) = json_call(&app, "GET", "/v1/models", None, &[]).await;
     let card = cards["data"].as_array().unwrap().iter().find(|c| c["id"] == MODEL).unwrap();
@@ -280,12 +341,22 @@ async fn a_running_job_is_cancelled() {
 async fn bad_requests_are_refused_before_the_model_runs() {
     let (app, runs) = app_counting(Provider::OpenRouter);
     let data = "data:video/mp4;base64,AAAA";
+    let png = png_url(10);
     for (body, want) in [
         (json!({"model": MODEL, "prompt": "x", "duration": 9}), StatusCode::BAD_REQUEST),
         (json!({"model": MODEL, "prompt": "x", "size": "33x16"}), StatusCode::BAD_REQUEST),
         (json!({"model": MODEL, "prompt": "x", "colour": "red"}), StatusCode::BAD_REQUEST),
         (json!({"model": MODEL, "prompt": "x", "callback_url": "https://example.com"}), StatusCode::BAD_REQUEST),
         (json!({"model": MODEL, "prompt": "x", "frame_images": [{"type": "image_url", "image_url": {"url": data}, "frame_type": "first_frame"}]}), StatusCode::BAD_REQUEST),
+        (json!({"model": MODEL, "prompt": "x", "frame_images": [frame("https://example.com/a.png", "first_frame")]}), StatusCode::BAD_REQUEST),
+        (json!({"model": MODEL, "prompt": "x", "frame_images": [frame("data:image/png;base64,AAAA", "first_frame")]}), StatusCode::BAD_REQUEST),
+        (json!({"model": MODEL, "prompt": "x", "frame_images": [frame(&png, "middle_frame")]}), StatusCode::BAD_REQUEST),
+        (json!({"model": MODEL, "prompt": "x", "frame_images": [frame(&png, "first_frame"), frame(&png, "first_frame")]}), StatusCode::BAD_REQUEST),
+        (json!({"model": MODEL, "prompt": "x", "input_references": [{"type": "video_url", "video_url": {"url": data}}]}), StatusCode::BAD_REQUEST),
+        (json!({"model": MODEL, "prompt": "x", "input_references": [image_ref(&png), image_ref(&png), image_ref(&png), image_ref(&png)]}), StatusCode::BAD_REQUEST),
+        (json!({"model": MODEL, "prompt": "x", "frame_images": [frame(&png, "first_frame")], "input_references": [image_ref(&png)]}), StatusCode::BAD_REQUEST),
+        (json!({"model": MODEL, "prompt": "x", "provider": {"options": {"brain": {"params": {"start_image": "/etc/passwd"}}}}}), StatusCode::BAD_REQUEST),
+        (json!({"model": MODEL, "prompt": "x", "provider": {"options": {"brain": {"action": "r2v", "params": {"refs": "/etc/passwd"}}}}}), StatusCode::BAD_REQUEST),
         (json!({"model": MODEL, "prompt": "x", "input_video": {"type": "video_url", "video_url": {"url": "https://example.com/a.mp4"}}, "provider": {"options": {"brain": {"action": "extend"}}}}), StatusCode::BAD_REQUEST),
         (json!({"model": MODEL, "prompt": "x", "provider": {"options": {"brain": {"action": "extend"}}}}), StatusCode::BAD_REQUEST),
         (json!({"model": MODEL, "prompt": "x", "provider": {"options": {"brain": {"params": {"weights": "/etc/passwd"}}}}}), StatusCode::BAD_REQUEST),
@@ -310,4 +381,34 @@ async fn video_routes_need_the_key_and_are_not_on_the_anthropic_surface() {
     let (app, _) = app_counting(Provider::Anthropic);
     let req = Request::get("/v1/videos/models").header("x-api-key", KEY).body(Body::empty()).unwrap();
     assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frame_images_anchor_the_clip_through_files_the_server_owns() {
+    let (app, _, seen) = app_seeing(Provider::OpenRouter);
+    let id = submit(&app, json!({"model": MODEL, "prompt": "a ball", "duration": 1, "size": "32x16", "frame_images": [frame(&png_url(240), "first_frame"), frame(&png_url(200), "last_frame")]})).await;
+    let done = wait(&app, &id).await;
+    assert_eq!(done["status"], "completed", "{done}");
+    let (_, _, mp4) = call(&app, "GET", done["unsigned_urls"][0].as_str().unwrap(), None, &[]).await;
+    let frames = frames_of(&mp4);
+    assert!((mean_red(&frames[0]) - 240.0).abs() < 12.0, "first frame {}", mean_red(&frames[0]));
+    assert!((mean_red(frames.last().unwrap()) - 200.0).abs() < 12.0, "last frame {}", mean_red(frames.last().unwrap()));
+    // The model read the stills from paths the server chose, and the server
+    // removed them with the job.
+    let paths = seen.lock().unwrap().clone();
+    assert_eq!(paths.len(), 2);
+    for path in &paths {
+        assert!(!std::path::Path::new(path).exists(), "{path} outlived its job");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn references_go_to_the_action_that_takes_them() {
+    let (app, _, seen) = app_seeing(Provider::OpenRouter);
+    let wav = format!("data:audio/wav;base64,{}", events::base64::encode(&audio::wav::encode(&vec![0.0; 1600], 16_000)));
+    let id = submit(&app, json!({"model": MODEL, "prompt": "<Picture 1> sings <Audio 1>", "input_references": [image_ref(&png_url(90)), {"type": "audio_url", "audio_url": {"url": wav}}]})).await;
+    let done = wait(&app, &id).await;
+    assert_eq!(done["status"], "completed", "{done}");
+    let kinds: Vec<String> = seen.lock().unwrap().iter().map(|p| std::path::Path::new(p).extension().unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(kinds, ["png", "wav"]);
 }

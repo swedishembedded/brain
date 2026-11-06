@@ -85,8 +85,9 @@ pub fn manifest() -> Manifest {
 
     // What `/videos` maps onto t2v: LTX-2.5's 1 + 8k frame grid at the
     // requested rate, sides on the VAE's 32-pixel stride, the 1-20 s the
-    // duration head predicts within, sound on request.
-    let t2v = t2v.video(video_contract());
+    // duration head predicts within, sound on request, and a request's first
+    // and last frame images as the start and end stills.
+    let t2v = t2v.video(video_contract().frame_images(Some("start_frame"), Some("end_frame")));
 
     // DFR takes everything t2v does - stills, sound, adapters, an unnamed
     // length the duration head predicts - on the real checkpoint only.

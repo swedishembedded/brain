@@ -26,8 +26,10 @@
 //! with the same `Idempotency-Key`.
 //!
 //! Inputs travel inline: an edit's `input_video` is a `data:` URL of an MP4 or
-//! WebM (AV1), decoded at the boundary. A remote URL is refused; the server
-//! never fetches on a caller's behalf.
+//! WebM (AV1), decoded at the boundary, and `frame_images` and
+//! `input_references` reach the action that declares them
+//! ([`crate::video_inputs`]). A remote URL is refused; the server never
+//! fetches on a caller's behalf.
 //!
 //! Swedish Embedded AB implements solutions for serving generative video
 //! behind standard APIs for its clients. If your team needs expertise in
@@ -59,6 +61,7 @@ use crate::auth::CallerExt;
 use crate::bridge::{self, EventStream, StreamMsg};
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::video_inputs::{self, JobInputs, Wanted};
 
 /// The largest request body: an edit carries its clip inline as base64.
 pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -107,9 +110,9 @@ struct CreateBody {
     #[serde(default)]
     seed: Option<i64>,
     #[serde(default)]
-    frame_images: Option<Vec<Value>>,
+    frame_images: Vec<video_inputs::FrameImage>,
     #[serde(default)]
-    input_references: Option<Vec<Value>>,
+    input_references: Vec<video_inputs::Reference>,
     #[serde(default)]
     input_video: Option<VideoUrl>,
     #[serde(default)]
@@ -149,12 +152,27 @@ struct BrainOptions {
     params: Map<String, Value>,
 }
 
-/// The action a model renders `/videos` requests with: the one named, which
-/// must declare a [`VideoContract`], else the model's first generation action.
-fn video_action<'m>(manifest: &'m Manifest, named: Option<&str>) -> Option<&'m ActionSpec> {
+/// The action a model renders a `/videos` request with: the one named, which
+/// must declare a [`VideoContract`] and take the request's frame images and
+/// references, else the model's first generation action that takes them.
+fn video_action<'m>(manifest: &'m Manifest, named: Option<&str>, wanted: &Wanted) -> Result<&'m ActionSpec, String> {
+    let model = &manifest.model;
     match named {
-        Some(name) => manifest.actions.iter().find(|a| a.name == name && a.video.is_some()),
-        None => manifest.actions.iter().find(|a| a.video.as_ref().is_some_and(|c| c.clip_input.is_none())),
+        Some(name) => {
+            let spec = manifest.actions.iter().find(|a| a.name == name && a.video.is_some()).ok_or_else(|| format!("{model} has no video action '{name}'"))?;
+            match wanted.unmet(spec.video.as_ref().expect("filtered on video")) {
+                Some(why) => Err(format!("{model} {name} {why}")),
+                None => Ok(spec),
+            }
+        }
+        None => {
+            let generation: Vec<&ActionSpec> = manifest.actions.iter().filter(|a| a.video.as_ref().is_some_and(|c| c.clip_input.is_none())).collect();
+            let first = generation.first().ok_or_else(|| format!("{model} has no text-to-video action; name an edit with provider.options.brain.action"))?;
+            generation.iter().find(|a| wanted.unmet(a.video.as_ref().expect("filtered on video")).is_none()).copied().ok_or_else(|| {
+                let why = wanted.unmet(first.video.as_ref().expect("filtered on video")).unwrap_or_default();
+                format!("{model} {why}")
+            })
+        }
     }
 }
 
@@ -167,6 +185,9 @@ struct Planned {
     model: String,
     action: String,
     inv: Invocation,
+    /// The server's copies of the request's frame images and references,
+    /// kept until the job ends.
+    inputs: Option<JobInputs>,
 }
 
 /// Turn a request into a validated invocation, or a 400 naming what is wrong.
@@ -177,9 +198,7 @@ async fn plan(state: &AppState, body: &Bytes) -> Result<Planned, ApiError> {
     if req.callback_url.is_some() {
         return Err(bad("callback_url is not supported: poll the job".into()));
     }
-    if req.frame_images.as_ref().is_some_and(|v| !v.is_empty()) || req.input_references.as_ref().is_some_and(|v| !v.is_empty()) {
-        return Err(bad(format!("{} takes no frame_images or input_references", req.model)));
-    }
+    let media_in = Wanted::new(req.frame_images, req.input_references).map_err(bad)?;
     let manifests = state.exec.manifests();
     let model = if is_video_model(&manifests, &req.model) {
         req.model.clone()
@@ -200,10 +219,7 @@ async fn plan(state: &AppState, body: &Bytes) -> Result<Planned, ApiError> {
             brain = serde_json::from_value(value).map_err(|e| bad(format!("provider.options.brain: {e}")))?;
         }
     }
-    let spec = video_action(manifest, brain.action.as_deref()).ok_or_else(|| match &brain.action {
-        Some(a) => bad(format!("{model} has no video action '{a}'")),
-        None => bad(format!("{model} has no text-to-video action; name an edit with provider.options.brain.action")),
-    })?;
+    let spec = video_action(manifest, brain.action.as_deref(), &media_in).map_err(bad)?;
     let contract = spec.video.clone().expect("video_action only returns actions with a contract");
 
     let wanted = VideoRequest {
@@ -242,8 +258,23 @@ async fn plan(state: &AppState, body: &Bytes) -> Result<Planned, ApiError> {
         (None, Some(_)) => return Err(bad(format!("{model} {} takes no input_video", spec.name))),
         (None, None) => {}
     }
-    let inv = spec.validate_served(inv).map_err(bad)?;
-    Ok(Planned { model, action: spec.name.clone(), inv })
+    // `validate_served`'s two passes with the host's answers between them: a
+    // host path param the caller named is refused as unknown first, then the
+    // server fills the ones the contract gives it from the request's own
+    // inputs, then the full spec checks the result.
+    let mut inv = spec.clone().for_serving().validate(inv).map_err(bad)?;
+    let inputs = if media_in.is_empty() {
+        None
+    } else {
+        let root = private_temp_dir().map_err(|e| ApiError::internal(provider, e))?;
+        let (inputs, host_params) = tokio::task::spawn_blocking(move || media_in.materialize(&root, &contract)).await.map_err(|e| ApiError::internal(provider, e.to_string()))?.map_err(bad)?;
+        if let Value::Object(params) = &mut inv.params {
+            params.extend(host_params);
+        }
+        Some(inputs)
+    };
+    let inv = spec.validate(inv).map_err(bad)?;
+    Ok(Planned { model, action: spec.name.clone(), inv, inputs })
 }
 
 /// An inline `data:video/...;base64,` clip, decoded into the video blob wire
@@ -521,7 +552,9 @@ fn encode(outcome: &Outcome, path: &FsPath) -> Result<Clip, String> {
 }
 
 /// Follow one job to its end: progress, then the encode, then the result.
-async fn drive(jobs: Arc<VideoJobs>, provider: crate::Provider, id: Uuid, mut stream: EventStream, mut cancel: oneshot::Receiver<()>) {
+/// Follow one job to its end. `_inputs` (the server's copies of the request's
+/// frame images and references) lives exactly as long as the job.
+async fn drive(jobs: Arc<VideoJobs>, provider: crate::Provider, id: Uuid, mut stream: EventStream, mut cancel: oneshot::Receiver<()>, _inputs: Option<JobInputs>) {
     let outcome = loop {
         tokio::select! {
             _ = &mut cancel => return,
@@ -600,7 +633,7 @@ async fn create(State(state): State<AppState>, caller: CallerExt, headers: Heade
             return e.into_response();
         }
     };
-    tokio::spawn(drive(Arc::clone(&state.videos), provider, id, stream, cancel_rx));
+    tokio::spawn(drive(Arc::clone(&state.videos), provider, id, stream, cancel_rx, planned.inputs));
     let mut response = (StatusCode::ACCEPTED, Json(json!({"id": id.to_string(), "polling_url": polling_url(id), "status": "pending"}))).into_response();
     if let Ok(location) = HeaderValue::from_str(&polling_url(id)) {
         response.headers_mut().insert(header::LOCATION, location);
@@ -760,13 +793,26 @@ async fn models(State(state): State<AppState>) -> Json<Value> {
             "canonical_slug": m.model,
             "name": m.model,
             "description": generate.summary,
-            "supported_frame_images": [],
             "pricing_skus": {},
             "allowed_passthrough_parameters": ["brain"],
         });
         if let (Some(obj), Value::Object(listing)) = (entry.as_object_mut(), contract.listing()) {
             obj.extend(listing);
         }
+        // Frame images and references the model takes through ANY of its
+        // generation actions: a request carrying them is routed to that one.
+        let generation = || sellable.iter().filter_map(|a| a.video.as_ref()).filter(|c| c.clip_input.is_none());
+        let mut frames: Vec<&str> = generation().flat_map(|c| c.frame_types()).collect();
+        frames.sort_by_key(|t| capability::video::FRAME_TYPES.iter().position(|f| f == t));
+        frames.dedup();
+        let mut references: Vec<&str> = Vec::new();
+        for kind in generation().flat_map(|c| c.reference_types()) {
+            if !references.contains(&kind) {
+                references.push(kind);
+            }
+        }
+        entry["supported_frame_images"] = json!(frames);
+        entry["supported_reference_types"] = json!(references);
         entry["actions"] = sellable
             .iter()
             .map(|a| {

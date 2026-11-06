@@ -53,8 +53,16 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   takes one.
 - **Video** (`/v1/videos`, also without `/v1`), OpenRouter's asynchronous
   video contract. `POST /videos` takes `{"model", "prompt", "duration"?,
-  "resolution"?, "aspect_ratio"?, "size"?, "generate_audio"?, "seed"?}` and
-  answers `202 {"id", "polling_url", "status": "pending"}`. `GET /videos/{id}`
+  "resolution"?, "aspect_ratio"?, "size"?, "generate_audio"?, "seed"?,
+  "frame_images"?, "input_references"?}` and answers `202 {"id",
+  "polling_url", "status": "pending"}`. `frame_images` anchors the clip's
+  `first_frame` and/or `last_frame` to an image
+  (`{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."},
+  "frame_type": "first_frame"}`); `input_references` are image, video
+  (MP4/WebM) or WAV audio content parts the clip draws its subjects, look
+  and sound from. Each is sent inline as a `data:` URL; the request goes to
+  the model's action that takes them (MiniMax-H3's `fl2va` for frames,
+  `ref2va` for references; LTX-2.5's `t2v` for frames). `GET /videos/{id}`
   reports `pending`, `in_progress` (with `progress {step, total}`),
   `completed` (with `unsigned_urls`, `usage {seconds, frames, fps, width,
   height, audio}` and `content [{media_type, bytes, sha256}]`), `failed`
@@ -62,8 +70,8 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   the clip as an MP4 (AV1 video, Opus sound), with `Range` support; it needs
   the same key. `GET /videos/models` lists each video model with
   `supported_durations`, `supported_resolutions`, `supported_aspect_ratios`,
-  `supported_sizes`, `generate_audio`, `seed` and, as an extension, its
-  `actions`. Each model maps these fields onto its own frame grid, sizes and
+  `supported_sizes`, `supported_frame_images`, `generate_audio`, `seed` and,
+  as extensions, `supported_reference_types` and its `actions`. Each model maps these fields onto its own frame grid, sizes and
   rate, and a value it cannot render is a 400 naming the field; nothing is
   silently changed beyond snapping the frame count to the model's grid.
   Extensions: an `Idempotency-Key` header returns the job it already started
