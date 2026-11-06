@@ -101,16 +101,25 @@ fn sparse_engine_on(kv_int8: bool, tree: bool) -> Engine {
 
 #[test]
 fn qwen3_with_latent_sparse_attention_conforms() {
+    if !crate::lsa_engine::lsa_runs_here() {
+        return;
+    }
     conformance::run_all(&Conformance { make: || sparse_engine_on(false, false), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
 }
 
 #[test]
 fn qwen3_with_latent_sparse_attention_over_int8_kv_conforms() {
+    if !crate::lsa_engine::lsa_runs_here() {
+        return;
+    }
     conformance::run_all(&Conformance { make: || sparse_engine_on(true, false), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
 }
 
 #[test]
 fn qwen3_with_latent_sparse_attention_through_a_tree_conforms() {
+    if !crate::lsa_engine::lsa_runs_here() {
+        return;
+    }
     conformance::run_all(&Conformance { make: || sparse_engine_on(true, true), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
 }
 
@@ -118,6 +127,9 @@ fn qwen3_with_latent_sparse_attention_through_a_tree_conforms() {
 /// the engine allocates.
 #[test]
 fn the_planned_sparse_attention_bytes_are_the_allocated_ones() {
+    if !crate::lsa_engine::lsa_runs_here() {
+        return;
+    }
     for tree in [false, true] {
         let e = sparse_engine_on(false, tree);
         let planned = qwen3::serve::lsa_device_bytes(&sparse_indexer(tree), BLOCK, 96, (MIN_SEQ_TOKENS as u32).div_ceil(BLOCK), 4, 16);

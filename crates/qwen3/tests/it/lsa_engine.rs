@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Latent sparse attention in the Qwen3 serving engine on the real Qwen3-0.6B
-//! checkpoint (skipped when the model store does not hold it).
+//! checkpoint (skipped when the model store does not hold it or the device
+//! cannot run the workgroup-cooperative LSA kernels).
 //!
 //! Swedish Embedded AB implements long-context serving whose attention reads
 //! a bounded set of keys per token for its clients. If your team needs
@@ -24,7 +25,20 @@ fn device() -> std::sync::MutexGuard<'static, ()> {
     DEVICE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Whether the test device runs the LSA kernels, which are
+/// workgroup-cooperative; a backend without workgroup barriers refuses them.
+pub(crate) fn lsa_runs_here() -> bool {
+    let runs = gpu_core::testgpu::dev(&[]).caps().workgroup_reductions;
+    if !runs {
+        brain_testutil::skip_unavailable("LSA: this backend does not run workgroup-barrier kernels (GPU-only)");
+    }
+    runs
+}
+
 fn checkpoint() -> Option<String> {
+    if !lsa_runs_here() {
+        return None;
+    }
     let dir = brain_testutil::model_dir("Qwen/Qwen3-0.6B").unwrap_or_default();
     // The upstream safetensors load as they are; a checkout holding only a
     // converted file loads that.

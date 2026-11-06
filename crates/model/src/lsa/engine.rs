@@ -193,6 +193,11 @@ impl LsaAttention {
     /// un-rotates by what rotated them, so an indexer built at native
     /// context reads the same position-free vectors past it.
     pub fn new(g: &Gpu, indexer: &Indexer, kernels: LsaKernels, kv: KvGeometry, max_rows: u32, page_capacity: u32, yarn_inv_freq: Option<&DeviceBuffer>) -> Result<LsaAttention, String> {
+        // The index, read and ward kernels are workgroup-cooperative; a
+        // backend that cannot run them is refused here, not at dispatch.
+        if !g.caps().workgroup_reductions {
+            return Err("LSA: sparse attention needs a device with workgroup barriers (a GPU backend)".to_string());
+        }
         indexer.validate()?;
         let cfg = indexer.cfg;
         let geo = indexer.geometry;

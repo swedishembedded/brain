@@ -2458,6 +2458,15 @@ mod tests {
             Ok(got.outputs.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string())
         };
         let dense = generate(None).unwrap();
+        // The LSA kernels are workgroup-cooperative: a backend without
+        // workgroup barriers refuses the flag at activation.
+        if !gpu_core::testgpu::dev(&[]).caps().workgroup_reductions {
+            let err = generate(Some(own)).unwrap_err();
+            assert!(err.contains("--sparse-attention") && err.contains("workgroup barriers"), "{err}");
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&indexers);
+            return;
+        }
         assert_eq!(generate(Some(own)).unwrap(), dense, "every-key sparse attention served something other than dense attention");
         let err = generate(Some(foreign)).unwrap_err();
         assert!(err.contains("--sparse-attention"), "{err}");

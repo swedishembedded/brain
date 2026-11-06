@@ -39,6 +39,9 @@ fn grads(m: &Qwen, cfg: &QwenConfig) -> Vec<f32> {
 /// window-only selection must not.
 #[test]
 fn a_budget_past_the_context_trains_like_dense_attention() {
+    if !crate::lsa_engine::lsa_runs_here() {
+        return;
+    }
     let t = 64u32;
     let cfg = small(97, t, 64, 16);
     let mut rng = Lcg::random();
