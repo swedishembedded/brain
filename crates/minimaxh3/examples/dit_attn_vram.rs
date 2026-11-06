@@ -107,8 +107,8 @@ fn main() {
         let t = Instant::now();
         // The arena the model's own forward replays its blocks in.
         let out = {
-            let _arena = cx.gpu.scratch_scope_in("minimaxh3 block");
-            block_forward(&cx, &w, &BlockInputs { x: &x, adaln_indices: &adaln_idx, cos: &cos, sin: &sin, modulation: &[&modulation], seq_len: seq, levels: ActLevels::One }, &cfg).0
+            let arena = cx.gpu.scratch_scope_in("minimaxh3 block");
+            block_forward(&cx, &w, &BlockInputs { x: &x, adaln_indices: &adaln_idx, cos: &cos, sin: &sin, modulation: &[&modulation], seq_len: seq, levels: ActLevels::One, scope: Some(&arena) }, &cfg).0
         };
         let probe = cx.gpu.read(&out, 1);
         assert!(probe[0].is_finite(), "non-finite block output");

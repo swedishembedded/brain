@@ -791,6 +791,10 @@ pub struct BlockInputs<'a> {
     pub seq_len: u32,
     /// The request's activation quantization for the block's linears.
     pub levels: ActLevels,
+    /// The scratch scope the block runs in, when it runs in one: the FFN
+    /// half then reuses the attention half's dropped intermediates
+    /// ([`gpu_core::ScratchScope::rewind`]) instead of adding to them.
+    pub scope: Option<&'a gpu_core::ScratchScope<'a>>,
 }
 
 /// `MiniMaxH3TransformerBlock.forward`: RoPE'd, AdaLN-Zero modulated
@@ -802,26 +806,34 @@ pub struct BlockInputs<'a> {
 /// only the block's final output, so a bug localizes to whichever half of
 /// the block introduced it.
 pub fn block_forward(cx: &Ctx, w: &BlockWeights, inp: &BlockInputs, cfg: &H3TransformerConfig) -> (DeviceBuffer, DeviceBuffer) {
-    let BlockInputs { x, adaln_indices, cos, sin, modulation, seq_len, levels } = *inp;
+    let BlockInputs { x, adaln_indices, cos, sin, modulation, seq_len, levels, scope } = *inp;
     let (hidden, heads, hd, ffn) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim, cfg.ffn_dim);
     let half = 3 * cfg.rope_freq_dim;
 
     assert!(!modulation.is_empty(), "block_forward: at least one timestep's modulation is required");
     let tables = adaln_tables(modulation, hidden as usize);
     let [shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp] = tables.map(|t| cx.upload(&t));
+    let attention_start = scope.map(|s| s.mark());
 
-    // attention sub-block
-    let n1 = rmsnorm(cx, x, &w.norm1, seq_len, hidden, cfg.norm_eps);
-    let mod1 = modulate(cx, &n1, adaln_indices, &scale_msa, &shift_msa, seq_len, hidden);
-    let [q, k, v] = linears(cx, levels, &mod1, [&w.wq, &w.wk, &w.wv], seq_len);
-    let qn = rmsnorm(cx, &q, &w.norm_q, seq_len * heads, hd, cfg.qk_norm_eps);
-    let kn = rmsnorm(cx, &k, &w.norm_k, seq_len * heads, hd, cfg.qk_norm_eps);
-    rope_partial(cx, &qn, cos, sin, seq_len, heads, hd, half);
-    rope_partial(cx, &kn, cos, sin, seq_len, heads, hd, half);
-    let mode = cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd));
-    let attn = attention(&cx.gpu, &DIT_ATTN, mode, &qn, &kn, &v, seq_len, heads, hd);
-    let attn_out = linear(cx, levels, &attn, &w.wo, None, seq_len);
-    let h1 = gated_residual(cx, x, adaln_indices, &gate_msa, &attn_out, seq_len, hidden);
+    // attention sub-block: everything but its result and output is dropped
+    // when this block ends, which is what lets the FFN half reuse it.
+    let (attn_out, h1) = {
+        let n1 = rmsnorm(cx, x, &w.norm1, seq_len, hidden, cfg.norm_eps);
+        let mod1 = modulate(cx, &n1, adaln_indices, &scale_msa, &shift_msa, seq_len, hidden);
+        let [q, k, v] = linears(cx, levels, &mod1, [&w.wq, &w.wk, &w.wv], seq_len);
+        let qn = rmsnorm(cx, &q, &w.norm_q, seq_len * heads, hd, cfg.qk_norm_eps);
+        let kn = rmsnorm(cx, &k, &w.norm_k, seq_len * heads, hd, cfg.qk_norm_eps);
+        rope_partial(cx, &qn, cos, sin, seq_len, heads, hd, half);
+        rope_partial(cx, &kn, cos, sin, seq_len, heads, hd, half);
+        let mode = cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd));
+        let attn = attention(&cx.gpu, &DIT_ATTN, mode, &qn, &kn, &v, seq_len, heads, hd);
+        let attn_out = linear(cx, levels, &attn, &w.wo, None, seq_len);
+        let h1 = gated_residual(cx, x, adaln_indices, &gate_msa, &attn_out, seq_len, hidden);
+        (attn_out, h1)
+    };
+    if let (Some(s), Some(m)) = (scope, attention_start) {
+        s.rewind(m);
+    }
 
     // FFN sub-block
     let n2 = rmsnorm(cx, &h1, &w.norm2, seq_len, hidden, cfg.norm_eps);

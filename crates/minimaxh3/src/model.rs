@@ -309,20 +309,23 @@ fn block_bytes(cfg: &H3TransformerConfig, tier: Dtype) -> u64 {
 }
 
 /// Peak transient device bytes one block's forward allocates over `rows`
-/// packed rows. The block's scratch arena gives every allocation of a block
-/// its own slot, so the peak is their sum: at `hidden`, the two norms, the two
-/// modulated inputs, the attention output, the two gated residuals and the
-/// FFN output; at `inner`, q/k/v, the normed q/k, the flash path's packed
-/// qkv slab and the attention result; at `ffn`, the SwiGLU's value, gate and
-/// product - all fp32 - plus the int8 copy of each linear's input. Measured
-/// at 13312 rows on a P40 with one activation level: 8.24 GB beside the
-/// block's weights, against 8.45 GB modelled. Two levels
+/// packed rows. The block runs in a scratch scope that rewinds between its
+/// attention and FFN halves (`block::BlockInputs::scope`), so the halves
+/// share slots: at `hidden`, one norm and one modulated input serving both
+/// halves, the attention residual `h1`, and the attention and FFN projection
+/// outputs; at `inner`, the normed k, the flash path's packed qkv slab and
+/// the attention result; one slot holding the larger of the normed q and the
+/// SwiGLU product (`ffn`); the larger of q/k/v and the FFN's value/gate,
+/// which the linears' allocator reuses once the rewind has drained the
+/// attention half - all fp32 - plus the int8 copy of each linear's input.
+/// Measured at 13312 rows on a P40 with one activation level: 6.05 GB beside
+/// the block's weights, against 6.05 GB modelled. Two levels
 /// ([`block::ActLevels::Two`]) add a second int8 copy of each input and, per
 /// linear, one fp32 slab of `model::ops::TWO_LEVEL_PASS_ROWS` rows its second
 /// product is folded through.
 pub fn block_workspace_bytes(cfg: &H3TransformerConfig, rows: u32, levels: block::ActLevels) -> u64 {
     let (hidden, inner, ffn) = (cfg.hidden_size as u64, cfg.inner_dim() as u64, cfg.ffn_dim as u64);
-    let fp32 = (8 * hidden + 9 * inner + 3 * ffn) * 4;
+    let fp32 = (5 * hidden + 5 * inner + ffn + (3 * inner).max(2 * ffn)) * 4;
     let int8_inputs = 2 * hidden + inner + ffn;
     let one = rows as u64 * (fp32 + int8_inputs);
     match levels {
@@ -557,9 +560,9 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
             // of a fresh multi-hundred-MB driver allocation per op. The
             // `poll_wait` below drains the block before the next scope opens.
             let out = {
-                let _arena = cx.gpu.scratch_scope_in(BLOCK_ARENA);
+                let arena = cx.gpu.scratch_scope_in(BLOCK_ARENA);
                 let rows = modulation.block_rows(i, inp.timestep).unwrap_or_else(|e| panic!("minimaxh3 forward: {e}"));
-                let (out, attn_out) = block::block_forward(cx, &w, &block::BlockInputs { x: &h, adaln_indices: adaln_idx_dev, cos, sin, modulation: &rows, seq_len, levels: inp.act_levels }, cfg);
+                let (out, attn_out) = block::block_forward(cx, &w, &block::BlockInputs { x: &h, adaln_indices: adaln_idx_dev, cos, sin, modulation: &rows, seq_len, levels: inp.act_levels, scope: Some(&arena) }, cfg);
                 if taps && i == 0 {
                     tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
                     tap_block0_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
