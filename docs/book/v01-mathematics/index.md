@@ -50,7 +50,7 @@ in the curriculum and appear here when they are written.
    turns inputs into outputs, and what shapes such rules can take.
 3. [Vectors: Lists of Numbers with Geometry](03-vectors.md): how a list of numbers gains a
    length and a direction, and how to measure how alike two lists are.
-4. Matrices as Linear Maps: what multiplying a matrix by a vector means, and
+4. [Matrices as Linear Maps](04-matrices.md): what multiplying a matrix by a vector means, and
    why it is the central operation of machine learning.
 5. Arrays, Shapes, Strides and Broadcasting: how vectors, matrices and
    higher-dimensional arrays are laid out in memory and indexed.

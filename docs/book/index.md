@@ -30,6 +30,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 1. [Numbers, Quantities and Notation](v01-mathematics/01-numbers.md): What are the numbers a machine learns with, and how do we write about them precisely?
 2. [Functions and Their Shapes](v01-mathematics/02-functions.md): How do we describe a rule that turns inputs into outputs, and what shapes can such rules take?
 3. [Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md): How can a list of numbers have a length and a direction, and how do we measure how alike two lists are?
+4. [Matrices as Linear Maps](v01-mathematics/04-matrices.md): What does it mean to multiply a matrix by a vector, and why is that the central operation of machine learning?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 

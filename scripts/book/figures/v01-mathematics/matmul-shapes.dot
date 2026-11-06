@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+//
+// The shapes in a matrix product [m,k] x [k,n] = [m,n]: the inner size k is
+// shared and disappears, the outer sizes survive, and each output entry is one
+// dot product of length k. The chapter's cost count (m*n*k multiply-adds) is
+// read straight off this picture.
+//
+// Swedish Embedded AB implements solutions for sizing and costing matrix
+// workloads before they run. If your team needs expertise in the cost of
+// linear algebra in machine learning, you can procure our services by sending
+// an email to info@swedishembedded.com.
+digraph matmul_shapes {
+  rankdir=LR;
+  nodesep=0.4; ranksep=0.5;
+  node [shape=box, style="rounded,filled", fillcolor="#e2e8f0", color="#4a5568", fontname="Helvetica"];
+  edge [color="#1a202c", arrowsize=0.8, fontname="Helvetica", fontsize=11];
+
+  A [label="A\n[m, k]\nm rows, each of length k"];
+  B [label="B\n[k, n]\nn columns, each of length k"];
+  dot [shape=ellipse, fillcolor="#fefcbf", label="C[i][j] =\nrow i of A . column j of B\n(k multiply-adds)"];
+  C [label="C = A B\n[m, n]\nm*n entries", fillcolor="#c6f6d5"];
+  cost [shape=note, fillcolor="#ffffff", label="cost: m*n entries x k\n= m*n*k multiply-adds"];
+
+  A -> dot [label="k shared"];
+  B -> dot [label="k shared"];
+  dot -> C [label="k disappears"];
+  C -> cost [style=dashed, arrowhead=none];
+}
