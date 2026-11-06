@@ -906,7 +906,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let scenes: Vec<ltxv::longform::Scene> = if scene_specs.is_empty() {
         let prompt = prompt.ok_or("--prompt is required (or one --scene <frames>:<prompt> per scene)")?;
         if !frames_given && ltxv::pipeline::can_predict_frames(&paths, &o) {
-            o.frames = ltxv::pipeline::predict_frames(&paths, &prompt, &o, ltxv::pipeline::prediction_streams(&o))?;
+            o.frames = ltxv::pipeline::predict_frames(&paths, &prompt, &o, ltxv::pipeline::prediction_streams())?;
             eprintln!("ltxv: the duration head predicts {} frames ({:.2}s at {} fps) for this prompt", o.frames, o.frames as f64 / o.fps as f64, o.fps);
         }
         vec![ltxv::longform::Scene { frames: o.frames, prompt }]

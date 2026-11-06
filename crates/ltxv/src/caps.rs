@@ -239,7 +239,7 @@ pub fn resolved_opts(paths: &Paths, prompt: &str, p: &GenParams) -> Result<GenOp
     let mut o = p.opts.clone();
     crate::pipeline::resolve_defaults(&mut o, paths, p.named);
     if !p.named.frames && crate::pipeline::can_predict_frames(paths, &o) {
-        o.frames = crate::pipeline::predict_frames(paths, prompt, &o, crate::pipeline::prediction_streams(&o))?;
+        o.frames = crate::pipeline::predict_frames(paths, prompt, &o, crate::pipeline::prediction_streams())?;
     }
     Ok(o)
 }
@@ -266,6 +266,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         height: inv.get_i64("height").unwrap_or(d.height as i64).max(32) as usize,
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
         guidance: guidance_from(inv)?,
+        negative_prompt: negative_prompt_from(inv),
         seed,
         fps: inv.get_i64("fps").unwrap_or(d.fps as i64).max(1) as usize,
         base_shift: inv.get_f64("base_shift").unwrap_or(d.base_shift),
@@ -341,6 +342,7 @@ pub fn t2a_params_from(inv: &Invocation) -> Result<crate::pipeline::AudioOpts, S
     let base = GenOpts {
         steps: inv.get_i64("steps").unwrap_or(d.base.steps as i64).max(1) as usize,
         guidance: guidance_from(inv)?,
+        negative_prompt: negative_prompt_from(inv),
         seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
         sampler,
         eta,
@@ -392,6 +394,7 @@ fn clip_gen_opts(paths: &Paths, inv: &Invocation, clip: &crate::pipeline::Video)
         fps: clip.fps,
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
         guidance: guidance_from(inv)?,
+        negative_prompt: negative_prompt_from(inv),
         seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
         sampler,
         eta,
@@ -469,6 +472,7 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
         height: inv.get_i64("height").unwrap_or(d.height as i64).max(64) as usize,
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
         guidance: guidance_from(inv)?,
+        negative_prompt: negative_prompt_from(inv),
         seed,
         fps: inv.get_i64("fps").unwrap_or(d.fps as i64).max(1) as usize,
         base_shift: inv.get_f64("base_shift").unwrap_or(d.base_shift),
@@ -654,7 +658,13 @@ fn guidance_params() -> Vec<ParamSpec> {
         ParamSpec::new("audio_rescale", ParamType::Float, "rescale on the audio stream (overrides rescale)"),
         ParamSpec::new("modality_guidance", ParamType::Float, "guidance against the pass with audio<->video cross-attention cut, video stream (a2v); 1 is off"),
         ParamSpec::new("audio_modality_guidance", ParamType::Float, "the same for the audio stream (v2a); 1 is off"),
+        ParamSpec::new("negative_prompt", ParamType::Str, "what classifier-free guidance steers away from; read only when some guidance scale is not 1 (default: the reference pipelines' artifact list)"),
     ]
+}
+
+/// The `negative_prompt` parameter, else the reference's default.
+fn negative_prompt_from(inv: &Invocation) -> String {
+    inv.get_str("negative_prompt").unwrap_or_else(|| crate::guidance::DEFAULT_NEGATIVE_PROMPT.into())
 }
 
 /// Decode [`guidance_params`] into both streams' guidance.
@@ -709,6 +719,16 @@ mod tests {
         let named = gen_params_from(&base.clone().set("frames", json!(17))).unwrap();
         assert!(named.named.frames);
         assert_eq!(named.opts.frames, 17);
+    }
+
+    /// CFG guides against the request's `negative_prompt`, and against the
+    /// reference pipelines' own default when it names none.
+    #[test]
+    fn the_negative_prompt_defaults_to_the_references() {
+        let base = Invocation::new().set("prompt", json!("a lighthouse in a storm"));
+        assert_eq!(gen_params_from(&base).unwrap().opts.negative_prompt, crate::guidance::DEFAULT_NEGATIVE_PROMPT);
+        let named = gen_params_from(&base.set("negative_prompt", json!("fog"))).unwrap();
+        assert_eq!(named.opts.negative_prompt, "fog");
     }
 
     /// `t2a` takes a prompt and a length and returns a WAV; its sampler's

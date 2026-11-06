@@ -99,9 +99,9 @@ pub struct Key {
     pub cross_attention_dim: usize,
     pub connector_registers: u32,
     pub use_connector: bool,
-    /// Whether the unconditional branch was really encoded (some stream guides against the negative prompt)
-    /// or is the all-zero stand-in.
-    pub uncond_encoded: bool,
+    /// The negative prompt the unconditional branch encodes, `None` when no
+    /// stream guides against it and that branch is the all-zero stand-in.
+    pub negative_prompt: Option<String>,
     /// Whether the AUDIO stream's own projection was built. An entry without
     /// it cannot serve a request that needs it, and an entry with it is a
     /// strictly larger (more expensive) encode - so the two are separate
@@ -134,7 +134,9 @@ pub struct Key {
 ///   written by an earlier revision carries no `a_ctx_*` field at all and
 ///   would deserialize as "audio was not requested" for a request that did
 ///   request it.
-pub const ENCODE_REVISION: u32 = 3;
+/// * `4` - the unconditional branch encodes the negative prompt rather than
+///   an empty one, and [`Encoded`] carries that branch's own mask.
+pub const ENCODE_REVISION: u32 = 4;
 
 impl Key {
     /// The key material as JSON - written into the cache file and compared on
@@ -149,7 +151,7 @@ impl Key {
             "cross_attention_dim": self.cross_attention_dim,
             "connector_registers": self.connector_registers,
             "use_connector": self.use_connector,
-            "uncond_encoded": self.uncond_encoded,
+            "negative_prompt": self.negative_prompt,
             "audio": self.audio,
             "encode_revision": self.encode_revision,
         })
@@ -175,6 +177,8 @@ pub struct Encoded {
     pub ctx_cond: Vec<f32>,
     pub ctx_uncond: Vec<f32>,
     pub context_valid: Vec<f32>,
+    /// The unconditional branch's own mask - its prompt is the negative one.
+    pub uncond_valid: Vec<f32>,
     pub context_len: usize,
     /// The AUDIO stream's own conditional/unconditional context, at the audio
     /// stream's own narrower width - `None` when the encode did not build it.
@@ -251,11 +255,12 @@ pub fn load(key: &Key, policy: Policy) -> Option<Encoded> {
     let ctx_cond = get("ctx_cond")?;
     let ctx_uncond = get("ctx_uncond")?;
     let context_valid = get("context_valid")?;
+    let uncond_valid = get("uncond_valid")?;
     let context_len = context_valid.len();
 
     // Structural agreement between the stored pieces, so a truncated write
     // cannot come back as a plausible-looking context.
-    if context_len == 0 || ctx_cond.len() != context_len * key.cross_attention_dim || ctx_uncond.len() != ctx_cond.len() {
+    if context_len == 0 || ctx_cond.len() != context_len * key.cross_attention_dim || ctx_uncond.len() != ctx_cond.len() || uncond_valid.len() != context_len {
         tracing::warn!(path = %path.display(), "text-context cache entry has inconsistent shapes; ignoring it");
         return None;
     }
@@ -269,7 +274,7 @@ pub fn load(key: &Key, policy: Policy) -> Option<Encoded> {
     }
     touch(&path);
     tracing::info!(path = %path.display(), context_len, audio = key.audio, "text context served from cache");
-    Some(Encoded { ctx_cond, ctx_uncond, context_valid, context_len, a_ctx_cond, a_ctx_uncond })
+    Some(Encoded { ctx_cond, ctx_uncond, context_valid, uncond_valid, context_len, a_ctx_cond, a_ctx_uncond })
 }
 
 /// Mark `path` as used NOW, by rewriting its mtime - the recency [`prune`]
@@ -355,6 +360,7 @@ pub fn store(key: &Key, enc: &Encoded, policy: Policy) {
         ("ctx_cond".to_string(), vec![enc.context_len as u64, dim], enc.ctx_cond.clone()),
         ("ctx_uncond".to_string(), vec![enc.context_len as u64, dim], enc.ctx_uncond.clone()),
         ("context_valid".to_string(), vec![enc.context_len as u64], enc.context_valid.clone()),
+        ("uncond_valid".to_string(), vec![enc.context_len as u64], enc.uncond_valid.clone()),
     ];
     // The audio stream's own width is whatever its projection produced, read
     // back from the data rather than assumed - the two streams' widths differ
@@ -408,7 +414,7 @@ mod tests {
             cross_attention_dim: 4,
             connector_registers: 2,
             use_connector: true,
-            uncond_encoded: false,
+            negative_prompt: None,
             audio: false,
             encode_revision: ENCODE_REVISION,
         }
@@ -430,7 +436,8 @@ mod tests {
             Key { cross_attention_dim: 8, ..base.clone() },
             Key { connector_registers: 4, ..base.clone() },
             Key { use_connector: false, ..base.clone() },
-            Key { uncond_encoded: true, ..base.clone() },
+            Key { negative_prompt: Some("blurry".into()), ..base.clone() },
+            Key { negative_prompt: Some("grainy".into()), ..base.clone() },
             Key { audio: true, ..base.clone() },
             Key { encode_revision: base.encode_revision + 1, ..base.clone() },
         ];
@@ -458,6 +465,7 @@ mod tests {
             ctx_cond: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             ctx_uncond: vec![0.0; 8],
             context_valid: vec![1.0, 0.0],
+            uncond_valid: vec![0.0, 1.0],
             context_len: 2,
         };
         let on = Policy::default();
@@ -465,6 +473,7 @@ mod tests {
         let got = load(&k, on).expect("a stored entry must load back");
         assert_eq!(got.ctx_cond, enc.ctx_cond);
         assert_eq!(got.context_valid, enc.context_valid);
+        assert_eq!(got.uncond_valid, enc.uncond_valid);
         assert_eq!(got.context_len, 2);
 
         // Same file, different key material: overwrite the entry's key with a
@@ -542,7 +551,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("brain-ltxv-text-cache-budget-test");
         std::fs::remove_dir_all(&tmp).ok();
         gpu_core::set_cache_dir(Some(tmp.clone()));
-        let enc = Encoded { ctx_cond: vec![1.0; 8], ctx_uncond: vec![0.0; 8], context_valid: vec![1.0; 2], context_len: 2, a_ctx_cond: None, a_ctx_uncond: None };
+        let enc = Encoded { ctx_cond: vec![1.0; 8], ctx_uncond: vec![0.0; 8], context_valid: vec![1.0; 2], uncond_valid: vec![1.0; 2], context_len: 2, a_ctx_cond: None, a_ctx_uncond: None };
         let base = Key { cross_attention_dim: 4, ..key() };
         let dir = tmp.join("ltxv-text-context");
         let read_total = || -> (usize, u64) {
@@ -587,7 +596,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("brain-ltxv-text-cache-off-test");
         std::fs::remove_dir_all(&tmp).ok();
         gpu_core::set_cache_dir(Some(tmp.clone()));
-        let enc = Encoded { ctx_cond: vec![1.0; 8], ctx_uncond: vec![0.0; 8], context_valid: vec![1.0; 2], context_len: 2, a_ctx_cond: None, a_ctx_uncond: None };
+        let enc = Encoded { ctx_cond: vec![1.0; 8], ctx_uncond: vec![0.0; 8], context_valid: vec![1.0; 2], uncond_valid: vec![1.0; 2], context_len: 2, a_ctx_cond: None, a_ctx_uncond: None };
         let off = Policy { enabled: false, ..Policy::default() };
         store(&key(), &enc, off);
         assert!(!tmp.join("ltxv-text-context").exists(), "a disabled cache must write nothing");

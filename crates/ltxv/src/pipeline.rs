@@ -387,6 +387,11 @@ pub struct GenOpts {
     /// isolated-modality and rescale. The default is a single conditional
     /// forward per step - what the distilled checkpoint denoises with.
     pub guidance: crate::guidance::Guidance,
+    /// The caption the negative-prompt guidance pass is conditioned on -
+    /// encoded only when some stream's guidance runs that pass
+    /// ([`crate::guidance::Guidance::needs_uncond`]). Defaults to the
+    /// reference's [`crate::guidance::DEFAULT_NEGATIVE_PROMPT`].
+    pub negative_prompt: String,
     pub seed: u64,
     pub fps: usize,
     /// [`ltx2_sigmas`]'s four shape parameters. Defaults are `LTX2Scheduler.
@@ -592,6 +597,7 @@ impl Default for GenOpts {
             height: 64,
             steps: 4,
             guidance: crate::guidance::Guidance::default(),
+            negative_prompt: crate::guidance::DEFAULT_NEGATIVE_PROMPT.into(),
             seed: data::rng::random_seed(),
             fps: 8,
             base_shift: 0.95,
@@ -768,8 +774,8 @@ fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
 /// [`Paths::text_encoder`] is set: open the checkpoint for streaming, extract
 /// its embedded tokenizer (`gemma4::tokenizer`'s doc - it is the checkpoint's
 /// own `tokenizer_json` tensor, not a separate file), tokenize `prompt`
-/// (and, only when some stream guides against the negative prompt, the empty string for the unconditional
-/// branch), run `gemma4::forward_streamed`, and project the full
+/// (and `negative`, the negative prompt, for the unconditional branch - only
+/// when some stream guides against it), run `gemma4::forward_streamed`, and project the full
 /// `hidden_states` tuple through `gemma4::AggregateEmbed`'s video head -
 /// the real `[t, cross_attention_dim]` context `LtxDit::forward`/
 /// `crate::dit::forward_q_streamed` expect.
@@ -794,22 +800,15 @@ fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
 /// registers round-robin over the INVALID positions - see that function's
 /// doc); `1024` happens to already be an exact multiple of the real
 /// checkpoint's `connector_num_learnable_registers` (128), so no further
-/// rounding is needed on top of it. `context_valid` marks the real (`1.0`)
-/// vs padded (`0.0`) positions so the connector substitutes its own
-/// learnable registers into the padded tail rather than the DiT reading
-/// zeros as if they were real caption content - the padded rows in
-/// `ctx_cond`/`ctx_uncond` are zero exactly because the connector rewrites
-/// them before any block reads them (see `EmbeddingsConnector::forward`'s
-/// step 1).
-///
-/// `denoise`'s own CFG fold shares ONE `context_len`/`context_valid` pair
-/// across both branches, so when the negative prompt is encoded the empty-prompt
-/// encoding is zero-padded/truncated to match `ctx_cond`'s length - a
-/// documented simplification real per-branch attention masking would
-/// avoid, not exercised by this pipeline's own default (`guidance <= 1.0`
-/// skips the unconditional forward entirely, per this module's doc);
-/// `ctx_uncond` there is an all-zero vector of the same shape,
-/// [`context_stub`]'s own "closest honest stand-in" convention.
+/// rounding is needed on top of it. Each branch is framed by
+/// [`frame_prompt`] - right-padded, as the reference's connector reads it - and carries
+/// its own mask of real (`1.0`) vs padded (`0.0`) positions, so the
+/// connector substitutes its learnable registers into exactly that branch's
+/// padding rather than the DiT reading zeros as caption content. The padded
+/// rows are zero because the connector rewrites them before any block reads
+/// them (see `EmbeddingsConnector::forward`'s step 1). Without a
+/// negative-prompt pass the unconditional branch is an all-zero vector of
+/// the same shape that nothing reads.
 ///
 /// What an encode hands the denoise loop, and what [`crate::text_cache`]
 /// stores.
@@ -826,14 +825,18 @@ fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
 pub struct TextContext {
     pub cond: Vec<f32>,
     pub uncond: Vec<f32>,
+    /// Which of `cond`'s rows are the prompt's own - see [`frame_prompt`].
     pub valid: Vec<f32>,
+    /// The same for `uncond`, whose prompt is the negative one: each branch
+    /// is masked by its own token count, as the reference encodes them.
+    pub uncond_valid: Vec<f32>,
     pub len: usize,
     pub a_cond: Option<Vec<f32>>,
     pub a_uncond: Option<Vec<f32>>,
 }
 
-#[tracing::instrument(level = "info", name = "text_encode", skip_all, fields(prompt_chars = prompt.len(), negative = negative))]
-fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, negative: bool, device: Option<&str>, want_audio: bool, runtime: &Runtime) -> Result<TextContext, String> {
+#[tracing::instrument(level = "info", name = "text_encode", skip_all, fields(prompt_chars = prompt.len(), negative = negative.is_some()))]
+fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, negative: Option<&str>, device: Option<&str>, want_audio: bool, runtime: &Runtime) -> Result<TextContext, String> {
     let cross_attention_dim = dit_cfg.cross_attention_dim as usize;
 
     let cfg = gemma4::Gemma4Config::gemma4_12b();
@@ -867,12 +870,18 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, negative:
         cross_attention_dim,
         connector_registers: dit_cfg.connector_num_learnable_registers,
         use_connector: dit_cfg.use_embeddings_connector,
-        uncond_encoded: negative,
+        negative_prompt: negative.map(str::to_string),
         audio: want_audio,
         encode_revision: crate::text_cache::ENCODE_REVISION,
     };
-    if let Some(hit) = crate::text_cache::load(&cache_key, runtime.text_cache) {
-        return Ok(TextContext { cond: hit.ctx_cond, uncond: hit.ctx_uncond, valid: hit.context_valid, len: hit.context_len, a_cond: hit.a_ctx_cond, a_uncond: hit.a_ctx_uncond });
+    // A silent request is also answered by the entry an audio request (or a
+    // duration prediction) wrote: the same encode plus one more projection.
+    let hit = crate::text_cache::load(&cache_key, runtime.text_cache).or_else(|| {
+        let with_audio = crate::text_cache::Key { audio: true, ..cache_key.clone() };
+        (!want_audio).then(|| crate::text_cache::load(&with_audio, runtime.text_cache)).flatten().map(|hit| crate::text_cache::Encoded { a_ctx_cond: None, a_ctx_uncond: None, ..hit })
+    });
+    if let Some(hit) = hit {
+        return Ok(TextContext { cond: hit.ctx_cond, uncond: hit.ctx_uncond, valid: hit.context_valid, uncond_valid: hit.uncond_valid, len: hit.context_len, a_cond: hit.a_ctx_cond, a_uncond: hit.a_ctx_uncond });
     }
 
     // Sub-stage timings, not one opaque block. The stage as a whole was
@@ -975,34 +984,26 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, negative:
             n_cond * cross_attention_dim
         ));
     }
-    // Pad an encode's `[n, dim]` rows into the fixed `[context_len, dim]`
-    // frame the connector reads. One helper for both streams and both
-    // branches, so a width that differs cannot make the four paths differ in
-    // any other way.
-    let framed = |raw: &[f32], rows: usize, dim: usize| -> Vec<f32> {
-        let mut v = vec![0f32; context_len * dim];
-        let rows = rows.min(context_len);
-        v[..rows * dim].copy_from_slice(&raw[..rows * dim]);
-        v
-    };
-    let ctx_cond = framed(&raw_cond, n_cond, cross_attention_dim);
+    // One framing for both streams and both branches, so a width that
+    // differs cannot make the four paths differ in any other way.
+    let framed = |raw: &[f32], rows: usize, dim: usize| frame_prompt(raw, rows, dim, context_len).0;
+    let (ctx_cond, context_valid) = frame_prompt(&raw_cond, n_cond, cross_attention_dim, context_len);
     let a_dim = raw_cond_a.as_ref().map(|v| v.len() / n_cond.max(1));
     let a_ctx_cond = raw_cond_a.as_ref().zip(a_dim).map(|(v, d)| framed(v, n_cond, d));
-    let mut context_valid = vec![0f32; context_len];
-    context_valid[..n_cond].fill(1.0);
 
-    let (ctx_uncond, a_ctx_uncond) = if negative {
-        let ids_u = tokenize("");
-        let (raw_u, raw_u_a) = encode(&ids_u)?;
-        let v = framed(&raw_u, ids_u.len(), cross_attention_dim);
-        let a = raw_u_a.as_ref().zip(a_dim).map(|(x, d)| framed(x, ids_u.len(), d));
-        (v, a)
-    } else {
-        // The same all-zero stand-in the video branch has always used, at
-        // each stream's own width - never the video vector reused, which
-        // would be a shape error on the audio side and a wrong conditioning
-        // if the two widths ever coincided.
-        (vec![0f32; context_len * cross_attention_dim], a_dim.map(|d| vec![0f32; context_len * d]))
+    let (ctx_uncond, uncond_valid, a_ctx_uncond) = match negative {
+        Some(negative) => {
+            let ids_u = tokenize(negative);
+            let (raw_u, raw_u_a) = encode(&ids_u)?;
+            let (v, valid) = frame_prompt(&raw_u, ids_u.len(), cross_attention_dim, context_len);
+            let a = raw_u_a.as_ref().zip(a_dim).map(|(x, d)| framed(x, ids_u.len(), d));
+            (v, valid, a)
+        }
+        // The all-zero stand-in, at each stream's own width - never the
+        // video vector reused, which would be a shape error on the audio side
+        // and a wrong conditioning if the two widths ever coincided. No pass
+        // reads it: the negative-prompt pass is exactly what is not run.
+        None => (vec![0f32; context_len * cross_attention_dim], context_valid.clone(), a_dim.map(|d| vec![0f32; context_len * d])),
     };
 
     crate::text_cache::store(
@@ -1011,13 +1012,37 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, negative:
             ctx_cond: ctx_cond.clone(),
             ctx_uncond: ctx_uncond.clone(),
             context_valid: context_valid.clone(),
+            uncond_valid: uncond_valid.clone(),
             context_len,
             a_ctx_cond: a_ctx_cond.clone(),
             a_ctx_uncond: a_ctx_uncond.clone(),
         },
         runtime.text_cache,
     );
-    Ok(TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, len: context_len, a_cond: a_ctx_cond, a_uncond: a_ctx_uncond })
+    Ok(TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, uncond_valid, len: context_len, a_cond: a_ctx_cond, a_uncond: a_ctx_uncond })
+}
+
+/// `rows` encoded `[rows, dim]` prompt tokens framed into the connector's
+/// fixed `[context_len, dim]` input, with the mask of which rows are the
+/// prompt's own.
+///
+/// RIGHT-padded: the prompt fills the FIRST `rows` positions and the padding
+/// the connector replaces with its registers follows. That is the layout the
+/// reference's connector reads, whatever side its tokenizer pads on -
+/// `EmbeddingsProcessor.create_embeddings` stably sorts the valid tokens
+/// before the pads ahead of both connectors. The side is not cosmetic: the
+/// connector substitutes the register tiled at each padded position's own
+/// index and runs rotary attention over raw sequence indices, so the prompt
+/// framed at the other end comes out a different conditioning (row cosines
+/// down to -0.4 against the reference). A prompt longer than the frame keeps
+/// its first `context_len` tokens, as the reference truncates.
+fn frame_prompt(raw: &[f32], rows: usize, dim: usize, context_len: usize) -> (Vec<f32>, Vec<f32>) {
+    let rows = rows.min(context_len);
+    let mut framed = vec![0f32; context_len * dim];
+    framed[..rows * dim].copy_from_slice(&raw[..rows * dim]);
+    let mut valid = vec![0f32; context_len];
+    valid[..rows].fill(1.0);
+    (framed, valid)
 }
 
 /// `gemma4::AggregateEmbed` over a streaming source. The eager path builds
@@ -2155,7 +2180,7 @@ mod conditioned_latent_tests {
 /// the loop, and this is where a denoiser states it. The default is the
 /// sequential pair every call site had before device plans existed.
 trait Denoiser {
-    fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32>;
+    fn forward(&self, i: &StepInputs, context: Caption) -> Vec<f32>;
 
     /// True when this denoiser carries LTX-2.5's audio stream as well as its
     /// video one, so [`denoise`] should step both.
@@ -2170,7 +2195,7 @@ trait Denoiser {
     /// depend on the other stream's input every block, so there is no "audio
     /// forward" that could be run on its own or afterwards. A denoiser that
     /// returns `false` from [`Self::has_audio`] is never asked.
-    fn forward_av(&self, _i: &StepInputs, _a: &AudioInputs, _context: &[f32], _a_context: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    fn forward_av(&self, _i: &StepInputs, _a: &AudioInputs, _context: Caption, _a_context: Caption) -> (Vec<f32>, Vec<f32>) {
         unreachable!("forward_av on a video-only denoiser - denoise checks has_audio first")
     }
 
@@ -2182,7 +2207,7 @@ trait Denoiser {
     /// across the two threads at all. [`RealDit`] overrides it: it resolves
     /// its open device from the card the call is SCOPED to, so scoping the
     /// call is enough to move the whole forward onto the other card.
-    fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+    fn forward_cfg_pair(&self, i: &StepInputs, cond: Caption, uncond: Caption) -> Result<(Vec<f32>, Vec<f32>), String> {
         Ok((self.forward(i, cond), self.forward(i, uncond)))
     }
 
@@ -2201,6 +2226,27 @@ trait Denoiser {
     fn release_devices(&self) {}
 }
 
+/// One guidance branch's text context as the embeddings connector reads it:
+/// the prompt's `[context_len, dim]` rows and which of them are the prompt's
+/// own (`1.0`) rather than padding the connector fills with its registers.
+///
+/// The two travel together because each branch encodes its OWN prompt, and
+/// the reference masks each by its own token count
+/// (`EmbeddingsProcessor.process_hidden_states` per prompt): an
+/// unconditional branch read under the conditional prompt's mask treats
+/// padding as caption and caption as padding.
+#[derive(Clone, Copy)]
+struct Caption<'a> {
+    rows: &'a [f32],
+    valid: &'a [f32],
+}
+
+impl<'a> Caption<'a> {
+    fn of(rows: &'a [f32], valid: &'a [f32]) -> Caption<'a> {
+        Caption { rows, valid }
+    }
+}
+
 /// Everything one denoise-step forward needs that is IDENTICAL across the
 /// conditional and unconditional branches. The text context is what differs
 /// between them, so it stays a separate argument; grouping the rest is what
@@ -2213,7 +2259,6 @@ struct StepInputs<'a> {
     positions: &'a [f32],
     keyframes_mask: &'a [f32],
     context_len: usize,
-    context_valid: &'a [f32],
     t: usize,
     /// The schedule's SCALAR sigma for this step. Only the joint AV forward
     /// reads it: each stream's cross-attention gate is modulated by the OTHER
@@ -2274,9 +2319,9 @@ struct AudioState<'a> {
 }
 
 impl Denoiser for LtxDit {
-    fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
+    fn forward(&self, i: &StepInputs, context: Caption) -> Vec<f32> {
         assert_eq!(i.perturbations, &crate::block::NO_PERTURBATIONS, "the tiny host DiT runs no perturbed guidance pass");
-        let inp = crate::dit::ForwardInputs { latent: i.latent, timesteps: i.timesteps, positions: i.positions, keyframes_mask: i.keyframes_mask, context, context_len: i.context_len, t: i.t, context_valid: i.context_valid };
+        let inp = crate::dit::ForwardInputs { latent: i.latent, timesteps: i.timesteps, positions: i.positions, keyframes_mask: i.keyframes_mask, context: context.rows, context_len: i.context_len, t: i.t, context_valid: context.valid };
         self.forward_referenced(&inp, i.reference_attention).out
     }
 }
@@ -2298,25 +2343,25 @@ impl Denoiser for LtxDit {
 /// run one schedule in lockstep
 /// (`ltx_pipelines.utils.samplers.euler_denoising_loop` steps them together
 /// off one `sigmas` tensor), so the two values are equal by construction.
-fn av_step<'a>(i: &StepInputs<'a>, a: &AudioInputs<'a>, v_context: &'a [f32], a_context: &'a [f32]) -> crate::dit::AvStreamedStep<'a> {
+fn av_step<'a>(i: &StepInputs<'a>, a: &AudioInputs<'a>, v_context: Caption<'a>, a_context: Caption<'a>) -> crate::dit::AvStreamedStep<'a> {
     crate::dit::AvStreamedStep {
         v_latent: i.latent,
         v_timesteps: i.timesteps,
         v_positions: i.positions,
         v_keyframes_mask: i.keyframes_mask,
-        v_context,
+        v_context: v_context.rows,
         v_context_len: i.context_len,
         tv: i.t,
         v_sigma: i.sigma,
-        v_context_valid: i.context_valid,
+        v_context_valid: v_context.valid,
         a_latent: a.latent,
         a_timesteps: a.timesteps,
         a_positions: a.positions,
-        a_context,
+        a_context: a_context.rows,
         a_context_len: i.context_len,
         ta: a.ta,
         a_sigma: i.sigma,
-        a_context_valid: i.context_valid,
+        a_context_valid: a_context.valid,
         perturbations: i.perturbations,
         reference_attention: i.reference_attention,
     }
@@ -2328,7 +2373,7 @@ impl Denoiser for crate::av_stream::AvDenoiser {
     /// change the VIDEO too, because the A2V cross-attention writes into the
     /// video residual every block. [`denoise`] checks [`Self::has_audio`] and
     /// takes [`Self::forward_av`] instead.
-    fn forward(&self, _i: &StepInputs, _context: &[f32]) -> Vec<f32> {
+    fn forward(&self, _i: &StepInputs, _context: Caption) -> Vec<f32> {
         unreachable!("AvDenoiser::forward - denoise takes forward_av for an audio-visual denoiser")
     }
 
@@ -2336,7 +2381,7 @@ impl Denoiser for crate::av_stream::AvDenoiser {
         true
     }
 
-    fn forward_av(&self, i: &StepInputs, a: &AudioInputs, context: &[f32], a_context: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    fn forward_av(&self, i: &StepInputs, a: &AudioInputs, context: Caption, a_context: Caption) -> (Vec<f32>, Vec<f32>) {
         crate::av_stream::AvDenoiser::forward(self, &av_step(i, a, context, a_context))
     }
 }
@@ -2412,7 +2457,7 @@ impl Denoiser for RealAvDit {
     /// Same reason [`crate::av_stream::AvDenoiser`]'s is unreachable: the A2V
     /// cross-attention writes into the video residual every block, so there is
     /// no video-only forward of this model that means anything.
-    fn forward(&self, _i: &StepInputs, _context: &[f32]) -> Vec<f32> {
+    fn forward(&self, _i: &StepInputs, _context: Caption) -> Vec<f32> {
         unreachable!("RealAvDit::forward - denoise takes forward_av for an audio-visual denoiser")
     }
 
@@ -2420,7 +2465,7 @@ impl Denoiser for RealAvDit {
         true
     }
 
-    fn forward_av(&self, i: &StepInputs, a: &AudioInputs, context: &[f32], a_context: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    fn forward_av(&self, i: &StepInputs, a: &AudioInputs, context: Caption, a_context: Caption) -> (Vec<f32>, Vec<f32>) {
         let session = self.session(i.t);
         crate::dit::av_forward_q_streamed_in(&session, &self.cfg, &self.src, &self.head, crate::block::QTier::Int8, &av_step(i, a, context, a_context), &self.cache)
     }
@@ -2528,7 +2573,7 @@ impl RealDit {
 }
 
 impl Denoiser for RealDit {
-    fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
+    fn forward(&self, i: &StepInputs, context: Caption) -> Vec<f32> {
         let session = self.session(i.t);
         let step = crate::dit::StreamedStep {
             stream: self.stream,
@@ -2536,10 +2581,10 @@ impl Denoiser for RealDit {
             timesteps: i.timesteps,
             positions: i.positions,
             keyframes_mask: i.keyframes_mask,
-            context,
+            context: context.rows,
             context_len: i.context_len,
             t: i.t,
-            context_valid: i.context_valid,
+            context_valid: context.valid,
             perturbations: i.perturbations,
             reference_attention: i.reference_attention,
         };
@@ -2574,7 +2619,7 @@ impl Denoiser for RealDit {
     /// No device handle crosses a thread boundary: each branch resolves its
     /// session from the card `crate::devplan::on_gpu` scoped it to, and both
     /// cards' VRAM is released together when this `RealDit` drops.
-    fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+    fn forward_cfg_pair(&self, i: &StepInputs, cond: Caption, uncond: Caption) -> Result<(Vec<f32>, Vec<f32>), String> {
         dispatch_cfg_pair(self, &self.place, i, cond, uncond)
     }
 
@@ -2606,7 +2651,7 @@ impl Denoiser for RealDit {
 /// `D: Sync` is the whole safety argument, checked by the compiler at every
 /// call site rather than asserted in prose: a denoiser that could not be
 /// shared across the two threads cannot reach this function.
-fn dispatch_cfg_pair<D: Denoiser + Sync>(dit: &D, place: &crate::devplan::Placement, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+fn dispatch_cfg_pair<D: Denoiser + Sync>(dit: &D, place: &crate::devplan::Placement, i: &StepInputs, cond: Caption, uncond: Caption) -> Result<(Vec<f32>, Vec<f32>), String> {
     if !place.cfg_is_parallel() {
         return Ok((dit.forward(i, cond), dit.forward(i, uncond)));
     }
@@ -2802,10 +2847,9 @@ struct GuidedModel<'a> {
     dit: &'a dyn Denoiser,
     positions: &'a [f32],
     keyframes_mask: &'a [f32],
-    ctx_cond: &'a [f32],
-    ctx_uncond: &'a [f32],
+    ctx_cond: Caption<'a>,
+    ctx_uncond: Caption<'a>,
     context_len: usize,
-    context_valid: &'a [f32],
     t: usize,
     /// The video latent's channel width - the axis `Modality.timesteps`
     /// `(B, T, 1)` broadcasts over in [`to_denoised`].
@@ -2853,7 +2897,6 @@ impl GuidedModel<'_> {
             positions: self.positions,
             keyframes_mask: self.keyframes_mask,
             context_len: self.context_len,
-            context_valid: self.context_valid,
             t: self.t,
             sigma: sigma as f32,
             perturbations: &NO_PERTURBATIONS,
@@ -2868,17 +2911,19 @@ impl GuidedModel<'_> {
                 let a_timesteps = Self::timesteps(self.audio_mask(), a.ta, sigma);
                 let ai = AudioInputs { latent: a_latent, timesteps: &a_timesteps, positions: &a.positions, ta: a.ta };
                 let a_x0 = |v: Vec<f32>| to_denoised(a_latent, &v, &a_timesteps, self.a_channels);
-                let run = |ptb: &crate::block::Perturbations, v_ctx: &[f32], a_ctx: &[f32]| {
+                let run = |ptb: &crate::block::Perturbations, v_ctx: Caption, a_ctx: Caption| {
                     let (v, av) = self.dit.forward_av(&base.with_perturbations(ptb), &ai, v_ctx, a_ctx);
                     (x0(v), Some(a_x0(av)))
                 };
+                // Both streams' projections of one prompt share its mask.
+                let (a_cond, a_uncond) = (Caption::of(a.ctx_cond, self.ctx_cond.valid), Caption::of(a.ctx_uncond, self.ctx_uncond.valid));
                 tracing::trace!(step, forwards = 1 + passes.len(), sigma, "joint audio+video guidance passes starting");
-                let cond = run(&NO_PERTURBATIONS, self.ctx_cond, a.ctx_cond);
+                let cond = run(&NO_PERTURBATIONS, self.ctx_cond, a_cond);
                 let others = passes
                     .iter()
                     .map(|p| match p {
-                        Pass::Uncond => run(&NO_PERTURBATIONS, self.ctx_uncond, a.ctx_uncond),
-                        Pass::Perturbed(ptb) | Pass::Isolated(ptb) => run(ptb, self.ctx_cond, a.ctx_cond),
+                        Pass::Uncond => run(&NO_PERTURBATIONS, self.ctx_uncond, a_uncond),
+                        Pass::Perturbed(ptb) | Pass::Isolated(ptb) => run(ptb, self.ctx_cond, a_cond),
                     })
                     .collect();
                 (cond, others)
@@ -2967,10 +3012,9 @@ fn denoise(
     latent: Vec<f32>,
     positions: &[f32],
     keyframes_mask: &[f32],
-    ctx_cond: &[f32],
-    ctx_uncond: &[f32],
+    ctx_cond: Caption,
+    ctx_uncond: Caption,
     context_len: usize,
-    context_valid: &[f32],
     t: usize,
     guidance: &crate::guidance::Guidance,
     sampling: Sampling,
@@ -2995,7 +3039,6 @@ fn denoise(
         ctx_cond,
         ctx_uncond,
         context_len,
-        context_valid,
         t,
         channels: latent.len().checked_div(t).unwrap_or(1),
         guidance,
@@ -3319,9 +3362,8 @@ struct StageCtx<'a> {
     o: &'a GenOpts,
     lat_t: usize,
     in_channels: usize,
-    ctx_cond: &'a [f32],
-    ctx_uncond: &'a [f32],
-    context_valid: &'a [f32],
+    ctx_cond: Caption<'a>,
+    ctx_uncond: Caption<'a>,
     context_len: usize,
     cancel: &'a capability::CancelToken,
     /// The IC-LoRA reference video a stage run with this context appends, with
@@ -3704,7 +3746,6 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
         sc.ctx_cond,
         sc.ctx_uncond,
         sc.context_len,
-        sc.context_valid,
         denoise_t_count,
         &o.guidance,
         Sampling { sampler: o.sampler, eta: st.eta, s_noise: o.s_noise, seed: o.seed ^ 0x4e_4f_49_53_45 ^ st.seed_salt },
@@ -4030,7 +4071,7 @@ fn build_context(paths: &Paths, prompt: &str, dit_cfg: LtxDitConfig, o: &GenOpts
         // content at all, so a fabricated "audio context" would be a second
         // meaningless vector rather than a stand-in for anything. A request
         // for sound is refused before it gets here (see `generate`).
-        return Ok(TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, len: context_len, a_cond: None, a_uncond: None });
+        return Ok(TextContext { cond: ctx_cond, uncond: ctx_uncond, uncond_valid: context_valid.clone(), valid: context_valid, len: context_len, a_cond: None, a_uncond: None });
     };
     tracing::info!(path = %te_path, "encoding the prompt with the real text encoder");
     let te_t = std::time::Instant::now();
@@ -4038,7 +4079,7 @@ fn build_context(paths: &Paths, prompt: &str, dit_cfg: LtxDitConfig, o: &GenOpts
     // one to spare: the 12B encoder's own device footprint is then released
     // from a card that is not about to hold the denoise loop's activations.
     // See `crate::devplan`.
-    let r = crate::devplan::on_gpu(place.text, || real_text_context(te_path, prompt, &dit_cfg, o.guidance.needs_uncond(o.audio), o.device.as_deref(), o.audio, &o.runtime))?
+    let r = crate::devplan::on_gpu(place.text, || real_text_context(te_path, prompt, &dit_cfg, o.guidance.needs_uncond(o.audio).then_some(o.negative_prompt.as_str()), o.device.as_deref(), o.audio, &o.runtime))?
         .inspect(|c| tracing::info!(context_len = c.len, audio = c.a_cond.is_some(), "prompt encoded"))
         .inspect_err(|e| tracing::error!(path = %te_path, error = %e, "text encoding failed"))?;
     *text_encode_secs = te_t.elapsed().as_secs_f32();
@@ -4262,7 +4303,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // ---- denoise ----------------------------------------------------------
     // Moved, never cloned: the projected caption is the widest host buffer
     // this function holds besides the latents themselves.
-    let TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, len: context_len, a_cond: text_a_cond, a_uncond: text_a_uncond } =
+    let TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, uncond_valid, len: context_len, a_cond: text_a_cond, a_uncond: text_a_uncond } =
         build_context(paths, prompt, dit_cfg, o, place, &mut timings.text_encode)?;
 
     // ---- the stage plan ---------------------------------------------------
@@ -4300,9 +4341,8 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         o,
         lat_t,
         in_channels,
-        ctx_cond: &ctx_cond,
-        ctx_uncond: &ctx_uncond,
-        context_valid: &context_valid,
+        ctx_cond: Caption::of(&ctx_cond, &context_valid),
+        ctx_uncond: Caption::of(&ctx_uncond, &uncond_valid),
         context_len,
         a_ctx_cond: &a_ctx_cond,
         a_ctx_uncond: &a_ctx_uncond,
@@ -4489,59 +4529,95 @@ pub fn can_predict_frames(paths: &Paths, o: &GenOpts) -> bool {
     paths.duration_head.is_some() && paths.dit.is_some() && paths.text_encoder.is_some() && o.dit_config == "ltx25_22b"
 }
 
-/// The streams whose connector outputs a generation's duration prediction
-/// pools: both for a clip with sound, the video stream's for a silent one.
-pub fn prediction_streams(o: &GenOpts) -> &'static [crate::config::Stream] {
-    use crate::config::Stream;
-    if o.audio {
-        &[Stream::Video, Stream::Audio]
-    } else {
-        &[Stream::Video]
-    }
+/// The streams whose connector outputs a video generation's duration
+/// prediction pools: both, with or without sound. Every reference video
+/// pipeline hands the head both encodings (`ti2vid_*`, `distilled`, `dfr`),
+/// and a silent clip is the same generation with its soundtrack dropped, so
+/// it takes the same length. The head is not robust to losing a stream:
+/// over the video encoding alone it predicts a single quick action four
+/// times longer than a multi-beat scene.
+pub fn prediction_streams() -> &'static [crate::config::Stream] {
+    &[crate::config::Stream::Video, crate::config::Stream::Audio]
 }
 
 /// The clip length the duration head predicts for `prompt`, in frames at
 /// `o.fps` - `resolve_num_frames` with the default `AutoDuration`: one to
 /// twenty seconds, on the causal VAE's `8k + 1` grid.
-///
-/// The head pools the prompt's connector outputs, the DiT's own view of it.
-/// So the prompt is encoded with exactly the flags the generation will use
-/// (the text cache then answers the generation's own encode), and routed
-/// through the checkpoint's connectors into the checkpoint cache the first
-/// forward reads - the prediction costs the head itself and nothing twice.
-/// A sound generation's head sees both streams' routing, a silent one the
-/// video stream's, and text-to-audio ([`Stream::Audio`] alone) the audio
-/// stream's, as the reference's pipelines pass them.
-///
-/// [`Stream::Audio`]: crate::config::Stream::Audio
 pub fn predict_frames(paths: &Paths, prompt: &str, o: &GenOpts, streams: &[crate::config::Stream]) -> Result<usize, String> {
-    if !can_predict_frames(paths, o) {
-        return Err("predicting the clip length needs the duration head, the real DiT checkpoint (dit_config ltx25_22b) and the real text encoder".into());
-    }
-    use crate::config::Stream;
-    let (head_path, dit_path) = (paths.duration_head.as_deref().unwrap_or_default(), paths.dit.as_deref().unwrap_or_default());
-    let head_cfg = crate::duration_head::DurationHeadConfig::ltx25();
-    let head_w = crate::import::import_duration_head(checkpoint::safetensors::read(head_path)?, &head_cfg)?;
-    let src = crate::gguf_src::LtxvGgufSource::open(dit_path)?;
-    let av_cfg = *src.config();
-    let place = o.devices.resolve(o.device.as_deref());
-    let mut encode_secs = 0.0;
-    let text = build_context(paths, prompt, av_cfg.video, o, place, &mut encode_secs)?;
-    let gpu = gpu_core::Gpu::open(o.device.as_deref(), &crate::block::KERNELS);
-    let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
-    let route = |stream: Stream| -> Result<Vec<f32>, String> {
-        let (cfg, context) = match stream {
-            Stream::Video => (av_cfg.video, &text.cond),
-            Stream::Audio => (av_cfg.audio_stream(), text.a_cond.as_ref().ok_or("predicting a clip length from the audio stream needs the prompt's audio projection")?),
-        };
-        Ok(crate::dit::routed_context(&gpu, &src, &cfg, stream, context, &text.valid, text.len, &cache, None))
-    };
-    let video = streams.contains(&Stream::Video).then(|| route(Stream::Video)).transpose()?;
-    let audio = streams.contains(&Stream::Audio).then(|| route(Stream::Audio)).transpose()?;
-    let seconds = crate::duration_head::DurationHead::new(head_cfg, &head_w).forward(video.as_deref(), audio.as_deref()) as f64;
+    let seconds = predict_seconds(paths, prompt, o, streams)?;
     let frames = crate::duration_head::frames_for_seconds(seconds, o.fps as f64, crate::duration_head::MIN_SECONDS, crate::duration_head::MAX_SECONDS);
     tracing::info!(predicted_seconds = seconds, frames, fps = o.fps, "duration head predicted the clip length");
     Ok(frames)
+}
+
+/// The duration head's raw, unclamped prediction for `prompt`, in seconds,
+/// over [`prompt_encodings`]'s `streams`.
+pub fn predict_seconds(paths: &Paths, prompt: &str, o: &GenOpts, streams: &[crate::config::Stream]) -> Result<f64, String> {
+    let head_path = paths.duration_head.as_deref().ok_or("predicting the clip length needs the duration head")?;
+    let (video, audio) = prompt_encodings(paths, prompt, o, streams)?;
+    let head_cfg = crate::duration_head::DurationHeadConfig::ltx25();
+    let head_w = crate::import::import_duration_head(checkpoint::safetensors::read(head_path)?, &head_cfg)?;
+    Ok(crate::duration_head::DurationHead::new(head_cfg, &head_w).forward(video.as_deref(), audio.as_deref()) as f64)
+}
+
+/// `prompt`'s connector outputs for `streams` - `[context_len, dim]` each,
+/// the reference's `EmbeddingsProcessorOutput.{video,audio}_encoding` and
+/// what the duration head pools: the DiT's own view of the prompt.
+///
+/// The prompt is encoded with exactly the flags the generation will use (the
+/// text cache then answers the generation's own encode), and routed through
+/// the checkpoint's connectors into the checkpoint cache the first forward
+/// reads - a prediction costs the head itself and nothing twice. A video
+/// generation's head sees both streams ([`prediction_streams`]) and
+/// text-to-audio ([`Stream::Audio`] alone) the audio stream, as the
+/// reference's pipelines pass them. The audio stream's projection is built
+/// whenever it is asked for, sound or not; a silent generation's own encode
+/// is then answered from that larger cache entry.
+///
+/// [`Stream::Audio`]: crate::config::Stream::Audio
+#[allow(clippy::type_complexity)]
+pub fn prompt_encodings(paths: &Paths, prompt: &str, o: &GenOpts, streams: &[crate::config::Stream]) -> Result<(Option<Vec<f32>>, Option<Vec<f32>>), String> {
+    use crate::config::Stream;
+    let o = &GenOpts { audio: o.audio || streams.contains(&Stream::Audio), ..o.clone() };
+    let text = prompt_context(paths, prompt, o)?;
+    let route = |stream: Stream| -> Result<Vec<f32>, String> {
+        let rows = match stream {
+            Stream::Video => &text.cond,
+            Stream::Audio => text.a_cond.as_ref().ok_or("routing the prompt through the audio connector needs the prompt's audio projection")?,
+        };
+        route_prompt(paths, o, stream, rows, &text.valid)
+    };
+    let video = streams.contains(&Stream::Video).then(|| route(Stream::Video)).transpose()?;
+    let audio = streams.contains(&Stream::Audio).then(|| route(Stream::Audio)).transpose()?;
+    Ok((video, audio))
+}
+
+/// `prompt` encoded for `o` by the real text encoder - the
+/// [`TextContext`] a generation denoises against, before any connector.
+pub fn prompt_context(paths: &Paths, prompt: &str, o: &GenOpts) -> Result<TextContext, String> {
+    if !can_predict_frames(paths, o) {
+        return Err("predicting the clip length needs the duration head, the real DiT checkpoint (dit_config ltx25_22b) and the real text encoder".into());
+    }
+    let src = crate::gguf_src::LtxvGgufSource::open(paths.dit.as_deref().unwrap_or_default())?;
+    let mut encode_secs = 0.0;
+    build_context(paths, prompt, src.config().video, o, o.devices.resolve(o.device.as_deref()), &mut encode_secs)
+}
+
+/// One stream's framed prompt `rows` (masked by `valid`) routed through the
+/// real checkpoint's embeddings connector for that stream, through the
+/// checkpoint cache the generation's first forward reads.
+pub fn route_prompt(paths: &Paths, o: &GenOpts, stream: crate::config::Stream, rows: &[f32], valid: &[f32]) -> Result<Vec<f32>, String> {
+    use crate::config::Stream;
+    let dit_path = paths.dit.as_deref().ok_or("routing a prompt needs the real DiT checkpoint")?;
+    let src = crate::gguf_src::LtxvGgufSource::open(dit_path)?;
+    let av_cfg = *src.config();
+    let cfg = match stream {
+        Stream::Video => av_cfg.video,
+        Stream::Audio => av_cfg.audio_stream(),
+    };
+    let gpu = gpu_core::Gpu::open(o.device.as_deref(), &crate::block::KERNELS);
+    let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
+    Ok(crate::dit::routed_context(&gpu, &src, &cfg, stream, rows, valid, valid.len(), &cache, None))
 }
 
 /// Text-to-audio options.
@@ -4620,7 +4696,7 @@ pub fn generate_audio(paths: &Paths, prompt: &str, opts: &AudioOpts, cancel: &ca
     timings.build_dit = build_t.elapsed().as_secs_f32();
     tracing::info!(audio_tokens = ta, seconds, layers = cfg.num_layers, inner_dim = cfg.inner_dim, "audio-only DiT ready (the video half is never read)");
 
-    let TextContext { valid: context_valid, len: context_len, a_cond, a_uncond, .. } = build_context(paths, prompt, av_cfg.video, &o, place, &mut timings.text_encode)?;
+    let TextContext { valid: context_valid, uncond_valid, len: context_len, a_cond, a_uncond, .. } = build_context(paths, prompt, av_cfg.video, &o, place, &mut timings.text_encode)?;
     let a_cond = a_cond.ok_or("text-to-audio needs the text encoder's audio projection")?;
     let a_uncond = a_uncond.unwrap_or_default();
     let audio_guidance = crate::guidance::GuiderParams { modality: 1.0, ..o.guidance.audio.clone() };
@@ -4631,7 +4707,7 @@ pub fn generate_audio(paths: &Paths, prompt: &str, opts: &AudioOpts, cancel: &ca
     let denoise_t = Instant::now();
     let sampling = Sampling { sampler: o.sampler, eta: o.eta, s_noise: o.s_noise, seed: o.seed ^ 0x4e_4f_49_53_45 ^ AUDIO_SEED_SALT };
     #[rustfmt::skip]
-    let latent = denoise(&dit, &sigmas, latent0, &positions, &vec![0.0; ta], &a_cond, &a_uncond, context_len, &context_valid, ta,
+    let latent = denoise(&dit, &sigmas, latent0, &positions, &vec![0.0; ta], Caption::of(&a_cond, &context_valid), Caption::of(&a_uncond, &uncond_valid), context_len, ta,
         &guidance, sampling, total, None, cancel, None, &mut |done, tot, phase| progress(1 + done, tot, phase))?;
     timings.denoise = denoise_t.elapsed().as_secs_f32();
     drop(dit);
@@ -4907,7 +4983,7 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
         tracing::warn!("no prompt: the refinement pass will denoise against an empty text context, which costs detail it would otherwise recover");
     }
     let text = build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
-    let (ctx_cond, ctx_uncond, context_valid, context_len) = (text.cond, text.uncond, text.valid, text.len);
+    let (ctx_cond, ctx_uncond, context_valid, uncond_valid, context_len) = (text.cond, text.uncond, text.valid, text.uncond_valid, text.len);
 
     let crate::import::VideoVae { arch: varch, weights: vweights } = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
     let in_channels = dit_cfg.in_channels as usize;
@@ -4959,9 +5035,8 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
             o: &pass_opts,
             lat_t,
             in_channels,
-            ctx_cond: &ctx_cond,
-            ctx_uncond: &ctx_uncond,
-            context_valid: &context_valid,
+            ctx_cond: Caption::of(&ctx_cond, &context_valid),
+            ctx_uncond: Caption::of(&ctx_uncond, &uncond_valid),
             context_len,
             cancel,
             reference: None,
@@ -5303,9 +5378,8 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
         o: &pass_opts,
         lat_t,
         in_channels,
-        ctx_cond: &text.cond,
-        ctx_uncond: &text.uncond,
-        context_valid: &text.valid,
+        ctx_cond: Caption::of(&text.cond, &text.valid),
+        ctx_uncond: Caption::of(&text.uncond, &text.uncond_valid),
         context_len: text.len,
         cancel,
         reference: None,
@@ -5946,7 +6020,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         return Err("ltxv: audio was requested but the built denoiser carries no audio stream".into());
     }
     timings.build_dit = build_t.elapsed().as_secs_f32();
-    let TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, len: context_len, a_cond, a_uncond } =
+    let TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, uncond_valid, len: context_len, a_cond, a_uncond } =
         build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
     let (a_ctx_cond, a_ctx_uncond) = (a_cond.unwrap_or_default(), a_uncond.unwrap_or_default());
     let crate::import::VideoVae { arch: varch, weights: vweights } = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
@@ -6009,9 +6083,8 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
             o: &win_opts,
             lat_t,
             in_channels,
-            ctx_cond: &ctx_cond,
-            ctx_uncond: &ctx_uncond,
-            context_valid: &context_valid,
+            ctx_cond: Caption::of(&ctx_cond, &context_valid),
+            ctx_uncond: Caption::of(&ctx_uncond, &uncond_valid),
             context_len,
             cancel,
             reference: None,
@@ -6335,7 +6408,7 @@ fn run_stage_major(
         return Err("ltxv: audio was requested but the built denoiser carries no audio stream".into());
     }
     timings.build_dit = build_t.elapsed().as_secs_f32();
-    let TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, len: context_len, .. } =
+    let TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, uncond_valid, len: context_len, .. } =
         build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
     let crate::import::VideoVae { arch: varch, weights: vweights } = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
     let upsampler = SpatialUpsampler::default();
@@ -6361,9 +6434,8 @@ fn run_stage_major(
             o: &win_opts,
             lat_t,
             in_channels,
-            ctx_cond: &ctx_cond,
-            ctx_uncond: &ctx_uncond,
-            context_valid: &context_valid,
+            ctx_cond: Caption::of(&ctx_cond, &context_valid),
+            ctx_uncond: Caption::of(&ctx_uncond, &uncond_valid),
             context_len,
             cancel,
             reference: None,
@@ -6443,9 +6515,8 @@ fn run_stage_major(
             o: &win_opts,
             lat_t,
             in_channels,
-            ctx_cond: &ctx_cond,
-            ctx_uncond: &ctx_uncond,
-            context_valid: &context_valid,
+            ctx_cond: Caption::of(&ctx_cond, &context_valid),
+            ctx_uncond: Caption::of(&ctx_uncond, &uncond_valid),
             context_len,
             cancel,
             reference: None,
@@ -6898,7 +6969,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let sigmas1 = ltx2_sigmas(t1, base.steps, base.base_shift, base.max_shift, base.stretch, base.terminal);
     let latent1_0 = seeded_noise(t1 * in_channels, base.seed ^ 0x53_31);
     let ctx_valid = vec![1.0f32; base.context_len]; // DFR's DiT is always tiny-config (connector disabled) - see this section's doc.
-    let final1 = denoise(&dit, &sigmas1, latent1_0, &layout1.positions, &layout1.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t1, &base.guidance, Sampling { sampler: base.sampler, eta: base.eta, s_noise: base.s_noise, seed: base.seed ^ 0x4e_31 }, base.steps as u32, None, cancel, None, &mut |_, _, _: &str| {})?;
+    let final1 = denoise(&dit, &sigmas1, latent1_0, &layout1.positions, &layout1.keyframes_mask, Caption::of(&ctx_cond, &ctx_valid), Caption::of(&ctx_uncond, &ctx_valid), base.context_len, t1, &base.guidance, Sampling { sampler: base.sampler, eta: base.eta, s_noise: base.s_noise, seed: base.seed ^ 0x4e_31 }, base.steps as u32, None, cancel, None, &mut |_, _, _: &str| {})?;
     if cancel.is_cancelled() {
         tracing::warn!(stage = "stage1", "cancelled");
         return Err("cancelled".into());
@@ -6953,7 +7024,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     // The per-stage seed tags are ASCII ("S2", "N2"), written unsplit because
     // `0x53_32` reads to clippy as `0x53` with a mistyped `i32` suffix.
     let latent2_0 = noised_seed(&seed2, sigma2_0, base.seed ^ 0x5332);
-    let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t2, &base.guidance, Sampling { sampler: base.sampler, eta: base.eta, s_noise: base.s_noise, seed: base.seed ^ 0x4e32 }, base.steps as u32, None, cancel, None, &mut |_, _, _: &str| {})?;
+    let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, Caption::of(&ctx_cond, &ctx_valid), Caption::of(&ctx_uncond, &ctx_valid), base.context_len, t2, &base.guidance, Sampling { sampler: base.sampler, eta: base.eta, s_noise: base.s_noise, seed: base.seed ^ 0x4e32 }, base.steps as u32, None, cancel, None, &mut |_, _, _: &str| {})?;
     if cancel.is_cancelled() {
         tracing::warn!(stage = "stage2", "cancelled");
         return Err("cancelled".into());
@@ -7032,10 +7103,9 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
                     latent_tile_0,
                     &layout_tile.positions,
                     &layout_tile.keyframes_mask,
-                    &ctx_cond,
-                    &ctx_uncond,
+                    Caption::of(&ctx_cond, &ctx_valid),
+                    Caption::of(&ctx_uncond, &ctx_valid),
                     base.context_len,
-                    &ctx_valid,
                     t_tile,
                     &base.guidance,
                     Sampling { sampler: base.sampler, eta: base.eta, s_noise: base.s_noise, seed: noise_seed_tile },
@@ -7266,11 +7336,11 @@ mod tests {
         let (v_ts, a_ts) = (vec![3.0f32, 3.5], vec![4.0f32]);
         let (v_pos, a_pos) = (vec![5.0f32; 12], vec![6.0f32; 2]);
         let kf = vec![7.0f32, 7.5];
-        let valid = vec![8.0f32; 4];
+        let (v_valid, a_valid) = (vec![8.0f32; 4], vec![8.5f32; 4]);
         let (v_ctx, a_ctx) = (vec![9.0f32; 4], vec![10.0f32; 3]);
-        let i = StepInputs { latent: &v_latent, timesteps: &v_ts, positions: &v_pos, keyframes_mask: &kf, context_len: 4, context_valid: &valid, t: 2, sigma: 0.25, perturbations: &crate::block::NO_PERTURBATIONS, reference_attention: None };
+        let i = StepInputs { latent: &v_latent, timesteps: &v_ts, positions: &v_pos, keyframes_mask: &kf, context_len: 4, t: 2, sigma: 0.25, perturbations: &crate::block::NO_PERTURBATIONS, reference_attention: None };
         let a = AudioInputs { latent: &a_latent, timesteps: &a_ts, positions: &a_pos, ta: 1 };
-        let s = av_step(&i, &a, &v_ctx, &a_ctx);
+        let s = av_step(&i, &a, Caption::of(&v_ctx, &v_valid), Caption::of(&a_ctx, &a_valid));
 
         assert_eq!(s.v_latent, &v_latent[..], "the video stream must carry the VIDEO latent");
         assert_eq!(s.a_latent, &a_latent[..], "the audio stream must carry the AUDIO latent");
@@ -7281,8 +7351,8 @@ mod tests {
         assert_eq!(s.v_keyframes_mask, &kf[..]);
         assert_eq!(s.v_context, &v_ctx[..], "the video stream must carry the VIDEO text projection");
         assert_eq!(s.a_context, &a_ctx[..], "the audio stream must carry the AUDIO text projection");
-        assert_eq!(s.v_context_valid, &valid[..]);
-        assert_eq!(s.a_context_valid, &valid[..]);
+        assert_eq!(s.v_context_valid, &v_valid[..]);
+        assert_eq!(s.a_context_valid, &a_valid[..]);
         assert_eq!((s.tv, s.ta), (2, 1));
         assert_eq!((s.v_context_len, s.a_context_len), (4, 4));
         // One schedule steps both streams, so the two sigmas are the same
@@ -7377,11 +7447,11 @@ mod tests {
         latents_seen: std::cell::RefCell<Vec<Vec<f32>>>,
     }
     impl Denoiser for FakeDit {
-        fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
-            self.seen.borrow_mut().push(context[0]);
+        fn forward(&self, i: &StepInputs, context: Caption) -> Vec<f32> {
+            self.seen.borrow_mut().push(context.rows[0]);
             self.timesteps_seen.borrow_mut().push(i.timesteps.to_vec());
             self.latents_seen.borrow_mut().push(i.latent.to_vec());
-            vec![context[0]; i.latent.len()]
+            vec![context.rows[0]; i.latent.len()]
         }
     }
 
@@ -7413,7 +7483,7 @@ mod tests {
         // content, never at noise.
         let latent0 = vec![0.0f32, 5.0];
 
-        let out = denoise(&dit, &sigmas, latent0, &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(1.0, 1.0, 7), 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("eta > 0 with conditioned tokens must run, not be refused");
+        let out = denoise(&dit, &sigmas, latent0, &positions, &keyframes_mask, Caption::of(&cond, &context_valid), Caption::of(&uncond, &context_valid), 1, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(1.0, 1.0, 7), 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("eta > 0 with conditioned tokens must run, not be refused");
 
         let latents = dit.latents_seen.borrow().clone();
         assert_eq!(latents.len(), 2, "one forward per step");
@@ -7466,7 +7536,7 @@ mod tests {
 
         for eta in [0.0f64, 1.0] {
             let dit = FakeDit::default();
-            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(eta, 1.0, 7), 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, Caption::of(&cond, &context_valid), Caption::of(&uncond, &context_valid), 1, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(eta, 1.0, 7), 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
             assert_eq!(out[1], want, "eta={eta}: a half-conditioned token must end half way between its x0 estimate and its clean content");
         }
     }
@@ -7501,7 +7571,7 @@ mod tests {
         let (t, channels) = (2usize, 1usize);
         let positions = grid_positions(t, 1, 1);
         let keyframes_mask = vec![0.0f32; t];
-        // A velocity of 1.0 on every token (`FakeDit` echoes `context[0]`) -
+        // A velocity of 1.0 on every token (`FakeDit` echoes `context.rows[0]`) -
         // the model does NOT conveniently predict zero at a frozen token, and
         // the fix must not depend on it doing so.
         let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
@@ -7512,7 +7582,7 @@ mod tests {
         let latent0 = vec![0.0f32, 5.0];
 
         for eta in [0.0f64, 1.0] {
-            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(eta, 1.0, 7), 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, Caption::of(&cond, &context_valid), Caption::of(&uncond, &context_valid), 1, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(eta, 1.0, 7), 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
             assert_eq!(out[1], 5.0, "eta={eta}: the frozen anchor must end at exactly its clean content, not at clean - velocity*sigma_terminal ({})", 5.0 - 0.421875);
             assert_ne!(out[0], 0.0, "eta={eta}: the free token really was denoised (guards against a fix that froze everything)");
         }
@@ -7587,7 +7657,7 @@ mod tests {
 
         let dit = FakeDit::default();
         for eta in [0.0f64, 1.0] {
-            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(eta, 1.0, 7), 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, Caption::of(&cond, &context_valid), Caption::of(&uncond, &context_valid), 1, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(eta, 1.0, 7), 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
             for &(lo, hi) in &frozen_ranges {
                 assert_eq!(&out[lo * channels..hi * channels], &clean[lo * channels..hi * channels], "eta={eta}: the frozen range [{lo}, {hi}) must come out exactly as it went in");
             }
@@ -7647,7 +7717,7 @@ mod tests {
         let mask = vec![1.0f32, 1.0, 0.0, 0.0];
         let clean = vec![0.0f32; t * channels];
         let frozen = Frozen { mask: &mask, clean: &clean, channels, attention: None };
-        denoise(&dit, &sigmas, vec![0.0; t * channels], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(0.0, 1.0, 7), 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+        denoise(&dit, &sigmas, vec![0.0; t * channels], &positions, &keyframes_mask, Caption::of(&cond, &context_valid), Caption::of(&uncond, &context_valid), 1, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(0.0, 1.0, 7), 4, Some(&frozen), &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
 
         let seen = dit.timesteps_seen.borrow().clone();
         assert_eq!(seen.len(), 2, "one forward per step at guidance <= 1");
@@ -7667,7 +7737,7 @@ mod tests {
         let keyframes_mask = vec![0.0f32; t];
         let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
         let context_valid = vec![1.0f32; 1];
-        denoise(&dit, &sigmas, vec![0.0; t], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(0.0, 1.0, 7), 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+        denoise(&dit, &sigmas, vec![0.0; t], &positions, &keyframes_mask, Caption::of(&cond, &context_valid), Caption::of(&uncond, &context_valid), 1, t, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(0.0, 1.0, 7), 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
         assert_eq!(*dit.timesteps_seen.borrow(), vec![vec![1.0f32; t], vec![0.5f32; t]]);
     }
 
@@ -7691,14 +7761,14 @@ mod tests {
         }
     }
     impl Denoiser for ConstantX0 {
-        fn forward(&self, i: &StepInputs, _context: &[f32]) -> Vec<f32> {
+        fn forward(&self, i: &StepInputs, _context: Caption) -> Vec<f32> {
             self.timesteps_seen.borrow_mut().push(i.sigma);
             Self::velocity(i.latent, i.timesteps, self.target)
         }
         fn has_audio(&self) -> bool {
             true
         }
-        fn forward_av(&self, i: &StepInputs, a: &AudioInputs, _context: &[f32], _a_context: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        fn forward_av(&self, i: &StepInputs, a: &AudioInputs, _context: Caption, _a_context: Caption) -> (Vec<f32>, Vec<f32>) {
             self.timesteps_seen.borrow_mut().push(i.sigma);
             (Self::velocity(i.latent, i.timesteps, self.target), Self::velocity(a.latent, a.timesteps, -self.target))
         }
@@ -7778,7 +7848,7 @@ mod tests {
     fn res2s_evaluates_each_step_at_its_sigma_and_midpoint_then_once_at_the_end() {
         let dit = ConstantX0::new(0.5);
         let (positions, keyframes_mask, context_valid) = (grid_positions(1, 1, 1), vec![0.0f32; 1], vec![1.0f32; 1]);
-        denoise(&dit, &[1.0, 0.5, 0.0], vec![0.3; 2], &positions, &keyframes_mask, &[1.0], &[0.0], 1, &context_valid, 1, &crate::guidance::Guidance::cfg(1.0), res2s(0.5, 7), 2, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("res2s runs");
+        denoise(&dit, &[1.0, 0.5, 0.0], vec![0.3; 2], &positions, &keyframes_mask, Caption::of(&[1.0], &context_valid), Caption::of(&[0.0], &context_valid), 1, 1, &crate::guidance::Guidance::cfg(1.0), res2s(0.5, 7), 2, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("res2s runs");
         let want = [1.0, 0.5f64.sqrt(), 0.5, (0.5f64 * 0.0011).sqrt(), 0.0011];
         let seen = dit.timesteps_seen.borrow();
         assert_eq!(seen.len(), want.len(), "{seen:?}");
@@ -7806,7 +7876,7 @@ mod tests {
         let mut audio = AudioState { latent: vec![0.9, -1.1, 0.2, 0.4], positions: crate::audio::positions(ta), ta, ctx_cond: &a_ctx, ctx_uncond: &a_ctx, frozen: None };
         let sigmas = [1.0, 0.9, 0.75, 0.6, 0.0];
         for eta in [0.0, 0.5, 1.0] {
-            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &[1.0], &[0.0], 1, &context_valid, t, &crate::guidance::Guidance::cfg(1.0), res2s(eta, 11), 4, Some(&frozen), &Default::default(), Some(&mut audio), &mut |_, _, _: &str| {}).expect("res2s runs");
+            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, Caption::of(&[1.0], &context_valid), Caption::of(&[0.0], &context_valid), 1, t, &crate::guidance::Guidance::cfg(1.0), res2s(eta, 11), 4, Some(&frozen), &Default::default(), Some(&mut audio), &mut |_, _, _: &str| {}).expect("res2s runs");
             assert_eq!(&out[..channels], &clean[..channels], "eta={eta}: the frozen token is the clean content exactly");
             for v in &out[channels..] {
                 assert!((v - 0.25).abs() < 1e-5, "eta={eta}: {out:?}");
@@ -7828,7 +7898,7 @@ mod tests {
         let dit = ConstantX0::new(0.25);
         let (positions, keyframes_mask, context_valid) = (grid_positions(2, 1, 1), vec![0.0f32; 2], vec![1.0f32; 1]);
         let x = vec![0.75f32, -1.75];
-        let out = denoise(&dit, &[1.0, 0.5], x.clone(), &positions, &keyframes_mask, &[1.0], &[0.0], 1, &context_valid, 2, &crate::guidance::Guidance::cfg(1.0), res2s(0.0, 5), 1, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("res2s runs");
+        let out = denoise(&dit, &[1.0, 0.5], x.clone(), &positions, &keyframes_mask, Caption::of(&[1.0], &context_valid), Caption::of(&[0.0], &context_valid), 1, 2, &crate::guidance::Guidance::cfg(1.0), res2s(0.0, 5), 1, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("res2s runs");
         for (o, x) in out.iter().zip(&x) {
             let want = 0.25 + 0.5 * (x - 0.25);
             assert!((o - want).abs() < 1e-6, "{out:?}");
@@ -7843,12 +7913,12 @@ mod tests {
         // shows in the result.
         struct Halfway;
         impl Denoiser for Halfway {
-            fn forward(&self, i: &StepInputs, _context: &[f32]) -> Vec<f32> {
+            fn forward(&self, i: &StepInputs, _context: Caption) -> Vec<f32> {
                 i.latent.iter().map(|&x| 0.5 * x).collect()
             }
         }
         let (positions, keyframes_mask, context_valid) = (grid_positions(4, 1, 1), vec![0.0f32; 4], vec![1.0f32; 1]);
-        let run = |seed| denoise(&Halfway, &[1.0, 0.7, 0.4, 0.0], vec![0.5, -0.5, 1.0, -1.0], &positions, &keyframes_mask, &[1.0], &[0.0], 1, &context_valid, 4, &crate::guidance::Guidance::cfg(1.0), res2s(0.5, seed), 3, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("res2s runs");
+        let run = |seed| denoise(&Halfway, &[1.0, 0.7, 0.4, 0.0], vec![0.5, -0.5, 1.0, -1.0], &positions, &keyframes_mask, Caption::of(&[1.0], &context_valid), Caption::of(&[0.0], &context_valid), 1, 4, &crate::guidance::Guidance::cfg(1.0), res2s(0.5, seed), 3, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("res2s runs");
         assert_eq!(run(3), run(3));
         assert_ne!(run(3), run(4));
     }
@@ -7860,7 +7930,7 @@ mod tests {
         let keyframes_mask = vec![0.0f32];
         let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
         let context_valid = vec![1.0f32; 1];
-        let out = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, &crate::guidance::Guidance::cfg(guidance), Sampling::euler(eta, 1.0, 7), 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+        let out = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, Caption::of(&cond, &context_valid), Caption::of(&uncond, &context_valid), 1, 1, &crate::guidance::Guidance::cfg(guidance), Sampling::euler(eta, 1.0, 7), 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
         let seen = dit.seen.borrow().clone();
         (seen, out)
     }
@@ -7883,6 +7953,38 @@ mod tests {
         assert_eq!(seen, vec![1.0, 1.0], "one forward per step, always conditional");
     }
 
+    /// A prompt is framed RIGHT-padded, as the reference's connector reads
+    /// it: its rows open the frame and the mask marks exactly those, and one
+    /// longer than the frame keeps its leading tokens.
+    #[test]
+    fn a_prompt_is_framed_right_padded() {
+        let (rows, valid) = frame_prompt(&[1.0, 2.0, 3.0, 4.0], 2, 2, 4);
+        assert_eq!(rows, vec![1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(valid, vec![1.0, 1.0, 0.0, 0.0]);
+        let (rows, valid) = frame_prompt(&[1.0, 2.0, 3.0], 3, 1, 2);
+        assert_eq!((rows, valid), (vec![1.0, 2.0], vec![1.0, 1.0]));
+    }
+
+    /// Each CFG branch reaches the denoiser under its OWN prompt's mask - the
+    /// negative prompt has its own token count, and reading it under the
+    /// conditional prompt's mask would treat its padding as caption.
+    #[test]
+    fn each_cfg_branch_is_masked_by_its_own_prompt() {
+        struct Masks(std::cell::RefCell<Vec<Vec<f32>>>);
+        impl Denoiser for Masks {
+            fn forward(&self, i: &StepInputs, context: Caption) -> Vec<f32> {
+                self.0.borrow_mut().push(context.valid.to_vec());
+                vec![0.0; i.latent.len()]
+            }
+        }
+        let dit = Masks(Default::default());
+        let (cond_valid, uncond_valid) = (vec![0.0f32, 1.0], vec![1.0f32, 1.0]);
+        let (positions, keyframes_mask) = (grid_positions(1, 1, 1), vec![0.0f32; 1]);
+        let (cond, uncond) = (Caption::of(&[1.0, 1.0], &cond_valid), Caption::of(&[0.5, 0.5], &uncond_valid));
+        denoise(&dit, &[1.0, 0.0], vec![0.3; 1], &positions, &keyframes_mask, cond, uncond, 2, 1, &crate::guidance::Guidance::cfg(3.0), Sampling::euler(0.0, 1.0, 7), 1, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("a guided step runs");
+        assert_eq!(*dit.0.borrow(), vec![cond_valid, uncond_valid]);
+    }
+
     /// Under the reference guidance a video-only step runs the conditional
     /// forward, the negative-prompt one and the STG one - in that order, the
     /// STG pass alone perturbed, on the configured block - and the isolated-
@@ -7891,16 +7993,16 @@ mod tests {
     fn reference_guidance_runs_each_pass_once_per_step() {
         struct Recorder(std::cell::RefCell<Vec<(f32, crate::block::Perturbations)>>);
         impl Denoiser for Recorder {
-            fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
-                self.0.borrow_mut().push((context[0], i.perturbations.clone()));
-                (0..i.latent.len()).map(|k| 0.1 * context[0] * (k + 1) as f32).collect()
+            fn forward(&self, i: &StepInputs, context: Caption) -> Vec<f32> {
+                self.0.borrow_mut().push((context.rows[0], i.perturbations.clone()));
+                (0..i.latent.len()).map(|k| 0.1 * context.rows[0] * (k + 1) as f32).collect()
             }
         }
         let dit = Recorder(Default::default());
         let (positions, keyframes_mask, context_valid) = (vec![0.0f32; 6], vec![0.0f32; 1], vec![1.0f32; 1]);
         let guidance = crate::guidance::Guidance::reference();
         #[rustfmt::skip]
-        denoise(&dit, &[1.0, 0.0], vec![0.3; 2], &positions, &keyframes_mask, &[1.0], &[2.0], 1, &context_valid, 1, &guidance, Sampling::euler(0.0, 1.0, 7), 1, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("a guided step runs");
+        denoise(&dit, &[1.0, 0.0], vec![0.3; 2], &positions, &keyframes_mask, Caption::of(&[1.0], &context_valid), Caption::of(&[2.0], &context_valid), 1, 1, &guidance, Sampling::euler(0.0, 1.0, 7), 1, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("a guided step runs");
         let seen = dit.0.borrow();
         let stg = crate::block::Perturbations { video_self_attn_blocks: vec![28], audio_self_attn_blocks: vec![], cross_modal: false };
         assert_eq!(*seen, vec![(1.0, crate::block::Perturbations::default()), (2.0, crate::block::Perturbations::default()), (1.0, stg)]);
@@ -7930,7 +8032,7 @@ mod tests {
         let context_valid = vec![1.0f32; 1];
         let cancel = capability::CancelToken::armed();
         let handle = cancel.clone();
-        let err = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(0.0, 1.0, 7), 6, None, &cancel, None, &mut |step, _, _: &str| {
+        let err = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, Caption::of(&cond, &context_valid), Caption::of(&uncond, &context_valid), 1, 1, &crate::guidance::Guidance::cfg(1.0), Sampling::euler(0.0, 1.0, 7), 6, None, &cancel, None, &mut |step, _, _: &str| {
             if step == 2 {
                 handle.cancel();
             }
@@ -7959,10 +8061,10 @@ mod tests {
         place: crate::devplan::Placement,
     }
     impl Denoiser for PerCallDeviceDit {
-        fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
+        fn forward(&self, i: &StepInputs, context: Caption) -> Vec<f32> {
             Denoiser::forward(&LtxDit::new(self.cfg, self.w.clone(), None), i, context)
         }
-        fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+        fn forward_cfg_pair(&self, i: &StepInputs, cond: Caption, uncond: Caption) -> Result<(Vec<f32>, Vec<f32>), String> {
             dispatch_cfg_pair(self, &self.place, i, cond, uncond)
         }
     }
@@ -8002,7 +8104,6 @@ mod tests {
             positions: &inputs_owned.2,
             keyframes_mask: &inputs_owned.3,
             context_len: ctx_len,
-            context_valid: &inputs_owned.4,
             t,
             perturbations: &crate::block::NO_PERTURBATIONS,
             reference_attention: None,
@@ -8012,11 +8113,12 @@ mod tests {
         let uncond: Vec<f32> = (0..ctx_len * d).map(|k| (k as f32 * 0.017).sin()).collect();
 
         let seq = PerCallDeviceDit { cfg, w: w.clone(), place: crate::devplan::Placement::single() };
-        let (c0, u0) = seq.forward_cfg_pair(&i, &cond, &uncond).expect("the sequential pair always runs");
+        let (cond, uncond) = (Caption::of(&cond, &inputs_owned.4), Caption::of(&uncond, &inputs_owned.4));
+        let (c0, u0) = seq.forward_cfg_pair(&i, cond, uncond).expect("the sequential pair always runs");
 
         let place = crate::devplan::DevicePlan::Auto.resolve(None);
         let par = PerCallDeviceDit { cfg, w, place };
-        let (c1, u1) = par.forward_cfg_pair(&i, &cond, &uncond).expect("the concurrent pair must run, not error");
+        let (c1, u1) = par.forward_cfg_pair(&i, cond, uncond).expect("the concurrent pair must run, not error");
 
         assert_eq!(c0.len(), c1.len());
         let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
@@ -8038,10 +8140,10 @@ mod tests {
             pairs: std::sync::atomic::AtomicUsize,
         }
         impl Denoiser for PairCounter {
-            fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
-                vec![context[0]; i.latent.len()]
+            fn forward(&self, i: &StepInputs, context: Caption) -> Vec<f32> {
+                vec![context.rows[0]; i.latent.len()]
             }
-            fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+            fn forward_cfg_pair(&self, i: &StepInputs, cond: Caption, uncond: Caption) -> Result<(Vec<f32>, Vec<f32>), String> {
                 self.pairs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok((self.forward(i, cond), self.forward(i, uncond)))
             }
@@ -8049,7 +8151,7 @@ mod tests {
         let dit = PairCounter::default();
         let sigmas = vec![1.0, 0.5, 0.0];
         let positions = grid_positions(1, 1, 1);
-        denoise(&dit, &sigmas, vec![0.0; 1], &positions, &[0.0f32], &[1.0f32], &[0.0f32], 1, &[1.0f32], 1, &crate::guidance::Guidance::cfg(5.0), Sampling::euler(0.0, 1.0, 7), 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+        denoise(&dit, &sigmas, vec![0.0; 1], &positions, &[0.0f32], Caption::of(&[1.0f32], &[1.0f32]), Caption::of(&[0.0f32], &[1.0f32]), 1, 1, &crate::guidance::Guidance::cfg(5.0), Sampling::euler(0.0, 1.0, 7), 4, None, &Default::default(), None, &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
         assert_eq!(dit.pairs.load(std::sync::atomic::Ordering::Relaxed), 2, "one pair dispatch per CFG step");
     }
 }

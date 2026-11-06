@@ -130,7 +130,9 @@ per stream (`--guidance`, `--stg`, `--stg-blocks`, `--rescale`,
 `--modality-guidance`, and their `--audio-*` counterparts). The terms combine
 on the x0 estimate exactly as `MultiModalGuider` does: STG bypasses
 self-attention in the named blocks, the isolated-modality pass cuts the
-audio/video cross-attention.
+audio/video cross-attention. CFG guides against `--negative-prompt`, which
+defaults to the reference pipelines' own list of artifacts; it is encoded
+only when some CFG scale is not 1.
 
 `--sampler res2s` runs the reference's second-order res_2s loop: two guided
 evaluations per step (the second at the geometric-midpoint sigma), SDE noise
@@ -145,7 +147,9 @@ When the request names no length and the duration head
 predicts it from the prompt: it pools the prompt's connector outputs into a
 length between one and twenty seconds, snapped onto the VAE's `8k + 1` frame
 grid. `t2v` without `--frames` and `t2a` without `--seconds` both use it; the
-prompt is encoded once either way.
+prompt is encoded once either way. A video clip, with or without sound, is
+predicted from both streams' connector outputs as every reference video
+pipeline predicts it, and `t2a` from the audio stream's alone.
 
 ### Anchoring a clip on real images
 

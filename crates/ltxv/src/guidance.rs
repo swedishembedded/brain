@@ -29,6 +29,26 @@
 
 use crate::block::Perturbations;
 
+/// What the negative-prompt pass is conditioned on when a request names no
+/// negative prompt of its own - the reference pipelines' `--negative-prompt`
+/// default (`ltx_pipelines.utils.constants.DEFAULT_NEGATIVE_PROMPT`),
+/// verbatim. CFG pushes the prediction away from this caption, so an empty
+/// one guides against "anything" rather than against these artifacts.
+pub const DEFAULT_NEGATIVE_PROMPT: &str = concat!(
+    "has_subtitles, has_blurbox, transition from black, transition to black, speech_ending_short, ",
+    "blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, ",
+    "grainy texture, poor lighting, flickering, motion blur, distorted proportions, unnatural skin tones, ",
+    "deformed facial features, asymmetrical face, missing facial features, extra limbs, disfigured hands, ",
+    "wrong hand count, artifacts around text, inconsistent perspective, camera shake, incorrect depth of ",
+    "field, background too sharp, background clutter, distracting reflections, harsh shadows, inconsistent ",
+    "lighting direction, color banding, cartoonish rendering, 3D CGI look, unrealistic materials, uncanny ",
+    "valley effect, incorrect ethnicity, wrong gender, exaggerated expressions, wrong gaze direction, ",
+    "mismatched lip sync, silent or muted audio, distorted voice, robotic voice, echo, background noise, ",
+    "off-sync audio, incorrect dialogue, added dialogue, repetitive speech, jittery movement, awkward ",
+    "pauses, incorrect timing, unnatural transitions, inconsistent framing, tilted camera, flat lighting, ",
+    "inconsistent tone, cinematic oversaturation, stylized filters, or AI artifacts."
+);
+
 /// One stream's guidance (`MultiModalGuiderParams`). The neutral value of
 /// every term is the [`Default`]: a single conditional forward.
 #[derive(Clone, Debug, PartialEq)]
