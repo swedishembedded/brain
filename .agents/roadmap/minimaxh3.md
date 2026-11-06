@@ -88,10 +88,9 @@ local checkout - see `[path/to/checkout]` in place of the real machine path):
   32-byte size difference, a different export) has been deleted; freed 45GB.
 
 **`H3Recipe` (`crates/modelstore/src/recipe.rs`) and the real-checkpoint test
-paths in `crates/minimaxh3/src/import.rs` still assume the old FL2VA/Ref2VA
-nested layout and need updating to the root flat layout - deferred until the
-download above completes (explicit user instruction), tracked in "Recorded
-gaps."**
+paths in `crates/minimaxh3/src/import.rs` follow the root flat layout** (see
+"Recorded gaps" for the retargeting and the recipe-ordering fix that came
+with it).
 
 **The unsloth GGUF release** (`unsloth/MiniMax-H3-GGUF`) is real and
 confirmed **pruned, not just quantized**: Q8_0 is 21.44GB per transformer
@@ -285,19 +284,13 @@ port is real-weight-parity-gated.
 ## Phases (see the approved plan for full detail)
 
 - [x] Phase 0 - ledger, arch registration, crate skeleton, license gate
-- [~] Phase 1 - reference oracle: **torch/diffusers/transformers installed
-      and confirmed to have full real MiniMax-H3 support** (`diffusers
-      0.40.0`, stable PyPI); the actual golden-dump script (`tools/
-      minimaxh3_dump_reference.py`) has not been written yet - most of what
-      it would settle has already been read directly from source instead
-      (see "Convention questions" - settled section), which is a stronger
-      form of ground truth than a golden dump for STRUCTURE, though real
-      numeric goldens (for the parity ladder's later rungs) still need the
-      script written and run.
+- [x] Phase 1 - reference oracle: torch/diffusers/transformers with full
+      real MiniMax-H3 support (`diffusers 0.40.0`), and the golden dumpers
+      under `tools/goldens/minimaxh3_*_dump_reference.py` (DiT tiny and real,
+      text encoder real, both VAEs, audio encoder, layout, presentation,
+      ref2va references).
 - [x] Phase 2 - fetch recipe for the two-level partitioned checkpoint
-      (`brain pull` only) - **now targets the WRONG layout** (the old
-      FL2VA/Ref2VA nested shape); needs updating to the root flat layout,
-      deferred until the current download completes (see Recorded gaps).
+      (`brain pull` only), on the root flat layout.
 - [x] Phase 3 - Qwen3-VL `encode_hidden`/`encode_hiddens` extension
 - [x] Phase 4 - audio VAE **decoder** port: structurally complete,
       real-checkpoint-validated, AND now real-weight NUMERIC parity-gated
@@ -329,8 +322,7 @@ port is real-weight-parity-gated.
       backward, `check_minimaxh3`/`check_minimaxh3_conditioning` both green.
       LoRA/device-trainer not built yet.
 - [x] Phase 11 - capability/residency/D-Bus serving contract for
-      `t2va`/`fl2va`. Real DiT weight import and a real (non-stub) Qwen3-VL
-      text encoder are both still open - see Recorded gaps.
+      `t2va`/`fl2va`, on the real DiT and the real Qwen3-VL text encoder.
 - [x] First real end-to-end `t2va` generation, real weights throughout -
   `crates/minimaxh3/examples/generate_t2va.rs`, run against the full
   checkpoint (`text_encoder/` 63GB, `transformer/` 66GB, `vae/` 10GB, all

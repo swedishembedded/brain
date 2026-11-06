@@ -161,11 +161,10 @@ this port:
       about eighty lines - rather than be pointed at a folded map. Folding a
       delta into weights that are then requantized rounds it onto the base
       weight's own 256-level grid and discards most of it.
-- [ ] **`ltxv` arch row + resource fetch** - `crates/arch/src/lib.rs` `ARCHS` row
-      (`id`/`gguf` both `"ltxv"`, `hf: &["AVTransformer3DModel"]`,
-      `default_ref: Lightricks/LTX-2.5`), this ledger, `docs/reference/models/ltxv.md`,
-      weights under `resources/ltxv/weights/` (the runnable-everywhere subset
-      only), source under `resources/ltxv/source/`.
+- [x] **`ltxv` arch row + resource fetch** - the `crates/arch/src/lib.rs`
+      `ARCHS` row, this ledger, `docs/reference/models/ltxv.md`, and every
+      weight role resolved from the model store (`ltxv::spec::LtxvSpec`,
+      `brain pull`).
 - [ ] **Shared DiT hoist** - `crates/dit` currently owns only RoPE despite its doc
       claiming adaLN/patchify/QK-norm, so `wan`/`s3dit`/`flux2` each re-implement
       PixArt timestep embedding and patchify/unpatchify. Hoist a shared
