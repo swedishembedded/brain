@@ -24,7 +24,7 @@ use model::collective::{Collective, Payload};
 use model::{JobContext, JobPlan};
 
 /// The name libtest filters to when this binary is re-executed as a rank.
-const CHILD: &str = "rank_process";
+const CHILD: &str = "distributed_job::rank_process";
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("brain-job-{}-{name}", std::process::id()));

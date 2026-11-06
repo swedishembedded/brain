@@ -26,7 +26,7 @@ use gpt2::GptConfig;
 use model::{GradSync, JobContext, JobPlan, Model};
 
 /// The name libtest filters to when this binary is re-executed as a rank.
-const CHILD: &str = "rank_process";
+const CHILD: &str = "distributed_train::rank_process";
 
 /// Both ranks train the same model on different batches, so the job is small
 /// enough to run in a test and large enough for the reduction to matter.
