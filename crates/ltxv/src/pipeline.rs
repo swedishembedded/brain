@@ -3299,6 +3299,8 @@ fn encode_still(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, path: &str
 const REFERENCE_SEED_SALT: u64 = 0x52_45_46_56_49_44; // "REFVID"
 /// Folded into the noise generated keyframe slots start from.
 const SLOT_SEED_SALT: u64 = 0x53_4c_4f_54; // "SLOT"
+/// Folded into the noise latent keyframe anchors start from.
+const ANCHOR_SEED_SALT: u64 = 0x41_4e_43_48; // "ANCH"
 
 /// A reference clip's `[f*h*w, channels]` latent tokens and its latent
 /// `(f, h, w)`.
@@ -3487,6 +3489,21 @@ struct Stage<'a> {
     /// Generated keyframe slots denoised beside the clip (DFR); `None` for
     /// every other stage.
     slots: Option<KeyframeSlots<'a>>,
+    /// Already-encoded keyframes guiding the clip (a DFR temporal tile's
+    /// seams); `None` for every other stage.
+    anchors: Option<LatentAnchors<'a>>,
+}
+
+/// `VideoConditionByKeyframeIndex` over latents a previous stage produced:
+/// each plane appended as one latent frame's worth of guiding tokens at its
+/// own pixel frame, unmarked, held at `strength`.
+#[derive(Clone, Copy)]
+struct LatentAnchors<'a> {
+    /// Pixel frames on the stage's own canvas, one per plane.
+    pixel_frames: &'a [usize],
+    /// `[C, K, lh, lw]`.
+    chw: &'a [f32],
+    strength: f32,
 }
 
 /// `VideoGeneratedKeyframeSlots`: one latent frame's worth of tokens per
@@ -3759,6 +3776,36 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
         }
         (latent, positions_d, keyframes_mask_d, denoise_t_count, frozen)
     };
+    // Latent keyframe anchors, after the images and before the slots - the
+    // order a DFR temporal tile lists its conditionings in. The item appends
+    // zero placeholders with the keyframe as their clean content, so
+    // `GaussianNoiser` (`lerp(clean, lerp(0, noise, sigma0), mask)`) starts a
+    // token held at `mask = 1 - strength` from
+    // `(1 - mask) * clean + mask * sigma0 * noise`.
+    let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = match &st.anchors {
+        None => (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen),
+        Some(a) => {
+            if st.mask.is_some() {
+                return Err("a masked video-to-video pass cannot also take keyframe anchors".into());
+            }
+            let k = a.pixel_frames.len();
+            let tc = chw_to_tc(a.chw, c, k, lh, lw);
+            let block = lh * lw * c;
+            let blocks: Vec<(usize, &[f32])> = a.pixel_frames.iter().enumerate().map(|(i, &p)| (p, &tc[i * block..(i + 1) * block])).collect();
+            let ic = append_image_conditioning(denoise_t_count, &positions_d, &keyframes_mask_d, lh, lw, c, o.fps as f64, 1.0 - a.strength, &blocks);
+            let sigma0 = if st.seed_chw.is_some() { st.sigmas[0] as f32 } else { 1.0 };
+            let mask = 1.0 - a.strength;
+            let noise = seeded_noise(tc.len(), o.seed ^ st.seed_salt ^ ANCHOR_SEED_SALT);
+            let mut latent = latent0;
+            latent.extend(tc.iter().zip(&noise).map(|(&x, &n)| (1.0 - mask) * x + mask * sigma0 * n));
+            let (mut mask, mut clean) = frozen.unwrap_or_else(|| (vec![1f32; denoise_t_count], vec![0f32; denoise_t_count * c]));
+            mask.extend_from_slice(&ic.denoise_mask[denoise_t_count..]);
+            clean.extend_from_slice(&ic.clean[denoise_t_count * c..]);
+            tracing::info!(stage = st.label, anchors = ?a.pixel_frames, strength = a.strength, "latent keyframe anchors appended");
+            let total_t = ic.keyframes_mask.len();
+            (latent, ic.positions, ic.keyframes_mask, total_t, Some((mask, clean)))
+        }
+    };
     // Generated keyframe slots, after the images and before the reference -
     // the order DFR's stages list their conditionings in.
     let slot_start = denoise_t_count;
@@ -4020,6 +4067,7 @@ fn upscale_and_refine(sc: &StageCtx<'_>, mut r: Refine<'_>, total: u32, progress
             // as the video half's `context` does.
             audio: r.audio.take(),
             slots: r.slots.zip(upscaled_keyframes.as_deref()).map(|((pixel_frames, _), initial)| KeyframeSlots { pixel_frames, initial_chw: Some(initial) }),
+            anchors: None,
         },
         total,
         progress,
@@ -4548,6 +4596,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
                 label: "stage1",
                 audio: audio_latent0.map(|latent| AudioStage { latent, context: audio_frozen.clone(), frozen: None }),
                 slots: None,
+                anchors: None,
             },
             total,
             &mut progress,
@@ -4607,6 +4656,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
                 label: "single",
                 audio: audio_latent0.map(|latent| AudioStage { latent, context: audio_frozen.clone(), frozen: None }),
                 slots: None,
+                anchors: None,
             },
             total,
             &mut progress,
@@ -5566,6 +5616,7 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
             label: "masked",
             audio: audio_noise.map(|latent| AudioStage { latent, context: Vec::new(), frozen: audio_frozen.clone() }),
             slots: None,
+            anchors: None,
         },
         total,
         &mut progress,
@@ -6326,6 +6377,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
                     label: "stage1",
                     audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_half), frozen: held_audio.clone() }),
                     slots: None,
+                    anchors: None,
                 },
                 total,
                 &mut progress,
@@ -6394,6 +6446,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
                     label: "single",
                     audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_full), frozen: held_audio.clone() }),
                     slots: None,
+                    anchors: None,
                 },
                 total,
                 &mut progress,
@@ -6629,6 +6682,7 @@ fn run_stage_major(
                 label: "s1",
                 audio: None,
                 slots: None,
+                anchors: None,
             },
             total,
             &mut progress,
@@ -6983,8 +7037,8 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
     if o.temporal_upsample_rounds > 2 {
         return Err(format!("temporal_upsample_rounds must be 0, 1, or 2, got {}", o.temporal_upsample_rounds));
     }
-    if o.temporal_upsample_rounds > 0 {
-        return Err("DFR's temporal rounds are not available yet: run without --temporal-upsample-rounds".into());
+    if o.temporal_upsample_rounds > 0 && paths.temporal_upsampler.is_none() {
+        return Err("DFR's temporal rounds need the temporal x2 latent upscaler: put it in the model store or pass --temporal-upsampler <path>".into());
     }
     if base.dit_config != "ltx25_22b" || paths.dit.is_none() {
         return Err("DFR needs the real LTX-2.5 checkpoint (dit_config ltx25_22b): its keyframe slots and detailing IC-LoRA are trained for it".into());
@@ -7001,14 +7055,15 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
     }
     let (canvas_frames, segment, slot_frames) = dfr::resolve_canvas(base.frames, dfr::VIDEO_TEMPORAL_SCALE)?;
     let lat_t = vcfg.latent_frames(canvas_frames as u32).expect("resolve_canvas returns a 1 + 8k frame count") as usize;
-    let o1 = GenOpts { frames: canvas_frames, ..base.clone() };
+    let o1 = GenOpts { frames: canvas_frames, ..dfr_window_stills(base, base.frames, 1, 0, canvas_frames - 1, 0) };
     let dit_cfg = dit_config_from_name(&o1.dit_config)?;
     let in_channels = dit_cfg.in_channels as usize;
     tracing::info!(requested_frames = base.frames, canvas_frames, segment, slots = ?slot_frames, "DFR canvas resolved");
 
     let sigmas1: Vec<f64> = LTX2_DISTILLED_SIGMAS.iter().map(|&s| s as f64).collect();
     let sigmas2 = stage2_sigmas(LTX2_STAGE2_STEPS)?;
-    let total = (sigmas1.len() - 1 + sigmas2.len() - 1) as u32 + 3;
+    let rounds = o.temporal_upsample_rounds;
+    let total = (sigmas1.len() - 1 + sigmas2.len() - 1) as u32 + rounds as u32 + 3;
     let mut timings = Timings::default();
     let place = o1.devices.resolve(o1.device.as_deref());
 
@@ -7052,6 +7107,7 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
             label: "dfr stage1",
             audio: audio_noise.map(|latent| AudioStage { latent, context: Vec::new(), frozen: None }),
             slots: Some(KeyframeSlots { pixel_frames: &slot_frames, initial_chw: None }),
+            anchors: None,
         },
         total,
         &mut progress,
@@ -7095,6 +7151,25 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
         &mut progress,
     )?;
     drop(detailing_dit);
+    let (lh, lw) = (base.height / 32, base.width / 32);
+    let stage2_keyframes = stage2.slots_chw.ok_or("DFR stage 2 returned no keyframe slots")?;
+    let plane = in_channels * lh * lw;
+    let mut keyframes: std::collections::BTreeMap<usize, Vec<f32>> = slot_frames.iter().enumerate().map(|(i, &p)| (p, dfr::slice_time_chw(&stage2_keyframes, in_channels, slot_frames.len(), lh, lw, i, i + 1))).collect();
+    debug_assert!(keyframes.values().all(|k| k.len() == plane));
+    let (mut video_chw, mut frames) = (stage2.video_chw, canvas_frames);
+    if rounds > 0 {
+        let temporal = crate::import::import_upsampler(read_any(paths.temporal_upsampler.as_deref().expect("checked above"))?, &LatentUpsamplerConfig::temporal_x2())?;
+        let round_ctx = TemporalRounds { sc: &stage_ctx, base, temporal: &temporal, stage1_audio: stage1.audio.as_deref(), source_seconds: canvas_frames as f64 / o1.fps as f64, lh, lw };
+        for round in 1..=rounds {
+            if cancel.is_cancelled() {
+                return Err("cancelled".into());
+            }
+            progress(sigmas1.len() as u32 + sigmas2.len() as u32 - 1 + round as u32, total, &format!("temporal round {round}"));
+            (video_chw, keyframes) = round_ctx.run(round, &video_chw, &keyframes, frames)?;
+            frames = 2 * (frames - 1) + 1;
+        }
+    }
+    drop(dit);
     timings.denoise = denoise_t.elapsed().as_secs_f32();
     timings.steps = sigmas1.len() + sigmas2.len() - 2;
     timings.tokens = lat_t * (base.height / 32) * (base.width / 32);
@@ -7103,10 +7178,13 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
         return Err("cancelled".into());
     }
 
-    // The canvas padded the tail; the request gets its own length back.
-    let (lh, lw) = (base.height / 32, base.width / 32);
-    let keep = vcfg.latent_frames(base.frames as u32).expect("checked above") as usize;
-    let video_chw = dfr::slice_time_chw(&stage2.video_chw, in_channels, lat_t, lh, lw, 0, keep);
+    // The canvas padded the tail; the request gets `(requested - 1) * 2^rounds
+    // + 1` frames back (`trim_video_to_requested_frames`).
+    let out_frames = dfr::target_frame_count(base.frames, rounds as u32);
+    let canvas_t = (frames - 1) / dfr::VIDEO_TEMPORAL_SCALE + 1;
+    let keep = (out_frames - 1) / dfr::VIDEO_TEMPORAL_SCALE + 1;
+    let video_chw = dfr::slice_time_chw(&video_chw, in_channels, canvas_t, lh, lw, 0, keep);
+    let playback_fps = base.fps << rounds;
     progress(total - 1, total, "vae decode");
     let decode_t = Instant::now();
     let (pixels, frames) = decode_video(&vcfg, varch, &vweights, keep as u32, lh as u32, lw as u32, &video_chw, base)?;
@@ -7116,7 +7194,7 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
         Some(latent) => {
             let path = paths.audio_vae.as_deref().expect("an audio request is refused earlier without an audio VAE path");
             let mut clip = decode_audio_latent(path, &latent, ta, base.device.as_deref())?;
-            let video_seconds = frames as f32 / base.fps as f32;
+            let video_seconds = frames as f32 / playback_fps as f32;
             clip.channels.iter_mut().for_each(|c| c.truncate((video_seconds * clip.sample_rate as f32).round() as usize));
             clip.pad_to_seconds(video_seconds);
             Some(clip)
@@ -7125,8 +7203,186 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
     };
     progress(total, total, "done");
     tracing::info!(frames, width = base.width, height = base.height, audio = audio.is_some(), total_secs = timings.total(), "DFR generation done");
-    Ok((Video { width: base.width as u32, height: base.height as u32, fps: base.fps, frames: out, audio }, timings))
+    Ok((Video { width: base.width as u32, height: base.height as u32, fps: playback_fps, frames: out, audio }, timings))
 }
+
+/// The request's stills placed on one DFR window: the `[pixel_start,
+/// pixel_end]` frames of a canvas `scale` times the request's frame rate
+/// (`rebase_image_conditionings`), only those inside the window and at or
+/// after `first_free` (the frames before it are a tile's pinned prefix,
+/// already the previous tile's content), in window-local frames. The start
+/// still keeps its pin at frame 0; the end still guides at the REQUESTED last
+/// frame rather than the padded canvas's, so it joins the future anchors;
+/// the mid still keeps its pin.
+fn dfr_window_stills(base: &GenOpts, requested: usize, scale: usize, pixel_start: usize, pixel_end: usize, first_free: usize) -> GenOpts {
+    let local = |frame: usize| {
+        let at = frame * scale;
+        (pixel_start..=pixel_end).contains(&at).then_some(at).filter(|&at| at >= first_free).map(|at| at - pixel_start)
+    };
+    let start_frame = base.start_frame.clone().filter(|_| local(0) == Some(0));
+    let mid_at = base.mid_frame.as_ref().map(|_| base.mid_frame_at.unwrap_or((requested - 1) / 2)).and_then(local);
+    let mut future_anchors: Vec<(usize, String)> = base.future_anchors.iter().filter_map(|(at, path)| local(*at).map(|l| (l, path.clone()))).collect();
+    if let Some((at, path)) = base.end_frame.as_ref().and_then(|p| local(requested - 1).map(|l| (l, p.clone()))) {
+        future_anchors.push((at, path));
+    }
+    GenOpts {
+        start_frame,
+        mid_frame: base.mid_frame.clone().filter(|_| mid_at.is_some()),
+        mid_frame_at: mid_at,
+        end_frame: None,
+        future_anchors,
+        ..base.clone()
+    }
+}
+
+/// The inputs every temporal round of one DFR generation shares.
+struct TemporalRounds<'a> {
+    /// The stage context the rounds denoise with - the base checkpoint
+    /// under the request's own adapters, without the detailing IC-LoRA.
+    sc: &'a StageCtx<'a>,
+    base: &'a GenOpts,
+    temporal: &'a Tensors,
+    /// Stage 1's `[ta, TOKEN_DIM]` soundtrack, which every tile reads frozen.
+    stage1_audio: Option<&'a [f32]>,
+    /// Stage 1's clip length - the timeline the soundtrack spans.
+    source_seconds: f64,
+    lh: usize,
+    lw: usize,
+}
+
+/// `TEMPORAL_ANCESTRAL_ETA`: each tile densifies with ancestral Euler at
+/// this eta.
+const TEMPORAL_ANCESTRAL_ETA: f64 = 0.5;
+/// `ANCHOR_KEYFRAME_STRENGTH`: a tile's seam keyframes guide it at this
+/// strength.
+const ANCHOR_KEYFRAME_STRENGTH: f32 = 0.95;
+/// A temporal tile's schedule: the distilled table from its fifth sigma on
+/// (`DISTILLED_SIGMAS[4:]`).
+const TEMPORAL_SIGMAS_FROM: usize = 4;
+
+impl TemporalRounds<'_> {
+    /// One temporal round (`run_one_temporal_round`): upscale the
+    /// `frames`-frame canvas x2 in time, split the doubled canvas into
+    /// `2^round` keyframe-seam tiles, denoise each - its seams as anchors,
+    /// its segment midpoints as new keyframe slots, a non-first tile starting
+    /// on the plane before its seam with the previous tile's cells pinned,
+    /// the stage-1 soundtrack frozen beside it - and stitch the cells each
+    /// owns. Returns the new canvas latent and the keyframe bag (the scaled
+    /// seams plus every new slot).
+    #[allow(clippy::type_complexity)]
+    fn run(&self, round: usize, video_chw: &[f32], keyframes: &std::collections::BTreeMap<usize, Vec<f32>>, frames: usize) -> Result<(Vec<f32>, std::collections::BTreeMap<usize, Vec<f32>>), String> {
+        let (sc, base, c, lh, lw) = (self.sc, self.base, self.sc.in_channels, self.lh, self.lw);
+        let scale = dfr::VIDEO_TEMPORAL_SCALE;
+        let cur_t = (frames - 1) / scale + 1;
+        let tup = LatentUpsampler::build(&LatentUpsamplerConfig::temporal_x2(), self.temporal, cur_t as u32, lh as u32, lw as u32, base.device.as_deref());
+        let (pc_mean, pc_std) = crate::vae3d::per_channel_statistics(sc.vweights);
+        let video = crate::upsampler::upsample_video(&tup, &pc_mean, &pc_std, video_chw);
+        drop(tup);
+        let frames = 2 * (frames - 1) + 1;
+        let canvas_t = (frames - 1) / scale + 1;
+        if video.len() != c * canvas_t * lh * lw {
+            return Err(format!("the temporal upscaler produced {} latent values, expected {canvas_t} frames", video.len() / (c * lh * lw)));
+        }
+        let playback_fps = (base.fps << round) as f64;
+        let cond_fps = dfr::conditioning_fps(playback_fps);
+        let scaled: std::collections::BTreeMap<usize, Vec<f32>> = keyframes.iter().map(|(&p, k)| (2 * p, k.clone())).collect();
+        let seams: Vec<usize> = scaled.keys().copied().collect();
+        let tiles = dfr::temporal_tile_plan(&seams, frames, 1 << round, scale)?;
+        let mut plane_at = scaled.clone();
+        let mut previous: Option<(usize, Vec<f32>, usize)> = None;
+        let mut owned = Vec::with_capacity(tiles.len());
+        let sigmas: Vec<f64> = LTX2_DISTILLED_SIGMAS[TEMPORAL_SIGMAS_FROM..].iter().map(|&s| s as f64).collect();
+        tracing::info!(round, frames, tiles = tiles.len(), playback_fps, cond_fps, seams = ?seams, "DFR temporal round");
+        for (ti, tile) in tiles.iter().enumerate() {
+            let prefix = (ti > 0).then(|| dfr::tile_prefix((tile.start - 1) * scale, plane_at.keys().copied(), scale)).transpose()?;
+            // `_temporal_tile_video_input`: the canvas run, or the prefix
+            // plane followed by the canvas cells after it.
+            let (tile_chw, tile_t, pixel_start, resume_pixel, pinned) = match prefix {
+                None => (dfr::slice_time_chw(&video, c, canvas_t, lh, lw, tile.start, tile.end), tile.end - tile.start, 0, 0, 0),
+                Some(p) => {
+                    let run = dfr::slice_time_chw(&video, c, canvas_t, lh, lw, p.video_start_cell, tile.end);
+                    let t = 1 + tile.end - p.video_start_cell;
+                    (concat_time_chw(&[(&plane_at[&p.keyframe_position], 1), (&run, t - 1)], c, lh * lw), t, p.keyframe_position, p.resume_pixel, p.cells)
+                }
+            };
+            let local_frames = (tile_t - 1) * scale + 1;
+            let tile_opts = GenOpts { frames: local_frames, fps: cond_fps as usize, ..dfr_window_stills(base, base.frames, 1 << round, pixel_start, pixel_start + local_frames - 1, resume_pixel) };
+            // The pinned prefix (`lead_in_carryover`): the plane, then the
+            // previous tile's own cells up to the seam.
+            let carried = match (prefix, &previous) {
+                (Some(p), Some((base_cell, prev, prev_t))) => {
+                    let offset = p.video_start_cell.checked_sub(*base_cell).filter(|o| o + p.cells - 1 <= *prev_t).ok_or_else(|| format!("tile {ti}'s pinned cells fall outside the previous tile"))?;
+                    let cells = dfr::slice_time_chw(prev, c, *prev_t, lh, lw, offset, offset + p.cells - 1);
+                    Some(concat_time_chw(&[(&plane_at[&p.keyframe_position], 1), (&cells, p.cells - 1)], c, lh * lw))
+                }
+                _ => None,
+            };
+            let kept: Vec<usize> = tile.anchors.iter().copied().filter(|&p| p >= resume_pixel).collect();
+            let anchor_frames: Vec<usize> = kept.iter().map(|p| p - pixel_start).collect();
+            let anchor_chw = concat_time_chw(&kept.iter().map(|p| (scaled[p].as_slice(), 1)).collect::<Vec<_>>(), c, lh * lw);
+            let slot_frames: Vec<usize> = tile.slots.iter().map(|p| p - pixel_start).collect();
+            let slot_seeds: Vec<Vec<f32>> = slot_frames.iter().map(|&p| { let f = dfr::slot_seed_frame(p, scale, tile_t); dfr::slice_time_chw(&tile_chw, c, tile_t, lh, lw, f, f + 1) }).collect();
+            let slot_chw = concat_time_chw(&slot_seeds.iter().map(|k| (k.as_slice(), 1)).collect::<Vec<_>>(), c, lh * lw);
+            let audio = match self.stage1_audio {
+                None => None,
+                Some(a) => {
+                    let dim = crate::audio::TOKEN_DIM as usize;
+                    let tokens = crate::audio::latent_frames(local_frames, cond_fps as usize);
+                    let window = dfr::audio_for_tile(a, dim, pixel_start, local_frames, playback_fps, self.source_seconds, tokens)?;
+                    Some(AudioStage { latent: window.clone(), context: Vec::new(), frozen: Some((vec![0f32; tokens], window)) })
+                }
+            };
+            let tile_sc = StageCtx { lat_t: tile_t, o: &tile_opts, ..*sc };
+            let out = denoise_stage(
+                &tile_sc,
+                Stage {
+                    mask: None,
+                    width: base.width,
+                    height: base.height,
+                    sigmas: &sigmas,
+                    eta: TEMPORAL_ANCESTRAL_ETA,
+                    seed_chw: Some(&tile_chw),
+                    context: carried.as_deref().map(|chw| LatentContext { chw, frames: pinned }),
+                    seed_salt: DFR_ROUND_SEED_SALT ^ (1000 * round as u64 + ti as u64),
+                    done_before: 0,
+                    label: "dfr temporal tile",
+                    audio,
+                    slots: (!slot_frames.is_empty()).then_some(KeyframeSlots { pixel_frames: &slot_frames, initial_chw: Some(&slot_chw) }),
+                    anchors: (!kept.is_empty()).then_some(LatentAnchors { pixel_frames: &anchor_frames, chw: &anchor_chw, strength: ANCHOR_KEYFRAME_STRENGTH }),
+                },
+                0,
+                &mut |_, _, _: &str| {},
+            )?;
+            if let Some(planes) = &out.slots_chw {
+                for (i, &p) in tile.slots.iter().enumerate() {
+                    plane_at.entry(p).or_insert_with(|| dfr::slice_time_chw(planes, c, tile.slots.len(), lh, lw, i, i + 1));
+                }
+            }
+            owned.push((dfr::slice_time_chw(&out.video_chw, c, tile_t, lh, lw, pinned, tile_t), tile_t - pinned));
+            previous = Some((prefix.map_or(tile.start, |p| p.video_start_cell - 1), out.video_chw, tile_t));
+        }
+        let stitched = concat_time_chw(&owned.iter().map(|(v, t)| (v.as_slice(), *t)).collect::<Vec<_>>(), c, lh * lw);
+        if stitched.len() != c * canvas_t * lh * lw {
+            return Err(format!("round {round}: the stitched tiles hold {} latent frames, expected {canvas_t}", stitched.len() / (c * lh * lw)));
+        }
+        Ok((stitched, plane_at))
+    }
+}
+
+/// `torch.cat(parts, dim=2)` over `[C, t_i, hw]` channel-major pieces.
+fn concat_time_chw(parts: &[(&[f32], usize)], c: usize, hw: usize) -> Vec<f32> {
+    let total: usize = parts.iter().map(|(_, t)| t).sum();
+    let mut out = Vec::with_capacity(c * total * hw);
+    for ci in 0..c {
+        for (x, t) in parts {
+            out.extend_from_slice(&x[ci * t * hw..(ci + 1) * t * hw]);
+        }
+    }
+    out
+}
+
+/// Folded into every DFR temporal tile's noise, beside its round and tile.
+const DFR_ROUND_SEED_SALT: u64 = 0x4446_5254; // "DFRT"
 
 /// Folded into DFR stage 1's and stage 2's noise, so neither draws what
 /// another stage or pipeline does.
@@ -7976,6 +8232,115 @@ mod tests {
             close(&format!("{stage} clean_latent (held tokens)"), &held(&clean), &held(&get(&format!("{stage}.clean_latent"))));
             close(&format!("{stage} latent"), &latent, &get(&format!("{stage}.latent")));
         }
+    }
+
+    /// One DFR temporal tile's conditioned state against `tools/goldens/
+    /// ltxv_dfr_temporal_dump_reference.py`, which builds it with the
+    /// official `_temporal_tile_video_input`, anchors, `slot_initials_from_
+    /// video`, `lead_in_carryover` and `audio_latent_for_tile`: the second
+    /// tile of a round-1 canvas, starting on its prefix plane with the
+    /// previous tile's cells pinned, at the round's snapped conditioning
+    /// rate. Composed as [`denoise_stage`] composes it, before the noiser.
+    #[test]
+    fn a_dfr_temporal_tile_is_conditioned_as_the_reference_conditions_it() {
+        let dir = brain_testutil::testdata("golden/ltxv/dfr_temporal");
+        let Ok(text) = std::fs::read_to_string(format!("{dir}/temporal.json")) else {
+            brain_testutil::skip(&format!("{dir} absent - run tools/goldens/ltxv_dfr_temporal_dump_reference.py"));
+            return;
+        };
+        let run: serde_json::Value = serde_json::from_str::<serde_json::Value>(&text).unwrap()["tile"].clone();
+        let fx = checkpoint::safetensors::read(&format!("{dir}/temporal_tile.safetensors")).expect("read golden");
+        let get = |n: &str| fx.iter().find(|t| t.name == n).unwrap_or_else(|| panic!("no golden {n}")).data.clone();
+        let n = |k: &str| run[k].as_u64().unwrap() as usize;
+        let close = |label: &str, got: &[f32], want: &[f32]| {
+            assert_eq!(got.len(), want.len(), "{label}: {} values vs {}", got.len(), want.len());
+            let worst = got.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+            assert!(worst <= 1e-5, "{label}: max |diff| {worst}");
+        };
+        let (c, lh, lw, scale) = (128usize, n("lh"), n("lw"), crate::dfr::VIDEO_TEMPORAL_SCALE);
+        let seams: Vec<usize> = run["seams"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let frames = n("round_frames");
+        let plan = crate::dfr::temporal_tile_plan(&seams, frames, 2, scale).unwrap();
+        let tile = &plan[n("tile_index")];
+        let planes: Vec<usize> = seams.iter().chain(&plan[0].slots).copied().collect();
+        let prefix = crate::dfr::tile_prefix((tile.start - 1) * scale, planes.iter().copied(), scale).unwrap();
+        let canvas_t = (frames - 1) / scale + 1;
+        let video = get("in.video_latent");
+        // The tile video: its prefix plane, then the canvas cells after it.
+        let plane = get(&format!("in.plane{}", prefix.keyframe_position));
+        let run_cells = crate::dfr::slice_time_chw(&video, c, canvas_t, lh, lw, prefix.video_start_cell, tile.end);
+        let lat_t = 1 + tile.end - prefix.video_start_cell;
+        let hw = lh * lw;
+        let mut tile_chw = Vec::with_capacity(c * lat_t * hw);
+        for ci in 0..c {
+            tile_chw.extend_from_slice(&plane[ci * hw..(ci + 1) * hw]);
+            tile_chw.extend_from_slice(&run_cells[ci * (lat_t - 1) * hw..(ci + 1) * (lat_t - 1) * hw]);
+        }
+        let (pixel_start, local_frames) = (prefix.keyframe_position, (lat_t - 1) * scale + 1);
+        assert_eq!((pixel_start, local_frames, prefix.cells), (n("pixel_start"), n("local_frames"), n("pinned_cells")));
+        let fps = crate::dfr::conditioning_fps(run["playback_fps"].as_f64().unwrap());
+        // The pinned lead-in: the plane, then the previous tile's own cells.
+        let previous = get("in.previous_latent");
+        let prev_t = plan[0].end - plan[0].start;
+        let offset = prefix.video_start_cell - n("previous_base_cell");
+        let prev_cells = crate::dfr::slice_time_chw(&previous, c, prev_t, lh, lw, offset, offset + prefix.cells - 1);
+        let mut carried = Vec::with_capacity(c * prefix.cells * hw);
+        for ci in 0..c {
+            carried.extend_from_slice(&plane[ci * hw..(ci + 1) * hw]);
+            carried.extend_from_slice(&prev_cells[ci * (prefix.cells - 1) * hw..(ci + 1) * (prefix.cells - 1) * hw]);
+        }
+        let t = lat_t * hw;
+        let mut latent = chw_to_tc(&tile_chw, c, lat_t, lh, lw);
+        latent[..prefix.cells * hw * c].copy_from_slice(&chw_to_tc(&carried, c, prefix.cells, lh, lw));
+        let mut denoise_mask = vec![1f32; t];
+        denoise_mask[..prefix.cells * hw].fill(0.0);
+        let mut clean = vec![0f32; t * c];
+        clean[..prefix.cells * hw * c].copy_from_slice(&latent[..prefix.cells * hw * c]);
+        let positions = real_pixel_positions(lat_t, lh, lw, fps);
+        let mut keyframes_mask = vec![0f32; t];
+        keyframes_mask[..hw].fill(1.0);
+        // Anchors at 0.95, then slots seeded from the tile's own frames.
+        let kept: Vec<usize> = tile.anchors.iter().copied().filter(|&p| p >= prefix.resume_pixel).collect();
+        let kept_local: Vec<usize> = kept.iter().map(|p| p - pixel_start).collect();
+        let anchor_tc: Vec<f32> = kept.iter().flat_map(|p| chw_to_tc(&get(&format!("in.plane{p}")), c, 1, lh, lw)).collect();
+        let blocks: Vec<(usize, &[f32])> = kept_local.iter().enumerate().map(|(i, &p)| (p, &anchor_tc[i * hw * c..(i + 1) * hw * c])).collect();
+        let ic = append_image_conditioning(t, &positions, &keyframes_mask, lh, lw, c, fps, 1.0 - 0.95, &blocks);
+        // The item's placeholder: zeros, its keyframe held as clean content.
+        latent.resize(latent.len() + anchor_tc.len(), 0.0);
+        denoise_mask.extend_from_slice(&ic.denoise_mask[t..]);
+        clean.extend_from_slice(&ic.clean[t * c..]);
+        let slot_local: Vec<usize> = tile.slots.iter().map(|p| p - pixel_start).collect();
+        let tile_tc = chw_to_tc(&tile_chw, c, lat_t, lh, lw);
+        let mut initial_tc = Vec::new();
+        for &p in &slot_local {
+            let f = crate::dfr::slot_seed_frame(p, scale, lat_t);
+            initial_tc.extend_from_slice(&tile_tc[f * hw * c..(f + 1) * hw * c]);
+        }
+        let initial = tc_to_chw(&initial_tc, c, slot_local.len(), lh, lw);
+        let slots = KeyframeSlots { pixel_frames: &slot_local, initial_chw: Some(&initial) };
+        let base = KeyframeSlotsInput { base_t: ic.keyframes_mask.len(), base_positions: &ic.positions, base_keyframes_mask: &ic.keyframes_mask, lh, lw, channels: c, fps };
+        let ks = append_keyframe_slots(base, &slots, 0.0, 1).unwrap();
+        latent.extend_from_slice(&ks.latent);
+        denoise_mask.resize(ks.total_t, 1.0);
+        clean.resize(ks.total_t * c, 0.0);
+        close("tile positions", &ks.positions, &get("tile.positions"));
+        close("tile keyframes_mask", &ks.keyframes_mask, &get("tile.keyframes_mask"));
+        close("tile denoise_mask", &denoise_mask, &get("tile.denoise_mask"));
+        // A fully held token's starting latent is never read - the noiser's
+        // `lerp(clean, ., 0)` replaces it with its clean content, which is
+        // what the port writes there directly - so the latent is compared on
+        // every token the noiser reads.
+        let read = |v: &[f32]| v.chunks(c).zip(&denoise_mask).flat_map(|(r, &m)| r.iter().map(move |x| if m > 0.0 { *x } else { 0.0 })).collect::<Vec<f32>>();
+        close("tile latent (tokens the noiser reads)", &read(&latent), &read(&get("tile.latent")));
+        let held = |v: &[f32]| v.chunks(c).zip(&denoise_mask).flat_map(|(r, &m)| r.iter().map(move |x| x * (1.0 - m))).collect::<Vec<f32>>();
+        close("tile clean_latent (held tokens)", &held(&clean), &held(&get("tile.clean_latent")));
+        // The frozen audio window, retiled onto the tile's own token count.
+        let dim = crate::audio::TOKEN_DIM as usize;
+        let (canvas, stage_fps) = (n("canvas"), 24usize);
+        let stage1 = chw_to_tc(&get("in.stage1_audio"), 8, crate::audio::latent_frames(canvas, stage_fps), 1, 16);
+        let out_tokens = crate::audio::latent_frames(local_frames, fps as usize);
+        let audio = crate::dfr::audio_for_tile(&stage1, dim, pixel_start, local_frames, run["playback_fps"].as_f64().unwrap(), canvas as f64 / stage_fps as f64, out_tokens).unwrap();
+        close("tile audio", &audio, &chw_to_tc(&get("tile.audio"), 8, out_tokens, 1, 16));
     }
 
     /// A prompt is framed RIGHT-padded, as the reference's connector reads

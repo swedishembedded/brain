@@ -507,7 +507,8 @@ both must be a multiple of 64):
   --eta <F>                     sampler noise strength (default 1.0 euler,
                                 0.5 res2s)
   --temporal-upsample-rounds <N> 0, 1, or 2 temporal x2 rounds, each doubling
-                                 the frame rate (default 0)
+                                 the frame rate: N frames come back as
+                                 (N - 1) * 2^rounds + 1 (default 0)
 
 Weights (resolved from the models directory; a flag names one outright):
   --vae <path>                 the causal 3D video VAE

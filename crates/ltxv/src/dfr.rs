@@ -18,10 +18,6 @@
 /// `SEGMENT_CANDIDATES`.
 pub const SEGMENT_CANDIDATES: [usize; 2] = [24, 32];
 
-/// Lead-in for non-first tiles, in canvas segments - `dfr_layout.py`'s
-/// `TILE_LEAD_SEGMENTS`. See [`tile_ranges`]'s doc for why 1.
-pub const TILE_LEAD_SEGMENTS: usize = 1;
-
 /// This port's causal video VAE's temporal stride (`VIDEO_SCALE_FACTORS.
 /// time` upstream) - one latent frame per 8 pixel frames, except latent
 /// frame 0 which covers pixel frame 0 alone. Matches
@@ -82,119 +78,131 @@ pub fn pixel_to_latent_index(pixel_frame: usize, temporal_scale: usize) -> Resul
     Ok(pixel_frame / temporal_scale)
 }
 
-/// One temporal denoise tile in global pixel/latent coordinates. `pixel_start`/
-/// `pixel_end` are inclusive, `latent_end_exclusive` is half-open. Non-first
-/// tiles start [`TILE_LEAD_SEGMENTS`] segments before the region they own, so
-/// the seam shared with the previous tile falls inside the window.
-/// `anchor_kf_global` are the seam keyframes in the window (every tile but
-/// the first has at least one - frame 0 is not itself a keyframe, so the
-/// first tile's window start contributes no anchor). `slot_kf_global` are
-/// the mid-segment positions this window invents. Mirrors `dfr_layout.py`'s
-/// `TileRange` NamedTuple field-for-field.
+/// One temporal-round tile (`dfr_helpers.layout.TemporalTile`): the latent
+/// cells `[start, end)` it owns, their pixel span `[pixel_start, pixel_end]`
+/// (inclusive), the seams it anchors on and the segment midpoints it
+/// generates slots at - all in the round's global pixel frames.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TileRange {
+pub struct TemporalTile {
+    pub start: usize,
+    pub end: usize,
     pub pixel_start: usize,
     pub pixel_end: usize,
-    pub latent_start: usize,
-    pub latent_end_exclusive: usize,
-    pub anchor_kf_global: Vec<usize>,
-    pub slot_kf_global: Vec<usize>,
-    pub drop_latent_prefix: usize,
+    pub anchors: Vec<usize>,
+    pub slots: Vec<usize>,
 }
 
-/// Split `n_segments` into `num_tiles` contiguous owned runs, largest first.
-/// Mirrors `dfr_layout.py::_owned_segment_counts`.
-fn owned_segment_counts(n_segments: usize, num_tiles: usize) -> Vec<usize> {
-    let base = n_segments / num_tiles;
-    let remainder = n_segments % num_tiles;
-    (0..num_tiles).map(|index| base + usize::from(index < remainder)).collect()
+/// `TemporalTilePlan`: split a round's `num_frames`-frame canvas into at most
+/// `num_tiles` tiles on its keyframe seams (`split_at_seams` with no
+/// overlap - segments dealt largest-first, leftovers to the leading tiles),
+/// each owning exactly its segments, and hand every seam and every canvas
+/// segment midpoint to the tile that contains it. `seams` are the round's
+/// keyframe pixel frames, the last one the canvas's last frame.
+pub fn temporal_tile_plan(seams: &[usize], num_frames: usize, num_tiles: usize, temporal_scale: usize) -> Result<Vec<TemporalTile>, String> {
+    if num_tiles == 0 {
+        return Err("a temporal round needs at least one tile".into());
+    }
+    let mut boundaries = vec![0usize];
+    for &p in seams {
+        boundaries.push(pixel_to_latent_index(p, temporal_scale)?);
+    }
+    if boundaries.windows(2).any(|w| w[1] <= w[0]) {
+        return Err(format!("seams must be strictly increasing and past frame 0, got {seams:?}"));
+    }
+    let latent_len = (num_frames - 1) / temporal_scale + 1;
+    if *boundaries.last().expect("holds 0") != latent_len - 1 {
+        return Err(format!("the last seam must be the canvas's last frame ({}), got {seams:?}", num_frames - 1));
+    }
+    let segments = boundaries.len() - 1;
+    let tiles = num_tiles.min(segments);
+    let (base, leftover) = (segments / tiles, segments % tiles);
+    let mut midpoints = Vec::with_capacity(seams.len());
+    let mut left = 0;
+    for &right in seams {
+        midpoints.push((left + right) / 2);
+        left = right;
+    }
+    let mut out = Vec::with_capacity(tiles);
+    let mut cursor = 0;
+    for ti in 0..tiles {
+        let start = if ti == 0 { 0 } else { boundaries[cursor] + 1 };
+        cursor += base + usize::from(ti < leftover);
+        let end = boundaries[cursor] + 1;
+        let (pixel_start, pixel_end) = (start * temporal_scale, (end - 1) * temporal_scale);
+        let within = |v: &[usize]| v.iter().copied().filter(|&p| (pixel_start..=pixel_end).contains(&p)).collect();
+        out.push(TemporalTile { start, end, pixel_start, pixel_end, anchors: within(seams), slots: within(&midpoints) });
+    }
+    Ok(out)
 }
 
-/// One window owning segments `[own_lo, own_hi)`, preceded by `lead_segments`
-/// of lead-in. Mirrors `dfr_layout.py::_build_tile`.
-fn build_tile(boundaries: &[usize], own_lo: usize, own_hi: usize, lead_segments: usize, temporal_scale: usize) -> Result<TileRange, String> {
-    let window_lo = own_lo.saturating_sub(lead_segments);
-    let pixel_start = boundaries[window_lo];
-    let pixel_end = boundaries[own_hi];
-    let latent_start = pixel_to_latent_index(pixel_start, temporal_scale)?;
-
-    // Handover is exactly at the shared keyframe: the previous tile keeps
-    // the seam latent (the 8-frame token ending on the KF mark) and this
-    // tile resumes strictly after it, so the prefix drops the lead-in plus
-    // that seam latent.
-    let mut drop_latent_prefix = pixel_to_latent_index(boundaries[own_lo], temporal_scale)? - latent_start;
-    if own_lo > 0 {
-        drop_latent_prefix += 1;
-    }
-
-    let anchor_kf_global: Vec<usize> = (window_lo..=own_hi).filter(|&i| boundaries[i] != 0).map(|i| boundaries[i]).collect();
-    let slot_kf_global: Vec<usize> = (window_lo..own_hi).map(|i| (boundaries[i] + boundaries[i + 1]) / 2).collect();
-
-    Ok(TileRange {
-        pixel_start,
-        pixel_end,
-        latent_start,
-        latent_end_exclusive: pixel_to_latent_index(pixel_end, temporal_scale)? + 1,
-        anchor_kf_global,
-        slot_kf_global,
-        drop_latent_prefix,
-    })
+/// Where a non-first tile starts (`dfr_helpers.ops.TilePrefix`): on the
+/// one-frame keyframe plane at the last plane before its seam, then the
+/// canvas cells between that plane and the seam, all pinned, so the tile
+/// reads as an image-to-video clip and resumes on the frame after the seam.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TilePrefix {
+    /// The plane that becomes the tile's latent frame 0.
+    pub keyframe_position: usize,
+    /// The first canvas cell of the pinned video run, right after the plane.
+    pub video_start_cell: usize,
+    /// Pinned latent frames, the plane included.
+    pub cells: usize,
+    /// The first pixel frame the tile denoises.
+    pub resume_pixel: usize,
 }
 
-/// Partition the canvas into `num_tiles` keyframe-seam tiles, gapless, with a
-/// lead-in. Owned segment runs are contiguous; each non-first window
-/// additionally reaches `lead_segments` back so it denoises through the
-/// shared seam keyframe. `num_tiles` is clamped to the segment count.
-/// Mirrors `dfr_layout.py::tile_ranges`.
-pub fn tile_ranges(seam_positions: &[usize], num_frames: usize, num_tiles: usize, temporal_scale: usize, lead_segments: usize) -> Result<Vec<TileRange>, String> {
-    if num_frames < 2 {
-        return Err(format!("num_frames must be >= 2, got {num_frames}"));
+/// `tile_prefix`: the prefix a tile resuming after `seam_pixel` starts from,
+/// out of the planes the round holds so far.
+pub fn tile_prefix(seam_pixel: usize, planes: impl IntoIterator<Item = usize>, temporal_scale: usize) -> Result<TilePrefix, String> {
+    let keyframe = planes.into_iter().filter(|&p| p < seam_pixel).max().ok_or_else(|| format!("no keyframe plane before seam {seam_pixel} to start the tile on"))?;
+    if !keyframe.is_multiple_of(temporal_scale) || !seam_pixel.is_multiple_of(temporal_scale) {
+        return Err(format!("keyframe {keyframe} and seam {seam_pixel} must both sit on the x{temporal_scale} border"));
     }
-    if seam_positions.is_empty() {
-        return Err("seam_positions must be non-empty".into());
-    }
-    if seam_positions[seam_positions.len() - 1] != num_frames - 1 {
-        return Err(format!("last seam must be the terminal frame {}, got {}", num_frames - 1, seam_positions[seam_positions.len() - 1]));
-    }
-    if lead_segments < 1 {
-        return Err(format!("lead_segments must be >= 1, got {lead_segments}"));
-    }
-    if num_tiles < 1 {
-        return Err(format!("num_tiles must be >= 1, got {num_tiles}"));
-    }
-
-    let mut boundaries: Vec<usize> = Vec::with_capacity(seam_positions.len() + 1);
-    boundaries.push(0);
-    boundaries.extend_from_slice(seam_positions);
-    for i in 1..boundaries.len() {
-        let span = boundaries[i] as isize - boundaries[i - 1] as isize;
-        if span <= 0 {
-            return Err(format!("seam_positions must be strictly increasing, got {seam_positions:?}"));
-        }
-        let span = span as usize;
-        if !span.is_multiple_of(temporal_scale) {
-            return Err(format!("segment span {span} is not a multiple of temporal scale {temporal_scale}"));
-        }
-        if span / temporal_scale < 2 {
-            return Err(format!("segment span {span} is under 2 latent frames, too short to carry a tile lead-in"));
-        }
-    }
-
-    let n_segments = boundaries.len() - 1;
-    let mut tiles = Vec::new();
-    let mut own_lo = 0usize;
-    for (index, count) in owned_segment_counts(n_segments, num_tiles.min(n_segments)).into_iter().enumerate() {
-        let lead = if index > 0 { lead_segments } else { 0 };
-        tiles.push(build_tile(&boundaries, own_lo, own_lo + count, lead, temporal_scale)?);
-        own_lo += count;
-    }
-    Ok(tiles)
+    Ok(TilePrefix { keyframe_position: keyframe, video_start_cell: keyframe / temporal_scale + 1, cells: 1 + (seam_pixel - keyframe) / temporal_scale, resume_pixel: seam_pixel + 1 })
 }
 
-/// Shift global pixel indices into a tile-local frame (`local = global -
-/// pixel_start`). Mirrors `dfr_layout.py::remap_positions_to_local`.
-pub fn remap_positions_to_local(positions: &[usize], pixel_start: usize) -> Vec<usize> {
-    positions.iter().map(|&p| p - pixel_start).collect()
+/// The frame rate a round's transformer positions run at
+/// (`dfr_helpers.ops.conditioning_fps`): above 30 it snaps to 60, the
+/// playback rate itself is unchanged.
+pub fn conditioning_fps(playback_fps: f64) -> f64 {
+    if playback_fps > 30.0 {
+        60.0
+    } else {
+        playback_fps
+    }
+}
+
+/// The video latent frame a slot at local `position` is seeded from
+/// (`slot_initials_from_video`): the nearest one, Python's halves-to-even
+/// rounding, clamped into the `latent_frames` the tile holds.
+pub fn slot_seed_frame(position: usize, temporal_scale: usize, latent_frames: usize) -> usize {
+    ((position as f64 / temporal_scale as f64).round_ties_even() as usize).min(latent_frames - 1)
+}
+
+/// `audio_latent_for_tile`: the stage-1 audio for one temporal tile - its
+/// playback window `[pixel_start, pixel_start + local_frames) / playback_fps`
+/// as a fraction of the stage-1 `source_seconds`, linearly resampled onto
+/// `out_tokens` (the tile's own token count at its conditioning rate).
+/// `audio` is `[T, token_dim]` token-major.
+pub fn audio_for_tile(audio: &[f32], token_dim: usize, pixel_start: usize, local_frames: usize, playback_fps: f64, source_seconds: f64, out_tokens: usize) -> Result<Vec<f32>, String> {
+    let full_t = audio.len() / token_dim;
+    if full_t == 0 || out_tokens == 0 || local_frames == 0 {
+        return Err(format!("cannot window a {full_t}-token audio latent into {out_tokens} tokens over {local_frames} frames"));
+    }
+    let src_start = pixel_start as f64 / playback_fps / source_seconds * full_t as f64;
+    let src_end = (pixel_start + local_frames) as f64 / playback_fps / source_seconds * full_t as f64;
+    // The positions in fp32, as the reference's `src_start + step *
+    // torch.arange(...)` computes them.
+    let (start, step) = (src_start as f32, ((src_end - src_start) / out_tokens as f64) as f32);
+    let mut out = Vec::with_capacity(out_tokens * token_dim);
+    for k in 0..out_tokens {
+        let pos = (start + step * k as f32).clamp(0.0, (full_t - 1) as f32);
+        let lo = pos.floor() as usize;
+        let hi = (lo + 1).min(full_t - 1);
+        let w = pos - lo as f32;
+        out.extend(audio[lo * token_dim..(lo + 1) * token_dim].iter().zip(&audio[hi * token_dim..(hi + 1) * token_dim]).map(|(&a, &b)| a * (1.0 - w) + b * w));
+    }
+    Ok(out)
 }
 
 /// Crop `[start, end)` out of a `[c, t, h, w]` row-major (channel-major)
@@ -214,44 +222,6 @@ pub fn slice_time_chw(x: &[f32], c: usize, t: usize, h: usize, w: usize, start: 
     out
 }
 
-/// Concatenate tile video latents along `T`, each tile contributing
-/// `latent[drop_latent_prefix:]` - the stitch handover lands exactly on the
-/// shared seam keyframe (see [`tile_ranges`]'s doc). Every tile latent is
-/// `[c, latent_end_exclusive - latent_start, h, w]` channel-major. Mirrors
-/// `dfr_layout.py::stitch_tile_latents`.
-pub fn stitch_tile_latents(tile_latents: &[Vec<f32>], ranges: &[TileRange], c: usize, h: usize, w: usize) -> Result<Vec<f32>, String> {
-    if tile_latents.len() != ranges.len() {
-        return Err(format!("expected {} tile latents, got {}", ranges.len(), tile_latents.len()));
-    }
-    if tile_latents.is_empty() {
-        return Err("tile_latents must be non-empty".into());
-    }
-    let hw = h * w;
-    let mut pieces: Vec<Vec<f32>> = Vec::with_capacity(tile_latents.len());
-    for (latent, tile) in tile_latents.iter().zip(ranges) {
-        let expected_t = tile.latent_end_exclusive - tile.latent_start;
-        if latent.len() != c * expected_t * hw {
-            return Err(format!("tile latent has {} values, expected {} for range [{}, {})", latent.len(), c * expected_t * hw, tile.latent_start, tile.latent_end_exclusive));
-        }
-        if tile.drop_latent_prefix >= expected_t {
-            return Err(format!("drop_latent_prefix={} invalid for tile T={expected_t}", tile.drop_latent_prefix));
-        }
-        pieces.push(slice_time_chw(latent, c, expected_t, h, w, tile.drop_latent_prefix, expected_t));
-    }
-    let out_t: usize = pieces.iter().zip(ranges).map(|(_, r)| (r.latent_end_exclusive - r.latent_start) - r.drop_latent_prefix).sum();
-    let mut out = vec![0f32; c * out_t * hw];
-    let mut t_off = 0usize;
-    for (piece, tile) in pieces.iter().zip(ranges) {
-        let keep = (tile.latent_end_exclusive - tile.latent_start) - tile.drop_latent_prefix;
-        for ci in 0..c {
-            let dst = (ci * out_t + t_off) * hw;
-            let src = ci * keep * hw;
-            out[dst..dst + keep * hw].copy_from_slice(&piece[src..src + keep * hw]);
-        }
-        t_off += keep;
-    }
-    Ok(out)
-}
 
 /// The final frame-count contract every DFR call honours regardless of how
 /// much the canvas padded its tail: `(requested - 1) * 2^rounds + 1`.
@@ -324,103 +294,48 @@ mod tests {
         assert!(e.contains("at least 2 pixel frames"), "{e}");
     }
 
-    // -------------------------------------------------------------- tile_ranges
+    // ------------------------------------------------------- temporal rounds
 
-    /// The 2-tile case pinned against a live reference `tile_ranges([24, 48],
-    /// 49, 2)` run - includes the degenerate "lead-in eats the whole prior
-    /// canvas" case that a 2-segment/2-tile split produces.
+    /// Every plan, prefix and conditioning rate against
+    /// `tools/goldens/ltxv_dfr_temporal_dump_reference.py`'s live run of the
+    /// reference's `TemporalTilePlan`, `tile_prefix` and `conditioning_fps`,
+    /// over canvases with leftover segments and more tiles than segments.
     #[test]
-    fn tile_ranges_two_tiles_matches_reference_numbers() {
-        let tiles = tile_ranges(&[24, 48], 49, 2, VIDEO_TEMPORAL_SCALE, TILE_LEAD_SEGMENTS).unwrap();
-        assert_eq!(tiles.len(), 2);
-        assert_eq!(
-            tiles[0],
-            TileRange { pixel_start: 0, pixel_end: 24, latent_start: 0, latent_end_exclusive: 4, anchor_kf_global: vec![24], slot_kf_global: vec![12], drop_latent_prefix: 0 }
-        );
-        assert_eq!(
-            tiles[1],
-            TileRange { pixel_start: 0, pixel_end: 48, latent_start: 0, latent_end_exclusive: 7, anchor_kf_global: vec![24, 48], slot_kf_global: vec![12, 36], drop_latent_prefix: 4 }
-        );
-    }
-
-    /// The 4-tile/5-segment case pinned against a live reference
-    /// `tile_ranges([24, 48, 72, 96, 120], 121, 4)` run - a non-degenerate
-    /// split where every tile's lead-in is a genuine PARTIAL reach-back, not
-    /// the whole canvas.
-    #[test]
-    fn tile_ranges_four_tiles_five_segments_matches_reference_numbers() {
-        let tiles = tile_ranges(&[24, 48, 72, 96, 120], 121, 4, VIDEO_TEMPORAL_SCALE, TILE_LEAD_SEGMENTS).unwrap();
-        assert_eq!(tiles.len(), 4);
-        assert_eq!(
-            tiles[0],
-            TileRange { pixel_start: 0, pixel_end: 48, latent_start: 0, latent_end_exclusive: 7, anchor_kf_global: vec![24, 48], slot_kf_global: vec![12, 36], drop_latent_prefix: 0 }
-        );
-        assert_eq!(
-            tiles[1],
-            TileRange { pixel_start: 24, pixel_end: 72, latent_start: 3, latent_end_exclusive: 10, anchor_kf_global: vec![24, 48, 72], slot_kf_global: vec![36, 60], drop_latent_prefix: 4 }
-        );
-        assert_eq!(
-            tiles[2],
-            TileRange { pixel_start: 48, pixel_end: 96, latent_start: 6, latent_end_exclusive: 13, anchor_kf_global: vec![48, 72, 96], slot_kf_global: vec![60, 84], drop_latent_prefix: 4 }
-        );
-        assert_eq!(
-            tiles[3],
-            TileRange { pixel_start: 72, pixel_end: 120, latent_start: 9, latent_end_exclusive: 16, anchor_kf_global: vec![72, 96, 120], slot_kf_global: vec![84, 108], drop_latent_prefix: 4 }
-        );
+    fn temporal_rounds_match_the_reference_geometry() {
+        let path = brain_testutil::testdata("golden/ltxv/dfr_temporal/temporal.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            brain_testutil::skip(&format!("{path} absent - run tools/goldens/ltxv_dfr_temporal_dump_reference.py"));
+            return;
+        };
+        let golden: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let nums = |v: &serde_json::Value| v.as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as usize).collect::<Vec<_>>();
+        let n = |v: &serde_json::Value, k: &str| v[k].as_u64().unwrap() as usize;
+        for plan in golden["plans"].as_array().unwrap() {
+            let (seams, frames, tiles) = (nums(&plan["seams"]), n(plan, "frames"), n(plan, "num_tiles"));
+            let got = temporal_tile_plan(&seams, frames, tiles, VIDEO_TEMPORAL_SCALE).unwrap();
+            let want = plan["tiles"].as_array().unwrap();
+            assert_eq!(got.len(), want.len(), "{plan}");
+            let mut planes: Vec<usize> = seams.clone();
+            for (ti, (g, w)) in got.iter().zip(want).enumerate() {
+                let tile = TemporalTile { start: n(w, "start"), end: n(w, "end"), pixel_start: n(w, "pixel_start"), pixel_end: n(w, "pixel_end"), anchors: nums(&w["anchors"]), slots: nums(&w["slots"]) };
+                assert_eq!(g, &tile, "tile {ti} of {plan}");
+                if ti > 0 {
+                    let p = &w["prefix"];
+                    let want = TilePrefix { keyframe_position: n(p, "keyframe_position"), video_start_cell: n(p, "video_start_cell"), cells: n(p, "cells"), resume_pixel: n(p, "resume_pixel") };
+                    assert_eq!(tile_prefix((g.start - 1) * VIDEO_TEMPORAL_SCALE, planes.iter().copied(), VIDEO_TEMPORAL_SCALE).unwrap(), want, "prefix of tile {ti} of {plan}");
+                }
+                planes.extend(&g.slots);
+            }
+        }
+        for (fps, want) in golden["conditioning_fps"].as_object().unwrap() {
+            assert_eq!(conditioning_fps(fps.parse().unwrap()), want.as_f64().unwrap(), "conditioning_fps({fps})");
+        }
     }
 
     #[test]
-    fn tile_ranges_clamps_num_tiles_to_the_segment_count() {
-        // Only 1 segment exists, so requesting 4 tiles must still yield 1.
-        let tiles = tile_ranges(&[24], 25, 4, VIDEO_TEMPORAL_SCALE, TILE_LEAD_SEGMENTS).unwrap();
-        assert_eq!(tiles.len(), 1);
-    }
-
-    #[test]
-    fn tile_ranges_rejects_a_seam_list_not_ending_on_the_terminal_frame() {
-        let e = tile_ranges(&[24, 40], 49, 2, VIDEO_TEMPORAL_SCALE, TILE_LEAD_SEGMENTS).unwrap_err();
-        assert!(e.contains("terminal frame"), "{e}");
-    }
-
-    // --------------------------------------------------- remap_positions_to_local
-
-    #[test]
-    fn remap_positions_to_local_matches_reference_numbers() {
-        assert_eq!(remap_positions_to_local(&[24, 48], 10), vec![14, 38]);
-    }
-
-    // ----------------------------------------------------- stitch_tile_latents
-
-    #[test]
-    fn stitch_tile_latents_drops_each_prefix_and_concatenates_along_t() {
-        // 2 tiles from the pinned 2-tile case above: tile0 T=4 drop=0 (keep
-        // 4), tile1 T=7 drop=4 (keep 3) -> stitched T=7, matching
-        // expected_t=(49-1)/8+1=7 the pipeline itself asserts.
-        let tiles = tile_ranges(&[24, 48], 49, 2, VIDEO_TEMPORAL_SCALE, TILE_LEAD_SEGMENTS).unwrap();
-        let (c, h, w) = (2usize, 1usize, 1usize);
-        // Tile0: 4 frames of 2 channels, values c*100 + t.
-        let t0: Vec<f32> = (0..c).flat_map(|ci| (0..4).map(move |t| (ci * 100 + t) as f32)).collect();
-        // Tile1: 7 frames, values c*1000 + t (distinguishable from tile0).
-        let t1: Vec<f32> = (0..c).flat_map(|ci| (0..7).map(move |t| (ci * 1000 + t) as f32)).collect();
-        let out = stitch_tile_latents(&[t0, t1], &tiles, c, h, w).unwrap();
-        assert_eq!(out.len(), c * 7 * h * w);
-        // Channel 0: tile0 keeps frames [0..4) = [0,1,2,3], tile1 keeps
-        // frames [4..7) (drop_latent_prefix=4) = [4,5,6].
-        assert_eq!(&out[0..7], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        // Channel 1: tile0 base 100, tile1 base 1000.
-        assert_eq!(&out[7..14], &[100.0, 101.0, 102.0, 103.0, 1004.0, 1005.0, 1006.0]);
-    }
-
-    #[test]
-    fn stitch_tile_latents_rejects_a_length_mismatch() {
-        // This tile's own `latent_end_exclusive - latent_start` is 4, so a
-        // correctly-shaped `[c=1, t=4, h=1, w=1]` latent has exactly 4
-        // values - deliberately pass 5 (a real mismatch), not the tile's own
-        // correct length.
-        let tiles = tile_ranges(&[24], 25, 1, VIDEO_TEMPORAL_SCALE, TILE_LEAD_SEGMENTS).unwrap();
-        assert_eq!(tiles[0].latent_end_exclusive - tiles[0].latent_start, 4);
-        let e = stitch_tile_latents(&[vec![0.0; 5]], &tiles, 1, 1, 1).unwrap_err();
-        assert!(e.contains("values, expected"), "{e}");
+    fn a_tile_plan_rejects_seams_that_miss_the_last_frame() {
+        assert!(temporal_tile_plan(&[48, 96], 145, 2, VIDEO_TEMPORAL_SCALE).is_err());
+        assert!(temporal_tile_plan(&[96, 48], 97, 2, VIDEO_TEMPORAL_SCALE).is_err());
     }
 
     // -------------------------------------------------------- target_frame_count
@@ -435,7 +350,5 @@ mod tests {
             assert_eq!(target_frame_count(requested, rounds), want, "requested={requested} rounds={rounds}");
         }
     }
-
-    // ------------------------------------------------------------ keyframe_slots
-
 }
+

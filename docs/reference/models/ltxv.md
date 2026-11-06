@@ -36,7 +36,7 @@ per component and the open gaps.
 | Guidance | [x] the reference's multimodal guider: CFG, STG, rescale and isolated-modality guidance per stream, `--guidance-preset reference` (see "Guidance and samplers") |
 | Samplers | [x] ancestral Euler (the distilled pipeline's) and res_2s (the reference's high-quality pipeline's), `--sampler` |
 | Post-hoc upscale | [x] `brain ltxv upscale` / the `upscale` action |
-| DFR | [~] `brain ltxv dfr` on the real checkpoint: keyframe-segment canvas, half-resolution stage 1 with generated keyframe slots, spatial upscale and the detailing pass under the Refine-Details IC-LoRA; temporal rounds and the spatial epilogue are not available yet |
+| DFR | [~] `brain ltxv dfr` on the real checkpoint: keyframe-segment canvas, half-resolution stage 1 with generated keyframe slots, spatial upscale, the detailing pass under the Refine-Details IC-LoRA and 0-2 temporal rounds; the spatial epilogue (`spatial_upscalings = 2`) is not available yet |
 | LoRA inference | [x] `--adapter <path>` (repeatable): ComfyUI/PEFT `.safetensors` from the official trainer, published IC-LoRAs (with `--reference-video`), or brain-trained adapters, applied beside the int8 weights |
 | LoRA / full fine-tune | [~] video-only DiT; the audio-visual DiT has no training support |
 | CLI | [x] `brain ltxv {t2v,t2a,v2v,extend,upscale,dfr}` |
@@ -418,7 +418,15 @@ reference. The canvas is trimmed back to the requested length; with
 adapter and duration-head behaviour, and needs the
 `ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors` IC-LoRA
 (`Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details`) in the model store or
-`--detailing-lora <path>`; the width and height must be multiples of 64:
+`--detailing-lora <path>`; the width and height must be multiples of 64.
+
+`--temporal-upsample-rounds 1|2` then doubles the frame rate once or twice:
+each round upscales the clip x2 in time with the temporal latent upscaler,
+splits it into keyframe-seam tiles and densifies each - its seams held as
+keyframes, a new keyframe generated mid-segment, a later tile starting on
+the keyframe before its seam with the earlier tile's frames pinned, the
+stage-1 soundtrack frozen beside it. A request of `N` frames comes back as
+`(N - 1) * 2^rounds + 1` frames at `fps * 2^rounds`:
 
 ```bash
 brain pull https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details/blob/main/ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors

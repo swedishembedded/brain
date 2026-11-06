@@ -103,11 +103,19 @@ this port:
       Refine-Details IC-LoRA (`detailing_lora` store role, strength 0.5) with
       the stage-1 latent as its reference (`StageReference::Latent`); both
       stages' conditioned states match `ltxv_dfr_conditioning_dump_reference.py`
-      exactly (`dfr_stage_conditioning_matches_the_reference`). Open: the
-      temporal rounds (anchor keyframes at 0.95, invented mid-segment slots,
-      frozen audio slices, `conditioning_fps` snapping above 30 fps) and the
-      `spatial_upscalings = 2` epilogue; the GPU end-to-end test
-      `dfr_real::a_dfr_clip_on_real_weights_comes_back_whole` has not run.
+      exactly (`dfr_stage_conditioning_matches_the_reference`). Temporal
+      rounds (`TemporalRounds::run`): `dfr::temporal_tile_plan` /
+      `tile_prefix` / `conditioning_fps` match the reference on five
+      canvases (`temporal_rounds_match_the_reference_geometry`), and a
+      prefixed tile's whole conditioned state - prefix plane, pinned
+      lead-in, anchors at 0.95, slots seeded from the tile, frozen retiled
+      audio - matches it exactly
+      (`a_dfr_temporal_tile_is_conditioned_as_the_reference_conditions_it`).
+      Fixed on the way, for every pipeline: an appended still below
+      strength 1 in a seeded stage now starts from `sigma0`-scaled noise,
+      and a wholly frozen stream (audio-to-video, video-to-audio, DFR tiles)
+      reads as sigma 0. Open: the `spatial_upscalings = 2` epilogue; the GPU
+      end-to-end tests in `dfr_real` have not run.
 - [ ] **Full-depth LTX-2.5 parity** - `ltxv_real_av_dit_full_dump_reference.py`
       dumps the official 48-block audio-visual `LTXModel` (bf16 checkpoint, fp32,
       CPU) on a real prompt's context; `av_dit_full_real::the_production_av_forward_

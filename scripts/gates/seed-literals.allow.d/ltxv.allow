@@ -15,3 +15,6 @@ crates/ltxv/src/pipeline.rs	-:DFR_STAGE2_SEED_SALT=0x4446_5232	const	salt: mixed
 crates/ltxv/src/pipeline.rs	-:SLOT_SEED_SALT=0x53_4c_4f_54	const	salt: mixed into the caller seed to derive an independent stream
 crates/ltxv/src/pipeline.rs	generate_dfr:seed_salt=DFR_STAGE1_SEED_SALT	default	salt: mixed into the caller seed to derive an independent stream
 crates/ltxv/src/pipeline.rs	generate_dfr:seed_salt=DFR_STAGE2_SEED_SALT	default	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/pipeline.rs	-:ANCHOR_SEED_SALT=0x41_4e_43_48	const	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/pipeline.rs	-:DFR_ROUND_SEED_SALT=0x4446_5254	const	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/pipeline.rs	TemporalRounds::run:seed_salt=DFR_ROUND_SEED_SALT	default	salt: mixed into the caller seed to derive an independent stream
