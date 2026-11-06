@@ -66,7 +66,7 @@ BRAIN_BIN ?= ./target/debug/brain
 # sub-make re-reads the Makefile from disk. Cargo.toml's [workspace.package]
 # version is the actual build-time source of truth (--version, D-Bus, the
 # .deb); this mirrors it for the release machinery only.
-BRAIN_VERSION := 5.0.0
+BRAIN_VERSION := 5.1.0
 # The git remote whose GitHub repository receives a release (release/publish,
 # package/deb/publish): the public repository, RELEASE_REPO. Add it once with
 #   git remote add upstream git@github.com:swedishembedded/brain.git

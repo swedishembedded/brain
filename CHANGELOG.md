@@ -6,6 +6,18 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-11-06
+
+### Features
+
+- LTX-2.5's DFR (Diffusion Fidelity Rendering, the `dfr` action) runs the reference's stages on the real checkpoint, where it ran a tiny random-weight model: a half-resolution stage with a generated keyframe at every segment border, the spatial upscale, and a detailing pass under the Refine-Details IC-LoRA. `--temporal-upsample-rounds 1|2` doubles the frame rate once or twice after it, and `--spatial-upscalings 2` (`spatial_upscalings`) renders the full layout up to the output size.
+- `brain-cli` builds for Windows with the training job and the API server: on Windows a job's work root is `brain-train` in the user's temporary directory, and a stored artifact is opened without following links.
+
+### Bug Fixes
+
+- LTX-2.5 runs the checkpoint's prompt-side AdaLN in every block's text cross-attention, as the real checkpoints and the reference do: every LTX-2.5 clip was conditioned on the static table alone. Against the reference at full depth the production int8 forward moves from cosine 0.71 (video) and 0.97 (audio) to 0.99991 and 0.99997, so clips follow their prompts as the official model does.
+- An LTX-2.5 conditioning still held below strength 1 starts from the reference's blend of its clean latent and noise, and a frozen stream (audio-to-video's soundtrack, video-to-audio's picture) enters the joint step at sigma 0.
+
 ## [5.0.0] - 2026-11-06
 
 ### Breaking Changes
