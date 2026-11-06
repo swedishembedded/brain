@@ -12,7 +12,7 @@
 //! dims, which is what makes a tiny-config parity test meaningful: it proves
 //! the op sequence this crate implements, not a simplified one. This crate
 //! implements exactly ONE point in the flag matrix -
-//! `cross_attention_adaln: true`, `use_prompt_adaln_single: false`,
+//! `cross_attention_adaln: true`, either `use_prompt_adaln_single`,
 //! `use_middle_indices_grid: true`, `apply_gated_attention: false` - and
 //! [`LtxDitConfig::assert_supported`] panics loudly if a future caller ever
 //! constructs a config outside that point, rather than silently running the
@@ -39,9 +39,12 @@ pub struct LtxDitConfig {
     /// gates the 9-row (vs. 6-row) adaLN table and the text-cross-attention
     /// AdaLN modulation path this crate implements.
     pub cross_attention_adaln: bool,
-    /// `false` for the real LTX-2.5 config (the class default is `true`) -
-    /// text K/V modulation is a static per-block table, not a timestep-MLP.
-    /// This crate only implements `false`; see [`LtxDitConfig::assert_supported`].
+    /// Whether the text cross-attention's K/V modulation adds a timestep MLP
+    /// (`prompt_adaln_single`, over the stream's scalar sigma) to each
+    /// block's static `prompt_scale_shift_table` (`crate::dit::prompt_kv`).
+    /// `true` for the real LTX-2.3/2.5 checkpoints: neither config sets the
+    /// key, the reference's absent-key default is `true`, and both headers
+    /// carry the MLP's tensors.
     pub use_prompt_adaln_single: bool,
     pub use_keyframes_abs_pos_embedding: bool,
     pub norm_eps: f32,
@@ -157,7 +160,6 @@ impl LtxDitConfig {
     /// `2*sigmoid(gate)` multiply is implemented.
     pub fn assert_supported(&self) {
         assert!(self.cross_attention_adaln, "ltxv M3 only implements cross_attention_adaln=true");
-        assert!(!self.use_prompt_adaln_single, "ltxv M3 only implements use_prompt_adaln_single=false (static prompt_scale_shift_table, no timestep MLP)");
         assert!(self.use_middle_indices_grid, "ltxv M3 only implements use_middle_indices_grid=true (RoPE at patch midpoints)");
     }
 
@@ -252,7 +254,7 @@ impl LtxDitConfig {
             cross_attention_dim: 4096,
             ff_bias: false,
             cross_attention_adaln: true,
-            use_prompt_adaln_single: false,
+            use_prompt_adaln_single: true,
             use_keyframes_abs_pos_embedding: true,
             norm_eps: 1e-6,
             positional_embedding_theta: 10000.0,
@@ -744,7 +746,7 @@ mod tests {
         assert_eq!(v.cross_attention_dim, 4096);
         assert!(!v.ff_bias);
         assert!(v.cross_attention_adaln);
-        assert!(!v.use_prompt_adaln_single);
+        assert!(v.use_prompt_adaln_single);
         assert!(v.use_keyframes_abs_pos_embedding);
         assert_eq!(v.norm_eps, 1e-6);
         assert_eq!(v.positional_embedding_theta, 10000.0);

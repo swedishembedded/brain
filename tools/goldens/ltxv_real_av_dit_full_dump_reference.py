@@ -55,7 +55,7 @@ from golden_source import source_block  # noqa: E402
 # audio tokens - small enough for an fp32 CPU forward of the whole model,
 # large enough that every axis of both streams' RoPE has more than one value.
 FRAMES, HEIGHT, WIDTH, FPS = 17, 128, 128, 24.0
-SIGMA = 0.6
+SIGMA = 1.0
 TAPPED_BLOCKS = (0, 11, 23, 35, 47)
 
 
@@ -65,6 +65,11 @@ def main():
     ap.add_argument("--prompt-golden", required=True, help="duration_e2e.safetensors (a real prompt's connector outputs)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, required=True)
+    ap.add_argument("--sigma", type=float, default=SIGMA, help="the step's sigma; the latent is pure noise, so 1.0 is the on-distribution value")
+    ap.add_argument("--tap-every-block", action="store_true", help="tap all 48 block outputs, not five")
+    ap.add_argument("--tap-block0", action="store_true", help="also tap block 0's attention, cross-attention and feed-forward outputs and both patchify projections")
+    ap.add_argument("--weights-from-gguf", default=None,
+                    help="replace every transformer weight with this Q8_0 GGUF's dequantized tensor, to separate the port from the weight format")
     ap.add_argument("--reference-root", default=str(Path(__file__).resolve().parents[2] / "scratchpad" / "reference" / "ltxv"),
                     help="the LTX-2 reference checkout (default: the repo's gitignored scratchpad copy)")
     args = ap.parse_args()
@@ -100,7 +105,7 @@ def main():
     prompt = load_file(args.prompt_golden)
     v_context = prompt["prompt0_video_encoding"][None]
     a_context = prompt["prompt0_audio_encoding"][None]
-    sigma = torch.tensor([SIGMA])
+    sigma = torch.tensor([args.sigma])
     video = modality_from_latent_state(v_state, v_context, sigma)
     audio = modality_from_latent_state(a_state, a_context, sigma)
 
@@ -112,6 +117,18 @@ def main():
         builder = builder.with_sd_ops((*builder.sd_ops, selection))
     model = builder.build(device=device, dtype=dtype).eval()
     print(f"built the full model: {len(model.transformer_blocks)} blocks", flush=True)
+    if args.weights_from_gguf:
+        from gguf import GGUFReader
+        from gguf.quants import dequantize
+        tensors = {t.name: t for t in GGUFReader(args.weights_from_gguf).tensors}
+        replaced = 0
+        for name, param in model.named_parameters():
+            t = tensors.get(name)
+            if t is None:
+                raise KeyError(f"{name} is not in {args.weights_from_gguf}")
+            param.data.copy_(torch.from_numpy(dequantize(t.data, t.tensor_type).reshape(param.shape).copy()))
+            replaced += 1
+        print(f"replaced {replaced} parameters with the GGUF's", flush=True)
 
     taps = {}
 
@@ -122,7 +139,19 @@ def main():
             taps[f"audio.block{i}"] = a.x[0].clone()
         return hook
 
-    handles = [model.transformer_blocks[i].register_forward_hook(tap(i)) for i in TAPPED_BLOCKS]
+    tapped = range(len(model.transformer_blocks)) if args.tap_every_block else TAPPED_BLOCKS
+    handles = [model.transformer_blocks[i].register_forward_hook(tap(i)) for i in tapped]
+    if args.tap_block0:
+        def keep(name):
+            def hook(_module, _inputs, output):
+                taps[name] = output[0].clone()
+            return hook
+        b0 = model.transformer_blocks[0]
+        for name, module in [("patchify_proj", model.patchify_proj), ("audio_patchify_proj", model.audio_patchify_proj),
+                             ("b0.attn1", b0.attn1), ("b0.attn2", b0.attn2), ("b0.ff", b0.ff),
+                             ("b0.audio_attn1", b0.audio_attn1), ("b0.audio_attn2", b0.audio_attn2), ("b0.audio_ff", b0.audio_ff),
+                             ("b0.a2v", b0.audio_to_video_attn), ("b0.v2a", b0.video_to_audio_attn)]:
+            handles.append(module.register_forward_hook(keep(name)))
     vx, ax = model(video, audio, None)
     for h in handles:
         h.remove()
@@ -139,8 +168,9 @@ def main():
     path = os.path.join(args.out, "av_dit_full.safetensors")
     save_file(tensors, path)
     manifest = {
-        "run": {"frames": FRAMES, "height": HEIGHT, "width": WIDTH, "fps": FPS, "sigma": SIGMA, "seed": args.seed,
-                "tapped_blocks": list(TAPPED_BLOCKS), "prompt": "prompt0 of the prompt golden"},
+        "run": {"frames": FRAMES, "height": HEIGHT, "width": WIDTH, "fps": FPS, "sigma": args.sigma, "seed": args.seed,
+                "weights": "gguf" if args.weights_from_gguf else "bf16",
+                "tapped_blocks": list(tapped), "prompt": "prompt0 of the prompt golden"},
         "av_dit_full.safetensors": {"sha256": hashlib.sha256(open(path, "rb").read()).hexdigest(),
                                     "tensors": {k: list(t.shape) for k, t in tensors.items()}},
         "versions": {"torch": torch.__version__, "python": sys.version.split()[0]},

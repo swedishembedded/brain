@@ -804,6 +804,7 @@ impl DitSession {
         x: Vec<f32>,
         adaln_table: &dit::adaln::RowTable,
         connector_context: &[f32],
+        prompt_kv: &[f32],
         rope: crate::block::SelfAttnTables,
         perturbations: &crate::block::Perturbations,
         weights: &mut dyn FnMut(usize, HostCopy) -> std::sync::Arc<CachedQBlockWeights>,
@@ -876,7 +877,7 @@ impl DitSession {
                 Some(idx) => {
                     let w = guard.as_ref().expect("a slot index implies a window");
                     let blk = &w.slots[idx].as_ref().expect("the slot was just filled").1;
-                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, rope, t as u32, &mut bt, perturbations.block(l), self.exec)
+                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, prompt_kv, rope, t as u32, &mut bt, perturbations.block(l), self.exec)
                 }
                 None => {
                     // No window (or a slot the budget refused): upload, run,
@@ -898,7 +899,7 @@ impl DitSession {
                     let mut blk = LtxBlockQ::on_cached(scratch, cfg, &cached, t as u32, context_len as u32, tier);
                     adapted(&self.adapter, &mut *blk, l);
                     up_ms += s.elapsed();
-                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, rope, t as u32, &mut bt, perturbations.block(l), self.exec)
+                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, prompt_kv, rope, t as u32, &mut bt, perturbations.block(l), self.exec)
                 }
             };
             after_block(l, uploaded, up_ms, &bt);
@@ -941,6 +942,9 @@ pub struct AvForwardInputs<'a> {
     pub av_v2a_gate: &'a [f32],
     pub v_context: &'a [f32],
     pub a_context: &'a [f32],
+    /// Each stream's `prompt_adaln_single(sigma)` rows (`crate::dit::prompt_kv`).
+    pub v_prompt_kv: &'a [f32],
+    pub a_prompt_kv: &'a [f32],
     pub rope: crate::block::AvRope<'a>,
     pub tv: usize,
     pub ta: usize,
@@ -1147,7 +1151,7 @@ impl AvDitSession {
         let v_ctx = row(inp.v_context);
         let a_ctx = row(inp.a_context);
         let forward_upload = s_up.elapsed();
-        let av = crate::block::AvModelTables { v_ss: &v_ss_buf, v_ss_map: &v_ss_map, a_ss: &a_ss_buf, a_ss_map: &a_ss_map, a2v_gate: &a2v_gate, v2a_gate: &v2a_gate };
+        let av = crate::block::AvModelTables { v_ss: &v_ss_buf, v_ss_map: &v_ss_map, a_ss: &a_ss_buf, a_ss_map: &a_ss_map, a2v_gate: &a2v_gate, v2a_gate: &v2a_gate, v_prompt_kv: inp.v_prompt_kv, a_prompt_kv: inp.a_prompt_kv };
 
         let (tv, ta) = (inp.tv as u32, inp.ta as u32);
         let resident_build = |scratch: &Gpu, c: &CachedQAvBlockWeights, l: usize| {

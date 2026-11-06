@@ -127,11 +127,23 @@ this port:
       no re-noise, and with no temporal round the epilogue is one
       whole-canvas window (the reference's plan raises on an empty seam
       list there). The GPU end-to-end tests in `dfr_real` have not run.
-- [ ] **Full-depth LTX-2.5 parity** - `ltxv_real_av_dit_full_dump_reference.py`
-      dumps the official 48-block audio-visual `LTXModel` (bf16 checkpoint, fp32,
-      CPU) on a real prompt's context; `av_dit_full_real::the_production_av_forward_
-      matches_the_reference_at_full_depth` compares brain's int8 streamed forward
-      against it and has not run (needs a GPU).
+- [x] **Full-depth LTX-2.5 parity** - `ltxv_real_av_dit_full_dump_reference.py`
+      runs the official 48-block audio-visual `LTXModel` (bf16 checkpoint,
+      fp32, CPU) on a real prompt's 1024-token context;
+      `av_dit_full_real::the_production_av_forward_matches_the_reference_at_full_depth`
+      runs brain's int8 streamed forward on the store's Q8_0 checkpoint
+      against it: velocity cosine 0.99991 (video) / 0.99997 (audio), gated at
+      0.9995. Its first run found a real port bug every LTX-2.5 generation
+      had: the checkpoint runs the prompt-side AdaLN (`use_prompt_adaln_single`
+      - neither config sets it, the reference defaults it to true, both
+      headers carry `prompt_adaln_single.*`), which adds a sigma-dependent
+      term to every block's text cross-attention K/V modulation; brain
+      hard-coded it off. Video velocity was at 0.71 and audio at 0.97 before
+      (block 0's audio text cross-attention alone at 0.93). The dumper's
+      `--weights-from-gguf` (the reference on brain's own Q8_0 weights) and
+      `--tap-every-block`/`--tap-block0` are how it was placed;
+      `the_eager_av_forward_matches_the_reference_block_by_block` is the
+      fp32 bisection test.
 - [x] **IC-LoRA attention mask** - `--reference-attention-strength` /
       `--reference-attention-mask` weight the reference<->clip attention as
       `ConditioningItemAttentionStrengthWrapper` does: per-token log weights

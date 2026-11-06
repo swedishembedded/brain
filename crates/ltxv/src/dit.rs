@@ -90,6 +90,9 @@ pub fn dit_tensor_manifest(cfg: &LtxDitConfig) -> Vec<(String, Vec<usize>)> {
         ("proj_out.weight".into(), vec![cfg.out_channels as usize, dim]),
         ("proj_out.bias".into(), vec![cfg.out_channels as usize]),
     ];
+    if cfg.use_prompt_adaln_single {
+        push_adaln_group(&mut m, "prompt_adaln_single", dim, 2);
+    }
     if cfg.use_keyframes_abs_pos_embedding {
         // Real checkpoint shape `[1, dim]` (torch order, GGUF `ne` reversed -
         // confirmed by range-reading the real header), not the `[dim, 1]`
@@ -216,11 +219,8 @@ fn push_connector(m: &mut Vec<(String, Vec<usize>)>, prefix: &str, num_registers
 }
 
 /// Every tensor an [`LtxAvDit`] forward reads OR the real 22B/4349-tensor
-/// checkpoint carries (some real tensors - `prompt_adaln_single`/
-/// `audio_prompt_adaln_single`, `to_gate_logits`, both embeddings
-/// connectors - are not yet consumed by [`LtxAvBlock::forward`]/
-/// [`LtxAvDit::forward`]; see `crate::config`'s doc on each field this reads
-/// for which). Name + shape, derived from `cfg`, the same "manifest drives
+/// checkpoint carries - the prompt-side AdaLN MLPs only for a config with
+/// `use_prompt_adaln_single`. Name + shape, derived from `cfg`, the same "manifest drives
 /// both sides" discipline [`dit_tensor_manifest`] uses - this is what a
 /// later real-weight-import milestone validates two-way coverage against,
 /// so every shape here was cross-checked against the real header (range-read
@@ -265,8 +265,10 @@ pub fn av_dit_tensor_manifest(cfg: &LtxAvDitConfig) -> Vec<(String, Vec<usize>)>
     // ---- the 8 model-level adaLN-single tables --------------------------
     push_adaln_group(&mut m, "adaln_single", vdim, rows9);
     push_adaln_group(&mut m, "audio_adaln_single", adim, rows9);
-    push_adaln_group(&mut m, "prompt_adaln_single", vdim, 2);
-    push_adaln_group(&mut m, "audio_prompt_adaln_single", adim, 2);
+    if cfg.video.use_prompt_adaln_single {
+        push_adaln_group(&mut m, "prompt_adaln_single", vdim, 2);
+        push_adaln_group(&mut m, "audio_prompt_adaln_single", adim, 2);
+    }
     push_adaln_group(&mut m, "av_ca_video_scale_shift_adaln_single", vdim, 4);
     push_adaln_group(&mut m, "av_ca_audio_scale_shift_adaln_single", adim, 4);
     push_adaln_group(&mut m, "av_ca_a2v_gate_adaln_single", vdim, 1);
@@ -400,9 +402,8 @@ pub(crate) fn av_shard_weights(cfg: &LtxAvDitConfig, init: &HashMap<String, Vec<
 /// Whether pipeline stage `shard` needs weight `name` at all - [`shard_owns_
 /// weight`]'s AV counterpart. `transformer_blocks.{l}.*` follows the block
 /// range, same as the video-only path. Every model-level adaLN-single table
-/// (video's own, audio's own, BOTH streams' `prompt_adaln_single` twins -
-/// unused by the forward today but still real header tensors, see
-/// [`av_dit_tensor_manifest`]'s doc - and all four AV cross-modal tables)
+/// (video's own, audio's own, BOTH streams' `prompt_adaln_single` twins, and
+/// all four AV cross-modal tables)
 /// plus BOTH embeddings connectors are REPLICATED: every stage independently
 /// recomputes them from the (replicated) batch, the same "small weight,
 /// replicate rather than wire a second boundary for it" call [`shard_owns_
@@ -547,6 +548,27 @@ fn layernorm_noaffine(x: &[f32], rows: usize, dim: usize, eps: f32) -> Vec<f32> 
 /// host_combine_and_slice` compares the gathering arm against. Converting it
 /// too would leave both arms sharing one row map and no gate on the scatter
 /// at all.
+/// One stream's `prompt_adaln_single(sigma)` for a forward - the `[2, dim]`
+/// `prompt_timestep` `apply_cross_attention_adaln` adds to every block's
+/// `prompt_scale_shift_table` (`TransformerArgsPreprocessor._prepare_timestep`
+/// over the stream's SCALAR sigma, scaled like every other timestep). Empty
+/// for a checkpoint without the MLP (`use_prompt_adaln_single = false`),
+/// whose blocks read their static table alone.
+pub(crate) fn prompt_kv(w: &Tensors, prefix: &str, enabled: bool, timestep_scale: f32, dim: usize, sigma: f32) -> Vec<f32> {
+    if !enabled {
+        return Vec::new();
+    }
+    ada_layer_norm_single(w, prefix, &[sigma * timestep_scale], dim, 2).0.expand()
+}
+
+/// The prompt-side MLP's tensor prefix for `stream`.
+fn prompt_adaln_prefix(stream: Stream) -> &'static str {
+    match stream {
+        Stream::Video => "prompt_adaln_single",
+        Stream::Audio => "audio_prompt_adaln_single",
+    }
+}
+
 fn ada_layer_norm_single(w: &Tensors, prefix: &str, timesteps_scaled: &[f32], dim: usize, coeff: usize) -> (dit::adaln::RowTable, dit::adaln::RowTable) {
     let w1 = tget(w, &format!("{prefix}.emb.timestep_embedder.linear_1.weight"));
     let b1 = tget(w, &format!("{prefix}.emb.timestep_embedder.linear_1.bias"));
@@ -866,6 +888,16 @@ pub fn routed_context(
 }
 
 impl LtxDit {
+    /// The video stream's [`prompt_kv`] for a forward over per-token
+    /// `timesteps`. This forward takes no scalar sigma; every token of a
+    /// stream that is not wholly held carries `mask * sigma` with mask 1
+    /// somewhere, so the largest timestep IS the stream's sigma - and a
+    /// wholly held stream's is 0, as `Modality.sigma` is for a frozen state.
+    fn prompt_kv_at(&self, timesteps: &[f32]) -> Vec<f32> {
+        let sigma = timesteps.iter().copied().fold(0.0f32, f32::max);
+        prompt_kv(&self.w, prompt_adaln_prefix(Stream::Video), self.cfg.use_prompt_adaln_single, self.cfg.timestep_scale_multiplier as f32, self.cfg.inner_dim as usize, sigma)
+    }
+
     pub fn new(cfg: LtxDitConfig, weights: Tensors, device: Option<&str>) -> LtxDit {
         let shard = Shard::whole(cfg.num_layers as usize);
         LtxDit::build(cfg, weights, device, shard)
@@ -1028,7 +1060,7 @@ impl LtxDit {
         };
 
         let (x_final, _block_out, _taps) =
-            self.forward_blocks(&gpu, &x0, &adaln_table.expand(), &batch.context, crate::block::SelfAttnTables::rope(&cos_bufs, &sin_bufs), batch.t as u32, batch.context_len as u32, self.shard.start as u32, self.shard.end as u32);
+            self.forward_blocks(&gpu, &x0, &adaln_table.expand(), &batch.context, &self.prompt_kv_at(&batch.timesteps), crate::block::SelfAttnTables::rope(&cos_bufs, &sin_bufs), batch.t as u32, batch.context_len as u32, self.shard.start as u32, self.shard.end as u32);
         *self.res_out.borrow_mut() = Some(x_final.clone());
 
         if self.shard.head {
@@ -1058,6 +1090,7 @@ impl LtxDit {
         x: &[f32],
         adaln_table: &[f32],
         context: &[f32],
+        prompt_kv: &[f32],
         rope: crate::block::SelfAttnTables,
         t: u32,
         context_len: u32,
@@ -1074,7 +1107,7 @@ impl LtxDit {
             // `gpu_core::transient` for what accumulates when they are not.
             let prefix = format!("transformer_blocks.{l}");
             let blk = LtxBlock::on(gpu, &self.cfg, &self.block_weights(&prefix), &prefix, t, context_len);
-            let (out, tp) = blk.forward(&xx, adaln_table, context, rope, t);
+            let (out, tp) = blk.forward(&xx, adaln_table, context, prompt_kv, rope, t);
             xx = out;
             block_out.push(xx.clone());
             taps.push(tp);
@@ -1097,6 +1130,7 @@ impl LtxDit {
         x: &[f32],
         adaln_table: &[f32],
         context: &[f32],
+        prompt_kv: &[f32],
         cos_bufs: &[DeviceBuffer],
         sin_bufs: &[DeviceBuffer],
         t: u32,
@@ -1114,7 +1148,7 @@ impl LtxDit {
             if let Some(adapter) = &self.adapter {
                 crate::block::AttachLora::attach_lora(&mut *blk, adapter, &prefix);
             }
-            let (out, tp) = blk.forward(&xx, adaln_table, context, cos_bufs, sin_bufs, t);
+            let (out, tp) = blk.forward(&xx, adaln_table, context, prompt_kv, cos_bufs, sin_bufs, t);
             xx = out;
             block_out.push(xx.clone());
             taps.push(tp);
@@ -1191,7 +1225,7 @@ impl LtxDit {
 
         let bias = reference.map(|r| upload_reference_attention(&gpu, r, t));
         let tables = crate::block::SelfAttnTables { cos: &cos_bufs, sin: &sin_bufs, bias: bias.as_ref().map(|(b, noisy, split)| crate::block::SelfAttnBias { log_weights: b, noisy: *noisy, split: *split }) };
-        let (x_final, block_out, mut taps) = self.forward_blocks(&gpu, &x, &adaln_table.expand(), &connector_context, tables, t as u32, context_len as u32, 0, cfg.num_layers);
+        let (x_final, block_out, mut taps) = self.forward_blocks(&gpu, &x, &adaln_table.expand(), &connector_context, &self.prompt_kv_at(timesteps), tables, t as u32, context_len as u32, 0, cfg.num_layers);
         x = x_final;
         assert!(!taps.is_empty(), "num_layers must be >= 1");
         let b0 = taps.remove(0);
@@ -1258,7 +1292,7 @@ impl LtxDit {
             cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
         );
 
-        let (x_final, block_out, mut taps) = self.forward_blocks_q(&gpu, &x, &adaln_table.expand(), &connector_context, &cos_bufs, &sin_bufs, t as u32, context_len as u32, 0, cfg.num_layers, tier);
+        let (x_final, block_out, mut taps) = self.forward_blocks_q(&gpu, &x, &adaln_table.expand(), &connector_context, &self.prompt_kv_at(timesteps), &cos_bufs, &sin_bufs, t as u32, context_len as u32, 0, cfg.num_layers, tier);
         x = x_final;
         assert!(!taps.is_empty(), "num_layers must be >= 1");
         let b0 = taps.remove(0);
@@ -1394,7 +1428,9 @@ pub fn forward_q_streamed(
     cache: &GenerationCache,
 ) -> Vec<f32> {
     let session = crate::devres::DitSession::transient(device);
-    let step = StreamedStep { stream: Stream::Video, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, perturbations: &crate::block::NO_PERTURBATIONS, reference_attention: None };
+    // The largest per-token timestep is the stream's sigma (see `LtxDit::prompt_kv_at`).
+    let sigma = timesteps.iter().copied().fold(0.0f32, f32::max);
+    let step = StreamedStep { stream: Stream::Video, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, sigma, perturbations: &crate::block::NO_PERTURBATIONS, reference_attention: None };
     forward_q_streamed_in(&session, cfg, src, head, tier, &step, cache)
 }
 
@@ -1427,6 +1463,9 @@ pub struct StreamedStep<'a> {
     pub context_len: usize,
     pub t: usize,
     pub context_valid: &'a [f32],
+    /// The stream's scalar sigma - what its prompt-side AdaLN reads
+    /// ([`prompt_kv`]); `0` for a wholly held stream.
+    pub sigma: f32,
     /// What this forward's guidance pass perturbs. A single-stream forward's
     /// self-attention bypass is the `video_self_attn_blocks` set whichever
     /// stream runs: it names the stream being denoised.
@@ -1455,7 +1494,7 @@ pub struct StreamedStep<'a> {
 /// WHEN bytes move, never what any kernel reads.
 #[tracing::instrument(level = "info", name = "dit_forward_streamed", skip_all, fields(stream = ?step.stream, t = step.t, context_len = step.context_len, layers = cfg.num_layers, tier = ?tier))]
 pub fn forward_q_streamed_in(session: &crate::devres::DitSession, cfg: &LtxDitConfig, src: &(dyn TensorSource + Sync), head: &Tensors, tier: QTier, step: &StreamedStep, cache: &GenerationCache) -> Vec<f32> {
-    let StreamedStep { stream, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, perturbations, reference_attention } = *step;
+    let StreamedStep { stream, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, sigma, perturbations, reference_attention } = *step;
     let dim = cfg.inner_dim as usize;
     assert_eq!(latent.len(), t * cfg.in_channels as usize);
     assert_eq!(timesteps.len(), t);
@@ -1628,7 +1667,7 @@ pub fn forward_q_streamed_in(session: &crate::devres::DitSession, cfg: &LtxDitCo
         let mut ahead = crate::devres::Lookahead::new(scope, cfg.num_layers as usize, &quantize, &uncached);
         #[rustfmt::skip]
         let out = session.run_blocks(
-            &gpu, cfg, tier, t, context_len, x, &adaln_table, &connector_context, crate::block::SelfAttnTables { cos: &cos_bufs, sin: &sin_bufs, bias: bias.as_ref().map(|(b, noisy, split)| crate::block::SelfAttnBias { log_weights: b, noisy: *noisy, split: *split }) }, perturbations,
+            &gpu, cfg, tier, t, context_len, x, &adaln_table, &connector_context, &prompt_kv(head, prompt_adaln_prefix(stream), cfg.use_prompt_adaln_single, cfg.timestep_scale_multiplier as f32, cfg.inner_dim as usize, sigma), crate::block::SelfAttnTables { cos: &cos_bufs, sin: &sin_bufs, bias: bias.as_ref().map(|(b, noisy, split)| crate::block::SelfAttnBias { log_weights: b, noisy: *noisy, split: *split }) }, perturbations,
             &mut |l, host| weights(l, host, &mut |l| ahead.take(l)), &mut after_block,
         );
         out
@@ -1800,6 +1839,9 @@ pub fn av_forward_q_streamed_in(
     let (v2a_gate, _) = ada_layer_norm_single(head, "av_ca_v2a_gate_adaln_single", &[step.v_sigma * cfg.av_ca_timestep_scale_multiplier], adim, 1);
     let a2v_gate_row = a2v_gate.expand();
     let v2a_gate_row = v2a_gate.expand();
+    let scale = vcfg.timestep_scale_multiplier as f32;
+    let v_prompt = prompt_kv(head, "prompt_adaln_single", vcfg.use_prompt_adaln_single, scale, vdim, step.v_sigma);
+    let a_prompt = prompt_kv(head, "audio_prompt_adaln_single", vcfg.use_prompt_adaln_single, scale, adim, step.a_sigma);
     gpu_core::profile::stage_time("av_forward_q_streamed: six adaLN tables (host, TOTAL - nests the ada_layer_norm_single stages above)", s_adaln);
     tracing::debug!(
         stage = "av_adaln",
@@ -1899,6 +1941,8 @@ pub fn av_forward_q_streamed_in(
         av_v2a_gate: &v2a_gate_row,
         v_context: &v_ctx,
         a_context: &a_ctx,
+        v_prompt_kv: &v_prompt,
+        a_prompt_kv: &a_prompt,
         rope,
         tv,
         ta,
@@ -2028,6 +2072,16 @@ pub struct LtxAvDit {
 }
 
 impl LtxAvDit {
+    /// `stream`'s [`prompt_kv`] at its scalar `sigma`.
+    fn prompt_kv_for(&self, stream: Stream, sigma: f32) -> Vec<f32> {
+        let dim = match stream {
+            Stream::Video => self.cfg.video.inner_dim,
+            Stream::Audio => self.cfg.audio.inner_dim,
+        } as usize;
+        let v = &self.cfg.video;
+        prompt_kv(&self.w, prompt_adaln_prefix(stream), v.use_prompt_adaln_single, v.timestep_scale_multiplier as f32, dim, sigma)
+    }
+
     pub fn new(cfg: LtxAvDitConfig, weights: Tensors, device: Option<&str>) -> LtxAvDit {
         let shard = Shard::whole(cfg.video.num_layers as usize);
         LtxAvDit::build(cfg, weights, device, shard)
@@ -2207,7 +2261,7 @@ impl LtxAvDit {
 
         #[rustfmt::skip]
         let (vx_final, ax_final, _v_block_out, _a_block_out, _taps) = self.forward_blocks_av(
-            &gpu, &vx0, &ax0, &v_adaln_table.expand(), &a_adaln_table.expand(), &v_connector_context, &a_connector_context,
+            &gpu, &vx0, &ax0, &v_adaln_table.expand(), &a_adaln_table.expand(), &v_connector_context, &a_connector_context, (&self.prompt_kv_for(Stream::Video, batch.v_sigma), &self.prompt_kv_for(Stream::Audio, batch.a_sigma)),
             &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
             &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
             &av_video_ss_table.expand(), &av_audio_ss_table.expand(), &av_a2v_gate_table.expand(), &av_v2a_gate_table.expand(),
@@ -2279,6 +2333,7 @@ impl LtxAvDit {
         a_adaln_table: &[f32],
         v_context: &[f32],
         a_context: &[f32],
+        (v_prompt_kv, a_prompt_kv): (&[f32], &[f32]),
         v_cos_bufs: &[DeviceBuffer],
         v_sin_bufs: &[DeviceBuffer],
         a_cos_bufs: &[DeviceBuffer],
@@ -2310,7 +2365,7 @@ impl LtxAvDit {
             let blk = LtxAvBlock::on(gpu, vcfg, acfg, &self.w, &format!("transformer_blocks.{l}"), (v_context.len() / vcfg.inner_dim as usize) as u32, (a_context.len() / acfg.inner_dim as usize) as u32);
             #[rustfmt::skip]
             let (vout, aout, tp) = blk.forward(
-                &vxx, &axx, v_adaln_table, a_adaln_table, v_context, a_context,
+                &vxx, &axx, v_adaln_table, a_adaln_table, v_context, a_context, v_prompt_kv, a_prompt_kv,
                 v_cos_bufs, v_sin_bufs, a_cos_bufs, a_sin_bufs,
                 v_cross_cos_bufs, v_cross_sin_bufs, a_cross_cos_bufs, a_cross_sin_bufs,
                 av_video_ss_table, av_audio_ss_table, av_a2v_gate_table, av_v2a_gate_table,
@@ -2469,7 +2524,7 @@ impl LtxAvDit {
 
         #[rustfmt::skip]
         let (vx_final, ax_final, v_block_out, a_block_out, mut av_taps) = self.forward_blocks_av(
-            &gpu, &vx, &ax, &v_adaln_table.expand(), &a_adaln_table.expand(), &v_connector_context, &a_connector_context,
+            &gpu, &vx, &ax, &v_adaln_table.expand(), &a_adaln_table.expand(), &v_connector_context, &a_connector_context, (&self.prompt_kv_for(Stream::Video, v_sigma), &self.prompt_kv_for(Stream::Audio, a_sigma)),
             &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
             &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
             &av_video_ss_table.expand(), &av_audio_ss_table.expand(), &av_a2v_gate_table.expand(), &av_v2a_gate_table.expand(),

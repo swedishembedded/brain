@@ -25,11 +25,11 @@
 //! 4. **Text cross-attention with AdaLN modulation** (`cross_attention_
 //!    adaln=true`): the query side is modulated by PER-TOKEN `shift_q`/
 //!    `scale_q` (rows 6-7 of the 9-row table) exactly like step 1; the KEY/
-//!    VALUE side is modulated by this BLOCK's own static
-//!    `prompt_scale_shift_table` (`[2, dim]`, `[shift_kv, scale_kv]`) -
-//!    NOT the per-token table, and NOT per-token at all
-//!    (`use_prompt_adaln_single=false`, so there is no timestep MLP on this
-//!    path; see `crate::config`'s doc). `attn2` gets NO RoPE (`pe=None` at
+//!    VALUE side is modulated by this BLOCK's own `prompt_scale_shift_table`
+//!    (`[2, dim]`, `[shift_kv, scale_kv]`) plus, with
+//!    `use_prompt_adaln_single`, the forward's `prompt_adaln_single(sigma)`
+//!    rows ([`prompt_kv_rows`]) - NOT the per-token table, and NOT per-token
+//!    at all. `attn2` gets NO RoPE (`pe=None` at
 //!    this call site in the reference - only self-attention rotates).
 //!    The cross-attention output is scaled by `gate_q` (row 8) before the
 //!    residual add.
@@ -1109,6 +1109,18 @@ pub struct LtxBlock {
 /// internal taps a parity test bisects with (`ca_raw` is the RAW
 /// cross-attention output BEFORE the `*gate_q` multiply, matching
 /// `transformer.py`'s hook point - see [`BlockTaps`]'s doc).
+/// A block's text-context `[shift_kv, scale_kv]` for one forward: its own
+/// `prompt_scale_shift_table` plus the forward's `prompt_adaln_single(sigma)`
+/// rows (`prompt_kv`, empty for a checkpoint without that MLP) -
+/// `apply_cross_attention_adaln`'s `kv_modulation`.
+fn prompt_kv_rows(table: &[f32], prompt_kv: &[f32]) -> Vec<f32> {
+    if prompt_kv.is_empty() {
+        return table.to_vec();
+    }
+    assert_eq!(prompt_kv.len(), table.len(), "prompt_kv must be [2, dim] like prompt_scale_shift_table");
+    table.iter().zip(prompt_kv).map(|(a, b)| a + b).collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn self_attn_and_text_ca(
     gpu: &Gpu,
@@ -1119,6 +1131,7 @@ fn self_attn_and_text_ca(
     m: &Mod,
     ctx_buf: &DeviceBuffer,
     ctx_len: u32,
+    prompt_kv: &[f32],
     rope: SelfAttnTables,
     dim: u32,
     heads: u32,
@@ -1140,10 +1153,10 @@ fn self_attn_and_text_ca(
     let one_plus_scale_q = up(&m.one_plus_scale_q);
     let gate_q = up(&m.gate_q);
 
-    // The block's static [shift_kv, scale_kv] (rows 0,1 of
-    // prompt_scale_shift_table), broadcast to every context row -
-    // per-block, NOT per-token (use_prompt_adaln_single=false).
-    let pst = &w.prompt_scale_shift_table;
+    // [shift_kv, scale_kv]: this block's prompt_scale_shift_table plus the
+    // forward's own `prompt_kv` (`apply_cross_attention_adaln`), broadcast
+    // to every context row.
+    let pst = prompt_kv_rows(&w.prompt_scale_shift_table, prompt_kv);
     let (shift_kv_row, scale_kv_row) = (&pst[0..dim as usize], &pst[dim as usize..2 * dim as usize]);
     let mut shift_kv = vec![0f32; (ctx_len * dim) as usize];
     let mut one_plus_scale_kv = vec![0f32; (ctx_len * dim) as usize];
@@ -1271,7 +1284,7 @@ impl LtxBlock {
     /// exists there because the VAE's per-block taps are large real-weight
     /// buffers this crate's much smaller DiT tensors do not need to guard).
     #[allow(clippy::too_many_arguments)]
-    pub fn forward(&self, x: &[f32], adaln_table: &[f32], context: &[f32], rope: SelfAttnTables, t: u32) -> (Vec<f32>, BlockTaps) {
+    pub fn forward(&self, x: &[f32], adaln_table: &[f32], context: &[f32], prompt_kv: &[f32], rope: SelfAttnTables, t: u32) -> (Vec<f32>, BlockTaps) {
         let gpu = &self.gpu;
         let cfg = &self.cfg;
         let dim = cfg.inner_dim;
@@ -1296,7 +1309,7 @@ impl LtxBlock {
         let mut s: Vec<Step> = Vec::new();
         let td = t * dim;
 
-        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, &x_buf, &m, &ctx_buf, ctx_len, rope, dim, heads, head_dim, t, eps, false);
+        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, &x_buf, &m, &ctx_buf, ctx_len, prompt_kv, rope, dim, heads, head_dim, t, eps, false);
         let (x3, ff_out) = mlp_sublayer(gpu, &mut s, &self.w.ff, &self.ones_t, &x2, &m.shift_mlp, &m.one_plus_scale_mlp, &m.gate_mlp, dim, t, eps);
 
         gpu.submit(&[], &s);
@@ -1324,7 +1337,7 @@ impl LtxBlock {
     /// "whole graph" shape `wan::WanDitDev` records directly. Does not
     /// change what [`LtxBlock::forward`] does or how it is dispatched.
     #[allow(clippy::too_many_arguments)]
-    pub fn build_steps(&self, x_buf: &DeviceBuffer, adaln_table: &[f32], ctx_buf: &DeviceBuffer, cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<Step>, DeviceBuffer) {
+    pub fn build_steps(&self, x_buf: &DeviceBuffer, adaln_table: &[f32], ctx_buf: &DeviceBuffer, prompt_kv: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<Step>, DeviceBuffer) {
         let gpu = &self.gpu;
         let cfg = &self.cfg;
         let dim = cfg.inner_dim;
@@ -1337,7 +1350,7 @@ impl LtxBlock {
         let m = slice_mod(&combined, t as usize, dim as usize);
 
         let mut s: Vec<Step> = Vec::new();
-        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, x_buf, &m, ctx_buf, ctx_len, SelfAttnTables::rope(cos_bufs, sin_bufs), dim, heads, head_dim, t, eps, false);
+        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, x_buf, &m, ctx_buf, ctx_len, prompt_kv, SelfAttnTables::rope(cos_bufs, sin_bufs), dim, heads, head_dim, t, eps, false);
         let (x3, _ff_out) = mlp_sublayer(gpu, &mut s, &self.w.ff, &self.ones_t, &x2, &m.shift_mlp, &m.one_plus_scale_mlp, &m.gate_mlp, dim, t, eps);
         (s, x3)
     }
@@ -1498,6 +1511,8 @@ impl LtxAvBlock {
         a_adaln_table: &[f32],
         v_context: &[f32],
         a_context: &[f32],
+        v_prompt_kv: &[f32],
+        a_prompt_kv: &[f32],
         v_cos: &[DeviceBuffer],
         v_sin: &[DeviceBuffer],
         a_cos: &[DeviceBuffer],
@@ -1551,8 +1566,8 @@ impl LtxAvBlock {
         // ---- 1-2: video, then audio - self-attn + text-CA, each stream run
         // to completion before the AV step touches either (this struct's
         // doc, steps 1-2).
-        let (vx1, v_attn1_out, v_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.vw, &self.ones_v, &vx_buf, &vm, &v_ctx_buf, self.v_ctx_len, SelfAttnTables::rope(v_cos, v_sin), vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
-        let (ax1, a_attn1_out, a_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.aw, &self.ones_a, &ax_buf, &am, &a_ctx_buf, self.a_ctx_len, SelfAttnTables::rope(a_cos, a_sin), adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
+        let (vx1, v_attn1_out, v_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.vw, &self.ones_v, &vx_buf, &vm, &v_ctx_buf, self.v_ctx_len, v_prompt_kv, SelfAttnTables::rope(v_cos, v_sin), vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
+        let (ax1, a_attn1_out, a_ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.aw, &self.ones_a, &ax_buf, &am, &a_ctx_buf, self.a_ctx_len, a_prompt_kv, SelfAttnTables::rope(a_cos, a_sin), adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
 
         // ---- 3: audio<->video cross-attention - vx1/ax1 are the pre-AV
         // snapshot BOTH directions read (this struct's doc, step 3).
@@ -2224,6 +2239,7 @@ fn self_attn_and_text_ca_q(
     m: &ModBufs,
     ctx_buf: &DeviceBuffer,
     ctx_len: u32,
+    prompt_kv: &[f32],
     rope: SelfAttnTables,
     dim: u32,
     heads: u32,
@@ -2247,7 +2263,7 @@ fn self_attn_and_text_ca_q(
     // whole `[ctx_len, dim]` payload in one call - on a non-ReBAR card the
     // staging allocation that needs is the size of the payload, which is the
     // same reason `crate::devres` chunks its own table uploads.
-    let pst = &w.prompt_scale_shift_table;
+    let pst = prompt_kv_rows(&w.prompt_scale_shift_table, prompt_kv);
     let (shift_kv_row, scale_kv_row) = (&pst[0..dim as usize], &pst[dim as usize..2 * dim as usize]);
     let one_plus_scale_row: Vec<f32> = scale_kv_row.iter().map(|v| 1.0 + v).collect();
     let mut shift_kv = vec![0f32; (ctx_len * dim) as usize];
@@ -2546,8 +2562,8 @@ impl LtxBlockQ {
     /// were uploaded through. Correct for the throwaway shape (build a block,
     /// run it once, drop it); see [`Self::forward_on`] for the resident shape.
     #[allow(clippy::too_many_arguments)]
-    pub fn forward(&self, x: &[f32], adaln_table: &[f32], context: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<f32>, BlockTaps) {
-        self.forward_on(&self.gpu, x, adaln_table, context, cos_bufs, sin_bufs, t)
+    pub fn forward(&self, x: &[f32], adaln_table: &[f32], context: &[f32], prompt_kv: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<f32>, BlockTaps) {
+        self.forward_on(&self.gpu, x, adaln_table, context, prompt_kv, cos_bufs, sin_bufs, t)
     }
 
     /// [`Self::forward`] with the per-call SCRATCH allocations placed on a
@@ -2571,15 +2587,16 @@ impl LtxBlockQ {
     /// Only which handle recorded the dispatch changes, which no kernel can
     /// observe.
     #[allow(clippy::too_many_arguments)]
-    pub fn forward_on(&self, scratch: &Gpu, x: &[f32], adaln_table: &[f32], context: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<f32>, BlockTaps) {
-        self.forward_timed(scratch, x, adaln_table, context, cos_bufs, sin_bufs, t, &mut BlockTimings::default())
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_on(&self, scratch: &Gpu, x: &[f32], adaln_table: &[f32], context: &[f32], prompt_kv: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<f32>, BlockTaps) {
+        self.forward_timed(scratch, x, adaln_table, context, prompt_kv, cos_bufs, sin_bufs, t, &mut BlockTimings::default())
     }
 
     /// [`Self::forward_on`] with the four costs a block forward really has,
     /// split apart - see [`BlockTimings`] for why they are worth separating
     /// and what each boundary is.
     #[allow(clippy::too_many_arguments)]
-    pub fn forward_timed(&self, scratch: &Gpu, x: &[f32], adaln_table: &[f32], context: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32, timings: &mut BlockTimings) -> (Vec<f32>, BlockTaps) {
+    pub fn forward_timed(&self, scratch: &Gpu, x: &[f32], adaln_table: &[f32], context: &[f32], prompt_kv: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32, timings: &mut BlockTimings) -> (Vec<f32>, BlockTaps) {
         let gpu = scratch;
         let cfg = &self.cfg;
         let dim = cfg.inner_dim;
@@ -2606,7 +2623,7 @@ impl LtxBlockQ {
         let mut s: Vec<Step> = Vec::new();
         let td = t * dim;
 
-        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca_q(gpu, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, &ctx_buf, ctx_len, SelfAttnTables::rope(cos_bufs, sin_bufs), dim, heads, head_dim, t, eps, false);
+        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca_q(gpu, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, &ctx_buf, ctx_len, prompt_kv, SelfAttnTables::rope(cos_bufs, sin_bufs), dim, heads, head_dim, t, eps, false);
         let (x3, ff_out) = mlp_sublayer_q(gpu, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
         // Every `wf` above is a synchronous `queue.write_buffer` and NOTHING
         // computes until `submit`, so the span this closes is exactly the
@@ -2657,6 +2674,7 @@ impl LtxBlockQ {
         adaln_buf: &DeviceBuffer,
         adaln_map_buf: &DeviceBuffer,
         ctx_buf: &DeviceBuffer,
+        prompt_kv: &[f32],
         cos_bufs: &[DeviceBuffer],
         sin_bufs: &[DeviceBuffer],
         t: u32,
@@ -2669,7 +2687,7 @@ impl LtxBlockQ {
         let x_buf = scratch.storage((t * dim) as u64);
         wf(scratch, &x_buf, x);
         timings.record_upload += s_rec.elapsed();
-        let x3 = self.forward_prod_dev(scratch, &x_buf, adaln_buf, adaln_map_buf, ctx_buf, SelfAttnTables::rope(cos_bufs, sin_bufs), t, timings, ptb, BlockExec::default());
+        let x3 = self.forward_prod_dev(scratch, &x_buf, adaln_buf, adaln_map_buf, ctx_buf, prompt_kv, SelfAttnTables::rope(cos_bufs, sin_bufs), t, timings, ptb, BlockExec::default());
         let s_back = std::time::Instant::now();
         let out = scratch.read(&x3, (t * dim) as usize);
         timings.readback += s_back.elapsed();
@@ -2717,6 +2735,7 @@ impl LtxBlockQ {
         adaln_buf: &DeviceBuffer,
         adaln_map_buf: &DeviceBuffer,
         ctx_buf: &DeviceBuffer,
+        prompt_kv: &[f32],
         rope: SelfAttnTables,
         t: u32,
         timings: &mut BlockTimings,
@@ -2741,7 +2760,7 @@ impl LtxBlockQ {
         let s_rec = std::time::Instant::now();
         let mut s: Vec<Step> = Vec::new();
         let mb = ModBufs::derive(scratch, &mut s, adaln_buf, adaln_map_buf, &self.sst_buf, t, dim);
-        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(scratch, &mut s, self.tier, &self.w, &self.ones_t, x_buf, &mb, ctx_buf, ctx_len, rope, dim, heads, head_dim, t, eps, ptb.video_self_attn);
+        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(scratch, &mut s, self.tier, &self.w, &self.ones_t, x_buf, &mb, ctx_buf, ctx_len, prompt_kv, rope, dim, heads, head_dim, t, eps, ptb.video_self_attn);
         let (x3, _ff_out) = mlp_sublayer_q(scratch, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
         timings.record_upload += s_rec.elapsed();
         let s_sub = std::time::Instant::now();
@@ -3006,6 +3025,10 @@ pub struct AvModelTables<'a> {
     pub a_ss_map: &'a DeviceBuffer,
     pub a2v_gate: &'a DeviceBuffer,
     pub v2a_gate: &'a DeviceBuffer,
+    /// Each stream's `prompt_adaln_single(sigma)` rows (`[2, dim]`, empty for
+    /// a checkpoint without that MLP) - see [`prompt_kv_rows`].
+    pub v_prompt_kv: &'a [f32],
+    pub a_prompt_kv: &'a [f32],
 }
 
 impl AvModBufs {
@@ -3123,6 +3146,7 @@ fn av_block_body_q(
     v_ctx_len: u32,
     a_ctx: &DeviceBuffer,
     a_ctx_len: u32,
+    (v_prompt_kv, a_prompt_kv): (&[f32], &[f32]),
     rope: AvRope,
     vcfg: &LtxDitConfig,
     acfg: &LtxAudioDitConfig,
@@ -3141,9 +3165,9 @@ fn av_block_body_q(
     // ---- 1-2: each stream's self-attention + text cross-attention, run to
     // completion before the AV step touches either.
     #[rustfmt::skip]
-    let (vx1, v_attn1, v_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.vw, ones_v, vx_buf, vm, v_ctx, v_ctx_len, SelfAttnTables { cos: rope.v_cos, sin: rope.v_sin, bias: rope.v_bias }, vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
+    let (vx1, v_attn1, v_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.vw, ones_v, vx_buf, vm, v_ctx, v_ctx_len, v_prompt_kv, SelfAttnTables { cos: rope.v_cos, sin: rope.v_sin, bias: rope.v_bias }, vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
     #[rustfmt::skip]
-    let (ax1, a_attn1, a_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.aw, ones_a, ax_buf, am, a_ctx, a_ctx_len, SelfAttnTables::rope(rope.a_cos, rope.a_sin), adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
+    let (ax1, a_attn1, a_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.aw, ones_a, ax_buf, am, a_ctx, a_ctx_len, a_prompt_kv, SelfAttnTables::rope(rope.a_cos, rope.a_sin), adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
 
     // ---- 3: audio<->video cross-attention. `vx1`/`ax1` are the pre-AV
     // snapshot BOTH directions read. A cut direction (the isolated-modality
@@ -3266,6 +3290,7 @@ impl LtxAvBlockQ {
         a_adaln_table: &[f32],
         v_context: &[f32],
         a_context: &[f32],
+        (v_prompt_kv, a_prompt_kv): (&[f32], &[f32]),
         rope: AvRope,
         av_video_ss_table: &[f32],
         av_audio_ss_table: &[f32],
@@ -3303,7 +3328,7 @@ impl LtxAvBlockQ {
         let mut s: Vec<Step> = Vec::new();
         #[rustfmt::skip]
         let b = av_block_body_q(gpu, &mut s, self.tier, &self.w, &self.ones_v, &self.ones_a, &vx_buf, &ax_buf, &vm, &am, &avm,
-            &v_ctx, self.v_ctx_len, &a_ctx, self.a_ctx_len, rope, &self.vcfg, &self.acfg, tv, ta, ptb);
+            &v_ctx, self.v_ctx_len, &a_ctx, self.a_ctx_len, (v_prompt_kv, a_prompt_kv), rope, &self.vcfg, &self.acfg, tv, ta, ptb);
         gpu.submit(&[], &s);
         let (vtd, atd) = ((tv * vdim) as usize, (ta * adim) as usize);
         let taps = AvBlockTaps {
@@ -3412,7 +3437,7 @@ impl LtxAvBlockQ {
         let avm = AvModBufs::derive(scratch, &mut s, av, &self.av, tv, vdim, ta, adim);
         #[rustfmt::skip]
         let b = av_block_body_q(scratch, &mut s, self.tier, &self.w, &self.ones_v, &self.ones_a, vx_buf, ax_buf, &vm, &am, &avm,
-            v_ctx, self.v_ctx_len, a_ctx, self.a_ctx_len, rope, &self.vcfg, &self.acfg, tv, ta, ptb);
+            v_ctx, self.v_ctx_len, a_ctx, self.a_ctx_len, (av.v_prompt_kv, av.a_prompt_kv), rope, &self.vcfg, &self.acfg, tv, ta, ptb);
         timings.record_upload += s_rec.elapsed();
         let s_sub = std::time::Instant::now();
         if exec.pipelined {

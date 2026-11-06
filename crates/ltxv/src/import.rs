@@ -446,19 +446,15 @@ fn dit_name_space(tensors: Vec<StTensor>) -> Tensors {
 /// its mind, and only the tensor list is what the manifest must match.
 ///
 /// Every other field this crate models is read by name and errors if absent
-/// or the wrong JSON type - never defaulted - with ONE exception that is a
-/// known open question rather than a settled reading:
-/// `use_prompt_adaln_single` is hardcoded `false` here because that is the
-/// only path this crate implements ([`crate::config::LtxDitConfig::
-/// use_prompt_adaln_single`], and `assert_supported` panics on `true`). It is
-/// NOT read from the config, and it is not safe to assume it is right:
-/// neither release's config sets the key, the reference's absent-key default
-/// is `True`, and both real headers carry the `prompt_adaln_single.*` /
-/// `audio_prompt_adaln_single.*` tensors the reference only builds when it IS
-/// `True` - tensors the manifest demands (so import stays two-way complete)
-/// and the forward never reads. If the reference reading is right, this
-/// affects LTX-2.5 exactly as much as LTX-2.3, and only a real-weight forward
-/// can settle it.
+/// or the wrong JSON type - never defaulted - except the three flags neither
+/// release's config sets, which the tensor list settles exactly as the
+/// reference's absent-key defaults do: `ff_bias`,
+/// `use_keyframes_abs_pos_embedding` and `use_prompt_adaln_single` are each
+/// `true` precisely when the checkpoint carries the tensors that flag builds
+/// (`LTXAudioVideoModelConfigurator.from_metadata`'s
+/// `config.get("use_prompt_adaln_single", True)` - both real headers carry
+/// `prompt_adaln_single.*`, and a full-depth forward against the reference
+/// diverges without it).
 pub fn av_dit_config_from_json(config_json: &str, has_tensor: &dyn Fn(&str) -> bool) -> Result<LtxAvDitConfig, String> {
     let full: serde_json::Value = serde_json::from_str(config_json).map_err(|e| format!("ltxv gguf import: config KV is not valid JSON: {e}"))?;
     let t = &full["transformer"];
@@ -498,7 +494,7 @@ pub fn av_dit_config_from_json(config_json: &str, has_tensor: &dyn Fn(&str) -> b
         cross_attention_dim: u("cross_attention_dim")?,
         ff_bias,
         cross_attention_adaln: b("cross_attention_adaln")?,
-        use_prompt_adaln_single: false,
+        use_prompt_adaln_single: t["use_prompt_adaln_single"].as_bool().unwrap_or_else(|| has_tensor("prompt_adaln_single.linear.weight")),
         use_keyframes_abs_pos_embedding: t["use_keyframes_abs_pos_embedding"].as_bool().unwrap_or_else(|| has_tensor("keyframes_abs_pos_embedding")),
         norm_eps: f("norm_eps")? as f32,
         positional_embedding_theta: f("positional_embedding_theta")?,
@@ -1197,6 +1193,14 @@ mod tests {
         let flipped = av_dit_config_from_json(&transformer_config_json(&tiny23, true), &h25).expect("must parse");
         assert!(!flipped.video.ff_bias, "ff_bias must follow the tensor list");
         assert!(flipped.video.use_keyframes_abs_pos_embedding, "the keyframe marker must follow the tensor list");
+
+        // Neither real config sets `use_prompt_adaln_single`; a checkpoint
+        // carrying the prompt-side MLP has it on (the reference's absent-key
+        // default), one without has it off.
+        let prompted = LtxAvDitConfig { video: LtxDitConfig { use_prompt_adaln_single: true, ..tiny25.video }, ..tiny25 };
+        let got = av_dit_config_from_json(&transformer_config_json(&tiny25, false), &has(&prompted)).expect("must parse");
+        assert!(got.video.use_prompt_adaln_single, "a checkpoint carrying prompt_adaln_single runs it");
+        assert!(!av_dit_config_from_json(&transformer_config_json(&tiny25, false), &h25).expect("must parse").video.use_prompt_adaln_single);
     }
 
     /// [`import_av_dit`] accepts both packagings and refuses the wrong

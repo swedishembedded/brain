@@ -166,7 +166,7 @@ fn bench_dit(reps: usize, layers: u32, t: u32, ctx_len: u32) {
     let mut steps = Vec::new();
     let mut cur = upload_zeros(&gpu, t as usize * dim);
     for _ in 0..layers {
-        let (s, out) = blk.build_steps(&cur, &adaln_table, &ctx_buf, &cos_bufs, &sin_bufs, t);
+        let (s, out) = blk.build_steps(&cur, &adaln_table, &ctx_buf, &[], &cos_bufs, &sin_bufs, t);
         steps.extend(s);
         cur = out;
     }
@@ -547,7 +547,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
             context: &context,
             context_len: ctx_len as usize,
             t: t as usize,
-            context_valid: &context_valid,
+            context_valid: &context_valid, sigma: 1.0,
             perturbations: &ltxv::block::NO_PERTURBATIONS,
             reference_attention: None,
         };

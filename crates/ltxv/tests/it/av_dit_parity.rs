@@ -524,7 +524,7 @@ fn av_int8_block_tracks_the_fp32_av_block() {
     let r = c.rope(&gpu_f32);
     let blk = LtxAvBlock::on(&gpu_f32, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len);
     #[rustfmt::skip]
-    let (vf, af, tf) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context,
+    let (vf, af, tf) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, &[], &[],
         &r.0, &r.1, &r.2, &r.3, &r.4, &r.5, &r.6, &r.7,
         &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, true, Default::default());
 
@@ -533,7 +533,7 @@ fn av_int8_block_tracks_the_fp32_av_block() {
     let rope = AvRope { v_cos: &rq.0, v_sin: &rq.1, a_cos: &rq.2, a_sin: &rq.3, v_cross_cos: &rq.4, v_cross_sin: &rq.5, a_cross_cos: &rq.6, a_cross_sin: &rq.7, v_bias: None };
     let blkq = LtxAvBlockQ::on(&gpu_q, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
     #[rustfmt::skip]
-    let (vq, aq, tq) = blkq.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
+    let (vq, aq, tq) = blkq.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, (&[], &[]), rope,
         &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, Default::default());
 
     report_lossy("av int8 video out", &vq, &vf, 0.9995, 3e-2);
@@ -559,7 +559,7 @@ fn av_int8_block_tracks_the_fp32_av_block_under_every_perturbation() {
     let q = LtxAvBlockQ::on(&gpu, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
     let fp32 = |ptb: Perturbation| {
         #[rustfmt::skip]
-        let (v, a, _) = f.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context,
+        let (v, a, _) = f.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, &[], &[],
             &r.0, &r.1, &r.2, &r.3, &r.4, &r.5, &r.6, &r.7, &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, false, ptb);
         (v, a)
     };
@@ -569,7 +569,7 @@ fn av_int8_block_tracks_the_fp32_av_block_under_every_perturbation() {
     for (name, ptb) in [("stg", stg), ("cross-modal cut", cut)] {
         let (vf, af) = fp32(ptb);
         #[rustfmt::skip]
-        let (vq, aq, _) = q.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
+        let (vq, aq, _) = q.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, (&[], &[]), rope,
             &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, ptb);
         report_lossy(&format!("{name}: av int8 video out"), &vq, &vf, 0.9995, 3e-2);
         report_lossy(&format!("{name}: av int8 audio out"), &aq, &af, 0.9995, 3e-2);
@@ -648,7 +648,7 @@ fn a_runtime_adapter_on_the_av_int8_block_delivers_the_exact_fp32_fold() {
         let r = c.rope(&gpu);
         let blk = LtxAvBlock::on(&gpu, vcfg, acfg, w, p, c.v_ctx_len, c.a_ctx_len);
         #[rustfmt::skip]
-        let (v, a, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context,
+        let (v, a, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, &[], &[],
             &r.0, &r.1, &r.2, &r.3, &r.4, &r.5, &r.6, &r.7,
             &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, true, Default::default());
         [v, a].concat()
@@ -663,7 +663,7 @@ fn a_runtime_adapter_on_the_av_int8_block_delivers_the_exact_fp32_fold() {
             assert!(a.unapplied().is_empty(), "the block must claim every correction: {:?}", a.unapplied());
         }
         #[rustfmt::skip]
-        let (v, a, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
+        let (v, a, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, (&[], &[]), rope,
             &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, Default::default());
         [v, a].concat()
     };
@@ -730,7 +730,7 @@ fn device_derived_av_modulation_is_bit_identical_to_the_host_uploaded_form() {
     let blk = LtxAvBlockQ::on(&gpu, vcfg, acfg, &c.w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
 
     #[rustfmt::skip]
-    let (v_host, a_host, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
+    let (v_host, a_host, _) = blk.forward(&c.vx, &c.ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, (&[], &[]), rope,
         &c.v_ss, &c.a_ss, &c.a2v_gate, &c.v2a_gate, c.tv, c.ta, Default::default());
 
     // The production path's inputs: the same tables, as DENSE `RowTable`s
@@ -758,7 +758,7 @@ fn device_derived_av_modulation_is_bit_identical_to_the_host_uploaded_form() {
     let (a_ss_b, a_ss_m) = table(&c.a_ss, c.ta as usize, 4 * adim);
     let (a2v_b, v2a_b) = (up(&c.a2v_gate), up(&c.v2a_gate));
     let (v_ctx_b, a_ctx_b) = (up(&c.v_context), up(&c.a_context));
-    let av = ltxv::block::AvModelTables { v_ss: &v_ss_b, v_ss_map: &v_ss_m, a_ss: &a_ss_b, a_ss_map: &a_ss_m, a2v_gate: &a2v_b, v2a_gate: &v2a_b };
+    let av = ltxv::block::AvModelTables { v_ss: &v_ss_b, v_ss_map: &v_ss_m, a_ss: &a_ss_b, a_ss_map: &a_ss_m, a2v_gate: &a2v_b, v2a_gate: &v2a_b, v_prompt_kv: &[], a_prompt_kv: &[] };
     let mut timings = ltxv::block::BlockTimings::default();
     #[rustfmt::skip]
     let (v_dev, a_dev) = blk.forward_prod(&gpu, &c.vx, &c.ax, &v_adaln_b, &v_adaln_m, &a_adaln_b, &a_adaln_m, &av,
@@ -822,11 +822,11 @@ fn a_closed_cross_modal_gate_makes_the_gated_stream_independent_of_the_other() {
         let rope = AvRope { v_cos: &r.0, v_sin: &r.1, a_cos: &r.2, a_sin: &r.3, v_cross_cos: &r.4, v_cross_sin: &r.5, a_cross_cos: &r.6, a_cross_sin: &r.7, v_bias: None };
         let q = LtxAvBlockQ::on(&gpu, &vcfg, &acfg, w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len, QTier::Int8);
         #[rustfmt::skip]
-        let (vq, aq, _) = q.forward(&c.vx, ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, rope,
+        let (vq, aq, _) = q.forward(&c.vx, ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, (&[], &[]), rope,
             &c.v_ss, &c.a_ss, a2v_gate, v2a_gate, c.tv, c.ta, Default::default());
         let f = LtxAvBlock::on(&gpu, &vcfg, &acfg, w, "transformer_blocks.0", c.v_ctx_len, c.a_ctx_len);
         #[rustfmt::skip]
-        let (vf, af, _) = f.forward(&c.vx, ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context,
+        let (vf, af, _) = f.forward(&c.vx, ax, &c.v_adaln, &c.a_adaln, &c.v_context, &c.a_context, &[], &[],
             &r.0, &r.1, &r.2, &r.3, &r.4, &r.5, &r.6, &r.7,
             &c.v_ss, &c.a_ss, a2v_gate, v2a_gate, c.tv, c.ta, false, Default::default());
         (vq, aq, vf, af)
@@ -942,7 +942,7 @@ fn real_q8_0_av_block0_int8_compute_matches_fp32() {
     let (acc, acs) = upload_rope(&gpu_f32, &acr);
     let blk = LtxAvBlock::on(&gpu_f32, &vcfg, &acfg, &w, "transformer_blocks.0", v_ctx_len, a_ctx_len);
     #[rustfmt::skip]
-    let (vf, af, tf) = blk.forward(&vx, &ax, &v_adaln, &a_adaln, &v_context, &a_context,
+    let (vf, af, tf) = blk.forward(&vx, &ax, &v_adaln, &a_adaln, &v_context, &a_context, &[], &[],
         &vc, &vs, &ac, &as_, &vcc, &vcs, &acc, &acs, &v_ss, &a_ss, &a2v_gate, &v2a_gate, tv, ta, true, Default::default());
     drop(blk);
 
@@ -954,7 +954,7 @@ fn real_q8_0_av_block0_int8_compute_matches_fp32() {
     let rope = AvRope { v_cos: &vc2, v_sin: &vs2, a_cos: &ac2, a_sin: &as2, v_cross_cos: &vcc2, v_cross_sin: &vcs2, a_cross_cos: &acc2, a_cross_sin: &acs2, v_bias: None };
     let blkq = LtxAvBlockQ::on(&gpu_q, &vcfg, &acfg, &w, "transformer_blocks.0", v_ctx_len, a_ctx_len, QTier::Int8);
     #[rustfmt::skip]
-    let (vq, aq, tq) = blkq.forward(&vx, &ax, &v_adaln, &a_adaln, &v_context, &a_context, rope,
+    let (vq, aq, tq) = blkq.forward(&vx, &ax, &v_adaln, &a_adaln, &v_context, &a_context, (&[], &[]), rope,
         &v_ss, &a_ss, &a2v_gate, &v2a_gate, tv, ta, Default::default());
 
     // Two-level int8 activations measure at cosine >= 0.999999999 and
@@ -1315,7 +1315,7 @@ fn the_audio_stream_alone_is_the_joint_forward_with_the_cross_modal_attention_cu
         context: &a_context,
         context_len: ctx_len,
         t: ta,
-        context_valid: &context_valid,
+        context_valid: &context_valid, sigma: joint.a_sigma,
         perturbations: &ltxv::block::NO_PERTURBATIONS,
         reference_attention: None,
     };

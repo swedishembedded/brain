@@ -2602,6 +2602,7 @@ impl Denoiser for RealDit {
             context_len: i.context_len,
             t: i.t,
             context_valid: context.valid,
+            sigma: i.sigma,
             perturbations: i.perturbations,
             reference_attention: i.reference_attention,
         };

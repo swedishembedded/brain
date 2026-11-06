@@ -97,7 +97,7 @@ fn run(session: &DitSession, cfg: &LtxDitConfig, src: &(dyn checkpoint::TensorSo
         context: &i.context,
         context_len: i.context_len,
         t: i.t,
-        context_valid: &i.context_valid,
+        context_valid: &i.context_valid, sigma: 1.0,
         perturbations: &ltxv::block::NO_PERTURBATIONS,
         reference_attention: None,
     };
