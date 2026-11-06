@@ -174,7 +174,7 @@ impl VideoContract {
 
     fn check_size(&self, w: u32, h: u32) -> Result<(), String> {
         let m = self.size_multiple.max(1);
-        if w == 0 || h == 0 || w % m != 0 || h % m != 0 {
+        if w == 0 || h == 0 || !w.is_multiple_of(m) || !h.is_multiple_of(m) {
             return Err(format!("size {w}x{h}: both sides must be positive multiples of {m}"));
         }
         if u64::from(w) * u64::from(h) > self.max_pixels {
