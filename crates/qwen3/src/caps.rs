@@ -195,6 +195,7 @@ pub fn manifest() -> Manifest {
     // answer - resolved through the model store (`crate::spec::Qwen3Spec`),
     // same as `generate`.
     let lora_train = ActionSpec::new("lora_train", "train a LoRA adapter on a masked chat dataset (JSONL blob in, adapter checkpoint blob out)")
+        .training()
         .streaming()
         .param(
             ParamSpec::new("weights", ParamType::Str, "path to the base brain-format Qwen checkpoint (.safetensors); overrides the model-store resolver's own pick when set")

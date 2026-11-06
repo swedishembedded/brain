@@ -142,7 +142,18 @@ pub fn local_url(scheme: &str, addr: SocketAddr) -> String {
 /// (never a requested `:0`), `https` when the surfaces serve TLS. The OpenAI and OpenRouter routes answer under
 /// `url` and under `url/v1`; the Anthropic ones under `url/v1` only.
 pub fn record_json(pid: u32, scheme: &str, bound: &[(Provider, SocketAddr, String)]) -> Value {
-    let surfaces: Vec<Value> = bound.iter().map(|(provider, addr, key)| json!({"provider": provider.as_str(), "url": local_url(scheme, *addr), "key": key})).collect();
+    // With named callers a surface has no key of its own: the record names
+    // none, and a local client uses its own caller's.
+    let surfaces: Vec<Value> = bound
+        .iter()
+        .map(|(provider, addr, key)| {
+            let mut surface = json!({"provider": provider.as_str(), "url": local_url(scheme, *addr)});
+            if !key.is_empty() {
+                surface["key"] = json!(key);
+            }
+            surface
+        })
+        .collect();
     json!({"pid": pid, "surfaces": surfaces})
 }
 

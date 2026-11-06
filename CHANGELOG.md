@@ -6,6 +6,21 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `brain serve` refuses to serve HTTP in plaintext on an address that is not loopback: pass `--tls-cert PEM --tls-key PEM` (every surface then serves `https`), or `--insecure-plaintext` when a proxy or VPN already encrypts the path. The key and every prompt crossed the network readable before. A surface bound to `127.0.0.1` is unchanged
+- Training actions (every `lora_train`, splat `fit`, horizon `train`, `brain/train`) run only on a server started with `--training`, over HTTP and D-Bus alike; any key-holder could run them before, and each holds a card for the length of a run. A served action that trains says so (`"training": true` in its capability entry, `ActionSpec::training`)
+- A distributed training rank needs `--job-secret FILE` beside `--job-plan` and `--job-rank` (the same owner-only file on every rank, e.g. `openssl rand -hex 32 > job.secret; chmod 600 job.secret`): the collective authenticates every rank and encrypts every frame. `JobContext::new` and `from_plan_file` take the secret; `NetworkCollective::coordinator`/`worker` replace the unauthenticated constructors
+- `brain forecast serve --listen ADDR` is gone, and `brain-py`'s `BrainStdio.connect` takes only `socket_path`: the event socket carries no credential and a frame may name a file of the serving machine, so it is served on an owner-only Unix socket alone. Remote forecasting is the key-gated `forecast` action of `brain serve`
+- The HTTP surfaces speak HTTP/1.1 only
+
+### Security
+
+- Named callers: `brain serve --caller NAME:ROLE:KEYFILE[:MAX]` gives each application its own key and only what its role allows (`inference`, `training`, `admin`), its own jobs, and its own share of the server in flight, so a compromised application is contained to that share
+- An idle, slow-header or slowly uploading connection is closed (10 s for a request head, 5 min for a body), each surface holds at most 1024 connections, and media in requests is decoded off the async runtime, at most four at a time, within the request's pixel budget checked from each image's header
+- A video sent for editing is read by brain's own demuxers and decoder only, never `ffmpeg`, within a pixel budget; the MP4 reader no longer loops forever or allocates by the counts a file declares, and the AV1 decoder refuses frames over 36 megapixels before allocating them
+- The event socket of `brain forecast serve` is owner-only and refuses lines over 64 MiB; a `camera_frame` path is read only when a detector is loaded
+
 ## [5.1.0] - 2026-11-06
 
 ### Features

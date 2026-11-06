@@ -9,6 +9,7 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
             [--dbus] [--models-dir DIR] [--api-keys-out FILE] \
             [--api-key-file FILE] [--runtime-dir DIR] [--ready-file PATH] \
             [--tls-cert PEM --tls-key PEM | --insecure-plaintext] \
+            [--caller NAME:ROLE:KEYFILE[:MAX] ...] \
             [--checkpoint PATH [--tokenizer PATH]] \
             [--adapter FILE | --adapter-manifest FILE | --watch-adapters DIR] \
             [--training [--artifact-store DIR]]
@@ -281,7 +282,17 @@ brain serve --openai 0.0.0.0:8788 \
 ```
 
 The certificate must name the address clients use (a DNS name, or an
-`IP:` subject alternative name). Clients then use `https://` base URLs; the
+`IP:` subject alternative name). Without a certificate authority of your
+own, one self-signed certificate is one command; hand `server.crt` to the
+clients to trust:
+
+```
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 825 \
+    -subj /CN=brain -addext "subjectAltName=IP:10.0.0.5,IP:127.0.0.1" \
+    -addext basicConstraints=critical,CA:FALSE -addext extendedKeyUsage=serverAuth \
+    -keyout server.key -out server.crt && chmod 600 server.key
+```
+ Clients then use `https://` base URLs; the
 connection record says `https` too, and a local client of an unspecified
 bind connects to `127.0.0.1`, which the certificate must also name for it
 to verify. Pass `--insecure-plaintext` instead of the certificate only when
@@ -304,6 +315,36 @@ Every HTTP surface bounds what one peer can hold, with or without a key:
 
 Only HTTP/1.1 is served. A streamed response stays open as long as its
 generation runs.
+
+## Callers
+
+By default every holder of a dialect's key may do everything the server
+serves, so one leaked key, or one compromised application, is all of it.
+Name each application instead, with its own key and only the rights it
+needs:
+
+```
+brain serve --openai 10.0.0.5:8788 --tls-cert server.crt --tls-key server.key \
+            --caller frontend:inference:/etc/brain/frontend.key:32 \
+            --caller trainer:training:/etc/brain/trainer.key:2 --training
+```
+
+- `inference` runs what does not train, on models already served.
+- `training` also runs training actions (`"training": true` in the
+  capability listing), when the server was started with `--training`.
+- `admin` also makes the server fetch a model it does not hold, when
+  auto-fetch is on.
+
+A caller's key works on every dialect. A caller sees, follows and cancels
+only its own jobs, and holds at most MAX calls in flight (background jobs
+included, default 16) across all dialects; a call past that is a 429 and
+leaves every other caller's share untouched. With `--caller`, no surface
+key is generated or printed, and `--api-key-file`/`--api-keys-out` are
+refused.
+
+Training actions (every `lora_train`, splat `fit`, `brain/train`) are
+refused (403) on a server started without `--training`, over HTTP and
+D-Bus alike.
 
 ## Local clients
 

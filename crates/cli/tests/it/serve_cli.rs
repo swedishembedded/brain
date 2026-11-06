@@ -512,3 +512,31 @@ fn a_tls_certificate_needs_its_key_and_the_key_its_certificate() {
         assert!(stderr.contains("--tls-cert") && stderr.contains("--tls-key"), "{args:?}: stderr: {stderr}");
     }
 }
+
+/// A caller is declared whole or refused before anything loads, and the flags
+/// that set a surface key are not silently ignored beside callers.
+#[test]
+fn a_malformed_caller_is_refused_before_serving() {
+    let dir = std::env::temp_dir().join(format!("brain-caller-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let key = dir.join("app.key");
+    std::fs::write(&key, "sk-brain-app\n").unwrap();
+    let key = key.to_str().unwrap().to_string();
+    let cases: [(Vec<String>, &str); 5] = [
+        (vec!["--caller".into(), "app:inference".into()], "NAME:ROLE:KEYFILE"),
+        (vec!["--caller".into(), format!("app:root:{key}")], "role"),
+        (vec!["--caller".into(), format!("app:inference:{key}:lots")], "MAX"),
+        (vec!["--caller".into(), "app:inference:/nonexistent/brain-app.key".into()], "brain-app.key"),
+        (vec!["--caller".into(), format!("app:inference:{key}"), "--api-key-file".into(), key.clone()], "--api-key-file"),
+    ];
+    for (flags, says) in cases {
+        let mut args = vec!["serve".to_string()];
+        args.extend(flags.iter().cloned());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run(&args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{flags:?}: stderr: {stderr}");
+        assert!(stderr.contains(says), "{flags:?}: stderr: {stderr}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

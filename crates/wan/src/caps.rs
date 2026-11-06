@@ -93,6 +93,7 @@ pub fn manifest() -> Manifest {
     );
 
     let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a folder of captioned video clips (a data::episode dataset plus captions.json; GPU-resident DiT trainer where a device is available, host f32 otherwise)")
+        .training()
         .streaming()
         .param(ParamSpec::new("data", ParamType::Str, "server-side folder holding a data::episode dataset plus captions.json").required().host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "server-side output path for the trained adapter").required().host_resolved())

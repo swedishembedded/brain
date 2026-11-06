@@ -85,7 +85,7 @@ async fn messages(State(state): State<AppState>, caller: CallerExt, body: Bytes)
         // body: an Unknown/no-supplier model stays a plain 404, matching the
         // non-streaming path below and never opening a stream that would just
         // immediately error.
-        match state.supplier.clone() {
+        match state.supplier_for_caller() {
             Some(supplier) if matches!(supplier.classify(&model), residency::Supply::Fetchable) => {
                 let est_input = heuristic_tokens(&request_text(&body));
                 stream_messages_with_autofetch(state, supplier, model, inv, est_input)

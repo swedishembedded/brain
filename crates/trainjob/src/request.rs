@@ -43,6 +43,7 @@ pub fn action_spec() -> ActionSpec {
     let optional_f = |name: &str, help: &str, min: f64, max: f64| ParamSpec::new(name, ParamType::Float, help).min(min).max(max);
     let blob = |name: &str, help: &str| BlobSpec::new(name, Media::Bytes, help);
     let mut spec = ActionSpec::new(ACTION, "fine-tune a chat model's LoRA adapter on a chat dataset, by supervised imitation or by the clipped policy gradient on rollouts (datasets in by blob or artifact digest, the adapter out by digest or blob)")
+        .training()
         .streaming()
         .param(ParamSpec::new("base", ParamType::Str, "the base model, `<vendor>/<repo>` in the server's model store").required())
         .param(ParamSpec::new("data", ParamType::Str, "JSON document naming the datasets: {\"train\": SRC, \"held_out\"?, \"held_out_text\"?, \"monitor\"?, \"start_adapter\"?, \"replay\"?: [SRC], \"weighted_replay\"?: [{SRC fields, \"share\"}]} where SRC is {\"digest\": \"<blake3 hex>\"} (an artifact of the server's store) or {\"blob\": \"<input name>\"} (an input blob of this call)").required())

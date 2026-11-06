@@ -74,7 +74,7 @@ use tower::{BoxError, ServiceBuilder};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-pub use auth::{Authenticator, CallerExt, Principal, StaticKey};
+pub use auth::{Authenticator, Caller, CallerExt, CallerSpec, Callers, Principal, Role, StaticKey};
 pub use catalog::{api_caps, CapSet};
 pub use error::{ApiError, Kind};
 pub use hooks::{Call, CallResult, RequestHooks, Ticket};
@@ -195,6 +195,12 @@ pub struct ServeOpts {
     /// plaintext, which the caller must only allow on loopback
     /// ([`tls::check_exposure`]).
     pub tls: Option<Tls>,
+    /// Serve training actions ([`AppState::training`]); off by default.
+    pub training: bool,
+    /// Named callers, each with its own key, role and budget, shared by every
+    /// surface (a caller's budget covers all dialects together). `None`
+    /// authenticates each surface with its own static key.
+    pub callers: Option<std::sync::Arc<Callers>>,
 }
 
 impl ServeOpts {
@@ -227,6 +233,14 @@ impl ServeOpts {
     }
     pub fn with_tls(mut self, tls: Option<Tls>) -> ServeOpts {
         self.tls = tls;
+        self
+    }
+    pub fn with_training(mut self, training: bool) -> ServeOpts {
+        self.training = training;
+        self
+    }
+    pub fn with_callers(mut self, callers: Option<std::sync::Arc<Callers>>) -> ServeOpts {
+        self.callers = callers;
         self
     }
 }
@@ -269,7 +283,7 @@ pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(3
 /// concurrently on a [`tokio::task::JoinSet`]. Blocks the calling thread.
 pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> anyhow::Result<()> {
     let shutdown = opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
-    let ServeOpts { supplier, ready, deadlines, record, limits, tls, .. } = opts;
+    let ServeOpts { supplier, ready, deadlines, record, limits, tls, training, callers, .. } = opts;
     let scheme = if tls.is_some() { "https" } else { "http" };
     let publication = record.and_then(|path| {
         if let Err(e) = path.parent().map_or(Ok(()), surface::private_dir) {
@@ -283,10 +297,15 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
     let result = rt.block_on(async move {
         let mut set = tokio::task::JoinSet::new();
         for s in surfaces {
-            let state = AppState::new(exec.clone(), s.api_key.clone(), s.provider)
+            let mut state = AppState::new(exec.clone(), s.api_key.clone(), s.provider);
+            if let Some(callers) = &callers {
+                state = state.with_authenticator(callers.clone());
+            }
+            let state = state
                 .with_admit_deadline(deadlines.admit)
                 .with_cold_build_admit_deadline(deadlines.cold_build)
-                .with_supplier(supplier.clone());
+                .with_supplier(supplier.clone())
+                .with_training(training);
             // Graceful shutdown waits for every in-flight request, and a
             // generation answers only when it ends: cancel them all the moment
             // shutdown fires so they end at their next poll.

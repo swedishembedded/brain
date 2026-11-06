@@ -84,6 +84,7 @@ pub fn manifest() -> Manifest {
         .output(image_out());
 
     let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a folder of captioned images (personalise a person/object/style)")
+        .training()
         .streaming()
         .param(ParamSpec::new("data", ParamType::Str, "folder with images + a captions.yaml (`filename: prompt`) and/or captions.jsonl").required().host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "output path for the trained adapter").required().host_resolved())

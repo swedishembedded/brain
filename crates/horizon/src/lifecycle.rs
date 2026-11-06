@@ -57,6 +57,7 @@ pub fn train_spec() -> ActionSpec {
         "train",
         "train a timeline model (or an ensemble) on a timeline-v1 dataset, early-stopping on held-out subjects; the model directory appears only when training completes",
     )
+    .training()
     .streaming()
     .param(
         ParamSpec::new(

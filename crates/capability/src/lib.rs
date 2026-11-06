@@ -260,6 +260,11 @@ pub struct ActionSpec {
     /// What a video action promises about its clips, so a generic video request
     /// maps onto its params - see [`video`]. `None` for every other action.
     pub video: Option<video::VideoContract>,
+    /// The action trains: it holds a device for minutes to hours and writes
+    /// weights. A serving surface runs it only for a caller the operator let
+    /// train (`brain serve --training`), so a client that can merely infer -
+    /// or one that was compromised - cannot occupy the cards with it.
+    pub training: bool,
 }
 
 impl ActionSpec {
@@ -273,6 +278,7 @@ impl ActionSpec {
             streaming: false,
             presentation: ActionPresentation::default(),
             video: None,
+            training: false,
         }
     }
     /// Builder setter for [`Self::video`].
@@ -301,6 +307,11 @@ impl ActionSpec {
         self.streaming = true;
         self
     }
+    /// Builder setter for [`Self::training`].
+    pub fn training(mut self) -> ActionSpec {
+        self.training = true;
+        self
+    }
     /// Builder setter for [`Self::presentation`].
     pub fn with_presentation(mut self, presentation: ActionPresentation) -> ActionSpec {
         self.presentation = presentation;
@@ -319,6 +330,9 @@ impl ActionSpec {
         }
         if let Some(contract) = &self.video {
             v["video"] = contract.to_json();
+        }
+        if self.training {
+            v["training"] = json!(true);
         }
         v
     }

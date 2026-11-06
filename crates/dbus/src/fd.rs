@@ -159,6 +159,33 @@ mod tests {
         assert_eq!(read_fd_to_vec(fd.as_fd()).expect("read2"), data);
     }
 
+    /// A caller keeps its own, unsealed fd and shrinks it while the server
+    /// copies it. A read through a mapping would take SIGBUS on the pages
+    /// past the new end and kill the whole server; the copy must instead end
+    /// in data or an error, every time.
+    #[test]
+    fn a_caller_shrinking_its_fd_mid_read_cannot_kill_the_server() {
+        let fd = memfd_create(&CString::new("unsealed").unwrap(), MemFdCreateFlag::MFD_CLOEXEC).expect("memfd");
+        let len = 8 << 20;
+        nix::unistd::ftruncate(&fd, len).expect("size it");
+        let shrinker_fd = fd.try_clone().expect("a second handle");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_shrinking = stop.clone();
+        let shrinker = std::thread::spawn(move || {
+            while !stop_shrinking.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = nix::unistd::ftruncate(&shrinker_fd, 0);
+                let _ = nix::unistd::ftruncate(&shrinker_fd, len);
+            }
+        });
+        for _ in 0..300 {
+            if let Ok(bytes) = read_fd_to_vec(fd.as_fd()) {
+                assert!(bytes.len() as i64 <= len);
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        shrinker.join().unwrap();
+    }
+
     #[test]
     fn empty_payload_ok() {
         let fd = memfd_seal("empty", &[]).expect("memfd");

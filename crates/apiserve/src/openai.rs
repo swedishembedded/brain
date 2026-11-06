@@ -352,7 +352,7 @@ async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> 
         // stream that would just immediately error.
         // A model fetched on the way is only known once it is resident, so
         // its `suffix` support is checked by the model itself.
-        None if stream => match state.supplier.clone() {
+        None if stream => match state.supplier_for_caller() {
             Some(supplier) if matches!(supplier.classify(&requested), Supply::Fetchable) => {
                 match bridge::stream_with_autofetch(&state, supplier, &requested, "generate", inv, false) {
                     Ok(src) => surface.render_stream(src, requested, want_usage()),

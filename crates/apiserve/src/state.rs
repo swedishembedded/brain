@@ -65,6 +65,11 @@ pub struct AppState {
     /// an unresolved model is a plain 404 with zero I/O, exactly today's behavior.
     /// Set only by `run_apis` (a live `brain serve`), via [`AppState::with_supplier`].
     pub supplier: Option<Arc<dyn ModelSupplier>>,
+    /// Whether this surface runs training actions ([`capability::ActionSpec::training`]).
+    /// Off unless the operator started the server with `--training`: a client
+    /// that can call the API must not be able to occupy the cards with a
+    /// training run on that alone.
+    pub training: bool,
 }
 
 impl AppState {
@@ -81,6 +86,7 @@ impl AppState {
             admit_deadline: DEFAULT_ADMIT_DEADLINE,
             cold_build_admit_deadline: DEFAULT_COLD_BUILD_ADMIT_DEADLINE,
             supplier: None,
+            training: false,
         }
     }
 
@@ -88,6 +94,12 @@ impl AppState {
     /// callers apart (builder-style).
     pub fn with_authenticator(mut self, authenticator: Arc<dyn Authenticator>) -> AppState {
         self.authenticator = authenticator;
+        self
+    }
+
+    /// Let this surface run training actions (builder-style); see [`Self::training`].
+    pub fn with_training(mut self, training: bool) -> AppState {
+        self.training = training;
         self
     }
 
@@ -103,6 +115,19 @@ impl AppState {
     /// small value.
     pub fn scoped(&self, caller: CallerExt) -> AppState {
         AppState { caller: caller.map(|axum::Extension(principal)| principal), ..self.clone() }
+    }
+
+    /// The supplier this request may make fetch a model: the surface's, unless
+    /// the request is from a named caller below [`crate::Role::Admin`]. Fetching
+    /// downloads gigabytes and fills the store, which is the operator's to
+    /// allow, not every client's. Every fetch path asks here, never
+    /// `self.supplier` itself.
+    pub fn supplier_for_caller(&self) -> Option<Arc<dyn ModelSupplier>> {
+        let below_admin = crate::auth::Caller::of(self.caller.as_ref()).is_some_and(|c| c.role < crate::Role::Admin);
+        if below_admin {
+            return None;
+        }
+        self.supplier.clone()
     }
 
     /// Whether the hooks list `model` on this surface.

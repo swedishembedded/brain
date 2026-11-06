@@ -35,6 +35,15 @@ them, so treat all request input as hostile.
       calls restricted to root + the `brain` group, so `--dbus-system` never
       depends on an operator improvising an allow-everyone policy.
 
+- [ ] Authorization is per caller, at the one dispatch seam: every HTTP call passes
+      `bridge::Pending::begin` (training refused without `--training` and below
+      `Role::Training`, a named caller's in-flight budget taken), every D-Bus call
+      `served_invocation` (training refused without `--training`), and every fetch
+      path asks `AppState::supplier_for_caller` (below `Role::Admin` fetches nothing).
+      A new served action that trains is marked `ActionSpec::training()`
+      (`crates/catalog/tests/it/served_training.rs` fails otherwise).
+      `crates/apiserve/tests/it/{callers,training_gate}.rs` pin the rest.
+
 ### 2. Input handling / DoS
 - [ ] Request bodies are size-limited (a max content length) so a huge body can't OOM.
 - [ ] JSON parsing is depth/size-bounded (no unbounded nesting / billion-laughs).

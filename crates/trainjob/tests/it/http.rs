@@ -46,7 +46,7 @@ fn job_body(params: Value) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_training_job_over_http_is_created_followed_and_collected_by_digest() {
     let rig = rig("http-job", 16 << 30, true);
-    let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI));
+    let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI).with_training(true));
     let train = data_digest(&rig, &rollouts());
     let params = json!({"base": BASE, "arch": "qwen35", "objective": "policy_gradient", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128, "data": json!({"train": {"digest": train.hex()}}).to_string()});
 
@@ -82,7 +82,7 @@ async fn a_training_job_over_http_is_created_followed_and_collected_by_digest() 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_job_api_is_closed_to_those_without_the_key_and_to_every_input_it_does_not_define() {
     let rig = rig("http-security", 16 << 30, true);
-    let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI));
+    let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI).with_training(true));
     let train = data_digest(&rig, &rollouts());
     let good = json!({"base": BASE, "arch": "qwen35", "data": json!({"train": {"digest": train.hex()}}).to_string()});
 

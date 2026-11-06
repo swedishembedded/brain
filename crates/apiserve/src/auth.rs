@@ -84,6 +84,141 @@ impl Authenticator for StaticKey {
     }
 }
 
+/// What a named caller may do. Each role includes the ones before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Role {
+    /// Run actions that do not train, on models already served.
+    Inference,
+    /// Also run training actions ([`capability::ActionSpec::training`]), when the
+    /// server serves training at all (`--training`).
+    Training,
+    /// Also make the server fetch a model it does not hold, when auto-fetch is on.
+    Admin,
+}
+
+impl Role {
+    /// The role named `name` (`inference`, `training`, `admin`).
+    pub fn parse(name: &str) -> Option<Role> {
+        match name {
+            "inference" => Some(Role::Inference),
+            "training" => Some(Role::Training),
+            "admin" => Some(Role::Admin),
+            _ => None,
+        }
+    }
+}
+
+/// One named caller as the operator declares it.
+#[derive(Clone, Debug)]
+pub struct CallerSpec {
+    /// `[a-z0-9_-]{1,64}`; separates the caller's jobs from everyone else's.
+    pub name: String,
+    pub role: Role,
+    /// The caller's own key.
+    pub key: String,
+    /// How many of its calls may be in flight at once, background jobs
+    /// included: a caller that is compromised can hold this share of the
+    /// server and no more.
+    pub max_in_flight: usize,
+}
+
+/// A caller the [`Callers`] authenticator let in: the [`Principal`] a request
+/// from it carries.
+#[derive(Debug)]
+pub struct Caller {
+    pub name: String,
+    pub role: Role,
+    max_in_flight: usize,
+    in_flight: std::sync::atomic::AtomicUsize,
+}
+
+impl Caller {
+    /// The caller a request carries, when it came through [`Callers`]; `None`
+    /// for a surface with one static key, whose holder the operator's flags
+    /// alone constrain.
+    pub fn of(principal: Option<&Principal>) -> Option<&Caller> {
+        principal.and_then(|p| p.downcast_ref::<Caller>())
+    }
+
+    /// Take one of the caller's in-flight slots, or `None` when all are taken.
+    pub(crate) fn begin(self: &Arc<Caller>) -> Option<InFlight> {
+        use std::sync::atomic::Ordering;
+        let taken = self.in_flight.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < self.max_in_flight).then_some(n + 1));
+        taken.ok().map(|_| InFlight(self.clone()))
+    }
+}
+
+/// One in-flight call of a [`Caller`], given back when dropped.
+pub(crate) struct InFlight(Arc<Caller>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The [`Authenticator`] for several named callers, each with its own key, role
+/// and in-flight budget (`brain serve --caller`). A caller's jobs are its own:
+/// its name is its job scope.
+pub struct Callers(Vec<(String, Arc<Caller>)>);
+
+impl Callers {
+    /// The callers in `specs`.
+    ///
+    /// # Errors
+    ///
+    /// No caller, a name that is not `[a-z0-9_-]{1,64}` or appears twice, an
+    /// empty key or one two callers share, or a budget of zero.
+    pub fn new(specs: Vec<CallerSpec>) -> Result<Callers, String> {
+        if specs.is_empty() {
+            return Err("no caller is declared".into());
+        }
+        let mut out: Vec<(String, Arc<Caller>)> = Vec::with_capacity(specs.len());
+        for spec in specs {
+            if spec.name.is_empty() || spec.name.len() > 64 || !spec.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-') {
+                return Err(format!("caller name {:?} is not 1-64 of [a-z0-9_-]", spec.name));
+            }
+            if spec.key.is_empty() {
+                return Err(format!("caller {} has an empty key", spec.name));
+            }
+            if spec.max_in_flight == 0 {
+                return Err(format!("caller {} may have nothing in flight", spec.name));
+            }
+            if out.iter().any(|(_, c)| c.name == spec.name) {
+                return Err(format!("caller {} is declared twice", spec.name));
+            }
+            if out.iter().any(|(key, _)| key_matches(key, &spec.key)) {
+                return Err(format!("caller {} shares its key with another caller", spec.name));
+            }
+            let caller = Caller { name: spec.name, role: spec.role, max_in_flight: spec.max_in_flight, in_flight: Default::default() };
+            out.push((spec.key, Arc::new(caller)));
+        }
+        Ok(Callers(out))
+    }
+}
+
+impl Authenticator for Callers {
+    fn authenticate(&self, provider: Provider, headers: &HeaderMap) -> Result<Principal, ApiError> {
+        let presented = presented_key(provider, headers).filter(|k| !k.is_empty());
+        // Every key is compared, whichever matches: the time taken says
+        // nothing about which caller, if any, a key belongs to.
+        let mut found = None;
+        for (key, caller) in &self.0 {
+            if presented.is_some_and(|k| key_matches(k, key)) {
+                found = Some(caller.clone());
+            }
+        }
+        match found {
+            Some(caller) => Ok(caller),
+            None => Err(ApiError::unauthorized(provider, "missing or invalid API key")),
+        }
+    }
+
+    fn scope(&self, principal: &Principal) -> String {
+        Caller::of(Some(principal)).map(|c| c.name.clone()).unwrap_or_default()
+    }
+}
+
 /// axum middleware: refuses the request unless the surface's [`Authenticator`]
 /// accepts it, and hands the caller it identified to the handler.
 pub async fn authenticate(State(state): State<AppState>, mut req: Request, next: Next) -> Result<Response, ApiError> {

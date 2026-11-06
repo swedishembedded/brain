@@ -65,6 +65,9 @@ pub struct Manager {
     /// activation, almost always) -- see `wait_for_admission`'s doc, mirroring
     /// `apiserve::AppState::cold_build_admit_deadline`.
     cold_build_admit_deadline: std::time::Duration,
+    /// Whether training actions are served ([`capability::ActionSpec::training`]);
+    /// off unless the operator passed `--training`.
+    training: bool,
 }
 
 impl Manager {
@@ -78,6 +81,7 @@ impl Manager {
             edge_permits: Arc::new(tokio::sync::Semaphore::new(residency::admission::EDGE_CONCURRENCY)),
             admit_deadline: residency::admission::DEFAULT_ADMIT_DEADLINE,
             cold_build_admit_deadline: residency::admission::DEFAULT_COLD_BUILD_ADMIT_DEADLINE,
+            training: false,
         }
     }
 
@@ -90,6 +94,12 @@ impl Manager {
     /// '…'"`. `None` restores today's no-auto-fetch behavior.
     pub fn with_supplier(mut self, supplier: Option<Arc<dyn ModelSupplier>>) -> Manager {
         self.supplier = supplier;
+        self
+    }
+
+    /// Serve training actions (builder-style); see the field's doc.
+    pub fn with_training(mut self, training: bool) -> Manager {
+        self.training = training;
         self
     }
 
@@ -272,10 +282,15 @@ fn emit_window(executor: &Executor, model: &str, window: &[f32], prompt_id: i64,
 /// ([`capability::ActionSpec::validate_served`]) - the same check
 /// `apiserve`'s `/v1/run` makes, so neither transport lets a caller name a
 /// file on the serving machine.
-fn served_invocation(exec: &Executor, model: &str, action: &str, inv: Invocation) -> Result<Invocation, String> {
+fn served_invocation(exec: &Executor, training: bool, model: &str, action: &str, inv: Invocation) -> Result<Invocation, String> {
     let manifests = exec.manifests();
     let manifest = manifests.iter().find(|m| m.model == model).ok_or_else(|| format!("no model '{model}'"))?;
     let spec = manifest.actions.iter().find(|a| a.name == action).ok_or_else(|| format!("model '{model}' has no action '{action}'"))?;
+    // Training holds a card for hours: only a server started with --training
+    // runs it, over the bus as over HTTP.
+    if spec.training && !training {
+        return Err(format!("{model} {action} trains, and this server does not serve training (start it with --training)"));
+    }
     let inv = spec.validate_served(inv)?;
     // What the spec cannot say is the model's to refuse at the door (`ResidentModel::check_job`).
     exec.check_job(model, action, &inv)?;
@@ -355,6 +370,7 @@ async fn wait_for_admission(
 #[allow(clippy::too_many_arguments)]
 fn submit_subscribed_job(
     exec: Executor,
+    training: bool,
     jobs: JobRegistry,
     stream: Arc<Mutex<crate::stream::StreamTx>>,
     job: u64,
@@ -368,7 +384,7 @@ fn submit_subscribed_job(
 ) {
     // Checked again for the fetched path (idempotent for the resident one,
     // which `subscribe` already checked): the job never reaches the model.
-    let inv = match served_invocation(&exec, &model, &action, inv) {
+    let inv = match served_invocation(&exec, training, &model, &action, inv) {
         Ok(inv) => inv,
         Err(e) => {
             finish_job(&jobs, job);
@@ -480,7 +496,7 @@ impl Manager {
         let model = resolve_model_alias(model);
         self.ensure_resident(&model).await?;
         let inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
-        let mut inv = served_invocation(&self.executor, &model, &action, inv).map_err(fdo::Error::Failed)?;
+        let mut inv = served_invocation(&self.executor, self.training, &model, &action, inv).map_err(fdo::Error::Failed)?;
         // Armed so ActiveJobs counts it; a Run has no client-visible job id, so its
         // token is only ever dropped here (the reply), never cancelled by Cancel.
         let (job, token) = self.register_job(&mut inv);
@@ -545,7 +561,7 @@ impl Manager {
         // method's own error; a model still to be fetched is checked once it
         // is resident, in `submit_subscribed_job`.
         if self.executor.manifests().iter().any(|m| m.model == model) {
-            inv = served_invocation(&self.executor, &model, &action, inv).map_err(fdo::Error::Failed)?;
+            inv = served_invocation(&self.executor, self.training, &model, &action, inv).map_err(fdo::Error::Failed)?;
         }
         // Arm a cancel token under the returned job id: `Cancel(job)` flips it and
         // the running action aborts at its next poll.
@@ -557,7 +573,7 @@ impl Manager {
         let cold_build_admit_deadline = self.cold_build_admit_deadline;
 
         if self.executor.manifests().iter().any(|m| m.model == model) {
-            submit_subscribed_job(self.executor.clone(), jobs, stream, job, model, action, inv, admit_deadline, cold_build_admit_deadline, token, permit);
+            submit_subscribed_job(self.executor.clone(), self.training, jobs, stream, job, model, action, inv, admit_deadline, cold_build_admit_deadline, token, permit);
             return Ok((job, client.into()));
         }
 
@@ -574,6 +590,7 @@ impl Manager {
         }
 
         let exec = self.executor.clone();
+        let training = self.training;
         let model_owned = model.clone();
         let stream_bg = stream.clone();
         tokio::spawn(async move {
@@ -607,7 +624,7 @@ impl Manager {
                     return;
                 }
             }
-            submit_subscribed_job(exec, jobs, stream_bg, job, model_owned, action, inv, admit_deadline, cold_build_admit_deadline, token, permit);
+            submit_subscribed_job(exec, training, jobs, stream_bg, job, model_owned, action, inv, admit_deadline, cold_build_admit_deadline, token, permit);
         });
 
         Ok((job, client.into()))

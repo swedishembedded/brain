@@ -29,28 +29,59 @@ use crate::hooks::{Call, CallResult, Ticket};
 use crate::state::{AppState, JobRegistry};
 use crate::surface::Provider;
 
+/// Refuse a training action on a surface that does not train. Every dispatch
+/// passes here ([`Pending::begin`]), so no route - `/v1/run`, `/v1/jobs`, a
+/// dialect's own - can reach one around it.
+/// A named caller below [`Role::Training`](crate::Role::Training) is refused one
+/// even where training is served.
+fn refuse_training(state: &AppState, model: &str, action: &str) -> Result<(), ApiError> {
+    let trains = state.exec.manifests().iter().filter(|m| m.model == model).flat_map(|m| &m.actions).any(|a| a.name == action && a.training);
+    if !trains {
+        return Ok(());
+    }
+    if !state.training {
+        return Err(ApiError::forbidden(state.provider, format!("{model} {action} trains, and this server does not serve training (start it with --training)")));
+    }
+    if let Some(caller) = crate::auth::Caller::of(state.caller.as_ref()).filter(|c| c.role < crate::Role::Training) {
+        return Err(ApiError::forbidden(state.provider, format!("{model} {action} trains, and caller {} may not train", caller.name)));
+    }
+    Ok(())
+}
+
 /// A call that has begun (the embedder's [`RequestHooks`](crate::RequestHooks) let
 /// it run) and not yet been settled.
 ///
 /// Settling consumes it, and dropping it unsettled settles it as
 /// [`CallResult::Refused`], so every path out of a call -- a reply, a failure, a
 /// job that was cancelled before it ran and whose reply closure was dropped
-/// unfired -- reaches the embedder exactly once. Without hooks it holds nothing.
-struct Pending(Option<Box<dyn Ticket>>);
+/// unfired -- reaches the embedder exactly once; a named caller's in-flight slot
+/// is held as long. Without hooks or a named caller it holds nothing.
+struct Pending {
+    ticket: Option<Box<dyn Ticket>>,
+    /// The caller's in-flight slot, given back when the call is dropped.
+    _in_flight: Option<crate::auth::InFlight>,
+}
 
 impl Pending {
     /// Asks the hooks whether this call may run.
     fn begin(state: &AppState, model: &str, action: &str, invocation: &Invocation) -> Result<Pending, ApiError> {
+        refuse_training(state, model, action)?;
         refuse_unread_images(&state.exec, state.provider, model, action, invocation)?;
+        // A named caller holds at most its own share in flight, for as long as
+        // this call is unsettled - a background job's whole run included.
+        let in_flight = match state.caller.as_ref().and_then(|p| p.clone().downcast::<crate::auth::Caller>().ok()) {
+            None => None,
+            Some(caller) => Some(caller.begin().ok_or_else(|| ApiError::rate_limited(state.provider, format!("caller {} has its whole share of the server in flight; retry when a call ends", caller.name)))?),
+        };
         match &state.hooks {
-            None => Ok(Pending(None)),
-            Some(hooks) => hooks.begin(&Call { provider: state.provider, caller: state.caller.as_ref(), model, action, invocation }).map(|ticket| Pending(Some(ticket))),
+            None => Ok(Pending { ticket: None, _in_flight: in_flight }),
+            Some(hooks) => hooks.begin(&Call { provider: state.provider, caller: state.caller.as_ref(), model, action, invocation }).map(|ticket| Pending { ticket: Some(ticket), _in_flight: in_flight }),
         }
     }
 
     /// Settles the call. An error means the settlement could not be recorded.
     fn settle(mut self, result: CallResult<'_>) -> Result<(), ApiError> {
-        match self.0.take() {
+        match self.ticket.take() {
             Some(ticket) => ticket.finish(result),
             None => Ok(()),
         }
@@ -59,7 +90,7 @@ impl Pending {
 
 impl Drop for Pending {
     fn drop(&mut self) {
-        if let Some(ticket) = self.0.take() {
+        if let Some(ticket) = self.ticket.take() {
             let _ = ticket.finish(CallResult::Refused);
         }
     }
@@ -98,7 +129,7 @@ pub fn refuse_unread_images(exec: &residency::Executor, provider: Provider, mode
 /// filesystem paths, and other fetch-internal detail are logged server-side,
 /// never reflected to the caller).
 pub async fn ensure_and_recheck<T>(state: &AppState, provider: Provider, model: &str, resolve: impl Fn(&str) -> Option<T>) -> Result<T, ApiError> {
-    let Some(supplier) = state.supplier.clone() else {
+    let Some(supplier) = state.supplier_for_caller() else {
         return Err(ApiError::model_not_found(provider, model));
     };
     match supplier.classify(model) {

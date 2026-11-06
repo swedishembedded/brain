@@ -109,6 +109,17 @@ HTTP INFERENCE APIS  (each behind its own key)
                                \"url\": \"http://127.0.0.1:8788\", \"key\": \"sk-brain-...\"}]}
   one entry per bound address, `url` the port actually bound (never a `:0`).
 
+  CALLERS: by default every holder of a dialect's key may do everything the
+  server serves. Give each application its own key and only the rights it
+  needs instead:
+  --caller NAME:ROLE:KEYFILE[:MAX]   repeatable. ROLE is inference (no training,
+                         no fetching), training (also training actions, with
+                         --training) or admin (also auto-fetch). KEYFILE holds the
+                         caller's key; any dialect accepts it. MAX bounds the
+                         caller's calls in flight, background jobs included
+                         (default 16). A caller sees only its own jobs. Replaces
+                         the per-dialect keys: no APIKEY key is printed.
+
   TRANSPORT SECURITY: an ADDR that is not loopback needs TLS, or the key and
   every request would cross the network readable:
   --tls-cert PEM --tls-key PEM   serve every HTTP surface over TLS (https://)
@@ -122,7 +133,8 @@ HTTP INFERENCE APIS  (each behind its own key)
 D-BUS CONTROL SURFACE
   --dbus                 serve com.swedishembedded.Brain1 on the session bus
   --dbus-system          use the system bus instead. Needs a system.d policy:
-                         the deb installs a vetted one (calls restricted to
+                         the deb installs a vetted one (the server runs as the
+                         system user 'brain', never root; calls restricted to
                          root + the 'brain' group); from a checkout, install
                          scripts/build/com.swedishembedded.Brain1.conf to
                          /usr/share/dbus-1/system.d/ yourself.
@@ -432,6 +444,40 @@ fn apply_policy(policy: &model::policy::ServePolicy, qwen: &mut catalog::residen
     }
 }
 
+/// The callers `--caller NAME:ROLE:KEYFILE[:MAX]` declares, or `None` when there
+/// are none. A caller's key is read from its file (one word, like
+/// `--api-key-file`); MAX, its in-flight budget, defaults to
+/// [`DEFAULT_CALLER_IN_FLIGHT`]. The flags that set a surface key would be
+/// ignored beside callers, so they are refused with them.
+fn parse_callers(flags: &[String], fixed_key: bool, keys_out: bool) -> Result<Option<std::sync::Arc<apiserve::Callers>>, String> {
+    if flags.is_empty() {
+        return Ok(None);
+    }
+    if fixed_key || keys_out {
+        return Err("--caller replaces the surface keys: drop --api-key-file and --api-keys-out".into());
+    }
+    let mut specs = Vec::with_capacity(flags.len());
+    for flag in flags {
+        let parts: Vec<&str> = flag.splitn(4, ':').collect();
+        let (name, role, file) = match parts.as_slice() {
+            [name, role, file] | [name, role, file, _] => (*name, *role, *file),
+            _ => return Err(format!("--caller {flag:?} is not NAME:ROLE:KEYFILE[:MAX]")),
+        };
+        let role = apiserve::Role::parse(role).ok_or_else(|| format!("--caller {name}: role {role:?} is not inference, training or admin"))?;
+        let max_in_flight = match parts.get(3) {
+            None => DEFAULT_CALLER_IN_FLIGHT,
+            Some(max) => max.parse().map_err(|_| format!("--caller {name}: MAX {max:?} is not a count"))?,
+        };
+        let key = apiserve::surface::read_key_file(Path::new(file)).map_err(|e| format!("--caller {name}: {e}"))?;
+        specs.push(apiserve::CallerSpec { name: name.to_string(), role, key, max_in_flight });
+    }
+    apiserve::Callers::new(specs).map(|callers| Some(std::sync::Arc::new(callers))).map_err(|e| format!("--caller: {e}"))
+}
+
+/// A caller's in-flight budget when `--caller` names none: a sixteenth of the
+/// edge's 256 concurrent requests, so one compromised caller leaves the rest.
+const DEFAULT_CALLER_IN_FLIGHT: usize = 16;
+
 fn val(args: &[String], i: &mut usize, flag: &str) -> String {
     *i += 1;
     match args.get(*i) {
@@ -655,6 +701,7 @@ pub fn run_serve(args: &[String]) {
     let mut tls_cert: Option<PathBuf> = None;
     let mut tls_key: Option<PathBuf> = None;
     let mut insecure_plaintext = false;
+    let mut caller_flags: Vec<String> = Vec::new();
     // `--runtime-dir DIR`: where the lifecycle files and the connection
     // record live (see `serve_daemon::state_dir`); `main` reads it too, for
     // `-d`/`--status`/`--stop`.
@@ -799,6 +846,7 @@ pub fn run_serve(args: &[String]) {
             "--tls-cert" => tls_cert = Some(PathBuf::from(val(args, &mut i, "--tls-cert"))),
             "--tls-key" => tls_key = Some(PathBuf::from(val(args, &mut i, "--tls-key"))),
             "--insecure-plaintext" => insecure_plaintext = true,
+            "--caller" => caller_flags.push(val(args, &mut i, "--caller")),
             "--tokenizer" => qwen_cfg.tokenizer = Some(val(args, &mut i, "--tokenizer")),
             "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
             "--admit-deadline-ms" => deadlines.admit = positive_ms(args, &mut i, "--admit-deadline-ms"),
@@ -849,6 +897,13 @@ pub fn run_serve(args: &[String]) {
         })),
         _ => {
             eprintln!("brain serve: --tls-cert PEM and --tls-key PEM are given together (the certificate chain and its private key)");
+            std::process::exit(2);
+        }
+    };
+    let callers = match parse_callers(&caller_flags, fixed_key.is_some(), api_keys_out.is_some()) {
+        Ok(callers) => callers,
+        Err(e) => {
+            eprintln!("brain serve: {e}");
             std::process::exit(2);
         }
     };
@@ -937,6 +992,7 @@ pub fn run_serve(args: &[String]) {
             fixed_key,
             fixed_key_file,
             tls,
+            callers,
             record: serve_daemon_record(runtime_dir.as_deref()),
             ready,
             deadlines,
@@ -1104,6 +1160,8 @@ struct RunApis {
     fixed_key_file: Option<PathBuf>,
     /// `--tls-cert`/`--tls-key`, loaded: every HTTP surface serves TLS.
     tls: Option<apiserve::Tls>,
+    /// `--caller`: named callers replace the per-dialect keys.
+    callers: Option<std::sync::Arc<apiserve::Callers>>,
     /// Where the connection record is published once every HTTP surface has
     /// bound (see `apiserve::surface::record_json`).
     record: PathBuf,
@@ -1210,6 +1268,9 @@ fn run_apis(a: RunApis) {
     // supplier and the healer - so the flag decides the store everywhere.
     let models_dir = loader::model_dir::resolve(a.models_dir.as_deref());
     let supplier = build_auto_fetch_supplier(models_dir.as_deref());
+    // `--training` is the one switch for every training action, not only
+    // `brain/train`'s: without it every surface refuses them.
+    let training = a.knobs.train.is_some();
     let serving::Serving { executor, qwen, qwen35 } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.knobs);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
@@ -1280,7 +1341,7 @@ fn run_apis(a: RunApis) {
             let ready = a.ready.clone();
             let ready_state = a.ready.clone();
             Some(std::thread::spawn(move || {
-                let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(sd).with_supplier(sup).with_ready(ready).with_deadlines(a.deadlines);
+                let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(sd).with_supplier(sup).with_ready(ready).with_deadlines(a.deadlines).with_training(training);
                 let Err(err) = brain_dbus::serve(e, opts, serve_opts) else { return };
                 eprintln!("{}", dbus_connect_hint(&err, dbus_system));
                 // Before ready, this is a FAILED start and has to end the
@@ -1302,7 +1363,7 @@ fn run_apis(a: RunApis) {
                 std::process::exit(1);
             }))
         } else {
-            let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(shutdown).with_supplier(sup).with_ready(a.ready.clone()).with_deadlines(a.deadlines);
+            let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(shutdown).with_supplier(sup).with_ready(a.ready.clone()).with_deadlines(a.deadlines).with_training(training);
             if let Err(err) = brain_dbus::serve(e, opts, serve_opts) {
                 eprintln!("{}", dbus_connect_hint(&err, a.dbus_system));
                 eprintln!("brain serve: the D-Bus surface was the only one requested -- exiting");
@@ -1327,7 +1388,8 @@ fn run_apis(a: RunApis) {
             (a.openrouter, apiserve::Provider::OpenRouter),
         ] {
             if let Some(addrs) = addrs {
-                let key = apiserve::surface::resolved_key(a.fixed_key.as_deref());
+                // With named callers a surface has no key of its own.
+                let key = if a.callers.is_some() { String::new() } else { apiserve::surface::resolved_key(a.fixed_key.as_deref()) };
                 for addr in addrs {
                     surfaces.push(apiserve::Surface::new(provider, addr, key.clone()));
                 }
@@ -1357,9 +1419,10 @@ fn run_apis(a: RunApis) {
         for s in &surfaces {
             if !announced.contains(&s.provider) {
                 // A pinned key is already in the operator's file: name it, never print the key.
-                match &a.fixed_key_file {
-                    Some(file) => println!("{}", s.announcement_of_pinned(file)),
-                    None => s.announce(keys_file),
+                match (&a.fixed_key_file, &a.callers) {
+                    (_, Some(_)) => println!("APIKEY {} per caller (--caller)", s.provider),
+                    (Some(file), None) => println!("{}", s.announcement_of_pinned(file)),
+                    (None, None) => s.announce(keys_file),
                 }
                 announced.push(s.provider);
             }
@@ -1398,7 +1461,7 @@ fn run_apis(a: RunApis) {
             eprintln!("brain serve: the surfaces did not drain within {}s of the shutdown signal; exiting", SHUTDOWN_DRAIN_TIMEOUT.as_secs());
             brain_shutdown::exit_now(0);
         });
-        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines).with_record(Some(a.record)).with_tls(a.tls);
+        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines).with_record(Some(a.record)).with_tls(a.tls).with_training(training).with_callers(a.callers);
         if let Err(e) = apiserve::serve_all(executor, surfaces, opts) {
             eprintln!("brain serve: {e}");
             std::process::exit(1);

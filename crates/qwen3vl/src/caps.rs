@@ -283,6 +283,7 @@ pub fn generate_spec() -> ActionSpec {
 /// attention+MLP projections adapt.
 pub fn lora_train_spec() -> ActionSpec {
     ActionSpec::new("lora_train", "fine-tune a LoRA adapter for the decoder on a folder of captioned images (data::imageset's captions.yaml/.jsonl - the format `brain label` writes)")
+        .training()
         .streaming()
         .param(ParamSpec::new("data", ParamType::Str, "folder with images + a captions.yaml (`filename: prompt`) and/or captions.jsonl").required().host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "output path for the trained adapter").required().host_resolved())
