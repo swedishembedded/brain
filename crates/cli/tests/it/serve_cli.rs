@@ -487,3 +487,28 @@ fn a_deprecated_architecture_prefixed_flag_still_works_and_says_what_replaces_it
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--qwen-kv-fp8 is deprecated") && stderr.contains("--kv-cache fp8"), "stderr:\n{stderr}");
 }
+
+/// A surface off loopback without TLS would put the API key and every request
+/// on the network readable, so it is refused before anything loads, naming
+/// the flags that fix it; loopback stays plaintext by default.
+#[test]
+fn plaintext_off_loopback_is_refused_before_serving() {
+    for addr in ["0.0.0.0:0", "[::]:0"] {
+        let out = run(&["serve", "--openai", addr]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{addr}: stderr: {stderr}");
+        assert!(stderr.contains("--tls-cert") && stderr.contains("--insecure-plaintext"), "{addr}: stderr: {stderr}");
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("APIKEY"), "{addr}: no key is drawn for a refused server");
+    }
+}
+
+/// Half a certificate is a usage error, never a plaintext fallback.
+#[test]
+fn a_tls_certificate_needs_its_key_and_the_key_its_certificate() {
+    for args in [&["serve", "--openai", "0.0.0.0:0", "--tls-cert", "server.crt"][..], &["serve", "--openai", "0.0.0.0:0", "--tls-key", "server.key"][..]] {
+        let out = run(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: stderr: {stderr}");
+        assert!(stderr.contains("--tls-cert") && stderr.contains("--tls-key"), "{args:?}: stderr: {stderr}");
+    }
+}

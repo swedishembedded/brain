@@ -12,4 +12,5 @@ mod audio;
 mod connections;
 mod seams;
 mod shutdown;
+mod tls;
 mod video;

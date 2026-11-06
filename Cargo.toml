@@ -472,6 +472,11 @@ tower-http = { version = "0.6", features = ["trace", "cors"] }
 # axum's own transitive dependencies.
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "server-graceful", "service", "tokio"] }
+# TLS for the HTTP surfaces (`apiserve::tls`): rustls on the ring provider,
+# the one `ureq` already builds, so aws-lc's C toolchain stays out of the
+# build. Both are in the tree already.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-stream = "0.1"
 # Speech uploads (crates/audio's `decode`): libopus, the reference decoder,

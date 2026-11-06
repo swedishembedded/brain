@@ -123,25 +123,26 @@ pub fn read_key_file(path: &Path) -> Result<String, String> {
     Ok(key.to_string())
 }
 
-/// The URL a client on this host reaches a listener on: an unspecified bind
+/// The URL a client on this host reaches a listener on, under `scheme`
+/// (`http`, or `https` when the surface serves TLS): an unspecified bind
 /// (`0.0.0.0`, `::`) is reached through the loopback of its family.
-pub fn local_url(addr: SocketAddr) -> String {
+pub fn local_url(scheme: &str, addr: SocketAddr) -> String {
     let ip = match addr.ip() {
         std::net::IpAddr::V4(ip) if ip.is_unspecified() => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         std::net::IpAddr::V6(ip) if ip.is_unspecified() => std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
         ip => ip,
     };
-    format!("http://{}", SocketAddr::new(ip, addr.port()))
+    format!("{scheme}://{}", SocketAddr::new(ip, addr.port()))
 }
 
 /// The connection record of a running server: what a client on this host
 /// needs to use it without being told anything. `{"pid": N, "surfaces":
 /// [{"provider": "openai", "url": "http://127.0.0.1:8788", "key": "sk-brain-…"}]}`,
 /// one entry per bound address, `url` the address the listener actually holds
-/// (never a requested `:0`). The OpenAI and OpenRouter routes answer under
+/// (never a requested `:0`), `https` when the surfaces serve TLS. The OpenAI and OpenRouter routes answer under
 /// `url` and under `url/v1`; the Anthropic ones under `url/v1` only.
-pub fn record_json(pid: u32, bound: &[(Provider, SocketAddr, String)]) -> Value {
-    let surfaces: Vec<Value> = bound.iter().map(|(provider, addr, key)| json!({"provider": provider.as_str(), "url": local_url(*addr), "key": key})).collect();
+pub fn record_json(pid: u32, scheme: &str, bound: &[(Provider, SocketAddr, String)]) -> Value {
+    let surfaces: Vec<Value> = bound.iter().map(|(provider, addr, key)| json!({"provider": provider.as_str(), "url": local_url(scheme, *addr), "key": key})).collect();
     json!({"pid": pid, "surfaces": surfaces})
 }
 
@@ -279,12 +280,14 @@ mod tests {
             (Provider::Anthropic, "[::]:8787".parse().unwrap(), "sk-b".to_string()),
             (Provider::OpenRouter, "192.168.1.5:8789".parse().unwrap(), "sk-c".to_string()),
         ];
-        let record = record_json(42, &bound);
+        let record = record_json(42, "http", &bound);
         assert_eq!(record["pid"], 42);
         let urls: Vec<&str> = record["surfaces"].as_array().unwrap().iter().map(|s| s["url"].as_str().unwrap()).collect();
         assert_eq!(urls, ["http://127.0.0.1:8788", "http://[::1]:8787", "http://192.168.1.5:8789"]);
         assert_eq!(record["surfaces"][1]["provider"], "anthropic");
         assert_eq!(record["surfaces"][2]["key"], "sk-c");
+        let tls = record_json(42, "https", &bound);
+        assert_eq!(tls["surfaces"][2]["url"], "https://192.168.1.5:8789", "a TLS surface is named https");
     }
 
     /// A record directory is created closed to others, and one others may

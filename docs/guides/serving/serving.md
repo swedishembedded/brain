@@ -8,6 +8,7 @@ one scheduler, and exposes them over one or more transports at once.
 brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
             [--dbus] [--models-dir DIR] [--api-keys-out FILE] \
             [--api-key-file FILE] [--runtime-dir DIR] [--ready-file PATH] \
+            [--tls-cert PEM --tls-key PEM | --insecure-plaintext] \
             [--checkpoint PATH [--tokenizer PATH]] \
             [--adapter FILE | --adapter-manifest FILE | --watch-adapters DIR] \
             [--training [--artifact-store DIR]]
@@ -32,6 +33,12 @@ With no surface flag, `brain serve` serves the OpenAI-compatible API on
 - `--api-key-file FILE` - serve every dialect with the one key `FILE` holds
   (surrounding whitespace trimmed) instead of a fresh key per dialect per launch.
   The startup lines then read `APIKEY <provider> read from FILE` and never print the key.
+- `--tls-cert PEM`, `--tls-key PEM` - serve every HTTP surface over TLS with
+  this certificate chain (leaf first) and its private key. See **Transport
+  security** below.
+- `--insecure-plaintext` - allow plaintext HTTP on an address that is not
+  loopback, for when a TLS-terminating proxy or a VPN already encrypts the
+  path. See **Transport security** below.
 - `--runtime-dir DIR` - where the pid file, log and connection record live
   (default `$XDG_RUNTIME_DIR/brain`, else `<tmpdir>/brain-<uid>`). A server under
   its own `DIR` is not found by clients looking in the default one.
@@ -261,6 +268,25 @@ stdout as `APIKEY <provider> <key>` lines, or - if `--api-keys-out FILE` is give
 written to `FILE` (the lines then read `APIKEY <provider> written to FILE`). Both the keys and the file are written before any socket
 binds, so a client can never race the server up.
 
+## Transport security
+
+A request carries the API key in a header and the prompt and output in its
+body, so on any network they are readable to every host on it - a private
+network included. `brain serve` therefore refuses to start when an HTTP
+surface would listen on an address other than loopback without TLS:
+
+```
+brain serve --openai 0.0.0.0:8788 \
+            --tls-cert /etc/brain/tls/server.crt --tls-key /etc/brain/tls/server.key
+```
+
+The certificate must name the address clients use (a DNS name, or an
+`IP:` subject alternative name). Clients then use `https://` base URLs; the
+connection record says `https` too, and a local client of an unspecified
+bind connects to `127.0.0.1`, which the certificate must also name for it
+to verify. Pass `--insecure-plaintext` instead of the certificate only when
+something else already encrypts every hop to the server.
+
 ## Connection limits
 
 Every HTTP surface bounds what one peer can hold, with or without a key:
@@ -270,7 +296,8 @@ Every HTTP surface bounds what one peer can hold, with or without a key:
 - a request must send its whole body within 5 minutes, however slowly it
   trickles in;
 - each surface holds at most 1024 connections; one more is closed before a
-  byte of it is read.
+  byte of it is read;
+- with TLS, the handshake is held to the same 10 seconds as a request head.
 
 Only HTTP/1.1 is served. A streamed response stays open as long as its
 generation runs.
@@ -285,6 +312,8 @@ it stops:
 ```json
 {"pid": 4242, "surfaces": [{"provider": "openai", "url": "http://127.0.0.1:8788", "key": "sk-brain-..."}]}
 ```
+
+(`https://` when the server was started with `--tls-cert`.)
 
 There is one entry per bound address; `url` is the address the listener
 actually holds (a `:0` request is reported as the port it got, an unspecified

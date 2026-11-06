@@ -43,6 +43,8 @@ use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
+use crate::tls::Tls;
+
 /// What one peer may hold of a surface. See the module docs for each bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConnectionLimits {
@@ -100,7 +102,10 @@ async fn body_deadline(limit: Duration, request: Request, next: Next) -> Respons
 
 /// Serve `app` on `listener` under `limits` until `shutdown` fires, then stop
 /// accepting and let open connections finish. The caller bounds that drain.
-pub(crate) async fn serve(listener: TcpListener, app: Router, limits: ConnectionLimits, shutdown: brain_shutdown::Shutdown) {
+/// With `tls`, every connection is a TLS session; its handshake must finish
+/// within the header deadline, so a peer that opens one and stalls is closed
+/// like any other slow header.
+pub(crate) async fn serve(listener: TcpListener, app: Router, limits: ConnectionLimits, tls: Option<Tls>, shutdown: brain_shutdown::Shutdown) {
     let app = app.layer(axum::middleware::from_fn(move |request, next| body_deadline(limits.body, request, next)));
     let slots = Arc::new(Semaphore::new(limits.max_connections));
     let graceful = GracefulShutdown::new();
@@ -125,15 +130,24 @@ pub(crate) async fn serve(listener: TcpListener, app: Router, limits: Connection
             drop(stream);
             continue;
         };
-        let mut http = hyper::server::conn::http1::Builder::new();
-        http.timer(TokioTimer::new()).header_read_timeout(limits.header_read);
-        let connection = http.serve_connection(TokioIo::new(stream), TowerToHyperService::new(app.clone()));
-        let watched = graceful.watch(connection);
+        let (watcher, service, tls) = (graceful.watcher(), TowerToHyperService::new(app.clone()), tls.clone());
         tokio::spawn(async move {
-            // A peer that resets or times out is that connection's end, not an
-            // error of the surface.
-            let _ = watched.await;
-            drop(slot);
+            let _slot = slot;
+            let mut http = hyper::server::conn::http1::Builder::new();
+            http.timer(TokioTimer::new()).header_read_timeout(limits.header_read);
+            // A peer that resets, fails its handshake or times out is that
+            // connection's end, not an error of the surface.
+            match tls {
+                None => {
+                    let _ = watcher.watch(http.serve_connection(TokioIo::new(stream), service)).await;
+                }
+                Some(tls) => {
+                    let Ok(Ok(stream)) = tokio::time::timeout(limits.header_read, tls.acceptor.accept(stream)).await else {
+                        return;
+                    };
+                    let _ = watcher.watch(http.serve_connection(TokioIo::new(stream), service)).await;
+                }
+            }
         });
     }
     graceful.shutdown().await;

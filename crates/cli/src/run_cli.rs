@@ -109,6 +109,12 @@ HTTP INFERENCE APIS  (each behind its own key)
                                \"url\": \"http://127.0.0.1:8788\", \"key\": \"sk-brain-...\"}]}
   one entry per bound address, `url` the port actually bound (never a `:0`).
 
+  TRANSPORT SECURITY: an ADDR that is not loopback needs TLS, or the key and
+  every request would cross the network readable:
+  --tls-cert PEM --tls-key PEM   serve every HTTP surface over TLS (https://)
+  --insecure-plaintext           serve plaintext off loopback anyway, when a
+                                 proxy or VPN already encrypts every hop
+
   With no ADDR given, a surface binds 127.0.0.1 (unchanged default). There is
   no --listen / --host / --bind flag -- the address goes directly after the
   dialect flag it names, as ADDR above.
@@ -646,6 +652,9 @@ pub fn run_serve(args: &[String]) {
     // fresh one per dialect per launch.
     let mut fixed_key: Option<String> = None;
     let mut fixed_key_file: Option<PathBuf> = None;
+    let mut tls_cert: Option<PathBuf> = None;
+    let mut tls_key: Option<PathBuf> = None;
+    let mut insecure_plaintext = false;
     // `--runtime-dir DIR`: where the lifecycle files and the connection
     // record live (see `serve_daemon::state_dir`); `main` reads it too, for
     // `-d`/`--status`/`--stop`.
@@ -787,6 +796,9 @@ pub fn run_serve(args: &[String]) {
                 fixed_key_file = Some(PathBuf::from(file));
             }
             "--runtime-dir" => runtime_dir = Some(PathBuf::from(val(args, &mut i, "--runtime-dir"))),
+            "--tls-cert" => tls_cert = Some(PathBuf::from(val(args, &mut i, "--tls-cert"))),
+            "--tls-key" => tls_key = Some(PathBuf::from(val(args, &mut i, "--tls-key"))),
+            "--insecure-plaintext" => insecure_plaintext = true,
             "--tokenizer" => qwen_cfg.tokenizer = Some(val(args, &mut i, "--tokenizer")),
             "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
             "--admit-deadline-ms" => deadlines.admit = positive_ms(args, &mut i, "--admit-deadline-ms"),
@@ -824,6 +836,26 @@ pub fn run_serve(args: &[String]) {
             eprint!("{HELP}");
             std::process::exit(2);
         }
+    }
+
+    // Before anything loads: a surface that would carry the key in plaintext
+    // over a network is refused, and a certificate is checked while the
+    // operator is still watching.
+    let tls = match (tls_cert, tls_key) {
+        (None, None) => None,
+        (Some(cert), Some(key)) => Some(apiserve::Tls::from_pem_files(&cert, &key).unwrap_or_else(|e| {
+            eprintln!("brain serve: {e}");
+            std::process::exit(2);
+        })),
+        _ => {
+            eprintln!("brain serve: --tls-cert PEM and --tls-key PEM are given together (the certificate chain and its private key)");
+            std::process::exit(2);
+        }
+    };
+    let http_addrs: Vec<SocketAddr> = [&anthropic, &openai, &openrouter].into_iter().flatten().flatten().copied().collect();
+    if let Err(e) = apiserve::tls::check_exposure(&http_addrs, tls.is_some(), insecure_plaintext) {
+        eprintln!("brain serve: {e}");
+        std::process::exit(2);
     }
 
     let adapter_mode = match crate::continuous_train::AdapterMode::from_flags(adapter.map(PathBuf::from), adapter_manifest.map(PathBuf::from), watch_adapters.map(PathBuf::from)) {
@@ -904,6 +936,7 @@ pub fn run_serve(args: &[String]) {
             api_keys_out,
             fixed_key,
             fixed_key_file,
+            tls,
             record: serve_daemon_record(runtime_dir.as_deref()),
             ready,
             deadlines,
@@ -1069,6 +1102,8 @@ struct RunApis {
     /// The file `--api-key-file` read the key from: the APIKEY lines name it
     /// instead of printing the key.
     fixed_key_file: Option<PathBuf>,
+    /// `--tls-cert`/`--tls-key`, loaded: every HTTP surface serves TLS.
+    tls: Option<apiserve::Tls>,
     /// Where the connection record is published once every HTTP surface has
     /// bound (see `apiserve::surface::record_json`).
     record: PathBuf,
@@ -1363,7 +1398,7 @@ fn run_apis(a: RunApis) {
             eprintln!("brain serve: the surfaces did not drain within {}s of the shutdown signal; exiting", SHUTDOWN_DRAIN_TIMEOUT.as_secs());
             brain_shutdown::exit_now(0);
         });
-        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines).with_record(Some(a.record));
+        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines).with_record(Some(a.record)).with_tls(a.tls);
         if let Err(e) = apiserve::serve_all(executor, surfaces, opts) {
             eprintln!("brain serve: {e}");
             std::process::exit(1);

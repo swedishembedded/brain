@@ -59,6 +59,7 @@ pub mod sampling;
 pub mod state;
 pub mod surface;
 pub mod systemone;
+pub mod tls;
 pub mod video;
 pub mod video_inputs;
 
@@ -77,6 +78,7 @@ pub use catalog::{api_caps, CapSet};
 pub use error::{ApiError, Kind};
 pub use hooks::{Call, CallResult, RequestHooks, Ticket};
 pub use listener::ConnectionLimits;
+pub use tls::Tls;
 pub use state::{AppState, JobRegistry, DEFAULT_ADMIT_DEADLINE};
 pub use surface::{write_keys, Provider, Surface};
 
@@ -188,6 +190,10 @@ pub struct ServeOpts {
     /// What one peer may hold of each surface: connections, and the header and
     /// body deadlines ([`ConnectionLimits`]).
     pub limits: ConnectionLimits,
+    /// Serve every surface over TLS with this certificate. `None` is
+    /// plaintext, which the caller must only allow on loopback
+    /// ([`tls::check_exposure`]).
+    pub tls: Option<Tls>,
 }
 
 impl ServeOpts {
@@ -218,6 +224,10 @@ impl ServeOpts {
         self.limits = limits;
         self
     }
+    pub fn with_tls(mut self, tls: Option<Tls>) -> ServeOpts {
+        self.tls = tls;
+        self
+    }
 }
 
 /// The addresses every surface actually bound, gathered as each listener
@@ -225,6 +235,7 @@ impl ServeOpts {
 /// that finds the record finds every listener already accepting.
 struct Publication {
     path: std::path::PathBuf,
+    scheme: &'static str,
     expected: usize,
     bound: std::sync::Mutex<Vec<(Provider, std::net::SocketAddr, String)>>,
 }
@@ -236,7 +247,7 @@ impl Publication {
         if bound.len() != self.expected {
             return;
         }
-        let body = surface::record_json(std::process::id(), &bound).to_string();
+        let body = surface::record_json(std::process::id(), self.scheme, &bound).to_string();
         if let Err(e) = surface::write_private(&self.path, body.as_bytes()) {
             eprintln!("brain serve: the connection record {} could not be written ({e}); local clients will not find this server", self.path.display());
         }
@@ -257,13 +268,14 @@ pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(3
 /// concurrently on a [`tokio::task::JoinSet`]. Blocks the calling thread.
 pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> anyhow::Result<()> {
     let shutdown = opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
-    let ServeOpts { supplier, ready, deadlines, record, limits, .. } = opts;
+    let ServeOpts { supplier, ready, deadlines, record, limits, tls, .. } = opts;
+    let scheme = if tls.is_some() { "https" } else { "http" };
     let publication = record.and_then(|path| {
         if let Err(e) = path.parent().map_or(Ok(()), surface::private_dir) {
             eprintln!("brain serve: no connection record is published ({e}); local clients will not find this server");
             return None;
         }
-        Some(std::sync::Arc::new(Publication { path, expected: surfaces.len(), bound: std::sync::Mutex::new(Vec::new()) }))
+        Some(std::sync::Arc::new(Publication { path, scheme, expected: surfaces.len(), bound: std::sync::Mutex::new(Vec::new()) }))
     });
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let published = publication.clone();
@@ -288,12 +300,13 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
             let sd = shutdown.clone();
             let ready = ready.clone();
             let publication = published.clone();
+            let tls = tls.clone();
             set.spawn(async move {
                 let listener = tokio::net::TcpListener::bind(addr)
                     .await
                     .map_err(|e| anyhow::anyhow!("bind {addr} ({provider}): {e}"))?;
                 let addr = listener.local_addr().unwrap_or(addr);
-                eprintln!("brain apiserve: {provider} on http://{addr}");
+                eprintln!("brain apiserve: {provider} on {scheme}://{addr}");
                 if let Some(publication) = &publication {
                     publication.bound(provider, addr, &key);
                 }
@@ -301,7 +314,7 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
                 // for, and BEFORE serving: the marker means "the listener existed",
                 // nothing stronger.
                 ready.bound(&provider.to_string());
-                listener::serve(listener, app, limits, sd).await;
+                listener::serve(listener, app, limits, tls, sd).await;
                 Ok::<(), anyhow::Error>(())
             });
         }

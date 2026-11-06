@@ -165,6 +165,12 @@ them, so treat all request input as hostile.
 ### 7. Transport
 - [ ] Servers bind `127.0.0.1` by default (localhost only); binding a public interface
       is an explicit operator choice, documented, and gated behind auth (always on).
+- [ ] Nothing but loopback is served in plaintext: `apiserve::tls::check_exposure` runs
+      before any model loads, so a non-loopback address needs `--tls-cert`/`--tls-key`
+      (rustls on the ring provider, HTTP/1.1 by ALPN, handshake inside the header
+      deadline) or the operator's explicit `--insecure-plaintext`. A private network
+      is still a network: the key in a request header is readable to every host on it.
+      `crates/apiserve/tests/it/tls.rs` and the unit tests in `tls.rs` pin it.
 - [ ] CORS is intentional (the permissive default is acceptable only because every
       route is key-gated; re-confirm if that changes).
 

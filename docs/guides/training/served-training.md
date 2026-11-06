@@ -19,8 +19,12 @@ The job is the model `brain/train` with one action, `train`. It trains
 
 ```
 brain serve --models-dir /models --training --artifact-store /shared/artifacts \
-    --openai 0.0.0.0:8788 --api-key-file /etc/brain/key --dbus
+    --openai 0.0.0.0:8788 --api-key-file /etc/brain/key --dbus \
+    --tls-cert /etc/brain/tls/server.crt --tls-key /etc/brain/tls/server.key
 ```
+
+A surface on an address other than loopback needs TLS (see
+[Transport security](../serving/serving.md#transport-security)).
 
 `--training` turns the workload on; it is off otherwise. `--artifact-store DIR`
 names the directory bulk data moves through (below); it must exist. The base is
