@@ -96,7 +96,7 @@ this port:
       streams, as every reference video pipeline does; over the video stream
       alone the head predicts a single quick action (20.7 s) far longer than
       a multi-beat scene (6.7 s).
-- [~] **Real-weight DFR** - `generate_dfr` runs the real checkpoint: the
+- [x] **Real-weight DFR** - `generate_dfr` runs the real checkpoint: the
       `resolve_canvas` layout, half-resolution stage 1 with generated
       keyframe slots (`KeyframeSlots`, `append_keyframe_slots`), the spatial
       upscale of video and slots, and the detailing pass under the
@@ -114,8 +114,19 @@ this port:
       Fixed on the way, for every pipeline: an appended still below
       strength 1 in a seeded stage now starts from `sigma0`-scaled noise,
       and a wholly frozen stream (audio-to-video, video-to-audio, DFR tiles)
-      reads as sigma 0. Open: the `spatial_upscalings = 2` epilogue; the GPU
-      end-to-end tests in `dfr_real` have not run.
+      reads as sigma 0. The `spatial_upscalings = 2` epilogue
+      (`SpatialEpilogue`): carry planes rebuilt through decode, byte
+      quantization, Pillow Lanczos x2 (`imaging::host::resize_lanczos_pil`)
+      and encode; windows on the last round's seams; per-window anchors,
+      opening plane, half-resolution reference and pinned lead-in; and the
+      spatial tile grid (`TiledDenoiser`, `plan_spatial_tiles`), whose kept
+      tokens, normalised positions and blend match `VideoModalityTilingHelper`
+      exactly (`the_epilogue_tiles_and_blends_as_the_reference_does`). Two
+      recorded departures: a window's three detailing steps run as one pass
+      where the reference splits them 1 + 2 with the same conditioning and
+      no re-noise, and with no temporal round the epilogue is one
+      whole-canvas window (the reference's plan raises on an empty seam
+      list there). The GPU end-to-end tests in `dfr_real` have not run.
 - [ ] **Full-depth LTX-2.5 parity** - `ltxv_real_av_dit_full_dump_reference.py`
       dumps the official 48-block audio-visual `LTXModel` (bf16 checkpoint, fp32,
       CPU) on a real prompt's context; `av_dit_full_real::the_production_av_forward_

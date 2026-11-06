@@ -509,6 +509,10 @@ both must be a multiple of 64):
   --temporal-upsample-rounds <N> 0, 1, or 2 temporal x2 rounds, each doubling
                                  the frame rate: N frames come back as
                                  (N - 1) * 2^rounds + 1 (default 0)
+  --spatial-upscalings <N>       1 (default): stage 1 at half the output size;
+                                 2: stage 1 at a quarter, the detailing pass
+                                 and rounds at half, then a spatial epilogue
+                                 at the output size (multiples of 128)
 
 Weights (resolved from the models directory; a flag names one outright):
   --vae <path>                 the causal 3D video VAE
@@ -1582,6 +1586,7 @@ fn dfr(args: &[String]) -> Result<(), String> {
             "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
             "--lora-scale" => crate::args::attach_lora_scale(&mut o.base.adapters, &mut scaled, need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?)?,
             "--temporal-upsample-rounds" => o.temporal_upsample_rounds = num(i, "--temporal-upsample-rounds")?,
+            "--spatial-upscalings" => o.spatial_upscalings = num(i, "--spatial-upscalings")?,
             "--device" => o.base.device = Some(need(i)?.clone()),
             f @ ("--vae" | "--spatial-upsampler" | "--temporal-upsampler" | "--detailing-lora") => {
                 overrides.insert(f.trim_start_matches("--").replace('-', "_"), need(i)?.clone());
@@ -1839,6 +1844,7 @@ mod tests {
             "--adapter",
             "--lora-scale",
             "--temporal-upsample-rounds",
+            "--spatial-upscalings",
             "--device",
             "--vae",
             "--spatial-upsampler",

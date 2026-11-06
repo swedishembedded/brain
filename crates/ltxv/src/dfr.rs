@@ -205,6 +205,92 @@ pub fn audio_for_tile(audio: &[f32], token_dim: usize, pixel_start: usize, local
     Ok(out)
 }
 
+/// One axis interval of a spatial tile split (`ltx_core.tiling.
+/// DimensionInterval`): cells `[start, end)` and the ramps blending it into
+/// its neighbours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AxisInterval {
+    pub start: usize,
+    pub end: usize,
+    pub left_ramp: usize,
+    pub right_ramp: usize,
+}
+
+/// `split_by_size`: tiles of `size` cells sharing `overlap`, the last one
+/// shorter when the axis does not divide evenly.
+fn split_by_size(size: usize, overlap: usize, dim: usize) -> Vec<AxisInterval> {
+    if dim <= size {
+        return vec![AxisInterval { start: 0, end: dim, left_ramp: 0, right_ramp: 0 }];
+    }
+    let amount = (dim + size - 2 * overlap - 1) / (size - overlap);
+    let mut out = vec![AxisInterval { start: 0, end: size, left_ramp: 0, right_ramp: overlap }];
+    for i in 1..amount - 1 {
+        out.push(AxisInterval { start: i * (size - overlap), end: i * (size - overlap) + size, left_ramp: overlap, right_ramp: overlap });
+    }
+    out.push(AxisInterval { start: (amount - 1) * (size - overlap), end: dim, left_ramp: overlap, right_ramp: 0 });
+    out
+}
+
+/// `split_by_count`: `num_tiles` tiles sharing `overlap` cells, the first
+/// `remainder` tiles one cell longer.
+pub fn split_by_count(num_tiles: usize, overlap: usize, dim: usize) -> Result<Vec<AxisInterval>, String> {
+    if num_tiles == 0 || num_tiles > dim {
+        return Err(format!("{num_tiles} tiles cannot split {dim} cells"));
+    }
+    if num_tiles == 1 {
+        return Ok(vec![AxisInterval { start: 0, end: dim, left_ramp: 0, right_ramp: 0 }]);
+    }
+    let total = dim + overlap * (num_tiles - 1);
+    let (size, remainder) = (total / num_tiles, total % num_tiles);
+    if size <= overlap {
+        return Err(format!("{num_tiles} tiles of {size} cells cannot share {overlap} over {dim}"));
+    }
+    Ok(split_by_size(size, overlap, dim - remainder)
+        .into_iter()
+        .enumerate()
+        .map(|(i, iv)| {
+            let (shift, grow) = (i.min(remainder), usize::from(i < remainder));
+            AxisInterval { start: iv.start + shift, end: iv.end + shift + grow, ..iv }
+        })
+        .collect())
+}
+
+/// `compute_trapezoidal_mask_1d`: ones with linear ramps in over
+/// `left_ramp` cells and out over `right_ramp` (neither reaching 0 or 1 at
+/// its end, as `linspace(...)[1:-1]` builds them).
+pub fn trapezoid_mask(iv: &AxisInterval) -> Vec<f32> {
+    let len = iv.end - iv.start;
+    let (l, r) = (iv.left_ramp.min(len), iv.right_ramp.min(len));
+    let mut m = vec![1f32; len];
+    // `torch.linspace(0, 1, l + 2)[1:-1]` and `linspace(1, 0, r + 2)[1:-1]`.
+    let ramp = |n: usize, k: usize| (k as f64 / (n + 1) as f64) as f32;
+    for (k, v) in m[..l].iter_mut().enumerate() {
+        *v *= ramp(l, k + 1);
+    }
+    for (k, v) in m[len - r..].iter_mut().enumerate() {
+        *v *= 1.0 - ramp(r, k + 1);
+    }
+    m
+}
+
+/// The epilogue's spatial tile count along a `cells`-cell latent axis
+/// (`epilogue_tile_count`): the fewest 32-cell tiles overlapping by 2 that
+/// cover it.
+pub fn epilogue_tile_count(cells: usize) -> usize {
+    const TILE: usize = 32;
+    const OVERLAP: usize = 2;
+    cells.saturating_sub(OVERLAP).div_ceil(TILE - OVERLAP).max(1)
+}
+
+/// `clamp_dim_tiling`: a tile count and overlap the axis can hold - one tile
+/// when it is shorter than the count, the overlap clamped to `dim - n`.
+pub fn clamp_axis_tiling(num_tiles: usize, overlap: usize, dim: usize) -> (usize, usize) {
+    if num_tiles <= 1 || dim < num_tiles {
+        return (1, 0);
+    }
+    (num_tiles, overlap.min(dim - num_tiles))
+}
+
 /// Crop `[start, end)` out of a `[c, t, h, w]` row-major (channel-major)
 /// buffer along the `t` axis. Channel-major slicing along a non-outermost
 /// axis is not a contiguous sub-slice (unlike token-major, see

@@ -97,7 +97,8 @@ pub fn manifest() -> Manifest {
         presentation: Default::default(),
         ..t2v.clone()
     }
-    .param(ParamSpec::new("temporal_upsample_rounds", ParamType::Int, "0, 1, or 2 temporal x2 rounds, each doubling the frame rate").default(json!(0)));
+    .param(ParamSpec::new("temporal_upsample_rounds", ParamType::Int, "0, 1, or 2 temporal x2 rounds, each doubling the frame rate").default(json!(0)))
+    .param(ParamSpec::new("spatial_upscalings", ParamType::Int, "1: stage 1 at half the output resolution, the detailing pass at it; 2: stage 1 at a quarter, the detailing pass and temporal rounds at half, then a spatial epilogue at the output resolution (width and height multiples of 128)").default(json!(1)));
 
     let a = crate::pipeline::AudioOpts::default();
     let t2a = ActionSpec::new(
@@ -428,6 +429,7 @@ pub fn clip_action_on(action: &str, paths: &Paths, inv: &Invocation, place: &dyn
 pub struct DfrParams {
     pub gen: GenParams,
     pub temporal_upsample_rounds: usize,
+    pub spatial_upscalings: usize,
 }
 
 /// Decode + validate `dfr`'s params from an invocation - [`gen_params_from`]
@@ -440,11 +442,15 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
     if temporal_upsample_rounds > 2 {
         return Err(format!("temporal_upsample_rounds must be 0, 1, or 2, got {temporal_upsample_rounds}"));
     }
-    let o = &gen.opts;
-    if (gen.named.size) && (!o.width.is_multiple_of(64) || !o.height.is_multiple_of(64)) {
-        return Err(format!("{}x{} is not a multiple of 64 for DFR (stage 1 halves it, and the half must still be a multiple of the VAE's 32 spatial stride)", o.width, o.height));
+    let spatial_upscalings = inv.get_i64("spatial_upscalings").unwrap_or(1).max(1) as usize;
+    if spatial_upscalings > 2 {
+        return Err(format!("spatial_upscalings must be 1 or 2, got {spatial_upscalings}"));
     }
-    Ok(DfrParams { gen, temporal_upsample_rounds })
+    let (o, divisor) = (&gen.opts, 32usize << spatial_upscalings);
+    if gen.named.size && (!o.width.is_multiple_of(divisor) || !o.height.is_multiple_of(divisor)) {
+        return Err(format!("{}x{} is not a multiple of {divisor} for DFR at {spatial_upscalings} spatial upscaling(s)", o.width, o.height));
+    }
+    Ok(DfrParams { gen, temporal_upsample_rounds, spatial_upscalings })
 }
 
 /// Run one DFR generation and wrap the result as a video-output [`Outcome`] -
@@ -453,7 +459,7 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
 pub fn dfr_on(paths: &Paths, inv: &Invocation, p: &DfrParams, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
     let base = resolved_opts(paths, &prompt, &p.gen)?;
-    let opts = DfrOpts { base, temporal_upsample_rounds: p.temporal_upsample_rounds };
+    let opts = DfrOpts { base, temporal_upsample_rounds: p.temporal_upsample_rounds, spatial_upscalings: p.spatial_upscalings };
     let (video, timings) = crate::pipeline::generate_dfr(paths, &prompt, &opts, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
     Ok(video_outcome(&video, &timings, opts.base.seed))
 }
@@ -782,6 +788,7 @@ mod tests {
         let mut want = names(t2v);
         want.retain(|n| n != "dit_config");
         want.push("temporal_upsample_rounds".into());
+        want.push("spatial_upscalings".into());
         assert_eq!(names(dfr), want, "dfr takes t2v's parameters on the real checkpoint, plus its rounds");
         let outputs = |a: &ActionSpec| a.outputs.iter().map(|b| (b.name.clone(), b.required)).collect::<Vec<_>>();
         assert_eq!(outputs(dfr), outputs(t2v), "dfr returns what t2v does, sound included");

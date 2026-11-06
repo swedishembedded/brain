@@ -7007,6 +7007,11 @@ pub struct DfrOpts {
     pub base: GenOpts,
     /// 0, 1 or 2 temporal x2 rounds, each doubling the frame rate.
     pub temporal_upsample_rounds: usize,
+    /// 1 or 2 (`spatial_upscalings`): 1 runs stage 1 at half the output
+    /// resolution and the detailing pass at it; 2 runs stage 1 at a quarter,
+    /// the detailing pass and the temporal rounds at half, then the spatial
+    /// epilogue at the output resolution. `0` reads as 1.
+    pub spatial_upscalings: usize,
 }
 
 /// DFR text to video on the real checkpoint (`DFRPipeline.__call__`):
@@ -7045,8 +7050,13 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
     }
     let detailing = paths.detailing_lora.clone().ok_or("DFR's detailing pass needs the Refine-Details IC-LoRA (ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors): put it in the model store or pass --detailing-lora <path>")?;
     let upsampler_path = paths.spatial_upsampler.as_deref().ok_or("DFR needs the spatial x2 latent upscaler: put it in the model store or pass --spatial-upsampler <path>")?;
-    if !base.width.is_multiple_of(64) || !base.height.is_multiple_of(64) {
-        return Err(format!("{}x{} is not a multiple of 64 for DFR (stage 1 halves it, and the half must still be a multiple of the VAE's 32 spatial stride)", base.width, base.height));
+    let spatial = o.spatial_upscalings.max(1);
+    if spatial > 2 {
+        return Err(format!("spatial_upscalings must be 1 or 2, got {spatial}"));
+    }
+    let divisor = 32 << spatial;
+    if !base.width.is_multiple_of(divisor) || !base.height.is_multiple_of(divisor) {
+        return Err(format!("{}x{} is not a multiple of {divisor} for DFR at {spatial} spatial upscaling(s) (stage 1 runs at 1/{} of it, which must still be a multiple of the VAE's 32 spatial stride)", base.width, base.height, 1 << spatial));
     }
     check_audio_request(paths, base)?;
     let vcfg = LtxVaeConfig::conv25();
@@ -7063,7 +7073,7 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
     let sigmas1: Vec<f64> = LTX2_DISTILLED_SIGMAS.iter().map(|&s| s as f64).collect();
     let sigmas2 = stage2_sigmas(LTX2_STAGE2_STEPS)?;
     let rounds = o.temporal_upsample_rounds;
-    let total = (sigmas1.len() - 1 + sigmas2.len() - 1) as u32 + rounds as u32 + 3;
+    let total = (sigmas1.len() - 1 + sigmas2.len() - 1) as u32 + rounds as u32 + u32::from(o.spatial_upscalings == 2) + 3;
     let mut timings = Timings::default();
     let place = o1.devices.resolve(o1.device.as_deref());
 
@@ -7091,7 +7101,8 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
         reference: None,
     };
     let denoise_t = Instant::now();
-    let (w1, h1) = (base.width / 2, base.height / 2);
+    let (w1, h1) = (base.width >> spatial, base.height >> spatial);
+    let (w2, h2) = (base.width >> (spatial - 1), base.height >> (spatial - 1));
     let stage1 = denoise_stage(
         &stage_ctx,
         Stage {
@@ -7138,8 +7149,8 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
             lat_t,
             lh1,
             lw1,
-            width: base.width,
-            height: base.height,
+            width: w2,
+            height: h2,
             sigmas: &sigmas2,
             eta: o1.eta,
             context: None,
@@ -7150,26 +7161,51 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
         total,
         &mut progress,
     )?;
-    drop(detailing_dit);
-    let (lh, lw) = (base.height / 32, base.width / 32);
+    let (lh, lw) = (h2 / 32, w2 / 32);
     let stage2_keyframes = stage2.slots_chw.ok_or("DFR stage 2 returned no keyframe slots")?;
     let plane = in_channels * lh * lw;
     let mut keyframes: std::collections::BTreeMap<usize, Vec<f32>> = slot_frames.iter().enumerate().map(|(i, &p)| (p, dfr::slice_time_chw(&stage2_keyframes, in_channels, slot_frames.len(), lh, lw, i, i + 1))).collect();
     debug_assert!(keyframes.values().all(|k| k.len() == plane));
     let (mut video_chw, mut frames) = (stage2.video_chw, canvas_frames);
+    // The last round's seams - the epilogue cuts its windows on them.
+    let mut seams: Vec<usize> = Vec::new();
     if rounds > 0 {
+        let mut keyframes_before_round = Vec::new();
         let temporal = crate::import::import_upsampler(read_any(paths.temporal_upsampler.as_deref().expect("checked above"))?, &LatentUpsamplerConfig::temporal_x2())?;
-        let round_ctx = TemporalRounds { sc: &stage_ctx, base, temporal: &temporal, stage1_audio: stage1.audio.as_deref(), source_seconds: canvas_frames as f64 / o1.fps as f64, lh, lw };
+        let round_ctx = TemporalRounds { sc: &stage_ctx, base, temporal: &temporal, stage1_audio: stage1.audio.as_deref(), source_seconds: canvas_frames as f64 / o1.fps as f64, width: w2, height: h2 };
         for round in 1..=rounds {
             if cancel.is_cancelled() {
                 return Err("cancelled".into());
             }
             progress(sigmas1.len() as u32 + sigmas2.len() as u32 - 1 + round as u32, total, &format!("temporal round {round}"));
+            keyframes_before_round = keyframes.keys().map(|&p| 2 * p).collect();
             (video_chw, keyframes) = round_ctx.run(round, &video_chw, &keyframes, frames)?;
             frames = 2 * (frames - 1) + 1;
         }
+        seams = keyframes_before_round;
     }
-    drop(dit);
+    // The rounds' checkpoint view is done; its weights stay in the host cache
+    // the epilogue's detailing view shares.
+    dit.release_devices();
+    let (lh, lw) = if spatial == 2 {
+        progress(total - 2, total, "spatial epilogue");
+        let epilogue = SpatialEpilogue {
+            sc: &StageCtx { dit: detailing_dit.as_ref(), ..stage_ctx },
+            base,
+            upsampler_path,
+            stage1_audio: stage1.audio.as_deref(),
+            source_seconds: canvas_frames as f64 / o1.fps as f64,
+            downscale,
+            rounds,
+            half: (h2, w2),
+            arch: varch,
+        };
+        video_chw = epilogue.run(&video_chw, &keyframes, frames, &seams)?;
+        (base.height / 32, base.width / 32)
+    } else {
+        (lh, lw)
+    };
+    drop(detailing_dit);
     timings.denoise = denoise_t.elapsed().as_secs_f32();
     timings.steps = sigmas1.len() + sigmas2.len() - 2;
     timings.tokens = lat_t * (base.height / 32) * (base.width / 32);
@@ -7246,8 +7282,9 @@ struct TemporalRounds<'a> {
     stage1_audio: Option<&'a [f32]>,
     /// Stage 1's clip length - the timeline the soundtrack spans.
     source_seconds: f64,
-    lh: usize,
-    lw: usize,
+    /// The resolution the rounds run at - the detailing pass's.
+    width: usize,
+    height: usize,
 }
 
 /// `TEMPORAL_ANCESTRAL_ETA`: each tile densifies with ancestral Euler at
@@ -7271,7 +7308,7 @@ impl TemporalRounds<'_> {
     /// seams plus every new slot).
     #[allow(clippy::type_complexity)]
     fn run(&self, round: usize, video_chw: &[f32], keyframes: &std::collections::BTreeMap<usize, Vec<f32>>, frames: usize) -> Result<(Vec<f32>, std::collections::BTreeMap<usize, Vec<f32>>), String> {
-        let (sc, base, c, lh, lw) = (self.sc, self.base, self.sc.in_channels, self.lh, self.lw);
+        let (sc, base, c, lh, lw) = (self.sc, self.base, self.sc.in_channels, self.height / 32, self.width / 32);
         let scale = dfr::VIDEO_TEMPORAL_SCALE;
         let cur_t = (frames - 1) / scale + 1;
         let tup = LatentUpsampler::build(&LatentUpsamplerConfig::temporal_x2(), self.temporal, cur_t as u32, lh as u32, lw as u32, base.device.as_deref());
@@ -7337,8 +7374,8 @@ impl TemporalRounds<'_> {
                 &tile_sc,
                 Stage {
                     mask: None,
-                    width: base.width,
-                    height: base.height,
+                    width: self.width,
+                    height: self.height,
                     sigmas: &sigmas,
                     eta: TEMPORAL_ANCESTRAL_ETA,
                     seed_chw: Some(&tile_chw),
@@ -7380,6 +7417,339 @@ fn concat_time_chw(parts: &[(&[f32], usize)], c: usize, hw: usize) -> Vec<f32> {
     }
     out
 }
+
+/// One spatial tile of a tiled denoise (`VideoModalityTilingHelper`'s
+/// per-tile plan): which tokens of the full sequence it runs - its own
+/// generated cells, then every conditioning token whose span overlaps it in
+/// all three axes or starts before time 0 - their positions shifted so the
+/// tile's generated cells start at 0, and the weights its prediction blends
+/// back with.
+struct TilePlan {
+    keep: Vec<usize>,
+    generated: usize,
+    /// One per generated token: the tile's separable trapezoidal mask.
+    gen_weights: Vec<f32>,
+    /// One per kept conditioning token: `1 / tiles keeping it`.
+    cond_weights: Vec<f32>,
+    /// `[3, keep.len(), 2]`.
+    positions: Vec<f32>,
+}
+
+/// Plan every tile of a spatial split of the `(f, h, w)` generated grid at
+/// the head of a `total_t`-token sequence with `[3, total_t, 2]` positions:
+/// one temporal tile, `split_by_count` on each spatial axis.
+fn plan_spatial_tiles(f: usize, h: usize, w: usize, (tiles_h, tiles_w, overlap): (usize, usize, usize), positions: &[f32], total_t: usize) -> Result<Vec<TilePlan>, String> {
+    let (th, oh) = dfr::clamp_axis_tiling(tiles_h, overlap, h);
+    let (tw, ow) = dfr::clamp_axis_tiling(tiles_w, overlap, w);
+    let (hs, ws) = (dfr::split_by_count(th, oh, h)?, dfr::split_by_count(tw, ow, w)?);
+    let gen_t = f * h * w;
+    let pos = |axis: usize, tok: usize, k: usize| positions[(axis * total_t + tok) * 2 + k];
+    let mut gen_sets = Vec::new();
+    for hi in &hs {
+        for wi in &ws {
+            let (mh, mw) = (dfr::trapezoid_mask(hi), dfr::trapezoid_mask(wi));
+            let mut idx = Vec::new();
+            let mut weights = Vec::new();
+            for fi in 0..f {
+                for (y, &my) in (hi.start..hi.end).zip(&mh) {
+                    for (x, &mx) in (wi.start..wi.end).zip(&mw) {
+                        idx.push((fi * h + y) * w + x);
+                        weights.push(my * mx);
+                    }
+                }
+            }
+            gen_sets.push((idx, weights));
+        }
+    }
+    let cond: Vec<usize> = (gen_t..total_t).collect();
+    let keeps: Vec<Vec<bool>> = gen_sets
+        .iter()
+        .map(|(idx, _)| {
+            let lo = |axis: usize| idx.iter().map(|&t| pos(axis, t, 0)).fold(f32::INFINITY, f32::min);
+            let hi = |axis: usize| idx.iter().map(|&t| pos(axis, t, 1)).fold(f32::NEG_INFINITY, f32::max);
+            let bounds: Vec<(f32, f32)> = (0..3).map(|a| (lo(a), hi(a))).collect();
+            cond.iter().map(|&t| pos(0, t, 0) < 0.0 || (0..3).all(|a| pos(a, t, 0) < bounds[a].1 && pos(a, t, 1) > bounds[a].0)).collect()
+        })
+        .collect();
+    let keepers: Vec<f32> = (0..cond.len()).map(|j| keeps.iter().filter(|k| k[j]).count() as f32).collect();
+    Ok(gen_sets
+        .into_iter()
+        .zip(&keeps)
+        .map(|((idx, gen_weights), keep_cond)| {
+            let generated = idx.len();
+            let mut keep = idx;
+            let mut cond_weights = Vec::new();
+            for (j, &t) in cond.iter().enumerate() {
+                if keep_cond[j] {
+                    keep.push(t);
+                    cond_weights.push(1.0 / keepers[j]);
+                }
+            }
+            let n = keep.len();
+            let mut p = vec![0f32; 3 * n * 2];
+            for axis in 0..3 {
+                let offset = keep[..generated].iter().map(|&t| pos(axis, t, 0)).fold(f32::INFINITY, f32::min);
+                for (i, &t) in keep.iter().enumerate() {
+                    for k in 0..2 {
+                        p[(axis * n + i) * 2 + k] = pos(axis, t, k) - offset;
+                    }
+                }
+            }
+            TilePlan { keep, generated, gen_weights, cond_weights, positions: p }
+        })
+        .collect())
+}
+
+/// Accumulate one tile's `[keep.len(), dim]` prediction into the full
+/// `[total_t, dim]` sequence with the plan's weights (`helper.blend`).
+fn blend_tile(out: &mut [f32], plan: &TilePlan, prediction: &[f32], dim: usize) {
+    for (i, &t) in plan.keep.iter().enumerate() {
+        let w = if i < plan.generated { plan.gen_weights[i] } else { plan.cond_weights[i - plan.generated] };
+        for (o, &p) in out[t * dim..(t + 1) * dim].iter_mut().zip(&prediction[i * dim..(i + 1) * dim]) {
+            *o += p * w;
+        }
+    }
+}
+
+/// A [`Denoiser`] evaluated over spatial tiles and blended back
+/// (`TiledDiffusionModel`): every forward runs the inner denoiser once per
+/// tile on that tile's tokens and blends the velocities - the same as
+/// blending x0, every tile seeing the same per-token timesteps and the
+/// weights summing to 1. Audio sees the whole stream in every tile; its
+/// prediction is the tiles' mean.
+struct TiledDenoiser<'a> {
+    inner: &'a dyn Denoiser,
+    /// `(frames, height, width)` of the generated grid at the head of every
+    /// sequence this denoiser is handed.
+    grid: (usize, usize, usize),
+    /// `(tiles along height, tiles along width, overlap)`.
+    split: (usize, usize, usize),
+    channels: usize,
+}
+
+impl TiledDenoiser<'_> {
+    fn plans(&self, i: &StepInputs) -> Vec<TilePlan> {
+        let (f, h, w) = self.grid;
+        plan_spatial_tiles(f, h, w, self.split, i.positions, i.t).expect("the epilogue's tile grid fits its own latent")
+    }
+
+    /// One tile's per-token inputs, gathered from the full step's.
+    fn gather(&self, i: &StepInputs, plan: &TilePlan) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let c = self.channels;
+        let latent = plan.keep.iter().flat_map(|&t| i.latent[t * c..(t + 1) * c].iter().copied()).collect();
+        let timesteps = plan.keep.iter().map(|&t| i.timesteps[t]).collect();
+        let keyframes = plan.keep.iter().map(|&t| i.keyframes_mask[t]).collect();
+        (latent, timesteps, keyframes)
+    }
+}
+
+impl Denoiser for TiledDenoiser<'_> {
+    fn forward(&self, i: &StepInputs, context: Caption) -> Vec<f32> {
+        assert!(i.reference_attention.is_none(), "a tiled denoise carries no weighted reference attention");
+        let mut out = vec![0f32; i.latent.len()];
+        for plan in self.plans(i) {
+            let (latent, timesteps, keyframes_mask) = self.gather(i, &plan);
+            let step = StepInputs { latent: &latent, timesteps: &timesteps, positions: &plan.positions, keyframes_mask: &keyframes_mask, t: plan.keep.len(), ..*i };
+            blend_tile(&mut out, &plan, &self.inner.forward(&step, context), self.channels);
+        }
+        out
+    }
+
+    fn has_audio(&self) -> bool {
+        self.inner.has_audio()
+    }
+
+    fn forward_av(&self, i: &StepInputs, a: &AudioInputs, context: Caption, a_context: Caption) -> (Vec<f32>, Vec<f32>) {
+        assert!(i.reference_attention.is_none(), "a tiled denoise carries no weighted reference attention");
+        let plans = self.plans(i);
+        let mut out = vec![0f32; i.latent.len()];
+        let mut audio = vec![0f32; a.latent.len()];
+        for plan in &plans {
+            let (latent, timesteps, keyframes_mask) = self.gather(i, plan);
+            let step = StepInputs { latent: &latent, timesteps: &timesteps, positions: &plan.positions, keyframes_mask: &keyframes_mask, t: plan.keep.len(), ..*i };
+            let (v, av) = self.inner.forward_av(&step, a, context, a_context);
+            blend_tile(&mut out, plan, &v, self.channels);
+            audio.iter_mut().zip(&av).for_each(|(o, x)| *o += x / plans.len() as f32);
+        }
+        (out, audio)
+    }
+
+    fn release_devices(&self) {
+        self.inner.release_devices();
+    }
+}
+
+/// DFR's spatial epilogue (`run_spatial_epilogue`, `spatial_upscalings =
+/// 2`): one more detailing pass at the output resolution, per temporal
+/// window of the last round's seams.
+struct SpatialEpilogue<'a> {
+    /// The detailing stage context - the checkpoint under the request's
+    /// adapters and the detailing IC-LoRA.
+    sc: &'a StageCtx<'a>,
+    base: &'a GenOpts,
+    upsampler_path: &'a str,
+    stage1_audio: Option<&'a [f32]>,
+    source_seconds: f64,
+    /// The detailing IC-LoRA's `reference_downscale_factor`.
+    downscale: usize,
+    rounds: usize,
+    /// The `(height, width)` the epilogue's input runs at - half the output.
+    half: (usize, usize),
+    /// The video VAE the planes are decoded through.
+    arch: VideoVaeArch,
+}
+
+/// `EPILOGUE_KEYFRAME_STRENGTH`: the epilogue holds its rebuilt keyframes
+/// exactly.
+const EPILOGUE_KEYFRAME_STRENGTH: f32 = 1.0;
+
+impl SpatialEpilogue<'_> {
+    /// One keyframe plane carried to the output resolution
+    /// (`_rebuild_carry_keyframes`): decoded as a one-frame clip, quantized
+    /// to bytes, stretched x2 with Pillow's Lanczos, encoded again.
+    fn rebuild_plane(&self, plane: &[f32]) -> Result<Vec<f32>, String> {
+        let (sc, (h, w)) = (self.sc, self.half);
+        let (pixels, _) = decode_video(sc.vcfg, self.arch, sc.vweights, 1, (h / 32) as u32, (w / 32) as u32, plane, self.base)?;
+        let plane_px = h * w;
+        let mut px = vec![0u8; plane_px * 3];
+        for c in 0..3 {
+            for i in 0..plane_px {
+                // `rgb_to_uint8_fhwc`: `[0, 1]` bytes, rounded.
+                px[i * 3 + c] = (((pixels[c * plane_px + i] + 1.0) / 2.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+        let stretched = imaging::host::resize_lanczos_pil(&imaging::Rgb8 { w: w as u32, h: h as u32, px }, 2 * w, 2 * h);
+        let (h2, w2) = (2 * h, 2 * w);
+        let mut chw = vec![0f32; 3 * h2 * w2];
+        for (i, rgb) in stretched.px.as_chunks::<3>().0.iter().enumerate() {
+            for c in 0..3 {
+                chw[c * h2 * w2 + i] = rgb[c] as f32 / 127.5 - 1.0;
+            }
+        }
+        Ok(LtxVaeEncoder::build(sc.vcfg, sc.vweights, 1, h2 as u32, w2 as u32, self.base.device.as_deref()).encode(&chw))
+    }
+
+    /// The whole pass: rebuild every carry plane (plus the clip's own first
+    /// frame when no still holds frame 0), upscale the video, cut it into
+    /// windows on `seams` and detail each - its keyframes and the opening
+    /// plane held, the half-resolution video as its reference, a non-first
+    /// window starting on its prefix plane with the previous window's cells
+    /// pinned, the stage-1 soundtrack frozen beside it - over the spatial
+    /// tile grid the output resolution needs. Returns the output-resolution
+    /// canvas latent.
+    fn run(&self, video_chw: &[f32], keyframes: &std::collections::BTreeMap<usize, Vec<f32>>, frames: usize, seams: &[usize]) -> Result<Vec<f32>, String> {
+        let (sc, base, c) = (self.sc, self.base, self.sc.in_channels);
+        let scale = dfr::VIDEO_TEMPORAL_SCALE;
+        let canvas_t = (frames - 1) / scale + 1;
+        let ((h, w), (lh, lw)) = (self.half, (base.height / 32, base.width / 32));
+        let (hh, hw) = (h / 32, w / 32);
+        let planes: std::collections::BTreeMap<usize, Vec<f32>> = keyframes.iter().map(|(&p, k)| Ok((p, self.rebuild_plane(k)?))).collect::<Result<_, String>>()?;
+        let opening = match &base.start_frame {
+            Some(_) => None,
+            None => Some(self.rebuild_plane(&dfr::slice_time_chw(video_chw, c, canvas_t, hh, hw, 0, 1))?),
+        };
+        tracing::info!(planes = planes.len(), opening = opening.is_some(), "epilogue keyframes rebuilt at the output resolution");
+        let scfg = LatentUpsamplerConfig::spatial_x2();
+        let ups = LatentUpsampler::build(&scfg, SpatialUpsampler::default().get(self.upsampler_path)?, canvas_t as u32, hh as u32, hw as u32, base.device.as_deref());
+        let (pc_mean, pc_std) = crate::vae3d::per_channel_statistics(sc.vweights);
+        let upscaled = crate::upsampler::upsample_video(&ups, &pc_mean, &pc_std, video_chw);
+        drop(ups);
+        // With no temporal round there are no seams; the epilogue is then one
+        // window over the whole canvas (the reference's own plan rejects an
+        // empty seam list).
+        let windows = if seams.is_empty() {
+            vec![dfr::TemporalTile { start: 0, end: canvas_t, pixel_start: 0, pixel_end: frames - 1, anchors: Vec::new(), slots: Vec::new() }]
+        } else {
+            dfr::temporal_tile_plan(seams, frames, 1 << self.rounds, scale)?
+        };
+        let playback_fps = (base.fps << self.rounds) as f64;
+        let cond_fps = dfr::conditioning_fps(playback_fps);
+        let sigmas = stage2_sigmas(LTX2_STAGE2_STEPS)?;
+        let split = (dfr::epilogue_tile_count(lh), dfr::epilogue_tile_count(lw), 2);
+        let mut previous: Option<(usize, Vec<f32>, usize)> = None;
+        let mut owned = Vec::with_capacity(windows.len());
+        for (wi, window) in windows.iter().enumerate() {
+            let prefix = (wi > 0).then(|| dfr::tile_prefix((window.start - 1) * scale, planes.keys().copied(), scale)).transpose()?;
+            let (latent_in, window_t, reference, origin, resume, pinned) = match prefix {
+                None => (dfr::slice_time_chw(&upscaled, c, canvas_t, lh, lw, window.start, window.end), window.end - window.start, dfr::slice_time_chw(video_chw, c, canvas_t, hh, hw, window.start, window.end), window.pixel_start, 0, 0),
+                Some(p) => {
+                    let run = dfr::slice_time_chw(&upscaled, c, canvas_t, lh, lw, p.video_start_cell, window.end);
+                    let t = 1 + window.end - p.video_start_cell;
+                    let latent = concat_time_chw(&[(&planes[&p.keyframe_position], 1), (&run, t - 1)], c, lh * lw);
+                    (latent, t, dfr::slice_time_chw(video_chw, c, canvas_t, hh, hw, p.video_start_cell - 1, window.end), p.keyframe_position, p.resume_pixel, p.cells)
+                }
+            };
+            let ref_t = reference.len() / (c * hh * hw);
+            let local_frames = (window_t - 1) * scale + 1;
+            let window_opts = GenOpts { frames: local_frames, fps: cond_fps as usize, ..dfr_window_stills(base, base.frames, 1 << self.rounds, origin, window.pixel_end, resume) };
+            let mut anchor_frames: Vec<usize> = planes.keys().copied().filter(|&p| (origin..=window.pixel_end).contains(&p) && p >= resume).collect();
+            let mut anchor_parts: Vec<(&[f32], usize)> = anchor_frames.iter().map(|p| (planes[p].as_slice(), 1)).collect();
+            if let (Some(op), None) = (&opening, prefix) {
+                anchor_frames.push(origin);
+                anchor_parts.push((op.as_slice(), 1));
+            }
+            for f in &mut anchor_frames {
+                *f -= origin;
+            }
+            let anchor_chw = concat_time_chw(&anchor_parts, c, lh * lw);
+            let carried = match (prefix, &previous) {
+                (Some(p), Some((base_cell, prev, prev_t))) => {
+                    let offset = p.video_start_cell.checked_sub(*base_cell).filter(|o| o + p.cells - 1 <= *prev_t).ok_or_else(|| format!("epilogue window {wi}'s pinned cells fall outside the previous window"))?;
+                    let cells = dfr::slice_time_chw(prev, c, *prev_t, lh, lw, offset, offset + p.cells - 1);
+                    Some(concat_time_chw(&[(&planes[&p.keyframe_position], 1), (&cells, p.cells - 1)], c, lh * lw))
+                }
+                _ => None,
+            };
+            let audio = match self.stage1_audio {
+                None => None,
+                Some(a) => {
+                    let tokens = crate::audio::latent_frames(local_frames, cond_fps as usize);
+                    let window = dfr::audio_for_tile(a, crate::audio::TOKEN_DIM as usize, origin, local_frames, playback_fps, self.source_seconds, tokens)?;
+                    Some(AudioStage { latent: window.clone(), context: Vec::new(), frozen: Some((vec![0f32; tokens], window)) })
+                }
+            };
+            let tiled = TiledDenoiser { inner: sc.dit, grid: (window_t, lh, lw), split, channels: c };
+            let window_sc = StageCtx {
+                dit: if split.0 * split.1 > 1 { &tiled } else { sc.dit },
+                lat_t: window_t,
+                o: &window_opts,
+                reference: Some(StageReference::Latent { chw: &reference, dims: (ref_t, hh, hw), downscale: self.downscale }),
+                ..*sc
+            };
+            tracing::info!(window = wi, of = windows.len(), origin, pinned, resume, anchors = ?anchor_frames, tiles = split.0 * split.1, "epilogue window");
+            let out = denoise_stage(
+                &window_sc,
+                Stage {
+                    mask: None,
+                    width: base.width,
+                    height: base.height,
+                    sigmas: &sigmas,
+                    eta: base.eta,
+                    seed_chw: Some(&latent_in),
+                    context: carried.as_deref().map(|chw| LatentContext { chw, frames: pinned }),
+                    seed_salt: DFR_EPILOGUE_SEED_SALT ^ (100 * wi as u64),
+                    done_before: 0,
+                    label: "dfr epilogue window",
+                    audio,
+                    slots: None,
+                    anchors: (!anchor_frames.is_empty()).then_some(LatentAnchors { pixel_frames: &anchor_frames, chw: &anchor_chw, strength: EPILOGUE_KEYFRAME_STRENGTH }),
+                },
+                0,
+                &mut |_, _, _: &str| {},
+            )?;
+            owned.push((dfr::slice_time_chw(&out.video_chw, c, window_t, lh, lw, pinned, window_t), window_t - pinned));
+            previous = Some((prefix.map_or(window.start, |p| p.video_start_cell - 1), out.video_chw, window_t));
+        }
+        let stitched = concat_time_chw(&owned.iter().map(|(v, t)| (v.as_slice(), *t)).collect::<Vec<_>>(), c, lh * lw);
+        if stitched.len() != c * canvas_t * lh * lw {
+            return Err(format!("the epilogue's windows hold {} latent frames, expected {canvas_t}", stitched.len() / (c * lh * lw)));
+        }
+        Ok(stitched)
+    }
+}
+
+/// Folded into every DFR epilogue window's noise, beside its window.
+const DFR_EPILOGUE_SEED_SALT: u64 = 0x4446_5245; // "DFRE"
 
 /// Folded into every DFR temporal tile's noise, beside its round and tile.
 const DFR_ROUND_SEED_SALT: u64 = 0x4446_5254; // "DFRT"
@@ -8341,6 +8711,46 @@ mod tests {
         let out_tokens = crate::audio::latent_frames(local_frames, fps as usize);
         let audio = crate::dfr::audio_for_tile(&stage1, dim, pixel_start, local_frames, run["playback_fps"].as_f64().unwrap(), canvas as f64 / stage_fps as f64, out_tokens).unwrap();
         close("tile audio", &audio, &chw_to_tc(&get("tile.audio"), 8, out_tokens, 1, 16));
+    }
+
+    /// The spatial epilogue's tiling against `tools/goldens/
+    /// ltxv_dfr_tiling_dump_reference.py`'s live run of the reference's
+    /// `VideoModalityTilingHelper`: a 40-cell-tall conditioned state split as
+    /// `_run_epilogue_windows` splits it - every tile's kept tokens, its
+    /// normalised positions and keyframes mask, and the blend of the tiles'
+    /// predictions back into the full sequence.
+    #[test]
+    fn the_epilogue_tiles_and_blends_as_the_reference_does() {
+        let dir = brain_testutil::testdata("golden/ltxv/dfr_tiling");
+        let Ok(text) = std::fs::read_to_string(format!("{dir}/dfr_tiling.json")) else {
+            brain_testutil::skip(&format!("{dir} absent - run tools/goldens/ltxv_dfr_tiling_dump_reference.py"));
+            return;
+        };
+        let run: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let fx = checkpoint::safetensors::read(&format!("{dir}/dfr_tiling.safetensors")).expect("read golden");
+        let get = |n: &str| fx.iter().find(|t| t.name == n).unwrap_or_else(|| panic!("no golden {n}")).data.clone();
+        let cells: Vec<usize> = run["cells"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let (f, h, w) = (cells[0], cells[1], cells[2]);
+        let positions = get("positions");
+        let total_t = positions.len() / 6;
+        let split = (crate::dfr::epilogue_tile_count(h), crate::dfr::epilogue_tile_count(w), 2);
+        let plans = plan_spatial_tiles(f, h, w, split, &positions, total_t).unwrap();
+        assert_eq!(plans.len(), run["tiles"].as_array().unwrap().len());
+        let (c, keyframes_mask) = (128usize, get("keyframes_mask"));
+        let mut out = vec![0f32; total_t * c];
+        for (ti, plan) in plans.iter().enumerate() {
+            let keep: Vec<usize> = get(&format!("tile{ti}.keep")).iter().map(|&k| k as usize).collect();
+            assert_eq!(plan.keep, keep, "tile {ti}'s tokens");
+            let want = get(&format!("tile{ti}.positions"));
+            let worst = plan.positions.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+            assert!(plan.positions.len() == want.len() && worst <= 1e-5, "tile {ti}'s positions: max |diff| {worst}");
+            let km: Vec<f32> = plan.keep.iter().map(|&t| keyframes_mask[t]).collect();
+            assert_eq!(km, get(&format!("tile{ti}.keyframes_mask")), "tile {ti}'s keyframes mask");
+            blend_tile(&mut out, plan, &get(&format!("tile{ti}.prediction")), c);
+        }
+        let want = get("blended");
+        let worst = out.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst <= 1e-5, "blended prediction: max |diff| {worst}");
     }
 
     /// A prompt is framed RIGHT-padded, as the reference's connector reads

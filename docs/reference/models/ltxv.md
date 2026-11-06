@@ -36,7 +36,7 @@ per component and the open gaps.
 | Guidance | [x] the reference's multimodal guider: CFG, STG, rescale and isolated-modality guidance per stream, `--guidance-preset reference` (see "Guidance and samplers") |
 | Samplers | [x] ancestral Euler (the distilled pipeline's) and res_2s (the reference's high-quality pipeline's), `--sampler` |
 | Post-hoc upscale | [x] `brain ltxv upscale` / the `upscale` action |
-| DFR | [~] `brain ltxv dfr` on the real checkpoint: keyframe-segment canvas, half-resolution stage 1 with generated keyframe slots, spatial upscale, the detailing pass under the Refine-Details IC-LoRA and 0-2 temporal rounds; the spatial epilogue (`spatial_upscalings = 2`) is not available yet |
+| DFR | [x] `brain ltxv dfr` on the real checkpoint: keyframe-segment canvas, stage 1 with generated keyframe slots, spatial upscale, the detailing pass under the Refine-Details IC-LoRA, 0-2 temporal rounds and the spatial epilogue (`--spatial-upscalings 2`) |
 | LoRA inference | [x] `--adapter <path>` (repeatable): ComfyUI/PEFT `.safetensors` from the official trainer, published IC-LoRAs (with `--reference-video`), or brain-trained adapters, applied beside the int8 weights |
 | LoRA / full fine-tune | [~] video-only DiT; the audio-visual DiT has no training support |
 | CLI | [x] `brain ltxv {t2v,t2a,v2v,extend,upscale,dfr}` |
@@ -426,7 +426,17 @@ splits it into keyframe-seam tiles and densifies each - its seams held as
 keyframes, a new keyframe generated mid-segment, a later tile starting on
 the keyframe before its seam with the earlier tile's frames pinned, the
 stage-1 soundtrack frozen beside it. A request of `N` frames comes back as
-`(N - 1) * 2^rounds + 1` frames at `fps * 2^rounds`:
+`(N - 1) * 2^rounds + 1` frames at `fps * 2^rounds`.
+
+`--spatial-upscalings 2` adds one more detailing pass at the output size:
+stage 1 runs at a quarter of it, the detailing pass and the rounds at half,
+and the epilogue rebuilds every keyframe at the output size (decoded,
+stretched x2 with Lanczos, encoded again), upscales the clip, and details it
+window by window on the last round's seams - each window holding its
+keyframes, with the half-size clip as its reference, the earlier window's
+frames pinned, and spatial tiles of 32 latent cells (1024 px) blended after
+every step on a side longer than that. The size must then be a multiple of
+128:
 
 ```bash
 brain pull https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details/blob/main/ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors

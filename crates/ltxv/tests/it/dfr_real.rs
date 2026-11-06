@@ -29,7 +29,7 @@ fn a_dfr_clip_on_real_weights_comes_back_whole() {
         return;
     }
     let base = ltxv::pipeline::GenOpts { dit_config: "ltx25_22b".into(), frames: 33, width: 256, height: 128, fps: 24, audio: true, seed: 11, ..Default::default() };
-    let o = ltxv::pipeline::DfrOpts { base, temporal_upsample_rounds: 0 };
+    let o = ltxv::pipeline::DfrOpts { base, temporal_upsample_rounds: 0, spatial_upscalings: 1 };
     let t0 = std::time::Instant::now();
     let (video, timings) = ltxv::pipeline::generate_dfr(&paths, "a red kite climbs over a windy beach", &o, &Default::default(), |_, _, _| {}).unwrap_or_else(|e| panic!("generate_dfr: {e}"));
     eprintln!("DFR 33 frames at 256x128 with sound: {:.1} s ({timings:?})", t0.elapsed().as_secs_f64());
@@ -61,7 +61,7 @@ fn a_dfr_temporal_round_on_real_weights_doubles_the_clip() {
         return;
     }
     let base = ltxv::pipeline::GenOpts { dit_config: "ltx25_22b".into(), frames: 49, width: 128, height: 128, fps: 24, audio: true, seed: 12, ..Default::default() };
-    let o = ltxv::pipeline::DfrOpts { base, temporal_upsample_rounds: 1 };
+    let o = ltxv::pipeline::DfrOpts { base, temporal_upsample_rounds: 1, spatial_upscalings: 1 };
     let t0 = std::time::Instant::now();
     let (video, _) = ltxv::pipeline::generate_dfr(&paths, "waves roll onto a pebble beach", &o, &Default::default(), |_, _, _| {}).unwrap_or_else(|e| panic!("generate_dfr: {e}"));
     eprintln!("DFR 49 frames + one temporal round at 128x128: {:.1} s", t0.elapsed().as_secs_f64());
@@ -74,4 +74,32 @@ fn a_dfr_temporal_round_on_real_weights_doubles_the_clip() {
     let audio = video.audio.as_ref().expect("an audio request returns sound");
     let seconds = audio.samples_per_channel() as f64 / audio.sample_rate as f64;
     assert!((seconds - 97.0 / 48.0).abs() < 0.05, "the soundtrack covers {seconds:.3} s of a {:.3} s clip", 97.0 / 48.0);
+}
+
+/// A temporal round and the spatial epilogue together (`spatial_upscalings
+/// = 2`): stage 1 at a quarter of 256x128, the detailing pass and the round
+/// at half, then the epilogue's two windows - the second on its prefix
+/// plane - at the full size, with the keyframes rebuilt there.
+#[test]
+#[ignore = "needs a GPU and the real LTX-2.5 checkpoint, text encoder, both latent upscalers, audio VAE and Refine-Details IC-LoRA in the model store"]
+fn a_dfr_epilogue_on_real_weights_comes_back_at_the_output_size() {
+    let Some(paths) = ltxv::spec::default_store_paths() else {
+        brain_testutil::skip("the model store does not resolve LTX-2.5");
+        return;
+    };
+    if paths.dit.is_none() || paths.detailing_lora.is_none() || paths.spatial_upsampler.is_none() || paths.temporal_upsampler.is_none() || paths.audio_vae.is_none() {
+        brain_testutil::skip("the model store lacks a role DFR's epilogue needs");
+        return;
+    }
+    let base = ltxv::pipeline::GenOpts { dit_config: "ltx25_22b".into(), frames: 49, width: 256, height: 128, fps: 24, audio: true, seed: 13, ..Default::default() };
+    let o = ltxv::pipeline::DfrOpts { base, temporal_upsample_rounds: 1, spatial_upscalings: 2 };
+    let t0 = std::time::Instant::now();
+    let (video, _) = ltxv::pipeline::generate_dfr(&paths, "a lighthouse beam sweeps across fog", &o, &Default::default(), |_, _, _| {}).unwrap_or_else(|e| panic!("generate_dfr: {e}"));
+    eprintln!("DFR 49 frames, one round, epilogue at 256x128: {:.1} s", t0.elapsed().as_secs_f64());
+    assert_eq!((video.width, video.height, video.fps, video.frames.len()), (256, 128, 48, 97));
+    for (i, f) in video.frames.iter().enumerate() {
+        let mean = f.iter().map(|&p| p as f64).sum::<f64>() / f.len() as f64;
+        let std = (f.iter().map(|&p| (p as f64 - mean).powi(2)).sum::<f64>() / f.len() as f64).sqrt();
+        assert!(std > 4.0, "frame {i} is flat (std {std:.2})");
+    }
 }
