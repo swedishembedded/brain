@@ -184,7 +184,7 @@ pub use rl::objective::external::{PolicyGradientConfig, PolicyGradientStats, Pol
 #[cfg(feature = "study")]
 pub use rl::objective::grpo::LossAgg;
 #[cfg(feature = "study")]
-pub use finetune::{emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, FineTuneStatus, HeldOutScore, MonitorPoint, PolicyGradientOutcome, RecordReadout, Selection, TokenReadout, TokenScore};
+pub use finetune::{emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, TrainFootprint, FineTuneStatus, HeldOutScore, MonitorPoint, PolicyGradientOutcome, RecordReadout, Selection, TokenReadout, TokenScore};
 #[cfg(feature = "study")]
 mod full_finetune;
 #[cfg(feature = "study")]

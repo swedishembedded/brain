@@ -121,6 +121,8 @@ pub struct ChatFineTune {
     evaluations_dir: Option<PathBuf>,
     cycle: u64,
     device: Device,
+    /// The caller has scoped this thread to its device ([`ChatFineTune::placed`]).
+    placed: bool,
     bf16_base: bool,
     int8_base: bool,
     nf4_base: bool,
@@ -219,6 +221,19 @@ impl ChatFamily {
         match self {
             ChatFamily::Qwen3(_) => params + 4 * params.div_ceil(model::int8::GROUP as u64),
             ChatFamily::Qwen35(_) => params / 2 + 4 * params.div_ceil(32),
+        }
+    }
+
+    /// Device bytes of `params` parameters held at this family's current tier.
+    fn base_bytes(&self, params: u64) -> u64 {
+        match self {
+            ChatFamily::Qwen3(dtype) | ChatFamily::Qwen35(dtype) => match *dtype {
+                qwen3::Dtype::F32 => 4 * params,
+                qwen3::Dtype::BF16 => 2 * params,
+                qwen3::Dtype::I8 | qwen3::Dtype::NF4 => self.quantised_base_bytes(params),
+                // FP8 weights: a byte each, and a scale per block of them (an f32 per 128x128 tile is well under 1%).
+                _ => params + params / 64,
+            },
         }
     }
 
@@ -364,6 +379,80 @@ pub(crate) fn choose_base_tier(single_card: bool, native: bool, params: u64, lay
     }
 }
 
+/// Where a [`ChatFineTune`]'s base is and which architecture it is.
+struct Located {
+    model_dir: PathBuf,
+    base_id: String,
+    arch: &'static crate::study::ArchEntry,
+    /// What the trainer opens as the checkpoint.
+    open: PathBuf,
+}
+
+/// Device memory a run is expected to need: what a workload scheduler reserves before the run is placed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrainFootprint {
+    /// Bytes on the card: the frozen base at its tier, the activations of one row, and the adapter with its
+    /// optimiser state, with a margin for what the estimate does not model.
+    pub device_bytes: u64,
+    /// The tier the frozen base will be held at (`f32`, `bf16`, `int8`, `nf4`, `fp8`...).
+    pub base_tier: String,
+    /// Why that tier.
+    pub reason: String,
+}
+
+/// Share added on top of the modelled bytes of a run, for the allocator's rounding and the buffers the
+/// estimate does not itemise.
+const FOOTPRINT_MARGIN_PERCENT: u64 = 10;
+/// Bytes of the LoRA adapter, its gradients and its AdamW state, and the device context, added to every run.
+const FOOTPRINT_FIXED_BYTES: u64 = 2 << 30;
+
+impl ChatFineTune {
+    /// The checkpoint [`Self::from_pretrained`] named, resolved in the model store, and its architecture.
+    fn locate_base(&self, named: Option<&'static crate::study::ArchEntry>) -> Result<Located> {
+        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
+        let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let arch = match named {
+            Some(arch) => arch,
+            None => {
+                let arch = crate::study::arch_of_checkpoint(&model_dir).map_or_else(|| crate::study::arch("qwen3"), Ok)?;
+                arch.require(Capability::ChatLoraFineTune)?;
+                arch
+            }
+        };
+        let open = qwen3::store_checkpoint_path(&weights, &model_dir);
+        Ok(Located { model_dir, base_id, arch, open })
+    }
+
+    /// What this run needs on a card with `card_bytes` of memory (`None`: a host-tier run, whose base is
+    /// the exact tier unless one is named) when its training rows are at most `block` tokens: the figure
+    /// a scheduler reserves before the run is placed. It reads the checkpoint's headers only.
+    ///
+    /// # Errors
+    /// The base is not found, is of an architecture without a chat trainer, or is held in a format its
+    /// trainer does not hold.
+    pub fn footprint(&self, block: u32, card_bytes: Option<u64>) -> Result<TrainFootprint> {
+        let named = self.arch.as_deref().map(crate::study::arch).transpose()?;
+        if let Some(arch) = named {
+            arch.require(Capability::ChatLoraFineTune)?;
+        }
+        let located = self.locate_base(named)?;
+        let family = ChatFamily::of(located.arch.id, self.bf16_base, self.int8_base, self.nf4_base, self.base_format.as_deref())?;
+        let (params, layers, width) = family.base_shape(&located.open)?;
+        let explicit = self.bf16_base || self.int8_base || self.nf4_base || self.f32_base || self.base_format.is_some();
+        let (family, reason) = match (explicit, card_bytes) {
+            (false, Some(card)) => {
+                let (choice, reason) = choose_base_tier(matches!(family, ChatFamily::Qwen35(_)), true, params, layers, width, block, family.quantised_base_bytes(params), &[card]).map_err(Error::Backend)?;
+                (family.with_tier(choice), reason)
+            }
+            (false, None) => (family.with_tier(BaseTierChoice::F32), "no accelerator: the fp32 reference tier".to_string()),
+            (true, _) => (family, "asked for".to_string()),
+        };
+        let base_bytes = family.base_bytes(params);
+        let modelled = base_bytes + activation_bytes(block, layers, width);
+        Ok(TrainFootprint { device_bytes: modelled + modelled * FOOTPRINT_MARGIN_PERCENT / 100 + FOOTPRINT_FIXED_BYTES, base_tier: family.tier_name().to_string(), reason })
+    }
+}
+
 impl ChatFineTune {
     /// A fine-tune of `base`: a checkpoint file, a `<models>/<vendor>/<repo>`
     /// directory, or a `vendor/repo` reference in the model store. The
@@ -401,6 +490,7 @@ impl ChatFineTune {
             evaluations_dir: None,
             cycle: 0,
             device: Device::default(),
+            placed: false,
             bf16_base: false,
             int8_base: false,
             nf4_base: false,
@@ -691,6 +781,15 @@ impl ChatFineTune {
         self
     }
 
+    /// Run on the device this thread is already scoped to (`gpu_core::devices::with_gpu`, or the host tier), the
+    /// way a residency-managed workload is: the process owns the device selection and other models are being served
+    /// from it, so the run neither resolves [`Self::device`] nor publishes a selection of its own. The frozen
+    /// base's tier is chosen against the memory of the scoped card.
+    pub fn placed(mut self, on: bool) -> Self {
+        self.placed = on;
+        self
+    }
+
     /// Whether the model is trained to reason before it answers (the
     /// default: records are rendered as the base's template renders them). Off,
     /// the model is trained for no-think mode: each supervised answer follows
@@ -843,17 +942,7 @@ impl ChatFineTune {
         }
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no out directory; call .out_dir(path)".to_string()))?;
-        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
-        let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
-        let arch = match named {
-            Some(arch) => arch,
-            None => {
-                let arch = crate::study::arch_of_checkpoint(&model_dir).map_or_else(|| crate::study::arch("qwen3"), Ok)?;
-                arch.require(Capability::ChatLoraFineTune)?;
-                arch
-            }
-        };
-        let open = qwen3::store_checkpoint_path(&weights, &model_dir);
+        let Located { model_dir, base_id, arch, open } = self.locate_base(named)?;
         let weights_str = utf8(&open)?;
         let family = ChatFamily::of(arch.id, self.bf16_base, self.int8_base, self.nf4_base, self.base_format.as_deref())?;
         self.check_policy_gradient_setup(arch.id)?;
@@ -921,12 +1010,16 @@ impl ChatFineTune {
         }
         let block = block_for(longest, self.max_block)?;
 
-        let set = crate::device::resolve(&self.device)?;
+        let selected_gpus: Vec<u32> = if self.placed {
+            gpu_core::devices::current_gpu().into_iter().collect()
+        } else {
+            crate::device::resolve(&self.device)?.gpus
+        };
         let explicit = self.bf16_base || self.int8_base || self.nf4_base || self.f32_base || self.base_format.is_some();
         let (family, base_tier_reason) = if explicit {
             (family, "asked for".to_string())
         } else {
-            let cards: Vec<u64> = gpu_core::devices::gpus().iter().filter(|d| set.gpus.contains(&d.index)).map(|d| d.identity.vram_bytes).collect();
+            let cards: Vec<u64> = gpu_core::devices::gpus().iter().filter(|d| selected_gpus.contains(&d.index)).map(|d| d.identity.vram_bytes).collect();
             let native = !cards.is_empty() && gpu_core::Gpu::new(&[]).caps().arch.compute_capability.is_some_and(|cc| cc >= gpu_core::select::I8_MMA_MIN_CC);
             let (params, layers, width) = family.base_shape(&open)?;
             let (choice, reason) = choose_base_tier(matches!(family, ChatFamily::Qwen35(_)), native, params, layers, width, block, family.quantised_base_bytes(params), &cards).map_err(Error::Backend)?;
@@ -1145,7 +1238,6 @@ impl FineTuneProgress {
         FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr, grad_norm: s.grad_norm, metrics: s.metrics.iter().map(|(name, value)| (name.to_string(), *value)).collect() }
     }
 }
-
 
 /// How a fine-tune ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
