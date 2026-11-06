@@ -130,6 +130,13 @@ impl AppState {
         self.supplier.clone()
     }
 
+    /// What separates this request's caller from every other: its job scope
+    /// ([`crate::Authenticator::scope`]), empty for an unnamed caller. Stamped
+    /// on every invocation this surface dispatches (`Invocation::scope`).
+    pub fn scope(&self) -> String {
+        self.caller.as_ref().map(|p| self.authenticator.scope(p)).unwrap_or_default()
+    }
+
     /// Whether the hooks list `model` on this surface.
     pub fn lists(&self, model: &str) -> bool {
         self.hooks.as_ref().is_none_or(|hooks| hooks.listed(model))

@@ -596,10 +596,6 @@ async fn drive(jobs: Arc<VideoJobs>, provider: crate::Provider, id: Uuid, mut st
 
 // ------------------------------------------------------------------ handlers
 
-fn scope_of(state: &AppState) -> String {
-    state.caller.as_ref().map(|p| state.authenticator.scope(p)).unwrap_or_default()
-}
-
 fn no_such_job(state: &AppState) -> Response {
     ApiError::not_found(state.provider, "no such video job").into_response()
 }
@@ -616,7 +612,7 @@ async fn create(State(state): State<AppState>, caller: CallerExt, headers: Heade
         Some(Ok(k)) if !k.is_empty() && k.len() <= 255 => Some((k.to_string(), Sha256::digest(&body).into())),
         Some(_) => return ApiError::invalid_request(provider, "Idempotency-Key must be 1 to 255 visible characters").into_response(),
     };
-    let scope = scope_of(&state);
+    let scope = state.scope();
     // A repeated key answers from the job it names, before any validation work.
     if let Some((k, digest)) = &key {
         let found = {
@@ -655,7 +651,7 @@ async fn create(State(state): State<AppState>, caller: CallerExt, headers: Heade
 }
 
 fn status_response(state: &AppState, id: Uuid) -> Response {
-    let Some(view) = state.videos.view(&scope_of(state), id) else { return no_such_job(state) };
+    let Some(view) = state.videos.view(&state.scope(), id) else { return no_such_job(state) };
     let mut body = json!({"id": id.to_string(), "polling_url": polling_url(id)});
     match view {
         View::Pending => body["status"] = json!("pending"),
@@ -690,7 +686,7 @@ async fn status(State(state): State<AppState>, caller: CallerExt, Path(raw): Pat
 async fn remove(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>) -> Response {
     let state = state.scoped(caller);
     let Ok(id) = Uuid::parse_str(&raw) else { return no_such_job(&state) };
-    match state.videos.remove(&scope_of(&state), id) {
+    match state.videos.remove(&state.scope(), id) {
         Some(outcome) => Json(json!({"id": id.to_string(), "status": outcome})).into_response(),
         None => no_such_job(&state),
     }
@@ -724,7 +720,7 @@ fn parse_range(value: &str, len: u64) -> Option<Result<(u64, u64), ()>> {
 async fn content(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>, Query(q): Query<ContentQuery>, headers: HeaderMap) -> Response {
     let state = state.scoped(caller);
     let Ok(id) = Uuid::parse_str(&raw) else { return no_such_job(&state) };
-    let clip = match state.videos.view(&scope_of(&state), id) {
+    let clip = match state.videos.view(&state.scope(), id) {
         None => return no_such_job(&state),
         Some(View::Completed(clip)) => clip,
         Some(_) => return (StatusCode::CONFLICT, Json(json!({"error": {"message": "the video is not available: poll its status"}}))).into_response(),

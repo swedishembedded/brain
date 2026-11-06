@@ -439,10 +439,6 @@ enum View {
     Cancelled,
 }
 
-fn scope_of(state: &AppState) -> String {
-    state.caller.as_ref().map(|p| state.authenticator.scope(p)).unwrap_or_default()
-}
-
 fn no_such_job(state: &AppState) -> Response {
     ApiError::not_found(state.provider, "no such job").into_response()
 }
@@ -457,7 +453,7 @@ async fn create_job(State(state): State<AppState>, caller: CallerExt, body: Byte
         Ok(call) => call,
         Err(e) => return e.into_response(),
     };
-    let scope = scope_of(&state);
+    let scope = state.scope();
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let id = match state.async_jobs.open(&scope, cancel_tx) {
         Ok(id) => id,
@@ -517,7 +513,7 @@ async fn drive(jobs: Arc<AsyncJobs>, provider: crate::Provider, id: Uuid, mut st
 async fn job_status(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>) -> Response {
     let state = state.scoped(caller);
     let Some(id) = parse_id(&raw) else { return no_such_job(&state) };
-    match state.async_jobs.view(&scope_of(&state), id) {
+    match state.async_jobs.view(&state.scope(), id) {
         None => no_such_job(&state),
         Some(View::Running { step, total }) => Json(json!({"id": id.to_string(), "status": "running", "progress": {"step": step, "total": total}})).into_response(),
         Some(View::Succeeded(_)) => Json(json!({"id": id.to_string(), "status": "succeeded"})).into_response(),
@@ -529,7 +525,7 @@ async fn job_status(State(state): State<AppState>, caller: CallerExt, Path(raw):
 async fn job_result(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>) -> Response {
     let state = state.scoped(caller);
     let Some(id) = parse_id(&raw) else { return no_such_job(&state) };
-    match state.async_jobs.view(&scope_of(&state), id) {
+    match state.async_jobs.view(&state.scope(), id) {
         None => no_such_job(&state),
         Some(View::Succeeded(outcome)) => Json(outcome_json(&outcome)).into_response(),
         Some(View::Running { .. }) => (StatusCode::CONFLICT, Json(json!({"id": id.to_string(), "status": "running", "error": {"message": "the job has not finished"}}))).into_response(),
@@ -599,7 +595,7 @@ async fn job_events(State(state): State<AppState>, caller: CallerExt, Path(raw):
         },
     };
     let jobs = Arc::clone(&state.async_jobs);
-    let follow = match jobs.follow(&scope_of(&state), id, seq) {
+    let follow = match jobs.follow(&state.scope(), id, seq) {
         None => return no_such_job(&state),
         Some(Err(())) => return ApiError::rate_limited(state.provider, "too many event streams are open on this job").into_response(),
         Some(Ok(follow)) => follow,
@@ -615,7 +611,7 @@ async fn job_events(State(state): State<AppState>, caller: CallerExt, Path(raw):
 async fn cancel_job(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>) -> Response {
     let state = state.scoped(caller);
     let Some(id) = parse_id(&raw) else { return no_such_job(&state) };
-    match state.async_jobs.cancel(&scope_of(&state), id) {
+    match state.async_jobs.cancel(&state.scope(), id) {
         None => no_such_job(&state),
         Some(status) => Json(json!({"id": id.to_string(), "status": status})).into_response(),
     }

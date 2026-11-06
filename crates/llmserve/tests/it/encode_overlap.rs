@@ -110,3 +110,23 @@ fn a_request_built_in_the_background_joins_while_the_others_keep_decoding() {
     let tokens = |r: &capability::ActionResult| r.as_ref().expect("served").outputs["completion_tokens"].as_u64().unwrap();
     assert_eq!((tokens(&results[0]), tokens(&results[1])), (5, 30));
 }
+
+/// A request whose parsing panics fails alone: more such requests than there
+/// are intake threads leave the front end building the next one, never
+/// without threads and never leaving a caller waiting.
+#[test]
+fn a_request_that_panics_its_parse_does_not_take_an_intake_thread() {
+    let parse: llmserve::ParseFn = Arc::new(|_tok: &QwenBpe, inv: &Invocation| {
+        if inv.get_bool("explode").unwrap_or(false) {
+            panic!("a parser bug a request can reach");
+        }
+        Ok(request(1, 4))
+    });
+    let front = llmserve::TextFrontend::new(tokenizer(), Vec::new(), "panicky", parse);
+    for _ in 0..16 {
+        let failed = front.parse_in_background(&Invocation::new().set("explode", serde_json::json!(true))).expect("intake threads exist");
+        assert!(failed.recv_timeout(Duration::from_secs(5)).expect("answered").is_err());
+    }
+    let ok = front.parse_in_background(&Invocation::new()).expect("intake threads still exist");
+    assert!(ok.recv_timeout(Duration::from_secs(5)).expect("answered").is_ok());
+}

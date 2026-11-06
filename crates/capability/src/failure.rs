@@ -110,6 +110,87 @@ fn classify_here(error: &str) -> Option<(FailureClass, &str)> {
     Some((class, message.strip_prefix(' ').unwrap_or(message)))
 }
 
+/// How `residency`'s lane loop words a panic it isolated.
+const PANICKED: &str = ": panicked while running: ";
+
+/// How a text model's `generate` reports a `suffix` its vocabulary cannot fill
+/// in the middle of (the end of `qwen3::chat::NO_FIM_TOKENS`'s message).
+const NO_FIM_TOKENS: &str = "has no fill-in-the-middle tokens";
+
+/// What a failed call may tell the caller, whatever surface it came through.
+///
+/// A model's or the scheduler's error text can carry a weight path, a panic
+/// message with its source location, an OS error or a backend's internals,
+/// none of which is the caller's to read. [`ReplyError::of`] sorts an error
+/// into what can be said; every surface answers from that and logs the text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReplyError {
+    /// The model classed its own failure: the tag promises the message names no
+    /// path or internals ([`tag`]).
+    Classified(FailureClass, String),
+    /// A lane panicked while running the call.
+    Faulted,
+    /// The model or action does not exist.
+    NoModel,
+    /// A `suffix` the model's vocabulary cannot fill in the middle of.
+    NoFim,
+    /// The prompt needs more tokens than the model's serving capacity.
+    Capacity { need: u64, capacity: u64 },
+    /// Anything else: a runtime or activation failure.
+    Failed,
+}
+
+impl ReplyError {
+    /// Sort an executor reply error.
+    pub fn of(e: &str) -> ReplyError {
+        if let Some((class, message)) = classify(e) {
+            return ReplyError::Classified(class, message.to_string());
+        }
+        if e.contains(PANICKED) {
+            return ReplyError::Faulted;
+        }
+        if e.starts_with("no model") || e.contains("no action") {
+            return ReplyError::NoModel;
+        }
+        if e.ends_with(NO_FIM_TOKENS) {
+            return ReplyError::NoFim;
+        }
+        if let Some((need, capacity)) = parse_exceeds_capacity(e) {
+            return ReplyError::Capacity { need, capacity };
+        }
+        ReplyError::Failed
+    }
+
+    /// Whether the original text holds what only the operator may read, and
+    /// so belongs in the server's log.
+    pub fn hides_detail(&self) -> bool {
+        matches!(self, ReplyError::Faulted | ReplyError::Capacity { .. } | ReplyError::Failed)
+    }
+
+    /// The message a caller is given, naming nothing of this machine.
+    pub fn client_message(&self, model: &str) -> String {
+        match self {
+            ReplyError::Classified(_, message) => message.clone(),
+            ReplyError::Faulted => "the model faulted while running the request".into(),
+            ReplyError::NoModel => format!("no model '{model}'"),
+            ReplyError::NoFim => "'suffix' (fill-in-the-middle) is not supported: this model's vocabulary has no fill-in-the-middle tokens".into(),
+            ReplyError::Capacity { need, capacity } => {
+                format!("the request needs {need} tokens but this model's serving capacity is {capacity} tokens; reduce the prompt or lower max_tokens")
+            }
+            ReplyError::Failed => "the model failed to process the request".into(),
+        }
+    }
+}
+
+/// The two counts in a capacity rejection, the one rejection reason whose text
+/// is safe to surface: `RejectReason::ExceedsCapacity`'s
+/// `"needs {need} tokens, engine capacity is {capacity}"`.
+pub fn parse_exceeds_capacity(e: &str) -> Option<(u64, u64)> {
+    let rest = e.split_once("needs ")?.1;
+    let (need, capacity) = rest.split_once(" tokens, engine capacity is ")?;
+    Some((need.trim().parse().ok()?, capacity.trim().parse().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

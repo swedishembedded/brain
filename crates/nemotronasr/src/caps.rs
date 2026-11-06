@@ -38,6 +38,23 @@ pub fn manifest() -> Manifest {
 /// died without sending `eos` must not leak its ~12 MB state forever).
 const SESSION_IDLE_SECS: u64 = 600;
 
+/// The most streams a serving instance holds at once (each ~12 MB of state).
+/// A new one past it is refused, never made room for: evicting an idle stream
+/// would let one caller end everyone else's.
+pub const MAX_SESSIONS: usize = 256;
+
+/// The key a session is held under: the caller's scope ([`Invocation::scope`])
+/// and the id it chose, so a caller can neither read nor advance another
+/// caller's stream by naming it.
+fn session_key(scope: &str, id: &str) -> String {
+    format!("{scope}\u{1f}{id}")
+}
+
+/// The id a client chose, from a session key.
+fn client_id(key: &str) -> &str {
+    key.split_once('\u{1f}').map_or(key, |(_, id)| id)
+}
+
 struct StreamSession {
     st: StreamState,
     /// Byte length of the transcript already returned to the client; zero until
@@ -63,7 +80,7 @@ impl StreamSessions {
     }
 
     /// Step one window of one session (see [`step_batch`](Self::step_batch)).
-    pub fn step(&mut self, enc: &Encoder, detok: &Detokenizer, id: &str, wav: &[f32], prompt_id: usize, eos: bool) -> Outcome {
+    pub fn step(&mut self, enc: &Encoder, detok: &Detokenizer, id: &str, wav: &[f32], prompt_id: usize, eos: bool) -> Result<Outcome, String> {
         self.step_batch(enc, detok, &[(id, wav, prompt_id, eos)]).pop().unwrap()
     }
 
@@ -73,11 +90,24 @@ impl StreamSessions {
     /// Jobs sharing a session id within one batch are stepped in order (the later
     /// ones in a follow-up round). Returns one outcome per job, in order: the
     /// session's newly emitted text/tokens, with `"final": true` on the flush.
-    pub fn step_batch(&mut self, enc: &Encoder, detok: &Detokenizer, jobs: &[(&str, &[f32], usize, bool)]) -> Vec<Outcome> {
+    pub fn step_batch(&mut self, enc: &Encoder, detok: &Detokenizer, jobs: &[(&str, &[f32], usize, bool)]) -> Vec<Result<Outcome, String>> {
         self.sessions.retain(|_, s| s.last_used.elapsed().as_secs() < SESSION_IDLE_SECS);
-        let mut out: Vec<Option<Outcome>> = vec![None; jobs.len()];
+        let mut out: Vec<Option<Result<Outcome, String>>> = vec![None; jobs.len()];
+        // A job that would open a stream past the bound is refused here, before
+        // any state is made for it; streams already open are always stepped.
+        let mut opening = 0usize;
+        for (j, &(id, ..)) in jobs.iter().enumerate() {
+            let opens = !self.sessions.contains_key(id) && !jobs[..j].iter().any(|other| other.0 == id);
+            if opens {
+                if self.sessions.len() + opening >= MAX_SESSIONS {
+                    out[j] = Some(Err(format!("transcribe_stream: {MAX_SESSIONS} streams are open; finish one with eos first")));
+                } else {
+                    opening += 1;
+                }
+            }
+        }
         // rounds of unique session ids, so state stepping stays ordered per session
-        let mut remaining: Vec<usize> = (0..jobs.len()).collect();
+        let mut remaining: Vec<usize> = (0..jobs.len()).filter(|&j| out[j].is_none()).collect();
         while !remaining.is_empty() {
             let mut round: Vec<usize> = Vec::new();
             let mut later: Vec<usize> = Vec::new();
@@ -119,9 +149,9 @@ impl StreamSessions {
                 sess.tok_seen = sess.st.tokens().len();
                 sess.last_used = Instant::now();
                 let o = transcription_outcome(new_text, &new_tokens)
-                    .set("stream", serde_json::json!(id))
+                    .set("stream", serde_json::json!(client_id(id)))
                     .set("final", serde_json::json!(eos));
-                out[j] = Some(o);
+                out[j] = Some(Ok(o));
                 if !eos {
                     self.sessions.insert(id.to_string(), sess);
                 }
@@ -134,8 +164,10 @@ impl StreamSessions {
 
 /// Decode a `transcribe_stream` invocation: `(session id, window, prompt_id, eos)`.
 /// The audio blob may be absent (a final `eos`-only flush).
+/// The session id is held under the caller's scope ([`session_key`]).
 pub fn stream_job_from_inv(inv: &Invocation) -> Result<(String, Vec<f32>, usize, bool), String> {
     let id = inv.get_str("stream").filter(|s| !s.is_empty()).ok_or("transcribe_stream: missing 'stream' session id")?;
+    let id = session_key(&inv.scope, &id);
     let wav = match inv.get_blob("audio") {
         Some(b) => wav_from_blob(b)?,
         None => Vec::new(),
@@ -197,7 +229,7 @@ impl Action for TranscribeStreamAction {
         let (id, wav, prompt_id, eos) = stream_job_from_inv(inv)?;
         progress(Progress::step(0, 1, format!("stream {id}: {} samples", wav.len())));
         let mut sessions = self.sessions.lock().map_err(|_| "nemotron stream sessions poisoned".to_string())?;
-        Ok(sessions.step(self.model.encoder(), &self.detok, &id, &wav, prompt_id, eos))
+        sessions.step(self.model.encoder(), &self.detok, &id, &wav, prompt_id, eos)
     }
 }
 
@@ -256,7 +288,7 @@ mod tests {
         while i < wav.samples.len() {
             let end = (i + win).min(wav.samples.len());
             let eos = end == wav.samples.len();
-            let o = sessions.step(&enc, &detok, "s1", &wav.samples[i..end], 0, eos);
+            let o = sessions.step(&enc, &detok, "s1", &wav.samples[i..end], 0, eos).expect("one stream fits");
             let seg = o.outputs.get("text").and_then(|v| v.as_str()).unwrap_or("");
             text.push_str(seg);
             if eos {

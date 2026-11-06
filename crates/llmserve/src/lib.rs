@@ -788,7 +788,11 @@ impl TextFrontend {
                         // One job at a time off the shared queue; the queue closes when the front end is dropped.
                         let Ok((inv, reply)) = rx.lock().unwrap_or_else(|e| e.into_inner()).recv() else { return };
                         // The scheduler may have dropped the receiver (the request was cancelled): nothing to deliver.
-                        let _ = reply.send((build.parse)(&build.tok, &inv).map(|req| (req, None)));
+                        // A request that makes parsing panic fails alone: the thread lives on to
+                        // build the next one, and the caller is answered instead of left waiting.
+                        let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (build.parse)(&build.tok, &inv)))
+                            .unwrap_or_else(|_| Err("the request could not be read".to_string()));
+                        let _ = reply.send(parsed.map(|req| (req, None)));
                     });
                     match spawned {
                         Ok(_) => started += 1,

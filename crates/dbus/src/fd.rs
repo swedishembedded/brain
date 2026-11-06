@@ -64,6 +64,25 @@ pub fn read_fd_to_vec(fd: BorrowedFd) -> anyhow::Result<Vec<u8>> {
     if len == 0 {
         return Ok(Vec::new());
     }
+    // A regular file - a memfd is one - is READ, never mapped: the caller
+    // keeps its own descriptor and may shrink it at any moment, and a mapped
+    // page past the new end raises SIGBUS in this process, ending the server
+    // for everyone. `pread` takes an offset, so the fd's shared position is
+    // never consulted, and a file that shrinks mid-read is a short read here.
+    if st.st_mode & nix::libc::S_IFMT == nix::libc::S_IFREG {
+        let mut out = vec![0u8; len];
+        let mut at = 0usize;
+        while at < len {
+            let n = nix::sys::uio::pread(fd, &mut out[at..], at as nix::libc::off_t)?;
+            if n == 0 {
+                anyhow::bail!("input fd shrank to {at} of {len} bytes while it was read");
+            }
+            at += n;
+        }
+        return Ok(out);
+    }
+    // What is left is a dmabuf, which cannot be read with `pread` and whose
+    // size its exporter fixes: mapped.
     let nz = NonZeroUsize::new(len).unwrap();
     // Shared first: a dmabuf can only be mapped shared. Older kernels (5.14, as
     // shipped by RHEL 9) refuse that with EPERM for a write-sealed memfd even

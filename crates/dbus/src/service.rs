@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -169,7 +169,21 @@ impl Manager {
     fn build_inv(&self, params: &str, in_fds: HashMap<String, ZOwnedFd>, in_meta: &str) -> Result<Invocation, String> {
         let params: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(params).map_err(|e| format!("params JSON: {e}"))? };
         let meta: Value = if in_meta.trim().is_empty() { json!({}) } else { serde_json::from_str(in_meta).map_err(|e| format!("in_meta JSON: {e}"))? };
-        let mut inv = Invocation { params, blobs: Default::default(), cancel: Default::default() };
+        let mut inv = Invocation { params, blobs: Default::default(), cancel: Default::default(), scope: String::new() };
+        // A call carries at most a few blobs and a bounded total: each fd is
+        // capped on its own (`MAX_FD_BLOB_BYTES`), and without these bounds a
+        // caller could still pass as many as the bus allows.
+        if in_fds.len() > MAX_FDS_PER_CALL {
+            return Err(format!("a call carries at most {MAX_FDS_PER_CALL} input fds, got {}", in_fds.len()));
+        }
+        let mut total = 0u64;
+        for zfd in in_fds.values() {
+            let size = nix::sys::stat::fstat(zfd.as_fd().as_raw_fd()).map_err(|e| format!("input fd: {e}"))?.st_size.max(0) as u64;
+            total = total.saturating_add(size);
+        }
+        if total > MAX_FD_CALL_BYTES {
+            return Err(format!("the input fds hold {total} bytes, over the {} MiB per call", MAX_FD_CALL_BYTES >> 20));
+        }
         for (name, zfd) in in_fds {
             let ofd: std::os::fd::OwnedFd = zfd.into();
             let bytes = read_fd_to_vec(ofd.as_fd()).map_err(|e| format!("reading input fd '{name}': {e}"))?;
@@ -269,7 +283,7 @@ fn emit_window(executor: &Executor, model: &str, window: &[f32], prompt_id: i64,
         }
         Ok(Err(e)) => {
             if let Ok(mut s) = stream.lock() {
-                s.error(&e);
+                s.error(&reply_message(model, &e));
             }
         }
         Err(_) => {} // executor gone
@@ -295,6 +309,28 @@ fn served_invocation(exec: &Executor, training: bool, model: &str, action: &str,
     // What the spec cannot say is the model's to refuse at the door (`ResidentModel::check_job`).
     exec.check_job(model, action, &inv)?;
     Ok(inv)
+}
+
+/// The most input fds one `Run`/`Subscribe` may carry.
+const MAX_FDS_PER_CALL: usize = 16;
+/// The most bytes all input fds of one call may hold together.
+const MAX_FD_CALL_BYTES: u64 = 1 << 30;
+
+/// What a caller over the bus is told of a failed call: the same sorting the
+/// HTTP surfaces answer from ([`capability::ReplyError`]), with the original
+/// text - which can name weight paths, carry panic text with its source
+/// location, or quote an OS error - logged here and never sent.
+fn reply_message(model: &str, e: &str) -> String {
+    let reply = capability::ReplyError::of(e);
+    if reply.hides_detail() {
+        eprintln!("brain dbus: model '{model}' call failed: {e}");
+    }
+    match reply {
+        // The class travels with the message, as the model tagged it, so a
+        // bus client classifies a failure the way an HTTP status does.
+        capability::ReplyError::Classified(class, message) => capability::tag(class, message),
+        other => other.client_message(model),
+    }
 }
 
 fn finish_job(jobs: &JobRegistry, job: u64) {
@@ -399,6 +435,7 @@ fn submit_subscribed_job(
     let (admit_tx, mut admit_rx) = tokio::sync::oneshot::channel::<()>();
     let mut admit_tx = Some(admit_tx);
     let model_for_admit = model.clone();
+    let model_for_reply = model.clone();
     let exec_for_admit = exec.clone();
     exec.submit(
         Job::new(model, action, inv)
@@ -438,7 +475,7 @@ fn submit_subscribed_job(
                             }
                             s.done(&outcome.outputs);
                         }
-                        Err(e) => s.error(&e),
+                        Err(e) => s.error(&reply_message(&model_for_reply, &e)),
                     }
                 }
             }),
@@ -526,7 +563,7 @@ impl Manager {
             return Err(fdo::Error::Failed(refusal.client_message()));
         }
 
-        let outcome = rx.await.map_err(|_| fdo::Error::Failed("executor dropped the reply".into()))?.map_err(fdo::Error::Failed)?;
+        let outcome = rx.await.map_err(|_| fdo::Error::Failed("executor dropped the reply".into()))?.map_err(|e| fdo::Error::Failed(reply_message(&model_for_admit, &e)))?;
         let want_dmabuf = transport.eq_ignore_ascii_case("dmabuf");
         let (out_fds, out_meta) = outcome_to_fds(&outcome, want_dmabuf).map_err(fdo::Error::Failed)?;
         Ok((serde_json::to_string(&outcome.outputs).unwrap_or_else(|_| "{}".into()), out_fds, serde_json::to_string(&out_meta).unwrap_or_else(|_| "{}".into())))
@@ -771,8 +808,9 @@ impl Manager {
             return Err(fdo::Error::Failed(format!("unknown param '{name}' for action '{action}'")));
         }
         let exec = self.executor.clone();
-        let planned = tokio::task::spawn_blocking(move || exec.plan(&model, &action, inv)).await.map_err(|e| fdo::Error::Failed(format!("plan task failed: {e}")))?;
-        planned.map(|plan| plan.to_json().to_string()).map_err(|e| fdo::Error::Failed(e.to_string()))
+        let named = model.clone();
+        let planned = tokio::task::spawn_blocking(move || exec.plan(&model, &action, inv)).await.map_err(|_| fdo::Error::Failed("the call could not be planned".into()))?;
+        planned.map(|plan| plan.to_json().to_string()).map_err(|e| fdo::Error::Failed(reply_message(&named, &e.to_string())))
     }
 
     /// Live stats: the same JSON document as `StatsSnapshot`, emitted on a timer by

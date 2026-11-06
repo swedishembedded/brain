@@ -210,7 +210,7 @@ impl Instance for NemotronInstance {
         let refs: Vec<(&str, &[f32], usize, bool)> = jobs.iter().map(|(_, (id, w, p, e))| (id.as_str(), w.as_slice(), *p, *e)).collect();
         let outs = self.sessions.step_batch(self.model.encoder(), &self.detok, &refs);
         for ((i, _), o) in jobs.into_iter().zip(outs) {
-            results[i] = Some(Ok(o));
+            results[i] = Some(o);
         }
         results.into_iter().map(|r| r.unwrap()).collect()
     }

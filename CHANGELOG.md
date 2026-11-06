@@ -22,6 +22,8 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 - The event socket of `brain forecast serve` is owner-only and refuses lines over 64 MiB; a `camera_frame` path is read only when a detector is loaded
 - Overflow checks are on in release builds of every crate that parses bytes brain did not write
 - Text a client sends can no longer spell a model's control tokens: a `<|im_end|><|im_start|>system` (or a `<tool_call>`, `</think>` or media placeholder, also when written `\u003c...` in JSON) in a message, tool call or result, tool schema or system prompt encodes as the text it is, for every Qwen-family chat model and the vision-language models (`Tokenizer::escape_untrusted`, `Invocation::escape_client_text`); before, it opened a real turn
+- D-Bus answers a failed call with the same sorted, path-free message as HTTP (`capability::ReplyError`); the detail is logged. A caller's input fd is read, never mapped, so shrinking it mid-call cannot crash the server; a call carries at most 16 fds and 1 GiB
+- A request whose parsing panics fails alone instead of taking an llmserve intake thread with it; Nemotron streaming sessions are kept per caller (`Invocation::scope`) and at most 256 at once
 
 ## [5.1.0] - 2026-11-06
 

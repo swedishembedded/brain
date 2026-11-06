@@ -248,72 +248,23 @@ pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
     ChatOutcome { text, prompt_tokens, completion_tokens, reasoning_tokens: o.outputs.get("reasoning_tokens").and_then(|v| v.as_i64()).unwrap_or_default(), cached_tokens: o.outputs.get("cached_tokens").and_then(|v| v.as_i64()), finish, reasoning, tool_calls, seed, adapter, base_digest: text_of("base_digest"), backend: text_of("backend"), engine: text_of("engine"), prompt_token_ids: numbers("prompt_token_ids"), completion_token_ids: numbers("completion_token_ids"), logprobs }
 }
 
-/// Detect an admission-time `model::serve::RejectReason::ExceedsCapacity` reply -
-/// literally `format!("qwen: {reason}")` where `reason` is
-/// `"needs {need} tokens, engine capacity is {capacity}"` (see
-/// `RejectReason`'s `Display` impl and `resident_llm.rs`'s admission-rejection
-/// handling) - and pull out the two counts.
-///
-/// This is the ONE reply-error shape treated as safe and actionable to reveal:
-/// it is exactly two integers with no paths, no panic text, and no backend
-/// internals, unlike the general run-failure text `map_reply_err` otherwise
-/// refuses to pass through. Matching is intentionally narrow (the full fixed
-/// phrase, not just a "qwen:" prefix) - other qwen error paths (e.g. weight
-/// file I/O failures) share that prefix and DO embed on-disk paths.
-fn parse_exceeds_capacity(e: &str) -> Option<(u64, u64)> {
-    let rest = e.split_once("needs ")?.1;
-    let (need, capacity) = rest.split_once(" tokens, engine capacity is ")?;
-    Some((need.trim().parse().ok()?, capacity.trim().parse().ok()?))
-}
-
-/// Map an executor reply error string to a provider-shaped [`ApiError`]. An unknown
-/// model/action surfaces as `model_not_found` (model resolution already happens in the
-/// handler, so this is a belt-and-braces fallback). A prompt that exceeds the model's
-/// serving capacity gets a specific, actionable `context_length_exceeded` error naming
-/// the two safe counts (see [`parse_exceeds_capacity`]). Every *other* reply error is a
-/// server-side runtime/activation failure (backend/device errors, and potentially
-/// on-disk model paths in the message): its raw text is NEVER reflected to the client.
-/// The detail is logged for the operator; the client gets a generic message.
-/// How a text model's `generate` reports a `suffix` its vocabulary cannot fill
-/// in the middle of (the end of `qwen3::chat::NO_FIM_TOKENS`'s message).
-const NO_FIM_TOKENS: &str = "has no fill-in-the-middle tokens";
-
-/// How `residency`'s lane loop words a panic it isolated.
-const PANICKED: &str = ": panicked while running: ";
-
+/// Map an executor reply error string to a provider-shaped [`ApiError`], through
+/// the sorting every surface shares ([`capability::ReplyError`]): a model's own
+/// classed failure, a fault, an unknown model, a FIM refusal and a capacity
+/// rejection keep their meaning; the raw text of anything else is NEVER sent
+/// (it can carry paths, panic text, backend internals) - it is logged here.
 pub fn map_reply_err(provider: Provider, model: &str, e: &str) -> ApiError {
-    // A model that classed its own failure is believed: the tag is a promise
-    // that the message names no path or backend internals.
-    if let Some((class, message)) = capability::classify(e) {
-        return ApiError::failure(provider, class, message);
+    let reply = capability::ReplyError::of(e);
+    if reply.hides_detail() {
+        eprintln!("apiserve: model '{model}' request failed: {e}");
     }
-    if e.contains(PANICKED) {
-        // The scheduler's own wording for a lane that panicked while running
-        // a request: a backend fault, whose text can carry internals.
-        eprintln!("apiserve: model '{model}' request failed: {e}");
-        return ApiError::failure(provider, capability::FailureClass::BackendFailure, "the model faulted while running the request");
-    }
-    if e.starts_with("no model") || e.contains("no action") {
-        ApiError::model_not_found(provider, model)
-    } else if e.ends_with(NO_FIM_TOKENS) {
-        // A fixed phrase naming no path or internal: the one thing the client
-        // can act on is to drop `suffix`.
-        ApiError::invalid_request(provider, "'suffix' (fill-in-the-middle) is not supported: this model's vocabulary has no fill-in-the-middle tokens")
-    } else if let Some((need, capacity)) = parse_exceeds_capacity(e) {
-        eprintln!("apiserve: model '{model}' request failed: {e}");
-        ApiError::context_length_exceeded(
-            provider,
-            format!(
-                "the request needs {need} tokens but this model's serving \
-                 capacity is {capacity} tokens; reduce the prompt or lower \
-                 max_tokens"
-            ),
-        )
-    } else {
-        // Do not leak internal error strings (paths, panic text, backend internals)
-        // to callers; log server-side, return a generic message.
-        eprintln!("apiserve: model '{model}' request failed: {e}");
-        ApiError::invalid_request(provider, "the model failed to process the request")
+    let message = reply.client_message(model);
+    match reply {
+        capability::ReplyError::Classified(class, _) => ApiError::failure(provider, class, message),
+        capability::ReplyError::Faulted => ApiError::failure(provider, capability::FailureClass::BackendFailure, message),
+        capability::ReplyError::NoModel => ApiError::model_not_found(provider, model),
+        capability::ReplyError::Capacity { .. } => ApiError::context_length_exceeded(provider, message),
+        capability::ReplyError::NoFim | capability::ReplyError::Failed => ApiError::invalid_request(provider, message),
     }
 }
 
@@ -377,6 +328,7 @@ fn refused(provider: Provider, refusal: &residency::admission::Refusal) -> ApiEr
 pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invocation) -> Result<Outcome, ApiError> {
     let provider = state.provider;
     // Before anything is registered or queued: a refused call costs nothing.
+    inv.scope = state.scope();
     let pending = Pending::begin(state, model, action, &inv)?;
     residency::log::info(&format!("{provider:?} request: {action} {model}"));
     let (id, token) = state.register();
@@ -606,6 +558,7 @@ pub async fn stream_progress(state: &AppState, model: &str, action: &str, inv: I
 /// (image denoise) or is dropped (chat, which streams only token deltas).
 async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invocation, forward_steps: bool) -> Result<EventStream, ApiError> {
     let provider = state.provider;
+    inv.scope = state.scope();
     let pending = Pending::begin(state, model, action, &inv)?;
     residency::log::info(&format!("{provider:?} request: {action} {model} (stream)"));
     let model_owned = model.to_string();
@@ -677,10 +630,11 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
 /// A 429 (admission failed after the fetch completed) becomes a terminal
 /// [`StreamMsg::Err`] here, not an HTTP 429 status — the SSE body's headers
 /// are already committed by the time admission is even attempted.
-pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: &str, action: &str, inv: Invocation, forward_steps: bool) -> Result<EventStream, ApiError> {
+pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: &str, action: &str, mut inv: Invocation, forward_steps: bool) -> Result<EventStream, ApiError> {
     let provider = state.provider;
     // Before the download starts: a caller who may not run the call must not be
     // able to make this server fetch a model first.
+    inv.scope = state.scope();
     let pending = Pending::begin(state, model, action, &inv)?;
     residency::log::info(&format!("{provider:?} request: {action} {model} (stream, not yet resident -- auto-fetching)"));
     let (id, token) = state.register();
@@ -849,7 +803,7 @@ mod tests {
     fn parse_exceeds_capacity_matches_the_real_reject_reason_shape() {
         // Exactly what resident_llm.rs produces: format!("qwen: {reason}")
         // where reason is RejectReason::ExceedsCapacity's Display impl.
-        let got = parse_exceeds_capacity("qwen: needs 14995 tokens, engine capacity is 2048");
+        let got = capability::failure::parse_exceeds_capacity("qwen: needs 14995 tokens, engine capacity is 2048");
         assert_eq!(got, Some((14995, 2048)));
     }
 
@@ -858,23 +812,23 @@ mod tests {
         // Other qwen error paths share the "qwen:" prefix but are NOT this
         // shape and may embed on-disk paths - must not be misparsed.
         assert_eq!(
-            parse_exceeds_capacity("qwen: folding adapter /home/user/lora.safetensors: bad shape"),
+            capability::failure::parse_exceeds_capacity("qwen: folding adapter /home/user/lora.safetensors: bad shape"),
             None
         );
     }
 
     #[test]
     fn parse_exceeds_capacity_ignores_other_reject_reasons() {
-        assert_eq!(parse_exceeds_capacity("qwen: rejected by admission_policy"), None);
+        assert_eq!(capability::failure::parse_exceeds_capacity("qwen: rejected by admission_policy"), None);
         assert_eq!(
-            parse_exceeds_capacity("qwen: token 999999 is outside the vocabulary (151936)"),
+            capability::failure::parse_exceeds_capacity("qwen: token 999999 is outside the vocabulary (151936)"),
             None
         );
     }
 
     #[test]
     fn parse_exceeds_capacity_ignores_generic_backend_errors() {
-        assert_eq!(parse_exceeds_capacity("backend panic at /home/secret/weights.gguf: kernel exploded"), None);
+        assert_eq!(capability::failure::parse_exceeds_capacity("backend panic at /home/secret/weights.gguf: kernel exploded"), None);
     }
 
     // ── map_reply_err ────────────────────────────────────────────────────────

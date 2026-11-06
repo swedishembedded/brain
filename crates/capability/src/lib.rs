@@ -41,7 +41,7 @@ pub mod hot;
 pub mod presentation;
 pub mod video;
 
-pub use failure::{classify, tag, FailureClass};
+pub use failure::{ReplyError, classify, tag, FailureClass};
 pub use presentation::{ActionPresentation, ModelPresentation};
 
 // ===================== descriptors (the self-describing schema) =====================
@@ -423,7 +423,7 @@ impl ActionSpec {
                 return Err(format!("unknown input '{k}' for action '{}'", self.name));
             }
         }
-        Ok(Invocation { params: Value::Object(params), blobs: inv.blobs, cancel: inv.cancel })
+        Ok(Invocation { params: Value::Object(params), blobs: inv.blobs, cancel: inv.cancel, scope: inv.scope })
     }
 }
 
@@ -632,16 +632,22 @@ pub struct Invocation {
     pub blobs: BTreeMap<String, Blob>,
     /// Cooperative cancellation; `Default` (unarmed) is never cancelled.
     pub cancel: CancelToken,
+    /// Who the call is from, as the serving surface knows it: the caller's job
+    /// scope, set by the surface that dispatched the call and never by a
+    /// param. A model that keeps state between calls under a name the client
+    /// chose (a streaming session) keys it by this too, so one caller can
+    /// neither read nor advance another's. Empty for an unnamed caller.
+    pub scope: String,
 }
 
 impl Invocation {
     pub fn new() -> Invocation {
-        Invocation { params: json!({}), blobs: BTreeMap::new(), cancel: CancelToken::default() }
+        Invocation { params: json!({}), blobs: BTreeMap::new(), cancel: CancelToken::default(), scope: String::new() }
     }
     /// This invocation's parameters and cancellation, without its blobs: what a caller that only needs to
     /// remember the request (not read its payload again) keeps. A page of pixels is tens of megabytes.
     pub fn without_blobs(&self) -> Invocation {
-        Invocation { params: self.params.clone(), blobs: BTreeMap::new(), cancel: self.cancel.clone() }
+        Invocation { params: self.params.clone(), blobs: BTreeMap::new(), cancel: self.cancel.clone(), scope: self.scope.clone() }
     }
     pub fn set(mut self, key: &str, v: Value) -> Invocation {
         self.params.as_object_mut().expect("params must be an object").insert(key.into(), v);
