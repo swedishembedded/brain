@@ -6,6 +6,46 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-11-06
+
+### Breaking Changes
+
+- MiniMax-H3 takes its Community License opt-in with the request: `--allow-community` on the command line, `allow_community: true` on a served request. `BRAIN_MINIMAXH3_ALLOW_COMMUNITY` is no longer read. Its weights come only from the model store: `BRAIN_MINIMAXH3_DIR`, `Paths::from_env`, the resident's and provider's environment constructors and the `generate_t2va` example are gone. `BRAIN_MINIMAXH3_ATTN` is gone too: an A/B pins the attention arm with `block::Ctx::attn` (`dit_attn_vram` takes it, and its device, as arguments).
+- LTX-2.5 resolves every weight from the model store, never the environment: the `BRAIN_LTXV_*` path variables are gone, `Paths` is plain data (built from the store's assembly or with `Paths::new`), the resident resolves through `LtxvResident::from_store` and DFR through `DfrPaths::from_paths`. The ten variables that chose how a run was placed and computed (resident block count, two-stage override, the fp32 audio-visual arm, VAE tiling, text-encoder precision, the text cache and its budget, the latent dump, the stage-major long-form path and its per-window token ceiling) are request options (`GenOpts::runtime`, two `LongOpts` fields) and CLI flags shared by every generating command (`--resident-blocks`, `--two-stage`, ...). `ltxv_bench` takes its decode instruments as options (`--lf-subst`, `--upsample`, `--upsample-raw`, `--pixel-dump`), and `perf`'s real 22B LTX config is an explicit `@real` suffix.
+- A plain `brain ltxv t2v` with the real checkpoint in the model store runs the real model at the reference pipelines' 768x512, 121 frames and 24 fps (or the duration head's length), where it rendered the tiny random-weight smoke test unless told otherwise.
+- LTX-2.5 classifier-free guidance encodes the reference's default negative prompt for its unconditional branch (`--negative-prompt` / `negative_prompt` override it), where it encoded an empty prompt, and reads each branch under its own mask. The text cache moves to revision 4, so the first run of each prompt re-encodes it. A clip's predicted length now reads both streams, as every reference video pipeline does.
+- The streamed LTX-2.5 forwards take a `Sync` tensor source (`&(dyn TensorSource + Sync)`); `minimaxh3::block::block_forward` takes a `BlockInputs`; `checkpoint::TensorSource` implementations should forward `advise_drop` (`checkpoint::forward_tensor_source!` writes the forwarding impl).
+
+### Features
+
+- MiniMax-H3 runs from the model store with its DiT held resident at int8 over as many cards as hold it and the Qwen3-VL text tower placed over the cards it needs; text-to-video+audio (`t2va`), first/last-frame (`fl2va`, keyframes fitted and presented to the conditioner the reference's way) and reference-to-video (`ref2va`, images, video and soundtracks packed as references) are served, cancellable, and report progress. A 768x448, 121-frame clip holds resident on two 24 GB cards. `--int8-activation-levels 2` / `int8_activation_levels` opts into two-level int8 activations.
+- LTX-2.5: LoRA adapters applied beside the int8 weights, IC-LoRA reference video with per-reference attention weighting, 48 kHz sound through the vocoder's bandwidth extension, the reference's multimodal guider and its high-quality preset, the `res_2s` sampler, audio-to-video (including soundtracks longer than one window), text-to-audio, retake of a time window, sound for a picture, extending an existing clip, and clip length from the duration head. Retake, extend and upscale are served capability actions, and the served model resolves from the model store.
+- Video is written and read in process: AV1 with Opus sound in MP4, WebM and Matroska, with no ffmpeg; a joint video and sound outcome is one clip.
+- `apiserve` speaks the OpenRouter `/videos` contract for generation and editing (`POST`/`GET /videos`, `/videos/{id}/content` with ranges, `/videos/models`, idempotency keys, cancel/delete); each video action declares the frame grid, rate, size bounds and sound it promises. Every model card says the server keeps no data.
+- A large chat model is served with one replica per card, each with its own KV pool and prefix cache; requests route to the replica holding their prefix, and `stats` shows each replica with its device, load and cache counters.
+- Training is a job of the serving process (`brain serve --training`, action `train`): supervised or policy-gradient LoRA fine-tunes, including on-policy self-distillation from teacher contexts, on the cards serving shares, with datasets from input blobs or a content-addressed artifact store. A job's events are a stream; a model can refuse a job at the door, and a job cancelled while waiting for a device never claims one.
+- Qwen3-VL: one `VisionTower` for image and video blocks, DeepStack features, prompts that interleave images and video, rotary settings from transformers 5 configs, and a language tower placed over several cards.
+- Images resize with Pillow's LANCZOS byte for byte, and audio resamples exactly as torchaudio's `Resample` does.
+- The video stack builds for Windows and the wgpu backend for macOS.
+
+### Performance
+
+- Loading streams a checkpoint instead of holding it: a mapped reader releases each tensor's pages once it is consumed, int8 weights upload in bounded chunks, LTX-2.5's Q8_0 blocks repack straight from the checkpoint (0.17 s a block, from 2.0-2.5 s), its embeddings connectors load only for a new context, the host keeps no copy of blocks the card pins, and streamed blocks repack one block ahead of the device. A 1280x704 LTX-2.5 clip with sound peaks at ~26 GB of host RAM, from 88 GB.
+- MiniMax-H3: AdaLN modulation is projected once per timestep and read from its tables per row (`kernels::{modulate_rows, gate_rows}`), parity taps stay out of the production forward, and a scratch scope can rewind over the slots its earlier phase dropped (`ScratchScope::rewind`), so a block's attention and FFN halves share one workspace: 8.68 -> 6.48 GB for a 13312-row block at the same speed. The video VAE decoder holds its weights for a whole decode and runs flash attention: a 704x384 clip's decode takes 158 s, from 786 s.
+- int8 packing rounds without a `roundf` per element (21.4 -> 9.4 ms for a 512x5376 block), tiled products reuse their scratch, and the NA decoder's neighborhood attention is fused.
+- Debug builds keep line tables only and each crate builds one integration test binary.
+
+### Bug Fixes
+
+- Resident placement budgets a card from the free VRAM it reports, less an allocator overhead proportional to what it holds, where it planned against the card's size and could run a split model out of memory at load or at its first step.
+- Gemma-4 prompts tokenize as SentencePiece byte-fallback BPE.
+- LTX-2.5's text encoder and spatial upscaler are found in the model store (the upscaler under the vendor's `config` metadata key), and an adapted connector routing is never served or kept.
+- A multimodal checkpoint's language sizes are read under `text_config`.
+- A MiniMax-H3 canvas tie rounds to the even multiple, as the reference does.
+- A key pinned with `--api-key-file` is named by its file on stdout, never printed.
+- A card that runs out of memory mid-call sends the sequences it carried back to the queue (they resume from the tokens already produced) and admits fewer at once until it is calm again, where every sequence in the call failed with HTTP 500. Only a request that fails alone on an emptied card is refused, with the new capability failure class `unavailable`: HTTP 503 with `Retry-After` (Anthropic `overloaded_error`), never a backend failure.
+- The resident GPU tests report their skips instead of returning silently.
+
 ## [4.0.0] - 2026-11-04
 
 ### Breaking Changes
