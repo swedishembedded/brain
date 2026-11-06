@@ -25,6 +25,10 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ## Contents
 
 <!-- contents -->
+### [Volume I: Thinking in Mathematics](v01-mathematics/index.md)
+
+1. [Numbers, Quantities and Notation](v01-mathematics/01-numbers.md): What are the numbers a machine learns with, and how do we write about them precisely?
+
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 
 4. [Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md): How do we compute the gradient of one loss with respect to millions of parameters in about the cost of one forward pass?

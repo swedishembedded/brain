@@ -79,7 +79,7 @@ volumes:
       - id: derivatives
         title: "Derivatives: The Mathematics of Change"
         question: "How do we measure how fast a function's output changes when its input moves a tiny bit?"
-        introduces: [limit, derivative, differentiation-rules, chain-rule, critical-point, convexity]
+        introduces: [limit, derivative, differentiation-rules, chain-rule, critical-point, convexity, newtons-method]
         requires: [function, composition, polynomial, exponential-function]
         brain: []
       - id: multivariable-calculus

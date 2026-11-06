@@ -327,6 +327,10 @@ navigation:
       - docs/book/how-to-read.md
       - docs/book/notation.md
       - docs/book/pseudocode.md
+      - title: "Volume I: Thinking in Mathematics"
+        pages:
+          - docs/book/v01-mathematics/index.md
+          - docs/book/v01-mathematics/01-numbers.md
       - title: "Volume III: Building Neural Networks from Nothing"
         pages:
           - docs/book/v03-neural-networks/index.md
