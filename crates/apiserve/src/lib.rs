@@ -55,6 +55,7 @@ pub mod models;
 pub mod openai;
 pub mod openrouter;
 pub mod png;
+pub mod preprocess;
 pub mod sampling;
 pub mod state;
 pub mod surface;

@@ -299,7 +299,23 @@ async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> 
         Ok(v) => v,
         Err(e) => return ApiError::invalid_request(provider, format!("invalid JSON body: {e}")).into_response(),
     };
-    let (requested, inv, stream) = match surface.parse(provider, &body) {
+    // Media is decoded off the async workers, a few requests at a time
+    // (`crate::preprocess`); a text-only request is parsed in place.
+    let (body, parsed) = if crate::media::carries_media(&body) {
+        match crate::preprocess::off_runtime(provider, move || {
+            let parsed = surface.parse(provider, &body);
+            (body, parsed)
+        })
+        .await
+        {
+            Ok(done) => done,
+            Err(e) => return e.into_response(),
+        }
+    } else {
+        let parsed = surface.parse(provider, &body);
+        (body, parsed)
+    };
+    let (requested, inv, stream) = match parsed {
         Ok(x) => x,
         Err(e) => return e.into_response(),
     };

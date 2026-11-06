@@ -56,37 +56,34 @@ impl ExtractedMedia {
         inv
     }
 
-    fn push_image(&mut self, blob: Blob) -> Result<(), String> {
+    /// Decode the next image's bytes (PNG/JPEG/PPM) into brain's HWC-f32 image
+    /// blob. The image is refused from its header, before it is decoded, when
+    /// it is over [`MAX_IMAGE_PIXELS`] or over what is left of the request's
+    /// [`MAX_REQUEST_PIXELS`]: checking the total only after decoding let one
+    /// request decode a whole further image past it.
+    fn push_image(&mut self, bytes: &[u8]) -> Result<(), String> {
         if self.images.len() == MAX_IMAGES {
             return Err(format!("a request may carry at most {MAX_IMAGES} images"));
         }
-        let dim = |k: &str| blob.meta.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-        self.pixels += dim("w") * dim("h");
-        if self.pixels > MAX_REQUEST_PIXELS {
-            return Err(format!("the images of a request may hold at most {MAX_REQUEST_PIXELS} pixels together"));
-        }
-        self.images.push(blob);
+        let left = MAX_REQUEST_PIXELS - self.pixels;
+        let rgb = imaging::codec::decode_bounded(bytes, MAX_IMAGE_PIXELS.min(left)).map_err(|e| {
+            if left < MAX_IMAGE_PIXELS {
+                format!("{e} (the images of a request may hold at most {MAX_REQUEST_PIXELS} pixels together)")
+            } else {
+                e
+            }
+        })?;
+        self.pixels += u64::from(rgb.w) * u64::from(rgb.h);
+        self.images.push(capability::blob::image_blob(&rgb.to_hwc_unit(), rgb.w, rgb.h, 3));
         Ok(())
-    }
-
-    /// Decode one image's bytes (PNG/JPEG/PPM) into brain's HWC-f32 image blob, refusing one over [`MAX_IMAGE_PIXELS`].
-    fn decode_image(bytes: &[u8]) -> Result<Blob, String> {
-        let rgb = imaging::codec::decode_bounded(bytes, MAX_IMAGE_PIXELS)?;
-        Ok(capability::blob::image_blob(&rgb.to_hwc_unit(), rgb.w, rgb.h, 3))
     }
 }
 
 /// Decode one image content part's bytes (PNG/JPEG/PPM, via
-/// `imaging::codec::decode`) into brain's HWC-f32 image blob.
-fn decode_image_data_url(data_url: &str) -> Result<Blob, String> {
+/// `imaging::codec::decode`): its bytes, for [`ExtractedMedia::push_image`].
+fn image_data_url_bytes(data_url: &str) -> Result<Vec<u8>, String> {
     let payload = capability::blob::data_url_payload(data_url).ok_or_else(|| "image_url: only inline 'data:...;base64,...' URLs are supported (no external fetch)".to_string())?;
-    ExtractedMedia::decode_image(&b64::decode(payload)?)
-}
-
-/// Decode one image content block's raw base64 payload (Anthropic's own
-/// `source.data` - no `data:` URL wrapper, unlike OpenAI's `image_url`).
-fn decode_image_base64(payload: &str) -> Result<Blob, String> {
-    ExtractedMedia::decode_image(&b64::decode(payload)?)
+    b64::decode(payload)
 }
 
 /// Decode one `input_audio` part's base64 payload (a whole recording FILE per
@@ -104,6 +101,17 @@ fn decode_input_audio(b64_data: &str, format: &str) -> Result<Blob, String> {
     Ok(audio::asr_caps::audio_blob_from_samples(&samples))
 }
 
+/// Whether a chat body carries media to decode: an OpenAI `image_url` or
+/// `input_audio` part, or an Anthropic `image` block. A request that does is
+/// parsed through [`crate::preprocess::off_runtime`]; one that does not stays
+/// on the async worker, where parsing text costs nothing worth bounding.
+pub fn carries_media(body: &Value) -> bool {
+    let Some(messages) = body.get("messages").and_then(Value::as_array) else { return false };
+    messages.iter().filter_map(|m| m.get("content").and_then(Value::as_array)).flatten().any(|part| {
+        matches!(part.get("type").and_then(Value::as_str), Some("image_url" | "input_audio" | "image"))
+    })
+}
+
 /// Scan OpenAI-shaped `messages` (the RAW pre-flatten request array) for
 /// every `image_url` content part and the first `input_audio` one across all
 /// messages, in order.
@@ -115,7 +123,7 @@ pub fn extract_openai(messages: &[Value]) -> Result<ExtractedMedia, String> {
             match p.get("type").and_then(|v| v.as_str()) {
                 Some("image_url") => {
                     if let Some(url) = p.get("image_url").and_then(|u| u.get("url")).and_then(|v| v.as_str()) {
-                        out.push_image(decode_image_data_url(url)?)?;
+                        out.push_image(&image_data_url_bytes(url)?)?;
                     }
                 }
                 Some("input_audio") if out.audio.is_none() => {
@@ -151,7 +159,8 @@ pub fn extract_anthropic(messages: &[Value]) -> Result<ExtractedMedia, String> {
                 continue; // a URL source: out of scope, see this function's doc
             }
             if let Some(data) = source.and_then(|s| s.get("data")).and_then(|v| v.as_str()) {
-                out.push_image(decode_image_base64(data)?)?;
+                // Anthropic's raw base64 `source.data`, no `data:` URL wrapper.
+                out.push_image(&b64::decode(data)?)?;
             }
         }
     }
@@ -297,12 +306,14 @@ mod tests {
         assert!(extract_anthropic(blocks.as_array().unwrap()).unwrap_err().contains("limit"));
     }
 
+    /// What is left of the request's budget bounds the next image from its
+    /// header: the PNG below has no pixel data, so a refusal that names the
+    /// budget proves nothing was decoded first.
     #[test]
-    fn the_images_of_one_request_share_a_pixel_budget() {
-        let mut media = ExtractedMedia::default();
-        let image = |w: u64| Blob::new(Media::Image, Vec::new()).with_meta(json!({"w": w, "h": 1000, "c": 3}));
-        media.push_image(image(30_000)).expect("30 MP is within the budget");
-        let err = media.push_image(image(40_000)).unwrap_err();
-        assert!(err.contains("together"), "{err}");
+    fn the_images_of_one_request_share_a_pixel_budget_checked_before_decoding() {
+        let mut media = ExtractedMedia { pixels: MAX_REQUEST_PIXELS - 1_000, ..ExtractedMedia::default() };
+        let err = media.push_image(&png_declaring(100, 100)).unwrap_err();
+        assert!(err.contains("limit") && err.contains("together"), "{err}");
+        assert!(media.images.is_empty());
     }
 }

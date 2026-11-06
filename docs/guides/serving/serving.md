@@ -297,7 +297,10 @@ Every HTTP surface bounds what one peer can hold, with or without a key:
   trickles in;
 - each surface holds at most 1024 connections; one more is closed before a
   byte of it is read;
-- with TLS, the handshake is held to the same 10 seconds as a request head.
+- with TLS, the handshake is held to the same 10 seconds as a request head;
+- images, recordings and clips in requests are decoded at most four at a
+  time across the whole server; a request that finds no decoder free within
+  30 seconds is answered 503.
 
 Only HTTP/1.1 is served. A streamed response stays open as long as its
 generation runs.

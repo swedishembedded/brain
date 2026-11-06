@@ -43,7 +43,23 @@ async fn messages(State(state): State<AppState>, caller: CallerExt, body: Bytes)
         Ok(v) => v,
         Err(e) => return ApiError::invalid_request(PROVIDER, format!("invalid JSON body: {e}")).into_response(),
     };
-    let (model, inv, stream) = match to_invocation(&body) {
+    // Media is decoded off the async workers, a few requests at a time
+    // (`crate::preprocess`); a text-only request is parsed in place.
+    let (body, parsed) = if crate::media::carries_media(&body) {
+        match crate::preprocess::off_runtime(PROVIDER, move || {
+            let parsed = to_invocation(&body);
+            (body, parsed)
+        })
+        .await
+        {
+            Ok(done) => done,
+            Err(e) => return e.into_response(),
+        }
+    } else {
+        let parsed = to_invocation(&body);
+        (body, parsed)
+    };
+    let (model, inv, stream) = match parsed {
         Ok(x) => x,
         Err(e) => return e.into_response(),
     };

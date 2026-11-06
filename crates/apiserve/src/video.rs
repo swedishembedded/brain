@@ -61,6 +61,7 @@ use crate::auth::CallerExt;
 use crate::bridge::{self, EventStream, StreamMsg};
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::surface::Provider;
 use crate::video_inputs::{self, JobInputs, Wanted};
 
 /// The largest request body: an edit carries its clip inline as base64.
@@ -251,7 +252,7 @@ async fn plan(state: &AppState, body: &Bytes) -> Result<Planned, ApiError> {
             if video.kind != "video_url" {
                 return Err(bad(format!("input_video.type must be \"video_url\", not \"{}\"", video.kind)));
             }
-            let blob = clip_from_data_url(&video.video_url.url).await.map_err(bad)?;
+            let blob = clip_from_data_url(provider, &video.video_url.url).await?;
             inv.blobs.insert(name.clone(), blob);
         }
         (Some(_), None) => return Err(bad(format!("{model} {} edits a clip: send it as input_video", spec.name))),
@@ -280,20 +281,21 @@ async fn plan(state: &AppState, body: &Bytes) -> Result<Planned, ApiError> {
 /// An inline `data:video/...;base64,` clip, decoded into the video blob wire
 /// format. Decoding needs a file, so the bytes pass through a private
 /// temporary one that is removed before this returns.
-async fn clip_from_data_url(url: &str) -> Result<capability::Blob, String> {
+async fn clip_from_data_url(provider: Provider, url: &str) -> Result<capability::Blob, ApiError> {
+    let bad = |m: String| ApiError::invalid_request(provider, m);
     let ext = if url.starts_with("data:video/mp4;") {
         "mp4"
     } else if url.starts_with("data:video/webm;") {
         "webm"
     } else if url.starts_with("data:") {
-        return Err("input_video must be a data:video/mp4 or data:video/webm URL".into());
+        return Err(bad("input_video must be a data:video/mp4 or data:video/webm URL".into()));
     } else {
-        return Err("input_video must be an inline data: URL; remote URLs are not fetched".into());
+        return Err(bad("input_video must be an inline data: URL; remote URLs are not fetched".into()));
     };
-    let payload = capability::blob::data_url_payload(url).ok_or("input_video is not a base64 data: URL")?;
-    let bytes = crate::b64::decode(payload).map_err(|e| format!("input_video: {e}"))?;
+    let payload = capability::blob::data_url_payload(url).ok_or_else(|| bad("input_video is not a base64 data: URL".into()))?;
+    let bytes = crate::b64::decode(payload).map_err(|e| bad(format!("input_video: {e}")))?;
     let ext = ext.to_string();
-    tokio::task::spawn_blocking(move || {
+    crate::preprocess::off_runtime(provider, move || {
         // The detail of a scratch-file failure names this machine's paths:
         // logged here, never sent.
         let dir = private_temp_dir().map_err(|e| {
@@ -311,8 +313,8 @@ async fn clip_from_data_url(url: &str) -> Result<capability::Blob, String> {
         let _ = std::fs::remove_file(&path);
         result
     })
-    .await
-    .map_err(|e| format!("input_video: {e}"))?
+    .await?
+    .map_err(bad)
 }
 
 // ------------------------------------------------------------------ jobs

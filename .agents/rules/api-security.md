@@ -85,6 +85,10 @@ them, so treat all request input as hostile.
       protocols), every container count is bounded by the file's own length and every
       size sum is checked (`videocodec::mp4` tests), and a decoded frame is capped at
       `videocodec::MAX_FRAME_PIXELS` inside the AV1 decoder, before it is allocated.
+- [ ] No request decodes media on an async worker: images, audio and clips go through
+      `crate::preprocess::off_runtime` (blocking pool, `MAX_CONCURRENT_DECODES` at once,
+      503 past `DECODE_QUEUE_DEADLINE`), and an image is refused from its header against
+      what is left of `MAX_REQUEST_PIXELS`, never after decoding it.
 - [ ] No peer, keyed or not, can hold a connection without sending: every surface
       is served by `crates/apiserve/src/listener.rs` (never `axum::serve`, which
       runs no header timer), with a header deadline that also ends idle kept-alive

@@ -52,13 +52,16 @@ struct TranscriptionRequest {
 pub async fn transcriptions(State(state): State<AppState>, caller: CallerExt, request: Request) -> Response {
     let state = state.scoped(caller);
     let provider = state.provider;
-    let req = match read_request(provider, request).await {
+    let mut req = match read_request(provider, request).await {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    let samples = match audio::decode::decode_speech(&req.audio, MAX_TRANSCRIPTION_SECONDS) {
-        Ok(s) => s,
-        Err(e) => return ApiError::invalid_request(provider, e.to_string()).into_response(),
+    let recording = std::mem::take(&mut req.audio);
+    let decoded = crate::preprocess::off_runtime(provider, move || audio::decode::decode_speech(&recording, MAX_TRANSCRIPTION_SECONDS)).await;
+    let samples = match decoded {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return ApiError::invalid_request(provider, e.to_string()).into_response(),
+        Err(e) => return e.into_response(),
     };
 
     let body = json!({ "model": req.model });
