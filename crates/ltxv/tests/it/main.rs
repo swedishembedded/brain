@@ -14,6 +14,7 @@ mod audio_parity;
 mod audio_seam;
 mod av_block_grad;
 mod av_concept_learning;
+mod av_dit_full_real;
 mod av_dit_parity;
 mod av_lora_reload;
 mod av_lora_train;

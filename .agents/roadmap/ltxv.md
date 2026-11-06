@@ -108,6 +108,11 @@ this port:
       frozen audio slices, `conditioning_fps` snapping above 30 fps) and the
       `spatial_upscalings = 2` epilogue; the GPU end-to-end test
       `dfr_real::a_dfr_clip_on_real_weights_comes_back_whole` has not run.
+- [ ] **Full-depth LTX-2.5 parity** - `ltxv_real_av_dit_full_dump_reference.py`
+      dumps the official 48-block audio-visual `LTXModel` (bf16 checkpoint, fp32,
+      CPU) on a real prompt's context; `av_dit_full_real::the_production_av_forward_
+      matches_the_reference_at_full_depth` compares brain's int8 streamed forward
+      against it and has not run (needs a GPU).
 - [x] **IC-LoRA attention mask** - `--reference-attention-strength` /
       `--reference-attention-mask` weight the reference<->clip attention as
       `ConditioningItemAttentionStrengthWrapper` does: per-token log weights
