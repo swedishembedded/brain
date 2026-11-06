@@ -11,6 +11,12 @@
 //!   request open (video, music, 3D); `GET /v1/jobs/{id}` reports its progress,
 //!   `GET /v1/jobs/{id}/result` returns it when it is done and
 //!   `DELETE /v1/jobs/{id}` cancels it.
+//! - `GET /v1/jobs/{id}/events` follows one as a server-sent event stream: each step
+//!   tick (`progress`) and each structured frame the action emits (`frame`, such as a
+//!   training step's loss and statistics) as it happens, then one terminal `done`
+//!   event carrying the job's final status. The last [`MAX_EVENTS_PER_JOB`] frames are
+//!   kept, so a client that connects late, or reconnects with `Last-Event-ID`, replays
+//!   what it missed.
 //!
 //! A call is `{"model", "action", "params", "blobs": {name: {"media", "data",
 //! "meta"}}}` with `data` base64. It is validated against the action's own
@@ -26,13 +32,15 @@
 //! kept, and a finished one is forgotten after [`RESULT_TTL`]. A process restart
 //! forgets them all.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -40,7 +48,7 @@ use capability::{ActionSpec, Blob, Invocation, Media, Outcome};
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
 use crate::auth::CallerExt;
@@ -59,6 +67,10 @@ pub const MAX_JOBS: usize = 1024;
 pub const RESULT_TTL: Duration = Duration::from_secs(60 * 60);
 /// The most bytes of finished results kept; the oldest are forgotten first.
 pub const MAX_RETAINED_BYTES: usize = 1024 * 1024 * 1024;
+/// The frames of one job kept for [`events`]; the oldest are forgotten first.
+pub const MAX_EVENTS_PER_JOB: usize = 4096;
+/// Event streams open on one job at once.
+pub const MAX_EVENT_STREAMS_PER_JOB: usize = 8;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -67,12 +79,16 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/jobs", post(create_job))
         .route("/v1/jobs/:id", get(job_status).delete(cancel_job))
         .route("/v1/jobs/:id/result", get(job_result))
+        .route("/v1/jobs/:id/events", get(job_events))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
 
 // ------------------------------------------------------------------ the call
 
+/// `deny_unknown_fields`: a field this route does not define is a client bug (or a probe), and ignoring it would
+/// hide that the caller believes it has set something.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CallBody {
     model: String,
     action: String,
@@ -83,6 +99,7 @@ struct CallBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BlobWire {
     media: String,
     data: String,
@@ -119,6 +136,9 @@ fn parse_call(state: &AppState, body: &Bytes) -> Result<(String, String, Invocat
     // A param the host resolves (a weights path, a dataset folder) is refused
     // as unknown, so a remote caller can never name a file on this machine.
     let inv = spec.validate_served(inv).map_err(|e| ApiError::invalid_request(provider, e))?;
+    // What the spec cannot say - that a base exists, that a dataset is in the store - the model is asked at the door,
+    // so a call that can never run is a 400 here and not a job that is accepted and then fails.
+    state.exec.check_job(&call.model, &call.action, &inv).map_err(|e| ApiError::invalid_request(provider, e))?;
     Ok((call.model, call.action, inv))
 }
 
@@ -212,6 +232,41 @@ struct Entry {
     finished: Option<Instant>,
     phase: Phase,
     cancel: Option<oneshot::Sender<()>>,
+    log: EventLog,
+    /// Carries the sequence number of the newest frame, so a follower waits for the next one.
+    wake: watch::Sender<u64>,
+    /// Event streams open on this job.
+    followers: Arc<AtomicUsize>,
+}
+
+/// One frame of a job's event stream: what happened, as the SSE `event:` name and its JSON.
+#[derive(Clone, Debug, PartialEq)]
+struct Frame {
+    seq: u64,
+    kind: &'static str,
+    data: Value,
+}
+
+/// The newest [`MAX_EVENTS_PER_JOB`] frames of one job, numbered from 1.
+#[derive(Default)]
+struct EventLog {
+    last: u64,
+    frames: VecDeque<Frame>,
+}
+
+impl EventLog {
+    fn push(&mut self, kind: &'static str, data: Value) -> u64 {
+        self.last += 1;
+        if self.frames.len() == MAX_EVENTS_PER_JOB {
+            self.frames.pop_front();
+        }
+        self.frames.push_back(Frame { seq: self.last, kind, data });
+        self.last
+    }
+
+    fn after(&self, seq: u64) -> Vec<Frame> {
+        self.frames.iter().filter(|f| f.seq > seq).cloned().collect()
+    }
 }
 
 /// The surface's background jobs. See the module doc for what it promises.
@@ -260,7 +315,18 @@ impl AsyncJobs {
             return Err("too many jobs: fetch or cancel some before starting another");
         }
         let id = Uuid::new_v4();
-        entries.insert(id, Entry { scope: scope.to_string(), finished: None, phase: Phase::Running { step: 0, total: 0 }, cancel: Some(cancel) });
+        entries.insert(
+            id,
+            Entry {
+                scope: scope.to_string(),
+                finished: None,
+                phase: Phase::Running { step: 0, total: 0 },
+                cancel: Some(cancel),
+                log: EventLog::default(),
+                wake: watch::channel(0).0,
+                followers: Arc::default(),
+            },
+        );
         Ok(id)
     }
 
@@ -269,8 +335,16 @@ impl AsyncJobs {
     }
 
     fn progress(&self, id: Uuid, step: u32, total: u32) {
-        if let Some(Entry { phase: phase @ Phase::Running { .. }, .. }) = self.lock().get_mut(&id) {
-            *phase = Phase::Running { step, total };
+        if let Some(entry) = self.lock().get_mut(&id).filter(|e| matches!(e.phase, Phase::Running { .. })) {
+            entry.phase = Phase::Running { step, total };
+            entry.record("progress", json!({"step": step, "total": total}));
+        }
+    }
+
+    /// A structured frame the action emitted (see [`Progress::event`](capability::Progress::event)).
+    fn frame(&self, id: Uuid, data: Value) {
+        if let Some(entry) = self.lock().get_mut(&id).filter(|e| matches!(e.phase, Phase::Running { .. })) {
+            entry.record("frame", data);
         }
     }
 
@@ -283,6 +357,7 @@ impl AsyncJobs {
                 entry.phase = phase;
                 entry.finished = Some(Instant::now());
                 entry.cancel = None;
+                entry.record_end();
             }
         }
     }
@@ -296,8 +371,27 @@ impl AsyncJobs {
             }
             entry.phase = Phase::Cancelled;
             entry.finished = Some(Instant::now());
+            entry.record_end();
         }
         Some(phase_name(&entry.phase))
+    }
+
+    /// The frames of job `id` after `seq`, for `scope`; with a receiver that wakes when there are more, and a
+    /// guard counting this follower. `None` when the job does not exist for `scope` or has too many followers.
+    fn follow(&self, scope: &str, id: Uuid, seq: u64) -> Option<Result<Follow, ()>> {
+        let entries = self.lock();
+        let entry = entries.get(&id).filter(|e| e.scope == scope)?;
+        if entry.followers.fetch_add(1, Ordering::SeqCst) >= MAX_EVENT_STREAMS_PER_JOB {
+            entry.followers.fetch_sub(1, Ordering::SeqCst);
+            return Some(Err(()));
+        }
+        Some(Ok(Follow { scope: scope.to_string(), id, seq, wake: entry.wake.subscribe(), pending: VecDeque::new(), ended: false, count: Arc::clone(&entry.followers) }))
+    }
+
+    /// The frames of job `id` after `seq`, and whether the job has ended (so no more will come); `None` once the
+    /// job is forgotten.
+    fn frames_after(&self, scope: &str, id: Uuid, seq: u64) -> Option<(Vec<Frame>, bool)> {
+        self.lock().get(&id).filter(|e| e.scope == scope).map(|e| (e.log.after(seq), !matches!(e.phase, Phase::Running { .. })))
     }
 
     /// What `scope` is allowed to see of job `id`.
@@ -310,6 +404,22 @@ impl AsyncJobs {
             Phase::Failed(error) => View::Failed(error.clone()),
             Phase::Cancelled => View::Cancelled,
         })
+    }
+}
+
+impl Entry {
+    fn record(&mut self, kind: &'static str, data: Value) {
+        let seq = self.log.push(kind, data);
+        self.wake.send_replace(seq);
+    }
+
+    /// The terminal frame, from the phase the job has just entered.
+    fn record_end(&mut self) {
+        let mut data = json!({"status": phase_name(&self.phase)});
+        if let Phase::Failed(error) = &self.phase {
+            data["error"] = json!({"message": error.message, "code": error.kind.status().as_u16()});
+        }
+        self.record("done", data);
     }
 }
 
@@ -384,7 +494,8 @@ async fn drive(jobs: Arc<AsyncJobs>, provider: crate::Provider, id: Uuid, mut st
             }
             msg = stream.next() => match msg {
                 Some(StreamMsg::Progress(step, total)) => jobs.progress(id, step, total),
-                Some(StreamMsg::Delta(_) | StreamMsg::Event(_) | StreamMsg::Fetching(_)) => {}
+                Some(StreamMsg::Event(frame)) => jobs.frame(id, frame),
+                Some(StreamMsg::Delta(_) | StreamMsg::Fetching(_)) => {}
                 Some(StreamMsg::Done(outcome)) => {
                     let bytes = outcome_bytes(&outcome);
                     jobs.finish(id, Phase::Succeeded { outcome: Arc::new(outcome), bytes });
@@ -425,6 +536,80 @@ async fn job_result(State(state): State<AppState>, caller: CallerExt, Path(raw):
         Some(View::Failed(error)) => error.into_response(),
         Some(View::Cancelled) => (StatusCode::GONE, Json(json!({"id": id.to_string(), "status": "cancelled", "error": {"message": "the job was cancelled"}}))).into_response(),
     }
+}
+
+/// One client following a job's event stream: where it has got to, and what it has still to send.
+struct Follow {
+    scope: String,
+    id: Uuid,
+    seq: u64,
+    wake: watch::Receiver<u64>,
+    pending: VecDeque<Frame>,
+    /// The terminal frame has been sent, or the job is gone.
+    ended: bool,
+    count: Arc<AtomicUsize>,
+}
+
+impl Drop for Follow {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Follow {
+    /// The next frame, waiting for the job to make one; `None` when the stream is over.
+    async fn next(&mut self, jobs: &AsyncJobs) -> Option<Frame> {
+        loop {
+            if let Some(frame) = self.pending.pop_front() {
+                self.seq = frame.seq;
+                self.ended = frame.kind == "done";
+                return Some(frame);
+            }
+            if self.ended {
+                return None;
+            }
+            // Mark the current value seen BEFORE reading, so a frame recorded in between wakes the wait below.
+            self.wake.borrow_and_update();
+            let (frames, finished) = jobs.frames_after(&self.scope, self.id, self.seq)?;
+            self.pending = frames.into();
+            if self.pending.is_empty() {
+                if finished {
+                    // The client already has the terminal frame.
+                    return None;
+                }
+                if self.wake.changed().await.is_err() {
+                    // The job was forgotten while it was followed.
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// `GET /v1/jobs/{id}/events`: the job's frames as server-sent events, from the start or from `Last-Event-ID`.
+async fn job_events(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>, headers: axum::http::HeaderMap) -> Response {
+    let state = state.scoped(caller);
+    let Some(id) = parse_id(&raw) else { return no_such_job(&state) };
+    // A malformed Last-Event-ID is a client bug, not a reason to replay from the start.
+    let seq = match headers.get("last-event-id") {
+        None => 0,
+        Some(value) => match value.to_str().ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+            Some(seq) => seq,
+            None => return ApiError::invalid_request(state.provider, "Last-Event-ID must be the number of the last event received").into_response(),
+        },
+    };
+    let jobs = Arc::clone(&state.async_jobs);
+    let follow = match jobs.follow(&scope_of(&state), id, seq) {
+        None => return no_such_job(&state),
+        Some(Err(())) => return ApiError::rate_limited(state.provider, "too many event streams are open on this job").into_response(),
+        Some(Ok(follow)) => follow,
+    };
+    let events = futures::stream::unfold((follow, jobs), |(mut follow, jobs)| async move {
+        let frame = follow.next(&jobs).await?;
+        let event = Event::default().id(frame.seq.to_string()).event(frame.kind).json_data(&frame.data).unwrap_or_else(|_| Event::default().event("error"));
+        Some((Ok::<_, std::convert::Infallible>(event), (follow, jobs)))
+    });
+    Sse::new(events).keep_alive(KeepAlive::default()).into_response()
 }
 
 async fn cancel_job(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>) -> Response {

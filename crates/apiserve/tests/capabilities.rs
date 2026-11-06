@@ -149,6 +149,48 @@ impl Instance for SlowInst {
     }
 }
 
+/// `train(steps)`: emits a structured frame per step, as a fine-tune reports its loss and statistics, and a
+/// plain tick before the first.
+struct Trainer;
+struct TrainerInst;
+
+impl ResidentModel for Trainer {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "brain-trainer",
+            "a workload that reports each step",
+            vec![ActionSpec::new("train", "train").streaming().param(ParamSpec::new("steps", ParamType::Int, "steps").default(json!(3)).max(100.0)).param(ParamSpec::new("fail", ParamType::Bool, "fail at the end").default(json!(false)))],
+        )
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-trainer", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(TrainerInst))
+    }
+}
+
+impl Instance for TrainerInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let steps = inv.params["steps"].as_u64().unwrap_or(3) as u32;
+        progress(Progress::step(0, steps, "loading"));
+        for step in 1..=steps {
+            if inv.cancel.is_cancelled() {
+                return Err("cancelled".into());
+            }
+            progress(Progress::event(step, steps, json!({"step": step, "steps": steps, "loss": 1.0 / step as f64})));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if inv.params["fail"].as_bool() == Some(true) {
+            return Err("the optimiser diverged".into());
+        }
+        Ok(Outcome::new().set("steps", json!(steps)))
+    }
+}
+
 // ------------------------------------------------------------------ the seams
 
 /// A caller named by its key; its scope is its own name.
@@ -210,7 +252,7 @@ struct Rig {
 
 fn rig() -> Rig {
     let saw_cancel = Arc::new(AtomicBool::new(false));
-    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Echo), Arc::new(Slow(Arc::clone(&saw_cancel))), Arc::new(Hosted)];
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Echo), Arc::new(Slow(Arc::clone(&saw_cancel))), Arc::new(Hosted), Arc::new(Trainer)];
     let mut budgets = Budgets::new();
     budgets.set(Device::Cpu, 8 << 30, 0);
     let exec = Executor::start(models, budgets, Policy::default());
@@ -245,6 +287,35 @@ async fn settled_job(app: &Router, id: &str, key: &str) -> Value {
         assert!(Instant::now() < deadline, "the job never finished: {status}");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// One server-sent event.
+#[derive(Debug, PartialEq)]
+struct Sse {
+    id: String,
+    event: String,
+    data: Value,
+}
+
+/// Reads an event stream to its end (the body ends when the job does).
+async fn events(app: &Router, uri: &str, key: &str, last_event_id: Option<&str>) -> (StatusCode, Vec<Sse>) {
+    let mut req = Request::builder().method(Method::GET).uri(uri).header(header::AUTHORIZATION, format!("Bearer {key}"));
+    if let Some(id) = last_event_id {
+        req = req.header("last-event-id", id);
+    }
+    let response = tokio::time::timeout(Duration::from_secs(20), app.clone().oneshot(req.body(Body::empty()).unwrap())).await.expect("the response").unwrap();
+    let status = response.status();
+    let bytes = tokio::time::timeout(Duration::from_secs(20), axum::body::to_bytes(response.into_body(), 1 << 22)).await.expect("the stream ended").unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let parsed = text
+        .split("\n\n")
+        .filter(|block| block.lines().any(|l| l.starts_with("event:")))
+        .map(|block| {
+            let field = |name: &str| block.lines().find_map(|l| l.strip_prefix(name)).map(|v| v.trim().to_string()).unwrap_or_default();
+            Sse { id: field("id:"), event: field("event:"), data: serde_json::from_str(&field("data:")).unwrap_or(Value::Null) }
+        })
+        .collect();
+    (status, parsed)
 }
 
 const AUDIO: &str = "AAECAwQF"; // base64 of the six bytes 0..=5
@@ -422,4 +493,88 @@ async fn an_unknown_job_is_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = call(&rig.app, Method::GET, "/v1/jobs/not-a-uuid", "alice", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ------------------------------------------------------------------ the event stream
+
+#[tokio::test]
+async fn a_jobs_events_replay_every_step_then_end_with_its_status() {
+    let rig = rig();
+    let (_, created) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-trainer", "train", json!({"steps": 4}), json!({})))).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    // Followed while it runs.
+    let (status, live) = events(&rig.app, &format!("/v1/jobs/{id}/events"), "alice", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let frames: Vec<&Sse> = live.iter().filter(|e| e.event == "frame").collect();
+    assert_eq!(frames.len(), 4, "{live:?}");
+    for (i, frame) in frames.iter().enumerate() {
+        assert_eq!(frame.data["step"], i as u64 + 1);
+        assert_eq!(frame.data["loss"], 1.0 / (i as f64 + 1.0));
+    }
+    let last = live.last().unwrap();
+    assert_eq!((last.event.as_str(), &last.data), ("done", &json!({"status": "succeeded"})));
+    let ids: Vec<u64> = live.iter().map(|e| e.id.parse().unwrap()).collect();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "event ids only grow: {ids:?}");
+
+    // Followed after it finished: the same events, from the log.
+    let (_, late) = events(&rig.app, &format!("/v1/jobs/{id}/events"), "alice", None).await;
+    assert_eq!(late, live);
+}
+
+#[tokio::test]
+async fn a_client_that_reconnects_resumes_after_the_last_event_it_got() {
+    let rig = rig();
+    let (_, created) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-trainer", "train", json!({"steps": 4}), json!({})))).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let (_, all) = events(&rig.app, &format!("/v1/jobs/{id}/events"), "alice", None).await;
+    let third = &all[2].id;
+    let (_, rest) = events(&rig.app, &format!("/v1/jobs/{id}/events"), "alice", Some(third)).await;
+    assert_eq!(rest, all[3..], "exactly the events after the third");
+    let (_, none) = events(&rig.app, &format!("/v1/jobs/{id}/events"), "alice", Some(&all.last().unwrap().id)).await;
+    assert!(none.is_empty(), "nothing follows the terminal event");
+}
+
+#[tokio::test]
+async fn a_failed_job_ends_its_stream_with_the_reason_and_a_cancelled_one_says_so() {
+    let rig = rig();
+    let (_, created) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-trainer", "train", json!({"steps": 2, "fail": true}), json!({})))).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let (_, failed) = events(&rig.app, &format!("/v1/jobs/{id}/events"), "alice", None).await;
+    let end = failed.last().unwrap();
+    assert_eq!((end.event.as_str(), end.data["status"].as_str()), ("done", Some("failed")), "{failed:?}");
+    assert!(end.data["error"]["message"].is_string());
+
+    let (_, created) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-trainer", "train", json!({"steps": 100}), json!({})))).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let follower = {
+        let (app, uri) = (rig.app.clone(), format!("/v1/jobs/{id}/events"));
+        tokio::spawn(async move { events(&app, &uri, "alice", None).await })
+    };
+    let (status, _) = call(&rig.app, Method::DELETE, &format!("/v1/jobs/{id}"), "alice", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, cancelled) = follower.await.unwrap();
+    assert_eq!(cancelled.last().unwrap().data, json!({"status": "cancelled"}));
+}
+
+#[tokio::test]
+async fn a_jobs_events_are_its_owners_alone() {
+    let rig = rig();
+    let (_, created) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-trainer", "train", json!({"steps": 2}), json!({})))).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let (status, body) = events(&rig.app, &format!("/v1/jobs/{id}/events"), "mallory", None).await;
+    assert_eq!((status, body.len()), (StatusCode::NOT_FOUND, 0), "another caller must not learn the job exists");
+    for uri in ["/v1/jobs/not-a-uuid/events", "/v1/jobs/00000000-0000-0000-0000-000000000000/events"] {
+        assert_eq!(events(&rig.app, uri, "alice", None).await.0, StatusCode::NOT_FOUND, "{uri}");
+    }
+    for bad in ["abc", "-1", "1.5", ""] {
+        let (status, _) = events(&rig.app, &format!("/v1/jobs/{id}/events"), "alice", Some(bad)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "Last-Event-ID {bad:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_event_stream_is_not_reachable_without_a_key() {
+    let rig = rig();
+    let response = rig.app.clone().oneshot(Request::builder().method(Method::GET).uri("/v1/jobs/00000000-0000-0000-0000-000000000000/events").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

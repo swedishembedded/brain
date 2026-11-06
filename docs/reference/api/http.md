@@ -199,10 +199,14 @@ present on every surface and behind the same key, hooks and admission:
   open. `GET /v1/jobs/{id}` reports `running` (with `progress.step` / `progress.total`),
   `succeeded`, `failed` or `cancelled`; `GET /v1/jobs/{id}/result` returns the result
   once it exists (409 while it is running); `DELETE /v1/jobs/{id}` cancels it, and the
-  running action sees the cancellation.
+  running action sees the cancellation. `GET /v1/jobs/{id}/events` follows it as
+  server-sent events: a `progress` event per step tick, a `frame` event per structured
+  frame the action reports (a training step's loss and statistics), and one `done`
+  event with the final status. The last 4096 frames are kept, and `Last-Event-ID`
+  resumes after the last event received; at most 8 streams follow one job.
 
 A call is `{"model", "action", "params", "blobs": {name: {"media", "data", "meta"}}}`
-with `data` base64 and `media` one of `image`, `mask`, `audio`, `video`, `text`,
+(no other field is accepted) with `data` base64 and `media` one of `image`, `mask`, `audio`, `video`, `text`,
 `bytes`. A result is `{"outputs", "blobs"}` in the same blob shape. The call is
 checked against the action's own spec first (unknown params, wrong types, values
 out of range, a missing or mistyped blob are all a 400), and the request body is

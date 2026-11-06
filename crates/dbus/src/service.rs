@@ -276,7 +276,10 @@ fn served_invocation(exec: &Executor, model: &str, action: &str, inv: Invocation
     let manifests = exec.manifests();
     let manifest = manifests.iter().find(|m| m.model == model).ok_or_else(|| format!("no model '{model}'"))?;
     let spec = manifest.actions.iter().find(|a| a.name == action).ok_or_else(|| format!("model '{model}' has no action '{action}'"))?;
-    spec.validate_served(inv)
+    let inv = spec.validate_served(inv)?;
+    // What the spec cannot say is the model's to refuse at the door (`ResidentModel::check_job`).
+    exec.check_job(model, action, &inv)?;
+    Ok(inv)
 }
 
 fn finish_job(jobs: &JobRegistry, job: u64) {
