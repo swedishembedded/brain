@@ -238,19 +238,32 @@ impl ResidentModel for LtxvResident {
             return MemCost::new(1u64 << 30, 512u64 << 20);
         };
         let vae_weights = manifest_bytes(&ltxv::LtxVaeConfig::conv25().tensor_manifest());
-        // VRAM keeps the pre-existing (deliberately conservative) manifest
-        // figure: a real streamed forward's peak VRAM is dominated by
-        // activation buffers whose size follows the latent token count, and
-        // deriving that honestly is its own piece of work - tracked on the
-        // roadmap ledger, not guessed at here. The HOST figure below is the
-        // one this milestone made real.
-        let dit_weights_fp32 = ltxv::pipeline::dit_config_from_name(&dit_config).map(|c| manifest_bytes(&ltxv::dit::dit_tensor_manifest(&c))).unwrap_or(0);
         // The VAE decoder's own activations dominate at any real clip size
         // (pixel-space buffers, `3 * frames * h * w` floats at several
         // stages) - the same `* 4` term `resident_wan.rs::estimate` charges
         // for its own VAE decode.
         let pixels = frames as u64 * w as u64 * h as u64 * 3 * 4;
-        MemCost::new(vae_weights + dit_weights_fp32 + pixels * 4, vae_weights + dit_host_bytes(&dit_config, &self.paths) + (256u64 << 20))
+        let decode = vae_weights + pixels * 4;
+        let vram = match streamed_config(&dit_config, &self.paths) {
+            // A real checkpoint is never on the card whole: one denoise
+            // window's activations are (`ltxv::devres`'s own measured
+            // reserve, at the most tokens a window or refine pass holds),
+            // with its int8 blocks streamed through it. The resident window
+            // sizes itself to whatever the card has beyond that, so the
+            // planner charges the working set, and the VAE decode, which
+            // runs after the DiT is dropped, when that is larger.
+            Some(cfg) => {
+                let latent_frames = (frames as usize).saturating_sub(1) / ltxv::pipeline::VAE_TEMPORAL_SCALE + 1;
+                let tokens = (latent_frames * (h as usize / 32) * (w as usize / 32)).min(ltxv::longform::LONGFORM_MAX_TOKENS);
+                // Blocks in flight beside the window: the one being run, the
+                // one being uploaded, and one of margin for the audio stream.
+                let blocks = 3 * ltxv::block::cached_block_bytes(&cfg, ltxv::block::QTier::Int8);
+                (ltxv::devres::activation_reserve_bytes(tokens, "wgpu") + blocks).max(decode)
+            }
+            // The random-weight `tiny` DiT really is materialized whole.
+            None => decode + ltxv::pipeline::dit_config_from_name(&dit_config).map(|c| manifest_bytes(&ltxv::dit::dit_tensor_manifest(&c))).unwrap_or(0),
+        };
+        MemCost::new(vram, vae_weights + dit_host_bytes(&dit_config, &self.paths) + (256u64 << 20))
     }
 
     /// Below `Hot` the block-weight cache is gone, so the host figure drops
@@ -539,6 +552,23 @@ mod tests {
         assert!(big.vram > small.vram, "a bigger clip must cost more");
         let gb = 1u64 << 30;
         assert!(small.vram < 4 * gb, "the VAE-dominated floor should be well under 4 GB, got {}", small.vram);
+    }
+
+    /// A clip the CLI renders on one 24 GB card must be schedulable on one:
+    /// the device figure is the pipeline's own working set (one window's
+    /// activations with blocks streamed in, or the VAE decode, whichever is
+    /// larger), never the DiT's whole fp32 manifest, which no run holds.
+    #[test]
+    fn a_real_seven_second_720p_clip_fits_one_24_gb_card() {
+        let mut r = resident();
+        r.paths.dit = Some("/dit.gguf".into());
+        let cost = r.estimate(&InstanceKey::new(ltxv::caps::MODEL, "ltx25_22b:169:1280x704".to_string()));
+        let gib = 1u64 << 30;
+        assert!(cost.vram < 22 * gib, "a 24 GB card less serve's 2 GB reserve must hold it: {} GiB", cost.vram / gib);
+        let window = ltxv::devres::activation_reserve_bytes(ltxv::longform::LONGFORM_MAX_TOKENS, "wgpu");
+        assert!(cost.vram >= window, "and it must still carry one window's activations ({} < {window})", cost.vram);
+        let small = r.estimate(&InstanceKey::new(ltxv::caps::MODEL, "ltx25_22b:9:256x256".to_string()));
+        assert!(small.vram < cost.vram, "a smaller clip costs less");
     }
 
     /// A real checkpoint's resident cost is the BLOCK-WEIGHT CACHE, and the
