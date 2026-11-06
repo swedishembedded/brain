@@ -2,49 +2,17 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! DFR (Diffusion Fidelity Rendering) geometry: the keyframe-segment canvas
-//! grid, temporal tile boundaries with their lead-in, and generated-keyframe-
-//! slot token-append bookkeeping. Ported from `dfr_layout.py` and
-//! `VideoGeneratedKeyframeSlots.apply_to`
-//! (`scratchpad/reference/ltxv/packages/ltx-pipelines/src/ltx_pipelines/
-//! dfr_layout.py`, `.../ltx-core/src/ltx_core/conditioning/types/
-//! keyframe_slots.py`) - PURE geometry/bookkeeping, no weights, no device,
+//! grid and the temporal tile boundaries with their lead-in. Ported from
+//! `ltx_pipelines.dfr_helpers.layout` - PURE geometry, no weights, no device,
 //! every function here is real and unit-tested (several pinned against
 //! numbers read directly off a live run of the reference `dfr_layout.py`,
 //! not hand-derived - see this module's tests for the exact python
 //! invocations each case reproduces).
 //!
-//! # What this module does NOT do
-//!
-//! It does not run a model, does not know about LoRA, and does not
-//! implement the real per-token/partial-strength "anchor keyframe" carry-
-//! forward `_ANCHOR_KEYFRAME_STRENGTH=0.95` mechanism (that needs per-token
-//! Euler-ancestral stepping the pipeline layer doesn't build - see
-//! `pipeline.rs`'s `generate_dfr` doc for exactly what's wired and what
-//! isn't). [`TileRange::anchor_kf_global`] is still computed correctly here
-//! (real geometry, real test coverage) even though `generate_dfr` does not
-//! act on it - a future milestone that adds per-token partial denoising can
-//! consume it without touching this file.
-//!
-//! # Position units: this port's own fractional-latent-grid convention, not
-//! # real LTX's pixel/fps time
-//!
-//! Real LTX-2.5 normalizes RoPE time positions to `pixel_frame / fps` so an
-//! 8-pixel-frame video token and a 1-pixel-frame keyframe-slot token sit on
-//! the same real-time axis (`keyframe_slots.py::_slot_positions`). This
-//! port's own RoPE convention (`pipeline::grid_positions`, parity-proven
-//! against the reference golden) never divides by fps at all - it uses plain
-//! INTEGER latent-grid coordinates, one unit per latent frame. This module
-//! extends that SAME convention fractionally rather than introducing a
-//! second, fps-normalized position space: a keyframe slot at pixel frame `p`
-//! (temporal scale `s`) gets latent-grid position `[p/s, p/s + 1/s)` - the
-//! natural generalization of "1 pixel frame is `1/s` of a latent frame's
-//! span" in a scheme where a whole latent frame already spans `[k, k+1)`.
-//! RoPE already supports fractional positions (`rope.rs`'s "fractional
-//! position -> midpoint" construction), so no new machinery is needed.
-//! This is a genuine, documented DEVIATION from upstream's pixel/fps units -
-//! reworking the whole pipeline onto fps-normalized positions was judged out
-//! of scope for a smoke-level milestone (it would touch the
-//! already-parity-tested position convention used by every other tap).
+//! The generated keyframe slots themselves are appended by the pipeline's
+//! stage machinery (`pipeline::append_keyframe_slots`, in the real
+//! fps-normalized position convention every real stage uses); this module
+//! only says where they go.
 
 /// Candidate keyframe-segment lengths, in pixel frames - `dfr_layout.py`'s
 /// `SEGMENT_CANDIDATES`.
@@ -295,95 +263,6 @@ pub fn target_frame_count(requested_frames: usize, rounds: u32) -> usize {
     (requested_frames - 1) * 2usize.pow(rounds) + 1
 }
 
-/// Geometry for appending `pixel_frame_indices.len()` generated-keyframe (or,
-/// with `marked=false`, ordinary anchor-image) tokens after `base_t` existing
-/// tokens, at the target's `(lh, lw)` spatial grid. Content (the actual
-/// latent values) is assembled by the caller - this is deliberately
-/// content-free, matching this module's "pure geometry" scope; `pipeline.rs`
-/// builds the token buffer itself, in the same order this lays out
-/// `positions`/`keyframes_mask` (base tokens first, then slots in
-/// `(slot, h, w)` raster order, [`Self::tokens_per_slot`] tokens per slot).
-#[derive(Debug)]
-pub struct KeyframeSlotLayout {
-    /// `base_t + pixel_frame_indices.len() * tokens_per_slot`.
-    pub total_tokens: usize,
-    /// `lh * lw` - one latent frame's worth of tokens at the target's
-    /// spatial resolution (`keyframe_slots.py`'s `tokens_per_keyframe`).
-    pub tokens_per_slot: usize,
-    /// Index of the first appended token - `base_t`.
-    pub first_token: usize,
-    /// `[total_tokens]`, non-zero marks a token [`crate::dit::LtxDit::
-    /// forward`]'s `keyframes_mask` should add
-    /// `keyframes_abs_pos_embedding` to. All-zero on `[0, base_t)`
-    /// (unmarked base tokens carry no keyframe/anchor semantics of their
-    /// own) then `marked as f32` on the appended range.
-    pub keyframes_mask: Vec<f32>,
-    /// `[3, total_tokens, 2]` row-major RoPE position bounds, same layout
-    /// `pipeline::grid_positions` produces - `base_positions` copied
-    /// unchanged into `[0, base_t)` of every axis block, appended slot
-    /// positions after. See this module's doc for the fractional-latent-grid
-    /// unit convention.
-    pub positions: Vec<f32>,
-}
-
-/// Build [`KeyframeSlotLayout`] for `pixel_frame_indices` appended after
-/// `base_positions` (`[3, base_t, 2]`, [`crate::pipeline::grid_positions`]'s
-/// layout). `marked` distinguishes a real generated-keyframe slot
-/// (`VideoGeneratedKeyframeSlots`, `marked=true`) from an ordinary anchor/
-/// image keyframe (`VideoConditionByKeyframeIndex`, `marked=false`) - see
-/// this crate's `dit.rs` doc on `keyframes_mask` for why only the former
-/// receives the learned embedding.
-pub fn keyframe_slots(base_t: usize, base_positions: &[f32], lh: usize, lw: usize, pixel_frame_indices: &[usize], temporal_scale: usize, marked: bool) -> Result<KeyframeSlotLayout, String> {
-    if base_positions.len() != 3 * base_t * 2 {
-        return Err(format!("base_positions has {} values, expected {}", base_positions.len(), 3 * base_t * 2));
-    }
-    if pixel_frame_indices.is_empty() {
-        return Err("pixel_frame_indices must be non-empty".into());
-    }
-    for w in pixel_frame_indices.windows(2) {
-        if w[1] <= w[0] {
-            return Err(format!("pixel_frame_indices must be strictly increasing, got {pixel_frame_indices:?}"));
-        }
-    }
-
-    let tokens_per_slot = lh * lw;
-    let k = pixel_frame_indices.len();
-    let num_new = tokens_per_slot * k;
-    let total_tokens = base_t + num_new;
-
-    let mut keyframes_mask = vec![0f32; total_tokens];
-    keyframes_mask[..base_t].copy_from_slice(&vec![0f32; base_t]); // explicit: base tokens are never marked here
-    if marked {
-        for v in &mut keyframes_mask[base_t..] {
-            *v = 1.0;
-        }
-    }
-
-    let mut positions = vec![0f32; 3 * total_tokens * 2];
-    for axis in 0..3 {
-        let src = &base_positions[axis * base_t * 2..(axis + 1) * base_t * 2];
-        let dst_off = axis * total_tokens * 2;
-        positions[dst_off..dst_off + base_t * 2].copy_from_slice(src);
-    }
-    let mut local = 0usize;
-    for &p in pixel_frame_indices {
-        let fstart = p as f32 / temporal_scale as f32;
-        let fend = fstart + 1.0 / temporal_scale as f32;
-        for hi in 0..lh {
-            for wi in 0..lw {
-                let axis_vals = [(fstart, fend), (hi as f32, hi as f32 + 1.0), (wi as f32, wi as f32 + 1.0)];
-                for (axis, &(s, e)) in axis_vals.iter().enumerate() {
-                    let off = axis * total_tokens * 2 + (base_t + local) * 2;
-                    positions[off] = s;
-                    positions[off + 1] = e;
-                }
-                local += 1;
-            }
-        }
-    }
-
-    Ok(KeyframeSlotLayout { total_tokens, tokens_per_slot, first_token: base_t, keyframes_mask, positions })
-}
 
 #[cfg(test)]
 mod tests {
@@ -559,61 +438,4 @@ mod tests {
 
     // ------------------------------------------------------------ keyframe_slots
 
-    #[test]
-    fn keyframe_slots_extends_length_marks_the_new_range_and_leaves_base_untouched() {
-        let base_t = 2 * 2 * 2; // lat_t=2, lh=2, lw=2
-        let base_positions = crate::pipeline::grid_positions(2, 2, 2);
-        let base_positions_before = base_positions.clone();
-        let layout = keyframe_slots(base_t, &base_positions, 2, 2, &[8, 16], VIDEO_TEMPORAL_SCALE, true).unwrap();
-        assert_eq!(layout.tokens_per_slot, 4); // lh*lw
-        assert_eq!(layout.first_token, base_t);
-        assert_eq!(layout.total_tokens, base_t + 2 * 4);
-        assert_eq!(layout.keyframes_mask.len(), layout.total_tokens);
-        assert!(layout.keyframes_mask[..base_t].iter().all(|&v| v == 0.0), "base tokens must be unmarked");
-        assert!(layout.keyframes_mask[base_t..].iter().all(|&v| v == 1.0), "every appended slot token must be marked");
-        // The base axis blocks must be copied through unchanged (spot-check
-        // axis 0 and axis 2).
-        for axis in [0usize, 2] {
-            let old = &base_positions_before[axis * base_t * 2..(axis + 1) * base_t * 2];
-            let new = &layout.positions[axis * layout.total_tokens * 2..axis * layout.total_tokens * 2 + base_t * 2];
-            assert_eq!(old, new, "axis {axis} base block must be unchanged");
-        }
-        // Slot 0 (pixel frame 8, temporal_scale 8) sits at latent-grid
-        // [1.0, 1.125) on the frame axis - one full latent-frame step in
-        // (matches a REGULAR latent frame boundary exactly, since 8/8=1).
-        let frame_axis = 0usize;
-        let tok = base_t; // first token of slot 0
-        let off = frame_axis * layout.total_tokens * 2 + tok * 2;
-        assert_eq!((layout.positions[off], layout.positions[off + 1]), (1.0, 1.125));
-        // Slot 1 (pixel frame 16) sits at [2.0, 2.125).
-        let tok1 = base_t + 4; // first token of slot 1
-        let off1 = frame_axis * layout.total_tokens * 2 + tok1 * 2;
-        assert_eq!((layout.positions[off1], layout.positions[off1 + 1]), (2.0, 2.125));
-        // Spatial axes of a slot token cover the same integer grid as a
-        // regular token at that (h, w).
-        let h_axis = 1usize;
-        let off_h = h_axis * layout.total_tokens * 2 + tok * 2; // slot 0, token (h=0,w=0)
-        assert_eq!((layout.positions[off_h], layout.positions[off_h + 1]), (0.0, 1.0));
-    }
-
-    #[test]
-    fn keyframe_slots_unmarked_leaves_the_mask_all_zero() {
-        let base_t = 1;
-        let base_positions = vec![0f32; 3 * base_t * 2];
-        let layout = keyframe_slots(base_t, &base_positions, 1, 1, &[8], VIDEO_TEMPORAL_SCALE, false).unwrap();
-        assert!(layout.keyframes_mask.iter().all(|&v| v == 0.0), "marked=false must leave every token unmarked");
-    }
-
-    #[test]
-    fn keyframe_slots_rejects_non_increasing_indices() {
-        let base_positions = vec![0f32; 3 * 2];
-        let e = keyframe_slots(1, &base_positions, 1, 1, &[8, 8], VIDEO_TEMPORAL_SCALE, true).unwrap_err();
-        assert!(e.contains("strictly increasing"), "{e}");
-    }
-
-    #[test]
-    fn keyframe_slots_rejects_a_base_positions_length_mismatch() {
-        let e = keyframe_slots(2, &[0f32; 3 * 2], 1, 1, &[8], VIDEO_TEMPORAL_SCALE, true).unwrap_err();
-        assert!(e.contains("values, expected"), "{e}");
-    }
 }

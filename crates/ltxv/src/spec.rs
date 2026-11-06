@@ -28,9 +28,9 @@ use capability::Assembly;
 
 pub struct LtxvSpec;
 
-const ROLES: &[&str] = &["dit", "vae", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler", "temporal_upsampler", "duration_head"];
+const ROLES: &[&str] = &["dit", "vae", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler", "temporal_upsampler", "duration_head", "detailing_lora"];
 /// Every role but `vae` is opt-in - see this module's doc.
-const OPTIONAL: &[&str] = &["dit", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler", "temporal_upsampler", "duration_head"];
+const OPTIONAL: &[&str] = &["dit", "audio_vae", "text_encoder", "tokenizer", "spatial_upsampler", "temporal_upsampler", "duration_head", "detailing_lora"];
 
 fn classify_gguf(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(g) = checkpoint::gguf::MmapGguf::open(&rec.path.to_string_lossy()) else { return };
@@ -68,6 +68,16 @@ fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, 
     // `duration_head.*`.
     if has("duration_head.attention_pooler.query_tokens") && has("duration_head.mlp_out.weight") {
         out.push((idx, "duration_head".to_string(), Confidence::Declared));
+        return;
+    }
+    // DFR's detailing IC-LoRA. Its tensors are an ordinary LoRA's and its
+    // metadata an ordinary IC-LoRA's, so only the shipped name says which
+    // IC-LoRA it is (`ltx-2.5-22b-ic-lora-refine-details-*.safetensors`).
+    let is_lora = has("diffusion_model.transformer_blocks.0.attn1.to_q.lora_A.weight");
+    let is_ic_lora = m.metadata().contains_key("reference_downscale_factor");
+    let named = rec.path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains("ic-lora-refine-details"));
+    if is_lora && is_ic_lora && named {
+        out.push((idx, "detailing_lora".to_string(), Confidence::Declared));
         return;
     }
     // Both latent upscalers carry the same tensor names; only the config
@@ -180,6 +190,20 @@ mod tests {
             None,
         )
         .unwrap();
+    }
+
+    /// A one-tensor LoRA file carrying IC-LoRA metadata, written by hand:
+    /// the crate's own writer stores a `config` key only.
+    fn write_ic_lora(path: &Path) {
+        let header = serde_json::json!({
+            "__metadata__": { "reference_downscale_factor": "1", "reference_kind": "image_frames" },
+            "diffusion_model.transformer_blocks.0.attn1.to_q.lora_A.weight": { "dtype": "F32", "shape": [1, 2], "data_offsets": [0, 8] },
+        })
+        .to_string();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&[0u8; 8]);
+        std::fs::write(path, bytes).unwrap();
     }
 
     fn write_duration_head(path: &Path) {
@@ -313,6 +337,10 @@ mod tests {
         let spatial_path = dir.join("ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors");
         let temporal_path = dir.join("ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors");
         let duration_path = dir.join("ltx-2.5-duration-head-bf16.safetensors");
+        let detailing_path = dir.join("ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors");
+        let other_ic_lora = dir.join("ltx-2.5-22b-ic-lora-union-control.safetensors");
+        write_ic_lora(&detailing_path);
+        write_ic_lora(&other_ic_lora);
         write_video_vae(&vae_path);
         write_audio_vae(&audio_vae_path);
         write_duration_head(&duration_path);
@@ -328,6 +356,8 @@ mod tests {
             complete(spatial_path.clone(), ArtifactKind::Safetensors),
             complete(temporal_path.clone(), ArtifactKind::Safetensors),
             complete(duration_path.clone(), ArtifactKind::Safetensors),
+            complete(detailing_path.clone(), ArtifactKind::Safetensors),
+            complete(other_ic_lora.clone(), ArtifactKind::Safetensors),
         ];
 
         let spec = LtxvSpec;
@@ -337,6 +367,7 @@ mod tests {
             Resolution::Resolved(a) => {
                 assert_eq!(a.roles["vae"], vae_path);
                 assert_eq!(a.roles["duration_head"], duration_path);
+                assert_eq!(a.roles["detailing_lora"], detailing_path, "the Refine-Details IC-LoRA, not another IC-LoRA beside it");
                 assert_eq!(a.roles["audio_vae"], audio_vae_path);
                 assert_eq!(a.roles["dit"], dit_path);
                 assert_eq!(a.roles["text_encoder"], text_encoder_path, "the store's own encoder, so audio needs no flag");

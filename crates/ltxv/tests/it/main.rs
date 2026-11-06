@@ -28,6 +28,7 @@ mod cfg_parallel;
 mod clip_stability_real;
 mod connector_real_parity;
 mod device_bytes_real;
+mod dfr_real;
 mod device_residency;
 mod dit_parity;
 mod duration_head_parity;

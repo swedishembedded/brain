@@ -83,14 +83,31 @@ this port:
       P40, before and after: denoise 1225.8 s (55.7 s per forward) and
       1154.8 s (52.5 s per forward) - no slowdown, the difference within run
       noise (both runs shared the host with work on the other card).
-- [ ] **Duration head on real weights** - the head's parity test and the
-      prediction path exist; the weights (`model_patches/ltx-2.5-duration-
-      head-bf16.safetensors`) are not in the store here, so no prediction has
-      run end to end.
-- [ ] **Real-weight DFR** - `generate_dfr` still builds the tiny DiT and a
-      stub context; the reference's DFR runs the real checkpoint with its
-      detailing IC-LoRA (`DETAILING_LORA_STRENGTH`) in stage 2 and tiled
-      temporal rounds.
+- [x] **Duration head on real weights** - `duration_head_parity::
+      a_prompt_predicts_the_reference_clip_length_on_real_weights` runs the
+      whole prediction (Gemma-4, both connectors, the head) against
+      `ltxv_duration_e2e_dump_reference.py`'s official `PromptEncoder` +
+      `DurationPredictor`: features cosine 1.000000000, connectors >=
+      0.9999996, seconds within 0.15% on two prompts and every stream set.
+      It found two text-conditioning gaps, both fixed: CFG guided against an
+      empty prompt (now the reference's `DEFAULT_NEGATIVE_PROMPT`,
+      `--negative-prompt`) and both CFG branches shared one mask (now one
+      per branch, `Caption`). A video clip's length is predicted from both
+      streams, as every reference video pipeline does; over the video stream
+      alone the head predicts a single quick action (20.7 s) far longer than
+      a multi-beat scene (6.7 s).
+- [~] **Real-weight DFR** - `generate_dfr` runs the real checkpoint: the
+      `resolve_canvas` layout, half-resolution stage 1 with generated
+      keyframe slots (`KeyframeSlots`, `append_keyframe_slots`), the spatial
+      upscale of video and slots, and the detailing pass under the
+      Refine-Details IC-LoRA (`detailing_lora` store role, strength 0.5) with
+      the stage-1 latent as its reference (`StageReference::Latent`); both
+      stages' conditioned states match `ltxv_dfr_conditioning_dump_reference.py`
+      exactly (`dfr_stage_conditioning_matches_the_reference`). Open: the
+      temporal rounds (anchor keyframes at 0.95, invented mid-segment slots,
+      frozen audio slices, `conditioning_fps` snapping above 30 fps) and the
+      `spatial_upscalings = 2` epilogue; the GPU end-to-end test
+      `dfr_real::a_dfr_clip_on_real_weights_comes_back_whole` has not run.
 - [x] **IC-LoRA attention mask** - `--reference-attention-strength` /
       `--reference-attention-mask` weight the reference<->clip attention as
       `ConditioningItemAttentionStrengthWrapper` does: per-token log weights

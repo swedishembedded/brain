@@ -26,7 +26,7 @@
 //! any environment variable - see `resolve_ltxv`. See `ltxv::pipeline`'s module doc for
 //! the full account of what is real and what is not.
 
-use ltxv::pipeline::{AudioOpts, DfrOpts, DfrPaths, ExtendOpts, GenOpts, LongOpts, MaskedOpts, Named, Paths, Sampler, UpscaleOpts};
+use ltxv::pipeline::{AudioOpts, DfrOpts, ExtendOpts, GenOpts, LongOpts, MaskedOpts, Named, Paths, Sampler, UpscaleOpts};
 use ltxv::spec::LtxvSpec;
 
 /// The guidance flags every generating subcommand takes ([`set_guidance`]).
@@ -41,6 +41,9 @@ macro_rules! guidance_help {
                             pair with --sampler res2s). The flags below
                             override it.
   --guidance <G>            classifier-free guidance on both streams (1 = off)
+  --negative-prompt <text>  what CFG guides away from (default: the reference
+                            pipelines' artifact list); read only when a CFG
+                            scale is not 1
   --audio-guidance <G>      classifier-free guidance on the audio stream
   --stg <S>                 spatio-temporal guidance: self-attention bypassed in
                             --stg-blocks (0 = off)
@@ -477,46 +480,41 @@ Adapters:
 Devices:
   --device <cpu|gpu>         DiT + VAE + upscaler (default: BRAIN_DEVICE)"#);
 
-const DFR_HELP: &str = concat!(r#"brain ltxv dfr - LTX-2.5 DFR (Diffusion Fidelity Rendering) smoke test
+const DFR_HELP: &str = concat!(r#"brain ltxv dfr - LTX-2.5 DFR (Diffusion Fidelity Rendering)
 
   brain ltxv dfr --prompt <text> --output-path <out.mp4> [options]
 
-DFR runs half-res base generation with generated keyframe slots, a REAL
-spatial x2 latent upscale, a full-res re-noised detailing pass (no
-IC-LoRA - none is downloaded, see `ltxv::pipeline`'s DFR doc), and 0-2
-REAL temporal x2 upsample rounds with tile-based stitching. Same tiny
-random-weight DiT and stub text context `t2v` uses - see
-`ltxv::pipeline`'s module doc (search "M8c") for exactly what DFR
-mechanics are real here and which remain a documented gap.
+DFR lays the clip out on a keyframe-segment canvas, generates it at half
+resolution together with a sharp keyframe at every segment border, then
+carries both up with the spatial x2 upscaler and re-denoises at full
+resolution under the Refine-Details IC-LoRA, the half-resolution video as
+its reference. Runs the real LTX-2.5 checkpoint and text encoder.
 
 Required:
-  --prompt <text>            folded into a deterministic noise/context seed
-                             only - there is no real text encoder yet
+  --prompt <text>            the clip's description
   --output-path <file>       .mp4 / .mkv / .webm / .gif
 
-Sampling (same shape as `t2v`; --width/--height are the FULL, stage-2
-resolution - stage 1 halves it, so both must be a multiple of 64):
-  --frames <N>                video frames, must be 1 + 8k (default 9)
-  --width <W> --height <H>    pixels, multiples of 64 (default 64x64)
-  --steps <N>                  denoise steps per stage/tile (default 4)
-"#, guidance_help!(), runtime_help!(), r#"  --seed <S>                   initial-noise/weight/context seed (default: drawn at random and printed)
-  --fps <N>                    stage-1 frame rate; the written fps is this
-                               times 2^rounds (default 8)
-  --base-shift <F>             LTX2Scheduler shift anchor at 1024 tokens (0.95)
-  --max-shift <F>              LTX2Scheduler shift anchor at 4096 tokens (2.05)
-  --no-stretch                  skip the terminal-sigma stretch (on by default)
-  --terminal <F>                stretch target sigma (default 0.1)
+Sampling (--width/--height are the OUTPUT resolution; stage 1 halves it, so
+both must be a multiple of 64):
+  --frames <N>                video frames, 1 + 8k. Unset, the duration head
+                              predicts the length from the prompt when it is
+                              in the model store; otherwise 121
+  --width <W> --height <H>    pixels (default 768x512)
+  --fps <N>                   frame rate (default 24)
+  --audio                     also generate the clip's sound
+"#, guidance_help!(), runtime_help!(), r#"  --seed <S>                   initial-noise seed (default: drawn at random and printed)
   --sampler <euler|res2s>       denoising loop (default euler; see t2v)
   --eta <F>                     sampler noise strength (default 1.0 euler,
                                 0.5 res2s)
-  --dit-config <name>           DiT size; only "tiny" is implemented (default)
-  --temporal-upsample-rounds <N> 0, 1, or 2 real temporal x2 refine rounds
-                                 (default 0; > 0 needs --temporal-upsampler)
+  --temporal-upsample-rounds <N> 0, 1, or 2 temporal x2 rounds, each doubling
+                                 the frame rate (default 0)
 
 Weights (resolved from the models directory; a flag names one outright):
   --vae <path>                 the causal 3D video VAE
   --spatial-upsampler <path>   the spatial x2 latent upscaler
   --temporal-upsampler <path>  the temporal x2 latent upscaler
+  --detailing-lora <path>      the Refine-Details IC-LoRA the detailing pass
+                               applies at strength 0.5
 
 Adapters:
   --adapter <path>           a LoRA to apply, repeatable: the official LTX
@@ -814,6 +812,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
                 named.fps = true;
             }
             f if guidance_flag(f) => set_guidance(&mut o.guidance, f, need(i)?)?,
+            "--negative-prompt" => o.negative_prompt = need(i)?.clone(),
             f if runtime_switch(f) => {
                 set_runtime_switch(&mut o.runtime, f);
                 i += 1;
@@ -1087,6 +1086,7 @@ fn extend(args: &[String]) -> Result<(), String> {
             "--fps" => fps = Some(num(i, "--fps")?),
             "--steps" => o.base.steps = num(i, "--steps")?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            "--negative-prompt" => o.base.negative_prompt = need(i)?.clone(),
             f if runtime_switch(f) => {
                 set_runtime_switch(&mut o.base.runtime, f);
                 i += 1;
@@ -1162,6 +1162,7 @@ fn t2a(args: &[String]) -> Result<(), String> {
             "--seconds" => o.seconds = Some(dbl(i, "--seconds")?),
             "--steps" => o.base.steps = need(i)?.parse().map_err(|e| format!("--steps: {e}"))?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            "--negative-prompt" => o.base.negative_prompt = need(i)?.clone(),
             f if runtime_switch(f) => {
                 set_runtime_switch(&mut o.base.runtime, f);
                 i += 1;
@@ -1281,6 +1282,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
             "--refine-steps" => o.refine_steps = num(i, "--refine-steps")?,
             "--context-frames" => context_frames = num(i, "--context-frames")?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            "--negative-prompt" => o.base.negative_prompt = need(i)?.clone(),
             f if runtime_switch(f) => {
                 set_runtime_switch(&mut o.base.runtime, f);
                 i += 1;
@@ -1441,6 +1443,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
             "--strength" => o.strength = flt(i, "--strength")?,
             "--steps" => o.base.steps = num(i, "--steps")?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            "--negative-prompt" => o.base.negative_prompt = need(i)?.clone(),
             f if runtime_switch(f) => {
                 set_runtime_switch(&mut o.base.runtime, f);
                 i += 1;
@@ -1527,67 +1530,60 @@ fn dfr(args: &[String]) -> Result<(), String> {
     let (seed, rest) = crate::args::split_seed(args, "ltxv dfr");
     let args = &rest[..];
     let mut o = DfrOpts::default();
+    o.base.dit_config = "ltx25_22b".into();
     let mut eta: Option<f64> = None;
     // How many `--adapter`s already carry their `--lora-scale`.
     let mut scaled = 0usize;
     o.base.seed = seed;
+    let mut named = Named { dit_config: true, ..Named::default() };
     let mut prompt: Option<String> = None;
     let mut out: Option<String> = None;
-    let mut vae: Option<String> = None;
-    let mut spatial_upsampler: Option<String> = None;
-    let mut temporal_upsampler: Option<String> = None;
+    let mut overrides = std::collections::BTreeMap::new();
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
         let num = |i: usize, what: &str| -> Result<usize, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
         let dbl = |i: usize, what: &str| -> Result<f64, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
         match args[i].as_str() {
-            "--prompt" => {
-                prompt = Some(need(i)?.clone());
+            "--prompt" => prompt = Some(need(i)?.clone()),
+            "--output-path" | "--out" => out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string()),
+            "--frames" => {
+                o.base.frames = num(i, "--frames")?;
+                named.frames = true;
             }
-            "--output-path" | "--out" => {
-                out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string());
+            "--width" => {
+                o.base.width = num(i, "--width")?;
+                named.size = true;
             }
-            "--frames" => o.base.frames = num(i, "--frames")?,
-            "--width" => o.base.width = num(i, "--width")?,
-            "--height" => o.base.height = num(i, "--height")?,
-            "--steps" => o.base.steps = num(i, "--steps")?,
-            "--fps" => o.base.fps = num(i, "--fps")?,
+            "--height" => {
+                o.base.height = num(i, "--height")?;
+                named.size = true;
+            }
+            "--fps" => {
+                o.base.fps = num(i, "--fps")?;
+                named.fps = true;
+            }
+            "--audio" => {
+                o.base.audio = true;
+                i += 1;
+                continue;
+            }
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
+            "--negative-prompt" => o.base.negative_prompt = need(i)?.clone(),
             f if runtime_switch(f) => {
                 set_runtime_switch(&mut o.base.runtime, f);
                 i += 1;
                 continue;
             }
             f if runtime_flag(f) => set_runtime(&mut o.base.runtime, f, need(i)?)?,
-            "--base-shift" => o.base.base_shift = dbl(i, "--base-shift")?,
-            "--max-shift" => o.base.max_shift = dbl(i, "--max-shift")?,
-            "--terminal" => o.base.terminal = dbl(i, "--terminal")?,
             "--sampler" => o.base.sampler = Sampler::parse(need(i)?)?,
             "--eta" => eta = Some(dbl(i, "--eta")?),
-            "--dit-config" => o.base.dit_config = need(i)?.clone(),
             "--adapter" => o.base.adapters.push(model::adapter::AdapterSpec::new(need(i)?.clone())),
             "--lora-scale" => crate::args::attach_lora_scale(&mut o.base.adapters, &mut scaled, need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?)?,
             "--temporal-upsample-rounds" => o.temporal_upsample_rounds = num(i, "--temporal-upsample-rounds")?,
-            "--device" => {
-                o.base.device = Some(need(i)?.clone());
-            }
-            "--vae" => {
-                vae = Some(need(i)?.clone());
-            }
-            "--spatial-upsampler" => {
-                spatial_upsampler = Some(need(i)?.clone());
-            }
-            "--temporal-upsampler" => {
-                temporal_upsampler = Some(need(i)?.clone());
-            }
-            // `--no-stretch` is a bare flag (no value), unlike every other
-            // option above - handled separately so the `i += 2` stride below
-            // stays uniform for everything else.
-            "--no-stretch" => {
-                o.base.stretch = false;
-                i += 1;
-                continue;
+            "--device" => o.base.device = Some(need(i)?.clone()),
+            f @ ("--vae" | "--spatial-upsampler" | "--temporal-upsampler" | "--detailing-lora") => {
+                overrides.insert(f.trim_start_matches("--").replace('-', "_"), need(i)?.clone());
             }
             "--help" | "-h" => {
                 println!("{DFR_HELP}");
@@ -1600,15 +1596,15 @@ fn dfr(args: &[String]) -> Result<(), String> {
     o.base.eta = o.base.sampler.resolve_eta(eta)?;
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;
-    // The weight flags name roles outright; every role they leave unnamed
-    // comes from the model store.
-    let overrides: std::collections::BTreeMap<String, String> =
-        [("vae", vae), ("spatial_upsampler", spatial_upsampler), ("temporal_upsampler", temporal_upsampler)].into_iter().filter_map(|(role, p)| p.map(|p| (role.to_string(), p))).collect();
-    let paths = DfrPaths::from_paths(&resolve_ltxv(&overrides, None)?)?;
-
+    let paths = resolve_ltxv(&overrides, None)?;
+    ltxv::pipeline::resolve_defaults(&mut o.base, &paths, named);
+    if !named.frames && ltxv::pipeline::can_predict_frames(&paths, &o.base) {
+        o.base.frames = ltxv::pipeline::predict_frames(&paths, &prompt, &o.base, ltxv::pipeline::prediction_streams())?;
+        eprintln!("ltxv dfr: the duration head predicts {} frames ({:.2}s at {} fps) for this prompt", o.base.frames, o.base.frames as f64 / o.base.fps as f64, o.base.fps);
+    }
     eprintln!(
-        "ltxv dfr (M8c smoke test - tiny random-weight DiT, real VAE + real upscalers): {} frames -> canvas, {}x{}, {} steps, {} temporal round(s), seed {}",
-        o.base.frames, o.base.width, o.base.height, o.base.steps, o.temporal_upsample_rounds, o.base.seed
+        "ltxv dfr: {} frames, {}x{}, {} temporal round(s), seed {}",
+        o.base.frames, o.base.width, o.base.height, o.temporal_upsample_rounds, o.base.seed
     );
 
     let t0 = std::time::Instant::now();
@@ -1832,22 +1828,21 @@ mod tests {
             "--frames",
             "--width",
             "--height",
-            "--steps",
             "--fps",
+            "--audio",
             "--guidance",
+            "--negative-prompt",
             "--seed",
-            "--base-shift",
-            "--max-shift",
-            "--no-stretch",
-            "--terminal",
             "--eta",
             "--sampler",
-            "--dit-config",
+            "--adapter",
+            "--lora-scale",
             "--temporal-upsample-rounds",
             "--device",
             "--vae",
             "--spatial-upsampler",
             "--temporal-upsampler",
+            "--detailing-lora",
         ] {
             assert!(super::DFR_HELP.contains(flag), "{flag} is parsed but not in dfr --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in dfr --help but not parsed");

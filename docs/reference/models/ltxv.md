@@ -36,7 +36,7 @@ per component and the open gaps.
 | Guidance | [x] the reference's multimodal guider: CFG, STG, rescale and isolated-modality guidance per stream, `--guidance-preset reference` (see "Guidance and samplers") |
 | Samplers | [x] ancestral Euler (the distilled pipeline's) and res_2s (the reference's high-quality pipeline's), `--sampler` |
 | Post-hoc upscale | [x] `brain ltxv upscale` / the `upscale` action |
-| DFR | [~] `brain ltxv dfr` runs the reference's stage layout with the real upscalers and VAE but still the tiny DiT and a stub context; real-weight DFR with the detailing IC-LoRA is open |
+| DFR | [~] `brain ltxv dfr` on the real checkpoint: keyframe-segment canvas, half-resolution stage 1 with generated keyframe slots, spatial upscale and the detailing pass under the Refine-Details IC-LoRA; temporal rounds and the spatial epilogue are not available yet |
 | LoRA inference | [x] `--adapter <path>` (repeatable): ComfyUI/PEFT `.safetensors` from the official trainer, published IC-LoRAs (with `--reference-video`), or brain-trained adapters, applied beside the int8 weights |
 | LoRA / full fine-tune | [~] video-only DiT; the audio-visual DiT has no training support |
 | CLI | [x] `brain ltxv {t2v,t2a,v2v,extend,upscale,dfr}` |
@@ -407,16 +407,23 @@ correctly at the sigma values distillation baked in, so fewer steps means
 starting further down the same table rather than taking the same span in
 bigger hops.
 
-`brain ltxv dfr` runs the same smoke-test DiT through DFR (Diffusion Fidelity
-Rendering): a half-res base generation with generated keyframe slots, a REAL
-spatial x2 latent upscale, a full-res re-noised detailing pass (no IC-LoRA -
-none exists in this repo), and 0-2 REAL temporal x2 upsample rounds with
-tile-based stitching, needing the VAE plus both real latent-upscaler
-checkpoints from the model store:
+`brain ltxv dfr` runs DFR (Diffusion Fidelity Rendering) on the real
+checkpoint. The clip is laid out on a canvas of whole 24- or 32-frame
+segments; stage 1 generates it at half resolution together with one sharp
+keyframe at every segment border, and stage 2 carries both up with the
+spatial x2 upscaler and re-denoises at full resolution under the
+Refine-Details IC-LoRA (strength 0.5), the half-resolution video as its
+reference. The canvas is trimmed back to the requested length; with
+`--audio` the soundtrack is stage 1's. It takes `t2v`'s sampling, guidance,
+adapter and duration-head behaviour, and needs the
+`ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors` IC-LoRA
+(`Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details`) in the model store or
+`--detailing-lora <path>`; the width and height must be multiples of 64:
 
 ```bash
-brain ltxv dfr --prompt "a cat walking on a beach" --frames 9 --width 64 \
-  --height 64 --steps 4 --output-path out.mp4
+brain pull https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details/blob/main/ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors
+brain -v --device gpu0 ltxv dfr --audio --prompt "a cat walking on a beach" \
+  --frames 49 --output-path out.mp4
 ```
 
 ### Generating sound
