@@ -170,6 +170,43 @@ pub fn with_adapters_disabled<M: Model, R>(model: &M, read: impl FnOnce() -> R) 
     Some(out)
 }
 
+/// Whether the model carries adapters that [`with_adapters_disabled`] can switch off.
+pub fn adapters_can_be_disabled<M: Model>(model: &M) -> bool {
+    !zero_started_names(model).is_empty()
+}
+
+/// Every adapter tensor of a model as it was when captured: the policy a run started from, kept as a frozen copy so
+/// that it can be scored after the live adapter has moved on.
+pub struct AdapterState {
+    tensors: Vec<(String, Vec<f32>)>,
+}
+
+impl AdapterState {
+    pub fn capture<M: Model>(model: &M) -> AdapterState {
+        let names = model.param_names().into_iter().filter(|n| adapter::device::init_of(n).is_some());
+        AdapterState { tensors: names.map(|n| { let w = model.read_weight(&n); (n, w) }).collect() }
+    }
+
+    /// Host bytes the copy holds.
+    pub fn bytes(&self) -> usize {
+        self.tensors.iter().map(|(_, w)| 4 * w.len()).sum()
+    }
+
+    /// Run `read` with this state in the model's adapters, then put the adapters back as they were.
+    pub fn with_applied<M: Model, R>(&self, model: &M, read: impl FnOnce() -> R) -> R {
+        let live = AdapterState::capture(model);
+        for (n, w) in &self.tensors {
+            model.write_weight(n, w);
+        }
+        let out = read();
+        for (n, w) in &live.tensors {
+            model.write_weight(n, w);
+        }
+        model.poll_wait();
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

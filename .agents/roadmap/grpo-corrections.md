@@ -59,9 +59,24 @@ its definition, the on-policy first step and the supervised parity of a record w
       peak device memory and the seconds of the start-of-run pass per 1000 tokens.
 - [ ] `brain qwen35 finetune` (the CLI) reads no advantage sidecar; the SDK is the one entry point.
 - [ ] Only `qwen35` bases; `qwen3` is refused by name. Held-out and monitoring selection are refused for these runs.
-- [ ] The start-of-run and reference passes are one forward per example before the first step; they could be skipped
-      for the examples whose log-probabilities are all recorded and whose KL is not wanted (already done) or cached on
-      disk across rounds that continue the same adapter.
+- [x] Lazy, cached preparation: the start-of-run pass, the reference (KL) pass and the teacher pass used to be one
+      forward per example over the whole dataset before step 1 (a 5890-record, 265 MB agent-call set sat over an hour
+      there while 60 steps x 4 records read 240 of them; the earlier CAD run measured ~47 min for 1.19M tokens). Now an
+      example is scored the first time a step draws it and kept for the rest of the run in a file beside the prepared
+      split (`score_cache.rs`: a slot per example in memory, the vectors on disk, removed with the run); an example no
+      step draws is never scored, one drawn again is read back. On-policy is preserved: behaviour log-probabilities
+      are the START policy's, measured under a frozen copy of the start adapter's tensors put in while scoring (the
+      adapters switched off for a fresh adapter, which is exactly the base), the live adapter written back
+      afterwards; no swap is made while the adapter is still the start one, and a resumed run (`begin` with draws done)
+      swaps from its first step because `prepare` captured the start before the checkpoint restored. The reference and
+      the teacher are measured under the policies they name, one pass serving both when they are the start policy.
+      Gated on the CPU in `crates/rl/tests/it/lazy_scoring.rs`: never-drawn never scored, redrawn scored once (counts
+      and bytes written), behaviour/reference/teacher advantage equal an independent pass under the start policy bit
+      for bit after the adapter moved (continued and fresh adapter, resumed run), the live adapter restored exactly,
+      memory a slot per example. The existing spec tests and gradchecks run unchanged. Not yet measured on real weights:
+      seconds of the first-draw scoring per step on the 27B (reported per step as `scoring_seconds`).
+- [ ] The score file is run-local. Reusing it across rounds that continue the same adapter would need the base's and
+      the adapter's identity in its name.
 - [ ] Per-sequence normalisation (`LossAgg::SeqMean`, the default) needs a batch of one sequence; long agent calls
       weigh less per token than short ones under it (`TokenSum` is the alternative, see knowledge 290).
 

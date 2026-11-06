@@ -531,9 +531,9 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   that a teacher, the same frozen model shown the extra messages, scores token by token. Brain renders both
   conversations with the model's own chat template (the teacher's is the student's with the messages inserted), checks
   that the two supervise exactly the same assistant tokens (a template that renders the answer differently once the
-  messages are there is refused), and, before the first step, measures `log q_teacher(y_t | privileged context, y_<t)`
-  with the policy `teacher` names (the adapter disabled, or the adapter the run started from; one forward over each
-  teacher rendering). Every supervised token then carries the per-token reverse-KL advantage
+  messages are there is refused), and, the first time a step draws the record, measures `log q_teacher(y_t | privileged
+  context, y_<t)` with the policy `teacher` names (the adapter disabled, or the adapter the run started from; one
+  forward over the teacher rendering). Every supervised token then carries the per-token reverse-KL advantage
   `A_t = log q_teacher - old_t` (added to the record's scalar advantage), trained through the same clipped step and
   `pg_batch::backward_weighted` as any advantage: failed attempts get dense credit on the student's own distribution.
   Guards against collapse, all named: `advantage_bound` clips each `A_t` to `[-c, c]`; `sequence_advantage_cap` scales a
@@ -544,18 +544,23 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   log-probability per sampled token), not the full-distribution reverse KL.
 - **Behaviour policy.** The recorded `behavior_logprobs` where there are some. Where there are none the importance ratio
   is taken against the adapter the run **started from** (a fresh adapter: the base), measured by one forward pass over
-  the dataset before the first step: the first optimiser step is the plain on-policy estimator `-A * log p` (ratio 1),
+  each record the first time a step draws it, under a frozen copy of the start adapter (the adapters switched off for a
+  fresh adapter), never under the adapter as it has since been trained: the first optimiser step is the plain on-policy estimator `-A * log p` (ratio 1),
   and the clip bounds how far later steps and epochs move a token from where the run began. It is a proxy for the true
   behaviour policy and exact when the rollouts were sampled from the adapter being continued.
 - **Reference policy.** `Base` (the adapter disabled) or `StartOfRun` (the adapter being continued); the same for a
-  fresh adapter. Measured by a forward pass before the first step (two passes when a continued adapter is compared with
-  the base).
-- **Cost.** One extra forward pass over the dataset before the first step (two with a continued adapter and the base
-  as reference) when behaviour log-probabilities are missing or a KL is wanted, then one forward and one backward per
-  micro-batch as in supervised training.
+  fresh adapter. Measured by a forward pass over each record the first time a step draws it (a second pass when a
+  continued adapter is compared with the base).
+- **Cost.** Nothing happens before the first step. A record a step draws for the first time costs one extra forward
+  pass (two with a continued adapter and the base as reference, one more with a teacher context) when behaviour
+  log-probabilities are missing or a KL is wanted; what was measured is kept in a file next to the prepared split
+  for the rest of the run, so a record drawn again costs nothing extra and a record no step draws is never scored. A run
+  of 60 steps over 5890 records scores at most the records those steps draw. Every step then runs one forward and one
+  backward per micro-batch as in supervised training. Holding the start adapter costs one host copy of the adapter
+  tensors (none for a fresh adapter), and the prepared directory must be writable for the score file.
 - **Reported.** `outcome.policy_gradient` holds the settings and, per optimiser step, the mean advantage-weighted loss,
-  the clip fraction, the mean KL to the reference, the ratio mean / min / max, the mean advantage and the imitation
-  tokens; `training.json` has the same, and the adapter card's provenance (`regime: "policy_gradient_lora"`) the
+  the clip fraction, the mean KL to the reference, the ratio mean / min / max, the mean advantage, the imitation
+  tokens and the seconds spent scoring the records the step drew for the first time; `training.json` has the same, and the adapter card's provenance (`regime: "policy_gradient_lora"`) the
   settings and the means.
 - **Refused before a device is claimed.** Records with an advantage without `.policy_gradient(..)` (supervised
   training would silently ignore it); `.policy_gradient(..)` without any record carrying one; an invalid setting; a
