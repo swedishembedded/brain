@@ -12,4 +12,5 @@ mod color;
 mod device_ops;
 mod resize_reference;
 mod save_formats;
+mod untrusted_clip;
 mod video_stream;

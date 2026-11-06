@@ -26,6 +26,12 @@ use crate::Media;
 /// The longest clip an edit takes as its input, in frames.
 pub const MAX_EDIT_CLIP_FRAMES: u32 = 2_000;
 
+/// The most pixels all frames of an edit's input clip may hold together, the
+/// same budget as all images of one request ([`crate::blob::MAX_REQUEST_PIXELS`]):
+/// 121 frames at 768 x 512, or 30 at 1080p. A decoded pixel is twelve bytes
+/// of float, and a few kilobytes of video can declare far more.
+pub const MAX_EDIT_CLIP_PIXELS: u64 = crate::blob::MAX_REQUEST_PIXELS;
+
 /// Named resolution tiers and the length of the frame's SHORT side they mean.
 pub const RESOLUTIONS: [(&str, u32); 4] = [("480p", 480), ("720p", 720), ("1080p", 1080), ("2K", 1440)];
 

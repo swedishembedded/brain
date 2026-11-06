@@ -369,6 +369,52 @@ pub fn clip_from_file(path: &Path, max_frames: u32) -> Result<capability::Blob, 
     Ok(blob)
 }
 
+/// [`clip_from_file`] for bytes a client sent: decoded by brain's own
+/// demuxers and AV1 decoder only, never handed to `ffmpeg` (whose demuxers,
+/// protocols and resource use a request must not choose), and refused as soon
+/// as the frames decoded so far hold more than `max_pixels` together, before
+/// the next is kept. Errors name no path of this machine.
+pub fn clip_from_untrusted_file(path: &Path, max_frames: u32, max_pixels: u64) -> Result<capability::Blob, String> {
+    let info = videocodec::probe(path).map_err(untrusted)?;
+    let fps = info.fps.filter(|f| f.is_finite() && *f > 0.0).ok_or("the clip states no frame rate")?;
+    let mut frames = Vec::new();
+    let mut pixels = 0u64;
+    let mut over = None;
+    videocodec::decode(path, &mut |f| {
+        pixels = pixels.saturating_add(f.w as u64 * f.h as u64);
+        if frames.len() >= max_frames as usize {
+            over = Some(format!("the clip is longer than {max_frames} frames"));
+        } else if pixels > max_pixels {
+            over = Some(format!("the clip holds more than {max_pixels} pixels"));
+        } else {
+            frames.push(Rgb8 { w: f.w, h: f.h, px: f.rgb });
+        }
+        over.is_none()
+    })
+    .map_err(untrusted)?;
+    if let Some(over) = over {
+        return Err(over);
+    }
+    if frames.is_empty() {
+        return Err("the clip holds no frames".into());
+    }
+    let frames: Vec<(Vec<f32>, u32, u32)> = frames.into_iter().map(|img| (img.to_hwc_unit(), img.w, img.h)).collect();
+    let mut blob = capability::blob::video_blob(&frames)?;
+    if let Some(meta) = blob.meta.as_object_mut() {
+        meta.insert("fps".into(), serde_json::json!(fps));
+    }
+    Ok(blob)
+}
+
+/// A decoder error, said without the path it was read from.
+fn untrusted(e: videocodec::Error) -> String {
+    match e {
+        videocodec::Error::Unsupported(_) => "the clip is not AV1 video in WebM, Matroska or MP4".into(),
+        videocodec::Error::Malformed(_) | videocodec::Error::Invalid(_) => "the clip is malformed".into(),
+        videocodec::Error::Io(_) => "the clip could not be read".into(),
+    }
+}
+
 /// The external decoder for input videos brain does not read itself.
 mod ffmpeg {
     use std::path::Path;

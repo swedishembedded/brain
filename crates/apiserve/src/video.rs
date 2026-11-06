@@ -294,9 +294,20 @@ async fn clip_from_data_url(url: &str) -> Result<capability::Blob, String> {
     let bytes = crate::b64::decode(payload).map_err(|e| format!("input_video: {e}"))?;
     let ext = ext.to_string();
     tokio::task::spawn_blocking(move || {
-        let dir = private_temp_dir()?;
+        // The detail of a scratch-file failure names this machine's paths:
+        // logged here, never sent.
+        let dir = private_temp_dir().map_err(|e| {
+            eprintln!("brain apiserve: input_video scratch directory: {e}");
+            "input_video could not be staged".to_string()
+        })?;
         let path = dir.join(format!("{}.{ext}", Uuid::new_v4()));
-        let result = std::fs::write(&path, &bytes).map_err(|e| format!("input_video: {e}")).and_then(|()| imaging::video::clip_from_file(&path, capability::video::MAX_EDIT_CLIP_FRAMES).map_err(|e| format!("input_video: {e}")));
+        let result = std::fs::write(&path, &bytes).map_err(|e| {
+            eprintln!("brain apiserve: input_video scratch file {}: {e}", path.display());
+            "input_video could not be staged".to_string()
+        });
+        let result = result.and_then(|()| {
+            imaging::video::clip_from_untrusted_file(&path, capability::video::MAX_EDIT_CLIP_FRAMES, capability::video::MAX_EDIT_CLIP_PIXELS).map_err(|e| format!("input_video: {e}"))
+        });
         let _ = std::fs::remove_file(&path);
         result
     })

@@ -79,6 +79,12 @@ them, so treat all request input as hostile.
       tool-calling conversation). Each is a 400, not a truncation/best-effort pass-through.
 
 ### 3. Resource safety & backpressure
+- [ ] Media a client sends is decoded by brain's own code only, within a budget
+      checked as it decodes: a clip goes through `imaging::video::clip_from_untrusted_file`
+      (never `clip_from_file`, whose ffmpeg fallback lets the file choose demuxers and
+      protocols), every container count is bounded by the file's own length and every
+      size sum is checked (`videocodec::mp4` tests), and a decoded frame is capped at
+      `videocodec::MAX_FRAME_PIXELS` inside the AV1 decoder, before it is allocated.
 - [ ] No peer, keyed or not, can hold a connection without sending: every surface
       is served by `crates/apiserve/src/listener.rs` (never `axum::serve`, which
       runs no header timer), with a header deadline that also ends idle kept-alive

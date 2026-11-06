@@ -227,11 +227,14 @@ fn children(f: &mut (impl Read + Seek), start: u64, end: u64) -> Result<Vec<BoxR
             0 => (8, end - at),
             n => (8, n),
         };
-        if size < header || at + size > end {
+        // `size` is the file's word: a 64-bit one near 2^64 would wrap a plain
+        // sum past the bound and send the walk back to the start, forever.
+        let box_end = at.checked_add(size).filter(|&e| size >= header && e <= end);
+        let Some(box_end) = box_end else {
             return Err(Error::Malformed(format!("mp4: box {} overruns its parent", String::from_utf8_lossy(&kind))));
-        }
-        out.push(BoxRef { kind, start: at + header, end: at + size });
-        at += size;
+        };
+        out.push(BoxRef { kind, start: at + header, end: box_end });
+        at = box_end;
     }
     Ok(out)
 }
@@ -324,6 +327,12 @@ fn video_track(f: &mut (impl Read + Seek), len: u64) -> Result<(StreamInfo, Vec<
         let stsz = table(f, b"stsz")?.ok_or_else(|| Error::Malformed("no stsz".into()))?;
         let uniform = be32(&stsz, 4)?;
         let count = be32(&stsz, 8)? as usize;
+        // Every count below comes from the file. A sample takes at least a
+        // byte of it, so no table may describe more samples than the file
+        // holds bytes; this bounds each allocation by the input's own size.
+        if count as u64 > len || (uniform as u64).saturating_mul(count as u64) > len || (uniform == 0 && count > (stsz.len().saturating_sub(12)) / 4) {
+            return Err(Error::Malformed(format!("mp4: {count} samples do not fit a {len}-byte file")));
+        }
         let sizes: Vec<u32> = if uniform != 0 { vec![uniform; count] } else { (0..count).map(|i| be32(&stsz, 12 + 4 * i)).collect::<Result<_, _>>()? };
 
         let chunk_offsets: Vec<u64> = match (table(f, b"stco")?, table(f, b"co64")?) {
@@ -345,7 +354,7 @@ fn video_track(f: &mut (impl Read + Seek), len: u64) -> Result<(StreamInfo, Vec<
             for _ in 0..per_chunk {
                 let Some(&size) = sizes.get(offsets.len()) else { break };
                 offsets.push((at, size));
-                at += size as u64;
+                at = at.saturating_add(size as u64);
             }
         }
         if offsets.len() != count {
@@ -353,10 +362,14 @@ fn video_track(f: &mut (impl Read + Seek), len: u64) -> Result<(StreamInfo, Vec<
         }
         let mut times = Vec::with_capacity(count);
         let mut t = 0u64;
-        for &(n, d) in &deltas {
+        'runs: for &(n, d) in &deltas {
             for _ in 0..n {
+                // A run may claim 2^32 samples; only `count` exist.
+                if times.len() == count {
+                    break 'runs;
+                }
                 times.push(t as f64 / timescale as f64);
-                t += d as u64;
+                t = t.saturating_add(d as u64);
             }
         }
         times.resize(count, t as f64 / timescale as f64);
@@ -380,5 +393,77 @@ impl SampleSource for Reader {
         let mut data = vec![0u8; size as usize];
         self.file.read_exact(&mut data).map_err(io)?;
         Ok(Some(Sample { time, data }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mux::{VideoPacket, VideoStream};
+    use std::io::Cursor;
+
+    /// A small valid AV1 MP4 as brain writes it (two frames of filler bytes;
+    /// the demuxer never decodes them).
+    fn valid() -> Vec<u8> {
+        let packets = vec![VideoPacket { data: vec![0x12, 0, 0x0a, 0x0b], key: true }, VideoPacket { data: vec![0x12, 0, 0x32], key: false }];
+        let video = VideoStream { w: 16, h: 16, fps: (24, 1), config: vec![0x81, 0, 0, 0], packets };
+        let mut out = Vec::new();
+        write(&mut out, &video, None);
+        out
+    }
+
+    fn open_bytes(bytes: &[u8]) -> Result<(StreamInfo, Vec<SampleRef>), Error> {
+        video_track(&mut Cursor::new(bytes), bytes.len() as u64)
+    }
+
+    /// The payload offset of the first `kind` box in `bytes`.
+    fn payload_at(bytes: &[u8], kind: &[u8; 4]) -> usize {
+        bytes.windows(4).position(|w| w == kind).expect("box present") + 4
+    }
+
+    #[test]
+    fn the_fixture_reads() {
+        let (_, samples) = open_bytes(&valid()).expect("a file brain wrote reads back");
+        assert_eq!(samples.len(), 2);
+    }
+
+    /// A 64-bit box size that wraps the walk back to the file's start must be
+    /// refused, not followed: it used to loop forever, growing a Vec.
+    #[test]
+    fn a_box_size_that_wraps_is_refused() {
+        let mut bytes = vec![0, 0, 0, 16, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0, 0, 0, 0];
+        bytes.extend_from_slice(&[0, 0, 0, 1, b'f', b'r', b'e', b'e']);
+        bytes.extend_from_slice(&(u64::MAX - 15).to_be_bytes());
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(open_bytes(&bytes).is_err());
+        });
+        assert_eq!(finished.recv_timeout(std::time::Duration::from_secs(5)), Ok(true), "the walk must end, refusing the box");
+    }
+
+    /// Sample tables whose declared counts the file cannot hold are refused
+    /// before anything is allocated for them.
+    #[test]
+    fn sample_counts_beyond_the_file_are_refused() {
+        let mut uniform = valid();
+        let at = payload_at(&uniform, b"stsz") + 4; // past version and flags
+        uniform[at..at + 4].copy_from_slice(&1u32.to_be_bytes());
+        uniform[at + 4..at + 8].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(matches!(open_bytes(&uniform), Err(Error::Malformed(_))), "a uniform-size table of 2^32 samples");
+
+        let mut listed = valid();
+        let at = payload_at(&listed, b"stsz") + 8;
+        listed[at..at + 4].copy_from_slice(&1_000_000u32.to_be_bytes());
+        assert!(matches!(open_bytes(&listed), Err(Error::Malformed(_))), "a size list longer than its box");
+    }
+
+    /// A time-to-sample run claiming 2^32 samples stops at the samples there are.
+    #[test]
+    fn a_time_run_longer_than_the_track_is_cut_at_its_samples() {
+        let mut bytes = valid();
+        let at = payload_at(&bytes, b"stts") + 8; // past version, flags and entry count
+        bytes[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        let (_, samples) = open_bytes(&bytes).expect("the track still reads");
+        assert_eq!(samples.len(), 2);
     }
 }

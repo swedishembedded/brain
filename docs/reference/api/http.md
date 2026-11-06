@@ -81,8 +81,9 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   `provider.options.brain.action`, with its own params in
   `provider.options.brain.params`, and sends the clip to edit as
   `input_video: {"type": "video_url", "video_url": {"url":
-  "data:video/mp4;base64,..."}}` (MP4 or WebM, AV1). A remote URL is
-  refused. Finished clips are kept for an hour, within the server's spool
+  "data:video/mp4;base64,..."}}` (MP4 or WebM, AV1, read by brain itself:
+  a clip in another codec is refused, never handed to ffmpeg), at most 2000
+  frames and 64 million pixels across them. A remote URL is refused. Finished clips are kept for an hour, within the server's spool
   budget; a restart forgets every job.
 - **Streaming** (`stream:true`): Anthropic emits `message_start`, then per content
   block (the thinking block, when the model reasons, then the text block)

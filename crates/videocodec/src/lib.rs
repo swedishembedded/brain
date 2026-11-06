@@ -278,6 +278,12 @@ pub struct Frame {
     pub rgb: Vec<u8>,
 }
 
+/// The most pixels one decoded frame may hold (an 8K frame is 33.2 million).
+/// A stream declaring more is refused before the frame is allocated: the
+/// bytes of a video may come from a client, and a few of them can declare a
+/// frame of gigabytes.
+pub const MAX_FRAME_PIXELS: u64 = 36_000_000;
+
 /// Decode the video of `path` frame by frame, in order. `on_frame` returns
 /// whether to go on; decoding stops at the first `false`. Returns the
 /// stream's description.

@@ -18,8 +18,9 @@ A few things are optional, needed only for specific paths:
 - **Node.js 18+ and a WebGPU-capable browser** (Chrome/Edge 113+) — only for
   the in-browser WebGPU demo (`make web/dev`).
 - **ffmpeg** - only to read an input video in a codec other than AV1 (an
-  H.264 phone clip, say); brain hands such a file to the `ffmpeg` CLI when it
-  is on `PATH`. Nothing brain writes needs it.
+  H.264 phone clip, say) from the command line; brain hands such a file to the
+  `ffmpeg` CLI when it is on `PATH`. A clip a client sends to `brain serve` is
+  never handed to it. Nothing brain writes needs it.
 - **Python + OpenVINO** — only for the Intel NPU export/run path
   (`brain npu …`) and a couple of benchmark reference scripts. `make
   environment/requirements` installs this tooling; the Rust engine itself never needs it,

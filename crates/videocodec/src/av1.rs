@@ -205,6 +205,9 @@ impl Decoder {
             dav1d_default_settings(NonNull::new_unchecked(settings.as_mut_ptr()));
             let mut settings = settings.assume_init();
             settings.n_threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(16) as i32;
+            // A sequence header may declare a 65536 x 65536 frame from a few
+            // bytes; the decoder refuses one over the bound before allocating it.
+            settings.frame_size_limit = crate::MAX_FRAME_PIXELS as std::ffi::c_uint;
             check(dav1d_open(Some(NonNull::from(&mut ctx)), Some(NonNull::from(&mut settings)))).map_err(|e| Error::Malformed(format!("AV1 decoder: open failed ({e})")))?;
         }
         Ok(Decoder { ctx })
@@ -295,6 +298,9 @@ impl Drop for Decoder {
 unsafe fn to_rgb(pic: &rav1d::include::dav1d::picture::Dav1dPicture) -> Result<Picture, Error> {
     use rav1d::include::dav1d::headers::*;
     let (w, h) = (pic.p.w as usize, pic.p.h as usize);
+    if (w as u64).saturating_mul(h as u64) > crate::MAX_FRAME_PIXELS {
+        return Err(Error::Malformed(format!("AV1 decoder: a {w} x {h} frame is over {} pixels", crate::MAX_FRAME_PIXELS)));
+    }
     let bits = pic.p.bpc as u32;
     let seq = pic.seq_hdr.ok_or_else(|| Error::Malformed("AV1 decoder: a picture without a sequence header".into()))?;
     // SAFETY: the sequence header lives as long as the picture references it.

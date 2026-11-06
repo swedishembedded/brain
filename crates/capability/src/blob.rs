@@ -115,16 +115,21 @@ pub fn decode_video(inv: &Invocation, name: &str) -> Result<Vec<(Vec<f32>, u32, 
         return Err(format!("'{name}' must be a video blob (got {})", b.media.name()));
     }
     let dim = |k: &str| b.meta.get(k).and_then(|v| v.as_u64()).ok_or_else(|| format!("'{name}' blob missing {k}"));
-    let frames = dim("frames")? as usize;
-    let (w, h, c) = (dim("w")? as u32, dim("h")? as u32, dim("c")? as usize);
+    // The sizes are the caller's word: converted and multiplied checked, so
+    // no choice of them wraps to the payload's length.
+    let narrow = |k: &str| dim(k).and_then(|v| u32::try_from(v).map_err(|_| format!("'{name}' {k}={v} is out of range")));
+    let (frames, w, h, c) = (narrow("frames")?, narrow("w")?, narrow("h")?, dim("c")?);
     if c != 3 {
         return Err(format!("'{name}' must be 3-channel RGB per frame (got c={c})"));
     }
     if frames == 0 || w == 0 || h == 0 {
         return Err(format!("'{name}': frames/w/h must all be > 0 (got frames={frames} w={w} h={h})"));
     }
-    let per_frame = w as usize * h as usize * c;
-    let want_bytes = frames * per_frame * 4;
+    let per_frame = (w as usize).checked_mul(h as usize).and_then(|p| p.checked_mul(3));
+    let want_bytes = per_frame.and_then(|p| p.checked_mul(frames as usize)).and_then(|n| n.checked_mul(4));
+    let (Some(per_frame), Some(want_bytes)) = (per_frame, want_bytes) else {
+        return Err(format!("'{name}': {frames} frames of {w}x{h} do not fit in memory"));
+    };
     if b.bytes.len() != want_bytes {
         return Err(format!(
             "'{name}' payload is {} bytes, expected {frames}×{w}×{h}×{c}×4 = {want_bytes}",
@@ -252,6 +257,12 @@ mod tests {
         // an image blob is not a clip, even with plausible-looking metadata
         let inv = Invocation::new().blob("video", image_blob(&[0.0; 3], 1, 1, 3).with_meta(json!({"frames": 1, "w": 1, "h": 1, "c": 3})));
         assert!(decode_video(&inv, "video").unwrap_err().contains("must be a video blob"));
+        // dimensions chosen to wrap: 2^32 + 1 used to read as 1, and a
+        // product past 2^64 as whatever it wrapped to
+        let inv = Invocation::new().blob("video", Blob::new(Media::Video, vec![0; 12]).with_meta(json!({"frames": 1, "w": (1u64 << 32) + 1, "h": 1, "c": 3})));
+        assert!(decode_video(&inv, "video").unwrap_err().contains("out of range"));
+        let inv = Invocation::new().blob("video", Blob::new(Media::Video, vec![0; 12]).with_meta(json!({"frames": u32::MAX, "w": u32::MAX, "h": u32::MAX, "c": 3})));
+        assert!(decode_video(&inv, "video").unwrap_err().contains("do not fit"));
     }
 
     /// An untagged payload (a client that sent no media kind) still decodes,
