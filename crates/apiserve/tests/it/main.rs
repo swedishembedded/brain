@@ -9,6 +9,7 @@
 
 mod api;
 mod audio;
+mod connections;
 mod seams;
 mod shutdown;
 mod video;

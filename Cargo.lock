@@ -597,6 +597,8 @@ dependencies = [
  "brain-testutil",
  "bytes",
  "futures",
+ "hyper",
+ "hyper-util",
  "jsonschema",
  "libc",
  "rand 0.8.7",

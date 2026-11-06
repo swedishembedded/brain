@@ -261,6 +261,20 @@ stdout as `APIKEY <provider> <key>` lines, or - if `--api-keys-out FILE` is give
 written to `FILE` (the lines then read `APIKEY <provider> written to FILE`). Both the keys and the file are written before any socket
 binds, so a client can never race the server up.
 
+## Connection limits
+
+Every HTTP surface bounds what one peer can hold, with or without a key:
+
+- a connection must send a whole request head within 10 seconds, and an idle
+  kept-alive connection is closed after the same time;
+- a request must send its whole body within 5 minutes, however slowly it
+  trickles in;
+- each surface holds at most 1024 connections; one more is closed before a
+  byte of it is read.
+
+Only HTTP/1.1 is served. A streamed response stays open as long as its
+generation runs.
+
 ## Local clients
 
 A client on the same machine needs neither the key nor the port. Once every

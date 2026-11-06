@@ -463,6 +463,11 @@ openvino = { version = "0.11", default-features = false, features = ["runtime-li
 axum = { version = "0.7", features = ["multipart"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
+# apiserve's own accept loop (header and body deadlines, a connection cap,
+# HTTP/1.1 only), in place of `axum::serve`, which sets none of them. Both are
+# axum's own transitive dependencies.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "http1", "server-graceful", "service", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-stream = "0.1"
 # Speech uploads (crates/audio's `decode`): libopus, the reference decoder,

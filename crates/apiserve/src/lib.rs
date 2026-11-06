@@ -49,6 +49,7 @@ pub mod capabilities;
 pub mod catalog;
 pub mod error;
 pub mod hooks;
+mod listener;
 pub mod media;
 pub mod models;
 pub mod openai;
@@ -75,6 +76,7 @@ pub use auth::{Authenticator, CallerExt, Principal, StaticKey};
 pub use catalog::{api_caps, CapSet};
 pub use error::{ApiError, Kind};
 pub use hooks::{Call, CallResult, RequestHooks, Ticket};
+pub use listener::ConnectionLimits;
 pub use state::{AppState, JobRegistry, DEFAULT_ADMIT_DEADLINE};
 pub use surface::{write_keys, Provider, Surface};
 
@@ -160,8 +162,8 @@ pub struct ServeOpts {
     /// it to both surfaces, which fixes both problems: exactly one registration,
     /// and every surface reacts to it.
     ///
-    /// Each surface is served with axum's `with_graceful_shutdown`, so in-flight
-    /// requests drain instead of being cut off mid-response. The jobs behind
+    /// Each surface stops accepting when it fires and lets in-flight
+    /// requests drain instead of cutting them off mid-response. The jobs behind
     /// them are cancelled when the signal fires, and the drain is bounded by
     /// [`SHUTDOWN_DRAIN`] so a slow client or an uninterruptible step cannot
     /// hold the process open.
@@ -183,6 +185,9 @@ pub struct ServeOpts {
     /// every surface has bound, removed again when serving ends. `None`
     /// publishes nothing.
     pub record: Option<std::path::PathBuf>,
+    /// What one peer may hold of each surface: connections, and the header and
+    /// body deadlines ([`ConnectionLimits`]).
+    pub limits: ConnectionLimits,
 }
 
 impl ServeOpts {
@@ -207,6 +212,10 @@ impl ServeOpts {
     }
     pub fn with_record(mut self, record: Option<std::path::PathBuf>) -> ServeOpts {
         self.record = record;
+        self
+    }
+    pub fn with_limits(mut self, limits: ConnectionLimits) -> ServeOpts {
+        self.limits = limits;
         self
     }
 }
@@ -248,7 +257,7 @@ pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(3
 /// concurrently on a [`tokio::task::JoinSet`]. Blocks the calling thread.
 pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> anyhow::Result<()> {
     let shutdown = opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
-    let ServeOpts { supplier, ready, deadlines, record, .. } = opts;
+    let ServeOpts { supplier, ready, deadlines, record, limits, .. } = opts;
     let publication = record.and_then(|path| {
         if let Err(e) = path.parent().map_or(Ok(()), surface::private_dir) {
             eprintln!("brain serve: no connection record is published ({e}); local clients will not find this server");
@@ -292,10 +301,7 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
                 // for, and BEFORE serving: the marker means "the listener existed",
                 // nothing stronger.
                 ready.bound(&provider.to_string());
-                axum::serve(listener, app)
-                    .with_graceful_shutdown(async move { sd.wait().await })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("serve {provider}: {e}"))?;
+                listener::serve(listener, app, limits, sd).await;
                 Ok::<(), anyhow::Error>(())
             });
         }

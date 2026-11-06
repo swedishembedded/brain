@@ -79,6 +79,13 @@ them, so treat all request input as hostile.
       tool-calling conversation). Each is a 400, not a truncation/best-effort pass-through.
 
 ### 3. Resource safety & backpressure
+- [ ] No peer, keyed or not, can hold a connection without sending: every surface
+      is served by `crates/apiserve/src/listener.rs` (never `axum::serve`, which
+      runs no header timer), with a header deadline that also ends idle kept-alive
+      connections, a whole-body deadline (not a per-frame one, which a byte-per-
+      interval trickle defeats), a connection cap closing the excess at accept, and
+      HTTP/1.1 only (HTTP/2 has no header deadline). `crates/apiserve/tests/it/connections.rs`
+      pins each.
 - [ ] Admission is bounded: a request that can't start within the admit deadline → 429
       (not an unbounded queue); the edge concurrency limit + load-shed → 503. Neither
       lets a client pin all lanes or grow memory without bound.
