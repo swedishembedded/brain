@@ -89,6 +89,11 @@ impl LtxvResident {
         Self::all_from_store(models_dir).into_iter().next()
     }
 
+    /// Whether the real DiT resolved from the model store (`brain perf ltxv@real` needs it before it starts).
+    pub fn has_real_dit(&self) -> bool {
+        self.paths.dit.is_some()
+    }
+
     /// Whether this checkpoint renders real video: the real DiT and text
     /// encoder resolved. Without them every clip comes from the random-weight
     /// smoke-test DiT, which may run but is never offered as a product.
