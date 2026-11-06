@@ -300,6 +300,9 @@ pub struct Executor {
     manifests: Arc<RwLock<Arc<Vec<Manifest>>>>,
     /// The adapter attached to each model right now; see [`crate::adapter`].
     adapters: Arc<ServedAdapters>,
+    /// The registered single-device models, so a front end can ask one whether it would take a job
+    /// ([`Self::check_job`]) without a round trip to the dispatcher.
+    models: Arc<RwLock<HashMap<String, Arc<dyn ResidentModel>>>>,
     stats: Arc<Mutex<Stats>>,
     /// The dispatcher thread's handle plus one per lane, spawned in
     /// [`Self::start`] - see [`Self::shutdown`]'s doc for why a real,
@@ -343,6 +346,7 @@ impl Executor {
             adapters.seed(&m.manifest().model, m.adapter_identity());
         }
         let devices: Vec<Device> = budgets.devices().collect();
+        let known: HashMap<String, Arc<dyn ResidentModel>> = models.iter().map(|m| (m.manifest().model, m.clone())).collect();
         let mut mgr = ResidencyManager::new(budgets);
         for m in models {
             crate::log::info(&format!("model registered: {}", m.manifest().model));
@@ -376,6 +380,7 @@ impl Executor {
             tx,
             manifests: Arc::new(RwLock::new(Arc::new(manifests))),
             adapters,
+            models: Arc::new(RwLock::new(known)),
             stats,
             join_handles: Arc::new(Mutex::new(Some(join_handles))),
         }
@@ -440,6 +445,7 @@ impl Executor {
     /// with no extra synchronization.
     pub fn register(&self, model: Arc<dyn ResidentModel>) {
         let manifest = model.manifest();
+        let manifest_name = manifest.model.clone();
         self.adapters.seed(&manifest.model, model.adapter_identity());
         {
             // Copy-on-write: readers hold cheap Arc snapshots, so a (rare)
@@ -450,6 +456,7 @@ impl Executor {
             v.push(manifest);
             *g = Arc::new(v);
         }
+        self.models.write().unwrap().insert(manifest_name, model.clone());
         let _ = self.tx.send(Msg::Register(model));
     }
 
@@ -476,6 +483,7 @@ impl Executor {
             *g = Arc::new(v);
             self.adapters.seed(&name, model.adapter_identity());
         }
+        self.models.write().unwrap().insert(name, model.clone());
         let _ = self.tx.send(Msg::Register(model));
         true
     }
@@ -499,7 +507,21 @@ impl Executor {
             }
         }
         self.adapters.set(model, None);
+        self.models.write().unwrap().remove(model);
         let _ = self.tx.send(Msg::Unregister(model.to_string()));
+    }
+
+    /// Whether the registered model `model` would accept the job `(action, inv)`
+    /// ([`ResidentModel::check_job`]), asked without queueing it: what a front end checks before it accepts a
+    /// call, so a request that can never run is refused to its caller at once (HTTP 400, a bus error) instead
+    /// of being accepted and failed later. A model that is not registered here (unknown, or multi-device)
+    /// accepts, and the caller's own "no model" handling stays the only outcome.
+    pub fn check_job(&self, model: &str, action: &str, inv: &Invocation) -> Result<(), String> {
+        let found = self.models.read().unwrap().get(model).cloned();
+        match found {
+            Some(m) => m.check_job(action, inv),
+            None => Ok(()),
+        }
     }
 
     /// [`Self::register`]'s multi-device sibling - registers a
@@ -807,6 +829,10 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
     match msg {
         Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
             Some(key) => {
+                if let Err(refusal) = mgr.check_job(&job.model, &job.action, &job.inv) {
+                    (job.reply)(Err(refusal));
+                    return;
+                }
                 mgr.stamp(&job.model, &mut job.inv);
                 let key = replica_routes.route(mgr, &job.model, &job.inv, key, queue, running_jobs);
                 let id = *next_id;
@@ -1738,6 +1764,62 @@ mod tests {
         let exec = Executor::start(Vec::new(), crate::budget::Budgets::new(), Policy::default());
         let err = exec.plan("nope", "run", Invocation::new()).unwrap_err();
         assert_eq!(err, crate::PlanError::UnknownModel { model: "nope".to_string() });
+        exec.shutdown();
+    }
+
+    /// A job its model refuses at the door is answered with the reason at once: no device is claimed, nothing
+    /// is built, and what is resident is left alone. A workload that is accepted gives its reservation back
+    /// when it ends.
+    #[test]
+    fn a_workload_refuses_at_the_door_and_gives_its_reservation_back() {
+        struct Gate {
+            built: Arc<std::sync::atomic::AtomicU32>,
+        }
+        struct GateInst;
+        impl ResidentModel for Gate {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("gate", "a workload", vec![capability::ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("gate", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(0, 6 << 30)
+            }
+            fn check_job(&self, _action: &str, inv: &Invocation) -> Result<(), String> {
+                match inv.get_str("base") {
+                    Some(base) if base == "known" => Ok(()),
+                    _ => Err("the base is not in the model store".to_string()),
+                }
+            }
+            fn transient(&self) -> bool {
+                true
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                self.built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Box::new(GateInst))
+            }
+        }
+        impl Instance for GateInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                Ok(capability::Outcome::new())
+            }
+        }
+        let built = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut budgets = crate::budget::Budgets::new();
+        budgets.set(Device::Cpu, 8 << 30, 0);
+        let exec = Executor::start(vec![Arc::new(Gate { built: built.clone() })], budgets, Policy::default());
+
+        let refused = exec.run_blocking("gate", "run", Invocation::new().set("base", serde_json::json!("other")), |_| {});
+        assert_eq!(refused.unwrap_err(), "the base is not in the model store");
+        assert_eq!(built.load(std::sync::atomic::Ordering::SeqCst), 0, "a refused job builds nothing");
+
+        // Two accepted jobs of 6 GB each on an 8 GB host: the second fits only because the first gave its bytes back.
+        for _ in 0..2 {
+            exec.run_blocking("gate", "run", Invocation::new().set("base", serde_json::json!("known")), |_| {}).expect("an accepted job");
+        }
+        assert_eq!(built.load(std::sync::atomic::Ordering::SeqCst), 2, "each run of a workload builds its own instance");
+        assert!(exec.residency().placements.is_empty(), "and none is left resident");
         exec.shutdown();
     }
 

@@ -351,6 +351,15 @@ impl ResidencyManager {
         }
     }
 
+    /// Whether the model `model` accepts the job `(action, inv)` ([`ResidentModel::check_job`]); a model
+    /// that is not registered accepts it here, and the caller's "no model" reply is the only outcome.
+    pub fn check_job(&self, model: &str, action: &str, inv: &Invocation) -> Result<(), String> {
+        match self.models.get(model) {
+            Some(m) => m.check_job(action, inv),
+            None => Ok(()),
+        }
+    }
+
     /// Register a model reachable via [`Self::claim_multi`] - a SEPARATE
     /// registry from [`Self::register`] (see this file's own module doc).
     pub fn register_multi(&mut self, model: Arc<dyn MultiDeviceResidentModel>) {
@@ -982,9 +991,15 @@ impl ResidencyManager {
         self.event(format!("build-failed {key}"));
     }
 
-    /// Unpin an instance after a run and mark it most-recently-used.
+    /// Unpin an instance after a run and mark it most-recently-used. An instance of a
+    /// [transient](ResidentModel::transient) model (a workload) is dropped instead, returning its
+    /// reservation.
     pub fn release(&mut self, key: &InstanceKey) {
         self.residents.set_pinned(key, false);
+        if self.models.get(&key.model).is_some_and(|m| m.transient()) {
+            self.evict_entry(key);
+            return;
+        }
         // Recency only: `claim` already counted this job's use (see
         // `Residents::touch_recency`).
         self.residents.touch_recency(key);
@@ -1526,6 +1541,49 @@ mod tests {
         fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
             Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
         }
+    }
+
+    /// A workload (a job that holds the device only while it runs, such as a fine-tune) is not a
+    /// model that stays resident: once its run is released the instance is dropped and its
+    /// reservation returned at once, so the bytes it needed do not stay charged to the card and
+    /// push serving residents out.
+    #[test]
+    fn a_transient_model_gives_its_reservation_back_when_its_run_is_released() {
+        struct Workload(Fake);
+        impl ResidentModel for Workload {
+            fn manifest(&self) -> Manifest {
+                self.0.manifest()
+            }
+            fn instance_key(&self, a: &str, i: &Invocation) -> InstanceKey {
+                self.0.instance_key(a, i)
+            }
+            fn estimate(&self, k: &InstanceKey) -> MemCost {
+                self.0.estimate(k)
+            }
+            fn activate(&self, k: &InstanceKey, d: Device) -> Result<Box<dyn crate::Instance>, String> {
+                self.0.activate(k, d)
+            }
+            fn transient(&self) -> bool {
+                true
+            }
+        }
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 2 * GB);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(Workload(Fake { name: "job".into(), vram: 20 * GB, live: live.clone() })));
+        mgr.register(Arc::new(Fake { name: "served".into(), vram: 10 * GB, live: live.clone() }));
+
+        mgr.run("job", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert_eq!(live.load(Ordering::SeqCst), 0, "the finished workload's instance is dropped");
+        assert_eq!(mgr.budgets.get(Device::Gpu(0)).unwrap().used, 0, "and its 20 GB are free again");
+        assert!(mgr.residency().is_empty());
+
+        // A served model that was resident is evicted FOR the job, and stays out once the job is gone.
+        mgr.run("served", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        mgr.run("job", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert_eq!(mgr.budgets.get(Device::Gpu(0)).unwrap().used, 0);
     }
 
     /// The whole point of `plan`: the prediction it makes is the decision

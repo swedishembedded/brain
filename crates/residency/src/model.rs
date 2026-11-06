@@ -97,6 +97,25 @@ pub trait ResidentModel: Send + Sync {
     /// Defaulted to a no-op: a model serving one id has nothing to say.
     fn stamp(&self, _inv: &mut Invocation) {}
 
+    /// Refuse a job at the door: called once with each accepted job, before it is queued or any device is
+    /// claimed for it, so a request that can never run (a base that is not in the store, settings the
+    /// workload cannot honour) fails at once with its reason instead of evicting residents to make room for
+    /// it first. Runs on the dispatcher thread: it must be quick and must not touch a device. Defaulted to
+    /// accepting every job.
+    fn check_job(&self, _action: &str, _inv: &Invocation) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Whether this is a **workload** rather than a model: a job that holds its device only while it
+    /// runs (a fine-tune), so its instance is dropped, and the bytes [`Self::estimate`] reserved are
+    /// returned to the device, the moment the run that claimed it is released. A model keeps its
+    /// instance resident for the next request; a workload left resident would stay charged to its
+    /// card for memory it no longer holds and push serving residents out for nothing.
+    /// Defaulted to `false`.
+    fn transient(&self) -> bool {
+        false
+    }
+
     /// The fine-tune this model id serves, when it is an adapter view: its
     /// card id and content digest, the facts a model card reports. The
     /// executor records it under the model id when the model is registered,
@@ -157,6 +176,12 @@ impl<M: ResidentModel + ?Sized> ResidentModel for Alias<M> {
     }
     fn stamp(&self, inv: &mut Invocation) {
         self.inner.stamp(inv)
+    }
+    fn check_job(&self, action: &str, inv: &Invocation) -> Result<(), String> {
+        self.inner.check_job(action, inv)
+    }
+    fn transient(&self) -> bool {
+        self.inner.transient()
     }
     fn adapter_identity(&self) -> Option<AdapterIdentity> {
         self.inner.adapter_identity()
