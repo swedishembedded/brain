@@ -15,6 +15,12 @@ brain serve --dbus --dbus-system   # system bus (needs a system.d policy)
 brain serve --dbus --dbus-name com.example.MyBrain
 ```
 
+On the system bus the shipped policy
+(`scripts/build/com.swedishembedded.Brain1.conf`) lets only the system user
+`brain` own the name, and only root and the `brain` group call it: run the
+server as that user, never as root (`useradd --system --no-create-home
+--user-group brain`, then `sudo -u brain brain serve --dbus --dbus-system`).
+
 Without a session bus of your own, wrap it in a private one:
 
 ```bash
