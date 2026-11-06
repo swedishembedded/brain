@@ -682,6 +682,8 @@ impl Action for GenerateAction {
         generate_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Client text cannot spell a control token (`Invocation::escape_client_text`).
+        let inv = &inv.escape_client_text(&|text| self.inner.tok.escape_untrusted(text));
         if last_user_text(inv).trim().is_empty() {
             return Err("omni generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
         }
@@ -713,6 +715,8 @@ impl Action for SpeakAction {
         speak_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Client text cannot spell a control token (`Invocation::escape_client_text`).
+        let inv = &inv.escape_client_text(&|text| self.inner.tok.escape_untrusted(text));
         let user_text = last_user_text(inv);
         if user_text.trim().is_empty() {
             return Err("omni speak: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
@@ -753,6 +757,8 @@ impl Action for ConverseAction {
         converse_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Client text cannot spell a control token (`Invocation::escape_client_text`).
+        let inv = &inv.escape_client_text(&|text| self.inner.tok.escape_untrusted(text));
         let prompt = last_user_text(inv);
         if prompt.trim().is_empty() {
             return Err("omni converse: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());

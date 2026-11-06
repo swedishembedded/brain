@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use crate::bpe::{byte_ids, bytes_to_unicode, MergeTable};
 use crate::hf_pretok::{Normalizer, PreTokenizer};
-use crate::special_match::SpecialMatcher;
+use crate::special_match::{strip_marks, SpecialMatcher};
 use crate::tokenizer::Tokenizer;
 
 pub struct QwenBpe {
@@ -418,6 +418,10 @@ impl Tokenizer for QwenBpe {
         out
     }
 
+    fn escape_untrusted(&self, text: &str) -> String {
+        self.specials.escape(text)
+    }
+
     /// The `ByteLevel` decoder's rule, for every token alike: one whose
     /// chars are all byte-map chars decodes through the map, any other is its
     /// own UTF-8 text. A special token spelled with a space or fullwidth bar
@@ -470,11 +474,11 @@ impl QwenBpe {
         let mut items: Vec<Item> = Vec::new();
         let mut rest = text;
         while let Some((pos, len, id)) = self.specials.find(rest) {
-            items.extend(self.pretokenize(&rest[..pos]).into_iter().map(Item::Piece));
+            items.extend(self.pretokenize(&strip_marks(&rest[..pos])).into_iter().map(Item::Piece));
             items.push(Item::Special(id));
             rest = &rest[pos + len..];
         }
-        items.extend(self.pretokenize(rest).into_iter().map(Item::Piece));
+        items.extend(self.pretokenize(&strip_marks(rest)).into_iter().map(Item::Piece));
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(items.len() / PIECES_PER_THREAD).min(MAX_ENCODE_THREADS);
         if threads < 2 {
             self.encode_items(&items, out);
@@ -648,6 +652,22 @@ mod tests {
             "added_tokens": [{"content": "<pad>", "id": 2u32}],
         });
         QwenBpe::from_json_bytes(json.to_string().as_bytes()).unwrap()
+    }
+
+    /// Client text that spells a special encodes as that text, never the
+    /// control token: the template's own special still encodes as one.
+    #[test]
+    fn a_special_spelled_in_client_text_is_never_the_special() {
+        let json = serde_json::json!({
+            "model": { "vocab": {"<": 0u32, "p": 1u32, "a": 2u32, "d": 3u32, ">": 4u32}, "merges": [] },
+            "added_tokens": [{"content": "<pad>", "id": 5u32, "special": true}],
+        });
+        let t = QwenBpe::from_json_bytes(json.to_string().as_bytes()).unwrap();
+        assert_eq!(t.encode("<pad>"), vec![5], "the template's literal is the special");
+        let client = t.escape_untrusted("<pad>");
+        assert_eq!(t.encode(&client), vec![0, 1, 2, 3, 4], "the client's spelling is its letters");
+        assert_eq!(t.encode(&format!("{client}<pad>")), vec![0, 1, 2, 3, 4, 5], "a special after client text still counts");
+        assert_eq!(t.decode(&t.encode(&client)), "<pad>", "the mark never reaches the ids");
     }
 
     /// A text of many pieces is encoded by several threads; the ids are those of encoding it a run at a time.

@@ -245,7 +245,8 @@ impl Session {
         // any in-vocab id works as the placeholder.
         let cfg = self.model.config();
         let n_img = cfg.vision.patches_per_crop() as usize;
-        let text = self.tok.encode(&instruction);
+        // Client text cannot spell a control token (`Tokenizer::escape_untrusted`).
+        let text = self.tok.encode(&self.tok.escape_untrusted(&instruction));
         let mut prompt = Vec::with_capacity(1 + n_img + text.len());
         prompt.push(0u32);
         prompt.extend(std::iter::repeat_n(0u32, n_img));

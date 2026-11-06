@@ -217,7 +217,8 @@ impl Action for CaptionAction {
         //    through the cache, image rows enter via step_embed — no residual
         //    splice needed on this path.
         let pre = hot.tok.encode("<|im_start|>user\n");
-        let post = hot.tok.encode(&format!("\n{prompt}<|im_end|>\n<|im_start|>assistant\n"));
+        // Client text cannot spell a control token (`Tokenizer::escape_untrusted`).
+        let post = hot.tok.encode(&format!("\n{}<|im_end|>\n<|im_start|>assistant\n", hot.tok.escape_untrusted(&prompt)));
         let d = 896usize;
         let vocab = hot.dec.cfg.vocab as usize;
         // The checkpoint's own eos ids, plus the end of the ChatML turn this

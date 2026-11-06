@@ -724,6 +724,58 @@ pub fn content_text(content: Option<&Value>) -> String {
 /// is no longer a bare string -- a real regression this fixes, not a
 /// theoretical one (this function gates `Int8ThinkerInstance::generate_chat`'s
 /// and `GenerateAction::run`'s own empty-prompt rejection).
+/// The params of a chat call that carry text a client wrote: rendered into a
+/// prompt, they must not be able to spell the model's control tokens.
+const CLIENT_TEXT_JSON: [&str; 3] = ["messages", "tools", "tool_choice"];
+
+/// A JSON document a client wrote (tool schemas, messages, tool-call
+/// arguments) with every string in it passed through `escape`, after parsing,
+/// so a `\u003c` spelling cannot slip past; text that is not JSON is escaped
+/// as text. See [`Invocation::escape_client_text`].
+pub fn escape_client_json(text: &str, escape: &dyn Fn(&str) -> String) -> String {
+    fn walk(escape: &dyn Fn(&str) -> String, v: &mut Value) {
+        match v {
+            Value::String(s) => *s = escape(s),
+            Value::Array(items) => items.iter_mut().for_each(|item| walk(escape, item)),
+            Value::Object(fields) => fields.values_mut().for_each(|field| walk(escape, field)),
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<Value>(text) {
+        Ok(mut v) => {
+            walk(escape, &mut v);
+            v.to_string()
+        }
+        Err(_) => escape(text),
+    }
+}
+
+impl Invocation {
+    /// This call with every string a client wrote into its chat passed through
+    /// `escape` (a tokenizer's `escape_untrusted`): message contents,
+    /// reasoning, tool calls and results, tool schemas, `tool_choice`, the
+    /// system prompt and a chat-mode `prompt`. JSON params are escaped string
+    /// by string after parsing, so a `\u003c` spelling cannot slip past. A raw
+    /// `chat: false` prompt is the client's own token stream by contract and
+    /// stays as sent. Every model renders client text from the result.
+    pub fn escape_client_text(&self, escape: &dyn Fn(&str) -> String) -> Invocation {
+        let mut out = self.clone();
+        for key in CLIENT_TEXT_JSON {
+            if let Some(text) = self.get_str(key) {
+                out = out.set(key, Value::String(escape_client_json(&text, escape)));
+            }
+        }
+        if let Some(system) = self.get_str("system") {
+            out = out.set("system", Value::String(escape(&system)));
+        }
+        let chat = self.get_str("messages").is_some_and(|m| !m.is_empty()) || self.get_bool("chat").unwrap_or(true);
+        if let (true, Some(prompt)) = (chat, self.get_str("prompt")) {
+            out = out.set("prompt", Value::String(escape(&prompt)));
+        }
+        out
+    }
+}
+
 pub fn last_user_text(inv: &Invocation) -> String {
     if let Some(s) = inv.get_str("messages") {
         if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&s) {

@@ -725,6 +725,8 @@ impl Int8ThinkerInstance {
                  BRAIN_QWEN3OMNIMOE_HF_DIR) at a directory holding tokenizer.json, or vocab.json + merges.txt."
             ));
         };
+        // Client text cannot spell a control token (`Invocation::escape_client_text`).
+        let inv = &inv.escape_client_text(&|text| tok.escape_untrusted(text));
         if last_user_text(inv).trim().is_empty() {
             return Err(format!("{MODEL} generate: empty prompt (need 'messages' with a user turn, or 'prompt')"));
         }

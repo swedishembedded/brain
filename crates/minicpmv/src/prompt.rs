@@ -144,7 +144,10 @@ impl Formatter {
         let (mut ni, mut nv) = (0usize, 0usize);
         let mut rest = rendered;
         loop {
-            let next = [(rest.find(IMAGE_PAD), true), (rest.find(VIDEO_PAD), false)].into_iter().filter_map(|(at, img)| at.map(|a| (a, img))).min();
+            // A pad a client typed is marked (`Tokenizer::escape_untrusted`)
+            // and is text: only the template's own pads place media.
+            let unmarked = |pad: &str| rest.match_indices(pad).map(|(at, _)| at).find(|&at| !rest[..at].ends_with(data::special_match::LITERAL_MARK));
+            let next = [(unmarked(IMAGE_PAD), true), (unmarked(VIDEO_PAD), false)].into_iter().filter_map(|(at, img)| at.map(|a| (a, img))).min();
             let Some((at, is_image)) = next else {
                 text.push_str(rest);
                 break;

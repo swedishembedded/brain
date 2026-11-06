@@ -28,6 +28,7 @@ use data::chat_template::ChatTemplate;
 use imaging::Rgb8;
 use model::kv_tier::KvTier;
 use qwen3::chat::{ChatFormat, ParsedRequest, SeqState};
+use data::tokenizer::Tokenizer;
 use serde_json::{json, Value};
 
 use crate::config::Downsample;
@@ -244,6 +245,9 @@ impl Session {
         if inv.cancel.is_cancelled() {
             return Err("cancelled".into());
         }
+        // Client text cannot spell a control token or a media placeholder
+        // (`Invocation::escape_client_text`).
+        let inv = &inv.escape_client_text(&|text| self.model.fmt.tokenizer.escape_untrusted(text));
         let images = decode_images(inv)?;
         let videos: Vec<Vec<Rgb8>> = decode_video(inv)?.into_iter().collect();
         // The checkpoint's template thinks only when asked; the shared

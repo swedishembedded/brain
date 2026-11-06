@@ -254,6 +254,9 @@ impl Session {
         if inv.cancel.is_cancelled() {
             return Err("cancelled".into());
         }
+        // Client text cannot spell a control token or an image placeholder
+        // (`Invocation::escape_client_text`).
+        let inv = &inv.escape_client_text(&|text| data::tokenizer::Tokenizer::escape_untrusted(&*self.vlm.tokenizer, text));
         let images = decode_images(inv)?;
         let (system, turns) = conversation(inv, images.len(), self.image_sep)?;
         let ids = self.vlm.prompt_ids_with(system.as_deref(), &turns)?;

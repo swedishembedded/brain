@@ -280,6 +280,8 @@ impl OcrFrontend {
 
     /// The page a request asks to read (pixels still packed), and its decode budget.
     fn page_of(&self, inv: &Invocation) -> Result<(PendingPage, usize), String> {
+        // Client text cannot spell a control token (`Invocation::escape_client_text`).
+        let inv = &inv.escape_client_text(&|text| data::tokenizer::Tokenizer::escape_untrusted(&*self.tok, text));
         let instruction = {
             let t = last_user_text(inv);
             if t.trim().is_empty() {

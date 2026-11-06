@@ -18,6 +18,15 @@ pub trait Tokenizer {
     fn decode(&self, ids: &[u32]) -> String;
     /// Number of distinct tokens.
     fn vocab_size(&self) -> usize;
+    /// `text` a client wrote, made safe to put into a prompt this tokenizer
+    /// encodes: a special-token literal in it ([`crate::special_match::LITERAL_MARK`])
+    /// encodes as the text it spells, never as the control token, so a client
+    /// cannot open a turn, close one, or forge a tool call or a media
+    /// placeholder by typing it. Every model renders client text through
+    /// this; a tokenizer without specials returns it unchanged.
+    fn escape_untrusted(&self, text: &str) -> String {
+        text.to_string()
+    }
 }
 
 /// Character-level tokenizer: each distinct `char` is one token.

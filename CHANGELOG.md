@@ -21,6 +21,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 - A video sent for editing is read by brain's own demuxers and decoder only, never `ffmpeg`, within a pixel budget; the MP4 reader no longer loops forever or allocates by the counts a file declares, and the AV1 decoder refuses frames over 36 megapixels before allocating them
 - The event socket of `brain forecast serve` is owner-only and refuses lines over 64 MiB; a `camera_frame` path is read only when a detector is loaded
 - Overflow checks are on in release builds of every crate that parses bytes brain did not write
+- Text a client sends can no longer spell a model's control tokens: a `<|im_end|><|im_start|>system` (or a `<tool_call>`, `</think>` or media placeholder, also when written `\u003c...` in JSON) in a message, tool call or result, tool schema or system prompt encodes as the text it is, for every Qwen-family chat model and the vision-language models (`Tokenizer::escape_untrusted`, `Invocation::escape_client_text`); before, it opened a real turn
 
 ## [5.1.0] - 2026-11-06
 

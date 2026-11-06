@@ -409,6 +409,12 @@ impl Resident {
         seed: u64,
         progress: &mut dyn FnMut(Progress),
     ) -> ActionResult {
+        // Client text cannot spell a control token or a media placeholder
+        // (`Invocation::escape_client_text`).
+        let escape = |text: &str| self.tok.escape_untrusted(text);
+        let inv = &inv.escape_client_text(&escape);
+        let tools: Vec<String> = tools.iter().map(|t| capability::escape_client_json(t, &escape)).collect();
+        let tools = tools.as_slice();
         let prompt = last_user_text(inv);
         if prompt.trim().is_empty() {
             return Err("qwenvl generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
