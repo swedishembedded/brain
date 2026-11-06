@@ -244,17 +244,17 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // reference-image editing, LoRA training (see resident_flux2.rs).
     let flux2_residents = catalog::resident_flux2::Flux2Resident::all_from_store(models_dir);
     if flux2_residents.is_empty() {
-        residency::log::not_served("brain: flux2-klein not served over the scheduler (set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER, or place a checkpoint under the model dir)");
+        residency::log::not_served("brain: flux2-klein not served over the scheduler (pull a FLUX.2 Klein checkpoint into the model dir)");
     }
     for f in flux2_residents {
         models.push(Arc::new(f));
     }
-    // Wan2.1 text-to-video (BRAIN_WAN_{DIT,VAE,T5,TOKENIZER}): a resident
-    // transformer per (variant, frames, size) - see resident_wan.rs.
+    // Wan2.1 text-to-video: a resident transformer per (variant, frames,
+    // size) - see resident_wan.rs. A pulled checkpoint reaches its adapter
+    // through `model_dir::resident_for_compound`'s `"wan"` arm, so whether
+    // Wan is missing is decided after the model-dir scan below.
     if let Some(w) = catalog::resident_wan::WanResident::from_env() {
         models.push(Arc::new(w));
-    } else {
-        residency::log::not_served("brain: wan not served over the scheduler (set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER)");
     }
     // MiniMax-H3 joint video+audio reaches its adapter through
     // `model_dir::resident_for_compound`'s `"minimaxh3"` arm, from the store.
@@ -446,6 +446,9 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
             eprintln!("brain: {} (family '{}') not registered: {} -- check its brain.manifest.json roles, or re-fetch it", e.dir.display(), e.family, e.reason);
         }
     }
+    if !serves_wan(&models) {
+        residency::log::not_served("brain: wan not served over the scheduler (pull a Wan2.1 checkpoint into the model dir: brain pull Wan-AI/Wan2.1-T2V-1.3B)");
+    }
 
     // The live capacity probe: the dispatcher re-measures every card's real
     // free VRAM on a cadence, so a neighbouring process taking or releasing
@@ -512,9 +515,28 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     Serving { executor: exec, qwen, qwen35: qwen35_discovered }
 }
 
+/// Whether any of `models` is a Wan resident, under whatever id it registered:
+/// every one shares `wan::caps::manifest`'s schema (see `WanResident::manifest`).
+fn serves_wan(models: &[Arc<dyn ResidentModel>]) -> bool {
+    let wan = wan::caps::manifest().summary;
+    models.iter().any(|m| m.manifest().summary == wan)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Wan checkpoint pulled into the model dir registers under its own
+    /// reference, not `wan::caps::MODEL`: it still counts as Wan being
+    /// served, so `serve` must not warn that Wan is missing.
+    #[test]
+    fn a_wan_served_from_the_model_dir_counts_as_wan() {
+        let paths = wan::Paths { dit: "d".into(), vae: "v".into(), t5: "t".into(), tokenizer: "k".into() };
+        let store: Arc<dyn ResidentModel> = Arc::new(catalog::resident_wan::WanResident::from_paths("Wan-AI/Wan2.1-T2V-1.3B".into(), paths));
+        let splat: Arc<dyn ResidentModel> = Arc::new(catalog::resident_splat::SplatResident);
+        assert!(serves_wan(&[splat.clone(), store]));
+        assert!(!serves_wan(&[splat]));
+    }
 
     /// `QwenResident::adapter_view` is INHERENT, not a `ResidentModel`
     /// method, so the erased `Arc<dyn ResidentModel>` the executor holds

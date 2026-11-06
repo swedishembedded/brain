@@ -89,7 +89,7 @@ impl Flux2Resident {
         match Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths) {
             Ok(r) => Some(r),
             Err(e) => {
-                residency::log::not_served(&format!("brain: flux2-klein not served over the scheduler (BRAIN_FLUX2_DIT: {e})"));
+                residency::log::not_served(&format!("brain: flux2-klein not served over the scheduler ({e})"));
                 None
             }
         }
