@@ -522,7 +522,7 @@ mod tests {
             // against the spec, so an undeclared param is rejected — which is
             // the capability layer doing its job, and caught this stub.
             ActionSpec::new("restore_face", "stub")
-                .param(capability::ParamSpec::new("w", capability::ParamType::Float, "fidelity dial"))
+                .param(capability::ParamSpec::new("w", capability::ParamType::Float, "fidelity dial").min(0.0).max(capability::bounds::UNIT))
                 .input(BlobSpec::new("image", Media::Image, "i"))
                 .output(BlobSpec::new("image", Media::Image, "o"))
         }
@@ -542,7 +542,7 @@ mod tests {
     impl Action for StubUpscale {
         fn spec(&self) -> ActionSpec {
             ActionSpec::new("upscale", "stub")
-                .param(capability::ParamSpec::new("tile", capability::ParamType::Int, "tile"))
+                .param(capability::ParamSpec::new("tile", capability::ParamType::Int, "tile").min(0.0).max(capability::bounds::SIZE_PX))
                 .input(BlobSpec::new("image", Media::Image, "i"))
                 .output(BlobSpec::new("image", Media::Image, "o"))
         }

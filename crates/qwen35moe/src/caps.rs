@@ -85,9 +85,9 @@ pub fn manifest() -> Manifest {
             "the prompt: text (with a tokenizer) or whitespace/comma-separated token ids (without); ignored when `messages` is set",
         ))
         .param(ParamSpec::new("tokenizer", ParamType::Str, "path to tokenizer.json; omit to feed/return raw token ids").host_env("BRAIN_QWEN35MOE_TOKENIZER"))
-        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(DEFAULT_MAX_NEW)))
+        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(DEFAULT_MAX_NEW)))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").min(0.0).max(capability::bounds::TOP_K).default(json!(40)))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(

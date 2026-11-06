@@ -75,9 +75,9 @@ pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate text continuing a prompt (GLM MLA + MoE decoder)")
         .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format GLM checkpoint (.safetensors)").required().host_env("BRAIN_GLMDSA_WEIGHTS"))
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue"))
-        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(128)))
+        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(128)))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.8)))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").min(0.0).max(capability::bounds::TOP_K).default(json!(40)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .output(BlobSpec::new("text", Media::Text, "the generated text"));
     Manifest::new(MODEL, "GLM-5.2 decoder (MLA + sigmoid noaux_tc MoE + DSA indexer): char-level text generation.", vec![generate])

@@ -103,7 +103,7 @@ fn horizon_of(inv: &Invocation, default: i64) -> usize {
 /// params (fincast `freq`, kronos calendar stamps).
 fn base_forecast_spec(summary: &str) -> ActionSpec {
     ActionSpec::new("forecast", summary)
-        .param(ParamSpec::new("horizon", ParamType::Int, "number of steps to forecast").default(json!(64)))
+        .param(ParamSpec::new("horizon", ParamType::Int, "number of steps to forecast").min(0.0).max(10000.0).default(json!(64)))
         .input(BlobSpec::new("context", Media::Bytes, "context series as raw f32-LE; meta {shape}").required())
         .output(BlobSpec::new("forecast", Media::Bytes, "forecast as raw f32-LE; meta {shape,kind,levels}"))
 }
@@ -320,7 +320,7 @@ impl FincastResident {
     }
     fn spec() -> ActionSpec {
         base_forecast_spec("financial forecast; forecast blob is [horizon, 1+levels] (col 0 mean)")
-            .param(ParamSpec::new("freq", ParamType::Int, "frequency bucket: 0 daily, 1 weekly, 2 monthly").default(json!(0)))
+            .param(ParamSpec::new("freq", ParamType::Int, "frequency bucket: 0 daily, 1 weekly, 2 monthly").min(0.0).max(2.0).default(json!(0)))
     }
 }
 
@@ -505,7 +505,7 @@ impl KronosResident {
             .param(ParamSpec::new("temperature", ParamType::Float, "sampling temperature (0 or argmax=true => deterministic)").default(json!(1.0)))
             .param(ParamSpec::new("argmax", ParamType::Bool, "deterministic argmax decode").default(json!(true)))
             .param(ParamSpec::new("seed", ParamType::Int, "RNG seed when sampling (omit for random)"))
-            .param(ParamSpec::new("samples", ParamType::Int, "sampled paths sharing one prefill (out [N,horizon,feat])").default(json!(1)))
+            .param(ParamSpec::new("samples", ParamType::Int, "sampled paths sharing one prefill (out [N,horizon,feat])").min(0.0).max(1000.0).default(json!(1)))
             // `host_resolved`: a path on the machine that runs the model is the
             // host's fact, never a remote caller's choice. A served surface drops
             // the param, and the resident falls back to the boot decoder; a local

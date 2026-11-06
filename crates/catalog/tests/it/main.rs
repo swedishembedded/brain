@@ -18,5 +18,6 @@ mod multi_adapter;
 mod npu_model_parity;
 mod resident_packed;
 mod scheduled_batch;
+mod served_bounds;
 mod served_paths;
 mod served_training;

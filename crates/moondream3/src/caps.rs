@@ -92,7 +92,7 @@ pub fn caption_spec() -> ActionSpec {
         .streaming()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw instruction (alternative to messages)").default(json!(DEFAULT_PROMPT)))
-        .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").default(json!(DEFAULT_MAX_NEW)))
+        .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(DEFAULT_MAX_NEW)))
         .param(
             ParamSpec::new("precision", ParamType::Str, "int8 (default, ~9 GiB) or fp32 (~43 GiB - needs a very large machine)")
                 .default(json!("int8")),

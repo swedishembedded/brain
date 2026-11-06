@@ -23,7 +23,7 @@ impl Action for EchoAction {
         use capability::{BlobSpec, ParamSpec};
         ActionSpec::new("echo", "repeat text, optionally upper/lower-cased")
             .param(ParamSpec::new("text", ParamType::Str, "the text").required())
-            .param(ParamSpec::new("times", ParamType::Int, "repeat count").default(json!(1)))
+            .param(ParamSpec::new("times", ParamType::Int, "repeat count").min(0.0).max(1000.0).default(json!(1)))
             .param(ParamSpec::new("mode", ParamType::Enum(vec!["as-is".into(), "upper".into(), "lower".into()]), "casing").default(json!("as-is")))
             .output(BlobSpec::new("result", Media::Text, "the echoed text"))
     }

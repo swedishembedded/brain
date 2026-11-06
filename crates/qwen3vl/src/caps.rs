@@ -224,9 +224,9 @@ pub fn generate_spec() -> ActionSpec {
         .streaming()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
-        .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").default(json!(64)))
+        .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(64)))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)).min(0.0).max(2.0).step(0.01))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(1000.0).step(1.0))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(capability::bounds::TOP_K).step(1.0))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)).min(0.0).max(1.0).step(0.01))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(
@@ -243,6 +243,8 @@ pub fn generate_spec() -> ActionSpec {
                 ParamType::Int,
                 "resident capacity: max input image area in pixels, applied to EACH image independently (up to 8 images/request; a larger single image, or a request whose combined visual tokens exceed this resident's total capacity, errors -- never silently truncates)",
             )
+            .min(1.0)
+            .max(capability::blob::MAX_IMAGE_PIXELS as f64)
             .default(json!(DEFAULT_SERVE_MAX_PIXELS)),
         )
         .param(
@@ -256,7 +258,9 @@ pub fn generate_spec() -> ActionSpec {
             "REQUIRED with 'video': the clip's real frames-per-second, used to place each frame in real time \
              (crate::mrope::get_rope_index_video's T axis) rather than by frame count -- see that function's doc \
              for what is verified vs assumed about the formula",
-        ))
+        )
+        .min(0.0)
+        .max(capability::bounds::FPS))
         .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema; needs a tokenizer)"))
         .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{\"type\":\"function\",...}); none withholds tool schemas, required/named are enforced post-generation (finish_reason \"tool_choice_unmet\" when unmet)"))
         .input(BlobSpec::new("image", Media::Image, "a still image: raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention) -- exactly one of 'image'/'video' is required"));
@@ -295,12 +299,12 @@ pub fn lora_train_spec() -> ActionSpec {
             )
             .host_resolved(),
         )
-        .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").default(json!(8)))
-        .param(ParamSpec::new("alpha", ParamType::Float, "LoRA alpha (delta scale = alpha/rank)").default(json!(16.0)))
-        .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(200)))
+        .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").min(0.0).max(capability::bounds::LORA_RANK).default(json!(8)))
+        .param(ParamSpec::new("alpha", ParamType::Float, "LoRA alpha (delta scale = alpha/rank)").min(0.0).max(4096.0).default(json!(16.0)))
+        .param(ParamSpec::new("steps", ParamType::Int, "training steps").min(0.0).max(capability::bounds::TRAIN_STEPS).default(json!(200)))
         .param(ParamSpec::new("lr", ParamType::Float, "peak learning rate (cosine schedule)").default(json!(1e-4)))
-        .param(ParamSpec::new("size", ParamType::Int, "training image square size, px (must be a multiple of patch_size*spatial_merge_size)").default(json!(224)))
-        .param(ParamSpec::new("seq_len", ParamType::Int, "fixed per-sample token budget (prompt + caption, padded); a caption that overflows it is skipped, not truncated").default(json!(256)))
+        .param(ParamSpec::new("size", ParamType::Int, "training image square size, px (must be a multiple of patch_size*spatial_merge_size)").min(0.0).max(capability::bounds::SIZE_PX).default(json!(224)))
+        .param(ParamSpec::new("seq_len", ParamType::Int, "fixed per-sample token budget (prompt + caption, padded); a caption that overflows it is skipped, not truncated").min(0.0).max(capability::bounds::CONTEXT_TOKENS).default(json!(256)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()), "what the decoder's backward keeps of the forward: the decoder rebuilds every layer from its residual, so only 'recompute' runs and 'keep' is refused by name before the first step; default: recompute"))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"))

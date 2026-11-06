@@ -58,10 +58,10 @@ pub fn manifest() -> Manifest {
             .input(BlobSpec::new("text", Media::Text, "input document (used when the 'text' param is absent)"))
     };
     let fill_mask = common(ActionSpec::new("fill_mask", "MLM top-k predictions at every <|mask|> position"))
-        .param(ParamSpec::new("topk", ParamType::Int, "predictions per mask position").default(json!(5)))
+        .param(ParamSpec::new("topk", ParamType::Int, "predictions per mask position").min(0.0).max(capability::bounds::TOP_K).default(json!(5)))
         .output(BlobSpec::new("predictions", Media::Text, "JSON: [{row, tokens: [{id, token, logit}]}]"));
     let embed = common(ActionSpec::new("embed", "bidirectional encoding: per-token hidden states + mean-pooled embedding"))
-        .param(ParamSpec::new("max_tokens", ParamType::Int, "truncate the input to this many tokens (0 = no limit)").default(json!(0)))
+        .param(ParamSpec::new("max_tokens", ParamType::Int, "truncate the input to this many tokens (0 = no limit)").min(0.0).max(capability::bounds::TOKENS).default(json!(0)))
         .param(
             ParamSpec::new("normalize", ParamType::Bool, "L2-normalize the mean-pooled embedding before returning it")
                 .default(json!(false)),

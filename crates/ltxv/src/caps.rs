@@ -50,14 +50,14 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("start_frame", ParamType::Str, "optional path to a PNG/JPEG still: encoded through the real video VAE and used as frame-0 conditioning while the rest of the clip denoises around it (VideoConditionByLatentIndex on its own, VideoConditionByKeyframeIndex when end_frame is also given - see crate::pipeline::conditioned_latent). Needs dit_config=ltx25_22b (the real VAE). Runs under either sampler: eta>0 follows the reference's ancestral loop (LTX-2.5 distilled's own stage-1 sampler), eta=0 the deterministic one.").host_resolved())
     .param(ParamSpec::new("end_frame", ParamType::Str, "optional path to a PNG/JPEG still: a clean image-guidance latent appended at the clip's LAST pixel frame's timestamp, not a replacement of it - the generated token there still denoises freely, only strongly guided toward the still via attention (start_frame given alone is the one case that IS a literal replacement; combined with end_frame/mid_frame it switches to this same appended-guide mechanism too). Same image as start_frame for a clip that loops seamlessly (the generated content in between connects the still to itself); a different image for a clip that morphs from one still to another. Same eta/dit_config requirements as start_frame.").host_resolved())
     .param(ParamSpec::new("mid_frame", ParamType::Str, "optional path to a PNG/JPEG still: the same appended image-guidance latent end_frame uses, anchored at ONE INTERIOR instant of the clip, so a single generation can be guided at its start, its middle and its end at once. Same eta/dit_config requirements as start_frame.").host_resolved())
-    .param(ParamSpec::new("mid_frame_at", ParamType::Int, "which pixel frame mid_frame anchors, strictly between 0 and frames-1. Unset takes the reference's own position for a single interior keyframe (evenly_spaced_keyframe_positions), (frames-1)/2. Only read when mid_frame is set."))
-    .param(ParamSpec::new("conditioning_strength", ParamType::Float, "ImageConditioningInput.strength for every given still: 1.0 pins the conditioned tokens to the encoded image exactly, lower values (the reference's own CLI example is 0.8) leave the model room to move. Only read when one of start_frame/mid_frame/end_frame is set.").default(json!(d.conditioning_strength)))
-    .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame). Unset, the duration head predicts the length from the prompt (1-20 s) when the real checkpoint, text encoder and duration head are configured; otherwise 121 with the real checkpoint, 9 for the tiny smoke test"))
-    .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 32); unset, 768 with the real checkpoint, 64 for the smoke test"))
-    .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 32); unset, 512 with the real checkpoint, 64 for the smoke test"))
-    .param(ParamSpec::new("steps", ParamType::Int, "denoise steps").default(json!(d.steps)))
+    .param(ParamSpec::new("mid_frame_at", ParamType::Int, "which pixel frame mid_frame anchors, strictly between 0 and frames-1. Unset takes the reference's own position for a single interior keyframe (evenly_spaced_keyframe_positions), (frames-1)/2. Only read when mid_frame is set.").min(0.0).max(capability::bounds::VIDEO_FRAMES))
+    .param(ParamSpec::new("conditioning_strength", ParamType::Float, "ImageConditioningInput.strength for every given still: 1.0 pins the conditioned tokens to the encoded image exactly, lower values (the reference's own CLI example is 0.8) leave the model room to move. Only read when one of start_frame/mid_frame/end_frame is set.").min(0.0).max(capability::bounds::UNIT).default(json!(d.conditioning_strength)))
+    .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame). Unset, the duration head predicts the length from the prompt (1-20 s) when the real checkpoint, text encoder and duration head are configured; otherwise 121 with the real checkpoint, 9 for the tiny smoke test").min(0.0).max(capability::bounds::VIDEO_FRAMES))
+    .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 32); unset, 768 with the real checkpoint, 64 for the smoke test").min(0.0).max(capability::bounds::SIDE_PX))
+    .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 32); unset, 512 with the real checkpoint, 64 for the smoke test").min(0.0).max(capability::bounds::SIDE_PX))
+    .param(ParamSpec::new("steps", ParamType::Int, "denoise steps").min(0.0).max(capability::bounds::DENOISE_STEPS).default(json!(d.steps)))
     .param(ParamSpec::new("seed", ParamType::Int, "initial-noise/weight/context seed (omit for random)"))
-    .param(ParamSpec::new("fps", ParamType::Int, "frame rate; unset, 24 with the real checkpoint, 8 for the smoke test"))
+    .param(ParamSpec::new("fps", ParamType::Int, "frame rate; unset, 24 with the real checkpoint, 8 for the smoke test").min(0.0).max(capability::bounds::FPS))
     .param(ParamSpec::new("base_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 1024 tokens").default(json!(d.base_shift)))
     .param(ParamSpec::new("max_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 4096 tokens").default(json!(d.max_shift)))
     .param(ParamSpec::new("stretch", ParamType::Bool, "stretch the schedule's terminal sigma to `terminal`").default(json!(d.stretch)))
@@ -98,8 +98,8 @@ pub fn manifest() -> Manifest {
         presentation: Default::default(),
         ..t2v.clone()
     }
-    .param(ParamSpec::new("temporal_upsample_rounds", ParamType::Int, "0, 1, or 2 temporal x2 rounds, each doubling the frame rate").default(json!(0)))
-    .param(ParamSpec::new("spatial_upscalings", ParamType::Int, "1: stage 1 at half the output resolution, the detailing pass at it; 2: stage 1 at a quarter, the detailing pass and temporal rounds at half, then a spatial epilogue at the output resolution (width and height multiples of 128)").default(json!(1)));
+    .param(ParamSpec::new("temporal_upsample_rounds", ParamType::Int, "0, 1, or 2 temporal x2 rounds, each doubling the frame rate").min(0.0).max(8.0).default(json!(0)))
+    .param(ParamSpec::new("spatial_upscalings", ParamType::Int, "1: stage 1 at half the output resolution, the detailing pass at it; 2: stage 1 at a quarter, the detailing pass and temporal rounds at half, then a spatial epilogue at the output resolution (width and height multiples of 128)").min(1.0).max(2.0).default(json!(1)));
 
     let a = crate::pipeline::AudioOpts::default();
     let t2a = ActionSpec::new(
@@ -108,9 +108,9 @@ pub fn manifest() -> Manifest {
     )
     .streaming()
     .param(ParamSpec::new("prompt", ParamType::Str, "what the clip should sound like").required())
-    .param(ParamSpec::new("seconds", ParamType::Float, "clip length in seconds; unset, the duration head predicts it from the prompt (1-20 s), or 5 s without one").min(0.04))
+    .param(ParamSpec::new("seconds", ParamType::Float, "clip length in seconds; unset, the duration head predicts it from the prompt (1-20 s), or 5 s without one").max(capability::bounds::SECONDS).min(0.04))
     .params(guidance_params())
-    .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (a non-distilled checkpoint's; the distilled one has a fixed schedule)").default(json!(a.base.steps)))
+    .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (a non-distilled checkpoint's; the distilled one has a fixed schedule)").min(0.0).max(capability::bounds::DENOISE_STEPS).default(json!(a.base.steps)))
     .param(ParamSpec::new("seed", ParamType::Int, "initial-noise seed (omit for random)"))
     .params(sampler_params())
     .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter to apply beside the quantized weights").host_resolved())
@@ -121,12 +121,12 @@ pub fn manifest() -> Manifest {
         spec.streaming()
             .input(BlobSpec::new("video", Media::Video, "the source clip, in the standard video wire convention (capability::blob::decode_video): every frame one (w,h), each a multiple of 32").required())
             .input(BlobSpec::new("soundtrack", Media::Audio, "the clip's own soundtrack, a WAV container; needed when audio=true"))
-            .param(ParamSpec::new("fps", ParamType::Int, "the clip's frame rate; unset, the video blob's meta.fps, else 24"))
+            .param(ParamSpec::new("fps", ParamType::Int, "the clip's frame rate; unset, the video blob's meta.fps, else 24").min(0.0).max(capability::bounds::FPS))
             .param(ParamSpec::new("prompt", ParamType::Str, "what the generated part shows").required())
             .params(guidance_params())
             .params(sampler_params())
             .param(ParamSpec::new("seed", ParamType::Int, "noise seed (omit for random)"))
-            .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (non-distilled checkpoints)").default(json!(d.steps)))
+            .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (non-distilled checkpoints)").min(0.0).max(capability::bounds::DENOISE_STEPS).default(json!(d.steps)))
             .param(ParamSpec::new("dit_config", ParamType::Enum(T2V_DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "ltx25_22b (default when the checkpoint is configured) or tiny (random-weight smoke test)"))
             .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter to apply beside the quantized weights").host_resolved())
             .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier; 1.0 = the reference default").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
@@ -144,7 +144,7 @@ pub fn manifest() -> Manifest {
         "retake part of a clip (ltx_pipelines.retake): a time window is regenerated against the prompt while the rest is held, the picture, the sound or both",
     ))
     .param(ParamSpec::new("start", ParamType::Float, "the window's start, seconds").required().min(0.0))
-    .param(ParamSpec::new("end", ParamType::Float, "the window's end, seconds").required().min(0.0))
+    .param(ParamSpec::new("end", ParamType::Float, "the window's end, seconds").max(3600.0).required().min(0.0))
     .param(ParamSpec::new("audio", ParamType::Bool, "also run the clip's sound through the same forwards").default(json!(false)))
     .param(ParamSpec::new("hold_video", ParamType::Bool, "regenerate no frame (with audio: video-to-audio)").default(json!(false)))
     .param(ParamSpec::new("hold_audio", ParamType::Bool, "keep the soundtrack everywhere").default(json!(false)));
@@ -152,14 +152,14 @@ pub fn manifest() -> Manifest {
         "extend",
         "continue a clip (video_extend_lora's forward extension): its last frames held as a clean prefix while new frames after them denoise; returns the clip followed by the new frames",
     ))
-    .param(ParamSpec::new("frames", ParamType::Int, "frames to add, rounded up to a multiple of 8").default(json!(crate::pipeline::ExtendOpts::default().frames)).min(1.0))
-    .param(ParamSpec::new("context_frames", ParamType::Int, "how much of the clip's end the continuation sees").default(json!(crate::longform::CONTEXT_FRAMES)).min(1.0))
+    .param(ParamSpec::new("frames", ParamType::Int, "frames to add, rounded up to a multiple of 8").max(capability::bounds::VIDEO_FRAMES).default(json!(crate::pipeline::ExtendOpts::default().frames)).min(1.0))
+    .param(ParamSpec::new("context_frames", ParamType::Int, "how much of the clip's end the continuation sees").max(capability::bounds::VIDEO_FRAMES).default(json!(crate::longform::CONTEXT_FRAMES)).min(1.0))
     .param(ParamSpec::new("audio", ParamType::Bool, "extend the soundtrack too (needs the soundtrack input)").default(json!(false)));
     let upscale = clip_in(ActionSpec::new(
         "upscale",
         "re-render a finished clip at twice its resolution: the real latent x2 upscaler, then the distilled refinement pass against the prompt",
     ))
-    .param(ParamSpec::new("refine_steps", ParamType::Int, "refinement steps, a suffix of the distilled stage-2 schedule").default(json!(crate::pipeline::UpscaleOpts::default().refine_steps)).min(1.0));
+    .param(ParamSpec::new("refine_steps", ParamType::Int, "refinement steps, a suffix of the distilled stage-2 schedule").max(capability::bounds::DENOISE_STEPS).default(json!(crate::pipeline::UpscaleOpts::default().refine_steps)).min(1.0));
 
     let (v2v, extend, upscale) = (edit(v2v, true), edit(extend, true), edit(upscale, false));
 

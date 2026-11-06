@@ -159,9 +159,9 @@ pub fn manifest() -> Manifest {
             )
             .host_resolved(),
         )
-        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate; bounded only by the memory the prompt plus these tokens need").default(json!(DEFAULT_MAX_NEW)).min(1.0).step(1.0))
+        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate; bounded only by the memory the prompt plus these tokens need").max(capability::bounds::TOKENS).default(json!(DEFAULT_MAX_NEW)).min(1.0).step(1.0))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)).min(0.0).max(2.0).step(0.01))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(1000.0).step(1.0))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(capability::bounds::TOP_K).step(1.0))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)).min(0.0).max(1.0).step(0.01))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random; the outcome echoes the one used)"))
         .param(
@@ -214,7 +214,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(500)).min(1.0).max(1_000_000.0).step(1.0))
         .param(ParamSpec::new("lr", ParamType::Float, "peak learning rate (cosine schedule down to min_lr)").default(json!(5e-5)).min(0.0))
         .param(ParamSpec::new("batch", ParamType::Int, "sequences per step").default(json!(4)).min(1.0).max(256.0).step(1.0))
-        .param(ParamSpec::new("block", ParamType::Int, "training context length, tokens; bounded only by the memory training at it needs").default(json!(1024)).min(1.0).step(1.0))
+        .param(ParamSpec::new("block", ParamType::Int, "training context length, tokens; bounded only by the memory training at it needs").max(capability::bounds::CONTEXT_TOKENS).default(json!(1024)).min(1.0).step(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random; the outcome echoes the one used)"))
         .param(ParamSpec::new("targets", ParamType::Str, "comma-separated projections to adapt, of wq,wk,wv,wo,gate,up,down").default(json!(crate::finetune::LORA_TARGETS.join(","))))
         .param(ParamSpec::new(
@@ -223,8 +223,8 @@ pub fn manifest() -> Manifest {
             "train each trained answer's <think> reasoning even where the chat template drops it from history (DeepSeek-R1's always does)",
         ).default(json!(false)))
         .param(ParamSpec::new("weight_decay", ParamType::Float, "AdamW decoupled weight decay").default(json!(0.1)).min(0.0).max(1.0))
-        .param(ParamSpec::new("grad_clip", ParamType::Float, "global gradient-norm clip; 0 disables it").default(json!(1.0)).min(0.0))
-        .param(ParamSpec::new("warmup", ParamType::Int, "linear warmup steps; omit for 5% of steps").min(0.0).step(1.0))
+        .param(ParamSpec::new("grad_clip", ParamType::Float, "global gradient-norm clip; 0 disables it").max(1000000.0).default(json!(1.0)).min(0.0))
+        .param(ParamSpec::new("warmup", ParamType::Int, "linear warmup steps; omit for 5% of steps").max(capability::bounds::TRAIN_COUNT).min(0.0).step(1.0))
         .param(ParamSpec::new("min_lr", ParamType::Float, "rate the cosine decays to; omit for lr/10").min(0.0))
         .param(ParamSpec::new("beta1", ParamType::Float, "AdamW first-moment decay").default(json!(0.9)).min(0.0).max(0.9999))
         .param(ParamSpec::new("beta2", ParamType::Float, "AdamW second-moment decay").default(json!(0.999)).min(0.0).max(0.99999))
@@ -303,7 +303,7 @@ pub fn manifest() -> Manifest {
         ParamType::Str,
         "optional task instruction, rendered as 'Instruct: {instruction}\\nQuery: {text}' (the Qwen3-Embedding query convention); omit when embedding a passage/document",
     ))
-    .param(ParamSpec::new("max_tokens", ParamType::Int, "truncate the input to this many tokens (0 = no limit, still bounded by the checkpoint's context)").default(json!(0)))
+    .param(ParamSpec::new("max_tokens", ParamType::Int, "truncate the input to this many tokens (0 = no limit, still bounded by the checkpoint's context)").min(0.0).max(capability::bounds::TOKENS).default(json!(0)))
     .output(BlobSpec::new("embeddings", Media::Bytes, "LE-f32 [dim] L2-normalized embedding"));
 
     Manifest::new(

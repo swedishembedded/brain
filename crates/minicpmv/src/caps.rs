@@ -60,7 +60,7 @@ pub fn generate_spec() -> ActionSpec {
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "let the model reason in a <think> block first").default(json!(false)))
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate; omitted, the reply runs to its end of turn or to the end of the context").min(1.0).max(SERVE_CONTEXT as f64))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0: greedy)").default(json!(0.8)))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k cut (0: off)").default(json!(40)))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k cut (0: off)").min(0.0).max(capability::bounds::TOP_K).default(json!(40)))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus cut (1: off)").default(json!(1.0)))
         .param(ParamSpec::new("seed", ParamType::Int, "sampling seed (random when unset; echoed in the outcome)"))
         .param(ParamSpec::new("downsample", ParamType::Str, "visual tokens per patch: \"16x\" (default) or \"4x\" (four times the tokens, for fine detail)"))

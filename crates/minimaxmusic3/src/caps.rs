@@ -54,8 +54,8 @@ pub fn generate_spec() -> ActionSpec {
         .streaming()
         .param(ParamSpec::new("lyrics", ParamType::Str, "song lyrics, with [verse]/[chorus]/etc structural tags").required())
         .param(ParamSpec::new("caption", ParamType::Str, "structured music description: genre, BPM, vocal timbre, instrumentation, arrangement").required())
-        .param(ParamSpec::new("duration_seconds", ParamType::Float, "target song length in seconds (the AR stage may stop earlier)").default(json!(d.duration_seconds)))
-        .param(ParamSpec::new("num_inference_steps", ParamType::Int, "Euler steps per denoise chunk").default(json!(d.num_inference_steps as i64)))
+        .param(ParamSpec::new("duration_seconds", ParamType::Float, "target song length in seconds (the AR stage may stop earlier)").min(0.0).max(capability::bounds::SECONDS).default(json!(d.duration_seconds)))
+        .param(ParamSpec::new("num_inference_steps", ParamType::Int, "Euler steps per denoise chunk").min(0.0).max(capability::bounds::DENOISE_STEPS).default(json!(d.num_inference_steps as i64)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run; omit for random)"))
         .output(BlobSpec::new("audio", Media::Audio, "the generated song: a complete 44.1 kHz stereo WAV").required())
 }

@@ -116,7 +116,7 @@ pub fn load(weights: &str) -> Result<Session, String> {
 pub fn manifest() -> Manifest {
     let infer = ActionSpec::new("infer", "dense relative inverse depth from a single image (ZipDepth)")
         .param(ParamSpec::new("weights", ParamType::Str, "path to a ZipDepth .pth checkpoint (variant auto-detected)").required().host_env("BRAIN_ZIPDEPTH_WEIGHTS"))
-        .param(ParamSpec::new("input", ParamType::Int, "model input (shorter side, x32); 0 = the checkpoint's native 384").default(json!(0)))
+        .param(ParamSpec::new("input", ParamType::Int, "model input (shorter side, x32); 0 = the checkpoint's native 384").min(0.0).max(capability::bounds::SIZE_PX).default(json!(0)))
         .input(BlobSpec::new("image", Media::Image, "the image to estimate depth for").required())
         .output(BlobSpec::new("depth", Media::Image, "min-max-normalized inverse-depth map on the frame grid (single channel)"));
     Manifest::new(MODEL, "ZipDepth monocular depth — dense relative inverse-depth from one image.", vec![infer])

@@ -77,7 +77,7 @@ const fn serving_set() -> [(&'static str, &'static str); N_MODEL + 2] {
 pub fn restore_spec() -> ActionSpec {
     ActionSpec::new("restore_face", "blind face restoration with a fidelity dial (CodeFormer)")
         .param(
-            ParamSpec::new("w", ParamType::Float, "identity-fidelity dial: 0 = maximum quality, 1 = maximum fidelity to the input")
+            ParamSpec::new("w", ParamType::Float, "identity-fidelity dial: 0 = maximum quality, 1 = maximum fidelity to the input").min(0.0).max(capability::bounds::UNIT)
                 .default(json!(0.5)),
         )
         .input(BlobSpec::new("image", Media::Image, "the (ideally aligned) face to restore; resized to 512x512").required())

@@ -62,10 +62,10 @@ impl MockResident {
             .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
             .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
             .param(ParamSpec::new("system", ParamType::Str, "system prompt"))
-            .param(ParamSpec::new("max_new", ParamType::Int, "max new tokens").default(json!(1024)))
+            .param(ParamSpec::new("max_new", ParamType::Int, "max new tokens").min(0.0).max(capability::bounds::TOKENS).default(json!(1024)))
             .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature").default(json!(1.0)))
             .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling p").default(json!(1.0)))
-            .param(ParamSpec::new("top_k", ParamType::Int, "top-k").default(json!(0)))
+            .param(ParamSpec::new("top_k", ParamType::Int, "top-k").min(0.0).max(capability::bounds::TOP_K).default(json!(0)))
             .param(ParamSpec::new("seed", ParamType::Int, "sampling seed").default(json!(0)))
             .param(ParamSpec::new("stop", ParamType::Str, "stop sequences (JSON array string)"))
             .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (accepted, only inspected for the mock tool-call trigger)"))
@@ -102,7 +102,7 @@ impl MockResident {
     fn forecast_spec() -> ActionSpec {
         ActionSpec::new("forecast", "deterministic mock time-series forecast")
             .input(BlobSpec::new("context", Media::Bytes, "f32-LE context series, meta.shape=[T]").required())
-            .param(ParamSpec::new("horizon", ParamType::Int, "steps to forecast").default(json!(16)))
+            .param(ParamSpec::new("horizon", ParamType::Int, "steps to forecast").min(0.0).max(10000.0).default(json!(16)))
             .param(ParamSpec::new("freq", ParamType::Int, "frequency bucket (accepted, ignored by the mock)").default(json!(0)))
             .output(BlobSpec::new("forecast", Media::Bytes, "f32-LE forecast, meta {shape:[levels,horizon], kind:\"quantiles\", levels}"))
     }
@@ -113,8 +113,8 @@ impl MockResident {
         ActionSpec::new("text2image", "deterministic mock image generation")
             .streaming()
             .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
-            .param(ParamSpec::new("width", ParamType::Int, "image width").default(json!(1024)))
-            .param(ParamSpec::new("height", ParamType::Int, "image height").default(json!(1024)))
+            .param(ParamSpec::new("width", ParamType::Int, "image width").min(0.0).max(capability::bounds::SIDE_PX).default(json!(1024)))
+            .param(ParamSpec::new("height", ParamType::Int, "image height").min(0.0).max(capability::bounds::SIDE_PX).default(json!(1024)))
             .param(ParamSpec::new("seed", ParamType::Int, "generation seed").default(json!(0)))
             .output(BlobSpec::new("image", Media::Image, "the generated image"))
     }

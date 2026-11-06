@@ -16,8 +16,8 @@ use capability::{ActionSpec, Blob, BlobSpec, Media, Outcome, ParamSpec, ParamTyp
 /// `prompt_id` param, marked streaming (progress frames while running).
 pub fn transcribe_spec() -> ActionSpec {
     ActionSpec::new("transcribe", "transcribe 16 kHz mono speech to text")
-        .param(ParamSpec::new("prompt_id", ParamType::Int, "language-prompt id (0 = en / default)").default(serde_json::json!(0)))
-        .param(ParamSpec::new("sample_rate", ParamType::Int, "input PCM sample rate; must be 16000").default(serde_json::json!(16000)))
+        .param(ParamSpec::new("prompt_id", ParamType::Int, "language-prompt id (0 = en / default)").min(0.0).max(1023.0).default(serde_json::json!(0)))
+        .param(ParamSpec::new("sample_rate", ParamType::Int, "input PCM sample rate; must be 16000").min(0.0).max(capability::bounds::SAMPLE_RATE).default(serde_json::json!(16000)))
         .input(BlobSpec::new("audio", Media::Audio, "raw mono f32 little-endian PCM at 16 kHz").required())
         .output(BlobSpec::new("text", Media::Text, "the transcription"))
         .streaming()
@@ -32,8 +32,8 @@ pub fn transcribe_stream_spec() -> ActionSpec {
     ActionSpec::new("transcribe_stream", "frame-synchronous streaming transcription; one window of a live session")
         .param(ParamSpec::new("stream", ParamType::Str, "session id; state persists across calls until eos"))
         .param(ParamSpec::new("eos", ParamType::Bool, "flush and close the session after this window").default(serde_json::json!(false)))
-        .param(ParamSpec::new("prompt_id", ParamType::Int, "language-prompt id (0 = en / default); fixed at session creation").default(serde_json::json!(0)))
-        .param(ParamSpec::new("sample_rate", ParamType::Int, "input PCM sample rate; must be 16000").default(serde_json::json!(16000)))
+        .param(ParamSpec::new("prompt_id", ParamType::Int, "language-prompt id (0 = en / default); fixed at session creation").min(0.0).max(1023.0).default(serde_json::json!(0)))
+        .param(ParamSpec::new("sample_rate", ParamType::Int, "input PCM sample rate; must be 16000").min(0.0).max(capability::bounds::SAMPLE_RATE).default(serde_json::json!(16000)))
         .input(BlobSpec::new("audio", Media::Audio, "raw mono f32 little-endian PCM at 16 kHz (may be absent on the final eos call)"))
         .output(BlobSpec::new("text", Media::Text, "text newly emitted by this window"))
         .streaming()

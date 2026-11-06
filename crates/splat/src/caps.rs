@@ -91,7 +91,7 @@ pub fn fit_spec() -> ActionSpec {
             ParamType::Str,
             "camera array as JSON, one entry per target-view frame in order: [{\"c2w\":[16 floats],\"fx\":...,\"fy\":...,\"cx\":...,\"cy\":...,\"width\":...,\"height\":...}, ...] - the same shape `mirror_cli.rs`'s cameras.json uses; a lens (\"model\": \"opencv\"|\"fisheye\"|\"equirect\" with \"k\"/\"p\"/\"s\" coefficients) and a rolling-shutter \"shutter\" twist are optional",
         ).required())
-        .param(ParamSpec::new("iters", ParamType::Int, "optimization steps").default(json!(200)).min(1.0))
+        .param(ParamSpec::new("iters", ParamType::Int, "optimization steps").max(capability::bounds::TRAIN_STEPS).default(json!(200)).min(1.0))
         .param(ParamSpec::new("lr_position", ParamType::Float, "starting position step, in units of a scene normalized to about one across; decays a hundredfold over the fit").default(json!(FitCfg::default().lr_position)))
         .input(BlobSpec::new("scene", Media::Bytes, "the initial scene to optimize: Inria-layout binary PLY").required())
         .input(BlobSpec::new("video", Media::Video, "N target views: interleaved-HWC f32 RGB frames, one per camera in 'views', same convention as every other video input (capability::blob::decode_video)").required())

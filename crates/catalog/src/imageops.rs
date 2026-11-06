@@ -17,14 +17,14 @@ pub const MODEL: &str = "brain/imageops";
 
 pub fn manifest() -> Manifest {
     let size = |s: ActionSpec| {
-        s.param(ParamSpec::new("width", ParamType::Int, "image width, px").default(json!(512)))
-            .param(ParamSpec::new("height", ParamType::Int, "image height, px").default(json!(512)))
+        s.param(ParamSpec::new("width", ParamType::Int, "image width, px").min(0.0).max(capability::bounds::SIDE_PX).default(json!(512)))
+            .param(ParamSpec::new("height", ParamType::Int, "image height, px").min(0.0).max(capability::bounds::SIDE_PX).default(json!(512)))
     };
     let mask_rect = size(ActionSpec::new("mask_rect", "make a binary inpainting mask: white rectangle on black (white = regenerate)"))
-        .param(ParamSpec::new("x", ParamType::Int, "rectangle left, px").default(json!(0)))
-        .param(ParamSpec::new("y", ParamType::Int, "rectangle top, px").default(json!(0)))
-        .param(ParamSpec::new("w", ParamType::Int, "rectangle width, px").required())
-        .param(ParamSpec::new("h", ParamType::Int, "rectangle height, px").required())
+        .param(ParamSpec::new("x", ParamType::Int, "rectangle left, px").min(0.0).max(capability::bounds::SIDE_PX).default(json!(0)))
+        .param(ParamSpec::new("y", ParamType::Int, "rectangle top, px").min(0.0).max(capability::bounds::SIDE_PX).default(json!(0)))
+        .param(ParamSpec::new("w", ParamType::Int, "rectangle width, px").min(0.0).max(capability::bounds::SIDE_PX).required())
+        .param(ParamSpec::new("h", ParamType::Int, "rectangle height, px").min(0.0).max(capability::bounds::SIDE_PX).required())
         .output(BlobSpec::new("mask", Media::Mask, "the mask (white rect on black)"));
 
     let gradient = size(ActionSpec::new("gradient", "render a smooth procedural gradient image - a deterministic, viewable test image"))
@@ -33,7 +33,7 @@ pub fn manifest() -> Manifest {
 
     let draw_boxes = ActionSpec::new("draw_boxes", "draw labeled detection boxes onto an image (e.g. yolov8 detect's own output)")
         .param(ParamSpec::new("boxes", ParamType::Str, "JSON array of {bbox:[x1,y1,x2,y2], conf, class, label?} in image coords - yolov8 detect's exact output shape; the optional 'label' string is drawn instead of the numeric class (e.g. 'einstein:0.87')").required())
-        .param(ParamSpec::new("thickness", ParamType::Int, "box edge thickness, px").default(json!(2)))
+        .param(ParamSpec::new("thickness", ParamType::Int, "box edge thickness, px").min(0.0).max(64.0).default(json!(2)))
         .input(BlobSpec::new("image", Media::Image, "the image the boxes were detected on"))
         .output(BlobSpec::new("image", Media::Image, "the image with boxes and class/confidence labels drawn"));
 

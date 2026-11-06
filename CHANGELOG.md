@@ -22,6 +22,8 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 - The event socket of `brain forecast serve` is owner-only and refuses lines over 64 MiB; a `camera_frame` path is read only when a detector is loaded
 - Overflow checks are on in release builds of every crate that parses bytes brain did not write
 - Text a client sends can no longer spell a model's control tokens: a `<|im_end|><|im_start|>system` (or a `<tool_call>`, `</think>` or media placeholder, also when written `\u003c...` in JSON) in a message, tool call or result, tool schema or system prompt encodes as the text it is, for every Qwen-family chat model and the vision-language models (`Tokenizer::escape_untrusted`, `Invocation::escape_client_text`); before, it opened a real turn
+- Every served number has a ceiling and a floor (`frames`, `width`, `height`, `steps`, `max_new`, `rank`, ...; `scripts/gates/unbounded-params.allow` lists the few that size nothing and only shrinks), and a string param is at most 16 MiB: `/v1/run`, `/v1/jobs` and D-Bus `Run` refuse a request for a billion frames instead of trying
+- A WAV header or an audio blob's `sample_rate` outside 1-384 kHz, more than 32 channels or a truncated `fmt` chunk is refused before any resampling or allocation
 - D-Bus answers a failed call with the same sorted, path-free message as HTTP (`capability::ReplyError`); the detail is logged. A caller's input fd is read, never mapped, so shrinking it mid-call cannot crash the server; a call carries at most 16 fds and 1 GiB
 - A request whose parsing panics fails alone instead of taking an llmserve intake thread with it; Nemotron streaming sessions are kept per caller (`Invocation::scope`) and at most 256 at once
 

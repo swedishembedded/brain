@@ -347,7 +347,8 @@ pub fn sound_track(b: &capability::Blob) -> Result<AudioTrack, String> {
     let (sample_rate, channels) = if audio::asr_caps::is_wav(&b.bytes) {
         audio::wav::parse_planar(&b.bytes).map_err(|e| format!("the sound track: {e}"))?
     } else {
-        let rate = b.meta.get("sample_rate").and_then(|v| v.as_u64()).ok_or("the sound track has no sample_rate and is not a WAV")? as u32;
+        let rate = b.meta.get("sample_rate").and_then(|v| v.as_u64()).ok_or("the sound track has no sample_rate and is not a WAV")?;
+        let rate = audio::wav::checked_rate(rate).map_err(|e| format!("the sound track: {e}"))?;
         (rate, vec![b.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes(*q)).collect()])
     };
     Ok(AudioTrack { channels, sample_rate })

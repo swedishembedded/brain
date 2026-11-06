@@ -84,7 +84,7 @@ pub fn check_size(size: u32) -> Result<(), String> {
 }
 
 fn size_param() -> ParamSpec {
-    ParamSpec::new("size", ParamType::Int, "square side the graph is built for (a multiple of the 32x downscale)")
+    ParamSpec::new("size", ParamType::Int, "square side the graph is built for (a multiple of the 32x downscale)").min(0.0).max(capability::bounds::SIZE_PX)
         .default(json!(DEFAULT_SIZE))
 }
 

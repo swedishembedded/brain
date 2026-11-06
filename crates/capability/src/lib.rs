@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde_json::{json, Value};
 
 pub mod blob;
+pub mod bounds;
 pub mod failure;
 pub mod hot;
 pub mod presentation;
@@ -436,7 +437,15 @@ fn host_env_value(p: &ParamSpec) -> Option<String> {
     std::env::var(var).ok().filter(|v| !v.is_empty())
 }
 
+/// The longest string a caller may pass as any param, in bytes: a whole chat
+/// conversation fits many times over, and no param can make the server hold
+/// or scan an unbounded string.
+pub const MAX_STR_PARAM_BYTES: usize = 16 << 20;
+
 fn check_type(name: &str, ty: &ParamType, v: &Value) -> Result<(), String> {
+    if v.as_str().is_some_and(|s| s.len() > MAX_STR_PARAM_BYTES) {
+        return Err(format!("param '{name}' is longer than {MAX_STR_PARAM_BYTES} bytes"));
+    }
     let ok = match ty {
         ParamType::Str => v.is_string(),
         ParamType::Int => v.is_i64() || v.is_u64(),

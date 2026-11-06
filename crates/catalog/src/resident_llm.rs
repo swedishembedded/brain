@@ -51,9 +51,9 @@ use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat};
 pub fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
     let mut s = ActionSpec::new("generate", summary)
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
-        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate; omitted, the reply runs to its end of turn or to the end of the context"))
+        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate; omitted, the reply runs to its end of turn or to the end of the context").min(0.0).max(capability::bounds::TOKENS))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.8)))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").min(0.0).max(capability::bounds::TOP_K).default(json!(40)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"));
     if chat {
         s = s
@@ -76,14 +76,14 @@ pub fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
             .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema)"))
             .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{...})"))
             .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block").default(json!(true)))
-            .param(ParamSpec::new("thinking_budget", ParamType::Int, "tokens the think block may take; after that the closing tag is forced and the model answers (default: unbounded)"))
+            .param(ParamSpec::new("thinking_budget", ParamType::Int, "tokens the think block may take; after that the closing tag is forced and the model answers (default: unbounded)").min(0.0).max(capability::bounds::TOKENS))
             .param(ParamSpec::new("min_p", ParamType::Float, "drop tokens below this fraction of the best token's probability (0 = off)"))
             .param(ParamSpec::new("presence_penalty", ParamType::Float, "subtracted from the logit of every token already generated (0 = off)"))
             .param(ParamSpec::new("frequency_penalty", ParamType::Float, "subtracted from a token's logit once per time it was generated (0 = off)"))
             .param(ParamSpec::new("repetition_penalty", ParamType::Float, "divides the positive logit of every token in the context, prompt included (1 = off)"))
             .param(ParamSpec::new("dry_multiplier", ParamType::Float, "DRY repetition penalty strength over the whole context (0 = off)"))
             .param(ParamSpec::new("dry_base", ParamType::Float, "DRY penalty growth per extra repeated token (default 1.75)"))
-            .param(ParamSpec::new("dry_allowed_length", ParamType::Int, "DRY: repeats up to this many tokens are not penalised (default 2)"))
+            .param(ParamSpec::new("dry_allowed_length", ParamType::Int, "DRY: repeats up to this many tokens are not penalised (default 2)").min(0.0).max(1024.0))
             .param(ParamSpec::new("dry_sequence_breakers", ParamType::Str, "JSON array of strings that end a DRY sequence (default newline, colon, quote, asterisk)"));
     }
     llmserve::with_token_capture(s.output(BlobSpec::new("text", Media::Text, "the generated text")))

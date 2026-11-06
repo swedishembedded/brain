@@ -75,8 +75,8 @@ pub fn train_spec() -> ActionSpec {
     .param(ParamSpec::new("steps", ParamType::Int, "optimiser steps at most (early stopping usually ends sooner)").default(json!(DEFAULT_STEPS)).min(1.0).max(1_000_000.0))
     .param(ParamSpec::new("batch", ParamType::Int, "subjects per batch").default(json!(DEFAULT_BATCH)).min(1.0).max(4096.0))
     .param(ParamSpec::new("seed", ParamType::Int, "seed of the initial weights, the batches and the masks (member i of an ensemble uses seed + i); drawn at random when omitted and reported per member").min(0.0))
-    .param(ParamSpec::new("eval_interval", ParamType::Int, "steps between held-out evaluations (and progress reports)").default(json!(DEFAULT_EVAL_INTERVAL)).min(1.0))
-    .param(ParamSpec::new("patience", ParamType::Int, "held-out evaluations without improvement before training stops").default(json!(DEFAULT_PATIENCE)).min(1.0))
+    .param(ParamSpec::new("eval_interval", ParamType::Int, "steps between held-out evaluations (and progress reports)").max(capability::bounds::TRAIN_COUNT).default(json!(DEFAULT_EVAL_INTERVAL)).min(1.0))
+    .param(ParamSpec::new("patience", ParamType::Int, "held-out evaluations without improvement before training stops").max(capability::bounds::TRAIN_COUNT).default(json!(DEFAULT_PATIENCE)).min(1.0))
     .param(ParamSpec::new("next_events", ParamType::Str, "comma-separated event codes to also model as 'which happens first, and when' (a self-supervised signal); default none").default(json!("")))
     .param(ParamSpec::new("next_weight", ParamType::Float, "weight of the next-event objective against the outcome codes").default(json!(0.5)).min(0.0))
     .param(
@@ -113,7 +113,7 @@ pub fn eval_spec() -> ActionSpec {
             .host_env(crate::caps::DIR_VAR),
     )
     .param(ParamSpec::new("horizons", ParamType::Str, "comma-separated horizons after entry, each within the model's knots").default(json!(crate::caps::DEFAULT_TIMES)))
-    .param(ParamSpec::new("min_events", ParamType::Int, "a (code, horizon) with fewer events by then is left out and listed under 'absent'").default(json!(MIN_EVENTS)).min(1.0))
+    .param(ParamSpec::new("min_events", ParamType::Int, "a (code, horizon) with fewer events by then is left out and listed under 'absent'").max(capability::bounds::TRAIN_COUNT).default(json!(MIN_EVENTS)).min(1.0))
     .input(BlobSpec::new("dataset", Media::Text, "held-out subjects: timeline-v1, never trained, early-stopped or calibrated on").required())
     .output(BlobSpec::new("evaluation", Media::Text, "JSON: {subjects, event_nll, results: [{code, horizon, events, uno_c, auc, brier, integrated_brier, calibration, intervals?}], absent}"))
 }
@@ -131,7 +131,7 @@ pub fn calibrate_spec() -> ActionSpec {
     )
     .param(ParamSpec::new("horizons", ParamType::Str, "comma-separated horizons after entry to calibrate, each within the model's knots").required())
     .param(ParamSpec::new("kind", ParamType::Str, "logistic (intercept, and slope where the data show it is not one; no interval) or venn_abers (isotonic with its interval)").default(json!(calibration::Kind::default().name())))
-    .param(ParamSpec::new("min_events", ParamType::Int, "a (code, horizon) with fewer validation events by then (and as many still event-free) is not calibrated; default 100 for logistic, 500 for venn_abers").min(1.0))
+    .param(ParamSpec::new("min_events", ParamType::Int, "a (code, horizon) with fewer validation events by then (and as many still event-free) is not calibrated; default 100 for logistic, 500 for venn_abers").max(capability::bounds::TRAIN_COUNT).min(1.0))
     .param(ParamSpec::new("out", ParamType::Str, "write a calibrated copy of the model into this directory instead of calibration.json into 'weights' (must not exist)").host_resolved())
     .param(ParamSpec::new("force", ParamType::Bool, "overwrite an existing calibration.json (or the directory at 'out')").default(json!(false)).host_resolved())
     .input(BlobSpec::new("validation", Media::Text, "validation subjects: timeline-v1").required())

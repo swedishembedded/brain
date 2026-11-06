@@ -64,9 +64,9 @@ fn checkpoint_and_sampling_params(spec: ActionSpec) -> ActionSpec {
     spec.param(ParamSpec::new("weights_dir", ParamType::Str, "the Qwen3-TTS checkpoint dir, or a dir holding talker/mtp/codec(/speaker).safetensors from `brain qwen3tts import`").required().host_env("BRAIN_QWEN3TTS_WEIGHTS"))
         .param(ParamSpec::new("ckpt", ParamType::Str, "HF checkpoint dir (config.json + tokenizer)").required().host_env("BRAIN_QWEN3TTS_CKPT"))
         .param(ParamSpec::new("lang", ParamType::Str, "synthesis language").default(json!("english")))
-        .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").default(json!(256)))
+        .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").min(0.0).max(16384.0).default(json!(256)))
         .param(ParamSpec::new("temp", ParamType::Float, &format!("sampling temperature (0 = greedy, degenerate for this model); {RESOLVED} 0.9")))
-        .param(ParamSpec::new("top_k", ParamType::Int, &format!("top-k sampling cutoff; {RESOLVED} 50")))
+        .param(ParamSpec::new("top_k", ParamType::Int, &format!("top-k sampling cutoff; {RESOLVED} 50")).min(0.0).max(capability::bounds::TOP_K))
         .param(ParamSpec::new("top_p", ParamType::Float, &format!("nucleus sampling cutoff (0 or 1 = disabled); {RESOLVED} 1.0")))
         .param(ParamSpec::new(
             "repetition_penalty",
@@ -176,9 +176,9 @@ pub fn speak_spec() -> ActionSpec {
         .param(ParamSpec::new("text", ParamType::Str, "the text to speak").required())
         .param(ParamSpec::new("lang", ParamType::Str, "synthesis language").default(json!("english")))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature").default(json!(0.9)))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k sampling cutoff").default(json!(50)))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k sampling cutoff").min(0.0).max(capability::bounds::TOP_K).default(json!(50)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run; omit for random)"))
-        .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").default(json!(256)))
+        .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").min(0.0).max(16384.0).default(json!(256)))
         .output(BlobSpec::new("audio", Media::Audio, "the synthesized speech: raw mono f32 little-endian PCM at 24 kHz"))
 }
 
@@ -195,9 +195,9 @@ pub fn design_spec() -> ActionSpec {
         .param(ParamSpec::new("instruct", ParamType::Str, "natural-language voice/emotion/prosody description").default(json!("")))
         .param(ParamSpec::new("speaker", ParamType::Str, "CustomVoice preset speaker name").default(json!("")))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature").default(json!(0.9)))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k sampling cutoff").default(json!(50)))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k sampling cutoff").min(0.0).max(capability::bounds::TOP_K).default(json!(50)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run; omit for random)"))
-        .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").default(json!(256)))
+        .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").min(0.0).max(16384.0).default(json!(256)))
         .output(BlobSpec::new("audio", Media::Audio, "the designed-voice speech: raw mono f32 little-endian PCM at 24 kHz"))
 }
 

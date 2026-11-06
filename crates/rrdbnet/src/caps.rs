@@ -54,6 +54,8 @@ pub fn upscale_spec() -> ActionSpec {
                 "process in tiles of this many input pixels a side (0 = whole image); \
                  peak VRAM is quadratic in the tile, so a large image needs this",
             )
+            .min(0.0)
+            .max(capability::bounds::SIZE_PX)
             .default(json!(0)),
         )
         .input(BlobSpec::new("image", Media::Image, "the image to upscale, RGB in [0,1]").required())

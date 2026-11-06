@@ -354,8 +354,8 @@ mod tests {
             "a real model",
             vec![
                 ActionSpec::new("text2image", "generate an image")
-                    .param(ParamSpec::new("width", ParamType::Int, "w").default(json!(8)))
-                    .param(ParamSpec::new("height", ParamType::Int, "h").default(json!(6)))
+                    .param(ParamSpec::new("width", ParamType::Int, "w").min(0.0).max(capability::bounds::SIDE_PX).default(json!(8)))
+                    .param(ParamSpec::new("height", ParamType::Int, "h").min(0.0).max(capability::bounds::SIDE_PX).default(json!(6)))
                     .output(BlobSpec::new("image", Media::Image, "the image")),
                 ActionSpec::new("generate", "chat").streaming().output(BlobSpec::new("text", Media::Text, "the reply")),
             ],

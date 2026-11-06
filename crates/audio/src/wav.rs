@@ -25,6 +25,26 @@ fn u32le(b: &[u8]) -> u32 {
 /// Parse a RIFF/WAVE byte stream into its sample rate and one plane per
 /// channel, each in `[-1, 1]` - the channels kept apart, for a caller that
 /// carries the sound on rather than analysing it.
+/// The lowest sample rate brain reads, in Hz. Every resampler's output length
+/// and filter size scale with the ratio of two rates, so a rate a file or a
+/// client declares is held to [`MIN_SAMPLE_RATE`]..=[`MAX_SAMPLE_RATE`]
+/// wherever it enters ([`checked_rate`]): a rate of 0 or 1 would otherwise
+/// ask for an allocation of gigabytes, or none at all.
+pub const MIN_SAMPLE_RATE: u32 = 1_000;
+/// The highest sample rate brain reads, in Hz (studio audio tops out at 384 kHz).
+pub const MAX_SAMPLE_RATE: u32 = 384_000;
+/// The most channels a recording may carry.
+pub const MAX_CHANNELS: u16 = 32;
+
+/// `rate` (from a file header or a blob's metadata) as a sample rate brain
+/// will resample, or why not.
+pub fn checked_rate(rate: u64) -> Result<u32, String> {
+    u32::try_from(rate)
+        .ok()
+        .filter(|r| (MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(r))
+        .ok_or_else(|| format!("a sample rate of {rate} Hz is outside {MIN_SAMPLE_RATE}..={MAX_SAMPLE_RATE}"))
+}
+
 pub fn parse_planar(bytes: &[u8]) -> io::Result<(u32, Vec<Vec<f32>>)> {
     let err = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
@@ -41,6 +61,9 @@ pub fn parse_planar(bytes: &[u8]) -> io::Result<(u32, Vec<Vec<f32>>)> {
         match id {
             b"fmt " if sz >= 16 => {
                 let b = &bytes[body_start..body_end];
+                if b.len() < 16 {
+                    return Err(err("truncated fmt chunk"));
+                }
                 fmt = Some((u16le(&b[0..2]), u16le(&b[2..4]), u32le(&b[4..8]), u16le(&b[14..16])));
             }
             b"data" => data = Some(&bytes[body_start..body_end]),
@@ -50,6 +73,10 @@ pub fn parse_planar(bytes: &[u8]) -> io::Result<(u32, Vec<Vec<f32>>)> {
     }
     let (format, channels, rate, bits) = fmt.ok_or_else(|| err("missing fmt chunk"))?;
     let data = data.ok_or_else(|| err("missing data chunk"))?;
+    checked_rate(rate.into()).map_err(|e| err(&e))?;
+    if channels > MAX_CHANNELS {
+        return Err(err(&format!("{channels} channels is more than {MAX_CHANNELS}")));
+    }
     let ch = channels.max(1) as usize;
     let bytes_per = (bits / 8) as usize;
     if bytes_per == 0 {
@@ -156,6 +183,26 @@ pub fn write_multi(path: impl AsRef<Path>, channels: &[&[f32]], sample_rate: u32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A header a client wrote is not trusted: a rate a resampler cannot
+    /// size an output from, a truncated fmt chunk or a channel count past the
+    /// bound is refused, never a panic or a giant allocation.
+    #[test]
+    fn a_hostile_header_is_refused() {
+        let good = encode(&[0.0, 0.5, -0.5], 16_000);
+        assert!(parse_planar(&good).is_ok());
+        for rate in [0u32, 1, 999, 384_001, u32::MAX] {
+            let mut bytes = good.clone();
+            bytes[24..28].copy_from_slice(&rate.to_le_bytes());
+            assert!(parse_planar(&bytes).is_err(), "rate {rate}");
+        }
+        let mut wide = good.clone();
+        wide[22..24].copy_from_slice(&1000u16.to_le_bytes());
+        assert!(parse_planar(&wide).is_err(), "1000 channels");
+        // A fmt chunk that claims 16 bytes and is cut after 10.
+        let truncated = [&good[..12], b"fmt ", &16u32.to_le_bytes(), &good[20..30]].concat();
+        assert!(parse_planar(&truncated).is_err());
+    }
 
     #[test]
     fn mono_encode_is_unchanged_by_the_encode_multi_refactor() {

@@ -53,7 +53,7 @@ impl DepthResident {
     fn depth_spec() -> ActionSpec {
         ActionSpec::new("depth", "monocular depth from a single image (ZipDepth)")
             .param(
-                ParamSpec::new("input", ParamType::Int, "model input (shorter side, x32); 0 = the checkpoint's native 384")
+                ParamSpec::new("input", ParamType::Int, "model input (shorter side, x32); 0 = the checkpoint's native 384").min(0.0).max(capability::bounds::SIZE_PX)
                     .default(json!(0)),
             )
             .input(BlobSpec::new("image", Media::Image, "the image to estimate depth for").required())
