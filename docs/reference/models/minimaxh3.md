@@ -77,10 +77,9 @@ reports per-step progress and stops at the next step boundary when cancelled.
   request's forward workspace free on each (~25 GB of packed linears and
   norms, split over two cards), so every step reads weights already on the
   cards. Otherwise it streams one block at a time at fp32, which any card
-  holds but which reads the whole checkpoint every step. On two P40s with
-  21.9 GiB free each, 704x384 x 121 frames (~11k packed rows) holds resident
-  and peaks at ~21.9 GB per card; 768x448 (~13.6k rows) does not - its first
-  step needs ~10.9 GB of workspace beside ~12.5 GB of weights per card.
+  holds but which reads the whole checkpoint every step. On two P40s,
+  768x448 x 121 frames (~13.6k packed rows) holds resident and peaks at
+  ~19.0 GB per card; a 20-step `fl2va` clip at that size takes ~50 min.
 * **`--int8-activation-levels 2`** (`int8_activation_levels: 2` on a
   request) quantizes each int8 linear's input in two levels: the second
   quantizes what the first rounds away, so the activation side is exact to

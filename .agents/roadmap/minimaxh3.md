@@ -953,13 +953,22 @@ module); the arena (`Gpu::scratch_scope_in`) removed it.
   rows, and each modulate was a `mul` and two `add2`s over fresh buffers.
   `kernels::{modulate_rows, gate_rows}` index the tables per row instead:
   one real block at 13312 rows went from 11.41 GB to 8.67 GB of device
-  memory (weights included), 2287 -> 2265 ms of device time. 768x448 is
-  still past what two P40s hold beside the int8 weights: the per-block
-  scratch arena issues every buffer of a block its own slot
-  (`gpu_core::scratch`'s replay contract), so a block's peak is the SUM of
-  its intermediates rather than the larger of its attention and FFN phases.
-  Liveness-aware slot reuse inside one scope is the change that would
-  admit it.
+  memory (weights included), 2287 -> 2265 ms of device time.
+- **The block's halves share one scratch scope.** The arena issued every
+  buffer of a block its own slot, so a block peaked at the SUM of its
+  attention and FFN intermediates. `ScratchScope::rewind` drains the device
+  and replays the dropped slots, and `block_forward` rewinds between the
+  halves: 8.68 -> 6.48 GB at 13312 rows, same speed. A 768x448 x 121-frame
+  `fl2va` clip now holds resident on two P40s at ~19.0 GB per card (50 min,
+  20 steps), where it ran out of memory at its first step before.
+- **The video VAE decoder holds its weights for a decode.** It re-uploaded
+  every layer for every tile of every chunk (an nsys trace of a real clip:
+  thousands of `vkAllocateMemory`/`vkFreeMemory` a minute and the device
+  idle half the decode). `DecoderWeights` uploads the 9.6 GB stack once when
+  the card has twice that free, streaming per layer otherwise: 450 -> 158 s
+  for a 704x384 clip's decode. At 768x448 the denoise is ~1080 s of device
+  time per card, `flash_attn_bidir_reg2` 58% and `matmul_i8_dyn` 39%: the
+  attention kernel is the largest remaining cost.
 - The residency adapter places its DiT on its ONE scheduled device; an int8
   DiT with a 10k-row workspace does not fit one 24 GB card, so resident
   serving refuses on this box while the direct path places over both.
