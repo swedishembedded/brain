@@ -1217,7 +1217,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
 
         // ---- elementwise (params [total] == threads) ------------------------
-        "add2" | "mul" | "pos_add" | "grad_scale" | "grad_scale_buf" => f(n0(), 12 * n0()),
+        "add" | "add2" | "mul" | "pos_add" | "grad_scale" | "grad_scale_buf" => f(n0(), 12 * n0()),
         "axpy" => f(2 * n0(), 12 * n0()),
         "silu_mul" | "silu_bwd_db" => f(5 * n0(), 12 * n0()),
         "silu_bwd_da" => f(8 * n0(), 16 * n0()),
