@@ -45,7 +45,7 @@ fn qwen3_finetune_refuses_a_profile_without_a_job_plan() {
     assert!(!err.contains("ignoring unknown flag"), "the flag must not fall through to the unknown-flag notice: {err}");
 }
 
-/// With the job pair present the flag is accepted: the run stops at the
+/// With the job's flags present the flag is accepted: the run stops at the
 /// missing plan file, not at the flag. That proves each verb takes the flag
 /// by name rather than leaving it to a leftovers or unknown-flag path.
 #[test]
@@ -58,6 +58,8 @@ fn both_verbs_accept_the_flag_with_a_job_plan() {
         "/nonexistent/brain-plan.json",
         "--job-rank",
         "0",
+        "--job-secret",
+        "/nonexistent/brain-job.secret",
         "--profile-collectives",
         "collectives.json",
     ]);
@@ -74,6 +76,8 @@ fn both_verbs_accept_the_flag_with_a_job_plan() {
         "/nonexistent/brain-plan.json",
         "--job-rank",
         "0",
+        "--job-secret",
+        "/nonexistent/brain-job.secret",
         "--profile-collectives",
         "collectives.json",
     ]);

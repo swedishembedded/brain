@@ -20,6 +20,21 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       with a different plan is refused with the mismatch rather than joining
       someone else's collective. `JobContext` carries a rank and derives its
       grid coordinate. Tests: the unit tests in `crates/model/src/job.rs`.
+- [x] **Only the job's ranks join, and nobody else reads the wire.** The
+      launcher hands every rank one owner-only secret file (`openssl rand -hex
+      32`, `model::JobSecret::read` refuses a file others may read). Each
+      connection proves it both ways by HMAC over fresh nonces, then every
+      frame is ChaCha20-Poly1305-sealed with per-connection, per-direction
+      HKDF keys and a sequence nonce (`model::sealedwire`). A peer without the
+      secret is dropped after a fixed-size exchange on its own thread, so it
+      can neither join, read, alter or replay frames, nor tear the forming
+      group down; there is no unauthenticated constructor left. Tests: the
+      unit tests in `crates/model/src/sealedwire.rs`, and
+      `a_peer_without_the_job_secret_cannot_join_or_disturb_the_job` in
+      `crates/model/tests/it/distributed_job.rs`. Cost, measured 2026-11-06 on
+      a Core Ultra 7 155H over loopback with 16 MiB frames (`fast` profile):
+      one sealed stream moves 1.32-1.35 GB/s against 5.5-6.0 GB/s plain, so
+      sealing is the ceiling of one connection on links faster than 10 GbE.
 - [x] **The group fails together.** The TCP transport has an abort frame: a
       coordinator that rejects a payload or loses a peer sends every remaining
       rank the reason, and each op carries a timeout from the plan, so no rank
@@ -67,9 +82,10 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       over loopback and asserts their trained replicas are bit-identical.
 
 - [x] **A train verb takes a job plan.** `brain gpt2 train <data_dir>
-      --job-plan FILE --job-rank N` joins the plan's collective, announces the
-      job and rank, and runs the distributed driver; giving only one of the
-      pair is a usage error. The flag is `--job-rank` because `--rank` is LoRA
+      --job-plan FILE --job-rank N --job-secret FILE` joins the plan's
+      collective, announces the job and rank, and runs the distributed driver;
+      giving only some of the three is a usage error (`args::JobFlags`, shared
+      with the fine-tune verb). The flag is `--job-rank` because `--rank` is LoRA
       rank throughout the CLI.
 
 - [x] **The LoRA chat fine-tune takes a job plan.** `FitControl::grad_sync`
@@ -77,8 +93,8 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       rank reduces each step's gradients over the group and trains on its own
       shard of the training-record stream, derived from the group's rank and
       world size. `brain qwen3 finetune --lora ... --job-plan FILE
-      --job-rank N` joins the plan's collective and sets it; half the pair is a
-      usage error, and a rank without `--seed` derives one from the plan bytes.
+      --job-rank N --job-secret FILE` joins the plan's collective and sets it;
+      part of the three is a usage error, and a rank without `--seed` derives one from the plan bytes.
       The record strategy is index-based and explicit: record `n` belongs to
       rank `n % world`, every rank consumes the whole stream, and evaluation is
       never sharded (rank 0 scores it and broadcasts the result). An objective
@@ -296,7 +312,8 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       Replicas are bit-identical, so one writer is enough until tensor
       parallelism shards the weights.
 - [ ] Ring/tree all-reduce for worlds where the coordinator star's bandwidth
-      matters, and cross-rank validation of every op on the worker side (the
+      matters (sealing runs at about 1.3 GB/s per connection, so a ring also
+      spreads the encryption over every rank's cores), and cross-rank validation of every op on the worker side (the
       coordinator validates today; a worker's own rank/length is checked
       locally).
 - [ ] Sharded optimizer state, and the tensor- and expert-parallel dimensions

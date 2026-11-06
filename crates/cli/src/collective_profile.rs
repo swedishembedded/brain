@@ -36,7 +36,7 @@ pub(crate) fn take_flag(args: &mut Args, distributed: bool) -> Result<Option<Pat
         (None, _) => Ok(None),
         (Some(path), true) => Ok(Some(PathBuf::from(path))),
         (Some(_), false) => Err(format!(
-            "{FLAG} FILE needs a distributed run: give it with --job-plan FILE and --job-rank N, \
+            "{FLAG} FILE needs a distributed run: give it with --job-plan FILE, --job-rank N and --job-secret FILE, \
              which is the collective it would measure (a one-process run has none; the \
              distributed_profile bench covers world 1)"
         )),

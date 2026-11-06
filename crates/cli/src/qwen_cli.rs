@@ -10,7 +10,7 @@
 //!   brain qwen3 finetune <data_dir> --weights BASE --out F [--steps N --lr X ...]
 //!   brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR
 //!                     [--alpha A --lora-variant V --lora-plus-ratio X --adapter-kind K --steps N --lr X --batch B --block T --seed S
-//!                      --models-dir DIR --dataset-id ID --job-plan FILE --job-rank N
+//!                      --models-dir DIR --dataset-id ID --job-plan FILE --job-rank N --job-secret FILE
 //!                      --profile-collectives FILE]
 //!   brain qwen3 eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG]
 //!                     --block T --models-dir DIR]
@@ -812,23 +812,9 @@ impl Drop for ScratchDir {
     }
 }
 
-/// The `--job-plan FILE` / `--job-rank N` pair, both or neither. `--rank` is
-/// LoRA rank throughout the CLI, so this process's place in a job is
-/// `--job-rank`.
-fn job_pair(plan: Option<String>, rank: Option<String>) -> Result<Option<(String, usize)>, String> {
-    let rank = rank
-        .map(|value| value.parse::<usize>().map_err(|_| format!("--job-rank {value:?} is not a rank number")))
-        .transpose()?;
-    match (plan, rank) {
-        (None, None) => Ok(None),
-        (Some(plan), Some(rank)) => Ok(Some((plan, rank))),
-        _ => Err("--job-plan FILE and --job-rank N must be given together (the plan every rank shares, and this rank's place in it)".to_string()),
-    }
-}
-
 /// `brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG]
 ///     --dataset DIR [--alpha A --lora-variant V --lora-plus-ratio X --adapter-kind K --steps N --lr X --batch B --block T --seed S
-///     --models-dir DIR --dataset-id ID --job-plan FILE --job-rank N --activations keep|recompute]`
+///     --models-dir DIR --dataset-id ID --job-plan FILE --job-rank N --job-secret FILE --activations keep|recompute]`
 ///
 /// Trains a NAMED LoRA adapter and saves ONLY the adapter tensors into the
 /// model store at `<models-dir>/<vendor>/<repo>/adapters/<owner>/<name>/<tag>/`
@@ -840,9 +826,10 @@ fn job_pair(plan: Option<String>, rank: Option<String>) -> Result<Option<(String
 /// `tokenizer_config.json` -- already on disk for any model fetched through
 /// the normal store/plan path, no extra step).
 ///
-/// `--job-plan`/`--job-rank` make this process one rank of a distributed job:
-/// it joins the plan's collective, every step's gradients are averaged over
-/// the group, and the rank trains on its own shard of the training records.
+/// `--job-plan`/`--job-rank`/`--job-secret` make this process one rank of a
+/// distributed job: it joins the plan's collective (proving the secret every
+/// rank was given), every step's gradients are averaged over the group, and
+/// the rank trains on its own shard of the training records.
 /// Every rank must be given the same base, dataset and starting adapter (and
 /// the same seed, which is derived from the plan when `--seed` is absent).
 /// Rank 0 writes the shared checkpoint; each rank saves the adapter its own
@@ -853,7 +840,7 @@ fn job_pair(plan: Option<String>, rank: Option<String>) -> Result<Option<(String
 /// its own accounting to `FILE.rank<rank>.json`.
 fn finetune_lora(args: &[String]) {
     let mut parsed = crate::args::Args::new(args);
-    let job = match job_pair(parsed.take_str("--job-plan"), parsed.take_str("--job-rank")) {
+    let job = match crate::args::JobFlags::take(&mut parsed) {
         Ok(job) => job,
         Err(e) => {
             eprintln!("usage: {e}");
@@ -874,10 +861,10 @@ fn finetune_lora(args: &[String]) {
     let seed = match parsed.seed_opt("--seed") {
         Some(seed) => seed,
         None => match &job {
-            Some((plan, _)) => match crate::args::plan_seed(Path::new(plan), "qwen3 finetune (lora)") {
+            Some(job) => match crate::args::plan_seed(Path::new(&job.plan), "qwen3 finetune (lora)") {
                 Ok(seed) => seed,
                 Err(e) => {
-                    eprintln!("error: reading {plan}: {e}");
+                    eprintln!("error: reading {}: {e}", job.plan);
                     std::process::exit(1);
                 }
             },
@@ -982,7 +969,7 @@ fn finetune_lora(args: &[String]) {
              [--patience N] [--lora-targets wq,wk,...] [--keep-reasoning] [--base-format f32|bf16|int8|nf4|fp8] [--grad-accum N] \
              [--weight-decay W --grad-clip C --warmup N --min-lr X --beta1 B --beta2 B --adam-eps E] \
              [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID] [--fresh] \
-             [--job-plan FILE --job-rank N --profile-collectives FILE] {}",
+             [--job-plan FILE --job-rank N --job-secret FILE --profile-collectives FILE] {}",
             crate::args::ACTIVATIONS_USAGE
         );
         return;
@@ -1152,8 +1139,8 @@ fn finetune_lora(args: &[String]) {
     // for the whole run, and the control hands it to the shared fit loop, which
     // shards the record stream by rank and averages every step's gradients.
     let context = match &job {
-        Some((plan, rank)) => {
-            let context = match model::JobContext::from_plan_file(Path::new(plan), *rank) {
+        Some(job) => {
+            let context = match job.context() {
                 Ok(context) => context,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -1831,19 +1818,6 @@ fn lora_gate(args: &[String]) {
 #[cfg(test)]
 mod lora_finetune_cli_tests {
     use super::*;
-
-    /// A job is the pair every rank shares: half of it is a usage error, never
-    /// a single-process run. `--rank` stays the LoRA rank.
-    #[test]
-    fn a_job_plan_and_rank_must_be_given_together() {
-        assert_eq!(job_pair(None, None).unwrap(), None);
-        assert_eq!(job_pair(Some("plan.json".into()), Some("1".into())).unwrap(), Some(("plan.json".into(), 1)));
-        let only_plan = job_pair(Some("plan.json".into()), None).expect_err("a plan with no rank is half a pair");
-        assert!(only_plan.contains("--job-rank"), "{only_plan}");
-        let only_rank = job_pair(None, Some("1".into())).expect_err("a rank with no plan is half a pair");
-        assert!(only_rank.contains("--job-plan"), "{only_rank}");
-        assert!(job_pair(Some("plan.json".into()), Some("rank-one".into())).is_err(), "a rank that is not a number is refused by name");
-    }
 
     #[test]
     fn parse_adapter_spec_defaults_the_tag_to_latest() {

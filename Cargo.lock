@@ -2083,6 +2083,7 @@ dependencies = [
  "brain-testutil",
  "half",
  "pollster",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

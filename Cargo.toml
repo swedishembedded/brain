@@ -392,6 +392,10 @@ image = { version = "0.25", default-features = false }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 sha2 = "0.10"
+# The training collective's handshake and sealed frames (`model::sealedwire`):
+# HMAC-SHA256, HKDF-SHA256 and ChaCha20-Poly1305. Already in the tree under
+# rustls; its CPU-specific code is upstream's, not hand-rolled.
+ring = "0.17"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

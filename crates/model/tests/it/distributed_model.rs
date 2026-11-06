@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use model::collective::Collective;
-use model::{federated_average, Batch, DdpOptimizer, HostCollective, Model, ModelConfig, NetworkCollective};
+use model::netcollective::GroupHello;
+use model::{federated_average, Batch, DdpOptimizer, HostCollective, JobSecret, Model, ModelConfig, NetworkCollective};
 use std::net::TcpListener;
 
 // ---- a minimal real Model: w ∈ R^D, loss = Σ (w - target)², grad = 2(w - target) ----
@@ -161,18 +162,16 @@ fn data_parallel_converges_over_network() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let listener = Arc::new(std::sync::Mutex::new(Some(listener)));
+    let secret = JobSecret::random();
+    let timeout = std::time::Duration::from_secs(30);
     let ws = train_dp(2, targets.clone(), move |r| {
+        let hello = GroupHello { plan: "data-parallel".into(), world: 2, rank: r };
         if r == 0 {
             let l = listener.lock().unwrap().take().unwrap();
-            Arc::new(NetworkCollective::coordinator(&l, 2).unwrap()) as Arc<dyn Collective>
+            Arc::new(NetworkCollective::coordinator(&l, &hello, &secret, timeout, timeout).unwrap()) as Arc<dyn Collective>
         } else {
-            // brief retry so the coordinator has time to start accepting.
-            loop {
-                if let Ok(c) = NetworkCollective::worker(r, 2, &addr) {
-                    break Arc::new(c) as Arc<dyn Collective>;
-                }
-                std::thread::yield_now();
-            }
+            // The worker retries its connection until the coordinator accepts.
+            Arc::new(NetworkCollective::worker(&hello, &addr, &secret, timeout, timeout).unwrap()) as Arc<dyn Collective>
         }
     });
     let mean: Vec<f32> = (0..2).map(|i| (targets[0][i] + targets[1][i]) / 2.0).collect();

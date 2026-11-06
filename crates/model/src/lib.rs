@@ -90,6 +90,8 @@ pub mod ops;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod netcollective;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod sealedwire;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod parallel;
 pub mod plan;
 pub mod projector;
@@ -121,6 +123,8 @@ pub use distributed::{federated_average, reduce_grads, DdpOptimizer};
 pub use netcollective::NetworkCollective;
 #[cfg(not(target_arch = "wasm32"))]
 pub use job::{CheckpointCommit, CommitFile, JobContext, JobPlan};
+#[cfg(not(target_arch = "wasm32"))]
+pub use sealedwire::JobSecret;
 pub use grid::{Coord, Grid, LocalGroups};
 #[cfg(not(target_arch = "wasm32"))]
 pub use parallel::DataParallel;

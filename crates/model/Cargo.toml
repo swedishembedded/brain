@@ -39,6 +39,7 @@ half.workspace = true
 # are the multi-GPU / offload paths that never run in a browser.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 brain-backend-cpu = { workspace = true }
+ring.workspace = true
 # `collective::Collective`'s ops are async (M7.2) so `dyn Collective` composes
 # into async call sites instead of forcing one; every existing call site here
 # is a plain OS thread, not an async task, so it drives that future the same

@@ -10,7 +10,7 @@
 //! it joins.
 //!
 //! A launcher (a scheduler, a batch system, or a test) starts one process per
-//! rank with the same [`JobPlan`] and a different rank. The plan is the
+//! rank with the same [`JobPlan`], the same secret file, and a different rank. The plan is the
 //! agreement the processes make before any tensor moves: it names the job, the
 //! world size, the parallelism grid and the coordinator. Every rank sends the
 //! plan's exact bytes when it joins, so a process started with a different
@@ -38,6 +38,7 @@ use sha2::{Digest as _, Sha256};
 use crate::collective::CollectiveError;
 use crate::grid::Grid;
 use crate::netcollective::{GroupHello, NetworkCollective};
+use crate::sealedwire::JobSecret;
 
 /// How long a rank waits for its peers to join, when the plan does not say.
 pub const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 120_000;
@@ -153,26 +154,29 @@ impl JobPlan {
     }
 }
 
-/// This process's part of a job: the plan every rank shares and the rank it is.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// This process's part of a job: the plan every rank shares, the secret that
+/// proves membership, and the rank it is.
+#[derive(Clone, Debug)]
 pub struct JobContext {
     plan: JobPlan,
+    secret: JobSecret,
     rank: usize,
 }
 
 impl JobContext {
     /// The context of `rank` in `plan`, refusing a rank the plan does not have.
-    pub fn new(plan: JobPlan, rank: usize) -> Result<JobContext, String> {
+    pub fn new(plan: JobPlan, secret: JobSecret, rank: usize) -> Result<JobContext, String> {
         plan.validate()?;
         if rank >= plan.world_size {
             return Err(format!("rank {rank} is outside job {:?}'s {} ranks", plan.job, plan.world_size));
         }
-        Ok(JobContext { plan, rank })
+        Ok(JobContext { plan, secret, rank })
     }
 
-    /// The context a launcher asked for, read from a plan file.
-    pub fn from_plan_file(path: &Path, rank: usize) -> Result<JobContext, String> {
-        JobContext::new(JobPlan::read(path)?, rank)
+    /// The context a launcher asked for: the plan file and the secret file it
+    /// handed every rank ([`JobSecret::read`]).
+    pub fn from_plan_file(path: &Path, rank: usize, secret: &Path) -> Result<JobContext, String> {
+        JobContext::new(JobPlan::read(path)?, JobSecret::read(secret)?, rank)
     }
 
     /// The plan every rank was given.
@@ -193,17 +197,20 @@ impl JobContext {
     /// Join the job's collective, or say why the group could not be formed.
     ///
     /// Rank 0 binds the coordinator address and waits for every other rank;
-    /// every other rank dials it. Both sides exchange the plan's identity, so a
-    /// rank started with a different plan is refused with the mismatch rather
-    /// than joining the wrong collective.
+    /// every other rank dials it. Each connection first proves the job secret
+    /// both ways and is sealed with keys of its own (`crate::sealedwire`), so
+    /// a host without the secret can neither join nor read the traffic. Both
+    /// sides then exchange the plan's identity, so a rank started with a
+    /// different plan is refused with the mismatch rather than joining the
+    /// wrong collective.
     pub fn collective(&self) -> Result<NetworkCollective, CollectiveError> {
         let hello = GroupHello { plan: self.plan.identity(), world: self.plan.world_size, rank: self.rank };
         if self.rank == 0 {
             let listener = std::net::TcpListener::bind(&self.plan.coordinator)
                 .map_err(|e| CollectiveError::Transport(format!("job {:?} rank 0 cannot bind {}: {e}", self.plan.job, self.plan.coordinator)))?;
-            NetworkCollective::coordinator_checked(&listener, &hello, self.plan.handshake_timeout(), self.plan.op_timeout())
+            NetworkCollective::coordinator(&listener, &hello, &self.secret, self.plan.handshake_timeout(), self.plan.op_timeout())
         } else {
-            NetworkCollective::worker_checked(&hello, &self.plan.coordinator, self.plan.handshake_timeout(), self.plan.op_timeout())
+            NetworkCollective::worker(&hello, &self.plan.coordinator, &self.secret, self.plan.handshake_timeout(), self.plan.op_timeout())
         }
     }
 }
@@ -380,7 +387,7 @@ mod tests {
     #[test]
     fn a_rank_outside_the_world_is_refused() {
         let plan = JobPlan::new("run", 2, "127.0.0.1:7000");
-        let err = JobContext::new(plan, 2).expect_err("rank 2 of a two-rank job");
+        let err = JobContext::new(plan, crate::sealedwire::JobSecret::random(), 2).expect_err("rank 2 of a two-rank job");
         assert!(err.contains("outside"), "{err}");
     }
 

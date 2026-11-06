@@ -6,7 +6,7 @@
 //!
 //!   brain gpt train <data_dir> [--out F --steps N --batch B --block T --lr X
 //!                               --layers L --d-model D --heads H --mask = --align
-//!                               --job-plan FILE --job-rank N
+//!                               --job-plan FILE --job-rank N --job-secret FILE
 //!                               --profile-collectives FILE]
 //!   brain gpt infer --weights F [--data <dir>] [--prompt "..." --max-new N
 //!                               --temp X --top-k K]
@@ -84,21 +84,10 @@ fn train(args: &[String]) {
         o.mask_per_line = true;
     }
     o.align_to_lines = a.take_flag("--align");
-    // The distributed pair. `--rank` is LoRA rank everywhere else in the CLI,
-    // so this process's place in a job is `--job-rank`.
-    let job_plan = a.take_str("--job-plan");
-    let job_rank = a.take_str("--job-rank").map(|value| match value.parse::<usize>() {
-        Ok(rank) => rank,
-        Err(_) => {
-            eprintln!("--job-rank {value:?} is not a rank number");
-            std::process::exit(2);
-        }
-    });
-    let job = match (job_plan, job_rank) {
-        (None, None) => None,
-        (Some(plan), Some(rank)) => Some((plan, rank)),
-        _ => {
-            eprintln!("usage: --job-plan FILE and --job-rank N must be given together (the plan every rank shares, and this rank's place in it)");
+    let job = match crate::args::JobFlags::take(&mut a) {
+        Ok(job) => job,
+        Err(e) => {
+            eprintln!("usage: {e}");
             std::process::exit(2);
         }
     };
@@ -114,7 +103,7 @@ fn train(args: &[String]) {
     // own random one would diverge from its peers before the first reduction.
     // The plan file is the value every rank shares, so its digest is the seed
     // when none was given.
-    o.seed = match (job.as_ref().map(|(plan, _)| plan), a.seed_opt("--seed")) {
+    o.seed = match (job.as_ref().map(|job| &job.plan), a.seed_opt("--seed")) {
         (_, Some(seed)) => seed,
         (Some(plan), None) => match crate::args::plan_seed(Path::new(plan), "gpt2 train") {
             Ok(seed) => seed,
@@ -131,7 +120,7 @@ fn train(args: &[String]) {
         "training gpt on {dir}: steps={} batch={} block={} layers={} d_model={} heads={}",
         o.steps, o.batch_size, o.block_size, cfg.n_layers, cfg.d_model, cfg.n_heads
     );
-    let Some((plan, rank)) = job else {
+    let Some(job) = job else {
         match gpt2::train::train(Path::new(&dir), cfg, &o, out.as_deref()) {
             Ok((i0, i1)) => println!("done: train loss {i0:.4} -> {i1:.4}"),
             Err(e) => {
@@ -141,7 +130,7 @@ fn train(args: &[String]) {
         }
         return;
     };
-    let context = match model::JobContext::from_plan_file(Path::new(&plan), rank) {
+    let context = match job.context() {
         Ok(context) => context,
         Err(e) => {
             eprintln!("error: {e}");

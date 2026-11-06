@@ -48,9 +48,13 @@ use std::time::{Duration, Instant};
 use gpt2::GptConfig;
 use model::collective::{SimulatedLink, TimedCollective};
 use model::train::{build_or_resume, causal_lm, fit_controlled_sharded, load_dataset_with_itos, FitOpts, FitControl, StepReport};
-use model::{Collective, GradSync, HostCollective, Model, NetworkCollective, ShapedCollective, Snapshot};
+use model::netcollective::GroupHello;
+use model::{Collective, GradSync, HostCollective, JobSecret, Model, NetworkCollective, ShapedCollective, Snapshot};
 
 use serde_json::{json, Value};
+
+/// How long the loopback group may take to form, and one of its ops to answer.
+const JOIN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Which transport a run exchanges gradients through.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,6 +353,9 @@ fn run_once(cfg: &ProfileConfig, data: &Path, transport: Transport, world: usize
         format!("{} world {world}: read the loopback listener address: {e}", transport.name())
     })?;
 
+    // The bench measures the sealed transport a real job runs over, so the
+    // encryption's cost is in its numbers.
+    let secret = &JobSecret::random();
     let results: Mutex<Vec<Option<RankResult>>> = Mutex::new((0..world).map(|_| None).collect());
     thread::scope(|scope| {
         for rank in 0..world {
@@ -368,10 +375,11 @@ fn run_once(cfg: &ProfileConfig, data: &Path, transport: Transport, world: usize
                         train_rank(&timed, rank, world, cfg, data)
                     }
                     Transport::Network => {
+                        let hello = GroupHello { plan: "bench".into(), world, rank };
                         let joined = if rank == 0 {
-                            NetworkCollective::coordinator(listener.expect("the network transport has a listener"), world)
+                            NetworkCollective::coordinator(listener.expect("the network transport has a listener"), &hello, secret, JOIN_TIMEOUT, JOIN_TIMEOUT)
                         } else {
-                            NetworkCollective::worker(rank, world, address.expect("the network transport has an address"))
+                            NetworkCollective::worker(&hello, address.expect("the network transport has an address"), secret, JOIN_TIMEOUT, JOIN_TIMEOUT)
                         };
                         match joined {
                             Ok(net) => {

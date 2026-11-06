@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use gpt2::model::Gpt;
 use gpt2::train::TrainOpts;
 use gpt2::GptConfig;
-use model::{GradSync, JobContext, JobPlan, Model};
+use model::{GradSync, JobContext, JobPlan, JobSecret, Model};
 
 /// The name libtest filters to when this binary is re-executed as a rank.
 const CHILD: &str = "distributed_train::rank_process";
@@ -78,6 +78,7 @@ fn spawn_rank(dir: &Path, rank: usize, plan: &Path, data: &Path, out: &Path, pro
         .args(["--ignored", "--exact", CHILD, "--test-threads=1", "--nocapture", "--"])
         .arg(format!("--rank={rank}"))
         .arg(format!("--plan={}", plan.display()))
+        .arg(format!("--secret={}", dir.join("job.secret").display()))
         .arg(format!("--data={}", data.display()))
         .arg(format!("--out={}", out.display()));
     if let Some(profile) = profile {
@@ -119,6 +120,7 @@ fn two_ranks_train_bit_identical_replicas_over_loopback() {
     plan.op_timeout_ms = 120_000;
     let plan_path = dir.join("plan.json");
     plan.write(&plan_path).unwrap();
+    JobSecret::random().write(&dir.join("job.secret")).unwrap();
 
     let weights: Vec<PathBuf> = (0..2).map(|rank| dir.join(format!("rank-{rank}.safetensors"))).collect();
     let children: Vec<Child> = (0..2).map(|rank| spawn_rank(&dir, rank, &plan_path, &data, &weights[rank], None)).collect();
@@ -159,6 +161,7 @@ fn every_rank_reports_its_collective_cost_in_its_own_document() {
     plan.op_timeout_ms = 120_000;
     let plan_path = dir.join("plan.json");
     plan.write(&plan_path).unwrap();
+    JobSecret::random().write(&dir.join("job.secret")).unwrap();
 
     let weights: Vec<PathBuf> = (0..2).map(|rank| dir.join(format!("rank-{rank}.safetensors"))).collect();
     // The flag's value; each rank appends `.rank<rank>.json` to it.
@@ -203,11 +206,12 @@ fn rank_process() {
     let flag = |name: &str| after.iter().find_map(|arg| arg.strip_prefix(name).map(str::to_string));
     let Some(rank) = flag("--rank=").and_then(|value| value.parse::<usize>().ok()) else { return };
     let Some(plan) = flag("--plan=") else { return };
+    let Some(secret) = flag("--secret=") else { return };
     let Some(data) = flag("--data=") else { return };
     let Some(out) = flag("--out=") else { return };
     let profile = flag("--profile=");
 
-    let context = match JobContext::from_plan_file(Path::new(&plan), rank) {
+    let context = match JobContext::from_plan_file(Path::new(&plan), rank, Path::new(&secret)) {
         Ok(context) => context,
         Err(e) => {
             eprintln!("rank {rank}: {e}");

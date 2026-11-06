@@ -15,6 +15,44 @@ use std::path::Path;
 
 pub use appopts::Args;
 
+/// This process's place in a distributed job: `--job-plan FILE --job-rank N
+/// --job-secret FILE`, all three or none. `--rank` is LoRA rank throughout the
+/// CLI, so the job's flags all carry the `--job-` prefix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct JobFlags {
+    /// The plan file every rank shares.
+    pub plan: String,
+    /// This rank's place in it.
+    pub rank: usize,
+    /// The owner-only secret file every rank shares (`openssl rand -hex 32`).
+    pub secret: String,
+}
+
+impl JobFlags {
+    /// Take the job's flags off `args`.
+    ///
+    /// # Errors
+    ///
+    /// Some but not all of the three, or a rank that is not a number.
+    pub(crate) fn take(args: &mut Args) -> Result<Option<JobFlags>, String> {
+        JobFlags::from_values(args.take_str("--job-plan"), args.take_str("--job-rank"), args.take_str("--job-secret"))
+    }
+
+    fn from_values(plan: Option<String>, rank: Option<String>, secret: Option<String>) -> Result<Option<JobFlags>, String> {
+        let rank = rank.map(|value| value.parse::<usize>().map_err(|_| format!("--job-rank {value:?} is not a rank number"))).transpose()?;
+        match (plan, rank, secret) {
+            (None, None, None) => Ok(None),
+            (Some(plan), Some(rank), Some(secret)) => Ok(Some(JobFlags { plan, rank, secret })),
+            _ => Err("--job-plan FILE, --job-rank N and --job-secret FILE must be given together (the plan every rank shares, this rank's place in it, and the secret that proves it belongs)".to_string()),
+        }
+    }
+
+    /// The job context the flags name: the plan and secret read and checked.
+    pub(crate) fn context(&self) -> Result<model::JobContext, String> {
+        model::JobContext::from_plan_file(Path::new(&self.plan), self.rank, Path::new(&self.secret))
+    }
+}
+
 /// The seed a distributed rank trains with when `--seed` was not given: the
 /// digest of the plan file, which every rank of the job holds byte for byte.
 /// Same plan, same starting weights and batch order on every rank; ranks that
@@ -299,4 +337,26 @@ pub(crate) fn attach_lora_scale(specs: &mut [model::adapter::AdapterSpec], scale
     spec.scale = value;
     *scaled += 1;
     Ok(())
+}
+
+#[cfg(test)]
+mod job_flags_tests {
+    use super::JobFlags;
+
+    /// A job is the triple every rank is given: part of it is a usage error,
+    /// never a single-process run.
+    #[test]
+    fn the_job_flags_are_all_three_or_none() {
+        let some = |v: &str| Some(v.to_string());
+        assert_eq!(JobFlags::from_values(None, None, None).unwrap(), None);
+        assert_eq!(
+            JobFlags::from_values(some("plan.json"), some("1"), some("job.secret")).unwrap(),
+            Some(JobFlags { plan: "plan.json".into(), rank: 1, secret: "job.secret".into() })
+        );
+        for (plan, rank, secret) in [(some("plan.json"), some("1"), None), (some("plan.json"), None, some("s")), (None, some("1"), some("s")), (None, None, some("s"))] {
+            let refusal = JobFlags::from_values(plan, rank, secret).expect_err("part of a job");
+            assert!(refusal.contains("--job-secret") && refusal.contains("--job-plan"), "{refusal}");
+        }
+        assert!(JobFlags::from_values(some("plan.json"), some("rank-one"), some("s")).unwrap_err().contains("rank-one"));
+    }
 }
