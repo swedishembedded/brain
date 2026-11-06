@@ -2896,13 +2896,47 @@ mod native_facade {
             self.gpu.scratch_leave(self.lane);
         }
     }
+
+    /// A position in an open scope's request sequence, from
+    /// [`ScratchScope::mark`].
+    #[derive(Clone, Copy, Debug)]
+    pub struct ScratchMark(usize);
+
+    impl ScratchScope<'_> {
+        fn with_arena<R>(&self, f: impl FnOnce(&mut crate::scratch::Arena) -> R) -> R {
+            let mut g = self.gpu.arena.lock().unwrap_or_else(|e| e.into_inner());
+            let (_, _, a) = g.iter_mut().find(|(l, _, a)| *l == self.lane && a.active()).expect("gpu_core::scratch: the scope's arena is open");
+            f(a)
+        }
+
+        /// Where this scope's request sequence is now - what [`Self::rewind`]
+        /// returns to.
+        pub fn mark(&self) -> ScratchMark {
+            ScratchMark(self.with_arena(|a| a.cursor()))
+        }
+
+        /// Serve the requests that follow from the slots handed out since
+        /// `mark`, after draining everything recorded so far.
+        ///
+        /// For a sequence with phases whose intermediates do not overlap - a
+        /// transformer block's attention, then its FFN - this makes the scope's
+        /// peak the larger phase rather than their sum. The drain is what keeps
+        /// it as safe as reuse across scopes: every dispatch that read a slot
+        /// has finished before the next request can be handed that slot. A slot
+        /// whose buffer the caller still holds is never handed out again, so the
+        /// caller drops a phase's intermediates before rewinding over them.
+        pub fn rewind(&self, mark: ScratchMark) {
+            self.gpu.poll_wait();
+            self.with_arena(|a| a.rewind(mark.0));
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_facade::{
     adapter_info, backend_name, backend_selected, device_caps, discrete_gpu_count,
-    available_gpu_backends, set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, PassScope, ScratchScope,
-    WeakGpu,
+    available_gpu_backends, set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, PassScope, ScratchMark,
+    ScratchScope, WeakGpu,
 };
 
 /// Process-wide, monotonic CUDA host-call totals (allocations, individual

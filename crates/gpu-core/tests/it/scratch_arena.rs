@@ -152,6 +152,45 @@ fn a_changed_size_is_re_allocated_not_reused() {
     gpu.scratch_release();
 }
 
+/// A slot serves any request it is large enough for. A sequence whose phases
+/// ask for different sizes at one position (a block's attention phase, then
+/// its FFN phase after a rewind) keeps the larger buffer there instead of
+/// re-allocating it every time the size alternates.
+#[test]
+fn a_larger_slot_serves_a_smaller_request() {
+    let Some(gpu) = dev() else { return };
+    let big = {
+        let _s = gpu.scratch_scope();
+        gpu.storage(65536).alloc_id()
+    };
+    let small = {
+        let _s = gpu.scratch_scope();
+        gpu.storage(256).alloc_id()
+    };
+    assert_eq!(small, big, "a 65536-word slot was re-allocated for a 256-word request");
+    assert_eq!(gpu.scratch_held(), (1, 65536), "the slot keeps its own size");
+    gpu.scratch_release();
+}
+
+/// Inside one scope, a rewind hands the slots from its mark out again - but
+/// only those the caller has dropped. The rewind drains the device first, so a
+/// dropped slot's last reader has finished before its next writer is recorded.
+#[test]
+fn a_rewound_scope_reuses_only_the_slots_the_caller_dropped() {
+    let Some(gpu) = dev() else { return };
+    let s = gpu.scratch_scope();
+    let mark = s.mark();
+    let kept = gpu.storage(1024);
+    let dropped_id = gpu.storage(1024).alloc_id();
+    s.rewind(mark);
+    let first = gpu.storage(1024);
+    let second = gpu.storage(1024);
+    assert_ne!(first.alloc_id(), kept.alloc_id(), "a rewind recycled a buffer the caller still holds");
+    assert_eq!(second.alloc_id(), dropped_id, "a rewind did not reuse the dropped slot");
+    drop((s, kept, first, second));
+    gpu.scratch_release();
+}
+
 /// Two repeating sequences on one handle - a decode step's layer stack and its
 /// head are the case - must not evict each other. Sharing one arena they
 /// alternated through the same slot indices at different sizes, so every slot

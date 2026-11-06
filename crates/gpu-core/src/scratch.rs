@@ -118,14 +118,33 @@ pub(crate) enum Slot {
 }
 
 impl Arena {
-    /// Advance the cursor and say whether the slot it names can be reused.
+    /// Advance the cursor and say whether the slot it names can be reused: a
+    /// slot at least `words` long that no caller still holds. A larger slot
+    /// serves a smaller request (no kernel sizes itself from its binding), so
+    /// a position whose request alternates between sizes keeps the larger
+    /// buffer instead of re-allocating on every change.
     pub(crate) fn take(&mut self, words: u64) -> Slot {
         let i = self.cursor;
         self.cursor += 1;
         match self.slots.get(i) {
-            Some((sz, b)) if *sz == words && b.is_unique() => Slot::Hit(b.clone()),
+            Some((sz, b)) if *sz >= words && b.is_unique() => Slot::Hit(b.clone()),
             _ => Slot::Miss(i),
         }
+    }
+
+    /// Where the open scope's cursor is.
+    pub(crate) fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Move the open scope's cursor back to `mark`, so the requests that
+    /// follow are served from the slots handed out since. The caller has
+    /// drained the device first (see `ScratchScope::rewind`); the slots a
+    /// caller still holds stay theirs through the `is_unique` check.
+    pub(crate) fn rewind(&mut self, mark: usize) {
+        assert!(self.active, "gpu_core::scratch: rewind outside a scope");
+        assert!(mark <= self.cursor, "gpu_core::scratch: rewind to {mark} is past the cursor at {}", self.cursor);
+        self.cursor = mark;
     }
 
     /// Record a freshly allocated buffer as the arena's copy of slot `i`.
