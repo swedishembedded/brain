@@ -90,7 +90,7 @@ mod tests {
     fn an_unknown_kv_suffix_or_empty_path_is_refused_with_the_valid_choices() {
         let e = parse_spec("/m/q.gguf:kvfoo").unwrap_err();
         assert!(e.contains("kvfoo") && e.contains(":kvint8"), "{e}");
-        assert!(parse_spec(":kvint8").unwrap_err().contains("GGUF path"));
+        assert!(parse_spec(":kvint8").unwrap_err().contains("needs a checkpoint path"));
     }
 
     #[test]
