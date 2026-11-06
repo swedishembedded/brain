@@ -3447,6 +3447,22 @@ land. Known traps already identified from reading (not yet test-pinned):
 
 ## Recorded gaps (kept current)
 
+- **Stage 1 of a 1280x704 audio+video clip is host-bound on re-uploading
+  the window's tail.** An nsys trace of a whole clip on one P40 shows the
+  12320-token stage 2 GPU-bound (the host waits on the device 51-60 s of
+  every minute) but the 3080-token stage 1 waiting only 28-44 s a minute,
+  with driver allocation small throughout (5768 `vkAllocateMemory` calls,
+  44 s, for the clip). A frame-pointer perf profile of stage 1 puts the
+  single-threaded wall time in `memmove` under `devres` `run_blocks` ->
+  `BlockWindow::acquire` -> `resident_on_cached` -> `queue_write_buffer`:
+  the 48 AV blocks (~440 MB each at int8) do not all fit one card, so the
+  window's rotating tail is copied host->staging->device every forward, and
+  at 3080 tokens a block's device work is too short to hide it. Two levers:
+  write the repacked block straight into a mapped staging range
+  (`write_buffer_with`) to drop the intermediate host copy, or split the
+  stack over both cards so every block stays resident (the 2-card CFG pair
+  already runs bit-identically).
+
 - **`brain ltxv upscale`'s multi-pass continuity has no real-weight
   measurement, and the command has no capability action.** Phase 21 added
   post-hoc 2x upscaling of a finished clip, sharing `upscale_and_refine` with
