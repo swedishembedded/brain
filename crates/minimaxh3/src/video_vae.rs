@@ -1153,59 +1153,146 @@ fn layerscale_residual(cx: &Ctx, x: &DeviceBuffer, scale: &DeviceBuffer, h: &Dev
     y
 }
 
+/// One decoder transformer layer's weights on the device - uploaded once
+/// per decode ([`DecoderWeights`]) and read by every tile and chunk. Clones
+/// share the device buffers.
+#[derive(Clone)]
+struct DecoderLayer {
+    wq: DeviceBuffer,
+    bq: DeviceBuffer,
+    wk: DeviceBuffer,
+    bk: DeviceBuffer,
+    wv: DeviceBuffer,
+    bv: DeviceBuffer,
+    wo: DeviceBuffer,
+    bo: DeviceBuffer,
+    norm1: DeviceBuffer,
+    norm2: DeviceBuffer,
+    scale1: DeviceBuffer,
+    scale2: DeviceBuffer,
+    fc1_value_w: DeviceBuffer,
+    fc1_gate_w: DeviceBuffer,
+    fc1_value_b: DeviceBuffer,
+    fc1_gate_b: DeviceBuffer,
+    fc2_w: DeviceBuffer,
+    fc2_b: DeviceBuffer,
+}
+
+impl DecoderLayer {
+    fn upload(cx: &Ctx, tensors: &Tensors, prefix: &str, cfg: &VideoVaeConfig) -> DecoderLayer {
+        let (dim, ffn) = (cfg.decoder_dim(), cfg.decoder_ffn_dim());
+        let up = |leaf: &str| upload(cx, tensors, &format!("{prefix}.{leaf}"));
+        let (fc1_w_shape, fc1_w) = get(tensors, &format!("{prefix}.ff.net.0.proj.weight"));
+        let (_, fc1_b) = get(tensors, &format!("{prefix}.ff.net.0.proj.bias"));
+        assert_eq!(fc1_w_shape, &vec![2 * ffn as usize, dim as usize], "{prefix}.ff.net.0.proj.weight");
+        let (half_w, half_b) = ((ffn * dim) as usize, ffn as usize);
+        DecoderLayer {
+            wq: up("attn.to_q.weight"),
+            bq: up("attn.to_q.bias"),
+            wk: up("attn.to_k.weight"),
+            bk: up("attn.to_k.bias"),
+            wv: up("attn.to_v.weight"),
+            bv: up("attn.to_v.bias"),
+            wo: up("attn.to_out.0.weight"),
+            bo: up("attn.to_out.0.bias"),
+            norm1: up("norm1.weight"),
+            norm2: up("norm2.weight"),
+            scale1: up("scale1"),
+            scale2: up("scale2"),
+            fc1_value_w: cx.gpu.storage_init(&format!("{prefix}.ff.net.0.proj.weight.value"), &fc1_w[..half_w]),
+            fc1_gate_w: cx.gpu.storage_init(&format!("{prefix}.ff.net.0.proj.weight.gate"), &fc1_w[half_w..2 * half_w]),
+            fc1_value_b: cx.gpu.storage_init(&format!("{prefix}.ff.net.0.proj.bias.value"), &fc1_b[..half_b]),
+            fc1_gate_b: cx.gpu.storage_init(&format!("{prefix}.ff.net.0.proj.bias.gate"), &fc1_b[half_b..2 * half_b]),
+            fc2_w: up("ff.net.2.weight"),
+            fc2_b: up("ff.net.2.bias"),
+        }
+    }
+}
+
+/// The ViT decoder's transformer stack as one decode reads it. A decode runs
+/// the stack over every tile of every temporal chunk, so uploading it once
+/// per decode, rather than once per layer per tile, removes dozens of
+/// re-reads of ~10 GB of fp32 weights over PCIe - when the card has room to
+/// hold them beside the decode itself. Otherwise each layer is uploaded when
+/// it runs and dropped after, which is what any card can afford.
+enum DecoderWeights<'t> {
+    Resident(Vec<DecoderLayer>),
+    Streamed(&'t Tensors),
+}
+
+impl<'t> DecoderWeights<'t> {
+    /// Resident when the card's measured free memory holds the stack with
+    /// as much again to spare for the decode's own buffers, streamed
+    /// otherwise (and on a device whose free memory cannot be measured). A
+    /// resident decode of a 704x384, 124-frame clip measured a 19.2 GB peak
+    /// on a P40 against a 9.6 GB stack, in 158 s where the streamed one took
+    /// 450 s.
+    fn for_decode(cx: &Ctx, tensors: &'t Tensors, cfg: &VideoVaeConfig) -> DecoderWeights<'t> {
+        let stack: u64 = (0..cfg.decoder_num_layers)
+            .flat_map(|i| tensors.iter().filter(move |(name, _)| name.starts_with(&format!("decoder.transformer_blocks.{i}."))))
+            .map(|(_, (_, data))| data.len() as u64 * 4)
+            .sum();
+        let free = match cx.gpu.memory_device() {
+            memauth::Device::Gpu(i) => gpu_core::capacity::available_for(i),
+            _ => None,
+        };
+        if free.is_some_and(|free| free >= 2 * stack) {
+            let layers = (0..cfg.decoder_num_layers as usize)
+                .map(|i| {
+                    let layer = DecoderLayer::upload(cx, tensors, &format!("decoder.transformer_blocks.{i}"), cfg);
+                    cx.gpu.poll_wait();
+                    layer
+                })
+                .collect();
+            DecoderWeights::Resident(layers)
+        } else {
+            DecoderWeights::Streamed(tensors)
+        }
+    }
+
+    /// Layer `i`, borrowed when resident, uploaded for this call otherwise.
+    fn layer(&self, cx: &Ctx, cfg: &VideoVaeConfig, i: usize) -> std::borrow::Cow<'_, DecoderLayer> {
+        match self {
+            DecoderWeights::Resident(layers) => std::borrow::Cow::Borrowed(&layers[i]),
+            DecoderWeights::Streamed(tensors) => std::borrow::Cow::Owned(DecoderLayer::upload(cx, tensors, &format!("decoder.transformer_blocks.{i}"), cfg)),
+        }
+    }
+}
+
+/// The decoder layers' per-layer scratch: every layer of every tile repeats
+/// the same allocation sequence, so the arena hands each the previous one's
+/// buffers instead of fresh driver allocations.
+const DECODER_ARENA: &str = "minimaxh3 vae decoder layer";
+
 /// One `MiniMaxH3VideoTransformerBlock.forward`.
 #[allow(clippy::too_many_arguments)]
-fn decoder_block_forward(cx: &Ctx, tensors: &Tensors, prefix: &str, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, ones_hd: &DeviceBuffer, cfg: &VideoVaeConfig, seq_len: u32) -> DeviceBuffer {
+fn decoder_block_forward(cx: &Ctx, w: &DecoderLayer, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, ones_hd: &DeviceBuffer, cfg: &VideoVaeConfig, seq_len: u32) -> DeviceBuffer {
     let dim = cfg.decoder_dim();
     let heads = cfg.decoder_num_attention_heads;
     let hd = cfg.decoder_attention_head_dim;
     let ffn = cfg.decoder_ffn_dim();
     let half = cfg.decoder_rope_dim() / 2;
     let eps = cfg.decoder_norm_eps;
+    let DecoderLayer { wq, bq, wk, bk, wv, bv, wo, bo, norm1, norm2, scale1, scale2, fc1_value_w, fc1_gate_w, fc1_value_b, fc1_gate_b, fc2_w, fc2_b } = w;
 
-    let wq = upload(cx, tensors, &format!("{prefix}.attn.to_q.weight"));
-    let bq = upload(cx, tensors, &format!("{prefix}.attn.to_q.bias"));
-    let wk = upload(cx, tensors, &format!("{prefix}.attn.to_k.weight"));
-    let bk = upload(cx, tensors, &format!("{prefix}.attn.to_k.bias"));
-    let wv = upload(cx, tensors, &format!("{prefix}.attn.to_v.weight"));
-    let bv = upload(cx, tensors, &format!("{prefix}.attn.to_v.bias"));
-    let wo = upload(cx, tensors, &format!("{prefix}.attn.to_out.0.weight"));
-    let bo = upload(cx, tensors, &format!("{prefix}.attn.to_out.0.bias"));
-    let norm1 = upload(cx, tensors, &format!("{prefix}.norm1.weight"));
-    let norm2 = upload(cx, tensors, &format!("{prefix}.norm2.weight"));
-    let scale1 = upload(cx, tensors, &format!("{prefix}.scale1"));
-    let scale2 = upload(cx, tensors, &format!("{prefix}.scale2"));
-
-    let (fc1_w_shape, fc1_w) = get(tensors, &format!("{prefix}.ff.net.0.proj.weight"));
-    let (_, fc1_b) = get(tensors, &format!("{prefix}.ff.net.0.proj.bias"));
-    assert_eq!(fc1_w_shape, &vec![2 * ffn as usize, dim as usize], "{prefix}.ff.net.0.proj.weight");
-    let half_w = (ffn * dim) as usize;
-    let half_b = ffn as usize;
-    let fc1_value_w = cx.gpu.storage_init(&format!("{prefix}.ff.net.0.proj.weight.value"), &fc1_w[..half_w]);
-    let fc1_gate_w = cx.gpu.storage_init(&format!("{prefix}.ff.net.0.proj.weight.gate"), &fc1_w[half_w..2 * half_w]);
-    let fc1_value_b = cx.gpu.storage_init(&format!("{prefix}.ff.net.0.proj.bias.value"), &fc1_b[..half_b]);
-    let fc1_gate_b = cx.gpu.storage_init(&format!("{prefix}.ff.net.0.proj.bias.gate"), &fc1_b[half_b..2 * half_b]);
-    let fc2_w = upload(cx, tensors, &format!("{prefix}.ff.net.2.weight"));
-    let fc2_b = upload(cx, tensors, &format!("{prefix}.ff.net.2.bias"));
-
-    let n1 = rmsnorm(cx, x, &norm1, seq_len, dim, eps);
-    let q = linear(cx, &n1, &wq, Some(&bq), seq_len, dim, dim);
-    let k = linear(cx, &n1, &wk, Some(&bk), seq_len, dim, dim);
-    let v = linear(cx, &n1, &wv, Some(&bv), seq_len, dim, dim);
+    let n1 = rmsnorm(cx, x, norm1, seq_len, dim, eps);
+    let q = linear(cx, &n1, wq, Some(bq), seq_len, dim, dim);
+    let k = linear(cx, &n1, wk, Some(bk), seq_len, dim, dim);
+    let v = linear(cx, &n1, wv, Some(bv), seq_len, dim, dim);
     let qn = rmsnorm(cx, &q, ones_hd, seq_len * heads, hd, eps);
     let kn = rmsnorm(cx, &k, ones_hd, seq_len * heads, hd, eps);
     rope_partial(cx, &qn, cos, sin, seq_len, heads, hd, half);
     rope_partial(cx, &kn, cos, sin, seq_len, heads, hd, half);
     let attn = crate::block::attention(&cx.gpu, &VAE_ATTN, crate::block::attn_mode(&cx.gpu, hd), &qn, &kn, &v, seq_len, heads, hd);
-    let attn_out = linear(cx, &attn, &wo, Some(&bo), seq_len, dim, dim);
-    let h1 = layerscale_residual(cx, x, &scale1, &attn_out, seq_len, dim);
+    let attn_out = linear(cx, &attn, wo, Some(bo), seq_len, dim, dim);
+    let h1 = layerscale_residual(cx, x, scale1, &attn_out, seq_len, dim);
 
-    let n2 = rmsnorm(cx, &h1, &norm2, seq_len, dim, eps);
-    let value = linear(cx, &n2, &fc1_value_w, Some(&fc1_value_b), seq_len, dim, ffn);
-    let gate = linear(cx, &n2, &fc1_gate_w, Some(&fc1_gate_b), seq_len, dim, ffn);
+    let n2 = rmsnorm(cx, &h1, norm2, seq_len, dim, eps);
+    let value = linear(cx, &n2, fc1_value_w, Some(fc1_value_b), seq_len, dim, ffn);
+    let gate = linear(cx, &n2, fc1_gate_w, Some(fc1_gate_b), seq_len, dim, ffn);
     let act = swiglu(cx, &value, &gate, seq_len * ffn);
-    let ff_out = linear(cx, &act, &fc2_w, Some(&fc2_b), seq_len, ffn, dim);
-    layerscale_residual(cx, &h1, &scale2, &ff_out, seq_len, dim)
+    let ff_out = linear(cx, &act, fc2_w, Some(fc2_b), seq_len, ffn, dim);
+    layerscale_residual(cx, &h1, scale2, &ff_out, seq_len, dim)
 }
 
 /// `MiniMaxH3VideoRotaryPosEmbed.forward`, host-side: `cos`/`sin` tables
@@ -1275,7 +1362,7 @@ fn unpatchify(proj: &[f32], num_frames: u32, height: u32, width: u32, out_channe
 /// buffer. Returns the pixel buffer `[out_channels, t*patch_size_t,
 /// h*patch_size, w*patch_size]` plus its shape. Takes an already-open
 /// [`Ctx`] so a tiled decode opens ONE device for the whole tile grid.
-fn decode_clip_untiled(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, z: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
+fn decode_clip_untiled(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, layers: &DecoderWeights, z: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
     assert_eq!(z.len(), (cfg.latent_channels * t * h * w) as usize, "decode_clip: input length {} != latent_channels*t*h*w", z.len());
     let zin = cx.gpu.storage_init("video_vae.z", z);
     let (pz, t1, h1, w1) = causal_conv3d(cx, tensors, "post_quant_conv", cfg.latent_channels, t, h, w, cfg.latent_channels, 1, (1, 1, 1), 0, 0, &zin);
@@ -1332,21 +1419,20 @@ fn decode_clip_untiled(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, z: &[f
 
     let mut hbuf = cx.gpu.storage_init("video_vae.h0", &full);
     for i in 0..cfg.decoder_num_layers as usize {
-        let p = format!("decoder.transformer_blocks.{i}");
-        hbuf = decoder_block_forward(cx, tensors, &p, &hbuf, &cos_dev, &sin_dev, &ones_hd, cfg, seq_len);
-        // Same reclaim-point requirement as `H3Transformer::forward_streaming`'s
-        // per-block loop: `decoder_block_forward` uploads roughly 18 fresh
-        // device buffers per call (`upload`/`storage_init`, never reused
-        // across layers), and dropping a `DeviceBuffer` does not itself free
-        // VRAM on the wgpu backend until a poll proves the GPU is done with
-        // it. Without this, one call's 36 layers alone hold onto ~10GB of
-        // never-reclaimed weight buffers (dim=2048/ffn=8192 per layer) plus
-        // activations - and `decode_clip_in`'s tile loop calls this function
-        // once per tile (4 times for a 2x2 grid), so a real decode OOM'd
-        // well before the outer per-chunk `poll_wait` in `decode`/`encode`
-        // ever got a chance to run.
+        let layer = layers.layer(cx, cfg, i);
+        hbuf = {
+            let _arena = cx.gpu.scratch_scope_in(DECODER_ARENA);
+            decoder_block_forward(cx, &layer, &hbuf, &cos_dev, &sin_dev, &ones_hd, cfg, seq_len)
+        };
+        // The arena's contract: this layer's work is drained before the next
+        // scope hands its buffers out again. It also reclaims a streamed
+        // layer's weights before the next layer's upload.
         cx.gpu.poll_wait();
     }
+    // Opening a scope has the backend hold freed blocks for reuse; the
+    // decode's other stages free buffers of every size, which must go back
+    // to the driver rather than accumulate across tiles and chunks.
+    cx.gpu.hold_freed_blocks(false);
 
     let norm_out_w = upload(cx, tensors, "decoder.norm_out.weight");
     let norm_out_b = upload(cx, tensors, "decoder.norm_out.bias");
@@ -1381,12 +1467,13 @@ fn decode_clip_untiled(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, z: &[f
 /// frame area. See [`attention`]'s own overflow assert.
 pub fn decode_clip(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, z: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
     let cx = Ctx::new(device);
-    decode_clip_in(&cx, cfg, tensors, z, t, h, w)
+    let layers = DecoderWeights::for_decode(&cx, tensors, cfg);
+    decode_clip_in(&cx, cfg, tensors, &layers, z, t, h, w)
 }
 
-fn decode_clip_in(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, z: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
+fn decode_clip_in(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, layers: &DecoderWeights, z: &[f32], t: u32, h: u32, w: u32) -> (Vec<f32>, u32, u32, u32) {
     if !cfg.use_tiling {
-        return decode_clip_untiled(cx, cfg, tensors, z, t, h, w);
+        return decode_clip_untiled(cx, cfg, tensors, layers, z, t, h, w);
     }
     let ratio = cfg.spatial_compression_ratio();
     let height = h * ratio;
@@ -1394,7 +1481,7 @@ fn decode_clip_in(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, z: &[f32], 
     let (y_idx, y_len, y_ov) = split_tiles(height, cfg.tile_sample_min_height, cfg.tile_sample_min_overlap_height, ratio);
     let (x_idx, x_len, x_ov) = split_tiles(width, cfg.tile_sample_min_width, cfg.tile_sample_min_overlap_width, ratio);
     if y_idx.len() == 1 && x_idx.len() == 1 {
-        return decode_clip_untiled(cx, cfg, tensors, z, t, h, w);
+        return decode_clip_untiled(cx, cfg, tensors, layers, z, t, h, w);
     }
 
     let mut rows: Vec<Vec<Tile>> = Vec::with_capacity(y_idx.len());
@@ -1402,7 +1489,7 @@ fn decode_clip_in(cx: &Ctx, cfg: &VideoVaeConfig, tensors: &Tensors, z: &[f32], 
         let mut row: Vec<Tile> = Vec::with_capacity(x_idx.len());
         for (&j_pos, &j_len) in x_idx.iter().zip(x_len.iter()) {
             let sub = spatial_window_host(z, cfg.latent_channels, t, h, w, i_pos / ratio, i_len / ratio, j_pos / ratio, j_len / ratio);
-            let (p, pt, ph, pw) = decode_clip_untiled(cx, cfg, tensors, &sub, t, i_len / ratio, j_len / ratio);
+            let (p, pt, ph, pw) = decode_clip_untiled(cx, cfg, tensors, layers, &sub, t, i_len / ratio, j_len / ratio);
             row.push(Tile::new(p, cfg.out_channels, pt, ph, pw));
             // Belt-and-suspenders alongside `decode_clip_untiled`'s own
             // per-layer poll_wait: reclaim this tile's buffers before the
@@ -1432,6 +1519,7 @@ pub fn decode(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, z: 
     let frame_overlap = cfg.frame_overlap();
     let ps = cfg.spatial_compression_ratio();
     let cx = Ctx::new(device);
+    let layers = DecoderWeights::for_decode(&cx, tensors, cfg);
 
     let num_tokens = nt + token_drop;
     let pad_tokens = (tokens_chunk_size - num_tokens % tokens_chunk_size) % tokens_chunk_size;
@@ -1448,7 +1536,7 @@ pub fn decode(cfg: &VideoVaeConfig, tensors: &Tensors, device: Option<&str>, z: 
         let start = i * tokens_chunk_size;
         let take = (tokens_chunk_size + token_overlap).min(zt - start);
         let zc = slice_frames_host(&zpad, c, zt, h, w, start, take);
-        let (clip_pixels, cf, ch_, cw_) = decode_clip_in(&cx, cfg, tensors, &zc, take, h, w);
+        let (clip_pixels, cf, ch_, cw_) = decode_clip_in(&cx, cfg, tensors, &layers, &zc, take, h, w);
         assert_eq!((ch_, cw_), (fh, fw), "decode: clip spatial shape drifted");
         // Same reclaim-point requirement as `H3Transformer::forward_streaming`'s
         // per-block loop (see that function's own doc): on the wgpu backend,

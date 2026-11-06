@@ -16,6 +16,9 @@ path = "src/lib.rs"
 # on separately.
 brain-capability.workspace = true
 brain-gpu-core.workspace = true
+# `Gpu::memory_device` names a card as a `memauth::Device`: how the video VAE
+# decoder asks whether its card holds the weight stack resident.
+brain-memauth.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
 # `AttentionGeometry`-shaped dispatch (QKV width != hidden width) and QK-norm
