@@ -476,8 +476,7 @@ impl Drop for VideoJobs {
 }
 
 fn create_private_dir(dir: &FsPath) -> Result<(), String> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(|e| format!("the video spool {}: {e}", dir.display()))
+    crate::surface::private_dir(dir).map_err(|e| format!("the video spool {}: {e}", dir.display()))
 }
 
 fn private_temp_dir() -> Result<PathBuf, String> {

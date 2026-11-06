@@ -29,7 +29,6 @@
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -168,12 +167,11 @@ impl ArtifactStore {
     /// that what was copied hashes to `digest`; `dest` is removed again when it does not. Returns the size.
     pub fn fetch(&self, digest: &Digest, dest: &Path, limit: u64) -> Result<u64, StoreError> {
         let path = self.root.join(digest.hex());
-        // `O_NOFOLLOW`: a link planted in the store is not followed out of it. `O_NONBLOCK`: opening a FIFO
-        // there must not hang the job; the type is checked on the open handle below.
-        let mut file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC).open(&path) {
+        let mut file = match open_stored(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(StoreError::Missing(*digest)),
             // A symbolic link (ELOOP) is not an artifact of the store.
+            #[cfg(unix)]
             Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(StoreError::Missing(*digest)),
             Err(e) => return Err(io_error("opening", &path, &e)),
         };
@@ -184,7 +182,7 @@ impl ArtifactStore {
         if meta.len() > limit {
             return Err(StoreError::TooLarge { digest: *digest, limit });
         }
-        let mut out = OpenOptions::new().write(true).create_new(true).mode(0o600).open(dest).map_err(|e| io_error("creating", dest, &e))?;
+        let mut out = create_new(dest, 0o600).map_err(|e| io_error("creating", dest, &e))?;
         let copied = copy_hashing(&mut file, &mut out, limit);
         let verdict = match copied {
             Ok((hash, size)) if &Digest::of(&hash) == digest => Ok(size),
@@ -213,7 +211,7 @@ impl ArtifactStore {
 
     fn publish_from(&self, input: &mut dyn Read) -> Result<(Digest, u64), StoreError> {
         let temp = self.root.join(format!(".publishing-{}-{}", std::process::id(), PUBLISHED.fetch_add(1, Ordering::Relaxed)));
-        let mut out = OpenOptions::new().write(true).create_new(true).mode(0o640).open(&temp).map_err(|e| io_error("creating", &temp, &e))?;
+        let mut out = create_new(&temp, 0o640).map_err(|e| io_error("creating", &temp, &e))?;
         let finish = (|| {
             let (hash, size) = copy_hashing(input, &mut out, u64::MAX).map_err(|e| match e {
                 CopyError::Io(e) => io_error("writing", &temp, &e),
@@ -234,6 +232,32 @@ impl ArtifactStore {
 enum CopyError {
     Io(std::io::Error),
     TooLong,
+}
+
+/// Opens the stored artifact `path` for reading, refusing to be led out of the store.
+fn open_stored(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    // `O_NOFOLLOW`: a link planted in the store is not followed out of it. `O_NONBLOCK`: opening a FIFO there
+    // must not hang the job. The type is checked on the open handle by the caller.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    // `FILE_FLAG_OPEN_REPARSE_POINT`: a link is opened as itself, which the caller's type check refuses.
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, 0x0020_0000);
+    options.open(path)
+}
+
+/// Creates the new file `path`, with the permission bits `mode` on Unix. Elsewhere it takes its directory's
+/// access control, which the store's owner sets.
+fn create_new(path: &Path, mode: u32) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, mode);
+    #[cfg(not(unix))]
+    let _ = mode;
+    options.open(path)
 }
 
 /// Copies `from` to `to`, hashing what passes, refusing more than `limit` bytes.
@@ -263,14 +287,16 @@ pub fn digest_of(bytes: &[u8]) -> Digest {
     Digest::of(&blake3::hash(bytes))
 }
 
-/// Mode bits of a published artifact, for tests that check what other users may read.
-pub fn published_mode(store: &ArtifactStore, digest: &Digest) -> Option<u32> {
-    std::fs::metadata(store.root.join(digest.hex())).ok().map(|m| m.permissions().mode() & 0o777)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mode bits of a published artifact: what other users may read.
+    #[cfg(unix)]
+    fn published_mode(store: &ArtifactStore, digest: &Digest) -> Option<u32> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(store.root.join(digest.hex())).ok().map(|m| m.permissions().mode() & 0o777)
+    }
 
     fn store() -> (tempfile::TempDir, ArtifactStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -296,6 +322,7 @@ mod tests {
         let (_dir, store) = store();
         let digest = store.publish_bytes(b"{\"messages\":[]}\n").unwrap();
         assert_eq!(digest, digest_of(b"{\"messages\":[]}\n"));
+        #[cfg(unix)]
         assert_eq!(published_mode(&store, &digest), Some(0o640));
         let work = tempfile::tempdir().unwrap();
         let copy = work.path().join("copy");
@@ -321,6 +348,7 @@ mod tests {
         assert!(!copy.exists(), "unverified bytes must not remain where a job could read them");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_link_a_directory_or_a_pipe_in_the_store_is_not_an_artifact() {
         let (dir, store) = store();

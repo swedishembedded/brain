@@ -12,6 +12,7 @@
 #[path = "../../../sdk/tests/chat_fixture/common.rs"]
 mod fixture;
 
+#[cfg(target_os = "linux")]
 mod dbus;
 mod door;
 mod http;

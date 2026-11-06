@@ -43,10 +43,15 @@ pub struct JobEnv {
 }
 
 /// The directory the jobs of this user make their private directories in: `brain-train-<uid>` under the
-/// temporary directory (`TMPDIR`).
+/// temporary directory (`TMPDIR`). Windows gives each user a temporary directory of their own, so there it is
+/// plain `brain-train`.
 pub fn default_work_root() -> PathBuf {
+    #[cfg(unix)]
     // SAFETY: `geteuid` has no preconditions.
-    std::env::temp_dir().join(format!("brain-train-{}", unsafe { libc::geteuid() }))
+    let name = format!("brain-train-{}", unsafe { libc::geteuid() });
+    #[cfg(not(unix))]
+    let name = "brain-train".to_string();
+    std::env::temp_dir().join(name)
 }
 
 /// A job's private directory, removed when the job ends however it ends.
@@ -56,18 +61,24 @@ static JOBS: AtomicU64 = AtomicU64::new(0);
 
 impl Workdir {
     pub fn create(root: &Path) -> Result<Workdir, String> {
-        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(root).map_err(|e| format!("train: cannot make the work directory {}: {e}", root.display()))?;
-        // The root may sit in a directory other users write to: what is there must be this process's own plain
-        // directory, not a link or a directory someone else made and can write to.
-        let meta = std::fs::symlink_metadata(root).map_err(|e| format!("train: cannot inspect the work directory {}: {e}", root.display()))?;
-        // SAFETY: `geteuid` has no preconditions.
-        let me = unsafe { libc::geteuid() };
-        if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o022 != 0 {
-            return Err(format!("train: the work directory {} must be a directory of this user that nobody else can write to", root.display()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.recursive(true).create(root).map_err(|e| format!("train: cannot make the work directory {}: {e}", root.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // The root may sit in a directory other users write to: what is there must be this process's own
+            // plain directory, not a link or a directory someone else made and can write to.
+            let meta = std::fs::symlink_metadata(root).map_err(|e| format!("train: cannot inspect the work directory {}: {e}", root.display()))?;
+            // SAFETY: `geteuid` has no preconditions.
+            let me = unsafe { libc::geteuid() };
+            if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o022 != 0 {
+                return Err(format!("train: the work directory {} must be a directory of this user that nobody else can write to", root.display()));
+            }
         }
         let dir = root.join(format!("job-{}-{}", std::process::id(), JOBS.fetch_add(1, Ordering::Relaxed)));
-        std::fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|e| format!("train: cannot make the job directory {}: {e}", dir.display()))?;
+        builder.recursive(false).create(&dir).map_err(|e| format!("train: cannot make the job directory {}: {e}", dir.display()))?;
         Ok(Workdir(dir))
     }
 
