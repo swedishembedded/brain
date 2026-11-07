@@ -140,6 +140,17 @@ and the `brain-model` `paged_sparse` device tests for the new geometries. The
 engine-level sparse-equals-oracle gate is the kernel's (per layer, against
 `lsa::attend`), not a Ripple logits comparison.
 
+Software Vulkan adapter (lavapipe, `BRAIN_DEVICE=software`, 2026-11-07): the
+`lsa` gates and the tiny-model `parity` and `serve` gates of `brain-ricursive`
+run on the wgpu path and agree with the CPU backend (11 of 14 tests pass; LSA
+full-budget worst scaled error 6.6e-7 against tolerance 1e-5, prefill and
+decode, chunked; warm vs cold prefill 0 to 5.2e-7). The three real-weight tests
+(`real_layers_0_and_4_match_the_reference`, the serving-engine one and the
+sparse full-budget one) do not run there: the real checkpoint binds a 200 MiB
+weight matrix and lavapipe caps a storage binding at 128 MiB, so
+`create_bind_group` rejects it. They stay CPU-JIT or card gates; the sparse one
+needs a card (it skips on the JIT).
+
 ## Open items for the later steps
 
 - Step 1's `Layer::record` still materializes `[heads, t, t]` scores; the

@@ -287,13 +287,32 @@ head layout; clustering, selection and the sparse read are written once.
       bytes, 80 heads whole-row 9040). The device gates against the scalar
       oracle (group 10 and 5, f32; packed bit-identity at 80/8/128; whole-row
       at 40, 64 and 80 heads) exist and skip on a backend without workgroup
-      barriers: they have not run yet.
+      barriers. They have run on the software Vulkan adapter (below), not yet
+      on a card.
+
+Software-adapter validation (2026-11-07, `BRAIN_DEVICE=software`, Mesa
+lavapipe on the CPU, no card touched; recipe in `rules/testing.md`). Every
+barrier-kernel gate that skips on the CPU JIT runs and passes there:
+
+| suite | result | time |
+|---|---|---|
+| `brain-model` lib `paged_sparse` (10, incl. `the_wide_group_kernels_match_the_scalar_oracle`, whole-row, packed, bf16 pools) | 10 passed | 8 s |
+| `brain-model` lib `lsa` (29: device read, tree, ward, native, engine, distill) | 29 passed; 2 skip by name, goldens absent | 2.4 s |
+| `brain-ricursive` `it` `lsa` (full budget equals dense, small budget reads fewer keys, prefix reuse and batching) | 5 passed; full-budget worst scaled error 6.6e-7 (tolerance 1e-5) | 7 s |
+| `brain-qwen3` `it` `lsa` (Qwen3-0.6B from the model store) | 7 passed, 2 ignored experiments | 940 s |
+
+`brain-qwen3` measured: full budget last-hidden relative error 1.26e-6, 8-key
+budget 1.75e-1 (it must differ), int8 KV sparse vs dense int8 1.26e-2, YaRN x2
+every-key sparse vs dense 8.98e-7, narrow-beam tree vs flat 4.39e-2. lavapipe
+reports `workgroup_reductions` true; no capability declaration was wrong and no
+kernel defect surfaced. The timings are lavapipe's and say nothing about a GPU.
 
 ## Not yet done
 
-- [ ] Run the new geometries' device gates (`make test/one P=brain-model
-      T=paged_sparse` lib tests, `brain-ricursive` `lsa`) on a GPU: the CPU JIT
-      executes none of the LSA kernels.
+- [ ] Run the new geometries' device gates (`brain-model` lib `paged_sparse`,
+      `brain-ricursive` `lsa` and its real-weight sparse test) on a card: they
+      pass on the software adapter, which cannot hold the real checkpoint's
+      200 MiB weight binding and says nothing about GPU timing.
 
 - [ ] Tensor-core sparse attention: a native (`gpu_core::provider::cuda`)
       kernel over a block of consecutive queries and the union of their

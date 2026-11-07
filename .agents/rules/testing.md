@@ -203,6 +203,24 @@ D-Bus suites additionally spin up a **private** `dbus-daemon` per run
 (`dbus-daemon --session --fork --print-address --print-pid=3`) so nothing here
 ever touches the real session/system bus.
 
+### Validating GPU kernels without a GPU (software Vulkan)
+
+On a node whose cards belong to other jobs, the CPU JIT skips every
+workgroup-barrier kernel by name. `--device software` (or `BRAIN_DEVICE=software`
+in a test binary) builds on Mesa lavapipe through wgpu instead: no CUDA context,
+no NVIDIA driver, no card index, and `DeviceCaps::workgroup_reductions` true.
+
+```bash
+source ~/project/shared/containers/lavapipe/env.sh   # lavapipe ICD, CUDA_VISIBLE_DEVICES=""
+BRAIN_DEVICE=software make test/one P=brain-ricursive T=it ARGS="lsa --test-threads=1"
+BRAIN_DEVICE=software cargo test --profile fast -p brain-model --lib -- lsa paged_sparse
+```
+
+Check the `adapter: llvmpipe ... (Cpu, Vulkan)` line. lavapipe caps one storage
+binding at 128 MiB, so a test that binds a larger weight fails in
+`create_bind_group`; that is its limit, not a kernel defect. No timing from it is
+a GPU number. Outcomes: `.agents/roadmap/lsa.md`.
+
 ## Test-only environment variables
 
 These gate test fixtures, weight-required test paths, or benchmark knobs. None
