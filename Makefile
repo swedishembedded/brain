@@ -652,6 +652,15 @@ test/e2e/shutdown: build/debug
 test/e2e/samples: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/samples.bats tests/e2e/samples_manifest.bats
 
+# End-to-end: Ripple-65B served by the real binary over the OpenAI API on the CPU backend: a
+# scripted tiny model through the published chat template with tools (streamed and not, a tool
+# result sent back), the sparse-attention indexer on the software Vulkan adapter, and the real
+# layers 0 and 4 of the checkpoint. Skips by name what its inputs are missing (template under
+# testdata/, BRAIN_LAVAPIPE_ENV, the 5 GB partial checkpoint).
+## test/e2e/ripple - Ripple-65B served end to end (scripted tiny model, sparse attention, real layers 0 and 4)
+test/e2e/ripple: build/debug
+	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/ripple.bats
+
 # End-to-end: `brain serve --ready-file PATH` fires only once EVERY requested
 # surface (HTTP dialects + D-Bus) has actually bound, never on a failed or
 # partial bind, and strictly AFTER --api-keys-out is written - so a script can
@@ -2230,7 +2239,7 @@ help:
         test test/nextest test/one test/package test/doc test/slow test/full test/times test/capability-report \
         test/gradcheck test/rl test/conformance test/cuda-matrix \
         test/parity test/parity/strict test/parity/forecast test/parity/wan \
-        test/e2e test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e/samples test/e2e/ready \
+        test/e2e test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e/samples test/e2e/ready test/e2e/ripple \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
         check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/copyright check/paths check/scope check/saved-policy check/hf-fixtures \

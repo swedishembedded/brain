@@ -31,3 +31,4 @@ tools/goldens/worldmirror2_dump_reference.py	sample:seed=0	python-default	world:
 tools/goldens/ouro_dump_reference.py	-:SEED=4242	python-const	frozen: the seed fixes the tiny reference checkpoint initialization, so the dumped hidden states, gates and logits are reproducible
 tools/goldens/huginn_dump_reference.py	-:SEED=2027	python-const	frozen: the seed fixes the tiny reference checkpoint initialization and the fixed latent starting state, so the dumped per-step logits and latents are reproducible
 tools/goldens/lsa_dump_reference.py	main:manual_seed=20261030	python-rng	frozen: the parity fixture's keys, queries and positions are drawn under this seed, so a re-dump reproduces the same golden the model::lsa parity test reads
+tools/goldens/ripple_serve_fixture.py	scripted:random.Random=7	python-rng	test-double: the scripted tiny model is a fixed fixture, so every run serves the same weights and the same reply

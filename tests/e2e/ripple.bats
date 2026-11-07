@@ -1,0 +1,166 @@
+#!/usr/bin/env bats
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Swedish Embedded AB implements solutions for proving that a served model
+# answers over its HTTP API exactly as its published reference format
+# prescribes, for its clients. If your team needs expertise in end-to-end
+# serving tests of large language models without their weights then you can
+# procure our services by sending an email to info@swedishembedded.com.
+
+# Ripple-65B served end to end by the real `brain` binary over the OpenAI API, on the CPU backend.
+#
+# Three servers, each its own model directory under a scratch root:
+#
+#  * a tiny SCRIPTED Ripple (tools/goldens/ripple_serve_fixture.py scripted): the published `chat_template.jinja`, a
+#    byte-level tokenizer and weights whose greedy decode replays one fixed reply (reasoning, a JSON tool call, end
+#    of turn). It tests the serving path: the template with tools, the tokenizer, the scheduler, the reply scanner and
+#    the OpenAI surface, streamed and not, plus a multi-turn conversation that sends the tool result back. Needs the
+#    template at testdata/ricursive/ripple-65b-partial/chat_template.jinja (skips by name without it).
+#  * the same model with `--sparse-attention` on the software Vulkan adapter (`--device software`), where the
+#    workgroup-barrier kernels run: needs the lavapipe environment file named by BRAIN_LAVAPIPE_ENV (see
+#    .agents/rules/testing.md), skips by name without it.
+#  * the REAL layers 0 and 4 of Ripple-65B (`ripple_serve_fixture.py partial`, 5 GB) as a two-layer model: it
+#    checks that the real tokenizer, template and bf16 tensors serve (a two-layer model does not answer
+#    sensibly; only the plumbing and the prompt are asserted). Skips by name without the partial checkpoint.
+#
+# Run: make test/e2e/ripple   (or: BRAIN_BIN=./target/fast/brain bats tests/e2e/ripple.bats)
+#
+# SAFETY: teardown kills ONLY the PIDs this file recorded (never pkill / killall).
+
+MODEL="ricursiveAI/Ripple-scripted"
+PARTIAL="ricursiveAI/Ripple-65B-layers-0-4"
+TOOLS='[{"type":"function","function":{"name":"get_weather","description":"Get the weather for a city.","parameters":{"type":"object","properties":{"city":{"type":"string","description":"City name"}},"required":["city"]}}}]'
+
+# Start `brain serve` on $2 over models directory $1 with the remaining arguments, wait until it is ready; sets
+# SERVER_PID_<port>. Prints the log and returns 1 if it never becomes ready.
+start_server() {
+  local models="$1" port="$2"
+  shift 2
+  local log="$SCRATCH/serve-$port.log" ready="$SCRATCH/ready-$port" keys="$SCRATCH/keys-$port.json"
+  "$BRAIN" serve --models-dir "$models" --openai "$port" --api-keys-out "$keys" --ready-file "$ready" "$@" >"$log" 2>&1 &
+  echo $! >>"$SCRATCH/pids"
+  local pid=$!
+  for _ in $(seq 1 240); do
+    [ -e "$ready" ] && return 0
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  cat "$log" >&3
+  return 1
+}
+
+key_of() { jq -r .openai "$SCRATCH/keys-$1.json"; }
+
+# POST a chat request body to the server on port $1; the JSON reply on stdout.
+chat() {
+  curl -sS --max-time 900 -H "Authorization: Bearer $(key_of "$1")" -H 'content-type: application/json' "http://127.0.0.1:$1/v1/chat/completions" -d "$2"
+}
+
+setup_file() {
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+  REPO="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
+  BRAIN="${BRAIN_BIN:-$REPO/target/debug/brain}"
+  [ -x "$BRAIN" ] || BRAIN="$REPO/target/release/brain"
+  [ -x "$BRAIN" ] || skip "no brain binary (set BRAIN_BIN)"
+  PARTIAL_DIR="$REPO/testdata/ricursive/ripple-65b-partial"
+  [ -f "$PARTIAL_DIR/chat_template.jinja" ] || skip "no Ripple chat_template.jinja under testdata/ricursive/ripple-65b-partial"
+  export REPO BRAIN PARTIAL_DIR
+  export SCRATCH="$(mktemp -d)"
+  : >"$SCRATCH/pids"
+  export PORT="${RIPPLE_PORT:-8931}"
+  python3 -I "$REPO/tools/goldens/ripple_serve_fixture.py" scripted "$SCRATCH/scripted" "$PARTIAL_DIR/chat_template.jinja" >/dev/null
+  start_server "$SCRATCH/scripted" "$PORT" --device cpu || skip "brain serve did not become ready"
+}
+
+teardown_file() {
+  if [ -n "${SCRATCH:-}" ] && [ -f "$SCRATCH/pids" ]; then
+    while read -r pid; do kill -9 "$pid" 2>/dev/null || true; done <"$SCRATCH/pids"
+    rm -rf "$SCRATCH"
+  fi
+}
+
+@test "the scripted checkpoint is listed under its pulled id with tools and chat" {
+  curl -fsS -H "Authorization: Bearer $(key_of "$PORT")" "http://127.0.0.1:$PORT/v1/models" >"$SCRATCH/models.json"
+  jq -e --arg m "$MODEL" '.data[] | select(.id == $m) | .capabilities | (index("chat") != null and index("tools") != null)' "$SCRATCH/models.json"
+}
+
+@test "a chat completion with a tool definition answers with reasoning and an OpenAI tool call" {
+  local body
+  body=$(jq -n --arg m "$MODEL" --argjson tools "$TOOLS" '{model: $m, messages: [{role: "user", content: "What is the weather in Zürich?"}], tools: $tools, max_tokens: 64, temperature: 0}')
+  chat "$PORT" "$body" >"$SCRATCH/chat.json"
+  jq -e '.choices[0].finish_reason == "tool_calls"' "$SCRATCH/chat.json"
+  jq -e '.choices[0].message.content == null' "$SCRATCH/chat.json"
+  jq -e '.choices[0].message.reasoning_content == "The user wants the weather, so I call the tool."' "$SCRATCH/chat.json"
+  jq -e '.choices[0].message.tool_calls | length == 1 and .[0].type == "function" and .[0].function.name == "get_weather"' "$SCRATCH/chat.json"
+  jq -e '.choices[0].message.tool_calls[0].function.arguments | fromjson == {city: "Zürich", unit: "celsius"}' "$SCRATCH/chat.json"
+  jq -e '.usage.prompt_tokens > 100 and .usage.completion_tokens == 7' "$SCRATCH/chat.json"
+}
+
+@test "a streamed completion carries reasoning, then the call as a name and argument fragments, then the finish" {
+  local body
+  body=$(jq -n --arg m "$MODEL" --argjson tools "$TOOLS" '{model: $m, stream: true, stream_options: {include_usage: true}, messages: [{role: "user", content: "What is the weather in Zürich?"}], tools: $tools, max_tokens: 64, temperature: 0}')
+  curl -sS -N --max-time 900 -H "Authorization: Bearer $(key_of "$PORT")" -H 'content-type: application/json' "http://127.0.0.1:$PORT/v1/chat/completions" -d "$body" |
+    sed -n 's/^data: //p' | grep -v '^\[DONE\]$' >"$SCRATCH/stream.jsonl"
+  jq -s -e '[.[].choices[0].delta.reasoning_content // empty] | join("") == "The user wants the weather, so I call the tool."' "$SCRATCH/stream.jsonl"
+  jq -s -e '[.[].choices[0].delta.tool_calls[0].function.name // empty] == ["get_weather"]' "$SCRATCH/stream.jsonl"
+  jq -s -e '[.[].choices[0].delta.tool_calls[0].function.arguments // empty] | join("") | fromjson == {city: "Zürich", unit: "celsius"}' "$SCRATCH/stream.jsonl"
+  jq -s -e '[.[].choices[0].finish_reason // empty] == ["tool_calls"]' "$SCRATCH/stream.jsonl"
+  jq -s -e '([.[].choices[0].delta.content // empty] | join("")) == ""' "$SCRATCH/stream.jsonl"
+  jq -s -e '.[-1].usage.completion_tokens == 7' "$SCRATCH/stream.jsonl"
+}
+
+@test "the tool result sent back with the assistant's message is read as the next turn" {
+  local first second body
+  body=$(jq -n --arg m "$MODEL" --argjson tools "$TOOLS" '{model: $m, messages: [{role: "user", content: "What is the weather in Zürich?"}], tools: $tools, max_tokens: 64, temperature: 0}')
+  first=$(chat "$PORT" "$body")
+  body=$(jq -n --arg m "$MODEL" --argjson tools "$TOOLS" --argjson first "$first" '{model: $m, messages: [{role: "user", content: "What is the weather in Zürich?"}, $first.choices[0].message, {role: "tool", tool_call_id: $first.choices[0].message.tool_calls[0].id, content: "{\"temp\": 21}"}], tools: $tools, max_tokens: 64, temperature: 0}')
+  second=$(chat "$PORT" "$body")
+  # The history grew by the assistant turn (reasoning and call as the template writes them) and the tool response.
+  [ "$(jq '.usage.prompt_tokens' <<<"$second")" -gt "$(jq '.usage.prompt_tokens' <<<"$first")" ]
+  jq -e '.choices[0].finish_reason == "tool_calls"' <<<"$second"
+}
+
+@test "a chat template variable reaches the request and an unmeetable tool_choice is refused" {
+  local body
+  body=$(jq -n --arg m "$MODEL" '{model: $m, messages: [{role: "user", content: "hi"}], max_tokens: 64, temperature: 0, chat_template_kwargs: {clear_thinking: true}}')
+  chat "$PORT" "$body" | jq -e '.choices[0].finish_reason == "tool_calls"'
+  body=$(jq -n --arg m "$MODEL" '{model: $m, messages: [{role: "user", content: "hi"}], max_tokens: 64, chat_template_kwargs: {clear_thinking: true}, tool_choice: {type: "function", function: {name: "missing"}}}')
+  chat "$PORT" "$body" | jq -e '.error != null'
+}
+
+@test "a Ripple served with a sparse-attention indexer on the software adapter answers the same call" {
+  [ -n "${BRAIN_LAVAPIPE_ENV:-}" ] && [ -f "$BRAIN_LAVAPIPE_ENV" ] || skip "set BRAIN_LAVAPIPE_ENV to the lavapipe environment file (.agents/rules/testing.md)"
+  mkdir -p "$SCRATCH/corpus"
+  head -c 6000 "$REPO/AGENTS.md" >"$SCRATCH/corpus/a.txt"
+  head -c 6000 "$REPO/docs/reference/models/ricursive.md" >"$SCRATCH/corpus/b.txt"
+  "$BRAIN" lsa distill --arch ricursive --checkpoint "$SCRATCH/scripted/$MODEL" --corpus "$SCRATCH/corpus" --out "$SCRATCH/indexer.safetensors" \
+    --tokens 1024 --train-docs 2 --epochs 1 --queries 8 --top-k 32 --top-p 16 --index-dim 8 --cluster-block 16 --window 16 --sink 2 --device cpu >"$SCRATCH/distill.log" 2>&1
+  [ -f "$SCRATCH/indexer.safetensors" ]
+  # shellcheck disable=SC1090
+  (
+    source "$BRAIN_LAVAPIPE_ENV"
+    start_server "$SCRATCH/scripted" $((PORT + 1)) --device software --sparse-attention "$SCRATCH/indexer.safetensors"
+  ) || skip "the software adapter server did not become ready"
+  local body
+  body=$(jq -n --arg m "$MODEL" --argjson tools "$TOOLS" '{model: $m, messages: [{role: "user", content: "What is the weather in Zürich? Check carefully and answer."}], tools: $tools, max_tokens: 64, temperature: 0}')
+  chat $((PORT + 1)) "$body" >"$SCRATCH/sparse.json"
+  jq -e '.choices[0].finish_reason == "tool_calls" and .choices[0].message.tool_calls[0].function.name == "get_weather"' "$SCRATCH/sparse.json"
+  grep -q "default kv-cache int8" "$SCRATCH/serve-$((PORT + 1)).log"
+  # An indexer that cannot be read is refused at startup, naming the flag, and the model is not listed.
+  start_server "$SCRATCH/scripted" $((PORT + 2)) --device cpu --sparse-attention "$SCRATCH/corpus/a.txt" || skip "the refusing server did not become ready"
+  grep -q "skip $MODEL.*--sparse-attention" "$SCRATCH/serve-$((PORT + 2)).log"
+  curl -fsS -H "Authorization: Bearer $(key_of $((PORT + 2)))" "http://127.0.0.1:$((PORT + 2))/v1/models" | jq -e --arg m "$MODEL" '[.data[].id] | index($m) == null'
+}
+
+@test "the real layers 0 and 4 of Ripple-65B serve through the same path" {
+  [ -f "$PARTIAL_DIR/layers-0-4.safetensors" ] && [ -f "$PARTIAL_DIR/tokenizer.json" ] || skip "no real partial checkpoint under testdata/ricursive/ripple-65b-partial"
+  python3 -I "$REPO/tools/goldens/ripple_serve_fixture.py" partial "$SCRATCH/partial" "$PARTIAL_DIR" >/dev/null
+  start_server "$SCRATCH/partial" $((PORT + 3)) --device cpu || skip "the partial server did not become ready"
+  local body
+  body=$(jq -n --arg m "$PARTIAL" --argjson tools "$TOOLS" '{model: $m, messages: [{role: "system", content: "You are terse."}, {role: "user", content: "Say hello."}], tools: $tools, max_tokens: 3, temperature: 0}')
+  chat $((PORT + 3)) "$body" >"$SCRATCH/partial.json"
+  jq -e '.choices[0].finish_reason == "length" and .usage.completion_tokens == 3 and .usage.prompt_tokens > 150' "$SCRATCH/partial.json"
+  grep -q "layers-0-4" "$SCRATCH/serve-$((PORT + 3)).log"
+}

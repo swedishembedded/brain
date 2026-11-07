@@ -65,7 +65,7 @@ CASES = [
     ("tools and system", [{"role": "system", "content": "Use tools when needed."}, {"role": "user", "content": "Weather in Zürich?"}], TOOLS, True, {}),
     ("tool call and result", [{"role": "user", "content": "Weather in Zürich?"}, {"role": "assistant", "content": None, "tool_calls": [CALL]}, {"role": "tool", "tool_call_id": "call_1", "content": "{\"temp\": 21}"}], TOOLS, True, {}),
     ("tool call with text and reasoning", [{"role": "user", "content": "Weather?"}, {"role": "assistant", "reasoning_content": "Need a tool.", "content": "Checking.", "tool_calls": [CALL]}, {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}, {"role": "assistant", "content": "It is sunny."}, {"role": "user", "content": "thanks"}], TOOLS, True, {}),
-    ("parallel calls and results", [{"role": "user", "content": "Do both."}, {"role": "assistant", "content": "", "tool_calls": [CALL, CALL2]}, {"role": "tool", "tool_call_id": "call_1", "content": "21C"}, {"role": "tool", "tool_call_id": "call_2", "content": "/home/u"}], TOOLS, True, {}),
+    ("parallel calls and results", [{"role": "user", "content": "Do both."}, {"role": "assistant", "content": "", "tool_calls": [CALL, CALL2]}, {"role": "tool", "tool_call_id": "call_1", "content": "21C"}, {"role": "tool", "tool_call_id": "call_2", "content": "three files"}], TOOLS, True, {}),
     ("system mid conversation", [{"role": "user", "content": "a"}, {"role": "system", "content": "note"}, {"role": "user", "content": "b"}], None, True, {}),
     ("unicode content", [{"role": "user", "content": "日本語 🙂 café\n\n  indented"}], None, True, {}),
 ]

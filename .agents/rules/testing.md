@@ -241,6 +241,13 @@ tuned from the environment instead of a recompile.
   tests. Process-wide, so a test wanting a different ceiling sets it in a
   child process of its own.
 
+**End-to-end (bats) inputs:**
+- `BRAIN_LAVAPIPE_ENV` - the lavapipe environment file (`source`d before a `--device software` server starts) that
+  `tests/e2e/ripple.bats` needs for its sparse-attention case; absent, that case skips by name.
+  `tests/e2e/ripple.bats` also reads `testdata/ricursive/ripple-65b-partial/` (the published
+  `chat_template.jinja`, and for the last case the two-layer partial checkpoint); the models it serves are built
+  by `tools/goldens/ripple_serve_fixture.py`.
+
 **Benchmark knobs:**
 - `BRAIN_BENCH_REPS` - repetition count for a benchmark harness.
 
