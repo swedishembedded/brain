@@ -12,6 +12,9 @@ reproduced its worked examples from the text alone in another language.
 
 ## Done
 
+- [x] Glossary generated from every chapter's Key terms
+      (`make generate/book/glossary`).
+
 - [x] Tooling: specification and concept-graph gate (`make check/book`),
       generated figures, worked examples, chronology and navigation
       (`make generate/book/*`, `make check/generated/book`), the book PDF
@@ -32,8 +35,14 @@ reproduced its worked examples from the text alone in another language.
       passed 227 items and its remaining 9 failures, 19 guesses and 13 text
       defects were fixed in the following commit. A third pass over the
       final text has not been run.
-- [ ] Volume II, What Does It Mean to Learn?: chapters 1 to 4 written.
-- [x] Volume III: chapter 4 (backpropagation, the pilot) written.
+- [x] Volume II, What Does It Mean to Learn?: all 8 chapters and the
+      project written. Verified by two independent C re-implementations
+      (`scratchpad/reader/v02`, `scratchpad/reader/v02-recheck`): the first
+      passed 169 of 181 items (11 after a guess, 1 failure); after fixes the
+      recheck passed all 297 items. Nine wording nits it noted (none
+      blocking reproduction) are open below.
+- [ ] Volume III, Building Neural Networks from Nothing: chapters 1 to 4
+      written.
 
 ## Open
 
@@ -41,4 +50,6 @@ reproduced its worked examples from the text alone in another language.
       volume introduction, worked examples, figures and exercises.
 - [ ] Independent-reader verification of each chapter's [Implement]
       exercises.
-- [ ] A glossary generated from the concept graph.
+- [ ] Volume II wording nits from `scratchpad/reader/v02-recheck/REPORT.md`
+      (a stale symbol in the project chapter, a midpoint rule in chapter 1,
+      Key terms for chapter 4's helper terms, and similar).
