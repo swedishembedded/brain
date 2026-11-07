@@ -17,6 +17,16 @@ HTTP endpoints, with concurrent request batching and a paged KV cache. See
 [the Qwen3 page](../../reference/models/qwen3.md) for the model, and
 [the HTTP API page](../../reference/api/http.md) for the served API surface.
 
+### A 65B reasoning and coding model - `brain/ricursive`
+
+Ripple-65B, served through the same paths as Qwen3: the checkpoint's own chat
+template, reasoning split from the answer, OpenAI tool calls (streamed or not),
+`--kv-cache`, `--weight-format` and `--sparse-attention`, and the layers staged
+over as many cards as the memory plan needs. `brain pull
+ricursiveAI/Ripple-65B-Preview-NVFP4` fits one 96 GiB card. See [the Ripple
+page](../../reference/models/ricursive.md) for the options, the memory model and
+what speculative decoding it supports.
+
 ### An alternative decoder architecture - `brain/glm`
 
 A from-scratch GLM-5.2 decoder: compressed low-rank attention plus a

@@ -78,7 +78,7 @@ every model that serves it; no flag is spelled with an architecture name.
 | `--gdn-state f32\|bf16` | the element type the Gated DeltaNet recurrent state and conv history of a running sequence are stored in (the Qwen3.8 GGUF and FP8 releases): `bf16` (default on CUDA), which halves the bytes a decode step streams at bf16 rounding of the carried state, or `f32`; arithmetic stays f32 in every kernel. `--exact-decode` keeps `f32` and refuses `bf16` |
 | `--linear-activations auto\|bf16\|e4m3` | the precision of the activation operand the NVFP4-weight linears of a model that supports it (the Qwen3.8 releases) feed their products: `e4m3` quantises the activations to FP8 with one scale per row (W4A8, faster, lower precision), `bf16` reads them as bf16 (W4A16). `auto` (default) is `bf16`: brain does not trade precision below vLLM's and SGLang's for speed unless asked to. FP8 and bf16 weight tiers ignore it, and the serve log says so once; accumulation is f32 either way |
 | `--kv-calibration` | use a `kv_calib.json` beside the checkpoint |
-| `--sparse-attention FILE` | read the attention layers the indexer `FILE` covers through latent sparse attention: each query attends its sinks, its recent window and the keys of its best-scoring key clusters instead of every cached key (Qwen3; see its model page; make the indexer with `brain lsa distill`). Off by default |
+| `--sparse-attention FILE` | read the attention layers the indexer `FILE` covers through latent sparse attention: each query attends its sinks, its recent window and the keys of its best-scoring key clusters instead of every cached key (Qwen3 over every layer and Ripple over its global layers; see their model pages; make the indexer with `brain lsa distill`). An indexer built for another model is refused at startup. Off by default |
 | `--exact-decode` | make a decode row's result independent of which other requests share its batch: int8 projections (and the head) run in groups small enough to stay on the bit-identical kernel and every row's attention is sized from `--ctx`, at the cost of one extra pass over the weights per group; speculation is off in this regime. Default off |
 | `--ctx N` | cap the context window below the model's declared one |
 | `--max-batch N` | the concurrency the server must carry |
@@ -131,6 +131,15 @@ Replicas are built when demand needs them, not at startup:
 Each replica is one instance in the monitoring snapshot, with its device, its
 queued and running requests and its prefix-cache counters
 ([Monitoring](monitoring.md)).
+
+A model that is bigger than one card is not replicated: Ripple-65B is one
+instance whose layers are cut into pipeline stages over the fewest of the
+selected cards that hold it (`brain serve --device gpu0,gpu1`), sized by the
+byte-exact memory plan (weights at the format they are stored in, the KV cache
+at `--kv-cache`, the sliding layers' rings, the sparse-attention index). The
+startup log prints the placement, and a deployment that does not place on the
+cards is left out with what it needs and what they offer. See
+[the Ripple page](../../reference/models/ricursive.md).
 
 ## Sampling defaults
 

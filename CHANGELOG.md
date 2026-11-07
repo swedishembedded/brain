@@ -18,6 +18,17 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 - `BRAIN_OV_CACHE` is gone: the OpenVINO compiled-graph cache of the ASR encoders lives in this user's private scratch root (`<tmp>/brain-<uid>/openvino-cache`), never in a directory other users can write to
 - A `--runtime-dir` (and the default state directory) must be a directory only the serving user can enter: one others may read or write is refused, since it holds the log, the lock and the connection records
 
+### Added
+
+- Ripple-65B is served: `brain serve` lists `ricursiveAI/Ripple-65B-Preview`, its NVFP4 release and any local directory of that layout through the shared paths (the checkpoint's `tokenizer.json` and `chat_template.jinja`, reasoning and OpenAI tool calls in responses and streams, `--weight-format`, `--kv-cache`, `--sparse-attention`, `--ctx`, `--max-batch`), with the layers staged over the fewest selected cards that hold the memory plan and `brain ricursive generate`; `--speculative ngram` verifies prompt-lookup proposals in one batched step
+- A chat template's own variables reach it through `chat_template_kwargs`, a tool schema reaches it in the order the client wrote it, and a template that serializes a call's arguments (`arguments | tojson`) is given them as the object they encode
+- `brain serve --device software` serves models on the software Vulkan adapter (it budgets the host's RAM, which it left at zero)
+
+### Fixed
+
+- A release that ships `chat_template.jinja` beside an older template inline in `tokenizer_config.json` is rendered with the file, as `transformers` does, and a pull fetches the file
+- The closing brace of a JSON tool call is no longer reported as a discarded tool-call tail on every call
+
 ### Security
 
 - Named callers: `brain serve --caller NAME:ROLE:KEYFILE[:MAX]` gives each application its own key and only what its role allows (`inference`, `training`, `admin`), its own jobs, and its own share of the server in flight, so a compromised application is contained to that share

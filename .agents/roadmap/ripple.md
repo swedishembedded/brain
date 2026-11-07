@@ -49,7 +49,7 @@ them as they are (`Rope::None`); nothing has to be un-rotated.
 | LSA index, selection, sparse paged read | `model::lsa` (per-layer `Option` projections, `Rope::None`, flat and tree reads, int8/fp8 KV) | wired into `qwen3/serve.rs` only: `set_lsa`, crossover, kernel set and memory charge live in the Qwen3 engine and must move to a shared place before a second engine can use them |
 | sparse attention kernels for 80/8/128 | per-KV-head `paged_sparse_flash_gqa` with a `GROUP` knob compiled for 2, 4, 5, 8; whole-row kernel requires `64 % n_heads == 0` | group 10 not compiled; whole-row prefill refuses 80 heads (roadmap `lsa.md`: templated workgroup) |
 | D-LSA distillation | `model::lsa::distill` (host math) and `brain lsa` | model-agnostic capture of a layer's Q/K, so a Ripple indexer can be distilled over the 16 global layers; device distillation (`lsa.md`) |
-| speculative decoding | DFlash2 in `crates/qwen35` | binding the Ripple DFlash2 drafter to a Ripple target |
+| speculative decoding | DFlash2 in `crates/qwen35` (bound to its GGUF single-stream path) | verify and prompt-lookup drafting are served; the Ripple DFlash2 drafter needs target hidden taps and its block forward ported |
 | training | gradcheck, LoRA, `ModelFit` | backward for value residual lerp, sigmoid gate, clipped SwiGLU (clamp masks), PeriNorm order |
 
 KV memory (bf16, per token): global 16 x 2 x 8 x 128 x 2 B = 64 KiB, so
@@ -68,7 +68,7 @@ serve other work; CUDA parity and performance follow on the same gates.
        the prompt) matches `modeling_ricursive.py` logits; real-weight
        per-layer parity on layers 0 (local) and 4 (global) plus embed/head,
        fetched by tensor (no full 130 GB download: the project drive has
-       ~60 GB free). Done on the CPU backend; CUDA parity is step 7.
+       ~60 GB free). Done on the CPU backend; CUDA parity is step 8.
 2. [x] Paged hybrid engine under the generic `Scheduler`: ring KV for local
        layers, paged KV for global ones; serving conformance suite; decode
        equals full-recompute logits across the window boundary; prefix
@@ -90,14 +90,24 @@ serve other work; CUDA parity and performance follow on the same gates.
        published), compact KV (bf16, int8, fp8) for the rings and the global
        pools, byte-exact placement over cards, the engine in pipeline stages.
        Done and measured on the CPU backend and the software Vulkan adapter;
-       no card has run it (step 7).
+       no card has run it (step 8).
 5b. [x] Latent sparse attention across stages (one binding per stage device over the
        global layers it owns, index pages in per-device domains of the shared block
        tables) and fused paged flash attention for Ripple's group of 10 (global layers
        and the rings' windows, all KV tiers). Measured below on the software Vulkan
        adapter; no card has run it.
-6. [ ] Backward, gradcheck, LoRA; N-LSA after D-LSA.
-7. [ ] CUDA parity and the measured long-context numbers (both GH200s,
+6. [x] Served like Qwen3, through the generic paths and no parallel stack: catalog entry
+       (`brain/ricursive`, `RicursiveSpec`), `RicursiveResident` (memory from
+       `ricursive::placement`, stages from the device selection, host tier on `--device cpu`),
+       the checkpoint's tokenizer and `chat_template.jinja` rendered by the shared engine
+       (byte-identical to `apply_chat_template`), reasoning and tool calls through the shared
+       scanner (streaming deltas), `--weight-format`/`--kv-cache`/`--sparse-attention`/`--ctx`/
+       `--max-batch` checked against `ricursive::POLICY`, `brain ricursive generate`, a pull that
+       fetches `chat_template.jinja`, batched speculative verify with prompt-lookup drafting.
+       End to end on the CPU backend and the software adapter (`tests/e2e/ripple.bats`). The
+       DFlash2 drafter is not run (below); no card has served it (step 8).
+7. [ ] Backward, gradcheck, LoRA; N-LSA after D-LSA.
+8. [ ] CUDA parity and the measured long-context numbers (both GH200s,
        when free).
 
 ## Measured
@@ -285,7 +295,7 @@ the `with_gpu` placement of a stage on a card and `StreamPlan::cards` (the free-
 not run: all physical GPUs are in use by other jobs. The one other serving engine I found that splits a sequence's decode
 over cards is `Qwen35GgufResident` (`qwen35/int8_gguf_resident.rs`), whose stage seam this engine follows; `model::shard::Shardable` is the training pipeline's trait (it
 needs `Model`, a backward) and is not implemented for Ripple: the adapter is `placement`
-(`LayerBytes`, `ShardCost`) until step 6.
+(`LayerBytes`, `ShardCost`) until step 7.
 
 Placement, published configuration on 96 GiB cards (`capacity::headroom` leaves 83.8 GiB usable
 of 96; `placements_of_the_published_configuration_on_96_gib_cards` prints the whole table), one
@@ -370,6 +380,50 @@ widened fused kernel, peer copies, throughput of any tier, KV format or attentio
 CPU backend (refused), the `brain lsa` staging path (`StreamPlan::cards` probes free card memory), the fused kernels' speed against the triad,
 and the host-RAM figure of the embedding gather (it reads one row per token from the mapped file).
 
+### Step 6: served like Qwen3 (CPU backend and the software Vulkan adapter, 2026-11-07)
+
+Gates, all in this repository: `crates/catalog/tests/it/ricursive_chat.rs`,
+`ricursive_served.rs`, `crates/serving/src/model_dir.rs` tests, `crates/ricursive/tests/it/serve.rs`,
+`crates/data/src/qwen_chat.rs` tests and `tests/e2e/ripple.bats`.
+
+| gate | result |
+|---|---|
+| tokenizer vs the `tokenizers` library (`tokenizer.json`, 100278-entry BPE; code, unicode, whitespace runs, special tokens, digit runs, contractions, empty text) | 18 texts, ids and decode identical |
+| rendered prompt vs `transformers.apply_chat_template` on the published `chat_template.jinja` | 14 conversations byte-identical (system, multi-turn, reasoning, `clear_thinking`, tools, tool calls with string arguments, parallel calls, tool results, generation prompt) |
+| reply scan against the rules of `inference/server/ripple_format.py` (reasoning, content, calls; chunked 1 character to whole; the Python needs SGLang and was read, not run) | 14 layouts equal, plus streamed deltas; 7 replies parsed and sent back re-render to the generated tokens |
+| engine verify vs the full forward, two sequences in one call, rollback at 4 acceptance lengths | argmax equal at every row, continuation equal within 1e-5 scaled error |
+| shared conformance suite with speculation (any drafter: right, partly right, wrong) | passes: output equals plain greedy, accepts and rejects exercised |
+| prompt-lookup speculation through the resident (cycle model, 3 requests, 24 tokens each) | output equal to plain greedy; 54 proposed, 54 accepted over 5 verify steps |
+| scripted tiny Ripple over HTTP (CPU backend): tool call, stream, tool result sent back, `chat_template_kwargs` | pass; 7 completion tokens, one call, reasoning split out |
+| same model with a distilled indexer on the software adapter | pass; `lsa_sparse_row_reads` > 0 through the resident; a bad indexer is refused at startup |
+| real layers 0 and 4 (two-layer model, 5.2 GB bf16) served on the CPU backend | built in 2 s at the first request; a 173-token tools prompt plus 4 tokens answered in 11 s end to end |
+
+Automatic context on the real config (the largest power-of-two halving of 2 Mi that places on
+cards of 96 GiB with 4 live and 2 cached sequences, `ricursive::placement::footprint`): NVFP4
+release on one card 262144 tokens at a bf16 cache, 524288 at int8; on two cards 1 Mi and 2 Mi.
+bf16 release: one card does not hold it; two cards 524288 at bf16, 1 Mi at int8. These are the
+plan's numbers (no card has checked them).
+
+Shared-code defects found and fixed on the way: `from_model_dir` preferred the template inline
+in `tokenizer_config.json` to `chat_template.jinja` (Ripple's inline one has no tools); a pull
+did not fetch `chat_template.jinja`; the OpenAI surface sorted a tool schema's members before the
+template printed them and gave a template that serializes a call's arguments the JSON text, not
+the object; every JSON tool call was reported as a discarded tool-call tail; `--device software`
+left the host budget at zero so nothing could be placed.
+
+What the DFlash2 drafter needs (config read from the hub; the 8 GB weights were not fetched):
+`target_layer_ids` 1, 20, 39, 58, 77 of 80 (the residual stream at those layers, 5 x 5120,
+fused by `fc` 25600 -> 5120 and `hidden_norm`), block size 16 with mask token 100278, 5 layers
+(4 sliding, window 4096, RoPE theta 10000; 1 global NoPE) of width 5120, 80/8 heads of 128, FFN
+40960, four-tap dynamic convolutions (`attention_conv`, `mlp_conv`: a `[2, 4, 5120]` base kernel
+and a `5120 -> 2560` kernel projection per sublayer, groups of 16), a candidate selector (top 32
+of the target's `lm_head`, rank 256, `predecessor_codebook` and `successor_codebook`
+`[100352, 256]`), the target's embedding and head shared. No reference implementation of
+`DFlash2DraftModel` is published with the target (the server sources call it from SGLang), so
+the port needs the SGLang source or a dump of the drafter's activations to gate against, and the
+engine needs per-sequence retention of the five taps (prefill and verify rows) behind
+`PagedDecoder::draft`.
+
 ### GPU phase runbook
 
 ```
@@ -380,8 +434,30 @@ brain lsa eval --arch ricursive --checkpoint <directory> --corpus <directory> \
     --indexer random,pca,ripple-lsa.safetensors --tokens 32768 --skip-docs 48 --held-docs 6
 ```
 
-Needs the host parallelism above for the teacher. Serve with the artifact through the
-engine's `set_lsa`; the catalog entry comes later.
+Needs the host parallelism above for the teacher. Serve with the artifact through
+`brain serve --sparse-attention` (below).
+
+Serving (step 6), after `brain pull`:
+
+```
+# 1 GH200, NVFP4 release, int8 KV, the distilled D-LSA indexer (DFlash2 and ngram speculation are
+# not available beside it; the drafter is not ported, see the step 6 measurements)
+brain pull ricursiveAI/Ripple-65B-Preview-NVFP4
+brain serve --openai --device gpu0 --kv-cache int8 --sparse-attention ripple-lsa.safetensors
+
+# the same without the indexer, prompt-lookup speculation on
+brain serve --openai --device gpu0 --kv-cache int8 --speculative ngram
+
+# 2 GH200, the bf16 release (staged over both cards; add --kv-cache int8 for 1M tokens)
+brain pull ricursiveAI/Ripple-65B-Preview
+brain serve --openai --device gpu0,gpu1
+```
+
+First checks: the startup log's placement line and defaults against `nvidia-smi` after the
+first request (the numbers above are the plan's); `BRAIN_BIN=./target/release/brain bats
+tests/e2e/ripple.bats` is CPU only, so on the card send the tool-call request of that file to
+the served id and compare the reply with the CPU run of the same prompt; then
+`brain lsa prefill` timings against `brain serve` latency.
 
 Which tier and placement (all numbers above; the first run on a card checks each against the
 engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
