@@ -253,8 +253,8 @@ impl ResidentModel for LtxvResident {
             // planner charges the working set, and the VAE decode, which
             // runs after the DiT is dropped, when that is larger.
             Some(cfg) => {
-                let latent_frames = (frames as usize).saturating_sub(1) / ltxv::pipeline::VAE_TEMPORAL_SCALE + 1;
-                let tokens = (latent_frames * (h as usize / 32) * (w as usize / 32)).min(ltxv::longform::LONGFORM_MAX_TOKENS);
+                let latent_frames = frames.saturating_sub(1) / ltxv::pipeline::VAE_TEMPORAL_SCALE + 1;
+                let tokens = (latent_frames * (h / 32) * (w / 32)).min(ltxv::longform::LONGFORM_MAX_TOKENS);
                 // Blocks in flight beside the window: the one being run, the
                 // one being uploaded, and one of margin for the audio stream.
                 let blocks = 3 * ltxv::block::cached_block_bytes(&cfg, ltxv::block::QTier::Int8);
