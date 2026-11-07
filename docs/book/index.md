@@ -36,6 +36,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 7. [Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md): How do we measure how fast a function's output changes when its input moves a tiny bit?
 8. [Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md): When a quantity depends on millions of numbers, which way should we move them all to make it smaller?
 9. [Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md): How do we add up infinitely many small pieces, and how do we follow a system that changes continuously?
+10. [Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md): How do we put numbers on uncertainty and update them when we see evidence?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 

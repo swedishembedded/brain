@@ -354,7 +354,7 @@ Inside $[0, 4]$ the two agree with the data to within the noise. At $x = 5$ the
 polynomial is already off by about five; at $x = 8$ it predicts 144.3 where the
 rule gives 17. The extra freedom was spent on reproducing the noise, and
 outside the data the noise is amplified. This is the first sighting of
-**overfitting**, which Volume II treats properly: a family flexible enough to
+overfitting, which Volume II treats properly: a family flexible enough to
 match anything it is shown has no reason to behave sensibly where it has not
 been shown anything.
 
@@ -869,7 +869,7 @@ and can be drawn without lifting the pencil) or may not, and they may meet at an
 angle, a **kink**: $|x|$ has a kink at 0. Four piecewise functions come up
 constantly in machine learning, and are drawn in Figure 5:
 
-- **ReLU**, the rectified linear unit, $\operatorname{relu}(x) = \max(0, x)$:
+- ReLU, the rectified linear unit, $\operatorname{relu}(x) = \max(0, x)$:
   zero for negative inputs, the identity for positive ones. One kink at 0.
 - The **clamp** $\operatorname{clamp}(x, l, u) = \min(\max(x, l), u)$, which
   holds $x$ inside the interval $[l, u]$ by replacing anything outside with

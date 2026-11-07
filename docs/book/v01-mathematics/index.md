@@ -62,8 +62,8 @@ in the curriculum and appear here when they are written.
    move millions of numbers at once to make a quantity smaller.
 9. [Integrals and Differential Equations](09-integrals-and-odes.md): adding up infinitely
    many small pieces, and following a system that changes continuously.
-10. Probability: Reasoning Under Uncertainty: putting numbers on uncertainty
-    and updating them on evidence.
+10. [Probability: Reasoning Under Uncertainty](10-probability.md): putting numbers on
+    uncertainty and updating them on evidence.
 11. The Distributions Machine Learning Uses: the few distributions that keep
     appearing, and why.
 12. Statistics: Learning Facts from Samples: how much a finite sample can tell

@@ -81,7 +81,7 @@ the gradient is positive: raising $w$ raises $y$ and makes things worse, so
 the loss slopes upward in $w$. The bigger $x$ is, the more a change in $w$
 moves $y$, so the steeper the slope.
 
-**Gradient descent** moves $w$ against the slope. With a **learning rate**
+Gradient descent moves $w$ against the slope. With a learning rate
 $\eta$ (a small positive number), one update is
 
 $$
@@ -213,7 +213,7 @@ dependency in the section on saved activations.
 
 A sweep like this is easy to get subtly wrong, so check it against the
 definition of the derivative: nudge each weight up and down by a tiny
-amount and compare (a **central difference**, which later chapters study in
+amount and compare (a central difference, which later chapters study in
 detail).
 
 <!-- worked: backprop.scalar_chain_check -->
@@ -905,7 +905,7 @@ while a nearby quantity compensated and hid the fact.
 
 How do we know the table above is right? The way that needs no trust in the
 person who wrote the backward pass is to go back to the definition. For one
-parameter $\theta_i$, the **central difference** estimate of the derivative is
+parameter $\theta_i$, the central difference estimate of the derivative is
 
 $$
 \frac{\partial L}{\partial \theta_i} \approx \frac{L(\theta + h\,\mathbf{e}_i) - L(\theta - h\,\mathbf{e}_i)}{2h},

@@ -12,6 +12,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **batch dimension**: an extra, usually first, axis of a tensor that indexes independent examples processed together, so that each example is one contiguous block. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
+**Bayes' rule**: the identity $P(A \mid B) = P(B \mid A)P(A)/P(B)$ that turns the probability of evidence given a cause into the probability of the cause given the evidence, using the prior probability of the cause. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
+
 **broadcasting**: the rule that aligns two shapes from the right and treats an axis of size 1 as stretched to match the other, by giving it stride 0, so that arrays of different shapes combine without copying. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 ## C
@@ -23,6 +25,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **computational graph**: a record of a calculation as nodes (values) and edges showing which values were used to compute which. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **condition number**: for a bowl-shaped function, the ratio of its largest to its smallest curvature; a large ratio means long, narrow contours and slow progress for a fixed step size. The floating-point chapter extends the idea to how strongly a computation amplifies small errors in its inputs. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**conditional probability**: the probability of an event within the part of the experiment where another event occurred, $P(A \mid B) = P(A \cap B)/P(B)$, defined when $P(B) > 0$. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 **convexity**: the property that no chord joining two points of the curve lies below the curve, equivalent for twice-differentiable functions to a non-negative second derivative; every critical point of a convex function is a global minimum. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
@@ -49,6 +53,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **eigenvector**: a nonzero vector that a matrix sends to a multiple of itself, so that the map only stretches (or flips) it. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
 **Euler's method**: the rule $x_{i+1} = x_i + h\,f(t_i, x_i)$ that follows the slope of an ODE for a short step $h$ and repeats; with a gradient as the slope it is gradient descent. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
+
+**expectation**: the probability-weighted average $\sum_x x\,p(x)$ (or $\int x f(x)\,dx$) of a random variable, the value its long-run average approaches; it is linear, $\mathbb{E}[X + Y] = \mathbb{E}[X] + \mathbb{E}[Y]$. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 **exponent**: the count of repeated factors in $b^n$, extended to zero, negative and fractional counts by the rule $b^m b^n = b^{m+n}$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
@@ -78,6 +84,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **identity matrix**: the square matrix with ones on the diagonal and zeros elsewhere, which leaves every vector unchanged. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
+**independence**: the property that $P(A \cap B) = P(A)P(B)$, so that knowing one event tells nothing about the other; it is not the same as being unable to occur together. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
+
 **integer**: a whole number, positive, negative or zero, with no fractional part; the exact numbers of counting and naming. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **integral**: the limit of the Riemann sums $\sum f(t_i)\,\Delta t$ as the width goes to zero, written $\int_a^b f(t)\,dt$; the signed area between the graph of $f$ and the axis. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
@@ -87,6 +95,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## J
 
 **Jacobian**: the matrix of shape outputs by inputs whose entry $(i, j)$ is $\partial f_i/\partial x_j$; it is the best linear approximation of a vector function near a point. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**joint distribution**: the probability $p(x, y)$ of each pair of values of two random variables on the same experiment, whose row and column sums are the marginal distributions. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 ## L
 
@@ -136,11 +146,15 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **polynomial**: a sum of constant multiples of powers of $x$; one of degree $n$ has $n + 1$ parameters and is fixed by $n + 1$ points. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
+**probability distribution**: the assignment of a probability to each value of a random variable, written as a table for finitely many values or as a density whose area over an interval is the probability. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
+
 **product notation**: the symbol $\prod_{i=a}^{b} x_i$ for the product of the terms $x_i$ as the index $i$ runs from $a$ to $b$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **projection**: the closest point to a vector $\mathbf{v}$ on the line through $\mathbf{u}$, namely $\frac{\mathbf{v}\cdot\mathbf{u}}{\mathbf{u}\cdot\mathbf{u}}\mathbf{u}$; what is left over is orthogonal to $\mathbf{u}$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 ## R
+
+**random variable**: a function from the outcomes of an experiment to numbers, such as the number of heads in three flips; the rule is fixed and the randomness is in which outcome occurs. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 **rank**: the number of independent columns of a matrix, equal to the number of independent rows and to the dimension of what the map can reach. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
@@ -179,6 +193,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **transpose**: the matrix $\mathbf{A}^\top$ with rows and columns swapped; $(\mathbf{A}\mathbf{B})^\top = \mathbf{B}^\top\mathbf{A}^\top$. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
 ## V
+
+**variance**: the expected squared deviation from the mean, $\mathbb{E}[X^2] - \mathbb{E}[X]^2$, which scales by $a^2$ under multiplication by $a$ and adds over independent variables; its square root is the standard deviation. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 **vector**: an ordered list of real numbers, read as data (the features of one example) or as an arrow with a length and a direction. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 

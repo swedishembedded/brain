@@ -281,7 +281,7 @@ consistent idea of where the elements are, and the results differ.
 The simplest case is a matrix handed from one convention to the other. A
 $[2, 3]$ matrix stored row-major is the buffer $1, 2, 3, 4, 5, 6$. Someone who
 reads that buffer as a column-major matrix of shape $[3, 2]$ (column $j$ is the
-three numbers starting at $3j$) obtains the **transpose** of the matrix, with
+three numbers starting at $3j$) obtains the transpose of the matrix, with
 no error and no warning:
 
 <!-- worked: arrays.misread_and_swap -->
@@ -510,7 +510,7 @@ copy; a view costs nothing now and may cost on every later read.
 
 ### Why reading order matters
 
-Memory is not read one number at a time. Hardware fetches a **cache line**, a
+Memory is not read one number at a time. Hardware fetches a cache line, a
 small fixed block of consecutive addresses (64 bytes is typical), whenever any
 byte of it is needed, and the next numbers in that line then arrive almost for
 free. A program that walks memory with stride 1 uses every number it fetched; a

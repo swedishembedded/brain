@@ -124,7 +124,16 @@ def knowledge_ids():
             if (m := re.match(r"(\d+[a-z]?)-", p.name))}
 
 
-def content(page_list, errors):
+BOLD = re.compile(r"\*\*([^*]+?)\*\*")
+
+
+def slug(term: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", term.casefold()).strip("-")
+
+
+def content(page_list, errors, owner=None):
+    """owner maps each concept id to the chapter that introduces it."""
+    owner = owner or {}
     kids = knowledge_ids()
     embedded = set()
     for path, ch in page_list:
@@ -145,7 +154,20 @@ def content(page_list, errors):
                 errors.append(f"{rel}: Key terms lacks concept '{cid}' (introduced here per book.yaml)")
             for cid in sorted(defined - set(ch.introduces)):
                 errors.append(f"{rel}: Key terms defines '{cid}', which this chapter does not introduce")
+        in_key_terms = False
         for n, line in enumerate(lines, start=1):
+            if line.startswith("## "):
+                in_key_terms = line.strip() == "## Key terms"
+            # A term is defined (in bold) only by the chapter that introduces
+            # its concept; anywhere else it is a duplicate definition.
+            if ch is not None and not in_key_terms:
+                for term in BOLD.findall(line):
+                    if term.endswith((".", ":")):
+                        continue  # a run-in paragraph label, not a definition
+                    cid = slug(term)
+                    if cid in owner and owner[cid] != ch.id:
+                        errors.append(f"{rel}:{n}: **{term}** is defined here, but '{cid}' is "
+                                      f"introduced by chapter '{owner[cid]}'")
             if EM_DASH in line:
                 errors.append(f"{rel}:{n}: U+2014 em dash (use a comma, colon or parentheses)")
             if MACHINE_PATH.search(line):
@@ -182,7 +204,7 @@ def main() -> int:
     errors = []
     introduced = structure(book, errors)
     page_list = pages(book, errors)
-    content(page_list, errors)
+    content(page_list, errors, introduced)
     if errors:
         print("\n".join(errors), file=sys.stderr)
         print(f"book check: {len(errors)} problem(s)", file=sys.stderr)

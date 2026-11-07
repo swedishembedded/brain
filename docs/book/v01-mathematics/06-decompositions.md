@@ -1237,7 +1237,7 @@ eigenvectors are the right singular vectors of $\mathbf{X}$, because
 $\mathbf{X}^\top\mathbf{X} = \mathbf{V}\boldsymbol{\Sigma}^2\mathbf{V}^\top$.
 The leading eigenvectors are the $r$ directions along which the data has the
 most energy, and projecting onto them is the best rank-$r$ summary of the
-examples in the Eckart-Young sense. This is **principal component analysis**,
+examples in the Eckart-Young sense. This is principal component analysis,
 met again in Volume II.
 
 ## The algorithms

@@ -51,7 +51,7 @@ depends on how the two effects combine. This chapter builds the tools to answer
 the question for any number of knobs. The **partial derivative** measures the
 effect of one knob with the others held still. The **gradient** collects them
 and points uphill. The **Jacobian** does the same for a function with many
-outputs, and with it the **chain rule** becomes a product of tables of slopes.
+outputs, and with it the chain rule becomes a product of tables of slopes.
 The **Hessian** measures how the slope itself bends, and the **Taylor
 expansion** puts the pieces together into a local model of the function. At the
 end we use the model to see why a narrow valley makes walking downhill slow.

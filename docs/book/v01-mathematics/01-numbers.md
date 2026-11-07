@@ -262,7 +262,7 @@ either; the **intersection** $A \cap B$ holds what is in both; the
 The last row introduces the **product** of two sets: $A \times B$ is the set
 of **ordered pairs** $(a, b)$ with $a \in A$ and $b \in B$. A pair differs
 from a two-element set because order matters and repeats are allowed:
-$(3, 3)$ is a pair, $\{3, 3\} = \{3\}$ is not. A **dataset** of $N$ labelled
+$(3, 3)$ is a pair, $\{3, 3\} = \{3\}$ is not. A dataset of $N$ labelled
 examples is exactly a collection of $N$ pairs $(x_n, y_n)$, input and desired
 output. One subtlety to remember: a set collapses repeats, but a real dataset
 may contain the same example twice, and each copy counts. When that matters
@@ -573,7 +573,7 @@ stands for an input and the expression says what to do with it. This is the
 idea of a function, and this section only introduces its notation. The next
 chapter builds the theory.
 
-A **function** is a rule that takes an input and produces an output. We give
+A function is a rule that takes an input and produces an output. We give
 the rule a name, usually a single letter, and write $f(x)$ for the output the
 rule $f$ produces from the input $x$. To define a function we give the rule:
 
@@ -1016,7 +1016,7 @@ unrestrained $z$ breaks in both directions. Moving to logarithms avoids
 underflow of products but does not remove the problem when we must add
 probabilities rather than multiply them: $\log(a + b)$ cannot be computed from
 $\log a$ and $\log b$ by any of the rules above, and the way out (the
-**log-sum-exp** trick) is the central technique of the floating-point chapter.
+log-sum-exp trick) is the central technique of the floating-point chapter.
 
 **Off-by-one in sums.** Mathematics counts from 1, arrays from 0, and ranges in
 pseudocode exclude the upper end. A sum over $n = 1, \dots, N$ has $N$ terms,

@@ -82,7 +82,7 @@ A_{m1} & A_{m2} & \cdots & A_{mn}
 $$
 
 The set of all such matrices is $\mathbb{R}^{m \times n}$, and the pair
-$[m, n]$ is the matrix's **shape**, written with the rows first as in
+$[m, n]$ is the matrix's shape, written with the rows first as in
 [Notation](../notation.md). A matrix with $m = n$ is **square**. The shape is
 part of the matrix: a $[2, 3]$ matrix and a $[3, 2]$ matrix are different
 things even if they hold the same six numbers. As in Chapter 3, mathematics
