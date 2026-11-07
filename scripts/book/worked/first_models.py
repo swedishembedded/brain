@@ -570,7 +570,10 @@ def linear_vs_pca():
     cos = [[abs(sum(a * b for a, b in zip(u, c))) for u in vecs[:3]] for c in unit]
     sub_rows = [[f"principal direction {j + 1}", _fx(inside[j], 5)] for j in range(4)]
     cos_rows = [[f"decoder column {c + 1}"] + [_fx(cos[c][j], 3) for j in range(3)] for c in range(3)]
-    return ("Linear autoencoders 16 -> k -> 16 (no activation, same loop; rate 0.03, 400 epochs, decay 0, streams `first_models.lin_init.<k>` and the batch stream):\n\n" + sweep +
+    return ("Linear autoencoders 16 -> k -> 16 (no activation), trained by the loop of the autoencoder's training log: AdamW (0.9, 0.999, 1e-8), batch 32, 400 epochs of 8 steps, clip 1.0, decay 0, "
+            "warmup of a tenth of the steps then cosine from 0.03 to 0.0003, the shuffle stream of that log (one shuffle of 0 .. 255 per epoch); weights N(0, 1/n_in) row by row, layer by layer, biases 0, from the generator `first_models.lin_init.k` with seeds "
+            + ", ".join(f"k = {k}: {_seed(f'first_models.lin_init.{k}')}" for k in (1, 2, 3, 4)) + ". The reported weights are those of the epoch with the lowest validation loss; training, validation and test errors are the mean squared error per entry on the three splits. "
+            "The PCA errors are those of the best rank-k reconstruction fitted on the training set.\n\n" + sweep +
             "\n\nBottleneck 3. Length of the projection of each principal direction (unit vector) onto the span of the decoder's three columns (1 means inside the span):\n\n" +
             _table(["direction", "length of projection"], sub_rows) +
             "\n\nAbsolute cosine between each decoder column and each principal direction (a column is not a principal direction, only the span is):\n\n" +
@@ -890,10 +893,12 @@ def ctrl_data():
     lin_val = mse([[sum(a * b for a, b in zip(w, x + [1.0]))] for x in Xv], Tv)
     mean_val = mse([[mean_u]] * len(Tv), Tv)
     head = (f"{CTRL_TRAJ} trajectories of {CTRL_LEN} steps on the nominal plant, so {len(X)} samples per training set, and {CTRL_VAL_TRAJ} validation trajectories ({len(Xv)} samples, the expert driving). "
-            f"Per trajectory: y(0) = -0.6 + 1.2 u; at every step c = uniform and, if t = 0 or c < 0.10, a new setpoint -1 + 2 u; "
-            "for the 'explore' set then r = uniform and, if r < 0.3, a normal draw g and the applied command clamp(u* + 0.25 g), "
+            f"Per trajectory, in this draw order: y(0) = -0.6 + 1.2 u (one uniform u); the setpoint, the previous command u_prev and the previous error e_prev start at 0. At step t = 0 a new setpoint -1 + 2 u is drawn (one uniform) and no c is drawn; "
+            "at every later step c = uniform and, if c < 0.10, a new setpoint -1 + 2 u (one more uniform). Then e = setpoint - y and u* is the expert's command from e, e_prev and u_prev (chapter section above); "
+            "for the 'explore' set then r = uniform and, if r < 0.3, a normal draw g and the applied command clamp(u* + 0.25 g, -1, 1), "
             "else if r < 0.38 a uniform draw and the applied command -1 + 2 u, else the applied command u*. "
-            f"The sample is (e, e_prev, u_prev) -> u* (the expert's command at that state, whatever was applied). Streams: {_seed('first_models.ctrl_data_expert')}, "
+            "The plant then advances with the applied command, u_prev becomes the applied command and e_prev becomes e. "
+            f"The sample is (e, e_prev, u_prev) -> u* (the expert's command at that state, whatever was applied). The mean predictor is the constant equal to the mean of the explore training targets. Streams: {_seed('first_models.ctrl_data_expert')}, "
             f"{_seed('first_models.ctrl_data_explore')}, {_seed('first_models.ctrl_val')}. The 'expert' set draws no r and no g.\n\n")
     rows = [
         ["samples in the training set", str(len(X)), str(len(Xe))],
@@ -954,7 +959,8 @@ def ctrl_closed_loop():
         rows.append([label, _fx(tracking_mse(r), 5), _fx(steady_error(r), 5), " / ".join(_fx(x[1], 1) for x in m),
                      " / ".join("-" if x[2] is None else str(x[2]) for x in m), _fx(max(abs(x[3]) for x in r), 3), _fx(action_errors(r), 4),
                      _fx(max(abs(a[2] - b[2]) for a, b in zip(r, pid_rows)), 4)])
-    head = ("Closed loop on the nominal plant, 180 steps, setpoint 0.70, -0.60, 0.40, -0.85 held for 45 steps each, from y = 0. "
+    head = ("Closed loop on the nominal plant, 180 steps, setpoint 0.70, -0.60, 0.40, -0.85 held for 45 steps each, from y = 0, u_prev = 0, e_prev = 0. "
+            "Each network is its training run's best-validation checkpoint (the weights of the epoch with the lowest validation loss, as kept in the training log), not the weights of the last epoch. "
             "'Tracking error' is the mean of e(t)^2 over the 180 steps; 'steady error' the mean |e| over steps 35 .. 44 of each hold; overshoot is "
             "(largest excursion beyond the setpoint) / |step| in percent; settling is the first step of the hold after which |e| stays within 5 % of the step; "
             "'action error' is the RMS difference between the commands used and the expert's command at the states visited; 'largest deviation' is the maximum of |y - y_PID|.\n\n")
@@ -1042,9 +1048,9 @@ def work_counts():
         P = n_params(spec)
         saved = saved_floats(spec, B)
         mem.append([name, _int(4 * P), _int(4 * P), _int(8 * P), _int(16 * P), _int(4 * saved), _int(28 * P), _fx(19 / 28, 3)])
-    second = _table(["model", "parameter bytes", "gradient bytes", "AdamW state bytes (m and v)", "persistent total", "saved activations of one step (bytes)", "bytes moved by one optimizer step", "optimizer FLOPs per byte"], mem)
+    second = _table(["model", "parameter bytes", "gradient bytes", "AdamW state bytes (m and v)", "persistent total", "saved activations of one step (bytes)", "bytes moved by one optimizer step", "clip and AdamW FLOPs per byte (19 / 28)"], mem)
     head = ("Matrix-product FLOPs follow chapter 12's rule: forward 2 M B, weight gradients 2 M B, gradients passed down 2 (M - M_1) B with M_1 the first layer's multiply-adds; "
-            "the clip costs 3 FLOPs and AdamW 16 per parameter (chapter 7). An epoch adds one forward pass over the training and the validation set. All arrays are counted as 4-byte floats.\n\n")
+            "the clip costs 3 FLOPs and AdamW 16 per parameter (chapter 7). An epoch adds one forward pass over the training and the validation set. All arrays are counted as 4-byte floats. The last column divides the 19 FLOPs per parameter of the clip and AdamW together (3 + 16) by the 28 bytes the optimizer step moves; AdamW alone is 16 / 28 = 0.571 (chapter 7).\n\n")
     return head + first + "\n\nMemory and traffic of the same runs:\n\n" + second
 
 

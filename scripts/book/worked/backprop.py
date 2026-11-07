@@ -135,6 +135,7 @@ def scalar_chain_check():
     n1 = (loss(SC_W1 + h, SC_W2) - loss(SC_W1 - h, SC_W2)) / (2 * h)
     n2 = (loss(SC_W1, SC_W2 + h) - loss(SC_W1, SC_W2 - h)) / (2 * h)
     return "\n".join([
+        "Central difference with h = 1e-6, double precision, tanh the library tanh; loss (w2 tanh(w1 x) - t)^2.", "",
         "| parameter | backward | central difference | absolute difference |",
         "|---|---:|---:|---:|",
         f"| w1 | {v['d_w1']:.6f} | {n1:.6f} | {abs(v['d_w1'] - n1):.1e} |",
@@ -376,7 +377,8 @@ def central_difference(theta, i, h=1e-5):
 
 def finite_difference():
     theta, grad = flat_params(), flat_gradient()
-    out = ["Step size h = 1e-5, double precision. One row per parameter.", "",
+    out = ["Step size h = 1e-5, double precision, tanh the correctly rounded library tanh. One row per parameter. The last column is rounding noise: "
+           "only its order of magnitude (between 1e-15 and 1e-9) is reproducible, not its digits.", "",
            "| parameter | backprop gradient | central difference | absolute difference |",
            "|---|---:|---:|---:|"]
     worst = 0.0
@@ -399,7 +401,8 @@ def wrong_backward():
     d_b1 = col_sums(d_z1)
     theta = flat_params()
     bad = [v for r in d_w1 for v in r] + d_b1 + flat_gradient()[H * D + H:]
-    out = ["| parameter | wrong backward | central difference | relative error |", "|---|---:|---:|---:|"]
+    out = ["Relative error = |wrong - central difference| / max(|wrong|, |central difference|); central difference with h = 1e-5, double precision, tanh the library tanh.", "",
+           "| parameter | wrong backward | central difference | relative error |", "|---|---:|---:|---:|"]
     labels = param_labels()
     for i in (0, 3, H * D, H * D + 2, H * D + H, H * D + H + O * H):
         n = central_difference(theta, i)
@@ -459,8 +462,9 @@ def forward_mode_check():
            "|---|---:|---:|---:|"]
     for name, a, b in spans:
         worst = max(abs(fm[i] - rv[i]) for i in range(a, b))
-        out.append(f"| {name} | {b - a} | {b - a} | {worst:.1e} |")
-    out += ["", f"Forward mode needed {n} passes, one per parameter. Reverse mode needed one forward pass and one "
+        shown = "below 1e-15" if worst < 1e-15 else f"{worst:.1e}"
+        out.append(f"| {name} | {b - a} | {b - a} | {shown} |")
+    out += ["", f"Differences at the level of one rounding error are printed as a bound. Forward mode needed {n} passes, one per parameter. Reverse mode needed one forward pass and one "
                 f"backward pass."]
     return "\n".join(out)
 

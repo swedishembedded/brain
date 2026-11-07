@@ -1,4 +1,4 @@
-<!-- source-sha256: 94e1d5383856d2b6ca553ed4099f10d612ad9c2cc6a7a314e81ce8158d3e05c7 -->
+<!-- source-sha256: 12724a71f3649e6f85c8194f1985eeb0f8748babbfe0db0f3f8266731696616b -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 374" width="800" height="374"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="374" fill="#ffffff"/>
 <rect x="20" y="10" width="760" height="354" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Dropout at p = 0.5: the output of a layer of six units is a_j m_j / (1 - p)</text>

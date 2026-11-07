@@ -17,6 +17,8 @@ Thirteen chapters have taught the parts of a neural network: a layer, a loss, a 
 6. **Two models trained end to end.** A classifier with softmax cross-entropy on a three-class synthetic task, and the autoencoder of chapter 13.
 7. **A debugging exercise.** A configuration that ships with three planted defects. You find each with the checklist of chapter 12 and fix it.
 
+Five words recur, each defined by where it is used. A **fixture** is a small input fixed by a formula rather than by a generator, so that any language computes the identical numbers. A **probe** is a fixed array that stands in for the gradient arriving from above, so that a layer's output becomes a single number to differentiate. A **checkpoint** is the saved state of a training run, and the **patience** is the number of consecutive epochs without an improvement of the validation loss that the loop tolerates before it stops. A **directional** check compares the gradient with a finite difference along one direction instead of along each coordinate (chapter 6).
+
 Nothing here is new. Every part was derived and worked by hand; the project asks whether the parts compose into a library you would trust, which is a different thing from following a derivation. The failures it is designed to expose are the ordinary ones: a backward pass that is right for a layer alone and wrong in a network, a test instance whose sizes hide the bug, an optimizer that applies its decay in the wrong place, a checkpoint that forgets one piece of state, a schedule measured in the wrong unit, an evaluation that quietly leaves dropout on.
 
 **How the project is organised.** Each milestone says what to build (in the book's pseudocode, which fixes the interface and nothing else), why it matters later, a check you run before moving on, and the mistakes readers actually make. The **acceptance tests** at the end give inputs and the outputs a correct library produces, written so that any language can be tested against them. Every expected value was computed by a second, independent implementation, `scripts/book/worked/project_nnlib.py`, and is regenerated whenever the book is built. Use only your language's standard library plus the library of Volume I (the generator, the strided arrays, matrix multiplication, log-sum-exp and the numerical gradient).
@@ -154,7 +156,7 @@ Parameter gradients after one backward pass from zero (tensor labels are k.name,
 The losses and the cases that break naive implementations:
 
 <!-- worked: project_nnlib.loss_values -->
-Logits z (softmax cross-entropy) and outputs y (mean squared error): z[b, j] = 2 sin(0.8 k + 0.5), k = 4 b + j, shape [3, 4]; labels (2, 0, 3). Targets t[b, j] = 1.5 sin(1.4 k + 0.2).
+Logits z (softmax cross-entropy): z[b, j] = 2 sin(0.8 k + 0.5), k = 4 b + j, shape [3, 4]; labels (2, 0, 3). Mean squared error: the outputs y are the same 12 numbers as z (y = z, shape [3, 4]) and the targets are t[b, j] = 1.5 sin(1.4 k + 0.2), the mean taken over all 12 entries.
 
 | loss | value | d[0,0] | d[0,2] | d[2,3] | sum of d below 1e-15 |
 |---|---:|---:|---:|---:|---:|
@@ -167,13 +169,13 @@ Overflow case, one row z = (710, 0, -5): label 0 gives loss 0.00000000, label 1 
 The loss for a row of logits near 710 is finite only because the maximum is subtracted before the exponential. The last check of the milestone is the one the linear layer's accumulators exist for:
 
 <!-- worked: project_nnlib.accumulation -->
-Linear 5 -> 7 of the layer fixtures, x of shape [3, 5], dy of shape [3, 7] (the probe). 'once' is one backward call after zero_grad. The last row cuts the batch into rows {0} and {1, 2} and calls forward and backward on each with the matching rows of dy.
+Linear 5 -> 7 of the layer fixtures, x of shape [3, 5], dy of shape [3, 7] (the probe). 'once' is one backward call after zero_grad. The last row cuts the batch into rows {0} and {1, 2} and calls forward and backward on each with the matching rows of dy. A difference at the level of one rounding error (under 1e-15) is printed as a bound: its value depends on the order in which the sums are formed.
 
 | experiment | largest |difference| from the stated value | expected |
 |---|---:|---|
-| backward twice without zero_grad | 0.0e+00 | twice the gradient |
-| zero_grad, then backward again | 0.0e+00 | the gradient |
-| rows 0 and rows 1 to 2 as two backward calls | 2.2e-16 | the gradient |
+| backward twice without zero_grad | below 1e-15 | twice the gradient |
+| zero_grad, then backward again | below 1e-15 | the gradient |
+| rows 0 and rows 1 to 2 as two backward calls | below 1e-15 | the gradient |
 
 The 'once' gradient has first entry -0.55651470 (the weight W[0,0]) and last entry +1.10517775 (the bias b[6]).
 <!-- /worked -->
@@ -284,7 +286,7 @@ Fault: the gradient of the mean squared error divides by B where B * O belongs. 
 
 At $(1, 1, 1)$ and at $O = 1$ the fault computes the right gradient, because $B\cdot O = B$; the policy `distinct_dims` says "no" for both. Equal sizes such as $(3, 5, 3)$ happen to expose this fault but not every fault, and the policy rejects them too: it is a rule about what an instance can reveal, not a prediction about one bug. Only a set of sizes that passes the policy, here $(3, 5, 2)$, is guaranteed to separate the roles of the three sizes.
 
-Finally the models of milestone 6 are checked as wholes, once their layers pass. The large tensors are checked directionally, the small ones (biases, gains, shifts) per entry, because those are the tensors that a backward pass folds and sums over a batch (chapter 6).
+Finally the models of milestone 6 are checked as wholes, once their layers pass. A tensor is labelled `k.name`, with `k` the 0-based position of a leaf layer (a layer that is not a container) in the depth-first order of the model's leaves, a residual wrapper contributing the leaves of its body in place, and `name` one of `W`, `b`, `gamma`, `beta`; the flat parameter vector of a model lists the tensors in that order, `W` before `b` (each row-major) and `gamma` before `beta`. The large tensors are checked directionally, the small ones (biases, gains, shifts) per entry, because those are the tensors that a backward pass folds and sums over a batch (chapter 6).
 
 <!-- worked: project_nnlib.model_gradient_checks -->
 Classifier of milestone 6 (hidden width 32, dropout p = 0.3 active, mask held fixed by restarting Generator seed 0x05f61e5542677ff4 (429564165995593716) before every evaluation) on training rows 0 to 4: loss 1.046265, 1507 parameters. Tensors of at most 64 entries are checked per entry (gate ratio below 1 means pass), the larger ones by the directional check with 4 directions from Generator seed 0xc983d605c60ecc45 (14520684943858650181).
@@ -335,7 +337,7 @@ The bodies are the pseudocode of chapters 7 and 8. The conventions that the acce
 - Decoupled decay is applied to the weight first, `theta = theta - eta * lam * theta`, and then the Adam move uses the moments computed from the unmodified gradient. Coupled decay (`decoupled = false`) adds `lam * theta` to the gradient before the moments.
 - Lion's sign of an exactly zero interpolation is $0$, not $+1$ (chapter 7), and Lion's state is one array.
 - The clip scale is `min(1, tau / (norm + 0.000001))` and the clip returns the norm **before** scaling, which is what the log records.
-- The schedule at the last warmup step is exactly the peak (`peak * (t + 1) / warmup` at `t = warmup - 1`), and the cosine reaches the floor at the last step of the run only if `total` counts steps.
+- The schedule at the last warmup step is exactly the peak (`peak * (t + 1) / warmup` at `t = warmup - 1`), and the cosine reaches the floor only at step `total` itself, one past the last step: at the last step `t = total - 1` the rate is still slightly above it (the table below prints the rate at `t = 99` of a run of 100 steps). A `total` that counts epochs instead of steps reaches the floor after that many steps, long before the run ends, which milestone 7 plants.
 
 **Why it matters later.** The loop of milestone 5 is these functions in a fixed order: clip, then schedule, then update. The order is part of the contract (chapter 8, "Clipping and Adam").
 
@@ -379,7 +381,7 @@ Start theta = (1.0, -2.0, 0.5). The gradient at step t (t = 0, 1, 2, ...) is g_t
 Read the table the way chapter 7 taught. SGD's first step is $\eta g$; momentum's first step equals it and its later ones grow; Adam's first step is $\eta\,\mathrm{sign}(g)$ up to the $\epsilon$ in its denominator, whatever the gradient's size; the coupled variant differs from AdamW from step 2 on, because its decay has been divided by the gradient scale (chapter 7); Lion's steps have size exactly $\eta$ plus the decay. Then the schedule and the clip:
 
 <!-- worked: project_nnlib.schedule_and_clip -->
-Schedule: peak 0.01, floor 1e-4, warmup 10, total 100; the second column holds the peak for 10 steps after the warmup. t is the 0-based step.
+Schedule: peak 0.01, floor 1e-4, warmup 10, total 100; the second column holds the peak for 10 steps after the warmup. t is the 0-based step. The last step of the run is t = 99 = total - 1; its rate is not yet the floor (the floor is reached at t = total = 100, where the rate is 0.00010000, and stays there).
 
 | t | hold 0 | hold 10 |
 |---|---:|---:|
@@ -428,9 +430,9 @@ The `factor` is the read-out factor of chapter 9 ("The output layer"): a classif
 **Check.** Draw a $128 \times 96$ matrix per scheme and shape from the named streams and compare the first draws and the standard deviation with the target:
 
 <!-- worked: project_nnlib.initialization_statistics -->
-A weight matrix with n_out = 128 and n_in = 96 (12288 entries, row-major), drawn from a fresh generator per row named project_nnlib.init.<scheme>.<shape> (seeds are derived from those names; the draw is the one call of the chapter-9 rule per entry, the truncated shape redrawing normal() until |z| <= 2). 'target sd' is sqrt(2/n_in), sqrt(2/(n_in+n_out)) or sqrt(1/n_in).
+A weight matrix with n_out = 128 and n_in = 96 (12288 entries, row-major), drawn from a fresh generator per row named project_nnlib.init.<scheme>.<shape> (the seed of a stream is the first 8 bytes, read as a big-endian unsigned integer, of the SHA-256 digest of its name; the seeds are printed below, so no derivation is needed; the draw is the one call of the chapter-9 rule per entry, the truncated shape redrawing normal() until |z| <= 2). 'target sd' is sqrt(2/n_in), sqrt(2/(n_in+n_out)) or sqrt(1/n_in). 'sd of the 12288' is the population standard deviation with divisor n = 12288 after subtracting the mean of the entries (not the divisor n - 1 of the book's sd).
 
-| scheme | shape | first three weights | target sd | sd of the 12288 | largest |w| |
+| scheme | shape | first three weights | target sd | sd of the 12288 (divisor n) | largest |w| |
 |---|---|---:|---:|---:|---:|
 | he | normal | +0.010290, +0.310372, -0.154359 | 0.144338 | 0.145302 | 0.5985 |
 | he | uniform | +0.121690, +0.188562, -0.005744 | 0.144338 | 0.144823 | 0.2499 |
@@ -470,7 +472,18 @@ record TrainState:
     wait: int                        # consecutive epochs without an improvement
     log: list<array<real>[7]>        # epoch, training loss, validation loss, accuracy or 0, mean grad norm, clipped steps, last rate
 
-function fit(state: inout TrainState, until_epoch: int, ...) -> none
+record TrainConfig:
+    batch: int                       # examples per step; divides N
+    peak: real                       # the schedule: warmup = total // 10, floor = peak / 100, hold 0, total = epochs * (N // batch)
+    epochs: int
+    tau: real                        # global-norm clip threshold
+    lam: real                        # decoupled decay of AdamW (beta1 0.9, beta2 0.999, eps 1e-8)
+    patience: optional int           # none: never stop early
+
+function fit(state: inout TrainState, until_epoch: int, model: Sequential, loss: Loss,
+             X: array<real>[N, n_in], T: list<array<real>>, Xv: array<real>[Nv, n_in], Tv: list<array<real>>,
+             cfg: TrainConfig) -> none
+    # T and Tv hold one target per row: the class index as a one-element array for softmax_ce, the target row for mse
     # for each epoch up to until_epoch, unless stopped:
     #   rng = Generator(state.rng_batches); shuffle(order, rng); state.rng_batches = rng.state   (the dropout generator likewise)
     #   for each batch: zero_grad, forward in "train" mode,
@@ -509,7 +522,7 @@ A run of equal losses, 1.0, 0.8, 0.6, 0.6, 0.6, 0.6, with patience 3 keeps epoch
 Then the exact-resume test. Train 12 epochs in one go. Train 6, save, build a new model and trainer from scratch, load, train 6 more. The two end in the same parameters and the same log, compared with `==`, not within a tolerance. The same program run twice gives the same result, which is the determinism test, and each piece of state left out of the checkpoint produces a run that is no longer the same:
 
 <!-- worked: project_nnlib.resume_identity -->
-Classifier of milestone 6 on the first 128 training rows (4 steps of 32 per epoch), 12 epochs, no early stopping, AdamW 3e-3, decay 0.01, clip 1. Streams: shuffles seed 0x6508599f48ae21a6 (7280167338298450342), dropout seed 0x6c197b6cca9a741c (7789392737699787804). 'Identical' means every parameter and every logged number equal with ==, not within a tolerance.
+Classifier of milestone 6 (dropout p = 0.3, initial weights from Generator seed 0x9551c68b36b463fb (10759599285985371131)) on the first 128 training rows (4 steps of 32 per epoch, the 256 validation rows for the log), 12 epochs, no early stopping; AdamW (0.9, 0.999, 1e-8) with decay 0.01, clip 1, and the schedule of milestone 3 with peak 3e-3, warmup 4 steps (a tenth of the 48 steps), floor 3e-5 and total 48 (hold 0). Streams: shuffles seed 0x6508599f48ae21a6 (7280167338298450342), dropout seed 0x6c197b6cca9a741c (7789392737699787804). The three damaged checkpoints are made from the checkpoint saved after epoch 6: the order replaced by the sorted order 0 .. 127, the dropout generator replaced by a generator at its seed (the start of its stream), the moments m and v replaced by zeros (the step count kept). 'Identical' means every parameter and every logged number equal with ==, not within a tolerance.
 
 | run | identical to the first row | largest parameter difference | training loss, epoch 12 | validation loss, epoch 12 |
 |---|---:|---:|---:|---:|
@@ -560,7 +573,7 @@ function make_classifier(p_drop: real, rng: inout Generator) -> Sequential
 The weights are drawn in the order `first`, `inner`, `last`. The loss is `softmax_ce`. Before training, run the checklist of chapter 12 that applies: the loop of milestone 2 on the whole model, the initial loss against $\ln 3$, the label prior, a linear baseline, and the overfit-one-batch test on 8 training rows with dropout off. Then train. The full settings are in the head of the table.
 
 <!-- worked: project_nnlib.classifier_training -->
-Model: Linear 8 -> 32 (He), GELU, residual block [layer norm 32, Linear 32 -> 32 (He), GELU, dropout 0.3], Linear 32 -> 3 (1/n_in scale times 0.1); 1507 parameters, biases and layer-norm shifts 0, gains 1. Start draws: Generator seed 0x9551c68b36b463fb (10759599285985371131), weights of the three linear layers in order, row-major, one normal() each. Loop: batch 32 (16 steps per epoch, at most 40 epochs = 640 steps), shuffles of 0 .. 511 from Generator seed 0x211ccd342efd4ba8 (2386007526609865640) (one in-place shuffle per epoch), dropout draws from Generator seed 0x4f307fd441988ba6 (5706201277488728998) (one uniform() per element of the 32 x 32 block, row-major, per step). AdamW (0.9, 0.999, 1e-8), decay 0.01, clip 1.0, peak rate 0.003, warmup 64 steps, cosine to 3.0e-05, early stopping with patience 8 on the validation loss. Losses and accuracy are computed in eval mode over the whole set after each epoch; 'grad norm' is the mean norm before the clip, 'clipped' the number of clipped steps in the epoch, 'rate' the rate of the epoch's last step.
+Model: Linear 8 -> 32 (He), GELU, residual block [layer norm 32, Linear 32 -> 32 (He), GELU, dropout 0.3], Linear 32 -> 3 (1/n_in scale times 0.1); 1507 parameters, biases and layer-norm shifts 0, gains 1. Start draws: Generator seed 0x9551c68b36b463fb (10759599285985371131), weights of the three linear layers in order, row-major, one normal() each. Loop: batch 32 (16 steps per epoch, at most 40 epochs = 640 steps), shuffles of 0 .. 511 from Generator seed 0x211ccd342efd4ba8 (2386007526609865640) (one in-place shuffle per epoch), dropout draws from Generator seed 0x4f307fd441988ba6 (5706201277488728998) (one uniform() per element of the 32 x 32 block, row-major, per step). AdamW (0.9, 0.999, 1e-8), decay 0.01, clip 1.0, peak rate 0.003, warmup 64 steps, cosine to 3.0e-05, early stopping with patience 8 on the validation loss. Losses and accuracy are computed in eval mode over the whole set after each epoch; 'grad norm' is the mean norm before the clip, 'clipped' the number of clipped steps in the epoch, 'rate' the rate of the epoch's last step. Linear softmax baseline: one linear layer 8 -> 3 (weights N(0, 1/8) row-major from Generator seed 0xb55c5dfb7d7f3d96 (13068423553446002070), biases 0), trained on the same data by the same loop (batch 32, shuffles from the classifier's shuffle stream, no dropout, no early stopping) for 20 epochs of 16 steps with AdamW decay 0.01, clip 1 and peak rate 0.01 (warmup 32 steps, cosine to 1e-4); validation loss and accuracy in eval mode after epoch 20. Overfit one batch: the classifier above with dropout in eval mode (off), training rows 0 to 7, a constant rate 0.01 (no schedule), AdamW without clip and without decay, 150 steps, the loss before the first step and after the 150th and the accuracy on those 8 rows.
 
 | before training | value |
 |---|---:|
@@ -696,7 +709,7 @@ The classifier of milestone 6 with every other setting unchanged, early stopping
 The shipped run's validation loss never leaves $\ln 3$ and its accuracy stays at $0.44$, close to the share of the majority class. That is one symptom with several causes (chapter 12, "Plateau"). The checklist separates them, and the measurements below are what each item reports on the shipped configuration and on the healthy one:
 
 <!-- worked: project_nnlib.debug_diagnostics -->
-Checklist measurements of the shipped configuration against the healthy one (stage 3 of the previous table). Validation labels are never shifted. The determinism probe evaluates the final weights of the stage-0 run twice on the validation set, in train mode from Generator seed 0xd7ed388ec07ca909 (15559154473400838409) (draws continue between the two calls) and then in eval mode.
+Checklist measurements of the shipped configuration against the healthy one (stage 3 of the previous table). Validation labels are never shifted. The linear baseline and the overfit-one-batch test have the settings of the milestone-6 table, trained on the shifted labels (training label i replaced by the label of row i + 1, the last by the first) in the shipped column. The determinism probe evaluates the final weights of the healthy run (the second column, stage 3) twice on the 256 validation rows, in train mode from Generator seed 0xd7ed388ec07ca909 (15559154473400838409) (draws continue between the two calls) and then in eval mode.
 
 | measurement | shipped | healthy | reading |
 |---|---:|---:|---|
@@ -705,7 +718,7 @@ Checklist measurements of the shipped configuration against the healthy one (sta
 | linear baseline, validation accuracy (majority class 0.4297) | 0.4531 | 0.5781 | shipped: barely above the majority class |
 | overfit one batch: final loss | 5.57e-06 | 3.71e-06 | both pass: memorising needs no signal |
 | epoch-1 rate and rate at epoch 5 (peak 0.003, floor 3e-05) | 2.367e-03, 3.000e-05 | 7.500e-04, 2.995e-03 | shipped: the floor by epoch 5 |
-| rate of the last step of epoch 40 | 3.000e-05 | 3.002e-05 | both at the floor, the shipped one 600 steps early |
+| rate of the last step of epoch 40 | 3.000e-05 | 3.002e-05 | both at the floor 3e-05 to three digits; the shipped one got there 600 steps early |
 | two evaluations of one model, train mode: loss difference | 0.0007 | - | different answers for one input |
 | two evaluations of one model, eval mode: loss difference | 0.0e+00 | - | eval mode: identical, as it must be |
 <!-- /worked -->
@@ -736,17 +749,17 @@ The tests are the blocks printed in the milestones above, collected here as a ch
 
 | milestone | test | expected | tolerance |
 |---|---|---|---|
-| 1 | layer fixtures: probe loss $L$, the four entries of $y$ and $dx$, the first and last parameter gradients and their sum of squares | as printed (8 decimals) | $10^{-9}$ |
-| 1 | softmax cross-entropy and mean squared error on the fixture; the overflow row | as printed; every value finite | $10^{-9}$ |
+| 1 | layer fixtures: probe loss $L$, the four entries of $y$ and $dx$, the first and last parameter gradients and their sum of squares | as printed (8 decimals) | $5\times10^{-9}$ |
+| 1 | softmax cross-entropy and mean squared error on the fixture; the overflow row | as printed; every value finite | $5\times10^{-9}$ |
 | 1 | dropout mask on the fixture seed | the printed pattern of 15 values | exact |
 | 1 | accumulation | twice, zero-then-once and in-pieces differences below the printed bounds | $10^{-15}$ |
 | 2 | every layer, input and every parameter tensor: failing entries and the directional verdict | zero failing; all pass; worst ratio below 1 | exact; ratio is a criterion, not a number to copy |
 | 2 | layer norm with the centring term dropped | input fails on 15 of 15 entries; gamma and beta pass | exact |
 | 2 | dimension policy | failing entries as printed for the four instances; `distinct_dims` as printed | exact |
 | 2 | model checks (classifier, autoencoder) | no failing entry; directional passes | exact |
-| 3 | optimizer trajectories: theta after 1, 2, 3 and 10 steps for the seven rules | as printed | $10^{-9}$ |
-| 3 | schedule rates; clip norm and scale | as printed | $10^{-12}$ |
-| 4 | initialization: first three weights per scheme and shape; standard deviation | as printed | $10^{-6}$ for a bit-exact generator; $3\%$ of the target for the standard deviation otherwise |
+| 3 | optimizer trajectories: theta after 1, 2, 3 and 10 steps for the seven rules | as printed | $5\times10^{-9}$ |
+| 3 | schedule rates; clip norm and scale | as printed (8 decimals) | $5\times10^{-9}$ |
+| 4 | initialization: first three weights per scheme and shape; standard deviation | as printed | $5\times10^{-7}$ for a bit-exact generator (the standard deviation uses the divisor $n = 12288$); $3\%$ of the target for the standard deviation otherwise |
 | 5 | early-stopping rule on the given losses | as printed | exact |
 | 5 | resume | full checkpoint: identical; each missing piece: not identical | exact |
 | 6 | task fingerprint: class counts, row 0, sum of the inputs | as printed | counts exact; $5\times10^{-7}$ |
@@ -761,14 +774,14 @@ A compact fingerprint of a correct library, to check at the end:
 <!-- worked: project_nnlib.acceptance_fingerprint -->
 | milestone | quantity | value | tolerance |
 |---|---|---:|---|
-| 1 | probe loss L, linear 5 -> 7 | +0.50268275 | 1e-9 |
-| 1 | probe loss L, layer norm | -1.11966819 | 1e-9 |
-| 1 | probe loss L, residual (5 -> 7 -> 5) | -1.98236398 | 1e-9 |
-| 1 | softmax cross-entropy on the fixture | +1.67574842 | 1e-9 |
+| 1 | probe loss L, linear 5 -> 7 | +0.50268275 | 5e-9 |
+| 1 | probe loss L, layer norm | -1.11966819 | 5e-9 |
+| 1 | probe loss L, residual (5 -> 7 -> 5) | -1.98236398 | 5e-9 |
+| 1 | softmax cross-entropy on the fixture | +1.67574842 | 5e-9 |
 | 2 | layer-norm input entries failing without the centring term | 15 of 15 | exact |
-| 3 | AdamW theta[0] after 10 steps | +0.68398993 | 1e-9 |
-| 3 | schedule rate at t = 55 (hold 0) | 0.00505000 | 1e-12 |
-| 4 | sd of He normal, 128 x 96 (stream init.he.normal) | 0.145302 | 1e-6 bit-exact; 3% of the target otherwise |
+| 3 | AdamW theta[0] after 10 steps | +0.68398993 | 5e-9 |
+| 3 | schedule rate at t = 55 (hold 0) | 0.00505000 | 5e-9 |
+| 4 | sd (divisor n = 12288) of He normal, 128 x 96 (stream init.he.normal) | 0.145302 | 5e-7 bit-exact; 3% of the target otherwise |
 | 5 | patience 3: best epoch, stop epoch | 6, 9 | exact |
 | 6 | classifier: initial training loss | 1.12218 | 1e-4 |
 | 6 | classifier: best epoch, stop epoch | 19, 27 | exact |
@@ -778,7 +791,7 @@ A compact fingerprint of a correct library, to check at the end:
 | 6 | autoencoder: best validation loss | 0.00246 | 1e-5 |
 | 7 | stage 3 equals milestone 6 without early stopping: validation loss, epoch 10 | 0.3925 | 1e-4 |
 | 7 | stage 2 (eval-mode fault only): validation accuracy, epoch 40 | 0.8984 | 1e-4 |
-| 7 | horizon fault only: rate of the last step, epoch 40 | 3.000e-05 | 1e-9 |
+| 7 | horizon fault only: rate of the last step, epoch 40 | 3.000e-05 | 5e-9 |
 <!-- /worked -->
 
 ## Where this appears in brain
@@ -787,7 +800,7 @@ The habits of this chapter are ones brain's own code enforces. `crates/gradcheck
 
 ## Summary
 
-If every acceptance test passes you have built and checked: ten layer types and two losses whose forward and backward passes agree with fixtures to $10^{-9}$ and with finite differences in the input and in every parameter; a checker that finds a planted fault in a layer's input gradient and a policy for the sizes it runs on; seven update rules and a schedule and clip that reproduce fixed trajectories; initializers whose draws are specified to the bit; a training loop whose checkpoints resume a run exactly, and whose every piece of state is accounted for; a classifier that reaches a test accuracy of $0.9141$ and an autoencoder that reproduces chapter 13's table from different code; and a diagnosis of three defects that each hid another.
+If every acceptance test passes you have built and checked: ten layer types and two losses whose forward and backward passes agree with fixtures to $5\times10^{-9}$ (the eighth printed decimal) and with finite differences in the input and in every parameter; a checker that finds a planted fault in a layer's input gradient and a policy for the sizes it runs on; seven update rules and a schedule and clip that reproduce fixed trajectories; initializers whose draws are specified to the bit; a training loop whose checkpoints resume a run exactly, and whose every piece of state is accounted for; a classifier that reaches a test accuracy of $0.9141$ and an autoencoder that reproduces chapter 13's table from different code; and a diagnosis of three defects that each hid another.
 
 What the project established, in order. The sizes of the test instance decide what the gradient check can see. A layer is not checked until its input gradient is. A resumed run is the same run only if the order of the examples and the state of every generator travel with the weights. A schedule is a function of steps and a loss curve is read in epochs. A passing gradient check and a passing overfit test say nothing about the data or about the evaluation.
 

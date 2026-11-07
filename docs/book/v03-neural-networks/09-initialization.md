@@ -9,23 +9,23 @@
 
 Gradient descent needs a place to start. For a line fitted to data in Volume II the starting point hardly mattered: the loss was a bowl, and every start rolled to the same bottom. A deep network is not a bowl, and the chapters so far quietly assumed that the weights were already somewhere sensible. This chapter asks where, and the answer turns out to decide whether the first step of training does anything at all.
 
-Take one network, used throughout this chapter and called the **deep stack**. It reads an input $\mathbf{x}$ of 64 numbers and has ten hidden layers of 64 units, each computing $\mathbf{z}_\ell = \mathbf{W}_\ell\mathbf{a}_{\ell-1} + \mathbf{b}_\ell$ and $\mathbf{a}_\ell = g(\mathbf{z}_\ell)$ with $\mathbf{a}_0 = \mathbf{x}$; a last weight vector, the read-out, turns $\mathbf{a}_{10}$ into one number $y$. It has $64\cdot 64 + 9\cdot 64\cdot 64 + 64 = 41{,}024$ weights, and $10\cdot 64 + 1 = 641$ biases (all starting at zero). The target is the smooth function $t = 1 + \sin(\mathbf{a}\cdot\mathbf{x})$ of a fixed direction $\mathbf{a}$, the loss is the mean squared error on 32 examples, and every run uses the same plain gradient descent with rate $0.01$ for 100 steps. The only thing that changes between runs is the starting weights, in five ways:
+Take one network, used throughout this chapter and called the **deep stack**. It reads an input $\mathbf{x}$ of 64 numbers and has ten hidden layers of 64 units, each computing $\mathbf{z}_\ell = \mathbf{W}_\ell\mathbf{a}_{\ell-1} + \mathbf{b}_\ell$ and $\mathbf{a}_\ell = g(\mathbf{z}_\ell)$ with $\mathbf{a}_0 = \mathbf{x}$; a last weight vector, the read-out, turns $\mathbf{a}_{10}$ into one number $y$. It has $64\cdot 64 + 9\cdot 64\cdot 64 + 64 = 41{,}024$ weights, and $10\cdot 64 + 1 = 641$ biases (all starting at zero). The target is the smooth function $t = 1 + \sin(\mathbf{a}\cdot\mathbf{x})$ of a fixed direction $\mathbf{a}$, the loss is the mean squared error on 32 examples, and every run uses the same plain gradient descent with rate $0.01$ for 100 steps. (The direction $\mathbf{a}$, the data and the weights come from the book's generator with seeds and a draw order that the first table below prints, so every table of this chapter can be reproduced.) The only thing that changes between runs is the starting weights, in five ways:
 
 - **zeros**: every weight $0$;
 - **small**: every weight a draw of $\mathrm{normal}()$ times $0.01$;
 - **large**: every weight a draw of $\mathrm{normal}()$ times $1$;
-- **Xavier** and **He**: draws scaled by $\sqrt{2/(n_{\mathrm{in}} + n_{\mathrm{out}})}$ and by $\sqrt{2/n_{\mathrm{in}}}$, which this chapter derives ($n_{\mathrm{in}}$ is the number of inputs of a layer and $n_{\mathrm{out}}$ its number of units).
+- **Xavier** and **He**: draws scaled by $\sqrt{2/(n_{\mathrm{in}} + n_{\mathrm{out}})}$ and by $\sqrt{2/n_{\mathrm{in}}}$, which this chapter derives ($n_{\mathrm{in}}$ is the number of inputs of a layer, its fan-in, and $n_{\mathrm{out}}$ its number of units, its fan-out; for the read-out $n_{\mathrm{out}} = 1$, so its Xavier scale is $\sqrt{2/65}$).
 
 The standard normals are the same in every run, so two starts differ only in scale. Here is the mean squared error with tanh units:
 
 <!-- worked: initialization.training_tanh -->
-Setup: the deep stack with tanh units, 32 training examples (full batch), mean squared error, plain gradient descent with rate 0.01, 100 steps, biases start at 0. The target is t = 1 + sin(a . x) with mean of t^2 = 1.5965; predicting the mean of the targets gives the loss 0.4558.
+Setup: the deep stack with tanh units, 32 training examples (full batch), mean squared error, plain gradient descent with rate 0.01, 100 steps, biases start at 0. The target is t = 1 + sin(a . x) with mean of t^2 = 1.5965; predicting the mean of the targets gives the loss 0.4558. Weights: one generator `initialization.weights` (seed 0x1fd7def6cdf88dde, 2294547686767496670). The 10 hidden weight matrices (shape [64, 64], row j holds the weights of unit j) and then the read-out vector (64 entries) are drawn in this order, layer by layer, row by row, entry i = 0, ..., 63 within a row; each weight is scale * normal(), and every scheme draws every normal() (a zero scale still consumes it), so all schemes see the same standard normals. Scales: zeros 0; small 0.01; large 1; Xavier sqrt(2 / (n_in + n_out)) with n_in = n_out = 64 in the hidden layers and n_in = 64, n_out = 1 in the read-out, so sqrt(2 / 65); He sqrt(2 / n_in) = sqrt(2 / 64) in every layer. Data: one generator `initialization.data` (seed 0x155d7f43c18852c4, 1539526576617050820). First the direction a: 64 draws of normal() each multiplied by 3/16 = 0.1875; then the examples, example after example, each 64 consecutive normal() draws (so the 128 inputs of the later tables extend the 32 training inputs, which are their first 32); the target of an example x is t = 1 + sin(a . x) (radians). The loss is the mean over the examples of (y - t)^2, with y = w_out . a_10 + b_out. A loss that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed with the leading digits that survive ('about 11'), or 'unstable' when not even one does: a run with large weights is chaotic, so only those digits can be reproduced in another implementation.
 
 | start | step 0 | step 10 | step 30 | step 60 | step 100 |
 |---|---:|---:|---:|---:|---:|
 | zeros | 1.5965 | 1.2173 | 0.7952 | 0.5568 | 0.4759 |
 | small (0.01) | 1.5965 | 1.2150 | 0.7917 | 0.5541 | 0.4747 |
-| large (1) | 82.7552 | 17.2652 | 11.0660 | 5.7721 | 0.1047 |
+| large (1) | 82.7552 | unstable | about 1e+01 | unstable | unstable |
 | Xavier | 1.7530 | 0.2766 | 0.0957 | 0.0235 | 0.0053 |
 | He | 2.3814 | 0.0719 | 0.0020 | 3.50e-05 | 4.55e-07 |
 <!-- /worked -->
@@ -33,7 +33,7 @@ Setup: the deep stack with tanh units, 32 training examples (full batch), mean s
 and with ReLU units:
 
 <!-- worked: initialization.training_relu -->
-Setup: the deep stack with relu units, 32 training examples (full batch), mean squared error, plain gradient descent with rate 0.01, 100 steps, biases start at 0. The target is t = 1 + sin(a . x) with mean of t^2 = 1.5965; predicting the mean of the targets gives the loss 0.4558.
+Setup: the deep stack with relu units, 32 training examples (full batch), mean squared error, plain gradient descent with rate 0.01, 100 steps, biases start at 0. The target is t = 1 + sin(a . x) with mean of t^2 = 1.5965; predicting the mean of the targets gives the loss 0.4558. Weights and data exactly as in the tanh table above (same generators, seeds, draw order and scales). A loss that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed with the leading digits that survive ('about 11'), or 'unstable' when not even one does: a run with large weights is chaotic, so only those digits can be reproduced in another implementation.
 
 | start | step 0 | step 10 | step 30 | step 60 | step 100 |
 |---|---:|---:|---:|---:|---:|
@@ -48,7 +48,7 @@ Setup: the deep stack with relu units, 32 training examples (full batch), mean s
 
 ![Training loss of the ten-layer ReLU stack from five starts over 100 steps; zeros and small settle at the loss of predicting the mean, large is not finite after one step, Xavier and He fall.](img/init-training-relu.svg)
 
-The same architecture, the same data, the same optimiser, and results that differ by orders of magnitude. The zero start and the small start end where a model that ignores its input would end, near the loss of always predicting the mean of the targets, $0.4558$ (they are still sliding down to it at step 100); that is all that a network can learn when the gradient never reaches the hidden layers. The large start either wanders (tanh) or leaves the floating-point numbers in one step (ReLU). The scaled starts learn. The rest of the chapter explains each of these behaviours, and ends with a rule that you can state in one line and apply to any layer.
+The same architecture, the same data, the same optimiser, and results that differ by orders of magnitude. The zero start and the small start end where a model that ignores its input would end, near the loss of always predicting the mean of the targets, $0.4558$ (they are still sliding down to it at step 100); that is all that a network can learn when the gradient never reaches the hidden layers. The large start either wanders (tanh, chaotically) or leaves the floating-point numbers in one step (ReLU). The scaled starts learn. The rest of the chapter explains each of these behaviours, and ends with a rule that you can state in one line and apply to any layer.
 
 The chapter has seven steps.
 
@@ -121,7 +121,7 @@ The "spread" columns are exactly $0$ for the identical start at every step, to t
 Zero weights are the case where *all* units of *all* layers are equal, and also the case where there is nothing to differentiate. Look at the gradient of each layer of the deep stack at the first step:
 
 <!-- worked: initialization.start_gradients -->
-Setup: the deep stack (10 layers of 64 units, a read-out), the first 32 inputs of the data, all biases 0, loss = mean of (y - t)^2. Entries are the Euclidean norm of the gradient of each layer's weight matrix and bias vector at step 0. Weights: all zero (tanh and ReLU), or He normal (ReLU), drawn from the stream named below.
+Setup: the deep stack (10 layers of 64 units, a read-out), the first 32 inputs of the data, all biases 0, loss = mean of (y - t)^2. Entries are the Euclidean norm of the gradient of each layer's weight matrix and bias vector at step 0. Weights: all zero (tanh and ReLU), or He normal (ReLU); weights and data are those of the first training table (generators `initialization.weights` and `initialization.data`, seeds 0x1fd7def6cdf88dde and 0x155d7f43c18852c4).
 
 | layer | tanh, zeros: norm of dW | tanh, zeros: norm of db | ReLU, zeros: norm of dW | ReLU, zeros: norm of db | ReLU, He: norm of dW | ReLU, He: norm of db |
 |---|---:|---:|---:|---:|---:|---:|
@@ -146,10 +146,10 @@ Symmetry is a property of units that share their incoming and outgoing weights. 
 
 ## How big is the signal after ten layers?
 
-With the weights random, there is a second question: how big are they? Measure first. Take 128 inputs of independent standard normals (so the rms of the input is about $1$), run the deep stack forward from each of the starts, and print the root mean square of the pre-activations $\mathbf{z}_\ell$ of layer $\ell$, taken over all examples and units. The weights are $\text{scale}\times\mathrm{normal}()$ from one generator seeded with `initialization.weights`, drawn layer by layer, row by row, so every start sees the same standard normals; the data come from `initialization.data`. With tanh units:
+With the weights random, there is a second question: how big are they? Measure first. Take 128 inputs of independent standard normals (so the rms of the input is about $1$), run the deep stack forward from each of the starts, and print the root mean square of the pre-activations $\mathbf{z}_\ell$ of layer $\ell$, taken over all examples and units. The weights are $\text{scale}\times\mathrm{normal}()$ from the generator `initialization.weights` and the inputs come from `initialization.data`, with the seeds and the draw order printed in the first table of the chapter (layer by layer, row by row, so every start sees the same standard normals). With tanh units:
 
 <!-- worked: initialization.forward_rms_tanh -->
-Setup: the deep stack with tanh units, 128 inputs (rms of the inputs 0.996), biases 0. Entries: the root mean square of z_l over all 128 x 64 pre-activations of layer l. Weights: scale * normal() from the stream named in the text (the same draws for every row).
+Setup: the deep stack with tanh units, 128 inputs (rms of the inputs 0.996), biases 0. Entries: the root mean square of z_l over all 128 x 64 pre-activations of layer l. Weights and data: as in the first training table of the chapter (weights generator `initialization.weights`, seed 0x1fd7def6cdf88dde; data generator `initialization.data`, seed 0x155d7f43c18852c4, the 128 inputs being the first 128 examples of that stream); scale * normal(), the same draws for every row.
 
 | start | z_1 | z_2 | z_3 | z_5 | z_7 | z_10 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -163,7 +163,7 @@ Setup: the deep stack with tanh units, 128 inputs (rms of the inputs 0.996), bia
 and with ReLU units:
 
 <!-- worked: initialization.forward_rms_relu -->
-Setup: the deep stack with relu units, 128 inputs (rms of the inputs 0.996), biases 0. Entries: the root mean square of z_l over all 128 x 64 pre-activations of layer l. Weights: scale * normal() from the stream named in the text (the same draws for every row).
+Setup: the deep stack with relu units, 128 inputs (rms of the inputs 0.996), biases 0. Entries: the root mean square of z_l over all 128 x 64 pre-activations of layer l. Weights and data: as in the first training table of the chapter (weights generator `initialization.weights`, seed 0x1fd7def6cdf88dde; data generator `initialization.data`, seed 0x155d7f43c18852c4, the 128 inputs being the first 128 examples of that stream); scale * normal(), the same draws for every row.
 
 | start | z_1 | z_2 | z_3 | z_5 | z_7 | z_10 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -194,7 +194,7 @@ $$
 \mathbb{E}_w[z^2] = \sum_{i=1}^{n_{\mathrm{in}}} \sigma_w^2\,x_i^2 = \sigma_w^2\lVert\mathbf{x}\rVert^2 .
 $$
 
-If the typical input has second moment $\mathbb{E}[x_i^2] = q$ (the same for all $i$), then $\lVert\mathbf{x}\rVert^2 \approx n_{\mathrm{in}} q$ and
+If the typical input has second moment $\mathbb{E}[x_i^2] = q$ (the **second moment** of a variable is the mean of its square; the same $q$ for all $i$), then $\lVert\mathbf{x}\rVert^2 \approx n_{\mathrm{in}} q$ and
 
 $$
 \boxed{\;\mathrm{Var}[z] = \mathbb{E}[z^2] = n_{\mathrm{in}}\,\sigma_w^2\,\mathbb{E}[x^2] .\;}
@@ -234,7 +234,7 @@ and after the first layer, whose input is the data, $q_\ell = \Gamma^{\ell-1}q_1
 The measured factors of the previous section are now predictions. For ReLU, computing $\kappa_g$ is done in the next section and gives $\frac12$; with it, the recursion is a statement about the table above:
 
 <!-- worked: initialization.forward_prediction -->
-Setup: ReLU deep stack, mean of x^2 over the 128 inputs q_0 = 0.9916. Prediction: E[z_1^2] = 64 Var(w) q_0 and E[z_l^2] = c E[z_(l-1)^2] with c = 64 Var(w) / 2 for the 64-unit layers.
+Setup: ReLU deep stack (weights and data as in the first training table of the chapter), mean of x^2 over the 128 inputs q_0 = 0.9916. Prediction: E[z_1^2] = 64 Var(w) q_0 and E[z_l^2] = c E[z_(l-1)^2] with c = 64 Var(w) / 2 for the 64-unit layers.
 
 | start | Var(w) | c = 64 Var(w)/2 | predicted rms z_1 | measured rms z_1 | predicted rms z_10 | measured rms z_10 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -244,7 +244,7 @@ Setup: ReLU deep stack, mean of x^2 over the 128 inputs q_0 = 0.9916. Prediction
 | He | 0.031250 | 1.0000 | 1.41e+00 | 1.44e+00 | 1.41e+00 | 1.51e+00 |
 <!-- /worked -->
 
-The small start has $\Gamma = 0.0032$ per layer, the large start $32$, Xavier $0.5$ and He $1$. The prediction of the size of $z_{10}$ and the measurement agree to within the sampling fluctuation of one random draw of the weights (the second moments of the table are one realisation, not an average over weights; the He row differs by 7 percent). Two things follow. First, initialization is a design problem with a closed-form answer: choose $\sigma_w^2$ so that $\Gamma = 1$. Second, the answer depends on $g$ through $\kappa_g$, so each activation has its own recipe.
+The small start has $\Gamma = 0.0032$ per layer, the large start $32$, Xavier $0.5$ and He $1$. The prediction of the size of $z_{10}$ and the measurement agree to within the sampling fluctuation of one random draw of the weights (the second moments of the table are one realisation, that is, one particular draw of the weights, not an average over weights; the He row differs by 7 percent). Two things follow. First, initialization is a design problem with a closed-form answer: choose $\sigma_w^2$ so that $\Gamma = 1$. Second, the answer depends on $g$ through $\kappa_g$, so each activation has its own recipe.
 
 ### ReLU zeroes half of the signal: He initialization
 
@@ -278,7 +278,7 @@ $$
 
 ### Units that look like the identity: Xavier initialization
 
-A tanh unit is close to the identity for small inputs: $\tanh z \approx z$ for $|z| \ll 1$. If the pre-activations stay small, $\kappa_g \approx 1$ and the condition $\Gamma = n_{\mathrm{in}}\sigma_w^2 = 1$ gives $\sigma_w^2 = 1/n_{\mathrm{in}}$. The forward argument alone would stop here; the next section explains why the usual form is $2/(n_{\mathrm{in}} + n_{\mathrm{out}})$, and for the 64-by-64 layers of the deep stack the two are the same, $1/64$. Measured, the Xavier tanh stack loses about 17 percent of its rms per layer, from $1.02$ to $0.228$ over ten layers: gentle, but a decay, and the reason is visible in the first table: $\kappa_{\mathrm{tanh}}$ is *below* $1$ as soon as $z$ is of order $1$, so the assumption $\kappa \approx 1$ was optimistic. The self-consistent choice is the one for which a pre-activation of second moment $1$ stays at second moment $1$: $\sigma_w^2 = 1/(n_{\mathrm{in}}\kappa_g)$ with $\kappa_g$ evaluated at the operating scale. For a standard normal $z$ it can be computed by integrating, for any $g$:
+A tanh unit is close to the identity for small inputs: $\tanh z \approx z$ for $|z| \ll 1$. If the pre-activations stay small, $\kappa_g \approx 1$ and the condition $\Gamma = n_{\mathrm{in}}\sigma_w^2 = 1$ gives $\sigma_w^2 = 1/n_{\mathrm{in}}$. The forward argument alone would stop here; the next section explains why the usual form is $2/(n_{\mathrm{in}} + n_{\mathrm{out}})$, and for the 64-by-64 layers of the deep stack the two are the same, $1/64$. Measured, the Xavier tanh stack loses about 15 percent of its rms per layer (from $1.02$ at layer 1 to $0.228$ at layer 10, nine steps of a factor $0.847$ each): gentle, but a decay, and the reason is visible in the first table: $\kappa_{\mathrm{tanh}}$ is *below* $1$ as soon as $z$ is of order $1$, so the assumption $\kappa \approx 1$ was optimistic. The self-consistent choice is the one for which a pre-activation of second moment $1$ stays at second moment $1$: $\sigma_w^2 = 1/(n_{\mathrm{in}}\kappa_g)$ with $\kappa_g$ evaluated at the operating scale. For a standard normal $z$ it can be computed by integrating, for any $g$:
 
 <!-- worked: initialization.gain_by_activation -->
 kappa = E[g(zeta)^2] for zeta standard normal, computed by the trapezoid rule on [-10, 10] with 4000 intervals. A layer with weight variance 1/(kappa n) and inputs of second moment 1 gives pre-activations of second moment 1.
@@ -336,7 +336,7 @@ the harmonic mean $2/(1/a + 1/b)$ of $a$ and $b$, which is also the reciprocal o
 Measured on the deep stack, the backward signal tells the same story as the forward one. The tables give the size of $dz_\ell$ relative to the top layer:
 
 <!-- worked: initialization.backward_rms_tanh -->
-Setup: as above, tanh units. Entries: the root mean square of d(loss of one example)/d z_l over the 128 examples and 64 units, divided by the same quantity at layer 10 (so layer 10 reads 1). The loss of one example is (y - t)^2.
+Setup: as above, tanh units. Entries: the root mean square of d(loss of one example)/d z_l over the 128 examples and 64 units, divided by the same quantity at layer 10 (so layer 10 reads 1). The loss of one example is (y - t)^2 with the target t = 1 + sin(a . x) of the first training table; weights and data as in that table (generators `initialization.weights` and `initialization.data`).
 
 | start | layer 1 | layer 2 | layer 3 | layer 5 | layer 7 | layer 10 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -348,7 +348,7 @@ Setup: as above, tanh units. Entries: the root mean square of d(loss of one exam
 <!-- /worked -->
 
 <!-- worked: initialization.backward_rms_relu -->
-Setup: as above, relu units. Entries: the root mean square of d(loss of one example)/d z_l over the 128 examples and 64 units, divided by the same quantity at layer 10 (so layer 10 reads 1). The loss of one example is (y - t)^2.
+Setup: as above, relu units. Entries: the root mean square of d(loss of one example)/d z_l over the 128 examples and 64 units, divided by the same quantity at layer 10 (so layer 10 reads 1). The loss of one example is (y - t)^2 with the target t = 1 + sin(a . x) of the first training table; weights and data as in that table (generators `initialization.weights` and `initialization.data`).
 
 | start | layer 1 | layer 2 | layer 3 | layer 5 | layer 7 | layer 10 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -372,7 +372,7 @@ The pre-activations of layer 10 of the tanh stack for two starts, as histograms:
 ![Histogram of the 8192 pre-activations z_10 of the tanh stack: the Xavier start is concentrated within one unit of zero, the start with weights of standard deviation 1 spreads over roughly plus and minus 15.](img/init-preactivation-histogram.svg)
 
 <!-- worked: initialization.layer10_summary -->
-Setup: z_10 of the deep stack for the 128 inputs and 64 units (8192 values per row).
+Setup: z_10 of the deep stack (weights and data as in the first training table of the chapter) for the 128 inputs and 64 units (8192 values per row).
 
 | activation | start | mean of z_10 | rms of z_10 | measure | share |
 |---|---|---:|---:|---|---:|
@@ -392,24 +392,24 @@ Everything above used only the variance of a weight. The mean and the variance f
 
 - **normal**: $w = \sigma_w\,\mathrm{normal}()$, variance $\sigma_w^2$ by definition;
 - **uniform** on $[-a, a]$: the variance is $\int_{-a}^{a}\frac{x^2}{2a}\,dx = \frac{a^2}{3}$, so $a = \sqrt3\,\sigma_w$ gives variance $\sigma_w^2$. In Xavier form $a = \sqrt{6/(n_{\mathrm{in}} + n_{\mathrm{out}})}$ and in He form $a = \sqrt{6/n_{\mathrm{in}}}$;
-- **truncated normal**: a normal that is redrawn when it falls beyond $c$ standard deviations. Truncation at $c = 2$ removes the tails, and the variance of what remains is $1 - 2c\varphi(c)/(2\Phi(c) - 1) = 0.7737$ (with $\varphi$ and $\Phi$ the standard Gaussian density and cumulative distribution), so the draw is divided by $\sqrt{0.7737}$ to restore the target variance.
+- **truncated normal**: a normal that is redrawn when it falls beyond $c$ standard deviations. Truncation at $c = 2$ removes the tails, and the variance of what remains is $1 - 2c\varphi(c)/(2\Phi(c) - 1) = 0.773741$ (to six digits, with $\varphi$ and $\Phi$ the standard Gaussian density and cumulative distribution), so the draw is divided by $\sqrt{0.773741}$ to restore the target variance.
 
 The variances match and the tails do not:
 
 <!-- worked: initialization.draw_shapes -->
-Generator: the book's SplitMix64, seed 0x012db5d56d64c4cf (84923896257889487). sigma = 1. 100000 draws per shape, one after the other from one generator in the order of the rows. The variance of a standard normal conditioned on abs(z) <= 2 is 0.7737. Fourth moment = mean of w^4 divided by the squared variance (3 for a normal, 1.8 for a uniform). Variance is the mean of w^2 (the mean is 0 by symmetry).
+Generator: the book's SplitMix64, seed 0x012db5d56d64c4cf (84923896257889487). sigma = 1. 100000 draws per shape, one after the other from one generator in the order of the rows. The variance of a standard normal conditioned on abs(z) <= 2 is 0.773741 (use this value or the formula, not a shorter one). Fourth moment = mean of w^4 divided by the squared variance (3 for a normal, 1.8 for a uniform). Variance is the mean of w^2 (the mean is 0 by symmetry).
 
 | shape | draw | variance | fourth moment | largest absolute w |
 |---|---|---:|---:|---:|
 | normal | sigma * normal() | 0.9972 | 2.991 | 4.125 |
 | uniform | sigma * sqrt(3) * (2 uniform() - 1) | 0.9944 | 1.807 | 1.732 |
-| truncated normal | sigma * z / sqrt(0.7737), z = normal() redrawn while abs(z) > 2 | 0.9973 | 2.377 | 2.274 |
+| truncated normal | sigma * z / sqrt(0.773741), z = normal() redrawn while abs(z) > 2 | 0.9973 | 2.377 | 2.274 |
 <!-- /worked -->
 
 The fourth moment of a normal is $3$; of a uniform, $1.8$; the truncated normal is between. The largest weight shows the effect: $4.1$ standard deviations for the normal, $1.73$ for the uniform (a hard bound, $\sqrt3$), $2.27$ for the truncated one. What do the tails change? The central limit theorem of Volume I says the pre-activation $z$, a sum of 64 terms, is close to normal whatever the weights' shape, so the layer's output hardly notices. Network by network:
 
 <!-- worked: initialization.shape_in_network -->
-Setup: the ReLU deep stack with He scale sigma = sqrt(2/fan_in), but each weight drawn with the named shape (`initialization.shape-net.<shape>` is the generator name, a separate stream per row; weights layer by layer, row by row). 128 inputs, biases 0. The predicted rms of z_1 is sqrt(2 q_0) with q_0 the mean of x^2.
+Setup: the ReLU deep stack with He scale sigma = sqrt(2/fan_in), but each weight drawn with the named shape (one generator per row: `initialization.shape-net.normal` = 0xd46492fdd4c58570, `initialization.shape-net.uniform` = 0xc8d73cb61fc60766, `initialization.shape-net.truncated` = 0x786739af9b79be90; weights layer by layer, row by row, one draw per weight in the shape's rule, the truncated shape redrawing a normal() until it passes). 128 inputs, the first 128 examples of the data stream of the first training table (generator `initialization.data`, seed 0x155d7f43c18852c4), biases 0. The predicted rms of z_1 is sqrt(2 q_0) with q_0 the mean of x^2.
 
 | weight shape | rms z_1 | rms z_5 | rms z_10 |
 |---|---:|---:|---:|
@@ -444,15 +444,15 @@ function init_linear(n_out: int, n_in: int, scheme: text, shape: text,
                     z = rng.normal()
                     if abs(z) <= 2.0:
                         break
-                W[j, i] = sigma * z / sqrt(0.7737)
+                W[j, i] = sigma * z / sqrt(0.773741)
     return W
 ```
 
-The biases are `zeros(real, [n_out])`. For the truncated shape the constant $0.7737$ is the variance of the truncated standard normal; use more digits if the tolerance of your check demands it (the worked module uses the exact formula).
+The biases are `zeros(real, [n_out])`. For the truncated shape the constant $0.773741$ is the variance of the truncated standard normal to six digits (use the formula $1 - 2c\varphi(c)/(2\Phi(c) - 1)$ with $c = 2$ if your check needs more).
 
 ## Back to the three starts
 
-The training tables of the problem section can now be read. **Zeros** is the symmetric start with no gradient: only the read-out bias learns, and the loss goes to the mean predictor. **Small** has $\Gamma \ll 1$: the signal and the gradient decay by 10 orders of magnitude across the stack, the hidden layers do not move at the rate $0.01$, and the loss again goes to the mean predictor; it is the vanishing-gradient failure that chapter 12 names. **Large** has $\Gamma \gg 1$ and exploding or saturating signals: the tanh stack starts at loss $82.8$ and wanders to $0.10$ at step 100, noisier and slower than the scaled starts; the ReLU stack's first loss is already $8.0\times10^{15}$ and the first step takes it out of the double-precision range. **Xavier** and **He** are the scaled starts: both learn, and with tanh He is faster (loss $4.6\times10^{-7}$ against $5.3\times10^{-3}$ at step 100) because its gain is nearer to the self-consistent $1.59$; with ReLU, He reaches $0.0190$ at step 100 and Xavier $0.1717$ because Xavier's $\Gamma = \frac12$ halves the second moment in each of ten layers. One caution about what this shows. The runs are 100 steps of plain gradient descent on 32 examples at one rate, and the claim is only about the starting point: it is not a statement about the best optimiser or about generalisation.
+The training tables of the problem section can now be read. **Zeros** is the symmetric start with no gradient: only the read-out bias learns, and the loss goes to the mean predictor. **Small** has $\Gamma \ll 1$: the signal and the gradient decay by 10 orders of magnitude across the stack, the hidden layers do not move at the rate $0.01$, and the loss again goes to the mean predictor; it is the vanishing-gradient failure that chapter 12 names. **Large** has $\Gamma \gg 1$ and exploding or saturating signals: the tanh stack starts at loss $82.8$ and then wanders (the run is chaotic: a change of one part in $10^{12}$ in one weight changes its later losses in their first digits, so the table prints none of them, and the figure shows one such run), noisier and slower than the scaled starts; the ReLU stack's first loss is already $8.0\times10^{15}$ and the first step takes it out of the double-precision range. **Xavier** and **He** are the scaled starts: both learn, and with tanh He is faster (loss $4.6\times10^{-7}$ against $5.3\times10^{-3}$ at step 100) because its gain is nearer to the self-consistent $1.59$; with ReLU, He reaches $0.0190$ at step 100 and Xavier $0.1717$ because Xavier's $\Gamma = \frac12$ halves the second moment in each of ten layers. One caution about what this shows. The runs are 100 steps of plain gradient descent on 32 examples at one rate, and the claim is only about the starting point: it is not a statement about the best optimiser or about generalisation.
 
 ## Special cases
 
@@ -463,7 +463,7 @@ The rule $\sigma_w^2 = \text{gain}^2/n_{\mathrm{in}}$ is for a layer that sits i
 The last layer feeds the loss directly, and there is no later layer to rescale its output. Its scale decides the size of the first loss and with it the first gradient. With a read-out whose weights are scaled by a factor $m$:
 
 <!-- worked: initialization.output_scale -->
-Setup: ReLU deep stack, He normal in the ten hidden layers; the read-out weights are multiplied by the factor in the first column. 32 examples; the mean of t^2 is 1.5965.
+Setup: ReLU deep stack (weights and data as in the first training table), He normal in the ten hidden layers; the read-out weights are multiplied by the factor in the first column. 32 examples; the mean of t^2 is 1.5965.
 
 | read-out factor | rms of the output y | loss at step 0 |
 |---|---:|---:|
@@ -527,7 +527,7 @@ $$
 Each factor's gradient is built from the *other*. If $\mathbf{A} = \mathbf{0}$ and $\mathbf{B} = \mathbf{0}$ both gradients are exactly zero for ever. If $\mathbf{B} = \mathbf{0}$ and $\mathbf{A}$ is random, $d\mathbf{B}$ is nonzero and $d\mathbf{A}$ is exactly zero at the first step; $\mathbf{B}$ moves, after which $d\mathbf{A}$ is no longer zero. This is symmetry-breaking again, with the randomness placed in the factor whose gradient does not pass through the zero:
 
 <!-- worked: initialization.lora_zero_start -->
-Generator: the book's SplitMix64, seed 0xd47045662f646831 (15307811438616406065). A frozen layer W (3 x 4) = [identity of size 3 | zero column] applied to x = (1, 2, 3, 4), so W x = (1, 2, 3); the target is (2, 1, 3.5). The adapter adds B (A x) with A of shape [2, 4] and B of shape [3, 2]; A = 0.5 * normal() (draws row by row) in the first start. Loss = squared distance of the output from the target, divided by 4 for scale only; gradient descent on A and B with rate 0.05. Columns: loss, norm of B, norm of dL/dB, norm of dL/dA.
+Generator: the book's SplitMix64, seed 0xd47045662f646831 (15307811438616406065). A frozen layer W (3 x 4) = [identity of size 3 | zero column] applied to x = (1, 2, 3, 4), so W x = (1, 2, 3); the target is (2, 1, 3.5). The adapter adds B (A x) with A of shape [2, 4] and B of shape [3, 2]; A = 0.5 * normal() (draws row by row) in the first start. Loss = squared distance of the output from the target, |y - target|^2 (its gradient with respect to y is 2 (y - target)); gradient descent on A and B with rate 0.05. Columns: loss, norm of B, norm of dL/dB, norm of dL/dA.
 
 | start | step | loss | norm of B | norm of dB | norm of dA |
 |---|---:|---:|---:|---:|---:|
@@ -609,7 +609,7 @@ Answers are at the end of the chapter.
 3. **[Calculate]** Derive $\mathbb{E}[\mathrm{relu}(z)^2]$ for $z \sim \mathcal{N}(0, s^2)$ by integrating, and show it is $s^2/2$. Then do the same for $\mathbb{E}[g'(z)^2]$.
 4. **[Calculate]** For a residual stack with branch gain $\omega$ and $L$ blocks, find the $\omega$ that makes the total growth equal to 2. Compare with $1/(2L)$ for $L = 10$ and 40.
 5. **[Calculate]** For $\pi = 0.02$ compute the initial loss of a binary classifier with the bias at $0$ and at the log-odds, and the number of gradient steps of rate $0.5$ on the bias alone to get within $0.01$ (reproduce the method of `initialization.class_prior_bias`).
-6. **[Implement]** Implement `init_linear` from the pseudocode and the deep stack with 10 layers of 64 units, and reproduce the table of `initialization.forward_rms_relu` for the He and large rows, using the generators named in the text. Print the rms of $z_\ell$ for every layer and plot it.
+6. **[Implement]** Implement `init_linear` from the pseudocode and the deep stack with 10 layers of 64 units, and reproduce the table of `initialization.forward_rms_relu` for the He and large rows, using the seeds, scales and draw order printed with the first training table. Print the rms of $z_\ell$ for every layer and plot it.
 7. **[Implement]** Add a backward pass and reproduce `initialization.backward_rms_relu` and `initialization.start_gradients` (the zero start must give exactly zero everywhere except the read-out bias).
 8. **[Implement]** Reproduce `initialization.variance_of_a_sum` (four combinations, 4000 trials each, in the stated draw order) and `initialization.relu_second_moment`.
 9. **[Investigate]** Train the deep stack with ReLU and the He start for 100 steps at the rates $0.001$, $0.003$, $0.01$, $0.03$ and $0.1$. Which diverge? Repeat with Xavier and explain why the largest stable rate differs.

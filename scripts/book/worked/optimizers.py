@@ -159,9 +159,9 @@ def epoch_cost():
                      _int(updates * 12 * COST_D)])
     head = (f"Squared error of a linear model with d = {_int(COST_D)} weights on N = {_int(COST_N)} examples. One example's "
             "loss and gradient cost 4d FLOPs (2d for the prediction, 2d for the gradient entries); one update of the weights "
-            "reads w and g and writes w, 12 d bytes in 32-bit floats. Batch sizes divide N exactly.\n\n")
-    return head + _table(["batch size B", "FLOPs of one step (4 d B)", "updates in one epoch (N / B)",
-                          "FLOPs in one epoch", "weight-update bytes in one epoch (12 d N / B)"], rows)
+            "reads w and g and writes w, 12 d bytes in 32-bit floats. The number of updates in an epoch is floor(N / B): a last batch smaller than B (for B = 1,024, the last 576 of the 1,000,000 examples) is dropped, and the later columns use that count.\n\n")
+    return head + _table(["batch size B", "FLOPs of one step (4 d B)", "updates in one epoch (floor(N / B))",
+                          "FLOPs in one epoch", "weight-update bytes in one epoch (12 d floor(N / B))"], rows)
 
 
 # ------------------------------------------------------------------ 2. minibatch gradients
@@ -530,8 +530,8 @@ def decay_strength():
             f"{DECAY_STEPS} draws per row, rows in the order of the table, one generator. The weight is held at w = 1 so that the probe measures the pull "
             f"of the penalty lam w = {lam} on the step, not the path: two Adam instances (eta = {lr}, beta1 = 0.9, beta2 = 0.999, eps = 1e-8) see the same noise, "
             "one with lam w added to its gradient and one without; the 'applied decay' is the mean over the last "
-            f"{DECAY_TAIL} steps of the difference of their steps, in units of eta lam w. Decoupled decay applies exactly 1 in these units.\n\n")
-    return head + _table(["noise s", "applied decay, penalty inside Adam (measured)", "1 / rms of the gradient (predicted)", "decoupled decay"], rows)
+            f"{DECAY_TAIL} steps of the difference of their steps, in units of eta lam w. 'Predicted' is 1 divided by the root mean square, over the same last steps, of the gradient the penalised Adam sees, g_t + lam w (data gradient plus penalty gradient). Decoupled decay applies exactly 1 in these units.\n\n")
+    return head + _table(["noise s", "applied decay, penalty inside Adam (measured)", "1 / rms of g + lam w (predicted)", "decoupled decay"], rows)
 
 
 # ------------------------------------------------------------------ 8. the rules side by side on one weight
@@ -645,8 +645,8 @@ def bowl_comparison():
                          str(stay) if stay is not None else "never"])
     head = (f"Both bowls have minimum (1, 2), start (0, 3.5) and curvatures {_fx(_L_HI, 4)} and {_fx(_L_LO, 4)} (condition number {_fx(_L_HI / _L_LO, 2)}). "
             "'Rotated' is the bowl of Volume I, Chapter 8, with Hessian [[2, 4], [4, 10]] whose steep direction is not a coordinate axis; "
-            f"'aligned' has the Hessian diag({_fx(_L_HI, 4)}, {_fx(_L_LO, 4)}), the same bowl turned so that its axes are the coordinates. "
-            "Each rule starts with empty state and takes the exact gradient; RMSProp and Adam use eps = 1e-8. "
+            f"'aligned' has the Hessian diag({_fx(_L_HI, 4)}, {_fx(_L_LO, 4)}), the same bowl turned so that its axes are the coordinates, the first coordinate the steep one. In both, the loss is 0.5 e^T H e for the error e = w - (1, 2), the gradient is H e, and the start error is e = (-1, 1.5). "
+            "Each rule starts with empty state and takes the exact gradient; RMSProp and Adam use eps = 1e-8 (added to the square root of the second-moment average, as in the pseudocode), the average is updated as beta2 v + (1.0 - beta2) * g * g, and momentum is the sum form of the pseudocode. "
             f"Columns: the distance to the minimum after 20, 50 and {BOWL_STEPS} steps; the first step at which the distance is below {BOWL_TOL}; "
             f"the first step after which it stays below {BOWL_TOL} up to step {BOWL_STEPS}.\n\n")
     return head + _table(["bowl", "rule", "hyperparameters", "dist. at 20", "dist. at 50", f"dist. at {BOWL_STEPS}", "first below", "stays below"],
@@ -749,10 +749,11 @@ MLP_CURVE_EVERY = 10
 MLP_TAIL = (250, 260, 270, 280, 290, 300)
 
 
-def mlp_train(make, lr, stream=BATCH_STREAM):
+def mlp_train(make, lr, stream=BATCH_STREAM, nudge=0.0):
     """Train from the common start; returns the full-data loss every MLP_CURVE_EVERY steps as [(step, loss)]
     (step 0 included), or None for a run whose gradient stopped being finite."""
     net, xs, ys, theta = mlp_problem()
+    theta[0] += nudge
     batches = mlp_batches(stream)
     opt = make(lr)
     curve = [(0, net.loss(theta, xs, ys))]
@@ -785,6 +786,16 @@ def mlp_sweep_results():
     return _SWEEP
 
 
+NUDGE = 1e-12   # a relative change of 1e-12 of one starting weight: the test of whether a run is reproducible in another implementation
+
+
+def mlp_unstable(make, lr, v):
+    """True when the score of a run changes in its third significant digit under a nudge of 1e-12 of one starting
+    weight, i.e. the run is chaotic and no other implementation can reproduce its digits."""
+    w = tail_loss(mlp_train(make, lr, nudge=NUDGE))
+    return v is not None and (w is None or abs(w - v) > 1e-3 * max(abs(v), 1e-12))
+
+
 def mlp_best_lr(name):
     scores = [tail_loss(c) for c in mlp_sweep_results()[name]]
     ok = [(v, i) for i, v in enumerate(scores) if v is not None]
@@ -799,9 +810,10 @@ def mlp_sweep():
     for name, _ in MLP_RULES:
         best = mlp_best_lr(name)
         cells = []
+        make = dict(MLP_RULES)[name]
         for lr, c in zip(LR_GRID, res[name]):
             v = tail_loss(c)
-            cell = "diverged" if v is None else _fx(v, 4)
+            cell = "diverged" if v is None else ("unstable" if mlp_unstable(make, lr, v) else _fx(v, 4))
             cells.append(f"**{cell}**" if lr == best else cell)
         rows.append([name] + cells)
     head = (f"Data and starting weights from one generator (seed 0x{bookrng.seed_of('optimizers.mlp'):016x}): for i = 0 .. {MLP_N - 1}, "
@@ -811,7 +823,10 @@ def mlp_sweep():
             f"Every rule runs {MLP_STEPS} steps of batch size {MLP_B}, with batches from a second generator "
             f"(seed 0x{bookrng.seed_of('optimizers.mlp_batches'):016x}): shuffle the list 0 .. {MLP_N - 1}, cut it into consecutive batches of {MLP_B}, "
             "reshuffle when the epoch ends; the same batches for every rule and learning rate. "
-            "Entries: the mean loss over all 200 examples, averaged over the six checkpoints at steps 250, 260, ..., 300; the best entry of each row is in bold.\n\n")
+            "Entries: the mean loss over all 200 examples, averaged over the six checkpoints at steps 250, 260, ..., 300 (the loss after k updates is the loss at step k); the best entry of each row is in bold. "
+            "Rule details: momentum is the sum form m = 0.9 m + g, theta = theta - eta m; RMSProp uses beta2 = 0.9 and eps = 1e-8; Adam uses 0.9, 0.999, 1e-8; AdamW adds decoupled decay 0.05; Lion uses beta1 = 0.9, beta2 = 0.99, the three-way sign (0 at 0) and decay 0. "
+            "Rounding noise grows into any difference in a run whose learning rate is too large, so a run that changes in its third significant digit when one starting weight is changed by 1e-12 is printed as 'unstable' (its digits cannot be reproduced in another implementation; its loss is of the order of the neighbouring entries or larger); "
+            "'diverged' means the gradient stopped being finite.\n\n")
     return head + _table(["rule"] + [f"eta = {lr:g}" for lr in LR_GRID], rows)
 
 
@@ -923,7 +938,7 @@ def mlp_repeats():
         mean = sum(scores) / len(scores)
         rows.append([name, f"{lr:g}", _fx(mean, 4), _fx(min(scores), 4), _fx(max(scores), 4)])
     seeds = ", ".join(f"0x{bookrng.seed_of(n):016x}" for n in REPEAT_STREAMS)
-    head = ("The same start, data and learning rates as the sweep, five more batch orders from the generators named "
+    head = ("The same start, data, rule details and learning rates as the sweep, five more batch orders from the generators named "
             f"optimizers.mlp_batches.1 .. optimizers.mlp_batches.5 (seeds {seeds}). Entries are the score of the sweep (mean full-data loss at steps 250, 260, ..., 300).\n\n")
     return head + _table(["rule", "eta", "mean of 5", "smallest", "largest"], rows)
 

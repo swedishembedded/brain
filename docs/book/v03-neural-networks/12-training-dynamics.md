@@ -24,17 +24,19 @@ The **gallery network** reads an input of 8 numbers and has two hidden layers of
 | training set | 512 examples, class counts [158, 218, 136], entropy of the label distribution 1.0785; ln 3 = 1.0986 |
 | validation set | 400 examples, teacher labels |
 | step | plain gradient descent, minibatch of 32 indices drawn with replacement by integer(512) from the stream 0x28e8e3949e5963e6; 400 steps; learning rate 0.1 |
-| overfitting task | 24 training examples, 400 validation examples with the teacher's labels; generator seed 0xaea5e79bfc3cbf36; the draws are the 48 of the teacher, the 24 training inputs, the 400 validation inputs, then for each training example in order one uniform() and, when it is below 0.25, one integer(2): the label moves by 1 + integer(2) classes (mod 3) |
+| overfitting task | 24 training examples, 400 validation examples with the teacher's labels; generator seed 0xaea5e79bfc3cbf36; the draws are the 48 of the teacher, the 24 training inputs, the 400 validation inputs, then for each training example in order one uniform() and, when it is below 0.25, one integer(2): the label moves by 1 + integer(2) classes (mod 3); the run uses the same start, minibatches of 8 indices drawn with replacement by integer(24) from the batch stream above, 600 steps at rate 0.1 |
 | evaluation | 'loss after t updates' is the mean cross-entropy (log-sum-exp form) of the whole training set of the run, or of the 400 validation examples, with the weights after t gradient steps; accuracy takes the first largest logit |
 <!-- /worked -->
 
 The inputs, the teacher and the validation labels of the main task are fixed by the two generator seeds above. The teacher's score of class $k$ is $2\,(\mathbf{u}_k\cdot\mathbf{x}) + (\mathbf{v}_k\cdot\mathbf{x})^2$, with $\mathbf{u}_k$ and $\mathbf{v}_k$ the vectors drawn in the stated order; the label is the index of the largest score, the first on a tie. Here is what the seven runs did.
 
 <!-- worked: training_dynamics.gallery_table -->
+A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' with the digits that survive, or as 'unstable'; the diverging run, whose loss reaches 1e22, is chaotic after its first steps and can only be reproduced to those digits. 'Log10 slope per 100 steps' is the least-squares slope of log10 of the training loss against the step over the evaluations at steps 100, 120, ..., 400, times 100.
+
 | run | what differs from the healthy run | step 0 | step 20 | step 100 | step 200 | step 400 | largest step loss | log10 slope per 100 steps | val acc |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
 | healthy | nothing: He start, rate 0.1, batch 32 | 1.260 | 0.953 | 0.642 | 0.362 | 0.144 | 1.251 | -0.225 | 0.860 |
-| diverging | rate 10 instead of 0.1 | 1.260 | 2.811 | 2.162 | 4.447 | 1.533 | 1.78e+22 | -0.027 | 0.393 |
+| diverging | rate 10 instead of 0.1 | 1.260 | 2.811 | about 2.2 | about 4 | about 2 | 1.78e+22 | unstable | 0.393 |
 | plateau | every weight 0.02 times its He scale | 1.099 | 1.085 | 1.080 | 1.080 | 1.079 | 1.213 | -7.74e-05 | 0.393 |
 | too slow | rate 0.003 instead of 0.1 | 1.260 | 1.196 | 1.080 | 1.029 | 0.975 | 1.471 | -0.014 | 0.510 |
 | noisy | batch 2 instead of 32 | 1.260 | 1.289 | 0.847 | 0.686 | 0.506 | 4.025 | -0.063 | 0.762 |
@@ -170,6 +172,8 @@ Each failure below is handled the same way: say what the curve shows, name the h
 The curve starts at $1.08$ and the next steps print $9.6$, $53$, $1.6\times10^4$. A rising loss at a single step could be an unlucky batch (the noise section above), so the first measurement is whether it keeps rising, and how the gradient behaves.
 
 <!-- worked: training_dynamics.divergence_table -->
+A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable' (as in the gallery table).
+
 | step t | minibatch loss | global gradient norm | norm / previous norm | largest |logit| |
 |---|---:|---:|---:|---:|
 | 0 | 1.080 | 1.043 |  | 3.113 |
@@ -185,13 +189,13 @@ The curve starts at $1.08$ and the next steps print $9.6$, $53$, $1.6\times10^4$
 The loss rises by a factor of about 9 at step 1 and keeps rising; the global gradient norm rises with it, by a factor of $8.5$, $4.3$, $37$, $605$ from one step to the next. A gradient that grows at every step is not noise. The hypothesis that fits is a step that is too long. Chapter 4 derived what a too-long step does for one weight: the error is multiplied at every step by $1 - 2\eta x^2$, and when $\lvert 1 - 2\eta x^2\rvert > 1$ it grows geometrically. For a network, take any direction in which the loss has a curvature $\lambda$ (the second derivative along it, Volume I): along that direction a gradient step multiplies the error by $1 - \eta\lambda$, and the descent is unstable along it once $\eta > 2/\lambda$. The loss of a network is not a quadratic, and the bigger weights then make the activations and the gradients bigger still, which is why the table shows the norm growing by more each step. The size of the first step is the measurement that exposes it:
 
 <!-- worked: training_dynamics.update_ratio_table -->
-The update ratio of a step is (rate * gradient norm) / (norm of all weights before the step), the relative size of the step, with the gradient norm before any clipping.
+The update ratio of a step is (rate * gradient norm) / (norm of all weights before the step), the relative size of the step, with the gradient norm before any clipping. The median is the book's median of the 100 ratios of steps 0 to 99 (the mean of the 50th and 51st smallest). A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable'.
 
 | run | rate | ratio at step 0 | step 1 | step 2 | median over steps 0 to 99 |
 |---|---:|---:|---:|---:|---:|
-| healthy | 0.1 | 9.45e-03 | 1.35e-02 | 9.65e-03 | 7.33e-03 |
-| slow | 0.003 | 2.83e-04 | 4.61e-04 | 4.32e-04 | 2.90e-04 |
-| diverging | 10 | 9.45e-01 | 5.98e+00 | 4.37e+00 | 1.56e-16 |
+| healthy | 0.1 | 9.45e-03 | 1.35e-02 | 9.65e-03 | 7.29e-03 |
+| slow | 0.003 | 2.83e-04 | 4.61e-04 | 4.32e-04 | 2.88e-04 |
+| diverging | 10 | 9.45e-01 | 5.98e+00 | 4.37e+00 | 1.55e-16 |
 <!-- /worked -->
 
 The **update ratio** of a step, $r_{\mathrm{upd}} = \eta\,\lVert\mathbf{g}\rVert/\lVert\boldsymbol{\theta}\rVert$, is the size of the change of the weights relative to the weights themselves (with $\mathbf{g}$ the gradient of the minibatch loss and $\boldsymbol{\theta}$ all weights). The healthy run moves its weights by about $0.7\%$ to $0.9\%$ per step; the diverging run, by $94.5\%$ at the first step and by six times their own norm at the second. A step that rewrites the weights is not a local move, and the local gradient is not information about where it lands. (The tiny median in the last column is what is left after the blow-up: the weights became so large that later steps are small by comparison.)
@@ -199,7 +203,7 @@ The **update ratio** of a step, $r_{\mathrm{upd}} = \eta\,\lVert\mathbf{g}\rVert
 The remedy that the hypothesis predicts is a smaller rate, and a rate sweep checks it, at the cost of ten short runs:
 
 <!-- worked: training_dynamics.lr_sweep_table -->
-Each row is a fresh run of the healthy configuration with only the rate changed, 100 steps, the same start and the same batches. Largest step loss: the largest minibatch loss of the run divided by the loss at step 0.
+Each row is a fresh run of the healthy configuration with only the rate changed, 100 steps, the same start and the same batches. Largest step loss: the largest minibatch loss of the run divided by the loss at step 0. A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable'.
 
 | rate | largest step loss / step-0 loss | full-set training loss after 100 steps | training accuracy |
 |---|---:|---:|---:|
@@ -212,7 +216,7 @@ Each row is a fresh run of the healthy configuration with only the rate changed,
 | 2 | 2.638 | 0.844 | 0.621 |
 | 3 | 2.241 | 0.846 | 0.611 |
 | 5 | 8.426 | 1.317 | 0.426 |
-| 10 | 1.65e+22 | 2.162 | 0.426 |
+| 10 | 1.65e+22 | about 2.2 | 0.426 |
 <!-- /worked -->
 
 Rates up to $1$ train. At $2$ and $3$ the loss spikes to more than twice its starting value and recovers, at $5$ it reaches $8.4$ times and does not recover, and at $10$ the largest step loss is $1.65\times10^{22}$ times the first. The best rate of the sweep, $0.3$, is three times the healthy run's $0.1$: the healthy run was safe but not fast. (The threshold $2/\lambda_{\max}$ is a first guess about where the cliff is; the sweep measures where it is. We do not compute $\lambda_{\max}$ here.)
@@ -220,9 +224,11 @@ Rates up to $1$ train. At $2$ and $3$ the loss spikes to more than twice its sta
 A different fix is to cap the step instead of the rate. The clip of chapter 8 multiplies the gradient by $\min(1, \tau_{\mathrm{clip}}/\lVert\mathbf{g}\rVert)$:
 
 <!-- worked: training_dynamics.clip_table -->
+A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable'.
+
 | rate | clip threshold (global norm) | steps clipped of 100 | largest step loss | full-set training loss after 100 steps |
 |---|---:|---:|---:|---:|
-| 10 | none | 0 | 1.78e+22 | 2.162 |
+| 10 | none | 0 | 1.78e+22 | about 2.2 |
 | 10 | 1 | 14 | 38.148 | 3.029 |
 | 10 | 0.1 | 100 | 1.273 | 0.408 |
 | 10 | 0.01 | 100 | 1.255 | 0.577 |
@@ -320,10 +326,10 @@ The bound is an upper bound, so it proves vanishing and cannot prove the opposit
 
 ### Measuring the product
 
-The deep stack of this section has an input layer ($8\to16$), 24 hidden matrices of $16\times16$ and a read-out ($16\to3$). It is plain (each layer $\mathbf{a} = g(\mathbf{W}\mathbf{a}+\mathbf{b})$) at its start, with weights $\text{gain}\cdot c/\sqrt{n_{\mathrm{in}}}\cdot$`normal()`, where $c = 1$ for sigmoid and tanh and $\sqrt2$ for ReLU, so gain 1 is He for ReLU and the variance-preserving scale of chapter 9 for tanh. First the product itself. For 16 inputs, each with a random unit vector at the top, the table gives the geometric mean of the norm after passing back through $k$ layers, the typical-gain prediction (with $\mathbb{E}[g'^2]$ measured from the same layers) and the norm bound.
+The deep stack of this section has an input layer ($8\to16$), 24 hidden matrices of $16\times16$ and a read-out ($16\to3$). It is plain (each layer $\mathbf{a} = g(\mathbf{W}\mathbf{a}+\mathbf{b})$) at its start, with weights $\text{gain}\cdot c/\sqrt{n_{\mathrm{in}}}\cdot$`normal()`, where $c = 1$ for sigmoid and tanh and $\sqrt2$ for ReLU, so gain 1 is He for ReLU and the variance-preserving scale of chapter 9 for tanh; the read-out is the exception, $\mathrm{normal}()/\sqrt{16}$ with no gain and no $c$. First the product itself. For 16 inputs, each with a random unit vector at the top, the table gives the geometric mean of the norm after passing back through $k$ layers, the typical-gain prediction (with $\mathbb{E}[g'^2]$ measured from the same layers) and the norm bound.
 
 <!-- worked: training_dynamics.jacobian_table -->
-Plain stack of 24 layers of width 16 (start of training). Generator: the book's SplitMix64, seed 0x70a0199053f0467b (8115514636195874427); draws in the order: input layer (16 x 8), the 24 hidden matrices, read-out. Weights = gain * c / sqrt(fan_in) * normal() with c = 1 for sigmoid and tanh. 16 pairs (first 16 training inputs, unit vector at the output of the last hidden layer from normal() draws normalised, stream 0xb546f4b44d8a777c). Entries are geometric means over the pairs of the norm of the gradient after passing back through k layers, started from a vector of norm 1.
+Plain stack of 24 layers of width 16 (start of training). Generator: the book's SplitMix64, seed 0x70a0199053f0467b (8115514636195874427); draws in the order: input layer (16 x 8), the 24 hidden matrices, read-out (rows one after the other, biases 0). Weights of the input layer and of the hidden matrices = gain * c / sqrt(fan_in) * normal() with c = 1 for sigmoid and tanh (fan_in 8 for the input layer, 16 for the hidden matrices); the read-out is normal() / sqrt(16), without gain. The spectral norm of a matrix (for the norm bound) is its largest singular value, found by 60 power iterations on W^T W from a start vector of 16 normal() draws of the generator `training_dynamics.spectral` (seed 0x20287cd37f8599fc), restarted for each matrix, each iteration normalising the vector. Slopes use the activation's derivative at the pre-activation (sigmoid s(1 - s), tanh 1 - a^2). 16 pairs (first 16 training inputs, unit vector at the output of the last hidden layer from normal() draws normalised, stream 0xb546f4b44d8a777c). Entries are geometric means over the pairs of the norm of the gradient after passing back through k layers, started from a vector of norm 1.
 
 | configuration | quantity | k = 1 | k = 2 | k = 4 | k = 8 | k = 16 | k = 24 |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -346,7 +352,7 @@ Each row group is one configuration. The sigmoid stack at gain 1 reaches $3.9\ti
 Now the quantity a training loop can actually log, the gradient norm of each weight matrix. The weight gradient of a layer is $d\mathbf{W}_\ell = \sum_n d\mathbf{z}_{\ell,n}\,\mathbf{a}_{\ell-1,n}^\top$, so its norm carries the backward signal $d\mathbf{z}_\ell$ and the forward activation $\mathbf{a}_{\ell-1}$ at that layer.
 
 <!-- worked: training_dynamics.stack_gradient_table -->
-Gradient of the loss on the first 32 training examples at the start. Matrix 1 is the one nearest the input layer and matrix 24 the one nearest the read-out. Same normal() draws for every row (Generator: the book's SplitMix64, seed 0x70a0199053f0467b (8115514636195874427)), only the scales differ; the residual stack adds s = sqrt(1 / 48) times the layer's output to its input. Last column: the norm of the gradient arriving at the output of hidden layer 1 divided by the one arriving at the output of hidden layer 24, which is the product of the 23 layers' Jacobians seen from above.
+Gradient of the loss (mean over the batch of the cross-entropy) on the first 32 training examples at the start; 'dW norm' is the Euclidean (Frobenius) norm of the gradient of the 16 x 16 weight matrix, the whole batch summed in the gradient and the bias gradient not included. Weights: input layer and hidden matrices gain * c / sqrt(fan_in) * normal() with c = sqrt(2) for ReLU and 1 for sigmoid and tanh (the gain is 1 for the ReLU rows), the read-out normal() / sqrt(16) without gain, biases 0. Matrix 1 is the one nearest the input layer and matrix 24 the one nearest the read-out. Same normal() draws for every row (Generator: the book's SplitMix64, seed 0x70a0199053f0467b (8115514636195874427)), only the scales differ; the residual stack adds s = sqrt(1 / 48) times the layer's output to its input. Last column: the norm of the gradient arriving at the output of hidden layer 1 divided by the one arriving at the output of hidden layer 24, which is the product of the 23 layers' Jacobians seen from above.
 
 | stack | loss | dW norm, matrix 1 | matrix 6 | matrix 12 | matrix 18 | matrix 24 | matrix 1 / matrix 24 | gradient at layer 1 / at layer 24 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -588,25 +594,25 @@ function overfit_one_batch(theta: array<real>[P], X: array<real>[B, D], y: array
 The test passes only if the forward pass, the loss, the backward pass and the update all work together on one batch. That makes it different from the gradient check of chapter 6, which tests only that the backward pass is the derivative of the forward pass. The table runs both on the gallery network, with one deliberate defect at a time:
 
 <!-- worked: training_dynamics.overfit_one_batch_table -->
-The first 8 training examples as one batch (or random labels), network 8 -> 32 -> 32 -> 3 from the gallery start, 300 steps of plain gradient descent at rate 0.1 on the whole batch. Gradient check: one random unit direction over all 1443 parameters (normal() draws, stream 0x995ad90a97622bfe), central difference with h = 1e-5, at the start; 'fails' when the relative error exceeds 1e-4. Random labels: 8 draws of integer(3) from stream 0x65414a9c627a7efe. Loss and accuracy are the usual (correct) cross-entropy and argmax accuracy on the batch after the last update; overfit one batch passes when that loss is below 1% of the loss at step 0 and the accuracy is 1.
+The first 8 training examples as one batch (or random labels), network 8 -> 32 -> 32 -> 3 from the gallery start, 300 steps of plain gradient descent at rate 0.1 on the whole batch. Gradient check: one random unit direction over all 1443 parameters (normal() draws, stream 0x995ad90a97622bfe), central difference with h = 1e-5, at the start; 'fails' when the relative error exceeds 1e-4. Random labels: 8 draws of integer(3) from stream 0x65414a9c627a7efe. Loss and accuracy are the usual (correct) cross-entropy and argmax accuracy on the batch after the last update; overfit one batch passes when that loss is below 1% of the loss at step 0 and the accuracy is 1. A relative error under 1e-8 is rounding noise of the central difference and is printed as a bound. 'The labels are reshuffled at every step': at each step the 8 labels, in their original order, are shuffled with the book's shuffle by the generator of the gallery's batch stream (seed 0x28e8e3949e5963e6), which continues from step to step. 'The gradient of the first layer is dropped': the whole gradient of layer 1, weights and bias vector, is set to zero before the update.
 
 | defect | lives in | gradient check: relative error | gradient check | loss at step 0 | loss after 300 steps | accuracy | overfit one batch |
 |---|---|---:|---|---:|---:|---:|---|
-| no defect | - | 5.1e-10 | passes | 1.220 | 0.0025 | 1.000 | passes |
-| no defect, labels replaced by random ones | data | 2.9e-10 | passes | 2.049 | 0.0026 | 1.000 | passes |
-| the update adds the gradient instead of subtracting it | update | 5.1e-10 | passes | 1.220 | NaN | 0.375 | fails |
-| the labels are reshuffled against the inputs at every step | data | 5.1e-10 | passes | 1.220 | 0.9937 | 0.375 | fails |
-| the softmax runs over the batch instead of over the classes | loss | 1.3e-09 | passes | 1.220 | 0.0941 | 1.000 | fails |
+| no defect | - | below 1e-8 | passes | 1.220 | 0.0025 | 1.000 | passes |
+| no defect, labels replaced by random ones | data | below 1e-8 | passes | 2.049 | 0.0026 | 1.000 | passes |
+| the update adds the gradient instead of subtracting it | update | below 1e-8 | passes | 1.220 | NaN | 0.375 | fails |
+| the labels are reshuffled against the inputs at every step | data | below 1e-8 | passes | 1.220 | 0.9937 | 0.375 | fails |
+| the softmax runs over the batch instead of over the classes | loss | below 1e-8 | passes | 1.220 | 0.0941 | 1.000 | fails |
 | backward forgets the ReLU slope (passes the gradient of every unit) | backward | 5.8e-01 | fails | 1.220 | 0.0021 | 1.000 | passes |
-| the gradient of the first layer's weights is dropped | backward | 1.2e+00 | fails | 1.220 | 0.0048 | 1.000 | passes |
+| the gradient of the first layer (weights and biases) is dropped | backward | 1.2e+00 | fails | 1.220 | 0.0048 | 1.000 | passes |
 <!-- /worked -->
 
 The two checks catch different defects. A **correct** network passes both, and passes the overfit test also on random labels, which shows that what it does is memorization of a fixed batch, not a property of the data. The defects:
 
 - *The update adds the gradient* (a sign error in the optimizer): the gradient check passes, since the gradient is right and the update is not; the overfit test fails at once, the loss going to `NaN`.
 - *Labels reshuffled against the inputs at every step* (a data-pipeline bug): the gradient check passes, since the gradient is right for the loss it is given; the overfit loss stays at $0.994$.
-- *The softmax over the batch axis* (a shape bug that mixes examples): the gradient check passes with a relative error of $1.3\times10^{-9}$, since the gradient is the right one for the loss as written, which is the wrong loss; the overfit test fails (a loss of $0.094$, under eight percent of the start and above the $1\%$ of the test, though the accuracy is $1$).
-- *The backward pass forgets the ReLU slope*, or *drops the gradient of the first layer*: the gradient check fails (relative errors $0.58$ and $1.2$), and **the overfit test passes**: the network has more than enough free parameters in the other layers and descends a direction that is not the gradient but still decreases the loss.
+- *The softmax over the batch axis* (a shape bug that mixes examples): the gradient check passes with a relative error below $10^{-8}$, since the gradient is the right one for the loss as written, which is the wrong loss; the overfit test fails (a loss of $0.094$, under eight percent of the start and above the $1\%$ of the test, though the accuracy is $1$).
+- *The backward pass forgets the ReLU slope*, or *drops the gradient of the first layer* (weights and bias): the gradient check fails (relative errors $0.58$ and $1.2$), and **the overfit test passes**: the network has more than enough free parameters in the other layers and descends a direction that is not the gradient but still decreases the loss.
 
 The two tests together cover the table. Neither is enough alone: the overfit test is the one that sees the loop, the loss and the data, and the gradient check is the one that sees a wrong gradient that the remaining parameters can compensate for. A permanent label misalignment, which memorization cannot see, is caught by a model that has to generalize:
 

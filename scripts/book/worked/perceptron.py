@@ -288,10 +288,10 @@ def gap_scaling():
         counts = _mistakes_over_orders(pts, bookrng.generator(GAP_ORDER_NAME))
         assert max(counts) <= bound
         rows.append((f"{g:g}", f"{gamma:.4f}", f"{r:.4f}", f"{bound:.1f}", min(counts), f"{sum(counts) / len(counts):.1f}", max(counts)))
-    head = (f"Data: {GAP_N} points per row. {_seed_line(GAP_DATA_NAME)} Draw order: candidate after candidate, x1 = 2 u1 - 1 then x2 = 2 u2 - 1 "
-            f"(u1, u2 = uniform()); a candidate is kept when |x1| >= g / 2, with label +1 if x1 > 0 and -1 otherwise, until {GAP_N} are kept. "
+    head = (f"Data: {GAP_N} points per row. {_seed_line(GAP_DATA_NAME)} The data generator is restarted from this seed for each row. Draw order: candidate after candidate, "
+            f"first u1 = uniform() then u2 = uniform(), x1 = 2 u1 - 1, x2 = 2 u2 - 1; a candidate is kept when |x1| >= g / 2, with label +1 if x1 > 0 and -1 otherwise, until {GAP_N} are kept. "
             "The separator is w* = (1, 0), b = 0.\n"
-            f"Orders: {_seed_line(GAP_ORDER_NAME)} {N_ORDERS} orders per row, each one shuffle of [0, ..., {GAP_N - 1}], the generator restarted for each row.\n\n")
+            f"Orders: {_seed_line(GAP_ORDER_NAME)} {N_ORDERS} orders per row, each one shuffle of a fresh list [0, ..., {GAP_N - 1}], the order generator restarted from this seed for each row. Both generators therefore start afresh in every row.\n\n")
     return head + _table(["gap g", "gamma", "R", "bound (R/gamma)^2", "fewest", "mean", "most"], rows)
 
 

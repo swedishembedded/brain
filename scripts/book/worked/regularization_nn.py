@@ -166,10 +166,12 @@ def _run_impl(spec):
     `regularization_nn.noise.<seed>`: for each step, for each training example in order, first the
     draw of the augmentation (if any), then 64 uniform() draws, one per hidden unit, for the
     dropout mask (if p_drop > 0); a unit is dropped when its draw is below p_drop."""
-    seed, n_train, wd, coupled, p_drop, aug_kind, aug_amount, keep = spec
+    seed, n_train, wd, coupled, p_drop, aug_kind, aug_amount, keep = spec[:8]
+    nudge = spec[8] if len(spec) > 8 else 0.0      # test of chaos: the first hidden weight changed by this amount
     vx, vy, tx, ty = _heldout()
     xs, ys = _training_set(seed, n_train)
     theta = _initial(seed)
+    theta[0] += nudge
     noise = bookrng.generator(f"regularization_nn.noise.{seed}")
     m1 = [0.0] * PARAMS
     m2 = [0.0] * PARAMS
@@ -273,6 +275,43 @@ def _fmt(v, d=3):
     return f"{v + 0.0:.{d}f}"
 
 
+NUDGE = 1e-12   # the first hidden weight of every network changed by this amount: a printed number that moves under it is chaotic
+
+
+def _twins(n=N_TRAIN, wd=0.0, coupled=False, drop=0.0, aug=("none", 0.0), keep=False):
+    """The same runs as `_runs` with the first hidden weight nudged, to test which printed digits are reproducible."""
+    return _run_many([_spec(s, n, wd, coupled, drop, aug, keep) + (NUDGE,) for s in SEEDS])
+
+
+def _fmtm(v, w, d=3):
+    """v to d decimals if the nudged value w agrees with it to within half a unit of the last digit; otherwise 'about'
+    v to the fewest decimals on which the two agree ('unstable' when they differ even in the integer part)."""
+    if abs(v - w) <= 0.5 * 10 ** (-d):
+        return f"{v + 0.0:.{d}f}"
+    for k in range(d - 1, -1, -1):
+        if f"{v + 0.0:.{k}f}" == f"{w + 0.0:.{k}f}":
+            return f"about {v + 0.0:.{k}f}"
+    return "unstable"
+
+
+def _m(f, a, b, d=3):
+    """Mean over the seeds of f(run), printed with `_fmtm` against the same mean over the nudged runs."""
+    return _fmtm(_mean([f(x) for x in a]), _mean([f(x) for x in b]), d)
+
+
+def _signed(v, w, d=3):
+    """_fmtm with an explicit sign."""
+    t = _fmtm(v, w, d)
+    return t if t == "unstable" else (t.replace("about ", "about +") if t.startswith("about") and not t.startswith("about -") else (("+" + t) if not t.startswith(("-", "about")) else t))
+
+
+def _paired_text(a, b, at, bt, d=3):
+    """('+0.012 (SE 0.004)', '+3.1', '7 of 8') of the paired comparison a - b, each printed against the nudged runs at, bt."""
+    m, se, t, wins = _paired(a, b)
+    m2, se2, t2, wins2 = _paired(at, bt)
+    return (f"{_signed(m, m2, d)} (SE {_fmtm(se, se2, d)})", _signed(t, t2, 1), f"{wins} of 8" if wins == wins2 else "unstable")
+
+
 def _paired(a, b):
     """Mean difference a - b over the seeds, its standard error, t, and the number of seeds with a < b."""
     d = [x - y for x, y in zip(a, b)]
@@ -296,11 +335,15 @@ def task_setup():
         f"Loss: mean squared error over the {N_TRAIN} training points. Optimizer: AdamW, full batch, learning rate {LR}, "
         f"beta1 {BETA1}, beta2 {BETA2}, epsilon {EPS_DEN:g}, {STEPS} steps, no schedule; the validation loss ({N_VAL} points) is computed every {EVAL_EVERY} steps.",
         "",
-        "Generators (the book's SplitMix64; k is the seed number 0 .. 7):",
+        "Generators (the book's SplitMix64; k is the seed number 0 .. 7; a generator named `regularization_nn.<stream>.k` is seeded with the seed printed in the table below, so each of the eight seeds has its own seed for each of the three streams):",
         "",
-        f"- {_seed_line('regularization_nn.train.0')} for k = 0: for i = 0 .. 15, x_i = uniform() then e_i = normal(); y_i = sin(2 pi x_i) + 0.3 e_i. Stream `regularization_nn.train.k` for the others.",
-        f"- {_seed_line('regularization_nn.init.0')} for k = 0: w_j = normal() for j = 0 .. 63, then b_j = normal() for j = 0 .. 63, then v_j = normal() / 8 for j = 0 .. 63; c = 0.",
-        f"- {_seed_line('regularization_nn.noise.0')} for k = 0: masks and augmentations (draw order in the examples that use them).",
+        "- `train.k`: for i = 0 .. 15, x_i = uniform() then e_i = normal(); y_i = sin(2 pi x_i) + 0.3 e_i (for a training set of N > 16 points the same rule continues to i = N - 1).",
+        "- `init.k`: w_j = normal() for j = 0 .. 63, then b_j = normal() for j = 0 .. 63, then v_j = normal() / 8 for j = 0 .. 63; c = 0.",
+        "- `noise.k`: masks and augmentations (draw order in the examples that use them).",
+        "",
+        _table(["k", "train.k", "init.k", "noise.k"],
+               [(k, *[f"0x{bookrng.seed_of(f'regularization_nn.{st}.{k}'):016x}" for st in ("train", "init", "noise")]) for k in SEEDS], "rlll"),
+        "",
         f"- {_seed_line(HELD_VAL_NAME)}: {N_VAL} validation points, drawn like the training points. {_seed_line(HELD_TEST_NAME)}: {N_TEST} test points, same rule.",
         "",
         "Training points of seed 0:",
@@ -315,23 +358,27 @@ def memorisation():
     r = _runs(keep=False)
     h = r[0]["history"]
     marks = (10, 50, 100, 200, 400, 600, 1000, 1500, 2000, 3000)
+    rt = _run_many([_spec(0) + (NUDGE,)])[0]["history"]
     rows = []
-    for t, tr, va, nm in h:
+    for (t, tr, va, nm), (_, tr2, va2, nm2) in zip(h, rt):
         if t in marks:
-            rows.append((t, _fmt(tr, 4), _fmt(va, 4), _fmt(nm, 1)))
+            rows.append((t, _fmtm(tr, tr2, 4), _fmtm(va, va2, 4), _fmtm(nm, nm2, 1)))
     out = [
         f"Seed 0, no regularization (AdamW with weight decay 0). Training loss is the mean squared error on the {N_TRAIN} training points in eval mode; "
-        f"validation is the mean squared error on the {N_VAL} validation points; the noise floor is {NOISE_SD ** 2:.2f}.",
+        f"validation is the mean squared error on the {N_VAL} validation points; the noise floor is {NOISE_SD ** 2:.2f}; the norm of the parameters is the Euclidean norm of the {PARAMS} parameters "
+        "(w, b, v and c together). The late rows come from a chaotic run: a change of 1e-12 in one initial weight changes the printed digits there, so an entry is printed in full only if it survives that change "
+        "and as 'about x' (the digits that survive) otherwise; the same rule applies to every number of this chapter's tables that comes from training.",
         "",
         _table(["step", "training loss", "validation loss", "norm of the parameters"], rows),
         "",
     ]
     bs = [x["best_step"] for x in r]
+    rtw = _twins()
     out.append(
         f"Over the 8 seeds: the validation loss is lowest at step {_mean(bs):.0f} on average (range {min(bs)} to {max(bs)}), where it is "
-        f"{_mean([x['best_val'] for x in r]):.3f}; at step {STEPS} it is {_mean([x['final_val'] for x in r]):.3f} on average "
-        f"(range {min(x['final_val'] for x in r):.3f} to {max(x['final_val'] for x in r):.3f}), while the training loss is "
-        f"{_mean([x['final_train'] for x in r]):.4f}."
+        f"{_m(lambda x: x['best_val'], r, rtw)}; at step {STEPS} it is {_m(lambda x: x['final_val'], r, rtw)} on average "
+        f"(range {_fmtm(min(x['final_val'] for x in r), min(x['final_val'] for x in rtw))} to {_fmtm(max(x['final_val'] for x in r), max(x['final_val'] for x in rtw))}), while the training loss is "
+        f"{_m(lambda x: x['final_train'], r, rtw, 4)}."
     )
     i_stop, i_best = _stop_point(h, 10)
     out.append(
@@ -354,16 +401,16 @@ def weight_decay_sweep():
     """Decoupled weight decay: the strength, what it does to a weight the data never touches, and the result."""
     rows = []
     for lam in (0.0,) + WD_GRID:
-        r = _runs(wd=lam)
+        r, rt = _runs(wd=lam), _twins(wd=lam)
         shrink = (1.0 - LR * lam) ** STEPS
         sd = "no prior" if lam == 0 else _fmt(_prior_sd(lam), 3)
         rows.append((
             f"{lam:g}", f"{LR * lam:.4f}", f"{shrink:.2e}" if lam else "1", sd,
-            _fmt(_mean([x["final_norm"] for x in r]), 1),
-            _fmt(_mean([_steepest_slope(x["theta"]) for x in r]), 1),
-            _fmt(_mean([x["final_train"] for x in r]), 4),
-            _fmt(_mean([x["final_val"] for x in r]), 3),
-            _fmt(_mean([x["final_test"] for x in r]), 3),
+            _m(lambda x: x["final_norm"], r, rt, 1),
+            _m(lambda x: _steepest_slope(x["theta"]), r, rt, 1),
+            _m(lambda x: x["final_train"], r, rt, 4),
+            _m(lambda x: x["final_val"], r, rt, 3),
+            _m(lambda x: x["final_test"], r, rt, 3),
         ))
     out = [
         f"Decoupled weight decay (AdamW, theta <- theta - eta lam theta - eta mhat / (sqrt(vhat) + eps)), applied to all {PARAMS} parameters, "
@@ -382,12 +429,12 @@ def coupled_vs_decoupled():
     rows = []
     for name, coupled, grid in (("decoupled (AdamW)", False, WD_GRID), ("in the gradient (Adam + L2)", True, L2_GRID)):
         for lam in grid:
-            r = _runs(wd=lam, coupled=coupled)
+            r, rt = _runs(wd=lam, coupled=coupled), _twins(wd=lam, coupled=coupled)
             rows.append((
                 name, f"{lam:g}",
-                _fmt(_mean([x["final_norm"] for x in r]), 1),
-                _fmt(_mean([x["final_train"] for x in r]), 4),
-                _fmt(_mean([x["final_val"] for x in r]), 3),
+                _m(lambda x: x["final_norm"], r, rt, 1),
+                _m(lambda x: x["final_train"], r, rt, 4),
+                _m(lambda x: x["final_val"], r, rt, 3),
             ))
     out = [
         "The same network and seeds, with the penalty (lam / 2) ||theta||^2 either applied to the weights directly (decoupled) or added to the gradient that Adam then rescales "
@@ -569,18 +616,20 @@ def _stochastic(theta, x, p, g):
 def train_vs_eval():
     """The dropout network of seed 0 evaluated at one input in eval mode and in train mode."""
     p = 0.3
-    theta = _run_many([_spec(0, drop=p)])[0]["theta"]
     x = 0.75
-    ev = _predict(theta, [x])[0]
-    g = bookrng.generator("regularization_nn.predict")
-    five = [_stochastic(theta, x, p, g) for _ in range(5)]
-    many = [_stochastic(theta, x, p, g) for _ in range(2000)]
-    mm = _mean(many)
-    sd = _sd(many)
-    rows = [(f"train mode, mask {i + 1}", _fmt(s, 4)) for i, s in enumerate(five)]
-    rows.append(("eval mode (no mask, no scaling)", _fmt(ev, 4)))
-    rows.append(("mean of 2000 further train-mode outputs", _fmt(mm, 4)))
-    rows.append(("standard deviation of those 2000", _fmt(sd, 4)))
+    pair = []
+    for spec in (_spec(0, drop=p), _spec(0, drop=p) + (NUDGE,)):
+        theta = _run_many([spec])[0]["theta"]
+        ev = _predict(theta, [x])[0]
+        g = bookrng.generator("regularization_nn.predict")
+        five = [_stochastic(theta, x, p, g) for _ in range(5)]
+        many = [_stochastic(theta, x, p, g) for _ in range(2000)]
+        pair.append((five, ev, _mean(many), _sd(many)))
+    (five, ev, mm, sd), (five2, ev2, mm2, sd2) = pair
+    rows = [(f"train mode, mask {i + 1}", _fmtm(s, s2, 4)) for i, (s, s2) in enumerate(zip(five, five2))]
+    rows.append(("eval mode (no mask, no scaling)", _fmtm(ev, ev2, 4)))
+    rows.append(("mean of 2000 further train-mode outputs", _fmtm(mm, mm2, 4)))
+    rows.append(("standard deviation of those 2000", _fmtm(sd, sd2, 4)))
     rows.append(("true value sin(2 pi x)", _fmt(_truth(x), 4)))
     return "\n".join([
         f"The network of seed 0 trained with dropout p = {p} on its hidden layer (3000 steps, otherwise the recipe of the chapter), evaluated at x = {x}. "
@@ -593,9 +642,9 @@ def train_vs_eval():
 def dropout_sweep():
     rows = []
     for p in (0.0,) + DROP_GRID:
-        r = _runs(drop=p)
-        rows.append((f"{p:g}", _fmt(_mean([x["final_norm"] for x in r]), 1), _fmt(_mean([x["final_train"] for x in r]), 4),
-                     _fmt(_mean([x["final_val"] for x in r]), 3), _fmt(_mean([x["best_val"] for x in r]), 3),
+        r, rt = _runs(drop=p), _twins(drop=p)
+        rows.append((f"{p:g}", _m(lambda x: x["final_norm"], r, rt, 1), _m(lambda x: x["final_train"], r, rt, 4),
+                     _m(lambda x: x["final_val"], r, rt, 3), _m(lambda x: x["best_val"], r, rt, 3),
                      f"{_mean([x['best_step'] for x in r]):.0f}"))
     return "\n".join([
         "Dropout on the 64 hidden units, p as listed, the recipe of the chapter, means over the 8 seeds. Training loss is eval mode on the 16 training points; "
@@ -608,12 +657,12 @@ def dropout_sweep():
 def dropout_by_size():
     rows = []
     for n in N_SWEEP:
-        a = _runs(n=n)
-        d = _runs(n=n, drop=0.3)
+        a, at = _runs(n=n), _twins(n=n)
+        d, dt = _runs(n=n, drop=0.3), _twins(n=n, drop=0.3)
         ta = [x["final_test"] for x in a]
         td = [x["final_test"] for x in d]
-        m, se, t, wins = _paired(td, ta)
-        rows.append((n, f"{PARAMS / n:.1f}", _fmt(_mean([x["final_train"] for x in a]), 3), _fmt(_mean(ta), 3), _fmt(_mean(td), 3), f"{m:+.3f} (SE {se:.3f})", f"{t:+.1f}", f"{wins} of 8"))
+        diff, tt, wins = _paired_text(td, ta, [x["final_test"] for x in dt], [x["final_test"] for x in at])
+        rows.append((n, f"{PARAMS / n:.1f}", _m(lambda x: x["final_train"], a, at, 3), _m(lambda x: x["final_test"], a, at, 3), _m(lambda x: x["final_test"], d, dt, 3), diff, tt, wins))
     return "\n".join([
         "The same network and recipe with N training examples (N = 16 is the chapter's task; for the others the training points are the first N pairs of a stream "
         "`regularization_nn.train.k` drawn by the same rule), without dropout and with p = 0.3, 3000 steps, test loss on the 1000 test points, means over the 8 seeds. "
@@ -670,10 +719,10 @@ def augmentation_ridge():
         out_rows.append(tuple(row))
     plain = normal_equations(xs, ys, 0.0)
     return "\n".join([
-        f"A linear model y = w . x with {d} features on {n} examples, features and noise from one generator ({_seed_line('regularization_nn.ridge')}): for i = 0 .. 11, "
-        f"x_i = three normal() draws, then y_i = 1 x_i0 - 2 x_i1 + 0.5 x_i2 + 0.5 normal(). Least squares without any augmentation: w = ({', '.join(_fmt(w, 4) for w in plain)}). "
+        f"A linear model y = w . x with {d} features on {n} examples, features and noise from one generator ({_seed_line('regularization_nn.ridge')}): "
+        f"first all {n} feature rows, row by row (3 normal() draws per row, 36 draws in all), and only then the {n} label noises (one normal() each, in the order of the rows), so that y_i = 1 x_i0 - 2 x_i1 + 0.5 x_i2 + 0.5 e_i with e_i the i-th noise draw. Least squares without any augmentation: w = ({', '.join(_fmt(w, 4) for w in plain)}). "
         "'Ridge' solves (X^T X + N s^2 I) w = X^T y. 'K copies' replaces each example by K noisy copies x + s * (three normal() draws), with the same label, and solves ordinary least squares "
-        "on the 12 K rows (the draws continue the same generator: first all rows of s = 0.3 with K = 10, then K = 1000, then s = 0.6 with K = 10, then K = 1000). "
+        "on the 12 K rows (the draws continue the same generator: first all rows of s = 0.3 with K = 10, then K = 1000, then s = 0.6 with K = 10, then K = 1000; within one setting example after example, K copies of an example one after the other, each copy three normal() draws, one per feature). "
         "'Max difference' is the largest difference of an entry from the ridge solution.",
         "",
         _table(["noise sd s", "ridge strength N s^2", "ridge w", "K = 10 copies: w", "max difference", "K = 1000 copies: w", "max difference"], out_rows, "lrlrrrr"),
@@ -702,16 +751,17 @@ AUGMENTATIONS = (
 
 def augmentation_table():
     g = bookrng.generator("regularization_nn.drift")
-    base = _runs()
+    base, baset = _runs(), _twins()
     tb = [x["final_test"] for x in base]
+    tbt = [x["final_test"] for x in baset]
     rows = []
     for name, aug in AUGMENTATIONS:
-        r = _runs(aug=aug)
+        r, rt = _runs(aug=aug), _twins(aug=aug)
         drift = 0.0 if aug[0] == "none" else _drift(aug[0], aug[1], g)
         t_ = [x["final_test"] for x in r]
-        m, se, t, wins = _paired(t_, tb)
-        rows.append((name, _fmt(drift, 3), _fmt(_mean([x["final_train"] for x in r]), 4), _fmt(_mean([x["final_val"] for x in r]), 3),
-                     _fmt(_mean(t_), 3), "-" if aug[0] == "none" else f"{m:+.3f}", "-" if aug[0] == "none" else f"{t:+.1f}"))
+        diff, tt, _ = _paired_text(t_, tb, [x["final_test"] for x in rt], tbt)
+        rows.append((name, _fmt(drift, 3), _m(lambda x: x["final_train"], r, rt, 4), _m(lambda x: x["final_val"], r, rt, 3),
+                     _m(lambda x: x["final_test"], r, rt, 3), "-" if aug[0] == "none" else diff.split(" (")[0], "-" if aug[0] == "none" else tt))
     return "\n".join([
         "Augmentation by changing the input of a training example, with its label kept, a fresh draw at every step for every example (online). Draw order of the stream "
         "`regularization_nn.noise.k`: for each step, for each example in order, one draw, then (when dropout is on, which it is not here) the 64 mask draws. 'noise' adds sd * normal() to x; "
@@ -749,19 +799,23 @@ def patience_rules():
     _, _, tx, ty = _heldout()
     out_rows = []
     for label, kw in (("no regularization", {}), ("dropout p = 0.3", {"drop": 0.3})):
-        runs = _runs(keep=True, **kw)
-        full_test = _mean([x["final_test"] for x in runs])
-        oracle = _mean([x["best_test"] for x in runs])
+        runs, twins = _runs(keep=True, **kw), _twins(keep=True, **kw)
+        full_test = _m(lambda x: x["final_test"], runs, twins)
+        oracle = _m(lambda x: x["best_test"], runs, twins)
         for pat in PATIENCES:
-            stops, restored, at_stop, bests = [], [], [], []
-            for x in runs:
-                i_stop, i_best = _stop_point(x["history"], pat)
-                stops.append(x["history"][i_stop][0])
-                bests.append(x["history"][i_best][0])
-                restored.append(_mse(x["snapshots"][i_best], tx, ty))
-                at_stop.append(_mse(x["snapshots"][i_stop], tx, ty))
-            out_rows.append((label, pat, f"{_mean(stops):.0f}", f"{_mean(bests):.0f}", _fmt(_mean(restored), 3), _fmt(_mean(at_stop), 3),
-                             _fmt(full_test, 3), _fmt(oracle, 3)))
+            res = []
+            for group in (runs, twins):
+                stops, restored, at_stop, bests = [], [], [], []
+                for x in group:
+                    i_stop, i_best = _stop_point(x["history"], pat)
+                    stops.append(x["history"][i_stop][0])
+                    bests.append(x["history"][i_best][0])
+                    restored.append(_mse(x["snapshots"][i_best], tx, ty))
+                    at_stop.append(_mse(x["snapshots"][i_stop], tx, ty))
+                res.append((_mean(stops), _mean(bests), _mean(restored), _mean(at_stop)))
+            (st, be, re_, ats), (st2, be2, re2, ats2) = res
+            step = lambda a, b: f"{a:.0f}" if round(a) == round(b) else f"about {a:.0f}"   # noqa: E731
+            out_rows.append((label, pat, step(st, st2), step(be, be2), _fmtm(re_, re2, 3), _fmtm(ats, ats2, 3), full_test, oracle))
     return "\n".join([
         f"The recorded validation losses (one every {EVAL_EVERY} steps) of the 8 runs of each setting, replayed with a patience rule: keep the lowest validation loss so far "
         "(only a strictly lower value counts as an improvement) and stop at the first evaluation at which `patience` evaluations in a row have not improved on it. "
@@ -939,26 +993,30 @@ def comparison_data():
 def method_comparison():
     data = comparison_data()
     wd, dp, ag = _chosen()
-    none = data[0][2]
+    twin_data = [(name, _twins(**kw)) for name, _, kw in _methods()]
+    none, none_t = data[0][2], twin_data[0][1]
     tn = [x["final_test"] for x in none]
     te = [x["best_test"] for x in none]
+    tnt = [x["final_test"] for x in none_t]
+    tet = [x["best_test"] for x in none_t]
     rows_a, rows_b = [], []
-    for name, setting, r in data:
+    for (name, setting, r), (_, rt) in zip(data, twin_data):
         t_final = [x["final_test"] for x in r]
         t_es = [x["best_test"] for x in r]
-        m, se, t, wins = _paired(t_final, tn)
-        rows_a.append((name, setting, _fmt(_mean([x["final_val"] for x in r]), 3), _fmt(_mean(t_final), 3), _fmt(_sd(t_final), 3),
-                       "-" if name == "none" else f"{m:+.3f} ({se:.3f})", "-" if name == "none" else f"{t:+.1f}",
-                       "-" if name == "none" else f"{wins} of 8", _fmt(_mean([x["final_norm"] for x in r]), 1)))
-        m2, se2, t2, wins2 = _paired(t_es, te)
-        rows_b.append((name, _fmt(_mean([x["best_val"] for x in r]), 3), f"{_mean([x['best_step'] for x in r]):.0f}", _fmt(_mean(t_es), 3),
-                       "-" if name == "none" else f"{m2:+.3f} ({se2:.3f})", "-" if name == "none" else f"{t2:+.1f}",
-                       "-" if name == "none" else f"{wins2} of 8"))
+        d1, tt1, w1 = _paired_text(t_final, tn, [x["final_test"] for x in rt], tnt)
+        rows_a.append((name, setting, _m(lambda x: x["final_val"], r, rt), _m(lambda x: x["final_test"], r, rt),
+                       _fmtm(_sd(t_final), _sd([x["final_test"] for x in rt]), 3),
+                       "-" if name == "none" else d1, "-" if name == "none" else tt1,
+                       "-" if name == "none" else w1, _m(lambda x: x["final_norm"], r, rt, 1)))
+        d2, tt2, w2 = _paired_text(t_es, te, [x["best_test"] for x in rt], tet)
+        rows_b.append((name, _m(lambda x: x["best_val"], r, rt), f"{_mean([x['best_step'] for x in r]):.0f}", _m(lambda x: x["best_test"], r, rt),
+                       "-" if name == "none" else d2, "-" if name == "none" else tt2,
+                       "-" if name == "none" else w2))
     return "\n".join([
         "Settings: the value of each method's grid with the lowest mean validation loss at step 3000 (weight decay lam in "
         f"{WD_GRID}, dropout p in {DROP_GRID}, noise sd in {NOISE_GRID}); the combinations use those values. "
         f"The chosen values are lam = {wd:g}, p = {dp:g}, noise sd = {ag:g}. Every row is the same 8 seeds (same training points, same initial weights); "
-        "test loss is on the 1000 test points, which were not used to choose anything. 'Difference' is the method's test loss minus that of 'none' per seed: mean (standard error = sd / sqrt(8), divisor 7), "
+        "test loss is on the 1000 test points, which were not used to choose anything. 'Test (sd over seeds)' is the standard deviation with divisor 7 of the eight test losses. 'Difference' is the method's test loss minus that of 'none' per seed: mean (standard error = sd / sqrt(8), sd with divisor 7), "
         "paired t with 7 degrees of freedom (|t| above 2.36 is significant at 5%), and the number of seeds where the method is better. The noise floor of the test loss is 0.09.",
         "",
         "Trained for 3000 steps and taken as they are:",

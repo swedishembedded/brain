@@ -78,6 +78,18 @@ def _num(v, sig=6):
     return f"{m} x 10^{int(e)}"
 
 
+def _num_exact(v, sig=6):
+    """_num for a Decimal, without the detour through a float that would underflow below 1e-308."""
+    if v == 0:
+        return "0"
+    if Decimal("1e-3") <= abs(v) < Decimal("1e6"):
+        return _num(float(v), sig)
+    m, e = f"{v:.{sig - 1}e}".split("e")
+    if "." in m:
+        m = m.rstrip("0").rstrip(".")
+    return f"{m} x 10^{int(e)}"
+
+
 def _below(v, tol=1e-15):
     """Rounding noise is printed as a bound, so the table does not depend on the last bits of a platform."""
     return f"below {tol:g}" if abs(v) < tol else _num(v, 2)
@@ -290,7 +302,7 @@ def log_ratio_and_shift():
         rows2.append([f"{c:g}"] + [f"{v:.6f}" for v in q])
     t2 = _table(["shift c"] + [f"p[{n}]" for n in CLASSES], rows2)
     return ("Log of the ratio of two probabilities against the difference of their logits:\n\n" + t1
-            + "\n\nThe softmax of z + c for the logits of the part, computed with the stable form:\n\n" + t2)
+            + "\n\nThe softmax of z + c for the logits of the part, computed by subtracting the largest logit before the exponentials (the stable softmax of the next section):\n\n" + t2)
 
 
 def scale_the_logits():
@@ -321,7 +333,7 @@ def overflow_and_underflow():
         exact = _exact_softmax(z)
         rows.append([name, f"{f.bits}-bit", "(" + ", ".join(_num(v, 5) for v in naive) + ")",
                      "(" + ", ".join(_num(v, 5) for v in stable) + ")",
-                     "(" + ", ".join(_num(float(v), 5) for v in exact) + ")"])
+                     "(" + ", ".join(_num_exact(v, 5) for v in exact) + ")"])
     head = ("Every operation is rounded to the stated format one at a time (`exp`, `+`, `-`, `/`), an `exp` "
             "above the largest finite number gives `inf`, and `inf / inf` and `0 / 0` are `nan`. "
             "\"naive\" is `exp(z[i]) / sum(exp(z))`; \"stable\" subtracts the largest logit first; "

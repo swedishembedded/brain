@@ -10,7 +10,7 @@
 The last chapter chose the starting weights of the deep stack so that the typical size of an activation is the same in every layer. It worked: at step 0 the pre-activations of all ten layers have a root-mean-square value (rms) between 1.4 and 2.1. The choice protects the first step and nothing after it. Gradient descent changes every weight at every step, and the size of a layer's output depends on all the weights below it. Here is the same stack with the same start and the same data (He weights, ReLU units, 32 examples, mean squared error), trained by plain gradient descent at the rate 0.01 that chapter 9 used, with the rms of the pre-activation $\mathbf{z}_\ell$ of selected layers measured as it trains:
 
 <!-- worked: normalization.stack_drift -->
-Setup: the deep stack of the initialization chapter (10 layers of 64 units, a read-out; ReLU), He start (the stream `initialization.weights` of that chapter, seed 0x1fd7def6cdf88dde), biases 0, the first 32 inputs and targets of the stream `initialization.data` (seed 0x155d7f43c18852c4), mean squared error, full batch, plain gradient descent with rate 0.01 for 100 steps. Entries are the rms of the pre-activations z_l of the layer, over the 32 examples and 64 units; "loss" is the loss before that step.
+Setup: the deep stack of the initialization chapter (10 layers of 64 units, a read-out; ReLU), He start (the stream `initialization.weights` of that chapter, seed 0x1fd7def6cdf88dde, scale sqrt(2 / 64) times each normal() in the order of that chapter's table: layer by layer, row by row, read-out last), biases 0, the first 32 inputs and targets of the stream `initialization.data` (seed 0x155d7f43c18852c4), mean squared error, full batch, plain gradient descent with rate 0.01 for 100 steps. Entries are the rms of the pre-activations z_l of the layer, over the 32 examples and 64 units; "loss" is the loss before that step.
 
 | step | loss | rms z_1 | rms z_2 | rms z_3 | rms z_5 | rms z_7 | rms z_10 |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -124,7 +124,7 @@ After the layer the three features have the means $\boldsymbol{\beta}$ and the v
 ```text
 function batch_norm_train(x: array<real>[B, D], gamma: array<real>[D], beta: array<real>[D],
                           eps: real) -> (y: array<real>[B, D], xhat: array<real>[B, D],
-                                         inv_std: array<real>[D])
+                                         inv_std: array<real>[D]):
     require B >= 2, "a batch of one has variance 0: every output would be beta"
     y = zeros(real, [B, D])
     xhat = zeros(real, [B, D])
@@ -154,7 +154,7 @@ $$
 \boldsymbol{\mu}_{\mathrm{run}} \leftarrow \beta_{\mathrm{run}}\,\boldsymbol{\mu}_{\mathrm{run}} + (1 - \beta_{\mathrm{run}})\,\boldsymbol{\mu}_{\mathrm{batch}}, \qquad \boldsymbol{\sigma}^2_{\mathrm{run}} \leftarrow \beta_{\mathrm{run}}\,\boldsymbol{\sigma}^2_{\mathrm{run}} + (1 - \beta_{\mathrm{run}})\,\boldsymbol{\sigma}^2_{\mathrm{batch}},
 $$
 
-with $\beta_{\mathrm{run}}$ close to 1 (many libraries expose $1 - \beta_{\mathrm{run}}$ as a parameter called the momentum, 0.1 being common). At prediction time the layer normalizes with these fixed numbers and no longer looks at the batch. One feature whose values are $3 + 2\cdot\mathrm{normal}()$, batches of 8, $\beta_{\mathrm{run}} = 0.9$:
+with $\beta_{\mathrm{run}}$ close to 1 (many libraries expose $1 - \beta_{\mathrm{run}}$ as a parameter called the momentum, 0.1 being common; the word means something else here than the optimizer's momentum of Chapter 7). At prediction time the layer normalizes with these fixed numbers and no longer looks at the batch. One feature whose values are $3 + 2\cdot\mathrm{normal}()$, batches of 8, $\beta_{\mathrm{run}} = 0.9$:
 
 <!-- worked: normalization.running_statistics -->
 Setup: one feature whose values are 3 + 2 * normal() (mean 3, variance 4). Generator: the book's SplitMix64, seed 0x7514b1d0f691daa4 (8436563513019849380); batch t takes the next 8 draws in order. Running averages start at mean 0 and variance 1 and update as run = beta_run * run + (1 - beta_run) * batch with beta_run = 0.9 (weight 0.1 on the new batch), batch variance with divisor 8.
@@ -180,7 +180,7 @@ The layer now behaves in two ways. In **train mode** it normalizes with the stat
 How different? Put a probe value, 5, first in a batch whose other members are draws from the same source (mean 3, variance 4), so that its correct standardized value is $(5-3)/2 = 1$, and compute its output in train mode over 1000 random batches for several batch sizes:
 
 <!-- worked: normalization.batch_size_dependence -->
-Setup: the feature of the previous example (population mean 3, variance 4). The probe example has the value 5, whose standardized value is (5 - 3) / 2 = 1. It is placed first in a batch of B values (the other B - 1 are 3 + 2 * normal() draws, in order). Train mode normalizes with the batch's mean and variance (divisor B, epsilon = 1e-05, gamma = 1, beta = 0). 1000 batches per B. Generator: the book's SplitMix64, seed 0x94c12fe3bf4ab7e9 (10718901243331917801); sizes are run in the order 1, 2, 4, 8, 32, 128, continuing one stream.
+Setup: the feature of the previous example (population mean 3, variance 4). The probe example has the value 5, whose standardized value is (5 - 3) / 2 = 1. It is placed first in a batch of B values (the other B - 1 are 3 + 2 * normal() draws, in order). Train mode normalizes with the batch's mean and variance (divisor B, epsilon = 1e-05, gamma = 1, beta = 0). 1000 batches per B; 'sd of output' is the standard deviation of the 1000 outputs with divisor 1000, and the percentiles use the book's percentile rule. Generator: the book's SplitMix64, seed 0x94c12fe3bf4ab7e9 (10718901243331917801); sizes are run in the order 1, 2, 4, 8, 32, 128, continuing one stream.
 
 | B | mean of output | sd of output | 5th percentile | 95th percentile |
 |---|---:|---:|---:|---:|
@@ -293,7 +293,7 @@ The derivation never used which numbers the group held. For batch normalization 
 
 ```text
 function norm_backward_group(dxhat: array<real>[n], xhat: array<real>[n],
-                             inv_std: real, centre: bool) -> array<real>[n]
+                             inv_std: real, centre: bool) -> array<real>[n]:
     # centre is true when the mean was subtracted in the forward pass
     m1 = 0.0
     if centre:
@@ -311,29 +311,29 @@ function norm_backward_group(dxhat: array<real>[n], xhat: array<real>[n],
 Checking all four layers on a $[4, 4]$ array against central differences, for the input, the gain and the shift:
 
 <!-- worked: normalization.norm_gradcheck -->
-Setup: a [4, 4] array x, gamma (1 + 0.3 * normal() per column), beta (0.3 * normal() per column) and an arriving gradient dy, all drawn in that order, x first, row-major. Generator: the book's SplitMix64, seed 0xaaa060781e3ec3c8 (12294933051741225928). The loss is L = sum(dy * y), epsilon = 1e-05, central differences with step 1e-06. "Sum of dx over a group" is for the first group (column 0 for batch norm, row 0 otherwise); for RMS norm it is not zero and is shown for contrast.
+Setup: a [4, 4] array x, gamma (1 + 0.3 * normal() per column), beta (0.3 * normal() per column) and an arriving gradient dy, all drawn in that order, x first, row-major. Generator: the book's SplitMix64, seed 0xaaa060781e3ec3c8 (12294933051741225928). The loss is L = sum(dy * y), epsilon = 1e-05, central differences with step 1e-06; the differences of a central difference are rounding noise, so values under 1e-8 are printed as a bound. "Sum of dx over a group" is for the first group (column 0 for batch norm, row 0 otherwise); for RMS norm it is not zero and is shown for contrast. RMS norm has no shift, so its beta is zero and it has no dbeta.
 
 | layer | largest |dx - numeric| | largest |dgamma - numeric| | largest |dbeta - numeric| | sum of dx over a group |
 |---|---:|---:|---:|---:|
-| batch | 3.21e-10 | 2.58e-10 | 2.40e-10 | 5.55e-17 |
-| layer | 6.10e-10 | 1.40e-10 | 2.46e-10 | 2.22e-16 |
-| rms | 3.02e-10 | 1.36e-10 | 3.09e-10 | 3.25e+00 |
-| group (2 per row) | 9.18e-10 | 3.15e-10 | 2.59e-10 | 8.33e-17 |
+| batch | below 1e-8 | below 1e-8 | below 1e-8 | below 1e-14 |
+| layer | below 1e-8 | below 1e-8 | below 1e-8 | below 1e-14 |
+| rms | below 1e-8 | below 1e-8 | none (no shift) | 3.25e+00 |
+| group (2 per row) | below 1e-8 | below 1e-8 | below 1e-8 | below 1e-14 |
 <!-- /worked -->
 
-Every difference is at the $10^{-10}$ level of a central difference with step $10^{-6}$. The last column confirms the structure: the gradient sums to zero over a group for batch, layer and group normalization, and does not for RMS normalization.
+Every difference is rounding noise of a central difference with step $10^{-6}$ (in practice at the $10^{-10}$ level, printed as a bound because its digits depend on the order of the arithmetic). RMS normalization has no shift $\beta$, so it has no $d\boldsymbol\beta$ to check. The last column confirms the structure: the gradient sums to zero over a group for batch, layer and group normalization, and does not for RMS normalization.
 
 ### A bias before batch normalization does nothing
 
 A linear layer is $\mathbf{z} = \mathbf{W}\mathbf{a} + \mathbf{b}$. If a batch-normalized layer follows, the bias is a constant added to every example of a feature, which the mean subtraction removes. The backward pass says the same: the gradient of the bias is $db_j = \sum_i dZ_{ij}$, and $dZ$ is what the batch-norm backward returned, whose column sums are zero. In the deep stack at step 0:
 
 <!-- worked: normalization.bias_before_norm -->
-Setup: the deep stack of the initialization chapter (10 layers of 64 units, a read-out; ReLU), He start (the stream `initialization.weights` of that chapter, seed 0x1fd7def6cdf88dde), biases 0, the first 32 inputs and targets of the stream `initialization.data` (seed 0x155d7f43c18852c4), mean squared error, full batch, plain gradient descent. Entries are the Euclidean norm of the gradient of the bias vector b_l (64 numbers) at step 0.
+Setup: the deep stack of the initialization chapter (10 layers of 64 units, a read-out; ReLU), He start (the stream `initialization.weights` of that chapter, seed 0x1fd7def6cdf88dde, scale sqrt(2 / 64) times each normal() in the order of that chapter's table: layer by layer, row by row, read-out last), biases 0, the first 32 inputs and targets of the stream `initialization.data` (seed 0x155d7f43c18852c4), mean squared error, full batch, plain gradient descent. Entries are the Euclidean norm of the gradient of the bias vector b_l (64 numbers) at step 0; a value at the level of rounding error (under 1e-14) is printed as a bound.
 
 | layers | layer 1 | layer 5 | layer 10 |
 |---|---:|---:|---:|
 | no normalization | 5.68e-01 | 1.24e+00 | 2.22e+00 |
-| batch norm | 2.35e-16 | 1.62e-16 | 1.53e-16 |
+| batch norm | below 1e-14 | below 1e-14 | below 1e-14 |
 | layer norm | 4.34e-01 | 1.27e+00 | 1.97e+00 |
 | RMS norm | 3.29e-01 | 1.20e+00 | 2.50e+00 |
 <!-- /worked -->
@@ -357,7 +357,7 @@ The pseudocode is the batch-norm routine with the roles of the axes exchanged, a
 ```text
 function layer_norm(x: array<real>[R, D], gamma: array<real>[D], beta: array<real>[D],
                     eps: real) -> (y: array<real>[R, D], xhat: array<real>[R, D],
-                                   inv_std: array<real>[R])
+                                   inv_std: array<real>[R]):
     # R = B * T rows; each row is one group
     y = zeros(real, [R, D])
     xhat = zeros(real, [R, D])
@@ -412,7 +412,7 @@ RMS normalization drops the mean (one reduction and one subtraction pass over th
 
 ```text
 function rms_norm(x: array<real>[R, D], gamma: array<real>[D], eps: real)
-        -> (y: array<real>[R, D], xhat: array<real>[R, D], inv_std: array<real>[R])
+        -> (y: array<real>[R, D], xhat: array<real>[R, D], inv_std: array<real>[R]):
     y = zeros(real, [R, D])
     xhat = zeros(real, [R, D])
     inv_std = zeros(real, [R])
@@ -485,7 +485,7 @@ With $G = 2$ the first group of example 0 is channels 0 and 1, the eight numbers
 
 ```text
 function group_norm(x: array<real>[N, C, H, W], gamma: array<real>[C], beta: array<real>[C],
-                    G: int, eps: real) -> array<real>[N, C, H, W]
+                    G: int, eps: real) -> array<real>[N, C, H, W]:
     require C mod G == 0, "the channels must divide into G equal groups"
     cpg = C // G                                   # channels per group
     y = zeros(real, [N, C, H, W])
@@ -534,7 +534,7 @@ The number of groups, the number of values in each and the learned parameters of
 The constant $\epsilon_{\mathrm{norm}}$ is meant to be negligible, and for rows of order one it is. When the spread of a group falls toward $\sqrt{\epsilon_{\mathrm{norm}}}$ it becomes the denominator. The same eight numbers $u$, multiplied by a scale $s$ and normalized with $\epsilon_{\mathrm{norm}}$ at $10^{-5}$ and $10^{-6}$:
 
 <!-- worked: normalization.epsilon_effect -->
-Setup: layer norm (gamma = 1, beta = 0) of the row s * u with u = (0.5, -1.5, 1.0, 2.0, -0.5, 1.5, -1.0, 0) (mean 0, sd 1.1726, n = 8), for a scale s. "Relative difference" is the Euclidean norm of the difference between the two outputs divided by the norm of the output at epsilon = 1e-6.
+Setup: layer norm (gamma = 1, beta = 0) of the row s * u with u = (0.5, -1.5, 1.0, 2.0, -0.5, 1.5, -1.0, 0) (mean 0.2500, sd with divisor n = 8 1.1456), for a scale s. "Relative difference" is the Euclidean norm of the difference between the two outputs divided by the norm of the output at epsilon = 1e-6.
 
 | scale s | sd of the row | rms of output, eps = 1e-5 | rms of output, eps = 1e-6 | relative difference |
 |---|---:|---:|---:|---:|
@@ -573,7 +573,7 @@ The same fact has a cost for testing, which brain's history records below: a gat
 Back to the problem. The deep stack gets a normalization layer between each of its ten linear layers and the ReLU that follows it: $\mathbf{a}_\ell = \mathrm{relu}(N(\mathbf{W}_\ell\mathbf{a}_{\ell-1}+\mathbf{b}_\ell))$, with $\boldsymbol{\gamma} = 1$ and $\boldsymbol{\beta} = 0$ at the start. First the sizes of the activations, which were the problem:
 
 <!-- worked: normalization.scale_by_layer -->
-Setup: the deep stack of the initialization chapter (10 layers of 64 units, a read-out; ReLU), He start (the stream `initialization.weights` of that chapter, seed 0x1fd7def6cdf88dde), biases 0, the first 32 inputs and targets of the stream `initialization.data` (seed 0x155d7f43c18852c4), mean squared error, full batch, plain gradient descent with rate 0.01. Entries are root-mean-square values over the 32 examples and 64 units of the layer: of the pre-activation z_l = W_l a_{l-1} + b_l, and, for the normalized stacks, of the output of the normalization layer, which is the input of the ReLU.
+Setup: the deep stack of the initialization chapter (10 layers of 64 units, a read-out; ReLU), He start (the stream `initialization.weights` of that chapter, seed 0x1fd7def6cdf88dde, scale sqrt(2 / 64) times each normal() in the order of that chapter's table: layer by layer, row by row, read-out last), biases 0, the first 32 inputs and targets of the stream `initialization.data` (seed 0x155d7f43c18852c4), mean squared error, full batch, plain gradient descent with rate 0.01. Entries are root-mean-square values over the 32 examples and 64 units of the layer: of the pre-activation z_l = W_l a_{l-1} + b_l, and, for the normalized stacks, of the output of the normalization layer, which is the input of the ReLU.
 
 | layers | step | layer 1 | layer 2 | layer 3 | layer 5 | layer 7 | layer 10 |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -582,7 +582,7 @@ Setup: the deep stack of the initialization chapter (10 layers of 64 units, a re
 | no normalization | 100 | 1.41 | 1.26 | 1.11 | 0.92 | 0.54 | 0.42 |
 | batch norm: z before the norm | 10 | 1.44 | 0.95 | 1.03 | 1.00 | 1.04 | 1.04 |
 | layer norm: z before the norm | 10 | 1.44 | 0.96 | 1.11 | 1.02 | 1.07 | 1.09 |
-| RMS norm: z before the norm | 10 | 1.44 | 0.95 | 1.10 | 0.98 | 1.19 | 0.99 |
+| RMS norm: z before the norm | 10 | 1.44 | 0.95 | 1.10 | 0.98 | 1.20 | 0.98 |
 | batch norm: output of the norm | 10 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
 | layer norm: output of the norm | 10 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
 | RMS norm: output of the norm | 10 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
@@ -597,29 +597,29 @@ The same fact for layer 10 alone, as a distribution of the 2048 values it feeds 
 ![Share of the 2048 values of the input of the ReLU in layer 10 in bins of width 0.25. The plain stack at step 0 is a broad bell with rms 1.50, at step 10 a narrow peak with rms 0.17 whose values all lie between -0.66 and 0.83, more than half of them in a single bin, and the batch-normalized stack at step 10 is again a broad bell of rms 1.00. Values beyond 4 in magnitude are not drawn.](img/norm-histogram-layer10.svg)
 
 <!-- worked: normalization.stack_training -->
-Setup: the deep stack of the initialization chapter (10 layers of 64 units, a read-out; ReLU), He start (the stream `initialization.weights` of that chapter, seed 0x1fd7def6cdf88dde), biases 0, the first 32 inputs and targets of the stream `initialization.data` (seed 0x155d7f43c18852c4), mean squared error, full batch, plain gradient descent, 100 steps. A normalization (gamma = 1, beta = 0 at the start, trained with the same rate, epsilon = 1e-05) sits between each of the ten linear layers and its ReLU; batch norm takes its statistics over the 32 examples, layer norm and RMS norm over the 64 units of an example. "not finite" means the loss overflowed or exceeded 1e30 before that step.
+Setup: the deep stack of the initialization chapter (10 layers of 64 units, a read-out; ReLU), He start (the stream `initialization.weights` of that chapter, seed 0x1fd7def6cdf88dde, scale sqrt(2 / 64) times each normal() in the order of that chapter's table: layer by layer, row by row, read-out last), biases 0, the first 32 inputs and targets of the stream `initialization.data` (seed 0x155d7f43c18852c4), mean squared error, full batch, plain gradient descent, 100 steps. A normalization (gamma = 1 and, for batch and layer norm, beta = 0 at the start, trained with the same rate, epsilon = 1e-05) sits between each of the ten linear layers and its ReLU; batch norm takes its statistics over the 32 examples, layer norm and RMS norm over the 64 units of an example. "not finite" means the loss overflowed or exceeded 1e30 before that step. A loss that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed with the leading digits that survive ('about 0.45') or as 'unstable'. RMS norm has only the vector gamma (no shift beta); batch norm and layer norm have gamma and beta, trained with the same rate; the weights, biases and gamma and beta are all updated by plain gradient descent.
 
 | rate | layers | step 0 | step 10 | step 30 | step 100 |
 |---:|---|---:|---:|---:|---:|
 | 0.01 | no normalization | 2.3880 | 0.9916 | 0.2525 | 0.0190 |
 | 0.01 | batch norm | 2.2475 | 0.0131 | 4.25e-06 | 1.14e-13 |
 | 0.01 | layer norm | 1.8074 | 0.2667 | 0.0788 | 0.0011 |
-| 0.01 | RMS norm | 2.0645 | 0.2986 | 0.1067 | 0.0023 |
+| 0.01 | RMS norm | 2.0645 | 0.3008 | 0.1044 | 0.0044 |
 | 0.03 | no normalization | 2.3880 | not finite | not finite | not finite |
 | 0.03 | batch norm | 2.2475 | 0.0525 | 2.40e-05 | 4.25e-08 |
 | 0.03 | layer norm | 1.8074 | 0.4563 | 0.4543 | 0.4476 |
-| 0.03 | RMS norm | 2.0645 | 0.4533 | 0.4459 | 0.7245 |
+| 0.03 | RMS norm | 2.0645 | 0.4524 | 0.4420 | 0.0706 |
 | 0.1 | no normalization | 2.3880 | not finite | not finite | not finite |
 | 0.1 | batch norm | 2.2475 | 0.0122 | 3.96e-04 | 3.54e-07 |
 | 0.1 | layer norm | 1.8074 | not finite | not finite | not finite |
 | 0.1 | RMS norm | 2.0645 | not finite | not finite | not finite |
 <!-- /worked -->
 
-![Base-ten logarithm of the training loss of the deep stack against the gradient step at the rate 0.01: all four runs fall; batch norm falls to 1e-13 by step 100, layer norm and RMS norm to about 1e-3, and the plain stack to 0.019.](img/norm-training-curves-small-rate.svg)
+![Base-ten logarithm of the training loss of the deep stack against the gradient step at the rate 0.01: all four runs fall; batch norm falls to 1e-13 by step 100, layer norm to about 1e-3, RMS norm to about 4e-3, and the plain stack to 0.019.](img/norm-training-curves-small-rate.svg)
 
-![Base-ten logarithm of the training loss at the rate 0.1: the plain stack leaves the plotted range at step 2, and layer norm and RMS norm, whose curves nearly coincide, at step 4 (the points on the top edge), while batch norm rises to 13.6 at step 3 and then falls to 3.5e-07 at step 100.](img/norm-training-curves-large-rate.svg)
+![Base-ten logarithm of the training loss at the rate 0.1: the plain stack leaves the plotted range at step 2, and layer norm and RMS norm, whose curves nearly coincide, at steps 4 and 3 (the points on the top edge), while batch norm rises to 13.6 at step 3 and then falls to 3.5e-07 at step 100.](img/norm-training-curves-large-rate.svg)
 
-Read the table for what it shows, no more. At the rate 0.01 every variant learns and each normalization is ahead of the plain stack (loss $1.1\times10^{-13}$ with batch norm, $1.1\times10^{-3}$ with layer norm, $2.3\times10^{-3}$ with RMS norm and $1.9\times10^{-2}$ plain at step 100). At 0.03 the plain stack has left the finite range after the first step and batch norm trains to $4.2\times10^{-8}$; layer and RMS norm do not blow up but stall near $0.45$, close to the $0.4558$ of a network that ignores its input (chapter 9), and the RMS run is climbing again at step 100. At 0.1 only batch norm survives. This is one network, one data set, one seed, and chapter 9 explained why one run is not a ranking: the table shows that a normalization layer can widen the range of usable rates by a factor of ten on this problem, and that the layers are not interchangeable in it; it does not show that batch norm is better than layer norm in general (an exercise asks why the stall happens).
+Read the table for what it shows, no more. At the rate 0.01 every variant learns and each normalization is ahead of the plain stack (loss $1.1\times10^{-13}$ with batch norm, $1.1\times10^{-3}$ with layer norm, $4.4\times10^{-3}$ with RMS norm and $1.9\times10^{-2}$ plain at step 100). At 0.03 the plain stack has left the finite range after the first step and batch norm trains to $4.2\times10^{-8}$; layer and RMS norm do not blow up but stall near $0.45$, close to the $0.4558$ of a network that ignores its input (chapter 9); the layer-norm run is still there at step 100 ($0.4476$) and the RMS-norm run has left the stall by then ($0.0706$ against $0.4420$ at step 30). At 0.1 only batch norm survives. This is one network, one data set, one seed, and chapter 9 explained why one run is not a ranking: the table shows that a normalization layer can widen the range of usable rates by a factor of ten on this problem, and that the layers are not interchangeable in it; it does not show that batch norm is better than layer norm in general (an exercise asks why the stall happens).
 
 ## Where to put it
 
@@ -766,7 +766,7 @@ Answers are at the end of the chapter.
 8. **[Implement]** Reproduce `normalization.groupnorm_example` (the 32 integers, the statistics for $G = 1, 2, 4$ and the change under replacing example 1 by zeros) and `normalization.accumulation`.
 9. **[Implement]** Build the deep stack of chapter 9 with the batch-norm layer between each linear layer and its ReLU, and reproduce the batch-norm rows of `normalization.stack_training` for the rates 0.01 and 0.1 and the first batch-norm row of `normalization.scale_by_layer`.
 10. **[Implement]** Reproduce `normalization.fold_batchnorm` and `normalization.variance_one_pass` (the 32-bit rounding after every operation).
-11. **[Investigate]** At the rate 0.03 layer norm and RMS norm stall near the loss of predicting the mean. Measure, step by step, the fraction of ReLU units that are active in each layer, the norms of the gradients and the values of $\boldsymbol{\gamma}$ and $\boldsymbol{\beta}$, and explain the stall. Does a smaller rate (0.02, 0.015) escape it?
+11. **[Investigate]** At the rate 0.03 layer norm (for the whole run) and RMS norm (for at least the first 30 steps) stall near the loss of predicting the mean. Measure, step by step, the fraction of ReLU units that are active in each layer, the norms of the gradients and the values of $\boldsymbol{\gamma}$ and $\boldsymbol{\beta}$, and explain the stall. Does a smaller rate (0.02, 0.015) escape it?
 12. **[Investigate]** Run the experiment of `normalization.running_statistics` for $\beta_{\mathrm{run}} \in \{0.5, 0.9, 0.99, 0.999\}$ and report, after 40 and 400 updates, the error of the eval-mode output for the probe 5. Which $\beta_{\mathrm{run}}$ is best at each horizon, and what does the answer say about a layer that is evaluated early in training?
 
 ## Summary

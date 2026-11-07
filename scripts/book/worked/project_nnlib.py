@@ -764,8 +764,8 @@ def loss_values():
     dy = mse.backward()
     r1 = [["softmax cross-entropy", _f(L, 8), _f(dz[0][0], 8), _f(dz[0][2], 8), _f(dz[2][3], 8), str(abs(sum(sum(r) for r in dz)) < 1e-15)],
           ["mean squared error", _f(Lm, 8), _f(dy[0][0], 8), _f(dy[0][2], 8), _f(dy[2][3], 8), "-"]]
-    return ("Logits z (softmax cross-entropy) and outputs y (mean squared error): z[b, j] = 2 sin(0.8 k + 0.5), k = 4 b + j, shape [3, 4]; "
-            "labels (2, 0, 3). Targets t[b, j] = 1.5 sin(1.4 k + 0.2).\n\n"
+    return ("Logits z (softmax cross-entropy): z[b, j] = 2 sin(0.8 k + 0.5), k = 4 b + j, shape [3, 4]; labels (2, 0, 3). "
+            "Mean squared error: the outputs y are the same 12 numbers as z (y = z, shape [3, 4]) and the targets are t[b, j] = 1.5 sin(1.4 k + 0.2), the mean taken over all 12 entries.\n\n"
             + _table(["loss", "value", "d[0,0]", "d[0,2]", "d[2,3]", "sum of d below 1e-15"], r1)
             + f"\n\nOverflow case, one row z = (710, 0, -5): label 0 gives loss {l0:.8f}, label 1 gives loss {l1:.8f}; "
               f"every value is finite and the gradient row sums to zero (below 1e-15: {abs(sum(big.backward()[0])) < 1e-15}).")
@@ -944,8 +944,11 @@ def optimizer_trajectories():
 def schedule_and_clip():
     ts = (0, 4, 9, 10, 11, 20, 55, 99)
     rows = [[t, f"{schedule_rate(t, 0.01, 1e-4, 10, 0, 100):.8f}", f"{schedule_rate(t, 0.01, 1e-4, 10, 10, 100):.8f}"] for t in ts]
+    last = schedule_rate(99, 0.01, 1e-4, 10, 0, 100)
+    at_total = schedule_rate(100, 0.01, 1e-4, 10, 0, 100)
     out = ("Schedule: peak 0.01, floor 1e-4, warmup 10, total 100; the second column holds the peak for 10 steps after the warmup. "
-           "t is the 0-based step.\n\n" + _table(["t", "hold 0", "hold 10"], rows))
+           "t is the 0-based step. The last step of the run is t = 99 = total - 1; its rate is not yet the floor (the floor is reached at t = total = 100, "
+           f"where the rate is {at_total:.8f}, and stays there).\n\n" + _table(["t", "hold 0", "hold 10"], rows))
     crows = []
     for tau in (5.0, 20.0):
         g = [[3.0, 4.0], [0.0, 12.0]]
@@ -967,9 +970,9 @@ def initialization_statistics():
         var = {"he": 2.0 / n_in, "xavier": 2.0 / (n_in + n_out), "fan_in": 1.0 / n_in}[scheme]
         rows.append([scheme, shape, ", ".join(f"{v:+.6f}" for v in W[:3]), f"{math.sqrt(var):.6f}", f"{sd:.6f}", f"{max(abs(v) for v in W):.4f}"])
     return ("A weight matrix with n_out = 128 and n_in = 96 (12288 entries, row-major), drawn from a fresh generator per row named "
-            "project_nnlib.init.<scheme>.<shape> (seeds are derived from those names; the draw is the one call of the chapter-9 rule per entry, "
-            "the truncated shape redrawing normal() until |z| <= 2). 'target sd' is sqrt(2/n_in), sqrt(2/(n_in+n_out)) or sqrt(1/n_in).\n\n"
-            + _table(["scheme", "shape", "first three weights", "target sd", "sd of the 12288", "largest |w|"], rows, "llrrrr")
+            "project_nnlib.init.<scheme>.<shape> (the seed of a stream is the first 8 bytes, read as a big-endian unsigned integer, of the SHA-256 digest of its name; the seeds are printed below, so no derivation is needed; the draw is the one call of the chapter-9 rule per entry, "
+            "the truncated shape redrawing normal() until |z| <= 2). 'target sd' is sqrt(2/n_in), sqrt(2/(n_in+n_out)) or sqrt(1/n_in). 'sd of the 12288' is the population standard deviation with divisor n = 12288 after subtracting the mean of the entries (not the divisor n - 1 of the book's sd).\n\n"
+            + _table(["scheme", "shape", "first three weights", "target sd", "sd of the 12288 (divisor n)", "largest |w|"], rows, "llrrrr")
             + "\n\nSeeds: " + "; ".join(f"init.{s}.{h} {_seed('init.' + s + '.' + h)}" for s, h in
                                        (("he", "normal"), ("he", "uniform"), ("he", "truncated"), ("xavier", "normal"), ("fan_in", "normal"))))
 
@@ -1007,11 +1010,13 @@ def accumulation():
         lin.forward(x[lo:hi])
         lin.backward(dy[lo:hi])
     chunks = get_grad(lin)
-    rows = [["backward twice without zero_grad", f"{max(abs(a - 2 * b) for a, b in zip(twice, once)):.1e}", "twice the gradient"],
-            ["zero_grad, then backward again", f"{max(abs(a - b) for a, b in zip(again, once)):.1e}", "the gradient"],
-            ["rows 0 and rows 1 to 2 as two backward calls", f"{max(abs(a - b) for a, b in zip(chunks, once)):.1e}", "the gradient"]]
+    bound = lambda v: "below 1e-15" if v < 1e-15 else f"{v:.1e}"   # noqa: E731  (rounding-level differences depend on the order of the sums)
+    rows = [["backward twice without zero_grad", bound(max(abs(a - 2 * b) for a, b in zip(twice, once))), "twice the gradient"],
+            ["zero_grad, then backward again", bound(max(abs(a - b) for a, b in zip(again, once))), "the gradient"],
+            ["rows 0 and rows 1 to 2 as two backward calls", bound(max(abs(a - b) for a, b in zip(chunks, once))), "the gradient"]]
     return ("Linear 5 -> 7 of the layer fixtures, x of shape [3, 5], dy of shape [3, 7] (the probe). 'once' is one backward call after "
-            "zero_grad. The last row cuts the batch into rows {0} and {1, 2} and calls forward and backward on each with the matching rows of dy.\n\n"
+            "zero_grad. The last row cuts the batch into rows {0} and {1, 2} and calls forward and backward on each with the matching rows of dy. "
+            "A difference at the level of one rounding error (under 1e-15) is printed as a bound: its value depends on the order in which the sums are formed.\n\n"
             + _table(["experiment", "largest |difference| from the stated value", "expected"], rows, "lrl")
             + f"\n\nThe 'once' gradient has first entry {once[0]:+.8f} (the weight W[0,0]) and last entry {once[-1]:+.8f} (the bias b[6]).")
 
@@ -1048,9 +1053,11 @@ def resume_identity():
     row("checkpoint without the shuffle order (sorted instead)", resumed(lambda s: s.__setitem__("order", sorted(s["order"]))))
     row("checkpoint without the dropout generator state", resumed(lambda s: s.__setitem__("rng_d", bookrng.seed_of(_name("resume_dropout")))))
     row("checkpoint without the optimizer moments", resumed(lambda s: (s.__setitem__("m", [0.0] * len(s["m"])), s.__setitem__("v", [0.0] * len(s["v"])))))
-    return ("Classifier of milestone 6 on the first 128 training rows (4 steps of 32 per epoch), 12 epochs, no early stopping, AdamW 3e-3, decay 0.01, "
-            f"clip 1. Streams: shuffles {_seed('resume_batches')}, dropout {_seed('resume_dropout')}. 'Identical' means every parameter and every logged "
-            "number equal with ==, not within a tolerance.\n\n"
+    return ("Classifier of milestone 6 (dropout p = 0.3, initial weights from Generator " + _seed('classifier_init') + ") on the first 128 training rows (4 steps of 32 per epoch, the 256 validation rows for the log), "
+            "12 epochs, no early stopping; AdamW (0.9, 0.999, 1e-8) with decay 0.01, clip 1, and the schedule of milestone 3 with peak 3e-3, warmup 4 steps (a tenth of the 48 steps), floor 3e-5 and total 48 "
+            f"(hold 0). Streams: shuffles {_seed('resume_batches')}, dropout {_seed('resume_dropout')}. The three damaged checkpoints are made from the checkpoint saved after epoch 6: "
+            "the order replaced by the sorted order 0 .. 127, the dropout generator replaced by a generator at its seed (the start of its stream), the moments m and v replaced by zeros (the step count kept). "
+            "'Identical' means every parameter and every logged number equal with ==, not within a tolerance.\n\n"
             + _table(["run", "identical to the first row", "largest parameter difference", "training loss, epoch 12", "validation loss, epoch 12"], rows, "lrrrr"))
 
 
@@ -1136,7 +1143,11 @@ def classifier_training():
             f"(one in-place shuffle per epoch), dropout draws from Generator {_seed('classifier_dropout')} (one uniform() per element of the 32 x 32 block, row-major, per step). "
             f"AdamW (0.9, 0.999, 1e-8), decay {CLS_RUN['lam']}, clip {CLS_RUN['tau']}, peak rate {CLS_RUN['peak']}, warmup {total // 10} steps, cosine to {CLS_RUN['peak'] / 100:.1e}, "
             f"early stopping with patience {CLS_RUN['patience']} on the validation loss. Losses and accuracy are computed in eval mode over the whole set after each epoch; "
-            "'grad norm' is the mean norm before the clip, 'clipped' the number of clipped steps in the epoch, 'rate' the rate of the epoch's last step.\n\n")
+            "'grad norm' is the mean norm before the clip, 'clipped' the number of clipped steps in the epoch, 'rate' the rate of the epoch's last step. "
+            f"Linear softmax baseline: one linear layer 8 -> 3 (weights N(0, 1/8) row-major from Generator {_seed('linear_init')}, biases 0), trained on the same data by the same loop (batch 32, shuffles from the classifier's shuffle stream, "
+            "no dropout, no early stopping) for 20 epochs of 16 steps with AdamW decay 0.01, clip 1 and peak rate 0.01 (warmup 32 steps, cosine to 1e-4); validation loss and accuracy in eval mode after epoch 20. "
+            "Overfit one batch: the classifier above with dropout in eval mode (off), training rows 0 to 7, a constant rate 0.01 (no schedule), AdamW without clip and without decay, 150 steps, "
+            "the loss before the first step and after the 150th and the accuracy on those 8 rows.\n\n")
     pre = _table(["before training", "value"], [
         ["ln 3, the loss of a model that ignores the input", f"{math.log(3):.5f}"],
         ["initial loss, training set (eval mode)", f"{t.start['train']:.5f}"],
@@ -1244,12 +1255,12 @@ def debug_diagnostics():
         ["linear baseline, validation accuracy (majority class " + f"{pacc:.4f})", f"{lb_bad.log[-1]['acc']:.4f}", f"{lb_good.log[-1]['acc']:.4f}", "shipped: barely above the majority class"],
         ["overfit one batch: final loss", f"{of_bad[1]:.2e}", f"{of_good[1]:.2e}", "both pass: memorising needs no signal"],
         ["epoch-1 rate and rate at epoch 5 (peak 0.003, floor 3e-05)", f"{bad.log[0]['lr']:.3e}, {bad.log[4]['lr']:.3e}", f"{good.log[0]['lr']:.3e}, {good.log[4]['lr']:.3e}", "shipped: the floor by epoch 5"],
-        ["rate of the last step of epoch 40", f"{bad.log[-1]['lr']:.3e}", f"{good.log[-1]['lr']:.3e}", "both at the floor, the shipped one 600 steps early"],
+        ["rate of the last step of epoch 40", f"{bad.log[-1]['lr']:.3e}", f"{good.log[-1]['lr']:.3e}", "both at the floor 3e-05 to three digits; the shipped one got there 600 steps early"],
         ["two evaluations of one model, train mode: loss difference", f"{d_tr:.4f}", "-", "different answers for one input"],
         ["two evaluations of one model, eval mode: loss difference", f"{d_ev:.1e}", "-", "eval mode: identical, as it must be"],
     ]
     return ("Checklist measurements of the shipped configuration against the healthy one (stage 3 of the previous table). Validation labels are never "
-            "shifted. The determinism probe evaluates the final weights of the stage-0 run twice on the validation set, in train mode from "
+            "shifted. The linear baseline and the overfit-one-batch test have the settings of the milestone-6 table, trained on the shifted labels (training label i replaced by the label of row i + 1, the last by the first) in the shipped column. The determinism probe evaluates the final weights of the healthy run (the second column, stage 3) twice on the 256 validation rows, in train mode from "
             f"Generator {_seed('determinism_probe')} (draws continue between the two calls) and then in eval mode.\n\n"
             + _table(["measurement", "shipped", "healthy", "reading"], rows, "lrrl"))
 
@@ -1259,11 +1270,11 @@ def acceptance_fingerprint():
     vals = {}
     for label, layer, x, R, mode, dname in _fixture_cases():
         vals[label] = layer_probe(layer, x, R, mode, dname)[0]
-    rows += [["1", "probe loss L, linear 5 -> 7", f"{vals['linear 5 -> 7']:+.8f}", "1e-9"],
-             ["1", "probe loss L, layer norm", f"{vals['layer norm']:+.8f}", "1e-9"],
-             ["1", "probe loss L, residual (5 -> 7 -> 5)", f"{vals['residual (5 -> 7 -> 5)']:+.8f}", "1e-9"]]
+    rows += [["1", "probe loss L, linear 5 -> 7", f"{vals['linear 5 -> 7']:+.8f}", "5e-9"],
+             ["1", "probe loss L, layer norm", f"{vals['layer norm']:+.8f}", "5e-9"],
+             ["1", "probe loss L, residual (5 -> 7 -> 5)", f"{vals['residual (5 -> 7 -> 5)']:+.8f}", "5e-9"]]
     z = rows_of(fix(12, 0.8, 0.5, 2.0), 4)
-    rows.append(["1", "softmax cross-entropy on the fixture", f"{SoftmaxCrossEntropy().forward(z, [2, 0, 3]):+.8f}", "1e-9"])
+    rows.append(["1", "softmax cross-entropy on the fixture", f"{SoftmaxCrossEntropy().forward(z, [2, 0, 3]):+.8f}", "5e-9"])
     cases = _fixture_cases()
     label, layer, x, R, mode, _ = next(c for c in cases if c[0] == "layer norm")
     L, y, dx, loss, theta0, grad, own = layer_probe(layer, x, R, mode, None, lambda dy: layer.backward(dy, centre_term=False))
@@ -1272,9 +1283,9 @@ def acceptance_fingerprint():
     m, v = [0.0] * 3, [0.0] * 3
     for t in range(10):
         adam_step(th, [0.5 * math.sin(0.8 * (3 * t + i) + 0.3) for i in range(3)], m, v, t + 1, 0.1, 0.9, 0.999, 1e-8, 0.1, True)
-    rows.append(["3", "AdamW theta[0] after 10 steps", f"{th[0]:+.8f}", "1e-9"])
-    rows.append(["3", "schedule rate at t = 55 (hold 0)", f"{schedule_rate(55, 0.01, 1e-4, 10, 0, 100):.8f}", "1e-12"])
-    rows.append(["4", "sd of He normal, 128 x 96 (stream init.he.normal)", f"{_init_sd():.6f}", "1e-6 bit-exact; 3% of the target otherwise"])
+    rows.append(["3", "AdamW theta[0] after 10 steps", f"{th[0]:+.8f}", "5e-9"])
+    rows.append(["3", "schedule rate at t = 55 (hold 0)", f"{schedule_rate(55, 0.01, 1e-4, 10, 0, 100):.8f}", "5e-9"])
+    rows.append(["4", "sd (divisor n = 12288) of He normal, 128 x 96 (stream init.he.normal)", f"{_init_sd():.6f}", "5e-7 bit-exact; 3% of the target otherwise"])
     rows.append(["5", "patience 3: best epoch, stop epoch", "6, 9", "exact"])
     t = classifier_run()
     rows += [["6", "classifier: initial training loss", f"{t.start['train']:.5f}", "1e-4"],
@@ -1288,7 +1299,7 @@ def acceptance_fingerprint():
     h = debug_run(False, True, False)
     rows += [["7", "stage 3 equals milestone 6 without early stopping: validation loss, epoch 10", f"{g.log[9]['val']:.4f}", "1e-4"],
              ["7", "stage 2 (eval-mode fault only): validation accuracy, epoch 40", f"{debug_run(False, False, True).log[-1]['acc']:.4f}", "1e-4"],
-             ["7", "horizon fault only: rate of the last step, epoch 40", f"{h.log[-1]['lr']:.3e}", "1e-9"]]
+             ["7", "horizon fault only: rate of the last step, epoch 40", f"{h.log[-1]['lr']:.3e}", "5e-9"]]
     return _table(["milestone", "quantity", "value", "tolerance"], rows, "llrl")
 
 

@@ -213,17 +213,18 @@ dependency in the section on saved activations.
 
 A sweep like this is easy to get subtly wrong, so check it against the
 definition of the derivative: nudge each weight up and down by a tiny
-amount and compare (a central difference, which later chapters study in
-detail).
+amount and compare. This is the central difference (chapter 6 studies it): for a parameter $\theta$ the estimate of $\partial L/\partial \theta$ is $(L(\theta + h) - L(\theta - h))/(2h)$, here with $h = 10^{-6}$ in double precision (a later section derives its error and chapter 6 studies the choice of $h$).
 
 <!-- worked: backprop.scalar_chain_check -->
+Central difference with h = 1e-6, double precision, tanh the library tanh; loss (w2 tanh(w1 x) - t)^2.
+
 | parameter | backward | central difference | absolute difference |
 |---|---:|---:|---:|
 | w1 | 2.931739 | 2.931739 | 6.7e-11 |
 | w2 | 1.229263 | 1.229263 | 9.7e-11 |
 <!-- /worked -->
 
-The two agree to about ten digits, which is as close as the nudging can get.
+The two agree to about ten digits, which is as close as the nudging can get. The last column is rounding noise: only its size, about $10^{-10}$, can be reproduced in another implementation, not its digits.
 
 ## Computational graphs
 
@@ -277,12 +278,12 @@ what it is).
 function reverse_mode(op: list<operation>, inputs: list<list<int>>,
                       value: list<tensor>, loss: int) -> list<tensor>:
     # value[i] holds the forward result of node i (the forward pass is done)
-    require value[loss] has one element, "the loss must be a scalar"
+    require numel(value[loss]) == 1, "the loss must be a scalar"
     n = len(op)
-    grad = list of n tensors, grad[i] = zeros(real, value[i].shape)
+    grad = [zeros(real, value[i].shape) for i in 0 .. n]
     grad[loss][0] = 1.0                                      # dL/dL = 1
     for i in loss down to 0:
-        if op[i] is input or parameter:
+        if op[i] is input or op[i] is parameter:
             continue
         ins = [value[j] for j in inputs[i]]
         contributions = vjp(op[i], ins, value[i], grad[i])   # one per input
@@ -381,12 +382,12 @@ numbers, one pass per parameter, against the backward pass:
 <!-- worked: backprop.forward_mode_check -->
 | tensor | entries | forward mode passes | largest |forward mode - reverse mode| |
 |---|---:|---:|---:|
-| W1 | 12 | 12 | 4.4e-16 |
-| b1 | 4 | 4 | 3.3e-16 |
-| W2 | 4 | 4 | 2.2e-16 |
-| b2 | 1 | 1 | 2.2e-16 |
+| W1 | 12 | 12 | below 1e-15 |
+| b1 | 4 | 4 | below 1e-15 |
+| W2 | 4 | 4 | below 1e-15 |
+| b2 | 1 | 1 | below 1e-15 |
 
-Forward mode needed 21 passes, one per parameter. Reverse mode needed one forward pass and one backward pass.
+Differences at the level of one rounding error are printed as a bound. Forward mode needed 21 passes, one per parameter. Reverse mode needed one forward pass and one backward pass.
 <!-- /worked -->
 
 They agree to rounding error, as they must: both evaluate the same product of
@@ -877,9 +878,11 @@ never be chosen to be square.
 **Errors in a backward pass stay local to what is upstream of them.** Suppose
 the tanh derivative is forgotten: the code uses $d\mathbf{Z}_1 = d\mathbf{A}$ and skips the factor
 $1 - A^2$. The loss still falls for a while, because the direction is
-roughly right. Compare the wrong gradients with finite differences:
+roughly right. Compare the wrong gradients with finite differences ($h = 10^{-5}$, as in the next section). The relative error of an estimate $a$ against a reference $n$ is $|a - n|/\max(|a|, |n|)$: zero for equal numbers, near one when they differ in size or sign by their own size (chapter 6 uses it as the main comparison):
 
 <!-- worked: backprop.wrong_backward -->
+Relative error = |wrong - central difference| / max(|wrong|, |central difference|); central difference with h = 1e-5, double precision, tanh the library tanh.
+
 | parameter | wrong backward | central difference | relative error |
 |---|---:|---:|---:|
 | W1[0,0] | -0.326680 | -0.377280 | 1.3e-01 |
@@ -920,7 +923,7 @@ of the chapter after next. Here, $h = 10^{-5}$ in double precision, on every
 one of the 21 parameters:
 
 <!-- worked: backprop.finite_difference -->
-Step size h = 1e-5, double precision. One row per parameter.
+Step size h = 1e-5, double precision, tanh the correctly rounded library tanh. One row per parameter. The last column is rounding noise: only its order of magnitude (between 1e-15 and 1e-9) is reproducible, not its digits.
 
 | parameter | backprop gradient | central difference | absolute difference |
 |---|---:|---:|---:|

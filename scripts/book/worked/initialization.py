@@ -66,8 +66,37 @@ def _gen_note(name):
     return f"Generator: the book's SplitMix64, seed 0x{s:016x} ({s})"
 
 
+def stack_note():
+    """The complete recipe of the deep stack's weights and data, printed with the first training table."""
+    ws, ds = bookrng.seed_of(WEIGHTS_NAME), bookrng.seed_of(DATA_NAME)
+    return (f"Weights: one generator `{WEIGHTS_NAME}` (seed 0x{ws:016x}, {ws}). The 10 hidden weight matrices (shape [64, 64], row j holds the weights of unit j) and then the read-out vector (64 entries) "
+            "are drawn in this order, layer by layer, row by row, entry i = 0, ..., 63 within a row; each weight is scale * normal(), and every scheme draws every normal() (a zero scale still consumes it), "
+            f"so all schemes see the same standard normals. Scales: zeros 0; small {SMALL_STD:g}; large {LARGE_STD:g}; Xavier sqrt(2 / (n_in + n_out)) with n_in = n_out = 64 in the hidden layers and "
+            "n_in = 64, n_out = 1 in the read-out, so sqrt(2 / 65); He sqrt(2 / n_in) = sqrt(2 / 64) in every layer. "
+            f"Data: one generator `{DATA_NAME}` (seed 0x{ds:016x}, {ds}). First the direction a: 64 draws of normal() each multiplied by 3/16 = 0.1875; then the examples, example after example, "
+            "each 64 consecutive normal() draws (so the 128 inputs of the later tables extend the 32 training inputs, which are their first 32); the target of an example x is t = 1 + sin(a . x) (radians). "
+            "The loss is the mean over the examples of (y - t)^2, with y = w_out . a_10 + b_out.")
+
+
 def _loss(v):
     return f"{v:.4f}" if 1e-3 <= v < 1e3 else _sci(v)
+
+
+NUDGE = 1e-12       # change of the first weight used to test whether a run is chaotic
+
+
+def _stable_loss(v, w):
+    """The loss v (a number, or None for 'not finite') to the book's precision when the nudged run w agrees to the third
+    significant digit; otherwise 'about x' with two or one significant digits on which they agree, or 'unstable'."""
+    if v is None or w is None:
+        return "not finite" if (v is None and w is None) else "unstable"
+    if abs(v - w) <= 1e-3 * max(abs(v), 1e-300):
+        return _loss(v)
+    if abs(v - w) <= 0.02 * max(abs(v), 1e-300):
+        return f"about {(v + w) / 2:.2g}"
+    if f"{v:.1g}" == f"{w:.1g}":
+        return f"about {v:.1g}"
+    return "unstable"
 
 
 def _is_bad(v):
@@ -204,11 +233,12 @@ def layer_statistics(act, scheme):
 
 
 @lru_cache(maxsize=None)
-def train_run(act, scheme, name=WEIGHTS_NAME, steps=TRAIN_STEPS, lr=TRAIN_LR, readout_scale=1.0):
+def train_run(act, scheme, name=WEIGHTS_NAME, steps=TRAIN_STEPS, lr=TRAIN_LR, readout_scale=1.0, nudge=0.0):
     """Full-batch gradient descent from a named start. Returns the loss before every step 0 .. steps
     (shorter if the loss leaves the finite range, in which case the last entry is the bad value)."""
     X, t = make_data(N_TRAIN)
     Ws, bs = init_stack(scheme, name, readout_scale)
+    Ws[0][0][0] += nudge
     out = []
     for s in range(steps + 1):
         Zs, As = forward(Ws, bs, X, act)
@@ -331,7 +361,8 @@ def start_gradients():
         rows.append((label, *[_sci(c[0][l]) if k % 2 == 0 else _sci(c[1][l]) for c in cols for k in range(2)]))
     return (f"Setup: the deep stack (10 layers of 64 units, a read-out), the first {N_TRAIN} inputs of the data, all biases 0, "
             f"loss = mean of (y - t)^2. Entries are the Euclidean norm of the gradient of each layer's weight matrix and bias vector "
-            f"at step 0. Weights: all zero (tanh and ReLU), or He normal (ReLU), drawn from the stream named below.\n\n"
+            f"at step 0. Weights: all zero (tanh and ReLU), or He normal (ReLU); weights and data are those of the first training table "
+            f"(generators `{WEIGHTS_NAME}` and `{DATA_NAME}`, seeds 0x{bookrng.seed_of(WEIGHTS_NAME):016x} and 0x{bookrng.seed_of(DATA_NAME):016x}).\n\n"
             + _table(["layer", "tanh, zeros: norm of dW", "tanh, zeros: norm of db", "ReLU, zeros: norm of dW", "ReLU, zeros: norm of db",
                       "ReLU, He: norm of dW", "ReLU, He: norm of db"], rows))
 
@@ -453,7 +484,8 @@ def _forward_rms(act):
         rows.append((_scheme_label(scheme), *[_sci(fz[l - 1]) for l in LAYERS_SHOWN]))
     return (f"Setup: the deep stack with {act} units, {N_MEASURE} inputs (rms of the inputs {x_rms:.3f}), biases 0. "
             f"Entries: the root mean square of z_l over all {N_MEASURE} x 64 pre-activations of layer l. "
-            f"Weights: scale * normal() from the stream named in the text (the same draws for every row).\n\n"
+            f"Weights and data: as in the first training table of the chapter (weights generator `{WEIGHTS_NAME}`, seed 0x{bookrng.seed_of(WEIGHTS_NAME):016x}; data generator `{DATA_NAME}`, "
+            f"seed 0x{bookrng.seed_of(DATA_NAME):016x}, the {N_MEASURE} inputs being the first {N_MEASURE} examples of that stream); scale * normal(), the same draws for every row.\n\n"
             + _table(["start"] + [f"z_{l}" for l in LAYERS_SHOWN], rows))
 
 
@@ -467,7 +499,8 @@ def _backward_rms(act):
         rows.append((_scheme_label(scheme), *[_sci(rel[l - 1]) for l in LAYERS_SHOWN]))
     return (f"Setup: as above, {act} units. Entries: the root mean square of d(loss of one example)/d z_l over the "
             f"{N_MEASURE} examples and 64 units, divided by the same quantity at layer 10 (so layer 10 reads 1). "
-            f"The loss of one example is (y - t)^2.\n\n"
+            f"The loss of one example is (y - t)^2 with the target t = 1 + sin(a . x) of the first training table; weights and data as in that table "
+            f"(generators `{WEIGHTS_NAME}` and `{DATA_NAME}`).\n\n"
             + _table(["start"] + [f"layer {l}" for l in LAYERS_SHOWN], rows))
 
 
@@ -500,7 +533,7 @@ def forward_prediction():
         pred_z10 = math.sqrt(q1 * c ** (DEPTH - 1))
         fz, _, _ = layer_statistics("relu", scheme)
         rows.append((_scheme_label(scheme), f"{s * s:.6f}", f"{c:.4f}", _sci(pred_z1), _sci(fz[0]), _sci(pred_z10), _sci(fz[-1])))
-    return (f"Setup: ReLU deep stack, mean of x^2 over the {N_MEASURE} inputs q_0 = {q0:.4f}. Prediction: "
+    return (f"Setup: ReLU deep stack (weights and data as in the first training table of the chapter), mean of x^2 over the {N_MEASURE} inputs q_0 = {q0:.4f}. Prediction: "
             f"E[z_1^2] = 64 Var(w) q_0 and E[z_l^2] = c E[z_(l-1)^2] with c = 64 Var(w) / 2 for the 64-unit layers.\n\n"
             + _table(["start", "Var(w)", "c = 64 Var(w)/2", "predicted rms z_1", "measured rms z_1",
                       "predicted rms z_10", "measured rms z_10"], rows))
@@ -519,7 +552,7 @@ def layer10_summary():
             what = "z > 0 (unit active)"
         mean = sum(z10) / n
         rows.append((act, _scheme_label(scheme), f"{mean:+.3e}", _sci(rms(z10)), what, f"{frac:.3f}"))
-    return (f"Setup: z_10 of the deep stack for the {N_MEASURE} inputs and 64 units ({N_MEASURE * WIDTH} values per row).\n\n"
+    return (f"Setup: z_10 of the deep stack (weights and data as in the first training table of the chapter) for the {N_MEASURE} inputs and 64 units ({N_MEASURE * WIDTH} values per row).\n\n"
             + _table(["activation", "start", "mean of z_10", "rms of z_10", "measure", "share"], rows, align="llrrlr"))
 
 
@@ -607,14 +640,14 @@ def draw_shapes():
     sigma = 1.0
     rows = []
     for shape, formula in (("normal", "sigma * normal()"), ("uniform", "sigma * sqrt(3) * (2 uniform() - 1)"),
-                           ("truncated normal", "sigma * z / sqrt(0.7737), z = normal() redrawn while abs(z) > 2")):
+                           ("truncated normal", f"sigma * z / sqrt({truncated_variance():.6f}), z = normal() redrawn while abs(z) > 2")):
         key = "truncated" if shape.startswith("trunc") else shape
         ws = [_draw_shape(key, sigma, g) for _ in range(SHAPE_DRAWS)]
         var = sum(w * w for w in ws) / SHAPE_DRAWS
         kurt = sum(w ** 4 for w in ws) / SHAPE_DRAWS / var ** 2
         rows.append((shape, formula, f"{var:.4f}", f"{kurt:.3f}", f"{max(abs(w) for w in ws):.3f}"))
     return (f"{_gen_note(name)}. sigma = {sigma:g}. {SHAPE_DRAWS} draws per shape, one after the other from one generator in "
-            f"the order of the rows. The variance of a standard normal conditioned on abs(z) <= 2 is {truncated_variance():.4f}. "
+            f"the order of the rows. The variance of a standard normal conditioned on abs(z) <= 2 is {truncated_variance():.6f} (use this value or the formula, not a shorter one). "
             f"Fourth moment = mean of w^4 divided by the squared variance (3 for a normal, 1.8 for a uniform). "
             f"Variance is the mean of w^2 (the mean is 0 by symmetry).\n\n"
             + _table(["shape", "draw", "variance", "fourth moment", "largest absolute w"], rows, align="llrrr"))
@@ -622,7 +655,9 @@ def draw_shapes():
 
 def shape_in_network():
     rows = []
+    seeds = []
     for shape in ("normal", "uniform", "truncated"):
+        seeds.append(f"`initialization.shape-net.{shape}` = 0x{bookrng.seed_of(f'initialization.shape-net.{shape}'):016x}")
         g = bookrng.generator(f"initialization.shape-net.{shape}")
         X, _ = make_data(N_MEASURE)
         a = X
@@ -635,8 +670,8 @@ def shape_in_network():
             a = [[max(0.0, v) for v in r] for r in Z]
         rows.append((shape, *[_sci(zr[l - 1], 3) for l in (1, 5, 10)]))
     return ("Setup: the ReLU deep stack with He scale sigma = sqrt(2/fan_in), but each weight drawn with the named shape "
-            f"(`initialization.shape-net.<shape>` is the generator name, a separate stream per row; weights layer by layer, row by row). "
-            f"{N_MEASURE} inputs, biases 0. The predicted rms of z_1 is sqrt(2 q_0) with q_0 the mean of x^2.\n\n"
+            f"(one generator per row: {', '.join(seeds)}; weights layer by layer, row by row, one draw per weight in the shape's rule, the truncated shape redrawing a normal() until it passes). "
+            f"{N_MEASURE} inputs, the first {N_MEASURE} examples of the data stream of the first training table (generator `{DATA_NAME}`, seed 0x{bookrng.seed_of(DATA_NAME):016x}), biases 0. The predicted rms of z_1 is sqrt(2 q_0) with q_0 the mean of x^2.\n\n"
             + _table(["weight shape", "rms z_1", "rms z_5", "rms z_10"], rows))
 
 
@@ -646,13 +681,14 @@ def training_table(act):
     e_t2, var_t = _target_stats()
     rows = []
     for scheme in SCHEMES:
-        run = train_run(act, scheme)
-        cells = [_loss(run[s]) if s < len(run) else "not finite" for s in TRAIN_RECORD]
+        run, twin = train_run(act, scheme), train_run(act, scheme, nudge=NUDGE)
+        cells = [_stable_loss(run[s] if s < len(run) else None, twin[s] if s < len(twin) else None) for s in TRAIN_RECORD]
         rows.append((_scheme_label(scheme), *cells))
     return (f"Setup: the deep stack with {act} units, {N_TRAIN} training examples (full batch), mean squared error, "
             f"plain gradient descent with rate {TRAIN_LR:g}, {TRAIN_STEPS} steps, biases start at 0. The target is "
             f"t = 1 + sin(a . x) with mean of t^2 = {e_t2:.4f}; predicting the mean of the targets gives the loss "
-            f"{var_t:.4f}.\n\n"
+            f"{var_t:.4f}. {stack_note() if act == "tanh" else "Weights and data exactly as in the tanh table above (same generators, seeds, draw order and scales)."} A loss that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed with the leading digits that survive "
+            "('about 11'), or 'unstable' when not even one does: a run with large weights is chaotic, so only those digits can be reproduced in another implementation.\n\n"
             + _table(["start"] + [f"step {s}" for s in TRAIN_RECORD], rows))
 
 
@@ -689,7 +725,7 @@ def output_scale():
         ys = [r[0] for r in Zs[-1]]
         rows.append((f"{m:g}", _sci(rms(ys), 2), f"{mean_loss(Zs, t):.4f}"))
     e_t2, _ = _target_stats()
-    return (f"Setup: ReLU deep stack, He normal in the ten hidden layers; the read-out weights are multiplied by the factor "
+    return (f"Setup: ReLU deep stack (weights and data as in the first training table), He normal in the ten hidden layers; the read-out weights are multiplied by the factor "
             f"in the first column. {N_TRAIN} examples; the mean of t^2 is {e_t2:.4f}.\n\n"
             + _table(["read-out factor", "rms of the output y", "loss at step 0"], rows))
 
@@ -791,7 +827,7 @@ def lora_zero_start():
     return (f"{_gen_note(name)}. A frozen layer W (3 x 4) = [identity of size 3 | zero column] applied to x = (1, 2, 3, 4), so W x = (1, 2, 3); "
             f"the target is (2, 1, 3.5). The adapter adds B (A x) with A of shape [{r}, 4] and B of shape [3, {r}]; "
             f"A = 0.5 * normal() (draws row by row) in the first start. Loss = squared distance of the output from the target, "
-            f"divided by 4 for scale only; gradient descent on A and B with rate {lr}. "
+            f"|y - target|^2 (its gradient with respect to y is 2 (y - target)); gradient descent on A and B with rate {lr}. "
             f"Columns: loss, norm of B, norm of dL/dB, norm of dL/dA.\n\n"
             + _table(["start", "step", "loss", "norm of B", "norm of dB", "norm of dA"], rows, align="lrrrrr"))
 

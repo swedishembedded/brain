@@ -753,9 +753,13 @@ def rule_checks():
         rows.append(f"| {title} | {RULE_FORMS[title]} | {', '.join(str(list(s)) for s in shapes)} | {d:.1e} |")
     return "\n".join([
         f"Seed {bookrng.seed_of(name)}. One generator for the whole table, `normal()` draws in table order: for "
-        f"each row its inputs in the order listed (row-major), then the output gradient (row-major). For the "
+        f"each row its inputs in the order listed (row-major), then the output gradient (row-major), which has the shape of the row's output "
+        f"(a single number for the sum of all entries, [4] for the sum along axis 0, [3] for the mean and the max along axis 1). For the "
         f"division the denominator is replaced by 1.5 plus the absolute value of its draw. Central-difference "
-        f"step 1e-6; the closest any ReLU or max input comes to its kink is {kink:.3f}.", ""] + rows +
+        f"step 1e-6; the closest any ReLU or max input comes to its kink is {kink:.3f} "
+        f"(a check on your draw order). The last column is rounding noise of the central difference: expect values below 1e-8, not these digits. "
+        f"[x > 0] in the ReLU rule is the Iverson bracket (1 when the condition holds, 0 otherwise). Phi and phi in the GELU rule are the standard Gaussian cumulative distribution, Phi(x) = (1 + erf(x / sqrt 2)) / 2, and density, "
+        f"phi(x) = exp(-x^2 / 2) / sqrt(2 pi).", ""] + rows +
         ["", f"Largest difference over all rows: {worst:.1e}."])
 
 

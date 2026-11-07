@@ -16,11 +16,23 @@ Task: x ~ uniform on [0, 1), y = sin(2 pi x) + 0.3 * normal(); the noise floor o
 
 Loss: mean squared error over the 16 training points. Optimizer: AdamW, full batch, learning rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-08, 3000 steps, no schedule; the validation loss (200 points) is computed every 10 steps.
 
-Generators (the book's SplitMix64; k is the seed number 0 .. 7):
+Generators (the book's SplitMix64; k is the seed number 0 .. 7; a generator named `regularization_nn.<stream>.k` is seeded with the seed printed in the table below, so each of the eight seeds has its own seed for each of the three streams):
 
-- `regularization_nn.train.0` seed 0xafafb1e96dba2278 for k = 0: for i = 0 .. 15, x_i = uniform() then e_i = normal(); y_i = sin(2 pi x_i) + 0.3 e_i. Stream `regularization_nn.train.k` for the others.
-- `regularization_nn.init.0` seed 0x9b92927c65f97bf1 for k = 0: w_j = normal() for j = 0 .. 63, then b_j = normal() for j = 0 .. 63, then v_j = normal() / 8 for j = 0 .. 63; c = 0.
-- `regularization_nn.noise.0` seed 0x506586d6384f3f45 for k = 0: masks and augmentations (draw order in the examples that use them).
+- `train.k`: for i = 0 .. 15, x_i = uniform() then e_i = normal(); y_i = sin(2 pi x_i) + 0.3 e_i (for a training set of N > 16 points the same rule continues to i = N - 1).
+- `init.k`: w_j = normal() for j = 0 .. 63, then b_j = normal() for j = 0 .. 63, then v_j = normal() / 8 for j = 0 .. 63; c = 0.
+- `noise.k`: masks and augmentations (draw order in the examples that use them).
+
+| k | train.k | init.k | noise.k |
+|---:|---|---|---|
+| 0 | 0xafafb1e96dba2278 | 0x9b92927c65f97bf1 | 0x506586d6384f3f45 |
+| 1 | 0x90ba10dda9accf97 | 0x0001027ff18cec5b | 0x069b3c226268c598 |
+| 2 | 0x35a921376df1cf6c | 0x1478f0047523ca96 | 0x181fa71de7dd6fc4 |
+| 3 | 0xe8662c575fa3f4ad | 0xb02ce4fe574c7374 | 0x5cbccc886012e023 |
+| 4 | 0x7307018ffbb216a9 | 0xbace3f74e1f1a969 | 0x36e69cdf840ca544 |
+| 5 | 0x426710f3906aaa42 | 0x29108e5cef0fedae | 0xb99d5e622872d4cf |
+| 6 | 0xacc80cf5dc9ed1d9 | 0x54f44750ba20751f | 0x410f414e3a9c8298 |
+| 7 | 0xcde1d06cdfc4d1d0 | 0x3b8db135575bd159 | 0x1d58f0f3d2a6bd9b |
+
 - `regularization_nn.validation` seed 0x20ff207307b8362f: 200 validation points, drawn like the training points. `regularization_nn.test` seed 0x2fecc37ae6bdd0af: 1000 test points, same rule.
 
 Training points of seed 0:
@@ -48,7 +60,7 @@ Training points of seed 0:
 Train it by full-batch AdamW (chapter 7) with no weight decay and watch two numbers: the mean squared error on the 16 training points, and on 200 validation points drawn from the same source.
 
 <!-- worked: regularization_nn.memorisation -->
-Seed 0, no regularization (AdamW with weight decay 0). Training loss is the mean squared error on the 16 training points in eval mode; validation is the mean squared error on the 200 validation points; the noise floor is 0.09.
+Seed 0, no regularization (AdamW with weight decay 0). Training loss is the mean squared error on the 16 training points in eval mode; validation is the mean squared error on the 200 validation points; the noise floor is 0.09; the norm of the parameters is the Euclidean norm of the 193 parameters (w, b, v and c together). The late rows come from a chaotic run: a change of 1e-12 in one initial weight changes the printed digits there, so an entry is printed in full only if it survives that change and as 'about x' (the digits that survive) otherwise; the same rule applies to every number of this chapter's tables that comes from training.
 
 | step | training loss | validation loss | norm of the parameters |
 |---|---:|---:|---:|
@@ -59,15 +71,15 @@ Seed 0, no regularization (AdamW with weight decay 0). Training loss is the mean
 | 400 | 0.1094 | 0.1367 | 11.7 |
 | 600 | 0.1086 | 0.1377 | 12.4 |
 | 1000 | 0.0929 | 0.1557 | 17.3 |
-| 1500 | 0.0315 | 0.1928 | 25.5 |
-| 2000 | 0.0298 | 0.2065 | 26.7 |
-| 3000 | 0.0274 | 0.2751 | 28.8 |
+| 1500 | 0.0315 | about 0.193 | 25.5 |
+| 2000 | 0.0298 | about 0.207 | 26.7 |
+| 3000 | 0.0274 | about 0.275 | 28.8 |
 
 Over the 8 seeds: the validation loss is lowest at step 449 on average (range 40 to 1780), where it is 0.138; at step 3000 it is 0.436 on average (range 0.128 to 0.890), while the training loss is 0.0218.
 Seed 0 alone: the lowest validation loss is 0.1367, at step 380; a patience of 10 evaluations (100 steps) fires at step 480.
 <!-- /worked -->
 
-The training loss falls below the noise floor of 0.09 around step 1000 and ends at 0.0274. A network that had learned only the curve could not do that: on average its training loss would sit near the floor, because the labels it is asked to reproduce carry noise it cannot predict. A training loss of a third of the floor means that the network is following the noise of these 16 points. The validation loss says what that costs: it is lowest early (0.1367 at step 380 for this seed) and then climbs to 0.2751 at step 3000, while the norm of the parameters more than doubles, from 11.2 to 28.8. Over the eight seeds the end-of-training validation loss averages 0.436, three times the 0.138 that the same runs reached at their best step. Figure 1 draws what the trained function looks like.
+The training loss falls below the noise floor of 0.09 around step 1000 and ends at 0.0274. A network that had learned only the curve could not do that: on average its training loss would sit near the floor, because the labels it is asked to reproduce carry noise it cannot predict. A training loss of a third of the floor means that the network is following the noise of these 16 points. The validation loss says what that costs: it is lowest early (0.1367 at step 380 for this seed) and then climbs to about 0.28 at step 3000 (the late rows of the table are chaotic, so only their leading digits are printed), while the norm of the parameters more than doubles, from 11.2 to 28.8. Over the eight seeds the end-of-training validation loss averages 0.436, three times the 0.138 that the same runs reached at their best step. Figure 1 draws what the trained function looks like.
 
 ![The curve sin(2 pi x), the 16 noisy training points, and three trained networks on the interval from 0 to 1: the unregularized network oscillates wildly through the points between 0.35 and 0.7, while the networks trained with weight decay and with dropout follow a smooth curve close to the true one.](img/reg-fits.svg)
 
@@ -109,11 +121,11 @@ Decoupled weight decay (AdamW, theta <- theta - eta lam theta - eta mhat / (sqrt
 | 0 | 0.0000 | 1 | no prior | 23.9 | 34.1 | 0.0218 | 0.436 | 0.400 |
 | 0.1 | 0.0010 | 4.97e-02 | 0.335 | 15.5 | 21.0 | 0.0299 | 0.222 | 0.204 |
 | 0.3 | 0.0030 | 1.22e-04 | 0.194 | 7.8 | 11.1 | 0.0469 | 0.155 | 0.140 |
-| 1 | 0.0100 | 8.05e-14 | 0.106 | 3.5 | 6.8 | 0.0742 | 0.166 | 0.145 |
+| 1 | 0.0100 | 8.05e-14 | 0.106 | 3.5 | 6.8 | about 0.074 | about 0.17 | about 0.14 |
 | 3 | 0.0300 | 2.07e-40 | 0.061 | 2.7 | 4.3 | 0.1362 | 0.215 | 0.199 |
 <!-- /worked -->
 
-Read the table from the top. Without decay the norm of the parameters is 23.9 and the fitted function reaches a slope of 34.1, against a slope of at most $2\pi = 6.3$ for the true curve: that steepness is the oscillation of Figure 1. With $\lambda = 0.3$ the norm is 7.8, the steepest slope 11.1, the training loss rises from 0.0218 to 0.0469 (the network may no longer follow every point), and the test loss falls from 0.400 to 0.140. At $\lambda = 1$ the slope, 6.8, is near that of the truth and the test loss is 0.145; at $\lambda = 3$ the penalty wins over the data: the training loss is 0.1362, above the noise floor, the network is underfitting, and the test loss is back to 0.199. So the strength has an optimum, and the validation loss (0.155 at $\lambda = 0.3$, 0.166 at 1, 0.215 at 3) finds it without the test set. The prior column says what the optimum believes: weights of standard deviation about 0.19, against a standard deviation of 1 at the start of training.
+Read the table from the top. Without decay the norm of the parameters is 23.9 and the fitted function reaches a slope of 34.1, against a slope of at most $2\pi = 6.3$ for the true curve: that steepness is the oscillation of Figure 1. With $\lambda = 0.3$ the norm is 7.8, the steepest slope 11.1, the training loss rises from 0.0218 to 0.0469 (the network may no longer follow every point), and the test loss falls from 0.400 to 0.140. At $\lambda = 1$ the slope, 6.8, is near that of the truth and the test loss is about 0.14; at $\lambda = 3$ the penalty wins over the data: the training loss is 0.1362, above the noise floor, the network is underfitting, and the test loss is back to 0.199. So the strength has an optimum, and the validation loss (0.155 at $\lambda = 0.3$, 0.166 at 1, 0.215 at 3) finds it without the test set. The prior column says what the optimum believes: weights of standard deviation about 0.19, against a standard deviation of 1 at the start of training.
 
 The mechanism is a bound. A hidden unit $v_j\tanh(w_j u + b_j)$ has slope at most $\lvert v_j w_j\rvert$ in $u$, so the slope of the whole function is at most $\sum_j \lvert v_j w_j\rvert$, which the product of two small weights keeps small. Shrinking all weights shrinks the largest slope the network can build, and with it the size of the swings that fit a point away from its neighbours.
 
@@ -128,15 +140,15 @@ The same network and seeds, with the penalty (lam / 2) ||theta||^2 either applie
 |---|---|---:|---:|---:|
 | decoupled (AdamW) | 0.1 | 15.5 | 0.0299 | 0.222 |
 | decoupled (AdamW) | 0.3 | 7.8 | 0.0469 | 0.155 |
-| decoupled (AdamW) | 1 | 3.5 | 0.0742 | 0.166 |
+| decoupled (AdamW) | 1 | 3.5 | about 0.074 | about 0.17 |
 | decoupled (AdamW) | 3 | 2.7 | 0.1362 | 0.215 |
 | in the gradient (Adam + L2) | 0.0001 | 9.9 | 0.0386 | 0.303 |
-| in the gradient (Adam + L2) | 0.001 | 4.1 | 0.0569 | 0.145 |
+| in the gradient (Adam + L2) | 0.001 | 4.1 | about 0.057 | about 0.14 |
 | in the gradient (Adam + L2) | 0.01 | 3.0 | 0.0677 | 0.145 |
 | in the gradient (Adam + L2) | 0.1 | 1.3 | 0.1951 | 0.248 |
 <!-- /worked -->
 
-The best validation loss is about the same for both, 0.155 for decoupled decay at $\lambda = 0.3$ and 0.145 for the coupled penalty at $\lambda = 0.001$ and $0.01$, but the two rules are not tuned in the same way. For the decoupled rule the norm falls steadily as the strength grows (15.5, 7.8, 3.5, 2.7): a tenfold change in $\lambda$ is a visible change in the network, and $\eta\lambda$ is the fraction removed per step whatever the network is doing. For the coupled penalty a hundredfold change, $\lambda = 0.001$ to $0.1$, moves the norm from 4.1 to 1.3, and two neighbouring decades ($0.001$ and $0.01$) give the same validation loss: the penalty is divided by the running gradient scale that Adam divides everything by, so its effective size depends on the gradients and not only on $\lambda$. Neither rule is wrong on this problem; the decoupled one is the one whose strength you can reason about, which is why chapter 7 recommends it and why the rest of this chapter uses it.
+The best validation loss is about the same for both, 0.155 for decoupled decay at $\lambda = 0.3$ and about 0.14 for the coupled penalty at $\lambda = 0.001$ and 0.145 at $0.01$, but the two rules are not tuned in the same way. For the decoupled rule the norm falls steadily as the strength grows (15.5, 7.8, 3.5, 2.7): a tenfold change in $\lambda$ is a visible change in the network, and $\eta\lambda$ is the fraction removed per step whatever the network is doing. For the coupled penalty a hundredfold change, $\lambda = 0.001$ to $0.1$, moves the norm from 4.1 to 1.3, and two neighbouring decades ($0.001$ and $0.01$) give the same validation loss: the penalty is divided by the running gradient scale that Adam divides everything by, so its effective size depends on the gradients and not only on $\lambda$. Neither rule is wrong on this problem; the decoupled one is the one whose strength you can reason about, which is why chapter 7 recommends it and why the rest of this chapter uses it.
 
 ### What to decay
 
@@ -353,7 +365,7 @@ $$
 because the cross term has mean zero and $\mathbb{E}[(\mathbf{w}\cdot\boldsymbol{\varepsilon})^2] = \sum_i w_i^2 s_{\mathrm{aug}}^2$. Summed over $N$ examples this is the squared error plus $N s_{\mathrm{aug}}^2\lVert\mathbf{w}\rVert^2$: **L2 regularization with strength $\lambda = N s_{\mathrm{aug}}^2$** in the form of Volume II, chapter 4 ($\frac12\sum r^2 + \frac\lambda2\lVert\mathbf{w}\rVert^2$ up to the factor 2 on both). Noise on the inputs penalizes the weights that read them. A check by sampling: fit the least squares model on $K$ noisy copies of each of 12 examples and compare with the ridge solution of strength $N s_{\mathrm{aug}}^2$.
 
 <!-- worked: regularization_nn.augmentation_ridge -->
-A linear model y = w . x with 3 features on 12 examples, features and noise from one generator (`regularization_nn.ridge` seed 0x6509d1b4d5518d57): for i = 0 .. 11, x_i = three normal() draws, then y_i = 1 x_i0 - 2 x_i1 + 0.5 x_i2 + 0.5 normal(). Least squares without any augmentation: w = (1.2028, -1.9723, 0.6152). 'Ridge' solves (X^T X + N s^2 I) w = X^T y. 'K copies' replaces each example by K noisy copies x + s * (three normal() draws), with the same label, and solves ordinary least squares on the 12 K rows (the draws continue the same generator: first all rows of s = 0.3 with K = 10, then K = 1000, then s = 0.6 with K = 10, then K = 1000). 'Max difference' is the largest difference of an entry from the ridge solution.
+A linear model y = w . x with 3 features on 12 examples, features and noise from one generator (`regularization_nn.ridge` seed 0x6509d1b4d5518d57): first all 12 feature rows, row by row (3 normal() draws per row, 36 draws in all), and only then the 12 label noises (one normal() each, in the order of the rows), so that y_i = 1 x_i0 - 2 x_i1 + 0.5 x_i2 + 0.5 e_i with e_i the i-th noise draw. Least squares without any augmentation: w = (1.2028, -1.9723, 0.6152). 'Ridge' solves (X^T X + N s^2 I) w = X^T y. 'K copies' replaces each example by K noisy copies x + s * (three normal() draws), with the same label, and solves ordinary least squares on the 12 K rows (the draws continue the same generator: first all rows of s = 0.3 with K = 10, then K = 1000, then s = 0.6 with K = 10, then K = 1000; within one setting example after example, K copies of an example one after the other, each copy three normal() draws, one per feature). 'Max difference' is the largest difference of an entry from the ridge solution.
 
 | noise sd s | ridge strength N s^2 | ridge w | K = 10 copies: w | max difference | K = 1000 copies: w | max difference |
 |---|---:|---|---:|---:|---:|---:|
@@ -473,7 +485,7 @@ $$
 w_i(\lambda) = \frac{\lambda_i}{\lambda_i + \lambda}\,w_i^\star .
 $$
 
-Both are filters on the least squares solution. Both keep the directions with large curvature (they are fitted fast, and the data pin them down) and suppress those with small curvature (the directions the data say little about, where noise dominates). The first filter reaches the value $\frac12$ when $(1-\eta\lambda_i)^t \approx \frac12$, that is for $\eta\lambda_i t \approx 0.7$, the second when $\lambda_i = \lambda$. Matching the scales of the two gives the rule of thumb
+Both are filters on the least squares solution. Both keep the directions with large curvature (they are fitted fast, and the data pin them down) and suppress those with small curvature (the directions the data say little about, where noise dominates). The first filter reaches the value $\frac12$ when $(1-\eta\lambda_i)^t \approx \frac12$, that is for $\eta\lambda_i t \approx \ln 2 \approx 0.7$, the second when $\lambda_i = \lambda$. Matching the two gives $\lambda \approx 0.7/(\eta t)$; the factor $0.7$ is of order one and the rule of thumb drops it (the table below uses $\lambda = 1/(\eta t)$ exactly, and shows that the paths stay close):
 
 $$
 \lambda \approx \frac{1}{\eta\,t}:
@@ -538,33 +550,33 @@ At $\epsilon_{\mathrm{ls}} = 0.1$ the loss is minimal at a gap of 3.6109 ($\ln 3
 Each method has one setting to choose, and the choice is made the way Volume II prescribes: on the validation set, never the test set. For each of weight decay, dropout and input noise the grid is listed in the table below, the value with the lowest mean validation loss at step 3000 is chosen (over the 8 seeds, with the 200 validation points shared by all of them), and the three are combined in pairs and all together at their chosen values. Every row uses the same eight seeds, so the same training points and the same starting weights: the comparison is paired, and the standard error of a difference is that of the per-seed differences (Volume II, chapter 8), which removes the large spread between seeds that the unregularized network has (the standard deviation of its test loss over the seeds is 0.274, against 0.014 to 0.029 for the regularized ones).
 
 <!-- worked: regularization_nn.method_comparison -->
-Settings: the value of each method's grid with the lowest mean validation loss at step 3000 (weight decay lam in (0.1, 0.3, 1.0, 3.0), dropout p in (0.1, 0.3, 0.5), noise sd in (0.03, 0.1, 0.2)); the combinations use those values. The chosen values are lam = 0.3, p = 0.1, noise sd = 0.03. Every row is the same 8 seeds (same training points, same initial weights); test loss is on the 1000 test points, which were not used to choose anything. 'Difference' is the method's test loss minus that of 'none' per seed: mean (standard error = sd / sqrt(8), divisor 7), paired t with 7 degrees of freedom (|t| above 2.36 is significant at 5%), and the number of seeds where the method is better. The noise floor of the test loss is 0.09.
+Settings: the value of each method's grid with the lowest mean validation loss at step 3000 (weight decay lam in (0.1, 0.3, 1.0, 3.0), dropout p in (0.1, 0.3, 0.5), noise sd in (0.03, 0.1, 0.2)); the combinations use those values. The chosen values are lam = 0.3, p = 0.1, noise sd = 0.03. Every row is the same 8 seeds (same training points, same initial weights); test loss is on the 1000 test points, which were not used to choose anything. 'Test (sd over seeds)' is the standard deviation with divisor 7 of the eight test losses. 'Difference' is the method's test loss minus that of 'none' per seed: mean (standard error = sd / sqrt(8), sd with divisor 7), paired t with 7 degrees of freedom (|t| above 2.36 is significant at 5%), and the number of seeds where the method is better. The noise floor of the test loss is 0.09.
 
 Trained for 3000 steps and taken as they are:
 
 | method | setting | validation | test (mean) | test (sd over seeds) | difference to none (SE) | paired t | better in | norm |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | none | - | 0.436 | 0.400 | 0.274 | - | - | - | 23.9 |
-| weight decay | lam 0.3 | 0.155 | 0.140 | 0.029 | -0.260 (0.098) | -2.7 | 8 of 8 | 7.8 |
-| dropout | p 0.1 | 0.163 | 0.142 | 0.021 | -0.258 (0.100) | -2.6 | 8 of 8 | 20.0 |
-| augmentation | noise sd 0.03 | 0.162 | 0.141 | 0.018 | -0.260 (0.099) | -2.6 | 8 of 8 | 13.6 |
-| weight decay + dropout | lam 0.3, p 0.1 | 0.158 | 0.138 | 0.026 | -0.262 (0.096) | -2.7 | 8 of 8 | 6.4 |
-| weight decay + augmentation | lam 0.3, noise sd 0.03 | 0.145 | 0.124 | 0.017 | -0.277 (0.097) | -2.8 | 8 of 8 | 4.4 |
-| dropout + augmentation | p 0.1, noise sd 0.03 | 0.163 | 0.142 | 0.014 | -0.258 (0.097) | -2.7 | 8 of 8 | 18.9 |
-| all three | lam 0.3, p 0.1, noise sd 0.03 | 0.149 | 0.129 | 0.019 | -0.271 (0.096) | -2.8 | 8 of 8 | 6.0 |
+| weight decay | lam 0.3 | 0.155 | 0.140 | 0.029 | -0.260 (SE 0.098) | -2.7 | 8 of 8 | 7.8 |
+| dropout | p 0.1 | 0.163 | 0.142 | 0.021 | -0.258 (SE 0.100) | -2.6 | 8 of 8 | 20.0 |
+| augmentation | noise sd 0.03 | 0.162 | 0.141 | 0.018 | -0.260 (SE 0.099) | -2.6 | 8 of 8 | 13.6 |
+| weight decay + dropout | lam 0.3, p 0.1 | 0.158 | 0.138 | 0.026 | -0.262 (SE 0.096) | -2.7 | 8 of 8 | 6.4 |
+| weight decay + augmentation | lam 0.3, noise sd 0.03 | 0.145 | 0.124 | 0.017 | -0.277 (SE 0.097) | -2.8 | 8 of 8 | 4.4 |
+| dropout + augmentation | p 0.1, noise sd 0.03 | 0.163 | 0.142 | 0.014 | -0.258 (SE 0.097) | -2.7 | 8 of 8 | 18.9 |
+| all three | lam 0.3, p 0.1, noise sd 0.03 | 0.149 | 0.129 | 0.019 | -0.271 (SE 0.096) | -2.8 | 8 of 8 | 6.0 |
 
 The same runs, each stopped at its own best validation step (the checkpoint with the lowest validation loss, as the early-stopping rule of this chapter would keep). The difference is to the unregularized network stopped at its own best step (test loss 0.121, the first row), per seed.
 
 | method | best validation | at step | test (mean) | difference to none, early stopped (SE) | paired t | better in |
 |---|---:|---:|---:|---:|---:|---:|
 | none | 0.138 | 449 | 0.121 | - | - | - |
-| weight decay | 0.139 | 1039 | 0.122 | +0.001 (0.004) | +0.3 | 6 of 8 |
-| dropout | 0.139 | 1184 | 0.120 | -0.000 (0.004) | -0.1 | 5 of 8 |
-| augmentation | 0.133 | 1092 | 0.116 | -0.004 (0.004) | -1.2 | 4 of 8 |
-| weight decay + dropout | 0.138 | 1531 | 0.120 | -0.001 (0.006) | -0.2 | 6 of 8 |
-| weight decay + augmentation | 0.130 | 1378 | 0.112 | -0.009 (0.005) | -1.8 | 6 of 8 |
-| dropout + augmentation | 0.140 | 811 | 0.121 | +0.001 (0.005) | +0.1 | 4 of 8 |
-| all three | 0.138 | 2164 | 0.120 | -0.000 (0.006) | -0.1 | 6 of 8 |
+| weight decay | 0.139 | 1039 | 0.122 | +0.001 (SE 0.004) | +0.3 | 6 of 8 |
+| dropout | 0.139 | 1184 | 0.120 | -0.000 (SE 0.004) | -0.1 | 5 of 8 |
+| augmentation | 0.133 | 1092 | 0.116 | -0.004 (SE 0.004) | -1.2 | 4 of 8 |
+| weight decay + dropout | 0.138 | 1531 | 0.120 | -0.001 (SE 0.006) | -0.2 | 6 of 8 |
+| weight decay + augmentation | 0.130 | 1378 | 0.112 | -0.009 (SE 0.005) | -1.8 | 6 of 8 |
+| dropout + augmentation | 0.140 | 811 | 0.121 | +0.001 (SE 0.005) | +0.1 | 4 of 8 |
+| all three | 0.138 | 2164 | 0.120 | -0.000 (SE 0.006) | -0.1 | 6 of 8 |
 <!-- /worked -->
 
 Read the first table. Every regularizer beats the unregularized network on all 8 seeds: the test loss falls from 0.400 to between 0.124 and 0.142, and the spread over seeds falls by a factor of ten or more. The paired $t$ is about $-2.7$, not larger, because the unregularized network's own seeds vary so much that the standard error of the differences, 0.1, is large; this is the situation that makes "better in 8 of 8" the more useful number. Weight decay (0.140), dropout (0.142) and input noise (0.141) are indistinguishable; the combination of weight decay with input noise is best (0.124) and the others are not better than their best part. The three chosen values are small ($\lambda = 0.3$, $p_{\mathrm{drop}} = 0.1$, noise standard deviation 0.03): on this task a little of anything is enough, and none of the methods is gentle with the other: each of them already removes the overfit that the others would remove.

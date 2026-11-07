@@ -562,7 +562,7 @@ The sums, means, reshapes and slices save nothing but sizes; the maximum and the
 Finally the check. For every rule of the table we drew random inputs from the book's generator, computed the rule's gradient and the central difference of $L = \sum G\,f(\text{inputs})$ with respect to every entry of every input, and report the largest difference:
 
 <!-- worked: layer_gradients.rule_checks -->
-Seed 5575565785777740154. One generator for the whole table, `normal()` draws in table order: for each row its inputs in the order listed (row-major), then the output gradient (row-major). For the division the denominator is replaced by 1.5 plus the absolute value of its draw. Central-difference step 1e-6; the closest any ReLU or max input comes to its kink is 0.051.
+Seed 5575565785777740154. One generator for the whole table, `normal()` draws in table order: for each row its inputs in the order listed (row-major), then the output gradient (row-major), which has the shape of the row's output (a single number for the sum of all entries, [4] for the sum along axis 0, [3] for the mean and the max along axis 1). For the division the denominator is replaced by 1.5 plus the absolute value of its draw. Central-difference step 1e-6; the closest any ReLU or max input comes to its kink is 0.051 (a check on your draw order). The last column is rounding noise of the central difference: expect values below 1e-8, not these digits. [x > 0] in the ReLU rule is the Iverson bracket (1 when the condition holds, 0 otherwise). Phi and phi in the GELU rule are the standard Gaussian cumulative distribution, Phi(x) = (1 + erf(x / sqrt 2)) / 2, and density, phi(x) = exp(-x^2 / 2) / sqrt(2 pi).
 
 | operation | backward rule | inputs | largest absolute difference |
 |---|---|---|---:|

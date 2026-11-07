@@ -312,7 +312,8 @@ def gelu_forms():
             "quick form x sigmoid(1.702 x); silu x sigmoid(x).\n\n"
             + _table(["x", "exact", "tanh form", "abs diff", "quick form", "abs diff", "silu"], rows)
             + "\n\nLargest absolute difference from the exact form over x = -6 + 0.01 i, i = 0, ..., 1200 "
-              "(the first grid point attaining the maximum).\n\n"
+              "(differences are compared after rounding to 12 decimals; among ties, which occur because the difference is an even function of x, "
+              "the grid point with the lowest x, the negative one, is reported).\n\n"
             + _table(["approximation", "largest abs difference", "at x"], s_rows))
 
 
@@ -333,7 +334,8 @@ def gelu_derivative_gap():
             "the tanh form, 0.5 (1 + t) + 0.5 x (1 - t^2) sqrt(2/pi) (1 + 3 * 0.044715 x^2) with "
             "t = tanh(sqrt(2/pi) (x + 0.044715 x^3)).\n\n"
             + _table(["x", "exact gelu'", "tanh-form gelu'", "abs diff"], rows)
-            + f"\n\nOver x = -4 + 0.01 i, i = 0, ..., 800 the largest absolute difference is {gaps[i]:.3e} at x = {xs[i]:+.2f}; "
+            + f"\n\nOver x = -4 + 0.01 i, i = 0, ..., 800 the largest absolute difference (differences compared after rounding to 12 decimals; the difference is an even function of x, so the lowest x of a tied pair is reported) "
+              f"is {gaps[i]:.3e} at x = {xs[i]:+.2f}; "
               f"the largest relative difference (where |exact gelu'| > 0.001) is {rel:.3f}.")
 
 
@@ -519,8 +521,8 @@ def tent_values():
     for i in range(9):
         x = Fraction(i, 8)
         rows.append((f"{i}/8", *[f"{float(_tent_eval(_tent_net(d), x)):.3f}" for d in (1, 2, 3)]))
-    return ("Tent network of depth d: hidden layers of width 2 with weights as described in the text; "
-            "T(x) = 2 relu(x) - 4 relu(x - 1/2) on [0, 1]; the depth-d network computes the d-fold composition.\n\n"
+    return ("Tent network of depth d: hidden layers of width 2. First layer: weights (1, 1)^T, biases (0, -1/2); later layers: weights [[2, -4], [2, -4]], biases (0, -1/2); "
+            "output weights (2, -4), output bias 0. Each hidden layer computes relu(W h + b), the output layer is linear; T(x) = 2 relu(x) - 4 relu(x - 1/2) on [0, 1]; the depth-d network computes the d-fold composition.\n\n"
             + _table(["x", "d = 1: T(x)", "d = 2: T(T(x))", "d = 3: T(T(T(x)))"], rows))
 
 
@@ -538,7 +540,7 @@ def tent_pieces():
             "6 d + 1 parameters. A one-hidden-layer ReLU network with u units has at most u + 1 pieces, so it needs "
             "at least pieces - 1 units, and 3 u + 1 parameters.\n\n"
             + _table(["depth d", "hidden units (deep)", "parameters (deep)", "linear pieces", "units needed (one hidden layer)",
-                      "parameters (one hidden layer)", "ratio of parameters"], rows))
+                      "parameters (one hidden layer)", "ratio of parameters (one hidden layer / deep)"], rows))
 
 
 def layer_work():

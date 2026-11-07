@@ -24,12 +24,15 @@ Every value has a type, and the book always states it when it matters.
 | `complex` | a pair of `real` numbers, see "Complex numbers" below |
 | `bool` | `true` or `false` |
 | `array<T>[d0, d1, ...]` | a tensor of element type `T` with the given shape |
-| `function(T) -> U` | a function taken as an argument or returned (a `function(real) -> real` maps a number to a number; with several arguments the types are listed, `function(real, real) -> real`) |
+| `function(T) -> U` | a function taken as an argument or returned (a `function(real) -> real` maps a number to a number; with several arguments the types are listed, `function(real, real) -> real`). A function is passed by writing its name, `map(tanh, a)`, and called through the argument's name |
 | `optional T` | either a value of type `T` or nothing. `x is present` is true when it holds a value and false otherwise; the value is only read after that test |
 | `text` | a string of characters. Its **bytes** are those of its UTF-8 encoding, each an `int` in `0 .. 255`, taken in order: `for b in the bytes of s:` visits them first to last (the text `"ab"` has the bytes `97, 98`) |
-| `(T, U)` | a pair (tuple) of a `T` and a `U`; an argument may have a tuple type, `a: (real, int)`, and `a[0]`, `a[1]` read its first and second component (0-indexed like an array) |
+| `(T, U)`, `(T, U, V)` | a pair or triple (tuple) of a `T` and a `U` (and a `V`); an argument may have a tuple type, `a: (real, int)`, and `a[0]`, `a[1]`, `a[2]` read the components (0-indexed like an array). A function may return a tuple of unnamed components, `-> (real, int, int)`, received as `(x, i, j) = f(...)` |
 | `Generator` | the state of a random number generator, see "Randomness" |
 | `list<T>` | an ordered, growable list of values of type `T`, indexed from 0: `L[i]` reads element `i` (`0 <= i < len(L)`; outside is an error), `len(L)` is its length, `append x to L` adds at the end. The elements may be arrays of different shapes (a network's weight matrices) |
+| `tensor` | a name for `array<real>` of any shape, used where an algorithm treats values of different shapes alike (a graph's node values); `t.shape` is its shape and `numel(t)` its number of elements |
+| `operation` | a value that names one differentiable operation of a graph (an input, a parameter, a matrix product, a `tanh`, ...) and carries the constants it needs; a chapter lists the operations it uses, and `op is input` tests which kind a value is |
+| `bytes` | an ordered sequence of `u8` values (a serialised checkpoint, the input of a hash); `len(b)` is its length. Floats written into bytes are stored as their IEEE 754 bit patterns (little-endian, 8 bytes for a double) so that they read back to the same bits |
 | `none` | the value of a function that returns nothing |
 
 A **record** groups named fields into one value:
@@ -114,7 +117,7 @@ named operations:
 | `matmul(A, B)` | matrix product; `A: [m, k]`, `B: [k, n]` gives `[m, n]` |
 | `transpose(A)` | swaps the last two axes |
 | `sum(a)`, `mean(a)` | sum and arithmetic mean of all elements of `a` (`mean` divides by `numel(a)`; `a` must not be empty) |
-| `sum(a, axis)`, `mean(a, axis)` | the same along one axis, which is removed from the shape |
+| `sum(a, axis)`, `mean(a, axis)` | the same along one axis, which is removed from the shape. The keyword form `sum(a, axis=0)` means the same as `sum(a, 0)` |
 | `max(a)`, `min(a)` | largest and smallest element of the whole array |
 | `max(a, axis)`, `min(a, axis)` | along one axis |
 | `argmax(a)`, `argmin(a)` | index of the largest (smallest) element of a vector; on a tie the **first** index wins |
@@ -124,6 +127,13 @@ named operations:
 | `median(a)` | `percentile(a, 0.5)`: the middle element of an odd count, the average of the two middle elements of an even count. A chapter that needs the lower or upper middle element of an even count says so and does not call it `median` |
 | `sd(a)` | the sample standard deviation of a vector `a` with `m >= 2` elements, with divisor `m - 1`: `sqrt(sum((a[i] - mean(a))^2 for i in 0 .. m) / (m - 1))`. A standardiser that divides by `m` says so in its signature and does not call `sd` |
 | `correlation(a, b)` | the Pearson correlation of two vectors of equal length `m >= 2`: `sum((a[i] - mean(a)) * (b[i] - mean(b))) / sqrt(sum((a[i] - mean(a))^2) * sum((b[i] - mean(b))^2))`, a `real` in `[-1, 1]`; it is an error (`require`) when either vector is constant, because a denominator is then zero. The divisor of the covariance cancels, so none is stated |
+| `all(c)`, `any(c)` | for an array or list `c` of `bool`: true when every (some) element is true; `all` of an empty list is true and `any` of an empty list is false |
+| `norm(x)` | the Euclidean length `sqrt(sum(x[i]^2 for i in 0 .. len(x)))` of a vector, also written $\lVert\mathbf{x}\rVert$; for a list of tensors the square root of the sum of the squares of every entry of every tensor (the global norm) |
+| `geometric_mean(a)` | `exp(mean(log(a)))` for a vector `a` of positive numbers |
+| `sha256(b)` | the SHA-256 digest (FIPS 180-4) of the `bytes` `b`, as 32 bytes; written as 64 lowercase hexadecimal digits when printed. The book prints only a prefix of it to compare two runs (Volume III, Chapter 13) |
+| `power_iteration(W, iters, v0)` | an estimate of the largest singular value of a matrix `W: [m, n]`: starting from the vector `v0` of length `n`, repeat `iters` times: multiply `v` by `W`, multiply the result by the transpose of `W`, and divide by its norm to get the new `v`; return `norm(W v)` at the end (Volume III, Chapter 12) |
+| `onehot(c, C)` | the vector of length `C` with `1.0` at index `c` and `0.0` elsewhere (`0 <= c < C`) |
+| `softmax(z)`, `lse(z)` | for a vector `z` of length `C >= 1`: `m = max(z)`, `lse(z) = m + log(sum(exp(z[i] - m)))` and `softmax(z)[i] = exp(z[i] - m) / sum(exp(z[j] - m))`, the stable forms of Volume III, chapter 3 (`logsumexp` is a synonym of `lse`); applied to a matrix `softmax(Z)` works on each row |
 | `map(f, a)` | applies the scalar function `f` to every element |
 | `a + b`, `a * b` on arrays | elementwise, and **only** when the shapes are equal or the text states the broadcast |
 
@@ -153,20 +163,22 @@ row of `x: [T, D]`".
 | `round(x, n)` | `x` rounded to `n >= 0` decimal places, **ties away from zero**: take the exact decimal value of `x` as written or computed, find the two multiples of `10^(-n)` that enclose it, and pick the nearer one; when `x` is exactly halfway, pick the one farther from zero (`round(2.5, 0) = 3`, `round(-2.5, 0) = -3`, `round(0.125, 2) = 0.13`). It returns a `real`. The book avoids a printed value that depends on this rule: where a table is rounded, the underlying quantity is not a tie, or the text says which way it was rounded. A binary floating-point number is rarely exactly halfway, so a reproduction compares unrounded values with a tolerance (see "Numerical tolerance") before it rounds |
 | `sigmoid(z)` | the logistic function $1/(1 + e^{-z})$, computed as `1 / (1 + exp(-z))` for `z >= 0` and as `exp(z) / (1 + exp(z))` for `z < 0`, so that `exp` never overflows; the result lies in $(0, 1)$ and `sigmoid(0) = 0.5` (Volume II, chapter 3) |
 | `softplus(z)` | $\log(1 + e^z)$, computed as `max(z, 0) + log1p(exp(-abs(z)))`, which is exact in real arithmetic and cannot overflow; `softplus(0) = log(2)` (Volume II, chapter 3) |
-| `tanh(x)` | the hyperbolic tangent $(e^x - e^{-x})/(e^x + e^{-x})$, computed as `2 * sigmoid(2 * x) - 1`; odd, in $(-1, 1)$, `tanh(0) = 0` (Volume III, chapter 2) |
+| `tanh(x)` | the hyperbolic tangent $(e^x - e^{-x})/(e^x + e^{-x})$ as the **correctly rounded library function** `tanh` of the stated format (in double precision, the `tanh` of the C math library or Python's `math.tanh`; in a stated 32-bit format, that value rounded to 32 bits); odd, in $(-1, 1)$, `tanh(0) = 0` (Volume III, chapter 2). As a remark, mathematically $\tanh x = 2\,\mathrm{sigmoid}(2x) - 1$, but that composition rounds differently in the last digits, and tables that print noise-level digits (Volume III, chapters 4 and 6) were computed with the library function |
 | `relu(x)` | `max(0, x)`: `x` when `x > 0` and `0` otherwise, so `relu(0) = 0`; its slope is taken as `1` for `x > 0` and `0` for `x <= 0` (Volume III, chapter 2) |
 | `gelu(x)` | the exact Gaussian-error linear unit `0.5 * x * (1 + erf(x / sqrt(2)))`, that is `x` times the standard Gaussian cumulative distribution at `x`; the tanh approximation is always named `gelu_tanh` (Volume III, chapter 2) |
 | `silu(x)` | `x * sigmoid(x)` (Volume III, chapter 2) |
 | `erf(x)` | the error function $\frac{2}{\sqrt\pi}\int_0^x e^{-s^2}ds$, odd, with `erf(0) = 0` and limits $\pm 1$; the standard Gaussian cumulative distribution is $\Phi(z) = \frac12\bigl(1 + \mathrm{erf}(z/\sqrt2)\bigr)$. Use the library routine of your language (a reproduction agrees to the printed digits; its series is not needed) |
+| `acos(x)`, `angle(a, b)` | `acos(x)` is the angle in $[0, \pi]$ whose cosine is `x`, for `x` in `[-1, 1]` (clamp a quotient that rounding pushed just outside). `angle(a, b)` for two nonzero vectors is `acos(dot(a, b) / (norm(a) * norm(b)))` |
+| `step(z)` | `1` if `z >= 0` and `0` otherwise, so `step(0) = 1` (Volume III, chapter 1) |
 | `atan2(y, x)` | the angle in radians, in $(-\pi, \pi]$, of the point with horizontal coordinate `x` and vertical coordinate `y` (the angle from the positive horizontal axis, anticlockwise); `atan2(0, 0)` is `0` |
 | `is_finite(x)` | true when `x` is neither `infinity`, `-infinity` nor not-a-number, false otherwise (so `is_finite(0.0 / 1.0)` is true and `is_finite(infinity - infinity)` is false); it is the test that a value can still be used in arithmetic (Volume III, chapter 12) |
 | `pi`, `infinity`, `nan` | the constant $\pi$, positive infinity (`-infinity` is its negative) and the not-a-number value (`is_finite(nan)` is false, `nan == nan` is false) |
 | `and`, `or`, `not` | logical operations on `bool`; `and` and `or` stop at the first operand that decides the result |
 | `x if c else y` | `x` when the condition `c` is true, otherwise `y`; only the chosen operand is evaluated |
 
-**Arithmetic in a stated format.** When a text says an expression is evaluated in `f32` (or another format) *one operation at a time*, each `+`, `-`, `*`, `/` and each call of `sqrt`, `exp`, `log` or `log1p` rounds its exact result, computed from the already rounded inputs, to the nearest number of the format, ties to even. Negation, `abs`, `min`, `max` and comparisons are exact and are not rounding steps. A result beyond the largest finite number becomes `infinity`; tiny results are kept as subnormal numbers (nothing is flushed to zero); `log(0)` is `-infinity`, `1 / infinity` is `0`, and `infinity - infinity` is not a number. Volume II, Chapter 3 uses this to show how a naive loss fails.
+**Arithmetic in a stated format.** When a text says an expression is evaluated in `f32` (or another format) *one operation at a time*, each `+`, `-`, `*`, `/` and each call of `sqrt`, `exp`, `log` or `log1p` rounds its exact result, computed from the already rounded inputs, to the nearest number of the format, ties to even; a value stored into a variable of that format is rounded the same way (`w = w + h` stored in `f32` is the exact sum of the two `f32` numbers rounded to `f32`; a mixed expression says which format each part is evaluated in, for example a quotient of two `f32` losses formed in `f64`). Negation, `abs`, `min`, `max` and comparisons are exact and are not rounding steps. A result beyond the largest finite number becomes `infinity`; tiny results are kept as subnormal numbers (nothing is flushed to zero); `log(0)` is `-infinity`, `1 / infinity` is `0`, and `infinity - infinity` is not a number. Volume II, Chapter 3 uses this to show how a naive loss fails.
 
-Comparison operators are `==`, `!=`, `<`, `<=`, `>`, `>=`. Every ordering comparison (`<`, `<=`, `>`, `>=`) with a not-a-number operand is false, so `v < best` is false when `v` is not a number, and an algorithm that keeps the lowest value seen never keeps a not-a-number one. A **chained comparison** `a <= b < c` means `a <= b and b < c`, with `b` evaluated once; it is only used with the operators `<` and `<=` pointing the same way. Operators bind in
+Comparison operators are `==`, `!=`, `<`, `<=`, `>`, `>=`; on `text` values `==` is true when both have the same characters in the same order (`scheme == "he"`). Every ordering comparison (`<`, `<=`, `>`, `>=`) with a not-a-number operand is false, so `v < best` is false when `v` is not a number, and an algorithm that keeps the lowest value seen never keeps a not-a-number one. A **chained comparison** `a <= b < c` means `a <= b and b < c`, with `b` evaluated once; it is only used with the operators `<` and `<=` pointing the same way. Operators bind in
 the usual order of arithmetic (`^` first, then `*`, `/`, `//`, `mod`, then
 `+`, `-`, then comparisons, then `not`, `and`, `or`). The bitwise operations
 below are always fully parenthesised in the book, so they need no precedence

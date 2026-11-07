@@ -328,7 +328,7 @@ def buggy_training():
         rows2.append([label, f"{_cos(g, g_ok):.6f}", f"{err:.3f}"])
     head = (f"Setup: B = {B} examples, D = {D} inputs, H = {H} hidden units, O = {O} outputs, tanh, mean squared error. Seed {bookrng.seed_of(name)}; draws in order: X ({B} x {D}, row-major), "
             f"V ({D} x 3, row-major), Wt (3 x {O}, row-major), W1 ({H} x {D}, row-major, each draw multiplied by 0.3), W2 ({O} x {H}, row-major, each draw multiplied by 0.3), all normal(); the biases start at 0. "
-            "The targets are T = tanh(X V) Wt (tanh elementwise). Plain full-batch gradient descent, 2000 steps; each entry is the loss before the step with that index.\n\n")
+            "The targets are T = tanh(X V) Wt (tanh elementwise). Plain full-batch gradient descent in double precision, 2000 steps; each entry is the loss before the step with that index.\n\n")
     mid = "\n\nAt the starting weights, the gradient each buggy backward pass returns against the correct one (the 7 x 5 + 7 + 2 x 7 + 2 = 58 numbers):\n\n"
     return (head + _table(["backward pass used"] + [f"step {s}" for s in cps], rows) + mid
             + _table(["bug", "cosine with the correct gradient", "relative L2 error"], rows2))
@@ -408,7 +408,10 @@ def step_curve():
     c = {(f, k): curve(f, k, hs) for f in ("32-bit", "64-bit") for k in ("forward", "central")}
     rows = [[f"1e-{k + 1}"] + [_sci(c[(f, kind)][k], 2) for f in ("32-bit", "64-bit") for kind in ("forward", "central")]
             for k in range(len(hs))]
-    head = "Absolute error of the difference quotient of the loss along W1[2,2] (exact derivative 1.60223547), the loss and every operation of the forward pass rounded to the format.\n\n"
+    head = ("Absolute error of the difference quotient of the loss along W1[2,2] (exact derivative 1.60223547), the loss and every operation of the forward pass rounded to the format. "
+            "Conventions: tanh is the correctly rounded library tanh (rounded to 32 bits in the 32-bit columns); the perturbed weight w + h or w - h is rounded to the format before the loss is evaluated; "
+            "the losses are 32-bit numbers in the 32-bit columns, but the quotient (L(w + h) - L(w - h)) / (2 h) is formed in double precision with the nominal 2 h (forward: (L(w + h) - L(w)) / h), "
+            "and the error is its absolute difference from the double-precision backward gradient.\n\n")
     return head + _table(["h", "32-bit forward", "32-bit central", "64-bit forward", "64-bit central"], rows)
 
 
@@ -488,8 +491,9 @@ def f32_needs_large_steps():
         ok_f64 = sum(within(a, b, 1e-6, 1e-4) for a, b in zip(g32, nums))
         rows.append([f"{h:.0e}", _sci(worst_abs, 2), _sci(worst_rel, 2), f"{ok_f32} of 21", f"{ok_f64} of 21"])
     head = ("Per-entry central differences of Chapter 4's loss on all 21 parameters, with every operation of the forward pass rounded to 32 bits, against the backward pass's gradient rounded to 32 bits. "
-            "Relative error is |a - n| / max(|a|, |n|, 0.001).\n\n")
-    return head + _table(["h", "worst absolute error", "worst relative error", "within (4e-3, 8e-2)", "within (1e-6, 1e-4)"], rows)
+            "Relative error is |a - n| / max(|a|, |n|, 0.001). A gate (atol, rtol) passes an entry when |a - n| <= atol + rtol max(|a|, |n|); tanh is the correctly rounded library tanh rounded to 32 bits, "
+            "the perturbed weight is rounded to 32 bits, and the quotient is formed in double precision with the nominal 2 h. The counts are entries passing.\n\n")
+    return head + _table(["h", "worst absolute error", "worst relative error", "loose gate (4e-3, 8e-2)", "strict gate (1e-6, 1e-4)"], rows)
 
 
 def small_gradient_entries():
@@ -504,8 +508,8 @@ def small_gradient_entries():
     for k in pick:
         n, i = ents[k]
         ae = abs(g[k] - nums[k])
-        rows.append([entry_label(CH4_P, n, i), f"{g[k]:+.6f}", f"{nums[k]:+.6f}", _sci(ae, 2), _sci(ae / abs(g[k]), 2)])
-    head = "32-bit per-entry central differences with h = 5e-3 on Chapter 4's network; the four entries with the smallest and the two with the largest gradient magnitude. Relative error is |a - n| / |a|.\n\n"
+        rows.append([entry_label(CH4_P, n, i), f"{g[k]:+.6f}", f"{nums[k]:+.6f}", _sci(ae, 2), _sci(ae / max(abs(g[k]), abs(nums[k])), 2)])
+    head = "32-bit per-entry central differences with h = 5e-3 on Chapter 4's network; the four entries with the smallest and the two with the largest gradient magnitude. Relative error is |a - n| / max(|a|, |n|).\n\n"
     return head + _table(["entry", "analytic a", "numeric n", "absolute error", "relative error"], rows)
 
 
@@ -651,6 +655,7 @@ def bug_catalogue():
             f"Seed {bookrng.seed_of(name)}; draws in order: X (row-major), T (row-major), W1 (row-major), b1, W2 (row-major), b2, each normal(), the last four multiplied by 0.5. "
             "Per-entry check: central difference with h = 1e-5 on every parameter. "
             f"Directional check: per tensor 4 directions of +-1 entries (seed {bookrng.seed_of(dname)}; for W1, b1, W2, b2 in turn, four directions each, an entry is +1 when integer(2) is 1 and -1 otherwise), step eps = 1e-4, the best of the four kept by relative error. "
+            "The 16 directions are drawn once, before the rows, and reused unchanged for every row (a row rejected by the shape check consumes no draws). "
             f"Both use the gate |a - n| <= {F64_ATOL:g} + {F64_RTOL:g} max(|a|, |n|). The cosine and relative L2 error compare the 58 analytic values with the correct backward pass's.\n\n")
     return head + _table(["bug injected in the backward pass", "cosine with correct gradient", "relative L2 error", "per-entry check: entries failing", "directional check, best of 4"], rows,
                          "lrrrl")
@@ -748,7 +753,7 @@ def kink_scan():
         ana = 1.0 if d > 0.0 else 0.0
         num = (relu(d + h) - relu(d - h)) / (2 * h)
         rows.append([f"{d:+.0e}" if d else "0", f"{ana:.0f}", f"{num:.4f}", f"{abs(ana - num):.4f}", "agree" if abs(ana - num) < 1e-9 else "DISAGREE"])
-    head = f"Central difference of relu(x) at x = delta with step h = {h:g}, against the slope 1 for x > 0 and 0 otherwise (double precision).\n\n"
+    head = f"Central difference of relu(x) at x = delta with step h = {h:g}, against the slope 1 for x > 0 and 0 otherwise (double precision). A row agrees when |difference| < 1e-9.\n\n"
     return head + _table(["delta", "analytic slope", "central difference", "|difference|", "verdict"], rows)
 
 
@@ -771,7 +776,8 @@ def kink_network():
         n = central(L, P, "b1", j, 1e-5)
         rows.append([f"{j}", f"{zs[0]:+.3e}", f"{zs[1]:+.3e}", f"{a:+.6f}", f"{n:+.6f}", "agree" if within(a, n, F64_ATOL, F64_RTOL) else "DISAGREE"])
     head = ("Chapter 4's network with tanh replaced by ReLU (slope 1 for z > 0, otherwise 0). Hidden unit j has pre-activation Z1[b, j] for the two examples b = 0, 1. Per-entry check of the four hidden biases, central difference h = 1e-5, double precision, gate "
-            f"{F64_ATOL:g} + {F64_RTOL:g} max(|a|, |n|).\n\n")
+            f"{F64_ATOL:g} + {F64_RTOL:g} max(|a|, |n|). Each pre-activation is the dot product of a row of W1 with the example, summed from index 0 upward starting at 0.0, plus b1[j]; "
+            "an entry of size 1e-17 is a rounding residue whose sign depends on that order.\n\n")
     return head + _table(["hidden unit j", "Z1[0, j]", "Z1[1, j]", "analytic db1[j]", "central difference", "verdict"], rows)
 
 
@@ -798,5 +804,6 @@ def tolerance_blindness():
         rows.append([label, f"{at:g}", f"{rt:g}", f"{caught} of {len(xs)}"])
     head = (f"The two GELU functions are gelu(x) = x Phi(x) with Phi the standard Gaussian distribution function, and the tanh form 0.5 x (1 + tanh(sqrt(2/pi)(x + 0.044715 x^3))). "
             f"Over the 801 points x = -4.00, -3.99, ..., 4.00 the largest difference between the two derivatives is {max(diffs):.2e}. "
+            "The derivatives are Phi(x) + x phi(x) (phi the standard Gaussian density) and, for the tanh form with t = tanh(sqrt(2/pi)(x + 0.044715 x^3)), 0.5 (1 + t) + 0.5 x (1 - t^2) sqrt(2/pi) (1 + 3 * 0.044715 x^2), tanh the library tanh. "
             "Each gate is asked whether one derivative, taken as the analytic value, agrees with the other, taken as the numeric one.\n\n")
     return head + _table(["gate", "atol", "rtol", "points where the wrong derivative is rejected"], rows)

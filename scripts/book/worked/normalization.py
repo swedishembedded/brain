@@ -154,7 +154,7 @@ def _relu(v):
 
 
 @lru_cache(maxsize=None)
-def stack_run(kind, lr, steps=STACK_STEPS):
+def stack_run(kind, lr, steps=STACK_STEPS, nudge=0.0):
     """Full-batch gradient descent on the deep stack of the initialization chapter, with a
     normalization of the given kind (or none) between every linear layer and its ReLU.
 
@@ -164,6 +164,7 @@ def stack_run(kind, lr, steps=STACK_STEPS):
     n = ini.N_TRAIN
     X, t = ini.make_data(n)
     Ws, bs = ini.init_stack("he")
+    Ws[0][0][0] += nudge
     depth, width = ini.DEPTH, ini.WIDTH
     gam = [[1.0] * width for _ in range(depth)]
     bet = [[0.0] * width for _ in range(depth)]
@@ -223,13 +224,14 @@ def stack_run(kind, lr, steps=STACK_STEPS):
         if kind != "none":
             for l in range(depth):
                 gam[l] = [g - lr * d for g, d in zip(gam[l], gg[l])]
-                bet[l] = [g - lr * d for g, d in zip(bet[l], gbt[l])]
+                if kind != "rms":                       # RMS normalization has no shift: one learned vector, gamma
+                    bet[l] = [g - lr * d for g, d in zip(bet[l], gbt[l])]
     return losses, rms_at, last_at, db0, z_at
 
 
 def _stack_setup(extra=""):
     return (f"Setup: the deep stack of the initialization chapter (10 layers of 64 units, a read-out; ReLU), He start "
-            f"(the stream `initialization.weights` of that chapter, seed 0x{bookrng.seed_of(ini.WEIGHTS_NAME):016x}), "
+            f"(the stream `initialization.weights` of that chapter, seed 0x{bookrng.seed_of(ini.WEIGHTS_NAME):016x}, scale sqrt(2 / 64) times each normal() in the order of that chapter's table: layer by layer, row by row, read-out last), "
             f"biases 0, the first {ini.N_TRAIN} inputs and targets of the stream `initialization.data` "
             f"(seed 0x{bookrng.seed_of(ini.DATA_NAME):016x}), mean squared error, full batch, plain gradient "
             f"descent{extra}.")
@@ -406,7 +408,8 @@ def batch_size_dependence():
     return (f"Setup: the feature of the previous example (population mean 3, variance 4). The probe example has the "
             f"value {PROBE:g}, whose standardized value is ({PROBE:g} - 3) / 2 = 1. It is placed first in a batch of B values "
             f"(the other B - 1 are 3 + 2 * normal() draws, in order). Train mode normalizes with the batch's mean and "
-            f"variance (divisor B, epsilon = {EPS:g}, gamma = 1, beta = 0). 1000 batches per B. "
+            f"variance (divisor B, epsilon = {EPS:g}, gamma = 1, beta = 0). 1000 batches per B; 'sd of output' is the standard deviation of the 1000 outputs with divisor 1000, "
+            "and the percentiles use the book's percentile rule. "
             f"{_gen_note(BATCH_NAME)}; sizes are run in the order 1, 2, 4, 8, 32, 128, continuing one stream.\n\n" +
             _table(["B", "mean of output", "sd of output", "5th percentile", "95th percentile"], rows) +
             f"\n\nEval mode with the exact population statistics (mean 3, variance 4) gives {_g(ev, 6)} for every batch.")
@@ -632,6 +635,16 @@ def _gc_forward_cases():
     return cases
 
 
+def _noise(v):
+    """A central-difference error is rounding noise of size about 1e-10: only its size is reproducible."""
+    return "below 1e-8" if v < 1e-8 else _sci(v)
+
+
+def _below(v, name):
+    """The sum of dx over a group is zero up to rounding for the centred layers; shown for contrast for RMS norm."""
+    return _sci(v) if name == "rms" else "below 1e-14"
+
+
 def norm_gradcheck():
     g = bookrng.generator(GC_NAME)
     n = GC_ROWS * GC_D
@@ -642,20 +655,23 @@ def norm_gradcheck():
     h = 1e-6
     rows = []
     for name, (groups, centre) in _gc_forward_cases().items():
-        def loss(xx, gg=gamma, bb=beta):
+        bta = [0.0] * GC_D if name == "rms" else beta       # RMS normalization has no shift
+        def loss(xx, gg=gamma, bb=bta):
             y, _ = norm_forward(xx, groups, centre, gg, bb)
             return sum(a * b for a, b in zip(dy, y))
-        _, cache = norm_forward(x, groups, centre, gamma, beta)
+        _, cache = norm_forward(x, groups, centre, gamma, bta)
         dx, dgam, dbet = norm_backward(dy, cache, groups, centre, gamma)
         ndx = _central(loss, x, h)
-        ndg = _central(lambda gg: loss(x, gg, beta), gamma, h)
-        ndb = _central(lambda bb: loss(x, gamma, bb), beta, h)
-        rows.append((name, _sci(max(abs(a - b) for a, b in zip(dx, ndx))), _sci(max(abs(a - b) for a, b in zip(dgam, ndg))),
-                     _sci(max(abs(a - b) for a, b in zip(dbet, ndb))), _sci(abs(sum(dx[i] for i in groups[0])))))
+        ndg = _central(lambda gg: loss(x, gg, bta), gamma, h)
+        ndb = _central(lambda bb: loss(x, gamma, bb), bta, h)
+        dbeta_err = "none (no shift)" if name == "rms" else _noise(max(abs(a - b) for a, b in zip(dbet, ndb)))
+        rows.append((name, _noise(max(abs(a - b) for a, b in zip(dx, ndx))), _noise(max(abs(a - b) for a, b in zip(dgam, ndg))),
+                     dbeta_err, _below(abs(sum(dx[i] for i in groups[0])), name)))
     return (f"Setup: a [4, 4] array x, gamma (1 + 0.3 * normal() per column), beta (0.3 * normal() per column) and an arriving "
             f"gradient dy, all drawn in that order, x first, row-major. {_gen_note(GC_NAME)}. The loss is L = sum(dy * y), "
-            f"epsilon = {EPS:g}, central differences with step {h:g}. \"Sum of dx over a group\" is for the first group "
-            f"(column 0 for batch norm, row 0 otherwise); for RMS norm it is not zero and is shown for contrast.\n\n" +
+            f"epsilon = {EPS:g}, central differences with step {h:g}; the differences of a central difference are rounding noise, so values under 1e-8 are printed as a bound. "
+            f"\"Sum of dx over a group\" is for the first group (column 0 for batch norm, row 0 otherwise); for RMS norm it is not zero and is shown for contrast. "
+            f"RMS norm has no shift, so its beta is zero and it has no dbeta.\n\n" +
             _table(["layer", "largest |dx - numeric|", "largest |dgamma - numeric|", "largest |dbeta - numeric|",
                     "sum of dx over a group"], rows))
 
@@ -726,8 +742,8 @@ def epsilon_effect():
         rel = math.sqrt(sum((a - b) ** 2 for a, b in zip(y5, y6)) / sum(b * b for b in y6))
         rows.append((_g(s, 4), _g(math.sqrt(v), 6), _g(math.sqrt(sum(a * a for a in y5) / n), 4),
                      _g(math.sqrt(sum(a * a for a in y6) / n), 4), _sci(rel)))
-    return (f"Setup: layer norm (gamma = 1, beta = 0) of the row s * u with u = {_vec(EPS_BASE, 1)} (mean 0, sd "
-            f"{_g(math.sqrt(sum(a * a for a in EPS_BASE) / len(EPS_BASE)), 4)}, n = 8), for a scale s. \"Relative difference\" is "
+    return (f"Setup: layer norm (gamma = 1, beta = 0) of the row s * u with u = {_vec(EPS_BASE, 1)} (mean "
+            f"{_g(sum(EPS_BASE) / n, 4)}, sd with divisor n = 8 {_g(math.sqrt(sum((a - sum(EPS_BASE) / n) ** 2 for a in EPS_BASE) / n), 4)}), for a scale s. \"Relative difference\" is "
             f"the Euclidean norm of the difference between the two outputs divided by the norm of the output at epsilon = 1e-6.\n\n" +
             _table(["scale s", "sd of the row", "rms of output, eps = 1e-5", "rms of output, eps = 1e-6", "relative difference"],
                    rows))
@@ -735,19 +751,30 @@ def epsilon_effect():
 
 # ------------------------------------------------------------------ training table
 
+def _stable_cell(v, w):
+    """A loss in the table's precision when a change of 1e-12 in one starting weight leaves its third significant digit unchanged
+    (a loss that has overflowed counts as 'not finite'), otherwise only the leading digits that survive, or 'unstable'."""
+    v = v if v is not None and math.isfinite(v) and v < 1e30 else None
+    w = w if w is not None and math.isfinite(w) and w < 1e30 else None
+    return ini._stable_loss(v, w).replace("not finite", "not finite")
+
+
 def stack_training():
     rows = []
     for lr in STACK_RATES:
         for kind in ("none", "batch", "layer", "rms"):
             losses = stack_run(kind, lr)[0]
+            twin = stack_run(kind, lr, nudge=ini.NUDGE)[0]
             cells = []
             for s in (0, 10, 30, 100):
-                cells.append(_loss(losses[s]) if s < len(losses) else "not finite")
+                cells.append(_stable_cell(losses[s] if s < len(losses) else None, twin[s] if s < len(twin) else None))
             rows.append((lr, KIND_LABEL[kind]) + tuple(cells))
-    return (_stack_setup(", 100 steps") + " A normalization (gamma = 1, beta = 0 at the start, trained with the same rate, "
+    return (_stack_setup(", 100 steps") + " A normalization (gamma = 1 and, for batch and layer norm, beta = 0 at the start, trained with the same rate, "
             f"epsilon = {EPS:g}) sits between each of the ten linear layers and its ReLU; batch norm takes its statistics "
             "over the 32 examples, layer norm and RMS norm over the 64 units of an example. "
-            "\"not finite\" means the loss overflowed or exceeded 1e30 before that step.\n\n" +
+            "\"not finite\" means the loss overflowed or exceeded 1e30 before that step. A loss that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 "
+            "is printed with the leading digits that survive ('about 0.45') or as 'unstable'. RMS norm has only the vector gamma (no shift beta); batch norm and layer norm have gamma and beta, trained with the same rate; "
+            "the weights, biases and gamma and beta are all updated by plain gradient descent.\n\n" +
             _table(["rate", "layers", "step 0", "step 10", "step 30", "step 100"], rows, "rlrrrr"))
 
 
@@ -771,8 +798,9 @@ def bias_before_norm():
     rows = []
     for kind in ("none", "batch", "layer", "rms"):
         db = stack_run(kind, 0.01)[3]
-        rows.append((KIND_LABEL[kind],) + tuple(_sci(db[l - 1]) for l in (1, 5, 10)))
-    return (_stack_setup() + " Entries are the Euclidean norm of the gradient of the bias vector b_l (64 numbers) at step 0.\n\n" +
+        rows.append((KIND_LABEL[kind],) + tuple(("below 1e-14" if db[l - 1] < 1e-14 else _sci(db[l - 1])) for l in (1, 5, 10)))
+    return (_stack_setup() + " Entries are the Euclidean norm of the gradient of the bias vector b_l (64 numbers) at step 0; "
+            "a value at the level of rounding error (under 1e-14) is printed as a bound.\n\n" +
             _table(["layers", "layer 1", "layer 5", "layer 10"], rows))
 
 

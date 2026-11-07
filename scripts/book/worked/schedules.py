@@ -171,18 +171,30 @@ class Run:
 
     def __init__(self):
         self.losses, self.norms, self.clipped, self.update_rms = {}, [], [], []
+        self._args, self._twin = None, None
+
+    @property
+    def twin(self):
+        """The same run with one starting weight changed by NUDGE: a quantity that differs between the two is chaotic,
+        and its digits cannot be reproduced by another implementation."""
+        if self._twin is None:
+            schedule, stream, steps, clip, outlier, dense, every = self._args
+            self._twin = train(schedule, stream, steps, clip, outlier, dense, every, nudge=NUDGE)
+        return self._twin
 
 
-def train(schedule, stream="schedules.batches", steps=RUN_STEPS, clip=None, outlier=None, dense=60, every=10):
+def train(schedule, stream="schedules.batches", steps=RUN_STEPS, clip=None, outlier=None, dense=60, every=10, nudge=0.0):
     """AdamW (beta1 0.9, beta2 0.999, eps 1e-8, decoupled decay LAMBDA) with learning rate schedule(t) at step t.
 
     clip: None, or tau: when ||g|| > tau the gradient is multiplied by tau / (||g|| + 1e-6) (global-norm clip).
     outlier: None, or (step, factor): that step's gradient is multiplied by factor before anything else."""
     net, xs, ys, theta = problem()
     theta = list(theta)
+    theta[0] += nudge
     n = len(theta)
     m, v = [0.0] * n, [0.0] * n
     run = Run()
+    run._args = (schedule, stream, steps, clip, outlier, dense, every)
     run.losses[0] = net.loss(theta, xs, ys)
     for t, idx in enumerate(batch_lists(stream, steps)):
         g = net.gradient(theta, [xs[i] for i in idx], [ys[i] for i in idx])
@@ -212,6 +224,45 @@ def train(schedule, stream="schedules.batches", steps=RUN_STEPS, clip=None, outl
     return run
 
 
+NUDGE = 1e-12        # change of one starting weight used to test whether a quantity is chaotic
+STABLE_TOL = 1e-3    # relative change under the nudge above which a quantity is printed as 'unstable'
+
+
+def cell(f, runs, digits=4):
+    """The mean over `runs` of the quantity f(run), to `digits` decimals, or 'unstable' when the nudged twins of the
+    runs give a mean that differs in the third significant digit."""
+    v = sum(f(r) for r in runs) / len(runs)
+    w = sum(f(r.twin) for r in runs) / len(runs)
+    return _stable_text(v, w, digits)
+
+
+def _stable_text(v, w, digits):
+    """v to `digits` decimals when the nudged value w agrees to the third significant digit; otherwise 'about x' with
+    two significant digits when v and w differ by at most 2%, one significant digit when they round alike, and
+    'unstable' when they do not even agree to that."""
+    if abs(v - w) <= STABLE_TOL * max(abs(v), 1e-12):
+        return _fx(v, digits)
+    if abs(v - w) <= 0.02 * max(abs(v), 1e-12):
+        return f"about {(v + w) / 2:.2g}"
+    if f"{v:.1g}" == f"{w:.1g}":
+        return f"about {v:.1g}"
+    return "unstable"
+
+
+def span_cell(f, runs, digits=4):
+    """'lowest to highest' of f over the runs, as for `cell`, or 'unstable' when any of the runs is."""
+    vs = [f(r) for r in runs]
+    ws = [f(r.twin) for r in runs]
+    parts = [_stable_text(a, b, digits) for a, b in zip(vs, ws)]
+    if any(t == "unstable" for t in parts):
+        return "unstable"
+    if all(not t.startswith("about") for t in parts):
+        return f"{_fx(min(vs), digits)} to {_fx(max(vs), digits)}"
+    lo = min(zip(vs, ws))[0]
+    hi = max(zip(vs, ws))[0]
+    return f"about {lo:.2g} to {hi:.2g}"
+
+
 def worst(run, lo, hi):
     """The largest recorded loss after s updates for lo <= s <= hi."""
     return max(v for s, v in run.losses.items() if lo <= s <= hi)
@@ -226,6 +277,11 @@ def tail(run, steps=RUN_STEPS):
 ORDERS = ["schedules.batches"] + [f"schedules.batches.{k}" for k in range(1, 5)]
 
 
+def _unstable_note():
+    return ("An entry that changes in its third significant digit when one starting weight is changed by 1e-12 belongs to a chaotic run (rounding noise grows into any difference) "
+            "and is printed with only the leading digits that survive the change ('about 0.089'), or as 'unstable' when not even one does: its other digits cannot be reproduced in another implementation.")
+
+
 def _setup_text():
     net, xs, ys, theta = problem()
     return (f"The network, data and starting weights are those of Chapter 7 (generator `optimizers.mlp`, seed {_seed('optimizers.mlp')}; "
@@ -238,7 +294,8 @@ def _setup_text():
 # ------------------------------------------------------------------ 1. a constant rate
 
 
-PEAK_HIGH = 3.0
+PEAK_HIGH = 3.0       # the peak of the warmup table: thirty times the best constant
+PEAK_COMPARE = 1.0    # the peak of the schedule comparison: ten times the best constant
 PEAK_TUNED = 0.1
 CLEAN_PEAK = 0.3
 CONSTANT_GRID = (0.03, 0.1, 0.3, 1.0, 3.0)
@@ -248,9 +305,11 @@ def constant_rates():
     rows = []
     for lr in CONSTANT_GRID:
         r = train(constant(lr))
-        rows.append([f"{lr:g}", _fx(r.losses[2], 4), _fx(worst(r, 1, 50), 4), _fx(r.losses[100], 4), _fx(worst(r, 301, RUN_STEPS), 4), _fx(tail(r), 4)])
+        rows.append([f"{lr:g}", cell(lambda q: q.losses[2], [r]), cell(lambda q: worst(q, 1, 50), [r]), cell(lambda q: q.losses[100], [r]),
+                     cell(lambda q: worst(q, 301, RUN_STEPS), [r]), cell(tail, [r])])
     head = (_setup_text() + " Entries: the mean loss over all 200 examples after 2 updates; the largest loss over steps 1 to 50 (every step "
-            "recorded); the loss after 100 updates; the largest loss over steps 301 to 600 (recorded every 10 steps); the mean loss at steps 550, 560, ..., 600 (the tail).\n\n")
+            "recorded); the loss after 100 updates; the largest loss over steps 301 to 600 (recorded every 10 steps: steps 310, 320, ..., 600); the mean loss at steps 550, 560, ..., 600 (the tail). "
+            + _unstable_note() + "\n\n")
     return head + _table(["constant eta", "loss at step 2", "worst, steps 1-50", "step 100", "worst, steps 301-600", "tail"], rows)
 
 
@@ -292,7 +351,7 @@ def adam_early_steps():
             f"(seed {_seed(name)}): coordinate by coordinate, {ES_T} calls of normal() each, in time order. Adam with beta1 = 0.9, beta2 = 0.999, "
             "epsilon = 1e-8 and bias correction. Columns: the exact RMS of the corrected first moment, sqrt((1 - beta1)/(1 + beta1) (1 - beta1^(2t))) / (1 - beta1^t) "
             "(unit gradient variance); the measured RMS of the whole Adam ratio mhat / (sqrt(vhat) + epsilon) over the coordinates (its sampling error is about 1.2%); "
-            "the measured relative spread (standard deviation over mean) of sqrt(vhat) across the coordinates (a few percent of sampling error); the learning rate, as a fraction of its final value, that would keep the typical step at its "
+            "the measured relative spread (standard deviation with divisor 4000, the number of coordinates, over the mean) of sqrt(vhat) across the coordinates (a few percent of sampling error); the learning rate, as a fraction of its final value, that would keep the typical step at its "
             "steady size (the limit divided by the first column); and, for comparison, the linear warmup t/50. "
             f"The limit of the first column for large t is sqrt((1 - beta1)/(1 + beta1)) = {_fx(limit, 4)}.\n\n")
     return head + _table(["t", "RMS of mhat (exact)", "RMS of the Adam ratio (measured)", "spread of sqrt(vhat) (measured)", "rate that keeps the step steady", "linear ramp t/50"], rows)
@@ -325,9 +384,10 @@ def warmup_lengths():
     for W in WARMUPS:
         sched = warmup_constant(PEAK_HIGH, W) if W else constant(PEAK_HIGH)
         r = train(sched)
-        rows.append([W if W else "none"] + [_fx(r.losses[s], 3) for s in (1, 2, 3, 5, 10, 20, 50)] + [_fx(worst(r, 1, 50), 3), _fx(r.losses[100], 3)])
+        rows.append([W if W else "none"] + [cell(lambda q, s=s: q.losses[s], [r], 3) for s in (1, 2, 3, 5, 10, 20, 50)]
+                    + [cell(lambda q: worst(q, 1, 50), [r], 3), cell(lambda q: q.losses[100], [r], 3)])
     head = (_setup_text() + f" The learning rate is eta(t) = {PEAK_HIGH:g} (t + 1) / W for t < W and {PEAK_HIGH:g} afterwards; W = none means {PEAK_HIGH:g} from the first step. "
-            "Entries: the mean loss over all 200 examples after the stated number of updates; 'worst' is the largest of the losses after 1, 2, ..., 50 updates.\n\n")
+            "Entries: the mean loss over all 200 examples after the stated number of updates; 'worst' is the largest of the losses after 1, 2, ..., 50 updates. " + _unstable_note() + "\n\n")
     return head + _table(["warmup W", "step 1", "step 2", "step 3", "step 5", "step 10", "step 20", "step 50", "worst, 1-50", "step 100"], rows)
 
 
@@ -356,11 +416,11 @@ def shape_table():
     for name, fn in shapes:
         rates = [fn(t) for t in range(SHAPE_T)]
         rows.append([name] + [f"{fn(t):.5f}" for t in marks] + [f"{sum(rates) / SHAPE_T:.5f}"])
-    head = (f"Peak eta_max = {SHAPE_PEAK:g}, floor eta_min = {SHAPE_FLOOR:g}, warmup W = {SHAPE_W} steps (eta(t) = {SHAPE_PEAK:g} (t + 1)/{SHAPE_W} for t < {SHAPE_W}), "
+    head = (f"Peak eta_max = {SHAPE_PEAK:g}, floor eta_min = {SHAPE_FLOOR:g}, warmup W = {SHAPE_W} steps for every row but the first (eta(t) = {SHAPE_PEAK:g} (t + 1)/{SHAPE_W} for t < {SHAPE_W}), "
             f"total T = {SHAPE_T} steps, t counted from 0. After the warmup: step decay {SHAPE_PEAK:g} * 0.3^floor((t - 30)/150); exponential {SHAPE_PEAK:g} * 0.99^(t - 30); "
             f"inverse square root {SHAPE_PEAK:g} sqrt(30/(t + 1)); cosine eta_min + (eta_max - eta_min)(1 + cos(pi u))/2 with u = (t - 30)/(T - 30) "
             "(and, in the last row, u = (t - 330)/(T - 330) after a hold of 300 steps at the peak); every decaying row is floored at eta_min. "
-            "The last column is the mean rate over the 600 steps.\n\n")
+            "The first row, 'constant', is the constant rate 0.3 with no warmup (0.3 at t = 0, mean 0.3); the other rows use the warmup. The last column is the mean rate over the 600 steps.\n\n")
     return head + _table(["schedule"] + [f"t = {t}" for t in marks] + ["mean rate"], rows)
 
 
@@ -376,7 +436,7 @@ def cosine_values():
 
 
 def floor_waste():
-    """How many steps of a T-step cooldown run at a rate below 1% of the peak, for a few floors."""
+    """How many steps of a T-step cooldown run at a rate below a hundredth of the peak, for a few floors."""
     T = 600
     rows = []
     for floor_ratio in (0.0, 0.01, 0.1):
@@ -426,14 +486,14 @@ def warmup_longer_than_run():
 
 
 def _comparison_cases():
-    p, f = PEAK_HIGH, PEAK_HIGH / 100
+    p, f = PEAK_COMPARE, PEAK_COMPARE / 100
     return [
         ("constant 0.1 (the best constant)", constant(PEAK_TUNED)),
-        ("constant 3", constant(p)),
-        ("warmup 60, then constant 3", warmup_constant(p, 60)),
+        ("constant 1", constant(p)),
+        ("warmup 60, then constant 1", warmup_constant(p, 60)),
         ("cosine from step 0 (no warmup)", _cosine_no_warmup(p, f, RUN_STEPS)),
-        ("warmup 60, linear to 0.03", linear_decay(p, f, 60, RUN_STEPS)),
-        ("warmup 60, cosine to 0.03", cosine(p, f, 60, RUN_STEPS)),
+        ("warmup 60, linear to 0.01", linear_decay(p, f, 60, RUN_STEPS)),
+        ("warmup 60, cosine to 0.01", cosine(p, f, 60, RUN_STEPS)),
     ]
 
 
@@ -455,14 +515,11 @@ def schedule_comparison():
     res = comparison_results()
     rows = []
     for name, runs in res.items():
-        early = [worst(r, 1, 50) for r in runs]
-        late = [worst(r, 301, RUN_STEPS) for r in runs]
-        tl = [tail(r) for r in runs]
-        rows.append([name, _fx(sum(early) / 5, 3), _fx(sum(late) / 5, 3), _fx(sum(tl) / 5, 4), f"{_fx(min(tl), 4)} to {_fx(max(tl), 4)}"])
+        rows.append([name, cell(lambda q: worst(q, 1, 50), runs, 3), cell(lambda q: worst(q, 301, RUN_STEPS), runs, 3), cell(tail, runs), span_cell(tail, runs)])
     seeds = ", ".join(_seed(s) for s in ORDERS)
     head = (_setup_text() + f" The same run on five batch orders (generators `schedules.batches`, `schedules.batches.1` .. `schedules.batches.4`; seeds {seeds}). "
-            "Peak 3 (ten times the rate that is best for a constant), floor 0.03, T = 600. Entries are means over the five orders: the largest loss over steps 1 to 50; "
-            "the largest loss over steps 301 to 600 (recorded every 10 steps); the tail (mean loss at steps 550, 560, ..., 600); and the range of the tail over the orders.\n\n")
+            "Peak 1 (ten times the rate that is best for a constant), floor 0.01, T = 600. Entries are means over the five orders: the largest loss over steps 1 to 50; "
+            "the largest loss over steps 301 to 600 (recorded every 10 steps); the tail (mean loss at steps 550, 560, ..., 600); and the range of the tail over the orders. " + _unstable_note() + "\n\n")
     return head + _table(["schedule", "worst, steps 1-50", "worst, steps 301-600", "tail (mean of 5)", "tail range"], rows)
 
 
@@ -474,10 +531,10 @@ def peak_robustness():
     for peak in PEAKS:
         const = [train(constant(peak), stream=s) for s in ORDERS]
         sched = [train(cosine(peak, peak / 100, 60, RUN_STEPS), stream=s) for s in ORDERS]
-        rows.append([f"{peak:g}", _fx(sum(tail(r) for r in const) / 5, 4), _fx(sum(worst(r, 1, 50) for r in const) / 5, 3),
-                     _fx(sum(tail(r) for r in sched) / 5, 4), _fx(sum(worst(r, 1, 50) for r in sched) / 5, 3)])
+        rows.append([f"{peak:g}", cell(tail, const), cell(lambda q: worst(q, 1, 50), const, 3),
+                     cell(tail, sched), cell(lambda q: worst(q, 1, 50), sched, 3)])
     head = (_setup_text() + " The five batch orders of the schedule comparison. For each peak rate: a constant rate, and a linear warmup over 60 steps followed by a cosine to one hundredth of the peak "
-            "at step 600. Entries are means over the five orders of the tail (mean loss at steps 550, 560, ..., 600) and of the largest loss over steps 1 to 50.\n\n")
+            "at step 600. Entries are means over the five orders of the tail (mean loss at steps 550, 560, ..., 600) and of the largest loss over steps 1 to 50. " + _unstable_note() + "\n\n")
     return head + _table(["peak", "constant: tail", "constant: worst 1-50", "warmup + cosine: tail", "warmup + cosine: worst 1-50"], rows)
 
 
@@ -498,10 +555,10 @@ def budget_runs():
         for label, sched in (("cosine over the whole run", cosine(peak, floor, W, B)),
                              (f"hold, then cooldown of {COOLDOWN}", cosine(peak, floor, W, B, H=B - W - COOLDOWN))):
             runs = [train(sched, stream=s, steps=B) for s in ORDERS]
-            rows.append([B, label, _fx(sum(tail(r, B) for r in runs) / 5, 4), f"{_fx(min(tail(r, B) for r in runs), 4)} to {_fx(max(tail(r, B) for r in runs), 4)}"])
+            rows.append([B, label, cell(lambda q, B=B: tail(q, B), runs), span_cell(lambda q, B=B: tail(q, B), runs)])
     head = (_setup_text() + f" Peak {CLEAN_PEAK:g}, floor {CLEAN_PEAK / 100:g}, warmup 30 steps; five batch orders as in the schedule comparison. Each run is trained for its own budget B: "
             f"'cosine' decays from step 30 to the floor at step B; 'hold, then cooldown' holds the peak until step B - {COOLDOWN} and then runs the cosine over the last {COOLDOWN} steps. "
-            "Entries: the tail (mean loss at the six steps B - 50, B - 40, ..., B), mean and range over the five orders.\n\n")
+            "Entries: the tail (mean loss at the six steps B - 50, B - 40, ..., B), mean and range over the five orders. " + _unstable_note() + "\n\n")
     return head + _table(["budget B", "shape", "tail (mean of 5)", "tail range"], rows, align="rlrr")
 
 
@@ -635,18 +692,16 @@ def gradient_norm_statistics():
 def clip_threshold_table():
     base = [clean_run(s) for s in ORDERS]
     out_runs = [train(CLEAN_SCHEDULE, stream=s, outlier=(OUT_STEP, OUT_FACTOR), dense=700) for s in ORDERS]
-    rows = [["no clip", "0.0%", _fx(sum(tail(r) for r in base) / 5, 4), _fx(sum(worst(r, 301, 400) for r in out_runs) / 5, 3),
-             _fx(sum(tail(r) for r in out_runs) / 5, 4)]]
+    rows = [["no clip", "0.0%", cell(tail, base), cell(lambda q: worst(q, 301, 400), out_runs, 3), cell(tail, out_runs)]]
     for tau in THRESHOLDS:
         runs = [train(CLEAN_SCHEDULE, stream=s, clip=tau) for s in ORDERS]
         frac = sum(sum(r.clipped) for r in runs) / (5 * RUN_STEPS)
         outs = [train(CLEAN_SCHEDULE, stream=s, clip=tau, outlier=(OUT_STEP, OUT_FACTOR), dense=700) for s in ORDERS]
-        rows.append([f"{tau:g}", f"{100 * frac:.1f}%", _fx(sum(tail(r) for r in runs) / 5, 4),
-                     _fx(sum(worst(r, 301, 400) for r in outs) / 5, 3), _fx(sum(tail(r) for r in outs) / 5, 4)])
+        rows.append([f"{tau:g}", f"{100 * frac:.1f}%", cell(tail, runs), cell(lambda q: worst(q, 301, 400), outs, 3), cell(tail, outs)])
     head = ("The run of the previous tables (warmup 30 steps to 0.3, cosine to 0.003, 600 steps) on the five batch orders of the schedule comparison, with the global-norm clip "
             f"at each threshold tau, once as it is and once with the outlier of the next table (the gradient of step index {OUT_STEP} multiplied by {OUT_FACTOR:g}). "
             "Columns: the share of the 3000 steps of the clean runs in which the clip changed the gradient; the tail (mean loss at steps 550, 560, ..., 600) of the clean runs; "
-            "the largest loss over steps 301 to 400 of the runs with the outlier; their tail. All entries are means of the five orders.\n\n")
+            "the largest loss over steps 301 to 400 of the runs with the outlier; their tail. All loss entries are means of the five orders. " + _unstable_note() + "\n\n")
     return head + _table(["tau", "steps clipped (clean)", "tail (clean)", "worst, 301-400 (outlier)", "tail (outlier)"], rows)
 
 
@@ -659,21 +714,21 @@ def outlier_batch():
     rows, extra = [], []
     for name, tau in cases:
         r = train(CLEAN_SCHEDULE, clip=tau, outlier=(OUT_STEP, OUT_FACTOR), dense=700)
-        rows.append([name] + [_fx(r.losses[s], 4) for s in marks] + [_fx(worst(r, 301, 400), 3)])
+        rows.append([name] + [cell(lambda q, s=s: q.losses[s], [r]) for s in marks] + [cell(lambda q: worst(q, 301, 400), [r], 3)])
 
         def mean_step(lo, hi):
-            return _fx(sum(r.update_rms[lo:hi]) / (hi - lo), 4)
+            return cell(lambda q: sum(q.update_rms[lo:hi]) / len(q.update_rms[lo:hi]), [r])
         extra.append([name, _fx(r.norms[OUT_STEP], 3), mean_step(OUT_STEP - 100, OUT_STEP), _fx(r.update_rms[OUT_STEP], 4),
-                      mean_step(OUT_STEP + 1, OUT_STEP + 21), mean_step(OUT_STEP + 51, OUT_STEP + 151), mean_step(OUT_STEP + 201, OUT_STEP + 301)])
+                      mean_step(OUT_STEP + 1, OUT_STEP + 21), mean_step(OUT_STEP + 51, OUT_STEP + 151), mean_step(OUT_STEP + 201, RUN_STEPS)])
     clean = clean_run()
     head = (_setup_text() + f" Learning rate: warmup 30 steps to {CLEAN_PEAK:g}, cosine to {CLEAN_PEAK / 100:g} at step {RUN_STEPS}. At step index {OUT_STEP} (the {OUT_STEP + 1}st update) the minibatch "
             f"gradient is multiplied by {OUT_FACTOR:g}, as if one batch had carried a loss weight of {OUT_FACTOR:g}; nothing else differs between the rows. "
             f"The same run without an outlier has a gradient norm of {_fx(clean.norms[OUT_STEP], 3)} at that step and a loss of {_fx(clean.losses[600], 4)} at step 600. "
-            "Entries: the mean loss over all 200 examples after the stated number of updates; the last column is the largest loss over steps 301 to 400.\n\n")
+            "Entries: the mean loss over all 200 examples after the stated number of updates; the last column is the largest loss over steps 301 to 400. " + _unstable_note() + "\n\n")
     t1 = _table(["clip", "step 299", "step 300", "step 301", "step 305", "step 320", "step 350", "step 400", "step 600", "worst, 301-400"], rows)
-    t2 = _table(["clip", "norm at the outlier", "steps 200-299", "at the outlier", "steps 301-320", "steps 351-450", "steps 501-600"], extra)
+    t2 = _table(["clip", "norm at the outlier", "steps 200-299", "at the outlier", "steps 301-320", "steps 351-450", "steps 501-599"], extra)
     return (head + t1 + "\n\nThe size of Adam's step in units of the learning rate: the root mean square over the 33 parameters of mhat / (sqrt(vhat) + epsilon), "
-            "averaged over the stated steps (step indices).\n\n" + t2)
+            "averaged over the stated steps (step indices 0 .. 599; the last window, 501 to 599, has 99 steps because the run has no step 600).\n\n" + t2)
 
 
 def outlier_curves(clip):
@@ -715,6 +770,11 @@ def _f32(x):
 NORM_N, NORM_CHUNK = 262_144, 1024
 
 
+def _below_floor(rel, floor=1e-12):
+    """A relative error at the level of 64-bit rounding noise is printed as a bound: its digits depend on the summation order."""
+    return f"below {floor:g}" if rel < floor else f"{rel:.2e}"
+
+
 def norm_accumulation():
     name = "schedules.norm_sum"
     rng = bookrng.generator(name)
@@ -736,10 +796,12 @@ def norm_accumulation():
         ["exact (compensated sum of the 32-bit squares' double-precision values)", f"{exact:.9e}", "0"],
         ["one 32-bit accumulator, in order", f"{serial:.9e}", f"{abs(serial - exact) / exact:.2e}"],
         [f"chunks of {NORM_CHUNK} in 32 bits, chunk sums added in 64 bits", f"{partial_sum_f64:.9e}", f"{abs(partial_sum_f64 - exact) / exact:.2e}"],
-        ["one 64-bit accumulator, in order", f"{f64_serial:.9e}", f"{abs(f64_serial - exact) / exact:.2e}"],
+        ["one 64-bit accumulator, in order", f"{f64_serial:.9e}", _below_floor(abs(f64_serial - exact) / exact)],
     ]
     head = (f"The sum of squares of N = {NORM_N:,} gradient entries: entry i is the 32-bit rounding of 0.01 * z_i, with z_i from normal() of the generator `{name}` (seed {_seed(name)}), "
-            "i = 0 .. N - 1 in order. Every 32-bit operation (the square, each addition) is rounded to the nearest 32-bit float.\n\n")
+            "i = 0 .. N - 1 in order. In the two 32-bit rows every operation (the square, each addition inside a chunk or inside the single accumulator) is rounded to the nearest 32-bit float. "
+            "In the 'exact' and 'one 64-bit accumulator' rows the square of a 32-bit entry is formed in double precision (it is exact there) and summed in double precision in order of index, with Python's compensated fsum for the exact row; "
+            "the chunk sums of the third row are added in double precision in order of chunk. The last row's relative error is rounding noise of that double-precision sum and is printed as a bound.\n\n")
     return head + _table(["method", "sum of squares", "relative error"], rows, align="lrr")
 
 

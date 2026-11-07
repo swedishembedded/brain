@@ -12,7 +12,7 @@ You have written the backward pass of a network, by hand, from the rules of the 
 Train a small network with five different backward passes and look. The task is a regression a small network can fit: 24 examples with 5 inputs, 7 hidden units, 2 outputs, targets produced by a random three-unit teacher network. One backward pass is correct. The other four each contain one realistic mistake: the factor 2 of the squared error dropped from $d\mathbf{Y}$, the mean taken over the batch only instead of over the batch and the outputs, the batch sum of the first-layer weight gradient missing the last example, and the factor $1 - A^2$ of the tanh forgotten. Plain gradient descent, 2000 steps:
 
 <!-- worked: gradient_checking.buggy_training -->
-Setup: B = 24 examples, D = 5 inputs, H = 7 hidden units, O = 2 outputs, tanh, mean squared error. Seed 12102139546493177346; draws in order: X (24 x 5, row-major), V (5 x 3, row-major), Wt (3 x 2, row-major), W1 (7 x 5, row-major, each draw multiplied by 0.3), W2 (2 x 7, row-major, each draw multiplied by 0.3), all normal(); the biases start at 0. The targets are T = tanh(X V) Wt (tanh elementwise). Plain full-batch gradient descent, 2000 steps; each entry is the loss before the step with that index.
+Setup: B = 24 examples, D = 5 inputs, H = 7 hidden units, O = 2 outputs, tanh, mean squared error. Seed 12102139546493177346; draws in order: X (24 x 5, row-major), V (5 x 3, row-major), Wt (3 x 2, row-major), W1 (7 x 5, row-major, each draw multiplied by 0.3), W2 (2 x 7, row-major, each draw multiplied by 0.3), all normal(); the biases start at 0. The targets are T = tanh(X V) Wt (tanh elementwise). Plain full-batch gradient descent in double precision, 2000 steps; each entry is the loss before the step with that index.
 
 | backward pass used | step 0 | step 100 | step 500 | step 1000 | step 2000 |
 |---|---:|---:|---:|---:|---:|
@@ -126,12 +126,12 @@ h^\ast = \left(\frac{3\,\mathrm{rnd}_L}{M_3}\right)^{1/3}, \qquad
 E^\ast = \frac{M_3}{2}\,(h^\ast)^2 .
 $$
 
-At $h^\ast$ the two terms are $\frac{M_3}{6}h^{\ast 2}$ and $\frac{M_3}{3}h^{\ast 2}$: round-off already contributes twice as much as truncation, which is why the valley's bottom lies a little to the right of where the two curves cross. Two consequences matter more than the constants. The best step scales as $u^{1/3}$ and the best achievable error as $u^{2/3}$: the central difference delivers about two thirds of the digits of the format.
+At $h^\ast$ the two terms are $\frac{M_3}{6}h^{\ast 2}$ and $\frac{M_3}{3}h^{\ast 2}$: round-off already contributes twice as much as truncation (the stationarity condition says $\mathrm{rnd}_L/h^\ast = \frac{M_3}{3}h^{\ast 2}$, twice $\frac{M_3}{6}h^{\ast 2}$), which is why the valley's bottom lies a little to the right of where the two curves cross. Two consequences matter more than the constants. The best step scales as $u^{1/3}$ and the best achievable error as $u^{2/3}$: the central difference delivers about two thirds of the digits of the format.
 
 Here is the curve on the same loss as before, along the same weight, with every operation of the forward pass rounded to 32 or to 64 bits (Volume I, Chapter 15, explains the rounding). All four columns are absolute errors against the backward pass's gradient $1.60223547$:
 
 <!-- worked: gradient_checking.step_curve -->
-Absolute error of the difference quotient of the loss along W1[2,2] (exact derivative 1.60223547), the loss and every operation of the forward pass rounded to the format.
+Absolute error of the difference quotient of the loss along W1[2,2] (exact derivative 1.60223547), the loss and every operation of the forward pass rounded to the format. Conventions: tanh is the correctly rounded library tanh (rounded to 32 bits in the 32-bit columns); the perturbed weight w + h or w - h is rounded to the format before the loss is evaluated; the losses are 32-bit numbers in the 32-bit columns, but the quotient (L(w + h) - L(w - h)) / (2 h) is formed in double precision with the nominal 2 h (forward: (L(w + h) - L(w)) / h), and the error is its absolute difference from the double-precision backward gradient.
 
 | h | 32-bit forward | 32-bit central | 64-bit forward | 64-bit central |
 |---|---:|---:|---:|---:|
@@ -190,6 +190,23 @@ L(w) = (1/N) sum_k (a_k w + b_k)^2 with N = 4096, w = 0.3000000119, h = 5e-3. Se
 
 Summing in 64 bits (the terms are still 32-bit) cuts the error by a factor of about 260. This is why a checker's harness should accumulate its loss in the wider format even when the network runs in 32 bits: the quantity being differenced is the loss, and its round-off lands directly in the numerator of the central difference.
 
+Over all 21 parameters of Chapter 4's network, in 32 bits, at several steps, with the two gates used later in this chapter (a pair $(\mathrm{atol}, \mathrm{rtol})$ passes an entry when $|\mathrm{ana} - \mathrm{num}| \le \mathrm{atol} + \mathrm{rtol}\,\max(|\mathrm{ana}|, |\mathrm{num}|)$; the next section derives it):
+
+<!-- worked: gradient_checking.f32_needs_large_steps -->
+Per-entry central differences of Chapter 4's loss on all 21 parameters, with every operation of the forward pass rounded to 32 bits, against the backward pass's gradient rounded to 32 bits. Relative error is |a - n| / max(|a|, |n|, 0.001). A gate (atol, rtol) passes an entry when |a - n| <= atol + rtol max(|a|, |n|); tanh is the correctly rounded library tanh rounded to 32 bits, the perturbed weight is rounded to 32 bits, and the quotient is formed in double precision with the nominal 2 h. The counts are entries passing.
+
+| h | worst absolute error | worst relative error | loose gate (4e-3, 8e-2) | strict gate (1e-6, 1e-4) |
+|---|---:|---:|---:|---:|
+| 1e-05 | 7.03e-03 | 9.62e-01 | 20 of 21 | 0 of 21 |
+| 1e-04 | 8.71e-04 | 7.30e-02 | 21 of 21 | 5 of 21 |
+| 1e-03 | 7.86e-05 | 1.34e-02 | 21 of 21 | 14 of 21 |
+| 5e-03 | 5.94e-05 | 4.44e-03 | 21 of 21 | 18 of 21 |
+| 1e-02 | 2.17e-04 | 1.04e-02 | 21 of 21 | 18 of 21 |
+| 5e-02 | 5.42e-03 | 1.34e-01 | 21 of 21 | 5 of 21 |
+<!-- /worked -->
+
+The strict gate is passed by no entry at $h = 10^{-5}$ and by most at $5 \times 10^{-3}$; the loose gate, whose absolute floor is larger than the noise, passes nearly all at every step shown. Exercise 6 asks for the same table in your language.
+
 **Everything about the step is a property of the loss.** $M_3$, $L$ and $\kappa$ belong to the forward pass being checked, so the right step differs between tensors and models. It is found by measurement: compute the check at a ladder of steps, as in the table above, and choose a step on the flat part of the valley. A model whose check improves steadily as $h$ falls to $10^{-6}$ in 32 bits is not accurate; it is fooling you, and the next measurement will show the error rising again.
 
 ## Comparing two numbers
@@ -205,7 +222,7 @@ $$
 which is scale-free: $0.2$ against $250$ is $8 \times 10^{-4}$. (Dividing by the larger of the two keeps the quantity symmetric and at most 1 when the signs agree.) But a relative error blows up where the true gradient is near zero, and a network has many such entries. Round-off puts a *floor* under the numeric value that does not depend on the size of the gradient: the noise of the numerator is $\mathrm{rnd}_L / h$ however small $\partial L / \partial\theta_i$ is. The relative error of an entry is therefore about $\mathrm{rnd}_L / (h\,|\partial L / \partial\theta_i|)$, unbounded as the gradient shrinks. In Chapter 4's network the entry $b_1[1]$ has a gradient of only $-0.000225$, and in 32 bits:
 
 <!-- worked: gradient_checking.small_gradient_entries -->
-32-bit per-entry central differences with h = 5e-3 on Chapter 4's network; the four entries with the smallest and the two with the largest gradient magnitude. Relative error is |a - n| / |a|.
+32-bit per-entry central differences with h = 5e-3 on Chapter 4's network; the four entries with the smallest and the two with the largest gradient magnitude. Relative error is |a - n| / max(|a|, |n|).
 
 | entry | analytic a | numeric n | absolute error | relative error |
 |---|---:|---:|---:|---:|
@@ -328,7 +345,7 @@ function gradient_check_directional(loss: function(array<real>[N]) -> real,
     return best_ok
 ```
 
-The "best of $n_{\mathrm{dirs}}$" selection exists for a reason. A random direction can be nearly orthogonal to the gradient, so that $\nabla L\cdot\mathbf{v}$ is close to zero and its relative error is large for the wrong reason (noise over a tiny number, as in the last section). Trying a few directions and keeping the best-conditioned one avoids spurious failures.
+The "best of $n_{\mathrm{dirs}}$" selection exists for a reason. A random direction can be nearly orthogonal to the gradient, so that $\nabla L\cdot\mathbf{v}$ is close to zero and its relative error is large for the wrong reason (noise over a tiny number, as in the last section). Trying a few directions and keeping the best-conditioned one (the smallest relative error) avoids spurious failures of that kind. It has a price, which the table below measures: the same selection also lets a real partial bug through more often, and the more directions are tried the more often.
 
 **Why it is stable, and what step it wants.** The directional estimate has a larger numerator than a single-entry one: the loss moves by about $h\,|\nabla L\cdot\mathbf{v}|$, and $\nabla L\cdot\mathbf{v}$ is a sum of $N$ terms, typically of size $\lVert\nabla L\rVert$ rather than one entry's. The round-off floor $\mathrm{rnd}_L / h$ is the same, so the signal-to-noise ratio is better, and a directional check tolerates a smaller $h$ than a per-entry one. But the step is longer than it looks: a direction of $N$ entries of size $\pm1$ has Euclidean length $\sqrt{N}$, so the weights move by $h\sqrt{N}$ in total. A tensor with 864 entries and $h = 5 \times 10^{-3}$ moves by $0.147$ in weight space, which may be well outside the region where the loss is locally smooth, and the truncation error grows with it. The step of a directional check must therefore *shrink as the tensor grows*, and be measured (the section on brain shows such a measurement).
 
@@ -390,7 +407,7 @@ The central difference of $\mathrm{relu}$ at $x$ with $|x| < h$ is $(\mathrm{rel
 At a distance more than $h$ from the kink the two agree; inside, they disagree by up to $\frac12$. With a step of $10^{-3}$:
 
 <!-- worked: gradient_checking.kink_scan -->
-Central difference of relu(x) at x = delta with step h = 0.001, against the slope 1 for x > 0 and 0 otherwise (double precision).
+Central difference of relu(x) at x = delta with step h = 0.001, against the slope 1 for x > 0 and 0 otherwise (double precision). A row agrees when |difference| < 1e-9.
 
 | delta | analytic slope | central difference | |difference| | verdict |
 |---|---:|---:|---:|---:|
@@ -409,7 +426,7 @@ Central difference of relu(x) at x = delta with step h = 0.001, against the slop
 The agreement stops exactly when $\delta$ falls to $h$ (the row $\delta = 10^{-3}$ is the last that agrees; the rows at $5 \times 10^{-4}$ and below show the ramp: $0.75$, $0.55$, and $0.5$ at the kink itself). In a network this is not a curiosity but a certain event, because we do not choose which pre-activations land near zero. Chapter 4's network, with tanh replaced by ReLU, has a hidden unit that sits at the kink for the first example:
 
 <!-- worked: gradient_checking.kink_network -->
-Chapter 4's network with tanh replaced by ReLU (slope 1 for z > 0, otherwise 0). Hidden unit j has pre-activation Z1[b, j] for the two examples b = 0, 1. Per-entry check of the four hidden biases, central difference h = 1e-5, double precision, gate 1e-07 + 1e-05 max(|a|, |n|).
+Chapter 4's network with tanh replaced by ReLU (slope 1 for z > 0, otherwise 0). Hidden unit j has pre-activation Z1[b, j] for the two examples b = 0, 1. Per-entry check of the four hidden biases, central difference h = 1e-5, double precision, gate 1e-07 + 1e-05 max(|a|, |n|). Each pre-activation is the dot product of a row of W1 with the example, summed from index 0 upward starting at 0.0, plus b1[j]; an entry of size 1e-17 is a rounding residue whose sign depends on that order.
 
 | hidden unit j | Z1[0, j] | Z1[1, j] | analytic db1[j] | central difference | verdict |
 |---|---:|---:|---:|---:|---:|
@@ -433,7 +450,7 @@ The remedies are all about where we test, not how.
 Now put the pieces together. Take the bugs that have appeared and a few more, inject each into the backward pass of a small network with distinct sizes ($B = 3$, $D = 5$, $H = 7$, $O = 2$), and see what each of two checks says, in 64 bits where the tolerances can be tight:
 
 <!-- worked: gradient_checking.bug_catalogue -->
-Network B = 3, D = 5, H = 7, O = 2 (58 parameters), tanh, mean squared error, double precision. Seed 9546417083664895460; draws in order: X (row-major), T (row-major), W1 (row-major), b1, W2 (row-major), b2, each normal(), the last four multiplied by 0.5. Per-entry check: central difference with h = 1e-5 on every parameter. Directional check: per tensor 4 directions of +-1 entries (seed 10285673115552927475; for W1, b1, W2, b2 in turn, four directions each, an entry is +1 when integer(2) is 1 and -1 otherwise), step eps = 1e-4, the best of the four kept by relative error. Both use the gate |a - n| <= 1e-07 + 1e-05 max(|a|, |n|). The cosine and relative L2 error compare the 58 analytic values with the correct backward pass's.
+Network B = 3, D = 5, H = 7, O = 2 (58 parameters), tanh, mean squared error, double precision. Seed 9546417083664895460; draws in order: X (row-major), T (row-major), W1 (row-major), b1, W2 (row-major), b2, each normal(), the last four multiplied by 0.5. Per-entry check: central difference with h = 1e-5 on every parameter. Directional check: per tensor 4 directions of +-1 entries (seed 10285673115552927475; for W1, b1, W2, b2 in turn, four directions each, an entry is +1 when integer(2) is 1 and -1 otherwise), step eps = 1e-4, the best of the four kept by relative error. The 16 directions are drawn once, before the rows, and reused unchanged for every row (a row rejected by the shape check consumes no draws). Both use the gate |a - n| <= 1e-07 + 1e-05 max(|a|, |n|). The cosine and relative L2 error compare the 58 analytic values with the correct backward pass's.
 
 | bug injected in the backward pass | cosine with correct gradient | relative L2 error | per-entry check: entries failing | directional check, best of 4 |
 |---|---:|---:|---:|---|
@@ -459,7 +476,7 @@ A passing check establishes one thing: *the gradient the backward pass returned 
 **Whatever the tolerance forgives.** The gate's absolute floor forgives any wrong gradient smaller than $\mathrm{atol}$. Brain has two GELU functions, an exact one built from the error function and a tanh approximation, whose derivatives differ everywhere by a small amount, and a model that borrowed the derivative of one for the other would train on the wrong gradient:
 
 <!-- worked: gradient_checking.tolerance_blindness -->
-The two GELU functions are gelu(x) = x Phi(x) with Phi the standard Gaussian distribution function, and the tanh form 0.5 x (1 + tanh(sqrt(2/pi)(x + 0.044715 x^3))). Over the 801 points x = -4.00, -3.99, ..., 4.00 the largest difference between the two derivatives is 8.68e-04. Each gate is asked whether one derivative, taken as the analytic value, agrees with the other, taken as the numeric one.
+The two GELU functions are gelu(x) = x Phi(x) with Phi the standard Gaussian distribution function, and the tanh form 0.5 x (1 + tanh(sqrt(2/pi)(x + 0.044715 x^3))). Over the 801 points x = -4.00, -3.99, ..., 4.00 the largest difference between the two derivatives is 8.68e-04. The derivatives are Phi(x) + x phi(x) (phi the standard Gaussian density) and, for the tanh form with t = tanh(sqrt(2/pi)(x + 0.044715 x^3)), 0.5 (1 + t) + 0.5 x (1 - t^2) sqrt(2/pi) (1 + 3 * 0.044715 x^2), tanh the library tanh. Each gate is asked whether one derivative, taken as the analytic value, agrees with the other, taken as the numeric one.
 
 | gate | atol | rtol | points where the wrong derivative is rejected |
 |---|---:|---:|---:|
@@ -521,7 +538,7 @@ Answers are at the end of the chapter.
 5. **Predict.** A ReLU unit has pre-activation $z = 3 \times 10^{-4}$ on one example, and the check uses $h = 10^{-3}$ on its bias. What does the central difference report for that example's contribution, and what does the backward pass report? What should you do?
 6. **Explain.** A directional check on a large weight matrix passes. Why does this not prove that the gradient of a weight used at two places in the network includes both uses, and what test would?
 7. **Explain.** Name two kinds of backward-pass error that a passing check with the 32-bit gate cannot detect, and for each say what detects it.
-8. **Predict.** Use the 32-bit table of the section on step size: which of $h = 10^{-5}$ and $h = 5 \times 10^{-3}$ do you expect to pass the strict gate $(10^{-6}, 10^{-4})$ on more entries, and why does the loose gate hide the difference?
+8. **Predict.** Use the last table of the section on step size (the counts of entries within each gate over all 21 parameters): which of $h = 10^{-5}$ and $h = 5 \times 10^{-3}$ do you expect to pass the strict gate $(10^{-6}, 10^{-4})$ on more entries, and why does the loose gate hide the difference?
 
 ## Exercises
 
@@ -535,13 +552,13 @@ Answers are at the end of the chapter.
 
 5. **[Calculate]** A ReLU unit has pre-activation $z = 2 \times 10^{-4}$. For $h = 10^{-3}$ compute the central difference of $\mathrm{relu}$ and compare it with the backward pass. At what $h$ would the two agree?
 
-6. **[Implement]** In your language, implement the loss of Chapter 4's network and the forward and central differences along $W_1[2,2]$, and reproduce the 64-bit columns of `gradient_checking.step_curve` and the table `gradient_checking.fd_orders`. If your language has 32-bit floats and lets you round after every operation, reproduce the 32-bit columns to their order of magnitude and locate the minimum of the central error.
+6. **[Implement]** In your language, implement the loss of Chapter 4's network and the forward and central differences along $W_1[2,2]$, and reproduce the 64-bit columns of `gradient_checking.step_curve` and the table `gradient_checking.fd_orders`. If your language has 32-bit floats and lets you round after every operation, reproduce the 32-bit columns to their order of magnitude (they depend on rounding the perturbed weight and every operation, with the quotient formed in double precision and divided by the nominal $2h$; use the library $\tanh$) and locate the minimum of the central error. Reproduce also `gradient_checking.f32_needs_large_steps`.
 
 7. **[Implement]** Implement the backward pass with the nine injectable bugs of `gradient_checking.bug_catalogue`, the per-entry check with the 64-bit gate, and the best-of-4 directional check, using the generator of Volume I, Chapter 17 with the seeds and draw orders printed in the table. Reproduce the cosine, the relative L2 error and the number of failing entries of every row.
 
 8. **[Implement]** Reproduce `gradient_checking.dims_hide`: four problems drawn one after another from one generator, four bugs, and the per-entry check. Then add a fifth set of sizes of your own with all sizes distinct and a sixth where $H = O = D$ and the weights are symmetric; what does the transposed-product bug do on the sixth?
 
-9. **[Implement]** Reproduce `gradient_checking.directional_miss` (1000 problems from one generator). Then vary the number of directions (1, 4, 16, 64) and the number of dropped examples, and report when a directional check becomes reliable and what it costs in forward passes compared with the per-entry check of 35 entries.
+9. **[Implement]** Reproduce `gradient_checking.directional_miss` (1000 problems from one generator). Then vary the number of directions (1, 4, 16, 64) and the number of dropped examples (1 or 2 of 3), and report how often the bug is accepted for each. State why choosing the best of more directions does not make the check reliable, and what $n$ directions cost in forward passes ($2n$) compared with the per-entry check of 35 entries (70).
 
 10. **[Investigate]** Replace tanh by ReLU in your implementation and scan the margin: shift the first-layer bias of one hidden unit so that its pre-activation on one example is $\delta$, for $\delta = 10^{-1}, 10^{-2}, \dots, 10^{-6}$, and check the unit's bias with $h = 10^{-5}$ in 64 bits. At which $\delta$ does the check start to fail, and how does that compare with $h$? Then run the directional check on the first-layer weights and find the largest perturbation of the pre-activations over the batch; is $\delta$ above it?
 
