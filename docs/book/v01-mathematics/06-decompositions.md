@@ -1054,7 +1054,7 @@ A = [[3, 0], [4, 5]] = sigma_1 u_1 v_1^T + sigma_2 u_2 v_2^T.
 | sum | [[3, 0], [4, 5]] | 2 |
 | A - A_1 | [[1.5, -1.5], [-0.5, 0.5]] | 1 |
 
-|A - A_1|_F = 2.2361 = sigma_2 = 2.2361; the largest stretch of A - A_1 is also 2.2361.
+Frobenius norm of A - A_1 = 2.2361 = sigma_2 = 2.2361; the largest stretch of A - A_1 is also 2.2361.
 <!-- /worked -->
 
 The first piece alone, $\mathbf{A}_1$, leaves an error whose size is exactly
@@ -1183,7 +1183,7 @@ the exact order of its draws, so that the last two columns can be reproduced
 digit for digit.
 
 <!-- worked: decompositions.eckart_young_check -->
-Frobenius error |M - X|_F for rank-r matrices X built four ways (smaller is better), printed to 5 significant digits.
+Frobenius norm of M - X (the error) for rank-r matrices X built four ways (smaller is better), printed to 5 significant digits.
 
 Column 2: orthonormalise (Gram-Schmidt, in order of decreasing column length) the r columns of M with the largest Euclidean norm, and project M onto their span in R^8. Columns 3 and 4 draw from ONE SplitMix64 generator with seed 8136057881202253862 (0x70E915894913E026), seeded once and never reseeded, used for r = 1, 2, 3, 4 in turn. For each r: first the 48 noise values 0.6 * (uniform() - 0.5), row by row (row 0 first), added to M for column 3; then 2000 random subspaces for column 4, each made of r vectors of 8 entries (uniform() - 0.5), drawn vector by vector and orthonormalised by Gram-Schmidt in the order drawn; M is projected on the span and the smallest error of the 2000 is kept.
 

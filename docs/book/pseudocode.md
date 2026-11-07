@@ -23,7 +23,10 @@ Every value has a type, and the book always states it when it matters.
 | `complex` | a pair of `real` numbers, see "Complex numbers" below |
 | `bool` | `true` or `false` |
 | `array<T>[d0, d1, ...]` | a tensor of element type `T` with the given shape |
-| `function(T) -> U` | a function taken as an argument or returned (a `function(real) -> real` maps a number to a number) |
+| `function(T) -> U` | a function taken as an argument or returned (a `function(real) -> real` maps a number to a number; with several arguments the types are listed, `function(real, real) -> real`) |
+| `optional T` | either a value of type `T` or nothing. `x is present` is true when it holds a value and false otherwise; the value is only read after that test |
+| `text` | a string of characters. Its **bytes** are those of its UTF-8 encoding, each an `int` in `0 .. 255`, taken in order: `for b in the bytes of s:` visits them first to last (the text `"ab"` has the bytes `97, 98`) |
+| `(T, U)` | a pair (tuple) of a `T` and a `U`; an argument may have a tuple type, `a: (real, int)`, and `a[0]`, `a[1]` read its first and second component (0-indexed like an array) |
 | `Generator` | the state of a random number generator, see "Randomness" |
 | `none` | the value of a function that returns nothing |
 
@@ -84,7 +87,7 @@ axis; a range keeps it.** So for `a` of shape `[3, 4]`:
 | `a[:, 2]` | `[3]` | column 2 as a vector |
 | `a[::2, :]` | `[2, 4]` | rows 0 and 2 |
 
-A slice is a **view**: it refers to the same storage, so writing through it
+A range with a step `k > 1` has `ceil((stop - start) / k)` elements (`0:5:2` is `0, 2, 4`, three elements; with `stop` the dimension when it is missing). A slice is a **view**: it refers to the same storage, so writing through it
 changes the original. Where a copy is needed, the pseudocode says
 `copy(...)`: `copy(x)` returns a new array (or list) of the same shape and
 values that shares no storage with `x`.
@@ -128,7 +131,7 @@ row of `x: [T, D]`".
 | Operation | Meaning |
 |---|---|
 | `+`, `-`, `*` | addition, subtraction, multiplication |
-| `/` | division: real division, even when both operands are `int` (`7 / 2` is `3.5`) |
+| `/` | division: real division, even when both operands are `int` (`7 / 2` is `3.5`); to halve an `int` size or index use `//` (`N // 2`), never `/` |
 | `a // b` | integer division for `int` operands, rounded toward minus infinity (`7 // 2` is `3`, `-7 // 2` is `-4`) |
 | `a mod n` | remainder after division by `n > 0`, always in `0 .. n - 1`, so that `a = (a // n) * n + (a mod n)` (`-7 mod 2` is `1`) |
 | `a ^ b` | power: `a` to the exponent `b`. It is never exclusive-or (that is `xor`). `a ^ 0` is 1 for every `a`, including `0 ^ 0 = 1`, because it is an empty product |
@@ -144,7 +147,7 @@ row of `x: [T, D]`".
 | `and`, `or`, `not` | logical operations on `bool`; `and` and `or` stop at the first operand that decides the result |
 | `x if c else y` | `x` when the condition `c` is true, otherwise `y`; only the chosen operand is evaluated |
 
-Comparison operators are `==`, `!=`, `<`, `<=`, `>`, `>=`. Operators bind in
+Comparison operators are `==`, `!=`, `<`, `<=`, `>`, `>=`. A **chained comparison** `a <= b < c` means `a <= b and b < c`, with `b` evaluated once; it is only used with the operators `<` and `<=` pointing the same way. Operators bind in
 the usual order of arithmetic (`^` first, then `*`, `/`, `//`, `mod`, then
 `+`, `-`, then comparisons, then `not`, `and`, `or`). The bitwise operations
 below are always fully parenthesised in the book, so they need no precedence
@@ -216,6 +219,8 @@ A `parallel for` promises that no iteration reads anything another
 iteration writes. If an algorithm needs iterations to combine results, it
 uses an explicit reduction (Volume IV), never a shared variable.
 
+Row operations on a matrix `M` are written as statements on slices: `M[r, :] = M[r, :] - c * M[p, :]` subtracts `c` times row `p` from row `r`, and `M[r, :] = M[r, :] / d` divides row `r` by `d`. The sentence forms "subtract `c` times row `p` from row `r`" and "divide row `r` by `d`" mean exactly these statements; each is a loop over the columns of the row.
+
 `swap a, b` exchanges the values of two variables or two array elements or
 two slices of equal shape (`swap x[i], x[j]`, `swap M[r, :], M[p, :]`). The
 sentence forms "swap `a[i]` and `a[j]`" and "swap rows `r` and `p` of `M`"
@@ -237,17 +242,26 @@ random number generator, is passed in.
 
 ## Randomness
 
-Random numbers come from an explicit generator `rng` of type `Generator`:
-`rng.next()` returns the next raw `u64`, `rng.uniform()` returns a
-`real` in $[0, 1)$, `rng.normal()` a sample of $\mathcal{N}(0, 1)$ and
-`rng.integer(n)` an `int` in `0 .. n`, that is `0, ..., n-1`. `shuffle(a, rng)`
-permutes an array in place. Two runs with generators created
-from the same seed produce the same numbers. `entropy()` returns a `u64`
-taken from the operating system, the only nondeterministic call in the book.
-Volume I, chapter "Randomness on a Deterministic Machine", shows how to
-build a generator and gives the exact rules for each of these calls; every
-worked example that draws random numbers prints its seed and the order of
-its draws so that you can reproduce it.
+Random numbers come from an explicit generator `rng` of type `Generator`,
+the SplitMix64 of Volume I, chapter "Randomness on a Deterministic Machine".
+Its state is a `u64`, equal to the seed before the first draw, plus a held
+Gaussian value (initially empty). The calls are:
+
+| Call | Meaning |
+|---|---|
+| `rng.next()` | the next raw `u64`: add `0x9E3779B97F4A7C15` to the state (mod $2^{64}$), then mix the new state; one call consumes one raw value |
+| `rng.uniform()` | `(r >> 11) / 2^53` for one raw value `r`: a `real` in $[0, 1)$ |
+| `rng.integer(n)` | an `int` in `0 .. n-1` (`0, ..., n-1`), the remainder `r mod n` of the first raw value `r >= 2^64 mod n` (rejection sampling) |
+| `rng.normal()` | a sample of $\mathcal{N}(0, 1)$ by Box-Muller. A call with no held value draws `u1 = rng.uniform()` then `u2 = rng.uniform()`, sets `R = sqrt(-2 * log(1 - u1))`, holds `R * sin(2 * pi * u2)` and returns `R * cos(2 * pi * u2)`; the next call returns the held value without drawing anything |
+| `shuffle(a, rng)` | permutes the array `a` in place: for `i` from `n-1` down to `1`, `j = rng.integer(i + 1)` and `swap a[i], a[j]` |
+
+Two runs with generators created from the same seed produce the same numbers.
+`os_entropy()` returns a `u64` taken from the operating system, the only
+nondeterministic call in the book (its name keeps it apart from the entropy of
+a distribution, `entropy(p)`, Chapter 13). The chapter on randomness gives the
+derivation of each rule and checks it on printed values; every worked example
+that draws random numbers prints its seed and the order of its draws so that
+you can reproduce it.
 
 ## Errors
 
@@ -261,7 +275,8 @@ an error code) is up to your language.
 
 Two floating-point results are compared with a tolerance, never with `==`,
 unless the algorithm needs an exact test and says so (for example a pivot
-that is exactly zero, or two integers). `close(a, b, rtol, atol)` is true
+that is exactly zero, or two integers). `close(a, b, rtol, atol)` (arguments always passed by position, in this
+order) is true
 when $\lvert a - b \rvert \le \mathrm{atol} + \mathrm{rtol} \cdot \lvert b \rvert$
 for every element; it also applies to two scalars. Each chapter states the
 tolerance its tests use and explains where it comes from.

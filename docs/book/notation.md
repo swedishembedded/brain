@@ -34,6 +34,16 @@ one and keeps to it.
 | $\approx$ | approximately equal |
 | $:=$ | is defined as |
 | $\mapsto$ | "maps to": $x \mapsto x^2$ is the function that squares |
+| $\pm$, $\mp$ | plus or minus; minus or plus (the lower sign goes with the lower sign of a $\pm$ in the same line) |
+| $\propto$ | is proportional to: equal up to a constant factor that does not depend on the variable of interest |
+| $a \equiv b \pmod m$ | congruent: $a - b$ is a multiple of $m$ (the same remainder on division by $m$) |
+| $\gcd(a, b)$ | the greatest common divisor of two integers |
+| $\ll$, $\lesssim$ | much less than; less than or about equal to, up to a modest constant (Chapters 6, 15) |
+| $\leftarrow$ | assignment in a displayed update: $x \leftarrow x + 1$ replaces the value of $x$ |
+| $\blacksquare$ | end of a proof or derivation |
+| $a \div b$ | integer division, the pseudocode's `//` (Chapter 5) |
+| $\Pi$ | the capital Greek letter pi: the same product as $\prod$, named as a word in Chapter 1 ("$\Pi$ means multiply"); the book writes $\prod$ |
+| $x^\ast$ | a special point of $x$ in a derivation, such as the end of a segment or a fixed point (Chapters 7, 8); $x^\star$ in the calculus table is the minimiser |
 
 ## Scalars, vectors, matrices and tensors
 
@@ -65,6 +75,10 @@ one and keeps to it.
 | $\lambda$, $\boldsymbol{\Lambda}$ | an eigenvalue; the diagonal matrix of eigenvalues |
 | $\mathbf{U}$, $\boldsymbol{\Sigma}$, $\mathbf{V}$ | the factors of the singular value decomposition $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$; $\sigma_i$ is the $i$-th singular value |
 | $\mathbf{A}_r$ | the rank-$r$ truncation of $\mathbf{A}$ (keep the $r$ largest singular values) |
+| $\tilde{\mathbf{x}}$, $\tilde{\mathbf{W}}$ | in Chapter 4, the input with a 1 appended, $(\mathbf{x}, 1)$, and the weight matrix with the bias as an extra last column, $[\mathbf{W}\,|\,\mathbf{b}]$ |
+| $\mathrm{op}(\mathbf{A})$, $\mathrm{ld}$ | in Chapter 5, $\mathbf{A}$ or its transpose according to a flag; the leading dimension, the stride between columns (or rows) of a stored matrix |
+| $\operatorname{trace}\,\mathbf{A}$ | the same as $\mathrm{tr}\,\mathbf{A}$ (Chapter 6 writes it out) |
+| $\overline{z}$, $\overline{\cdot}$ | the complex conjugate, as $\bar z$; a long bar over an expression, such as $\overline{\operatorname{DFT}(\overline{X})}$, conjugates every entry (Chapter 14) |
 | $\omega$ | a rotation rate: angle per unit of position (Chapter 6), or an angular frequency (Chapter 14) |
 | $\Delta$ | $ad - bc$, the determinant of a $2 \times 2$ matrix, in Chapter 4; with a following symbol, $\Delta t$, a small step |
 | $d_{\mathrm{in}}$, $d_{\mathrm{out}}$ | input and output widths of a layer |
@@ -72,6 +86,8 @@ one and keeps to it.
 | $\mathrm{i}$ | the imaginary unit, $\mathrm{i}^2 = -1$ (the pseudocode writes `1i`) |
 | $\mathrm{Re}\,z$, $\mathrm{Im}\,z$, $\bar z$ | real part, imaginary part and complex conjugate of $z$ |
 | $\omega$, $X[k]$, $\mathbf{F}$ | in Chapter 14 only: $\omega = e^{-2\pi\mathrm{i}/N}$ is the primitive $N$-th root of unity, $X[k] = \sum_n x[n]\,\omega^{kn}$ the DFT of the signal $x$, and $\mathbf{F}$ the matrix with entries $\omega^{kn}$ (so $\mathbf{F}^H$ is its conjugate transpose, $\langle u, v\rangle$ the inner product conjugating its first argument) |
+
+Words set upright inside a formula, such as $\mathrm{offset}$, $\mathrm{kv}$ or $\mathrm{head\_dim}$, are labels for quantities the text defines on the spot (the same words as in the pseudocode), not symbols with a fixed meaning.
 
 A tensor has a **number of axes** (its order), written $R$ in Chapter 5; the
 word *rank* is kept for matrices, as in the table above.
@@ -119,6 +135,15 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\max$, $\min$ | largest, smallest of the numbers listed |
 | $\mathrm{sign}(x)$ | $+1$ for $x \ge 0$ and $-1$ for $x < 0$, so $\mathrm{sign}(0) = +1$ (the pseudocode page explains why) |
 | $\mathrm{erf}(x)$ | the error function $\frac{2}{\sqrt\pi}\int_0^x e^{-s^2}ds$ |
+| $\Gamma(z)$ | the gamma function, $\Gamma(n) = (n-1)!$ for a positive integer $n$ and $\Gamma(z+1) = z\Gamma(z)$ (used for the volume of a ball, Chapter 17, Exercise 5) |
+| $\lim_{h \to 0}$ | the limit as $h$ approaches 0: the value the expression gets arbitrarily close to (Chapters 7, 8, 9) |
+| $\tanh(x)$ | the hyperbolic tangent $(e^x - e^{-x})/(e^x + e^{-x})$ (Chapters 7, 8, 15) |
+| $\mathrm{atan2}(y, x)$ | the angle of the point $(x, y)$ (the pseudocode's `atan2`; Chapter 3 and 14) |
+| $\mathrm{relu}(x)$, $\mathrm{clamp}(x, l, u)$ | $\max(0, x)$ and $\min(\max(x, l), u)$, defined where they first appear (Chapter 2) |
+| $\mathrm{log1p}(x)$ | $\log(1 + x)$ computed accurately for tiny $x$ (Chapter 15; the pseudocode's `log1p`) |
+| $\epsilon$ | in Chapters 6, 11, 13 and 15, a small amount or a relative perturbation (as in $x(1 + \epsilon)$ or a probability shifted by $\epsilon$); $\varepsilon$ is reserved for machine epsilon and the tolerances listed in "Symbols with more than one meaning" |
+| $\beta$ | in Chapters 6 and 14 only, a rotation angle (as $\alpha$ is); in Volume II the scale $\beta_w$ of a prior |
+| $\mathrm{atol}$, $\mathrm{rtol}$ | absolute and relative tolerance of `close` (the pseudocode page) |
 | $\varepsilon$, $\varepsilon_{\mathrm{mach}}$ | machine epsilon: the gap between 1 and the next larger floating-point number ($2^{1-p}$, which is $2^{-52}$ in 64 bits); Chapter 15 writes $\varepsilon_{\mathrm{mach}}$ |
 | $u$ | the unit round-off $2^{-p} = \varepsilon_{\mathrm{mach}}/2$: the largest relative error of rounding one number (Chapter 15) |
 | $\mathrm{fl}(x)$ | the floating-point number a computer stores for $x$ (the exact result rounded to the nearest, ties to even) |
@@ -153,6 +178,7 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\bar{x}$, $\bar{X}$ | the sample mean |
 | $s$, $s^2$ | the sample standard deviation and variance (divisor $n - 1$ unless the text says $n$) |
 | $\mathrm{SE}$ | standard error: the standard deviation of an estimate |
+| $\mathrm{PPL}$ | perplexity, $\exp(H(p, q))$ with the entropy in nats (Chapter 13) |
 | $\hat{p}$, $\hat\theta$ | an estimate computed from data (the hat marks an estimate) |
 | $\alpha$ | significance level of a test, or confidence level $1 - \alpha$ |
 | $\mathcal{N}(\mu, \sigma^2)$ | Gaussian with mean $\mu$, variance $\sigma^2$ |

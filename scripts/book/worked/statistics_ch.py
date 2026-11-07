@@ -442,7 +442,11 @@ def test_error_rates():
         pw.append((n, _fx(se_n, 4), _fx(power, 3)))
     return (f"{_generator_line(name)} One generator; first row, then second. An experiment draws A's 500 questions, then B's 500 "
             "(one `rng.uniform()` each, right when below the model's true accuracy), and declares the models different "
-            "when |z| > 1.959964 for the pooled-accuracy z-test; 1000 experiments per row.\n\n"
+            "when |z| > 1.959964 for the pooled-accuracy z-test (pooled accuracy = (pA + pB) / 2, z = (pB - pA) / sqrt(2 pooled (1 - pooled) / 500)); "
+            "1000 experiments per row. \"3 points better\" means B's true accuracy is 0.730 against A's 0.700. "
+            "Second table, analytic: both accuracies taken as 0.70, so the standard error of the difference is sqrt(2 * 0.7 * 0.3 / n); "
+            "the chance of detecting is the two-sided power P(|z| > 1.959964) when z is Gaussian with mean 0.03 / standard error and "
+            "standard deviation 1, that is 1 - Phi(1.959964 - shift) + Phi(-1.959964 - shift) with shift = 0.03 / standard error.\n\n"
             + _table(["truth", "questions", "share of 1000 experiments declared different"], rows, "lrr")
             + "\n\n" + _table(["questions n", "standard error of the difference", "chance of detecting a 3-point gain"], pw))
 
@@ -649,7 +653,7 @@ def bootstrap_median():
            "`rng.integer(25)`, each the index into the ascending latencies above. The median of 25 values is "
            "the 13th smallest. Interval ends: the 2.5th and 97.5th percentiles of the sorted replicates by linear "
            "interpolation at position q (R - 1). The Gaussian row for the mean is the estimate plus or minus 1.959964 times s/sqrt(25), s the standard deviation with "
-           "divisor n - 1.", ""]
+           "divisor n - 1. The mean and the median rows share the same resamples: each of the 10,000 resamples yields both its mean and its median.", ""]
     out.append(_table(["statistic", "estimate (ms)", "lower end of 95 percent interval", "upper end", "how"],
                       [("mean", _fx(_mean(x), 1), _fx(_mean(x) - Z95 * se_mean, 1), _fx(_mean(x) + Z95 * se_mean, 1), "standard error s/sqrt(n)"),
                        ("mean", _fx(_mean(x), 1), _fx(_percentile(means, 0.025), 1), _fx(_percentile(means, 0.975), 1), "bootstrap"),
@@ -704,7 +708,8 @@ def cluster_bootstrap():
     return (f"{_generator_line(CLUSTER_NAME)} One generator. Experiment: 15 sequences of 16 frames; per sequence one `rng.uniform()` u gives "
             "its success probability 0.3 + 0.6 u, then 16 `rng.uniform()` calls give its frames (1 when below that probability). "
             "First 2000 fresh experiments (the target is the standard deviation of their overall accuracy, divisor 2000). "
-            f"Then {CL_DATASETS} more experiments in turn, each a data set; for each, {CL_RESAMPLES} rounds, a round making "
+            f"Then {CL_DATASETS} more experiments in turn, each a data set; each data set is generated immediately before its own "
+            f"{CL_RESAMPLES} rounds (data set 1, its rounds, data set 2, its rounds, ...); a round makes "
             "240 calls of `rng.integer(240)` over its frames in order, sequence by sequence ('frames': accuracy of the "
             "resampled frames) and then 15 calls of `rng.integer(15)` over its sequences ('whole sequences': accuracy of "
             "the resampled sequences). Each data set's standard error is the standard deviation of its "
@@ -756,10 +761,13 @@ def best_of_twenty():
         best_gaps.append(best)
     rows = [("a single test: share declared different", _fx(hits / tests, 3), "0.050"),
             ("20 tests, any declared different at 0.05", _fx(any_sig / runs, 3), _fx(1 - 0.95 ** m, 3)),
-            (f"20 tests, any declared different at 0.05/20 (z > {_fx(z_bonf, 2)})", _fx(any_bonf / runs, 3), _fx(1 - (1 - 0.0025) ** m, 3)),
+            (f"20 tests, any declared different at 0.05/20 (z > {_fx(z_bonf, 4)})", _fx(any_bonf / runs, 3), _fx(1 - (1 - 0.0025) ** m, 3)),
             ("average gap of the best-looking of 20 configurations (points)", _fx(100 * _mean(best_gaps), 2), "0 (true gap)")]
     return (f"{_generator_line(name)} One generator, 400 repeats in turn. A repeat draws the baseline's 500 answers (one `rng.uniform()` "
             "each, right when below 0.7), then for each of the 20 configurations its 500 answers in the same question order. "
+            "A test is one (repeat, configuration) pair, so 'a single test: share declared different' is the share over all 400 x 20 = 8000 tests. "
+            "'Best-looking' is the configuration with the largest signed gap (B wins minus A wins, divided by 500). "
+            "The Bonferroni z is the exact two-sided quantile for the level 0.05/20, 3.0233 (the Gaussian value holding 1 - 0.0025 within -z and z). "
             "The test per configuration is the paired z (B wins minus A wins over discordant pairs; variance with divisor n - 1 of "
             "the per-question differences), compared with 1.959964, or with the Bonferroni z for the level 0.05/20.\n\n"
             + _table(["400 repeats of: baseline and 20 configurations, all truly 0.70", "simulated", "independent-tests formula"], rows, "lrr"))

@@ -338,7 +338,7 @@ other order, and the buffer that comes out is already in the row-major layout
 the caller wanted. Every row-major program that calls a column-major library
 does this, and every one that forgets it, or applies it to one operand and not
 the other, gets a transposed or scrambled result of a perfectly valid shape.
-If the matrices are square, even the shape check passes.
+The routine's own checks do not protect against this: a buffer-length and leading-dimension check passes for every shape once the leading dimension is chosen large enough to satisfy it (Exercise 10 asks for both mistakes), while the numbers are wrong.
 
 ## Strides: the general description
 
@@ -807,6 +807,8 @@ has twelve entries from seven stored numbers. How many stored numbers each
 broadcast actually touches:
 
 <!-- worked: arrays.broadcast_cost -->
+Symbol values: T = 7 and D = 5 in the first three rows; B = 2 and T = 4 in the last row.
+
 | broadcast | view strides | elements seen | stored numbers touched |
 |---|---:|---:|---:|
 | bias [D] over [T, D] | (0, 1) | 35 | 5 |

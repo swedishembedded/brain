@@ -57,7 +57,7 @@ function make(values: array<real>[S], shape: array<int>[R]) -> Array     # row-m
 function get(a: Array, index: array<int>[R]) -> real                    # require every index in bounds
 function set(a: inout Array, index: array<int>[R], value: real) -> none
 function transpose(a: Array, i: int, j: int) -> Array                     # swap two axes of shape and strides
-function slice(a: Array, start, stop, step: array<int>[R]) -> Array      # half-open, 0 <= start <= stop <= dim, step >= 1
+function slice(a: Array, start, stop, step: array<int>[R]) -> Array      # half-open, 0 <= start <= stop <= dim, step >= 1; axis length ceil((stop - start) / step)
 function broadcast_shape(p: array<int>[P], q: array<int>[Q]) -> array<int>[max(P, Q)]
 function broadcast_to(a: Array, shape: array<int>[R]) -> Array           # stride 0 on stretched axes
 function add(a: Array, b: Array) -> Array                                # require equal shapes
@@ -65,7 +65,7 @@ function to_list(a: Array) -> array<real>[numel]                         # eleme
 function reshape(a: Array, shape: array<int>[Q]) -> Array                # view if contiguous, else copy
 ```
 
-`slice` requires `0 <= start[k] <= stop[k] <= shape[k]` and `step[k] >= 1` on every axis (anything else is an error); `start[k] == stop[k]` gives an empty axis of size $0$. `reshape` of a contiguous view keeps the view's offset. `add` accepts only equal shapes. To add a column to a row you call `broadcast_to` on both, which is Chapter 5's explicit-broadcast policy. This is not a limitation to be fixed later; it is the design, because a silent broadcast is the origin of the attention-heads bug of that chapter.
+`slice` requires `0 <= start[k] <= stop[k] <= shape[k]` and `step[k] >= 1` on every axis (anything else is an error); `start[k] == stop[k]` gives an empty axis of size $0$. The new axis $k$ has $\lceil (\mathrm{stop}_k - \mathrm{start}_k)/\mathrm{step}_k \rceil$ elements (the integers $\mathrm{start}_k, \mathrm{start}_k + \mathrm{step}_k, \dots$ below $\mathrm{stop}_k$), its stride is the old stride times $\mathrm{step}_k$, and the offset moves by $\sum_k \mathrm{start}_k\,\mathrm{stride}_k$; for $\mathrm{step} = 1$ the length is $\mathrm{stop} - \mathrm{start}$. `reshape` of a contiguous view keeps the view's offset. `add` accepts only equal shapes. To add a column to a row you call `broadcast_to` on both, which is Chapter 5's explicit-broadcast policy. This is not a limitation to be fixed later; it is the design, because a silent broadcast is the origin of the attention-heads bug of that chapter.
 
 **Why it matters later.** Every tensor in Volumes III to XVI is this record. The transpose that costs nothing, the slice that aliases, and the reshape that sometimes copies explain why a model's layout change is free in one place and a copy of gigabytes in another (Volume IV), and why a kernel needs the strides as arguments.
 
@@ -207,17 +207,17 @@ The acceptance test catches genuine mistakes in the update. Error divided by the
 |---|---:|---:|
 | [1.0, 2.0, 3.0] | 3.4076059644443806 | 3.4076059644443806 |
 | [88.0, 88.0, 88.0] | 89.09861228866811 | 89.09861228866811 |
-| [1000.0, 1000.0, 1000.0] | fails | 1001.0986122886682 |
-| [1000.0, 0.0, -1000.0] | fails | 1000.0 |
-| [-1000.0, -1000.0, -1000.0] | fails | -998.9013877113318 |
-| [-800.0, -801.0] | fails | -799.6867383124818 |
+| [1000.0, 1000.0, 1000.0] | inf (wrong) | 1001.0986122886682 |
+| [1000.0, 0.0, -1000.0] | inf (wrong) | 1000.0 |
+| [-1000.0, -1000.0, -1000.0] | -inf (wrong) | -998.9013877113318 |
+| [-800.0, -801.0] | -inf (wrong) | -799.6867383124818 |
 | [0.0, -inf] | 0.0 | 0.0 |
-| [-inf, -inf] | fails | -inf |
+| [-inf, -inf] | -inf | -inf |
 | [0.0] | 0.0 | 0.0 |
 
 Cross-entropy by lse(z) - z[t] for z = [1000.0, 998.0, 990.0, 0.0, -5.0], t = 1: 2.1269679983689684.
 
-The naive column shows only whether the formula as written survives: its failures (overflow, or the logarithm of zero) are the point. The empty list must be refused with an error.
+The naive column evaluates the formula as written in IEEE arithmetic (exp overflows to inf above about 709.78, exp of a very negative number underflows to 0, and log(0) = -inf); (wrong) marks a value that differs from logsumexp(z). The naive formula is right for the all -inf row, because log(0) = -inf is the correct answer; the special case there only avoids computing -inf - (-inf). The empty list must be refused with an error.
 <!-- /worked -->
 
 The first case is the clearest: each of the $10^6$ terms $10^{-16}$ is smaller than half the gap above $1$ ($1.1 \times 10^{-16}$), so a left-to-right sum never moves off $1.0$, and loses all $10^{-10}$ of the true excess. The compensated sum recovers it. The third case adds $10^6$ small terms to a large one and then cancels the large one (Chapter 15, "Cancellation"): the left-to-right sum is off by about $6 \times 10^{-11}$ on an answer of $0.01$, a relative error near $6 \times 10^{-9}$, while the compensated sum is exact to the last digit shown.
@@ -245,11 +245,11 @@ function integer(g: inout Generator, n: int) -> int:
     loop:
         r = next(g)
         if r >= threshold: return r mod n
-function normal(g: inout Generator) -> real      # Box-Muller; the sine half of a pair is kept for the next call
+function normal(g: inout Generator) -> real      # Chapter 17's rule: Box-Muller, R cos first, the sine half is held for the next call
 function shuffle(a: inout array<T>[n], g: inout Generator) -> none     # Fisher-Yates, i = n-1 down to 1, j = integer(g, i+1)
 ```
 
-The constants are in Chapter 17: `GAMMA` = `0x9E3779B97F4A7C15`, and the two multipliers `0xBF58476D1CE4E5B9` and `0x94D049BB133111EB`; the mixing steps are shifts by $30$, $27$ and $31$. `integer(g, n)` needs the integer $2^{64}$ (Pseudocode Conventions: `int` is exact): in a language with only $64$-bit unsigned integers, compute the threshold $2^{64} \bmod n$ as $(2^{64} - n) \bmod n$ and treat $n = 2^{64}$ separately (threshold $0$, the result is the raw value). `integer(g, 1)` has threshold $0$, so it consumes one raw value and returns $0$. Two choices are fixed here so that every implementation produces the same numbers. `normal` uses $u_1$ then $u_2$ as the two uniforms of a pair, computes $R = \sqrt{-2\ln(1 - u_1)}$ with angle $2\pi u_2$, returns $R\cos$ first and holds $R\sin$ for the next call. `shuffle` draws exactly one `integer(g, i + 1)` per position, from the last position down to position $1$.
+The constants are in Chapter 17: `GAMMA` = `0x9E3779B97F4A7C15`, and the two multipliers `0xBF58476D1CE4E5B9` and `0x94D049BB133111EB`; the mixing steps are shifts by $30$, $27$ and $31$. `integer(g, n)` needs the integer $2^{64}$ (Pseudocode Conventions: `int` is exact): in a language with only $64$-bit unsigned integers, compute the threshold $2^{64} \bmod n$ as $(2^{64} - n) \bmod n$ and treat $n = 2^{64}$ separately (threshold $0$, the result is the raw value). `integer(g, 1)` has threshold $0$, so it consumes one raw value and returns $0$. `normal` is the rule of Chapter 17 (the call returns the cosine half first and holds the sine half for the next call, drawing nothing); spelled out, it uses $u_1$ then $u_2$ as the two uniforms of a pair, computes $R = \sqrt{-2\ln(1 - u_1)}$ with angle $2\pi u_2$, returns $R\cos$ first and holds $R\sin$ for the next call. `shuffle` draws exactly one `integer(g, i + 1)` per position, from the last position down to position $1$.
 
 **Why it matters later.** Every experiment in Volumes II to XVI starts from a seed, and a result you cannot reproduce is a result you cannot debug. Every seed below is simply given: a generator started at a seed has the state equal to that seed before its first call, and each test names the calls it makes, in order. The tests below are bit-exact on purpose: unlike almost everything else in this volume, the generator's output is an integer sequence that either matches or does not, and a match is a strong sign that the shifts, the constants and the order of operations are all right.
 
@@ -338,7 +338,7 @@ function gradient(f: function(array<real>[N]) -> real, x: array<real>[N]) -> arr
 function close(a: array<real>[N], b: array<real>[N], rtol: real, atol: real) -> bool
 ```
 
-The rule $h \propto \varepsilon^{1/3}$ is Chapter 15's: truncation error shrinks as $h^2$, round-off error grows as $1/h$, and they balance at the cube root of the machine epsilon, times the scale of the argument. Dividing by $x_p - x_m$ rather than $2h$ removes the error from the rounding of $x \pm h$ itself.
+Compute $\varepsilon^{1/3}$ as `pow(eps, 1/3)` with the 64-bit exponent $1/3$ (the float nearest one third), not with a cube-root function: the two differ in the last digits, and since $h$ enters every numerical gradient, the difference reaches the last printed digits of the tables that use it. The rule $h \propto \varepsilon^{1/3}$ is Chapter 15's: truncation error shrinks as $h^2$, round-off error grows as $1/h$, and they balance at the cube root of the machine epsilon, times the scale of the argument. Dividing by $x_p - x_m$ rather than $2h$ removes the error from the rounding of $x \pm h$ itself.
 
 The gradient check has a fixed shape. Take a function that uses the earlier milestones, so that the check also tests them: the function
 $$f(\mathbf{x}) = \log \sum_{i} e^{z_i} + \tfrac{1}{2}\lVert \mathbf{x} \rVert^2, \qquad \mathbf{z} = A\mathbf{x},$$
@@ -358,7 +358,7 @@ with $A$ of shape $[3, 2]$. Its gradient, derived with the chain rule of Chapter
 | tanh | -1.5 | 9.083e-06 | 0.18070663892364858 | 3.839e-11 |
 | exp at a large point | 20.0 | 1.211e-04 | 485165195.4097903 | 2.444e-09 |
 
-The step is eps^(1/3) max(1, |x|) with eps = 2^-52. The check passes when the relative error is below 1e-6. The log row at x = 0.01 has the largest error because the step (6.06e-6) is not small next to the distance 0.01 to the singularity of the function; the last row has the step scaled up with |x|, as the rule demands.
+The step is eps^(1/3) max(1, |x|) with eps = 2^-52, computed as pow(eps, 1/3). The relative error of the check is |num - analytic| / |analytic|, with num the central difference of the derivative function of the chapter. The check passes when it is below 1e-6. The log row at x = 0.01 has the largest error because the step (6.06e-6) is not small next to the distance 0.01 to the singularity of the function; the last row has the step scaled up with |x|, as the rule demands.
 <!-- /worked -->
 
 <!-- worked: project_numlib.gradient_check -->
@@ -366,6 +366,8 @@ The step is eps^(1/3) max(1, |x|) with eps = 2^-52. The check passes when the re
 |---|---:|---:|---:|
 | 0 | 0.6892220180660255 | 0.6892220180730584 | 1.020e-11 |
 | 1 | -2.2263357081885093 | -2.2263357081568453 | 1.422e-11 |
+
+relative error = |numerical - analytic| / |analytic| for each entry i.
 
 f(x) = log(exp(z_0) + exp(z_1) + exp(z_2)) + (1/2)(x_0^2 + x_1^2), where z = A x for A = [[1.0, 2.0], [-1.0, 0.5], [0.5, -2.0]], at x = [0.3, -0.7]: f(x) = 2.006746197705487. The analytic gradient is A^T p + x, where p_i = exp(z_i - lse(z)).
 
@@ -438,7 +440,7 @@ The normal-formula interval and the bootstrap interval of the mean agree to with
 
 **What to build.** One program, using only the six modules above, that carries out the following.
 
-1. Generate $n = 50$ points. Seed the generator with the given seed; for $i = 0, \dots, 49$ let $x_i = 4 i / 49$ and $y_i = 2 x_i + 1 + 0.5\, z_i$, where $z_i$ is the $i$-th call of `normal`. (The calls are in order: the cosine half of a pair for even $i$, the sine half for odd $i$.)
+1. Generate $n = 50$ points. Seed the generator with the given seed; for $i = 0, \dots, 49$ let $x_i = 4 i / 49$ and $y_i = 2 x_i + 1 + 0.5\, z_i$, where $z_i$ is the $i$-th call of `normal` (Chapter 17's rule). (The calls are in order: the cosine half of a pair for even $i$, the sine half for odd $i$.)
 2. Define the mean squared residual of a line $y = a x + b$:
 $$
 L(a, b) = \frac{1}{n}\sum_{i=0}^{n-1} (a x_i + b - y_i)^2,

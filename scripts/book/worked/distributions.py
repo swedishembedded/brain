@@ -208,7 +208,7 @@ def categorical_sampling():
         onehot_mean = counts[k] / n               # mean of the indicator "token k was drawn"
         rows.append([t, _fx(p[k]), counts[k], _fx(onehot_mean), _fx(p[k] * (1 - p[k])),
                      _fx(onehot_mean * (1 - onehot_mean))])
-    return (f"{_generator_line(name)} Each of the 20,000 draws is one `rng.uniform()` passed to the cumulative-table rule. "
+    return (f"{_generator_line(name)} Each of the 20,000 draws is one `rng.uniform()` passed to the cumulative-table rule, with the cumulative sum taken in the row order of the softmax table. "
             "Variance of the indicators: f(1 - f) for the frequency f.\n\n"
             + _table(["token", "p", "draws of 20,000", "frequency = mean of indicator", "p(1-p)",
                       "variance of the indicators"], rows))
@@ -364,11 +364,11 @@ def correlation_shapes():
              ("y independent noise", [rng.normal() for _ in xs]),
              ("y = x^2", [a * a for a in xs])]
     rows = []
-    for name, ys in cases:
+    for label, ys in cases:
         c = _cov(xs, ys)
-        rows.append([name, _fx(c, 4), _fx(c / math.sqrt(_var(xs) * _var(ys)), 4)])
+        rows.append([label, _fx(c, 4), _fx(c / math.sqrt(_var(xs) * _var(ys)), 4)])
     return (f"{_generator_line(name)} x takes 2000 equally spaced values from -2 to 2 inclusive (step 4/1999). "
-            "The noise is `rng.normal()`: 2000 values in order for the third relation, then 2000 more for the fourth. "
+            "The noise is `rng.normal()`, one generator for the whole table: the 2000 values added to x for the third relation are drawn first, in the order of x, then the 2000 values of the fourth relation. "
             "Covariance and variances use divisor 2000.\n\n"
             + _table(["relation between x and y", "covariance", "correlation"], rows))
 
@@ -562,6 +562,8 @@ def high_dim_norm():
                      _fx(_mean(norms), 3), _fx(math.sqrt(d), 3)])
     return (f"{_generator_line(name)} One generator for the table, rows in the order d = 1, 10, 100, 1000, 10000. "
             "A row makes 400 vectors (100 for d = 10000); a vector is d calls of `rng.normal()`. "
+            "The one generator runs on across all vectors and rows, so a sine value held by the Gaussian rule is carried into the next vector. "
+            "Mean length: the average of the Euclidean norm sqrt(sum of squares) over the vectors of the row. "
             "Std: divisor equal to the number of vectors.\n\n"
             + _table(["dimension d", "mean of squared length / d", "std of squared length / d", "sqrt(2/d)", "mean length", "sqrt(d)"], rows))
 
@@ -578,7 +580,7 @@ def init_variance():
             rows.append([n, label, _fx(norm2, 1), _fx(sw ** 2 * norm2, 2), _fx(_var(ys), 2)])
     return (f"{_generator_line(name)} One generator for the table. For n = 16, 64, 256, 1024 in turn: the input x is n calls "
             "of `rng.normal()`; then for weight std 1 and then 1/sqrt(n), 1500 outputs y = sum_i w_i x_i, each with n fresh "
-            "weights w_i = std * `rng.normal()` drawn for i = 0, 1, ... in order. Measured variance: divisor 1500.\n\n"
+            "weights w_i = std * `rng.normal()` drawn for i = 0, 1, ... in order. Measured variance: deviations from the sample mean of the 1500 outputs, divisor 1500.\n\n"
             + _table(["inputs n", "weight std", "sum of x_i^2", "predicted Var[y] = std^2 * sum of x_i^2", "measured Var[y], 1500 weight draws"], rows))
 
 
@@ -599,7 +601,7 @@ def lln_bernoulli():
     rows = [_chebyshev_row(n, p, eps, reps, rng) for n in (10, 100, 1000, 10000)]
     return (f"{_generator_line(name)} One generator, rows in the order n = 10, 100, 1000, 10000. A row makes 300 means; "
             "a mean is n calls of `rng.uniform()`, each counted as 1 when below p = 0.3, averaged. "
-            "RMS error: root of the mean squared distance of the 300 means from 0.3.\n\n"
+            "RMS error: root of the mean squared distance of the 300 means from 0.3. The Chebyshev bound is capped at 1 (the raw value at n = 10 is 8.4).\n\n"
             + _table(["n draws per mean", "RMS error of the mean over 300 repeats", "sigma / sqrt(n)",
                       "share of repeats with error > 0.05", "Chebyshev bound sigma^2 / (n * 0.05^2)"], rows))
 

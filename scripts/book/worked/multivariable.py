@@ -668,17 +668,14 @@ def gradcheck_toy():
         g_true = [sum(r[k] * X[k][j] for k in range(m)) for j in range(n)]
         g_bug = [sum(r[k] * X[k][j] for k in range(1, m)) for j in range(n)]  # example 0 never reaches the gradient
         rel_missing += _norm([a - b for a, b in zip(g_true, g_bug)]) / _norm(g_true)
-        best = None
+        accepted = False
         for _ in range(4):
             v = [1.0 if rng.integer(2) else -1.0 for _ in range(n)]
             analytic = _dot(g_bug, v)
             numeric = (L([a + eps * b for a, b in zip(w, v)]) - L([a - eps * b for a, b in zip(w, v)])) / (2 * eps)
-            err = abs(analytic - numeric)
-            rel = err / max(abs(analytic), abs(numeric), 1e-3)
-            ok = err <= atol + rtol * max(abs(analytic), abs(numeric))
-            if best is None or rel < best[0]:
-                best = (rel, ok)
-        dir_pass += best[1]
+            ok = abs(analytic - numeric) <= atol + rtol * max(abs(analytic), abs(numeric))
+            accepted = accepted or ok
+        dir_pass += accepted
         bad = 0
         for j in range(n):
             up, dn = list(w), list(w)
@@ -691,7 +688,12 @@ def gradcheck_toy():
         frac_bad += bad / n
     return ("One generator (Volume I, chapter 17), seed " + str(bookrng.seed_of(name)) + ", draws the "
             "1000 problems one after another: for each, X row by row, then t, then w, all with normal(), "
-            "then the four directions, each entry +1 when integer(2) is 1 and -1 otherwise.\n\n"
+            "then the four directions, each entry +1 when integer(2) is 1 and -1 otherwise (all four are always drawn). "
+            "The loss is L(w) = 1/2 sum_k (x_k . w - t_k)^2; the \"analytic\" gradient omits example 0 (the first row of X); "
+            "the numeric value is a central difference of the true loss (all six examples) with h = 1e-4. "
+            "A comparison passes when |a - n| <= atol + rtol max(|a|, |n|) with atol = 4e-3 and rtol = 8e-2, "
+            "a the analytic and n the numeric value (this is not the close(a, b, ...) of the pseudocode page, which scales by |b| only); "
+            "the directional check accepts the bug when any of its four directions passes; the per-entry check compares each of the 24 entries with the same gate and a central difference per entry (h = 1e-4).\n\n"
             + _table(["check", "result over 1000 random problems"], [
         ["relative size of the missing part, mean of ||missing|| / ||gradient||", _fx(rel_missing / trials, 3)],
         ["best-of-4 random +-1 directions: bug accepted (check passes)", f"{dir_pass} of {trials}"],

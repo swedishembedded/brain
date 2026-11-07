@@ -1128,7 +1128,7 @@ $s = 1/(1 + e^{-x})$, which is exactly the product-rule example of the chain-rul
 section. `crates/kernels/wgsl/gelu_bwd.wgsl` differentiates $0.5\,x\,(1 + \tanh u)$ with
 $u = k\,(x + 0.044715\,x^3)$, $k = \sqrt{2/\pi}$, by the product rule and the chain rule, giving
 $0.5\,(1 + t) + 0.5\,x\,(1 - t^2)\,u'$. Each of the three formulas, recomputed
-here from the rules and compared with a central difference of its forward function:
+here from the rules and compared with a central difference ($h = 10^{-5}$) of its forward function, where the forward functions are $\tanh x$, $x\cdot s(x)$ evaluated as the product of $x$ and $s(x)$ with $s(x) = 1/(1 + e^{-x})$ computed first (the last column depends on this order at the $10^{-11}$ level), and $0.5\,x\,(1 + \tanh u)$ with $u = k\,(x + 0.044715\,x^3)$:
 
 <!-- worked: derivatives.activation_derivatives -->
 | function | x | value | formula | central difference | abs difference |
@@ -1175,7 +1175,7 @@ have had to borrow the derivative of a *different function*. The commit added
 interesting part: the two derivatives are so close that the gradient gate cannot
 tell them apart. The test is `crates/gradcheck/tests/it/gelu_erf_fd.rs`, whose
 mispairing test asserts that the largest absolute gap between the two derivatives
-sits below the gate's absolute tolerance. Recomputing it from the formulas:
+sits below the gate's absolute tolerance. Recomputing it from the formulas: the exact GELU is $0.5\,x\,(1 + \mathrm{erf}(x/\sqrt2))$, with slope $0.5\,(1 + \mathrm{erf}(x/\sqrt2)) + x\,e^{-x^2/2}/\sqrt{2\pi}$; the tanh form has the slope given earlier in this section. Over the grid $x = (i - 400)/100$ for $i = 0, \dots, 800$, with $a$ the tanh-form slope and $n$ the exact slope, the *absolute difference* is $|a - n|$ and the *relative difference* is $|a - n|/\max(|a|, |n|)$; a tie for the largest is reported at the first grid point that attains it:
 
 <!-- worked: derivatives.gelu_pair_gap -->
 Slope of the tanh-form GELU against the slope of the exact erf-form GELU, x from -4 to 4 in steps of 0.01.
@@ -1222,7 +1222,7 @@ Answers are at the end of the chapter.
 
 2. **[Calculate]** Differentiate $\frac{x^2 + 1}{x - 1}$, $e^{-x^2}$ and $\log(1 + x^2)$, and evaluate each derivative at $x = 2$. Then compute a central difference with $h = 10^{-5}$ for each and compare to six digits.
 
-3. **[Calculate]** For $L(w) = (\sigma(2w) - 1)^2$, where $\sigma$ is the logistic function, write $L$ as a chain, find $L'(w)$ with the chain rule and the identity $\sigma' = \sigma(1 - \sigma)$, and evaluate it at $w = 0.3$. Is $L$ convex at $w = 0.3$? Use the second-derivative formula from the chapter (note the inner factor $2$).
+3. **[Calculate]** For $L(w) = (s(2w) - 1)^2$, where $s$ is the logistic function, write $L$ as a chain, find $L'(w)$ with the chain rule and the identity $s' = s(1 - s)$, and evaluate it at $w = 0.3$. Is $L$ convex at $w = 0.3$? Use the second-derivative formula from the chapter (note the inner factor $2$).
 
 4. **[Calculate]** Find every critical point of $f(x) = x^3 - 6x^2 + 9x$ and classify each. On the interval $[0, 5]$, what are the largest and smallest values of $f$? (Check the endpoints too.)
 
@@ -1236,7 +1236,7 @@ Answers are at the end of the chapter.
 
 9. **[Implement]** Implement Newton's method for roots with exact fractions and reproduce `derivatives.newton_sqrt2` (the iterates $1$, $3/2$, $17/12$, $577/408$, $665857/470832$ and the errors $e_n = (x_n^2 - 2)/(x_n + \sqrt2)$ from the exact numerators). Then reproduce the far-start table and the cycle of `derivatives.newton_failures`.
 
-10. **[Implement]** Implement the forward and central differences of $e^x$ at $x = 1$ and reproduce `derivatives.numdiff_errors` for $h = 10^{-1}, \dots, 10^{-15}$ and `derivatives.numdiff_best_step`. Form $h$ as the 64-bit float nearest $10^{-k}$. Plot $\log_{10}$ of the error against $-\log_{10} h$ and read off the two slopes (about $-1$ and $-2$ over $h = 10^{-1}$ to $10^{-4}$) and the two turning points (the smallest error: $10^{-8}$ for the forward difference; $10^{-5}$ for the central, which ties with $10^{-7}$).
+10. **[Implement]** Implement the forward and central differences of $e^x$ at $x = 1$ and reproduce `derivatives.numdiff_errors` for $h = 10^{-1}, \dots, 10^{-15}$ and `derivatives.numdiff_best_step`. Form $h$ as the 64-bit float nearest $10^{-k}$. Tabulate the pairs $(\log_{10} h,\ \log_{10}\text{error})$ for both methods (or plot them, with $-\log_{10} h$ on the horizontal axis) and report: (a) the slope of $\log_{10}\text{error}$ against $-\log_{10} h$ over $h = 10^{-1}, 10^{-2}, 10^{-3}, 10^{-4}$, estimated by a least-squares line through those four points (the first-to-last difference $(y_4 - y_1)/(x_4 - x_1)$ gives the same to three digits), which should be about $-1.005$ for the forward difference and $-2.000$ for the central difference; (b) the two turning points, the $h$ of the smallest error over all fifteen steps: $10^{-8}$ for the forward difference and $10^{-5}$ for the central difference (which ties with $10^{-7}$ at $5.86\times10^{-11}$).
 
 11. **[Investigate]** For $g(x) = x^3 - 2x + 2$ run Newton's method from $200$ starting values between $-3$ and $3$. Classify each by where it ends (the root near $-1.77$, the cycle $0 \leftrightarrow 1$, or elsewhere) and print the starts in order as a string of symbols. Describe the pattern of the starts that land in the cycle, and explain why a tiny change in a starting point can change the outcome.
 

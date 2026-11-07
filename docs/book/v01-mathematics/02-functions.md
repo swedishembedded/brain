@@ -308,13 +308,18 @@ function fit_polynomial(xs: array<real>[m], ys: array<real>[m]) -> array<real>[m
             A[i, j] = xs[i] ^ j               # 0 ^ 0 = 1: the column of ones is exact at x = 0
         A[i, m] = ys[i]
     for col in 0 .. m:
-        pivot = the row r >= col with the largest abs(A[r, col])
-        swap rows col and pivot
+        # pivot: the row r >= col with the largest abs(A[r, col]); the first one on a tie
+        pivot = col + argmax([abs(A[r, col]) for r in col .. m])
+        swap A[col, :], A[pivot, :]
         require abs(A[col, col]) > 0, "singular system"   # an exact zero only; see below
-        divide row col by A[col, col]          # now A[col, col] = 1
+        d = A[col, col]
+        for j in 0 .. m + 1:
+            A[col, j] = A[col, j] / d          # now A[col, col] = 1
         for r in 0 .. m:
             if r != col:
-                subtract A[r, col] times row col from row r   # clears the column
+                f = A[r, col]
+                for j in 0 .. m + 1:
+                    A[r, j] = A[r, j] - f * A[col, j]   # clears the column
     return A[:, m]                              # c[j] is the coefficient of x^j
 ```
 
@@ -373,7 +378,9 @@ been shown anything.
 Even for a function with no noise at all, high-degree polynomials are not a
 safe default. Fit polynomials of increasing degree through equally spaced
 points of the smooth bump $1/(1 + 25\,x^2)$ on $[-1, 1]$ and record the largest
-gap between polynomial and function over a fine grid:
+gap between polynomial and function over a fine grid of 1001 equally spaced points
+$x_i = -1 + 2i/1000$, $i = 0, \dots, 1000$ (the nodes are the $n$ equally spaced points
+$-1 + 2i/(n-1)$):
 
 <!-- worked: functions_ch.runge -->
 | points n | degree n-1 | largest error on [-1, 1] |

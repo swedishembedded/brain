@@ -40,7 +40,7 @@ sum of the stored numbers, computed in exact rational arithmetic (for example Py
 arithmetic on a scaled value), so that only the rounding of the additions is counted:
 
 <!-- worked: floating.million_tenths -->
-The sum of 10^6 copies of the stored value of 0.1. Relative errors are measured against the exact sum of the stored copies, computed in exact rational arithmetic (a Fraction): 100000.001490 for the 32-bit copies of 0.1 (0.10000000149 each) and, for the first row, 100000.000000000000000 for the 64-bit copies. The 64-bit accumulator of the last row holds 100000.001490116 before it is rounded to the nearest 32-bit number.
+The sum of 10^6 copies of the stored value of 0.1. Relative errors are measured against the exact sum of the stored copies, computed in exact rational arithmetic (a Fraction): 100000.001490 for the 32-bit copies of 0.1 (0.10000000149 each) and, for the first row, 100000.000000000005551115123 (exact, 21 decimals) for the 64-bit copies. The 64-bit accumulator of the last row holds 100000.001490116 before it is rounded to the nearest 32-bit number.
 
 | method | computed sum | relative error |
 |---|---:|---:|
@@ -1208,7 +1208,7 @@ loses the last two. The same experiment, run here on pairs of 512-dimensional
 vectors with a cosine near $0.995$ and 200 random trials:
 
 <!-- worked: floating.cosine_accumulation -->
-Cosine of 200 pairs of 512-dimensional vectors (the second is the first plus noise of one tenth of its standard deviation, cosine near 0.995), against the exact value (exact rational sums, one final evaluation in 64 bits). Generator: the book's SplitMix64, seed 0x75c7e1bcf07f2c79; each trial draws 512 `normal()` values for the first vector (rounded to 32 bits), then 512 for the noise, b = f32(a + 0.1 z).
+Cosine of 200 pairs of 512-dimensional vectors (the second is the first plus noise of one tenth of its standard deviation, cosine near 0.995), against the exact value (exact rational sums, one final evaluation in 64 bits). Generator: the book's SplitMix64, seed 0x75c7e1bcf07f2c79; each trial draws 512 `normal()` values for the first vector (rounded to 32 bits), then 512 for the noise, b = f32(a + 0.1 z). The 32-bit row computes dot, na = a . a and nb = b . b by running f32 sums of f32 products, then cos = dot / (sqrt(na) * sqrt(nb)) with both square roots, their product and the quotient rounded to f32 (not dot / sqrt(na * nb)); the 64-bit row accumulates dot, na, nb in 64 bits and rounds only the final cosine to f32.
 
 | accumulation | mean abs. error | max abs. error |
 |---|---:|---:|

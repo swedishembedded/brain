@@ -88,7 +88,7 @@ named before reading on.
 2. (Chapter 2, exponential function and the cosine schedule.) The decay piece of the cosine learning-rate schedule is $\tfrac12(1 + \cos \pi u)$ for $u$ from $0$ to $1$. What are its values at $u = 0$, $\tfrac12$ and $1$?
 3. (Chapter 3, the unit circle.) What are $\cos 90^\circ$, $\sin 90^\circ$ and $\cos 180^\circ$, and what point of the plane does the angle $\theta$ select on the circle of radius 1?
 4. (Chapter 3, projection and orthogonality.) Project $\mathbf{v} = (3, 4)$ onto $\mathbf{u} = (2, 1)$: what coefficient $t$ gives the closest multiple $t\mathbf{u}$, and what is the dot product of the residual with $\mathbf{u}$?
-5. (Chapter 6, rotation matrices.) Write the matrix $\mathbf{R}(\theta)$ that turns the plane by $\theta$. What is $\mathbf{R}(\alpha)\mathbf{R}(\beta)$?
+5. (Chapter 6, rotation matrices.) Write the matrix $\mathbf{R}(\theta)$ that turns the plane by $\theta$. What is $\mathbf{R}(\alpha)\mathbf{R}(\beta)$ for two turning angles $\alpha$ and $\beta$?
 6. (Chapters 2 and 7, the exponential function.) What does $e^a e^b$ equal? Which function equals its own derivative and starts at 1, and what polynomial series did Chapter 7 build for it?
 
 ## Complex numbers: points in the plane that multiply
@@ -604,16 +604,18 @@ $z_n$ the $n$-th call of `rng.normal()`, 64 calls in sample order from the book'
 SplitMix64 generator with seed `0ad16a14ce1679e1` (hexadecimal; 779520848101276129).
 In the time domain nothing is evident. In the spectrum, two
 stems stand far above a low floor, at the planted frequencies and with
-amplitudes close to the planted ones (the table below): the noise is spread evenly
+amplitudes close to the planted ones (the table below, in which every $k$ from 1 to 32 is scored as $2\,|X[k]|/N$, $k = 32$ included): the noise is spread evenly
 over all frequencies, and each frequency receives only a little of it.
 
 <!-- worked: fourier.noisy_spectrum -->
+Amplitude 2 abs X[k] / N for every k listed, k = 32 included (it is doubled like the others); the mean is over the 30 values k = 1 .. 32 except 3 and 11.
+
 | amplitude 2 abs X[k] / N | value |
 |---|---:|
 | k = 3 (planted 2) | 2.04 |
 | k = 11 (planted 1) | 0.989 |
-| largest of k = 1 .. 32 except 3 and 11 | 0.131 |
-| mean of k = 1 .. 32 except 3 and 11 | 0.066 |
+| largest of k = 1 .. 32 except 3 and 11 | 0.1315 |
+| mean of k = 1 .. 32 except 3 and 11 | 0.06668 |
 <!-- /worked -->
 
 ![Top: 64 noisy samples of a signal over one second, wandering between about -3 and 3. Bottom: its amplitude spectrum for k = 0 to 32, with two tall stems at k = 3 (amplitude 2.04) and k = 11 (amplitude 0.989) over a low floor of noise.](img/signal-spectrum.svg)
@@ -963,18 +965,18 @@ function fft(x: array<complex>[N]) -> array<complex>[N]:
     require N >= 1 and N is a power of two, "radix-2 FFT needs a power-of-two length"
     if N == 1:
         return copy(x)
-    even = zeros(complex, [N / 2])
-    odd = zeros(complex, [N / 2])
-    for m in 0 .. N / 2:
+    even = zeros(complex, [N // 2])
+    odd = zeros(complex, [N // 2])
+    for m in 0 .. N // 2:
         even[m] = x[2 * m]
         odd[m] = x[2 * m + 1]
     E = fft(even)
     O = fft(odd)
     X = zeros(complex, [N])
-    for k in 0 .. N / 2:
+    for k in 0 .. N // 2:
         t = exp(-2 * pi * 1i * k / N) * O[k]        # one twiddle multiplication
         X[k] = E[k] + t
-        X[k + N / 2] = E[k] - t
+        X[k + N // 2] = E[k] - t
     return X
 ```
 
@@ -1043,13 +1045,13 @@ function fft_in_place(x: inout array<complex>[N]):
         if i < j: swap x[i], x[j]
     size = 2
     while size <= N:                                # stage: blocks of `size` slots
-        for b in 0 .. N / size:
+        for b in 0 .. N // size:
             start = b * size
-            for k in 0 .. size / 2:
+            for k in 0 .. size // 2:
                 u = x[start + k]
-                t = exp(-2 * pi * 1i * k / size) * x[start + k + size / 2]
+                t = exp(-2 * pi * 1i * k / size) * x[start + k + size // 2]
                 x[start + k] = u + t
-                x[start + k + size / 2] = u - t
+                x[start + k + size // 2] = u - t
         size = size * 2
 ```
 
@@ -1283,7 +1285,7 @@ The table is the honest picture. For a short kernel such as $3$ or $9$ weights,
 sliding is far cheaper: the transform route pays for three whole transforms
 regardless of how short the kernel is. As the kernel grows the balance tips: here
 the two routes cost exactly the same at $M = 164$ ($4096 \cdot 164 = 671{,}744$) and the
-transform route is strictly cheaper from $M = 165$ on (the table below), and at a kernel as long as the signal the
+transform route is strictly cheaper from $M = 165$ on (the table above), and at a kernel as long as the signal the
 transform route is $25$ times cheaper. This is what "makes convolution cheap"
 means: for long kernels the cost drops from the product $NM$ to about $L\log_2 L$.
 (Counts of multiplications ignore memory traffic and the extra work of padding,

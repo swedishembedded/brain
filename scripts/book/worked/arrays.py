@@ -446,7 +446,8 @@ def broadcast_cost():
         v = a.broadcast_to(target)
         touched = {offset_of(i, v.strides, v.offset) for i in v.indices()}
         rows.append((name, _t(v.strides), numel(target), len(touched)))
-    return _table(["broadcast", "view strides", "elements seen", "stored numbers touched"], rows, "lrrr")
+    return ("Symbol values: T = 7 and D = 5 in the first three rows; B = 2 and T = 4 in the last row.\n\n"
+            + _table(["broadcast", "view strides", "elements seen", "stored numbers touched"], rows, "lrrr"))
 
 
 def image_layouts():

@@ -269,7 +269,7 @@ Plain remainder: the values 6 and 7 wrap around to 0 and 1, so those two results
 Eight values cannot be divided evenly into six results: two results must get two raw values and four get one. The faces $0$ and $1$ are twice as likely as the others. The repair is to refuse the raw values that cause the imbalance, and to ask again. This is our first example of **rejection sampling**: draw a candidate from an easy distribution, test it against a rule, throw it away if it fails and draw again; what is kept has the distribution that the rule selects. Here the easy distribution is the raw bits, and the rule is "$r \ge 2^b \bmod n$", which discards exactly the first $2^b \bmod n$ raw values and leaves a number of values divisible by $n$:
 
 ```text
-function integer(rng, n: int) -> int:               # uniform in 0 .. n-1
+function integer(rng: Generator, n: int) -> int:               # uniform in 0 .. n-1
     require 0 < n and n <= 2^64, "no integer in an empty range"   # n = 2^64 is allowed
     threshold = 2^64 mod n                          # the raw values below this cause the bias
     loop:
@@ -424,6 +424,36 @@ The largest radius is R = sqrt(-2 ln t) for the smallest argument t the logarith
 
 With $53$ bits the Gaussian reaches $8.6$ standard deviations and the missing tail has probability $10^{-17}$, irrelevant. With a $24$-bit float grid it stops at $5.8$ and cuts a probability of $8 \times 10^{-9}$, which a rare-event simulation drawing a billion values would notice. The clamp of the last row cuts at $7.43$ standard deviations, a probability of $10^{-13}$. Any bound on the generator is a bound on the events the simulation can see.
 
+### The call `rng.normal()`
+
+The pseudocode calls `rng.normal()` for one standard Gaussian at a time, and every table in this book that draws Gaussians depends on exactly which value that call returns. The rule is the Box-Muller pair above, consumed one value per call. A generator carries one extra piece of state besides its 64-bit state: a **held value**, initially empty.
+
+```text
+function normal(rng: Generator) -> real:
+    if rng holds a value z:
+        clear the held value
+        return z                                      # no uniform number is drawn
+    u1 = rng.uniform()                                # first draw of the pair
+    u2 = rng.uniform()                                # second draw of the pair
+    R = sqrt(-2 * log(1 - u1))                        # 1 - u1 is in (0, 1], so log is defined
+    hold R * sin(2 * pi * u2)                         # the sine half waits for the next call
+    return R * cos(2 * pi * u2)                       # the cosine half is returned now
+```
+
+So the first call after a fresh seed consumes two uniform numbers (the first is `u1`, the second `u2`) and returns $R\cos\theta$; the second call consumes nothing and returns the held $R\sin\theta$ of the same pair; the third call starts a new pair. Calling `uniform()` or `next()` between two `normal()` calls does not disturb the held value, it only moves the position in the stream. A table that draws an odd number of Gaussians therefore leaves a held value behind, and the next table sharing the generator starts with it; the worked examples use one generator per example, so nothing is held across examples.
+
+### The four calls, exactly
+
+All draws consume raw values from `rng.next()` in order; two generators started at the same state give identical results. In the table `r` is one raw 64-bit value.
+
+| call | result | raw values consumed |
+|---|---|---|
+| `rng.next()` | the next raw `u64`: add `GAMMA` to the state, then mix the new state (the state before the first draw is the seed) | 1 |
+| `rng.uniform()` | `(r >> 11) / 2^53`, a multiple of $2^{-53}$ in $[0, 1 - 2^{-53}]$ | 1 |
+| `rng.integer(n)` | `r mod n` for the first raw `r >= 2^64 mod n` (rejection as above), a value in `0 .. n-1` | 1 plus one per rejected value |
+| `rng.normal()` | as above: $R\cos\theta$ with `u1` then `u2`, then the held $R\sin\theta$ | 2 on every other call, else 0 |
+| `shuffle(a, rng)` | for `i` from `n-1` down to `1`: `j = rng.integer(i + 1)`, swap `a[i]` and `a[j]` | 1 per position at least |
+
 ## Rejection sampling in general
 
 Rejection, which fixed the integers, is also the general-purpose tool for a density with no invertible cumulative distribution. Suppose the density $f$ on $[0, 1]$ has a largest value $M$. Throw darts uniformly into the rectangle $[0, 1] \times [0, M]$: draw $x$ uniform on $[0, 1]$ and $y$ uniform on $[0, M]$, and keep $x$ only if the dart landed under the curve, $y < f(x)$. The point $(x, y)$ is uniform in a region of area $M$, so the probability of landing under the curve is the area under the curve divided by $M$, namely $1/M$ (the area under a density is $1$). The kept $x$ values have a density proportional to the height of the curve at $x$: that is $f(x)$ itself, because the chance of a dart at $x$ being kept is $f(x)/M$. The cost is $M$ proposals per accepted value, on average.
@@ -474,7 +504,7 @@ The square contains the disc with probability $\pi/4 = 0.785$, as measured, so a
 To **shuffle** a list is to rearrange it into an order chosen uniformly at random among all $n!$ orders. It is what turns a dataset into an epoch of training. The correct algorithm is two lines, and it is easy to write a plausible one that is wrong.
 
 ```text
-function shuffle(a: inout array<T>[n], rng) -> none:
+function shuffle(a: inout array<T>[n], rng: Generator) -> none:
     for i in n-1 down to 1:
         j = rng.integer(i + 1)          # uniform in 0 .. i
         swap a[i] and a[j]              # a[i] is now final
@@ -619,7 +649,7 @@ If seeds make runs repeatable, why not fix one in the code and be done? Because 
 <!-- worked: randomness.hidden_luck -->
 Generator: the book's SplitMix64, seed 0x127f7caae1c3c010 (1332921088098942992), used as the state before the first draw. The run seeds come from this generator: pair k (k = 0 .. 399) is its raw draws 2k and 2k + 1 (`next()`), run A uses the first as its seed and run B the second (or the first again in the last row). Each run is the toy run of the first table with the learning rate stated; the loss is its final loss. Standard error = sample standard deviation (divisor n - 1) of the differences over sqrt(n).
 
-Final loss of the toy run over 400 seeds (the A runs): mean 0.7725, standard deviation 0.2284, smallest 0.3930, largest 1.2787.
+Final loss of the toy run over 400 seeds (the A runs): mean 0.7725, standard deviation (divisor n - 1) 0.2284, smallest 0.3930, largest 1.2787.
 
 | comparison (400 pairs) | share of pairs where B has the lower loss | mean of (loss B - loss A) | standard error of that mean |
 |---|---:|---:|---:|
@@ -647,13 +677,13 @@ function resolve_seed(given: optional int) -> int:
     if given is present:
         require 0 <= given < 2^64, "not a seed"       # refuse, never clamp
         return given
-    s = entropy()            # clock, process id, a counter, bytes from the operating system, mixed
+    s = os_entropy()         # clock, process id, a counter, bytes from the operating system, mixed
     print "seed", s          # shown at the boundary ...
     record s in the run's output   # ... and stored, so that passing it back reproduces the run
     return s
 ```
 
-The entropy source is the one place where the machine leaves determinism, and it is deliberately outside the generator: it is where the seed comes from, not how the stream is made. Accepting the seed back needs care. A seed uses the whole range $0 \dots 2^{64} - 1$ and must survive the trip at both ends:
+The operating-system entropy source, `os_entropy()` (named so that it cannot be mistaken for the entropy of a distribution, Chapter 13), is the one place where the machine leaves determinism, and it is deliberately outside the generator: it is where the seed comes from, not how the stream is made. Accepting the seed back needs care. A seed uses the whole range $0 \dots 2^{64} - 1$ and must survive the trip at both ends:
 
 <!-- worked: randomness.seed_parse -->
 | text given as a seed | value | result |

@@ -236,12 +236,14 @@ def noisy_spectrum():
     """Amplitudes 2 abs(X[k]) / N of the noisy signal at the planted frequencies and elsewhere."""
     n = 64
     X = _fft(_noisy_signal(n))
-    amp = [(1 if k in (0, n // 2) else 2) * abs(X[k]) / n for k in range(n // 2 + 1)]
+    amp = [2 * abs(X[k]) / n for k in range(n // 2 + 1)]  # every k, k = 32 included, is doubled
     others = [a for k, a in enumerate(amp) if k not in (0, 3, 11)]
     rows = [("k = 3 (planted 2)", _g(amp[3], 3)), ("k = 11 (planted 1)", _g(amp[11], 3)),
-            ("largest of k = 1 .. 32 except 3 and 11", _g(max(others), 3)),
-            ("mean of k = 1 .. 32 except 3 and 11", _g(sum(others) / len(others), 3))]
-    return _table(["amplitude 2 abs X[k] / N", "value"], rows, "lr")
+            ("largest of k = 1 .. 32 except 3 and 11", _g(max(others), 4)),
+            ("mean of k = 1 .. 32 except 3 and 11", _g(sum(others) / len(others), 4))]
+    return ("Amplitude 2 abs X[k] / N for every k listed, k = 32 included (it is doubled like the others); "
+            "the mean is over the 30 values k = 1 .. 32 except 3 and 11.\n\n"
+            + _table(["amplitude 2 abs X[k] / N", "value"], rows, "lr"))
 
 
 DEMO_X = [3, 1, 4, 1, 5, 9, 2, 6]

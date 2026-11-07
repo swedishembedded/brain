@@ -12,12 +12,12 @@ A training set is a long list of token ids, and before it is used someone has to
 Here is a list of twelve ids. Three programs answer the question: one compares every id with every later one, one sorts the list and compares neighbours, one remembers each id in a hash table as it goes. All three find a repeated id; the table counts the elementary steps each took.
 
 <!-- worked: algorithms.duplicates_small -->
-The list, in order, has n = 12 ids: [4021, 87, 15032, 9, 87, 311, 40022, 7, 311, 12, 6, 15032]. The ids that occur twice are [87, 311, 15032]. The methods may report different repeated ids because they visit the list in different orders; each reported id really is repeated. The hash table has m = 32 buckets (2n = 24 rounded up to a power of two) and the hash of the chapter; the all-pairs count is the number of pairs (i, j) with i < j visited up to and including the first equal pair.
+The list, in order, has n = 12 ids: [4021, 87, 15032, 9, 87, 311, 40022, 7, 311, 12, 6, 15032]. The ids that occur twice are [87, 311, 15032]. The methods may report different repeated ids because they visit the list in different orders; each reported id really is repeated. The hash table has m = 32 buckets (2n = 24 rounded up to a power of two) and the hash of the chapter; the all-pairs count is the number of pairs (i, j) with i < j visited up to and including the first equal pair. The sort count is the element comparisons of the chapter's merge sort of the whole list (30) plus the neighbour tests in the sorted list up to and including the first equal pair (5 here, not all n - 1 = 11). The hash count is one hash evaluation per lookup, plus the key comparisons along the chain, and the loop stops when a lookup finds the id; an insertion costs one more evaluation and no comparison.
 
 | method | reports | operations counted | what is counted |
 |---|---|---:|---|
 | compare all pairs | 87 | 14 | stops at the first equal pair it meets |
-| sort, then compare neighbours | 87 | 35 | merge sort comparisons plus n - 1 neighbour tests |
+| sort, then compare neighbours | 87 | 35 | merge sort comparisons plus neighbour tests up to the first equal pair |
 | remember ids in a hash table | 87 | 10 | hash evaluations plus key comparisons; stops at the first repeat |
 <!-- /worked -->
 
@@ -552,7 +552,7 @@ Counting sort costs $\Theta(n + b)$. For large keys, $b$ is too big for a table,
 With 32-bit keys cut into four 8-bit digits, each pass uses a table of $256$ counters, and a sort is four passes of $\Theta(n + 256)$: in all $\Theta(w (n + b))$ for $w$ digits of base $b$, which is *linear* in $n$ for fixed key width. It is called radix sort. Counting the elementary steps (counter increments, scan steps and moves) and comparing them with the comparisons of merge sort on the same random 32-bit keys:
 
 <!-- worked: algorithms.radix_vs_merge -->
-Generator: the book's SplitMix64, seed 0x782c9b0f36f59cd2 (the seed of the name `algorithms.radix_vs_merge`). Each key is the top 32 bits of one raw draw (`next()` shifted right by 32); the keys for n are the first n of 65,536 drawn in order. Radix sort: four passes of 8 bits starting from the least significant, each pass making one counter increment per key, 256 scan steps and one move per key, so 4 (2n + 256) steps in all. Merge sort: comparisons of the chapter's algorithm on the same keys.
+Generator: the book's SplitMix64, seed 0x782c9b0f36f59cd2 (the seed of the name `algorithms.radix_vs_merge`). Each key is the top 32 bits of one raw draw (`next()` shifted right by 32); the keys for n are the first n of 65,536 drawn in order. Radix sort: four passes of 8 bits starting from the least significant, each pass making one counter increment per key, 256 scan steps and one move per key, so 4 (2n + 256) steps in all. Merge sort: comparisons of the chapter's algorithm on the same keys. The ratio column is merge-sort comparisons divided by radix-sort steps.
 
 | n | radix sort: counter increments + scan steps + moves | merge sort: comparisons | ratio |
 |---|---:|---:|---:|
@@ -580,7 +580,7 @@ where $\gg$ shifts right and $A$ is about $2^{32}$ divided by the golden ratio (
 **Expected cost.** Let $\alpha = n/m$ be the **load**, the average chain length. If $h$ spreads keys evenly, a lookup of a key *not* in the table scans a whole chain, whose expected length is $\alpha$ comparisons. A lookup of a key that *is* present scans the chain up to that key: the key itself (one comparison) plus on average half of the other $\alpha$ keys that share its bucket, so about $1 + \alpha/2$. Both are independent of $n$ when $\alpha$ is held constant by keeping $m$ proportional to $n$. This is why hashing is called **expected $O(1)$** per operation: the expectation is over the keys, and the worst case is still $O(n)$, a single chain holding everything. We measure both predictions on a table of $1024$ buckets as the number of keys grows:
 
 <!-- worked: algorithms.hash_loads -->
-A table of 1,024 buckets with chaining and the multiplicative hash of the chapter (b = 10); n random 24-bit keys. Generator: the book's SplitMix64, seed 0xd3bd911f079cb32a (the seed of the name `algorithms.hash_loads`). Keys are `integer(2^24)` draws in order with repeats discarded: the stored keys of a row are the first n of them, and the 2,000 absent keys are the draws numbered 4,097 to 6,096, the same for every row. Comparisons are counted for looking up every stored key (found) or every absent key (absent), one per chain entry visited up to and including the match; the chain is in insertion order. The prediction columns are 1 + alpha/2 and alpha.
+A table of 1,024 buckets with chaining and the multiplicative hash of the chapter (b = 10); n random 24-bit keys. Generator: the book's SplitMix64, seed 0xd3bd911f079cb32a (the seed of the name `algorithms.hash_loads`). Keys are `integer(2^24)` draws in order with repeats discarded: the stored keys of a row are the first n of them, and the 2,000 absent keys are the 4,097th to 6,096th distinct keys (the draws that repeat an earlier key are skipped and not numbered), the same for every row. Comparisons are counted for looking up every stored key (found) or every absent key (absent), one per chain entry visited up to and including the match; the chain is in insertion order. The prediction columns are 1 + alpha/2 and alpha.
 
 | n keys | load alpha = n/m | comparisons to find a stored key | prediction 1 + alpha/2 | comparisons for an absent key | prediction alpha | longest chain |
 |---|---:|---:|---:|---:|---:|---:|
@@ -596,7 +596,7 @@ The measured comparisons agree with the predictions $\alpha$ and $1 + \alpha/2$ 
 **What a bad hash function does.** The expectation assumed that $h$ spreads the keys. A function that does not turns the table into a list. Take $256$ token ids that are all multiples of $64$, in $64$ buckets, and hash by the remainder $x \bmod 64$, which looks natural:
 
 <!-- worked: algorithms.hash_bad_function -->
-256 token ids, all multiples of 64, in a table of 64 buckets (load 4.0).
+256 token ids, the multiples of 64 from 64 to 16384 (ids 64 k for k = 1 .. 256), in a table of 64 buckets (load 4.0). Each id is inserted in this order, then every id is looked up once; x mod 64 is the bucket of the first row, the multiplicative hash of the chapter with b = 6 the second; comparisons are counted as in the table of loads above.
 
 | hash function | longest chain | buckets used (of 64) | mean comparisons per lookup |
 |---|---:|---:|---:|
@@ -649,6 +649,8 @@ Look back at the three duplicate checkers with the vocabulary of the chapter. Al
 **A quadratic hiding in a tokenizer.** Byte-pair encoding turns text into token ids by repeatedly merging the adjacent pair of symbols with the lowest *rank* in a table; Volume V derives it. The table is a hash table from a pair of symbols to its rank, `ranks: HashMap<(String, String), u32>` in `crates/data/src/bpe.rs`. The textbook loop rescans every adjacent pair after each merge, and that is the same count as the "all pairs" method: for a piece of $n$ symbols that merge one at a time, $n(n-1)/2$ rank lookups. Commit `c13603044` (October 2026) records the consequence. A prompt with no whitespace, such as random text, base64 or a minified file, reaches the tokenizer as one piece, and the quadratic loop held a serving thread for seconds while the GPU sat idle; the commit message describes how it was found, serving a large model to a load generator that sent random prompts. The fix keeps the symbols in a linked list and the candidate pairs in a min-heap ordered by rank then position, so each merge updates only the two pairs it touches; the doc comment of `bpe_merge` states the cost as $O(n \log n)$ instead of $O(n^2)$ and says that the result is the textbook loop's. The test beside it pins the new code to the textbook loop on small alphabets and requires a $100{,}000$-symbol piece to finish. The worked module has both versions as independent implementations and counts their rank lookups on a merge table that forces one merge at a time:
 
 <!-- worked: algorithms.bpe_scan_counts -->
+The piece is the n symbols 0, 1, ..., n - 1. The merge table has n - 1 entries: for k = 0 .. n - 2 the pair (A_k, k + 1) has rank k and merges into the new symbol A_(k+1) = n + k, where A_0 = 0 (so only the leftmost symbol ever merges, one merge at a time). For n = 4 the table is: (0, 1) -> 4 (rank 0); (4, 2) -> 5 (rank 1); (5, 3) -> 6 (rank 2). A pair lookup is one read of this table for one ordered pair of adjacent symbols (found or not). Textbook loop: each round looks up every adjacent pair of the current piece, merges the pair of lowest rank (every non-overlapping occurrence, left to right), and stops after a round in which no pair is found; it ends with one symbol. Heap + linked list: the pieces are a doubly linked list of symbols; one lookup for each of the n - 1 initial pairs, then after each merge one lookup for the new pair with the left neighbour (if any) and one for the new pair with the right neighbour (if any); a found pair is pushed on a min-heap ordered by (rank, position); popping the heap and discarding stale entries costs no lookup.
+
 | symbols n | textbook loop: pair lookups | n(n-1)/2 | heap + linked list: pair lookups |
 |---|---:|---:|---:|
 | 16 | 120 | 120 | 29 |
@@ -657,7 +659,7 @@ Look back at the three duplicate checkers with the vocabulary of the chapter. Al
 | 1,024 | 523,776 | 523,776 | 2,045 |
 <!-- /worked -->
 
-The textbook count equals $n(n-1)/2$ exactly; the heap version does about $2n$ lookups ($2045$ at $n = 1024$). The lesson is the chapter's, not a trick of tokenizers: a quadratic loop on an input whose size the user controls is a denial of service, and nothing in a short test shows it.
+The textbook count equals $n(n-1)/2$ exactly; the heap version does exactly $2n - 3$ lookups ($2045$ at $n = 1024$). The lesson is the chapter's, not a trick of tokenizers: a quadratic loop on an input whose size the user controls is a denial of service, and nothing in a short test shows it.
 
 **Top-k selection in sampling.** Sampling needs the best few logits of a vocabulary of $V$ tokens, not the whole ordering. `crates/model/src/serve.rs` documents the default of the trait method `admit_topk`: sort the full vocabulary vector on the host and truncate, $\Theta(V \log V)$ comparisons. The Qwen3 serving engine in `crates/qwen3/src/serve.rs` overrides it with an on-device top-$k$ that repeats an argmax reduction $k$ times and masks the winner out each time (`topk_extract_step`, `crates/kernels/wgsl/topk_extract_step.wgsl`), so only $k$ index and value pairs travel back to the host. In comparisons, that is $k(V-1)$, which for large $k$ is *more* than sorting. The table counts the three ways on a vocabulary of $16{,}384$ and also the bytes that cross back:
 

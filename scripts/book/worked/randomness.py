@@ -825,7 +825,7 @@ def hidden_luck():
            "(`next()`), run A uses the first as its seed and run B the second (or the first again in the last row). "
            "Each run is the toy run of the first table with the learning rate stated; the loss is its final loss. "
            "Standard error = sample standard deviation (divisor n - 1) of the differences over sqrt(n).\n\n")
-    out += f"Final loss of the toy run over {n} seeds (the A runs): mean {m:.4f}, standard deviation {sd:.4f}, smallest {min(losses):.4f}, largest {max(losses):.4f}.\n\n"
+    out += f"Final loss of the toy run over {n} seeds (the A runs): mean {m:.4f}, standard deviation (divisor n - 1) {sd:.4f}, smallest {min(losses):.4f}, largest {max(losses):.4f}.\n\n"
     out += _table(["comparison (400 pairs)", "share of pairs where B has the lower loss", "mean of (loss B - loss A)", "standard error of that mean"], rows, "lrrr")
     first = [(f"{a:.4f}", f"{b:.4f}", "B" if b < a else "A") for a, b in same[:5]]
     out += "\n\nThe first five identical-procedure pairs:\n\n" + _table(["loss A", "loss B", "winner"], first, "rrl")

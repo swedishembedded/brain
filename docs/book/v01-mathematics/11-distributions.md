@@ -111,8 +111,9 @@ variance without any new work: by linearity $\mathbb{E}[K] = np$, and since the
 variables are independent the variances add, $\mathrm{Var}[K] = np(1-p)$. The
 whole table of $K$ can be built one example at a time. If after $j$ examples the
 count is $k$ with probability $q_j(k)$, then after one more example the count is
-$k$ if the new one was wrong (probability $1 - p$) and $k$ if the old count was
-$k - 1$ and the new one was right (probability $p$):
+$k$ in exactly two ways: the old count was already $k$ and the new example was wrong
+(probability $1 - p$), or the old count was $k - 1$ and the new example was right
+(probability $p$):
 
 $$
 q_{j+1}(k) = q_j(k)\,(1 - p) + q_j(k - 1)\,p .
@@ -201,7 +202,7 @@ lists over many draws is the table of frequencies, which is why the mean of the 
 is the probability vector itself:
 
 <!-- worked: distributions.categorical_sampling -->
-Generator: the book's SplitMix64, seed 0xd3309acb11fd4fe5 (15217833337855758309). Each of the 20,000 draws is one `rng.uniform()` passed to the cumulative-table rule. Variance of the indicators: f(1 - f) for the frequency f.
+Generator: the book's SplitMix64, seed 0xd3309acb11fd4fe5 (15217833337855758309). Each of the 20,000 draws is one `rng.uniform()` passed to the cumulative-table rule, with the cumulative sum taken in the row order of the softmax table. Variance of the indicators: f(1 - f) for the frequency f.
 
 | token | p | draws of 20,000 | frequency = mean of indicator | p(1-p) | variance of the indicators |
 |---|---:|---:|---:|---:|---:|
@@ -352,7 +353,7 @@ $95\%$ within two and $99.7\%$ within three (the "68-95-99.7 rule"). The rod
 machine therefore produces about $95\%$ of its rods within $0.4$ mm of $50.0$, and
 a rod more than $0.6$ mm off, three standard deviations, about once in $370$. The
 table also lists $1.645$, $1.96$ and $2.576$, the usual rounded multipliers for
-$90\%$, $95\%$ and $99\%$: they enclose $0.90003$, $0.95000$ and $0.99001$, so they are
+$90\%$, $95\%$ and $99\%$: they enclose $0.90003$, $0.95000$ and $0.99000$, so they are
 rounded values, and the multipliers that enclose exactly those shares are
 $1.644854$, $1.959964$ and $2.575829$. The statistics chapter uses the rounded ones. Note how
 quickly the tail thins: going from $3$ to $4$ standard deviations changes "one in
@@ -467,7 +468,7 @@ changes by a factor of $100$ and the correlation does not. What correlation does
 see is only the linear relationship:
 
 <!-- worked: distributions.correlation_shapes -->
-Generator: the book's SplitMix64, seed 0x896ea023049287a2 (9903028702895310754). x takes 2000 equally spaced values from -2 to 2 inclusive (step 4/1999). The noise is `rng.normal()`: 2000 values in order for the third relation, then 2000 more for the fourth. Covariance and variances use divisor 2000.
+Generator: the book's SplitMix64, seed 0xd68c52cc9bf33c90 (15459822659599285392). x takes 2000 equally spaced values from -2 to 2 inclusive (step 4/1999). The noise is `rng.normal()`, one generator for the whole table: the 2000 values added to x for the third relation are drawn first, in the order of x, then the 2000 values of the fourth relation. Covariance and variances use divisor 2000.
 
 | relation between x and y | covariance | correlation |
 |---|---:|---:|
@@ -692,7 +693,7 @@ pseudocode for sampling follows.
 ```text
 function cholesky(s: array<real>[D, D]) -> array<real>[D, D]:
     require s.shape[0] == s.shape[1], "covariance matrix must be square"
-    require close(s, transpose(s), rtol=1e-6, atol=1e-9), "covariance matrix must be symmetric"
+    require close(s, transpose(s), 1e-6, 1e-9), "covariance matrix must be symmetric"
     L = zeros(real, [D, D])
     for i in 0 .. D:
         for j in 0 ..= i:
@@ -802,7 +803,7 @@ rather than derive). By the variance of a mean in Chapter 10, that average has
 variance $2/D$:
 
 <!-- worked: distributions.high_dim_norm -->
-Generator: the book's SplitMix64, seed 0x32ffccfba4ec6fa0 (3674881202133430176). One generator for the table, rows in the order d = 1, 10, 100, 1000, 10000. A row makes 400 vectors (100 for d = 10000); a vector is d calls of `rng.normal()`. Std: divisor equal to the number of vectors.
+Generator: the book's SplitMix64, seed 0x32ffccfba4ec6fa0 (3674881202133430176). One generator for the table, rows in the order d = 1, 10, 100, 1000, 10000. A row makes 400 vectors (100 for d = 10000); a vector is d calls of `rng.normal()`. The one generator runs on across all vectors and rows, so a sine value held by the Gaussian rule is carried into the next vector. Mean length: the average of the Euclidean norm sqrt(sum of squares) over the vectors of the row. Std: divisor equal to the number of vectors.
 
 | dimension d | mean of squared length / d | std of squared length / d | sqrt(2/d) | mean length | sqrt(d) |
 |---|---:|---:|---:|---:|---:|
@@ -852,7 +853,7 @@ Bernoulli variable with $p = 0.3$, so $\sigma^2 = 0.21$, taking $300$ repeats of
 average:
 
 <!-- worked: distributions.lln_bernoulli -->
-Generator: the book's SplitMix64, seed 0xa1936518d852eccb (11642760619065797835). One generator, rows in the order n = 10, 100, 1000, 10000. A row makes 300 means; a mean is n calls of `rng.uniform()`, each counted as 1 when below p = 0.3, averaged. RMS error: root of the mean squared distance of the 300 means from 0.3.
+Generator: the book's SplitMix64, seed 0xa1936518d852eccb (11642760619065797835). One generator, rows in the order n = 10, 100, 1000, 10000. A row makes 300 means; a mean is n calls of `rng.uniform()`, each counted as 1 when below p = 0.3, averaged. RMS error: root of the mean squared distance of the 300 means from 0.3. The Chebyshev bound is capped at 1 (the raw value at n = 10 is 8.4).
 
 | n draws per mean | RMS error of the mean over 300 repeats | sigma / sqrt(n) | share of repeats with error > 0.05 | Chebyshev bound sigma^2 / (n * 0.05^2) |
 |---|---:|---:|---:|---:|
@@ -978,7 +979,7 @@ If the inputs are standard-sized numbers, $\lVert\mathbf{x}\rVert^2 \approx n$, 
 output's variance grows with the width $n$ unless $\sigma_w^2$ shrinks like $1/n$:
 
 <!-- worked: distributions.init_variance -->
-Generator: the book's SplitMix64, seed 0xfaaff9906e080491 (18063931029122974865). One generator for the table. For n = 16, 64, 256, 1024 in turn: the input x is n calls of `rng.normal()`; then for weight std 1 and then 1/sqrt(n), 1500 outputs y = sum_i w_i x_i, each with n fresh weights w_i = std * `rng.normal()` drawn for i = 0, 1, ... in order. Measured variance: divisor 1500.
+Generator: the book's SplitMix64, seed 0xfaaff9906e080491 (18063931029122974865). One generator for the table. For n = 16, 64, 256, 1024 in turn: the input x is n calls of `rng.normal()`; then for weight std 1 and then 1/sqrt(n), 1500 outputs y = sum_i w_i x_i, each with n fresh weights w_i = std * `rng.normal()` drawn for i = 0, 1, ... in order. Measured variance: deviations from the sample mean of the 1500 outputs, divisor 1500.
 
 | inputs n | weight std | sum of x_i^2 | predicted Var[y] = std^2 * sum of x_i^2 | measured Var[y], 1500 weight draws |
 |---|---:|---:|---:|---:|

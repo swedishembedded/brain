@@ -494,22 +494,31 @@ def compensated_sums():
     return out
 
 
+def _ieee_exp(v):
+    try:
+        return math.exp(v)
+    except OverflowError:
+        return math.inf
+
+
 def logsumexp_cases():
     cases = [[1, 2, 3], [88, 88, 88], [1000, 1000, 1000], [1000, 0, -1000], [-1000, -1000, -1000],
              [-800, -801], [0, -math.inf], [-math.inf, -math.inf], [0.0]]
     rows = []
     for z in cases:
         z = [float(v) for v in z]
-        try:
-            naive = _g(math.log(sum(math.exp(v) for v in z)))
-        except (OverflowError, ValueError):
-            naive = "fails"
+        # IEEE-754 semantics, as a C or Rust program would compute the formula: exp overflows to inf, log(0) = -inf
+        total = sum(_ieee_exp(v) for v in z)
+        value = -math.inf if total == 0.0 else math.log(total)
+        naive = _g(value) if value == logsumexp(z) else _g(value) + " (wrong)"
         rows.append((_flist(z), naive, _g(logsumexp(z))))
     out = _table(["z", "log(sum(exp(z)))", "logsumexp(z)"], rows, "lrr")
     z = [1000.0, 998.0, 990.0, 0.0, -5.0]
     out += (f"\n\nCross-entropy by lse(z) - z[t] for z = {_flist(z)}, t = 1: {_g(logsumexp(z) - z[1])}.")
-    out += ("\n\nThe naive column shows only whether the formula as written survives: its failures "
-            "(overflow, or the logarithm of zero) are the point. The empty list must be refused with an error.")
+    out += ("\n\nThe naive column evaluates the formula as written in IEEE arithmetic (exp overflows to inf above about 709.78, "
+            "exp of a very negative number underflows to 0, and log(0) = -inf); (wrong) marks a value that differs from "
+            "logsumexp(z). The naive formula is right for the all -inf row, because log(0) = -inf is the correct answer; "
+            "the special case there only avoids computing -inf - (-inf). The empty list must be refused with an error.")
     return out
 
 
@@ -662,8 +671,9 @@ def derivative_cases():
         rows.append((name, _g(x), _e(h), _g(exact), _e(abs(d - exact) / abs(exact))))
     out = _table(["function", "x", "step h", "analytic derivative", "relative error of the check"],
                  rows, "lrrrr")
-    out += ("\n\nThe step is eps^(1/3) max(1, |x|) with eps = 2^-52. The check passes when the relative "
-            "error is below 1e-6. The log row at x = 0.01 has the largest error because the step (6.06e-6) is "
+    out += ("\n\nThe step is eps^(1/3) max(1, |x|) with eps = 2^-52, computed as pow(eps, 1/3). The relative error of the "
+            "check is |num - analytic| / |analytic|, with num the central difference of the derivative function of the "
+            "chapter. The check passes when it is below 1e-6. The log row at x = 0.01 has the largest error because the step (6.06e-6) is "
             "not small next to the distance 0.01 to the singularity of the function; the last row has the "
             "step scaled up with |x|, as the rule demands.")
     return out
@@ -695,6 +705,7 @@ def gradient_check():
     bad = _gf_analytic(_GX, bug=True)
     rows = [(f"{i}", _g(ana[i]), _g(num[i]), _e(abs(ana[i] - num[i]) / abs(ana[i]))) for i in range(2)]
     out = _table(["i", "analytic gradient", "numerical gradient", "relative error"], rows, "lrrr")
+    out += "\n\nrelative error = |numerical - analytic| / |analytic| for each entry i."
     out += (f"\n\nf(x) = log(exp(z_0) + exp(z_1) + exp(z_2)) + (1/2)(x_0^2 + x_1^2), where z = A x for "
             f"A = {_list(_GA)}, at x = {_list(_GX)}: f(x) = {_g(_gf(_GX))}. The analytic gradient is "
             f"A^T p + x, where p_i = exp(z_i - lse(z)).")

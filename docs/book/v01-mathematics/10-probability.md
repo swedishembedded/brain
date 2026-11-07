@@ -952,7 +952,7 @@ table, and both state their assumptions:
 ```text
 function marginal_over_columns(p: array<real>[R, C]) -> array<real>[R]:
     require R > 0 and C > 0, "empty joint table"
-    require min(p) >= 0.0 and close(sum(p), 1.0, rtol=1e-6, atol=1e-6), "not a distribution"
+    require min(p) >= 0.0 and close(sum(p), 1.0, 1e-6, 1e-6), "not a distribution"
     m = zeros(real, [R])
     for r in 0 .. R:
         for c in 0 .. C:
@@ -977,7 +977,7 @@ probabilities end to end on $[0, 1)$ and see which segment the number lands in.
 
 ```text
 function sample_discrete(p: array<real>[K], rng: Generator) -> int:
-    require K > 0 and min(p) >= 0.0 and close(sum(p), 1.0, rtol=1e-6, atol=1e-6)
+    require K > 0 and min(p) >= 0.0 and close(sum(p), 1.0, 1e-6, 1e-6)
     u = rng.uniform()               # u in [0, 1)
     acc = 0.0
     for k in 0 .. K:

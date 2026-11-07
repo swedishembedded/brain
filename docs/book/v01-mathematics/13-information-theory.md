@@ -630,7 +630,7 @@ they return **nats**; divide by `log(2)` for bits:
 
 ```text
 function entropy(p: array<real>[K]) -> real:
-    require K > 0 and min(p) >= 0.0 and close(sum(p), 1.0, rtol=1e-6, atol=1e-6)
+    require K > 0 and min(p) >= 0.0 and close(sum(p), 1.0, 1e-6, 1e-6)
     h = 0.0
     for k in 0 .. K:
         if p[k] > 0.0:                     # 0 * log 0 is 0
@@ -639,8 +639,8 @@ function entropy(p: array<real>[K]) -> real:
 
 function cross_entropy(p: array<real>[K], q: array<real>[K]) -> real:
     require K > 0 and min(p) >= 0.0 and min(q) >= 0.0
-    require close(sum(p), 1.0, rtol=1e-6, atol=1e-6)
-    require close(sum(q), 1.0, rtol=1e-6, atol=1e-6)
+    require close(sum(p), 1.0, 1e-6, 1e-6)
+    require close(sum(q), 1.0, 1e-6, 1e-6)
     c = 0.0
     for k in 0 .. K:
         if p[k] > 0.0:

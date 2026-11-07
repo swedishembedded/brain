@@ -204,9 +204,12 @@ def duplicates_small():
     d_pairs, c_pairs = _dup_pairs(ids)
     d_sort, c_sort, _ = _dup_sort(ids)
     d_hash, c_hash, _ = _dup_hash(ids)
+    sort_counter = [0]
+    _merge_sort(ids, sort_counter)
+    sort_tests = c_sort - sort_counter[0]
     rows = [
         ("compare all pairs", d_pairs, c_pairs, "stops at the first equal pair it meets"),
-        ("sort, then compare neighbours", d_sort, c_sort, "merge sort comparisons plus n - 1 neighbour tests"),
+        ("sort, then compare neighbours", d_sort, c_sort, "merge sort comparisons plus neighbour tests up to the first equal pair"),
         ("remember ids in a hash table", d_hash, c_hash, "hash evaluations plus key comparisons; stops at the first repeat"),
     ]
     note = (f"The list, in order, has n = {len(ids)} ids: {_list(ids)}. The ids that occur twice are "
@@ -214,7 +217,11 @@ def duplicates_small():
             "they visit the list in different orders; each reported id really is repeated. "
             "The hash table has m = 32 buckets (2n = 24 rounded up to a power of two) and the hash of the chapter; "
             "the all-pairs count is the number of pairs (i, j) with i < j visited up to and including the first "
-            "equal pair.")
+            "equal pair. The sort count is the element comparisons of the chapter's merge sort of the whole list "
+            f"({c_sort - sort_tests}) plus the neighbour tests in the sorted list up to and including the first equal "
+            f"pair ({sort_tests} here, not all n - 1 = {len(ids) - 1}). The hash count is one hash evaluation per "
+            "lookup, plus the key comparisons along the chain, and the loop stops when a lookup finds the id; "
+            "an insertion costs one more evaluation and no comparison.")
     return note + "\n\n" + _table(["method", "reports", "operations counted", "what is counted"], rows, "llrl")
 
 
@@ -794,7 +801,7 @@ def radix_vs_merge():
             "right by 32); the keys for n are the first n of 65,536 drawn in order. Radix sort: four passes of 8 bits "
             "starting from the least significant, each pass making one counter increment per key, 256 scan steps and "
             "one move per key, so 4 (2n + 256) steps in all. Merge sort: comparisons of the chapter's algorithm on "
-            "the same keys.\n\n"
+            "the same keys. The ratio column is merge-sort comparisons divided by radix-sort steps.\n\n"
             + _table(["n", "radix sort: counter increments + scan steps + moves", "merge sort: comparisons",
                       "ratio"], rows))
 
@@ -839,8 +846,8 @@ def hash_loads():
                      max(len(c) for c in table.chains)))
     return (f"A table of {_n(m)} buckets with chaining and the multiplicative hash of the chapter (b = {bits}); n random 24-bit keys. "
             f"{_seed_note(name)} Keys are `integer(2^24)` draws in order with repeats discarded: the stored keys of a "
-            "row are the first n of them, and the 2,000 absent keys are the draws numbered 4,097 to 6,096, the same "
-            "for every row. Comparisons are counted for looking up every stored key (found) or every absent key "
+            "row are the first n of them, and the 2,000 absent keys are the 4,097th to 6,096th distinct keys (the draws "
+            "that repeat an earlier key are skipped and not numbered), the same for every row. Comparisons are counted for looking up every stored key (found) or every absent key "
             "(absent), one per chain entry visited up to and including the match; the chain is in insertion order. "
             "The prediction columns are 1 + alpha/2 and alpha.\n\n"
             + _table(["n keys", "load alpha = n/m", "comparisons to find a stored key", "prediction 1 + alpha/2",
@@ -864,7 +871,9 @@ def hash_bad_function():
             table.find(k)
         rows.append((name, max(len(c) for c in table.chains), sum(1 for c in table.chains if c),
                      f"{table.comparisons / n:.2f}"))
-    return (f"{n} token ids, all multiples of 64, in a table of 64 buckets (load 4.0).\n\n"
+    return (f"{n} token ids, the multiples of 64 from 64 to {64 * n} (ids 64 k for k = 1 .. {n}), in a table of 64 buckets (load 4.0). "
+            f"Each id is inserted in this order, then every id is looked up once; x mod 64 is the bucket of the first row, the "
+            f"multiplicative hash of the chapter with b = 6 the second; comparisons are counted as in the table of loads above.\n\n"
             + _table(["hash function", "longest chain", "buckets used (of 64)", "mean comparisons per lookup"], rows))
 
 
@@ -1061,6 +1070,8 @@ def _bpe_heap(n, ranks, result):
 
 
 def bpe_scan_counts():
+    demo_ranks, demo_result = _bpe_chain(4)
+    demo = "; ".join(f"{pair} -> {demo_result[pair]} (rank {r})" for pair, r in sorted(demo_ranks.items(), key=lambda t: t[1]))
     rows = []
     for n in (16, 64, 256, 1024):
         ranks, result = _bpe_chain(n)
@@ -1068,4 +1079,14 @@ def bpe_scan_counts():
         fast, b = _bpe_heap(n, ranks, result)
         assert slow == fast and len(slow) == 1
         rows.append((_n(n), _n(a), _n(n * (n - 1) // 2), _n(b)))
-    return _table(["symbols n", "textbook loop: pair lookups", "n(n-1)/2", "heap + linked list: pair lookups"], rows)
+    return ("The piece is the n symbols 0, 1, ..., n - 1. The merge table has n - 1 entries: for k = 0 .. n - 2 the pair "
+            "(A_k, k + 1) has rank k and merges into the new symbol A_(k+1) = n + k, where A_0 = 0 (so only the leftmost "
+            f"symbol ever merges, one merge at a time). For n = 4 the table is: {demo}. "
+            "A pair lookup is one read of this table for one ordered pair of adjacent symbols (found or not). "
+            "Textbook loop: each round looks up every adjacent pair of the current piece, merges the pair of lowest rank "
+            "(every non-overlapping occurrence, left to right), and stops after a round in which no pair is found; it "
+            "ends with one symbol. Heap + linked list: the pieces are a doubly linked list of symbols; one lookup for each "
+            "of the n - 1 initial pairs, then after each merge one lookup for the new pair with the left neighbour (if any) "
+            "and one for the new pair with the right neighbour (if any); a found pair is pushed on a min-heap "
+            "ordered by (rank, position); popping the heap and discarding stale entries costs no lookup.\n\n"
+            + _table(["symbols n", "textbook loop: pair lookups", "n(n-1)/2", "heap + linked list: pair lookups"], rows))

@@ -791,7 +791,7 @@ def rank_one_pieces():
                      [("sigma_1 u_1 v_1^T", _m(A1, 5), 1), ("sigma_2 u_2 v_2^T", _m(piece2, 5), 1),
                       ("sum", _m([[a + b for a, b in zip(r1, r2)] for r1, r2 in zip(A1, piece2)], 5), 2),
                       ("A - A_1", _m(diff, 5), 1)], "lrr")
-            + f"\n\n|A - A_1|_F = {_g(_fro(diff), 5)} = sigma_2 = {_g(s[1], 5)}; the largest stretch of A - A_1 is also {_g(_spectral_norm(diff), 5)}.")
+            + f"\n\nFrobenius norm of A - A_1 = {_g(_fro(diff), 5)} = sigma_2 = {_g(s[1], 5)}; the largest stretch of A - A_1 is also {_g(_spectral_norm(diff), 5)}.")
 
 
 def spectrum_table():
@@ -850,7 +850,7 @@ def eckart_young_check():
             best = min(best, _fro(_sub(M, _project_columns(M, basis))))
         rows.append((r, _g(opt, 5), _g(a, 5), _g(b, 5), _g(best, 5)))
     seed = bookrng.seed_of(name)
-    return (f"Frobenius error |M - X|_F for rank-r matrices X built four ways (smaller is better), printed to 5 significant digits.\n\n"
+    return (f"Frobenius norm of M - X (the error) for rank-r matrices X built four ways (smaller is better), printed to 5 significant digits.\n\n"
             f"Column 2: orthonormalise (Gram-Schmidt, in order of decreasing column length) the r columns of M with the largest Euclidean norm, "
             f"and project M onto their span in R^8. Columns 3 and 4 draw from ONE SplitMix64 generator with seed {seed} "
             f"(0x{seed:016X}), seeded once and never reseeded, used for r = 1, 2, 3, 4 in turn. For each r: first the 48 noise values "

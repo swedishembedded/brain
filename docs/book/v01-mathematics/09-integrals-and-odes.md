@@ -494,11 +494,11 @@ repeatedly, each time at the point where the previous tangent landed. As an
 algorithm:
 
 ```text
-euler(f: (real, real) -> real, t0: real, x0: real, h: real, n: int) -> array<real>[n + 1]
+function euler(f: function(real, real) -> real, t0: real, x0: real, h: real, n: int) -> array<real>[n + 1]:
     require n >= 0
     x = zeros(real, [n + 1])
     x[0] = x0
-    for i in 0 .. n
+    for i in 0 .. n:
         x[i + 1] = x[i] + h * f(t0 + i * h, x[i])
     return x
 ```
@@ -760,22 +760,22 @@ per step:
 - The **midpoint method** reads the slope in the middle of the step instead: it takes a half Euler step, $k = f(t + h/2,\; x + \tfrac{h}{2}f(t, x))$, and steps with $x + h k$.
 
 ```text
-heun(f: (real, real) -> real, t0: real, x0: real, h: real, n: int) -> array<real>[n + 1]
+function heun(f: function(real, real) -> real, t0: real, x0: real, h: real, n: int) -> array<real>[n + 1]:
     require n >= 0
     x = zeros(real, [n + 1])
     x[0] = x0
-    for i in 0 .. n
+    for i in 0 .. n:
         t = t0 + i * h
         k1 = f(t, x[i])
         k2 = f(t + h, x[i] + h * k1)
         x[i + 1] = x[i] + h * (k1 + k2) / 2
     return x
 
-midpoint(f: (real, real) -> real, t0: real, x0: real, h: real, n: int) -> array<real>[n + 1]
+function midpoint(f: function(real, real) -> real, t0: real, x0: real, h: real, n: int) -> array<real>[n + 1]:
     require n >= 0
     x = zeros(real, [n + 1])
     x[0] = x0
-    for i in 0 .. n
+    for i in 0 .. n:
         t = t0 + i * h
         k = f(t + h / 2, x[i] + (h / 2) * f(t, x[i]))
         x[i + 1] = x[i] + h * k

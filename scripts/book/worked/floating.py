@@ -184,6 +184,13 @@ def _sum64(xs):
     return s
 
 
+def _exact_decimal(q, places):
+    """The Fraction q to `places` decimals, rounded half up, from exact integer arithmetic."""
+    scaled = (q * 10 ** places * 2 + 1) // 2
+    whole, frac = divmod(scaled, 10 ** places)
+    return f"{whole}.{frac:0{places}d}"
+
+
 def million_tenths():
     n = 10 ** 6
     tenth32 = f32(0.1)
@@ -201,7 +208,7 @@ def million_tenths():
     return (f"The sum of 10^6 copies of the stored value of 0.1. Relative errors are measured against the exact "
             f"sum of the stored copies, computed in exact rational arithmetic (a Fraction): "
             f"{float(exact):.6f} for the 32-bit copies of 0.1 ({_g(float(tenth32), 12)} each) and, for the first row, "
-            f"{float(n * Fraction(0.1)):.15f} for the 64-bit copies. The 64-bit accumulator of the last row holds "
+            f"{_exact_decimal(n * Fraction(0.1), 21)} (exact, 21 decimals) for the 64-bit copies. The 64-bit accumulator of the last row holds "
             f"{_sum64(xs):.9f} before it is rounded to the nearest 32-bit number.\n\n"
             + _table(["method", "computed sum", "relative error"], rows, "lrr"))
 
@@ -808,7 +815,10 @@ def cosine_accumulation():
     return (f"Cosine of {trials} pairs of 512-dimensional vectors (the second is the first plus noise of one tenth of its standard deviation, "
             f"cosine near 0.995), against the exact value (exact rational sums, one final evaluation in 64 bits). "
             f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x}; each trial draws {d} `normal()` values "
-            f"for the first vector (rounded to 32 bits), then {d} for the noise, b = f32(a + 0.1 z).\n\n" + _table(["accumulation", "mean abs. error", "max abs. error"], rows, "lrr"))
+            f"for the first vector (rounded to 32 bits), then {d} for the noise, b = f32(a + 0.1 z). "
+            f"The 32-bit row computes dot, na = a . a and nb = b . b by running f32 sums of f32 products, then "
+            f"cos = dot / (sqrt(na) * sqrt(nb)) with both square roots, their product and the quotient rounded to f32 "
+            f"(not dot / sqrt(na * nb)); the 64-bit row accumulates dot, na, nb in 64 bits and rounds only the final cosine to f32.\n\n" + _table(["accumulation", "mean abs. error", "max abs. error"], rows, "lrr"))
 
 
 # ------------------------------------------------ the sum 0.1 + 0.2
