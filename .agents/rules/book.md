@@ -94,7 +94,10 @@ the chapter where a reader should first meet it.
   defines it there in the same change, including edge cases such as
   `sign(0)`. Every symbol is in `docs/book/notation.md`, and no symbol or
   word carries two meanings without the text saying so.
-- **Figures are generated SVG.** Structure diagrams are Graphviz sources
+- **Figures are generated SVG.** Block diagrams are placed on an exact grid
+  with `scripts/book/svgdiagram.py` (aligned columns, equal panels, labels
+  clear of the lines); Graphviz is for trees and graphs that need automatic
+  layout. Other structure diagrams are Graphviz sources
   (`scripts/book/figures/<volume dir>/<name>.dot`); anything that plots numbers
   is a Python `render()` using `scripts/book/svgplot.py` and computing its data
   with the chapter's arithmetic. `make generate/book/figures` writes
