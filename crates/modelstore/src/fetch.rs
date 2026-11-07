@@ -119,7 +119,11 @@ fn free_bytes(dir: &Path) -> Option<u64> {
         ok.then(|| {
             // SAFETY: statvfs succeeded, so it wrote the whole struct.
             let stat = unsafe { stat.assume_init() };
-            (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64)
+            // `fsblkcnt_t` and `c_ulong` are u64 on Linux but narrower on other
+            // Unix targets: the conversion is for them.
+            #[allow(clippy::useless_conversion)]
+            let free = u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize));
+            free
         })
     }
     #[cfg(not(unix))]
