@@ -65,8 +65,8 @@ in the curriculum and appear here when they are written.
    gradient explodes.
 9. [Initialization: Where Training Starts](09-initialization.md): why the random
    starting point decides whether a deep network trains at all.
-10. Normalization Layers: how rescaling activations inside a network makes it
-    train faster and more stably.
+10. [Normalization Layers](10-normalization.md): how rescaling activations inside
+    a network makes it train faster and more stably.
 11. Regularization in Neural Networks: how to stop a network with millions of
     parameters from memorizing its training set.
 12. Training Dynamics and Debugging: how to find out why a loss curve looks

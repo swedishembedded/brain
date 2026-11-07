@@ -1,0 +1,36 @@
+<!-- source-sha256: 1271965e878952ab0dc43d364967fbc02ee95c47f401bd24030ad0f1ebdfa9bc -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 360" width="620" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="360" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-4</text>
+<line x1="194" y1="314" x2="194" y2="30" stroke="#edf2f7"/>
+<text x="194" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-2</text>
+<line x1="330" y1="314" x2="330" y2="30" stroke="#edf2f7"/>
+<text x="330" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="466" y1="314" x2="466" y2="30" stroke="#edf2f7"/>
+<text x="466" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="602" y1="314" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="58" y1="314" x2="602" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="232.86" x2="602" y2="232.86" stroke="#edf2f7"/>
+<text x="52" y="236.86" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="151.71" x2="602" y2="151.71" stroke="#edf2f7"/>
+<text x="52" y="155.71" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="70.57" x2="602" y2="70.57" stroke="#edf2f7"/>
+<text x="52" y="74.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<rect x="58" y="30" width="544" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#6b46c1" stroke-width="2.0" stroke-dasharray="6 4" points="66.5,312.42 83.5,311.42 100.5,311.42 117.5,310.83 134.5,310.43 151.5,309.84 168.5,308.65 185.5,307.26 202.5,304.49 219.5,299.74 236.5,298.55 253.5,288.05 270.5,285.47 287.5,283.89 304.5,280.92 321.5,278.54 338.5,283.49 355.5,287.06 372.5,289.83 389.5,293.4 406.5,297.36 423.5,301.92 440.5,305.88 457.5,306.67 474.5,308.85 491.5,308.26 508.5,308.85 525.5,308.65 542.5,309.44 559.5,310.24 576.5,313.41 593.5,312.61"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="66.5,314 83.5,314 100.5,314 117.5,314 134.5,314 151.5,314 168.5,314 185.5,314 202.5,314 219.5,314 236.5,314 253.5,314 270.5,314 287.5,311.62 304.5,283.69 321.5,82.62 338.5,191.57 355.5,296.37 372.5,312.61 389.5,313.8 406.5,314 423.5,314 440.5,314 457.5,314 474.5,314 491.5,314 508.5,314 525.5,314 542.5,314 559.5,314 576.5,314 593.5,314"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="66.5,314 83.5,313.8 100.5,313.8 117.5,313.41 134.5,312.61 151.5,312.61 168.5,312.02 185.5,310.43 202.5,309.05 219.5,303.1 236.5,297.36 253.5,292.6 270.5,284.48 287.5,279.93 304.5,278.54 321.5,276.16 338.5,272.2 355.5,276.95 372.5,275.17 389.5,285.08 406.5,295.18 423.5,299.93 440.5,304.09 457.5,307.26 474.5,310.04 491.5,311.82 508.5,312.61 525.5,313.01 542.5,313.41 559.5,314 576.5,314 593.5,313.8"/></g>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">input of the ReLU in layer 10</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">share of the 2048 values per bin</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Layer 10: distribution of the ReLU input</text>
+<rect x="417.41" y="38" width="176.59" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="425.41" y1="53" x2="445.41" y2="53" stroke="#6b46c1" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="451.41" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">no normalization, step 0</text>
+<line x1="425.41" y1="70" x2="445.41" y2="70" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="451.41" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">no normalization, step 10</text>
+<line x1="425.41" y1="87" x2="445.41" y2="87" stroke="#2b6cb0" stroke-width="2"/>
+<text x="451.41" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">batch norm, step 10</text>
+</svg>

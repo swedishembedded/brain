@@ -42,6 +42,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **batch dimension**: an extra, usually first, axis of a tensor that indexes independent examples processed together, so that each example is one contiguous block. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
+**batch-normalization**: normalizing each feature of a layer's output with the mean and variance taken over the examples of the batch, then applying a learned gain and shift; it keeps running averages of the statistics for use at prediction time. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
+
 **Bayes' rule**: the identity $P(A \mid B) = P(B \mid A)P(A)/P(B)$ that turns the probability of evidence given a cause into the probability of the cause given the evidence, using the prior probability of the cause. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 **Bernoulli distribution**: the distribution of a single yes/no outcome coded as $1$ or $0$, equal to $1$ with probability $p$; its mean is $p$ and its variance is $p(1-p)$. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
@@ -200,6 +202,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **gradient descent**: the iteration that repeatedly moves the parameters a small step against the gradient of the loss, $\mathbf{w} \leftarrow \mathbf{w} - \eta\nabla\mathcal{L}(\mathbf{w})$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
+**group-normalization**: normalizing groups of consecutive channels of one example, over the group's channels and all spatial positions, with a learned gain and shift per channel; one group is layer normalization and one group per channel is instance normalization. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
+
 ## H
 
 **hashing**: computing from a value, by a fixed rule, a fixed-size number used as the address of the value in a table (giving expected constant-time lookup when the rule spreads the keys) or as a fingerprint that changes if any byte of the value changes. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
@@ -255,6 +259,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **label-smoothing**: replacing the one-hot target by a mixture of it with the uniform distribution, so that the loss is smallest at a finite gap between the scores instead of only in the limit of infinite confidence. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **law of large numbers**: the statement that the average of $n$ independent draws with finite variance converges to their expectation, with the probability of an error above any fixed amount going to zero as $n$ grows. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
+
+**layer-normalization**: normalizing each example's features with the mean and variance taken over the features of that one example, then applying a learned gain and shift; it does not depend on the batch or the mode. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
 **learning rate**: the positive number $\eta$ that scales the step of gradient descent; too small is slow, above $2/\lambda_{\max}$ the iteration diverges on a quadratic loss. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
@@ -410,6 +416,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **reverse-mode differentiation**: computing derivatives by carrying a row vector from the single output back through the chain of Jacobians, so one sweep gives the gradient with respect to every input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
+**rms-normalization**: layer normalization without the subtraction of the mean: dividing each example's features by their root mean square and applying a learned gain. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
+
 **RMSProp**: an update that divides each coordinate's gradient by the root of a running average of its own squared gradient, so every coordinate takes a step of about the learning rate whatever its scale. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **ROC curve**: the curve of the true positive rate against the false positive rate as the decision threshold moves over every value; its area equals the probability that a random positive is scored above a random negative, counting ties as one half. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
@@ -477,6 +485,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **test set**: rows used once, after every choice is made, to report the final score of the chosen model; looking at it more than once turns it into a validation set. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **test-dimension choice**: choosing the sizes of the model a test runs on (batch, features, widths, heads) all different and above 1, so that bugs that confuse two sizes or depend on a size of 1 change the result. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
+
+**train-vs-eval-mode**: the two behaviours of a layer that has a state of its own: in train mode batch normalization uses the batch statistics and updates its running averages, in eval mode it uses the running averages and changes nothing. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
 **training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
