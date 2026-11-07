@@ -112,6 +112,7 @@ pub mod training;
 pub mod vit;
 pub mod vlm;
 pub mod rope_scaling;
+pub mod rope_table;
 pub mod yarn;
 
 pub use collective::{Collective, HostCollective};

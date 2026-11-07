@@ -1,35 +1,40 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Half-split RoPE for the sliding layers: a host-built `(cos, sin)` table and
-//! the existing `rope2d` kernel.
+//! The table-driven half-split RoPE that several decoders share: a host-built
+//! `(cos, sin)` table, its device upload, and the `rope2d` dispatch that
+//! rotates a buffer in place.
 //!
 //! Swedish Embedded AB implements solutions for rotary position encodings in
 //! long-context decoders for its clients. If your team needs expertise in
 //! position encodings and their numerical parity with a reference then you can
 //! procure our services by sending an email to info@swedishembedded.com.
 //!
-//! The reference rotates `q * cos + rotate_half(q) * sin` with
-//! `rotate_half(x) = [-x2, x1]` over the two halves of the head, in f32, with
-//! `inv_freq[i] = 1 / theta^(2i/dim)` and `angle = position * inv_freq`. That
-//! is exactly `rope2d.wgsl`'s contract (channel `d` pairs with `d + half`,
-//! every head reading the same `[t, half]` table), so no new kernel is needed.
-//! Global layers apply no rotation and never build a table.
+//! `rope2d.wgsl` pairs channel `d` with `d + half` of each head
+//! (`y1 = x1 cos - x2 sin`, `y2 = x2 cos + x1 sin`) and reads the angle from a
+//! `[rows, half]` table shared by every head of one dispatch, which is the
+//! rotation `rotate_half` implements in the Hugging Face decoders. A model
+//! chooses its table (the plain reciprocal-power one below, a partially
+//! rotating one, a per-head one built from a position grid); the dispatch and
+//! the upload are the same for all of them.
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
-/// Row-major `[t, half]` cosine and sine tables, positions `0..t`.
+/// Row-major `[t, half]` cosine and sine tables for positions `0..t`.
+#[derive(Clone, Debug)]
 pub struct RopeTable {
     pub cos: Vec<f32>,
     pub sin: Vec<f32>,
     pub half: usize,
+    pub t: usize,
 }
 
-/// The table for `head_dim`-wide heads at base `theta`, in f32 like the
-/// reference (`model::rope_scaling::base_inv_freq` is the same reciprocal
-/// power).
+/// The plain table for `head_dim`-wide heads at base `theta`: `inv_freq[i] =
+/// 1 / theta^(2i/head_dim)` and `angle = position * inv_freq`, all in f32 as
+/// the reference decoders compute them (`rope_scaling::base_inv_freq` is the
+/// same reciprocal power).
 pub fn half_split_table(head_dim: usize, theta: f32, t: usize) -> RopeTable {
-    let inv_freq = model::rope_scaling::base_inv_freq(head_dim as u32, theta);
+    let inv_freq = crate::rope_scaling::base_inv_freq(head_dim as u32, theta);
     let half = inv_freq.len();
     let mut cos = Vec::with_capacity(t * half);
     let mut sin = Vec::with_capacity(t * half);
@@ -40,14 +45,15 @@ pub fn half_split_table(head_dim: usize, theta: f32, t: usize) -> RopeTable {
             sin.push(angle.sin());
         }
     }
-    RopeTable { cos, sin, half }
+    RopeTable { cos, sin, half, t }
 }
 
-/// A [`RopeTable`] resident on the device.
+/// A [`RopeTable`] resident on the device. `half` travels with the buffers so
+/// the dispatch cannot be given a width the table was not built for.
 pub struct DeviceRope {
-    cos: DeviceBuffer,
-    sin: DeviceBuffer,
-    half: u32,
+    pub cos: DeviceBuffer,
+    pub sin: DeviceBuffer,
+    pub half: u32,
 }
 
 impl DeviceRope {
@@ -62,8 +68,16 @@ impl DeviceRope {
     /// Rotate `heads` heads of every row of `buf` (`[rows, row_stride]`) in
     /// place. `kernel` is the index of `rope2d` in the caller's kernel table.
     pub fn apply(&self, gpu: &Gpu, kernel: usize, buf: &DeviceBuffer, rows: u32, heads: u32, row_stride: u32) -> Step {
-        gpu.step(kernel, &[buf, &self.cos, &self.sin], &[rows, heads, self.half, row_stride, 0, rows, f(1.0)], rows * heads * self.half)
+        rope2d_step(gpu, kernel, buf, &self.cos, &self.sin, rows, heads, self.half, row_stride, 0)
     }
+}
+
+/// One `rope2d` dispatch: rotate `heads` heads, `2 * half` channels each, of
+/// the `rows` rows of `buf` (row stride `row_stride`, region starting at
+/// channel `off`), row `r` reading table row `r`.
+#[allow(clippy::too_many_arguments)]
+pub fn rope2d_step(gpu: &Gpu, kernel: usize, buf: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, rows: u32, heads: u32, half: u32, row_stride: u32, off: u32) -> Step {
+    gpu.step(kernel, &[buf, cos, sin], &[rows, heads, half, row_stride, off, rows, f(1.0)], rows * heads * half)
 }
 
 #[cfg(test)]
@@ -73,7 +87,7 @@ mod tests {
     #[test]
     fn position_zero_is_the_identity_and_every_row_is_a_unit_rotation() {
         let t = half_split_table(16, 10_000.0, 5);
-        assert_eq!(t.half, 8);
+        assert_eq!((t.half, t.t), (8, 5));
         assert!(t.cos[..8].iter().all(|c| *c == 1.0) && t.sin[..8].iter().all(|s| *s == 0.0));
         for (c, s) in t.cos.iter().zip(&t.sin) {
             assert!((c * c + s * s - 1.0).abs() < 1e-6);

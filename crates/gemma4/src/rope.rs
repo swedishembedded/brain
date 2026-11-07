@@ -63,35 +63,15 @@
 //! abs deviation this way, see the self-validated `cos^2+sin^2==1` invariant
 //! in `tools/goldens/gemma4_dump_reference.py`).
 
-/// One layer type's per-token `(cos, sin)` rotation table, row-major `[T,
-/// half]`, `half = head_dim/2` for BOTH layer types (see this module's doc
-/// for why `full_attention`'s table is NOT narrowed to `rope_angles` - the
-/// zero-padded remainder is genuine table content, not an omitted range).
-#[derive(Clone, Debug)]
-pub struct RopeTable {
-    pub cos: Vec<f32>,
-    pub sin: Vec<f32>,
-    pub half: usize,
-    pub t: usize,
-}
+use gpu_core::{DeviceBuffer, Gpu, Step};
+pub use model::rope_table::{DeviceRope, RopeTable};
 
 /// `sliding_attention`'s table: `rope_type="default"`, every one of
 /// `head_dim`'s `head_dim/2` frequency slots rotates -
 /// `Gemma3RotaryEmbedding.compute_default_rope_parameters`:
-/// `inv_freq[i] = theta^(-2i/head_dim)`.
+/// `inv_freq[i] = theta^(-2i/head_dim)`. The plain table the decoders share.
 pub fn sliding_table(head_dim: u32, theta: f64, t: usize) -> RopeTable {
-    let half = (head_dim / 2) as usize;
-    let mut cos = vec![0f32; t * half];
-    let mut sin = vec![0f32; t * half];
-    for pos in 0..t {
-        for k in 0..half {
-            let inv_freq = theta.powf(-((2 * k) as f64) / head_dim as f64);
-            let angle = pos as f64 * inv_freq;
-            cos[pos * half + k] = angle.cos() as f32;
-            sin[pos * half + k] = angle.sin() as f32;
-        }
-    }
-    RopeTable { cos, sin, half, t }
+    model::rope_table::half_split_table(head_dim as usize, theta as f32, t)
 }
 
 /// `full_attention`'s table: `rope_type="proportional"` -
@@ -120,23 +100,8 @@ pub fn full_table(global_head_dim: u32, theta: f64, partial_rotary_factor: f64, 
     RopeTable { cos, sin, half, t }
 }
 
-use gpu_core::{f, DeviceBuffer, Gpu, Step};
-
-/// A [`RopeTable`], uploaded to the device - `half` travels alongside the
-/// buffers (rather than being recomputed at the call site) so there is
-/// exactly ONE place (`sliding_table`/`full_table`) that computes it.
-pub struct DeviceRope {
-    pub cos: DeviceBuffer,
-    pub sin: DeviceBuffer,
-    pub half: u32,
-}
-
 pub fn upload_rope(gpu: &Gpu, tbl: &RopeTable) -> DeviceRope {
-    let cos = gpu.storage(tbl.cos.len() as u64);
-    gpu.write_f32(&cos, &tbl.cos);
-    let sin = gpu.storage(tbl.sin.len() as u64);
-    gpu.write_f32(&sin, &tbl.sin);
-    DeviceRope { cos, sin, half: tbl.half as u32 }
+    DeviceRope::upload(gpu, tbl)
 }
 
 /// `rope2d.wgsl` (`kernels::ROPE2D`): the WHOLE `head_dim` of every head in
@@ -149,7 +114,7 @@ pub fn upload_rope(gpu: &Gpu, tbl: &RopeTable) -> DeviceRope {
 /// columns), not in a different kernel.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_rope_full(gpu: &Gpu, kernel: usize, buf: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, rows: u32, heads: u32, half: u32, row_stride: u32) -> Step {
-    gpu.step(kernel, &[buf, cos, sin], &[rows, heads, half, row_stride, 0, rows, f(1.0)], rows * heads * half)
+    model::rope_table::rope2d_step(gpu, kernel, buf, cos, sin, rows, heads, half, row_stride, 0)
 }
 
 #[cfg(test)]

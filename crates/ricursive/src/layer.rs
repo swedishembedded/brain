@@ -38,7 +38,7 @@ use paramstore::upload::Uploader;
 
 use crate::config::{LayerType, RicursiveConfig};
 use crate::import::layer_tensor;
-use crate::rope::DeviceRope;
+use model::rope_table::DeviceRope;
 
 pub(crate) const K_MATMUL: usize = 0;
 pub(crate) const K_RMSNORM: usize = 1;

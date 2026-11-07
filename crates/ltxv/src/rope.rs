@@ -69,7 +69,7 @@
 
 use std::f64::consts::FRAC_PI_2;
 
-use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use gpu_core::{DeviceBuffer, Gpu, Step};
 
 /// Per-token, per-head `(cos, sin)` rotation tables - `[heads, T, half]`
 /// row-major, `half = head_dim/2`. This is the SAME layout the golden's
@@ -187,8 +187,7 @@ pub fn ltx_rope_tables(inner_dim: u32, num_heads: u32, theta: f64, max_pos: &[u3
 /// that head's channel range within the `[T, inner_dim]` buffer. `sign=1.0`
 /// (forward rotation); `tmod=T` (an exact per-token table, no frame-repeat).
 pub fn apply_rope_step(gpu: &Gpu, kernel: usize, buf: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, t: u32, head_dim: u32, row_stride: u32, off: u32) -> Step {
-    let half = head_dim / 2;
-    gpu.step(kernel, &[buf, cos, sin], &[t, 1, half, row_stride, off, t, f(1.0)], t * half)
+    model::rope_table::rope2d_step(gpu, kernel, buf, cos, sin, t, 1, head_dim / 2, row_stride, off)
 }
 
 #[cfg(test)]

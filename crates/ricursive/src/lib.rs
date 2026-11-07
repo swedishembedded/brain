@@ -19,14 +19,12 @@
 //! - [`config`]: the typed `config.json`, hybrid layer types.
 //! - [`import`]: the tensor manifest, two-way coverage and the mmap source.
 //! - [`layer`]: one decoder layer as a kernel graph.
-//! - [`rope`]: the half-split RoPE table for sliding layers.
 //! - [`model`]: embedding, layer stack, final norm and head.
 
 pub mod config;
 pub mod import;
 pub mod layer;
 pub mod model;
-pub mod rope;
 
 pub use config::{LayerType, RicursiveConfig};
 pub use import::{manifest, open_safetensors, validate_layout};
