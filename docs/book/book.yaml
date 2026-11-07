@@ -510,7 +510,7 @@ volumes:
         question: "How do we shrink the KV cache without losing what attention needs?"
         introduces: [multi-query-attention, multi-latent-attention, sliding-window-attention, attention-sink]
         requires: [grouped-query-attention, kv-cache, low-rank-approximation]
-        brain: [deepseek2]
+        brain: [deepseek2, ricursive]
       - id: mixture-of-experts
         title: "Mixture of Experts"
         question: "How can a model have a trillion parameters yet use only a few billion per token?"
