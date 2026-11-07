@@ -32,14 +32,14 @@ fn fixture() -> Option<Fixture> {
         brain_testutil::skip(&format!("{dir} absent: run tools/goldens/dflash2_reference_forward.py tiny --out {dir}"));
         return None;
     }
-    let cfg = Dflash2Config::from_json(&std::fs::read_to_string(format!("{dir}/config.json")).unwrap()).unwrap();
+    let cfg = Dflash2Config::from_json(&std::fs::read_to_string(format!("{dir}/draft/config.json")).unwrap()).unwrap();
     let gold = Golden::read(&format!("{dir}/golden.safetensors"));
     Some(Fixture { cfg, dir, gold })
 }
 
 fn load(fx: &Fixture, slots: u32, cap: u32) -> Dflash2 {
     let gpu = gpu_core::Gpu::open(None, &dflash2::pipelines(&fx.cfg));
-    let src = HfDraft::open(std::path::Path::new(&format!("{}/model.safetensors", fx.dir))).unwrap();
+    let src = HfDraft::open(std::path::Path::new(&format!("{}/draft", fx.dir))).unwrap();
     Dflash2::load(gpu, fx.cfg.clone(), Box::new(src), slots, cap).unwrap()
 }
 
@@ -127,4 +127,14 @@ fn a_draft_that_cannot_run_is_refused_by_name() {
     assert!(m.append_context(0, fx.gold.get("a.taps"), 10).unwrap_err().contains("slot holds"));
     let n = noise(&fx, "a.");
     assert!(m.denoise_blocks(&[BlockJob { slot: 0, pos: 0, noise: &n }, BlockJob { slot: 0, pos: 0, noise: &n }]).unwrap_err().contains("share a cache slot"));
+}
+
+#[test]
+fn the_memory_plan_charges_the_weight_bytes_the_load_reports() {
+    let Some(fx) = fixture() else { return };
+    let src = HfDraft::open(std::path::Path::new(&format!("{}/draft", fx.dir))).unwrap();
+    let planned = src.device_weight_bytes(&fx.cfg);
+    let m = load(&fx, 1, 20);
+    assert_eq!(planned, m.weight_bytes());
+    assert_eq!(fx.cfg.cache_bytes(3, 32), (0..fx.cfg.n_layers).map(|l| 2 * 3 * u64::from(fx.cfg.cache_rows(l, 32)) * u64::from(fx.cfg.kv_dim()) * 4).sum::<u64>());
 }

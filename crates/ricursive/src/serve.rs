@@ -75,12 +75,26 @@
 //!   cache are host-side and shared; each stage holds the KV of its own layers, and only the residual stream
 //!   crosses a boundary.
 //!
+//! # Speculation, taps and the draft model
+//!
+//! A verify scores `1 + k` consecutive rows of a sequence in one forward ([`RowsForward`]); the scheduler truncates the
+//! rejected rows' block-table entries and nothing else needs undoing (the rings are `window + prefill_chunk` rows, so no
+//! verify row overwrites a key an accepted position still reads). Beside latent sparse attention a verify must not
+//! cross a cluster block of the index ([`PagedDecoder::spec_rows_limit`]), so every row reads the index a plain
+//! decode step at its position would.
+//!
+//! The proposals come from prompt lookup (an external `Drafter`) or from a DFlash2 draft model
+//! ([`RicursiveEngine::set_drafter`]), which reads the target's hidden states. The engine retains them in a
+//! [`TapPool`] addressed by the global block tables, written by every forward it runs
+//! (`retain_taps`); the draft's own K/V caches are keyed by request and rebuilt from the taps.
+//!
 //! [`global_kv_bytes_per_token`] and [`ring_bytes_per_slot`] are the two KV costs the memory plan charges: the
 //! global KV grows with tokens held, the rings are fixed per slot (live and snapshot) however long the
 //! sequences are. Latent sparse attention ([`RicursiveEngine::set_lsa`]) reads the global layers sparsely over
 //! an f32, int8 or fp8 cache, one binding per stage; there is no offload in this engine.
 
 use checkpoint::TensorSource;
+use dflash2::{DraftHost, DraftRequest, Dflash2Drafter, TapRows};
 use gpu_core::{DeviceBuffer, Gpu};
 use model::adapter::bank::{AdapterBank, AdapterBankConfig, AdapterError, AdapterInfo, BankedEngine, UnloadStatus, VerifiedAdapter};
 use model::adapter::sites::LoraSites;
@@ -93,7 +107,7 @@ use model::ops::{Ops, TierPolicy};
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
 use model::paged_sparse::PackedKv;
 use model::serve::rows::RowsForward;
-use model::serve::{AdapterAvailability, AdapterId, PagedDecoder, PrefillProgress};
+use model::serve::{AdapterAvailability, AdapterId, DraftQuery, PagedDecoder, PrefillProgress, TapPool};
 use model::shard::StreamPlan;
 use model::snapshot_prefix::{Entry, SnapshotPrefixCache};
 
@@ -149,12 +163,40 @@ pub struct ServeConfig {
     /// The bank is part of the footprint ([`crate::placement::footprint`]): its bytes are charged to the stage that holds
     /// each layer. `None`: no adapters.
     pub adapter_bank: Option<AdapterBankConfig>,
+    /// A DFlash2 draft model proposing for the scheduler ([`RicursiveEngine::set_drafter`]): its weights and K/V caches
+    /// are charged to the last stage's device and its retained hidden states to the host
+    /// ([`crate::placement::footprint`]). `None`: no draft model.
+    pub drafter: Option<DraftSizing>,
+}
+
+/// What a DFlash2 draft model costs, from its configuration and the bytes its weights take on the device.
+#[derive(Clone, Debug)]
+pub struct DraftSizing {
+    pub cfg: dflash2::Dflash2Config,
+    /// Resident bytes of the draft's weights at the tier they are loaded in ([`dflash2::HfDraft::weight_bytes`]).
+    pub weight_bytes: u64,
+}
+
+impl DraftSizing {
+    /// Device bytes of the draft beside the target: its weights, the K/V caches of `slots` sequences of up to
+    /// `max_seq_len` positions, and the activations of one block per sequence.
+    pub fn device_bytes(&self, slots: u32, max_seq_len: u32) -> u64 {
+        let c = &self.cfg;
+        let rows = u64::from(slots) * u64::from(c.block_size);
+        let activations = 4 * rows * (3 * u64::from(c.d_ff) + 5 * u64::from(c.q_dim()) + 4 * u64::from(c.kv_dim()) + 10 * u64::from(c.d_model) + u64::from(c.dyn_width()));
+        self.weight_bytes + c.cache_bytes(slots, max_seq_len) + activations
+    }
+
+    /// Host bytes of the target's retained hidden states for a block pool of `num_blocks` x `block_size` positions.
+    pub fn tap_bytes(&self, hidden: usize, num_blocks: u32, block_size: u32) -> u64 {
+        TapPool::bytes(self.cfg.target_layers.len(), hidden, num_blocks, block_size)
+    }
 }
 
 impl ServeConfig {
     /// A config with the given sizes, weights as stored and an f32 KV cache.
     pub fn new(block_size: u32, num_blocks: u32, max_seq_len: u32, max_batch: u32, prefix_slots: u32, prefill_chunk: u32) -> ServeConfig {
-        ServeConfig { block_size, num_blocks, max_seq_len, max_batch, prefix_slots, prefill_chunk, sparse_attention: false, weights: None, kv_cache: KvTier::F32, dense_keys: None, fused_attention: true, adapter_bank: None }
+        ServeConfig { block_size, num_blocks, max_seq_len, max_batch, prefix_slots, prefill_chunk, sparse_attention: false, weights: None, kv_cache: KvTier::F32, dense_keys: None, fused_attention: true, adapter_bank: None, drafter: None }
     }
 
     fn validate(&self, cfg: &RicursiveConfig) -> Result<(), String> {
@@ -309,6 +351,12 @@ pub struct RicursiveEngine {
     lsa: Vec<StageLsa>,
     /// While capturing attention: the queries of each global layer of the forward in flight.
     capture_q: Option<Vec<DeviceBuffer>>,
+    /// The residual stream after each tapped layer, per cached position ([`PagedDecoder::enable_taps`]).
+    taps: Option<TapPool>,
+    /// The DFlash2 draft model proposing for the scheduler ([`Self::set_drafter`]).
+    drafter: Option<Dflash2Drafter>,
+    /// The `--device` the stages were opened on, for the draft model's own device.
+    device: Option<String>,
 }
 
 impl RicursiveEngine {
@@ -369,6 +417,9 @@ impl RicursiveEngine {
             max_blocks_per_seq,
             lsa: Vec::new(),
             capture_q: None,
+            taps: None,
+            drafter: None,
+            device: device.map(str::to_string),
             plan: plan.clone(),
             stages,
             tiers,
@@ -645,6 +696,8 @@ impl RicursiveEngine {
         let index = HostIndex::build(&geometry, rows);
         let n = rows.len() as u32;
         let boundary_bytes = u64::from(n) * self.cfg.hidden_size as u64 * 4;
+        let tap_layers: Vec<usize> = self.taps.as_ref().map(|t| t.layers().to_vec()).unwrap_or_default();
+        let mut tapped: Vec<(usize, DeviceBuffer)> = Vec::new();
         let mut carry: Option<(usize, DeviceBuffer)> = None;
         for (i, stage) in self.stages.iter().enumerate() {
             let gpu = stage.gpu();
@@ -658,13 +711,31 @@ impl RicursiveEngine {
                     into
                 }
             };
-            let out = stage.forward(&geometry, &index, n, &x_in, &x0, self.lsa.iter().find(|s| s.stage == i).map(|s| &s.binding), self.capture_q.as_mut())?;
+            let (out, taken) = stage.forward(&geometry, &index, n, &x_in, &x0, self.lsa.iter().find(|s| s.stage == i).map(|s| &s.binding), self.capture_q.as_mut(), &tap_layers)?;
+            tapped.extend(taken);
             carry = Some((i, out));
         }
         for s in &self.lsa {
             s.binding.end_forward();
         }
+        self.retain_taps(rows, &tapped);
         Ok(carry.expect("an engine has a stage").1)
+    }
+
+    /// Store the tapped layers' residual of each row of a forward in the tap pool, at the row's position of its
+    /// sequence's blocks. `tapped` holds `[rows, hidden]` per tapped layer, on the device of the stage that owns it.
+    fn retain_taps(&mut self, rows: &[RowPlan<'_>], tapped: &[(usize, DeviceBuffer)]) {
+        let Some(pool) = self.taps.as_mut() else { return };
+        let hidden = self.cfg.hidden_size;
+        let host: Vec<Vec<f32>> = tapped.iter().map(|(l, buf)| self.stages.iter().find(|s| s.range.contains(l)).expect("the stages tile the layers").gpu().read(buf, rows.len() * hidden)).collect();
+        debug_assert_eq!(host.len(), pool.layers().len(), "every tapped layer came back from its stage");
+        let mut row = vec![0f32; pool.width()];
+        for (r, plan) in rows.iter().enumerate() {
+            for (j, layer) in host.iter().enumerate() {
+                row[j * hidden..(j + 1) * hidden].copy_from_slice(&layer[r * hidden..(r + 1) * hidden]);
+            }
+            pool.write(plan.blocks, plan.pos, &row);
+        }
     }
 
     /// Final norm and logits for `rows` rows of the residual stream `x` (on the last stage): `(normed, logits)`.
@@ -682,7 +753,10 @@ impl RicursiveEngine {
     }
 
     /// Copy the first `rows` rows of global block `from` over block `to` on every global layer.
-    fn copy_block_rows(&self, from: u32, to: u32, rows: u32) {
+    fn copy_block_rows(&mut self, from: u32, to: u32, rows: u32) {
+        if let Some(taps) = self.taps.as_mut() {
+            taps.copy_rows(from, to, rows);
+        }
         let bs = u64::from(self.serve.block_size);
         let geometry = self.geometry();
         for stage in &self.stages {
@@ -907,8 +981,23 @@ fn top_k(logits: &[f32], k: usize) -> Vec<(u32, f32)> {
 impl RowsForward for RicursiveEngine {
     fn forward_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
         assert_eq!(tables.len(), rows.len(), "ricursive serve: tables/rows length mismatch");
-        assert!(self.lsa.is_empty(), "ricursive serve: a verify step cannot run beside latent sparse attention (spec_max_draft is 0 then)");
         let total: usize = rows.iter().map(Vec::len).sum();
+        if !self.lsa.is_empty() {
+            // The index is brought up to date as a forward starts, over the positions cached before it: a verify is
+            // the chunk of its rows, exactly as a decode step is one row, and `spec_rows_limit` keeps it inside one
+            // cluster block so every row reads the index a plain decode step at its position would.
+            let mut prepared: Vec<(&mut BlockTable, u32, u32)> = tables
+                .iter_mut()
+                .zip(rows)
+                .map(|(t, row)| {
+                    let cached = t.len();
+                    (&mut **t, cached, row.len() as u32)
+                })
+                .collect();
+            for s in &mut self.lsa {
+                s.binding.prepare_rows(self.stages[s.stage].gpu(), &mut prepared, s.pools.key_pools()).unwrap_or_else(|e| panic!("ricursive serve: latent sparse attention: {e}"));
+            }
+        }
         assert!(total <= self.spec_row_budget(), "ricursive serve: a verify of {total} rows exceeds the forward's {}", self.spec_row_budget());
         let mut plans: Vec<(u32, u32, u32, usize, KvNamespace)> = Vec::with_capacity(total);
         let mut blocks: Vec<Vec<u32>> = Vec::with_capacity(tables.len());
@@ -1084,14 +1173,43 @@ impl PagedDecoder for RicursiveEngine {
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY.min(self.cfg.vocab_size)
     }
-    /// Proposals per sequence a verify scores: one forward of `1 + proposals` rows, which must fit the ring slack.
-    /// Zero beside latent sparse attention, whose index pages a rejected row would leave built over rolled-back keys.
+    /// Proposals per sequence a verify scores: one forward of `1 + proposals` rows, which must fit the ring slack. With
+    /// a draft model that is at most the rest of its block.
     fn spec_max_draft(&self) -> usize {
-        if self.lsa.is_empty() {
-            model::serve::rows::DEFAULT_MAX_DRAFT.min((self.serve.prefill_chunk as usize).saturating_sub(1))
-        } else {
-            0
+        let slack = (self.serve.prefill_chunk as usize).saturating_sub(1);
+        self.drafter.as_ref().map_or(model::serve::rows::DEFAULT_MAX_DRAFT, Dflash2Drafter::max_draft).min(slack)
+    }
+    /// Beside latent sparse attention a verify may not cross a cluster block: the index of a block is built when a forward
+    /// starts, so rows past the boundary would read a state a plain decode step builds one step later.
+    fn spec_rows_limit(&self, table: &BlockTable) -> usize {
+        self.lsa.first().map_or(usize::MAX, |a| a.binding.chunk_limit(table.len()) as usize)
+    }
+    fn enable_taps(&mut self, layers: &[usize]) -> Result<(), String> {
+        let n = self.cfg.num_hidden_layers;
+        if layers.is_empty() || layers.iter().any(|&l| l >= n) || layers.iter().enumerate().any(|(i, l)| layers[..i].contains(l)) {
+            return Err(format!("ricursive: taps need distinct layers of the model's {n}, got {layers:?}"));
         }
+        match &self.taps {
+            Some(pool) if pool.layers() == layers => Ok(()),
+            Some(pool) => Err(format!("ricursive: taps are already retained for layers {:?}, not {layers:?}", pool.layers())),
+            None => {
+                self.taps = Some(TapPool::new(layers.to_vec(), self.cfg.hidden_size, self.serve.num_blocks, self.serve.block_size));
+                Ok(())
+            }
+        }
+    }
+    fn tap_layers(&self) -> &[usize] {
+        self.taps.as_ref().map_or(&[], TapPool::layers)
+    }
+    fn read_taps(&self, table: &BlockTable, from: u32, count: u32) -> Result<Vec<f32>, String> {
+        self.taps.as_ref().ok_or("ricursive: hidden-state taps are not enabled")?.read(table, from, count)
+    }
+    fn draft(&mut self, queries: &[DraftQuery], ks: &[usize]) -> Vec<Vec<u32>> {
+        let Some(mut drafter) = self.drafter.take() else { return vec![Vec::new(); queries.len()] };
+        let requests: Vec<DraftRequest<'_>> = queries.iter().zip(ks).map(|(q, &want)| DraftRequest { id: q.id, context: q.context, table: q.table, want }).collect();
+        let proposals = drafter.propose(&*self, &*self, &requests);
+        self.drafter = Some(drafter);
+        proposals
     }
     /// The rows a forward is sized for: the widest of a prefill chunk and a full decode batch.
     fn spec_row_budget(&self) -> usize {
@@ -1099,6 +1217,68 @@ impl PagedDecoder for RicursiveEngine {
     }
     fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
         self.forward_rows(tables, rows, cands)
+    }
+}
+
+/// The draft model shares the target's token embedding (the rows as the checkpoint stores them, without
+/// `embed_scale`) and its output head.
+impl DraftHost for RicursiveEngine {
+    fn embed(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
+        crate::model::embed_unscaled(self.src.as_ref(), &self.cfg, tokens)
+    }
+    fn project(&self, normed: &[f32]) -> Result<Vec<f32>, String> {
+        Ok(self.last().project(normed, self.cfg.vocab_size))
+    }
+}
+
+impl TapRows for RicursiveEngine {
+    fn tap_rows(&self, table: &BlockTable, from: u32, count: u32) -> Result<Vec<f32>, String> {
+        self.read_taps(table, from, count)
+    }
+}
+
+impl RicursiveEngine {
+    /// Draft with the DFlash2 model in `dir` (a Hugging Face directory: `config.json` and its safetensors): it is loaded on
+    /// the last stage's device with a cache slot for each live sequence, the engine starts retaining the target's
+    /// residual at the layers the draft reads, and the scheduler's verify takes the draft's proposals
+    /// ([`PagedDecoder::draft`]). Must be called before the first request: sequences already running have no taps for
+    /// the positions they consumed. The engine must have been sized with the draft's [`ServeConfig::drafter`] for the
+    /// placement to have charged it.
+    pub fn set_drafter(&mut self, dir: &std::path::Path) -> Result<(), String> {
+        let cfg = dflash2::Dflash2Config::from_json(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("ricursive: draft model {}: config.json: {e}", dir.display()))?).map_err(|e| format!("ricursive: draft model {}: {e}", dir.display()))?;
+        self.check_drafter(&cfg)?;
+        let source = dflash2::HfDraft::open(dir)?;
+        let last = self.stages.len() - 1;
+        let device = self.device.clone();
+        let (slots, cap) = (self.serve.max_batch, self.serve.max_seq_len);
+        let model = self.plan.open_stage(last, || {
+            let gpu = Gpu::open(device.as_deref(), &dflash2::pipelines(&cfg));
+            dflash2::Dflash2::load(gpu, cfg.clone(), Box::new(source), slots, cap)
+        })??;
+        tracing::info!(draft = %dir.display(), weights_gib = model.weight_bytes() as f64 / (1u64 << 30) as f64, slots, cap, layers = ?cfg.target_layers, "ricursive: draft model loaded");
+        self.enable_taps(&cfg.target_layers)?;
+        self.drafter = Some(Dflash2Drafter::new(model));
+        Ok(())
+    }
+
+    /// Refuse, by name, a draft built for another target.
+    pub fn check_drafter(&self, cfg: &dflash2::Dflash2Config) -> Result<(), String> {
+        let c = &self.cfg;
+        if cfg.d_model as usize != c.hidden_size || cfg.vocab as usize != c.vocab_size {
+            return Err(format!("ricursive: the draft model is for a target of width {} and vocabulary {}, this one is {} and {}", cfg.d_model, cfg.vocab, c.hidden_size, c.vocab_size));
+        }
+        if let Some(&bad) = cfg.target_layers.iter().find(|&&l| l >= c.num_hidden_layers) {
+            return Err(format!("ricursive: the draft model reads layer {bad} of the target, which has {}", c.num_hidden_layers));
+        }
+        if cfg.mask_token_id as usize >= c.vocab_size {
+            return Err(format!("ricursive: the draft model's mask token {} is outside the vocabulary", cfg.mask_token_id));
+        }
+        Ok(())
+    }
+
+    /// What the draft model has cost so far; `None` without one.
+    pub fn draft_stats(&self) -> Option<dflash2::drafter::DraftStats> {
+        self.drafter.as_ref().map(Dflash2Drafter::stats)
     }
 }
 

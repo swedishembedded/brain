@@ -14,6 +14,7 @@ mod real_weight_parity;
 mod serve;
 mod staged_lsa;
 mod synthetic;
+mod dflash;
 mod fused;
 mod taps;
 mod tiers;

@@ -18,6 +18,8 @@ use checkpoint::gguf::MmapGguf;
 use checkpoint::packed::{BoundedWorkspace, CodecRegistry, MemoryBudget, PackedReader, PackedSource};
 use checkpoint::TensorSource;
 use gpu_core::select::Dtype;
+
+use crate::Dflash2Config;
 use model::ops::{stored_tier, upload_from_source, Ops, Weight};
 
 const MODEL: &str = "dflash2";
@@ -155,6 +157,31 @@ impl HfDraft {
         let reader = PackedReader::open(path).map_err(|e| format!("{MODEL}: cannot open {}: {e}", path.display()))?;
         let src = PackedSource::identity_lenient(Box::new(reader), CodecRegistry::reference());
         Ok(HfDraft { src, staging: BoundedWorkspace::new(MemoryBudget::new(STAGING_BYTES, 0)) })
+    }
+}
+
+impl HfDraft {
+    /// Device bytes the draft's linears take when loaded as the file stores them: what a memory plan charges before
+    /// anything is read ([`crate::Dflash2::weight_bytes`] reports the same after the load).
+    pub fn device_weight_bytes(&self, cfg: &Dflash2Config) -> u64 {
+        let (d, ff, hq, hkv) = (cfg.d_model as usize, cfg.d_ff as usize, cfg.q_dim() as usize, cfg.kv_dim() as usize);
+        let dynamic = cfg.dyn_width() as usize;
+        let mut linears = vec![(Tensor::Fc, d, cfg.tap_width())];
+        for l in 0..cfg.n_layers {
+            let t = |leaf| Tensor::Layer(l, leaf);
+            linears.extend([
+                (t(Leaf::Q), hq, d),
+                (t(Leaf::K), hkv, d),
+                (t(Leaf::V), hkv, d),
+                (t(Leaf::O), d, hq),
+                (t(Leaf::Gate), ff, d),
+                (t(Leaf::Up), ff, d),
+                (t(Leaf::Down), d, ff),
+                (t(Leaf::AttnConvProj), dynamic, d),
+                (t(Leaf::MlpConvProj), dynamic, d),
+            ]);
+        }
+        linears.into_iter().map(|(t, n, k)| Weight::bytes_for(stored_tier(&self.src, &t.name_hf()).unwrap_or(Dtype::F32), n, k)).sum()
     }
 }
 

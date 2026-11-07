@@ -20,6 +20,8 @@ brain-paramstore.workspace = true
 # `model::rope_scaling::base_inv_freq`: the reciprocal-power frequency table
 # computed in f32 exactly as the reference does.
 brain-model.workspace = true
+# The DFlash2 draft model the scheduler's verify can take its proposals from.
+brain-dflash2.workspace = true
 # Device AdamW over the parameter store, and the seeded initial weights of a fresh training run.
 brain-optim.workspace = true
 brain-data.workspace = true

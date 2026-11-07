@@ -28,7 +28,7 @@ use ricursive::{RicursiveConfig, RicursiveEngine, ServeConfig};
 use crate::serve::{check_row, engine, engine_with, prefill_in_slices, recompute_last, serve_config, stream, tiny_config, tiny_dir};
 
 /// Whether this device runs the workgroup-cooperative LSA kernels.
-fn lsa_runs_here() -> bool {
+pub(crate) fn lsa_runs_here() -> bool {
     let runs = gpu_core::testgpu::dev(&[]).caps().workgroup_reductions;
     if !runs {
         brain_testutil::skip_unavailable("LSA: this backend does not run workgroup-barrier kernels (GPU-only)");
@@ -41,12 +41,12 @@ fn geometry(cfg: &RicursiveConfig) -> IndexGeometry {
     IndexGeometry { n_layers: cfg.num_hidden_layers, n_heads: cfg.num_attention_heads, n_kv_heads: cfg.num_key_value_heads, head_dim: cfg.head_dim, rope_base: 0.0 }
 }
 
-fn lsa_config(top_p: usize, top_k: usize) -> LsaConfig {
+pub(crate) fn lsa_config(top_p: usize, top_k: usize) -> LsaConfig {
     LsaConfig { index_dim: 4, pool_size: 1, bucket_size: 2, bucket_cap: 4, cluster_block: 8, top_p, top_k, sink: 1, window: 8, early: None }
 }
 
 /// A random indexer over the global layers only.
-fn indexer(cfg: &RicursiveConfig, lsa: LsaConfig, seed: u64) -> Indexer {
+pub(crate) fn indexer(cfg: &RicursiveConfig, lsa: LsaConfig, seed: u64) -> Indexer {
     let mut ix = Indexer::random(lsa, geometry(cfg), seed).expect("random indexer");
     for (l, layer) in ix.layers.iter_mut().enumerate() {
         if cfg.layer_type(l) != ricursive::LayerType::Full {

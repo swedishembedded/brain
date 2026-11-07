@@ -44,7 +44,7 @@ Two further modes write a golden file (`golden.safetensors`, f32) the Rust gates
     dflash2_reference_forward.py real --safetensors DRAFT/model.safetensors --config DRAFT/config.json \\
         --target PARTIAL/layers-0-4.safetensors --tokenizer PARTIAL/tokenizer.json --out OUT --ctx-len 24 --seed 7
 
-    # a tiny random draft (config.json, model.safetensors) and its golden, for the checks that need no checkpoint
+    # a tiny random draft (draft/config.json, draft/model.safetensors) and its golden, for the checks that need no checkpoint
     dflash2_reference_forward.py tiny --out testdata/golden/dflash2/tiny
 
 Usage of the original, GGUF form:
@@ -663,11 +663,13 @@ def tiny_weights(seed):
 
 
 def run_tiny(out):
-    os.makedirs(out, exist_ok=True)
+    """`OUT/draft/` is a Hugging Face directory of the draft (config.json, model.safetensors); `OUT/golden.safetensors`
+    holds the reference's intermediates and the target tables they were computed with."""
+    os.makedirs(f"{out}/draft", exist_ok=True)
     cfg, tensors, rng = tiny_weights(1234)
-    json.dump(cfg, open(f"{out}/config.json", "w"), indent=2)
-    write_safetensors(f"{out}/model.safetensors", tensors)
-    w = Weights.from_safetensors(f"{out}/model.safetensors", f"{out}/config.json")
+    json.dump(cfg, open(f"{out}/draft/config.json", "w"), indent=2)
+    write_safetensors(f"{out}/draft/model.safetensors", tensors)
+    w = Weights.from_safetensors(f"{out}/draft/model.safetensors", f"{out}/draft/config.json")
     vocab, d = cfg["vocab_size"], cfg["hidden_size"]
     embed = (rng.standard_normal((vocab, d)) * 0.3).astype(np.float32)
     head = (rng.standard_normal((vocab, d)) * 0.3).astype(np.float32)
@@ -677,7 +679,7 @@ def run_tiny(out):
     gold.update(golden_case(w, taps[:14], 5, 14, lambda ids: embed[ids], head, "a."))
     gold.update(golden_case(w, taps[:17], 9, 17, lambda ids: embed[ids], head, "b."))
     write_safetensors(f"{out}/golden.safetensors", gold)
-    print(f"wrote {out}: config.json, model.safetensors, golden.safetensors")
+    print(f"wrote {out}: draft/config.json, draft/model.safetensors, golden.safetensors")
 
 
 def run_real(args):

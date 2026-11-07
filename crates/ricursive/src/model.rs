@@ -34,6 +34,16 @@ use crate::weights::Loader;
 /// Reads only the rows it needs (a bounded range read per token), never the
 /// whole table. An id outside the vocabulary is an error, not a clamp.
 pub fn embed(src: &dyn TensorSource, cfg: &RicursiveConfig, ids: &[u32]) -> Result<Vec<f32>, String> {
+    let mut out = embed_unscaled(src, cfg, ids)?;
+    if let Some(scale) = cfg.embed_scale {
+        out.iter_mut().for_each(|v| *v *= scale);
+    }
+    Ok(out)
+}
+
+/// [`embed`] without `embed_scale`: the rows of `embed_tokens` as the checkpoint stores them, which is the token
+/// embedding a draft model shares with the target.
+pub fn embed_unscaled(src: &dyn TensorSource, cfg: &RicursiveConfig, ids: &[u32]) -> Result<Vec<f32>, String> {
     let h = cfg.hidden_size;
     let mut out = vec![0f32; ids.len() * h];
     for (row, &id) in ids.iter().enumerate() {
@@ -43,9 +53,6 @@ pub fn embed(src: &dyn TensorSource, cfg: &RicursiveConfig, ids: &[u32]) -> Resu
         if !checkpoint::read_range_into(src, "model.embed_tokens.weight", id as usize * h, &mut out[row * h..(row + 1) * h]) {
             return Err("ricursive: source has no tensor model.embed_tokens.weight (or it is shorter than the vocabulary)".into());
         }
-    }
-    if let Some(scale) = cfg.embed_scale {
-        out.iter_mut().for_each(|v| *v *= scale);
     }
     Ok(out)
 }

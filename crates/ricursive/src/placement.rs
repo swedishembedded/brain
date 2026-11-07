@@ -65,6 +65,10 @@ pub struct Footprint {
     pub kv_global: u64,
     pub kv_rings: u64,
     pub lsa: u64,
+    /// The DFlash2 draft model's device bytes (weights, caches, activations), on the last stage; 0 without one.
+    pub draft: u64,
+    /// Host bytes of the target's retained hidden states for the draft; 0 without one.
+    pub taps_host: u64,
 }
 
 impl Footprint {
@@ -110,7 +114,10 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
     let rows = u64::from(serve.max_batch.max(serve.prefill_chunk));
     let head_weight = Weight::bytes_for(tiers.want("lm_head.weight"), cfg.vocab_size, cfg.hidden_size);
     weights += head_weight;
-    let head = head_weight + 4 * cfg.hidden_size as u64 + 4 * rows * cfg.vocab_size as u64;
+    // A draft model rides the last stage's device beside the head.
+    let draft = serve.drafter.as_ref().map_or(0, |d| d.device_bytes(serve.max_batch, serve.max_seq_len));
+    let taps_host = serve.drafter.as_ref().map_or(0, |d| d.tap_bytes(cfg.hidden_size, serve.num_blocks, serve.block_size));
+    let head = head_weight + draft + 4 * cfg.hidden_size as u64 + 4 * rows * cfg.vocab_size as u64;
 
     // The dense triad's two score slabs, sized by the keys a dense read may span.
     let keys = u64::from(serve.dense_keys.unwrap_or(serve.max_seq_len).max(cfg.sliding_window as u32));
@@ -129,6 +136,8 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
         kv_global: pool_bytes * globals,
         kv_rings: ring_bytes * n_slide,
         lsa: lsa.per_global_layer * globals + lsa.per_stage,
+        draft,
+        taps_host,
     }
 }
 

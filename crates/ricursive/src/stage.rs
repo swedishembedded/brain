@@ -261,9 +261,10 @@ impl Stage {
     /// The stage's layers over `rows` (already indexed as `index`): appends their K/V and returns the residual
     /// stream after the last of them, `[rows, hidden]` on this stage's device. `x` is the residual entering the
     /// stage and `x0` the value-residual source (the scaled embeddings), both on this device. `capture` collects
-    /// each global layer's normed queries; `lsa` reads the global layers sparsely.
+    /// each global layer's normed queries; `lsa` reads the global layers sparsely. `taps` names layers whose residual
+    /// stream (the output of the layer, `[rows, hidden]`) is returned beside the final one, in `taps` order.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn forward(&self, g: &Geometry<'_>, index: &HostIndex, n: u32, x: &DeviceBuffer, x0: &DeviceBuffer, lsa: Option<&LsaBinding>, mut capture: Option<&mut Vec<DeviceBuffer>>) -> Result<DeviceBuffer, String> {
+    pub(crate) fn forward(&self, g: &Geometry<'_>, index: &HostIndex, n: u32, x: &DeviceBuffer, x0: &DeviceBuffer, lsa: Option<&LsaBinding>, mut capture: Option<&mut Vec<DeviceBuffer>>, taps: &[usize]) -> Result<(DeviceBuffer, Vec<(usize, DeviceBuffer)>), String> {
         let c = g.cfg;
         let (ops, gpu) = (&self.ops, self.gpu());
         let idx = index.upload(gpu);
@@ -271,6 +272,7 @@ impl Stage {
         let (q_dim, kv_dim) = (c.q_dim() as u32, c.kv_dim() as u32);
         let mut s: Vec<Step> = Vec::new();
         let mut x = x.clone();
+        let mut tapped = Vec::new();
         // The adapter runtime's scratch is sized for this forward's rows.
         // A bank corrects each row by its own adapter; a batch of base rows records no correction at all.
         let banked = self.bank.as_ref().filter(|_| index.namespaces.iter().any(|&ns| ns != BASE_KV_NAMESPACE));
@@ -349,9 +351,12 @@ impl Stage {
             let attn_normed = ops::rmsnorm(gpu, &mut s, &attn_out, &w.post_attn_ln, hidden, n, c.rms_norm_eps);
             let x1 = ops::binary(gpu, &mut s, K_ADD2, &x, &attn_normed, n * hidden);
             x = w.feed_forward(c, adapter.as_ref()).record(ops, &mut s, &x1, n);
+            if taps.contains(&l) {
+                tapped.push((l, x.clone()));
+            }
         }
         gpu.submit(&[], &s);
-        Ok(x)
+        Ok((x, tapped))
     }
 
     /// Final norm and logits for `rows` rows of the residual stream `x`: `(normed, logits)`. Only the last stage has a head.
