@@ -96,6 +96,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **decision tree**: a model that asks a sequence of yes-or-no questions, each a threshold on one feature chosen to make the answers as informative about the class as possible, and predicts the class held at the leaf reached. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
+**depth-vs-width**: the tradeoff between a network of many layers and one of few wide layers; for the sawtooth, $d$ layers of width $2$ make $2^d$ linear pieces, while one layer with $u$ units makes at most $u + 1$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
+
 **derivative**: the limit of the difference quotient $\frac{f(x+h) - f(x)}{h}$ as $h \to 0$; the slope of the tangent to the curve of $f$ at $x$, and the rate at which $f$ changes when $x$ changes. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **determinant**: the signed factor by which a square matrix scales area or volume ($ad - bc$ for a $2 \times 2$); zero exactly when the matrix crushes space and has no inverse. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
@@ -160,6 +162,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Gaussian distribution**: the bell-shaped distribution with density $\frac{1}{\sigma\sqrt{2\pi}}e^{-(x-\mu)^2/(2\sigma^2)}$, fixed by its mean $\mu$ and variance $\sigma^2$, written $\mathcal{N}(\mu, \sigma^2)$ and also called the normal distribution. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
+**gelu**: the Gaussian error linear unit $z\,\Phi(z)$, the input times the probability that a standard Gaussian variable lies below it, a smooth cousin of the ReLU that dips slightly below zero for negative inputs; it is computed exactly with the error function or approximately by a tanh form or a sigmoid form that are different functions. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
+
 **gradient**: the vector of all the partial derivatives of a scalar function, the same shape as its inputs; it points in the direction of steepest ascent and its length is the steepest rate of change. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **gradient descent**: the iteration that repeatedly moves the parameters a small step against the gradient of the loss, $\mathbf{w} \leftarrow \mathbf{w} - \eta\nabla\mathcal{L}(\mathbf{w})$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
@@ -169,6 +173,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **hashing**: computing from a value, by a fixed rule, a fixed-size number used as the address of the value in a table (giving expected constant-time lookup when the rule spreads the keys) or as a fingerprint that changes if any byte of the value changes. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
 **Hessian**: the symmetric matrix of second partial derivatives of a scalar function; $\mathbf{u}^\top\mathbf{H}\mathbf{u}$ is the curvature along the unit direction $\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**hidden layer**: a layer of units between the input and the output whose values are not given by the data; it computes a new description of the input from which the next layer can compute the answer with a simpler rule. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **hypothesis space**: the set of all functions a model can express as its parameters vary. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
@@ -262,6 +268,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **monotonic function**: a function that never reverses direction, always increasing or always decreasing, and so keeps the order of single values. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
+**multilayer perceptron**: a network of fully connected layers, each followed by an activation function (usually except the last), so that each layer reads all of the outputs of the one before it; the name is historical, since its units rarely use the step. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
+
 **multiple comparisons**: the problem that testing many hypotheses makes some significant by chance, so that the chance of at least one false positive grows with their number, controlled by tests at a smaller level such as the Bonferroni correction. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **multivariable chain rule**: the Jacobian of a composition of vector functions is the product of their Jacobians, the outer one evaluated at the inner function's output. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
@@ -344,6 +352,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **rejection sampling**: drawing a candidate from an easy distribution, keeping it only if it passes a test and otherwise drawing again, so that the kept values have the distribution the test selects; it gives unbiased integers and samples from densities with no invertible cumulative distribution, at the cost of the discarded draws. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
+**relu**: the rectified linear unit $\max(0, z)$, zero for negative inputs and the identity for positive ones, with slope $1$ where it is positive and $0$ elsewhere. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
+
 **reporting uncertainty**: stating with a result its intervals over seeds and over the test sample, the numbers of seeds and examples, what was tuned on which split, and how many variants were tried, so that a reader can judge how far to trust it. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
 **reproducibility**: the property that running again from the same recorded inputs (seed, data, code, settings) gives the same results exactly, which requires the same draws in the same order and the same floating-point arithmetic. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
@@ -380,6 +390,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **sigmoid**: the function $\sigma(z) = 1/(1 + e^{-z})$ that maps any real number to $(0, 1)$ and is the inverse of the logit; its slope is $\sigma(1 - \sigma)$, at most $1/4$. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
+**silu**: the sigmoid linear unit $z\,\sigma(z)$ (also called swish), the input times the logistic sigmoid of the input, smooth, with a slope that overshoots $1$ before settling to it. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
+
 **singular value decomposition**: the factorisation $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$ of any matrix into a rotation, a stretch by non-negative singular values and a second rotation. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
 **sinusoid**: a wave $A\cos(2\pi f t + \varphi)$ described by an amplitude $A$ (its largest value), a frequency $f$ (cycles per second) and a phase $\varphi$ (where in its cycle it stands at time zero); a cosine and a sine are the same sinusoid a quarter period apart. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
@@ -396,6 +408,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## T
 
+**tanh-activation**: the hyperbolic tangent used as a neuron's activation, a smooth step from $-1$ to $1$ equal to $2\sigma(2z) - 1$ with slope $1 - \tanh^2(z)$, centred on zero and saturating for large $|z|$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
+
 **Taylor expansion**: the polynomial that matches a function's value and first derivatives at a point, such as $f(a) + f'(a)h + \tfrac{1}{2}f''(a)h^2$, whose error is of the order of the first term dropped. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **tensor**: an array of numbers with any number of axes (zero for a scalar, one for a vector, two for a matrix), described by its shape. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
@@ -409,6 +423,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## U
 
 **underfitting**: a model too restricted to represent the pattern, so that its error is high on the training rows and on new rows alike. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
+**universal-approximation**: the theorem that, for any continuous function on a closed bounded set and any tolerance, some one-hidden-layer network with a non-polynomial activation stays within that tolerance everywhere on the set; it guarantees that the weights exist, not how many units they need or how to find them. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **unsupervised learning**: learning from examples without labels, to find structure such as groups in the features themselves. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 

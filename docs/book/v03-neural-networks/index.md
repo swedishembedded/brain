@@ -46,7 +46,7 @@ in the curriculum and appear here when they are written.
 
 1. [The Neuron and the Perceptron](01-perceptron.md): what an artificial
    neuron is, and what a single one can never learn.
-2. Multilayer Networks: why stacking layers with a nonlinearity between them
+2. [Multilayer Networks](02-mlp.md): why stacking layers with a nonlinearity between them
    lets a network represent almost anything.
 3. Softmax, Logits and Cross-Entropy: how a network chooses among many
    classes, and why the gradient of that choice is so simple.

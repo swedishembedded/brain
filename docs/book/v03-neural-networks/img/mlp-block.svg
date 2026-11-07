@@ -1,0 +1,39 @@
+<!-- source-sha256: cf756677ac7ed007dd841da872ecb8a191070a086ad2443ad9d427f462849772 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 870 165" width="870" height="165"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="870" height="165" fill="#ffffff"/>
+<rect x="116" y="20" width="494" height="125" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="130" y="42" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">hidden layer: H = 2 units</text>
+<ellipse cx="57" cy="97" rx="37" ry="35" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="57" y="85.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">X</text>
+<text x="57" y="101.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[B, D]</text>
+<text x="57" y="117.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[4, 2]</text>
+<rect x="128" y="62" width="110" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="183" y="85.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Linear 1</text>
+<text x="183" y="101.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W1 [H, D]</text>
+<text x="183" y="117.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">b1 [H]</text>
+<ellipse cx="309" cy="97" rx="37" ry="35" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="309" y="85.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Z1</text>
+<text x="309" y="101.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[B, H]</text>
+<text x="309" y="117.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[4, 2]</text>
+<rect x="380" y="62" width="110" height="70" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="435" y="85.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">activation g</text>
+<text x="435" y="101.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">elementwise</text>
+<text x="435" y="117.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tanh</text>
+<ellipse cx="561" cy="97" rx="37" ry="35" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="561" y="85.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">A</text>
+<text x="561" y="101.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[B, H]</text>
+<text x="561" y="117.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[4, 2]</text>
+<rect x="632" y="62" width="110" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="687" y="85.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Linear 2</text>
+<text x="687" y="101.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W2 [O, H]</text>
+<text x="687" y="117.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">b2 [O]</text>
+<ellipse cx="813" cy="97" rx="37" ry="35" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="813" y="85.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Y</text>
+<text x="813" y="101.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[B, O]</text>
+<text x="813" y="117.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[4, 1]</text>
+<line x1="97" y1="97" x2="125" y2="97" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="241" y1="97" x2="269" y2="97" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="349" y1="97" x2="377" y2="97" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="493" y1="97" x2="521" y2="97" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="601" y1="97" x2="629" y2="97" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="745" y1="97" x2="773" y2="97" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

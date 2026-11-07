@@ -28,6 +28,7 @@ Every value has a type, and the book always states it when it matters.
 | `text` | a string of characters. Its **bytes** are those of its UTF-8 encoding, each an `int` in `0 .. 255`, taken in order: `for b in the bytes of s:` visits them first to last (the text `"ab"` has the bytes `97, 98`) |
 | `(T, U)` | a pair (tuple) of a `T` and a `U`; an argument may have a tuple type, `a: (real, int)`, and `a[0]`, `a[1]` read its first and second component (0-indexed like an array) |
 | `Generator` | the state of a random number generator, see "Randomness" |
+| `list<T>` | an ordered, growable list of values of type `T`, indexed from 0: `L[i]` reads element `i` (`0 <= i < len(L)`; outside is an error), `len(L)` is its length, `append x to L` adds at the end. The elements may be arrays of different shapes (a network's weight matrices) |
 | `none` | the value of a function that returns nothing |
 
 A **record** groups named fields into one value:
@@ -151,6 +152,10 @@ row of `x: [T, D]`".
 | `round(x, n)` | `x` rounded to `n >= 0` decimal places, **ties away from zero**: take the exact decimal value of `x` as written or computed, find the two multiples of `10^(-n)` that enclose it, and pick the nearer one; when `x` is exactly halfway, pick the one farther from zero (`round(2.5, 0) = 3`, `round(-2.5, 0) = -3`, `round(0.125, 2) = 0.13`). It returns a `real`. The book avoids a printed value that depends on this rule: where a table is rounded, the underlying quantity is not a tie, or the text says which way it was rounded. A binary floating-point number is rarely exactly halfway, so a reproduction compares unrounded values with a tolerance (see "Numerical tolerance") before it rounds |
 | `sigmoid(z)` | the logistic function $1/(1 + e^{-z})$, computed as `1 / (1 + exp(-z))` for `z >= 0` and as `exp(z) / (1 + exp(z))` for `z < 0`, so that `exp` never overflows; the result lies in $(0, 1)$ and `sigmoid(0) = 0.5` (Volume II, chapter 3) |
 | `softplus(z)` | $\log(1 + e^z)$, computed as `max(z, 0) + log1p(exp(-abs(z)))`, which is exact in real arithmetic and cannot overflow; `softplus(0) = log(2)` (Volume II, chapter 3) |
+| `tanh(x)` | the hyperbolic tangent $(e^x - e^{-x})/(e^x + e^{-x})$, computed as `2 * sigmoid(2 * x) - 1`; odd, in $(-1, 1)$, `tanh(0) = 0` (Volume III, chapter 2) |
+| `relu(x)` | `max(0, x)`: `x` when `x > 0` and `0` otherwise, so `relu(0) = 0`; its slope is taken as `1` for `x > 0` and `0` for `x <= 0` (Volume III, chapter 2) |
+| `gelu(x)` | the exact Gaussian-error linear unit `0.5 * x * (1 + erf(x / sqrt(2)))`, that is `x` times the standard Gaussian cumulative distribution at `x`; the tanh approximation is always named `gelu_tanh` (Volume III, chapter 2) |
+| `silu(x)` | `x * sigmoid(x)` (Volume III, chapter 2) |
 | `erf(x)` | the error function $\frac{2}{\sqrt\pi}\int_0^x e^{-s^2}ds$, odd, with `erf(0) = 0` and limits $\pm 1$; the standard Gaussian cumulative distribution is $\Phi(z) = \frac12\bigl(1 + \mathrm{erf}(z/\sqrt2)\bigr)$. Use the library routine of your language (a reproduction agrees to the printed digits; its series is not needed) |
 | `atan2(y, x)` | the angle in radians, in $(-\pi, \pi]$, of the point with horizontal coordinate `x` and vertical coordinate `y` (the angle from the positive horizontal axis, anticlockwise); `atan2(0, 0)` is `0` |
 | `pi`, `infinity` | the constant $\pi$ and positive infinity (`-infinity` is its negative) |
