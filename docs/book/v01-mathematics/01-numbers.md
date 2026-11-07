@@ -51,6 +51,16 @@ claim is computed by a program rather than typed, so that you can check it.
 You may use only school arithmetic: addition, subtraction, multiplication,
 division and fractions. Everything else is introduced below.
 
+## Before you begin
+
+Five facts from school arithmetic that this chapter builds on, to answer from memory. The answers are at the end of the chapter. There is no earlier chapter to return to, so if one is hard, work it through on paper before reading on.
+
+1. (School arithmetic, fractions.) Compute $\frac{1}{2} + \frac{1}{3}$ as a single fraction.
+2. (School arithmetic, powers.) What is $2^5$, and what is $10^3 \times 10^2$ written as a single power of 10?
+3. (School arithmetic, order of operations.) Evaluate $3 + 4 \times 2^2$.
+4. (School arithmetic, negative numbers.) Evaluate $-3 - (-5)$.
+5. (School arithmetic, decimals.) Write $\frac{3}{4}$ as a decimal and $0.25$ as a fraction.
+
 ## Integers
 
 A **natural number** answers "how many?": $0, 1, 2, 3, \dots$. An
@@ -1051,6 +1061,17 @@ where an ordinary line-fitting method applies; its doc comment describes
 the method as ordinary least squares in log-log space. An exponent and a
 logarithm, used for exactly the reasons this chapter gives.
 
+## Check your understanding
+
+Answers are at the end of the chapter.
+
+1. **Predict.** What are $2^{10} \times 2^{-4}$ and $2^{-3}$?
+2. **Find the error.** "$\log(a + b) = \log a + \log b$, so the logarithm of 20 is the logarithm of 10 plus the logarithm of 10." Check it in base 10 and say which rule is the true one.
+3. **Predict.** Evaluate $\sum_{k=1}^{4} 2k$ and $\prod_{k=1}^{4} k$.
+4. **Explain.** A model multiplies 1000 chances, each equal to $0.01$. Why does the product cause trouble on a machine while the sum of the base-10 logarithms does not?
+5. **Find the error.** "$b^0 = 0$, because zero factors of $b$ multiply to nothing." Use the rule $b^m b^n = b^{m+n}$ to say what $b^0$ must be.
+6. **Predict.** How many elements has $\{1, 2, 2, 3\}$, and what are $\{1, 2\} \cup \{2, 3\}$ and $\{1, 2\} \cap \{2, 3\}$?
+
 ## Exercises
 
 1. **[Calculate]** Compute $-23 = 7q + r$ under both the floor and the
@@ -1153,3 +1174,33 @@ not asked what happens when one rule feeds another, when a rule can be
 reversed, or what shapes the graphs of rules can take. The next chapter,
 Functions and Their Shapes, builds exactly that, starting
 from the notation introduced here.
+
+## Key terms
+
+- **integer**: a whole number, positive, negative or zero, with no fractional part; the exact numbers of counting and naming. <!-- concept: integer -->
+- **real number**: any number on the number line, including fractions and irrational numbers such as $\sqrt{2}$; a computer holds only an approximation of most of them. <!-- concept: real-number -->
+- **exponent**: the count of repeated factors in $b^n$, extended to zero, negative and fractional counts by the rule $b^m b^n = b^{m+n}$. <!-- concept: exponent -->
+- **logarithm**: the exponent to which a base must be raised to give a number; it is the inverse of the exponent and turns a product into a sum, $\log(uv) = \log u + \log v$. <!-- concept: logarithm -->
+- **summation notation**: the symbol $\sum_{i=a}^{b} x_i$ for the sum of the terms $x_i$ as the index $i$ runs from $a$ to $b$. <!-- concept: summation-notation -->
+- **product notation**: the symbol $\prod_{i=a}^{b} x_i$ for the product of the terms $x_i$ as the index $i$ runs from $a$ to $b$. <!-- concept: product-notation -->
+- **set**: a collection of distinct elements, written with braces and combined by union, intersection and difference. <!-- concept: set -->
+- **function notation**: the writing $f(x)$ for the output of the rule $f$ at the input $x$, and $f(x; w, b)$ to separate inputs from parameters. <!-- concept: function-notation -->
+
+## Answers
+
+**Before you begin.**
+
+1. $\frac{3}{6} + \frac{2}{6} = \frac{5}{6}$.
+2. $2^5 = 32$; $10^3 \times 10^2 = 10^5$ (the exponents add).
+3. Powers first, then multiplication, then addition: $3 + 4 \times 4 = 19$.
+4. Subtracting a negative adds: $-3 + 5 = 2$.
+5. $0.75$ and $\frac{1}{4}$.
+
+**Check your understanding.**
+
+1. The exponents add: $2^{10} \times 2^{-4} = 2^{6} = 64$. And $2^{-3} = 1/2^3 = 1/8$.
+2. In base 10, $\log 20 \approx 1.301$ but $\log 10 + \log 10 = 2$, so the claim is false. The true rule is for a product: $\log(uv) = \log u + \log v$, so $\log 100 = \log 10 + \log 10 = 2$. There is no rule that turns the logarithm of a sum into a sum of logarithms.
+3. $2 + 4 + 6 + 8 = 20$ and $1 \cdot 2 \cdot 3 \cdot 4 = 24$.
+4. The product is $10^{-2000}$, far below the smallest positive number a 32-bit or even a 64-bit float can hold, so it underflows to 0 and every later comparison is wrong. The sum of the base-10 logarithms is $1000 \times (-2) = -2000$, an ordinary number.
+5. $b^m b^0 = b^{m+0} = b^m$, so $b^0$ must be the number that leaves $b^m$ unchanged under multiplication, which is 1. The "no factors" argument is also right once you read it as an empty product, and the empty product is 1, not 0.
+6. Four entries are written, but a set holds distinct elements, so it has 3: $\{1, 2, 3\}$. The union is $\{1, 2, 3\}$ and the intersection is $\{2\}$.

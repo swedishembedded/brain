@@ -50,25 +50,58 @@ know at least one model family well.
 
 ## The shape of a chapter
 
-Every chapter answers one question, stated at its start. Chapters follow the
-same arc, though not mechanically:
+Every chapter answers one question, stated under its title, and every
+chapter is laid out the same way, so that after the first few you always
+know where you are.
 
-1. **The problem.** A concrete situation, and exactly what we cannot yet do.
-2. **The idea.** The solution in plain language, with a small example,
-   before any formula.
-3. **The derivation.** The mathematics, built from what earlier chapters
-   established, with every step shown.
-4. **The algorithm.** The method as precise pseudocode, with the shape and
-   type of every array.
-5. **Making it work.** Memory layout, numerical pitfalls, cost, and what goes
+1. **The problem.** What we cannot yet do, why it matters, and a small
+   concrete case you can see and compute.
+2. **Before you begin.** A handful of short questions about ideas from
+   earlier chapters that this one builds on, each naming where the idea was
+   taught. Answer them from memory before reading on. If one is hard, go
+   back to that chapter first: the new material will not make sense on top
+   of a shaky foundation, and it is much cheaper to repair the foundation
+   now.
+3. **The explanation.** One new idea at a time: first in plain language with
+   a concrete example and a picture, then derived properly from what you
+   already know, then written as a precise algorithm with the shape and type
+   of every array. New terms appear in **bold** where they are defined, and
+   never before.
+4. **Making it work.** Memory layout, numerical pitfalls, cost, and what goes
    wrong in practice.
-6. **In brain.** Where the idea lives in a real engine and how it is tested
-   there, often with the story of how it got that way.
-7. **Exercises.** Calculations by hand, implementations in your own language,
-   and investigations that ask you to change something and explain what
-   happens.
-8. **Summary.** What you now know, what remains open, and why the next
-   chapter comes next.
+5. **In brain.** Where the idea lives in a real engine, how it is tested
+   there, and often the story of a mistake that shaped it.
+6. **Check your understanding.** Short questions that ask you to explain,
+   predict or spot an error, with answers at the end of the chapter.
+7. **Exercises.** Calculations by hand, implementations in your own
+   language, and investigations that ask you to change something and
+   explain what happens.
+8. **Summary** and **Key terms.** What the chapter established and why the
+   next one follows, then every new term with a plain-language definition.
+   The same definitions, from every chapter, make up the
+   [Glossary](glossary.md).
+
+Each volume ends with a **project**: a larger piece of work, built from
+nothing in the language of your choice, that uses everything the volume
+taught. The projects are where knowledge becomes ability. Do not move to
+the next volume until its project works and you can explain why it works.
+
+## How to study with it
+
+Read with something to write on. When a derivation appears, cover the next
+line and try to produce it yourself. When a worked example appears, compute
+at least its first row by hand before reading the table.
+
+Answer the "Before you begin" questions honestly, from memory. Recalling an
+idea is what makes it stay; rereading it is much weaker. The questions
+deliberately reach back several chapters, so that ideas come back to you
+after you have had time to forget them a little.
+
+If an explanation stops making sense, do not push on. Go back to the last
+point where everything was clear and look for the first word or symbol you
+cannot define precisely; the [Glossary](glossary.md) and
+[Notation](notation.md) are there for this. Almost always the difficulty
+started there, not where you noticed it.
 
 ## Conventions in the text
 

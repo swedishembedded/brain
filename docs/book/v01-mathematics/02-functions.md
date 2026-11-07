@@ -47,6 +47,16 @@ logarithms and function notation, including the idea of a parameter. Nothing
 else is assumed. Where the chapter points forward to vectors, matrices or
 derivatives, it says so and does not use them.
 
+## Before you begin
+
+Five questions on ideas from the previous chapter, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+
+1. (Chapter 1, real numbers.) Is $\sqrt{2}$ a fraction of two integers? What does a computer store instead of it?
+2. (Chapter 1, exponents.) Write $2^3 \times 2^{-5}$ as a single power of 2 and as a fraction.
+3. (Chapter 1, logarithms.) What are $\log_2 32$ and $\log_{10} 0.001$?
+4. (Chapter 1, logarithms.) Use the product rule to write $\log_2(8 \times 4)$ as a sum and evaluate it.
+5. (Chapter 1, function notation.) If $f(x; w, b) = wx + b$, evaluate $f(2; 3, -1)$ and say which of $x$, $w$, $b$ are inputs and which are parameters.
+
 ## What a function is
 
 A **function** $f$ from a set $A$ to a set $B$, written $f: A \to B$,
@@ -1164,6 +1174,18 @@ copies of the tanh GELU into `model::hostmath::gelu_tanh`. When a function
 exists in several places, each is one more place for the shape to drift, and
 exactly one place for a test to pin it.
 
+## Check your understanding
+
+Answers are at the end of the chapter.
+
+1. **Find the error.** "$f(x) = 1/x$ is a function on all the real numbers." Which input breaks the definition, and what is the repair?
+2. **Predict.** With $f(x) = 2x + 1$ and $g(x) = x^2$, compute $g(f(3))$ and $f(g(3))$. Are the two compositions equal?
+3. **Find the error.** "$f(x) = x^2$ has the inverse $\sqrt{x}$ everywhere." Find two inputs that show the problem and a domain on which the inverse does exist.
+4. **Explain.** Compose $f(x) = 2x + 1$ with $g(x) = 3x - 2$. What kind of function results, and what does that say about stacking lines without anything that bends?
+5. **Predict.** How many points fix a polynomial of degree 3, and what goes wrong when a degree-4 polynomial is forced through five noisy points?
+6. **Predict.** For $\mathrm{ReLU}(x) = \max(0, x)$, what are the values at $x = -3, 0, 2$?
+7. **Explain.** Model A scores $\{0, 10\}$ on two cases and model B scores $\{6, 6\}$. Which has the larger average, and which has the larger average after applying $e^x$ to every score? What does this show about monotonic functions?
+
 ## Exercises
 
 1. **[Calculate]** For each of $f(x) = \sqrt{x - 3}$, $g(x) = 1/(x^2 - 4)$ and
@@ -1268,3 +1290,33 @@ of a network is not one line but many lines sharing the same input. The next
 chapter, Vectors, gives a list of numbers a length, a direction and a way to
 compare two lists, which is what turns the lines of this chapter into the layers of
 the next volumes.
+
+## Key terms
+
+- **function**: a rule that assigns exactly one output to each input from its domain; the range is the set of outputs that actually occur. <!-- concept: function -->
+- **composition**: feeding the output of one function into another, $(g \circ f)(x) = g(f(x))$; it is associative but not commutative. <!-- concept: composition -->
+- **inverse function**: the function $f^{-1}$ that undoes $f$, so $f^{-1}(f(x)) = x$; it exists when $f$ is one-to-one. <!-- concept: inverse-function -->
+- **polynomial**: a sum of constant multiples of powers of $x$; one of degree $n$ has $n + 1$ parameters and is fixed by $n + 1$ points. <!-- concept: polynomial -->
+- **exponential function**: a function $b^x$ that multiplies by the same factor for each unit step in $x$, growing if $b > 1$ and decaying if $b < 1$. <!-- concept: exponential-function -->
+- **monotonic function**: a function that never reverses direction, always increasing or always decreasing, and so keeps the order of single values. <!-- concept: monotonic-function -->
+- **piecewise function**: a function defined by different rules on different parts of its domain, such as the absolute value, ReLU and a schedule with a warmup. <!-- concept: piecewise-function -->
+
+## Answers
+
+**Before you begin.**
+
+1. No: $\sqrt{2}$ is irrational, no fraction of integers equals it. The computer stores an approximation, a nearby number it can represent.
+2. $2^3 \times 2^{-5} = 2^{-2} = \frac{1}{4}$.
+3. $\log_2 32 = 5$ because $2^5 = 32$; $\log_{10} 0.001 = -3$ because $10^{-3} = 0.001$.
+4. $\log_2 8 + \log_2 4 = 3 + 2 = 5$, and indeed $8 \times 4 = 32 = 2^5$.
+5. $f(2; 3, -1) = 3 \cdot 2 - 1 = 5$. The input is $x$; the parameters are $w$ and $b$.
+
+**Check your understanding.**
+
+1. The input $x = 0$ has no output, so the rule is not defined there. Either state the domain as the real numbers except 0 or restrict it further; a formula without a stated domain is an incomplete function.
+2. $g(f(3)) = g(7) = 49$ and $f(g(3)) = f(9) = 19$. They differ: composition is not commutative.
+3. $f(2) = f(-2) = 4$, so the output 4 cannot be traced back to one input and $f$ is not one-to-one. On $x \ge 0$ the function is strictly increasing, and there $\sqrt{x}$ is its inverse.
+4. $g(f(x)) = 3(2x + 1) - 2 = 6x + 1$, again a line. Any number of lines composed is one line, so depth adds nothing without a function that bends between them.
+5. Four points fix a degree-3 polynomial (it has four parameters). With five noisy points a degree-4 polynomial passes through every one, noise included, and between and beyond the points it can swing far from the truth, as the fit that predicted 144.3 where the truth was 17.
+6. $\mathrm{ReLU}(-3) = 0$, $\mathrm{ReLU}(0) = 0$, $\mathrm{ReLU}(2) = 2$.
+7. Averages: A is $5$, B is $6$, so B is larger. After $e^x$: A is $(1 + 22026.5)/2 \approx 11013.7$ and B is $e^6 \approx 403.4$, so A is larger. A monotonic function keeps the order of single values (so the largest score stays the largest), but it does not keep the order of averages.

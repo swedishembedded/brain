@@ -55,6 +55,16 @@ dimension of the set of outputs a map can reach, is built here from scratch
 under the name **rank**. How a matrix is laid out in memory is Chapter 5, and
 what a matrix hides inside it (rotations, low-rank structure) is Chapter 6.
 
+## Before you begin
+
+Five questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+
+1. (Chapter 3, dot product.) Compute $(1, 2, 3) \cdot (4, 5, 6)$.
+2. (Chapter 3, orthogonality.) What does it mean for the dot product of two nonzero vectors to be 0?
+3. (Chapter 2, composition.) With $f(x) = x + 3$ and $g(x) = x^2$, evaluate $g(f(2))$. Which function is applied first?
+4. (Chapter 2, functions.) Can a function give two different outputs for one input? Can two different inputs give the same output?
+5. (Chapter 1, summation.) Evaluate $\sum_{l=1}^{3} l(l+1)$.
+
 ## A matrix is a table
 
 A **matrix** with $m$ rows and $n$ columns is a rectangular table of real
@@ -1228,6 +1238,18 @@ The operation is the same matrix product throughout, and its cost is decided
 by shapes and schedule: when the $m n k$ count says a product should be cheap
 and the profile says it is not, the first question is which kernel ran.
 
+## Check your understanding
+
+Answers are at the end of the chapter.
+
+1. **Predict.** For $\mathbf{A} = \begin{pmatrix}1&2\\3&4\end{pmatrix}$ and $\mathbf{x} = (1, 1)$, compute $\mathbf{A}\mathbf{x}$ twice: once as dot products of rows with $\mathbf{x}$, once as a weighted sum of columns.
+2. **Find the error.** "A $[2, 3]$ matrix times another $[2, 3]$ matrix is a $[2, 3]$ matrix." Which rule is broken, and what shape would make the product defined?
+3. **Predict.** For $\mathbf{A} = \begin{pmatrix}1&1\\0&1\end{pmatrix}$ and $\mathbf{B} = \begin{pmatrix}1&0\\1&1\end{pmatrix}$, compute $\mathbf{A}\mathbf{B}$ and $\mathbf{B}\mathbf{A}$.
+4. **Explain.** $\mathbf{A}$ and $\mathbf{B}$ are $512 \times 512$ and $\mathbf{x}$ has 512 entries. Both $(\mathbf{A}\mathbf{B})\mathbf{x}$ and $\mathbf{A}(\mathbf{B}\mathbf{x})$ give the same vector. Which is cheaper, and by roughly what factor?
+5. **Find the error.** "$\begin{pmatrix}1&2\\2&4\end{pmatrix}$ has the inverse $\frac{1}{ad-bc}\begin{pmatrix}d&-b\\-c&a\end{pmatrix}$." Evaluate $ad - bc$ and say what the rank is and what happens to the input directions.
+6. **Explain.** A network applies $\mathbf{y} = \mathbf{W}_2(\mathbf{W}_1\mathbf{x})$ with nothing between the layers. Why is it no more expressive than one layer?
+7. **Predict.** If $\mathbf{A}$ has shape $[2, 3]$ and $\mathbf{B}$ has shape $[3, 4]$, what are the shapes of $\mathbf{A}\mathbf{B}$ and of $(\mathbf{A}\mathbf{B})^\top$, and what is $(\mathbf{A}\mathbf{B})^\top$ in terms of $\mathbf{A}^\top$ and $\mathbf{B}^\top$?
+
 ## Exercises
 
 1. **[Calculate]** For each function from $\mathbb{R}^2$ to $\mathbb{R}^2$ decide
@@ -1341,3 +1363,34 @@ the count of multiply-adds. The next chapter shows how vectors, matrices and
 tensors with more axes are laid out, how an index becomes an address, why a
 transpose can be free, and how arrays of different shapes are combined without
 copying.
+
+## Key terms
+
+- **matrix**: a table of numbers with $m$ rows and $n$ columns, which is also a linear map from $n$ numbers to $m$ numbers. <!-- concept: matrix -->
+- **linear map**: a function of vectors that commutes with addition and scaling, and is determined by what it does to the unit vectors. <!-- concept: linear-map -->
+- **matrix-vector product**: the vector whose entries are the dot products of the rows of a matrix with the input vector, equivalently a weighted sum of the matrix's columns. <!-- concept: matrix-vector-product -->
+- **matrix multiplication**: the matrix of the composition of two linear maps, $(\mathbf{B}\mathbf{A})_{ij} = \sum_l B_{il}A_{lj}$, defined when the inner sizes agree. <!-- concept: matrix-multiplication -->
+- **transpose**: the matrix $\mathbf{A}^\top$ with rows and columns swapped; $(\mathbf{A}\mathbf{B})^\top = \mathbf{B}^\top\mathbf{A}^\top$. <!-- concept: transpose -->
+- **identity matrix**: the square matrix with ones on the diagonal and zeros elsewhere, which leaves every vector unchanged. <!-- concept: identity-matrix -->
+- **matrix inverse**: the matrix $\mathbf{A}^{-1}$ that undoes $\mathbf{A}$, so $\mathbf{A}^{-1}\mathbf{A}$ is the identity; it exists only for a square matrix whose rank equals its size. <!-- concept: matrix-inverse -->
+- **rank**: the number of independent columns of a matrix, equal to the number of independent rows and to the dimension of what the map can reach. <!-- concept: rank -->
+
+## Answers
+
+**Before you begin.**
+
+1. $4 + 10 + 18 = 32$.
+2. The vectors are orthogonal: at right angles, with none of one pointing along the other.
+3. $g(f(2)) = g(5) = 25$; $f$ is applied first, then $g$.
+4. No: a function gives exactly one output for each input. Yes: two inputs may share an output (for example $x^2$ at $2$ and $-2$); that is what stops such a function from having an inverse.
+5. $1\cdot 2 + 2 \cdot 3 + 3 \cdot 4 = 2 + 6 + 12 = 20$.
+
+**Check your understanding.**
+
+1. Rows: $(1\cdot 1 + 2\cdot 1,\ 3\cdot 1 + 4\cdot 1) = (3, 7)$. Columns: $1\cdot(1, 3) + 1\cdot(2, 4) = (3, 7)$.
+2. The inner sizes must agree: $[m, k] \times [k, n] = [m, n]$, and here the inner sizes are 3 and 2. A $[3, n]$ second factor makes it defined, giving $[2, n]$.
+3. $\mathbf{A}\mathbf{B} = \begin{pmatrix}2&1\\1&1\end{pmatrix}$ and $\mathbf{B}\mathbf{A} = \begin{pmatrix}1&1\\1&2\end{pmatrix}$. They differ: matrix multiplication is not commutative.
+4. $\mathbf{A}(\mathbf{B}\mathbf{x})$ costs two matrix-vector products, $2 \cdot 512^2$ multiply-adds. $(\mathbf{A}\mathbf{B})\mathbf{x}$ first forms a matrix product at $512^3$ multiply-adds, then one more matrix-vector product. The ratio is about $513/2$, roughly 256 times more.
+5. $ad - bc = 1\cdot 4 - 2\cdot 2 = 0$, so the formula divides by zero and there is no inverse. The second row is twice the first, the rank is 1, and the map crushes a whole direction to zero, so the original input cannot be recovered.
+6. $\mathbf{W}_2(\mathbf{W}_1\mathbf{x}) = (\mathbf{W}_2\mathbf{W}_1)\mathbf{x}$ by associativity, so the two layers are one matrix. The functions between layers are what add expressive power.
+7. $\mathbf{A}\mathbf{B}$ is $[2, 4]$ and $(\mathbf{A}\mathbf{B})^\top$ is $[4, 2]$; it equals $\mathbf{B}^\top\mathbf{A}^\top$ (shapes $[4, 3]$ and $[3, 2]$), with the order reversed.

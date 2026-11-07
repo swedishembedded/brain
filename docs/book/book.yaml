@@ -34,6 +34,7 @@ front:
   - pseudocode.md
 
 back:
+  - glossary.md
   - history/chronology.md
   - about-the-author.md
 
@@ -145,6 +146,13 @@ volumes:
         requires: [integer, probability-distribution, gaussian-distribution, algorithm]
         brain: [seed]
 
+      - id: project-numerical-library
+        title: "Project: A Numerical Library from Nothing"
+        question: "Can you build the numerical toolkit every later chapter relies on, and prove each piece correct?"
+        introduces: []
+        requires: [matrix-multiplication, stride, broadcasting, gradient, log-sum-exp, compensated-summation, pseudo-random-generator, confidence-interval]
+        brain: []
+
   - id: v02
     dir: v02-learning
     title: "What Does It Mean to Learn?"
@@ -197,6 +205,13 @@ volumes:
         introduces: [baseline, ablation, controlled-experiment, effect-size, reporting-uncertainty]
         requires: [hypothesis-test, paired-test, seed, reproducibility, test-set]
         brain: [bench]
+
+      - id: project-first-predictor
+        title: "Project: A Predictor You Can Trust"
+        question: "Can you train a model on real measurements, evaluate it honestly and explain exactly where it fails?"
+        introduces: []
+        requires: [gradient-descent, binary-cross-entropy, validation-set, calibration, baseline, data-leakage]
+        brain: []
 
   - id: v03
     dir: v03-neural-networks
@@ -281,6 +296,13 @@ volumes:
         requires: [multilayer-perceptron, adamw, gradient-check, mean-squared-error, training-set]
         brain: [toyautoencoder, toypid, web]
 
+      - id: project-neural-network
+        title: "Project: A Neural Network Library with Proven Gradients"
+        question: "Can you build a small neural network library whose every gradient is checked, and train it to solve a problem?"
+        introduces: []
+        requires: [multilayer-perceptron, backward-pass, gradient-check, adamw, layer-normalization, residual-connection]
+        brain: []
+
   - id: v04
     dir: v04-computation
     title: "How Computers Actually Execute Machine Learning"
@@ -363,6 +385,13 @@ volumes:
         introduces: [graph-export, onnx-graph, post-training-quantization, calibration-set, graph-compiler]
         requires: [affine-quantization, computational-graph, backend-abstraction]
         brain: [onnx, npu, rknpu]
+
+      - id: project-tensor-engine
+        title: "Project: A Device-Independent Tensor Engine"
+        question: "Can you make the same matrix multiply run correctly and fast on more than one kind of hardware?"
+        introduces: []
+        requires: [tiled-matmul, parallel-reduction, cross-backend-parity, device-synchronized-timing, group-wise-quantization]
+        brain: []
 
   - id: v05
     dir: v05-sequences
@@ -453,6 +482,13 @@ volumes:
         requires: [transformer-block, cosine-similarity, softmax-cross-entropy, wordpiece]
         brain: [modernbert, t5encoder]
 
+      - id: project-gpt
+        title: "Project: Your Own Small Language Model"
+        question: "Can you train a small GPT from raw text and generate from it with a KV cache that provably matches uncached generation?"
+        introduces: []
+        requires: [gpt-architecture, kv-cache, cache-equivalence, top-p-sampling, byte-pair-encoding]
+        brain: []
+
   - id: v06
     dir: v06-language-models
     title: "Advanced Language Model Architectures"
@@ -517,6 +553,13 @@ volumes:
         introduces: [parameter-count, flops-per-token, inference-memory-formula, training-memory-formula, scaling-laws]
         requires: [transformer-block, router, kv-cache, bf16-format]
         brain: [modelcost, gemma4, minimaxh3]
+
+      - id: project-architecture-comparison
+        title: "Project: Comparing Language Model Blocks"
+        question: "Can you implement several alternative language-model blocks and compare their quality, cost and memory fairly?"
+        introduces: []
+        requires: [grouped-query-attention, router, gated-delta-network, flops-per-token, parity-tolerance, ablation]
+        brain: []
 
   - id: v07
     dir: v07-vision
@@ -588,6 +631,13 @@ volumes:
         introduces: [face-detection, angular-margin-loss, identity-embedding, face-parsing]
         requires: [anchor-free-detection, cosine-similarity, softmax-cross-entropy, semantic-segmentation]
         brain: [scrfd, arcface]
+
+      - id: project-vision-pipeline
+        title: "Project: A Vision Pipeline"
+        question: "Can you build a pipeline that detects, segments and tracks objects through video frames?"
+        introduces: []
+        requires: [non-maximum-suppression, promptable-segmentation, memory-attention, shared-preprocessing]
+        brain: []
 
   - id: v08
     dir: v08-image-generation
@@ -666,6 +716,13 @@ volumes:
         requires: [adversarial-loss, codebook, latent-diffusion, convolutional-network]
         brain: [rrdbnet, codeformer, supir]
 
+      - id: project-image-generator
+        title: "Project: A Small Image Generator"
+        question: "Can you train a small generator and grow it into a conditioned latent generation system?"
+        introduces: []
+        requires: [flow-matching, classifier-free-guidance, variational-autoencoder, latent-diffusion]
+        brain: []
+
   - id: v09
     dir: v09-audio
     title: "Audio, Speech and Music"
@@ -718,6 +775,13 @@ volumes:
         introduces: [omni-model, thinker-talker-split, streaming-speech-output]
         requires: [speech-encoder, vision-projector, text-to-speech, router]
         brain: [qwen3omnimoe]
+
+      - id: project-speech-pipeline
+        title: "Project: From Waveform to Speech and Back"
+        question: "Can you build a pipeline from a waveform to a learned representation and back to generated audio?"
+        introduces: []
+        requires: [log-mel-spectrogram, residual-vector-quantization, connectionist-temporal-classification, text-to-speech]
+        brain: []
 
   - id: v10
     dir: v10-video-and-3d
@@ -772,6 +836,13 @@ volumes:
         requires: [ordinary-differential-equation, euler-method, learned-controller]
         brain: [neuro, connectome, mujoco, flybody, fly]
 
+      - id: project-dynamic-scene
+        title: "Project: Reconstructing and Predicting a Scene"
+        question: "Can you reconstruct a scene from images and predict how it changes?"
+        introduces: []
+        requires: [gaussian-primitive, differentiable-rendering, bundle-adjustment, world-model]
+        brain: []
+
   - id: v11
     dir: v11-forecasting
     title: "Forecasting, Decisions and Uncertainty"
@@ -812,6 +883,13 @@ volumes:
         introduces: [proper-scoring-rule, brier-score, log-score, decision-threshold]
         requires: [calibration, cross-entropy, expectation]
         brain: [rlcd]
+
+      - id: project-forecaster
+        title: "Project: A Calibrated Forecasting System"
+        question: "Can you build a forecaster whose uncertainty estimates are calibrated and honestly evaluated?"
+        introduces: []
+        requires: [quantile-forecast, forecast-calibration, walk-forward-evaluation, proper-scoring-rule]
+        brain: []
 
   - id: v12
     dir: v12-reinforcement-learning
@@ -860,6 +938,13 @@ volumes:
         requires: [supervised-fine-tuning, paired-test, validation-set]
         brain: [promote, audit]
 
+      - id: project-agent
+        title: "Project: An Agent That Improves from Verified Feedback"
+        question: "Can you train an agent that solves progressively harder tasks from verified rewards, and decide when a new version is better?"
+        introduces: []
+        requires: [ppo, grpo, verifiable-reward, promotion-gate]
+        brain: []
+
   - id: v13
     dir: v13-training-at-scale
     title: "Training Large Models Efficiently"
@@ -906,6 +991,13 @@ volumes:
         introduces: [transactional-checkpoint, training-resumption, determinism-in-training]
         requires: [checkpoint-format, seed, reproducibility, adamw]
         brain: [checkpoint, paramstore]
+
+      - id: project-scaling-training
+        title: "Project: Scaling a Training Run"
+        question: "Can you move a training run from one device to several without changing what it learns?"
+        introduces: []
+        requires: [data-parallelism, all-reduce, activation-checkpointing, lora, transactional-checkpoint]
+        brain: []
 
   - id: v14
     dir: v14-inference-and-serving
@@ -960,6 +1052,13 @@ volumes:
         requires: [capability, request-scheduling]
         brain: [trace, stats, braintop, hfsm, runtime, shutdown]
 
+      - id: project-inference-server
+        title: "Project: A Multi-Client Inference Server"
+        question: "Can you build a server that answers many clients at once within fixed memory and stays safe under hostile input?"
+        introduces: []
+        requires: [continuous-batching, paged-kv-cache, admission-control, input-bounds]
+        brain: []
+
   - id: v15
     dir: v15-methods
     title: "Scientific and Engineering Methods"
@@ -993,6 +1092,13 @@ volumes:
         question: "What went wrong while building a real engine, and what general lesson does each failure teach?"
         introduces: [defect-class, root-cause-analysis, regression-gate]
         requires: [gate-that-never-runs, benchmark-validity, porting-workflow]
+        brain: []
+
+      - id: project-reproduction
+        title: "Project: Reproduce, Verify, Optimize, Defend"
+        question: "Can you reproduce a published model component, prove it correct, make it fast and defend the result?"
+        introduces: []
+        requires: [porting-workflow, benchmark-validity, falsifiable-hypothesis, regression-gate]
         brain: []
 
   - id: v16

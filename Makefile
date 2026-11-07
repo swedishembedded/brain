@@ -1004,6 +1004,7 @@ check/generated/book:
 	scripts/book/figures.py --check
 	scripts/book/worked.py --check
 	scripts/book/chronology.py --check
+	scripts/book/glossary.py --check
 	scripts/book/manifest.py --check
 
 # The book against its specification (docs/book/book.yaml) and its evidence:
@@ -2045,6 +2046,10 @@ generate/book/worked:
 generate/book/chronology:
 	scripts/book/chronology.py
 
+## generate/book/glossary - regenerate docs/book/glossary.md from every chapter's Key terms
+generate/book/glossary:
+	scripts/book/glossary.py
+
 ## generate/book/navigation - regenerate the Book part of docs/manifest.yaml and the book's contents page
 generate/book/navigation:
 	scripts/book/manifest.py
@@ -2256,7 +2261,7 @@ help:
         generate/kernels/cuda-table generate/samples generate/samples/manifest \
         generate/knowledge generate/knowledge/index \
         generate/book generate/book/figures generate/book/worked generate/book/chronology \
-        generate/book/navigation \
+        generate/book/glossary generate/book/navigation \
         testdata testdata/fetch hooks hooks/install \
         release release/patch release/minor release/major release/changelog release/notes \
         release/publish _release/preflight _release/finalize \

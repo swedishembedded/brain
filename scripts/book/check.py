@@ -14,7 +14,10 @@ Structure (from book.yaml):
     its introduction.
 
 Content (of every written page):
-  - each chapter starts with `# <its title>`;
+  - each chapter starts with `# <its title>` and has the recurring sections
+    every chapter shares (a project chapter has its own set);
+  - a chapter's Key terms define exactly the concepts it introduces, each
+    marked with its concept id;
   - every `commit <hash>` citation resolves to a commit in this repository
     and every `knowledge #N` citation to an existing knowledge entry;
   - every `crates/...` path a page names exists;
@@ -39,6 +42,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bookspec import BOOK, ROOT, load  # noqa: E402
+from glossary import key_terms  # noqa: E402
+
+CHAPTER_SECTIONS = ["The problem", "Before you begin", "Check your understanding", "Exercises",
+                    "Summary", "Key terms", "Answers"]
+PROJECT_SECTIONS = ["The goal", "Before you begin", "Milestones", "Acceptance tests", "Summary"]
 
 SVG_BUDGET = 120 * 1024
 COMMIT = re.compile(r"\bcommit `?([0-9a-f]{7,40})`?")
@@ -127,6 +135,16 @@ def content(page_list, errors):
             first = next((l for l in lines if l.startswith("# ")), "")
             if first != f"# {ch.title}":
                 errors.append(f"{rel}: first heading must be '# {ch.title}'")
+            headings = [l[3:].strip() for l in lines if l.startswith("## ")]
+            required = PROJECT_SECTIONS if ch.id.startswith("project-") else CHAPTER_SECTIONS
+            for sec in required:
+                if sec not in headings:
+                    errors.append(f"{rel}: missing section '## {sec}'")
+            defined = {cid for _, _, cid in key_terms(text)}
+            for cid in sorted(set(ch.introduces) - defined):
+                errors.append(f"{rel}: Key terms lacks concept '{cid}' (introduced here per book.yaml)")
+            for cid in sorted(defined - set(ch.introduces)):
+                errors.append(f"{rel}: Key terms defines '{cid}', which this chapter does not introduce")
         for n, line in enumerate(lines, start=1):
             if EM_DASH in line:
                 errors.append(f"{rel}:{n}: U+2014 em dash (use a comma, colon or parentheses)")

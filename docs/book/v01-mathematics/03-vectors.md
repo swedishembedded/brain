@@ -51,6 +51,14 @@ we need, the cosine of an angle, is defined here from a circle. Matrices,
 which are lists of lists, are the subject of the next chapter, and
 derivatives, which give a vector a gradient, are Chapters 7 and 8.
 
+## Before you begin
+
+Three questions on ideas from Chapter 1, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+
+1. (Chapter 1, summation.) Evaluate $\sum_{i=1}^{3} i^2$.
+2. (Chapter 1, summation.) Write the average of $n$ numbers $x_1, \dots, x_n$ using summation notation.
+3. (Chapter 1, real numbers.) Evaluate $\sqrt{9 + 16}$. Is it equal to $\sqrt{9} + \sqrt{16}$?
+
 ## What a vector is
 
 A **vector** with $n$ entries is an ordered list of $n$ real numbers. We
@@ -1058,6 +1066,18 @@ accumulated in 32-bit integers. The next chapter shows that the matrix
 product is exactly $M \times N$ dot products, and Volume IV is about
 scheduling them.
 
+## Check your understanding
+
+Answers are at the end of the chapter.
+
+1. **Predict.** For $\mathbf{a} = (1, 2, 2)$ and $\mathbf{b} = (2, 0, -1)$, compute $\mathbf{a} \cdot \mathbf{b}$ and $\lVert\mathbf{a}\rVert$. What does the first result say about the two vectors?
+2. **Predict.** What is the cosine similarity of $(1, 0)$ and $(1, 1)$, and what angle is that?
+3. **Predict.** Compute $2(1, 2) + (3, -1)$.
+4. **Find the error.** "The cosine similarity of $\mathbf{a}$ and $1.05\,\mathbf{a}$ is $1.05$, so the second is even more similar to $\mathbf{a}$ than $\mathbf{a}$ itself." What is the value, and what does it imply for a check that a candidate vector matches a reference?
+5. **Explain.** For $(3, 4)$, compute the L1, L2 and max norms and show they satisfy $\lVert\cdot\rVert_\infty \le \lVert\cdot\rVert_2 \le \lVert\cdot\rVert_1$.
+6. **Find the error.** "The projection of $\mathbf{v} = (3, 4)$ onto $\mathbf{u} = (1, 0)$ is the number 3, and the rest of $\mathbf{v}$ points along $\mathbf{u}$ too." What is the projection, what is the residual, and how is the residual related to $\mathbf{u}$?
+7. **Explain.** Two random vectors in 1000 dimensions have a cosine similarity close to 0. What does that say about reading a cosine of $0.1$ between two embeddings of that width?
+
 ## Exercises
 
 1. **[Calculate]** For $\mathbf{a} = (2, -1, 3)$ and $\mathbf{b} = (1, 4, -2)$
@@ -1162,3 +1182,32 @@ same again. The next chapter gives that operation a name, the matrix, shows that
 multiplying a matrix by a vector is exactly such a list of dot products, and
 shows that it is the most general way to turn one vector into another that
 respects addition and scaling.
+
+## Key terms
+
+- **vector**: an ordered list of real numbers, read as data (the features of one example) or as an arrow with a length and a direction. <!-- concept: vector -->
+- **vector addition**: adding two vectors of the same length entry by entry; as arrows it is the parallelogram rule. <!-- concept: vector-addition -->
+- **scalar multiplication**: multiplying every entry of a vector by one number, which stretches, shrinks or flips the arrow. <!-- concept: scalar-multiplication -->
+- **dot product**: the number $\sum_i a_i b_i$ obtained from two vectors of equal length, equal to $\lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert\cos\theta$. <!-- concept: dot-product -->
+- **norm**: the length of a vector; the L2 norm is $\sqrt{\mathbf{a}\cdot\mathbf{a}}$, and the L1 and max norms measure total and largest-entry size. <!-- concept: norm -->
+- **cosine similarity**: the dot product of two vectors after dividing each by its norm, a number from $-1$ to $1$ that ignores positive scaling. <!-- concept: cosine-similarity -->
+- **orthogonality**: the property of two vectors having dot product 0, that is, being at right angles. <!-- concept: orthogonality -->
+- **projection**: the closest point to a vector $\mathbf{v}$ on the line through $\mathbf{u}$, namely $\frac{\mathbf{v}\cdot\mathbf{u}}{\mathbf{u}\cdot\mathbf{u}}\mathbf{u}$; what is left over is orthogonal to $\mathbf{u}$. <!-- concept: projection -->
+
+## Answers
+
+**Before you begin.**
+
+1. $1 + 4 + 9 = 14$.
+2. $\frac{1}{n}\sum_{i=1}^{n} x_i$.
+3. $\sqrt{25} = 5$, while $\sqrt{9} + \sqrt{16} = 3 + 4 = 7$. They are not equal: a square root of a sum is not the sum of the square roots.
+
+**Check your understanding.**
+
+1. $\mathbf{a}\cdot\mathbf{b} = 2 + 0 - 2 = 0$ and $\lVert\mathbf{a}\rVert = \sqrt{1 + 4 + 4} = 3$. A zero dot product means the vectors are orthogonal.
+2. $\frac{1}{1 \cdot \sqrt{2}} \approx 0.7071$, which is the cosine of $45^\circ$.
+3. $(2, 4) + (3, -1) = (5, 3)$.
+4. The cosine similarity is exactly 1, because it divides out the lengths and cannot exceed 1 (Cauchy-Schwarz). It ignores positive scaling, so a candidate that is 5% too large still scores a perfect 1; such a check must also look at a norm of the difference.
+5. L1 is $3 + 4 = 7$, L2 is $\sqrt{9 + 16} = 5$, max is $4$, and $4 \le 5 \le 7$.
+6. The projection is the vector $(3, 0)$; the number 3 is only its coefficient along $\mathbf{u}$. The residual is $(0, 4)$, which has dot product 0 with $\mathbf{u}$: it is orthogonal to $\mathbf{u}$, not along it.
+7. In high dimensions unrelated vectors are nearly orthogonal, so the scale of cosines that count as "close" shrinks with the dimension. A value of $0.1$ may be far above chance at width 1000 and meaningless at width 3; a similarity must be read against its dimension.

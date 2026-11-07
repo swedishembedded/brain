@@ -35,6 +35,16 @@ the Jacobian (Volume I), the squared-error loss and gradient descent
 (Volume II), and the multilayer network with its activation functions and
 softmax with cross-entropy (the earlier chapters of this volume).
 
+## Before you begin
+
+Five questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+
+1. ("Gradients, Jacobians and Many Variables", chain rule.) A quantity $z$ depends on $x$ through two intermediate quantities $y_1(x)$ and $y_2(x)$. Write $\frac{dz}{dx}$ in terms of partial derivatives.
+2. ("Gradients, Jacobians and Many Variables", Jacobian.) What is the shape of the Jacobian of a function from three inputs to two outputs, and what is its entry in row $i$, column $j$?
+3. ("Multilayer Networks".) A hidden layer computes $\mathbf{h} = \tanh(\mathbf{W}_1\mathbf{x} + \mathbf{b}_1)$ from an input of width 4 to a hidden width of 3. What is the shape of $\mathbf{W}_1$?
+4. ("Linear Regression and the First Descent", loss and descent.) Write the squared error of a prediction $y$ for a target $t$, and the gradient-descent update of a weight $w$ with learning rate $\eta$.
+5. (Chapter 4, "Matrices as Linear Maps", and Chapter 5, "Arrays, Shapes, Strides and Broadcasting".) If $\mathbf{A}$ has shape $[m, k]$ and $\mathbf{B}$ has shape $[k, n]$, what are the shapes of $\mathbf{A}\mathbf{B}$ and of $\mathbf{B}^\top\mathbf{A}^\top$?
+
 ## One weight
 
 Start with the smallest possible model: one input $x$, one weight $w$, and an
@@ -1063,6 +1073,18 @@ Memory for the gradients themselves is managed in the same spirit: commit
 an activation only while the walk still needs it, with the input gradient
 bit-identical. The volume on training at scale returns to all of this.
 
+## Check your understanding
+
+Answers are at the end of the chapter.
+
+1. **Explain.** For a loss and $P = 10^6$ parameters, how many forward-pass-sized computations does a central-difference gradient need, how many does forward mode need, and how many does reverse mode need? Why?
+2. **Find the error.** "When a value feeds two later quantities, its gradient is the one from the quantity computed last." What is the correct rule, and why?
+3. **Predict.** With $y = wx$, $L = (y - t)^2$, $x = 2$, $t = 3$, $w = 0.5$ and $\eta = 0.05$, compute $y$, $\frac{dL}{dw}$ and the weight after one step.
+4. **Predict.** For $v_1 = w_1 x$, $v_2 = \tanh v_1$, $v_3 = w_2 v_2$, $v_4 = v_3 - t$, $L = v_4^2$: in what order does the backward pass visit these quantities, and what value does it start from?
+5. **Find the error.** "For a linear layer $\mathbf{Z} = \mathbf{X}\mathbf{W}^\top$ with $\mathbf{W}$ of shape $[O, D]$, the input gradient is $d\mathbf{X} = d\mathbf{Z}\,\mathbf{W}^\top$." Check the shapes and give the correct formula.
+6. **Explain.** The Jacobian of a layer from 4096 inputs to 4096 outputs has how many entries per example? Why does backpropagation never build it?
+7. **Explain.** Why must the forward pass keep some of its intermediate values until the backward pass, and what grows as the network gets deeper?
+
 ## Exercises
 
 1. **[Calculate]** Take the single-weight model with $x = -1.5$, $t = 2$,
@@ -1175,6 +1197,36 @@ derivation. The next chapter, The Backward Pass of Every Layer,
 writes them out systematically, and the one after it makes the finite-difference
 checker previewed here into a proper tool, with a theory of how to choose its step
 and how to read its output.
+
+## Key terms
+
+- **computational graph**: a record of a calculation as nodes (values) and edges showing which values were used to compute which. <!-- concept: computational-graph -->
+- **forward pass**: computing every value of the computational graph in order, from the inputs to the loss. <!-- concept: forward-pass -->
+- **backward pass**: visiting the nodes of the graph in reverse order, multiplying the gradient that arrives from the next quantity by the local derivative and adding contributions where a value is used more than once. <!-- concept: backward-pass -->
+- **reverse-mode differentiation**: computing derivatives by carrying a row vector from the single output back through the chain of Jacobians, so one sweep gives the gradient with respect to every input. <!-- concept: reverse-mode-differentiation -->
+- **forward-mode differentiation**: computing derivatives by carrying the derivative with respect to one input forward through the graph, which costs one pass per input. <!-- concept: forward-mode-differentiation -->
+- **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. <!-- concept: vector-jacobian-product -->
+- **saved activations**: the values of the forward pass that are kept in memory because the backward pass reads them. <!-- concept: saved-activations -->
+
+## Answers
+
+**Before you begin.**
+
+1. $\frac{dz}{dx} = \frac{\partial z}{\partial y_1}\frac{dy_1}{dx} + \frac{\partial z}{\partial y_2}\frac{dy_2}{dx}$: one product per path from $x$ to $z$, added.
+2. Shape $[2, 3]$ (outputs by inputs); the entry is $\partial f_i / \partial x_j$, how output $i$ changes with input $j$.
+3. $[3, 4]$: hidden width by input width, so that $\mathbf{W}_1\mathbf{x}$ has 3 entries.
+4. $L = (y - t)^2$ and $w \leftarrow w - \eta\,\frac{dL}{dw}$.
+5. $\mathbf{A}\mathbf{B}$ is $[m, n]$ and $\mathbf{B}^\top\mathbf{A}^\top$ is $[n, m]$, the transpose of the product.
+
+**Check your understanding.**
+
+1. Central differences need two forward passes per parameter, $2\times 10^6$. Forward mode carries the derivative with respect to one input at a time, so $10^6$ passes. Reverse mode carries a row vector from the single output back through the chain, so one backward pass of about the cost of one forward pass gives every gradient entry.
+2. The gradients from every use are added. The loss changes through each path independently, and the changes sum, as in the chain rule with several intermediate quantities. Overwriting loses all but one path.
+3. $y = 1$; $\frac{dL}{dw} = 2(y - t)x = 2(-2)(2) = -8$; $w \leftarrow 0.5 - 0.05(-8) = 0.9$.
+4. In reverse: $L$, $v_4$, $v_3$, $v_2$, $v_1$, ending with the gradients of $w_2$ and $w_1$. It starts from $\bar{L} = 1$, the derivative of $L$ with respect to itself.
+5. $d\mathbf{Z}$ is $[B, O]$ and $\mathbf{W}^\top$ is $[D, O]$, so the product is undefined unless $D = O$, and then it has the right shape but the wrong values. The correct formula is $d\mathbf{X} = d\mathbf{Z}\,\mathbf{W}$, shape $[B, D]$.
+6. $4096^2 = 16{,}777{,}216$ entries. The backward pass needs only the product of a row vector with it, which is one matrix-vector product with the weights ($4096^2$ multiply-adds) and needs no table of derivatives.
+7. The backward rules use values of the forward pass (an input to a product, the output of a $\tanh$). Those saved activations must stay in memory until used, so memory grows with depth and batch size, which is why training engines trade it for recomputation.
 
 ## References
 
