@@ -3,34 +3,41 @@
 
 # 220. A 4-bit NF4 base is read by the float GEMMs, one copy for forward and dX
 
-`Weight::NF4` (QLoRA) is not the W4A8 tier the older `matmul_q4_gemv_nf4`
-kernel serves. Training needs the weight read against fp32 activations in both
-`x*W^T` and `dY*W`, so `kernels::template::nf4_weight_variant` rewrites the `w`
-binding of `matmul`, `matmul_reg3`, `matmul_dx` and `matmul_dx_reg` (the same
-mechanism as the int8 base, finding 197): eight codes per word, each load decoded
-as `NF4_CODEBOOK[code] * scale[wi >> 5]`. One packed copy serves both
+**Lesson:** A packed low-bit base is read by the float GEMMs against full-precision activations,
+with one packed copy serving both the forward and the input gradient. That tier is not the older
+kernel with quantised activations, and silent promotion to another tier passes every test on the
+wrong path.
+
+## What happened
+`Weight::NF4` (QLoRA) is not the W4A8 tier the older `matmul_q4_gemv_nf4` kernel serves. Training
+needs the weight read against fp32 activations in both `x*W^T` and `dY*W`.
+
+So `kernels::template::nf4_weight_variant` rewrites the `w` binding of `matmul`, `matmul_reg3`,
+`matmul_dx` and `matmul_dx_reg` (the same mechanism as the int8 base, finding 197): eight codes per
+word, each load decoded as `NF4_CODEBOOK[code] * scale[wi >> 5]`. One packed copy serves both
 directions; no activation is quantised.
 
+## Why
 Things that bite:
 
-- `DType::NF4.promote` used to demand `int8_dot` (it was W4A8). The float-read
-  tier needs no capability, so it now promotes to itself everywhere, including
-  the CPU JIT; otherwise `Weight::upload(.., NF4)` silently became F32 and every
-  test passed on the wrong tier.
-- The tiled variants (`matmul_reg3`, `matmul_dx_reg`) carry workgroup barriers
-  the CPU JIT cannot run, and the CPU backend's fast paths match kernels by
-  name, so a `#w=nf4` tiled variant has none. `Ops` chooses the tile only when
-  `caps.workgroup_reductions` holds; the CPU keeps the naive kernels, which is
-  also what host oracle tests exercise. The tiled kernels are verified under
-  `--ignored` on a GPU.
-- The codebook has one source, `kernels::template::NF4_CODEBOOK`
-  (`model::lut4::NF4_LUT` is an alias), so the host quantizer and the generated
-  WGSL decode helper cannot drift.
-- `Ops::matmul_dx` now takes the tiled kernel for bf16 as well as NF4; the
-  kernels are optional (`model::ops::frozen_base_kernels()`, union in
-  `training_kernel_list()`) so models that register only `kernel_list()` keep
-  working with the naive bf16 dX.
+- `DType::NF4.promote` used to demand `int8_dot` (it was W4A8). The float-read tier needs no
+  capability, so it now promotes to itself everywhere, including the CPU JIT; otherwise
+  `Weight::upload(.., NF4)` silently became F32 and every test passed on the wrong tier.
+- The tiled variants (`matmul_reg3`, `matmul_dx_reg`) carry workgroup barriers the CPU JIT cannot
+  run, and the CPU backend's fast paths match kernels by name, so a `#w=nf4` tiled variant has
+  none.
+- The codebook has one source, `kernels::template::NF4_CODEBOOK` (`model::lut4::NF4_LUT` is an
+  alias), so the host quantizer and the generated WGSL decode helper cannot drift.
 
-**Superseded (qops, 2026-10-20):** the `#w=nf4` float-read kernel variants and the decoded-weight scope are gone. NF4 is one of the tiers of
-`model::ops::tiled`: a bounded row tile is decoded (`weight_decode`, or `weight_dequant_bf16` for the tensor-core library path) and the dense
-GEMM runs on the tile; the one stored copy still serves forward and dX.
+## What to do
+- `Ops` chooses the tile only when `caps.workgroup_reductions` holds; the CPU keeps the naive
+  kernels, which is also what host oracle tests exercise. The tiled kernels are verified under
+  `--ignored` on a GPU.
+- `Ops::matmul_dx` now takes the tiled kernel for bf16 as well as NF4. The kernels are optional
+  (`model::ops::frozen_base_kernels()`, union in `training_kernel_list()`) so models that register
+  only `kernel_list()` keep working with the naive bf16 dX.
+
+**Superseded (qops, 2026-10-20):** the `#w=nf4` float-read kernel variants and the decoded-weight
+scope are gone. NF4 is one of the tiers of `model::ops::tiled`: a bounded row tile is decoded
+(`weight_decode`, or `weight_dequant_bf16` for the tensor-core library path) and the dense GEMM
+runs on the tile; the one stored copy still serves forward and dX.

@@ -3,24 +3,30 @@
 
 # 251. Two git worktrees that share one cargo target dir hand each other stale path-crate artifacts
 
-Symptom. `cargo test -p brain-model --test X` printed `Compiling brain-model`
-and then failed with `unresolved import model::new_module` for a module that
-sits in the working tree, or ran a test binary that lacked an edit, while the
-other worktree was building the same crate into the same target dir.
+**Lesson:** Two worktrees sharing one cargo target dir hand each other stale path crates, because
+the fingerprint is judged by source mtimes against an artifact the other tree built. Give the
+crates you edit a private hash per worktree.
 
-Cause. Cargo's `-C metadata` hash of a workspace member is the same in both
-worktrees (it uses the package id relative to the workspace root), so both
-write `libmodel-<hash>.rlib` and one fingerprint file. The fingerprint is
-judged by source mtimes against the artifact's mtime, so a build made from the
-other tree after your edit makes your tree look up to date. A build serialised
-by the target-dir lock is still wrong, because the staleness is a decision, not
-a race.
+## What happened
+`cargo test -p brain-model --test X` printed `Compiling brain-model` and then failed with
+`unresolved import model::new_module` for a module that sits in the working tree, or ran a test
+binary that lacked an edit, while the other worktree was building the same crate into the same
+target dir.
 
-Fix that costs one recompile. Give the crates you edit a private hash with a
-per-package profile override, which changes only those packages and their
-dependents (not the 300 upstream crates):
+## Why
+Cargo's `-C metadata` hash of a workspace member is the same in both worktrees (it uses the package
+id relative to the workspace root), so both write `libmodel-<hash>.rlib` and one fingerprint file.
+
+The fingerprint is judged by source mtimes against the artifact's mtime, so a build made from the
+other tree after your edit makes your tree look up to date. A build serialised by the target-dir
+lock is still wrong, because the staleness is a decision, not a race.
+
+## What to do
+The fix that costs one recompile: give the crates you edit a private hash with a per-package
+profile override, which changes only those packages and their dependents (not the 300 upstream
+crates):
 
     cargo test --config 'profile.dev.package.brain-model.debug=1' ...
 
-Use a different value (or package list) per worktree. A copy of the target dir
-works too but costs the whole tree's disk.
+Use a different value (or package list) per worktree. A copy of the target dir works too but costs
+the whole tree's disk.

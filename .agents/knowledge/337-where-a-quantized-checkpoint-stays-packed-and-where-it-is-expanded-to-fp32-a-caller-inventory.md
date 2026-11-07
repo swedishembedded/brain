@@ -3,14 +3,24 @@
 
 # 337. Where a quantized checkpoint stays packed and where it is expanded to fp32: a caller inventory
 
-Read at 4af5f59bf (2026-10-20). Purpose: before any loader is moved onto a bounded, packed-preserving
-path, know which callers keep bytes packed, which expand one tensor, which expand the whole model, and
-where precision is chosen. Invariant used throughout: a quantized checkpoint is never implicitly
-expanded to full precision; loading is Preserve (copy packed bytes), Repack (lossless layout change),
-or Convert (numeric change under an explicit policy, bounded tiles, recorded). Nothing below is a
-measurement; every class is read from the code and cites where.
+**Lesson:** Most loaders silently expand a quantized checkpoint to full precision because the
+reading API defaults to whole-tensor decoding, and only a few paths keep bytes packed. Know which
+class each caller falls in before moving any loader onto a bounded, packed-preserving path.
 
-## 1. The reading API and what each entry point costs
+## What happened
+
+Read at 4af5f59bf (2026-10-20). Purpose: before any loader is moved onto a bounded,
+packed-preserving path, know which callers keep bytes packed, which expand one tensor, which expand
+the whole model, and where precision is chosen.
+
+Invariant used throughout: a quantized checkpoint is never implicitly expanded to full precision;
+loading is Preserve (copy packed bytes), Repack (lossless layout change), or Convert (numeric change
+under an explicit policy, bounded tiles, recorded). Nothing below is a measurement; every class is
+read from the code and cites where.
+
+## Why
+
+### 1. The reading API and what each entry point costs
 
 `checkpoint::TensorSource` (`crates/checkpoint/src/lib.rs`) is the only seam loaders use.
 
@@ -23,25 +33,33 @@ measurement; every class is read from the code and cites where.
 | `with_tensor_u32_chunks` | bounded packed-int8 words | brain's own int8 layout only (`PACKED_INT8_LAYOUT`); no other packed format has a bounded reader |
 | `raw_blocks` | borrowed GGUF block bytes + `BlockLayout` | the only Preserve/Repack primitive for GGUF; `None` for safetensors, for any value-transforming wrapper, and for `Concat`/`RowPermute` |
 
-There is no reader that yields packed FP8, NF4, MX or NVFP4 blocks. `DerivedCheckpoint`
-(`weightio.rs`): `tensor_f32` and `tensor_u32` only; `Renamed` advertises every tensor as `F32`
-and reads through the source's whole-tensor f32 decode; `InMemory` holds f32 and clones on read; so a
-derived view over a quantized source expands it. Its callers: `qwen3tts::import` and
-`ecapatdnn::import` (`Renamed`), `yolov8::import` and `clip::import` (`InMemory`), `mimi::import`
-(`CodecView`), `qwen3omnimoe::int8_thinker_resident` (`Int8View`, passes `U32` through).
-`WeightReader::tensor` (whole tensor, f32) is the eager accessor behind `qwen35::import`
-(`import_layer`, `import_mtp`), `qwen35::stream` (norm, embedding rows through
-`tensor_f32_range`), `ltxv`/`vqgan`/`deepseek2ocr`/`januspro` imports and `sdxlunet::import`
-(`tensor_f32`).
+There is no reader that yields packed FP8, NF4, MX or NVFP4 blocks.
 
-## 2. Classification of loaders
+`DerivedCheckpoint` (`weightio.rs`) has `tensor_f32` and `tensor_u32` only. `Renamed` advertises
+every tensor as `F32` and reads through the source's whole-tensor f32 decode; `InMemory` holds f32
+and clones on read; so a derived view over a quantized source expands it. Its callers:
+
+- `qwen3tts::import` and `ecapatdnn::import` (`Renamed`)
+- `yolov8::import` and `clip::import` (`InMemory`)
+- `mimi::import` (`CodecView`)
+- `qwen3omnimoe::int8_thinker_resident` (`Int8View`, passes `U32` through)
+
+`WeightReader::tensor` (whole tensor, f32) is the eager accessor behind:
+
+- `qwen35::import` (`import_layer`, `import_mtp`)
+- `qwen35::stream` (norm, embedding rows through `tensor_f32_range`)
+- `ltxv`/`vqgan`/`deepseek2ocr`/`januspro` imports
+- `sdxlunet::import` (`tensor_f32`)
+
+### 2. Classification of loaders
 
 Classes: **P** preserve or repack, packed bytes reach the device; **T** per-tensor fp32 (one tensor
 at a time on the host as f32, then uploaded at a chosen tier); **W** whole-model fp32 on the host
 (a map or container of every tensor); **D** whole-model fp32 resident on the device
 (`ParamStore`); **H** host fp32 trainer or optimizer state.
 
-### P - packed bytes survive
+#### P - packed bytes survive
+
 - `gguf::int8_direct::try_i8_rect` and `model::int8::q8_0_rect`: a Q8_0 GGUF tensor becomes brain
   packed int8 as a byte repack (exact, no fp32). Reached through `model::int8::quantize_from`,
   `upload_quantized`, `upload_rect`. Callers: `qwen3/src/q8.rs`, `qwen35` head and MTP
@@ -64,11 +82,13 @@ at a time on the host as f32, then uploaded at a chosen tier); **W** whole-model
 - NF4 and bf16 weights (`Weight::NF4`, `Weight::BF16`) are never loaded packed from a file: both are
   produced by `Weight::upload` from f32 (section 2 T). There is no NF4 or FP8 checkpoint reader.
 
-### T - one tensor at a time as f32, then `Weight::upload`
+#### T - one tensor at a time as f32, then `Weight::upload`
+
 `Weight::upload(ops, raw, n, k, want)` (`model/src/ops.rs`) takes an f32 slice of the whole
 `[n, k]` tensor and packs it (F32, BF16, F16, I8, Q4, NF4); it cannot take a chunk or a packed
 source. The host peak is therefore one full tensor in f32 (the 248320 x 5120 embedding or head
 is 5 GB in f32). Callers:
+
 - `qwen3/src/model.rs:1376,1407` (the seven linears per layer and the half-precision tables),
   `qwen35/src/model.rs:1703` (`upload` closure over `TierPolicy`), `qwen35moe/src/model.rs:1558`
   (hard-coded `Dtype::I8` when `quant(name)`), `qwen3/src/serve.rs` (13 sites, from the class W map),
@@ -97,7 +117,8 @@ is 5 GB in f32). Callers:
   (FP8) per layer on every pass; `Weight::F32` is the only base this trainer accepts
   (`train_base.rs` rejects I8/Q4/KQuant for training).
 
-### W - whole model as f32 on the host
+#### W - whole model as f32 on the host
+
 - `qwen3::serve::Engine::tensors_from` builds a `HashMap<String, Vec<f32>>` of the whole model.
   Callers: `Engine::load`, `catalog/src/resident_llm.rs:873` (`engine_tensors`, every Qwen3 resident
   activation), `qwen3/src/eval.rs:61`, `qwen3/src/rollout.rs`, `januspro/src/t2i.rs:151`,
@@ -114,19 +135,24 @@ is 5 GB in f32). Callers:
 - Eval/rollout/`read_weight`/`write_weight` on the `Model` trait (`model/src/lib.rs:303`) exchange
   `Vec<f32>` of one named tensor.
 
-### D - whole model as fp32 on the device
+#### D - whole model as fp32 on the device
+
 `paramstore::ParamStore` allocates every parameter as an fp32 buffer; a trainable parameter also
 gets grad, Adam m and v buffers (all fp32); `Role::Frozen` still holds the fp32 weight. About fifty
 crates build one (`grep ParamStore::new` under `crates/`; the large ones are `qwen3/model.rs`,
 `qwen35/model.rs`, `qwen35moe/model.rs`, `glmdsa`, `deepseek2`, `gpt2`, `fastvlm`, `clip`).
-`paramstore/src/dtype.rs` `device_bytes` charges every dtype 4 bytes per element except packed-int8
-`U32`; every placement and footprint decision (`qwen3/src/footprint.rs`, `memauth`) inherits that
-charge, so a reduced tier is accounted at fp32 where it goes through `ParamStore` and at its true
-size only where it goes through `Weight`. The quantized linears are excluded from the `ParamStore`
-(`is_quantizable_linear` in `qwen35/src/model.rs`), so a LoRA build over a bf16/NF4/int8 base holds
-packed linears plus an fp32 store of norms, embeddings (unless `table_tier`), head and adapters.
 
-### H - host fp32 trainer or optimizer state
+`paramstore/src/dtype.rs` `device_bytes` charges every dtype 4 bytes per element except packed-int8
+`U32`. Every placement and footprint decision (`qwen3/src/footprint.rs`, `memauth`) inherits that
+charge, so a reduced tier is accounted at fp32 where it goes through `ParamStore` and at its true
+size only where it goes through `Weight`.
+
+The quantized linears are excluded from the `ParamStore` (`is_quantizable_linear` in
+`qwen35/src/model.rs`), so a LoRA build over a bf16/NF4/int8 base holds packed linears plus an fp32
+store of norms, embeddings (unless `table_tier`), head and adapters.
+
+#### H - host fp32 trainer or optimizer state
+
 - `optim/src/offload.rs` `OffloadAdam`: `OffloadSlot = (String, Vec<f32> x3)` master weights, m, v
   for every `Role::Offload` parameter. Qwen3 full fine-tune (`finetune.rs:94,108`,
   `with_adam_offloaded`) trains in fp32 only (`Dtype::F32`) and exports fp32; there is no
@@ -136,9 +162,10 @@ packed linears plus an fp32 store of norms, embeddings (unless `table_tier`), he
 - `model::lora` fold paths (`fold_adapter_into`, `flux2::lora::fold_adapters`): f32 per tensor or per
   stage; a fold into an int8 base requantizes lossily (`flux2/tests/lora_requant_int8.rs`).
 
-## 3. Where precision is chosen
+### 3. Where precision is chosen
 
 Per model crate (conditionals that choose a storage dtype in model code):
+
 - `qwen3/src/model.rs`: `quantized` bool plus a `Dtype`; `Qwen::new_lora_dt_gemm`; trainers accept
   F32, BF16 and I8 only (`sdk/src/finetune.rs` `qwen3_tier`; NF4 is not exposed for qwen3).
 - `qwen35/src/model.rs` + `train_base.rs`: `TierPolicy` per leaf (substring rules), `table_tier`
@@ -157,7 +184,10 @@ Per model crate (conditionals that choose a storage dtype in model code):
 - `model::adapter::device::is_adapter_param` hard-codes the `.lora_a` and `.lora_b` suffixes; the
   only `AdapterKind` implementation is `LoraPair`.
 
-## 4. Top findings, in priority order
+## What to do
+
+Top findings, in priority order:
+
 1. `with_tensor_chunks` and `with_tensor_range` default to whole-tensor: every wrapper that does not
    override both is silently unbounded; `checkpoint::srccheck` checks value agreement of the
    entry points, not that the memory bound holds.

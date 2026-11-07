@@ -3,29 +3,54 @@
 
 # 386. The FP8 weight stream stopped at 2 TB/s on instructions and barriers, not on the memory, so each lane copies its own fragment and the hardware decodes the bytes
 
-Question: knowledge 382 left `matmul_fp8_dq_stream_r4` at ~2.1 TB/s (12.3 ms of an 18.8 ms decode graph) with the m <= 8 variants "not limited by
-shared memory or ring depth". The card reads 3.68 TB/s (the tuner's `roof_read` probe, 1 GiB, 16-byte `ld.global.nc` grid-stride). Why does the
-stream stop, and what reaches the roof?
+**Lesson:** A weight-streaming kernel that stalls below the memory roof may be limited by
+instruction issue and barriers rather than by bandwidth; having each lane copy its own fragment and
+letting the hardware decode the quantized bytes removes both limits.
 
-Measured (gpu1, `make test/one P=brain-gpu-core T=fp8_linear_native ARGS="--ignored --nocapture fp8_decode_bandwidth"`: weights cycled past the L2,
-device events; ncu on the same binary, `-k regex:fp8_dq_stream_r4 -c 1`):
+## What happened
 
-1. **The limiter was the issue slots and the barrier, not bytes in flight.** r4 at the 5120 x 34816 shape: 25.3 M warp instructions for 178 MB of
-   weights (4.5 thread instructions per weight byte), issue slots 42 % busy at 2.09 TB/s, 3 blocks (12 warps) an SM because the stage ring
-   is sized for 64 rows of x (74 KB) whatever the batch, one `__syncthreads` per 8 KB stage. Little's law was met (48 KB in flight an SM against the
-   ~21-30 KB the memory needs); the 8-row-x variants of 382 freed shared memory but kept the 2.5-instruction bf16 decode (`prmt`, `shr`, two `lop3`,
-   `fma.bf16x2` a pair) and the barrier, which is why they did not move.
-2. **What was built** (`cu/matmul_fp8_gemv_f16.cu`, four candidates `matmul_fp8_gemv_f16_a{tiles}w{warps}d{slots}b{blocks}` through the tuner):
-   - the lane copies its own A fragment (16-byte `cp.async` chunks of the (g, g+8) rows, the k permutation of 377) into a per-warp ring and reads the
-     same bytes back: no barrier, the bytes in flight cost no registers (a register-prefetch version spilled at 255 registers and ran at 2.4 TB/s);
-   - `cvt.rn.f16x2.e4m3x2` decodes two weights in one instruction and is exact (f16 holds every E4M3 code), so the block scale is not in the operand:
-     the tensor core adds the 128 k of a block unscaled and one f32 fma per accumulator folds `scale * partial`. The bf16 activations are widened to f16
-     once per fragment (`satfinite`; exact for 6e-5 <= |x| <= 65504). The result is closer to the f64 reference of the stored weights than the bf16
-     kernels (they round `code * scale` to bf16);
-   - the copies of the first line steps are issued before `griddepcontrol.wait` (the weights do not depend on the previous kernel) and
-     `launch_dependents` is signalled first, so under programmatic dependent launch the next GEMV streams while this one finishes;
-   - a block is `warps` warps taking the 128-wide line steps of K in turn, 16 x `tiles` weight rows, partial sums added in warp order through shared memory
-     (deterministic).
+Question: knowledge 382 left `matmul_fp8_dq_stream_r4` at ~2.1 TB/s (12.3 ms of an 18.8 ms decode
+graph) with the m <= 8 variants "not limited by shared memory or ring depth". The card reads 3.68
+TB/s (the tuner's `roof_read` probe, 1 GiB, 16-byte `ld.global.nc` grid-stride). Why does the stream
+stop, and what reaches the roof?
+
+Measured (gpu1,
+`make test/one P=brain-gpu-core T=fp8_linear_native ARGS="--ignored --nocapture fp8_decode_bandwidth"`:
+weights cycled past the L2, device events; ncu on the same binary,
+`-k regex:fp8_dq_stream_r4 -c 1`):
+
+## Why
+
+1. **The limiter was the issue slots and the barrier, not bytes in flight.** r4 at the 5120 x 34816
+   shape: 25.3 M warp instructions for 178 MB of weights (4.5 thread instructions per weight byte),
+   issue slots 42 % busy at 2.09 TB/s, 3 blocks (12 warps) an SM because the stage ring is sized for
+   64 rows of x (74 KB) whatever the batch, one `__syncthreads` per 8 KB stage. Little's law was met
+   (48 KB in flight an SM against the ~21-30 KB the memory needs); the 8-row-x variants of 382 freed
+   shared memory but kept the 2.5-instruction bf16 decode (`prmt`, `shr`, two `lop3`, `fma.bf16x2` a
+   pair) and the barrier, which is why they did not move.
+
+## What to do
+
+2. **What was built** (`cu/matmul_fp8_gemv_f16.cu`, four candidates
+   `matmul_fp8_gemv_f16_a{tiles}w{warps}d{slots}b{blocks}` through the tuner):
+   - the lane copies its own A fragment (16-byte `cp.async` chunks of the (g, g+8) rows, the k
+     permutation of 377) into a per-warp ring and reads the same bytes back: no barrier, the bytes
+     in flight cost no registers (a register-prefetch version spilled at 255 registers and ran at
+     2.4 TB/s);
+   - `cvt.rn.f16x2.e4m3x2` decodes two weights in one instruction and is exact (f16 holds every E4M3
+     code), so the block scale is not in the operand: the tensor core adds the 128 k of a block
+     unscaled and one f32 fma per accumulator folds `scale * partial`. The bf16 activations are
+     widened to f16 once per fragment (`satfinite`; exact for 6e-5 <= |x| <= 65504). The result is
+     closer to the f64 reference of the stored weights than the bf16 kernels (they round
+     `code * scale` to bf16);
+   - the copies of the first line steps are issued before `griddepcontrol.wait` (the weights do not
+     depend on the previous kernel) and `launch_dependents` is signalled first, so under
+     programmatic dependent launch the next GEMV streams while this one finishes;
+   - a block is `warps` warps taking the 128-wide line steps of K in turn, 16 x `tiles` weight rows,
+     partial sums added in warp order through shared memory (deterministic).
+
+## Evidence
+
 3. **Result**, isolated kernel (us, TB/s of weight bytes), best candidate against r4, rows 1:
 
    | shape (K x N) | r4 | f16 stream |
@@ -36,18 +61,26 @@ device events; ncu on the same binary, `-k regex:fp8_dq_stream_r4 -c 1`):
    | 5120 x 10240 | 29.0 us 1.81 | 21.5 us 2.44 |
    | 6144 x 5120 | 19.7 us 1.60 | 15.0 us 2.09 |
 
-   The isolated figure includes a ~6 us launch floor of the event timing; those are 89-97 % of "bytes at the 3.68 TB/s roof plus the floor".
-4. **Decode graph** (nsys, FP8 27B, c = 1, critical-path attribution = time between consecutive kernel completions): `matmul_fp8_*` 11.82 -> 9.13 ms of
-   15.81 -> 13.15 ms a token. At 24.3 GB of weights a token that is 2.66 TB/s in the graph: a launch's ramp and tail cost what the isolated floor does.
+The isolated figure includes a ~6 us launch floor of the event timing; those are 89-97 % of "bytes
+at the 3.68 TB/s roof plus the floor".
 
-Not solved here: rows 9-16 (the activation fragment is converted per MMA, two x tiles, and the L1 serves the B fragments at 8 lines a load, so the f16 stream
-loses to r4 above 8 rows); a GEMV whose x is the A operand would amortise both.
+4. **Decode graph** (nsys, FP8 27B, c = 1, critical-path attribution = time between consecutive
+   kernel completions): `matmul_fp8_*` 11.82 -> 9.13 ms of 15.81 -> 13.15 ms a token. At 24.3 GB of
+   weights a token that is 2.66 TB/s in the graph: a launch's ramp and tail cost what the isolated
+   floor does.
 
-## The rest of the decode step (non-GEMM)
+Not solved here: rows 9-16 (the activation fragment is converted per MMA, two x tiles, and the L1
+serves the B fragments at 8 lines a load, so the f16 stream loses to r4 above 8 rows); a GEMV whose
+x is the A operand would amortise both.
 
-Critical-path attribution of one decode graph (nsys, `--cuda-graph-trace=node`; the time between consecutive kernel completions, charged to the later
-kernel: a kernel started early by programmatic dependent launch spins in `griddepcontrol.wait`, so its own duration and the union busy time both
-overcount it). FP8 27B, c = 1, int8 KV, ms a token:
+### The rest of the decode step (non-GEMM)
+
+Critical-path attribution of one decode graph (nsys, `--cuda-graph-trace=node`; the time between
+consecutive kernel completions, charged to the later kernel: a kernel started early by programmatic
+dependent launch spins in `griddepcontrol.wait`, so its own duration and the union busy time both
+overcount it).
+
+FP8 27B, c = 1, int8 KV, ms a token:
 
 | | base | after the GEMV | + fused bf16 rows | + split GDN decode |
 |---|---|---|---|---|
@@ -60,45 +93,67 @@ overcount it). FP8 27B, c = 1, int8 KV, ms a token:
 | GQA glue (`rmsnorm_rows`, rope, `concat_split`, `kv_append_i8`) | 0.45 | 0.45 | 0.44 | 0.43 |
 | `topk_rows` | 0.19 | 0.19 | 0.19 | 0.19 |
 
-1. **A cast in front of an FP8 product is a launch, not arithmetic**: 1.2 us of kernel and 0.5 us of gap, 256 a token. `add_rms_quant` (flags bit 2) and
-   `quant_epilogue` (flags bit 1) already hold the activation in registers and now store `cast_f32_bf16`'s rows beside it (bit-equal, gated in
-   `add_rms_quant_native` and `quant_epilogue_native`): 256 -> 48 casts (the remaining ones are the GDN gated output, which no fused front end produces).
-   An f32-reading GEMV (the rows rounded to f16 inside the kernel, no cast at all) was tried and is 4 us slower per GEMV at 1 row (twice the x traffic
-   through the L1): not kept.
-2. **`gdn_decode_pool` ran 16 blocks at one sequence and spilled nothing but time**: one block of 384 threads per (key head, sequence) because the q/k
-   conv windows are shared by a key head's value heads and rewritten in place. 17 us at one sequence, 72 us at 16, 270 us at 64 (the 3 MB of state a
-   sequence reads and writes are 2, 28 and 110 us at the memory roof): with one block an SM the load, the 128-step recurrence and the store do not overlap.
-   The conv has no sharing once it is its own kernel: `gdn_conv_pool` (a thread a channel, 2.5 us in the graph) and `gdn_recur_pool` (a block of 128 threads per
-   (sequence, value head): the head's state arrives as 16-byte `cp.async` copies issued before `griddepcontrol.wait`, the recurrence walks it in shared memory in
-   two passes (the decayed value is recomputed, so no 128-register column is live), the q/k norms and the gated norm are the reference's single-thread ascending
-   walks). Bit-identical to the single-launch body on f32 and bf16 pools, 1 to 3 value heads a key head (`gdn_decode_native`). Isolated kernels:
-   one sequence 17.3 -> 14.9 us, 4: 18.7 -> 18.5, 16: 72.5 -> 56.8, 64: 270 -> 155 us a layer. The first version (state in 128 registers, a block per value head)
-   was no faster: ncu showed 168 registers and 6 M local-memory spill requests, 2.6 TB/s of DRAM traffic for 400 MB of state; the second let the compiler
-   hoist all 128 shared loads (255 registers, two blocks an SM) until the loops were unrolled by two.
-3. **Glue that was a launch each, now one**: the two bf16 gate projections (`in_proj_b`, `in_proj_a`, 48 + 48 launches of 4.7 us) are grouped apart from the
-   FP8 projections and run as one `Bf16GemvMulti` (5.4 us, saves 0.2 ms); with an int8 KV cache the eight-kernel GQA front half (`concat_split` x 2, `rmsnorm_rows` x 2, `rope`
-   x 2, `kv_append_i8` x 2, 27 us a layer) is one `gqa_decode_prep_i8` (4.9 us, saves 0.35 ms): the f32-pool kernel's body ends in the clipped per-head int8 append
-   (max, `min(max, clip) / 127`, `rint(v / scale)`, four to a word), bit-equal to the chain on K, V, the scale tables and the attention output
-   (`gqa_decode_prep_native`, int8 added); the device top-k head (`topk_rows`) keeps the best of each 16-column sub-run in registers so a winner costs one sub-run rescan
-   (not 61 vector loads out of L2): 187 -> 103 us.
-4. **The head is a second graph behind a host round trip.** The step is not one graph: the first 64 held steps are launched as a graph of their own (`PASS_FIRST_FLUSH_STEPS`),
-   the rest follow, and the last layer's residual is read back to the host, uploaded again and normed by `head_rows_on` (the generated RMSNorm, 40 us a row, then the
-   int8 packing the bf16 head never reads). Per token on the card, c = 1: 443 us idle between the previous token's top-k and the first kernel of the next (the readback,
-   the sampling, ten small uploads and a 110 us `cuGraphLaunch`), 291 us idle between the first graph and the second (the host building 192 steps and a 377 us launch
-   of the big graph), 88 us between the last layer and the head. `final_norm_step` runs the head's norm as `add_rms_quant` without the add (2.9 us; bit-equal when the
-   unfused norm would have been the cooperative one) and the unneeded packing is skipped. The remaining 0.8 ms a token of host gaps is the next lever.
-5. **Nine to sixteen rows: the rows of x as the A operand.** `matmul_fp8_gemv_f16_*` puts 16 weight rows in the MMA's A operand and the rows of x in the 8-wide B
-   operand: two B tiles at 9-16 rows, each converted bf16 -> f16 per MMA and loaded one cache line a row, and it lost to `r4` there (43 us against 40 at 5120 x 17408).
-   `matmul_fp8_gemv_f16x_*` swaps the operands (16 rows of x are the A operand, converted once per k16 step and shared by the 8 or 4 weight tiles a warp streams; 8 weight rows
-   are the B operand): the activation work no longer grows with the rows. `t8w8d2b1` (64 weight rows a block, 8 warps taking the lines of K in turn, two ring slots, one block an SM) at 16
-   rows, isolated: 5120 x 34816 74.6 -> 64.7 us, 5120 x 17408 40.5 -> 38.7, 17408 x 5120 38.1 -> 35.0, 5120 x 10240 28.5 -> 26.8, 6144 x 5120 18.3 -> 16.3. Smaller blocks (32 rows)
-   re-read x once per 32 weight rows (L2 traffic equal to the weights'); 128-row blocks leave too few blocks for the small matrices. Served, 16 sequences: 483 -> 518 output tok/s,
-   decode step 17.3 -> 15.3 ms (the FP8 GEMVs of the step 12.2 -> 9.9 ms).
+1. **A cast in front of an FP8 product is a launch, not arithmetic**: 1.2 us of kernel and 0.5 us of
+   gap, 256 a token. `add_rms_quant` (flags bit 2) and `quant_epilogue` (flags bit 1) already hold
+   the activation in registers and now store `cast_f32_bf16`'s rows beside it (bit-equal, gated in
+   `add_rms_quant_native` and `quant_epilogue_native`): 256 -> 48 casts (the remaining ones are the
+   GDN gated output, which no fused front end produces). An f32-reading GEMV (the rows rounded to
+   f16 inside the kernel, no cast at all) was tried and is 4 us slower per GEMV at 1 row (twice the
+   x traffic through the L1): not kept.
+2. **`gdn_decode_pool` ran 16 blocks at one sequence and spilled nothing but time**: one block of
+   384 threads per (key head, sequence) because the q/k conv windows are shared by a key head's
+   value heads and rewritten in place. 17 us at one sequence, 72 us at 16, 270 us at 64 (the 3 MB of
+   state a sequence reads and writes are 2, 28 and 110 us at the memory roof): with one block an SM
+   the load, the 128-step recurrence and the store do not overlap. The conv has no sharing once it
+   is its own kernel: `gdn_conv_pool` (a thread a channel, 2.5 us in the graph) and `gdn_recur_pool`
+   (a block of 128 threads per (sequence, value head): the head's state arrives as 16-byte
+   `cp.async` copies issued before `griddepcontrol.wait`, the recurrence walks it in shared memory
+   in two passes (the decayed value is recomputed, so no 128-register column is live), the q/k norms
+   and the gated norm are the reference's single-thread ascending walks). Bit-identical to the
+   single-launch body on f32 and bf16 pools, 1 to 3 value heads a key head (`gdn_decode_native`).
+   Isolated kernels: one sequence 17.3 -> 14.9 us, 4: 18.7 -> 18.5, 16: 72.5 -> 56.8, 64: 270 -> 155
+   us a layer. The first version (state in 128 registers, a block per value head) was no faster: ncu
+   showed 168 registers and 6 M local-memory spill requests, 2.6 TB/s of DRAM traffic for 400 MB of
+   state; the second let the compiler hoist all 128 shared loads (255 registers, two blocks an SM)
+   until the loops were unrolled by two.
+3. **Glue that was a launch each, now one**: the two bf16 gate projections (`in_proj_b`,
+   `in_proj_a`, 48 + 48 launches of 4.7 us) are grouped apart from the FP8 projections and run as
+   one `Bf16GemvMulti` (5.4 us, saves 0.2 ms); with an int8 KV cache the eight-kernel GQA front half
+   (`concat_split` x 2, `rmsnorm_rows` x 2, `rope` x 2, `kv_append_i8` x 2, 27 us a layer) is one
+   `gqa_decode_prep_i8` (4.9 us, saves 0.35 ms): the f32-pool kernel's body ends in the clipped
+   per-head int8 append (max, `min(max, clip) / 127`, `rint(v / scale)`, four to a word), bit-equal
+   to the chain on K, V, the scale tables and the attention output (`gqa_decode_prep_native`, int8
+   added); the device top-k head (`topk_rows`) keeps the best of each 16-column sub-run in registers
+   so a winner costs one sub-run rescan (not 61 vector loads out of L2): 187 -> 103 us.
+4. **The head is a second graph behind a host round trip.** The step is not one graph: the first 64
+   held steps are launched as a graph of their own (`PASS_FIRST_FLUSH_STEPS`), the rest follow, and
+   the last layer's residual is read back to the host, uploaded again and normed by `head_rows_on`
+   (the generated RMSNorm, 40 us a row, then the int8 packing the bf16 head never reads). Per token
+   on the card, c = 1: 443 us idle between the previous token's top-k and the first kernel of the
+   next (the readback, the sampling, ten small uploads and a 110 us `cuGraphLaunch`), 291 us idle
+   between the first graph and the second (the host building 192 steps and a 377 us launch of the
+   big graph), 88 us between the last layer and the head. `final_norm_step` runs the head's norm as
+   `add_rms_quant` without the add (2.9 us; bit-equal when the unfused norm would have been the
+   cooperative one) and the unneeded packing is skipped. The remaining 0.8 ms a token of host gaps
+   is the next lever.
+5. **Nine to sixteen rows: the rows of x as the A operand.** `matmul_fp8_gemv_f16_*` puts 16 weight
+   rows in the MMA's A operand and the rows of x in the 8-wide B operand: two B tiles at 9-16 rows,
+   each converted bf16 -> f16 per MMA and loaded one cache line a row, and it lost to `r4` there (43
+   us against 40 at 5120 x 17408). `matmul_fp8_gemv_f16x_*` swaps the operands (16 rows of x are the
+   A operand, converted once per k16 step and shared by the 8 or 4 weight tiles a warp streams; 8
+   weight rows are the B operand): the activation work no longer grows with the rows. `t8w8d2b1` (64
+   weight rows a block, 8 warps taking the lines of K in turn, two ring slots, one block an SM) at
+   16 rows, isolated: 5120 x 34816 74.6 -> 64.7 us, 5120 x 17408 40.5 -> 38.7, 17408 x 5120 38.1 ->
+   35.0, 5120 x 10240 28.5 -> 26.8, 6144 x 5120 18.3 -> 16.3. Smaller blocks (32 rows) re-read x
+   once per 32 weight rows (L2 traffic equal to the weights'); 128-row blocks leave too few blocks
+   for the small matrices. Served, 16 sequences: 483 -> 518 output tok/s, decode step 17.3 -> 15.3
+   ms (the FP8 GEMVs of the step 12.2 -> 9.9 ms).
 
-## Result
+### Result
 
-Decode-step period (nsys, `--cuda-graph-trace=node`, 160 decoding steps of 48-token prompts, int8 KV, speculative off; the nsys numbers carry the profiler's
-own overhead) and served output tok/s (same client, 1K in / 128 out, `bench.sh`):
+Decode-step period (nsys, `--cuda-graph-trace=node`, 160 decoding steps of 48-token prompts, int8
+KV, speculative off; the nsys numbers carry the profiler's own overhead) and served output tok/s
+(same client, 1K in / 128 out, `bench.sh`):
 
 | sequences | 1 | 4 | 16 | 64 |
 |---|---|---|---|---|
@@ -107,11 +162,18 @@ own overhead) and served output tok/s (same client, 1K in / 128 out, `bench.sh`)
 | output tok/s, base | 58.7 | 242 | 465 | 675 |
 | output tok/s, now | 76.5 | 295 | 529 | 717 |
 
-Served inter-token latency at one sequence, outside the profiler: 15.7 -> 11.6 ms (target 11.5). 31K TTFT 4.46 -> 4.50 s. `qwen35_fp8_parity` (8 x 1500 tokens): both
-98.44 % / KL 2.73e-3. Greedy chat outputs (6 prompts, 96 tokens, temperature 0): 4 identical to the base token for token, 2 diverge after 300-400 characters; the base
-alone is only 2 of 6 identical between batch 1 and batch 6, so the numerics moved by less than batch composition already moves them. W8K NF4 train probe 1003-1022 tok/s
-(base 1003-1012 on the same node), `gdn_decode_native`, `gqa_decode_prep_native`, `add_rms_quant_native`, `quant_epilogue_native`, `readout_topk`, `fp8_linear_native`,
-`hf_fp8_conformance` pass.
+Served inter-token latency at one sequence, outside the profiler: 15.7 -> 11.6 ms (target 11.5). 31K
+TTFT 4.46 -> 4.50 s. `qwen35_fp8_parity` (8 x 1500 tokens): both 98.44 % / KL 2.73e-3.
 
-What did not help, measured: PDL `launch_dependents` ahead of `wait` in every small kernel (11.65 -> 11.61 ms, noise); first/later graph chunk sizes 40/128 (worse, 11.93) and 96/256
-(equal); an f32-reading GEMV (no cast launch, +4 us a GEMV); x as the A operand at 17-64 rows (x re-read once per 64 weight rows is as many L2 bytes as the weights).
+Greedy chat outputs (6 prompts, 96 tokens, temperature 0): 4 identical to the base token for token,
+2 diverge after 300-400 characters; the base alone is only 2 of 6 identical between batch 1 and
+batch 6, so the numerics moved by less than batch composition already moves them.
+
+W8K NF4 train probe 1003-1022 tok/s (base 1003-1012 on the same node), `gdn_decode_native`,
+`gqa_decode_prep_native`, `add_rms_quant_native`, `quant_epilogue_native`, `readout_topk`,
+`fp8_linear_native`, `hf_fp8_conformance` pass.
+
+What did not help, measured: PDL `launch_dependents` ahead of `wait` in every small kernel (11.65 ->
+11.61 ms, noise); first/later graph chunk sizes 40/128 (worse, 11.93) and 96/256 (equal); an
+f32-reading GEMV (no cast launch, +4 us a GEMV); x as the A operand at 17-64 rows (x re-read once
+per 64 weight rows is as many L2 bytes as the weights).
