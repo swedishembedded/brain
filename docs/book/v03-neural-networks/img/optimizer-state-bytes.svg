@@ -1,0 +1,43 @@
+<!-- source-sha256: d2b16009a90efcf1ac595225f29ed943119168b33557b2c1dac56bfc9fed66ab -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 430" width="850" height="430"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="850" height="430" fill="#ffffff"/>
+<rect x="184" y="14" width="22" height="16" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="214" y="26.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">value</text>
+<rect x="304" y="14" width="22" height="16" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="334" y="26.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">gradient</text>
+<rect x="424" y="14" width="22" height="16" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="454" y="26.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">state</text>
+<text x="14" y="78.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">SGD</text>
+<rect x="185" y="56" width="142" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="329" y="56" width="142" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="482" y="78.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">8 bytes</text>
+<text x="14" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">SGD with momentum</text>
+<rect x="185" y="106" width="142" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="329" y="106" width="142" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="473" y="106" width="142" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="626" y="128.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">12 bytes</text>
+<text x="14" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">Lion</text>
+<rect x="185" y="156" width="142" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="329" y="156" width="142" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="473" y="156" width="142" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="626" y="178.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">12 bytes</text>
+<text x="14" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">AdamW</text>
+<rect x="185" y="206" width="142" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="329" y="206" width="142" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="473" y="206" width="286" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="770" y="228.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">16 bytes</text>
+<text x="14" y="278.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">AdamW, bf16 moments</text>
+<rect x="185" y="256" width="142" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="329" y="256" width="142" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="473" y="256" width="142" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="626" y="278.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">12 bytes</text>
+<text x="14" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">Lion, int8 state</text>
+<rect x="185" y="306" width="142" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="329" y="306" width="142" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="473" y="306" width="36.25" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520.25" y="328.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">9.0625 bytes</text>
+<text x="14" y="378.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">AdamW, int8 state</text>
+<rect x="185" y="356" width="142" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="329" y="356" width="142" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<rect x="473" y="356" width="74.5" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="558.5" y="378.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">10.125 bytes</text>
+</svg>

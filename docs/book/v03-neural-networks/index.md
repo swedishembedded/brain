@@ -58,8 +58,8 @@ in the curriculum and appear here when they are written.
    written out exactly.
 6. [Proving Gradients Correct](06-gradient-checking.md): how to know a backward
    pass is right without trusting the person who wrote it.
-7. Optimizers: From SGD to AdamW: the smartest way to use a gradient once we
-   have one.
+7. [Optimizers: From SGD to AdamW](07-optimizers.md): the smartest way to use
+   a gradient once we have one.
 8. Learning-Rate Schedules and Gradient Clipping: why the step size should
    change during training, and what to do when a gradient explodes.
 9. Initialization: Where Training Starts: why the random starting point

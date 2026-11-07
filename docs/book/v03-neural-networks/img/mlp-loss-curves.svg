@@ -1,0 +1,47 @@
+<!-- source-sha256: 0b1a2a6f393eada7509570d0e1969fa7facf2e2468c54c3578232cefa9f2ff89 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 793 380" width="793" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="793" height="380" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="148.67" y1="334" x2="148.67" y2="30" stroke="#edf2f7"/>
+<text x="148.67" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">50</text>
+<line x1="239.33" y1="334" x2="239.33" y2="30" stroke="#edf2f7"/>
+<text x="239.33" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="330" y1="334" x2="330" y2="30" stroke="#edf2f7"/>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">150</text>
+<line x1="420.67" y1="334" x2="420.67" y2="30" stroke="#edf2f7"/>
+<text x="420.67" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">200</text>
+<line x1="511.33" y1="334" x2="511.33" y2="30" stroke="#edf2f7"/>
+<text x="511.33" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">250</text>
+<line x1="602" y1="334" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">300</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="258" x2="602" y2="258" stroke="#edf2f7"/>
+<text x="52" y="262" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="182" x2="602" y2="182" stroke="#edf2f7"/>
+<text x="52" y="186" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="106" x2="602" y2="106" stroke="#edf2f7"/>
+<text x="52" y="110" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="1.8" points="58,50.12 76.13,102.42 94.27,132.96 112.4,174.62 130.53,237.83 148.67,239.75 166.8,253.61 184.93,279.39 203.07,263.27 221.2,274.1 239.33,261.65 257.47,283.84 275.6,162.57 293.73,197.33 311.87,278.97 330,271.35 348.13,285.21 366.27,294.14 384.4,294.47 402.53,289.89 420.67,239.19 438.8,287.89 456.93,286.49 475.07,291.29 493.2,276.11 511.33,289.1 529.47,293.1 547.6,301.53 565.73,291.1 583.87,297.25 602,289.21"/><polyline fill="none" stroke="#c05621" stroke-width="1.8" points="58,50.12 76.13,73.84 94.27,100.17 112.4,117.38 130.53,197.05 148.67,239.85 166.8,253.82 184.93,274.45 203.07,279.32 221.2,286.69 239.33,289.18 257.47,287.6 275.6,270.36 293.73,292.42 311.87,286.13 330,265.85 348.13,292.33 366.27,292.97 384.4,270.85 402.53,292.15 420.67,289.04 438.8,297.23 456.93,301.23 475.07,301.28 493.2,294.68 511.33,297.28 529.47,297.06 547.6,301.85 565.73,302.74 583.87,302.97 602,300.01"/><polyline fill="none" stroke="#2f855a" stroke-width="1.8" points="58,50.12 76.13,115.83 94.27,156.64 112.4,209.78 130.53,240.44 148.67,252.99 166.8,261.05 184.93,275.81 203.07,276.29 221.2,274.23 239.33,280.16 257.47,286.7 275.6,270.79 293.73,272.8 311.87,290.39 330,278.68 348.13,289.86 366.27,293.91 384.4,294.73 402.53,293.83 420.67,279 438.8,296.3 456.93,289.75 475.07,296.92 493.2,292.31 511.33,296.07 529.47,293.55 547.6,301.22 565.73,299.13 583.87,301.46 602,289.8"/><polyline fill="none" stroke="#9b2c2c" stroke-width="1.8" points="58,50.12 76.13,136.87 94.27,227.81 112.4,271.87 130.53,274.51 148.67,242.56 166.8,289.11 184.93,286.98 203.07,295.41 221.2,295.81 239.33,285.68 257.47,295.18 275.6,283.76 293.73,290.51 311.87,291.37 330,274.56 348.13,295.93 366.27,302.69 384.4,272.99 402.53,278.89 420.67,290.12 438.8,300.86 456.93,301.96 475.07,288.66 493.2,288.23 511.33,304.94 529.47,302.4 547.6,305.31 565.73,302.37 583.87,306.83 602,296.53"/><polyline fill="none" stroke="#6b46c1" stroke-width="1.8" stroke-dasharray="6 4" points="58,50.12 76.13,86.01 94.27,107.67 112.4,143.14 130.53,182.47 148.67,217.21 166.8,237.92 184.93,258 203.07,266.98 221.2,272.41 239.33,275.55 257.47,277 275.6,272.17 293.73,274.94 311.87,278.13 330,271.35 348.13,276.02 366.27,282.08 384.4,281.68 402.53,284.06 420.67,279.21 438.8,284.63 456.93,286.26 475.07,285.49 493.2,278.72 511.33,278.47 529.47,280.32 547.6,283.93 565.73,280.85 583.87,287.7 602,287.1"/><polyline fill="none" stroke="#4a5568" stroke-width="1.8" points="58,50.12 76.13,81.56 94.27,95.09 112.4,119.27 130.53,161.61 148.67,198.61 166.8,227.18 184.93,250.82 203.07,266.79 221.2,277.77 239.33,285.88 257.47,291.78 275.6,295.59 293.73,298.81 311.87,301 330,301.12 348.13,303.56 366.27,304.53 384.4,306.37 402.53,308.02 420.67,308.6 438.8,311.72 456.93,313.02 475.07,313.44 493.2,314.04 511.33,315.05 529.47,313.95 547.6,316.66 565.73,315.98 583.87,313.23 602,317.04"/></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">step (batch of 20)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">mean loss over all 200 examples</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Six optimisers at their best learning rate</text>
+<line x1="624" y1="40" x2="644" y2="40" stroke="#2b6cb0" stroke-width="2"/>
+<text x="650" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">SGD (eta 3)</text>
+<line x1="624" y1="57" x2="644" y2="57" stroke="#c05621" stroke-width="2"/>
+<text x="650" y="61" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">momentum 0.9 (eta 0.3)</text>
+<line x1="624" y1="74" x2="644" y2="74" stroke="#2f855a" stroke-width="2"/>
+<text x="650" y="78" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">RMSProp 0.9 (eta 0.1)</text>
+<line x1="624" y1="91" x2="644" y2="91" stroke="#9b2c2c" stroke-width="2"/>
+<text x="650" y="95" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">Adam (eta 0.3)</text>
+<line x1="624" y1="108" x2="644" y2="108" stroke="#6b46c1" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="650" y="112" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">AdamW 0.05 (eta 0.1)</text>
+<line x1="624" y1="125" x2="644" y2="125" stroke="#4a5568" stroke-width="2"/>
+<text x="650" y="129" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">Lion (eta 0.03)</text>
+</svg>

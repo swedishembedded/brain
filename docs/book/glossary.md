@@ -14,6 +14,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **activation function**: the fixed one-input function $g$ a neuron applies to its weighted sum to produce its output, for example the identity, the sigmoid or the step. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
 
+**Adam**: an update that steps along a bias-corrected running average of the gradient divided by the root of a bias-corrected running average of its square, keeping two state arrays per parameter. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
+
+**AdamW**: Adam with decoupled weight decay: $\theta \leftarrow \theta - \eta\lambda\theta - \eta\hat{\mathbf{m}}/(\sqrt{\hat{\mathbf{v}}} + \epsilon_{\mathrm{den}})$. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
+
 **algorithm**: a finite list of definite steps that turns any input of a stated kind into an output of a stated kind, whose correctness can be argued with an invariant that holds before and after every pass of its loops. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
 **artificial neuron**: a function of an input vector that forms a weighted sum of its entries plus a bias and passes the total through an activation function, $y = g(\mathbf{w}\cdot\mathbf{x} + b)$; the weights and the bias are what is learned. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
@@ -41,6 +45,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **Bayes' rule**: the identity $P(A \mid B) = P(B \mid A)P(A)/P(B)$ that turns the probability of evidence given a cause into the probability of the cause given the evidence, using the prior probability of the cause. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 **Bernoulli distribution**: the distribution of a single yes/no outcome coded as $1$ or $0$, equal to $1$ with probability $p$; its mean is $p$ and its variance is $p(1-p)$. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
+
+**bias correction**: dividing an exponential average that started at zero by $1 - \beta^t$, which removes the start-up bias toward zero so that the early averages and the first steps have the right size. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **bias-variance tradeoff**: the exact split of the expected squared error into noise, squared bias (what the model family cannot express) and variance (how much the fit moves between training sets), and the fact that making a model more flexible lowers the first of the last two and raises the second. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
@@ -107,6 +113,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **decision boundary**: the set of inputs where the model switches its decision, for a linear logit the line, plane or flat sheet $\mathbf{w}\cdot\mathbf{x} = 0$ (at threshold $1/2$), which separates the two predicted classes. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
 **decision tree**: a model that asks a sequence of yes-or-no questions, each a threshold on one feature chosen to make the answers as informative about the class as possible, and predicts the class held at the leaf reached. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
+
+**decoupled weight decay**: shrinking every weight by the factor $1 - \eta\lambda$ directly, outside the gradient and the adaptive scaling, so that the decay means the same for every parameter. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **depth-vs-width**: the tradeoff between a network of many layers and one of few wide layers; for the sawtooth, $d$ layers of width $2$ make $2^d$ linear pieces, while one layer with $u$ units makes at most $u + 1$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
@@ -252,6 +260,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **linear separability**: the property of labelled points that some line (plane, flat sheet) puts all points of one class on one side and all points of the other on the other; equivalently, the labelling is computed by a single threshold neuron. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
 
+**Lion**: an update that steps by exactly the learning rate in the sign of an interpolation of the momentum and the new gradient, keeping one state array instead of Adam's two. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
+
 **log-sum-exp**: the function $\log \sum_i e^{z_i}$, computed stably as $m + \log \sum_i e^{z_i - m}$ with $m = \max_i z_i$ so that no exponential overflows and the sum is at least $1$; it is the logarithm of a sum of probabilities given their logarithms, and the denominator of the log of a softmax. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **logarithm**: the exponent to which a base must be raised to give a number; it is the inverse of the exponent and turns a product into a sum, $\log(uv) = \log u + \log v$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
@@ -284,7 +294,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **metric selection**: choosing the number that scores a model from the decision its output feeds and the costs of its mistakes, checking it on a trivial and a perfect predictor, and reporting it with an uncertainty. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
+**minibatch**: the small set of $B$ examples whose mean loss gradient is used for one update; its gradient has the full gradient's expectation and a variance $1/B$ that of one example. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
+
 **model**: a function whose rule has a fixed shape and whose behaviour is set by a list of parameters, used to turn the features of an example into a prediction. *([The Learning Problem](v02-learning/01-learning-problem.md))*
+
+**momentum**: a running weighted sum of past gradients, $\mathbf{m}_t = \beta\mathbf{m}_{t-1} + \mathbf{g}_t$, stepped along instead of the gradient, so that steady directions add up and back-and-forth directions cancel. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **monotonic function**: a function that never reverses direction, always increasing or always decreasing, and so keeps the order of single values. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
@@ -386,6 +400,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **reverse-mode differentiation**: computing derivatives by carrying a row vector from the single output back through the chain of Jacobians, so one sweep gives the gradient with respect to every input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
+**RMSProp**: an update that divides each coordinate's gradient by the root of a running average of its own squared gradient, so every coordinate takes a step of about the learning rate whatever its scale. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
+
 **ROC curve**: the curve of the true positive rate against the false positive rate as the decision threshold moves over every value; its area equals the probability that a random positive is scored above a random negative, counting ties as one half. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **rotation matrix**: an orthogonal matrix with determinant $+1$; in the plane $\begin{pmatrix}\cos\theta&-\sin\theta\\\sin\theta&\cos\theta\end{pmatrix}$, and rotations compose by adding their angles. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
@@ -429,6 +445,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **stable-softmax**: the softmax computed after subtracting the largest score from every score, which gives the same probabilities but keeps every exponent at most zero, so nothing overflows and the sum is at least one. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **standard error**: the standard deviation of an estimator over repeated samples, the typical size of its error; for the sample mean it is $\sigma/\sqrt{n}$, estimated by $s/\sqrt{n}$. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
+
+**stochastic gradient descent**: gradient descent that steps along the gradient of a small random batch of examples instead of the whole training set, $\theta \leftarrow \theta - \eta\,\mathbf{g}_t$, an unbiased but noisy estimate of the full step. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **stride**: the distance in memory, counted in elements, between two neighbours along one axis; a view is described by one stride per axis, and stride 0 repeats one number. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 

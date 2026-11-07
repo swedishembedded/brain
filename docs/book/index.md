@@ -66,4 +66,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 4. [Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md): How do we compute the gradient of one loss with respect to millions of parameters in about the cost of one forward pass?
 5. [The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md): What is the backward pass of a matrix multiply, a sum, a broadcast and an elementwise function, written out exactly?
 6. [Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md): How do we know a backward pass is right without trusting the person who wrote it?
+7. [Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md): Once we have a gradient, what is the smartest way to use it?
 <!-- /contents -->
