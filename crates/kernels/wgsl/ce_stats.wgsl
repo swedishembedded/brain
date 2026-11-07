@@ -15,7 +15,8 @@
 //   stats[2n+1] = sum_v exp(logits[n,v] - max)      (0 for ignored rows)
 // One invocation per ROW (not per element). This is what lets `ce_grad_stats`
 // run in O(rows*vocab) instead of the naive per-element softmax recompute's
-// O(rows*vocab^2) - four orders of magnitude apart at a 151936 vocab.
+// O(rows*vocab^2) - a factor of the vocabulary apart, about five orders of
+// magnitude at a 151936 vocab.
 struct Params { n_rows: u32, u_bins: u32, ignore: u32 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       logits:  array<f32>;
