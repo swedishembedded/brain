@@ -1,0 +1,83 @@
+<!-- source-sha256: f08a0e8ec3807bef51a63c9c5de4fb42d22c1f7aec147bee4c72d18981a99aa5 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 516 276" width="516" height="276">
+<rect width="516" height="276" fill="#ffffff"/>
+<text x="20" y="40" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="start" font-weight="bold">A: shape [3, 4], strides (4, 1)</text>
+<text x="20" y="58" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#4a5568" text-anchor="start">reads the storage in order</text>
+<rect x="20" y="70" width="52" height="52" fill="#bee3f8" stroke="#2b6cb0"/>
+<rect x="72" y="70" width="52" height="52" fill="#bee3f8" stroke="#2b6cb0"/>
+<rect x="124" y="70" width="52" height="52" fill="#bee3f8" stroke="#2b6cb0"/>
+<rect x="176" y="70" width="52" height="52" fill="#bee3f8" stroke="#2b6cb0"/>
+<rect x="20" y="122" width="52" height="52" fill="#fed7aa" stroke="#c05621"/>
+<rect x="72" y="122" width="52" height="52" fill="#fed7aa" stroke="#c05621"/>
+<rect x="124" y="122" width="52" height="52" fill="#fed7aa" stroke="#c05621"/>
+<rect x="176" y="122" width="52" height="52" fill="#fed7aa" stroke="#c05621"/>
+<rect x="20" y="174" width="52" height="52" fill="#c6f6d5" stroke="#2f855a"/>
+<rect x="72" y="174" width="52" height="52" fill="#c6f6d5" stroke="#2f855a"/>
+<rect x="124" y="174" width="52" height="52" fill="#c6f6d5" stroke="#2f855a"/>
+<rect x="176" y="174" width="52" height="52" fill="#c6f6d5" stroke="#2f855a"/>
+<polyline fill="none" stroke="#4a5568" stroke-width="1.4" stroke-dasharray="4 3" points="46.0,96.0 98.0,96.0 150.0,96.0 202.0,96.0 46.0,148.0 98.0,148.0 150.0,148.0 202.0,148.0 46.0,200.0 98.0,200.0 150.0,200.0 202.0,200.0"/>
+<circle cx="46.0" cy="96.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="46.0" y="100.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">0</text>
+<circle cx="98.0" cy="96.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="98.0" y="100.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">1</text>
+<circle cx="150.0" cy="96.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="150.0" y="100.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">2</text>
+<circle cx="202.0" cy="96.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="202.0" y="100.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">3</text>
+<circle cx="46.0" cy="148.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="46.0" y="152.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">4</text>
+<circle cx="98.0" cy="148.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="98.0" y="152.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">5</text>
+<circle cx="150.0" cy="148.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="150.0" y="152.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">6</text>
+<circle cx="202.0" cy="148.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="202.0" y="152.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">7</text>
+<circle cx="46.0" cy="200.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="46.0" y="204.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">8</text>
+<circle cx="98.0" cy="200.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="98.0" y="204.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">9</text>
+<circle cx="150.0" cy="200.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="150.0" y="204.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">10</text>
+<circle cx="202.0" cy="200.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="202.0" y="204.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">11</text>
+<text x="268" y="40" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="start" font-weight="bold">B = A^T: shape [4, 3], strides (1, 4)</text>
+<text x="268" y="58" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#4a5568" text-anchor="start">same storage, jumps of 4</text>
+<rect x="268" y="70" width="52" height="52" fill="#bee3f8" stroke="#2b6cb0"/>
+<rect x="268" y="122" width="52" height="52" fill="#fed7aa" stroke="#c05621"/>
+<rect x="268" y="174" width="52" height="52" fill="#c6f6d5" stroke="#2f855a"/>
+<rect x="320" y="70" width="52" height="52" fill="#bee3f8" stroke="#2b6cb0"/>
+<rect x="320" y="122" width="52" height="52" fill="#fed7aa" stroke="#c05621"/>
+<rect x="320" y="174" width="52" height="52" fill="#c6f6d5" stroke="#2f855a"/>
+<rect x="372" y="70" width="52" height="52" fill="#bee3f8" stroke="#2b6cb0"/>
+<rect x="372" y="122" width="52" height="52" fill="#fed7aa" stroke="#c05621"/>
+<rect x="372" y="174" width="52" height="52" fill="#c6f6d5" stroke="#2f855a"/>
+<rect x="424" y="70" width="52" height="52" fill="#bee3f8" stroke="#2b6cb0"/>
+<rect x="424" y="122" width="52" height="52" fill="#fed7aa" stroke="#c05621"/>
+<rect x="424" y="174" width="52" height="52" fill="#c6f6d5" stroke="#2f855a"/>
+<polyline fill="none" stroke="#4a5568" stroke-width="1.4" stroke-dasharray="4 3" points="294.0,96.0 294.0,148.0 294.0,200.0 346.0,96.0 346.0,148.0 346.0,200.0 398.0,96.0 398.0,148.0 398.0,200.0 450.0,96.0 450.0,148.0 450.0,200.0"/>
+<circle cx="294.0" cy="96.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="294.0" y="100.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">0</text>
+<circle cx="294.0" cy="148.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="294.0" y="152.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">1</text>
+<circle cx="294.0" cy="200.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="294.0" y="204.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">2</text>
+<circle cx="346.0" cy="96.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="346.0" y="100.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">3</text>
+<circle cx="346.0" cy="148.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="346.0" y="152.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">4</text>
+<circle cx="346.0" cy="200.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="346.0" y="204.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">5</text>
+<circle cx="398.0" cy="96.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="398.0" y="100.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">6</text>
+<circle cx="398.0" cy="148.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="398.0" y="152.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">7</text>
+<circle cx="398.0" cy="200.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="398.0" y="204.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">8</text>
+<circle cx="450.0" cy="96.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="450.0" y="100.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">9</text>
+<circle cx="450.0" cy="148.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="450.0" y="152.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">10</text>
+<circle cx="450.0" cy="200.0" r="12" fill="#ffffff" stroke="#4a5568"/>
+<text x="450.0" y="204.5" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">11</text>
+<text x="20" y="262" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="start">Cell colour = storage row of A. Number = step at which a row-major reading visits the cell.</text>
+</svg>

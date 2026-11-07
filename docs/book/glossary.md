@@ -10,6 +10,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **backward pass**: visiting the nodes of the graph in reverse order, multiplying the gradient that arrives from the next quantity by the local derivative and adding contributions where a value is used more than once. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
+**batch dimension**: an extra, usually first, axis of a tensor that indexes independent examples processed together, so that each example is one contiguous block. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
+**broadcasting**: the rule that aligns two shapes from the right and treats an axis of size 1 as stretched to match the other, by giving it stride 0, so that arrays of different shapes combine without copying. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
 ## C
 
 **composition**: feeding the output of one function into another, $(g \circ f)(x) = g(f(x))$; it is associative but not commutative. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
@@ -88,7 +92,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **real number**: any number on the number line, including fractions and irrational numbers such as $\sqrt{2}$; a computer holds only an approximation of most of them. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
+**reshape-and-view**: reshaping keeps a tensor's line of numbers in row-major order and cuts it into a new shape; a view is a new shape, strides and offset over the same storage, so a reshape of a contiguous array needs no copy. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
 **reverse-mode differentiation**: computing derivatives by carrying a row vector from the single output back through the chain of Jacobians, so one sweep gives the gradient with respect to every input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
+
+**row-major layout**: storing a tensor in memory with the last index changing fastest, so that the element $(i_0, \dots, i_{R-1})$ sits at offset $\sum_k i_k s_k$ with $s_k$ the product of the sizes to its right. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 ## S
 
@@ -98,9 +106,15 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **set**: a collection of distinct elements, written with braces and combined by union, intersection and difference. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
+**shape**: the list of the sizes of a tensor's axes, outermost first; the number of elements is their product. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
+**stride**: the distance in memory, counted in elements, between two neighbours along one axis; a view is described by one stride per axis, and stride 0 repeats one number. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
 **summation notation**: the symbol $\sum_{i=a}^{b} x_i$ for the sum of the terms $x_i$ as the index $i$ runs from $a$ to $b$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 ## T
+
+**tensor**: an array of numbers with any number of axes (zero for a scalar, one for a vector, two for a matrix), described by its shape. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **transpose**: the matrix $\mathbf{A}^\top$ with rows and columns swapped; $(\mathbf{A}\mathbf{B})^\top = \mathbf{B}^\top\mathbf{A}^\top$. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 

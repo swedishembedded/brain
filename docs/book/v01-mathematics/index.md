@@ -52,7 +52,7 @@ in the curriculum and appear here when they are written.
    length and a direction, and how to measure how alike two lists are.
 4. [Matrices as Linear Maps](04-matrices.md): what multiplying a matrix by a vector means, and
    why it is the central operation of machine learning.
-5. Arrays, Shapes, Strides and Broadcasting: how vectors, matrices and
+5. [Arrays, Shapes, Strides and Broadcasting](05-arrays.md): how vectors, matrices and
    higher-dimensional arrays are laid out in memory and indexed.
 6. Eigenvalues, Rotations and Low-Rank Structure: the hidden structure of a
    matrix, and how a large one is approximated by small ones.
