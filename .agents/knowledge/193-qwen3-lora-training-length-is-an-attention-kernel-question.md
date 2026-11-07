@@ -2,40 +2,52 @@
 <!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
 
 # 193. Qwen3 LoRA training length was capped by one T² buffer; now attention speed caps it
+**Lesson:** Training length is an attention-kernel question. Before calling a sequence length a
+model's limit, find the single largest buffer and the single longest submission, and check each
+against the binding limit and the wait bound.
 
-The materialised training attention (`gqa_scores` -> `attn_softmax` ->
-`gqa_apply`, and the `gqa_bwd_*` chain) keeps `n_heads·T²` fp32 scores,
-probabilities and score gradients. For Qwen3-0.6B and 1.7B (16 query heads)
-one such buffer is `64·T²` bytes. It passes the 2047 MiB storage-binding limit
-at `T = 5793`. A 5824-token step failed at `create_bind_group` for
-`gqa_scores` (2070 MiB, wgpu). On native Vulkan, 5760 and 5824 tokens made no
-progress in 12 and 15 minutes. Well below the limit the chain was already slow:
-24.2 s per step at 2048 tokens and 160 s at 4096.
+## What happened
+A 5824-token step failed at `create_bind_group` for `gqa_scores` (2070 MiB, wgpu). On native
+Vulkan, 5760 and 5824 tokens made no progress in 12 and 15 minutes.
 
-Training now runs the causal GQA flash trio (`flash_attn_causal_gqa`, which
-also writes the row log-sum-exp, then `flash_attn_causal_gqa_bwd_{dq,dkv}`).
-The backward rebuilds each softmax weight from that log-sum-exp, so no
-`[H,T,T]` buffer exists. Three other changes were needed before a long block
-fit on the card and completed a step:
+Well below the limit the chain was already slow: 24.2 s per step at 2048 tokens and 160 s at 4096.
 
-- The backward recomputes each layer's forward from the saved residual
-  `res[l]`, so all layers share one set of activation buffers.
+## Why
+The materialised training attention (`gqa_scores` -> `attn_softmax` -> `gqa_apply`, and the
+`gqa_bwd_*` chain) keeps `n_heads·T²` fp32 scores, probabilities and score gradients.
+
+For Qwen3-0.6B and 1.7B (16 query heads) one such buffer is `64·T²` bytes. It passes the 2047 MiB
+storage-binding limit at `T = 5793`.
+
+## What to do
+Training now runs the causal GQA flash trio (`flash_attn_causal_gqa`, which also writes the row
+log-sum-exp, then `flash_attn_causal_gqa_bwd_{dq,dkv}`). The backward rebuilds each softmax weight
+from that log-sum-exp, so no `[H,T,T]` buffer exists.
+
+Three other changes were needed before a long block fit on the card and completed a step:
+
+- The backward recomputes each layer's forward from the saved residual `res[l]`, so all layers
+  share one set of activation buffers.
 - The LM head works in row chunks, and `WeightedCe` takes the same chunks.
-- The tape is submitted one layer at a time. Submitted whole, a 16k-token
-  backward is about 80 s in one batch, and the 30 s `BRAIN_GPU_WAIT_S` bound
-  fired on it.
+- The tape is submitted one layer at a time. Submitted whole, a 16k-token backward is about 80 s
+  in one batch, and the 30 s `BRAIN_GPU_WAIT_S` bound fired on it.
 
-Profiling on the way found the per-row cross-entropy pair (`ce_value_masked`,
-`ce_stats`) at 1% of its memory roof. It cost 0.64 s of a 4.2 s step at 2048
-tokens. `ce_value_stats_rows` (one workgroup per row) does the same work in
-4 ms.
+Profiling on the way found the per-row cross-entropy pair (`ce_value_masked`, `ce_stats`) at 1% of
+its memory roof. It cost 0.64 s of a 4.2 s step at 2048 tokens. `ce_value_stats_rows` (one
+workgroup per row) does the same work in 4 ms.
 
-Measured by `qwen_bench lora-train` on one P40 (`--device vulkan`). Setup:
-batch 1, rank 8, alpha 16, all 7 projections, AdamW, clip 1.0. Each row is
-the mean of 3 timed steps after 2 warm-up steps (1 timed step from 16k up).
-0.6B used the real checkpoint. 1.7B used random weights at its published
-shape, because its checkpoint is not in the model store. Peak is the
-process's own device memory from `nvidia-smi`.
+Rule: before calling a sequence length a model's limit, find the single largest buffer and the
+single longest submission, and check each against the binding limit and the wait bound.
+
+## Evidence
+Measured by `qwen_bench lora-train` on one P40 (`--device vulkan`). Setup: batch 1, rank 8,
+alpha 16, all 7 projections, AdamW, clip 1.0. Each row is the mean of 3 timed steps after 2 warm-up
+steps (1 timed step from 16k up).
+
+- 0.6B used the real checkpoint.
+- 1.7B used random weights at its published shape, because its checkpoint is not in the model
+  store.
+- Peak is the process's own device memory from `nvidia-smi`.
 
 | T | 0.6B s/step | tok/s | peak MiB | 1.7B s/step | tok/s | peak MiB |
 |---|---|---|---|---|---|---|
@@ -49,15 +61,11 @@ process's own device memory from `nvidia-smi`.
 | 32768 | 373.3 | 88 | card full | out of memory | | |
 | 40960 | 574.3 | 71 | card full | | | |
 
-Rows marked "card full" read the whole 24 GB from `nvidia-smi` while another
-process shared the card, so the reading is an upper bound and not this run's
-own peak.
+Rows marked "card full" read the whole 24 GB from `nvidia-smi` while another process shared the
+card, so the reading is an upper bound and not this run's own peak.
 
-At 16k tokens the flash forward is 14.4 s of a 19.0 s forward. The three
-flash kernels run at 15-20% of the card's fp32 roof. Throughput past a few
-thousand tokens is now set by those kernels, not by memory. Recomputing each
-layer costs one extra forward, about 0.4 s of the 1.7 s step at 1024 tokens.
+At 16k tokens the flash forward is 14.4 s of a 19.0 s forward. The three flash kernels run at
+15-20% of the card's fp32 roof. Throughput past a few thousand tokens is now set by those kernels,
+not by memory.
 
-Rule: before calling a sequence length a model's limit, find the single
-largest buffer and the single longest submission, and check each against the
-binding limit and the wait bound.
+Recomputing each layer costs one extra forward, about 0.4 s of the 1.7 s step at 1024 tokens.
