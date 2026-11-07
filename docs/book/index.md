@@ -64,4 +64,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 2. [Multilayer Networks](v03-neural-networks/02-mlp.md): Why does stacking layers with a nonlinearity between them let a network represent almost anything?
 3. [Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md): How does a network choose among many classes, and why is its gradient so simple?
 4. [Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md): How do we compute the gradient of one loss with respect to millions of parameters in about the cost of one forward pass?
+5. [The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md): What is the backward pass of a matrix multiply, a sum, a broadcast and an elementwise function, written out exactly?
 <!-- /contents -->

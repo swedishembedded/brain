@@ -62,6 +62,14 @@ class Diagram:
         self.items.append(f'<text x="{fmt(x + 14)}" y="{fmt(y + 22)}" {FONT} font-size="13" font-weight="bold" '
                           f'fill="{INK}">{escape(title)}</text>')
 
+    def group(self, x, y, w, h, color=FRAME, dash="5 3"):
+        """A dashed outline around boxes that act together (a column that is
+        summed, a set of copies); returns its edge midpoints like `box`."""
+        self.items.append(f'<rect x="{fmt(x)}" y="{fmt(y)}" width="{fmt(w)}" height="{fmt(h)}" rx="12" '
+                          f'fill="none" stroke="{color}" stroke-width="1.3" stroke-dasharray="{dash}"/>')
+        cx, cy = x + w / 2, y + h / 2
+        return {"l": (x, cy), "r": (x + w, cy), "t": (cx, y), "b": (cx, y + h)}
+
     def text(self, cx, cy, lines, size=13, color=INK, weight="normal", anchor="middle"):
         """Lines of text centred vertically on cy."""
         top = cy - (len(lines) - 1) * LINE_H / 2

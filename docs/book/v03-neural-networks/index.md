@@ -53,8 +53,9 @@ in the curriculum and appear here when they are written.
 4. [Backpropagation Derived from Scratch](04-backpropagation.md): how the
    gradient of one loss with respect to millions of parameters costs about
    one extra pass.
-5. The Backward Pass of Every Layer: the backward pass of a matrix multiply,
-   a sum, a broadcast and an elementwise function, written out exactly.
+5. [The Backward Pass of Every Layer](05-layer-gradients.md): the backward
+   pass of a matrix multiply, a sum, a broadcast and an elementwise function,
+   written out exactly.
 6. Proving Gradients Correct: how to know a backward pass is right without
    trusting the person who wrote it.
 7. Optimizers: From SGD to AdamW: the smartest way to use a gradient once we

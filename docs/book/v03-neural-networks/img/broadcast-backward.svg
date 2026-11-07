@@ -1,0 +1,93 @@
+<!-- source-sha256: 50be976addf6fa9c68f7148a59505aa9893d8272eee9bce96e5bb880cca87c95 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 328" width="700" height="328"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="700" height="328" fill="#ffffff"/>
+<rect x="20" y="16" width="320" height="296" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">forward: copy b to every row</text>
+<rect x="360" y="16" width="320" height="296" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="374" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">backward: sum dY down every column</text>
+<rect x="44" y="75" width="56" height="34" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="72" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.5</text>
+<rect x="44" y="153" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="72" y="174.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.5</text>
+<rect x="44" y="195" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="72" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.5</text>
+<rect x="44" y="237" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="72" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.5</text>
+<rect x="40" y="149" width="64" height="126" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<line x1="72" y1="112" x2="72" y2="146" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="81" y="133.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">copy</text>
+<rect x="116" y="75" width="56" height="34" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="144" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-0.5</text>
+<rect x="116" y="153" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="144" y="174.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-0.5</text>
+<rect x="116" y="195" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="144" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-0.5</text>
+<rect x="116" y="237" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="144" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-0.5</text>
+<rect x="112" y="149" width="64" height="126" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<line x1="144" y1="112" x2="144" y2="146" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="188" y="75" width="56" height="34" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="216" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="188" y="153" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="216" y="174.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="188" y="195" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="216" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="188" y="237" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="216" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="184" y="149" width="64" height="126" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<line x1="216" y1="112" x2="216" y2="146" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="260" y="75" width="56" height="34" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="288" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="260" y="153" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="288" y="174.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="260" y="195" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="288" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="260" y="237" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="288" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="256" y="149" width="64" height="126" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<line x1="288" y1="112" x2="288" y2="146" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="34" y="66.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">b [O]</text>
+<text x="34" y="298.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">the same value in all 3 rows of the result</text>
+<rect x="384" y="75" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="412" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="384" y="117" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="412" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="384" y="159" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="412" y="180.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-2</text>
+<rect x="380" y="71" width="64" height="126" rx="12" fill="none" stroke="#c53030" stroke-width="1.3" stroke-dasharray="5 3"/>
+<rect x="384" y="237" width="56" height="34" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="412" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-1</text>
+<line x1="412" y1="200" x2="412" y2="234" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-c53030)"/>
+<text x="421" y="221.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="start">sum</text>
+<rect x="456" y="75" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="484" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-1</text>
+<rect x="456" y="117" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="484" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="456" y="159" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="484" y="180.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="452" y="71" width="64" height="126" rx="12" fill="none" stroke="#c53030" stroke-width="1.3" stroke-dasharray="5 3"/>
+<rect x="456" y="237" width="56" height="34" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="484" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2</text>
+<line x1="484" y1="200" x2="484" y2="234" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-c53030)"/>
+<rect x="528" y="75" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="556" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="528" y="117" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="556" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-1</text>
+<rect x="528" y="159" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="556" y="180.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="524" y="71" width="64" height="126" rx="12" fill="none" stroke="#c53030" stroke-width="1.3" stroke-dasharray="5 3"/>
+<rect x="528" y="237" width="56" height="34" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="556" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<line x1="556" y1="200" x2="556" y2="234" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-c53030)"/>
+<rect x="600" y="75" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="628" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="600" y="117" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="628" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="600" y="159" width="56" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="628" y="180.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3</text>
+<rect x="596" y="71" width="64" height="126" rx="12" fill="none" stroke="#c53030" stroke-width="1.3" stroke-dasharray="5 3"/>
+<rect x="600" y="237" width="56" height="34" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="628" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4</text>
+<line x1="628" y1="200" x2="628" y2="234" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-c53030)"/>
+<text x="374" y="66.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">dY [B, O]</text>
+<text x="374" y="298.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">db [O]: each entry is the sum of 3 entries of dY</text>
+</svg>

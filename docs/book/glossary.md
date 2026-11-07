@@ -24,6 +24,16 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **backward pass**: visiting the nodes of the graph in reverse order, multiplying the gradient that arrives from the next quantity by the local derivative and adding contributions where a value is used more than once. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
+**backward pass of a broadcast**: the rule that sums the incoming gradient over every axis the forward pass stretched, so a copy in the forward becomes a sum in the backward. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
+
+**backward pass of a linear layer**: the three rules $d\mathbf{X} = d\mathbf{Y}\mathbf{W}$, $d\mathbf{W} = d\mathbf{Y}^\top\mathbf{X}$ and $d\mathbf{b} = \sum_b d\mathbf{Y}$ for $\mathbf{Y} = \mathbf{X}\mathbf{W}^\top + \mathbf{b}$, each gradient having the shape of the array it belongs to. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
+
+**backward pass of a matrix multiply**: for $\mathbf{C} = \mathbf{A}\mathbf{B}$, the gradients $d\mathbf{A} = d\mathbf{C}\mathbf{B}^\top$ and $d\mathbf{B} = \mathbf{A}^\top d\mathbf{C}$, two matrix products of the forward's size; for a batch, the same per item, summed over the batch for an operand shared by all items. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
+
+**backward pass of a reduction**: the rule that sends the gradient of a sum, mean or maximum back to the entries that were collapsed: copied for a sum, divided by the count for a mean, routed to the argmax for a maximum. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
+
+**backward pass of an elementwise function**: multiplying the incoming gradient entry by entry with the derivative of the function at the input, $dx = dy\,f'(x)$, which needs the input, the output or a mask saved from the forward. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
+
 **baseline**: a method run under the same protocol as the new one, trivial (no features), simple (an earlier chapter's method fitted properly) or the previous best, whose result the new one must beat to count as progress. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
 **batch dimension**: an extra, usually first, axis of a tensor that indexes independent examples processed together, so that each example is one contiguous block. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
@@ -165,6 +175,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **gelu**: the Gaussian error linear unit $z\,\Phi(z)$, the input times the probability that a standard Gaussian variable lies below it, a smooth cousin of the ReLU that dips slightly below zero for negative inputs; it is computed exactly with the error function or approximately by a tanh form or a sigmoid form that are different functions. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **gradient**: the vector of all the partial derivatives of a scalar function, the same shape as its inputs; it points in the direction of steepest ascent and its length is the steepest rate of change. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**gradient accumulation**: adding each contribution to a value's gradient into one persistent buffer, never assigning, with the buffer zeroed once per optimiser step; it sums the uses of a shared weight and the pieces of a batch split into micro-batches. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
 
 **gradient descent**: the iteration that repeatedly moves the parameters a small step against the gradient of the loss, $\mathbf{w} \leftarrow \mathbf{w} - \eta\nabla\mathcal{L}(\mathbf{w})$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
