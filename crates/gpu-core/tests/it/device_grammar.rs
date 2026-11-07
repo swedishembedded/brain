@@ -25,7 +25,7 @@ use std::process::Command;
 fn run_ambient(device: Option<&str>) -> (String, String, String, String) {
     let exe = std::env::current_exe().expect("current_exe");
     let mut cmd = Command::new(exe);
-    cmd.args(["--exact", "print_ambient", "--ignored", "--nocapture", "--test-threads=1"]);
+    cmd.args(["--exact", "device_grammar::print_ambient", "--ignored", "--nocapture", "--test-threads=1"]);
     // `BRAIN_BACKEND` overrides the backend a device token implies, in the
     // child as in this process. The comparison is of the token alone, so a
     // lane that exports it (the CUDA validation run) must not reach the child.
@@ -63,7 +63,7 @@ fn run_ambient(device: Option<&str>) -> (String, String, String, String) {
 
 /// The subprocess entry point `run_ambient` invokes. Never runs as part of
 /// a normal `cargo test` pass (kept `#[ignore]`, selected explicitly via
-/// `--exact print_ambient --ignored`).
+/// `--exact device_grammar::print_ambient --ignored`).
 #[test]
 #[ignore = "invoked as a subprocess by the other tests in this file"]
 fn print_ambient() {
@@ -85,11 +85,14 @@ fn print_ambient() {
 #[test]
 fn device_and_brain_device_agree_on_every_token() {
     let inv = gpu_core::Inventory::probe();
-    let mut tokens: Vec<String> = vec!["".into(), "cpu".into(), "vulkan".into(), "wgpu".into()];
+    let mut tokens: Vec<String> = vec!["".into(), "cpu".into()];
     if inv.cpu_cores > 7 {
         tokens.push("cpu0-7".into());
     }
+    // A backend token asks for GPU compute, so it resolves only where a card exists.
     if inv.gpus > 0 {
+        tokens.push("vulkan".into());
+        tokens.push("wgpu".into());
         tokens.push("gpu".into());
         tokens.push("gpu0".into());
         if inv.cpu_cores > 3 {
@@ -104,7 +107,7 @@ fn device_and_brain_device_agree_on_every_token() {
         tokens.push("npu".into());
         tokens.push("npu0".into());
     }
-    assert!(tokens.len() > 4, "expected more than the always-present tokens on {inv:?}");
+    assert!(tokens.len() > 2, "expected more than the always-present tokens on {inv:?}");
 
     for tok in &tokens {
         let want = gpu_core::DeviceSpec::parse(tok)
