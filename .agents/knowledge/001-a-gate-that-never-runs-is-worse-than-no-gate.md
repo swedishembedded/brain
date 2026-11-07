@@ -3,8 +3,11 @@
 
 # 1. A gate that never runs is worse than no gate
 
-It reports green and nobody looks again. Four separate instances, all found in
-one workstream:
+**Lesson:** A gate that never runs reports green and nobody looks again, so it is worse than no
+gate.
+
+## What happened
+Four separate instances were found in one workstream:
 
 | Gate | Why it never ran |
 |---|---|
@@ -13,8 +16,13 @@ one workstream:
 | `cargo clippy` | aborts at the first deny-by-default lint and then reports nothing about everything after it - a 123-file backlog stayed invisible **twice in one day** |
 | `wgsl-cpu` `compile_all` | one kernel out of the whole set would not compile on the CPU JIT, so int8 quantization had no working CPU path at all |
 
-**Rules that follow.** A test that self-skips must say so loudly and its fixture
-must be provisioned by `make testdata/fetch`. A tool's **exit code** is the
-signal, not its stdout (`make check/clippy` checks both, separately). And when a suite
-reports "N passed", check how many of those N were skips - an implementer
-reported 9 vqgan tests passing when 7 of them were `SKIP: set BRAIN_VQGAN_WEIGHTS`.
+## What to do
+- A test that self-skips must say so loudly, and its fixture must be provisioned by
+  `make testdata/fetch`.
+- A tool's **exit code** is the signal, not its stdout (`make check/clippy` checks both,
+  separately).
+- When a suite reports "N passed", check how many of those N were skips.
+
+## Evidence
+An implementer reported 9 vqgan tests passing when 7 of them were
+`SKIP: set BRAIN_VQGAN_WEIGHTS`.

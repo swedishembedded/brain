@@ -61,6 +61,31 @@ as its first heading, then run `make generate/knowledge/index`. `make test/full`
 `knowledge-index/check`, which fails if the index has drifted or two entries
 claim one id.
 
+Every entry has the same readable layout, so it can be skimmed in seconds:
+
+```markdown
+# <NNN>. <title: the lesson as one sentence>
+
+**Lesson:** the general rule, in one or two sentences a reader can apply
+elsewhere.
+
+## What happened
+The symptom as it was seen: what looked fine, what was actually wrong.
+
+## Why
+The cause, down to the mechanism.
+
+## What to do
+The fix that landed, and how to avoid or detect the class next time.
+
+## Evidence
+Optional: the measurement, test or commit that shows it, with its setup.
+```
+
+Keep paragraphs to a few lines and use lists for anything enumerable. A
+short finding may use only the Lesson line and one section; the Lesson line
+is never omitted.
+
 What belongs where:
 
 | what you learned | where it belongs |

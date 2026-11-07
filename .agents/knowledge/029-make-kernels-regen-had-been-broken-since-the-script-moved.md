@@ -3,20 +3,21 @@
 
 # 29. `make generate/kernels/registry` had been broken since the script moved
 
-`scripts/build/kernels-regen.sh` computed its repo root relative to its own
-location, which was right when it lived directly under `scripts/` and became
-wrong once it moved a directory deeper. Every invocation died with a missing
-path.
+**Lesson:** A generator whose output can be produced by hand will be, and its breakage is
+invisible until someone needs it to be authoritative. A generator wants a regen-is-a-no-op check.
 
-Nobody noticed because the failure mode is *silent at the level that matters*:
-you add a `.wgsl`, the regen fails, and you hand-append the two lines to
-`crates/kernels/src/lib.rs` instead. The registry stays correct, so no test ever
-fails - it just stops being mechanically derivable. Re-running the fixed script
-produced a nontrivial diff over kernels added since the breakage: the older
-doc comments replaced by the generated form, and several consts out of sort
-order.
+## What happened
+`scripts/build/kernels-regen.sh` computed its repo root relative to its own location, which was
+right when it lived directly under `scripts/` and became wrong once it moved a directory deeper.
+Every invocation of `make generate/kernels/registry` died with a missing path.
 
-The lesson is about the class, not the typo: **a generator whose output can be
-produced by hand will be, and its breakage is invisible until someone needs it
-to be authoritative.** `make check/scripts` verifies every script *parses*; it
-cannot verify one still *works*. A generator wants a regen-is-a-no-op check.
+Nobody noticed because the failure mode is *silent at the level that matters*. You add a `.wgsl`,
+the regen fails, and you hand-append the two lines to `crates/kernels/src/lib.rs` instead. The
+registry stays correct, so no test ever fails; it just stops being mechanically derivable.
+
+Re-running the fixed script produced a nontrivial diff over kernels added since the breakage: the
+older doc comments replaced by the generated form, and several consts out of sort order.
+
+## What to do
+The lesson is about the class, not the typo. `make check/scripts` verifies every script *parses*;
+it cannot verify one still *works*. Add a regen-is-a-no-op check for each generator.
