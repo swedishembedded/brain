@@ -116,14 +116,14 @@ pub const ARGMAX_ROW: &str = include_str!("../wgsl/argmax_row.wgsl");
 pub const ATTENTION: &str = include_str!("../wgsl/attention.wgsl");
 /// `wgsl/attn_apply.wgsl`
 pub const ATTN_APPLY: &str = include_str!("../wgsl/attn_apply.wgsl");
-/// `wgsl/attn_bias_groups.wgsl`
-pub const ATTN_BIAS_GROUPS: &str = include_str!("../wgsl/attn_bias_groups.wgsl");
 /// `wgsl/attn_apply_bidir.wgsl`
 pub const ATTN_APPLY_BIDIR: &str = include_str!("../wgsl/attn_apply_bidir.wgsl");
 /// `wgsl/attn_apply_cross.wgsl`
 pub const ATTN_APPLY_CROSS: &str = include_str!("../wgsl/attn_apply_cross.wgsl");
 /// `wgsl/attn_apply_full.wgsl`
 pub const ATTN_APPLY_FULL: &str = include_str!("../wgsl/attn_apply_full.wgsl");
+/// `wgsl/attn_bias_groups.wgsl`
+pub const ATTN_BIAS_GROUPS: &str = include_str!("../wgsl/attn_bias_groups.wgsl");
 /// `wgsl/attn_bwd_dbias.wgsl`
 pub const ATTN_BWD_DBIAS: &str = include_str!("../wgsl/attn_bwd_dbias.wgsl");
 /// `wgsl/attn_bwd_dk.wgsl`
@@ -316,6 +316,8 @@ pub const CHAN_SCALE_GRAD: &str = include_str!("../wgsl/chan_scale_grad.wgsl");
 pub const CIOU: &str = include_str!("../wgsl/ciou.wgsl");
 /// `wgsl/ciou_grad.wgsl`
 pub const CIOU_GRAD: &str = include_str!("../wgsl/ciou_grad.wgsl");
+/// `wgsl/clamp_range.wgsl`
+pub const CLAMP_RANGE: &str = include_str!("../wgsl/clamp_range.wgsl");
 /// `wgsl/clip_coef.wgsl`
 pub const CLIP_COEF: &str = include_str!("../wgsl/clip_coef.wgsl");
 /// `wgsl/clip_coef_wg.wgsl`
@@ -1552,6 +1554,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("chan_scale_grad", CHAN_SCALE_GRAD),
     ("ciou", CIOU),
     ("ciou_grad", CIOU_GRAD),
+    ("clamp_range", CLAMP_RANGE),
     ("clip_coef", CLIP_COEF),
     ("clip_coef_wg", CLIP_COEF_WG),
     ("col2im", COL2IM),

@@ -193,6 +193,7 @@ load of it must already be bare-identifier-indexed.
 | [`chan_scale_grad`](../../../crates/kernels/wgsl/chan_scale_grad.wgsl) | Filter gradient of a per-channel feature scaling:  df[c,k] += sum_r x[r,k] * g[r,c,k] | one thread per filter element, serial over rows | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`ciou`](../../../crates/kernels/wgsl/ciou.wgsl) | CIoU loss value per assigned anchor | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`ciou_grad`](../../../crates/kernels/wgsl/ciou_grad.wgsl) | Gradient of the CIoU loss L = 1 - CIoU w.r.t | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`clamp_range`](../../../crates/kernels/wgsl/clamp_range.wgsl) | Elementwise clamp:  out[i] = min(max(x[i], lo), hi) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`clip_coef`](../../../crates/kernels/wgsl/clip_coef.wgsl) | Global grad-norm clip coefficient, computed on-device (no host round-trip) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`clip_coef_wg`](../../../crates/kernels/wgsl/clip_coef_wg.wgsl) | Global grad-norm clip coefficient from `gradnorm_part`'s partial sums - the cooperative counterpart of `clip_coef.wgsl` | 64-thread workgroup tile, 1 barrier | 4/5 | ✓ | ✓ | - | - | f32 |
 | [`col2im`](../../../crates/kernels/wgsl/col2im.wgsl) | col2im as a GATHER - the input gradient of a conv, given the gradient of its im2col matrix | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |

@@ -23,6 +23,7 @@ mod bench_rmsnorm_dx;
 mod bench_upload_cadence;
 mod bf16_gemv_native;
 mod bf16_gemv_splitk_native;
+mod clamp_range;
 mod conv2d_native_bench;
 mod coopmat_provider_declines_on_this_box;
 mod cpu_isa_provider_zero_delta;

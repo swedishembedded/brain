@@ -1262,6 +1262,8 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // y = 1/(1+exp(-x)): exp + add + divide = 3, one op short of `silu`
         // above, which is that sigmoid times x. params [total].
         "sigmoid" => f(3 * n0(), 8 * n0()),
+        // min(max(x, lo), hi): two compares per element. params [total, lo, hi].
+        "clamp_range" => f(2 * n0(), 8 * n0()),
         // dx = dy * s * (1 + x*(1-s)) — the same sigmoid plus the product rule.
         "silu_bwd" => f(8 * n0(), 12 * n0()),
         // params [total, c, inner]: out[i] *= scale[chan(i)].
