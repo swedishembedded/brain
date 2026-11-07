@@ -1,0 +1,41 @@
+<!-- source-sha256: 5cf2b91f0b70e16d3b312a5615f884575ba721d443ee7418fcadab30dea96384 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 732 380" width="732" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="732" height="380" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="148.67" y1="334" x2="148.67" y2="30" stroke="#edf2f7"/>
+<text x="148.67" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="239.33" y1="334" x2="239.33" y2="30" stroke="#edf2f7"/>
+<text x="239.33" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="330" y1="334" x2="330" y2="30" stroke="#edf2f7"/>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">30</text>
+<line x1="420.67" y1="334" x2="420.67" y2="30" stroke="#edf2f7"/>
+<text x="420.67" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">40</text>
+<line x1="511.33" y1="334" x2="511.33" y2="30" stroke="#edf2f7"/>
+<text x="511.33" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">50</text>
+<line x1="602" y1="334" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">60</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="252.93" x2="602" y2="252.93" stroke="#edf2f7"/>
+<text x="52" y="256.93" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="171.87" x2="602" y2="171.87" stroke="#edf2f7"/>
+<text x="52" y="175.87" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="90.8" x2="602" y2="90.8" stroke="#edf2f7"/>
+<text x="52" y="94.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><line x1="58" y1="303.72" x2="602" y2="303.72" stroke="#a0aec0" stroke-dasharray="4 4"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.8" points="58,303.72 67.07,102.33 76.13,228.66 85.2,173.33 94.27,230.65 103.33,61.23 112.4,69.64 121.47,220.68 130.53,220.47 139.6,162.25 148.67,221.55 157.73,220.09 166.8,214.23 175.87,195.7 184.93,230.25 194,241.35 203.07,235.51 212.13,254.85 221.2,272.32 230.27,292.5 239.33,291.84 248.4,301.02 257.47,287.22 266.53,281.96 275.6,286.64 284.67,288.04 293.73,286.57 302.8,294.59 311.87,305.45 320.93,275.67 330,266.18 339.07,281.13 348.13,278.39 357.2,278.31 366.27,285.75 375.33,311.55 384.4,291.53 393.47,279.59 402.53,303.34 411.6,286.31 420.67,276.74 429.73,313.1 438.8,292.15 447.87,304.65 456.93,312.29 466,308.63 475.07,308.27 484.13,295.63 493.2,300.91 502.27,292.91 511.33,308.94 520.4,304.74 529.47,309.38 538.53,301.66 547.6,304.86 556.67,303.77 565.73,306.9 574.8,298.84 583.87,300.44 592.93,286.06 602,297.51"/><polyline fill="none" stroke="#c05621" stroke-width="1.8" points="58,303.72 67.07,300.62 76.13,303.38 85.2,306.34 94.27,286.43 103.33,293.71 112.4,285.16 121.47,287.72 130.53,284.74 139.6,272.19 148.67,310.39 157.73,288.4 166.8,300.39 175.87,317.64 184.93,316.7 194,309.76 203.07,311.78 212.13,315.24 221.2,314.24 230.27,305.36 239.33,296.35 248.4,321.62 257.47,318.46 266.53,312.99 275.6,310.81 284.67,319.84 293.73,322.33 302.8,319.73 311.87,318.31 320.93,315.88 330,317.07 339.07,320.29 348.13,320.63 357.2,318.61 366.27,323.12 375.33,321.66 384.4,317.38 393.47,321.35 402.53,313.82 411.6,322.02 420.67,325.04 429.73,318.74 438.8,317.56 447.87,318.06 456.93,311.06 466,317.88 475.07,319.94 484.13,319.43 493.2,312.47 502.27,315.78 511.33,316.66 520.4,322.36 529.47,318.01 538.53,313.67 547.6,317.73 556.67,321.24 565.73,325.02 574.8,317.07 583.87,301.93 592.93,288.22 602,314.27"/><polyline fill="none" stroke="#2f855a" stroke-width="1.8" points="58,303.72 67.07,303.87 76.13,305.84 85.2,304.99 94.27,303.48 103.33,301.88 112.4,303.22 121.47,305.69 130.53,306.2 139.6,307.05 148.67,314.35 157.73,315.58 166.8,313.21 175.87,316.27 184.93,313.51 194,319.79 203.07,308.49 212.13,307.76 221.2,307.06 230.27,301.85 239.33,294.98 248.4,295.45 257.47,306.31 266.53,319.39 275.6,308.03 284.67,302.29 293.73,294.68 302.8,299.54 311.87,317.48 320.93,309.7 330,300.16 339.07,309.78 348.13,323.62 357.2,313.18 366.27,321.01 375.33,319 384.4,309.77 393.47,310.52 402.53,312.83 411.6,312.16 420.67,316.01 429.73,315.57 438.8,314.32 447.87,305.64 456.93,301.91 466,320.05 475.07,308.17 484.13,304.48 493.2,321.47 502.27,310.76 511.33,303.06 520.4,307.05 529.47,322.07 538.53,291.22 547.6,293.97 556.67,321.33 565.73,283.85 574.8,242.4 583.87,271.9 592.93,275.87 602,220.43"/><polyline fill="none" stroke="#9b2c2c" stroke-width="1.8" points="58,303.72 67.07,304.14 76.13,305.81 85.2,305.97 94.27,305.11 103.33,305.03 112.4,305.38 121.47,307.84 130.53,308.71 139.6,308.78 148.67,308.61 157.73,311.16 166.8,312.35 175.87,316.25 184.93,316.05 194,317.96 203.07,323.71 212.13,321.84 221.2,319.53 230.27,325.01 239.33,325.56 248.4,324.78 257.47,319 266.53,315.72 275.6,316.09 284.67,314.06 293.73,313.14 302.8,312.33 311.87,313.98 320.93,321.02 330,319.83 339.07,321.18 348.13,315.76 357.2,315.53 366.27,322.87 375.33,317.45 384.4,321.98 393.47,319.67 402.53,316.88 411.6,316.25 420.67,316.92 429.73,315.98 438.8,320.48 447.87,324.49 456.93,318.94 466,318.6 475.07,321.59 484.13,323.44 493.2,314.89 502.27,318.42 511.33,323.99 520.4,320.2 529.47,314.77 538.53,292.48 547.6,321.54 556.67,320.85 565.73,307.17 574.8,317.59 583.87,291.34 592.93,280.65 602,299.76"/></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">step</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">mean loss over all 200 examples</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">AdamW at a peak rate of 3: the first 60 steps</text>
+<line x1="624" y1="40" x2="644" y2="40" stroke="#2b6cb0" stroke-width="2"/>
+<text x="650" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">no warmup</text>
+<line x1="624" y1="57" x2="644" y2="57" stroke="#c05621" stroke-width="2"/>
+<text x="650" y="61" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">warmup 10</text>
+<line x1="624" y1="74" x2="644" y2="74" stroke="#2f855a" stroke-width="2"/>
+<text x="650" y="78" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">warmup 30</text>
+<line x1="624" y1="91" x2="644" y2="91" stroke="#9b2c2c" stroke-width="2"/>
+<text x="650" y="95" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">warmup 60</text>
+</svg>

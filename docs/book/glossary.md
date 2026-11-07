@@ -94,6 +94,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **convolution theorem**: the fact that the discrete Fourier transform of a circular convolution of two signals is the pointwise product of their transforms, so that convolution acts independently on each frequency and a long convolution can be computed with three fast transforms. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
+**cosine schedule**: a decay of the learning rate from its peak to a floor along half a period of the cosine, $\eta_{\min} + (\eta_{\max} - \eta_{\min})\tfrac12(1 + \cos\pi u)$, which starts and ends with zero slope. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
+
 **cosine similarity**: the dot product of two vectors after dividing each by its norm, a number from $-1$ to $1$ that ignores positive scaling. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **covariance**: the expected product of the deviations of two variables from their means, $\mathbb{E}[XY] - \mathbb{E}[X]\mathbb{E}[Y]$, positive when they tend to move together; it is the cross term in the variance of a sum and the entry of the covariance matrix. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
@@ -186,11 +188,15 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **gelu**: the Gaussian error linear unit $z\,\Phi(z)$, the input times the probability that a standard Gaussian variable lies below it, a smooth cousin of the ReLU that dips slightly below zero for negative inputs; it is computed exactly with the error function or approximately by a tanh form or a sigmoid form that are different functions. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
+**global gradient norm**: the Euclidean norm of the gradient of every parameter of the model, all tensors taken together as one vector, the number a clip compares with its threshold. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
+
 **gradient**: the vector of all the partial derivatives of a scalar function, the same shape as its inputs; it points in the direction of steepest ascent and its length is the steepest rate of change. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **gradient accumulation**: adding each contribution to a value's gradient into one persistent buffer, never assigning, with the buffer zeroed once per optimiser step; it sums the uses of a shared weight and the pieces of a batch split into micro-batches. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
 
 **gradient check**: a test that compares the gradient returned by a backward pass with finite-difference estimates of the same forward pass, entry by entry or along random directions, under a stated step and tolerance. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
+
+**gradient clipping**: multiplying the gradient by $\min(1, \tau_{\mathrm{clip}}/(\lVert\mathbf{g}\rVert + \epsilon_{\mathrm{clip}}))$ so that its length never exceeds a threshold and its direction is kept, as a guard against rare very large gradients. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
 
 **gradient descent**: the iteration that repeatedly moves the parameters a small step against the gradient of the loss, $\mathbf{w} \leftarrow \mathbf{w} - \eta\nabla\mathcal{L}(\mathbf{w})$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
@@ -249,6 +255,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **law of large numbers**: the statement that the average of $n$ independent draws with finite variance converges to their expectation, with the probability of an error above any fixed amount going to zero as $n$ grows. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **learning rate**: the positive number $\eta$ that scales the step of gradient descent; too small is slow, above $2/\lambda_{\max}$ the iteration diverges on a quadratic loss. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
+
+**learning-rate warmup**: a learning rate that rises from a small value to its peak over the first $W$ steps, $\eta_t = \eta_{\max}(t+1)/W$, so that the first updates of an adaptive optimizer, whose averages are not yet calibrated, are small. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
 
 **least squares**: the method of choosing parameters that minimise the sum of the squared differences between predictions and labels. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
