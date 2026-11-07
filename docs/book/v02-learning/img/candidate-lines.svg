@@ -1,0 +1,37 @@
+<!-- source-sha256: fac094fb0d538b86379e6402bc6556019b1c7cc4abcc66c55fe909b269ff22d7 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="213.43" y1="334" x2="213.43" y2="30" stroke="#edf2f7"/>
+<text x="213.43" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="407.71" y1="334" x2="407.71" y2="30" stroke="#edf2f7"/>
+<text x="407.71" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="602" y1="334" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="267.91" x2="602" y2="267.91" stroke="#edf2f7"/>
+<text x="52" y="271.91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">25</text>
+<line x1="58" y1="201.83" x2="602" y2="201.83" stroke="#edf2f7"/>
+<text x="52" y="205.83" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">50</text>
+<line x1="58" y1="135.74" x2="602" y2="135.74" stroke="#edf2f7"/>
+<text x="52" y="139.74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">75</text>
+<line x1="58" y1="69.65" x2="602" y2="69.65" stroke="#edf2f7"/>
+<text x="52" y="73.65" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#4a5568" stroke-width="1.6" stroke-dasharray="6 4" points="58,297.52 602,119.88"/><polyline fill="none" stroke="#2f855a" stroke-width="1.6" stroke-dasharray="6 4" points="58,283.77 602,135.74"/><polyline fill="none" stroke="#9b2c2c" stroke-width="1.6" stroke-dasharray="6 4" points="58,275.84 602,127.81"/><polyline fill="none" stroke="#2b6cb0" stroke-width="3.0" points="58,270.82 602,126.49"/><circle cx="170.69" cy="261.3" r="5" fill="#9b2c2c"/><circle cx="269.77" cy="217.69" r="5" fill="#9b2c2c"/><circle cx="302.8" cy="205.79" r="5" fill="#9b2c2c"/><circle cx="302.8" cy="203.15" r="5" fill="#9b2c2c"/><circle cx="355.26" cy="183.06" r="5" fill="#9b2c2c"/><circle cx="396.06" cy="176.18" r="5" fill="#9b2c2c"/><circle cx="417.43" cy="175.92" r="5" fill="#9b2c2c"/><circle cx="475.71" cy="152.66" r="5" fill="#9b2c2c"/><circle cx="508.74" cy="151.86" r="5" fill="#9b2c2c"/><circle cx="516.51" cy="149.75" r="5" fill="#9b2c2c"/></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">sensor voltage v (V)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">temperature y (deg C)</text>
+<text x="310" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Four lines, labelled (w, b): average off by</text>
+<line x1="432" y1="40" x2="452" y2="40" stroke="#4a5568" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="458" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">attempt 1 (24, 9): 3.10</text>
+<line x1="432" y1="58" x2="452" y2="58" stroke="#2f855a" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="458" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">attempt 2 (20, 15): 4.67</text>
+<line x1="432" y1="76" x2="452" y2="76" stroke="#9b2c2c" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="458" y="80" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">attempt 3 (20, 18): 2.27</text>
+<line x1="432" y1="94" x2="452" y2="94" stroke="#2b6cb0" stroke-width="2"/>
+<text x="458" y="98" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">grid search (19.5, 20): 1.86</text>
+<circle cx="442" cy="112" r="3.5" fill="#9b2c2c"/>
+<text x="458" y="116" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">measured rows</text>
+</svg>

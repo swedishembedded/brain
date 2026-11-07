@@ -40,9 +40,6 @@ repeatable.
 
 ## Chapters
 
-The chapters that exist in this edition are linked; the others are specified
-in the curriculum and appear here when they are written.
-
 1. [Numbers, Quantities and Notation](01-numbers.md): the numbers a machine
    learns with, and the notation (exponents, logarithms, sums, products, sets,
    function notation) for writing about them precisely.
@@ -79,3 +76,5 @@ in the curriculum and appear here when they are written.
     and how much memory it needs before running it.
 17. [Randomness on a Deterministic Machine](17-randomness.md): how a deterministic
     computer produces random numbers, and how to make random experiments repeatable.
+18. [Project: A Numerical Library from Nothing](18-project-numerical-library.md): build the
+    toolkit of this volume from nothing, and prove each piece correct against stated numbers.

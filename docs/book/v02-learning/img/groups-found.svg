@@ -1,0 +1,33 @@
+<!-- source-sha256: 2d6b48c86badc7e798b3ac6db4c82c205eae8681517447c9e333f2821d963597 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 360" width="520" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="520" height="360" fill="#ffffff"/>
+<line x1="132" y1="314" x2="132" y2="30" stroke="#edf2f7"/>
+<text x="132" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="280" y1="314" x2="280" y2="30" stroke="#edf2f7"/>
+<text x="280" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="428" y1="314" x2="428" y2="30" stroke="#edf2f7"/>
+<text x="428" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="58" y1="293.71" x2="502" y2="293.71" stroke="#edf2f7"/>
+<text x="52" y="297.71" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="212.57" x2="502" y2="212.57" stroke="#edf2f7"/>
+<text x="52" y="216.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="131.43" x2="502" y2="131.43" stroke="#edf2f7"/>
+<text x="52" y="135.43" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="50.29" x2="502" y2="50.29" stroke="#edf2f7"/>
+<text x="52" y="54.29" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<rect x="58" y="30" width="444" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="444" height="284"/></clipPath>
+<g clip-path="url(#plot)"><circle cx="245.96" cy="260.45" r="5" fill="#2b6cb0"/><circle cx="188.98" cy="242.19" r="5" fill="#2b6cb0"/><circle cx="123.12" cy="239.35" r="5" fill="#2b6cb0"/><circle cx="208.96" cy="258.01" r="5" fill="#2b6cb0"/><circle cx="155.68" cy="265.31" r="5" fill="#2b6cb0"/><circle cx="243.74" cy="220.69" r="5" fill="#2b6cb0"/><circle cx="391.74" cy="163.07" r="5" fill="#c05621"/><circle cx="341.42" cy="145.63" r="5" fill="#c05621"/><circle cx="425.78" cy="172.81" r="5" fill="#c05621"/><circle cx="395.44" cy="180.11" r="5" fill="#c05621"/><circle cx="379.16" cy="195.13" r="5" fill="#c05621"/><circle cx="402.84" cy="160.23" r="5" fill="#c05621"/><circle cx="194.41" cy="247.67" r="8" fill="#1a202c"/><circle cx="389.4" cy="169.5" r="8" fill="#1a202c"/><circle cx="132" cy="293.71" r="4" fill="#a0aec0"/><circle cx="206" cy="273.43" r="4" fill="#a0aec0"/><circle cx="123.12" cy="239.35" r="4" fill="#a0aec0"/><circle cx="307.25" cy="205.78" r="4" fill="#a0aec0"/><circle cx="169.19" cy="251.22" r="4" fill="#a0aec0"/><circle cx="353.26" cy="187.26" r="4" fill="#a0aec0"/></g>
+<text x="280" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">feature 1</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">feature 2</text>
+<text x="260" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Groups found without any labels</text>
+<circle cx="342" cy="40" r="3.5" fill="#2b6cb0"/>
+<text x="358" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">group A</text>
+<circle cx="342" cy="58" r="3.5" fill="#c05621"/>
+<text x="358" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">group B</text>
+<circle cx="342" cy="76" r="3.5" fill="#1a202c"/>
+<text x="358" y="80" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">group centres</text>
+<circle cx="342" cy="94" r="3.5" fill="#a0aec0"/>
+<text x="358" y="98" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">earlier centres</text>
+</svg>
