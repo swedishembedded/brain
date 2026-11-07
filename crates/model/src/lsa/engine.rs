@@ -516,6 +516,24 @@ impl LsaAttention {
         }
     }
 
+    /// Let `to`, an empty table over the same KV blocks as `from` (a prefix
+    /// snapshot forked from it), hold the index pages `from` holds: they are
+    /// shared, refcounted, and freed when the last holder releases. A tree
+    /// engine's node pages are not shared this way.
+    pub fn retain_pages(&mut self, from: &BlockTable, to: &mut BlockTable) -> Result<(), String> {
+        if self.tree.is_some() {
+            return Err("LSA: index pages of a tree engine cannot be retained by a snapshot".into());
+        }
+        if !to.index_pages().is_empty() {
+            return Err("LSA: retain_pages needs a table that holds no pages yet".into());
+        }
+        for &page in from.index_pages() {
+            self.pages.incref(page);
+            to.push_index_page(page);
+        }
+        Ok(())
+    }
+
     fn drop_page(&mut self, page: u32) {
         self.pages.decref(page);
         if self.pages.refcount(page) == 0 {

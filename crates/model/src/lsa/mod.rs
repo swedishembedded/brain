@@ -42,6 +42,7 @@
 //! path.
 
 pub mod attend;
+pub mod binding;
 pub mod config;
 pub mod device;
 pub mod distill;

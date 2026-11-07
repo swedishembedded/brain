@@ -260,47 +260,30 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
             }
         }
         v.extend(model::kv_tier::fp8_pool_pipelines());
-        v.extend(model::lsa::device::KERNELS);
-        v.push(model::lsa::tree_device::KERNEL);
         v.push(("splice", kernels::SPLICE));
-        v.push(model::paged_sparse::KERNEL);
-        for kv in [model::paged_sparse::PackedKv::Int8, model::paged_sparse::PackedKv::Fp8] {
-            v.push(model::lsa::device::index_keys_kernel(kv).expect("lsa_index_keys_i8 marks its byte decode"));
-        }
-        for group in LSA_GQA_GROUPS {
-            v.push(model::paged_sparse::gqa_kernel(group).expect("paged_sparse_flash_gqa declares the GROUP knob"));
-            for kv in [model::paged_sparse::PackedKv::Int8, model::paged_sparse::PackedKv::Fp8] {
-                v.push(model::paged_sparse::gqa_kernel_kv(group, kv).expect("paged_sparse_flash_gqa_i8 declares GROUP and marks its byte decode"));
-            }
-        }
-        for (heads, kv_heads) in LSA_WHOLE_ROW_GEOMETRIES {
-            for kv in [model::paged_sparse::PackedKv::Int8, model::paged_sparse::PackedKv::Fp8] {
-                v.push(model::paged_sparse::rows_kernel_kv(heads, kv_heads, 128, kv).expect("the Qwen3 geometries have a whole-row kernel"));
-            }
-        }
+        v.extend(model::lsa::binding::kernel_pipelines(&LSA_SHAPES, &LSA_EXTRA_GROUPS, &[model::paged_sparse::PackedKv::Int8, model::paged_sparse::PackedKv::Fp8], true));
         v
     })
 }
 
-/// The query-heads-per-KV-head groups of the Qwen3 family (0.6B/1.7B: 2,
-/// 4B/8B: 4, 14B: 5, 32B: 8) whose per-KV-head sparse attention kernel is
-/// compiled in; another group reads through the per-head kernel.
-const LSA_GQA_GROUPS: [u32; 4] = [2, 4, 5, 8];
+/// The attention shapes of the Qwen3 family (head width 128) whose per-KV-head and whole-row sparse kernels this
+/// engine registers: 0.6B/1.7B (16 heads, group 2), 4B/8B (32 heads, group 4) and 14B (40 heads, group 5). The
+/// device's kernel list is fixed before the model is known, so the family's shapes are registered; a shape outside
+/// them reads through the per-head kernel ([`model::lsa::binding::resolve_kernels`]).
+const LSA_SHAPES: [model::lsa::binding::HeadShape; 3] = [
+    model::lsa::binding::HeadShape { n_heads: 16, n_kv_heads: 8, head_dim: 128 },
+    model::lsa::binding::HeadShape { n_heads: 32, n_kv_heads: 8, head_dim: 128 },
+    model::lsa::binding::HeadShape { n_heads: 40, n_kv_heads: 8, head_dim: 128 },
+];
 
-/// Index pages an engine allocates for latent sparse attention over a pool of
-/// `num_blocks` KV blocks: shared prefixes share pages, and sequences that
-/// diverge inside a cluster block each need their own, hence the margin over
-/// one page per pool cluster block.
-fn lsa_page_capacity(num_blocks: u32, block_size: u32, cluster_block: u32) -> u32 {
-    2 * (num_blocks * block_size).div_ceil(cluster_block) + 1
-}
+/// Groups of larger family members (32B: 8) registered for the per-KV-head kernel only.
+const LSA_EXTRA_GROUPS: [u32; 1] = [8];
 
 /// The device bytes [`Engine::set_lsa`] allocates for `indexer` on an engine
 /// of this pool geometry: what a memory planner charges before loading.
 pub fn lsa_device_bytes(indexer: &model::lsa::indexer::Indexer, block_size: u32, num_blocks: u32, max_blocks_per_seq: u32, max_batch: u32, max_prefill: u32) -> u64 {
     let kv = model::lsa::engine::KvGeometry { block_size, max_blocks_per_seq };
-    let pages = lsa_page_capacity(num_blocks, block_size, indexer.cfg.cluster_block as u32);
-    model::lsa::engine::LsaAttention::device_bytes_for(indexer, kv, max_prefill.max(max_batch), pages)
+    model::lsa::binding::LsaBinding::device_bytes_for(indexer, kv, max_prefill.max(max_batch), num_blocks)
 }
 
 /// One layer's attention inputs from [`Engine::capture_attention`], rotated
@@ -312,11 +295,6 @@ pub struct LayerCapture {
     /// `[T, kv_dim]` keys.
     pub k: Vec<f32>,
 }
-
-/// `(query heads, KV heads)` of the Qwen3 family (head width 128) whose
-/// whole-row packed-pool prefill kernel is compiled in: 0.6B/1.7B and 4B/8B.
-/// The query heads must divide the workgroup's 64 threads.
-const LSA_WHOLE_ROW_GEOMETRIES: [(u32, u32); 2] = [(16, 8), (32, 8)];
 
 /// Output columns per thread of the int8 prefill tile: 4 gives a 128x64
 /// workgroup tile whose register block fits two workgroups per SM, faster
@@ -1094,14 +1072,7 @@ pub struct Engine {
     tape_cache: HashMap<(u32, bool), Vec<Step>>,
     /// Latent sparse attention ([`Engine::set_lsa`]): the layers it covers
     /// read a per-query selection of keys instead of every cached key.
-    lsa: Option<model::lsa::engine::LsaAttention>,
-    /// Prefill chunks ending at or below this position read densely
-    /// ([`Engine::measure_lsa_crossover`]).
-    lsa_dense_until: u32,
-    /// Set while recording a prefill chunk that reads densely.
-    lsa_dense_now: std::cell::Cell<bool>,
-    /// Prefill rows read densely below the crossover.
-    lsa_dense_rows: u64,
+    lsa: Option<model::lsa::binding::LsaBinding>,
     /// [`Engine::capture_attention`]'s per-layer `[T, q_dim]` query buffers and
     /// the first row of the chunk being recorded; `None` outside a capture.
     capture: Option<(Vec<DeviceBuffer>, std::cell::Cell<u32>)>,
@@ -1676,9 +1647,6 @@ impl Engine {
             topk_idx_dev,
             tape_cache: HashMap::new(),
             lsa: None,
-            lsa_dense_until: 0,
-            lsa_dense_now: std::cell::Cell::new(false),
-            lsa_dense_rows: 0,
             capture: None,
             bank: None,
             warned_calib_with_adapters: false,
@@ -1808,37 +1776,26 @@ impl Engine {
     /// bytes per key), and positions under YaRN scaling past the model's
     /// native context (the index un-rotates by the engine's own table).
     pub fn set_lsa(&mut self, indexer: &model::lsa::indexer::Indexer) -> Result<(), String> {
+        use model::lsa::binding::{self, Attachment, HeadShape};
+        use model::paged_sparse::PackedKv;
         let c = &self.cfg;
         let geometry = model::lsa::indexer::IndexGeometry { n_layers: c.n_layers as usize, n_heads: c.n_heads as usize, n_kv_heads: c.n_kv_heads as usize, head_dim: c.head_dim as usize, rope_base: c.rope_theta };
-        indexer.check_model(&geometry)?;
-        let group = c.n_heads / c.n_kv_heads;
-        let name = |n: &str| self.gpu.kernel_index(n).ok_or_else(|| format!("latent sparse attention: kernel {n} is not registered"));
-        use model::paged_sparse::{Layout, PackedKv};
         let packed = self.kv_int8.then(|| if self.kv_fp8.is_some() { PackedKv::Fp8 } else { PackedKv::Int8 });
-        // Decode steps read per KV head (or per head outside the compiled
-        // groups); prefill chunks over a packed pool read a whole row per
-        // workgroup where the model's geometry has that kernel compiled.
-        let (few, layout_few, index_keys_packed) = match (packed, LSA_GQA_GROUPS.contains(&group)) {
-            (Some(kv), true) => (name(model::paged_sparse::gqa_kernel_kv(group, kv)?.0)?, Layout::PerKvHead, Some(name(model::lsa::device::index_keys_kernel(kv)?.0)?)),
-            (Some(_), false) => return Err(format!("latent sparse attention over a packed KV cache needs a compiled group ({LSA_GQA_GROUPS:?}), the model's is {group}; serve with --kv-cache f32")),
-            (None, true) => (name(model::paged_sparse::gqa_kernel(group)?.0)?, Layout::PerKvHead, None),
-            (None, false) => (name(model::paged_sparse::KERNEL.0)?, Layout::PerHead, None),
-        };
-        let whole_row = packed.and_then(|kv| model::paged_sparse::rows_kernel_kv(c.n_heads, c.n_kv_heads, c.head_dim, kv).ok()).and_then(|(n, _)| self.gpu.kernel_index(n));
-        let (attend, layout) = whole_row.map_or((few, layout_few), |k| (k, Layout::PerRow));
-        let kernels = model::lsa::engine::LsaKernels { index_vectors: name(model::lsa::device::KERNELS[0].0)?, read: name(model::lsa::device::KERNELS[1].0)?, ward: name(model::lsa::device::KERNELS[2].0)?, tree: Some(name(model::lsa::tree_device::KERNEL.0)?), attend, layout, attend_few: few, layout_few, index_keys_packed };
+        let kernels = binding::resolve_kernels(&self.gpu, HeadShape { n_heads: c.n_heads, n_kv_heads: c.n_kv_heads, head_dim: c.head_dim }, packed, true)?;
         let kv = model::lsa::engine::KvGeometry { block_size: self.block_size, max_blocks_per_seq: self.max_blocks_per_seq };
-        let pages = lsa_page_capacity(self.alloc.num_blocks(), self.block_size, indexer.cfg.cluster_block as u32);
-        let rows = self.max_prefill.max(self.max_batch);
         let yarn = self.yarn.as_ref().map(|(inv_freq, _)| inv_freq);
-        self.lsa = Some(model::lsa::engine::LsaAttention::new(&self.gpu, indexer, kernels, kv, rows, pages, yarn)?);
+        let attachment = Attachment {
+            geometry,
+            packed,
+            kv,
+            max_rows: self.max_prefill.max(self.max_batch),
+            page_capacity: binding::page_capacity(self.alloc.num_blocks(), self.block_size, indexer.cfg.cluster_block as u32),
+            yarn_inv_freq: yarn,
+            sparse_capable: None,
+        };
+        self.lsa = Some(binding::LsaBinding::attach(&self.gpu, indexer, kernels, &attachment)?);
         self.tape_cache.clear();
-        self.lsa_dense_until = self.measure_lsa_crossover();
-        // The measurement's reads served no row.
-        if let Some(lsa) = &self.lsa {
-            lsa.reset_read_stats(&self.gpu);
-        }
-        self.lsa_dense_rows = 0;
+        self.measure_lsa_crossover();
         Ok(())
     }
 
@@ -1953,71 +1910,53 @@ impl Engine {
     /// below it read densely, which there is both faster and exact - or 0
     /// when sparse wins from the start or the device has no fused dense
     /// prefill to compare.
-    fn measure_lsa_crossover(&mut self) -> u32 {
-        let Some(lsa) = self.lsa.as_ref() else { return 0 };
-        let layer = (0..self.cfg.n_layers as usize).find(|&l| lsa.sparse(l)).unwrap_or(0);
-        if !fused_paged_attention(&self.gpu, true, self.kv_int8, self.cfg.head_dim, self.max_prefill) {
-            return 0;
-        }
-        let cb = lsa.config().cluster_block as u32;
-        let rows = self.max_prefill.min(cb).max(1);
-        let mbt = self.max_blocks_per_seq;
-        let blocks = self.alloc.num_blocks().max(1);
-        let bt: Vec<u32> = (0..rows).flat_map(|_| (0..mbt).map(|j| j % blocks)).collect();
+    fn measure_lsa_crossover(&mut self) {
+        let Some(mut lsa) = self.lsa.take() else { return };
+        let layer = (0..self.cfg.n_layers as usize).find(|&l| lsa.attention().sparse(l)).unwrap_or(0);
+        let compare = fused_paged_attention(&self.gpu, true, self.kv_int8, self.cfg.head_dim, self.max_prefill);
+        let rows = self.max_prefill;
+        let (mbt, blocks) = (self.max_blocks_per_seq, self.alloc.num_blocks().max(1));
         let g = &self.gpu;
-        g.write(&self.sc.bt_buf, &bt);
-        let mut dense_until = 0;
-        let mut start = 1024u32;
-        while start + rows <= self.max_seq_len() as u32 {
-            let seqlens: Vec<u32> = (0..rows).map(|i| start + i + 1).collect();
-            let positions: Vec<u32> = (0..rows).map(|i| start + i).collect();
-            g.write(&self.sc.seqlen_buf, &seqlens);
-            g.write(&self.sc.pos_buf, &positions);
-            let dense = gpu_core::profile::best_of(g, &[self.dense_chunk_attention(layer, rows)], 2);
-            // The sparse side as a real chunk reads it: index queries and the
-            // read over `start / cb` closed blocks, then attention over a
-            // full-width selection spread over the cached keys (a selection
-            // of the read's own garbage output would hit a few cached rows).
-            lsa.write_page_tables_for_timing(g, rows, start / cb);
-            let scales = self.kv_int8.then(|| (&self.scales_k[layer], &self.scales_v[layer]));
-            let bufs = model::lsa::engine::LayerBuffers { q: &self.sc.q, pos: &self.sc.pos_buf, seqlen: &self.sc.seqlen_buf, block_tables: &self.sc.bt_buf, pool_k: &self.pool_k[layer], pool_v: &self.pool_v[layer], scales, ctx: &self.sc.ctx };
-            let mut read = Vec::new();
-            let Ok(attend) = lsa.record_read(g, &mut read, layer, rows, &bufs).and_then(|()| lsa.attend_step(g, rows, &bufs)) else {
-                return dense_until;
-            };
-            let read_time = gpu_core::profile::best_of(g, &read, 2);
-            lsa.write_selection_for_timing(g, rows, start);
-            let sparse = read_time + gpu_core::profile::best_of(g, &[attend], 2);
-            if sparse < dense {
-                break;
-            }
-            dense_until = start + rows;
-            // Positions about a quarter apart, in whole chunks.
-            start += (start / 4).div_ceil(rows) * rows;
-        }
-        dense_until
+        let scales = self.kv_int8.then(|| (&self.scales_k[layer], &self.scales_v[layer]));
+        lsa.measure_crossover(
+            g,
+            layer,
+            rows,
+            self.max_seq_len() as u32,
+            compare,
+            |start, rows| {
+                let bt: Vec<u32> = (0..rows).flat_map(|_| (0..mbt).map(|j| j % blocks)).collect();
+                g.write(&self.sc.bt_buf, &bt);
+                let seqlens: Vec<u32> = (0..rows).map(|i| start + i + 1).collect();
+                let positions: Vec<u32> = (0..rows).map(|i| start + i).collect();
+                g.write(&self.sc.seqlen_buf, &seqlens);
+                g.write(&self.sc.pos_buf, &positions);
+            },
+            |rows| self.dense_chunk_attention(layer, rows),
+            || model::lsa::engine::LayerBuffers { q: &self.sc.q, pos: &self.sc.pos_buf, seqlen: &self.sc.seqlen_buf, block_tables: &self.sc.bt_buf, pool_k: &self.pool_k[layer], pool_v: &self.pool_v[layer], scales, ctx: &self.sc.ctx },
+        );
+        self.lsa = Some(lsa);
     }
 
     /// The prefill position up to which chunks read densely (the measured
     /// crossover; 0 without sparse attention).
     pub fn lsa_dense_until(&self) -> u32 {
-        self.lsa_dense_until
+        self.lsa.as_ref().map_or(0, |a| a.dense_until())
     }
 
     /// Override the measured crossover: prefill chunks ending at or below
     /// `position` read densely (0: every chunk reads sparsely).
     pub fn set_lsa_dense_until(&mut self, position: u32) {
-        self.lsa_dense_until = position;
+        if let Some(lsa) = self.lsa.as_mut() {
+            lsa.set_dense_until(position);
+        }
     }
 
     /// What latent sparse attention holds and has done (one small
     /// readback of the read counters), or `None` when every layer reads
     /// densely.
     pub fn lsa_stats(&self) -> Option<model::lsa::engine::LsaStats> {
-        self.lsa.as_ref().map(|a| {
-            let (pages_in_use, page_capacity) = a.page_usage();
-            model::lsa::engine::LsaStats { device_bytes: a.device_bytes(), pages_in_use, page_capacity, pages_built: a.built_pages(), reads: a.read_stats(&self.gpu), dense_rows: self.lsa_dense_rows }
-        })
+        self.lsa.as_ref().map(|a| a.stats(&self.gpu))
     }
 
     /// Set up a prefill chunk of `rows` consecutive positions starting after
@@ -2026,14 +1965,9 @@ impl Engine {
     /// first sparse chunk or decode step builds every closed block's page it
     /// lacks); any other brings the index up to date for a sparse read.
     fn lsa_prepare_chunk(&mut self, table: &mut BlockTable, cached: u32, rows: u32) {
-        let dense = cached + rows <= self.lsa_dense_until;
-        self.lsa_dense_now.set(dense);
-        if dense && self.lsa.is_some() {
-            self.lsa_dense_rows += u64::from(rows);
-        }
-        if let Some(lsa) = self.lsa.as_mut().filter(|_| !dense) {
+        if let Some(lsa) = self.lsa.as_mut() {
             let pools = model::lsa::engine::KeyPools { keys: &self.pool_k, scales: self.kv_int8.then_some(&self.scales_k[..]) };
-            lsa.prepare(&self.gpu, &mut [(table, cached, rows)], pools).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
+            lsa.prepare_chunk(&self.gpu, table, cached, rows, pools).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
         }
     }
 
@@ -2041,10 +1975,7 @@ impl Engine {
     /// attention cluster block, so every query's closed blocks are indexed
     /// before it runs (no limit without sparse attention).
     fn lsa_chunk_limit(&self, start: u32) -> u32 {
-        self.lsa.as_ref().map_or(u32::MAX, |a| {
-            let cb = a.config().cluster_block as u32;
-            cb - start % cb
-        })
+        self.lsa.as_ref().map_or(u32::MAX, |a| a.chunk_limit(start))
     }
 
     pub fn kv_fp8(&self) -> bool {
@@ -2143,7 +2074,7 @@ impl Engine {
                 })
                 .collect();
             let pools = model::lsa::engine::KeyPools { keys: &self.pool_k, scales: self.kv_int8.then_some(&self.scales_k[..]) };
-            lsa.prepare(&self.gpu, &mut rows, pools).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
+            lsa.prepare_rows(&self.gpu, &mut rows, pools).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
         }
         let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut bt = vec![0u32; bsz as usize * mbt];
@@ -3031,7 +2962,7 @@ impl Engine {
                 // serves decode at every batch size, so `fused` answers
                 // `true` in both regimes; asking once and branching mirrors
                 // the fp32 arm.
-                if let Some(lsa) = self.lsa.as_ref().filter(|a| a.sparse(l) && !self.lsa_dense_now.get()) {
+                if let Some(lsa) = self.lsa.as_ref().filter(|a| a.reads_sparsely(l)) {
                     // Latent sparse attention over the packed pool: the same three
                     // shape-only dispatches as the f32 arm, the sparse read
                     // dequantising each selected key against its scale.
@@ -3103,7 +3034,7 @@ impl Engine {
                 // than asking twice, since the selector is pure per
                 // `(Op, OpShape)` but a call still costs a `DeviceCaps`
                 // filter.
-                if let Some(lsa) = self.lsa.as_ref().filter(|a| a.sparse(l) && !self.lsa_dense_now.get()) {
+                if let Some(lsa) = self.lsa.as_ref().filter(|a| a.reads_sparsely(l)) {
                     // Latent sparse attention: index queries from the rotated
                     // queries, the read over this layer's index pages, and
                     // attention over the selected keys of the paged pool. Shapes
@@ -3585,7 +3516,9 @@ impl Engine {
             }
             let input = if embeds { Input::Embeds(&rows) } else { Input::Tokens(&tokens) };
             let hidden = self.run_batched(&meta, input, true);
-            self.lsa_dense_now.set(false);
+            if let Some(lsa) = &self.lsa {
+                lsa.end_forward();
+            }
             last = hidden[(run - 1) * d..run * d].to_vec();
             start += cc;
         }
@@ -3630,7 +3563,9 @@ impl Engine {
             table.reserve(cc, &mut self.alloc).expect("KV pool exhausted");
             let meta = self.chunk_meta(table, start, cc);
             let hidden = self.run_batched(&meta, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), true);
-            self.lsa_dense_now.set(false);
+            if let Some(lsa) = &self.lsa {
+                lsa.end_forward();
+            }
             out[start as usize * d..(start + cc) as usize * d].copy_from_slice(&hidden[..cc as usize * d]);
             start += cc;
         }
