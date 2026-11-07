@@ -135,6 +135,54 @@ fn decode_across_window_wraps_equals_full_recompute_at_every_step() {
     eprintln!("decode equivalence: worst scaled error {worst:.3e} (tolerance {TOLERANCE:.0e})");
 }
 
+/// A verify scores each of its rows as the full forward over the prefix would, across ring wraps (window 4), block
+/// edges (4 rows) and sequences of different lengths in one call; and after a rejection the sequence continues as if the
+/// rejected rows had never been scored: the rolled-back table and ring give the logits of the accepted prefix plus the
+/// next token, at every acceptance length.
+#[test]
+fn a_verify_scores_every_row_and_a_rolled_back_one_leaves_no_trace() {
+    let Some(dir) = tiny_dir() else { return };
+    let vocab = tiny_config(&dir).vocab_size as u32;
+    let mut worst = 0.0f32;
+    let seqs: Vec<Vec<u32>> = [(5u32, 9usize), (6, 14)].iter().map(|&(seed, n)| stream(seed, n + 12, vocab)).collect();
+    let prompt_lens = [9usize, 14];
+    for keep in 1..=4usize {
+        let mut e = engine(&dir, 8, 0);
+        assert!(e.spec_max_draft() >= 3, "a Ripple engine verifies proposals");
+        let mut tables: Vec<BlockTable> = prompt_lens.iter().map(|_| BlockTable::new()).collect();
+        for ((t, s), &n) in tables.iter_mut().zip(&seqs).zip(&prompt_lens) {
+            prefill_in_slices(&mut e, t, &s[..n], usize::MAX);
+        }
+        // Two sequences verify 4 and 3 rows in one forward.
+        let rows: Vec<Vec<u32>> = vec![seqs[0][9..13].to_vec(), seqs[1][14..17].to_vec()];
+        let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+        let scored = e.forward_batched_verify(&mut refs, &rows, 3);
+        for (i, (row, got)) in rows.iter().zip(&scored).enumerate() {
+            assert_eq!(got.len(), row.len());
+            for (j, cands) in got.iter().enumerate() {
+                let want = recompute_last(&dir, &seqs[i][..prompt_lens[i] + j + 1]);
+                let best = want.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |b, (t, &v)| if v > b.1 { (t, v) } else { b }).0 as u32;
+                assert_eq!(cands[0].0, best, "seq {i} row {j}: the best candidate is the full forward's argmax");
+                assert!((cands[0].1 - want[best as usize]).abs() <= 1e-3 * want[best as usize].abs().max(1.0), "seq {i} row {j}: logit {} vs {}", cands[0].1, want[best as usize]);
+            }
+        }
+        // The scheduler's rollback: keep `keep` rows of the first sequence, all of the second; continue decoding both.
+        tables[0].truncate((prompt_lens[0] + keep) as u32, e.alloc_mut());
+        for step in 0..6usize {
+            let inputs = [seqs[0][prompt_lens[0] + keep + step], seqs[1][prompt_lens[1] + 3 + step]];
+            let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+            let logits = e.decode_logits(&mut refs, &inputs);
+            check_row(&format!("keep {keep} step {step}: rolled-back sequence"), &logits[0], &recompute_last(&dir, &seqs[0][..prompt_lens[0] + keep + step + 1]), &mut worst);
+            check_row(&format!("keep {keep} step {step}: accepted sequence"), &logits[1], &recompute_last(&dir, &seqs[1][..prompt_lens[1] + 3 + step + 1]), &mut worst);
+        }
+        for t in &mut tables {
+            e.release_table(t);
+        }
+        assert_eq!(e.free_blocks(), 160, "keep {keep}: every block comes back");
+    }
+    eprintln!("verify and rollback: worst scaled error {worst:.3e} (tolerance {TOLERANCE:.0e})");
+}
+
 #[test]
 fn concurrent_sequences_at_different_positions_decode_as_each_alone() {
     let Some(dir) = tiny_dir() else { return };

@@ -333,7 +333,11 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          gaps. Engines that do not mix prompts into decoding
                          report the setting as ignored (default: the engine's
                          own, 45 for the Qwen3.8 GGUF models).
-  --speculative MODE     speculative decoding for the Qwen3.8 GGUF models:
+  --speculative MODE     speculative decoding for the Qwen3.8 GGUF models and
+                         Ripple (Ripple: off, or ngram; it offers no drafter
+                         checkpoint the engine can run, so auto is off and mtp
+                         and dflash are refused, as is ngram beside
+                         --sparse-attention):
                          auto|off|mtp|dflash|ngram (default auto = the best
                          drafter the checkpoint offers, off when it has none;
                          off where the cards cannot run the CUDA verify
@@ -840,11 +844,13 @@ pub fn run_serve(args: &[String]) {
             "--decision-default" => decision_cfg.default = Some(val(args, &mut i, "--decision-default")),
             "--speculative" => {
                 let mode = val(args, &mut i, "--speculative");
-                qwen35_cfg.gguf.speculative = Some(qwen35::int8_gguf_resident::SpeculativeMode::parse(&mode).unwrap_or_else(|e| {
+                let parsed = qwen35::int8_gguf_resident::SpeculativeMode::parse(&mode).unwrap_or_else(|e| {
                     eprintln!("brain serve: --speculative {mode:?}: {e}\n");
                     eprint!("{HELP}");
                     std::process::exit(2);
-                }));
+                });
+                qwen35_cfg.gguf.speculative = Some(parsed);
+                ricursive_cfg.speculative = Some(parsed);
             }
             "--anthropic" => anthropic = Some(take_addrs(args, &mut i, 8787)),
             "--openai" => openai = Some(take_addrs(args, &mut i, 8788)),

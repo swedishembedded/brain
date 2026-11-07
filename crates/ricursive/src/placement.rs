@@ -18,7 +18,7 @@
 //! # Why this is not `impl Shardable`
 //!
 //! `model::Shardable` is the training pipeline's seam: it requires `model::Model` (a loss, a backward, a
-//! gradient per parameter) and a stage constructor over a weight map. Ripple has no backward until step 6 of the
+//! gradient per parameter) and a stage constructor over a weight map. Ripple has no backward until step 7 of the
 //! port, so claiming the trait would be a fiction; the serving engine needs only what the resident engines of
 //! the other families use, the byte-exact [`LayerBytes`] and a [`StreamPlan`]. [`shard_cost`] gives the
 //! parameter-count [`ShardCost`] the trait's planner balances by, for equal cards.

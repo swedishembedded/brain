@@ -90,6 +90,7 @@ use model::lsa::indexer::{IndexGeometry, Indexer};
 use model::ops::{Ops, TierPolicy};
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
 use model::paged_sparse::PackedKv;
+use model::serve::rows::RowsForward;
 use model::serve::{AdapterId, PagedDecoder, PrefillProgress};
 use model::shard::StreamPlan;
 use model::snapshot_prefix::{Entry, SnapshotPrefixCache};
@@ -816,6 +817,38 @@ fn top_k(logits: &[f32], k: usize) -> Vec<(u32, f32)> {
     ranked
 }
 
+/// Speculation: the rows of a verify are consecutive new positions of a sequence, scored in one forward exactly as a
+/// prefill chunk is. The scheduler truncates a rejected row's block table entries; the sliding rings need no
+/// rollback, because the ring holds `window + prefill_chunk` rows and a verify has at most `prefill_chunk` rows, so no
+/// row of a verify overwrites a key a position at or before the last accepted one still reads, and a later write at
+/// a rolled-back position replaces what the rejected row left.
+impl RowsForward for RicursiveEngine {
+    fn forward_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
+        assert_eq!(tables.len(), rows.len(), "ricursive serve: tables/rows length mismatch");
+        assert!(self.lsa.is_empty(), "ricursive serve: a verify step cannot run beside latent sparse attention (spec_max_draft is 0 then)");
+        let total: usize = rows.iter().map(Vec::len).sum();
+        assert!(total <= self.spec_row_budget(), "ricursive serve: a verify of {total} rows exceeds the forward's {}", self.spec_row_budget());
+        let mut plans: Vec<(u32, u32, u32, usize)> = Vec::with_capacity(total);
+        let mut blocks: Vec<Vec<u32>> = Vec::with_capacity(tables.len());
+        for (i, (t, row)) in tables.iter_mut().zip(rows).enumerate() {
+            assert!(row.len() <= self.serve.prefill_chunk as usize, "ricursive serve: a verify row run of {} exceeds the ring slack of {}", row.len(), self.serve.prefill_chunk);
+            let first = t.len();
+            for _ in row {
+                t.append(&mut self.alloc).unwrap_or_else(|e| panic!("ricursive serve: {e}"));
+            }
+            assert!(t.len() <= self.serve.max_seq_len, "ricursive serve: sequence outgrew the limit of {} tokens", self.serve.max_seq_len);
+            blocks.push(t.blocks().to_vec());
+            plans.extend(row.iter().enumerate().map(|(j, &token)| (token, first + j as u32, Self::ring_slot(t), i)));
+        }
+        let row_plans: Vec<RowPlan<'_>> = plans.iter().map(|&(token, pos, ring, seq)| RowPlan { token, pos, ring, blocks: &blocks[seq] }).collect();
+        let x = self.forward_hidden(&row_plans).unwrap_or_else(|e| panic!("{e}"));
+        let k = cands.clamp(1, self.topk_capacity());
+        let logits = self.head(&x, total as u32).1;
+        let mut ranked = logits.chunks(self.cfg.vocab_size).map(|l| top_k(l, k));
+        rows.iter().map(|row| ranked.by_ref().take(row.len()).collect()).collect()
+    }
+}
+
 impl PagedDecoder for RicursiveEngine {
     fn alloc_mut(&mut self) -> &mut BlockAllocator {
         &mut self.alloc
@@ -934,6 +967,22 @@ impl PagedDecoder for RicursiveEngine {
     }
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY.min(self.cfg.vocab_size)
+    }
+    /// Proposals per sequence a verify scores: one forward of `1 + proposals` rows, which must fit the ring slack.
+    /// Zero beside latent sparse attention, whose index pages a rejected row would leave built over rolled-back keys.
+    fn spec_max_draft(&self) -> usize {
+        if self.lsa.is_empty() {
+            model::serve::rows::DEFAULT_MAX_DRAFT.min((self.serve.prefill_chunk as usize).saturating_sub(1))
+        } else {
+            0
+        }
+    }
+    /// The rows a forward is sized for: the widest of a prefill chunk and a full decode batch.
+    fn spec_row_budget(&self) -> usize {
+        self.serve.prefill_chunk.max(self.serve.max_batch) as usize
+    }
+    fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
+        self.forward_rows(tables, rows, cands)
     }
 }
 

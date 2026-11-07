@@ -35,23 +35,49 @@ fn config() -> RicursiveConfig {
 
 /// A pulled directory: config, random weights, a byte-level tokenizer that covers any ASCII prompt.
 fn pulled_dir(tag: &str) -> std::path::PathBuf {
+    pulled_dir_with(tag, None)
+}
+
+/// [`pulled_dir`] whose greedy decode walks the cycle `a b c d a b c ...` whatever the prompt, when `cycle` is set: each
+/// of the four tokens has a random unit code for its embedding, and the output row of its successor is that code scaled
+/// up, so the successor wins the argmax by a wide margin while the layers (with small gains on their branches) still run.
+fn pulled_dir_with(tag: &str, cycle: Option<[u8; 4]>) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("brain-ricursive-served-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = config();
+    let (vocab, hidden) = (cfg.vocab_size, cfg.hidden_size);
     let mut rng = Lcg::new(31);
+    let codes: Vec<Vec<f32>> = (0..vocab)
+        .map(|_| {
+            let v: Vec<f32> = (0..hidden).map(|_| rng.signed()).collect();
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            v.into_iter().map(|x| x / norm).collect()
+        })
+        .collect();
     let order: Vec<usize> = (0..cfg.num_hidden_layers).collect();
     let tensors: Vec<brain_testutil::hfquant::Raw> = manifest(&cfg, &order)
         .into_iter()
         .map(|(name, dims)| {
             let n: usize = dims.iter().product();
-            let data: Vec<f32> = if name.contains("norm") || name.contains("layernorm") {
+            let data: Vec<f32> = if cycle.is_some() && name == "model.embed_tokens.weight" {
+                codes.iter().flatten().copied().collect()
+            } else if let (Some(ring), "lm_head.weight") = (cycle, name.as_str()) {
+                let mut head = vec![0.0f32; n];
+                for (i, &cur) in ring.iter().enumerate() {
+                    let next = ring[(i + 1) % ring.len()] as usize;
+                    head[next * hidden..(next + 1) * hidden].iter_mut().zip(&codes[cur as usize]).for_each(|(h, c)| *h = c * 40.0);
+                }
+                head
+            } else if name.contains("post_attention_layernorm") || name.contains("post_feedforward_layernorm") {
+                vec![if cycle.is_some() { 0.05 } else { 1.0 }; n]
+            } else if name.contains("norm") {
                 vec![1.0; n]
             } else if name.ends_with("value_res_lambda") {
                 vec![0.0; n]
             } else {
                 let fan_in = dims.last().copied().unwrap_or(1) as f32;
-                (0..n).map(|_| rng.signed() * 1.7 / fan_in.sqrt()).collect()
+                (0..n).map(|_| rng.signed() * if cycle.is_some() { 0.5 } else { 1.7 } / fan_in.sqrt()).collect()
             };
             brain_testutil::hfquant::f32_raw(&name, &dims, &data)
         })
@@ -234,4 +260,41 @@ fn an_indexer_for_another_model_is_refused_at_startup_and_a_fitting_one_is_read_
     });
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_dir_all(&ix_dir).ok();
+}
+
+#[test]
+fn prompt_lookup_speculation_returns_the_plain_greedy_tokens_and_reports_what_it_proposed() {
+    use qwen35::int8_gguf_resident::SpeculativeMode;
+    let dir = pulled_dir_with("speculative", Some(*b"abcd"));
+    let plain = resident(&dir, &RicursiveServeConfig::default(), &[]).unwrap();
+    let speculating = resident(&dir, &RicursiveServeConfig { speculative: Some(SpeculativeMode::Ngram), ..Default::default() }, &[]).unwrap();
+    let key = InstanceKey::new(ID, "default");
+    // The model continues the cycle its prompts are written in, so the lookup drafter's proposals are right.
+    let prompts = ["abcdabcdabcdabcdabcd", "xabcdabcdabcdabcdabcdabcd", "bcdabcdabcdabcdabcdabcdabcdabcdabcd"];
+    let run = |resident: &RicursiveResident| {
+        gpu_core::devices::with_host_tier(|| {
+            let mut instance = resident.activate(&key, Device::Cpu).expect("activates");
+            let invs: Vec<Invocation> = prompts.iter().map(|p| ask(p).set("max_new", serde_json::json!(24))).collect();
+            let outputs: Vec<String> = instance.run_batch("generate", &invs, &mut |_, _| {}).into_iter().map(text).collect();
+            let (proposed, accepted, steps) = (metric(&*instance, "spec_proposed"), metric(&*instance, "spec_accepted"), metric(&*instance, "spec_verify_steps"));
+            eprintln!("speculation: {proposed} proposed, {accepted} accepted over {steps} verify steps");
+            assert!(proposed == 0 || accepted > 0, "right proposals are accepted");
+            (outputs, proposed, steps)
+        })
+    };
+    let (want, none, _) = run(&plain);
+    let (got, proposed, steps) = run(&speculating);
+    assert_eq!(none, 0, "plain decoding proposes nothing");
+    assert_eq!(got, want, "speculation never changes greedy output");
+    assert!(proposed > 0 && steps > 0, "the drafter proposed and the engine verified: {proposed} proposals over {steps} steps");
+    assert!(want.iter().all(|t| t.starts_with(['a', 'b', 'c', 'd'])) && want.iter().all(|t| t.chars().count() > 8), "the model walks the cycle: {want:?}");
+
+    // What the drafters of the release would need is refused by name, and the lookup drafter beside sparse attention too.
+    for (mode, needle) in [(SpeculativeMode::Mtp, "multi-token-prediction"), (SpeculativeMode::Dflash, "hidden states")] {
+        let err = resident(&dir, &RicursiveServeConfig { speculative: Some(mode), ..Default::default() }, &[]).err().expect("refused");
+        assert!(err.contains(needle), "{err}");
+    }
+    let err = resident(&dir, &RicursiveServeConfig { speculative: Some(SpeculativeMode::Ngram), sparse_attention: Some("ix.safetensors".into()), ..Default::default() }, &[]).err().expect("refused");
+    assert!(err.contains("--sparse-attention"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
 }

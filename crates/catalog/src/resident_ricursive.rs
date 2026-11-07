@@ -46,8 +46,9 @@ use model::kv_tier::KvTier;
 use model::lsa::indexer::Indexer;
 use model::ops::TierPolicy;
 use model::policy::ServePolicy;
-use model::serve::Scheduler;
+use model::serve::{NgramDrafter, Scheduler};
 use qwen3::chat::{parse_request_as, ChatFormat};
+use qwen35::int8_gguf_resident::SpeculativeMode;
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use ricursive::placement::{card_budget, footprint, place, stream_plan, Footprint};
@@ -68,6 +69,8 @@ const DEFAULT_PREFIX_SLOTS: u32 = 2;
 const HOST_DEFAULT_CTX: u32 = 4096;
 /// The shortest context the automatic sizing will settle for before it reports that the deployment does not place.
 const MIN_CTX: u32 = 2048;
+/// Tokens of context the prompt-lookup drafter matches to find what to propose.
+const NGRAM_ORDER: usize = 3;
 /// Tokens a companion sequence is assumed to hold beside the one that fills the context, when sizing the block pool.
 const COMPANION_TOKENS: u32 = 4096;
 
@@ -93,6 +96,9 @@ pub struct RicursiveServeConfig {
     pub sparse_attention: Option<String>,
     /// Cached prompts kept for prefix reuse (0 turns reuse off).
     pub prefix_slots: Option<u32>,
+    /// `--speculative`: `None`, `Off` and `Auto` decode plainly (the release offers no drafter this engine runs),
+    /// `Ngram` drafts by prompt lookup and verifies in one batched step. `Mtp` and `Dflash` are refused.
+    pub speculative: Option<SpeculativeMode>,
     /// Why the policy could not be honoured, when it could not (the resident then refuses to build, naming it).
     pub refused: Option<String>,
 }
@@ -291,6 +297,8 @@ pub struct RicursiveResident {
     deployment: Deployment,
     /// The indexer file `--sparse-attention` named, loaded again for each instance.
     sparse_attention: Option<String>,
+    /// Draft by prompt lookup (`--speculative ngram`).
+    ngram: bool,
     /// `(device index, usable bytes)` of the cards the deployment may be placed over; empty for the host tier.
     cards: Vec<(usize, u64)>,
     sampling: SamplingDefaults,
@@ -304,6 +312,16 @@ impl RicursiveResident {
     pub fn from_hf_dir(dir: &str, id: &str, knobs: &RicursiveServeConfig, gpus: &[(u32, u64)], reserved: u64) -> Result<RicursiveResident, String> {
         if let Some(why) = &knobs.refused {
             return Err(why.clone());
+        }
+        match knobs.speculative {
+            Some(SpeculativeMode::Mtp) => return Err(format!("{id}: --speculative mtp: Ripple has no multi-token-prediction head")),
+            Some(SpeculativeMode::Dflash) => {
+                return Err(format!("{id}: --speculative dflash: the Ripple-65B-Preview-DFlash2 drafter needs the target's hidden states at its layers 1, 20, 39, 58 and 77, which this engine does not retain, and its block forward is not ported; use ngram or off"))
+            }
+            Some(SpeculativeMode::Ngram) if knobs.sparse_attention.is_some() => {
+                return Err(format!("{id}: --speculative ngram cannot be combined with --sparse-attention: a rejected row would leave index pages built over rolled-back keys"))
+            }
+            _ => {}
         }
         let path = Path::new(dir);
         if !path.join("tokenizer.json").exists() {
@@ -322,7 +340,7 @@ impl RicursiveResident {
             deployment.serve.check_indexer(&cfg, ix).map_err(|e| format!("{id}: --sparse-attention: {e}"))?;
         }
         let sampling = SamplingDefaults::from_generation_config(path)?;
-        Ok(RicursiveResident { id: id.to_string(), dir: path.to_path_buf(), cfg, deployment, sparse_attention: knobs.sparse_attention.clone(), cards, sampling })
+        Ok(RicursiveResident { id: id.to_string(), dir: path.to_path_buf(), cfg, deployment, sparse_attention: knobs.sparse_attention.clone(), ngram: knobs.speculative == Some(SpeculativeMode::Ngram), cards, sampling })
     }
 
     /// The values the defaults chose, as `name value` lines for the startup log.
@@ -374,7 +392,11 @@ impl RicursiveResident {
             let indexer = Indexer::load(path).map_err(|e| format!("ricursive: --sparse-attention {path}: {e}"))?;
             engine.set_lsa(&indexer).map_err(|e| format!("ricursive: --sparse-attention {path}: {e}"))?;
         }
-        Ok(Box::new(ScheduledInstance::new(front, Scheduler::new(engine, live), live)))
+        let mut sched = Scheduler::new(engine, live);
+        if self.ngram {
+            sched.set_drafter(Box::new(NgramDrafter::new(NGRAM_ORDER)));
+        }
+        Ok(Box::new(ScheduledInstance::new(front, sched, live)))
     }
 }
 
