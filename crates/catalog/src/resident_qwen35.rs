@@ -379,6 +379,7 @@ pub const QWEN35_GGUF_POLICY: model::policy::PolicySupport = model::policy::Poli
     gdn_state: true,
     linear_activations: true,
     sparse_attention: false,
+    draft_model: false,
 };
 
 /// What the brain-checkpoint Qwen3.8 resident honours of a serving policy: the weight tier is the checkpoint's own
@@ -396,6 +397,7 @@ pub const QWEN35_FP32_POLICY: model::policy::PolicySupport = model::policy::Poli
     gdn_state: false,
     linear_activations: false,
     sparse_attention: false,
+    draft_model: false,
 };
 
 impl Qwen35ServeConfig {

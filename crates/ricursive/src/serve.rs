@@ -1237,6 +1237,21 @@ impl TapRows for RicursiveEngine {
     }
 }
 
+/// Refuse, by name, a draft model built for another target than `target`: its width, vocabulary and the layers it
+/// reads must be this model's.
+pub fn check_draft_fits(target: &RicursiveConfig, draft: &dflash2::Dflash2Config) -> Result<(), String> {
+    if draft.d_model as usize != target.hidden_size || draft.vocab as usize != target.vocab_size {
+        return Err(format!("the draft model is for a target of width {} and vocabulary {}, this one is {} and {}", draft.d_model, draft.vocab, target.hidden_size, target.vocab_size));
+    }
+    if let Some(&bad) = draft.target_layers.iter().find(|&&l| l >= target.num_hidden_layers) {
+        return Err(format!("the draft model reads layer {bad} of the target, which has {}", target.num_hidden_layers));
+    }
+    if draft.mask_token_id as usize >= target.vocab_size {
+        return Err(format!("the draft model's mask token {} is outside the vocabulary", draft.mask_token_id));
+    }
+    Ok(())
+}
+
 impl RicursiveEngine {
     /// Draft with the DFlash2 model in `dir` (a Hugging Face directory: `config.json` and its safetensors): it is loaded on
     /// the last stage's device with a cache slot for each live sequence, the engine starts retaining the target's
@@ -1246,7 +1261,7 @@ impl RicursiveEngine {
     /// placement to have charged it.
     pub fn set_drafter(&mut self, dir: &std::path::Path) -> Result<(), String> {
         let cfg = dflash2::Dflash2Config::from_json(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("ricursive: draft model {}: config.json: {e}", dir.display()))?).map_err(|e| format!("ricursive: draft model {}: {e}", dir.display()))?;
-        self.check_drafter(&cfg)?;
+        self.check_drafter(&cfg).map_err(|e| format!("ricursive: {e}"))?;
         let source = dflash2::HfDraft::open(dir)?;
         let last = self.stages.len() - 1;
         let device = self.device.clone();
@@ -1263,17 +1278,7 @@ impl RicursiveEngine {
 
     /// Refuse, by name, a draft built for another target.
     pub fn check_drafter(&self, cfg: &dflash2::Dflash2Config) -> Result<(), String> {
-        let c = &self.cfg;
-        if cfg.d_model as usize != c.hidden_size || cfg.vocab as usize != c.vocab_size {
-            return Err(format!("ricursive: the draft model is for a target of width {} and vocabulary {}, this one is {} and {}", cfg.d_model, cfg.vocab, c.hidden_size, c.vocab_size));
-        }
-        if let Some(&bad) = cfg.target_layers.iter().find(|&&l| l >= c.num_hidden_layers) {
-            return Err(format!("ricursive: the draft model reads layer {bad} of the target, which has {}", c.num_hidden_layers));
-        }
-        if cfg.mask_token_id as usize >= c.vocab_size {
-            return Err(format!("ricursive: the draft model's mask token {} is outside the vocabulary", cfg.mask_token_id));
-        }
-        Ok(())
+        check_draft_fits(&self.cfg, cfg)
     }
 
     /// What the draft model has cost so far; `None` without one.

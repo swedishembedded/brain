@@ -284,6 +284,13 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          released Qwen3.8 GGUFs the fastest that fits the
                          cards, int8 first; for Ripple bf16, or int8 with
                          --sparse-attention).
+  --draft-model DIR      speculative decoding with the draft model in DIR (a
+                         directory, or the <vendor>/<repo> of a pulled one),
+                         for the models whose engine retains the hidden states
+                         it reads (Ripple: the DFlash2 draft); implies
+                         --speculative dflash. Its weights, caches and the
+                         target's retained hidden states are part of the memory
+                         plan, so the context shrinks to leave room.
   --sparse-attention FILE
                          read the attention layers an indexer covers through
                          latent sparse attention, for the models that support it
@@ -334,14 +341,17 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          report the setting as ignored (default: the engine's
                          own, 45 for the Qwen3.8 GGUF models).
   --speculative MODE     speculative decoding for the Qwen3.8 GGUF models and
-                         Ripple (Ripple: off, or ngram; it offers no drafter
-                         checkpoint the engine can run, so auto is off and mtp
-                         and dflash are refused, as is ngram beside
-                         --sparse-attention):
+                         Ripple (Ripple: off, ngram, or dflash with the
+                         DFlash2 draft model; mtp is refused):
                          auto|off|mtp|dflash|ngram (default auto = the best
                          drafter the checkpoint offers, off when it has none;
                          off where the cards cannot run the CUDA verify
                          kernels or its memory would squeeze the context).
+                         Ripple's `dflash` reads the draft pulled beside the
+                         target (`brain pull ricursiveAI/Ripple-65B-Preview-DFlash2`)
+                         or the one --draft-model names; it works beside
+                         --sparse-attention, with the verify held inside one
+                         cluster block of the index.
                          The scheduler verifies each sequence's proposals in
                          one batched step and keeps the longest prefix the
                          model agrees with, so greedy output is unchanged; it

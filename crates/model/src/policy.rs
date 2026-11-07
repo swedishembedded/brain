@@ -195,6 +195,9 @@ pub struct ServePolicy {
     /// `--sparse-attention FILE`: read the attention layers an indexer
     /// covers through latent sparse attention (`model::lsa`).
     pub sparse_attention: Option<String>,
+    /// `--draft-model DIR`: speculative decoding with the draft model in this directory (a path, or the
+    /// `<vendor>/<repo>` of a pulled one), for the models that take one (`model::serve::PagedDecoder::enable_taps`).
+    pub draft_model: Option<String>,
     /// `--exact-decode`: make a decode row's result independent of which other
     /// sequences share its batch (see [`PolicySupport`] models that honour it).
     /// Off by default: today's batched numerics, unchanged.
@@ -203,7 +206,7 @@ pub struct ServePolicy {
 }
 
 /// The public flags that take a value.
-pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--act-precision", "--gdn-state", "--linear-activations", "--sparse-attention", "--ctx", "--max-batch", "--kv-offload-gb", "--itl-target-ms"];
+pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--act-precision", "--gdn-state", "--linear-activations", "--sparse-attention", "--draft-model", "--ctx", "--max-batch", "--kv-offload-gb", "--itl-target-ms"];
 /// The public switches (no value).
 pub const SWITCH_FLAGS: &[&str] = &["--kv-calibration", "--exact-decode"];
 /// Settings that are derived by default and exist only as the target of a
@@ -237,6 +240,12 @@ impl ServePolicy {
                     return Err("--sparse-attention needs the path of an indexer file".into());
                 }
                 self.sparse_attention = Some(value.trim().to_string());
+            }
+            "--draft-model" => {
+                if value.trim().is_empty() {
+                    return Err("--draft-model needs the directory (or model id) of a draft model".into());
+                }
+                self.draft_model = Some(value.trim().to_string());
             }
             "--ctx" => self.limits.ctx = Some(count(flag, value)?),
             "--max-batch" => self.limits.max_batch = Some(count(flag, value)?),
@@ -290,6 +299,9 @@ impl ServePolicy {
         }
         if let Some(path) = &self.sparse_attention {
             v.push(format!("sparse-attention={path}"));
+        }
+        if let Some(path) = &self.draft_model {
+            v.push(format!("draft-model={path}"));
         }
         let l = &self.limits;
         for (name, x) in [("ctx", l.ctx), ("max-batch", l.max_batch), ("itl-target-ms", l.itl_target_ms), ("kv-tokens", l.kv_tokens), ("prefix-slots", l.prefix_slots), ("max-prefill", l.max_prefill), ("prefill-slice", l.prefill_slice), ("prefill-batch", l.prefill_batch)] {
@@ -346,6 +358,8 @@ pub struct PolicySupport {
     pub linear_activations: bool,
     /// `--sparse-attention` honoured: the model's attention can read through latent sparse attention.
     pub sparse_attention: bool,
+    /// `--draft-model` honoured: the model's engine can retain the hidden states a draft model reads.
+    pub draft_model: bool,
 }
 
 impl PolicySupport {
@@ -391,6 +405,9 @@ impl PolicySupport {
         }
         if policy.sparse_attention.is_some() && !self.sparse_attention {
             return Err(format!("{}: --sparse-attention is not supported", self.model));
+        }
+        if policy.draft_model.is_some() && !self.draft_model {
+            return Err(format!("{}: --draft-model is not supported", self.model));
         }
         Ok(())
     }
@@ -562,6 +579,7 @@ mod tests {
         gdn_state: false,
         linear_activations: false,
         sparse_attention: false,
+        draft_model: false,
     };
 
     #[test]
@@ -606,6 +624,13 @@ mod tests {
         assert!(sparse.describe().contains("sparse-attention=indexer.safetensors"), "{}", sparse.describe());
         assert!(LLM.check(&sparse).unwrap_err().contains("--sparse-attention"), "a model that does not declare it refuses the flag");
         assert!(PolicySupport { sparse_attention: true, ..LLM }.check(&sparse).is_ok());
+        let mut draft = ServePolicy::default();
+        draft.set("--draft-model", "ricursiveAI/Ripple-65B-Preview-DFlash2").unwrap();
+        assert_eq!(draft.draft_model.as_deref(), Some("ricursiveAI/Ripple-65B-Preview-DFlash2"));
+        assert!(draft.describe().contains("draft-model=ricursiveAI/Ripple-65B-Preview-DFlash2"), "{}", draft.describe());
+        assert!(LLM.check(&draft).unwrap_err().contains("--draft-model"), "a model that does not declare it refuses the flag");
+        assert!(PolicySupport { draft_model: true, ..LLM }.check(&draft).is_ok());
+        assert!(draft.set("--draft-model", " ").is_err());
         assert!(ServePolicy::default().set("--sparse-attention", " ").is_err(), "an empty indexer path is refused");
         let mut only = ServePolicy::default();
         only.set("--act-precision", "auto").unwrap();

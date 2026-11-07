@@ -874,6 +874,7 @@ dependencies = [
  "brain-deepseek2ocr",
  "brain-deepseekocr2",
  "brain-deepseekvl",
+ "brain-dflash2",
  "brain-fastvlm",
  "brain-fincast",
  "brain-florence2",
@@ -2635,6 +2636,7 @@ version = "5.1.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
+ "brain-dflash2",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",

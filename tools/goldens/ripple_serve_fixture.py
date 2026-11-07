@@ -20,6 +20,10 @@ Both modes write a Hugging Face directory a pull would leave (`config.json`, `mo
             weights are small random values that the engine still computes. The tokenizer is byte level with the
             reply's pieces as extra tokens. It tests the serving path (template, tokenizer, scheduler, scanner,
             OpenAI surface); the transformer math is gated against the reference in `crates/ricursive/tests`.
+            The same directory also holds `Ripple-scripted-DFlash2` beside it, a tiny RANDOM DFlash2 draft model for it
+            (width 64, three layers reading the target's three, a window of 6, blocks of five rows): it proposes at
+            random, so a speculative run exercises the draft, the tap retention and the verify, and the output must
+            still be the fixed reply.
   partial   Layers 0 and 4 of the real checkpoint (a sliding and a global layer, with the embedding, final norm and
             `lm_head`) as a two-layer model, from a directory of `layers-0-4.safetensors` (or the NVFP4 file) beside the
             release's `config.json`, tokenizer and template: the weights file with layer 4 renamed layer 1, `config.json`
@@ -171,6 +175,58 @@ def scripted(out_dir, template):
     json.dump(tcfg, open(os.path.join(repo, "tokenizer_config.json"), "w"))
     with open(template) as src, open(os.path.join(repo, "chat_template.jinja"), "w") as dst:
         dst.write(src.read())
+    print(repo)
+    scripted_draft(out_dir, vocab_size)
+
+
+def scripted_draft(out_dir, vocab_size):
+    """A tiny random DFlash2 draft model for the scripted Ripple, laid out as a pulled `<vendor>/<repo>-DFlash2`
+    (what `--speculative dflash` finds beside the target). Weights are small gaussians, the convolutions start as the
+    identity on the current token (tap 0 = 1), as the published draft's do."""
+    rng = random.Random(11)
+    d, ff, heads, kv_heads, head_dim, layers, group, taps, rank = HIDDEN, FFN, HEADS, KV_HEADS, HEAD_DIM, 3, 8, 4, 8
+    q_dim, kv_dim = heads * head_dim, kv_heads * head_dim
+
+    def gauss(rows, cols, scale=0.08):
+        return ((rows, cols), [rng.gauss(0, scale) for _ in range(rows * cols)])
+
+    def gain(n):
+        return ((n,), [1.0 + rng.gauss(0, 0.2) for _ in range(n)])
+
+    def base():
+        values = [rng.gauss(0, 0.1) + (1.0 if t == 0 else 0.0) for _ in range(2) for t in range(taps) for _ in range(d)]
+        return ((2, taps, d), values)
+
+    t = {
+        "fc.weight": gauss(d, 3 * d, 0.06),
+        "hidden_norm.weight": gain(d),
+        "norm.weight": gain(d),
+        "candidate_selector.hidden_projection.weight": gauss(rank, d, 0.2),
+        "candidate_selector.predecessor_codebook": gauss(vocab_size, rank, 1.0),
+        "candidate_selector.successor_codebook": gauss(vocab_size, rank, 1.0),
+    }
+    for i in range(layers):
+        p = f"layers.{i}."
+        t.update({
+            p + "input_layernorm.weight": gain(d), p + "post_attention_layernorm.weight": gain(d),
+            p + "self_attn.q_proj.weight": gauss(q_dim, d), p + "self_attn.k_proj.weight": gauss(kv_dim, d), p + "self_attn.v_proj.weight": gauss(kv_dim, d),
+            p + "self_attn.o_proj.weight": gauss(d, q_dim), p + "self_attn.q_norm.weight": gain(head_dim), p + "self_attn.k_norm.weight": gain(head_dim),
+            p + "mlp.gate_proj.weight": gauss(ff, d), p + "mlp.up_proj.weight": gauss(ff, d), p + "mlp.down_proj.weight": gauss(d, ff),
+            p + "attention_conv.base_kernel": base(), p + "attention_conv.kernel_projection.weight": gauss(2 * taps * (d // group), d, 0.1),
+            p + "mlp_conv.base_kernel": base(), p + "mlp_conv.kernel_projection.weight": gauss(2 * taps * (d // group), d, 0.1),
+        })
+    repo = os.path.join(out_dir, VENDOR, "Ripple-scripted-DFlash2")
+    os.makedirs(repo, exist_ok=True)
+    write_safetensors(os.path.join(repo, "model.safetensors"), t)
+    config = {
+        "architectures": ["DFlash2DraftModel"], "model_type": "qwen3", "hidden_size": d, "intermediate_size": ff, "num_hidden_layers": layers,
+        "num_attention_heads": heads, "num_key_value_heads": kv_heads, "head_dim": head_dim, "rms_norm_eps": 1e-6,
+        "rope_parameters": {"rope_theta": 10000.0, "rope_type": "default"}, "rope_theta": 10000.0, "sliding_window": 6, "use_sliding_window": True,
+        "layer_types": ["sliding_attention", "sliding_attention", "full_attention"], "no_rope_layers": [2], "is_causal": False,
+        "vocab_size": vocab_size, "draft_vocab_size": vocab_size, "num_target_layers": len(LAYER_TYPES), "max_position_embeddings": 2048,
+        "dflash_config": {"block_size": 5, "conv_group_size": group, "conv_kernel_size": taps, "mask_token_id": vocab_size - 1, "selector_rank": rank, "selector_top_k": 4, "target_layer_ids": [0, 1, 2]},
+    }
+    json.dump(config, open(os.path.join(repo, "config.json"), "w"), indent=2)
     print(repo)
 
 

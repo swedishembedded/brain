@@ -50,5 +50,5 @@ pub use model::{embed, embed_unscaled, Forward, Head, HeadOutput, RicursiveModel
 pub use ops::pipelines;
 pub use policy::POLICY;
 pub use train::{Ripple, TrainConfig, TrainOpts};
-pub use serve::{global_kv_bytes_per_token, lsa_device_bytes, ring_bytes_per_slot, LsaCharge, ring_rows, DraftSizing, RicursiveEngine, ServeConfig};
+pub use serve::{global_kv_bytes_per_token, lsa_device_bytes, ring_bytes_per_slot, LsaCharge, ring_rows, check_draft_fits, DraftSizing, RicursiveEngine, ServeConfig};
 pub use weights::{linear_names, resolve_tiers, WeightReport};

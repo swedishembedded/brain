@@ -608,6 +608,7 @@ pub const QWEN3_POLICY: model::policy::PolicySupport = model::policy::PolicySupp
     gdn_state: false,
     linear_activations: false,
     sparse_attention: true,
+    draft_model: false,
 };
 
 impl QwenServeConfig {

@@ -24,6 +24,11 @@
 #    checks that the real tokenizer, template and bf16 tensors serve (a two-layer model does not answer
 #    sensibly; only the plumbing and the prompt are asserted). Skips by name without the partial checkpoint.
 #
+#  * the same scripted model served with `--speculative dflash`: the tiny random DFlash2 draft the fixture writes beside it
+#    (`ricursiveAI/Ripple-scripted-DFlash2`, found as a pulled sibling) proposes, the engine retains the hidden states it
+#    reads and verifies in one batched step; the reply must be the fixed one, and the server's log reports the rounds.
+#    A random draft is right by chance only, so what is asserted of the acceptance is that it is reported.
+#
 # `brain ricursive finetune` (the generic `brain finetune --arch ricursive`) trains a LoRA adapter over the scripted model
 # on the CPU backend, writes it, and a second run continues it at its own rank; a full fine-tune writes a checkpoint.
 #
@@ -133,6 +138,25 @@ teardown_file() {
   chat "$PORT" "$body" | jq -e '.error != null'
 }
 
+@test "speculative decoding with the DFlash2 draft pulled beside the target answers the same call and reports its rounds" {
+  local port=$((PORT + 5)) body plain spec
+  start_server "$SCRATCH/scripted" "$port" --device cpu --speculative dflash --verbose 2
+  grep -q "default draft model .*Ripple-scripted-DFlash2" "$SCRATCH/serve-$port.log"
+  body=$(jq -n --arg m "$MODEL" --argjson tools "$TOOLS" '{model: $m, messages: [{role: "user", content: "What is the weather in Zürich?"}], tools: $tools, max_tokens: 64, temperature: 0}')
+  plain=$(chat "$PORT" "$body")
+  spec=$(chat "$port" "$body")
+  [ "$(jq -c '.choices[0] | [.finish_reason, .message.reasoning_content, .message.tool_calls[0].function]' <<<"$plain")" = "$(jq -c '.choices[0] | [.finish_reason, .message.reasoning_content, .message.tool_calls[0].function]' <<<"$spec")" ]
+  jq -e '.usage.completion_tokens == 7' <<<"$spec"
+  grep -E "spec_rounds=[1-9][0-9]* spec_accept_rate=[0-9.]+ spec_tokens_per_round=[0-9.]+ spec_verify_steps=[1-9]" "$SCRATCH/serve-$port.log"
+}
+
+@test "a draft model that is not there is refused by name and the model is not served" {
+  local port=$((PORT + 6))
+  start_server "$SCRATCH/scripted" "$port" --device cpu --speculative dflash --draft-model nowhere/Not-Pulled --verbose 1
+  grep -q "no draft model directory with a config.json" "$SCRATCH/serve-$port.log"
+  curl -fsS -H "Authorization: Bearer $(key_of "$port")" "http://127.0.0.1:$port/v1/models" | jq -e --arg m "$MODEL" '[.data[].id] | index($m) == null'
+}
+
 @test "a Ripple served with a sparse-attention indexer on the software adapter answers the same call" {
   [ -n "${BRAIN_LAVAPIPE_ENV:-}" ] && [ -f "$BRAIN_LAVAPIPE_ENV" ] || skip "set BRAIN_LAVAPIPE_ENV to the lavapipe environment file (.agents/rules/testing.md)"
   mkdir -p "$SCRATCH/corpus"
@@ -151,6 +175,14 @@ teardown_file() {
   chat $((PORT + 1)) "$body" >"$SCRATCH/sparse.json"
   jq -e '.choices[0].finish_reason == "tool_calls" and .choices[0].message.tool_calls[0].function.name == "get_weather"' "$SCRATCH/sparse.json"
   grep -q "default kv-cache int8" "$SCRATCH/serve-$((PORT + 1)).log"
+  # Speculation with the draft beside the index: the same reply, the verify held inside one cluster block of the index.
+  (
+    source "$BRAIN_LAVAPIPE_ENV"
+    start_server "$SCRATCH/scripted" $((PORT + 7)) --device software --sparse-attention "$SCRATCH/indexer.safetensors" --speculative dflash --verbose 2
+  ) || skip "the software adapter server with a draft model did not become ready"
+  chat $((PORT + 7)) "$body" >"$SCRATCH/sparse-spec.json"
+  [ "$(jq -c '.choices[0] | [.finish_reason, .message.reasoning_content, .message.tool_calls[0].function]' "$SCRATCH/sparse.json")" = "$(jq -c '.choices[0] | [.finish_reason, .message.reasoning_content, .message.tool_calls[0].function]' "$SCRATCH/sparse-spec.json")" ]
+  grep -E "spec_rounds=[1-9][0-9]* spec_accept_rate=" "$SCRATCH/serve-$((PORT + 7)).log"
   # An indexer that cannot be read is refused at startup, naming the flag, and the model is not listed.
   start_server "$SCRATCH/scripted" $((PORT + 2)) --device cpu --sparse-attention "$SCRATCH/corpus/a.txt" || skip "the refusing server did not become ready"
   grep -q "skip $MODEL.*--sparse-attention" "$SCRATCH/serve-$((PORT + 2)).log"

@@ -170,10 +170,12 @@ fn the_serving_policy_reaches_ripple_and_a_choice_it_cannot_honour_is_refused_by
     p.set("--ctx", "4096").unwrap();
     p.set("--max-batch", "6").unwrap();
     p.set("--sparse-attention", "ix.safetensors").unwrap();
+    p.set("--draft-model", "ricursiveAI/Ripple-65B-Preview-DFlash2").unwrap();
     let mut cfg = RicursiveServeConfig::default();
     let notes = cfg.apply_policy(&p).expect("Ripple honours it");
     assert!(notes.is_empty(), "{notes:?}");
     assert_eq!((cfg.kv_cache.unwrap().as_str(), cfg.ctx, cfg.max_batch, cfg.sparse_attention.as_deref()), ("fp8", Some(4096), Some(6), Some("ix.safetensors")));
+    assert_eq!(cfg.draft_model.as_deref(), Some("ricursiveAI/Ripple-65B-Preview-DFlash2"));
 
     let mut nf4 = ServePolicy::default();
     nf4.set("--weight-format", "nf4").unwrap();
@@ -289,13 +291,14 @@ fn prompt_lookup_speculation_returns_the_plain_greedy_tokens_and_reports_what_it
     assert!(proposed > 0 && steps > 0, "the drafter proposed and the engine verified: {proposed} proposals over {steps} steps");
     assert!(want.iter().all(|t| t.starts_with(['a', 'b', 'c', 'd'])) && want.iter().all(|t| t.chars().count() > 8), "the model walks the cycle: {want:?}");
 
-    // What the drafters of the release would need is refused by name, and the lookup drafter beside sparse attention too.
-    for (mode, needle) in [(SpeculativeMode::Mtp, "multi-token-prediction"), (SpeculativeMode::Dflash, "hidden states")] {
-        let err = resident(&dir, &RicursiveServeConfig { speculative: Some(mode), ..Default::default() }, &[]).err().expect("refused");
-        assert!(err.contains(needle), "{err}");
-    }
-    let err = resident(&dir, &RicursiveServeConfig { speculative: Some(SpeculativeMode::Ngram), sparse_attention: Some("ix.safetensors".into()), ..Default::default() }, &[]).err().expect("refused");
-    assert!(err.contains("--sparse-attention"), "{err}");
+    // The multi-token-prediction head Ripple does not have is refused by name; so is a draft model beside prompt lookup, and
+    // the DFlash2 mode without a draft pulled beside the target says what to pull.
+    let err = resident(&dir, &RicursiveServeConfig { speculative: Some(SpeculativeMode::Mtp), ..Default::default() }, &[]).err().expect("refused");
+    assert!(err.contains("multi-token-prediction"), "{err}");
+    let err = resident(&dir, &RicursiveServeConfig { speculative: Some(SpeculativeMode::Dflash), ..Default::default() }, &[]).err().expect("no draft pulled");
+    assert!(err.contains("brain pull ricursiveAI/Ripple-tiny-DFlash2"), "{err}");
+    let err = resident(&dir, &RicursiveServeConfig { speculative: Some(SpeculativeMode::Ngram), draft_model: Some("d".into()), ..Default::default() }, &[]).err().expect("refused");
+    assert!(err.contains("prompt lookup"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -470,4 +473,100 @@ fn adapters_are_offered_replaced_and_withdrawn_on_a_running_server() {
     exec.shutdown();
     std::fs::remove_dir_all(&dir).ok();
     files.iter().for_each(|f| drop(std::fs::remove_file(f)));
+}
+
+/// A random DFlash2 draft for the tiny target of [`config`]: width 64, vocabulary 264, three layers (two sliding with a
+/// window of 6, one full NoPE) reading the target's layers 0, 2 and 4.
+fn write_draft(dir: &std::path::Path, vocab: usize) {
+    std::fs::create_dir_all(dir).unwrap();
+    let (d, ff, heads, kv_heads, hd, layers, group, taps, rank) = (64usize, 96usize, 4usize, 2usize, 16usize, 3usize, 8usize, 4usize, 8usize);
+    let mut rng = Lcg::new(77);
+    let mut tensors = Vec::new();
+    let mut put = |name: String, dims: Vec<usize>, scale: f32, offset: f32| {
+        let n: usize = dims.iter().product();
+        let data: Vec<f32> = (0..n).map(|_| offset + rng.signed() * scale).collect();
+        tensors.push(brain_testutil::hfquant::f32_raw(&name, &dims, &data));
+    };
+    put("fc.weight".into(), vec![d, 3 * d], 0.1, 0.0);
+    put("hidden_norm.weight".into(), vec![d], 0.2, 1.0);
+    put("norm.weight".into(), vec![d], 0.2, 1.0);
+    put("candidate_selector.hidden_projection.weight".into(), vec![rank, d], 0.3, 0.0);
+    put("candidate_selector.predecessor_codebook".into(), vec![vocab, rank], 1.0, 0.0);
+    put("candidate_selector.successor_codebook".into(), vec![vocab, rank], 1.0, 0.0);
+    for l in 0..layers {
+        let p = |t: &str| format!("layers.{l}.{t}");
+        for (name, dims, scale, offset) in [
+            ("input_layernorm.weight", vec![d], 0.2, 1.0),
+            ("post_attention_layernorm.weight", vec![d], 0.2, 1.0),
+            ("self_attn.q_proj.weight", vec![heads * hd, d], 0.1, 0.0),
+            ("self_attn.k_proj.weight", vec![kv_heads * hd, d], 0.1, 0.0),
+            ("self_attn.v_proj.weight", vec![kv_heads * hd, d], 0.1, 0.0),
+            ("self_attn.o_proj.weight", vec![d, heads * hd], 0.1, 0.0),
+            ("self_attn.q_norm.weight", vec![hd], 0.2, 1.0),
+            ("self_attn.k_norm.weight", vec![hd], 0.2, 1.0),
+            ("mlp.gate_proj.weight", vec![ff, d], 0.1, 0.0),
+            ("mlp.up_proj.weight", vec![ff, d], 0.1, 0.0),
+            ("mlp.down_proj.weight", vec![d, ff], 0.1, 0.0),
+            ("attention_conv.base_kernel", vec![2, taps, d], 0.1, 0.5),
+            ("attention_conv.kernel_projection.weight", vec![2 * taps * (d / group), d], 0.1, 0.0),
+            ("mlp_conv.base_kernel", vec![2, taps, d], 0.1, 0.5),
+            ("mlp_conv.kernel_projection.weight", vec![2 * taps * (d / group), d], 0.1, 0.0),
+        ] {
+            put(p(name), dims, scale, offset);
+        }
+    }
+    brain_testutil::hfquant::write_safetensors(&dir.join("model.safetensors"), &tensors);
+    let config = serde_json::json!({
+        "architectures": ["DFlash2DraftModel"], "model_type": "qwen3", "hidden_size": d, "intermediate_size": ff, "num_hidden_layers": layers,
+        "num_attention_heads": heads, "num_key_value_heads": kv_heads, "head_dim": hd, "rms_norm_eps": 1e-6, "rope_parameters": {"rope_theta": 10000.0, "rope_type": "default"},
+        "sliding_window": 6, "use_sliding_window": true, "layer_types": ["sliding_attention", "sliding_attention", "full_attention"], "no_rope_layers": [2], "is_causal": false,
+        "vocab_size": vocab, "draft_vocab_size": vocab, "num_target_layers": 5,
+        "dflash_config": {"block_size": 5, "conv_group_size": group, "conv_kernel_size": taps, "mask_token_id": vocab - 1, "selector_rank": rank, "selector_top_k": 4, "target_layer_ids": [0, 2, 4]},
+    });
+    std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+}
+
+#[test]
+fn a_draft_model_is_charged_to_the_plan_and_never_changes_the_greedy_output() {
+    use qwen35::int8_gguf_resident::SpeculativeMode;
+    let dir = pulled_dir_with("draft", Some(*b"abcd"));
+    let draft = dir.with_extension("draft");
+    write_draft(&draft, config().vocab_size);
+    let plain = resident(&dir, &RicursiveServeConfig::default(), &[]).unwrap();
+    let knobs = RicursiveServeConfig { speculative: Some(SpeculativeMode::Dflash), draft_model: Some(draft.to_string_lossy().into_owned()), ..Default::default() };
+    let drafted = resident(&dir, &knobs, &[]).expect("a draft model that fits the target");
+    let key = InstanceKey::new(ID, "default");
+    assert!(drafted.estimate(&key).vram > plain.estimate(&key).vram, "the draft's weights and caches are part of the plan");
+    assert!(drafted.estimate(&key).ram > plain.estimate(&key).ram, "so are the target's retained hidden states, on the host");
+
+    // `--draft-model` alone implies the DFlash2 mode.
+    let implied = resident(&dir, &RicursiveServeConfig { draft_model: knobs.draft_model.clone(), ..Default::default() }, &[]).expect("the draft model alone selects the mode");
+    assert_eq!(implied.estimate(&key).vram, drafted.estimate(&key).vram);
+
+    let prompts = ["abcdabcdabcdabcdabcd", "xabcdabcdabcdabcdabcdabcd", "bcdabcdabcdabcdabcdabcdabcdabcdabcd"];
+    let run = |resident: &RicursiveResident| {
+        gpu_core::devices::with_host_tier(|| {
+            let mut instance = resident.activate(&key, Device::Cpu).expect("activates");
+            let invs: Vec<Invocation> = prompts.iter().map(|p| ask(p).set("max_new", serde_json::json!(24))).collect();
+            let outputs: Vec<String> = instance.run_batch("generate", &invs, &mut |_, _| {}).into_iter().map(text).collect();
+            (outputs, metric(&*instance, "spec_proposed"), metric(&*instance, "spec_verify_steps"))
+        })
+    };
+    let (want, none, _) = run(&plain);
+    let (got, proposed, steps) = run(&drafted);
+    eprintln!("draft model: {proposed} proposed over {steps} verify steps");
+    assert_eq!(none, 0, "plain decoding proposes nothing");
+    assert_eq!(got, want, "speculation never changes greedy output");
+    assert!(proposed > 0 && steps > 0, "the draft model proposed and the engine verified: {proposed} proposals over {steps} steps");
+
+    // A draft built for another target is refused by name; an unreachable one says where it looked.
+    let other = dir.with_extension("other");
+    write_draft(&other, config().vocab_size + 8);
+    let err = resident(&dir, &RicursiveServeConfig { draft_model: Some(other.to_string_lossy().into_owned()), ..Default::default() }, &[]).err().expect("another vocabulary");
+    assert!(err.contains("vocabulary 272"), "{err}");
+    let err = resident(&dir, &RicursiveServeConfig { draft_model: Some("nowhere/Not-Pulled".into()), ..Default::default() }, &[]).err().expect("not there");
+    assert!(err.contains("--draft-model nowhere/Not-Pulled") && err.contains("config.json"), "{err}");
+    for d in [&dir, &draft, &other] {
+        std::fs::remove_dir_all(d).ok();
+    }
 }

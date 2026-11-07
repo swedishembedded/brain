@@ -31,4 +31,5 @@ pub const POLICY: PolicySupport = PolicySupport {
     gdn_state: false,
     linear_activations: false,
     sparse_attention: true,
+    draft_model: true,
 };

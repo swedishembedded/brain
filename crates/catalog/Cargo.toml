@@ -32,6 +32,7 @@ brain-glmdsa.workspace = true
 brain-qwen35moe.workspace = true
 brain-qwen35.workspace = true
 brain-ricursive.workspace = true
+brain-dflash2.workspace = true
 brain-llmserve.workspace = true
 brain-horizon.workspace = true
 brain-lfm2.workspace = true

@@ -52,7 +52,7 @@ use qwen35::int8_gguf_resident::SpeculativeMode;
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use ricursive::placement::{card_budget, footprint, place, stream_plan, Footprint};
-use ricursive::{LsaCharge, RicursiveConfig, RicursiveEngine, ServeConfig};
+use ricursive::{DraftSizing, LsaCharge, RicursiveConfig, RicursiveEngine, ServeConfig};
 
 use crate::adapter_registry::{AdaptedInstance, AdapterBankSettings, AdapterHost, AdapterRegistry};
 use crate::adapter_release::{LoadedAdapter, ServedBase, RICURSIVE_FAMILY};
@@ -98,9 +98,12 @@ pub struct RicursiveServeConfig {
     pub sparse_attention: Option<String>,
     /// Cached prompts kept for prefix reuse (0 turns reuse off).
     pub prefix_slots: Option<u32>,
-    /// `--speculative`: `None`, `Off` and `Auto` decode plainly (the release offers no drafter this engine runs),
-    /// `Ngram` drafts by prompt lookup and verifies in one batched step. `Mtp` and `Dflash` are refused.
+    /// `--speculative`: `None`, `Off` and `Auto` decode plainly unless `--draft-model` names a draft, `Ngram` drafts
+    /// by prompt lookup and `Dflash` with the DFlash2 draft model, each verified in one batched step. `Mtp` is refused.
     pub speculative: Option<SpeculativeMode>,
+    /// `--draft-model`: the directory (or pulled `<vendor>/<repo>`) of the DFlash2 draft model. `--speculative dflash`
+    /// without it looks for the draft pulled beside the target (`<repo>-DFlash2`, the quantization suffix dropped).
+    pub draft_model: Option<String>,
     /// `--adapter*`: the bank of adapter slots built beside the base; `None`: none (adapter flags build one).
     pub adapter_bank: Option<AdapterBankSettings>,
     /// Why the policy could not be honoured, when it could not (the resident then refuses to build, naming it).
@@ -123,6 +126,9 @@ impl RicursiveServeConfig {
         }
         if let Some(path) = &p.sparse_attention {
             self.sparse_attention = Some(path.clone());
+        }
+        if let Some(draft) = &p.draft_model {
+            self.draft_model = Some(draft.clone());
         }
         let l = &p.limits;
         self.ctx = l.ctx.or(self.ctx);
@@ -153,6 +159,22 @@ fn pool_blocks(ctx: u32, max_batch: u32, prefix_slots: u32) -> u32 {
     let short = ctx.min(COMPANION_TOKENS);
     let tokens = u64::from(ctx) + u64::from(max_batch.saturating_sub(1) + prefix_slots) * u64::from(short);
     tokens.div_ceil(u64::from(BLOCK_SIZE)).min(u64::from(u32::MAX - 2)) as u32 + 2
+}
+
+/// The draft pulled beside the target `id` (`ricursiveAI/Ripple-65B-Preview-NVFP4`): the same repo without its
+/// quantization suffix, plus `-DFlash2` (`ricursiveAI/Ripple-65B-Preview-DFlash2`).
+fn sibling_draft_id(id: &str) -> String {
+    let base = ["-NVFP4", "-FP8", "-INT8", "-GGUF"].iter().find_map(|suffix| id.strip_suffix(suffix)).unwrap_or(id);
+    format!("{base}-DFlash2")
+}
+
+/// What the draft in `dir` costs beside the target `cfg`, after refusing, by name, a draft built for another target.
+fn draft_sizing(cfg: &RicursiveConfig, dir: &Path) -> Result<DraftSizing, String> {
+    let text = std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("draft model {}: config.json: {e}", dir.display()))?;
+    let draft = dflash2::Dflash2Config::from_json(&text).map_err(|e| format!("draft model {}: {e}", dir.display()))?;
+    ricursive::check_draft_fits(cfg, &draft)?;
+    let source = dflash2::HfDraft::open(dir)?;
+    Ok(DraftSizing { weight_bytes: source.device_weight_bytes(&draft), cfg: draft })
 }
 
 /// Everything about the checkpoint the sizing reads.
@@ -186,7 +208,7 @@ fn config_eos(dir: &Path) -> Vec<u32> {
 }
 
 /// The deployment `knobs` ask for on `cards` (`(device index, usable bytes)`; empty for the host tier).
-fn size(ck: &Checkpoint, knobs: &RicursiveServeConfig, lsa: Option<&Indexer>, cards: &[(usize, u64)]) -> Result<Deployment, String> {
+fn size(ck: &Checkpoint, knobs: &RicursiveServeConfig, lsa: Option<&Indexer>, draft: Option<&DraftSizing>, cards: &[(usize, u64)]) -> Result<Deployment, String> {
     let mut chosen = Vec::new();
     let kv = match knobs.kv_cache {
         Some(kv) => kv,
@@ -205,6 +227,7 @@ fn size(ck: &Checkpoint, knobs: &RicursiveServeConfig, lsa: Option<&Indexer>, ca
         serve.weights = knobs.weights.clone();
         serve.adapter_bank = ck.bank.clone();
         serve.sparse_attention = lsa.is_some();
+        serve.drafter = draft.cloned();
         serve
     };
     let fit = |serve: &ServeConfig| {
@@ -249,13 +272,14 @@ fn does_not_place(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy
     let fp = footprint(cfg, serve, tiers, lsa.map_or(LsaCharge::default(), |ix| LsaCharge::of(ix, serve)));
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
     format!(
-        "ricursive: a context of {} tokens needs {:.1} GiB ({:.1} weights, {:.1} global KV, {:.1} rings, {:.1} index, {:.1} fixed per stage) and the {} card(s) offer {:.1} GiB usable; use a narrower --weight-format or --kv-cache, a smaller --ctx or --max-batch, or more cards",
+        "ricursive: a context of {} tokens needs {:.1} GiB ({:.1} weights, {:.1} global KV, {:.1} rings, {:.1} index, {:.1} draft model, {:.1} fixed per stage) and the {} card(s) offer {:.1} GiB usable; use a narrower --weight-format or --kv-cache, a smaller --ctx or --max-batch, or more cards",
         serve.max_seq_len,
         gib(fp.single_card_bytes()),
         gib(fp.weights),
         gib(fp.kv_global),
         gib(fp.kv_rings),
         gib(fp.lsa),
+        gib(fp.draft),
         gib(fp.per_stage),
         cards.len(),
         gib(cards.iter().map(|c| c.1).sum())
@@ -308,6 +332,8 @@ pub struct RicursiveResident {
     sparse_attention: Option<String>,
     /// Draft by prompt lookup (`--speculative ngram`).
     ngram: bool,
+    /// The DFlash2 draft model's directory (`--speculative dflash`, `--draft-model`).
+    draft: Option<PathBuf>,
     /// `(device index, usable bytes)` of the cards the deployment may be placed over; empty for the host tier.
     cards: Vec<(usize, u64)>,
     sampling: SamplingDefaults,
@@ -327,12 +353,7 @@ impl RicursiveResident {
         }
         match knobs.speculative {
             Some(SpeculativeMode::Mtp) => return Err(format!("{id}: --speculative mtp: Ripple has no multi-token-prediction head")),
-            Some(SpeculativeMode::Dflash) => {
-                return Err(format!("{id}: --speculative dflash: the Ripple-65B-Preview-DFlash2 drafter needs the target's hidden states at its layers 1, 20, 39, 58 and 77, which this engine does not retain, and its block forward is not ported; use ngram or off"))
-            }
-            Some(SpeculativeMode::Ngram) if knobs.sparse_attention.is_some() => {
-                return Err(format!("{id}: --speculative ngram cannot be combined with --sparse-attention: a rejected row would leave index pages built over rolled-back keys"))
-            }
+            Some(SpeculativeMode::Ngram) if knobs.draft_model.is_some() => return Err(format!("{id}: --speculative ngram drafts by prompt lookup and takes no --draft-model")),
             _ => {}
         }
         let path = Path::new(dir);
@@ -344,16 +365,42 @@ impl RicursiveResident {
         let src = ricursive::open_shared_checkpoint(dir, &cfg, &layers).map_err(|e| format!("{id}: {e}"))?;
         let tiers = ricursive::resolve_tiers(&cfg, src.as_ref(), knobs.weights.as_ref());
         drop(src);
+        let draft = Self::resolve_draft(path, id, knobs)?;
+        let draft_sizing = draft.as_ref().map(|d| draft_sizing(&cfg, d)).transpose().map_err(|e| format!("{id}: {e}"))?;
         let indexer = knobs.sparse_attention.as_deref().map(Indexer::load).transpose().map_err(|e| format!("{id}: --sparse-attention: {e}"))?;
         let cards: Vec<(usize, u64)> = gpus.iter().map(|&(i, total)| (i as usize, card_budget(total).saturating_sub(reserved))).collect();
         let bank = knobs.adapter_bank.as_ref().map(|b| b.bank_config(&ricursive::TrainConfig::new(cfg.clone(), 1))).transpose().map_err(|e| format!("{id}: {e}"))?;
         let ck = Checkpoint { cfg: cfg.clone(), bank, tiers, max_positions };
-        let deployment = size(&ck, knobs, indexer.as_ref(), &cards).map_err(|e| format!("{id}: {e}"))?;
+        let mut deployment = size(&ck, knobs, indexer.as_ref(), draft_sizing.as_ref(), &cards).map_err(|e| format!("{id}: {e}"))?;
+        if let (Some(dir), None) = (&draft, &knobs.draft_model) {
+            deployment.chosen.push(format!("draft model {} (--speculative dflash)", dir.display()));
+        }
         if let Some(ix) = &indexer {
             deployment.serve.check_indexer(&cfg, ix).map_err(|e| format!("{id}: --sparse-attention: {e}"))?;
         }
         let sampling = SamplingDefaults::from_generation_config(path)?;
-        Ok(RicursiveResident { id: id.to_string(), dir: path.to_path_buf(), cfg, deployment, sparse_attention: knobs.sparse_attention.clone(), ngram: knobs.speculative == Some(SpeculativeMode::Ngram), cards, sampling, bank: knobs.adapter_bank.clone(), adapters: Arc::default() })
+        Ok(RicursiveResident { id: id.to_string(), dir: path.to_path_buf(), cfg, deployment, sparse_attention: knobs.sparse_attention.clone(), ngram: knobs.speculative == Some(SpeculativeMode::Ngram), draft, cards, sampling, bank: knobs.adapter_bank.clone(), adapters: Arc::default() })
+    }
+
+    /// The draft model directory the knobs ask for, or `None` when speculation is not by a draft model. `--draft-model`
+    /// names a directory or a pulled `<vendor>/<repo>` (looked up beside the target's); `--speculative dflash`
+    /// alone looks for the draft pulled beside the target, and says what to pull when there is none.
+    fn resolve_draft(weights: &Path, id: &str, knobs: &RicursiveServeConfig) -> Result<Option<PathBuf>, String> {
+        let wants_dflash = knobs.speculative == Some(SpeculativeMode::Dflash);
+        let named = match (&knobs.draft_model, wants_dflash) {
+            (Some(name), _) => name.clone(),
+            (None, true) => sibling_draft_id(id),
+            (None, false) => return Ok(None),
+        };
+        // The store holds a pulled model at `<root>/<vendor>/<repo>`, and the target's directory is one of them.
+        let root = weights.parent().and_then(Path::parent);
+        let mut tried = vec![PathBuf::from(&named)];
+        tried.extend(root.map(|r| r.join(&named)));
+        match tried.iter().find(|p| p.join("config.json").is_file()) {
+            Some(dir) => Ok(Some(dir.clone())),
+            None if knobs.draft_model.is_some() => Err(format!("{id}: --draft-model {named}: no draft model directory with a config.json at {}", tried.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" or "))),
+            None => Err(format!("{id}: --speculative dflash needs the draft model, and {named} is not pulled: run `brain pull {named}`, or name its directory with --draft-model")),
+        }
     }
 
     /// The values the defaults chose, as `name value` lines for the startup log.
@@ -427,6 +474,9 @@ impl RicursiveResident {
             let indexer = Indexer::load(path).map_err(|e| format!("ricursive: --sparse-attention {path}: {e}"))?;
             engine.set_lsa(&indexer).map_err(|e| format!("ricursive: --sparse-attention {path}: {e}"))?;
         }
+        if let Some(draft) = &self.draft {
+            engine.set_drafter(draft)?;
+        }
         let mut sched = Scheduler::new(engine, live);
         if self.ngram {
             sched.set_drafter(Box::new(NgramDrafter::new(NGRAM_ORDER)));
@@ -452,7 +502,7 @@ impl ResidentModel for RicursiveResident {
     /// A server with cards places Ripple through [`MultiDeviceResidentModel`]; this is the host tier's footprint
     /// (the whole deployment as one stage), which is what a server with no card registers the resident for.
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        MemCost::new(self.deployment.footprint.single_card_bytes(), HOST_OVERHEAD_BYTES)
+        MemCost::new(self.deployment.footprint.single_card_bytes(), HOST_OVERHEAD_BYTES + self.deployment.footprint.taps_host)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let plan = model::shard::StreamPlan::single(self.cfg.num_hidden_layers);
