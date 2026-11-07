@@ -1,0 +1,44 @@
+<!-- source-sha256: 183549bea37639c9525f8502eaf8bd925234e4b08058b13b10df17be60b16528 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300" width="800" height="300"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="300" fill="#ffffff"/>
+<text x="40" y="24.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">360 pumps, 4 rows each</text>
+<line x1="40" y1="48" x2="634" y2="48" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="None"/>
+<line x1="40" y1="48" x2="40" y2="56" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="None"/>
+<line x1="634" y1="48" x2="634" y2="56" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="None"/>
+<text x="340" y="42.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">site A: 300 pumps</text>
+<line x1="646" y1="48" x2="760" y2="48" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="None"/>
+<line x1="646" y1="48" x2="646" y2="56" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="None"/>
+<line x1="760" y1="48" x2="760" y2="56" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="None"/>
+<text x="700" y="42.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">site B: 60 pumps</text>
+<rect x="43" y="70" width="354" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="220" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">training: 180 pumps</text>
+<rect x="403" y="70" width="114" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="460" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">validation: 60</text>
+<rect x="523" y="70" width="114" height="44" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="580" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">test: 60</text>
+<rect x="643" y="70" width="114" height="44" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="700" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">shift: 60</text>
+<text x="52" y="134.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">fit; folds choose lambda, k</text>
+<text x="460" y="134.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">scale a</text>
+<text x="580" y="134.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">read once</text>
+<text x="700" y="134.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">read last</text>
+<rect x="43" y="170" width="66" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="76" y="188.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fold 0</text>
+<text x="76" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">36</text>
+<rect x="115" y="170" width="66" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="148" y="188.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fold 1</text>
+<text x="148" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">36</text>
+<rect x="187" y="170" width="66" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="220" y="188.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fold 2</text>
+<text x="220" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">36</text>
+<rect x="259" y="170" width="66" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="292" y="188.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fold 3</text>
+<text x="292" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">36</text>
+<rect x="331" y="170" width="66" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="364" y="188.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fold 4</text>
+<text x="364" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">36</text>
+<line x1="40" y1="116" x2="40" y2="168" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<line x1="394" y1="116" x2="394" y2="168" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<text x="414" y="182.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">each fold: whole pumps of the training set,</text>
+<text x="414" y="198.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">scored by models fitted on the other four</text>
+<text x="40" y="266.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">Each box is a set of whole pumps: the four rows of a pump are always on the same side.</text>
+</svg>

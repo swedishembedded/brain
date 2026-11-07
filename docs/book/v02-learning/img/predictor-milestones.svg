@@ -1,0 +1,33 @@
+<!-- source-sha256: 1205a19b9ccc1dc485b988c6ce657f2d5a3dc0f739d2ba18f87510142ea2e478 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 408" width="800" height="408"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="408" fill="#ffffff"/>
+<rect x="305" y="23" width="190" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="46.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  Splits and leakage</text>
+<text x="400" y="62.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pumps, folds, standardiser</text>
+<rect x="45" y="119" width="190" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2  Baselines</text>
+<text x="140" y="158.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">constant and simple</text>
+<rect x="305" y="119" width="190" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3  Linear regression</text>
+<text x="400" y="158.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">normal equations, descent</text>
+<rect x="565" y="119" width="190" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="660" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4  Logistic classifier</text>
+<text x="660" y="158.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">penalty chosen by folds</text>
+<rect x="565" y="215" width="190" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="660" y="238.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5  Evaluation</text>
+<text x="660" y="254.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">AUC, calibration, cost</text>
+<rect x="565" y="311" width="190" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="660" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6  Nearest neighbours</text>
+<text x="660" y="350.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the classical comparison</text>
+<rect x="305" y="311" width="190" height="54" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">7  Report</text>
+<text x="400" y="350.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">intervals, seeds, ablation, slice</text>
+<line x1="347.06" y1="77.59" x2="142.94" y2="118.41" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="400" y1="80" x2="400" y2="116" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="452.94" y1="77.59" x2="657.06" y2="118.41" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="660" y1="176" x2="660" y2="212" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="660" y1="272" x2="660" y2="308" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="562" y1="338" x2="498" y2="338" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="360" y1="176" x2="360" y2="308" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M565,242 L450,242 Q440,242 440,252 L440,308" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M140,173 L140,328 Q140,338 150,338 L302,338" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

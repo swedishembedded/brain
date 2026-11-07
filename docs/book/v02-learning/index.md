@@ -39,9 +39,6 @@ measurements.
 
 ## Chapters
 
-The chapters that exist in this edition are linked; the others are specified in
-the curriculum and appear here when they are written.
-
 1. [The Learning Problem](01-learning-problem.md): what a model is, what it
    learns and from what, and the three settings (labels, no labels, rewards) in
    which the same idea appears.
@@ -62,5 +59,6 @@ the curriculum and appear here when they are written.
    right tool.
 8. [Experiments, Baselines and Claims](08-experiments.md): how to run an experiment
    whose result can be believed and repeated.
-9. Project: A Predictor You Can Trust: train a model on real measurements,
-   evaluate it honestly and explain exactly where it fails.
+9. [Project: A Predictor You Can Trust](09-project-first-predictor.md): train a
+   model on real measurements, evaluate it honestly and explain exactly where it
+   fails.
