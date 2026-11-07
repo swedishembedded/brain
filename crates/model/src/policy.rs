@@ -430,6 +430,7 @@ fn canonical_weights(spec: &str) -> String {
         "fp32" => "f32".to_string(),
         "fp16" => "f16".to_string(),
         "fp8" | "fp8e4m3" => "f8e4m3".to_string(),
+        "nvfp4" => "f4e2m1".to_string(),
         "fp8e5m2" => "f8e5m2".to_string(),
         other => other.to_string(),
     };

@@ -13,7 +13,7 @@
 //! `config.json`) in the published layout, read in whatever encoding it stores (bf16, FP8, the ModelOpt NVFP4
 //! release). Tensors are read one at a time into the device; the model never exists as f32 on the host.
 //! A full fine-tune trains f32 weights, so it needs the base in a float encoding; an adapter trains over the frozen
-//! base held at any tier [`ChatTrainer::LORA_BASES`] lists.
+//! base held at any tier [`ChatTrainer::LORA_BASES`] lists (NVFP4 only as the ModelOpt release stores it).
 
 use std::path::{Path, PathBuf};
 
@@ -84,7 +84,7 @@ fn built(result: Result<Ripple, String>, path: &Path) -> std::io::Result<Ripple>
 
 impl ChatTrainer for RippleTrainer {
     type Trained = Ripple;
-    const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "ricursive", bases: &[Dtype::F32, Dtype::BF16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3] };
+    const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "ricursive", bases: &[Dtype::F32, Dtype::BF16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3, Dtype::F4E2M1] };
     /// The optimizer is the device AdamW over the parameter store with f32 moments; every other choice is refused by
     /// name.
     const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "ricursive", state: model::StateSupport::Fp32, resident: false, layer_streamed: false, f32_streamed: false };
@@ -111,8 +111,18 @@ impl ChatTrainer for RippleTrainer {
     }
 
     fn train_lora(base: &Path, lora: &LoraRequest<'_>, opts: &FitOpts, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Ripple)> {
-        let tiers = lora.checked::<Self>()?.clone();
+        let asked = lora.checked::<Self>()?.clone();
         let opened = Base::open(base)?;
+        // NVFP4 is held as the release published it (nothing quantizes into it): the base must store it.
+        let tiers = if asked.dtypes().any(|t| t == Dtype::F4E2M1) {
+            let stored = crate::weights::resolve_tiers(&opened.model, &*opened.source, None);
+            if !stored.dtypes().any(|t| t == Dtype::F4E2M1) {
+                return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("{}: a base format of nvfp4 holds the NVFP4 release as published, and this checkpoint stores {}; nothing quantizes into NVFP4", base.display(), stored.describe())));
+            }
+            stored
+        } else {
+            asked
+        };
         let cfg = opened.train_config(opts.block_size).with_lora(LoraCfg::new(lora.rank, lora.alpha, default_targets()));
         let init = match lora.continue_from {
             Some(path) => {

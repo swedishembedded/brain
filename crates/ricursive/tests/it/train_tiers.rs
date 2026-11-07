@@ -169,3 +169,45 @@ fn an_adapter_over_an_nvfp4_release_trains_like_one_over_its_decoded_values() {
     assert!((loss - want_loss).abs() <= 1e-4 * want_loss.abs().max(1.0), "loss {loss} vs {want_loss}");
     assert!(rel < 2e-3, "{name}'s gradient is {rel} from the decoded-values build's");
 }
+
+/// A fit that stops at the model it is handed: the build is what the test is about.
+struct StopAtTheModel(Option<String>);
+
+impl model::finetune::ModelFit for StopAtTheModel {
+    fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(model::FitReport, M)> {
+        self.0 = Some(format!("{} trainable tensors", model.param_names().len()));
+        Err(std::io::Error::other("stopped at the model"))
+    }
+}
+
+/// Spec: the generic trainer opens an NVFP4 release as the frozen base of an adapter when asked for the `nvfp4` base
+/// format, and refuses that format over a checkpoint that does not store NVFP4 (nothing quantizes into it).
+#[test]
+fn the_generic_trainer_holds_the_nvfp4_release_as_published_and_refuses_the_format_otherwise() {
+    use model::finetune::{ChatTrainer, LoraRequest};
+    use ricursive::finetune::RippleTrainer;
+
+    let cfg = adapter_config();
+    let weights = cfg.tiny_weights(5);
+    let tmp = tempfile::tempdir().unwrap();
+    let (release, _) = nvfp4_release(&cfg, &weights, tmp.path());
+    std::fs::write(tmp.path().join("config.json"), cfg.model.to_json().to_string()).unwrap();
+    let tiers = TierPolicy::uniform(Dtype::F4E2M1);
+    let request = LoraRequest { rank: 2, alpha: 4.0, continue_from: None, base: &tiers };
+    let opts = model::FitOpts { batch_size: ROWS, block_size: SEQ, ..model::FitOpts::default() };
+
+    let mut fit = StopAtTheModel(None);
+    let err = RippleTrainer::train_lora(std::path::Path::new(&release), &request, &opts, &mut fit).err().expect("the stop is the fit's");
+    assert!(err.to_string().contains("stopped at the model"), "{err}");
+    assert_eq!(fit.0.as_deref(), Some("48 trainable tensors"), "an adapter on all eight linears of three layers, the base frozen");
+
+    // An f32 base has nothing to hold as NVFP4.
+    let dense = tmp.path().join("dense");
+    std::fs::create_dir_all(&dense).unwrap();
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg.param_list().into_iter().filter(|(n, _)| weights.contains_key(n)).map(|(n, k)| (n.clone(), vec![k as u64], weights[&n].clone())).collect();
+    checkpoint::st::save_safetensors(dense.join("model.safetensors").to_str().unwrap(), &tensors, &TrainConfig::new(cfg.model.clone(), SEQ).to_json(), None).unwrap();
+    let mut fit = StopAtTheModel(None);
+    let err = RippleTrainer::train_lora(&dense.join("model.safetensors"), &request, &opts, &mut fit).err().expect("refused");
+    assert!(err.to_string().contains("nothing quantizes into NVFP4"), "{err}");
+    assert!(fit.0.is_none(), "refused before the model was built");
+}

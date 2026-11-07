@@ -27,7 +27,11 @@ scheduler, tokenizer, chat-template, reply-parsing and policy paths.
 | Layers staged over several cards, chosen by the memory plan from the device selection | [x] |
 | Speculative decoding: batched verify with prompt-lookup drafting (`--speculative ngram`) | [x] |
 | Speculative decoding with the `Ripple-65B-Preview-DFlash2` drafter | [ ] |
-| Training | [ ] |
+| Full fine-tuning (f32 weights, AdamW on the device) and LoRA/QLoRA through the shared trainers (`brain finetune`, `ChatFineTune`, `ChatFullFineTune`, `PreferenceFineTune`) | [x] |
+| LoRA over a bf16, fp8, nf4 or int8 base, or the ModelOpt NVFP4 release as published; the adapter exports as a PEFT directory | [x] |
+| Pipeline-parallel training over several devices (`model::Pipeline`) | [x] |
+| Native sparse attention training (N-LSA) on the global layers | [x] |
+| Layer-streamed or resident low-precision full fine-tuning of the 65B; an adapter bank in `brain serve` | [ ] |
 
 ## Serving it
 
@@ -138,6 +142,25 @@ context token and the drafter's block forward would have to be ported (the
 Qwen3.8 implementation in `qwen35::dflash2` is bound to its GGUF
 single-stream path, not to the scheduler). `--speculative dflash` says so and
 refuses.
+
+## Training it
+
+`brain finetune BASE --dataset chat.jsonl --out DIR` trains every weight (the checkpoint, with the tokenizer files,
+is written under DIR); with `--lora RANK` it trains a LoRA adapter over the frozen base instead and writes
+`DIR/adapter.safetensors`. `BASE` is a local file or directory in the release layout, a brain-format checkpoint,
+or a model id. `brain ricursive finetune ...` is the same command. The adapter targets `q_proj`, `k_proj`,
+`v_proj`, `o_proj`, `g_proj`, `gate_proj`, `up_proj` and `down_proj` of every layer; `--base-format`
+(`f32`, `bf16`, `int8`, `nf4`, `fp8`, or `nvfp4` for the NVFP4 release) says how the frozen base is held,
+`--activations keep|recompute|bf16|fp8` what the backward keeps (Ripple recomputes every layer from its input
+boundary, in f32 or narrowed, and refuses `keep` by name), `--continue FILE` continues an adapter at its own rank.
+A variant of the adapter Ripple does not train (rank-stabilised, LoRA+, frozen A) is refused by name.
+
+Every operation has a backward, checked against finite differences and against PyTorch autograd of the
+released `modeling_ricursive.py` on random weights and on the real layers 0 and 4. The value residual reads the
+embedding in every layer, so a pipeline stage holds the embedding table and recomputes it from the tokens. With
+a library, `ricursive::Ripple` is a `model::Model` and `model::Shardable` (`model::Pipeline::<Ripple>`), and
+`Ripple::enable_native_lsa` trains the global layers with native sparse attention (a device that runs
+workgroup-barrier kernels).
 
 ## Using it as a library
 

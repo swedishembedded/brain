@@ -931,6 +931,7 @@ mod tests {
             ("llama", Qwen3::TOKEN_OBJECTIVES, offered::<Qwen3>(qwen3::config::QwenConfig { qk_norm: false, ..qwen3::config::QwenConfig::tiny() })),
             (Qwen35::ID, Qwen35::TOKEN_OBJECTIVES, offered::<Qwen35>(qwen35::config::Qwen35Config::tiny())),
             (Qwen35Moe::ID, Qwen35Moe::TOKEN_OBJECTIVES, offered::<Qwen35Moe>(qwen35moe::config::Qwen35Config::tiny())),
+            (Ripple::ID, Ripple::TOKEN_OBJECTIVES, offered::<Ripple>(ricursive::TrainConfig::tiny())),
         ];
         for (id, claimed, actual) in claims {
             assert_eq!(claimed, actual, "{id}: the registry claims token_objectives={claimed} but the model offers {actual}");

@@ -106,7 +106,10 @@ serve other work; CUDA parity and performance follow on the same gates.
        fetches `chat_template.jinja`, batched speculative verify with prompt-lookup drafting.
        End to end on the CPU backend and the software adapter (`tests/e2e/ripple.bats`). The
        DFlash2 drafter is not run (below); no card has served it (step 8).
-7. [ ] Backward, gradcheck, LoRA; N-LSA after D-LSA.
+7. [x] Backward for every Ripple op, gradchecked and compared with PyTorch autograd; the `Model` and `Shardable`
+       faces through the generic trainer, pipeline and objectives; LoRA/QLoRA through `model::adapter` served by
+       the engine; full fine-tuning; N-LSA on the global layers; `brain finetune` and the SDK fine-tuners. Measured
+       on the CPU backend and the software Vulkan adapter below; no card has trained it (step 8).
 8. [ ] CUDA parity and the measured long-context numbers (both GH200s,
        when free).
 
@@ -424,6 +427,55 @@ the port needs the SGLang source or a dump of the drafter's activations to gate 
 engine needs per-sequence retention of the five taps (prefill and verify rows) behind
 `PagedDecoder::draft`.
 
+### Step 7: trained through the generic paths (CPU backend and the software Vulkan adapter, 2026-11-07)
+
+Gates: `crates/ricursive/tests/it/train_*.rs`, `crates/gradcheck/tests/it/ricursive_fd.rs`,
+`crates/sdk/tests/it/chat_finetune_ricursive.rs`, `tests/e2e/ripple.bats`, the references from
+`tools/goldens/ricursive_dump_reference.py` (`grads`, `real-grads`, `real-lora`; torch 2.15,
+transformers 5.22, fp32 on the CPU). `ricursive::Ripple` is a `model::Model` (embedding scale, value-residual
+lerp with its own gate, f32 sigmoid attention gate, one- and two-sided clamps with zero gradient where they
+saturate, per-head QK norm, PeriNorm order, windowed and global attention, untied head) and a
+`model::Shardable`; only the residual between layers is kept (`model::saved`, f32/bf16/fp8 boundaries) and
+each layer is rebuilt in the backward.
+
+| gate | result |
+|---|---|
+| finite differences, whole tiny model, every parameter, 8 random directions, seeds 3 and 11 (`ricursive_every_parameter_matches_finite_differences`) | 206 checks inside atol 4e-3 / rtol 8e-2; worst relative error 2.5e-2 on directions with a gradient over 0.05 |
+| finite differences entry by entry: the embedding (it sums every layer's value path, 80 of them in the real model) and each layer's value-residual gate | worst absolute error 2.4e-4 at gradients to 0.4; the feed-forward clamp is off in this check (a finite difference across its kink is wrong, see the gradcheck commit) and is held by the directional check, the kernel tests and autograd |
+| every feature moves the loss (clamp, window, value residual, gate, embedding scale) | each by more than 1e-3 |
+| tiny 3-layer model (sliding, sliding, global; window 4 < 12 tokens; clamp 0.5 firing) vs PyTorch autograd of the official `modeling_ricursive.py` | loss exact to 1e-5; all 48 parameter gradients, worst scaled error 4.5e-5 |
+| three AdamW steps with global-norm clipping vs `torch.optim.AdamW` | losses to 2e-7, parameters to 2.5e-5 |
+| real layers 0 and 4 (5.2 GB bf16 as f32), one backward vs autograd | loss 9.5e-7; gradient norms 1.4e-5; 4096 sampled entries per tensor 4.8e-5 |
+| real layers 0 and 4 with a rank-8 adapter on all eight linears of both layers (`one_lora_step_over_real_layers_0_and_4_matches_pytorch`, 47 s forward and backward, 105 s the test) | loss 13.992954 vs 13.992969 (1.0e-6); all 32 factors' gradients in full, worst scaled error 4.3e-5; after one AdamW step 36 of 3,145,728 factor entries moved differently (first-step Adam moves each entry by the learning rate, so a gradient within rounding of zero can flip), loss 11.53493 vs 11.534856 (6.5e-6) |
+| a run learns a repeated sentence through the shared fit loop; a run stopped and resumed ends bit for bit where the uninterrupted one does | loss 3.28 -> 0.0000 in 40 steps; resumed equal |
+| adapter gradient = merged-weight gradient through the factors (`dB = s dW A^T`, `dA = s B^T dW`) | worst scaled error 3.4e-6 over 48 factors |
+| zero-init adapter equals the base; a run learns and leaves the base untouched | adapter loss 4.1951 -> 0.0551; base tensors identical |
+| a trained adapter attached to `RicursiveEngine` vs the training model's logits | scaled error 2.3e-7 |
+| adapter over a bf16, FP8, NF4 base vs an f32 build over the decoded values (QLoRA) | loss and gradients identical (0.0); int8 needs a packed-int8 product (skips on this backend) |
+| adapter over the ModelOpt NVFP4 release (MLP resident in NVFP4, attention and head as stored) vs the decoded values | loss 4.219043 both, worst adapter gradient 1.0e-6 |
+| two-stage `model::Pipeline<Ripple>` vs one stage (cut between the second sliding layer and the global layer, so the value residual reaches across it) | loss identical; every gradient equal (worst 6.4e-8, the embedding, which both stages hold); four AdamW steps to 7.8e-7; also with an adapter and with bf16 boundaries |
+| N-LSA on the global layer, full budget vs dense (`train_nlsa`, software adapter, 2 x 64 tokens) | loss 3.759443 both, worst gradient difference 3.2e-7 of the largest; window-only 3.771009 |
+| N-LSA, sparse budget (window 8, sinks 2, top_k 16, top_p 8) | 40 AdamW steps: loss 3.7757 -> 0.0004 |
+| SDK `ChatFineTune` (LoRA), `ChatFullFineTune`, `PreferenceFineTune` on a tiny Ripple | loss falls in each; the DPO margin starts at ln 2; an adapter file holds adapter tensors only; a variant this model does not train and a held-out set it does not score are refused by name |
+| `brain ricursive finetune` / `brain finetune --arch ricursive` end to end (`tests/e2e/ripple.bats`, `--device cpu`) | a LoRA run on the scripted model lowers the loss and writes the adapter, a second run continues it at its own rank and a different rank is refused; a full run writes a checkpoint |
+
+How a stage is cut: with the value residual every stage holds the embedding table and recomputes `x0` from the
+tokens, so nothing but the residual crosses the cut; each stage turns its share of `x0`'s gradient into an
+embedding gradient of its own and the pipeline sums the copies as it does for any tensor held by several
+stages (`Residuals::ingest` stores a stage's input boundary in the narrow stream). N-LSA reuses
+`model::lsa::native` as Qwen3 does, with `Rope::None` for the NoPE index space (the selector takes the rope as a
+parameter now) and `window_selection` moved there from Qwen3.
+
+Shared-code defects found and fixed on the way: the Ripple entry-by-entry gradient check failed at the first
+commit that introduced it (a finite difference across the clamp's kink); `NativeSelector` assumed RoPE.
+
+CLI and SDK: `brain finetune BASE --dataset FILE --out DIR [--lora RANK] [--arch ID] [--base-format F]
+[--activations P] [--continue ADAPTER]` (model-agnostic flags; `brain ricursive finetune ...` is the same
+command) over `ChatFineTune` (supervised LoRA, written as `adapter.safetensors` with a card) and
+`ChatFullFineTune`; `PreferenceFineTune` and the rest of the SDK take `.arch("ricursive")`. Ripple's trainer
+declares its frozen-base formats (`f32, bf16, int8, nf4, fp8` and `nvfp4` as the release stores it) in
+`RippleTrainer::LORA_BASES` and an f32 optimizer.
+
 ### GPU phase runbook
 
 ```
@@ -436,6 +488,38 @@ brain lsa eval --arch ricursive --checkpoint <directory> --corpus <directory> \
 
 Needs the host parallelism above for the teacher. Serve with the artifact through
 `brain serve --sparse-attention` (below).
+
+Training (step 7), after `brain pull`, one to two GH200s. Every command below ran on the CPU backend at
+tiny scale; none has run on a card.
+
+```
+# LoRA over the NVFP4 release on 1 GH200 (52 GiB of weights; the adapter, its AdamW state and the activations
+# of one row are small beside it). --base-format nvfp4 holds the release as published.
+brain pull ricursiveAI/Ripple-65B-Preview-NVFP4
+brain finetune ricursiveAI/Ripple-65B-Preview-NVFP4 --arch ricursive --dataset chat.jsonl --out run-lora \
+    --lora 16 --alpha 32 --base-format nvfp4 --activations recompute --steps 200 --lr 1e-4 --max-block 4096 \
+    --device gpu0
+
+# The bf16 release (129 GB) does not fit one card, and the generic LoRA trainer builds one stage: it needs
+# model::Pipeline<Ripple> (tested against one stage, not yet built by RippleTrainer::train_lora; Open items).
+# Until then the one-card runs are the NVFP4 release above, or --base-format nf4/fp8 from a card that holds the
+# base once quantized (the load reads the bf16 tensors one at a time).
+
+# serve the result: the adapter is a PEFT-exportable file (ricursive::train::adapter::export_peft) and
+# RicursiveEngine::attach_adapter applies it beside the resident base
+```
+
+First checks on a card, in order: `train_lora` and `train_pipeline` with `--device gpu0` / `gpu0,gpu1` against
+the CPU numbers above; the real-weight step (`train_real_lora`, set the testdata link) on a card against the
+CPU loss 13.992954 and gradients; one `brain finetune` step with `--kernel-profile` against the GH200 roofline
+(`kernels.md` section F) before any tuning, with the head in view (below).
+
+N-LSA continued training of the dense release (the global layers only; a model trained dense reads the
+selection as a restriction, so start from a budget near the context and tighten it): there is no verb yet, so
+use the library: `Ripple::enable_native_lsa(LsaConfig { window, sink, top_k, top_p, cluster_block, .. }, true)` on
+the model the trainer built, then the usual fit loop; start with a budget past the row (equal to dense) and
+step it down while the held-out loss follows. It needs a device that runs workgroup-barrier kernels (a GPU, or
+`--device software` for the tiny gates).
 
 Serving (step 6), after `brain pull`:
 
@@ -481,6 +565,32 @@ engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
   per tier with `brain perf` (`kernels.md` section F) before any tuning.
 
 ## Open items for the later steps
+
+- Training, step 7. The LM head and the loss are not chunked: logits and their gradient are `[rows, vocab]`
+  floats each (rows = batch x block), 5 GB each at 8192 rows of the 100k vocabulary, and Qwen's `HeadCe` chunks
+  them. Fine for the first GPU runs at moderate blocks; a long-row run needs `HeadCe` in `Ripple` (with the
+  weighted loss, the log-probability readout and the logit scale it already carries).
+- Training: `RippleTrainer::train_lora` builds one stage on one device; building `model::Pipeline<Ripple>` over
+  the selected cards (as Qwen3's trainer does) is what trains the bf16 release across two GH200s. The pipeline
+  itself is tested against one stage.
+- Training: one adapter per run; `brain serve` has no adapter bank for Ripple (`RicursiveEngine::attach_adapter`
+  applies one at run time; a served multi-adapter instance needs the batched per-row adapter slots the Qwen
+  engines have, and a catalog entry that takes `--adapter`). No `brain` verb serves a trained adapter yet.
+- Training: the attention gate (`g_proj`) and the norms and `value_res_lambda` train as full parameters only in a
+  full fine-tune; the adapter policy has no "also train these tensors" mode, so a LoRA run leaves them frozen.
+- Training: an adapter trains over an NVFP4 base only as the ModelOpt release stores it (nothing quantizes into
+  NVFP4), and a full fine-tune needs a float base (f32 weights, AdamW on the device); layer-streamed and
+  resident bf16/fp8 full fine-tuning (`Model::set_resident`) are not wired, so the 65B cannot be fully
+  fine-tuned yet. `PolicyGradient` fine-tuning and held-out scoring before and after are wired for Qwen families
+  only.
+- Training: on the CPU backend `matmul_dx` with a very large contraction (the head's, vocabulary 152k) is a
+  naive strided loop, 25 s a step for a toy model, so toy tests use a 32-token vocabulary; a GPU does not
+  have the problem.
+- N-LSA has a library entry (`Ripple::enable_native_lsa`) and no CLI verb or SDK option; the selection's index
+  space is the NoPE queries and keys as they are (no learned projection), so an indexer distilled for serving
+  (D-LSA) is a separate artifact from the N-LSA model.
+- Real-weight training numbers on a card (tokens/s against the GH200 roofline, the two-card pipeline's bubble,
+  N-LSA's crossover against the dense flash path at Ripple's head dimension) are step 8.
 
 - Activation quantization to FP4 (W4A4 as the release was calibrated) as an opt-in beside the float-read default
   would need the static `input_scale`s applied; the checks and the coverage numbers above are the groundwork.

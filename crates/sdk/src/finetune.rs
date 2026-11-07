@@ -2461,14 +2461,14 @@ mod base_tier_tests {
     fn qwen3_tier(bf16: bool, int8: bool) -> Dtype {
         match ChatFamily::of("qwen3", bf16, int8, false, None).unwrap() {
             ChatFamily::Qwen3(tier) => tier,
-            ChatFamily::Qwen35(_) => unreachable!(),
+            ChatFamily::Qwen35(_) | ChatFamily::Ripple(_) => unreachable!(),
         }
     }
 
     fn qwen35_tier(bf16: bool, nf4: bool) -> Dtype {
         match ChatFamily::of("qwen35", bf16, false, nf4, None).unwrap() {
             ChatFamily::Qwen35(tier) => tier,
-            ChatFamily::Qwen3(_) => unreachable!(),
+            ChatFamily::Qwen3(_) | ChatFamily::Ripple(_) => unreachable!(),
         }
     }
 
@@ -2486,8 +2486,10 @@ mod base_tier_tests {
     #[test]
     fn one_format_flag_names_the_base_of_every_architecture() {
         let tier = |arch, spec| match ChatFamily::of(arch, false, false, false, Some(spec)).unwrap() {
-            ChatFamily::Qwen3(t) | ChatFamily::Qwen35(t) => t,
+            ChatFamily::Qwen3(t) | ChatFamily::Qwen35(t) | ChatFamily::Ripple(t) => t,
         };
+        assert_eq!(tier("ricursive", "nvfp4"), Dtype::F4E2M1, "the NVFP4 release is a base format of Ripple");
+        assert_eq!(tier("ricursive", "nf4"), Dtype::NF4);
         assert_eq!(tier("qwen3", "nf4"), Dtype::NF4);
         assert_eq!(tier("qwen3", "fp8"), Dtype::F8E4M3);
         assert_eq!(tier("qwen35", "fp8"), Dtype::F8E4M3);
