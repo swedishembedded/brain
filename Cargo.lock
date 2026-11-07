@@ -2134,6 +2134,7 @@ dependencies = [
  "brain-capability",
  "brain-checkpoint",
  "brain-modelref",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

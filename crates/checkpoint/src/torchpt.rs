@@ -799,7 +799,14 @@ impl<'a> Archive<'a> {
 /// `t`'s elements, contiguous, gathered from its decoded `storage` through its
 /// offset and strides.
 fn gather(name: &str, t: &TensorNode, storage: &[f32]) -> Result<Vec<f32>, String> {
-    let numel: usize = t.size.iter().product();
+    // The pickle's sizes are the file's word: a tensor of more elements than
+    // its storage holds (strides of zero repeating a few values) would expand
+    // a small file into an allocation of any size.
+    let numel = t.size.iter().try_fold(1usize, |n, &d| n.checked_mul(d));
+    let numel = match numel {
+        Some(n) if n <= storage.len() => n,
+        _ => return Err(format!("torchpt: tensor '{name}' declares {:?} elements over a storage of {}", t.size, storage.len())),
+    };
     let mut data = Vec::with_capacity(numel);
     if numel == 0 {
         return Ok(data);

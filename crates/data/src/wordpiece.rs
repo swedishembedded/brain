@@ -181,6 +181,12 @@ impl WordPiece {
             max_id = max_id.max(id);
             vocab.insert(k.clone(), id);
         }
+        // Ids index the pieces table, so they must be dense: a vocabulary of a
+        // few entries with an id of four billion would otherwise reserve
+        // gigabytes. Real vocabularies number their pieces 0..len.
+        if max_id as usize >= vocab.len().saturating_mul(2).max(1024) {
+            return Err(format!("vocab ids run to {max_id} for {} pieces; ids must be dense", vocab.len()));
+        }
         let mut pieces = vec![String::new(); max_id as usize + 1];
         for (k, &id) in &vocab {
             pieces[id as usize] = k.clone();

@@ -39,6 +39,16 @@ pub fn stream_to_file(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // A download that would fill the store's filesystem is refused before it
+    // starts: a request for a repository larger than the disk must not take
+    // the disk the server, its logs and every other model share.
+    if let (Some(total), Some(parent)) = (total, dest.parent()) {
+        if let Some(free) = free_bytes(parent) {
+            if !room_for(total, free) {
+                return Err(std::io::Error::new(std::io::ErrorKind::StorageFull, format!("a {total}-byte download leaves less than {} bytes free of {free}", DISK_RESERVE)));
+            }
+        }
+    }
     // Each download writes its own `.part` (two fetches of one file, two
     // quantisations of one base, must not interleave into one), created
     // exclusively, and removed on every way out but success.
@@ -85,6 +95,38 @@ pub fn stream_to_file(
     }
     std::fs::rename(&tmp, dest)?;
     Ok(())
+}
+
+/// What a download must leave free on the store's filesystem.
+pub const DISK_RESERVE: u64 = 1 << 30;
+
+/// Whether a download of `total` bytes leaves [`DISK_RESERVE`] of `free`.
+fn room_for(total: u64, free: u64) -> bool {
+    total.checked_add(DISK_RESERVE).is_some_and(|need| need <= free)
+}
+
+/// Bytes an unprivileged user may still write on the filesystem holding
+/// `dir`; `None` when that cannot be asked.
+fn free_bytes(dir: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+        // SAFETY: `path` is a valid C string and `stat` a writable statvfs;
+        // the struct is read only when the call succeeds.
+        let ok = unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } == 0;
+        ok.then(|| {
+            // SAFETY: statvfs succeeded, so it wrote the whole struct.
+            let stat = unsafe { stat.assume_init() };
+            (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        None
+    }
 }
 
 /// The lowercase-hex SHA-256 of a file's bytes - the digest
@@ -309,6 +351,16 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A download is refused unless it leaves the reserve free, however large
+    /// the size a server declares.
+    #[test]
+    fn a_download_must_leave_the_reserve_free() {
+        assert!(room_for(10, DISK_RESERVE + 10));
+        assert!(!room_for(11, DISK_RESERVE + 10));
+        assert!(!room_for(u64::MAX, u64::MAX));
+        assert!(free_bytes(&std::env::temp_dir()).is_some_and(|free| free > 0));
+    }
 
     /// A download that fails leaves no `.part`, and one that sends more than
     /// it declared is refused.

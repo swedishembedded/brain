@@ -682,6 +682,14 @@ impl<'a> Cursor<'a> {
     fn new(b: &'a [u8]) -> Self {
         Cursor { b, p: 0 }
     }
+    /// What to reserve for `n` items a header declares, each at least
+    /// `min_item_bytes` long: never more than the bytes left could hold, so a
+    /// count in a file of a few bytes cannot ask for gigabytes up front (a
+    /// failed reservation aborts the process).
+    fn reserve(&self, n: u64, min_item_bytes: usize) -> usize {
+        let left = (self.b.len() - self.p) / min_item_bytes.max(1);
+        usize::try_from(n).unwrap_or(usize::MAX).min(left)
+    }
     fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
         let end = self.p.checked_add(n).ok_or("gguf: length overflow")?;
         if end > self.b.len() {
@@ -722,8 +730,14 @@ impl<'a> Cursor<'a> {
         let n = self.u64()? as usize;
         String::from_utf8(self.take(n)?.to_vec()).map_err(|e| e.to_string())
     }
-    /// Read one metadata value of the given GGUF value type (arrays recurse).
+    /// Read one metadata value of the given GGUF value type (arrays recurse,
+    /// at most [`MAX_ARRAY_DEPTH`] deep: each level costs a file twelve bytes,
+    /// and an unbounded descent would overflow the stack).
     fn value(&mut self, ty: u32) -> Result<GgufValue, String> {
+        self.value_at(ty, 0)
+    }
+
+    fn value_at(&mut self, ty: u32, depth: usize) -> Result<GgufValue, String> {
         Ok(match ty {
             0 => GgufValue::U8(self.u8()?),
             1 => GgufValue::I8(self.u8()? as i8),
@@ -735,11 +749,14 @@ impl<'a> Cursor<'a> {
             7 => GgufValue::Bool(self.u8()? != 0),
             8 => GgufValue::String(self.string()?),
             9 => {
+                if depth >= MAX_ARRAY_DEPTH {
+                    return Err(format!("gguf: metadata arrays nested deeper than {MAX_ARRAY_DEPTH}"));
+                }
                 let et = self.u32()?;
-                let n = self.u64()? as usize;
-                let mut items = Vec::with_capacity(n);
+                let n = self.u64()?;
+                let mut items = Vec::with_capacity(self.reserve(n, 1));
                 for _ in 0..n {
-                    items.push(self.value(et)?);
+                    items.push(self.value_at(et, depth + 1)?);
                 }
                 GgufValue::Array(items)
             }
@@ -750,6 +767,9 @@ impl<'a> Cursor<'a> {
         })
     }
 }
+
+/// How deep GGUF metadata arrays may nest (real files nest one level).
+const MAX_ARRAY_DEPTH: usize = 8;
 
 /// One tensor's header info, resolved to torch shape.
 struct Info {
@@ -785,11 +805,12 @@ fn parse_header(bytes: &[u8]) -> Result<Header, String> {
 
     let alignment = kv.get("general.alignment").and_then(|v| v.as_u64()).unwrap_or(32).max(1) as usize;
 
-    let mut infos = Vec::with_capacity(n_tensors as usize);
+    // A tensor info is at least a length-prefixed name, a rank, a type and an offset.
+    let mut infos = Vec::with_capacity(c.reserve(n_tensors, 24));
     for _ in 0..n_tensors {
         let name = c.string()?;
         let nd = c.u32()? as usize;
-        let mut ne = Vec::with_capacity(nd);
+        let mut ne = Vec::with_capacity(c.reserve(nd as u64, 8));
         for _ in 0..nd {
             ne.push(c.u64()? as usize);
         }
@@ -2031,6 +2052,42 @@ fn gval_json(v: &GgufValue) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A GGUF header is read as hostile: a count larger than the file cannot
+    /// reserve memory for it, and arrays nested past the bound are refused
+    /// rather than descended into until the stack runs out.
+    #[test]
+    fn a_hostile_header_is_refused_without_reserving_or_recursing() {
+        let header = |kv: &[u8], n_kv: u64, n_tensors: u64| -> Vec<u8> {
+            let mut b = b"GGUF".to_vec();
+            b.extend_from_slice(&3u32.to_le_bytes());
+            b.extend_from_slice(&n_tensors.to_le_bytes());
+            b.extend_from_slice(&n_kv.to_le_bytes());
+            b.extend_from_slice(kv);
+            b
+        };
+        // Billions of tensors declared, none present: an EOF error, quickly.
+        assert!(parse_header(&header(&[], 0, u64::MAX / 2)).is_err());
+        // One key whose value is an array of arrays of ... nested 64 deep.
+        let mut kv = Vec::new();
+        kv.extend_from_slice(&1u64.to_le_bytes());
+        kv.push(b'k');
+        kv.extend_from_slice(&9u32.to_le_bytes());
+        for _ in 0..64 {
+            kv.extend_from_slice(&9u32.to_le_bytes());
+            kv.extend_from_slice(&1u64.to_le_bytes());
+        }
+        let err = parse_header(&header(&kv, 1, 0)).err().expect("refused");
+        assert!(err.contains("nested"), "{err}");
+        // An array claiming 2^60 one-byte items in a few bytes of file.
+        let mut kv = Vec::new();
+        kv.extend_from_slice(&1u64.to_le_bytes());
+        kv.push(b'k');
+        kv.extend_from_slice(&9u32.to_le_bytes());
+        kv.extend_from_slice(&0u32.to_le_bytes());
+        kv.extend_from_slice(&(1u64 << 60).to_le_bytes());
+        assert!(parse_header(&header(&kv, 1, 0)).is_err());
+    }
 
     /// A GGUF-backed device upload must be bounded the way a safetensors one
     /// already is. `paramstore::upload` pulls every weight through

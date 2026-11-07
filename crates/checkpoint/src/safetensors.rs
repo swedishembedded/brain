@@ -342,10 +342,35 @@ fn parse_inner(bytes: &[u8], source: &str, mut on_tensor: impl FnMut(usize)) -> 
             .iter()
             .map(|v| v.as_u64().unwrap_or(0) as usize)
             .collect();
-        let off = meta["data_offsets"].as_array().ok_or("safetensors: missing data_offsets")?;
-        let start = off[0].as_u64().unwrap() as usize;
-        let end = off[1].as_u64().unwrap() as usize;
+        // The header is the file's word: offsets that are not two numbers in
+        // order inside the data, or an extent that is not the shape's bytes,
+        // are refused by name rather than indexed into.
+        let (start, end) = match meta["data_offsets"].as_array().map(|o| o.as_slice()) {
+            Some([a, b]) => match (a.as_u64(), b.as_u64()) {
+                (Some(a), Some(b)) => (usize::try_from(a).unwrap_or(usize::MAX), usize::try_from(b).unwrap_or(usize::MAX)),
+                _ => return Err(format!("safetensors: {name}: data_offsets are not two integers")),
+            },
+            _ => return Err(format!("safetensors: {name}: data_offsets is not a pair")),
+        };
+        if start > end || end > blob.len() {
+            return Err(format!("safetensors: {name}: data_offsets {start}..{end} lie outside the {} bytes of data", blob.len()));
+        }
         let raw = &blob[start..end];
+        let width = match dtype {
+            "F32" | "I32" => Some(4),
+            "F16" | "BF16" => Some(2),
+            "I64" => Some(8),
+            "U8" | "F8_E4M3" => Some(1),
+            _ => None,
+        };
+        let declared = shape.iter().try_fold(1usize, |n, &d| n.checked_mul(d)).and_then(|n| width.and_then(|w| n.checked_mul(w)));
+        if let (Some(_), Some(bytes)) = (width, declared) {
+            if bytes != raw.len() {
+                return Err(format!("safetensors: {name}: shape {shape:?} of {dtype} is {bytes} bytes, its data is {}", raw.len()));
+            }
+        } else if width.is_some() {
+            return Err(format!("safetensors: {name}: shape {shape:?} does not fit in memory"));
+        }
 
         let data: Vec<f32> = match dtype {
             "F32" => decode_elems(raw, 4, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
@@ -521,6 +546,31 @@ pub fn read_model_dir(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file whose header misdescribes its data is refused by name, never
+    /// indexed into: offsets that are not a pair, out of order or past the
+    /// data, and an extent that is not the shape's bytes.
+    #[test]
+    fn a_header_that_misdescribes_its_data_is_refused() {
+        let file = |meta: &str| {
+            let header = format!("{{\"w\":{meta}}}");
+            let mut b = (header.len() as u64).to_le_bytes().to_vec();
+            b.extend_from_slice(header.as_bytes());
+            b.extend_from_slice(&[0u8; 8]);
+            b
+        };
+        assert_eq!(parse(&file(r#"{"dtype":"F32","shape":[2],"data_offsets":[0,8]}"#)).unwrap()[0].data, vec![0.0, 0.0]);
+        for bad in [
+            r#"{"dtype":"F32","shape":[2],"data_offsets":[0]}"#,
+            r#"{"dtype":"F32","shape":[2],"data_offsets":[5,1]}"#,
+            r#"{"dtype":"F32","shape":[2],"data_offsets":[0,9000]}"#,
+            r#"{"dtype":"F32","shape":[2],"data_offsets":["a","b"]}"#,
+            r#"{"dtype":"F32","shape":[3],"data_offsets":[0,8]}"#,
+            r#"{"dtype":"F32","shape":[4294967296,4294967296],"data_offsets":[0,8]}"#,
+        ] {
+            assert!(parse(&file(bad)).is_err(), "{bad}");
+        }
+    }
 
     /// The materializing reader reports the same load-progress stream the
     /// mmap readers emit: one cumulative per-tensor event against the file's
