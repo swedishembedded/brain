@@ -370,6 +370,7 @@ navigation:
           - docs/book/v03-neural-networks/03-softmax.md
           - docs/book/v03-neural-networks/04-backpropagation.md
           - docs/book/v03-neural-networks/05-layer-gradients.md
+          - docs/book/v03-neural-networks/06-gradient-checking.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

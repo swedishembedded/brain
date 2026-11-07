@@ -58,6 +58,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **categorical distribution**: a table of $K$ non-negative probabilities summing to $1$, one per outcome of a choice among $K$ possibilities such as the next word; the case $K = 2$ is the Bernoulli distribution. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
+**central difference**: the finite difference $(f(x+h) - f(x-h))/(2h)$, whose error is proportional to $h^2$ because the first error term cancels by symmetry. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
+
 **central limit theorem**: the statement that the average of many independent draws with finite variance, shifted by the mean and divided by $\sigma/\sqrt{n}$, has a distribution that approaches the standard Gaussian whatever the distribution of the draws. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **chain rule**: the derivative of a composition is the derivative of the outer function, evaluated at the inner value, times the derivative of the inner function: $(f\circ g)'(x) = f'(g(x))\,g'(x)$. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
@@ -156,6 +158,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **feature**: one measurable property of an example that a prediction may depend on; the features of one example form a vector. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
+**finite difference**: an estimate of a derivative built from values of the function at nearby points, such as the forward difference $(f(x+h) - f(x))/h$. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
+
 **floating-point number**: a number stored as a sign, an exponent in a fixed range and a significand of fixed precision $p$ bits, $(-1)^s(1 + f/2^{p-1})2^e$; it keeps the same number of significant digits at every scale, so the absolute gap between neighbours doubles with each binade. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **forward pass**: computing every value of the computational graph in order, from the inputs to the loss. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
@@ -177,6 +181,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **gradient**: the vector of all the partial derivatives of a scalar function, the same shape as its inputs; it points in the direction of steepest ascent and its length is the steepest rate of change. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **gradient accumulation**: adding each contribution to a value's gradient into one persistent buffer, never assigning, with the buffer zeroed once per optimiser step; it sums the uses of a shared weight and the pieces of a batch split into micro-batches. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
+
+**gradient check**: a test that compares the gradient returned by a backward pass with finite-difference estimates of the same forward pass, entry by entry or along random directions, under a stated step and tolerance. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
 **gradient descent**: the iteration that repeatedly moves the parameters a small step against the gradient of the loss, $\mathbf{w} \leftarrow \mathbf{w} - \eta\nabla\mathcal{L}(\mathbf{w})$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
@@ -368,6 +374,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **rejection sampling**: drawing a candidate from an easy distribution, keeping it only if it passes a test and otherwise drawing again, so that the kept values have the distribution the test selects; it gives unbiased integers and samples from densities with no invertible cumulative distribution, at the cost of the discarded draws. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
+**relative error**: the size of the difference between two numbers divided by the larger of their sizes, which is independent of scale but unbounded near zero. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
+
 **relu**: the rectified linear unit $\max(0, z)$, zero for negative inputs and the identity for positive ones, with slope $1$ where it is positive and $0$ elsewhere. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **reporting uncertainty**: stating with a result its intervals over seeds and over the test sample, the numbers of seeds and examples, what was tuned on which split, and how many variants were tried, so that a reader can judge how far to trust it. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
@@ -437,6 +445,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **tensor**: an array of numbers with any number of axes (zero for a scalar, one for a vector, two for a matrix), described by its shape. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **test set**: rows used once, after every choice is made, to report the final score of the chosen model; looking at it more than once turns it into a validation set. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
+**test-dimension choice**: choosing the sizes of the model a test runs on (batch, features, widths, heads) all different and above 1, so that bugs that confuse two sizes or depend on a size of 1 change the result. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
 **training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 

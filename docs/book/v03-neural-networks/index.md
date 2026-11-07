@@ -56,8 +56,8 @@ in the curriculum and appear here when they are written.
 5. [The Backward Pass of Every Layer](05-layer-gradients.md): the backward
    pass of a matrix multiply, a sum, a broadcast and an elementwise function,
    written out exactly.
-6. Proving Gradients Correct: how to know a backward pass is right without
-   trusting the person who wrote it.
+6. [Proving Gradients Correct](06-gradient-checking.md): how to know a backward
+   pass is right without trusting the person who wrote it.
 7. Optimizers: From SGD to AdamW: the smartest way to use a gradient once we
    have one.
 8. Learning-Rate Schedules and Gradient Clipping: why the step size should
