@@ -1974,16 +1974,17 @@ mod tests {
     fn sampling_params_carry_ui_ranges() {
         let g = &manifest().actions[0];
         let p = |name: &str| g.params.iter().find(|p| p.name == name).unwrap();
-        // No upper bound: the context a request may use is the memory it
-        // needs, which the footprint check decides, not a fixed length.
-        assert_eq!((p("max_new").min, p("max_new").max, p("max_new").step), (Some(1.0), None, Some(1.0)));
+        // The shared token ceiling bounds what a caller may ask; within it, the
+        // memory the request needs decides (the footprint check).
+        assert_eq!((p("max_new").min, p("max_new").max, p("max_new").step), (Some(1.0), Some(capability::bounds::TOKENS), Some(1.0)));
         assert_eq!((p("temp").min, p("temp").max, p("temp").step), (Some(0.0), Some(2.0), Some(0.01)));
         assert_eq!((p("top_k").min, p("top_k").max, p("top_k").step), (Some(0.0), Some(1000.0), Some(1.0)));
         assert_eq!((p("top_p").min, p("top_p").max, p("top_p").step), (Some(0.0), Some(1.0), Some(0.01)));
     }
 
     /// A budget beyond any context is refused by name, never turned into a
-    /// truncated context or an allocation that aborts the process.
+    /// truncated context or an allocation that aborts the process: the shared
+    /// token ceiling refuses it before the model is built.
     #[test]
     fn a_max_new_beyond_any_context_is_a_clean_error() {
         let reg = {
@@ -1992,9 +1993,11 @@ mod tests {
             r
         };
         let path = tiny_checkpoint("beyond-context");
-        let inv = Invocation::new().set("weights", json!(path.to_str().unwrap())).set("prompt", json!("1 2")).set("max_new", json!(i64::MAX));
-        let err = reg.run(MODEL, "generate", inv, &mut |_| {}).unwrap_err();
-        assert!(err.contains("beyond any context"), "got: {err}");
+        let ask = |max_new: i64| Invocation::new().set("weights", json!(path.to_str().unwrap())).set("prompt", json!("1 2")).set("max_new", json!(max_new));
+        for max_new in [i64::MAX, capability::bounds::TOKENS as i64 + 1] {
+            let err = reg.run(MODEL, "generate", ask(max_new), &mut |_| {}).unwrap_err();
+            assert!(err.contains("at most"), "{max_new}: got: {err}");
+        }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
