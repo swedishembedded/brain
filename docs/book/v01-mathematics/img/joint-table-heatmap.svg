@@ -1,0 +1,47 @@
+<!-- source-sha256: 2d364262564b53961683fb690017bde8815ea1b00fa63cc411e145f4e6c278e3 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 452 426" width="452" height="426">
+<rect width="452" height="426" fill="#ffffff"/>
+<text x="222" y="20" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="bold">predicted class</text>
+<text transform="rotate(-90 14 188)" x="14" y="188" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="bold">true class</text>
+<text x="138" y="52" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">cat</text>
+<text x="222" y="52" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">dog</text>
+<text x="306" y="52" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">bird</text>
+<text x="390" y="52" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c05621" text-anchor="middle" font-weight="bold">P(true)</text>
+<text x="88" y="108" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="end" font-weight="normal">cat</text>
+<rect x="96" y="62" width="84" height="84" fill="#3573b4" stroke="#ffffff" stroke-width="2"/>
+<text x="138" y="109" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#ffffff" text-anchor="middle" font-weight="normal">0.270</text>
+<rect x="180" y="62" width="84" height="84" fill="#a6c1dd" stroke="#ffffff" stroke-width="2"/>
+<text x="222" y="109" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#1a202c" text-anchor="middle" font-weight="normal">0.040</text>
+<rect x="264" y="62" width="84" height="84" fill="#bbcfe5" stroke="#ffffff" stroke-width="2"/>
+<text x="306" y="109" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#1a202c" text-anchor="middle" font-weight="normal">0.020</text>
+<rect x="348" y="62" width="84" height="84" fill="#fffaf0" stroke="#ffffff" stroke-width="2"/>
+<text x="390" y="109" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#c05621" text-anchor="middle" font-weight="bold">0.330</text>
+<text x="88" y="192" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="end" font-weight="normal">dog</text>
+<rect x="96" y="146" width="84" height="84" fill="#b0c8e1" stroke="#ffffff" stroke-width="2"/>
+<text x="138" y="193" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#1a202c" text-anchor="middle" font-weight="normal">0.030</text>
+<rect x="180" y="146" width="84" height="84" fill="#2b6cb0" stroke="#ffffff" stroke-width="2"/>
+<text x="222" y="193" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#ffffff" text-anchor="middle" font-weight="normal">0.300</text>
+<rect x="264" y="146" width="84" height="84" fill="#cadaea" stroke="#ffffff" stroke-width="2"/>
+<text x="306" y="193" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#1a202c" text-anchor="middle" font-weight="normal">0.010</text>
+<rect x="348" y="146" width="84" height="84" fill="#fffaf0" stroke="#ffffff" stroke-width="2"/>
+<text x="390" y="193" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#c05621" text-anchor="middle" font-weight="bold">0.340</text>
+<text x="88" y="276" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="end" font-weight="normal">bird</text>
+<rect x="96" y="230" width="84" height="84" fill="#c2d4e7" stroke="#ffffff" stroke-width="2"/>
+<text x="138" y="277" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#1a202c" text-anchor="middle" font-weight="normal">0.015</text>
+<rect x="180" y="230" width="84" height="84" fill="#c2d4e7" stroke="#ffffff" stroke-width="2"/>
+<text x="222" y="277" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#1a202c" text-anchor="middle" font-weight="normal">0.015</text>
+<rect x="264" y="230" width="84" height="84" fill="#2b6cb0" stroke="#ffffff" stroke-width="2"/>
+<text x="306" y="277" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#ffffff" text-anchor="middle" font-weight="normal">0.300</text>
+<rect x="348" y="230" width="84" height="84" fill="#fffaf0" stroke="#ffffff" stroke-width="2"/>
+<text x="390" y="277" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#c05621" text-anchor="middle" font-weight="bold">0.330</text>
+<text x="88" y="360" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c05621" text-anchor="end" font-weight="bold">P(predicted)</text>
+<rect x="96" y="314" width="84" height="84" fill="#fffaf0" stroke="#ffffff" stroke-width="2"/>
+<text x="138" y="361" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#c05621" text-anchor="middle" font-weight="bold">0.315</text>
+<rect x="180" y="314" width="84" height="84" fill="#fffaf0" stroke="#ffffff" stroke-width="2"/>
+<text x="222" y="361" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#c05621" text-anchor="middle" font-weight="bold">0.355</text>
+<rect x="264" y="314" width="84" height="84" fill="#fffaf0" stroke="#ffffff" stroke-width="2"/>
+<text x="306" y="361" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#c05621" text-anchor="middle" font-weight="bold">0.330</text>
+<rect x="348" y="314" width="84" height="84" fill="#fffaf0" stroke="#ffffff" stroke-width="2"/>
+<text x="390" y="361" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#c05621" text-anchor="middle" font-weight="bold">1.000</text>
+<text x="96" y="418" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="start" font-weight="normal">darker = more probability; orange = marginals (sums)</text>
+</svg>
