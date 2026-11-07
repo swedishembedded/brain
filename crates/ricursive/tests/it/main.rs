@@ -12,5 +12,6 @@ mod parity;
 mod real_nvfp4;
 mod real_weight_parity;
 mod serve;
+mod staged_lsa;
 mod taps;
 mod tiers;

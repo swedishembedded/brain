@@ -44,5 +44,5 @@ pub use layer::{Layer, LayerBuffers, LayerOutput};
 pub use model::{embed, Forward, Head, HeadOutput, RicursiveModel};
 pub use ops::pipelines;
 pub use policy::POLICY;
-pub use serve::{global_kv_bytes_per_token, lsa_device_bytes, ring_bytes_per_slot, ring_rows, RicursiveEngine, ServeConfig};
+pub use serve::{global_kv_bytes_per_token, lsa_device_bytes, ring_bytes_per_slot, LsaCharge, ring_rows, RicursiveEngine, ServeConfig};
 pub use weights::{linear_names, resolve_tiers, WeightReport};

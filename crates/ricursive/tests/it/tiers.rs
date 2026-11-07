@@ -401,20 +401,6 @@ fn a_two_stage_engine_reproduces_the_single_stage_logits() {
     assert!(worst_scaled("staged prefix reuse", &rows[0], &rows[1]) <= 1e-6);
 }
 
-/// Spec: a split engine that cannot serve a feature says so: latent sparse attention indexes one device's pools.
-#[test]
-fn latent_sparse_attention_refuses_a_split_engine_by_name() {
-    let Some(dir) = tiny_dir() else { return };
-    let cfg = tiny_config(&dir);
-    let plan = two_stages();
-    let serve = ServeConfig { sparse_attention: true, ..serve_config(4, 0) };
-    let mut e = RicursiveEngine::from_source_staged(cfg.clone(), Box::new(weights(&dir, &cfg)), serve, Some("cpu"), &plan).expect("engine");
-    let geometry = model::lsa::indexer::IndexGeometry { n_layers: 3, n_heads: 4, n_kv_heads: 2, head_dim: 16, rope_base: 0.0 };
-    let indexer = model::lsa::indexer::Indexer::random(model::lsa::config::LsaConfig { index_dim: 8, cluster_block: 16, ..Default::default() }, geometry, 1).expect("indexer");
-    let err = e.set_lsa(&indexer).unwrap_err();
-    assert!(err.contains("2 stages"), "{err}");
-}
-
 /// Spec: the D-LSA capture and the scoring pass work across stages (each global layer's queries and keys are read
 /// from the stage that owns it), and a compact cache is refused by name because the capture reads unquantized keys.
 #[test]

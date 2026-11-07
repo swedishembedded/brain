@@ -190,7 +190,7 @@ pub struct BlockTable {
     cached_rows: u32,
     /// Index pages of the sequence's closed cluster blocks, in block order, for a decoder with a sparse
     /// attention index (see [`Self::index_pages`]).
-    index_pages: Vec<u32>,
+    index_pages: Vec<Vec<u32>>,
     /// Node pages of each level of the same index's tree (see [`Self::node_pages`]).
     node_pages: Vec<Vec<u32>>,
 }
@@ -245,19 +245,42 @@ impl BlockTable {
     /// blocks), and not released by [`Self::release`] - the decoder that allocated the pages frees them
     /// before it releases the blocks.
     pub fn index_pages(&self) -> &[u32] {
-        &self.index_pages
+        self.index_pages_in(0)
     }
     /// Record the page of the next closed cluster block.
     pub fn push_index_page(&mut self, page: u32) {
-        self.index_pages.push(page);
+        self.push_index_page_in(0, page);
     }
     /// Keep the first `n` index pages and hand back the rest (blocks a truncation removed).
     pub fn truncate_index_pages(&mut self, n: usize) -> Vec<u32> {
-        self.index_pages.split_off(n.min(self.index_pages.len()))
+        self.truncate_index_pages_in(0, n)
     }
     /// Hand every index page back.
     pub fn take_index_pages(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.index_pages)
+        self.take_index_pages_in(0)
+    }
+
+    /// [`Self::index_pages`] of index domain `domain`. A decoder whose index lives on several devices (its
+    /// layers split over pipeline stages) gives each device's index its own domain: the page ids of one
+    /// device's page pool mean nothing to another's, yet all of them ride the one sequence identity. Domain 0
+    /// is the plain methods above.
+    pub fn index_pages_in(&self, domain: usize) -> &[u32] {
+        self.index_pages.get(domain).map_or(&[], |v| &v[..])
+    }
+    /// [`Self::push_index_page`] in `domain`.
+    pub fn push_index_page_in(&mut self, domain: usize, page: u32) {
+        if self.index_pages.len() <= domain {
+            self.index_pages.resize(domain + 1, Vec::new());
+        }
+        self.index_pages[domain].push(page);
+    }
+    /// [`Self::truncate_index_pages`] in `domain`.
+    pub fn truncate_index_pages_in(&mut self, domain: usize, n: usize) -> Vec<u32> {
+        self.index_pages.get_mut(domain).map_or_else(Vec::new, |v| v.split_off(n.min(v.len())))
+    }
+    /// [`Self::take_index_pages`] in `domain`.
+    pub fn take_index_pages_in(&mut self, domain: usize) -> Vec<u32> {
+        self.index_pages.get_mut(domain).map_or_else(Vec::new, std::mem::take)
     }
     /// The node pages a sparse-attention decoder built over this sequence's index pages for `level` (from 1)
     /// of its tree, in order - a cache of the decoder's like [`Self::index_pages`].

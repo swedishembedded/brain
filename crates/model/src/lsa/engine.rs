@@ -182,6 +182,8 @@ pub struct LsaAttention {
     built_pages: u64,
     /// The indexer's tree, read in place of the flat read.
     tree: Option<TreeEngine>,
+    /// The index domain of the tables' pages ([`BlockTable::index_pages_in`]): 0 unless the engine runs several indexes.
+    domain: usize,
 }
 
 impl LsaAttention {
@@ -266,12 +268,23 @@ impl LsaAttention {
             inv_freq: yarn_inv_freq.cloned().unwrap_or_else(|| g.storage(1)),
             built_pages: 0,
             tree,
+            domain: 0,
         })
     }
 
     /// The index configuration.
     pub fn config(&self) -> &LsaConfig {
         &self.cfg
+    }
+
+    /// Keep this index's pages in `domain` of every table ([`BlockTable::index_pages_in`]): one domain per index when an
+    /// engine runs several (one per pipeline stage). A tree reads its node pages beside domain 0 only.
+    pub fn set_domain(&mut self, domain: usize) -> Result<(), String> {
+        if domain != 0 && self.tree.is_some() {
+            return Err("LSA: an indexer that reads through a tree keeps its pages in domain 0".into());
+        }
+        self.domain = domain;
+        Ok(())
     }
 
     /// Whether `layer` reads sparsely.
@@ -291,6 +304,17 @@ impl LsaAttention {
     pub fn device_bytes_for(indexer: &Indexer, kv: KvGeometry, max_rows: u32, page_capacity: u32) -> u64 {
         let sparse = indexer.layers.iter().filter(|l| l.is_some()).count();
         Self::bytes(&indexer.cfg, indexer.tree.as_ref(), indexer.geometry.input_dim() as u32, sparse, kv, max_rows, page_capacity)
+    }
+
+    /// [`Self::device_bytes_for`] split into what each sparse layer costs (projections, its slot of every page, the
+    /// build scratch) and what one device costs whatever its layers (the read scratch): an engine that spreads its
+    /// sparse layers over several devices charges each device `layers x per_layer + per_device`. `indexer` is only
+    /// read for its configuration, geometry and tree.
+    pub fn device_bytes_split(indexer: &Indexer, kv: KvGeometry, max_rows: u32, page_capacity: u32) -> (u64, u64) {
+        let (input, tree) = (indexer.geometry.input_dim() as u32, indexer.tree.as_ref());
+        let one = Self::bytes(&indexer.cfg, tree, input, 1, kv, max_rows, page_capacity);
+        let two = Self::bytes(&indexer.cfg, tree, input, 2, kv, max_rows, page_capacity);
+        (two - one, one - (two - one))
     }
 
     fn bytes(cfg: &LsaConfig, tree: Option<&super::tree::TreeConfig>, input: u32, sparse: usize, kv: KvGeometry, max_rows: u32, page_capacity: u32) -> u64 {
@@ -432,6 +456,7 @@ impl LsaAttention {
     /// recomputed), reusing a page another sequence already built over the
     /// same KV blocks, and frees the pages of blocks a truncation removed.
     pub fn prepare(&mut self, g: &Gpu, rows: &mut [(&mut BlockTable, u32, u32)], pools: KeyPools) -> Result<(), String> {
+        let domain = self.domain;
         let total: u32 = rows.iter().map(|r| r.2).sum();
         if total > self.max_rows {
             return Err(format!("LSA: a forward of {total} rows exceeds the {} the scratch holds", self.max_rows));
@@ -447,13 +472,13 @@ impl LsaAttention {
             let mut tab = vec![0u32; total as usize * stride];
             let mut r = 0usize;
             for (table, cached, count) in rows.iter_mut() {
-                let built = table.index_pages().len();
+                let built = table.index_pages_in(domain).len();
                 let last = tree.growth(*cached + count.saturating_sub(1), built);
                 tree.grow(g, &self.pool, table, &last)?;
                 let held: Vec<Vec<u32>> = (1..=top).map(|l| table.node_pages(l).to_vec()).collect();
                 for i in 0..*count {
                     let growth = tree.growth(*cached + i, built);
-                    tree.geom.write_row(&mut tab[r * stride..][..stride], table.index_pages(), &growth, &held)?;
+                    tree.geom.write_row(&mut tab[r * stride..][..stride], table.index_pages_in(domain), &growth, &held)?;
                     r += 1;
                 }
             }
@@ -464,7 +489,7 @@ impl LsaAttention {
         let mut tab = vec![0u32; total as usize * width];
         let mut r = 0usize;
         for (table, _, count) in rows.iter() {
-            let pages = table.index_pages();
+            let pages = table.index_pages_in(self.domain);
             for _ in 0..*count {
                 let row = &mut tab[r * width..][..width];
                 row[0] = pages.len() as u32;
@@ -511,7 +536,7 @@ impl LsaAttention {
         if let Some(tree) = self.tree.as_mut() {
             tree.release(table);
         }
-        for page in table.take_index_pages() {
+        for page in table.take_index_pages_in(self.domain) {
             self.drop_page(page);
         }
     }
@@ -524,12 +549,12 @@ impl LsaAttention {
         if self.tree.is_some() {
             return Err("LSA: index pages of a tree engine cannot be retained by a snapshot".into());
         }
-        if !to.index_pages().is_empty() {
+        if !to.index_pages_in(self.domain).is_empty() {
             return Err("LSA: retain_pages needs a table that holds no pages yet".into());
         }
-        for &page in from.index_pages() {
+        for &page in from.index_pages_in(self.domain) {
             self.pages.incref(page);
-            to.push_index_page(page);
+            to.push_index_page_in(self.domain, page);
         }
         Ok(())
     }
@@ -558,12 +583,12 @@ impl LsaAttention {
         if closed > self.read.max_pages as usize {
             return Err(format!("LSA: {closed} closed blocks exceed the {} pages a page table holds", self.read.max_pages));
         }
-        for page in table.truncate_index_pages(closed) {
+        for page in table.truncate_index_pages_in(self.domain, closed) {
             self.drop_page(page);
         }
         let per_cluster = (cb / self.kv.block_size) as usize;
-        while table.index_pages().len() < closed {
-            let c = table.index_pages().len();
+        while table.index_pages_in(self.domain).len() < closed {
+            let c = table.index_pages_in(self.domain).len();
             let key: PageKey = (c as u32, table.blocks()[c * per_cluster..(c + 1) * per_cluster].to_vec());
             let page = match self.page_of.get(&key) {
                 Some(&page) => {
@@ -582,7 +607,7 @@ impl LsaAttention {
                     page
                 }
             };
-            table.push_index_page(page);
+            table.push_index_page_in(self.domain, page);
         }
         Ok(())
     }

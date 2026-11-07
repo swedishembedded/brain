@@ -270,7 +270,7 @@ impl RippleOpener {
         let mut serve = ricursive::ServeConfig { sparse_attention: true, kv_cache: kv, ..ricursive::ServeConfig::new(block_size, 2 * max_tokens.div_ceil(block_size) + 8, max_tokens, 1, 0, 64) };
         serve.apply_policy(&model::policy::ServePolicy { kv_cache: None, ..self.policy.clone() })?;
         let tiers = ricursive::resolve_tiers(&self.cfg, &src, serve.weights.as_ref());
-        let plan = ricursive::placement::auto_plan(&self.cfg, &serve, &tiers, 0, None)?;
+        let plan = ricursive::placement::auto_plan(&self.cfg, &serve, &tiers, ricursive::LsaCharge::default(), None)?;
         println!("ricursive: {} layers over {} stage(s) [{}], weights {}, KV {}", self.cfg.num_hidden_layers, plan.n_stages(), plan.describe(), tiers.summary(), serve.kv_cache);
         ricursive::RicursiveEngine::from_source_staged(self.cfg.clone(), Box::new(src), serve, None, &plan)
     }

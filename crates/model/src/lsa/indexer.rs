@@ -133,6 +133,18 @@ impl Indexer {
         Ok(())
     }
 
+    /// This indexer with only the layers for which `keep` is true reading sparsely (the others `None`): one device's
+    /// share when a model's layers are split over devices.
+    pub fn restricted_to(&self, keep: impl Fn(usize) -> bool) -> Indexer {
+        let mut ix = self.clone();
+        for (l, layer) in ix.layers.iter_mut().enumerate() {
+            if !keep(l) {
+                *layer = None;
+            }
+        }
+        ix
+    }
+
     /// Refuse to attach to a model whose attention differs from the one the
     /// indexer was built for: projections of another model select nothing
     /// meaningful.

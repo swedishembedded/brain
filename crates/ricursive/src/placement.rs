@@ -39,7 +39,7 @@ use model::shard::{plan_fewest_devices, LayerBytes, Placement, ShardCost, Stream
 
 use crate::config::{LayerType, RicursiveConfig};
 use crate::import::layer_tensor;
-use crate::serve::{ring_rows, ServeConfig};
+use crate::serve::{ring_rows, LsaCharge, ServeConfig};
 use crate::weights::layer_linears;
 
 /// The tiers of the official `Ripple-65B-Preview-NVFP4` release: every MLP linear NVFP4, everything else bf16
@@ -75,9 +75,10 @@ impl Footprint {
 }
 
 /// The byte-exact footprint of serving `cfg` sized by `serve` ([`ServeConfig::kv_cache`] is the KV tier) with
-/// weights at `tiers` and, when latent sparse attention is attached, `lsa_bytes` of index
-/// ([`crate::lsa_device_bytes`]).
-pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy, lsa_bytes: u64) -> Footprint {
+/// weights at `tiers` and, when latent sparse attention is attached, its `lsa` charge ([`LsaCharge::of`]): each global
+/// layer costs its projections and its slot of every index page, and each stage that holds any costs the read scratch
+/// ([`Footprint::per_stage`]), so a split engine pays the scratch once per device.
+pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy, lsa: LsaCharge) -> Footprint {
     let (kv_dim, hd) = (cfg.kv_dim() as u64, cfg.head_dim as u64);
     let kv = serve.kv_cache;
     let slots = u64::from(serve.max_batch + serve.prefix_slots);
@@ -92,7 +93,7 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
             weights += w;
             w + match cfg.layer_type(l) {
                 LayerType::Sliding => ring_bytes,
-                LayerType::Full => pool_bytes + lsa_bytes / globals.max(1),
+                LayerType::Full => pool_bytes + lsa.per_global_layer,
             }
         })
         .collect();
@@ -113,11 +114,11 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
     let n_slide = cfg.layer_types.len() as u64 - globals;
     Footprint {
         bytes: LayerBytes { per_layer, embed: 0, head },
-        per_stage: scores + activations + tiles,
+        per_stage: scores + activations + tiles + lsa.per_stage,
         weights,
         kv_global: pool_bytes * globals,
         kv_rings: ring_bytes * n_slide,
-        lsa: lsa_bytes,
+        lsa: lsa.per_global_layer * globals + lsa.per_stage,
     }
 }
 
@@ -147,12 +148,12 @@ pub fn stream_plan(fp: &Footprint, cards: &[(usize, u64)]) -> Option<StreamPlan>
 /// schedule: the fewest of them that hold the deployment ([`stream_plan`]), each at what it has free now, or one
 /// stage on the ambient device when the selection has no card (the CPU backend). An error says how many bytes
 /// the deployment needs and what the cards offer, never a partial plan.
-pub fn auto_plan(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy, lsa_bytes: u64, device: Option<&str>) -> Result<StreamPlan, String> {
+pub fn auto_plan(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy, lsa: LsaCharge, device: Option<&str>) -> Result<StreamPlan, String> {
     let cards = StreamPlan::cards(device, 0);
     if cards.is_empty() {
         return Ok(StreamPlan::single(cfg.num_hidden_layers));
     }
-    let fp = footprint(cfg, serve, tiers, lsa_bytes);
+    let fp = footprint(cfg, serve, tiers, lsa);
     stream_plan(&fp, &cards).ok_or_else(|| {
         let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
         format!(
@@ -223,7 +224,7 @@ mod tests {
     #[test]
     fn the_bf16_weights_are_the_published_parameter_count_at_two_bytes() {
         let cfg = real();
-        let fp = footprint(&cfg, &serve(4096, KvTier::F32, 1), &TierPolicy::uniform(Dtype::BF16), 0);
+        let fp = footprint(&cfg, &serve(4096, KvTier::F32, 1), &TierPolicy::uniform(Dtype::BF16), LsaCharge::default());
         let linears_per_layer = (10240 * 5120) * 3 + (1024 * 5120) * 2 + 3 * (40960 * 5120);
         let small = 4 * (4 * 5120 + 2 * 128 + 1);
         let expected = 80 * (2 * linears_per_layer as u64 + small) + 2 * (100352u64 * 5120);
@@ -237,7 +238,7 @@ mod tests {
     #[test]
     fn the_nvfp4_release_tiers_cost_what_the_published_files_weigh() {
         let cfg = real();
-        let fp = footprint(&cfg, &serve(4096, KvTier::F32, 1), &nvfp4_release_tiers(&cfg), 0);
+        let fp = footprint(&cfg, &serve(4096, KvTier::F32, 1), &nvfp4_release_tiers(&cfg), LsaCharge::default());
         let embedding = 2 * 100352u64 * 5120;
         // Four bytes a tensor for the per-tensor `weight_scale_2` and `input_scale` (3 MLP linears a layer, two each).
         let stored = fp.weights + embedding + 80 * 3 * 4 * 2;
@@ -253,12 +254,12 @@ mod tests {
         let one = [(0, card_budget(96 * GIB))];
         let two = [(0, card_budget(96 * GIB)), (1, card_budget(96 * GIB))];
 
-        let nv = footprint(&cfg, &serve(131_072, KvTier::INT8, 1), &nvfp4_release_tiers(&cfg), 0);
+        let nv = footprint(&cfg, &serve(131_072, KvTier::INT8, 1), &nvfp4_release_tiers(&cfg), LsaCharge::default());
         let placed = place(&nv, &one).expect("NVFP4 + int8 KV at 128k fits one card");
         assert_eq!(placed.len(), 1);
         assert!(placed[0].bytes + nv.per_stage <= one[0].1);
 
-        let bf = footprint(&cfg, &serve(131_072, KvTier::INT8, 1), &TierPolicy::uniform(Dtype::BF16), 0);
+        let bf = footprint(&cfg, &serve(131_072, KvTier::INT8, 1), &TierPolicy::uniform(Dtype::BF16), LsaCharge::default());
         assert!(place(&bf, &one).is_none(), "129.6 GB of bf16 weights cannot fit one card");
         let placed = place(&bf, &two).expect("bf16 fits two cards");
         assert_eq!(placed.len(), 2);
@@ -271,8 +272,8 @@ mod tests {
     #[test]
     fn a_million_tokens_of_int8_cache_is_half_the_bf16_cache_and_needs_the_sparse_index() {
         let cfg = real();
-        let bf16 = footprint(&cfg, &serve(1 << 20, KvTier::BF16, 1), &nvfp4_release_tiers(&cfg), 0);
-        let int8 = footprint(&cfg, &serve(1 << 20, KvTier::INT8, 1), &nvfp4_release_tiers(&cfg), 0);
+        let bf16 = footprint(&cfg, &serve(1 << 20, KvTier::BF16, 1), &nvfp4_release_tiers(&cfg), LsaCharge::default());
+        let int8 = footprint(&cfg, &serve(1 << 20, KvTier::INT8, 1), &nvfp4_release_tiers(&cfg), LsaCharge::default());
         // 16 global layers x 2 planes x 1024 elements x 2 bytes = 64 KiB a token: 64 GiB at 1M.
         assert_eq!(bf16.kv_global, 64 * GIB);
         // One byte an element and a 4-byte scale per 128: 33 GiB.
@@ -285,8 +286,8 @@ mod tests {
     #[test]
     fn the_rings_cost_the_same_at_any_context() {
         let cfg = real();
-        let short = footprint(&cfg, &serve(4096, KvTier::BF16, 1), &nvfp4_release_tiers(&cfg), 0);
-        let long = footprint(&cfg, &serve(1 << 20, KvTier::BF16, 1), &nvfp4_release_tiers(&cfg), 0);
+        let short = footprint(&cfg, &serve(4096, KvTier::BF16, 1), &nvfp4_release_tiers(&cfg), LsaCharge::default());
+        let long = footprint(&cfg, &serve(1 << 20, KvTier::BF16, 1), &nvfp4_release_tiers(&cfg), LsaCharge::default());
         assert_eq!(short.kv_rings, long.kv_rings);
         // 64 sliding layers x 2 planes x (1024 + 512 slack) rows x 1024 elements x 2 bytes.
         assert_eq!(short.kv_rings, 64 * 2 * (1024 + 512) * 1024 * 2);
@@ -295,7 +296,7 @@ mod tests {
     #[test]
     fn an_infeasible_deployment_is_reported_not_papered_over() {
         let cfg = real();
-        let fp = footprint(&cfg, &serve(1 << 20, KvTier::BF16, 4), &TierPolicy::uniform(Dtype::BF16), 0);
+        let fp = footprint(&cfg, &serve(1 << 20, KvTier::BF16, 4), &TierPolicy::uniform(Dtype::BF16), LsaCharge::default());
         assert!(place(&fp, &[(0, card_budget(96 * GIB)), (1, card_budget(96 * GIB))]).is_none());
         assert!(stream_plan(&fp, &[(0, card_budget(96 * GIB))]).is_none());
     }
@@ -303,7 +304,7 @@ mod tests {
     #[test]
     fn the_stream_plan_tiles_the_layers_in_card_order() {
         let cfg = real();
-        let fp = footprint(&cfg, &serve(131_072, KvTier::INT8, 1), &TierPolicy::uniform(Dtype::BF16), 0);
+        let fp = footprint(&cfg, &serve(131_072, KvTier::INT8, 1), &TierPolicy::uniform(Dtype::BF16), LsaCharge::default());
         let plan = stream_plan(&fp, &[(0, card_budget(96 * GIB)), (1, card_budget(96 * GIB))]).expect("fits two");
         assert_eq!(plan.n_layers(), 80);
         assert_eq!(plan.n_stages(), 2);
@@ -341,7 +342,7 @@ mod tests {
             for (kv, tier) in [("bf16", KvTier::BF16), ("int8", KvTier::INT8), ("fp8", KvTier::FP8)] {
                 for tokens in [131_072u32, 1 << 20] {
                     let s = serve(tokens, tier, 1);
-                    let lsa = crate::lsa_device_bytes(&indexer, &s);
+                    let lsa = LsaCharge::of(&indexer, &s);
                     let fp = footprint(&cfg, &s, &tiers, lsa);
                     let n = (1..=4).find(|&n| place(&fp, &cards[..n]).is_some());
                     eprintln!(
@@ -363,7 +364,7 @@ mod tests {
             for (kv, tier) in [("bf16", KvTier::BF16), ("int8", KvTier::INT8)] {
                 let fits = |tokens: u32| {
                     let s = serve(tokens, tier, 1);
-                    place(&footprint(&cfg, &s, &tiers, crate::lsa_device_bytes(&indexer, &s)), &cards[..1]).is_some()
+                    place(&footprint(&cfg, &s, &tiers, LsaCharge::of(&indexer, &s)), &cards[..1]).is_some()
                 };
                 let (mut lo, mut hi) = (0u32, 4 << 20);
                 while hi - lo > 4096 {

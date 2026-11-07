@@ -181,9 +181,24 @@ impl LsaBinding {
     /// does not match, and resolve nothing else: the caller resolves kernels
     /// ([`resolve_kernels`]) and passes them in.
     pub fn attach(g: &Gpu, indexer: &Indexer, kernels: LsaKernels, a: &Attachment) -> Result<LsaBinding, String> {
+        Self::attach_in_domain(g, indexer, kernels, a, 0)
+    }
+
+    /// [`Self::attach`] for one of several bindings that ride the same block tables: an engine whose layers are
+    /// split over devices attaches one binding per device, each with the indexer restricted to its layers
+    /// ([`Indexer::restricted_to`]) and its own `domain`, so the tables hold each device's page ids apart
+    /// ([`BlockTable::index_pages_in`]). Every binding is driven with the same tables, chunks and releases.
+    pub fn attach_in_domain(g: &Gpu, indexer: &Indexer, kernels: LsaKernels, a: &Attachment, domain: usize) -> Result<LsaBinding, String> {
         a.check(indexer)?;
-        let attn = LsaAttention::new(g, indexer, kernels, a.kv, a.max_rows, a.page_capacity, a.yarn_inv_freq)?;
+        let mut attn = LsaAttention::new(g, indexer, kernels, a.kv, a.max_rows, a.page_capacity, a.yarn_inv_freq)?;
+        attn.set_domain(domain)?;
         Ok(LsaBinding { attn, dense_until: 0, dense_now: Cell::new(false), dense_rows: 0 })
+    }
+
+    /// [`Self::device_bytes_for`] split per sparse layer and per device (`LsaAttention::device_bytes_split`).
+    pub fn device_bytes_split(indexer: &Indexer, kv: KvGeometry, max_rows: u32, num_blocks: u32) -> (u64, u64) {
+        let pages = page_capacity(num_blocks, kv.block_size, indexer.cfg.cluster_block as u32);
+        LsaAttention::device_bytes_split(indexer, kv, max_rows, pages)
     }
 
     /// The device bytes attaching `indexer` allocates, before allocating: what
