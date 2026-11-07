@@ -4,9 +4,8 @@
 
 """Generate the book's chronology appendix from the mainline history.
 
-For each month: how many commits landed, which crates first appeared (with
-the commit that introduced them) and which engineering findings were written
-down. A crate that was renamed is dated by its earliest name, found by
+For each month: how many commits landed and which crates first appeared
+(with the commit that introduced them). A crate that was renamed is dated by its earliest name, found by
 following the file renames git records, so a model that began life under
 another name keeps its true starting date. Dates are author dates: the
 history is rebased to stay linear, which rewrites commit dates but not author
@@ -34,9 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bookspec import BOOK, ROOT, load  # noqa: E402
 
 OUT = BOOK / "history" / "chronology.md"
-KNOWLEDGE_DIR = ROOT / ".agents" / "knowledge"
 CRATE = re.compile(r"^crates/([^/]+)/")
-KNOWLEDGE = re.compile(r"^\.agents/knowledge/(\d+[a-z]?)-[^/]+\.md$")
 MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
           "September", "October", "November", "December"]
 
@@ -59,19 +56,10 @@ def git_log(rev: str):
         yield sha, date, changes
 
 
-def knowledge_title(kid: str) -> str | None:
-    for p in KNOWLEDGE_DIR.glob(f"{kid}-*.md"):
-        for line in p.read_text(encoding="utf-8").splitlines():
-            if line.startswith("# "):
-                return re.sub(r"^#\s*\d+[a-z]?\.\s*", "", line).strip()
-    return None
-
-
 def build(rev: str) -> str:
     first_seen: dict[str, tuple[str, str]] = {}
     renamed_from: dict[str, str] = {}
     per_month = Counter()
-    knowledge_by_month = defaultdict(list)
     for sha, date, changes in git_log(rev):
         month = date[:7]
         per_month[month] += 1
@@ -87,8 +75,6 @@ def build(rev: str) -> str:
                 a, b = CRATE.match(paths[0]), CRATE.match(paths[1])
                 if a and b and a.group(1) != b.group(1):
                     rename_votes[(a.group(1), b.group(1))] += 1
-            if status.startswith("A") and (k := KNOWLEDGE.match(path)):
-                knowledge_by_month[month].append(k.group(1))
         for (old, new), _ in rename_votes.most_common():
             renamed_from.setdefault(new, old)
 
@@ -123,10 +109,9 @@ def build(rev: str) -> str:
         "# Chronology of brain",
         "",
         "This appendix is the engineering timeline the book's historical threads are drawn from. "
-        "It is generated from the repository's own history: for every month, the number of commits, "
-        "the crates that first appeared (dated by their earliest name when they were later renamed, "
-        "and linked to the chapters that explain them) and the engineering findings that were written "
-        "down. Dates are author dates; the history is kept linear by rebasing, which preserves them.",
+        "It is generated from the repository's own history: for every month, the number of commits "
+        "and the crates that first appeared (dated by their earliest name when they were later renamed, "
+        "and linked to the chapters that explain them). Dates are author dates; the history is kept linear by rebasing, which preserves them.",
         "",
         "The chapters teach in the order a reader needs the ideas. This page shows the order in which "
         "brain actually needed them, which is often very different: the engine began with a "
@@ -144,14 +129,6 @@ def build(rev: str) -> str:
                 where = ", ".join(f"[{ch.title}](../{ch.rel})" if ch.written else ch.title
                                   for ch in explained[c]) or "not yet placed"
                 lines.append(f"| {date[:10]}, commit `{sha[:9]}` | `{c}`{was} | {where} |")
-            lines.append("")
-        found = [(k, t) for k in knowledge_by_month[month] if (t := knowledge_title(k))]
-        if found:
-            lines += ["Findings recorded this month:", ""]
-            # Finding titles quote the measurements of their day; marked as
-            # reviewed historical numbers for the perf-number gate.
-            lines += [f"- knowledge #{k.lstrip('0')}: {t} <!-- perf-number: dated historical finding -->"
-                      for k, t in found]
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

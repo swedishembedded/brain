@@ -68,8 +68,11 @@
 \AtBeginDocument{\setlength{\headwidth}{\textwidth}\fancyhfoffset{0pt}}
 \renewcommand{\chaptermark}[1]{\markboth{\ifnum\value{secnumdepth}>-1 \thechapter.\ \fi#1}{}}
 \renewcommand{\sectionmark}[1]{\markright{\ifnum\value{secnumdepth}>0 \thesection\ \ \fi#1}}
-\fancyhead[LE]{\displayfont\footnotesize\color{muted}\nouppercase{\leftmark}}
-\fancyhead[RO]{\displayfont\footnotesize\color{muted}\nouppercase{\rightmark}}
+% A long chapter or section title is cut with an ellipsis rather than
+% allowed to run past the text block on either page.
+\usepackage[fit]{truncate}
+\fancyhead[LE]{\displayfont\footnotesize\color{muted}\truncate{\headwidth}{\nouppercase{\leftmark}}}
+\fancyhead[RO]{\displayfont\footnotesize\color{muted}\truncate[\,\dots]{\headwidth}{\hfill\nouppercase{\rightmark}}}
 \fancyfoot[LE,RO]{\displayfont\footnotesize\color{muted}\thepage}
 \renewcommand{\headrulewidth}{0pt}
 \renewcommand{\footrulewidth}{0pt}

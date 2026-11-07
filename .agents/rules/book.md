@@ -89,6 +89,13 @@ the chapter where a reader should first meet it.
   images, nothing copied from papers or the web. Render to PNG
   (`scripts/book/figures.py --png scratchpad/book/png`) and look at it before
   committing: a figure that is wrong is worse than none.
+- **Sources are claims, not facts.** Commit messages and knowledge entries
+  record what someone believed at the time; some were later corrected, some
+  overstate, and their numbers belong to one setup on one day. Use them to
+  find the story, then confirm what the book states against the code, the
+  tests or the diff. Teach the general lesson and the mechanism; leave out
+  incidental detail (exact timings, ticket-like specifics) the reader does
+  not need. When a claim cannot be confirmed, leave it out.
 - **History is cited, not narrated from memory.** A historical claim cites
   `commit <hash>` (at least 9 hex digits, verified to exist) or
   `knowledge #N`. Mine the evidence with `scripts/book/history.py extract`
