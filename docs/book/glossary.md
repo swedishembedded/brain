@@ -110,6 +110,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## D
 
+**data augmentation**: training on altered copies of the examples, with their labels kept, where the alteration encodes a known invariance of the task; an alteration that changes the true label adds wrong training data. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
+
 **data leakage**: any route by which information about the rows used for scoring reaches the fitting (duplicates, statistics computed from all the rows, the future, the same subject on both sides), which makes the score too good to be true. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **dataset**: a collection of $N$ examples, each a vector of features paired with a label, written as the pairs $(\mathbf{x}_n, y_n)$. *([The Learning Problem](v02-learning/01-learning-problem.md))*
@@ -136,7 +138,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **dot product**: the number $\sum_i a_i b_i$ obtained from two vectors of equal length, equal to $\lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert\cos\theta$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
+**dropout**: randomly setting each unit of a layer to zero with probability $p_{\mathrm{drop}}$ during training, and scaling the kept units by $1/(1 - p_{\mathrm{drop}})$ so that the expected output is unchanged; the layer is the identity at prediction time. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
+
 ## E
+
+**early stopping**: evaluating the validation loss at intervals, keeping the parameters of the lowest value seen, and stopping when it has not improved for a number of evaluations (the patience). *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
 
 **effect size**: the size of a difference in the metric's own units (points of accuracy), or standardised as the mean difference over the standard deviation of the differences; it says how much a result matters, where a test says only whether chance could explain it. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
@@ -513,6 +519,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **vector addition**: adding two vectors of the same length entry by entry; as arrows it is the parallelogram rule. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
+
+## W
+
+**weight decay**: shrinking every weight toward zero by the fraction $\eta\lambda$ at each step, as a regularizer of a neural network; the L2 penalty of Volume II, applied directly to the weights in the decoupled form of chapter 7. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
 
 ## X
 

@@ -70,4 +70,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 8. [Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md): Why should the step size change during training, and what do we do when a gradient explodes?
 9. [Initialization: Where Training Starts](v03-neural-networks/09-initialization.md): Why does the random starting point decide whether a deep network trains at all?
 10. [Normalization Layers](v03-neural-networks/10-normalization.md): How does rescaling activations inside a network make it train faster and more stably?
+11. [Regularization in Neural Networks](v03-neural-networks/11-regularization.md): How do we stop a network with millions of parameters from memorizing its training set?
 <!-- /contents -->

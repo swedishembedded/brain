@@ -1,0 +1,74 @@
+<!-- source-sha256: 94e1d5383856d2b6ca553ed4099f10d612ad9c2cc6a7a314e81ce8158d3e05c7 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 374" width="800" height="374"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="374" fill="#ffffff"/>
+<rect x="20" y="10" width="760" height="354" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Dropout at p = 0.5: the output of a layer of six units is a_j m_j / (1 - p)</text>
+<text x="716" y="78.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">sum of the row</text>
+<text x="168" y="78.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">unit 0</text>
+<text x="254" y="78.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">unit 1</text>
+<text x="340" y="78.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">unit 2</text>
+<text x="426" y="78.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">unit 3</text>
+<text x="512" y="78.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">unit 4</text>
+<text x="598" y="78.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">unit 5</text>
+<text x="82" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">eval mode</text>
+<rect x="133" y="90" width="70" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="168" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="219" y="90" width="70" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="254" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-0.5</text>
+<rect x="305" y="90" width="70" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="391" y="90" width="70" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="426" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.5</text>
+<rect x="477" y="90" width="70" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="512" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-1.5</text>
+<rect x="563" y="90" width="70" height="36" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="598" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.25</text>
+<text x="716" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1.75</text>
+<text x="82" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mask 1</text>
+<rect x="133" y="148" width="70" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="168" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="219" y="148" width="70" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="254" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="305" y="148" width="70" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4</text>
+<rect x="391" y="148" width="70" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="426" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="477" y="148" width="70" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="512" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-3</text>
+<rect x="563" y="148" width="70" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="598" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<text x="716" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4</text>
+<text x="82" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mask 2</text>
+<rect x="133" y="206" width="70" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="168" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="219" y="206" width="70" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="254" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-1</text>
+<rect x="305" y="206" width="70" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4</text>
+<rect x="391" y="206" width="70" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="426" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="477" y="206" width="70" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="512" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="563" y="206" width="70" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="598" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.5</text>
+<text x="716" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3.5</text>
+<text x="82" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mask 3</text>
+<rect x="133" y="264" width="70" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="168" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="219" y="264" width="70" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="254" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="305" y="264" width="70" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4</text>
+<rect x="391" y="264" width="70" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="426" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="477" y="264" width="70" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="512" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-3</text>
+<rect x="563" y="264" width="70" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="598" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<text x="716" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="133" y="331" width="18" height="18" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="161" y="344.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">kept: a_j / (1 - p) = 2 a_j</text>
+<rect x="391.6" y="331" width="18" height="18" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="419.6" y="344.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">dropped: 0</text>
+<rect x="529.2" y="331" width="18" height="18" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="557.2" y="344.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">eval mode: unchanged</text>
+</svg>

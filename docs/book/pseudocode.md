@@ -164,7 +164,7 @@ row of `x: [T, D]`".
 
 **Arithmetic in a stated format.** When a text says an expression is evaluated in `f32` (or another format) *one operation at a time*, each `+`, `-`, `*`, `/` and each call of `sqrt`, `exp`, `log` or `log1p` rounds its exact result, computed from the already rounded inputs, to the nearest number of the format, ties to even. Negation, `abs`, `min`, `max` and comparisons are exact and are not rounding steps. A result beyond the largest finite number becomes `infinity`; tiny results are kept as subnormal numbers (nothing is flushed to zero); `log(0)` is `-infinity`, `1 / infinity` is `0`, and `infinity - infinity` is not a number. Volume II, Chapter 3 uses this to show how a naive loss fails.
 
-Comparison operators are `==`, `!=`, `<`, `<=`, `>`, `>=`. A **chained comparison** `a <= b < c` means `a <= b and b < c`, with `b` evaluated once; it is only used with the operators `<` and `<=` pointing the same way. Operators bind in
+Comparison operators are `==`, `!=`, `<`, `<=`, `>`, `>=`. Every ordering comparison (`<`, `<=`, `>`, `>=`) with a not-a-number operand is false, so `v < best` is false when `v` is not a number, and an algorithm that keeps the lowest value seen never keeps a not-a-number one. A **chained comparison** `a <= b < c` means `a <= b and b < c`, with `b` evaluated once; it is only used with the operators `<` and `<=` pointing the same way. Operators bind in
 the usual order of arithmetic (`^` first, then `*`, `/`, `//`, `mod`, then
 `+`, `-`, then comparisons, then `not`, `and`, `or`). The bitwise operations
 below are always fully parenthesised in the book, so they need no precedence

@@ -67,8 +67,8 @@ in the curriculum and appear here when they are written.
    starting point decides whether a deep network trains at all.
 10. [Normalization Layers](10-normalization.md): how rescaling activations inside
     a network makes it train faster and more stably.
-11. Regularization in Neural Networks: how to stop a network with millions of
-    parameters from memorizing its training set.
+11. [Regularization in Neural Networks](11-regularization.md): how to stop a
+    network with millions of parameters from memorizing its training set.
 12. Training Dynamics and Debugging: how to find out why a loss curve looks
     wrong.
 13. First Complete Models: what it takes to build, train and verify a small
