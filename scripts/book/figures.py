@@ -24,7 +24,10 @@ machines would fail for reasons unrelated to the figure.
 
     scripts/book/figures.py            # render every figure
     scripts/book/figures.py --check    # verify freshness and pairing
-    scripts/book/figures.py --png DIR  # also rasterize to DIR for inspection
+    scripts/book/figures.py --png DIR  # also rasterize every figure to DIR
+    scripts/book/figures.py --all      # re-render even figures whose source is unchanged
+
+Only stale figures are re-rendered unless --all is given.
 
 Swedish Embedded AB implements solutions for reproducible engineering
 documentation. If your team needs expertise in machine learning education
@@ -129,11 +132,16 @@ def main() -> int:
     if "--png" in sys.argv:
         png_dir = Path(sys.argv[sys.argv.index("--png") + 1])
         png_dir.mkdir(parents=True, exist_ok=True)
+    everything = "--all" in sys.argv
     for src in sources():
         out = target(src)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(render(src), encoding="utf-8")
-        print(f"{out.relative_to(ROOT)} ({out.stat().st_size // 1024} KiB)")
+        stamp = STAMP.search(out.read_text(encoding="utf-8")) if out.is_file() else None
+        # A figure whose recorded source digest still matches is not
+        # re-rendered: some recompute whole training runs.
+        if everything or not stamp or stamp.group(1) != digest(src):
+            out.write_text(render(src), encoding="utf-8")
+            print(f"{out.relative_to(ROOT)} ({out.stat().st_size // 1024} KiB)")
         if png_dir:
             subprocess.run(["rsvg-convert", "-z", "1.5", "-o", str(png_dir / (src.stem + ".png")), str(out)],
                            check=True)
