@@ -436,10 +436,15 @@ pub const ARCHS: &[Arch] = &[
     // Ripple-65B: a dense decoder mixing sliding-window RoPE layers and global
     // NoPE layers (4:1) with value residual, sigmoid-gated attention and a
     // clipped SwiGLU. llama.cpp has no entry for it, so this is a brain-defined
-    // id in the `[a-z0-9]+` style (the HF model type is `ricursive`). Forward
-    // parity only so far: not served, no `default_ref`, no declared training
-    // capability.
-    arch!("ricursive", "Ripple-65B (hybrid sliding/global decoder, value residual, gated attention)", Text, Brain, "brain-ricursive", hf: &["RicursiveForCausalLM"]),
+    // id in the `[a-z0-9]+` style (the HF model type is `ricursive`). Served through
+    // the generic scheduler, no `default_ref`; training capabilities are the ones the
+    // capability matrix names the tests for.
+    arch!("ricursive", "Ripple-65B (hybrid sliding/global decoder, value residual, gated attention)", Text, Brain, "brain-ricursive", hf: &["RicursiveForCausalLM"],
+        caps: Caps::NONE.full_ft().lora(&[BaseTier::F32, BaseTier::Bf16, BaseTier::I8, BaseTier::Nf4, BaseTier::Fp8]).other()),
+    // DFlash2: the block-diffusion draft model of a speculative decoder (the published `Ripple-65B-Preview-DFlash2`, the
+    // Qwen3.8 `DFlash2` GGUF). It is not a language model that serves on its own: a target's engine loads it
+    // (`--speculative dflash`), so a pull fetches it and the model scan leaves it for the target to find.
+    arch!("dflash2", "DFlash2 block-diffusion draft model for speculative decoding (sliding, full and NoPE layers, dynamic convolutions, candidate selector)", Text, Brain, "brain-dflash2", hf: &["DFlash2DraftModel"]),
     // -- Multimodal (VLM / omni / ASR) -----------------------------------
     arch!("qwen3omnimoe", "Qwen3-Omni-30B-A3B (Thinker+Talker+Code2Wav)", Multimodal, Brain, "brain-qwen3omnimoe", hf: &["Qwen3OmniMoeForConditionalGeneration"]),
     // DENSE Qwen3-VL only - the 30B-A3B release is a DIFFERENT real HF class

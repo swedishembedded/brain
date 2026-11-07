@@ -34,7 +34,7 @@ Sources: `ricursiveAI/Ripple-65B-Preview` `config.json`,
 | positions | `max_position_embeddings` 2097152; advertised 1M |
 | tokenizer | `PreTrainedTokenizerFast` (100k BPE), ChatML `<\|im_start\|>`, tool calls in XML tags (`chat_template.jinja`) |
 | NVFP4 release | modelopt NVFP4 W4A4, group 16, static input scales, **MLP only**: every `self_attn*`, `embed_tokens` and `lm_head` stay bf16 |
-| drafter | `Ripple-65B-Preview-DFlash2` (a Qwen3-architecture DFlash2 drafter) |
+| drafter | `Ripple-65B-Preview-DFlash2` (`DFlash2DraftModel`, `model_type: qwen3`, 4.04 B parameters in one 8.08 GB bf16 `model.safetensors`; 81 tensors; layers 1, 20, 39, 58, 77 of the target are its taps) |
 
 The global layers' Q/K are RMS-normed and un-rotated, so the LSA index reads
 them as they are (`Rope::None`); nothing has to be un-rotated.
@@ -49,7 +49,7 @@ them as they are (`Rope::None`); nothing has to be un-rotated.
 | LSA index, selection, sparse paged read | `model::lsa` (per-layer `Option` projections, `Rope::None`, flat and tree reads, int8/fp8 KV) | wired into `qwen3/serve.rs` only: `set_lsa`, crossover, kernel set and memory charge live in the Qwen3 engine and must move to a shared place before a second engine can use them |
 | sparse attention kernels for 80/8/128 | per-KV-head `paged_sparse_flash_gqa` with a `GROUP` knob compiled for 2, 4, 5, 8; whole-row kernel requires `64 % n_heads == 0` | group 10 not compiled; whole-row prefill refuses 80 heads (roadmap `lsa.md`: templated workgroup) |
 | D-LSA distillation | `model::lsa::distill` (host math) and `brain lsa` | model-agnostic capture of a layer's Q/K, so a Ripple indexer can be distilled over the 16 global layers; device distillation (`lsa.md`) |
-| speculative decoding | DFlash2 in `crates/qwen35` (bound to its GGUF single-stream path) | verify and prompt-lookup drafting are served; the Ripple DFlash2 drafter needs target hidden taps and its block forward ported |
+| speculative decoding | DFlash2 in `crates/qwen35` (bound to its GGUF single-stream path) | done as step 6b: the draft is the shared `crates/dflash2`, the engine retains the taps, the scheduler's verify takes its proposals |
 | training | gradcheck, LoRA, `ModelFit` | backward for value residual lerp, sigmoid gate, clipped SwiGLU (clamp masks), PeriNorm order |
 
 KV memory (bf16, per token): global 16 x 2 x 8 x 128 x 2 B = 64 KiB, so
@@ -105,7 +105,14 @@ serve other work; CUDA parity and performance follow on the same gates.
        `--max-batch` checked against `ricursive::POLICY`, `brain ricursive generate`, a pull that
        fetches `chat_template.jinja`, batched speculative verify with prompt-lookup drafting.
        End to end on the CPU backend and the software adapter (`tests/e2e/ripple.bats`). The
-       DFlash2 drafter is not run (below); no card has served it (step 8).
+       No card has served it (step 8). DFlash2 speculation is step 6b.
+6b. [x] DFlash2 speculative decoding, through the generic scheduler: the draft model out of `qwen35` into a
+       target-agnostic crate (`crates/dflash2`: per-layer sliding, full and NoPE attention, a ring of window plus one
+       block per sequence, one batched forward over the blocks of several sequences, safetensors or GGUF), the
+       engine contract for hidden-state taps (`PagedDecoder::enable_taps`/`read_taps`, a `TapPool` addressed by the
+       KV block tables), `RicursiveEngine::set_drafter`, `--speculative dflash` and `--draft-model`, the draft and
+       the taps charged in the placement, and speculation beside `--sparse-attention`. Measured below on the CPU
+       backend and the software adapter; no card has run it (step 8).
 7. [x] Backward for every Ripple op, gradchecked and compared with PyTorch autograd; the `Model` and `Shardable`
        faces through the generic trainer, pipeline and objectives; LoRA/QLoRA through `model::adapter` served by
        the engine; full fine-tuning; N-LSA on the global layers; `brain finetune` and the SDK fine-tuners. Measured
@@ -420,18 +427,61 @@ template printed them and gave a template that serializes a call's arguments the
 the object; every JSON tool call was reported as a discarded tool-call tail; `--device software`
 left the host budget at zero so nothing could be placed.
 
-What the DFlash2 drafter needs (config read from the hub; the 8 GB weights were not fetched):
-`target_layer_ids` 1, 20, 39, 58, 77 of 80 (the residual stream at those layers, 5 x 5120,
-fused by `fc` 25600 -> 5120 and `hidden_norm`), block size 16 with mask token 100278, 5 layers
-(4 sliding, window 4096, RoPE theta 10000; 1 global NoPE) of width 5120, 80/8 heads of 128, FFN
-40960, four-tap dynamic convolutions (`attention_conv`, `mlp_conv`: a `[2, 4, 5120]` base kernel
-and a `5120 -> 2560` kernel projection per sublayer, groups of 16), a candidate selector (top 32
-of the target's `lm_head`, rank 256, `predecessor_codebook` and `successor_codebook`
-`[100352, 256]`), the target's embedding and head shared. No reference implementation of
-`DFlash2DraftModel` is published with the target (the server sources call it from SGLang), so
-the port needs the SGLang source or a dump of the drafter's activations to gate against, and the
-engine needs per-sequence retention of the five taps (prefill and verify rows) behind
-`PagedDecoder::draft`.
+### Step 6b: the DFlash2 drafter (CPU backend and the software Vulkan adapter, 2026-11-08)
+
+The drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`, fetched with `brain pull` to
+`~/project/shared/models-qhf/ripple-65b-preview-dflash2/`: `config.json` and an 8,075,513,104-byte `model.safetensors`)
+has 81 tensors of 4,037,752,064 parameters, all bf16. Against the Qwen3.8-27B drafter this repository first ported
+(`qwen35::dflash2`), what differs:
+
+| | Qwen3.8-27B draft (GGUF) | Ripple draft (safetensors) |
+|---|---|---|
+| tensor names | `blk.N.attn_q.weight`, `enc.output_norm`, `selector_predecessor.weight` ... | `layers.N.self_attn.q_proj.weight`, `hidden_norm`, `candidate_selector.predecessor_codebook` ... (both spellings live in `dflash2::source::Tensor`) |
+| layers | all sliding, window 2048, all rotate | 4 sliding (window 4096, RoPE theta 10000) then 1 full NoPE (`layer_types`, `no_rope_layers: [4]`) |
+| dynamic convolutions | two taps | four taps (`conv_kernel_size` 4), groups of 16, bases `[2, 4, 5120]`, projections `5120 -> 2560` |
+| selector | top 16 | top 32, rank 256, codebooks `[100352, 256]` |
+| width, heads | 5120, 24/4 (head 256) per the GGUF | 5120, 80/8 of 128, FFN 40960, `q_norm`/`k_norm` over the head (plain RMSNorm gains, not `1 + w`) |
+| target layers | GGUF stores them one higher (hidden-states tuple index) | `target_layer_ids` are decoder layers: the output of layer `i` |
+| attention | non-causal within the window both ways | non-causal; the full layer reads every position |
+| config keys | `dflash.*` metadata | `dflash_config`, `layer_types`, `no_rope_layers`, `rope_parameters.rope_theta`, `is_causal: false`, `draft_vocab_size` |
+
+It is NOT Ripple's PeriNorm/value-residual block: the layers carry only `input_layernorm`, `post_attention_layernorm`,
+the two head norms, the three MLP linears and the two convolution sublayers.
+
+| gate | result |
+|---|---|
+| draft forward on the REAL 4.04 B weights vs `tools/goldens/dflash2_reference_forward.py real` (float32 numpy over the bf16 values; 24 synthetic tap rows of 5 x 5120 with heavy-tailed channels, the anchor ` the` (token 279), the shared embedding and `lm_head` from `layers-0-4.safetensors`), CPU backend | layers 0 to 4 scaled error 3.2e-6, 1.0e-5, 2.5e-5, 2.4e-5, 2.4e-5; post-norm rows 3.1e-5; head logits (15 x 100352) 2.7e-5; the selector's 15-token path identical; the embedding rows exact. Load 7.42 GiB in 4.7 s, 24 context rows in 1.2 s, one block in 8.6 s (288 host cores) |
+| the same on a tiny random draft (window 6, three layers, one full NoPE, block 5), context of 14 and 17 positions so the rings wrap; context fed whole, in pieces, and extended after a denoise; two sequences in one forward | per layer, post-norm rows and logits at most 2e-6, the selector paths identical |
+| retained taps vs the step-1 forward's hidden state at the tapped layers (tiny Ripple, `dflash::retained_taps_equal...`) through chunked prefill, decode, a verify of four rows of which two are kept, and a prefix hit whose tail block is copied | within bf16 rounding (scaled error bound 5e-3) at every position |
+| speculation with the draft equals plain greedy (4 sequences of 9, 15, 30 and 6 tokens, 40 new tokens each, target window 4, draft window 6) | all four outputs equal; 14 sequence-rounds, 19 proposals, 8 verify steps; the random draft is right only by chance (0 accepted), so rejection and rollback are what ran |
+| the same after a prefix hit (22 tokens filed, 31 resumed) | equal |
+| the shared conformance suite (batching, short request not held, prefix reuse, scripted drafters that are right, partly right and wrong) with the draft attached and taps retained for every row | passes |
+| sparse attention: the scripted-drafter conformance run beside the index (software adapter, cluster blocks of 8 keys) | equal to plain greedy with the same index; with `spec_rows_limit` off the output diverges (`91 15 68 ... 116 51` against `... 102 39`), so the limit is what makes it exact |
+| sparse attention with the draft model proposing (software adapter) | equal to plain greedy with the same index; the global layer read sparsely |
+| e2e (`tests/e2e/ripple.bats`): the scripted tiny Ripple with the fixture's random draft over HTTP, `--speculative dflash` with the draft found beside the target; again on the software adapter with `--sparse-attention` | the same reply and tool call as the plain server; the log reports `spec_rounds`, `spec_accept_rate`, `spec_tokens_per_round`, `spec_verify_steps` |
+| sampled requests (temperature 0.9, top-k 20, seeded) with the draft attached | run to the end through the rejection-sampling verify, repeatable under one seed |
+| a draft model that is not there, or built for another target | refused by name; the model is not served |
+
+Memory the plan charges (`placement::tests::the_draft_model_is_charged...`, NVFP4 target, int8 KV, one sequence): the
+draft is 7.42 GiB of weights plus its caches (1.13 GiB at 128k tokens, 2.13 GiB at 256k; four sequences at 256k: 8.5
+GiB) on the last stage's card, and the target's retained hidden states are 50 KiB a pooled position on the host (6.2 GiB
+at 128k, 12.5 GiB at 256k). On one 96 GiB card the longest dense context falls from about 962k tokens to about 581k with
+the draft attached.
+
+Shared-code defects found and fixed on the way: speculation was off beside latent sparse attention (a verify that
+crossed a cluster block of the index read a state a plain decode builds later: now the scheduler bounds each verify,
+`spec_rows_limit`, and the verify prepares the index as a chunk); the dynamic-convolution kernel could not run
+several blocks in one dispatch; `brain pull` refused the draft ("unsupported architecture") and the model scan
+called a pulled draft an unservable family; the `ricursive` registry row declared none of the training capabilities
+the capability matrix records.
+
+Not verified: the draft with REAL hidden states of the 80-layer target (no card here holds it, so every number above is
+the draft's forward, not its acceptance), the acceptance rate and speedup, and two conventions the published files do
+not settle. The target taps are taken as the OUTPUT of decoder layer `i` (as the Qwen3.8 port established, and as the
+GGUF's one-higher index shows), and the block's noise embedding is the target's `embed_tokens` row as stored, WITHOUT
+`embed_scale` (the README says "token embeddings"; the scaled embedding is what the target's first layer reads). Both
+are one line to flip (`RicursiveEngine::tap_layers` offset, `DraftHost::embed`) and the first run on a card settles them
+by `spec_accept_rate`: a wrong convention shows as an acceptance near the random draft's.
 
 ### Step 7: trained through the generic paths (CPU backend and the software Vulkan adapter, 2026-11-07)
 
@@ -541,18 +591,30 @@ CPU loss 13.992954 and gradients; one `brain finetune` step with `--kernel-profi
 Serving (step 6), after `brain pull`:
 
 ```
-# 1 GH200, NVFP4 release, int8 KV, the distilled D-LSA indexer (DFlash2 and ngram speculation are
-# not available beside it; the drafter is not ported, see the step 6 measurements)
+# 1 GH200, NVFP4 release, int8 KV, the distilled D-LSA indexer
 brain pull ricursiveAI/Ripple-65B-Preview-NVFP4
 brain serve --openai --device gpu0 --kv-cache int8 --sparse-attention ripple-lsa.safetensors
 
 # the same without the indexer, prompt-lookup speculation on
 brain serve --openai --device gpu0 --kv-cache int8 --speculative ngram
 
+# 1 GH200, NVFP4 target + the DFlash2 drafter + int8 KV (the draft is found beside the target; the startup log prints
+# "default draft model ..." and the placement with the draft's 7.4 GiB and caches charged to the card, the taps to
+# the host; add --sparse-attention ripple-lsa.safetensors to read the global layers sparsely beside it)
+brain pull ricursiveAI/Ripple-65B-Preview-DFlash2
+brain serve --openai --device gpu0 --kv-cache int8 --speculative dflash --verbose 2
+
 # 2 GH200, the bf16 release (staged over both cards; add --kv-cache int8 for 1M tokens)
 brain pull ricursiveAI/Ripple-65B-Preview
 brain serve --openai --device gpu0,gpu1
 ```
+
+First checks for the drafter, in order: `make test/one P=brain-dflash2 T=it ARGS=tiny` with `--device gpu0` (the tiny draft
+against the reference on a card, the fused paged decode attention in place of the CPU's triad), then `real` (needs
+`testdata/dflash2/ripple-65b-preview-dflash2` and the golden of `tools/goldens/dflash2_reference_forward.py real`), then
+the same request twice, plain and `--speculative dflash`, and the replies must be identical; `spec_accept_rate` in the
+`--verbose 2` request lines settles the two conventions listed under step 6b (tap layers, unscaled embedding) and is the
+number to record, with tokens/s against plain decode at batch 1 and 4.
 
 First checks: the startup log's placement line and defaults against `nvidia-smi` after the
 first request (the numbers above are the plan's); `BRAIN_BIN=./target/release/brain bats
@@ -582,6 +644,16 @@ engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
   per tier with `brain perf` (`kernels.md` section F) before any tuning.
 
 ## Open items for the later steps
+
+- DFlash2, step 6b. The draft's K/V caches are f32, one slot per live sequence, a full layer holding every position
+  (2.1 GiB a sequence at 256k): a cache slot above the device's binding limit is refused by name at load, so very long
+  contexts need a paged or compact (bf16/int8) draft cache; the dense fallback attention (no workgroup barriers) allocates
+  score slabs of `rows x heads x keys` for the full layer. The taps are bf16 on the host (50 KiB a position, 13 GiB at
+  256k) and cross to the draft through a host copy per round. The drafter reads one slot per request id; a finished
+  request's slot is reclaimed only when another needs it. The shared engine contract is implemented by Ripple only:
+  Qwen3.8 (`qwen35::dflash2`) still drives the draft single-stream, behind its own tap path, and Qwen3's engine does
+  not retain taps. Sampled decoding takes the scheduler's rejection sampling (`verify_proposals`); with the draft it ran
+  (seeded, repeatable, verify steps taken) but its distribution was not measured against plain sampling.
 
 - Adapter serving, step 7c. The bank is allocated per stage with `slots` x `rank_cap` x (in + out) f32 per targeted
   linear (`--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`; Ripple's default is all eight linears, 4 slots of

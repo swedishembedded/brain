@@ -26,7 +26,8 @@ scheduler, tokenizer, chat-template, reply-parsing and policy paths.
 | Latent sparse attention over the global layers (`--sparse-attention FILE`, `brain lsa`) | [x] |
 | Layers staged over several cards, chosen by the memory plan from the device selection | [x] |
 | Speculative decoding: batched verify with prompt-lookup drafting (`--speculative ngram`) | [x] |
-| Speculative decoding with the `Ripple-65B-Preview-DFlash2` drafter | [ ] |
+| Speculative decoding with the `Ripple-65B-Preview-DFlash2` drafter (`--speculative dflash`, `--draft-model`), also beside `--sparse-attention` | [x] |
+| Measured acceptance and speedup of the drafter against the real 65B target | [ ] |
 | Full fine-tuning (f32 weights, AdamW on the device) and LoRA/QLoRA through the shared trainers (`brain finetune`, `ChatFineTune`, `ChatFullFineTune`, `PreferenceFineTune`) | [x] |
 | LoRA over a bf16, fp8, nf4 or int8 base, or the ModelOpt NVFP4 release as published; the adapter exports as a PEFT directory | [x] |
 | Pipeline-parallel training over several devices (`model::Pipeline`) | [x] |
@@ -63,7 +64,8 @@ global KV, rings, index, fixed bytes per stage) and what the cards offer.
 | `--sparse-attention FILE` | The indexer `brain lsa distill --arch ricursive` writes. It must be built for this model (geometry, global layers only, no tree, cluster block a whole number of KV blocks) and an f32, int8 or fp8 cache; anything else is refused at startup, naming the flag. |
 | `--ctx N` | Per-sequence tokens. Default: the longest context that places on the selected cards, at most the model's own limit (2 Mi). An explicit value that does not place is refused, never shortened. On the host tier the default is 4096. |
 | `--max-batch N` | Sequences decoded together (default 4); each costs a ring of the sliding layers. |
-| `--speculative MODE` | `off` (default, and `auto`) or `ngram`. `mtp` and `dflash` are refused by name; `ngram` cannot be combined with `--sparse-attention`. |
+| `--speculative MODE` | `off` (default, and `auto`), `ngram` (prompt lookup) or `dflash` (the DFlash2 draft model). `mtp` is refused by name; `ngram` takes no `--draft-model`. Both work beside `--sparse-attention`. |
+| `--draft-model DIR` | The DFlash2 draft model: a directory, or the `<vendor>/<repo>` of a pulled one (looked up beside the target in the model store); implies `--speculative dflash`. Without it `--speculative dflash` reads `<repo>-DFlash2` (the target's repo without its quantization suffix) and says what to pull when it is not there. |
 | `--device SPEC` | Decides how many cards the layers are cut over: the fewest of the selected cards that hold the deployment, one pipeline stage each. `--device cpu` runs one stage on the host. `--device software` runs it on the software Vulkan adapter, where the sparse-attention kernels run without a GPU (validation only). |
 
 `--exact-decode`, `--gemm`, `--gdn-state`, `--act-precision`,
@@ -131,20 +133,33 @@ conformance suite and `a_verify_scores_every_row_and_a_rolled_back_one_leaves_no
 check it, across ring wraps and block edges). `--speculative ngram` drafts by
 prompt lookup; the acceptance figures are reported with the model's metrics
 (`spec_proposed`, `spec_accepted`, `spec_accept_rate`, `spec_tokens_per_round`).
-Verification is off beside `--sparse-attention`: a rejected row would leave
-index pages built over rolled-back keys.
+Verification works beside `--sparse-attention`: an index page is built when a forward
+starts, over the positions cached before it, so a verify that crossed a cluster block of the index
+would read a state a plain decode step builds one step later; the scheduler keeps each verify inside one
+block (`PagedDecoder::spec_rows_limit`), and the output equals plain greedy decoding with the same index.
 
-`ricursiveAI/Ripple-65B-Preview-DFlash2` (4.04 B parameters, a
-`DFlash2DraftModel`) is not run yet. It drafts blocks of 16 tokens
-conditioned on the target's hidden states at layers 1, 20, 39, 58 and 77
-(five 5120-wide taps, fused by a `25600 -> 5120` projection), through four
-sliding-window layers (window 4096) and one global NoPE layer with dynamic
-four-tap convolutions and a rank-256 candidate selector over predecessor and
-successor codebooks; the engine would have to retain those hidden states per
-context token and the drafter's block forward would have to be ported (the
-Qwen3.8 implementation in `qwen35::dflash2` is bound to its GGUF
-single-stream path, not to the scheduler). `--speculative dflash` says so and
-refuses.
+`ricursiveAI/Ripple-65B-Preview-DFlash2` (4.04 B parameters, a `DFlash2DraftModel`, see [DFlash2](dflash2.md))
+drafts blocks of 16 tokens conditioned on the target's hidden states at layers 1, 20, 39, 58 and 77 (the output of
+each layer, five 5120-wide taps, fused by a `25600 -> 5120` projection and an RMSNorm), through four sliding-window
+layers (window 4096, RoPE theta 10000) and one full NoPE layer, each wrapped in dynamic four-tap convolutions
+(groups of 16), and a rank-256 candidate selector over predecessor and successor codebooks walks the target head's
+top 32 candidates into one path. The draft shares the target's embedding (the rows as the checkpoint stores them,
+without `embed_scale`) and `lm_head`.
+
+```bash
+brain pull ricursiveAI/Ripple-65B-Preview-NVFP4
+brain pull ricursiveAI/Ripple-65B-Preview-DFlash2
+brain serve --openai --device gpu0 --kv-cache int8 --speculative dflash
+```
+
+The engine retains the residual at the five layers for every position it consumes (prefill, decode and verify rows,
+bf16 on the host: 50 KiB a position, in blocks shared with the KV so prefix reuse and rollback need nothing more), and
+`PagedDecoder::draft` runs the draft for every sequence of the step in one forward: each sequence has a cache slot
+keyed by its request that is fed the taps of the positions it has not seen. The memory plan charges the draft's
+weights (7.42 GiB), its caches (a ring of window plus one block for each sliding layer, every position for the full
+one, per live sequence: 1.13 GiB at 128k tokens for one sequence) and one block of activations per sequence to the
+last stage's card, and the taps to the host: on one 96 GiB card with the NVFP4 release and an int8 cache the longest
+dense context falls from about 962k to about 581k tokens with the draft attached.
 
 ## Training it
 
@@ -199,4 +214,4 @@ weights. A config that sets a RoPE scaling, an attention or MLP bias, a
 non-SiLU activation or tied embeddings is refused, because this port does not
 implement them.
 
-Package: `brain-ricursive` (engine), `brain-catalog` (`resident_ricursive`).
+Package: `brain-ricursive` (engine), `brain-dflash2` (the draft model), `brain-catalog` (`resident_ricursive`).

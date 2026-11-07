@@ -340,6 +340,69 @@ mod tests {
         assert!(plan.stages()[1].end - plan.stages()[1].start <= plan.stages()[0].end - plan.stages()[0].start);
     }
 
+    /// The published `Ripple-65B-Preview-DFlash2` configuration: what the draft costs beside the target.
+    fn real_draft() -> crate::serve::DraftSizing {
+        let cfg = dflash2::Dflash2Config::from_json(
+            r#"{"dflash_config":{"block_size":16,"conv_group_size":16,"conv_kernel_size":4,"mask_token_id":100278,"selector_rank":256,"selector_top_k":32,"target_layer_ids":[1,20,39,58,77]},
+                "draft_vocab_size":100352,"head_dim":128,"hidden_size":5120,"intermediate_size":40960,"is_causal":false,
+                "layer_types":["sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention"],"no_rope_layers":[4],
+                "num_attention_heads":80,"num_hidden_layers":5,"num_key_value_heads":8,"num_target_layers":80,"rms_norm_eps":1e-06,
+                "rope_parameters":{"rope_theta":10000.0},"sliding_window":4096,"vocab_size":100352}"#,
+        )
+        .unwrap();
+        // The linears at bf16: `fc` and, per layer, q, k, v, o, gate, up, down and the two convolution projections.
+        let (d, ff, hq, hkv, dynamic) = (5120u64, 40960u64, 10240u64, 1024u64, 2560u64);
+        let per_layer = hq * d + 2 * hkv * d + d * hq + 3 * ff * d + 2 * dynamic * d;
+        let params = d * (5 * d) + 5 * per_layer;
+        crate::serve::DraftSizing { cfg, weight_bytes: 2 * params }
+    }
+
+    /// The draft model rides the last stage beside the head: its weights, the K/V caches of every live sequence and one
+    /// block of activations per sequence, in the device bytes; the target's retained hidden states in the host's. Printed
+    /// with `--nocapture`: the numbers the GPU-phase runbook quotes.
+    #[test]
+    fn the_draft_model_is_charged_to_the_last_stage_and_its_taps_to_the_host() {
+        let cfg = real();
+        let tiers = nvfp4_release_tiers(&cfg);
+        let draft = real_draft();
+        let gib = |b: u64| b as f64 / GIB as f64;
+        assert_eq!(draft.weight_bytes, 7_969_177_600, "7.42 GiB of bf16, the resident bytes the load reports");
+        for (tokens, sequences) in [(131_072u32, 1u32), (262_144, 1), (262_144, 4)] {
+            let plain = serve(tokens, KvTier::INT8, sequences);
+            let with = ServeConfig { drafter: Some(draft.clone()), ..plain.clone() };
+            let (a, b) = (footprint(&cfg, &plain, &tiers, LsaCharge::default()), footprint(&cfg, &with, &tiers, LsaCharge::default()));
+            assert_eq!((a.draft, a.taps_host), (0, 0));
+            assert_eq!(b.draft, draft.device_bytes(sequences, tokens));
+            assert_eq!(b.taps_host, 5 * 5120 * 2 * u64::from(with.num_blocks) * u64::from(with.block_size), "bf16 rows of five 5120-wide taps for every pooled position");
+            assert_eq!(b.single_card_bytes(), a.single_card_bytes() + b.draft, "the draft is on the last stage; nothing else moves");
+            assert_eq!(b.bytes.head, a.bytes.head + b.draft);
+            eprintln!(
+                "nvfp4 target + draft, kv int8, ctx {tokens:>6} x {sequences} sequence(s): draft {:.2} GiB on the card (weights {:.2}, caches {:.2}), taps {:.1} GiB on the host",
+                gib(b.draft),
+                gib(draft.weight_bytes),
+                gib(draft.cfg.cache_bytes(sequences, tokens)),
+                gib(b.taps_host)
+            );
+        }
+        // The context one card holds with the draft attached, one sequence, int8 cache.
+        let cards = [(0usize, card_budget(96 * GIB))];
+        let fits = |tokens: u32, with_draft: bool| {
+            let s = ServeConfig { drafter: with_draft.then(|| draft.clone()), sparse_attention: false, dense_keys: None, ..serve(tokens, KvTier::INT8, 1) };
+            place(&footprint(&cfg, &s, &tiers, LsaCharge::default()), &cards).is_some()
+        };
+        let longest = |with_draft: bool| {
+            let (mut lo, mut hi) = (4096u32, 8 << 20);
+            while hi - lo > 4096 {
+                let mid = (lo + hi) / 2;
+                if fits(mid, with_draft) { lo = mid } else { hi = mid }
+            }
+            lo
+        };
+        let (without, with) = (longest(false), longest(true));
+        eprintln!("one card, nvfp4 + int8 KV, dense: the longest context is about {without} tokens, {with} with the draft attached");
+        assert!(with < without && with > 400_000, "the draft's weights and its cache shorten the context but leave it long: {with} of {without}");
+    }
+
     /// The placements the GPU-phase runbook quotes: the published configuration on 96 GiB cards (GH200), the fewest
     /// cards for each weight format, KV tier and context, with the latent-sparse-attention index charged where the
     /// global layers read sparsely. Printed with `--nocapture`.

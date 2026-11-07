@@ -886,6 +886,9 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
         // resident_minimaxh3`'s own doc for why one hot transformer serves
         // every request shape).
         "minimaxh3" => minimaxh3_paths_from_roles(roles).map(|paths| Arc::new(catalog::resident_minimaxh3::MiniMaxH3Resident::from_paths(card.id.clone(), paths)) as Arc<dyn ResidentModel>),
+        // A draft model is not a model to serve: the target it drafts for loads it (`--speculative dflash`, found beside
+        // the target or named with `--draft-model`).
+        "dflash2" => Err("a draft model is loaded by the model it drafts for (brain serve --speculative dflash), not served on its own".to_string()),
         other => Err(format!("compound family '{other}' not servable from the model dir yet")),
     };
     other.map(Built::Other)
@@ -1641,6 +1644,17 @@ mod tests {
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
         let got = ids(&residents);
         assert!(got.contains(&"Wan-AI/Wan2.1-T2V-1.3B".to_string()), "wan compound model not discovered: {got:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_pulled_draft_model_is_not_served_and_says_what_loads_it() {
+        let dir = tmp_dir("draft-model");
+        write_compound_fixture(&dir, "ricursiveAI", "Ripple-65B-Preview-DFlash2", "dflash2");
+        let Discovered { residents, errors, .. } = discover(&dir, &ScanSettings::default());
+        assert!(ids(&residents).is_empty(), "a draft model registers no resident");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].reason.contains("--speculative dflash"), "{:?}", errors[0]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

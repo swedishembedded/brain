@@ -20,6 +20,7 @@ named on the model's own page (see
 | [`qwen35`](qwen35.md) | dense hybrid GDN/GQA decoder + MTP + vision splice | [x] | [x] | [x] |
 | [`edgerock`](edgerock.md) | windowed hybrid GDN/GQA decoder with a bounded anchor memory | [x] | [x] | [x] |
 | [`ricursive`](ricursive.md) ⤓ | Ripple-65B: hybrid sliding/global-NoPE decoder, chat, reasoning, tool calls, sparse attention, staged over several cards | [x] | [ ] | [ ] |
+| [`dflash2`](dflash2.md) ⤓ | DFlash2 draft model for speculative decoding: reads the target's hidden states, proposes a block of tokens in one forward | [x] | [ ] | [ ] |
 | [`gpt2`](gpt2.md) | dense nanoGPT-parity baseline | [x] | [x] | [ ] |
 | [`glmdsa`](glmdsa.md) | MLA + sigmoid noaux_tc MoE decoder | [x] | [x] | [ ] |
 

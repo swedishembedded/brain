@@ -17,7 +17,7 @@
 use std::path::Path;
 
 use model::paged::BlockTable;
-use model::serve::{PagedDecoder, Request, Scheduler, SpecPolicy};
+use model::serve::{PagedDecoder, Request, SampleParams, Scheduler, SpecPolicy};
 use ricursive::{DraftSizing, RicursiveEngine, RicursiveModel, ServeConfig};
 
 use crate::serve::{engine_with, serve_config, stream, tiny_config, tiny_dir, weights};
@@ -291,4 +291,25 @@ fn scripted_speculation_beside_sparse_attention_equals_plain_greedy() {
     conformance::speculation_equals_plain_greedy(&c);
     conformance::batched_output_equals_single_request_output(&c);
     conformance::a_prefix_hit_prefills_only_the_suffix(&c);
+}
+
+/// Sampled decoding takes the verify's rejection-sampling path (the draft's proposals are scored against the target's
+/// candidate distribution, not its argmax): requests with a temperature run to the end with the draft attached, verify
+/// steps happen, and a seed makes the run repeatable.
+#[test]
+fn sampled_decoding_runs_through_rejection_sampling_with_the_draft_model() {
+    let (Some(dir), Some(draft)) = (tiny_dir(), draft_dir()) else { return };
+    let vocab = tiny_config(&dir).vocab_size as u32;
+    let prompts: Vec<Vec<u32>> = [(31u32, 12usize), (32, 20)].iter().map(|&(seed, n)| stream(seed, n, vocab)).collect();
+    let sample = SampleParams { temp: 0.9, top_k: 20, ..SampleParams::greedy() };
+    let run = || {
+        let mut sched = Scheduler::new(drafted_engine(&dir, &draft, serve_config(8, 0)), 4);
+        let ids: Vec<u64> = prompts.iter().enumerate().map(|(i, p)| sched.submit_sampled(greedy(p, 40), sample, 7 + i as u64)).collect();
+        let done = sched.run();
+        (ids.iter().map(|id| done[id].clone()).collect::<Vec<_>>(), sched.spec_stats())
+    };
+    let (first, stats) = run();
+    assert!(first.iter().all(|t| t.len() == 40 && t.iter().all(|&x| x < vocab)), "{first:?}");
+    assert!(stats.verify_steps > 0 && stats.proposed > 0, "sampled requests were verified against the draft's proposals: {stats:?}");
+    assert_eq!(run().0, first, "the same seeds give the same sampled text");
 }
