@@ -1,0 +1,23 @@
+[package]
+name = "brain-dflash2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DFlash2 block-diffusion draft model, generic over the target: per-layer sliding/full/NoPE attention, dynamic convolutions and the candidate selector, loaded from Hugging Face safetensors or a GGUF, with a per-sequence serving drafter that reads the target's retained hidden states."
+
+[lib]
+name = "dflash2"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+brain-gguf.workspace = true
+brain-paramstore.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

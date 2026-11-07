@@ -33,7 +33,21 @@ Python would cost hours and prove nothing new. The target's contribution -
 the concatenated hidden states of layers `target_layer_ids` - is an INPUT
 here, read from a raw f32 dump the Rust side writes.
 
-Usage:
+The same forward serves the Ripple-65B draft (`Ripple-65B-Preview-DFlash2`, HF safetensors): per-layer attention from
+`layer_types` (sliding with a window, or full) and `no_rope_layers` (a NoPE layer applies no rotation), a four-tap
+convolution, a 32-way candidate selector. Only numpy is needed: the safetensors are read by hand (bf16 included).
+
+Two further modes write a golden file (`golden.safetensors`, f32) the Rust gates compare against, layer by layer:
+
+    # the real Ripple draft, synthetic target taps of the right shape and a real anchor token, the shared embedding and
+    # head read from the partial target checkpoint (layers-0-4.safetensors: embed_tokens and lm_head)
+    dflash2_reference_forward.py real --safetensors DRAFT/model.safetensors --config DRAFT/config.json \\
+        --target PARTIAL/layers-0-4.safetensors --tokenizer PARTIAL/tokenizer.json --out OUT --ctx-len 24 --seed 7
+
+    # a tiny random draft (config.json, model.safetensors) and its golden, for the checks that need no checkpoint
+    dflash2_reference_forward.py tiny --out testdata/golden/dflash2/tiny
+
+Usage of the original, GGUF form:
 
     tools/goldens/dflash2_reference_forward.py \\
         --gguf ~/models/incoai/Qwen3.8-27B-DFlash2-GGUF/Q8_0.gguf \\
@@ -56,6 +70,7 @@ info@swedishembedded.com.
 
 import argparse
 import json
+import os
 import struct
 import sys
 
@@ -226,6 +241,7 @@ class Weights:
             target_layers=[int(i) - 1 for i in g.kv["dflash.target_layers"]],
             causal=bool(g.kv["dflash.attention.causal"]),
         )
+        w.cfg["layers"] = [("sliding", True)] * w.cfg["n_layers"]
         w.fc = g.tensor("fc.weight")
         w.hidden_norm = g.tensor("enc.output_norm.weight")
         w.norm = g.tensor("output_norm.weight")
@@ -238,26 +254,31 @@ class Weights:
 
     @classmethod
     def from_safetensors(cls, path, config_path):
-        # Via torch, not `safetensors.numpy`: the released checkpoint is
-        # bf16, which numpy has no dtype for.
-        import torch
-        from safetensors.torch import load_file
-
-        st = {k: v.float().numpy() for k, v in load_file(path).items()}
-        del torch
+        """The published bf16 draft, read without torch (see `read_safetensors`)."""
+        st = read_safetensors(path)
         cfg = json.load(open(config_path))
         d = cfg["dflash_config"]
+        n_layers = cfg["num_hidden_layers"]
+        window = cfg.get("sliding_window")
+        kinds = cfg.get("layer_types") or (["sliding_attention"] * n_layers if cfg.get("use_sliding_window") and window else ["full_attention"] * n_layers)
+        no_rope = cfg.get("no_rope_layers") or []
+        # `no_rope_layers` is either one 0/1 flag per layer (1 = rotates) or the indices of the layers that do not.
+        if len(no_rope) == n_layers and all(v in (0, 1) for v in no_rope):
+            rope = [bool(v) for v in no_rope]
+        else:
+            rope = [i not in no_rope for i in range(n_layers)]
         w = cls()
         w.cfg = dict(
-            n_layers=cfg["num_hidden_layers"],
+            n_layers=n_layers,
             d_model=cfg["hidden_size"],
             d_ff=cfg["intermediate_size"],
             n_heads=cfg["num_attention_heads"],
             n_kv_heads=cfg["num_key_value_heads"],
             head_dim=cfg["head_dim"],
             eps=cfg["rms_norm_eps"],
-            rope_theta=float(cfg["rope_parameters"]["rope_theta"]),
-            window=cfg["sliding_window"],
+            rope_theta=float((cfg.get("rope_parameters") or {}).get("rope_theta", cfg.get("rope_theta"))),
+            window=window or (1 << 31),
+            layers=[("sliding" if k == "sliding_attention" else "full", r) for k, r in zip(kinds, rope)],
             block_size=d["block_size"],
             conv_kernel=d["conv_kernel_size"],
             conv_group=d["conv_group_size"],
@@ -265,16 +286,15 @@ class Weights:
             selector_top_k=d["selector_top_k"],
             mask_token_id=d["mask_token_id"],
             target_layers=d["target_layer_ids"],
-            causal=cfg["is_causal"],
+            causal=cfg.get("is_causal", True),
         )
-        f32 = lambda n: st[n].astype(np.float32)
+        f32 = lambda n: st.get(n).astype(np.float32)
         w.fc = f32("fc.weight")
         w.hidden_norm = f32("hidden_norm.weight")
         w.norm = f32("norm.weight")
         w.sel_hidden = f32("candidate_selector.hidden_projection.weight")
-        w.sel_pred = f32("candidate_selector.predecessor_codebook")
-        w.sel_succ = f32("candidate_selector.successor_codebook")
-        pre = "layers.{}."
+        w.sel_pred = st.get("candidate_selector.predecessor_codebook")
+        w.sel_succ = st.get("candidate_selector.successor_codebook")
         name = {
             "input_layernorm": "input_layernorm.weight",
             "post_attention_layernorm": "post_attention_layernorm.weight",
@@ -292,9 +312,76 @@ class Weights:
             "mlp_conv_base": "mlp_conv.base_kernel",
             "mlp_conv_proj": "mlp_conv.kernel_projection.weight",
         }
-        for i in range(w.cfg["n_layers"]):
-            w.layers.append({k: f32(pre.format(i) + v) for k, v in name.items()})
+        for i in range(n_layers):
+            w.layers.append({k: f32(f"layers.{i}.{v}") for k, v in name.items()})
         return w
+
+
+class Safetensors:
+    """A safetensors file mapped read-only: tensors (or a few rows of one) come out as float32 numpy arrays."""
+
+    def __init__(self, path):
+        self.f = open(path, "rb")
+        (n,) = struct.unpack("<Q", self.f.read(8))
+        self.header = json.loads(self.f.read(n))
+        self.header.pop("__metadata__", None)
+        self.base = 8 + n
+        self.mm = np.memmap(path, dtype=np.uint8, mode="r")
+
+    def names(self):
+        return list(self.header)
+
+    def shape(self, name):
+        return tuple(self.header[name]["shape"])
+
+    @staticmethod
+    def _decode(raw, dtype):
+        if dtype == "BF16":
+            return (raw.view("<u2").astype(np.uint32) << 16).view("<f4")
+        if dtype == "F16":
+            return raw.view("<f2").astype(np.float32)
+        if dtype == "F32":
+            return raw.view("<f4")
+        raise SystemExit(f"unsupported safetensors dtype {dtype}")
+
+    def get(self, name):
+        h = self.header[name]
+        lo, hi = h["data_offsets"]
+        raw = np.array(self.mm[self.base + lo : self.base + hi])
+        return self._decode(raw, h["dtype"]).reshape(h["shape"])
+
+    def rows(self, name, idx):
+        """Rows `idx` of a 2-D tensor, without decoding the rest of it."""
+        h = self.header[name]
+        lo, _ = h["data_offsets"]
+        width = h["shape"][1]
+        size = {"BF16": 2, "F16": 2, "F32": 4}[h["dtype"]]
+        out = np.empty((len(idx), width), dtype=np.float32)
+        for k, r in enumerate(idx):
+            at = self.base + lo + int(r) * width * size
+            out[k] = self._decode(np.array(self.mm[at : at + width * size]), h["dtype"])
+        return out
+
+
+def read_safetensors(path):
+    return Safetensors(path)
+
+
+def write_safetensors(path, tensors):
+    """Write `{name: float32 array}` as a safetensors file."""
+    header, blobs, at = {}, [], 0
+    for name, a in tensors.items():
+        a = np.ascontiguousarray(a, dtype="<f4")
+        header[name] = {"dtype": "F32", "shape": list(a.shape), "data_offsets": [at, at + a.nbytes]}
+        blobs.append(a.tobytes())
+        at += a.nbytes
+    head = json.dumps(header).encode()
+    head += b" " * (-len(head) % 8)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(head)))
+        f.write(head)
+        for b in blobs:
+            f.write(b)
 
 
 # ------------------------------------------------------------------- forward
@@ -389,7 +476,8 @@ def draft_forward(w, ctx, noise_embedding, ctx_positions, q_positions):
     `ctx` is the already-`fc`-projected, already-`hidden_norm`-ed target
     context (one row per context token); `noise_embedding` is the target's raw
     embedding of `[anchor, MASK, ...]`. Returns the post-`norm` hidden for
-    every block row, the anchor row included (the caller drops it).
+    every block row, the anchor row included (the caller drops it), and the
+    hidden after each layer.
     """
     c = w.cfg
     hd, nh, nkv = c["head_dim"], c["n_heads"], c["n_kv_heads"]
@@ -400,17 +488,21 @@ def draft_forward(w, ctx, noise_embedding, ctx_positions, q_positions):
     cos_k, sin_k = rope_tables(list(ctx_positions) + list(q_positions), hd, c["rope_theta"])
     cos_q, sin_q = cos_k[ctx_len:], sin_k[ctx_len:]
 
-    # Non-causal INSIDE the sliding window, in both directions: the block's
-    # MASK rows are denoised jointly, so a row sees the ones after it.
+    # Non-causal: the block's MASK rows are denoised jointly, so a row sees the ones after it. A sliding layer sees
+    # the keys within `window` of the query in both directions; a full layer sees every key.
     kpos = np.asarray(list(ctx_positions) + list(q_positions))[None, :]
     qpos = np.asarray(q_positions)[:, None]
-    visible = np.abs(qpos - kpos) < c["window"]
-    if c["causal"]:
-        visible &= kpos <= qpos
-    bias = np.where(visible, 0.0, -np.inf).astype(np.float32)
+
+    def bias_for(kind):
+        visible = np.abs(qpos - kpos) < c["window"] if kind == "sliding" else np.ones((len(q_positions), kpos.shape[1]), dtype=bool)
+        if c["causal"]:
+            visible &= kpos <= qpos
+        return np.where(visible, 0.0, -np.inf).astype(np.float32)
 
     x = noise_embedding.astype(np.float32)
-    for layer in w.layers:
+    trace = []
+    for layer, (kind, rope) in zip(w.layers, c["layers"]):
+        bias = bias_for(kind)
         residual = x
         h = rmsnorm(x, layer["input_layernorm"], eps)
         h, dyn = conv_prepare(h, layer["attn_conv_base"], layer["attn_conv_proj"], c["conv_kernel"], group)
@@ -419,8 +511,9 @@ def draft_forward(w, ctx, noise_embedding, ctx_positions, q_positions):
         kv_rows = np.concatenate([ctx, h], axis=0)
         k = rmsnorm((kv_rows @ layer["k_proj"].T).reshape(ctx_len + q_len, nkv, hd), layer["k_norm"], eps)
         v = (kv_rows @ layer["v_proj"].T).reshape(ctx_len + q_len, nkv, hd)
-        q = apply_rope(q, cos_q, sin_q)
-        k = apply_rope(k, cos_k, sin_k)
+        if rope:
+            q = apply_rope(q, cos_q, sin_q)
+            k = apply_rope(k, cos_k, sin_k)
 
         # GQA: every `nh / nkv` query heads share one kv head.
         k = np.repeat(k, nh // nkv, axis=1)
@@ -438,8 +531,9 @@ def draft_forward(w, ctx, noise_embedding, ctx_positions, q_positions):
         h, dyn = conv_prepare(h, layer["mlp_conv_base"], layer["mlp_conv_proj"], c["conv_kernel"], group)
         h = (silu(h @ layer["gate_proj"].T) * (h @ layer["up_proj"].T)) @ layer["down_proj"].T
         x = residual + conv_finish(h, dyn, layer["mlp_conv_base"], group)
+        trace.append(x)
 
-    return x, rmsnorm(x, w.norm, eps)
+    return x, rmsnorm(x, w.norm, eps), trace
 
 
 def select_path(w, hidden, logits, anchor_id):
@@ -469,6 +563,150 @@ def select_path(w, hidden, logits, anchor_id):
     return path, cands
 
 
+# ------------------------------------------------------------ golden writers
+
+
+def golden_case(w, taps, anchor, start, embed_rows, head, prefix=""):
+    """One draft round on `taps` (the target's hidden at the context positions `start - len(taps) .. start`): every
+    intermediate the Rust gates compare, as float32 arrays keyed `prefix + name`."""
+    c = w.cfg
+    ctx_len = taps.shape[0]
+    block = c["block_size"]
+    ctx = rmsnorm(taps @ w.fc.T, w.hidden_norm, c["eps"])
+    ids = [anchor] + [c["mask_token_id"]] * (block - 1)
+    noise = embed_rows(ids)
+    positions = list(range(start, start + block))
+    ctx_positions = list(range(start - ctx_len, start))
+    pre, post, trace = draft_forward(w, ctx, noise, ctx_positions, positions)
+    hidden = post[1:]
+    logits = hidden @ head.T
+    path, cands = select_path(w, hidden, logits, anchor)
+    out = {"taps": taps, "ids": np.asarray(ids, np.float32), "start": np.asarray([start], np.float32), "noise": noise, "ctx": ctx, "hidden": hidden, "logits": logits, "path": np.asarray(path, np.float32)}
+    for i, t in enumerate(trace):
+        out[f"layer.{i}"] = t
+    for i, cand in enumerate(cands):
+        out[f"cand.{i}"] = np.sort(cand).astype(np.float32)
+    return {prefix + k: v for k, v in out.items()}
+
+
+def tokenizer_id(path, piece):
+    """The id of one vocabulary piece of a Hugging Face `tokenizer.json`."""
+    vocab = json.load(open(path))["model"]["vocab"]
+    if piece not in vocab:
+        raise SystemExit(f"{path}: no piece {piece!r}")
+    return vocab[piece]
+
+
+def tiny_weights(seed):
+    """A small random draft whose structure exercises every branch: a sliding window shorter than the contexts, a full
+    NoPE layer, grouped queries, four conv taps, groups of eight."""
+    rng = np.random.default_rng(seed)
+    d, ff, nh, nkv, hd, n_layers, vocab = 64, 96, 4, 2, 16, 3, 128
+    cfg = {
+        "architectures": ["DFlash2DraftModel"],
+        "model_type": "qwen3",
+        "hidden_size": d,
+        "intermediate_size": ff,
+        "num_hidden_layers": n_layers,
+        "num_attention_heads": nh,
+        "num_key_value_heads": nkv,
+        "head_dim": hd,
+        "rms_norm_eps": 1e-6,
+        "rope_parameters": {"rope_theta": 10000.0, "rope_type": "default"},
+        "rope_theta": 10000.0,
+        "sliding_window": 6,
+        "use_sliding_window": True,
+        "layer_types": ["sliding_attention", "sliding_attention", "full_attention"],
+        "no_rope_layers": [2],
+        "is_causal": False,
+        "vocab_size": vocab,
+        "draft_vocab_size": vocab,
+        "num_target_layers": 3,
+        "max_position_embeddings": 256,
+        "dflash_config": {"block_size": 5, "conv_group_size": 8, "conv_kernel_size": 4, "mask_token_id": vocab - 1, "selector_rank": 8, "selector_top_k": 4, "target_layer_ids": [0, 1, 2]},
+    }
+    d_cfg = cfg["dflash_config"]
+    groups = d // d_cfg["conv_group_size"]
+    k = d_cfg["conv_kernel_size"]
+    n = lambda *shape, s=0.08: (rng.standard_normal(shape) * s).astype(np.float32)
+    t = {
+        "fc.weight": n(d, 3 * d, s=0.06),
+        "hidden_norm.weight": (1 + n(d, s=0.2)),
+        "norm.weight": (1 + n(d, s=0.2)),
+        "candidate_selector.hidden_projection.weight": n(d_cfg["selector_rank"], d, s=0.2),
+        "candidate_selector.predecessor_codebook": n(vocab, d_cfg["selector_rank"], s=1.0),
+        "candidate_selector.successor_codebook": n(vocab, d_cfg["selector_rank"], s=1.0),
+    }
+    for i in range(n_layers):
+        base = np.zeros((2, k, d), np.float32)
+        base[:, 0, :] = 1.0
+        t.update(
+            {
+                f"layers.{i}.input_layernorm.weight": 1 + n(d, s=0.2),
+                f"layers.{i}.post_attention_layernorm.weight": 1 + n(d, s=0.2),
+                f"layers.{i}.self_attn.q_proj.weight": n(nh * hd, d),
+                f"layers.{i}.self_attn.k_proj.weight": n(nkv * hd, d),
+                f"layers.{i}.self_attn.v_proj.weight": n(nkv * hd, d),
+                f"layers.{i}.self_attn.o_proj.weight": n(d, nh * hd),
+                f"layers.{i}.self_attn.q_norm.weight": 1 + n(hd, s=0.2),
+                f"layers.{i}.self_attn.k_norm.weight": 1 + n(hd, s=0.2),
+                f"layers.{i}.mlp.gate_proj.weight": n(ff, d),
+                f"layers.{i}.mlp.up_proj.weight": n(ff, d),
+                f"layers.{i}.mlp.down_proj.weight": n(d, ff),
+                f"layers.{i}.attention_conv.base_kernel": base + n(2, k, d, s=0.1),
+                f"layers.{i}.attention_conv.kernel_projection.weight": n(2 * k * groups, d, s=0.1),
+                f"layers.{i}.mlp_conv.base_kernel": base + n(2, k, d, s=0.1),
+                f"layers.{i}.mlp_conv.kernel_projection.weight": n(2 * k * groups, d, s=0.1),
+            }
+        )
+    return cfg, t, rng
+
+
+def run_tiny(out):
+    os.makedirs(out, exist_ok=True)
+    cfg, tensors, rng = tiny_weights(1234)
+    json.dump(cfg, open(f"{out}/config.json", "w"), indent=2)
+    write_safetensors(f"{out}/model.safetensors", tensors)
+    w = Weights.from_safetensors(f"{out}/model.safetensors", f"{out}/config.json")
+    vocab, d = cfg["vocab_size"], cfg["hidden_size"]
+    embed = (rng.standard_normal((vocab, d)) * 0.3).astype(np.float32)
+    head = (rng.standard_normal((vocab, d)) * 0.3).astype(np.float32)
+    taps = (rng.standard_normal((17, 3 * d)) * 3.0).astype(np.float32)
+    gold = {"embed": embed, "head": head}
+    # Round A: 14 context positions, the anchor at position 14. Round B: the same stream three positions later.
+    gold.update(golden_case(w, taps[:14], 5, 14, lambda ids: embed[ids], head, "a."))
+    gold.update(golden_case(w, taps[:17], 9, 17, lambda ids: embed[ids], head, "b."))
+    write_safetensors(f"{out}/golden.safetensors", gold)
+    print(f"wrote {out}: config.json, model.safetensors, golden.safetensors")
+
+
+def run_real(args):
+    os.makedirs(args.out, exist_ok=True)
+    w = Weights.from_safetensors(args.safetensors, args.config)
+    c = w.cfg
+    target = Safetensors(args.target)
+    anchor = tokenizer_id(args.tokenizer, args.anchor_piece)
+    seed = args.seed if args.seed is not None else int.from_bytes(os.urandom(4), "little")
+    print(f"taps seed {seed}")
+    rng = np.random.default_rng(seed)
+    d = c["d_model"]
+    # Residual streams of a decoder are heavy-tailed: a few channels carry most of the norm. Per tapped layer a
+    # gaussian bulk plus a handful of large channels; the draft RMS-norms the fused rows, so the exact scale matters
+    # less than the shape.
+    taps = np.empty((args.ctx_len, len(c["target_layers"]) * d), np.float32)
+    for j in range(len(c["target_layers"])):
+        bulk = rng.standard_normal((args.ctx_len, d)).astype(np.float32) * (1.0 + j)
+        for ch in rng.choice(d, 4, replace=False):
+            bulk[:, ch] *= 40.0
+        taps[:, j * d : (j + 1) * d] = bulk
+    embed_rows = lambda ids: target.rows("model.embed_tokens.weight", ids)
+    head = target.get("lm_head.weight")
+    gold = golden_case(w, taps, anchor, args.ctx_len, embed_rows, head)
+    write_safetensors(f"{args.out}/golden.safetensors", gold)
+    print(f"anchor piece {args.anchor_piece!r} = token {anchor}; proposed: {' '.join(str(int(t)) for t in gold['path'])}")
+    print(f"wrote {args.out}/golden.safetensors")
+
+
 # ---------------------------------------------------------------------- main
 
 # The target's own token list, for readable diagnostics. A one-element list so
@@ -477,6 +715,23 @@ G_TOKENS = [None]
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "tiny":
+        ap = argparse.ArgumentParser(prog="dflash2_reference_forward.py tiny")
+        ap.add_argument("--out", required=True)
+        run_tiny(ap.parse_args(sys.argv[2:]).out)
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "real":
+        ap = argparse.ArgumentParser(prog="dflash2_reference_forward.py real")
+        ap.add_argument("--safetensors", required=True)
+        ap.add_argument("--config", required=True)
+        ap.add_argument("--target", required=True, help="safetensors holding model.embed_tokens.weight and lm_head.weight")
+        ap.add_argument("--tokenizer", required=True)
+        ap.add_argument("--anchor-piece", default="Ġthe", help="the vocabulary piece whose id is the anchor token")
+        ap.add_argument("--out", required=True)
+        ap.add_argument("--ctx-len", type=int, default=24)
+        ap.add_argument("--seed", type=int, default=None, help="the taps' random seed (default: drawn, and printed)")
+        run_real(ap.parse_args(sys.argv[2:]))
+        return
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gguf", help="the DFlash2 Q8_0 GGUF")
     ap.add_argument("--safetensors", help="load the draft weights from the original HF checkpoint instead")
@@ -528,7 +783,7 @@ def main():
     positions = list(range(args.start, args.start + block))
     ctx_positions = list(range(args.start - ctx_len, args.start))
 
-    pre, post = draft_forward(w, ctx, noise, ctx_positions, positions)
+    pre, post, _ = draft_forward(w, ctx, noise, ctx_positions, positions)
     pre, hidden = pre[1:], post[1:]
     if args.dump_draft_hidden:
         hidden.astype("<f4").tofile(args.dump_draft_hidden)

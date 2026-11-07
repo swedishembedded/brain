@@ -698,6 +698,12 @@ impl Weight {
         Weight::F32 { w, n, k }
     }
 
+    /// An `[n, k]` int8 weight from its already packed words and group scales on the device (the pair
+    /// [`crate::int8::upload_quantized`] returns).
+    pub fn from_packed_int8(w: DeviceBuffer, s: DeviceBuffer, n: usize, k: usize) -> Weight {
+        Weight::I8 { w, s, n: n as u32, k: k as u32 }
+    }
+
     /// Whether this is a dense f32 weight (one f32 buffer, no scales).
     pub fn is_dense_f32(&self) -> bool {
         matches!(self, Weight::F32 { .. })

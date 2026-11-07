@@ -926,7 +926,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             // A round emits at most accepted + 1 tokens, so more than
             // `remaining - 1` proposals could never all be used.
             let remaining = r.max_new.saturating_sub(r.generated.len());
-            let mut k = window(r).min(remaining.saturating_sub(1));
+            let mut k = window(r).min(remaining.saturating_sub(1)).min(self.dec.spec_rows_limit(&r.table).saturating_sub(1));
             let held = r.table.blocks().len() as u32;
             // The decode step's own token is covered by `ensure_decode_room`;
             // proposals each need a position beyond it.

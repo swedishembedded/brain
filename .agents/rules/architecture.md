@@ -59,8 +59,8 @@ layer 3 - training substrate and shared contracts
     vision, weightset
 layer 4 - models
     arcface, bisenet, campplus, captioner, chronos2, clip, codeformer, connectome, controlnet,
-    cosyvoice, decide, decisions, deepseek2, deepseek2ocr, deepseekocr2, deepseekvl, diamond,
-    ecapatdnn, eval, fastvlm, fincast, florence2, flux1, flux2, fly, flybody, gemma4,
+    cosyvoice, decide, decisions, deepseek2, deepseek2ocr, deepseekocr2, deepseekvl, dflash2,
+    diamond, ecapatdnn, eval, fastvlm, fincast, florence2, flux1, flux2, fly, flybody, gemma4,
     genieredux, glmdsa, gpt2, horizon, huginn, imaging, imgpipe, instantid, januspro, kronos,
     lfm2, llava, llmserve, lpips, ltxv, mimi, minicpmv, minimaxh3, minimaxmusic3, modernbert,
     moondream3, mujoco, mvs, nemotronasr, npu, ocrserve, ouro, pulid, qwen3, qwen35, qwen35moe,

@@ -19,6 +19,7 @@ brain-checkpoint.workspace = true
 brain-residency.workspace = true
 brain-llmserve.workspace = true
 brain-gguf.workspace = true
+brain-dflash2.workspace = true
 brain-kernels.workspace = true
 brain-data.workspace = true
 brain-qwen3.workspace = true

@@ -28,10 +28,12 @@
 // stays one dispatch with no broadcast pass.
 //
 // It also takes the whole block at once rather than one token per call. The
-// consumer (a block-diffusion drafter, `qwen35::dflash2`) denoises all its
-// rows in a single non-autoregressive forward, so the conv's history is
-// entirely inside the block and there is no ring-buffer state to carry: row 0
-// convolves against zeros, by construction and not by initialisation.
+// consumer (a block-diffusion drafter, `dflash2`) denoises all its rows in a
+// single non-autoregressive forward, so the conv's history is entirely inside
+// the block and there is no ring-buffer state to carry: the first row of a
+// block convolves against zeros, by construction and not by initialisation.
+// Several blocks (one per sequence) ride one dispatch: `block` is the rows of
+// one, and the history restarts at every multiple of it.
 //
 // Buffers:
 //   x    : `[n, c]`  the block's activations, token-major
@@ -44,6 +46,8 @@
 //   base : `[*, taps, c]` the static per-channel kernel, at `base_off`; same
 //           two-halves-in-one-tensor reason for the offset.
 //   y    : `[n, c]`
+//
+// `n` is a whole number of blocks of `block` rows; pass `block = n` for one.
 //
 // `group_size` must divide `c`, and `groups = c / group_size` must be the same
 // `groups` the projection was laid out with - the host is what knows both, so
@@ -58,6 +62,7 @@ struct Params {
     dyn_stride: u32,
     dyn_off: u32,
     base_off: u32,
+    block: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -73,12 +78,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     if (idx >= p.n * p.c) { return; }
     let t = idx / p.c;
     let ci = idx % p.c;
+    let in_block = t % p.block;
     let g = ci / p.group_size;
     let drow = t * p.dyn_stride + p.dyn_off;
 
     var acc = 0.0;
     for (var j: u32 = 0u; j < p.taps; j = j + 1u) {
-        if (j > t) { break; }
+        if (j > in_block) { break; }
         let w = base[p.base_off + j * p.c + ci] + dyn[drow + j * p.groups + g];
         acc = acc + w * x[(t - j) * p.c + ci];
     }

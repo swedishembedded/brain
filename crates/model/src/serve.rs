@@ -26,11 +26,13 @@ mod budget;
 mod embeds;
 mod sampler;
 mod speculate;
+pub mod taps;
 pub mod rows;
 pub mod conformance;
 pub use budget::{MixedLimits, StepCost};
 pub use embeds::{ContentKey, PromptEmbeds};
 pub use sampler::{apply_processors, apply_processors_with, ngram_followers, DryParams, NoRepeatNgram, ProcessorState, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_NGRAM_ALLOW, MAX_THINK_CLOSE, MAX_THINK_LEAD};
+pub use taps::TapPool;
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
 
 /// The seam a model's paged serving engine implements. Every method mirrors
@@ -417,6 +419,42 @@ pub trait PagedDecoder {
     /// speculate and the scheduler never calls the other speculation methods.
     fn spec_max_draft(&self) -> usize {
         0
+    }
+
+    /// The most rows (one input plus its proposals) one verify may carry for the sequence of `table` as it stands,
+    /// when something about its position bounds that below [`Self::spec_row_budget`]: a decoder whose result
+    /// depends on where a forward falls (latent sparse attention indexes a cluster block when a forward starts, so a
+    /// verify that crossed a block boundary would read an index a plain decode builds one step later) asks for
+    /// windows that do not cross it. The scheduler shrinks the sequence's proposals to fit; the default is no bound.
+    fn spec_rows_limit(&self, table: &BlockTable) -> usize {
+        let _ = table;
+        usize::MAX
+    }
+
+    // ---- hidden-state taps (optional; see [`taps`]) ----
+    //
+    // A drafter that reads the target's internals needs the residual stream at chosen layers for every position the
+    // decoder consumes. The defaults say "this decoder retains none".
+
+    /// Start retaining the residual stream after each of `layers` (0-based decoder layers) for every position the
+    /// decoder consumes from now on, prefill, decode and verify rows alike, in blocks shared with its KV so that
+    /// rollback and prefix reuse need nothing more. Sequences already running have no rows for the positions they
+    /// consumed before; call this before the first request. The default refuses.
+    fn enable_taps(&mut self, layers: &[usize]) -> Result<(), String> {
+        let _ = layers;
+        Err("this decoder does not retain hidden states".into())
+    }
+
+    /// The layers [`Self::enable_taps`] enabled, in row order; empty while none are.
+    fn tap_layers(&self) -> &[usize] {
+        &[]
+    }
+
+    /// The retained rows of positions `from .. from + count` of `table` (`[count, layers x hidden]`). An error when
+    /// taps are not enabled or the range is not cached.
+    fn read_taps(&self, table: &BlockTable, from: u32, count: u32) -> Result<Vec<f32>, String> {
+        let _ = (table, from, count);
+        Err("this decoder does not retain hidden states".into())
     }
 
     /// The largest number of sequences for which verifying beats plain

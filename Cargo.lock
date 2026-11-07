@@ -1358,6 +1358,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-dflash2"
+version = "5.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gguf",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-testutil",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "brain-diamond"
 version = "5.1.0"
 dependencies = [
@@ -2435,6 +2450,7 @@ dependencies = [
  "brain-capability",
  "brain-checkpoint",
  "brain-data",
+ "brain-dflash2",
  "brain-gguf",
  "brain-gpu-core",
  "brain-imaging",
