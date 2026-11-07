@@ -29,7 +29,7 @@
 % -- Headings ----------------------------------------------------------------
 \usepackage{titlesec}
 \titleformat{\chapter}[display]
-  {\displayfont\color{ink}}
+  {\raggedright\displayfont\color{ink}}
   {\color{accent}\fontsize{13}{15}\selectfont\MakeUppercase{\chaptertitlename}\ \thechapter}
   {6pt}
   {\fontsize{24}{28}\selectfont\bfseries}
@@ -40,13 +40,13 @@
   [\vspace{4pt}{\color{accent}\titlerule[1.2pt]}]
 \titlespacing*{\chapter}{0pt}{0pt}{22pt}
 \titleformat{\section}
-  {\displayfont\color{ink}\fontsize{14}{17}\selectfont\bfseries}
+  {\raggedright\displayfont\color{ink}\fontsize{14}{17}\selectfont\bfseries}
   {\color{accent}\thesection}{0.8em}{}
 \titleformat{\subsection}
-  {\displayfont\color{ink}\fontsize{11.5}{14}\selectfont\bfseries}
+  {\raggedright\displayfont\color{ink}\fontsize{11.5}{14}\selectfont\bfseries}
   {\color{accent}\thesubsection}{0.8em}{}
 \titleformat{\subsubsection}
-  {\displayfont\color{muted}\fontsize{10.5}{13}\selectfont\bfseries}
+  {\raggedright\displayfont\color{muted}\fontsize{10.5}{13}\selectfont\bfseries}
   {\thesubsubsection}{0.8em}{}
 \titlespacing*{\section}{0pt}{18pt}{6pt}
 \titlespacing*{\subsection}{0pt}{12pt}{4pt}
@@ -63,6 +63,9 @@
 \usepackage{fancyhdr}
 \pagestyle{fancy}
 \fancyhf{}
+% header.tex loaded fancyhdr under the manual's geometry; the head must span
+% this page's text block, not the old one, or it runs into the margin.
+\AtBeginDocument{\setlength{\headwidth}{\textwidth}\fancyhfoffset{0pt}}
 \renewcommand{\chaptermark}[1]{\markboth{\ifnum\value{secnumdepth}>-1 \thechapter.\ \fi#1}{}}
 \renewcommand{\sectionmark}[1]{\markright{\ifnum\value{secnumdepth}>0 \thesection\ \ \fi#1}}
 \fancyhead[LE]{\displayfont\footnotesize\color{muted}\nouppercase{\leftmark}}
