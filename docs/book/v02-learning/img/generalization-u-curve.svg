@@ -1,0 +1,33 @@
+<!-- source-sha256: 5e10beddeb5ec6e40389bd89d1cd64bac90f499ca9fc7eb42678443490508f78 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="75" y1="334" x2="75" y2="30" stroke="#edf2f7"/>
+<text x="75" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="188.33" y1="334" x2="188.33" y2="30" stroke="#edf2f7"/>
+<text x="188.33" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="301.67" y1="334" x2="301.67" y2="30" stroke="#edf2f7"/>
+<text x="301.67" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="415" y1="334" x2="415" y2="30" stroke="#edf2f7"/>
+<text x="415" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="528.33" y1="334" x2="528.33" y2="30" stroke="#edf2f7"/>
+<text x="528.33" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">8</text>
+<line x1="58" y1="315" x2="602" y2="315" stroke="#edf2f7"/>
+<text x="52" y="319" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="220" x2="602" y2="220" stroke="#edf2f7"/>
+<text x="52" y="224" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="125" x2="602" y2="125" stroke="#edf2f7"/>
+<text x="52" y="129" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.5</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><line x1="58" y1="299.96" x2="602" y2="299.96" stroke="#a0aec0" stroke-dasharray="4 4"/><text x="596.33" y="292.36" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">noise floor 1.2 deg C</text><polyline fill="none" stroke="#2b6cb0" stroke-width="2.4" points="75,85.95 131.67,211.13 188.33,275.16 245,275.18 301.67,298.54 358.33,301.66 415,313.3 471.67,313.36 528.33,314.47 585,314.62"/><circle cx="75" cy="85.95" r="4" fill="#2b6cb0"/><circle cx="131.67" cy="211.13" r="4" fill="#2b6cb0"/><circle cx="188.33" cy="275.16" r="4" fill="#2b6cb0"/><circle cx="245" cy="275.18" r="4" fill="#2b6cb0"/><circle cx="301.67" cy="298.54" r="4" fill="#2b6cb0"/><circle cx="358.33" cy="301.66" r="4" fill="#2b6cb0"/><circle cx="415" cy="313.3" r="4" fill="#2b6cb0"/><circle cx="471.67" cy="313.36" r="4" fill="#2b6cb0"/><circle cx="528.33" cy="314.47" r="4" fill="#2b6cb0"/><circle cx="585" cy="314.62" r="4" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.4" points="75,77.43 131.67,204.2 188.33,290.37 245,290.62 301.67,269.26 358.33,260.56 415,230.86 471.67,236.43 528.33,252.82 585,227.99"/><circle cx="75" cy="77.43" r="4" fill="#c05621"/><circle cx="131.67" cy="204.2" r="4" fill="#c05621"/><circle cx="188.33" cy="290.37" r="4" fill="#c05621"/><circle cx="245" cy="290.62" r="4" fill="#c05621"/><circle cx="301.67" cy="269.26" r="4" fill="#c05621"/><circle cx="358.33" cy="260.56" r="4" fill="#c05621"/><circle cx="415" cy="230.86" r="4" fill="#c05621"/><circle cx="471.67" cy="236.43" r="4" fill="#c05621"/><circle cx="528.33" cy="252.82" r="4" fill="#c05621"/><circle cx="585" cy="227.99" r="4" fill="#c05621"/></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">polynomial degree d</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">log10 of RMSE (deg C)</text>
+<text x="310" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Training error keeps falling; fresh error turns up</text>
+<line x1="432" y1="40" x2="452" y2="40" stroke="#2b6cb0" stroke-width="2"/>
+<text x="458" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">training rows (20)</text>
+<line x1="432" y1="58" x2="452" y2="58" stroke="#c05621" stroke-width="2"/>
+<text x="458" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">fresh rows (2000)</text>
+</svg>

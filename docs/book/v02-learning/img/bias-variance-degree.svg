@@ -1,0 +1,35 @@
+<!-- source-sha256: 7476769cc553a28625621b61657c0f97cdbfb26474f7697233746a252968fb49 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="82.73" y1="334" x2="82.73" y2="30" stroke="#edf2f7"/>
+<text x="82.73" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="247.58" y1="334" x2="247.58" y2="30" stroke="#edf2f7"/>
+<text x="247.58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="412.42" y1="334" x2="412.42" y2="30" stroke="#edf2f7"/>
+<text x="412.42" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="577.27" y1="334" x2="577.27" y2="30" stroke="#edf2f7"/>
+<text x="577.27" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="258" x2="602" y2="258" stroke="#edf2f7"/>
+<text x="52" y="262" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<line x1="58" y1="182" x2="602" y2="182" stroke="#edf2f7"/>
+<text x="52" y="186" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="106" x2="602" y2="106" stroke="#edf2f7"/>
+<text x="52" y="110" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">15</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.4" points="82.73,-4424.55 165.15,134.8 247.58,333.99 330,333.97 412.42,333.93 494.85,333.85 577.27,332.73"/><polyline fill="none" stroke="#c05621" stroke-width="2.4" points="82.73,91.55 165.15,301.24 247.58,329.62 330,326.22 412.42,310.84 494.85,208.39 577.27,-1952.55"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.4" points="82.73,-4688.89 165.15,80.15 247.58,307.73 330,304.31 412.42,288.89 494.85,186.35 577.27,-1975.71"/><circle cx="82.73" cy="-4424.55" r="3.5" fill="#2b6cb0"/><circle cx="165.15" cy="134.8" r="3.5" fill="#2b6cb0"/><circle cx="247.58" cy="333.99" r="3.5" fill="#2b6cb0"/><circle cx="330" cy="333.97" r="3.5" fill="#2b6cb0"/><circle cx="412.42" cy="333.93" r="3.5" fill="#2b6cb0"/><circle cx="494.85" cy="333.85" r="3.5" fill="#2b6cb0"/><circle cx="577.27" cy="332.73" r="3.5" fill="#2b6cb0"/><circle cx="82.73" cy="91.55" r="3.5" fill="#c05621"/><circle cx="165.15" cy="301.24" r="3.5" fill="#c05621"/><circle cx="247.58" cy="329.62" r="3.5" fill="#c05621"/><circle cx="330" cy="326.22" r="3.5" fill="#c05621"/><circle cx="412.42" cy="310.84" r="3.5" fill="#c05621"/><circle cx="494.85" cy="208.39" r="3.5" fill="#c05621"/><circle cx="577.27" cy="-1952.55" r="3.5" fill="#c05621"/><circle cx="82.73" cy="-4688.89" r="3.5" fill="#9b2c2c"/><circle cx="165.15" cy="80.15" r="3.5" fill="#9b2c2c"/><circle cx="247.58" cy="307.73" r="3.5" fill="#9b2c2c"/><circle cx="330" cy="304.31" r="3.5" fill="#9b2c2c"/><circle cx="412.42" cy="288.89" r="3.5" fill="#9b2c2c"/><circle cx="494.85" cy="186.35" r="3.5" fill="#9b2c2c"/><circle cx="577.27" cy="-1975.71" r="3.5" fill="#9b2c2c"/><text x="206.36" y="136.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="start">off the scale: degree 0 (bias^2 313, total 330)</text><text x="206.36" y="151.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="start">and degree 6 (variance 150, total 152)</text></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">polynomial degree d</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">squared error (deg C squared)</text>
+<text x="310" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Bias squared, variance and their sum by degree</text>
+<line x1="432" y1="40" x2="452" y2="40" stroke="#2b6cb0" stroke-width="2"/>
+<text x="458" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">bias squared</text>
+<line x1="432" y1="58" x2="452" y2="58" stroke="#c05621" stroke-width="2"/>
+<text x="458" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">variance</text>
+<line x1="432" y1="76" x2="452" y2="76" stroke="#9b2c2c" stroke-width="2"/>
+<text x="458" y="80" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">bias^2 + variance + noise</text>
+</svg>

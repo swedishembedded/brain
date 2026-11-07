@@ -52,8 +52,9 @@ the curriculum and appear here when they are written.
 4. [Maximum Likelihood, Priors and Regularization](04-likelihood.md): why the
    losses in use are the right ones, and what it means to prefer simple
    explanations.
-5. Generalization, Overfitting and Honest Evaluation: how to know that a model
-   has learned the pattern rather than memorized the examples.
+5. [Generalization, Overfitting and Honest Evaluation](05-generalization.md): how
+   to know that a model has learned the pattern rather than memorized the
+   examples.
 6. Measuring Models: Metrics and Calibration: which number says whether a model
    is good, and why accuracy is so often the wrong one.
 7. Machine Learning Before Deep Learning: what the field knew before neural

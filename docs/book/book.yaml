@@ -185,7 +185,7 @@ volumes:
         title: "Generalization, Overfitting and Honest Evaluation"
         question: "How do we know a model has learned the pattern rather than memorized the examples?"
         introduces: [training-set, validation-set, test-set, overfitting, underfitting, bias-variance-tradeoff, cross-validation, data-leakage, distribution-shift]
-        requires: [dataset, loss-function, estimator, variance]
+        requires: [dataset, loss-function, estimator, variance, mean-squared-error, l2-regularization, multiple-comparisons]
         brain: []
       - id: metrics
         title: "Measuring Models: Metrics and Calibration"

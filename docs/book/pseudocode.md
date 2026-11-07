@@ -92,6 +92,8 @@ changes the original. Where a copy is needed, the pseudocode says
 `copy(...)`: `copy(x)` returns a new array (or list) of the same shape and
 values that shares no storage with `x`.
 
+`rows(A, idx)` gathers rows: for `A` of shape `[N, ...]` and a list `idx` of integers, each in `0 .. N-1`, it returns a new array of shape `[len(idx), ...]` whose row `m` is a copy of `A[idx[m], ...]`. The indices may repeat and need not be sorted; an index outside `0 .. N-1` is an error. (A slice cannot express this, because a slice selects a regular range.)
+
 A list comprehension `[expression for i in 0 .. n]` builds the vector of the
 expression's values for `i = 0, 1, ..., n - 1`, and `[expression for i in 0 ..
 n if condition]` keeps only the values where the condition holds. `[]` is the

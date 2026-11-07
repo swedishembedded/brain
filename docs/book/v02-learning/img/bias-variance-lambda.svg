@@ -1,0 +1,29 @@
+<!-- source-sha256: 41965091d328144147ddf3ef2cde251b1effe5a386f9429983e60800539719c7 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="184.29" y1="334" x2="184.29" y2="30" stroke="#edf2f7"/>
+<text x="184.29" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-2</text>
+<line x1="378.57" y1="334" x2="378.57" y2="30" stroke="#edf2f7"/>
+<text x="378.57" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="572.86" y1="334" x2="572.86" y2="30" stroke="#edf2f7"/>
+<text x="572.86" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="58" y1="248.5" x2="602" y2="248.5" stroke="#edf2f7"/>
+<text x="52" y="252.5" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="153.5" x2="602" y2="153.5" stroke="#edf2f7"/>
+<text x="52" y="157.5" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="58.5" x2="602" y2="58.5" stroke="#edf2f7"/>
+<text x="52" y="62.5" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.4" points="87.14,319.81 184.29,324.49 230.63,287.18 281.43,252.27 327.78,220.66 378.57,185.95 475.71,126.73 572.86,92.99"/><polyline fill="none" stroke="#c05621" stroke-width="2.4" points="87.14,207.8 184.29,236.95 230.63,246.48 281.43,249.55 327.78,242.36 378.57,228.09 475.71,207.57 572.86,236.45"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.4" points="87.14,203.96 184.29,224.41 230.63,228.04 281.43,224.36 327.78,209.44 378.57,182.2 475.71,126.25 572.86,92.96"/><circle cx="87.14" cy="319.81" r="3.5" fill="#2b6cb0"/><circle cx="184.29" cy="324.49" r="3.5" fill="#2b6cb0"/><circle cx="230.63" cy="287.18" r="3.5" fill="#2b6cb0"/><circle cx="281.43" cy="252.27" r="3.5" fill="#2b6cb0"/><circle cx="327.78" cy="220.66" r="3.5" fill="#2b6cb0"/><circle cx="378.57" cy="185.95" r="3.5" fill="#2b6cb0"/><circle cx="475.71" cy="126.73" r="3.5" fill="#2b6cb0"/><circle cx="572.86" cy="92.99" r="3.5" fill="#2b6cb0"/><circle cx="87.14" cy="207.8" r="3.5" fill="#c05621"/><circle cx="184.29" cy="236.95" r="3.5" fill="#c05621"/><circle cx="230.63" cy="246.48" r="3.5" fill="#c05621"/><circle cx="281.43" cy="249.55" r="3.5" fill="#c05621"/><circle cx="327.78" cy="242.36" r="3.5" fill="#c05621"/><circle cx="378.57" cy="228.09" r="3.5" fill="#c05621"/><circle cx="475.71" cy="207.57" r="3.5" fill="#c05621"/><circle cx="572.86" cy="236.45" r="3.5" fill="#c05621"/><circle cx="87.14" cy="203.96" r="3.5" fill="#9b2c2c"/><circle cx="184.29" cy="224.41" r="3.5" fill="#9b2c2c"/><circle cx="230.63" cy="228.04" r="3.5" fill="#9b2c2c"/><circle cx="281.43" cy="224.36" r="3.5" fill="#9b2c2c"/><circle cx="327.78" cy="209.44" r="3.5" fill="#9b2c2c"/><circle cx="378.57" cy="182.2" r="3.5" fill="#9b2c2c"/><circle cx="475.71" cy="126.25" r="3.5" fill="#9b2c2c"/><circle cx="572.86" cy="92.96" r="3.5" fill="#9b2c2c"/></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log10 of the penalty lambda</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">log10 of squared error</text>
+<text x="310" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Degree 9: bias and variance as the penalty grows</text>
+<line x1="432" y1="40" x2="452" y2="40" stroke="#2b6cb0" stroke-width="2"/>
+<text x="458" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">bias squared</text>
+<line x1="432" y1="58" x2="452" y2="58" stroke="#c05621" stroke-width="2"/>
+<text x="458" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">variance</text>
+<line x1="432" y1="76" x2="452" y2="76" stroke="#9b2c2c" stroke-width="2"/>
+<text x="458" y="80" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">bias^2 + variance + noise</text>
+</svg>

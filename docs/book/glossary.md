@@ -22,6 +22,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Bernoulli distribution**: the distribution of a single yes/no outcome coded as $1$ or $0$, equal to $1$ with probability $p$; its mean is $p$ and its variance is $p(1-p)$. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
+**bias-variance tradeoff**: the exact split of the expected squared error into noise, squared bias (what the model family cannot express) and variance (how much the fit moves between training sets), and the fact that making a model more flexible lowers the first of the last two and raises the second. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
 **binary cross-entropy**: the loss $-[y\log\hat{p} + (1 - y)\log(1 - \hat{p})]$ for a yes-or-no label $y$ and predicted probability $\hat{p}$, the cross-entropy of a Bernoulli outcome; in terms of the logit $z$ it is $\mathrm{softplus}(z) - y z$. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
 **bootstrap**: a method that estimates the sampling distribution of a statistic by repeatedly drawing a sample of the same size with replacement from the sample itself and recomputing the statistic, giving a standard error or interval without a formula. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
@@ -68,7 +70,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **cross-entropy**: the expected surprise under a belief $q$ of data drawn from $p$, $H(p, q) = -\sum_k p_k \log q_k$, the average code length paid for believing $q$; it is never below $H(p)$. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
+**cross-validation**: estimating the error on new rows by dividing the data into $k$ folds, fitting to all but one fold and scoring on the one left out, in turn, and averaging the $k$ scores. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
 ## D
+
+**data leakage**: any route by which information about the rows used for scoring reaches the fitting (duplicates, statistics computed from all the rows, the future, the same subject on both sides), which makes the score too good to be true. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **dataset**: a collection of $N$ examples, each a vector of features paired with a label, written as the pairs $(\mathbf{x}_n, y_n)$. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
@@ -83,6 +89,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **directional derivative**: the rate of change of a function per unit distance in a chosen unit direction $\mathbf{u}$, equal to $\nabla L\cdot\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **discrete Fourier transform**: the list $X[k] = \sum_{n=0}^{N-1} x[n]e^{-2\pi i kn/N}$ of correlations of $N$ samples with turning pointers, one per frequency $k$; its modulus gives the amplitude and its angle the phase of the component at that frequency, and the original samples are recovered by the inverse transform. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
+
+**distribution shift**: a difference between the source of the rows a model will meet and the source of the rows it was fitted to and scored on, which no held-out set from the training source can reveal. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **dot product**: the number $\sum_i a_i b_i$ obtained from two vectors of equal length, equal to $\lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert\cos\theta$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
@@ -248,6 +256,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **orthogonality**: the property of two vectors having dot product 0, that is, being at right angles. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
+**overfitting**: a model so flexible for its data that it fits the accidents of the training rows, so that its training error is low and its error on new rows is worse than that of a simpler model. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
 **overflow and underflow**: overflow is an exact result too large for the format, stored as infinity; underflow is a nonzero result too small, stored with fewer and fewer significant digits (subnormal numbers) and finally as zero. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 ## P
@@ -344,13 +354,21 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **tensor**: an array of numbers with any number of axes (zero for a scalar, one for a vector, two for a matrix), described by its shape. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
+**test set**: rows used once, after every choice is made, to report the final score of the chosen model; looking at it more than once turns it into a validation set. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
+**training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
 **transpose**: the matrix $\mathbf{A}^\top$ with rows and columns swapped; $(\mathbf{A}\mathbf{B})^\top = \mathbf{B}^\top\mathbf{A}^\top$. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
 ## U
 
+**underfitting**: a model too restricted to represent the pattern, so that its error is high on the training rows and on new rows alike. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
 **unsupervised learning**: learning from examples without labels, to find structure such as groups in the features themselves. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 ## V
+
+**validation set**: rows kept apart from fitting and used to choose between models (degree, penalty, learning rate, when to stop); the score of the chosen model on it is optimistic, because it was chosen for its score. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **variance**: the expected squared deviation from the mean, $\mathbb{E}[X^2] - \mathbb{E}[X]^2$, which scales by $a^2$ under multiplication by $a$ and adds over independent variables; its square root is the standard deviation. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
