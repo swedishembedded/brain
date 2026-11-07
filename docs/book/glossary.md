@@ -24,6 +24,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **asymptotic complexity**: the growth rate of an algorithm's cost as the size of its input grows, stated with $O$, $\Omega$ and $\Theta$ so that constants and lower-order terms are dropped and only the shape (such as $n$, $n \log n$ or $n^2$) remains. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
+**autoencoder**: a network trained to output its own input after passing it through a bottleneck layer much narrower than the input, so that it must learn a short code from which the input can be rebuilt. *([First Complete Models](v03-neural-networks/13-first-models.md))*
+
 ## B
 
 **backward pass**: visiting the nodes of the graph in reverse order, multiplying the gradient that arrives from the next quantity by the local derivative and adding contributions where a value is used more than once. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
@@ -152,6 +154,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **eigenvector**: a nonzero vector that a matrix sends to a multiple of itself, so that the map only stretches (or flips) it. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
+**end-to-end-training-loop**: the whole path from data to saved model in one function: shuffle, batch, forward, loss, backward, clip, optimizer step at the scheduled rate, log, evaluate on the validation set, keep the best checkpoint. *([First Complete Models](v03-neural-networks/13-first-models.md))*
+
 **ensemble**: a set of models whose predictions are combined by a vote or an average; trained independently on resampled data (bagging, random forests) it lowers variance, trained in sequence on what is left (boosting) it lowers bias. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
 **entropy**: the expected surprise of a distribution, $H(p) = -\sum_k p_k \log p_k$; it is $0$ for a certain outcome, at most $\log K$ for $K$ outcomes, and the lower bound on the average length of a code for data from the distribution. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
@@ -271,6 +275,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **law of large numbers**: the statement that the average of $n$ independent draws with finite variance converges to their expectation, with the probability of an error above any fixed amount going to zero as $n$ grows. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **layer-normalization**: normalizing each example's features with the mean and variance taken over the features of that one example, then applying a learned gain and shift; it does not depend on the batch or the mode. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
+
+**learned-controller**: a network trained to produce a control command from the state of a system, here by imitating the commands of a classical controller, and judged by the behaviour of the system when it is in charge. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 **learning rate**: the positive number $\eta$ that scales the step of gradient descent; too small is slow, above $2/\lambda_{\max}$ the iteration diverges on a quadratic loss. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
@@ -411,6 +417,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **rank**: the number of independent columns of a matrix, equal to the number of independent rows and to the dimension of what the map can reach. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
 **real number**: any number on the number line, including fractions and irrational numbers such as $\sqrt{2}$; a computer holds only an approximation of most of them. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
+
+**reconstruction-loss**: the mean squared error between an autoencoder's output and its input, $L_{\mathrm{rec}} = \frac{1}{BD}\sum(\hat{x} - x)^2$; it needs no labels. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 **reduction algorithm**: an algorithm that combines the elements of an array into one value by repeated use of a binary operation, as a sum, a maximum or an argmax does; it takes $n - 1$ applications, and if the operation is associative they can be regrouped into a tree of depth $\lceil \log_2 n \rceil$. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 

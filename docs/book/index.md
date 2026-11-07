@@ -72,4 +72,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 10. [Normalization Layers](v03-neural-networks/10-normalization.md): How does rescaling activations inside a network make it train faster and more stably?
 11. [Regularization in Neural Networks](v03-neural-networks/11-regularization.md): How do we stop a network with millions of parameters from memorizing its training set?
 12. [Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md): When a loss curve looks wrong, how do we find out why?
+13. [First Complete Models](v03-neural-networks/13-first-models.md): What does it take to build, train and verify a small network end to end?
 <!-- /contents -->

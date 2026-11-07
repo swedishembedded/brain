@@ -1,0 +1,55 @@
+<!-- source-sha256: 22e7c40d0907b45ea01471db7925f20d324ea7ea3567b54ed536cc50aa8acba9 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 770 482" width="770" height="482"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="770" height="482" fill="#ffffff"/>
+<rect x="18" y="18" width="734" height="322" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="32" y="40" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">every step (S steps make an epoch)</text>
+<rect x="60" y="57" width="150" height="58" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="135" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">training set</text>
+<text x="135" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">X, T</text>
+<rect x="238" y="57" width="150" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="313" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">shuffle, batch</text>
+<text x="313" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B rows per step</text>
+<rect x="416" y="57" width="150" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="491" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">forward</text>
+<text x="491" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Y = f(theta, x)</text>
+<rect x="594" y="57" width="150" height="58" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="669" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">loss</text>
+<text x="669" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mean squared error</text>
+<rect x="594" y="177" width="150" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="669" y="202.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">backward</text>
+<text x="669" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gradient g</text>
+<rect x="416" y="177" width="150" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="491" y="202.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">clip</text>
+<text x="491" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">global norm to tau</text>
+<rect x="238" y="177" width="150" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="313" y="202.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">AdamW</text>
+<text x="313" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">update theta, m, v</text>
+<rect x="60" y="177" width="150" height="58" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="135" y="202.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">log</text>
+<text x="135" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">loss, norm, rate</text>
+<ellipse cx="313" cy="290" rx="60" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="313" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">schedule</text>
+<text x="313" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rate eta(t)</text>
+<line x1="213" y1="86" x2="235" y2="86" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="391" y1="86" x2="413" y2="86" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="569" y1="86" x2="591" y2="86" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="669" y1="118" x2="669" y2="174" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="591" y1="206" x2="569" y2="206" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="413" y1="206" x2="391" y2="206" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="235" y1="206" x2="213" y2="206" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="313" y1="265" x2="313" y2="238" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M60,206 L40,206 Q30,206 30,196 L30,96 Q30,86 40,86 L57,86" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="18" y="352" width="734" height="112" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="32" y="374" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">every epoch</text>
+<rect x="60" y="389" width="150" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="135" y="410.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">evaluate</text>
+<text x="135" y="426.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">validation loss</text>
+<rect x="238" y="389" width="150" height="50" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="313" y="410.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">checkpoint</text>
+<text x="313" y="426.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">keep theta if lower</text>
+<rect x="416" y="389" width="150" height="50" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="491" y="410.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">test, once</text>
+<text x="491" y="426.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">after the last epoch</text>
+<line x1="135" y1="238" x2="135" y2="386" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="213" y1="414" x2="235" y2="414" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="391" y1="414" x2="413" y2="414" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

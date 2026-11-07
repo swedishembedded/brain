@@ -1,0 +1,40 @@
+<!-- source-sha256: 205a7c113ca4feb8269805fef6cde0dce6cfb0eaf14e31be8ba3ddb3da094a74 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 360" width="620" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="360" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="213.43" y1="314" x2="213.43" y2="30" stroke="#edf2f7"/>
+<text x="213.43" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="368.86" y1="314" x2="368.86" y2="30" stroke="#edf2f7"/>
+<text x="368.86" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="524.29" y1="314" x2="524.29" y2="30" stroke="#edf2f7"/>
+<text x="524.29" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="58" y1="314" x2="602" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-3</text>
+<line x1="58" y1="266.67" x2="602" y2="266.67" stroke="#edf2f7"/>
+<text x="52" y="270.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-2.5</text>
+<line x1="58" y1="219.33" x2="602" y2="219.33" stroke="#edf2f7"/>
+<text x="52" y="223.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-2</text>
+<line x1="58" y1="172" x2="602" y2="172" stroke="#edf2f7"/>
+<text x="52" y="176" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-1.5</text>
+<line x1="58" y1="124.67" x2="602" y2="124.67" stroke="#edf2f7"/>
+<text x="52" y="128.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-1</text>
+<line x1="58" y1="77.33" x2="602" y2="77.33" stroke="#edf2f7"/>
+<text x="52" y="81.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-0.5</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<rect x="58" y="30" width="544" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,43.03 135.71,140.11 213.43,169.09 291.14,284.81 368.86,287.22 446.57,291.03 524.29,294.43 602,298.84"/><circle cx="135.71" cy="139.42" r="4.5" fill="#c05621"/><circle cx="213.43" cy="168.15" r="4.5" fill="#c05621"/><circle cx="291.14" cy="284.47" r="4.5" fill="#c05621"/><circle cx="368.86" cy="286.66" r="4.5" fill="#c05621"/><circle cx="291.14" cy="275.61" r="4.5" fill="#2f855a"/><line x1="58" y1="284.87" x2="602" y2="284.87" stroke="#a0aec0" stroke-dasharray="4 4"/></g>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">bottleneck width k</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">log10 of the test error</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Test error against the width of the bottleneck</text>
+<rect x="385.07" y="38" width="208.93" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="393.07" y1="53" x2="413.07" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="419.07" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">PCA with k components</text>
+<circle cx="403.07" cy="70" r="3.5" fill="#c05621"/>
+<text x="419.07" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">linear autoencoder</text>
+<circle cx="403.07" cy="87" r="3.5" fill="#2f855a"/>
+<text x="419.07" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">autoencoder with GELU layers</text>
+</svg>

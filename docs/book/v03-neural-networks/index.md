@@ -71,5 +71,5 @@ in the curriculum and appear here when they are written.
     network with millions of parameters from memorizing its training set.
 12. [Training Dynamics and Debugging](12-training-dynamics.md): how to find out
     why a loss curve looks wrong.
-13. First Complete Models: what it takes to build, train and verify a small
-    network end to end.
+13. [First Complete Models](13-first-models.md): what it takes to build,
+    train and verify a small network end to end.
