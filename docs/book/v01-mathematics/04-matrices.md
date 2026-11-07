@@ -1179,11 +1179,11 @@ variants (`matmul_reg3.wgsl` and its relatives, `matmul_gemv.wgsl`,
 `matmul_i8.wgsl`, `matmul_q4_gemv.wgsl`) that compute the same sum and differ in
 how the $m n k$ multiply-adds are scheduled and in what number format the weights are stored.
 The bias is a separate, cheap step: `crates/model/src/rowemit.rs` has a
-`linear` method whose documentation says `y = x @ Wᵀ (+ bias when given)`, which
+`linear` method whose documentation says `y = x @ W^T (+ bias when given)`, which
 dispatches the matrix product and then, if there is a bias, a second
 kernel that adds it to every row, the broadcast written explicitly. For one vector the host helper `matvec` in
 `crates/model/src/hostmath.rs` is the matrix-vector product, documented as
-`y = x·Wᵀ` with `W: [out, inn]`, which is the layout of the kernel at $m = 1$.
+`y = x·W^T` with `W: [out, inn]`, which is the layout of the kernel at $m = 1$.
 
 **The transpose in the backward pass.** `crates/kernels/wgsl/matmul_dx.wgsl`
 states in its header the backward of $\mathbf{x}\mathbf{W}^\top$ with respect to

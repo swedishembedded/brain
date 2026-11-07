@@ -152,6 +152,13 @@ def main() -> int:
                "-H", str(ROOT / "docs" / "pandoc" / "book.tex"), "-H", str(title)))
     if bad:
         print("WARNING: some content overflows the page; see build/book/brain-book.pandoc.log", file=sys.stderr)
+    # A glyph the font lacks is silently dropped from the page; refuse it.
+    log = (OUT / "brain-book.pandoc.log").read_text(encoding="utf-8", errors="replace")
+    missing = sorted(set(re.findall(r"Missing character: There is no (\S+) \((U\+[0-9A-F]+)\)", log)))
+    if missing:
+        print("missing glyphs (the PDF would drop them): " +
+              ", ".join(f"{c} {u}" for c, u in missing), file=sys.stderr)
+        return 1
     return 0
 
 
