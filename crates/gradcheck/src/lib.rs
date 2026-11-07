@@ -103,6 +103,9 @@ pub use sam_hd::{check_sam_hd, check_sam_hd_shared};
 /// LM-shaped (`vocab()`/`block_size()`) and this is a forecaster.
 pub mod horizon;
 pub mod ouro;
+
+/// `check_ricursive` / `check_ricursive_folded` (src/ricursive.rs) - the Ripple training graph.
+pub mod ricursive;
 pub use ouro::check_ouro;
 pub mod spectrallm;
 pub use spectrallm::check_spectrallm;

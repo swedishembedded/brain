@@ -20,6 +20,9 @@ brain-paramstore.workspace = true
 # `model::rope_scaling::base_inv_freq`: the reciprocal-power frequency table
 # computed in f32 exactly as the reference does.
 brain-model.workspace = true
+# Device AdamW over the parameter store, and the seeded initial weights of a fresh training run.
+brain-optim.workspace = true
+brain-data.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -27,4 +30,3 @@ tracing.workspace = true
 [dev-dependencies]
 brain-testutil.workspace = true
 tempfile.workspace = true
-brain-data.workspace = true

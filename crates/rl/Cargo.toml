@@ -70,6 +70,8 @@ brain-qwen3vl.workspace = true
 brain-gpu-core.workspace = true
 # `tests/conformance.rs` registers `qwen35moe::Qwen35` too.
 brain-qwen35moe.workspace = true
+# `tests/conformance.rs` registers `ricursive::Ripple` (a hybrid local/global decoder with a value residual).
+brain-ricursive.workspace = true
 # `tests/lora_acceptance.rs` runs the LoRA workflow over the diffusion trainer too.
 brain-flux2.workspace = true
 

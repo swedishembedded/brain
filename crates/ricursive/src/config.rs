@@ -188,6 +188,32 @@ impl RicursiveConfig {
         Ok(cfg)
     }
 
+    /// The `config.json` body that [`Self::from_json`] reads back to this configuration (the released key names).
+    pub fn to_json(&self) -> serde_json::Value {
+        let layer_types: Vec<&str> = self.layer_types.iter().map(|t| if *t == LayerType::Sliding { "sliding_attention" } else { "full_attention" }).collect();
+        serde_json::json!({
+            "model_type": "ricursive",
+            "vocab_size": self.vocab_size,
+            "hidden_size": self.hidden_size,
+            "intermediate_size": self.intermediate_size,
+            "num_hidden_layers": self.num_hidden_layers,
+            "num_attention_heads": self.num_attention_heads,
+            "num_key_value_heads": self.num_key_value_heads,
+            "head_dim": self.head_dim,
+            "hidden_act": "silu",
+            "rms_norm_eps": self.rms_norm_eps,
+            "rope_theta": self.rope_theta,
+            "sliding_window": self.sliding_window,
+            "layer_types": layer_types,
+            "use_gated_attention": self.use_gated_attention,
+            "gate_full_precision": self.gate_full_precision,
+            "use_valres": self.use_valres,
+            "ffn_clamp_threshold": self.ffn_clamp_threshold,
+            "embed_scale": self.embed_scale,
+            "tie_word_embeddings": false,
+        })
+    }
+
     /// Read and parse a `config.json` file.
     pub fn from_file(path: &str) -> Result<RicursiveConfig, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("ricursive config: reading {path}: {e}"))?;
@@ -304,6 +330,14 @@ mod tests {
         assert!(RicursiveConfig::from_json(&tied).unwrap_err().contains("tie_word_embeddings"));
         let gelu = real("").replace("\"silu\"", "\"gelu\"");
         assert!(RicursiveConfig::from_json(&gelu).unwrap_err().contains("hidden_act"));
+    }
+
+    #[test]
+    fn a_config_survives_its_own_json() {
+        let cfg = RicursiveConfig::from_json(&real(r#","layer_types":["sliding_attention","full_attention","sliding_attention","sliding_attention","full_attention"]"#)).unwrap();
+        assert_eq!(RicursiveConfig::from_json(&cfg.to_json().to_string()).unwrap(), cfg);
+        let folded = RicursiveConfig { embed_scale: None, ffn_clamp_threshold: None, use_valres: false, ..cfg };
+        assert_eq!(RicursiveConfig::from_json(&folded.to_json().to_string()).unwrap(), folded);
     }
 
     #[test]

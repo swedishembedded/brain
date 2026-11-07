@@ -35,6 +35,7 @@ mod ouro_fd;
 mod prelu_kernels;
 mod quick_gelu_fd;
 mod qwen35_image_record_fd;
+mod ricursive_fd;
 mod resize_bicubic_kernels;
 mod sam_hd_fd;
 mod spectrallm_fd;

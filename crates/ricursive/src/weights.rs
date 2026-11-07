@@ -61,6 +61,11 @@ pub(crate) fn all_linears(cfg: &RicursiveConfig) -> Vec<(String, usize, usize)> 
     v
 }
 
+/// Every linear weight of `cfg` with its shape `(name, rows, columns)`: what a weight format applies to.
+pub fn all_linears_of(cfg: &RicursiveConfig) -> Vec<(String, usize, usize)> {
+    all_linears(cfg)
+}
+
 /// The canonical names of every linear weight of `cfg`, the layers' and `lm_head`: the tensors a weight format applies to.
 pub fn linear_names(cfg: &RicursiveConfig) -> Vec<String> {
     all_linears(cfg).into_iter().map(|(name, ..)| name).collect()
