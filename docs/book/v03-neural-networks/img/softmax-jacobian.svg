@@ -1,0 +1,46 @@
+<!-- source-sha256: 19c27be19ccfe20d08841b5747eac3c7caf5909df5b2844ce218a0f8384df139 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 442 402" width="442" height="402">
+<rect width="442" height="402" fill="#ffffff"/>
+<text x="274" y="20" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Jacobian of the softmax, entry (i, j) = d p[i] / d z[j]</text>
+<text x="274" y="38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">orange: raising z[j] raises p[i]; blue: it lowers p[i]</text>
+<text x="157" y="66" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">z[0] scratch</text>
+<text x="235" y="66" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">z[1] dent</text>
+<text x="313" y="66" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">z[2] crack</text>
+<text x="391" y="66" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">z[3] burr</text>
+<text x="108" y="121" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">p[0] scratch</text>
+<rect x="118" y="78" width="78" height="78" fill="#c05621" stroke="#ffffff" stroke-width="2"/>
+<text x="157" y="121" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">0.1909</text>
+<rect x="196" y="78" width="78" height="78" fill="#acc5e0" stroke="#ffffff" stroke-width="2"/>
+<text x="235" y="121" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0747</text>
+<rect x="274" y="78" width="78" height="78" fill="#dae5f1" stroke="#ffffff" stroke-width="2"/>
+<text x="313" y="121" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0336</text>
+<rect x="352" y="78" width="78" height="78" fill="#a3bfdd" stroke="#ffffff" stroke-width="2"/>
+<text x="391" y="121" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0826</text>
+<text x="108" y="199" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">p[1] dent</text>
+<rect x="118" y="156" width="78" height="78" fill="#acc5e0" stroke="#ffffff" stroke-width="2"/>
+<text x="157" y="199" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0747</text>
+<rect x="196" y="156" width="78" height="78" fill="#e1af96" stroke="#ffffff" stroke-width="2"/>
+<text x="235" y="199" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">0.0905</text>
+<rect x="274" y="156" width="78" height="78" fill="#fafcfd" stroke="#ffffff" stroke-width="2"/>
+<text x="313" y="199" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0045</text>
+<rect x="352" y="156" width="78" height="78" fill="#f3f6fa" stroke="#ffffff" stroke-width="2"/>
+<text x="391" y="199" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0112</text>
+<text x="108" y="277" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">p[2] crack</text>
+<rect x="118" y="234" width="78" height="78" fill="#dae5f1" stroke="#ffffff" stroke-width="2"/>
+<text x="157" y="277" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0336</text>
+<rect x="196" y="234" width="78" height="78" fill="#fafcfd" stroke="#ffffff" stroke-width="2"/>
+<text x="235" y="277" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0045</text>
+<rect x="274" y="234" width="78" height="78" fill="#f1d9cd" stroke="#ffffff" stroke-width="2"/>
+<text x="313" y="277" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">0.0431</text>
+<rect x="352" y="234" width="78" height="78" fill="#f9fbfd" stroke="#ffffff" stroke-width="2"/>
+<text x="391" y="277" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0050</text>
+<text x="108" y="355" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">p[3] burr</text>
+<rect x="118" y="312" width="78" height="78" fill="#a3bfdd" stroke="#ffffff" stroke-width="2"/>
+<text x="157" y="355" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0826</text>
+<rect x="196" y="312" width="78" height="78" fill="#f3f6fa" stroke="#ffffff" stroke-width="2"/>
+<text x="235" y="355" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0112</text>
+<rect x="274" y="312" width="78" height="78" fill="#f9fbfd" stroke="#ffffff" stroke-width="2"/>
+<text x="313" y="355" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">-0.0050</text>
+<rect x="352" y="312" width="78" height="78" fill="#dea88c" stroke="#ffffff" stroke-width="2"/>
+<text x="391" y="355" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle">0.0988</text>
+</svg>

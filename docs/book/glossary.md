@@ -218,6 +218,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **label**: the answer attached to an example, the quantity a supervised model is asked to predict. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
+**label-smoothing**: replacing the one-hot target by a mixture of it with the uniform distribution, so that the loss is smallest at a finite gap between the scores instead of only in the limit of infinite confidence. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
+
 **law of large numbers**: the statement that the average of $n$ independent draws with finite variance converges to their expectation, with the probability of an error above any fixed amount going to zero as $n$ grows. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **learning rate**: the positive number $\eta$ that scales the step of gradient descent; too small is slow, above $2/\lambda_{\max}$ the iteration diverges on a quadratic loss. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
@@ -293,6 +295,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **numerical integration**: approximating an integral by a weighted sum of function values, such as rectangles, trapezoids or Simpson's rule, whose error falls as a fixed power of the panel width. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
 ## O
+
+**one-hot-encoding**: writing a class index as a vector with a one in the position of that class and zeros elsewhere, the probability vector that puts all its weight on that class. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **ordinary differential equation**: an equation $dx/dt = f(t, x)$ that gives the rate of change of an unknown function of one variable in terms of the function itself; its solution is a curve that follows the prescribed slopes from a given starting value. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
@@ -396,7 +400,13 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **sinusoid**: a wave $A\cos(2\pi f t + \varphi)$ described by an amplitude $A$ (its largest value), a frequency $f$ (cycles per second) and a phase $\varphi$ (where in its cycle it stands at time zero); a cosine and a sine are the same sinusoid a quarter period apart. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
+**softmax**: the function that turns a vector of real scores into a probability vector by exponentiating each score and dividing by the sum of the exponentials, so that the outputs are positive, add to one and keep the order of the scores. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
+
+**softmax-cross-entropy**: the loss of a classifier computed directly from its scores and the true class as the log-sum-exp of the scores minus the score of the true class; it is the negative log-likelihood of the true class under the softmax, and its gradient with respect to the scores is the probability vector minus the one-hot target. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
+
 **sorting**: rearranging a list into non-decreasing order; comparison sorts need $\Omega(n \log n)$ comparisons in the worst case and merge sort achieves it, while sorts that use the values of integer keys as addresses can be linear. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
+
+**stable-softmax**: the softmax computed after subtracting the largest score from every score, which gives the same probabilities but keeps every exponent at most zero, so nothing overflows and the sum is at least one. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **standard error**: the standard deviation of an estimator over repeated samples, the typical size of its error; for the sample mean it is $\sigma/\sqrt{n}$, estimated by $s/\sqrt{n}$. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 

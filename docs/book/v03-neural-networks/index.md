@@ -48,8 +48,8 @@ in the curriculum and appear here when they are written.
    neuron is, and what a single one can never learn.
 2. [Multilayer Networks](02-mlp.md): why stacking layers with a nonlinearity between them
    lets a network represent almost anything.
-3. Softmax, Logits and Cross-Entropy: how a network chooses among many
-   classes, and why the gradient of that choice is so simple.
+3. [Softmax, Logits and Cross-Entropy](03-softmax.md): how a network chooses
+   among many classes, and why the gradient of that choice is so simple.
 4. [Backpropagation Derived from Scratch](04-backpropagation.md): how the
    gradient of one loss with respect to millions of parameters costs about
    one extra pass.

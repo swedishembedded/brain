@@ -62,5 +62,6 @@ historical sections draw on in the [Chronology](history/chronology.md).
 
 1. [The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md): What is an artificial neuron, and what can a single one never learn?
 2. [Multilayer Networks](v03-neural-networks/02-mlp.md): Why does stacking layers with a nonlinearity between them let a network represent almost anything?
+3. [Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md): How does a network choose among many classes, and why is its gradient so simple?
 4. [Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md): How do we compute the gradient of one loss with respect to millions of parameters in about the cost of one forward pass?
 <!-- /contents -->

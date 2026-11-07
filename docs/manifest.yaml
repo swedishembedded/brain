@@ -367,6 +367,7 @@ navigation:
           - docs/book/v03-neural-networks/index.md
           - docs/book/v03-neural-networks/01-perceptron.md
           - docs/book/v03-neural-networks/02-mlp.md
+          - docs/book/v03-neural-networks/03-softmax.md
           - docs/book/v03-neural-networks/04-backpropagation.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
