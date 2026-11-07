@@ -8,7 +8,9 @@ Every figure in docs/book is generated, never drawn by hand, so it can be
 reviewed as text and regenerated when the idea it shows changes:
 
     scripts/book/figures/<volume dir>/<name>.dot  -> Graphviz (structure)
-    scripts/book/figures/<volume dir>/<name>.py   -> render() -> SVG (numbers)
+    scripts/book/figures/<volume dir>/<name>.py   -> render() -> SVG (numbers,
+                                                     or computed structure
+                                                     drawn via dot_svg())
 
 both written to docs/book/<volume dir>/img/<name>.svg. A `.py` figure computes
 its data with the arithmetic the chapter teaches, so the picture and the text
@@ -62,16 +64,22 @@ def digest(src: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def render_dot(src: Path) -> str:
-    r = subprocess.run(["dot", "-Tsvg", *DOT_DEFAULTS, str(src)], capture_output=True, text=True)
+def dot_svg(source: str, where: str = "<dot>") -> str:
+    """Graphviz source to a compact SVG. Python figures whose structure is
+    computed (a tree built by the chapter's algorithm) call this too."""
+    r = subprocess.run(["dot", "-Tsvg", *DOT_DEFAULTS], input=source, capture_output=True, text=True)
     if r.returncode != 0:
-        sys.exit(f"{src}: dot failed: {r.stderr.strip()}")
+        sys.exit(f"{where}: dot failed: {r.stderr.strip()}")
     svg = r.stdout
     svg = re.sub(r"<\?xml[^>]*\?>\s*", "", svg)
     svg = re.sub(r"<!DOCTYPE[^>]*>\s*", "", svg, flags=re.S)
     svg = re.sub(r"<!--.*?-->\s*", "", svg, flags=re.S)
     svg = re.sub(r"<title>[^<]*</title>\s*", "", svg)
     return "\n".join(line.strip() for line in svg.splitlines() if line.strip()) + "\n"
+
+
+def render_dot(src: Path) -> str:
+    return dot_svg(src.read_text(encoding="utf-8"), str(src))
 
 
 def render_py(src: Path) -> str:
