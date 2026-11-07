@@ -7,19 +7,19 @@
 
 ## The problem
 
-Fit a line $y = w x$ to eight points by stepping through them one at a time and nudging $w$ after each. The points are fixed. The learning rate is fixed. Two things are left to chance: where $w$ starts (a number in $[-1, 1)$) and in what order the eight points are visited in each of two passes. Run the program three times; the first and third runs are given the same seed, a 64-bit number that we will define properly below, and the second a different one.
+Fit a line $y = w x$ to eight points by stepping through them one at a time and nudging $w$ after each. The points, the loss, the update rule and the learning rate are fixed, and the block below lists them. Two things are left to chance: where $w$ starts (a number in $[-1, 1)$) and in what order the eight points are visited in each of two passes (called epochs). Run the program three times; the first and third runs are given the same seed, a 64-bit number that we will define properly below, and the second a different one. Every worked example in this chapter that draws random numbers prints its seed, and the seed is simply given: to reproduce a table, start the generator built below at the printed seed and draw in the printed order. How the book chose the seeds does not matter; any other seed gives a table of the same kind with different digits.
 
 <!-- worked: randomness.toy_runs -->
-The same eight points, learning rate 0.01, two epochs, differing only in the seed:
+Points (x, y): (0.5, 1.4), (1.0, 2.1), (1.5, 4.6), (2.0, 5.8), (2.5, 7.9), (3.0, 9.3), (3.5, 10.2), (4.0, 12.4). Model y = w x. Loss: L(w) = (1/8) sum over the eight points of (w x - y)^2. Each visited point (x, y) updates w <- w - 0.01 * 2 (w x - y) x. Learning rate 0.01, 2 epochs of eight steps each. Generator: the book's SplitMix64 started at the printed seed (state = seed before the first draw). Draw order: first w0 = 2 uniform() - 1; then, once per epoch, a new array [0, 1, ..., 7] is shuffled in place with the same generator (epoch 1 first) and the points are visited in that order. Final loss is L at the final w; "last epoch order" is the order of epoch 2.
 
 | run | seed | initial w | last epoch order | final w | final loss |
 |---|---|---:|---|---:|---:|
-| run 1 | 0xa8816eaf7c27178b | -0.2816 | 4 7 2 3 0 5 1 6 | 2.680070 | 0.923742 |
-| run 2 | 0x5eac9efcb2d5d7c4 | -0.4836 | 0 7 2 6 5 1 4 3 | 2.669283 | 0.971855 |
-| run 3 (seed of run 1 again) | 0xa8816eaf7c27178b | -0.2816 | 4 7 2 3 0 5 1 6 | 2.680070 | 0.923742 |
+| run 1 | 0xee43491424935bca | 0.9472 | 1 4 2 7 3 0 6 5 | 2.815481 | 0.445964 |
+| run 2 | 0xcc6c60b3b12a1973 | 0.0696 | 2 4 1 0 5 6 7 3 | 2.730141 | 0.719833 |
+| run 3 (seed of run 1 again) | 0xee43491424935bca | 0.9472 | 1 4 2 7 3 0 6 5 | 2.815481 | 0.445964 |
 <!-- /worked -->
 
-The first two runs end at different weights and different losses, so a number such as "the loss of this method is $0.92$" is already a statement about one draw of the dice, not about the method. The third run ends exactly where the first did, to every printed digit, in the initial weight, the order of the visits and the loss. Randomness that can be switched on and off by a number is the subject of this chapter.
+The first two runs end at different weights and different losses ($0.45$ and $0.72$), so a number such as "the loss of this method is $0.45$" is already a statement about one draw of the dice, not about the method. The third run ends exactly where the first did, to every printed digit, in the initial weight, the order of the visits and the loss. Randomness that can be switched on and off by a number is the subject of this chapter.
 
 Randomness enters machine learning in at least five places, and each of them needs it for a different reason. The initial weights are drawn at random so that the units of a layer do not all compute the same thing (Volume III). The order of the training examples is shuffled so that each step sees a varied mix. Dropout (Volume III) zeroes a random subset of activations to stop units from co-adapting. A language model chooses its next word by drawing from a probability table, so that the same prompt can have several answers. Image generators start from a cloud of Gaussian noise. In every case the code needs numbers that behave as if they were drawn by chance, and a computer, which does exactly what its instructions say, has no chance in it.
 
@@ -61,7 +61,7 @@ Starting from the state $7$ the machine prints $6, 1, 8, 11, 10, 5, 12, \dots$, 
 
 The starting state is chosen by the caller. The number the starting state is computed from is the **seed**: two generators of the same kind started from the same seed produce the same sequence, and different seeds give different sequences. (For the toy machine the seed is the state itself. For the generators below the state is larger than the seed, or computed from it, and the seed is the thing a person writes down.)
 
-Two properties of the machine matter at once. The **period** is the number of steps before the sequence repeats; a generator with a period of $16$ cannot supply $17$ distinct draws. And the quality of the outputs, which is subtler, depends on what $f$ and $g$ do. We study the first through the oldest family of generators.
+Two properties of the machine matter at once. The **period** is the length of the cycle the sequence eventually enters, that is, the number of steps after which it repeats for good (when the seed itself lies on the cycle, as in the table above, this is the number of steps until the seed returns); a generator with a period of $16$ cannot supply $17$ distinct draws. And the quality of the outputs, which is subtler, depends on what $f$ and $g$ do. We study the first through the oldest family of generators.
 
 ## Arithmetic on a clock: the linear congruential generator
 
@@ -76,6 +76,8 @@ with a **multiplier** $a$, an **increment** $c$ and a **modulus** $m$ (here $5$,
 Which pairs $(a, c)$ make a good LCG? The first requirement is a long period. With $m = 16$ there are only $16$ states, so the best conceivable period is $16$, called the **full period**: every state appears once per lap. The table tries some choices from the seed $1$.
 
 <!-- worked: randomness.tiny_lcg_periods -->
+The period is the length of the cycle the sequence eventually enters (the number of steps after which it repeats forever). For a = 4, c = 3 the sequence from seed 1 is 1, 7, 15, 15, 15, ...: it settles on the single state 15, so its period is 1 although the seed itself is never visited again.
+
 | a | c | period from seed 1 |
 |---|---:|---:|
 | 5 | 3 | 16 |
@@ -115,7 +117,7 @@ First 16 values of bit k of the sequence x_0, x_1, ... of the generator with a =
 | 15 | 65536 | 0110100100000111 |
 <!-- /worked -->
 
-A program that takes `x % 2` to flip a coin gets $1, 0, 1, 0, \dots$, an alternating sequence that no coin would produce. Taking `x % 6` for a die throws away the better bits as well: bit $0$ of the result is the alternating bit. The remedy is to use the **top** bits, which depend on all the lower ones; bit $15$ above has the full period $65536$. This is why every generator below hands out its high bits, and why the doc comment of `data::rng::Lcg` in brain says "the top bits are used because an LCG's low bits have short periods".
+A program that takes `x % 2` to flip a coin gets $1, 0, 1, 0, \dots$, an alternating sequence that no coin would produce. Taking `x % 6` for a die throws away the better bits as well: for any even modulus, such as $6$, the remainder has the parity of $x$, so bit $0$ of the result is the alternating bit. The remedy is to use the **top** bits, which depend on all the lower ones; bit $15$ above has the full period $65536$. This is why every generator below hands out its high bits, and why the doc comment of `data::rng::Lcg` in brain says "the top bits are used because an LCG's low bits have short periods".
 
 ### The pairs fall on lines
 
@@ -146,7 +148,7 @@ Three-dimensional triples fall on planes in the same way (the title of Marsaglia
 
 The LCG's two weaknesses have one cause: the output is a very simple function of the state, and a very simple function of a simple state keeps simple structure. The modern remedy is to separate the two jobs. Let the state advance in the simplest possible way (it only has to visit many different values), and make the output a thorough scramble of the state.
 
-For the advance, add a fixed odd constant modulo $2^{64}$. An odd increment has no common factor with $2^{64}$, so adding it repeatedly visits all $2^{64}$ states before returning: a period of $1.8 \times 10^{19}$ with no conditions to check. The constant used here is $\gamma$, in hexadecimal `0x9E3779B97F4A7C15`, which is $2^{64}$ divided by the golden ratio and rounded to an odd integer; its job is to be an odd number whose binary digits look irregular.
+For the advance, add a fixed odd constant modulo $2^{64}$. An odd increment has no common factor with $2^{64}$, so adding it repeatedly visits all $2^{64}$ states before returning: a period of $1.8 \times 10^{19}$ with no conditions to check. The constant used here is `GAMMA`, in hexadecimal `0x9E3779B97F4A7C15`, which is $2^{64}$ divided by the golden ratio and rounded to an odd integer; its job is to be an odd number whose binary digits look irregular.
 
 For the scramble we need three small operations, all native to a processor. A **shift** $z \gg k$ moves every bit $k$ places toward the low end and drops the bits that fall off, so $z \gg 30$ brings the top $34$ bits of a $64$-bit word down to the bottom. **Exclusive or** $p \oplus q$ compares two words bit by bit and writes $1$ where the bits differ and $0$ where they agree. And a multiplication modulo $2^{64}$ by an odd constant mixes each bit into all the bits above it (a bit at position $j$ appears, shifted, in every position at or above $j$, through the carries). Alone each is weak: a shift-xor mixes only downward, a multiplication only upward. Alternating them spreads every input bit over every output bit. The recipe, named SplitMix64 (Steele, Lea and Flood, 2014), is
 
@@ -163,32 +165,32 @@ function splitmix_next(state: inout int) -> int:     # state and result lie in 0
     return z xor (z >> 31)
 ```
 
-Here is one call traced, from a seed drawn once from a frozen stream (the numbers are printed in hexadecimal, sixteen digits for $64$ bits):
+A generator started from a seed $s$ holds the state $s$ before its first call, so the first call computes $s + \text{GAMMA}$ and mixes it. Here is one call traced, from a given seed (the numbers are printed in hexadecimal, sixteen digits for $64$ bits):
 
 <!-- worked: randomness.splitmix_trace -->
 | step | 64-bit value |
 |---|---:|
-| seed | 0x27f1cb3eb179f773 |
-| state + GAMMA | 0xc62944f830c47388 |
-| z ^ (z >> 30), times C1 | 0xf595062c863bb328 |
-| z ^ (z >> 27), times C2 | 0xd6a3d18dfed032e8 |
-| z ^ (z >> 31) = output | 0xd6a3d18c539791f3 |
+| seed | 0x60c83be1b42d7c66 |
+| state + GAMMA | 0xfeffb59b3377f87b |
+| z ^ (z >> 30), times C1 | 0xe55682ce31d8e19f |
+| z ^ (z >> 27), times C2 | 0xe92b6ffcc94822b3 |
+| z ^ (z >> 31) = output | 0xe92b6ffd1b1efd4a |
 
-The first four outputs from that seed: `0xd6a3d18c539791f3`, `0x1aa5e54f1be40e6f`, `0x87a71e648f93c7a2`, `0x1c5d8e2a99aa26fa`.
+The first four outputs from that seed: `0xe92b6ffd1b1efd4a`, `0x274e6231dd55a008`, `0xd868879f36a23b89`, `0x27a75603fc701fcc`.
 <!-- /worked -->
 
 The scramble is judged by an **avalanche** test: flip one bit of the input and count how many bits of the output change. A good scramble changes about half of the $64$, whichever bit was flipped. For the LCG step the count is about $17$ (a flipped bit at position $k$ can only change positions $k$ and above), and for the neighbouring seeds $s$ and $s + 1$ the outputs of the LCG differ by the same amount, $a$, every single time:
 
 <!-- worked: randomness.avalanche -->
-Over 2000 random seeds.
+Generator: the book's SplitMix64, seed 0x48216c57116d4892 (5197554566172592274), used as the state before the first draw. Over 2000 trials; each trial draws a seed s = `next()` and then a bit position k = `integer(64)`. SplitMix64's first output is the output of the first call of a generator whose state is s. The LCG step is x -> (a x + c) mod 2^64 with a = 6364136223846793005 and c = 1442695040888963407, applied to s. The first column averages the number of differing output bits between s and s with bit k flipped; the second counts the distinct values of (output for s + 1) - (output for s) modulo 2^64.
 
 | generator | average number of the 64 output bits that change when one random seed bit is flipped | distinct values of (output for s + 1) - (output for s) |
 |---|---:|---:|
-| SplitMix64 first output | 32.10 | 2000 |
-| one LCG step (64-bit modulus) | 17.33 | 1 |
+| SplitMix64 first output | 31.98 | 2000 |
+| one LCG step (64-bit modulus) | 17.22 | 1 |
 <!-- /worked -->
 
-Two properties follow that are the reason this generator is the workhorse of the engine in the case study. Its finalizer is a hash function in the sense of Chapter 16, so seeds that are close together (seed $1$ and seed $2$, which people really do type) give streams that have nothing to do with each other. And a state of $0$ is harmless, because the advance adds $\gamma$ before anything is mixed: an LCG with $c = 0$ is trapped by the state zero, this generator is not.
+Two properties follow that are the reason this generator is the workhorse of the engine in the case study. Its finalizer is a hash function in the sense of Chapter 16, so seeds that are close together (seed $1$ and seed $2$, which people really do type) give streams that have nothing to do with each other. And a state of $0$ is harmless, because the advance adds `GAMMA` before anything is mixed: an LCG with $c = 0$ is trapped by the state zero, this generator is not.
 
 ### Testing a generator by counting
 
@@ -198,28 +200,32 @@ $$
 X^2 = \sum_{j=1}^{k} \frac{(O_j - E)^2}{E} .
 $$
 
-Squaring makes deviations in both directions count and large ones count more; dividing by $E$ makes the scale independent of the size of the experiment. How big should $X^2$ be for a fair source? Statistics texts derive that its mean is $k - 1$ and its spread is $\sqrt{2(k - 1)}$ (this is Pearson's chi-square statistic). We do not need to take that on trust: simulate a fair source, with Python's own generator as an independent reference stream, many times, and look.
+Squaring makes deviations in both directions count and large ones count more; dividing by $E$ makes the scale independent of the size of the experiment. How big should $X^2$ be for a fair source? Statistics texts derive that its mean is $k - 1$ and its spread is $\sqrt{2(k - 1)}$ (this is Pearson's chi-square statistic). We do not need to take that on trust: simulate a fair source many times and look. The fair source here is the generator of this section itself, one separately seeded stream per row, each draw being `integer(k)` (the next section defines it); any good generator would do, and the means and spreads are what a reader's own generator should reproduce.
 
 <!-- worked: randomness.bucket_calibration -->
-| cells k | draws n | experiments | mean of X^2 | k - 1 | spread of X^2 | sqrt(2(k - 1)) | alarm: mean + 5 spreads |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| 4 | 400 | 3000 | 3.0 | 3 | 2.4 | 2.4 | 15 |
-| 16 | 1600 | 2000 | 15.0 | 15 | 5.5 | 5.5 | 42 |
-| 256 | 25600 | 150 | 256.2 | 255 | 24.2 | 22.6 | 377 |
+Each row is a fair source: a generator started at the printed seed (state = seed), whose experiments follow one another; one draw is `integer(k)` and adds one to that cell's count, and an experiment is n draws. The spread is the sample standard deviation (divisor experiments - 1) of the X^2 values.
+
+| cells k | draws n | experiments | seed | mean of X^2 | k - 1 | spread of X^2 | sqrt(2(k - 1)) | alarm: k - 1 + 5 sqrt(2(k - 1)) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 400 | 3000 | 0x4280bbeed351bf5e | 3.0 | 3 | 2.5 | 2.4 | 15 |
+| 16 | 1600 | 2000 | 0xb7cdc7f8b5ff12c8 | 15.1 | 15 | 5.5 | 5.5 | 42 |
+| 256 | 25600 | 150 | 0xc53f9039f6222a22 | 253.6 | 255 | 22.1 | 22.6 | 368 |
 <!-- /worked -->
 
-The measured means match $k - 1$ and the measured spreads match the formula. A value more than five spreads above the mean is a failure that chance does not produce; the last column is that alarm level. Now put the generators to three questions: is the top nibble (4 bits) of the output evenly spread over $16$ buckets; are pairs of consecutive low-order bit pairs evenly spread over their $16$ combinations; and are pairs of consecutive top nibbles evenly spread over their $256$ combinations?
+The measured means match $k - 1$ and the measured spreads match the formula. A value more than five spreads above the mean is a failure that chance does not produce. From here on the **alarm level** is the value $k - 1 + 5\sqrt{2(k - 1)}$, which the last column computes (the measured mean plus five measured spreads of the third row, $253.6 + 5 \cdot 22.1 = 364$, is close to the formula's $368$; the formula is used because $150$ experiments measure a spread only roughly). Now put the generators to three questions, asked of one sequence of outputs $x_1, x_2, \dots$ per generator (the first $1600$ values for the first question, the next $1601$ for the second, the next $25{,}601$ for the third). Is the top nibble (4 bits) of the output evenly spread over $16$ buckets? Are the pairs of the lowest two bits of consecutive outputs evenly spread over their $16$ combinations? Here a pair means two **overlapping** neighbours $(x_i, x_{i+1})$, so $1601$ values give $1600$ pairs, and the pair goes to cell $4\,(x_i \bmod 4) + (x_{i+1} \bmod 4)$. And are the pairs of top nibbles of consecutive outputs evenly spread over their $256$ combinations (cell $16 \cdot \text{nibble}(x_i) + \text{nibble}(x_{i+1})$, with $25{,}600$ pairs)? The table gives each generator's seed; an LCG starts from the initial state $x_0$ listed and yields $x_1 = (a x_0 + c) \bmod m$ first, SplitMix64 yields its first output first. The $b$-bit values of the LCGs are used whole: $b = 32$ for the first, $16$ for the others.
 
 <!-- worked: randomness.bucket_tests -->
-| generator | top 4 bits, 16 cells (alarm 42) | pairs of low 2 bits, 16 cells (alarm 42) | pairs of top 4 bits, 256 cells (alarm about 370) |
-|---|---:|---:|---:|
-| SplitMix64 (64 bits) | 18.2 | 16.0 | 246.8 |
-| LCG a = 1664525, c = 1013904223, m = 2^32 | 16.0 | 4800.0 | 235.1 |
-| LCG a = 25173, c = 13849, m = 2^16 | 6.8 | 4800.0 | 133.1 |
-| LCG a = 4097, c = 1, m = 2^16 | 0.0 | 4800.0 | 5278.3 |
+Alarm levels (calibration table): 42 for 16 cells, 368 for 256 cells. Each generator yields the values x_1, x_2, ... (a b-bit integer each; an LCG starts from x_0 and the first value it yields is x_1 = (a x_0 + c) mod m; SplitMix64's x_1 is its first output). One sequence per row feeds the three tests one after the other: the first 1600 values, the next 1601, the next 25601. Top 4 bits: cell = x >> (b - 4) for a b-bit value. Pairs of low 2 bits: with the 1601 consecutive values x_i, the 1600 overlapping pairs (x_i, x_(i+1)) go to the cell 4 (x_i and 3) + (x_(i+1) and 3). Pairs of top 4 bits: the 25600 overlapping pairs of 25601 consecutive values go to the cell 16 (x_i >> (b - 4)) + (x_(i+1) >> (b - 4)).
+
+| generator | start | top 4 bits, 16 cells (alarm 42) | pairs of low 2 bits, 16 cells (alarm 42) | pairs of top 4 bits, 256 cells (alarm 368) |
+|---|---|---:|---:|---:|
+| SplitMix64 (64 bits) | seed 0x05e6b08e7421fe7d | 14.2 | 12.5 | 268.3 |
+| LCG a = 1664525, c = 1013904223, m = 2^32 | x_0 = 3829122784 (seed 0x645067a3e43bc6e0 mod 2^32) | 23.8 | 4800.0 | 246.2 |
+| LCG a = 25173, c = 13849, m = 2^16 | x_0 = 3006 (seed 0x3ec115d024300bbe mod 2^16) | 15.1 | 4800.0 | 135.4 |
+| LCG a = 4097, c = 1, m = 2^16 | x_0 = 63379 (seed 0x4d92b36e5ab6f793 mod 2^16) | 0.0 | 4800.0 | 4860.7 |
 <!-- /worked -->
 
-SplitMix64 passes all three, near the middle of the reference range. All three LCGs put the $1600$ pairs of low bit pairs into only $4$ of the $16$ cells, a statistic of exactly $4800 = 3n$: that is the period-$4$ cycle of the low two bits made visible. The multiplier $4097$ has top nibbles that are almost perfectly evenly spread, a value so low that chance would not produce it either: a sequence can be too regular as well as not regular enough. And when pairs of its top nibbles are tested, it fails by a factor of $14$ over the alarm level, which is the line structure of the picture seen from the counting side. No single test settles quality; each exposes a different kind of structure, and a generator earns trust by passing the ones that resemble how it will be used.
+SplitMix64 passes all three, within the reference range. All three LCGs put the $1600$ overlapping pairs of low bit pairs into only $4$ of the $16$ cells (each of the four cells that occur receives $400$ pairs, the others none), a statistic of exactly $4800 = 3n$ whatever the seed: that is the period-$4$ cycle of the low two bits made visible. The multiplier $4097$ has top nibbles that are almost perfectly evenly spread, a value so low that chance would not produce it either: a sequence can be too regular as well as not regular enough. And when pairs of its top nibbles are tested, it fails by a factor of $13$ over the alarm level ($4860.7$ against $368$), which is the line structure of the picture seen from the counting side. No single test settles quality; each exposes a different kind of structure, and a generator earns trust by passing the ones that resemble how it will be used.
 
 ## Uniform numbers and integers
 
@@ -227,7 +233,7 @@ A generator yields $64$ random bits. The pseudocode of this book promises `rng.u
 
 ### A real number in $[0, 1)$
 
-The obvious recipe is to divide the $64$-bit integer by $2^{64}$. It fails for a reason from Chapter 15. A double-precision number has only $53$ significant bits, so converting a $64$-bit integer to a double rounds it, and an integer just below $2^{64}$ rounds up to $2^{64}$, giving exactly $1.0$ after the division. The convention says $1$ is excluded; code that takes $\ln(1 - u)$ or indexes an array with $\lfloor u\,n \rfloor$ breaks at that one value in $2^{53}$ draws. The correct recipe keeps exactly the bits a double can hold: shift off the low $11$ bits and divide the remaining $53$-bit integer by $2^{53}$.
+The obvious recipe is to divide the $64$-bit integer by $2^{64}$. It fails for a reason from Chapter 15. A double-precision number has only $53$ significant bits, so converting a $64$-bit integer to a double rounds it, and an integer just below $2^{64}$ rounds up to $2^{64}$, giving exactly $1.0$ after the division. Counting exactly: doubles just below $2^{64}$ are $2^{11} = 2048$ apart, so the $1024$ raw values `0xfffffffffffffc00` to `0xffffffffffffffff` (the exact half-way value rounds to the even neighbour, which is $2^{64}$) all convert to $2^{64}$, and the quotient is $1.0$ with probability $1024 / 2^{64} = 2^{-54}$. The convention says $1$ is excluded; code that takes $\ln(1 - u)$ or indexes an array with $\lfloor u\,n \rfloor$ breaks whenever the raw value is one of the $1024$ largest. The correct recipe keeps exactly the bits a double can hold: shift off the low $11$ bits and divide the remaining $53$-bit integer by $2^{53}$.
 
 <!-- worked: randomness.uniform_from_bits -->
 | raw 64-bit value | top 53 bits / 2^53 | float(raw) / 2^64 |
@@ -235,12 +241,13 @@ The obvious recipe is to divide the $64$-bit integer by $2^{64}$. It fails for a
 | 0x0000000000000000 | 0.0 | 0.0 |
 | 0x8000000000000000 | 0.5 | 0.5 |
 | 0xfffffffffffff800 | 0.9999999999999999 | 0.9999999999999999 |
+| 0xfffffffffffffc00 | 0.9999999999999999 | 1.0 |
 | 0xffffffffffffffff | 0.9999999999999999 | 1.0 |
 
-The spacing of the grid of values (raw >> 11) / 2^53 is 2^-53 = 1.110e-16; the largest value is 1 - 2^-53 = 0.9999999999999999. For a 32-bit float the same recipe takes the top 24 bits: the grid is 2^-24 = 5.960e-08 and the largest value 0.9999999403953552.
+The smallest raw value for which float(raw) / 2^64 equals 1.0 is 0xfffffffffffffc00: the 1024 raw values 0xfffffffffffffc00 to 0xffffffffffffffff all convert to 2^64, so the quotient is 1.0 with probability 1024 / 2^64 = 2^-54. The spacing of the grid of values (raw >> 11) / 2^53 is 2^-53 = 1.110e-16; the largest value is 1 - 2^-53 = 0.9999999999999999. For a 32-bit float the same recipe takes the top 24 bits: the grid is 2^-24 = 5.960e-08 and the largest value 0.9999999403953552.
 <!-- /worked -->
 
-Every value is a multiple of $2^{-53}$ in $[0, 1 - 2^{-53}]$, exactly representable, evenly spaced, never $1$. It uses the high bits, which is also what the section on LCGs recommended. For a $32$-bit float the same recipe takes $24$ bits: the grid is $2^{-24}$, coarser, and the smallest probability that can be drawn is no longer a fantasy; it matters in the tails below.
+The top-$53$-bit recipe avoids this: the numerator $\text{raw} \gg 11$ is an integer of at most $2^{53} - 1$, which a double holds exactly, and dividing by $2^{53}$ only changes the exponent, so no rounding happens at all. Every value is a multiple of $2^{-53}$ in $[0, 1 - 2^{-53}]$, exactly representable, evenly spaced, never $1$. It uses the high bits, which is also what the section on LCGs recommended. For a $32$-bit float the same recipe takes $24$ bits: the grid is $2^{-24}$, coarser, and the smallest probability that can be drawn is no longer a fantasy; it matters in the tails below.
 
 ### An integer in $0 \dots n - 1$ and the remainder trap
 
@@ -262,8 +269,8 @@ Plain remainder: the values 6 and 7 wrap around to 0 and 1, so those two results
 Eight values cannot be divided evenly into six results: two results must get two raw values and four get one. The faces $0$ and $1$ are twice as likely as the others. The repair is to refuse the raw values that cause the imbalance, and to ask again. This is our first example of **rejection sampling**: draw a candidate from an easy distribution, test it against a rule, throw it away if it fails and draw again; what is kept has the distribution that the rule selects. Here the easy distribution is the raw bits, and the rule is "$r \ge 2^b \bmod n$", which discards exactly the first $2^b \bmod n$ raw values and leaves a number of values divisible by $n$:
 
 ```text
-function integer(rng, n: int) -> int:               # uniform in 0 .. n-1, for 0 < n <= 2^64
-    require n > 0, "no integer in an empty range"
+function integer(rng, n: int) -> int:               # uniform in 0 .. n-1
+    require 0 < n and n <= 2^64, "no integer in an empty range"   # n = 2^64 is allowed
     threshold = 2^64 mod n                          # the raw values below this cause the bias
     loop:
         r = rng.next()                              # 64 random bits as an integer
@@ -271,19 +278,21 @@ function integer(rng, n: int) -> int:               # uniform in 0 .. n-1, for 0
             return r mod n
 ```
 
-Every result $k$ is reached by the same number of kept raw values, $(2^{64} - \text{threshold})/n$, so every result has the same probability. The probability that a draw is kept is $(2^{64} - \text{threshold})/2^{64}$, which is more than one half: if $n \le 2^{63}$ the threshold is below $n$, hence below $2^{63}$, and if $n > 2^{63}$ the threshold is $2^{64} - n < 2^{63}$ as well. So the expected number of draws per result is below $2$. Check the bookkeeping by running the die on the $3$-bit generator, with and without rejection:
+Here `2^64` is an exact integer, as the pseudocode page defines (in a language whose integers stop at $2^{64} - 1$, compute $2^{64} \bmod n$ as $(2^{64} - n) \bmod n$, which is the wrapped value `(-n) mod n` of the unsigned type, and treat $n = 2^{64}$ separately: its threshold is $0$ and the result is the raw value itself). Two edge cases: $n = 1$ has threshold $0$, so it consumes one raw value and returns $0$; and $n = 2^{64}$ never rejects. Every result $k$ is reached by the same number of kept raw values, $(2^{64} - \text{threshold})/n$, so every result has the same probability. The probability that a draw is kept is $(2^{64} - \text{threshold})/2^{64}$, which is more than one half: if $n \le 2^{63}$ the threshold is below $n$, hence below $2^{63}$, and if $n > 2^{63}$ the threshold is $2^{64} - n < 2^{63}$ as well. So the expected number of draws per result is below $2$. Check the bookkeeping by running the die on the $3$-bit generator, with and without rejection:
 
 <!-- worked: randomness.rejection_integer_counts -->
-| result | remainder only (79,786 draws) | with rejection (60,000 kept) |
-|---|---:|---:|
-| 0 | 20146 | 10216 |
-| 1 | 19763 | 9907 |
-| 2 | 9913 | 9913 |
-| 3 | 9972 | 9972 |
-| 4 | 10025 | 10025 |
-| 5 | 9967 | 9967 |
+Generator: the book's SplitMix64, seed 0x1969228bc9a64304 (1831032707281732356), used as the state before the first draw. Each draw is r = `next()` >> 61 (the top 3 bits, a value in 0 .. 7); the remainder-only column counts r mod 6 for every draw, the rejection column counts r mod 6 only for draws with r >= 2; drawing stops at 60,000 kept.
 
-The rejecting sampler used 79,786 draws for 60,000 results, 1.3298 per result (the prediction is 1.3333).
+| result | remainder only (79,671 draws) | with rejection (60,000 kept) |
+|---|---:|---:|
+| 0 | 19896 | 10015 |
+| 1 | 19739 | 9949 |
+| 2 | 10069 | 10069 |
+| 3 | 10067 | 10067 |
+| 4 | 9993 | 9993 |
+| 5 | 9907 | 9907 |
+
+The rejecting sampler used 79,671 draws for 60,000 results, 1.3278 per result (the prediction is 1.3333).
 <!-- /worked -->
 
 Without rejection two faces get twice the counts; with it all six agree, at the cost of $1.33$ draws per result instead of $1$ (the prediction is $8/6$). With a $64$-bit generator the picture changes in degree, not in kind:
@@ -309,14 +318,16 @@ We now have $\text{uniform}() \in [0, 1)$. To **sample from a distribution** mea
 A probability table $p_0, \dots, p_{K-1}$ is a distribution on $K$ outcomes (Chapter 10). Lay the probabilities end to end on $[0, 1)$: outcome $0$ owns $[0, p_0)$, outcome $1$ owns $[p_0, p_0 + p_1)$, and so on. A uniform number $u$ lands in outcome $k$'s segment with probability equal to the segment's length, which is $p_k$. The segment boundaries are the prefix sums of Chapter 16, and a lookup is a search in that sorted array. Here are six next-token candidates with logits $(2, 1, 0.5, 0, -1, -2)$ turned into probabilities by the softmax of Volume III, their cumulative sums, and $20{,}000$ draws:
 
 <!-- worked: randomness.discrete_sampling -->
+Generator: the book's SplitMix64, seed 0x38f7077b452d44f7 (4104757811394462967), used as the state before the first draw. Each of the 20,000 draws is one `uniform()`; the outcome is the first token whose cumulative p is above it (the last token if rounding leaves none).
+
 | token | logit | p | cumulative p | draws of 20,000 | frequency |
 |---|---:|---:|---:|---:|---:|
-| 0 | 2.0 | 0.5573 | 0.5573 | 11302 | 0.5651 |
-| 1 | 1.0 | 0.2050 | 0.7623 | 3936 | 0.1968 |
+| 0 | 2.0 | 0.5573 | 0.5573 | 11317 | 0.5658 |
+| 1 | 1.0 | 0.2050 | 0.7623 | 3959 | 0.1979 |
 | 2 | 0.5 | 0.1243 | 0.8866 | 2510 | 0.1255 |
-| 3 | 0.0 | 0.0754 | 0.9620 | 1486 | 0.0743 |
-| 4 | -1.0 | 0.0277 | 0.9898 | 552 | 0.0276 |
-| 5 | -2.0 | 0.0102 | 1.0000 | 214 | 0.0107 |
+| 3 | 0.0 | 0.0754 | 0.9620 | 1484 | 0.0742 |
+| 4 | -1.0 | 0.0277 | 0.9898 | 532 | 0.0266 |
+| 5 | -2.0 | 0.0102 | 1.0000 | 198 | 0.0099 |
 <!-- /worked -->
 
 The frequencies agree with the probabilities within the usual $\sigma/\sqrt{n}$ fluctuation. The walk of Chapter 10 costs up to $K$ comparisons; a binary search over the prefix sums costs $\lceil \log_2 K \rceil$. For a vocabulary of $50{,}000$ tokens a flat distribution makes the walk average $25{,}000$ comparisons against $16$ for the search, which is why a sampler that sorts or scans per token is an implementation decision, not a detail. The last entry of the prefix sum should be $1$ up to rounding; a draw above it (possible by rounding) must still return a valid outcome, as the pseudocode of Chapter 10 handled.
@@ -348,11 +359,13 @@ Because $u \in [0, 1)$, the argument $1 - u$ lies in $(0, 1]$ and the logarithm 
 | 0.90 | 1.1513 | 0.90 |
 | 0.99 | 2.3026 | 0.99 |
 
+Generator: the book's SplitMix64, seed 0x85d82ee874243deb (9644510177929739755), used as the state before the first draw. The second table uses 50,000 draws, each x = -ln(1 - uniform()) / 2; the variance divisor is 50,000.
+
 | quantity | 50,000 draws | exact |
 |---|---:|---:|
-| mean | 0.4985 | 0.5000 |
-| variance | 0.2466 | 0.2500 |
-| share above 1 | 0.1338 | 0.1353 |
+| mean | 0.4968 | 0.5000 |
+| variance | 0.2450 | 0.2500 |
+| share above 1 | 0.1335 | 0.1353 |
 <!-- /worked -->
 
 The mean $1/\lambda$, the variance $1/\lambda^2$ and the share above $1$, $e^{-\lambda}$, are reproduced by $50{,}000$ draws within the usual noise. The method needs an invertible $F$ in closed form, and the Gaussian's cumulative distribution is not one: its integral has no closed form. A different idea is needed.
@@ -368,44 +381,48 @@ $$
 This is the **Box-Muller transform** (Box and Muller, 1958). Two uniform numbers give two independent standard Gaussians. Each column checks itself: $z_1^2 + z_2^2$ must equal $R^2$.
 
 <!-- worked: randomness.box_muller_one_pair -->
+Generator: the book's SplitMix64, seed 0x6c45941368405ed7 (7801804740563590871), used as the state before the first draw. Three pairs, each u1 = `uniform()` then u2 = `uniform()`; the columns are computed from the unrounded u1 and u2, and shown to 4 decimals.
+
 | u1 | u2 | R^2 = -2 ln(1 - u1) | R | angle = 2 pi u2 | z1 = R cos | z2 = R sin | z1^2 + z2^2 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 0.5407 | 0.4374 | 1.5562 | 1.2475 | 2.7482 | -1.1522 | 0.4781 | 1.5562 |
-| 0.7401 | 0.1540 | 2.6952 | 1.6417 | 0.9676 | 0.9313 | 1.3520 | 2.6952 |
-| 0.5757 | 0.1980 | 1.7145 | 1.3094 | 1.2440 | 0.4203 | 1.2401 | 1.7145 |
+| 0.8987 | 0.8836 | 4.5792 | 2.1399 | 5.5517 | 1.5925 | -1.4294 | 4.5792 |
+| 0.2399 | 0.2886 | 0.5486 | 0.7407 | 1.8131 | -0.1777 | 0.7191 | 0.5486 |
+| 0.5187 | 0.4021 | 1.4627 | 1.2094 | 2.5263 | -0.9876 | 0.6981 | 1.4627 |
 <!-- /worked -->
 
 A table of three pairs says little about a distribution. Draw $20{,}000$ pairs and compare with the exact values:
 
 <!-- worked: randomness.box_muller_check -->
-20,000 pairs, 40,000 values.
+Generator: the book's SplitMix64, seed 0xf2783749d741705c (17471775544667369564), used as the state before the first draw. 20,000 pairs, 40,000 values: each pair is u1 = `uniform()`, u2 = `uniform()`, then z1 = R cos, z2 = R sin as in the formulas. Variance divisor n = 40,000 (about the mean); covariance = the mean of z1 z2 over the pairs.
 
 | quantity | measured | exact |
 |---|---:|---:|
-| mean | -0.0024 | 0 |
-| variance | 1.0068 | 1 |
-| covariance of z1 and z2 | 0.0039 | 0 |
-| share with absolute value at most 1 | 0.6818 | 0.6827 |
-| share with absolute value at most 2 | 0.9533 | 0.9545 |
-| share with absolute value at most 3 | 0.9972 | 0.9973 |
+| mean | 0.0003 | 0 |
+| variance | 0.9984 | 1 |
+| covariance of z1 and z2 | -0.0043 | 0 |
+| share with absolute value at most 1 | 0.6815 | 0.6827 |
+| share with absolute value at most 2 | 0.9557 | 0.9545 |
+| share with absolute value at most 3 | 0.9977 | 0.9973 |
 <!-- /worked -->
 
 The mean and variance are $0$ and $1$ within noise, the two coordinates of a pair are uncorrelated, and the shares within one, two and three standard deviations match $\operatorname{erf}(k/\sqrt{2})$. The histogram shows the same thing as a picture:
 
 ![Histogram of 40,000 values from the Box-Muller transform, as bars normalised to unit total area, with the standard Gaussian density drawn as a curve over them. The bars follow the curve closely over the whole range from -4 to 4.](img/box-muller-histogram.svg)
 
-There is a limit worth knowing. A generator cannot produce a value it cannot represent: the largest $R$ is reached when $1 - u_1$ is the smallest possible number. With $53$-bit uniform numbers that is $2^{-53}$, and the tail beyond is not sampled at all. A cruder source cuts the tail much earlier.
+There is a limit worth knowing. A generator cannot produce a value it cannot represent: the largest $R$ is reached when $1 - u_1$ is the smallest possible number. With $53$-bit uniform numbers that is $2^{-53}$, and the tail beyond is not sampled at all. A cruder source cuts the tail much earlier. The first three rows below use the formula of this section, $R = \sqrt{-2\ln(1 - u_1)}$. The last row is the variant that takes $R = \sqrt{-2 \ln u}$ and, because $u = 0$ is possible there, clamps $u$ to at least $10^{-12}$ before the logarithm (the variant used in the case study below). Every probability in the table is a two-sided tail $P(|Z| > R)$.
 
 <!-- worked: randomness.tail_reach -->
-| uniform source | largest absolute z it can produce | Gaussian probability beyond that |
-|---|---:|---:|
-| 53-bit uniform, 1 - u in [2^-53, 1] | 8.572 | 1.02e-17 |
-| 32-bit uniform, 1 - u in [2^-32, 1] | 6.660 | 2.73e-11 |
-| 24-bit uniform (float32 grid), 1 - u in [2^-24, 1] | 5.768 | 8.02e-09 |
-| 53-bit uniform with u clamped to at least 10^-12 | 7.434 | 1.05e-13 |
+The largest radius is R = sqrt(-2 ln t) for the smallest argument t the logarithm can receive. The "Gaussian probability beyond that" is the two-sided tail P(|Z| > R) = erfc(R / sqrt(2)) in every row.
+
+| uniform source | radius uses | smallest argument t of the logarithm | largest absolute z it can produce | Gaussian probability beyond that |
+|---|---|---:|---:|---:|
+| 53-bit uniform, 1 - u in [2^-53, 1] | ln(1 - u) | 1.110e-16 | 8.572 | 1.02e-17 |
+| 32-bit uniform, 1 - u in [2^-32, 1] | ln(1 - u) | 2.328e-10 | 6.660 | 2.73e-11 |
+| 24-bit uniform (float32 grid), 1 - u in [2^-24, 1] | ln(1 - u) | 5.960e-08 | 5.768 | 8.02e-09 |
+| 53-bit uniform, radius from ln u with u clamped to at least 10^-12 | ln u | 1.000e-12 | 7.434 | 1.05e-13 |
 <!-- /worked -->
 
-With $53$ bits the Gaussian reaches $8.6$ standard deviations and the missing tail has probability $10^{-17}$, irrelevant. With a $24$-bit float grid it stops at $5.8$ and cuts a probability of $8 \times 10^{-9}$, which a rare-event simulation drawing a billion values would notice. Any bound on the generator is a bound on the events the simulation can see.
+With $53$ bits the Gaussian reaches $8.6$ standard deviations and the missing tail has probability $10^{-17}$, irrelevant. With a $24$-bit float grid it stops at $5.8$ and cuts a probability of $8 \times 10^{-9}$, which a rare-event simulation drawing a billion values would notice. The clamp of the last row cuts at $7.43$ standard deviations, a probability of $10^{-13}$. Any bound on the generator is a bound on the events the simulation can see.
 
 ## Rejection sampling in general
 
@@ -414,15 +431,17 @@ Rejection, which fixed the integers, is also the general-purpose tool for a dens
 Try it on $f(x) = 6x(1 - x)$, which has $M = 1.5$ at $x = 1/2$ and whose cumulative distribution $3x^2 - 2x^3$ lets us check the answer exactly:
 
 <!-- worked: randomness.rejection_general -->
+Generator: the book's SplitMix64, seed 0x11c9f6ccc8bf3833 (1281826928365353011), used as the state before the first draw. Each proposal draws x = `uniform()` and then y = 1.5 `uniform()`; x is kept when y < 6 x (1 - x), until 40,000 are kept. An interval is [lo, hi).
+
 | interval | share of accepted | exact probability | share if the proposal were kept as is |
 |---|---:|---:|---:|
-| [0.0, 0.2) | 0.1027 | 0.1040 | 0.2 |
-| [0.2, 0.4) | 0.2514 | 0.2480 | 0.2 |
-| [0.4, 0.6) | 0.2961 | 0.2960 | 0.2 |
-| [0.6, 0.8) | 0.2452 | 0.2480 | 0.2 |
-| [0.8, 1.0) | 0.1047 | 0.1040 | 0.2 |
+| [0.0, 0.2) | 0.1053 | 0.1040 | 0.2 |
+| [0.2, 0.4) | 0.2500 | 0.2480 | 0.2 |
+| [0.4, 0.6) | 0.2951 | 0.2960 | 0.2 |
+| [0.6, 0.8) | 0.2470 | 0.2480 | 0.2 |
+| [0.8, 1.0) | 0.1026 | 0.1040 | 0.2 |
 
-59,935 proposals gave 40,000 accepted values: acceptance 0.6674 against the predicted 1/M = 0.6667. The accepted values have mean 0.4994 (exact 0.5000).
+59,964 proposals gave 40,000 accepted values: acceptance 0.6671 against the predicted 1/M = 0.6667. The accepted values have mean 0.4981 (exact 0.5000).
 <!-- /worked -->
 
 The accepted values follow the density, and the acceptance rate is the predicted $1/M = 2/3$. The method's weakness is that $M$ can be large (a sharply peaked density wastes almost every dart) and, in many dimensions, the rectangle becomes nearly all empty: this is the problem of Exercise 5.
@@ -436,14 +455,16 @@ $$
 This is the polar method (Marsaglia and Bray, 1964).
 
 <!-- worked: randomness.disc_and_polar -->
+Generator: the book's SplitMix64, seed 0x9bd5dfec27663a18 (11229127451284486680), used as the state before the first draw. Each try draws v1 = 2 `uniform()` - 1 and then v2 = 2 `uniform()` - 1; it is kept when 0 < s = v1^2 + v2^2 < 1, giving the two outputs v1 k and v2 k with k = sqrt(-2 ln(s) / s); tries continue until 40,000 outputs exist. Variance divisor n = 40,000 (about the mean).
+
 | quantity | measured | exact |
 |---|---:|---:|
-| pairs tried | 25,494 |  |
+| pairs tried | 25,454 |  |
 | pairs inside the unit disc | 20,000 |  |
-| acceptance | 0.7845 | pi/4 = 0.7854 |
-| mean of the 40,000 outputs | -0.0066 | 0 |
-| variance | 1.0020 | 1 |
-| share with absolute value at most 2 | 0.9542 | 0.9545 |
+| acceptance | 0.7857 | pi/4 = 0.7854 |
+| mean of the 40,000 outputs | -0.0011 | 0 |
+| variance | 1.0012 | 1 |
+| share with absolute value at most 2 | 0.9552 | 0.9545 |
 <!-- /worked -->
 
 The square contains the disc with probability $\pi/4 = 0.785$, as measured, so about a fifth of the proposals are discarded; in exchange no trigonometric function is evaluated. Which is faster depends on the machine; both give the same distribution, and both are used.
@@ -503,14 +524,16 @@ The bias is small for three items; it grows with the length of the list.
 By seven items the likeliest order is more than eight times as likely as the least likely. Running the correct algorithm on a real generator reproduces the flat table of probabilities:
 
 <!-- worked: randomness.shuffle_empirical -->
+Generator: the book's SplitMix64, seed 0x89eb90b1d7bdacd9 (9938196096226274521), used as the state before the first draw. 60,000 shuffles one after the other: each shuffles a fresh array [0, 1, 2] with the same generator, and the final array is the order.
+
 | order | count in 60,000 shuffles | frequency |
 |---|---:|---:|
-| 0 1 2 | 10085 | 0.1681 |
-| 0 2 1 | 9854 | 0.1642 |
-| 1 0 2 | 10022 | 0.1670 |
-| 1 2 0 | 9952 | 0.1659 |
-| 2 0 1 | 10122 | 0.1687 |
-| 2 1 0 | 9965 | 0.1661 |
+| 0 1 2 | 9979 | 0.1663 |
+| 0 2 1 | 9891 | 0.1648 |
+| 1 0 2 | 9908 | 0.1651 |
+| 1 2 0 | 10198 | 0.1700 |
+| 2 0 1 | 10040 | 0.1673 |
+| 2 1 0 | 9984 | 0.1664 |
 <!-- /worked -->
 
 A shuffle can also pick $k$ distinct items from $n$ (sampling without replacement): run only the first $k$ steps from the front and keep the prefix. And it can be made reproducible per epoch, which the case study shows below.
@@ -524,51 +547,67 @@ A run is **reproducible** when running it again from its recorded inputs gives t
 Three things must be the same. The seed, obviously. The **order and number of draws**: a generator is a stream, and the value you receive is the one at your position in it. And the **arithmetic**: the same floating-point operations in the same grouping, which Chapters 15 and 16 showed is not automatic once a sum is split across threads or a reduction is reordered. The last is demonstrated by the same draws summed three ways:
 
 <!-- worked: randomness.float_order -->
-The same 100,000 draws, added in three orders.
+Generator: the book's SplitMix64, seed 0x5b21607a8d99f741 (6566635811160848193), used as the state before the first draw. The 100,000 values are x_i = `uniform()` - 0.5 + 0.001 (i mod 7) for i = 0 .. 99999, one draw each in order. Left to right adds x_0 first; right to left adds x_99999 first (both start from 0.0); the pairwise tree sums a list of length at most 2 directly and otherwise sums its first floor(len/2) values and the rest separately, then adds the two results. The exact sum is the correctly rounded sum of the stored doubles (Python `math.fsum`).
 
 | order of the additions | sum | difference from exact |
 |---|---:|---:|
-| left to right | 317.4107929158752 | -4.32e-12 |
-| right to left | 317.41079291587903 | -5.12e-13 |
-| pairwise tree | 317.4107929158796 | +5.68e-14 |
-| exact (fsum) | 317.41079291587954 | 0 |
+| left to right | 275.67544289206563 | -2.56e-12 |
+| right to left | 275.67544289206427 | -3.92e-12 |
+| pairwise tree | 275.6754428920682 | +0.00e+00 |
+| exact (fsum) | 275.6754428920682 | 0 |
 <!-- /worked -->
 
-Nothing random is left in that table, and the three sums still differ in the twelfth digit, because floating-point addition is not associative. A training run whose loss reductions are scheduled differently from one execution to the next cannot be reproduced to the last bit however carefully it is seeded.
+Nothing random is left in that table once the draws are fixed, and the plain sums still differ from the exact sum, and from each other, in the twelfth digit, because floating-point addition is not associative (the pairwise tree happens to land on the correctly rounded value here). A training run whose loss reductions are scheduled differently from one execution to the next cannot be reproduced to the last bit however carefully it is seeded.
 
-The order of draws is the subtler requirement. Suppose a program draws its initial weights and its data order from one generator, in that order. Add a fifth weight to the model and the data order, which comes after the weights in the stream, changes, though nothing about the data changed. The cure is a **stream per purpose**: derive a separate generator for each use from the run's seed and a name. A simple derivation hashes the seed with the purpose's name through the mixing function of the previous section, and the result seeds a new SplitMix64.
+The order of draws is the subtler requirement. Suppose a program draws its initial weights and its data order from one generator, in that order. Add a fifth weight to the model and the data order, which comes after the weights in the stream, changes, though nothing about the data changed. The cure is a **stream per purpose**: derive a separate generator for each use from the run's seed and a name. A simple derivation hashes the seed with the purpose's name through the mixing function of the previous section, and the result seeds a new SplitMix64. The rule used for the tables below is exact. Let `mix(z)` be the three scrambling lines of `splitmix_next` (from `z = state` on, without the advance). Then
+
+```text
+function derive_seed(run_seed: int, name: text) -> int:    # result in 0 .. 2^64 - 1
+    h = mix(run_seed)
+    for b in the bytes of name (UTF-8, in order):
+        h = mix(h xor b)
+    return h
+```
+
+and the stream called `name` is a generator whose state is `derive_seed(run_seed, name)` before its first draw. This is one rule among many. A reader reproducing the tables below needs only this rule and the printed run seed; the derived-seed columns are data produced by it, and Exercise 10 asks for a derivation of the reader's own.
 
 <!-- worked: randomness.shared_vs_split -->
+Run seed 0x2cf0edac0fb8a8a3 (3238349455333304483). A generator "seeded with s" has state s before its first draw. One shared generator: seeded with the run seed; the weights come first (each weight is 2 `uniform()` - 1, in order), then the data order is `shuffle` of a fresh array [0, 1, 2, 3, 4, 5] with the same generator. One stream per purpose: the weights come from a generator seeded with derive_seed(run seed, "init") and the data order from a different generator seeded with derive_seed(run seed, "order") (rule in the chapter). The weights column shows the first four weights.
+
 | design | weights drawn | first four weights | data order |
 |---|---:|---|---|
-| one shared generator | 4 | +0.202 +0.827 +0.527 +0.801 | 0 5 1 3 4 2 |
-| one shared generator | 5 | +0.202 +0.827 +0.527 +0.801 | 3 0 5 2 1 4 |
-| one stream per purpose | 4 | +0.822 -0.125 +0.954 +0.275 | 2 4 5 1 0 3 |
-| one stream per purpose | 5 | +0.822 -0.125 +0.954 +0.275 | 2 4 5 1 0 3 |
+| one shared generator | 4 | -0.561 +0.609 +0.237 -0.822 | 0 3 1 4 5 2 |
+| one shared generator | 5 | -0.561 +0.609 +0.237 -0.822 | 1 2 5 0 3 4 |
+| one stream per purpose | 4 | -0.963 -0.521 +0.579 +0.883 | 5 3 1 4 0 2 |
+| one stream per purpose | 5 | -0.963 -0.521 +0.579 +0.883 | 5 3 1 4 0 2 |
 <!-- /worked -->
 
-With one shared generator, adding one weight rearranged the data order from $0\,5\,1\,3\,4\,2$ to $3\,0\,5\,2\,1\,4$. With a stream per purpose the order did not move, and the first four weights did not either, for any number of extra weights. Any component can now be changed, added or removed without disturbing the others. It also makes parallel work safe: give worker $i$ the stream derived from the seed and $i$, rather than letting the workers race for a shared generator, whose draw order then depends on thread scheduling.
+With one shared generator, adding one weight rearranged the data order from $0\,3\,1\,4\,5\,2$ to $1\,2\,5\,0\,3\,4$. With a stream per purpose the order did not move, and the first four weights did not either, for any number of extra weights. Any component can now be changed, added or removed without disturbing the others. It also makes parallel work safe: give worker $i$ the stream derived from the seed and $i$, rather than letting the workers race for a shared generator, whose draw order then depends on thread scheduling.
 
-Can derived streams overlap? SplitMix64's state only ever grows by $\gamma$, so every stream is a walk along the same cycle of $2^{64}$ states; a stream started from the state $s + 3\gamma$ is the stream started from $s$, three draws later.
+Can derived streams overlap? SplitMix64's state only ever grows by `GAMMA`, so every stream is a walk along the same cycle of $2^{64}$ states; a stream started from the state $s + 3\,\text{GAMMA}$ (modulo $2^{64}$) is the stream started from $s$, three draws later.
 
 <!-- worked: randomness.streams_are_positions -->
+State s = run seed = 0xbca1e2da8a00ca54 (13592394578626923092); a generator seeded with s has state s before its first draw. The first stream draws six raw values; the second is seeded with (s + 3 GAMMA) mod 2^64 and draws three.
+
 | draw | stream from state s | stream from state s + 3 GAMMA |
 |---:|---|---|
-| 0 | 0xeb7fbcd7e729b20d |  |
-| 1 | 0x1f519c109b8d4b8b |  |
-| 2 | 0xca380fafa5025cbd |  |
-| 3 | 0x8e7285051c832ad5 | 0x8e7285051c832ad5 |
-| 4 | 0x937051aa731cd576 | 0x937051aa731cd576 |
-| 5 | 0xae4fe64a5568fcee | 0xae4fe64a5568fcee |
+| 0 | 0x163c0d6a9059274e |  |
+| 1 | 0xff57d27242b8663c |  |
+| 2 | 0xd0d88c139bf63299 |  |
+| 3 | 0x864b5e873368c9c0 | 0x864b5e873368c9c0 |
+| 4 | 0x5ff2215a0db24776 | 0x5ff2215a0db24776 |
+| 5 | 0x1eac6ef347ddef0d | 0x1eac6ef347ddef0d |
 
 The second stream is the first one three positions later: yes.
 
+Derived seeds under the same run seed s, by derive_seed(s, name) of the chapter; the first draw is that of a generator seeded with the derived seed.
+
 | stream name | derived seed | first draw |
 |---|---:|---:|
-| `init` | 0x18d3babaec52ad4c | 0x2fbf87b2e0a721f2 |
-| `order` | 0x49d53463446a1c61 | 0x3436f437cddf920e |
-| `dropout` | 0x5bed74531258e4fe | 0x49b56691a96f8e99 |
-| `init2` | 0x7f56b7a33e125ca0 | 0x717de281ee265c45 |
+| `init` | 0xe427cfcb744afb00 | 0x2982955f81c85287 |
+| `order` | 0x12900f07d7d64e47 | 0x5acd03ca38d8e490 |
+| `dropout` | 0xa9c25a5e5856ba9c | 0xfc93e756a3562c1f |
+| `init2` | 0x58d146c4c6a38ab9 | 0x131a3f545f8df768 |
 <!-- /worked -->
 
 Two streams collide only if their starting positions on the cycle lie within the number of draws of each other. Streams placed pseudo-randomly by hashing the seed and a name are far apart with overwhelming probability: for a billion draws each, the chance of overlap between two streams is about $2 \times 10^9 / 1.8 \times 10^{19} \approx 10^{-10}$. Different names give unrelated derived seeds, as the last table shows (the names `init` and `init2` differ by one character and give unrelated streams).
@@ -578,26 +617,28 @@ Two streams collide only if their starting positions on the cycle lie within the
 If seeds make runs repeatable, why not fix one in the code and be done? Because repeatability is not truth. The first table of this chapter showed that one draw of the dice is one sample, and a method compared with another on one seed compares two samples. Run the toy problem over $400$ seeds:
 
 <!-- worked: randomness.hidden_luck -->
-Final loss of the toy run over 400 seeds: mean 0.7691, standard deviation 0.2228, smallest 0.3806, largest 1.2892.
+Generator: the book's SplitMix64, seed 0x127f7caae1c3c010 (1332921088098942992), used as the state before the first draw. The run seeds come from this generator: pair k (k = 0 .. 399) is its raw draws 2k and 2k + 1 (`next()`), run A uses the first as its seed and run B the second (or the first again in the last row). Each run is the toy run of the first table with the learning rate stated; the loss is its final loss. Standard error = sample standard deviation (divisor n - 1) of the differences over sqrt(n).
+
+Final loss of the toy run over 400 seeds (the A runs): mean 0.7725, standard deviation 0.2284, smallest 0.3930, largest 1.2787.
 
 | comparison (400 pairs) | share of pairs where B has the lower loss | mean of (loss B - loss A) | standard error of that mean |
 |---|---:|---:|---:|
-| B = A's procedure, own seed | 0.497 | -0.0051 | 0.0154 |
-| B = learning rate 0.0105, own seed | 0.672 | -0.1457 | 0.0138 |
-| B = learning rate 0.0105, A's seed | 1.000 | -0.1418 | 0.0025 |
+| B = A's procedure, own seed | 0.532 | -0.0253 | 0.0154 |
+| B = learning rate 0.0105, own seed | 0.700 | -0.1615 | 0.0138 |
+| B = learning rate 0.0105, A's seed | 1.000 | -0.1425 | 0.0026 |
 
 The first five identical-procedure pairs:
 
 | loss A | loss B | winner |
 |---:|---:|---|
-| 0.8053 | 0.4945 | B |
-| 0.7174 | 0.6278 | B |
-| 0.8314 | 0.3961 | B |
-| 0.3988 | 0.5705 | A |
-| 0.4626 | 0.5915 | A |
+| 0.8091 | 0.4411 | B |
+| 0.5728 | 0.4027 | B |
+| 0.6849 | 0.7694 | A |
+| 0.7425 | 0.4978 | B |
+| 0.8802 | 1.1781 | A |
 <!-- /worked -->
 
-The final loss of an identical procedure varies from $0.38$ to $1.29$ across seeds (a standard deviation of $0.22$), so a difference of $0.1$ between two methods on one seed each is within the noise: in the second table identical methods give a "winner" in exactly the way the first five rows show, $B$ ahead in about half the pairs. A real change of the learning rate from $0.01$ to $0.0105$ shows up as a mean gap of $0.146 \pm 0.014$ over $400$ seeds each, but not in every pair ($B$ wins in $0.672$ of the pairs): a single pair of runs would have given the wrong answer about a third of the time. Running both arms on the same seed (the last row) removes the seed's contribution from the difference (this is the **common random numbers** device): $B$ wins every pair and the standard error of the gap shrinks from $0.014$ to $0.0025$. That is a legitimate use of a fixed seed: *both arms* share it, deliberately, and the experiment is also run over many seeds.
+The final loss of an identical procedure varies from $0.39$ to $1.28$ across seeds (a standard deviation of $0.23$), so a difference of $0.1$ between two methods on one seed each is within the noise: in the second table identical methods give a "winner" in exactly the way the first five rows show, $B$ ahead in about half the pairs. A real change of the learning rate from $0.01$ to $0.0105$ shows up as a mean gap of $0.162 \pm 0.014$ over $400$ seeds each, but not in every pair ($B$ wins in $0.700$ of the pairs): a single pair of runs would have given the wrong answer about three times in ten. Running both arms on the same seed (the last row) removes the seed's contribution from the difference (this is the **common random numbers** device): $B$ wins every pair and the standard error of the gap shrinks from $0.014$ to $0.0026$. That is a legitimate use of a fixed seed: *both arms* share it, deliberately, and the experiment is also run over many seeds.
 
 A hard-coded seed that hides the noise is the failure. A default of "seed 0" or "seed 1234" makes every run of a program byte-identical, so two runs that were meant to be independent samples are one sample counted twice, and an unlucky or lucky draw gets baked into results and tests for years. The engine in this book takes the opposite policy, stated plainly: **every default seed is random.** A run that was not given a seed draws one from the operating system and the clock, prints it at the start, and records it in its output; to reproduce the run, the caller passes that number back.
 
@@ -649,13 +690,13 @@ A caller who passes back what was printed, in decimal or in hexadecimal, gets th
 **Predictable, by design.** The scramble is a bijection (each step, xor-shift or odd multiplication, is undone by an inverse), so one output reveals the state and every later output follows. A generator in this chapter is a statistical tool, not a cryptographic one; secrets and tokens need a generator designed to resist this.
 
 <!-- worked: randomness.predict_from_output -->
-One observed output `0x81c625d044a73814` was undone step by step (xor-shift, multiply by the inverse of C2 modulo 2^64, xor-shift, multiply by the inverse of C1, xor-shift) to the state `0x203491ec78e3a459`.
+Generator: the book's SplitMix64, seed 0x7a6a91fc7815f2f0 (8821023333691028208), used as the state before the first draw. Draw 1 is the observed output; draws 2 to 4 are the later ones. One observed output `0xdfc8cf78de53244f` was undone step by step (xor-shift, multiply by the inverse of C2 modulo 2^64, xor-shift, multiply by the inverse of C1, xor-shift) to the state `0x18a20bb5f7606f05`.
 
 | draw number | predicted from the one output | actual | equal |
 |---:|---|---|---:|
-| 2 | 0xb608b289c199dcf6 | 0xb608b289c199dcf6 | yes |
-| 3 | 0x66b9ffb75ec7a165 | 0x66b9ffb75ec7a165 | yes |
-| 4 | 0x1b968018e6035864 | 0x1b968018e6035864 | yes |
+| 2 | 0x4f49155d4958bca1 | 0x4f49155d4958bca1 | yes |
+| 3 | 0x831530d8b8fb33fc | 0x831530d8b8fb33fc | yes |
+| 4 | 0xac6e3131049293f7 | 0xac6e3131049293f7 | yes |
 <!-- /worked -->
 
 The prediction is exact. It is also why "deterministic" and "unpredictable" are different properties: what we need for experiments is the first and the statistical quality of the second.
@@ -663,17 +704,19 @@ The prediction is exact. It is also why "deterministic" and "unpredictable" are 
 **Reading the range.** A recipe that gets a range wrong passes every smoke test. A value meant to lie in $[-1, 1)$ is made from the top bits of a $64$-bit state by taking the top $31$ bits, dividing by $2^{31}$ and subtracting $1$. The top $31$ bits divided by $2^{31}$ lie in $[0, 1)$, so after subtracting $1$ every value is in $[-1, 0)$:
 
 <!-- worked: randomness.one_sided_range -->
+Generator: the book's SplitMix64, seed 0x0211c0af4a94b35f (149112121783006047), used as the state before the first draw. The LCG state s starts as the first draw `next()`; then each of the 100,000 steps sets s = (a s + c) mod 2^64 with a = 6364136223846793005, c = 1442695040888963407 and reads the new s with both recipes (same s for both rows).
+
 | recipe for a value meant to lie in [-1, 1) | smallest of 100,000 | largest of 100,000 | share below 0 |
 |---|---:|---:|---:|
-| top 31 bits (shift by 33), divided by 2^31, minus 1 | -0.999991 | -0.000016 | 1.0000 |
-| top 32 bits (shift by 32), divided by 2^31, minus 1 | -0.999982 | 0.999968 | 0.5010 |
+| top 31 bits (shift by 33), divided by 2^31, minus 1 | -1.000000 | -0.000005 | 1.0000 |
+| top 32 bits (shift by 32), divided by 2^31, minus 1 | -1.000000 | 0.999990 | 0.5017 |
 <!-- /worked -->
 
 The fix is one shift: keep $32$ bits, and divide by $2^{31}$. The lesson is to test the range and sign of a generator, not just that its output varies.
 
 ## Where this appears in brain
 
-**The generator.** `crates/data/src/rng.rs` holds the SplitMix64 of this chapter, `Rng`, as a state and four lines of mixing: add $\gamma$, then the two shift-xor-multiply rounds with `0xBF58476D1CE4E5B9` and `0x94D049BB133111EB`, then the last xor-shift. `Rng::next_f64` takes the top $53$ bits and divides by $2^{53}$, the recipe above. `Rng::new` starts the state at the seed plus $\gamma$, one step further along the cycle than the plain description (its comment says so that seed $0$ still gives a mixed stream, which this generator would also do without the offset). `Rng::state` and `Rng::from_state` expose the state so an interrupted training run can continue its stream exactly; a unit test resumes from a saved state and checks eight draws against the original, and commit `5b3ecc51d` (September 2026) added them for the sake of a fine-tune that resumes "bit for bit". Two simplifications are visible against what this chapter built: `gen_range_inclusive` takes `next_u64() % span`, which has the bias of the table above (about $5 \times 10^{-17}$ at a span of $1000$, immeasurable), and `next_gaussian` evaluates only the cosine half of Box-Muller, discards the sine partner, and clamps the uniform number to at least $10^{-12}$ so $\ln$ is defined. By the tail table, that clamp bounds the output at $7.43$ standard deviations. Chapter 11 told how the three Gaussian generators in the workspace differ as streams while agreeing as distributions.
+**The generator.** `crates/data/src/rng.rs` holds the SplitMix64 of this chapter, `Rng`, as a state and four lines of mixing: add `GAMMA`, then the two shift-xor-multiply rounds with `0xBF58476D1CE4E5B9` and `0x94D049BB133111EB`, then the last xor-shift. `Rng::next_f64` takes the top $53$ bits and divides by $2^{53}$, the recipe above. `Rng::new` starts the state at the seed plus `GAMMA`, one step further along the cycle than the plain description of this chapter, where the state starts at the seed (its comment says so that seed $0$ still gives a mixed stream, which this generator would also do without the offset). So the brain stream for a seed is the chapter's stream for that seed with its first draw skipped, and the chapter's printed values cannot be compared with `Rng::new` draw for draw. `Rng::state` and `Rng::from_state` expose the state so an interrupted training run can continue its stream exactly; a unit test resumes from a saved state and checks eight draws against the original, and commit `5b3ecc51d` (September 2026) added them for the sake of a fine-tune that resumes "bit for bit". Two simplifications are visible against what this chapter built: `gen_range_inclusive` takes `next_u64() % span`, which has the bias of the table above (about $5 \times 10^{-17}$ at a span of $1000$, immeasurable), and `next_gaussian` evaluates only the cosine half of Box-Muller, discards the sine partner, and clamps the uniform number to at least $10^{-12}$ so $\ln$ is defined. By the tail table, that clamp bounds the output at $7.43$ standard deviations. Chapter 11 told how the three Gaussian generators in the workspace differ as streams while agreeing as distributions.
 
 **Sampling a token.** `sample_logits` in `crates/data/src/sample.rs` applies the temperature, optionally keeps only the top-$k$ logits, subtracts the maximum before exponentiating, draws one uniform number scaled by the sum, and walks the running total until it passes the draw: the cumulative-sum sampler of this chapter without a division. Greedy decoding is the temperature-zero branch and draws nothing.
 
@@ -705,11 +748,11 @@ The fix is one shift: keep $32$ bits, and divide by $2^{31}$. The lesson is to t
 3. **[Calculate]** A $5$-bit generator ($32$ equally likely values) is used for a die of $n = 7$ faces by remainder. Give the probability of each face, the threshold of the rejecting sampler, the share of draws kept and the expected draws per result.
 4. **[Calculate]** The density $f(x) = 2x$ on $[0, 1]$ has cumulative distribution $F(x) = x^2$. Give the inverse-transform sampler, and compute the three quartiles of the distribution from it. Then give the acceptance rate of rejection sampling for the same density with a uniform proposal.
 5. **[Calculate]** The unit ball in $d$ dimensions has volume $\pi^{d/2}/\Gamma(d/2 + 1)$. By rejection from the cube $[-1, 1]^d$, what is the acceptance rate for $d = 2$ (it is $\pi/4$), $d = 3$, $d = 10$? What does this say about drawing uniform points in a high-dimensional ball by rejection?
-6. **[Implement]** Implement SplitMix64 and reproduce `randomness.splitmix_trace`: starting from the printed seed, your four outputs must equal the printed four. Implement `uniform` (top $53$ bits) and `integer(n)` with rejection and `shuffle`, and check `integer(6)` on a $3$-bit source against `randomness.modulo_bias_small`.
-7. **[Implement]** Implement the bucket test and reproduce `randomness.bucket_calibration` (with your language's own generator as the reference; the means and spreads should match $k - 1$ and $\sqrt{2(k-1)}$) and the SplitMix64 and low-bit rows of `randomness.bucket_tests`. Is your generator's low-bit pair test at the alarm level?
+6. **[Implement]** Implement SplitMix64 and reproduce `randomness.splitmix_trace`: starting from the printed seed (state = seed), your four outputs must equal the printed four. Implement `uniform` (top $53$ bits), `integer(n)` with rejection and `shuffle`, and reproduce `randomness.modulo_bias_small` (exact counts) and `randomness.toy_runs` (initial weight, last-epoch order, final weight and loss from the printed seeds).
+7. **[Implement]** Implement the bucket test and reproduce `randomness.bucket_calibration` (with the printed seeds the rows match digit for digit; with your language's own generator as the reference, the means and spreads should match $k - 1$ and $\sqrt{2(k-1)}$) and the rows of `randomness.bucket_tests` from the printed seeds and initial states (they reproduce digit for digit, the LCG low-bit pair rows being exactly $4800.0$). Then run the low-bit pair test on your language's own generator: is it at the alarm level?
 8. **[Implement]** Implement Box-Muller and reproduce `randomness.box_muller_check`: the mean, variance, covariance and the three shares must agree with the exact column to within the noise of $40{,}000$ values. Then implement the polar method and reproduce the acceptance rate of `randomness.disc_and_polar`.
 9. **[Implement]** Enumerate both shuffles exactly for $n = 3$ and $n = 4$ and reproduce `randomness.shuffle_n3` and the first two rows of `randomness.shuffle_bias_by_n` (counts, ratio of most to fewest paths, total variation distance).
-10. **[Implement]** Reproduce `randomness.shared_vs_split` with your own derivation of a stream from a seed and a name (any mixing function, not necessarily this chapter's): with one shared generator the data order changes when a weight is added, with one stream per purpose it does not.
+10. **[Implement]** Reproduce `randomness.shared_vs_split` and `randomness.streams_are_positions` from the printed run seed with the chapter's `derive_seed` (the derived seeds must match digit for digit). Then do it again with your own derivation of a stream from a seed and a name (any mixing function; the printed derived-seed columns are given data, not something your derivation has to match): with one shared generator the data order changes when a weight is added, with one stream per purpose it does not.
 11. **[Investigate]** Reproduce the three comparisons of `randomness.hidden_luck` on a toy model of your own. How many seeds per arm do you need before the change of learning rate from $0.01$ to $0.0105$ is detected with a standard error well below the gap? Does the pairing of arms on the same seed change the number?
 12. **[Investigate]** Make the broken LCG of `randomness.lattice_lines` ($a = 4097$, $c = 1$, $m = 65536$) a Gaussian source by feeding pairs of it into Box-Muller and plot or count the output. What structure survives the transform, and what does that say about using a poor generator under a good transform?
 
@@ -744,10 +787,10 @@ Reproducibility needs the same seed, the same order and number of draws, and the
 **Check your understanding**
 
 1. From the table $x_0, \dots, x_{12} = 7, 6, 1, 8, 11, 10, 5, 12, 15, 14, 9, 0, 3$, so $x_{12} = 3$. The period is $16$, so $x_{1000} = x_{1000 \bmod 16} = x_8 = 15$ since $1000 = 62 \cdot 16 + 8$.
-2. Converting a raw value just below $2^{64}$ to a double rounds it up to $2^{64}$, so $u = 1.0$ exactly (the table shows this for the largest raw value) and the index is $n$, out of range, at about one draw in $2^{53}$. The fix is to build $u$ from the top $53$ bits divided by $2^{53}$, never reaching $1$ (or to use the rejection sampler of `integer(n)`, which has no floats at all).
+2. Converting a raw value just below $2^{64}$ to a double rounds it up to $2^{64}$, so $u = 1.0$ exactly (the table shows this for the largest raw value) and the index is $n$, out of range, at probability $2^{-54}$ per draw (the $1024$ largest raw values). The fix is to build $u$ from the top $53$ bits divided by $2^{53}$, never reaching $1$ (or to use the rejection sampler of `integer(n)`, which has no floats at all).
 3. The lowest bit alternates $1, 0, 1, 0, \dots$ (odd multiplier and odd increment: the parity flips every step), so the coin alternates heads and tails strictly. Bit $31$ depends on every lower bit through the carries, so it has the full period of the generator.
 4. There are six arrangements of three cards, not three, and $27$ is not divisible by $6$ ($4.5$ paths per arrangement), so the paths cannot be split equally; the exact counts are $4, 5, 5, 5, 4, 4$ paths. That $27$ is a multiple of three is irrelevant: the number of paths must be divisible by the number of arrangements.
-5. Every term is $(100 - 100)^2/100 = 0$, so $X^2 = 0$. The reference mean is $15.0$ with spread $5.5$: $0$ is $2.7$ spreads below the mean, and a fair source almost never lands there. The counts are suspiciously regular, which suggests a structured sequence (as for $a = 4097$ in the table); a failure at the low end is as informative as one at the high end.
+5. Every term is $(100 - 100)^2/100 = 0$, so $X^2 = 0$. The reference mean is $15$ with spread $5.5$: $0$ is $2.7$ spreads below the mean, and a fair source almost never lands there. The counts are suspiciously regular, which suggests a structured sequence (as for $a = 4097$ in the table); a failure at the low end is as informative as one at the high end.
 6. With $u_1 \in [0, 1)$ the value $u_1 = 0$ is possible, and $\ln 0$ is undefined; $1 - u_1$ is in $(0, 1]$ and its logarithm always exists. The distribution is the same either way, because $1 - u_1$ is itself uniform: the map $u \mapsto 1 - u$ preserves the uniform distribution.
 7. A single seed is one sample of a noisy quantity: the seed-to-seed standard deviation of a loss can exceed the difference between methods, and a default of $0$ shared with the baseline means the result may be a feature of that stream rather than the method. The authors should have run both methods over many seeds and reported the mean and its standard error (or the share of seeds on which one wins), and if they paired arms on a shared seed, said so and still repeated over seeds.
 8. The expected number of draws is $1/(3/4) = 4/3$. The plain remainder would have used $2^{64} \bmod n = 2^{62}$ surplus raw values to make the first third of the results ($0 \dots 2^{62} - 1$) twice as likely as the others.

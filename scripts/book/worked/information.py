@@ -10,7 +10,7 @@ arguments returns a markdown string that the chapter embeds between
 underscore (or that take arguments) are shared with the chapter's figures, so a
 picture and the table beside it cannot disagree. Code constructions use exact
 `fractions.Fraction` arithmetic; every simulation draws from a named `bookrng`
-stream.
+generator.
 
 Swedish Embedded AB implements solutions for measuring how well a model's
 beliefs match the data. If your team needs expertise in information-theoretic
@@ -88,6 +88,14 @@ def kl_divergence(p, q, base=2.0):
 # The five-word next-token distribution of the distributions chapter.
 NEXT_WORDS = ["mat", "floor", "sofa", "moon", "the"]
 NEXT_SCORES = [3.0, 2.0, 1.0, -1.0, 0.0]
+
+
+# The three contexts of the next-token examples: name and the scores (logits) for NEXT_WORDS.
+NEXT_CONTEXTS = [
+    ("confident context", [6.0, 1.0, 0.0, -2.0, -1.0]),
+    ("the chapter's context", NEXT_SCORES),
+    ("undecided context", [0.4, 0.3, 0.2, -0.1, 0.0]),
+]
 
 
 def next_token_distribution():
@@ -192,7 +200,7 @@ def entropy_examples():
     ]
     rows = []
     for name, p in cases:
-        rows.append([name, len([x for x in p if x > 0]), _fx(entropy(p, 2), 4), _fx(entropy(p, math.e), 4),
+        rows.append([name, len(p), _fx(entropy(p, 2), 4), _fx(entropy(p, math.e), 4),
                      _fx(math.log2(len(p)), 4)])
     return _table(["distribution", "outcomes", "H in bits", "H in nats", "log_2 of outcome count"], rows)
 
@@ -205,6 +213,10 @@ def binary_entropy_table():
     return _table(["P(heads) = p", "surprise of heads", "surprise of tails", "H(p) in bits"], rows)
 
 
+UNIFORM_NAME = "information.uniform_is_largest"
+GIBBS_NAME = "information.gibbs_random"
+
+
 def uniform_is_largest():
     """Over four outcomes, entropy is largest when the outcomes are equally likely."""
     rows = []
@@ -214,10 +226,10 @@ def uniform_is_largest():
                     ("(0.97, 0.01, 0.01, 0.01)", [0.97, 0.01, 0.01, 0.01]),
                     ("(0.25, 0.25, 0.5, 0)", [0.25, 0.25, 0.5, 0.0])):
         rows.append([name, _fx(entropy(p), 4)])
-    rng = bookrng.stream("information.uniform_is_largest")
+    rng = bookrng.generator(UNIFORM_NAME)
     best, total, n = 0.0, 0.0, 10000
     for _ in range(n):
-        w = [rng.expovariate(1.0) for _ in range(4)]
+        w = [-math.log(1.0 - rng.uniform()) for _ in range(4)]
         s = sum(w)
         h = entropy([x / s for x in w])
         best = max(best, h)
@@ -229,17 +241,13 @@ def uniform_is_largest():
 
 def next_token_entropy():
     """The same five words under three different contexts: confident, as before, undecided."""
-    cases = [
-        ("confident context", [6.0, 1.0, 0.0, -2.0, -1.0]),
-        ("the chapter's context", NEXT_SCORES),
-        ("undecided context", [0.4, 0.3, 0.2, -0.1, 0.0]),
-    ]
     rows = []
-    for name, z in cases:
+    for name, z in NEXT_CONTEXTS:
         p = _softmax(z)
-        rows.append([name] + [_fx(v, 3) for v in p] + [_fx(entropy(p), 3)])
-    rows.append(["uniform guess", "0.200", "0.200", "0.200", "0.200", "0.200", _fx(math.log2(5), 3)])
-    return _table(["context"] + NEXT_WORDS + ["H in bits"], rows)
+        rows.append([name, "(" + ", ".join(f"{v:g}" for v in z) + ")"] + [_fx(v, 5) for v in p]
+                    + [_fx(entropy(p), 4)])
+    rows.append(["uniform guess", "(0, 0, 0, 0, 0)"] + ["0.20000"] * 5 + [_fx(math.log2(5), 4)])
+    return _table(["context", "scores z"] + NEXT_WORDS + ["H in bits"], rows, "llrrrrrr")
 
 
 # ---------------------------------------------------------- prefix codes
@@ -372,10 +380,10 @@ def log_below_tangent():
 
 def gibbs_random():
     """KL(p || q) over many random pairs of distributions on five outcomes is never negative."""
-    rng = bookrng.stream("information.gibbs_random")
+    rng = bookrng.generator(GIBBS_NAME)
 
     def draw(sharp):
-        w = [rng.expovariate(1.0) ** sharp for _ in range(5)]
+        w = [(-math.log(1.0 - rng.uniform())) ** sharp for _ in range(5)]
         s = sum(w)
         return [x / s for x in w]
 
@@ -488,7 +496,7 @@ def perplexity_effective_choices():
         ("coin with P(heads) = 0.9", [0.9, 0.1]),
         ("die with P(6) = 0.5, others 0.1", [0.5] + [0.1] * 5),
         ("five-word next-token distribution", next_token_distribution()),
-        ("confident context", _softmax([6.0, 1.0, 0.0, -2.0, -1.0])),
+        ("confident context", _softmax(NEXT_CONTEXTS[0][1])),
     ]
     rows = []
     for name, p in cases:

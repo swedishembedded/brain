@@ -12,10 +12,10 @@ and the table beside it cannot disagree.
 
 The generators under study (a linear congruential generator and SplitMix64) are
 implemented here from the chapter's description, on Python's unbounded
-integers with explicit masking to 64 bits. The only source of "outside"
-randomness is a named `bookrng` stream, used for the seeds the examples start
-from and as the independent reference stream the statistical tests are
-calibrated against; no module in the book carries a seed literal.
+integers with explicit masking to 64 bits. Every example that draws random
+numbers takes its seed from `bookrng.seed_of("randomness.<example>")` and prints
+it with the order of its draws (`_gen_line`); no module in the book carries a
+seed literal, and nothing here uses `bookrng.stream`.
 
 Swedish Embedded AB implements solutions for reproducible random sampling in
 machine learning pipelines. If your team needs expertise in pseudo-random
@@ -56,52 +56,25 @@ def _fx(v, d=4):
 
 
 def _seed(name):
-    """A 64-bit seed for the example `name`, drawn from its frozen bookrng stream."""
-    return bookrng.stream("randomness." + name).getrandbits(64)
+    """The 64-bit seed of the example `name`: the seed of the book's generator of that name."""
+    return bookrng.seed_of("randomness." + name)
+
+
+def _gen_line(name):
+    """The sentence that makes a table reproducible: the generator and its seed (state before the first draw)."""
+    s = _seed(name)
+    return f"Generator: the book's SplitMix64, seed {_hex(s)} ({s}), used as the state before the first draw."
 
 
 # ------------------------------------------------------------ the generators
 
-class SplitMix64:
-    """Add a fixed odd constant to the state, then mix the new state with xor-shifts and multiplications."""
+# The book's generator (state += GAMMA, then the mix below), shared with every other worked module.
+SplitMix64 = bookrng.SplitMix64
 
-    def __init__(self, seed):
-        self.state = seed & M64
 
-    def next_u64(self):
-        self.state = (self.state + GAMMA) & M64
-        return _mix(self.state)
-
-    def uniform(self):
-        return (self.next_u64() >> 11) / (1 << 53)
-
-    def integer(self, n):
-        """Uniform in 0 .. n-1 by rejection (draws until the value lies above 2^64 mod n)."""
-        assert 0 < n <= (1 << 64)
-        threshold = (1 << 64) % n
-        while True:
-            r = self.next_u64()
-            if r >= threshold:
-                return r % n
-
-    def normal(self):
-        """Box-Muller; the sine partner of each pair is returned on the next call."""
-        if self._spare is not None:
-            z, self._spare = self._spare, None
-            return z
-        u1, u2 = self.uniform(), self.uniform()
-        r = math.sqrt(-2.0 * math.log(1.0 - u1))
-        self._spare = r * math.sin(2 * math.pi * u2)
-        return r * math.cos(2 * math.pi * u2)
-
-    _spare = None
-
-    def shuffle(self, items):
-        """Fisher-Yates, in place; returns the list for convenience."""
-        for i in range(len(items) - 1, 0, -1):
-            j = self.integer(i + 1)
-            items[i], items[j] = items[j], items[i]
-        return items
+def _gen(name):
+    """The book's generator for the example `name`, started at its printed seed."""
+    return bookrng.generator("randomness." + name)
 
 
 def _mix(z):
@@ -111,7 +84,8 @@ def _mix(z):
 
 
 def _derive(seed, name):
-    """The seed of the stream called `name` under the run seed `seed`: a hash of both."""
+    """The seed of the stream called `name` under the run seed `seed`: h = mix(seed); then, for each byte b of the
+    UTF-8 text of the name in order, h = mix(h xor b). `mix` is the three-line scramble of splitmix_next."""
     h = _mix(seed & M64)
     for b in name.encode("utf-8"):
         h = _mix(h ^ b)
@@ -140,10 +114,14 @@ def _period(a, c, m, x0):
 DATA = [(0.5, 1.4), (1.0, 2.1), (1.5, 4.6), (2.0, 5.8), (2.5, 7.9), (3.0, 9.3), (3.5, 10.2), (4.0, 12.4)]
 
 
-def _sgd_run(seed, lr=0.01, epochs=2, rng=None):
-    """Fit y = w x by one-example steps. w starts uniform in [-1, 1); each epoch visits the examples
-    in a freshly shuffled order. Returns (initial w, last epoch's order, final w, final mean squared error)."""
-    rng = rng or SplitMix64(seed)
+LEARNING_RATE, EPOCHS = 0.01, 2
+
+
+def _sgd_run(seed, lr=LEARNING_RATE, epochs=EPOCHS):
+    """Fit y = w x by one-example steps. Draw order from the generator started at `seed`: first w0 = 2 uniform() - 1,
+    then one shuffle of a fresh identity array per epoch. Update: w <- w - lr * 2 (w x - y) x for each visited point.
+    Returns (initial w, last epoch's order, final w, final mean squared error)."""
+    rng = SplitMix64(seed)
     w = 2.0 * rng.uniform() - 1.0
     w0 = w
     order = []
@@ -157,13 +135,19 @@ def _sgd_run(seed, lr=0.01, epochs=2, rng=None):
 
 
 def toy_runs():
-    sa, sb = _seed("toy_runs.a"), _seed("toy_runs.b")
+    sa, sb = _seed("toy_runs.run1"), _seed("toy_runs.run2")
+    points = ", ".join(f"({x}, {y})" for x, y in DATA)
     rows = []
     for label, s in (("run 1", sa), ("run 2", sb), ("run 3 (seed of run 1 again)", sa)):
         w0, order, w, loss = _sgd_run(s)
         rows.append((label, _hex(s), _fx(w0), " ".join(map(str, order)), f"{w:.6f}", f"{loss:.6f}"))
     head = ["run", "seed", "initial w", "last epoch order", "final w", "final loss"]
-    return ("The same eight points, learning rate 0.01, two epochs, differing only in the seed:\n\n"
+    return (f"Points (x, y): {points}. Model y = w x. Loss: L(w) = (1/8) sum over the eight points of (w x - y)^2. "
+            f"Each visited point (x, y) updates w <- w - {LEARNING_RATE} * 2 (w x - y) x. Learning rate {LEARNING_RATE}, {EPOCHS} epochs "
+            "of eight steps each. Generator: the book's SplitMix64 started at the printed seed (state = seed before the first draw). "
+            "Draw order: first w0 = 2 uniform() - 1; then, once per epoch, a new array [0, 1, ..., 7] is shuffled in place "
+            "with the same generator (epoch 1 first) and the points are visited in that order. "
+            "Final loss is L at the final w; \"last epoch order\" is the order of epoch 2.\n\n"
             + _table(head, rows, "llrlrr"))
 
 
@@ -189,7 +173,14 @@ def tiny_lcg_periods():
         rows.append((a, c, _period(a, c, m, 1)))
     full = [(a, c) for a in range(m) for c in range(m) if _period(a, c, m, 1) == m]
     predicted = [(a, c) for a in range(m) for c in range(m) if c % 2 == 1 and a % 4 == 1]
-    out = _table(["a", "c", "period from seed 1"], rows)
+    traj, x = [], 1
+    for _ in range(5):
+        traj.append(x)
+        x = (4 * x + 3) % m
+    out = ("The period is the length of the cycle the sequence eventually enters (the number of steps after which it repeats forever). "
+           f"For a = 4, c = 3 the sequence from seed 1 is {', '.join(map(str, traj))}, ...: it settles on the single state "
+           f"{traj[-1]}, so its period is 1 although the seed itself is never visited again.\n\n")
+    out += _table(["a", "c", "period from seed 1"], rows)
     out += (f"\n\nOf the {m * m} pairs (a, c), {len(full)} reach the full period {m} from seed 1; "
             f"the pairs with c odd and a - 1 divisible by 4 number {len(predicted)}, "
             f"and the two sets are {'identical' if full == predicted else 'different'}.")
@@ -276,11 +267,15 @@ def _popcount(v):
     return bin(v).count("1")
 
 
+AVALANCHE_A, AVALANCHE_C = 6364136223846793005, 1442695040888963407
+
+
 def avalanche():
-    rng = bookrng.stream("randomness.avalanche")
+    name = "avalanche"
+    rng = _gen(name)
     trials = 2000
     sm_flip, lcg_flip, sm_gap, lcg_gap = [], [], set(), set()
-    a, c = 6364136223846793005, 1442695040888963407
+    a, c = AVALANCHE_A, AVALANCHE_C
 
     def sm(s):
         return SplitMix64(s).next_u64()
@@ -289,15 +284,19 @@ def avalanche():
         return (a * s + c) & M64
 
     for _ in range(trials):
-        s = rng.getrandbits(64)
-        k = rng.randrange(64)
+        s = rng.next_u64()
+        k = rng.integer(64)
         sm_flip.append(_popcount(sm(s) ^ sm(s ^ (1 << k))))
         lcg_flip.append(_popcount(lcg(s) ^ lcg(s ^ (1 << k))))
         sm_gap.add((sm((s + 1) & M64) - sm(s)) & M64)
         lcg_gap.add((lcg((s + 1) & M64) - lcg(s)) & M64)
     rows = [("SplitMix64 first output", f"{sum(sm_flip) / trials:.2f}", len(sm_gap)),
             ("one LCG step (64-bit modulus)", f"{sum(lcg_flip) / trials:.2f}", len(lcg_gap))]
-    return (f"Over {trials} random seeds.\n\n"
+    return (f"{_gen_line(name)} Over {trials} trials; each trial draws a seed s = `next()` and then a bit position k = `integer(64)`. "
+            "SplitMix64's first output is the output of the first call of a generator whose state is s. "
+            f"The LCG step is x -> (a x + c) mod 2^64 with a = {a} and c = {c}, applied to s. "
+            "The first column averages the number of differing output bits between s and s with bit k flipped; "
+            "the second counts the distinct values of (output for s + 1) - (output for s) modulo 2^64.\n\n"
             + _table(["generator", "average number of the 64 output bits that change when one random seed bit is flipped",
                       "distinct values of (output for s + 1) - (output for s)"], rows, "lrr"))
 
@@ -309,33 +308,45 @@ def _chi2(counts, expected):
 
 
 def _reference_chi2(cells, n, runs):
-    """X^2 of `runs` experiments of `n` draws over `cells` equally likely cells, from an independent reference stream."""
-    rng = bookrng.stream(f"randomness.reference.{cells}.{n}")
+    """X^2 of `runs` experiments of `n` draws over `cells` equally likely cells: each draw is `integer(cells)`
+    from the generator of the calibration row, one experiment after the other."""
+    rng = _gen(f"bucket_calibration.{cells}")
     out = []
     for _ in range(runs):
         counts = [0] * cells
         for _ in range(n):
-            counts[rng.randrange(cells)] += 1
+            counts[rng.integer(cells)] += 1
         out.append(_chi2(counts, n / cells))
     return out
 
 
 def _mean_sd(xs):
+    """Mean and sample standard deviation (divisor len(xs) - 1)."""
     m = sum(xs) / len(xs)
     return m, math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
+
+
+def _alarm(cells):
+    """The alarm level used throughout: the mean k - 1 plus five spreads sqrt(2 (k - 1))."""
+    return cells - 1 + 5 * math.sqrt(2 * (cells - 1))
 
 
 def bucket_calibration():
     rows = []
     for cells, n, runs in ((4, 400, 3000), (16, 1600, 2000), (256, 25600, 150)):
         m, sd = _mean_sd(_reference_chi2(cells, n, runs))
-        rows.append((cells, n, runs, f"{m:.1f}", cells - 1, f"{sd:.1f}", f"{math.sqrt(2 * (cells - 1)):.1f}",
-                     f"{m + 5 * sd:.0f}"))
-    return _table(["cells k", "draws n", "experiments", "mean of X^2", "k - 1", "spread of X^2", "sqrt(2(k - 1))", "alarm: mean + 5 spreads"], rows)
+        rows.append((cells, n, runs, _hex(_seed(f"bucket_calibration.{cells}")), f"{m:.1f}", cells - 1, f"{sd:.1f}",
+                     f"{math.sqrt(2 * (cells - 1)):.1f}", f"{_alarm(cells):.0f}"))
+    return ("Each row is a fair source: a generator started at the printed seed (state = seed), whose experiments follow one "
+            "another; one draw is `integer(k)` and adds one to that cell's count, and an experiment is n draws. "
+            "The spread is the sample standard deviation (divisor experiments - 1) of the X^2 values.\n\n"
+            + _table(["cells k", "draws n", "experiments", "seed", "mean of X^2", "k - 1", "spread of X^2", "sqrt(2(k - 1))",
+                      "alarm: k - 1 + 5 sqrt(2(k - 1))"], rows))
 
 
-def _tests_for(name, draw, bits_total):
-    """Three X^2 values for a source of `bits_total`-bit values: top 4 bits, pairs of low 2 bits, pairs of top 4 bits."""
+def _tests_for(draw, bits_total):
+    """Three X^2 values for one run of a source of `bits_total`-bit values, drawing values in sequence x_0, x_1, ...:
+    test 1 uses 1600 values, test 2 the next 1601, test 3 the next 25601."""
     n1 = 1600
     c = [0] * 16
     for _ in range(n1):
@@ -362,52 +373,71 @@ def _tests_for(name, draw, bits_total):
 
 def bucket_tests():
     gens = []
-    sm = SplitMix64(_seed("bucket_tests.splitmix"))
-    gens.append(("SplitMix64 (64 bits)", sm.next_u64, 64))
-    x = [_seed("bucket_tests.nr") & 0xFFFFFFFF]
+    s_sm = _seed("bucket_tests.splitmix")
+    sm = _gen("bucket_tests.splitmix")
+    gens.append(("SplitMix64 (64 bits)", f"seed {_hex(s_sm)}", sm.next_u64, 64))
 
-    def nr():
-        x[0] = (1664525 * x[0] + 1013904223) % (1 << 32)
-        return x[0]
-    gens.append(("LCG a = 1664525, c = 1013904223, m = 2^32", nr, 32))
-    y = [_seed("bucket_tests.good16") & 0xFFFF]
+    def lcg(a, c, m, name):
+        x0 = _seed(name) % m             # initial state x_0: the seed of the example reduced modulo m
+        x = [x0]
 
-    def good16():
-        y[0] = (A16 * y[0] + C16) % M16
-        return y[0]
-    gens.append(("LCG a = 25173, c = 13849, m = 2^16", good16, 16))
-    z = [_seed("bucket_tests.bad16") & 0xFFFF]
+        def draw():
+            x[0] = (a * x[0] + c) % m
+            return x[0]
+        return draw, x0
 
-    def bad16():
-        z[0] = (4097 * z[0] + 1) % M16
-        return z[0]
-    gens.append(("LCG a = 4097, c = 1, m = 2^16", bad16, 16))
+    for label, a, c, bits, name in (("LCG a = 1664525, c = 1013904223, m = 2^32", 1664525, 1013904223, 32, "bucket_tests.nr"),
+                                    ("LCG a = 25173, c = 13849, m = 2^16", A16, C16, 16, "bucket_tests.good16"),
+                                    ("LCG a = 4097, c = 1, m = 2^16", 4097, 1, 16, "bucket_tests.bad16")):
+        draw, x0 = lcg(a, c, 1 << bits, name)
+        gens.append((label, f"x_0 = {x0} (seed {_hex(_seed(name))} mod 2^{bits})", draw, bits))
     rows = []
-    for name, draw, bits in gens:
-        t1, t2, t3 = _tests_for(name, draw, bits)
-        rows.append((name, f"{t1:.1f}", f"{t2:.1f}", f"{t3:.1f}"))
-    return _table(["generator", "top 4 bits, 16 cells (alarm 42)", "pairs of low 2 bits, 16 cells (alarm 42)",
-                   "pairs of top 4 bits, 256 cells (alarm about 370)"], rows, "lrrr")
+    for name, start, draw, bits in gens:
+        t1, t2, t3 = _tests_for(draw, bits)
+        rows.append((name, start, f"{t1:.1f}", f"{t2:.1f}", f"{t3:.1f}"))
+    return (f"Alarm levels (calibration table): {_alarm(16):.0f} for 16 cells, {_alarm(256):.0f} for 256 cells. "
+            "Each generator yields the values x_1, x_2, ... (a b-bit integer each; an LCG starts from x_0 and the first value "
+            "it yields is x_1 = (a x_0 + c) mod m; SplitMix64's x_1 is its first output). One sequence per row feeds the three "
+            "tests one after the other: the first 1600 values, the next 1601, the next 25601. "
+            "Top 4 bits: cell = x >> (b - 4) for a b-bit value. Pairs of low 2 bits: with the 1601 consecutive values x_i, "
+            "the 1600 overlapping pairs (x_i, x_(i+1)) go to the cell 4 (x_i and 3) + (x_(i+1) and 3). "
+            "Pairs of top 4 bits: the 25600 overlapping pairs of 25601 consecutive values go to the cell "
+            "16 (x_i >> (b - 4)) + (x_(i+1) >> (b - 4)).\n\n"
+            + _table(["generator", "start", f"top 4 bits, 16 cells (alarm {_alarm(16):.0f})",
+                      f"pairs of low 2 bits, 16 cells (alarm {_alarm(16):.0f})",
+                      f"pairs of top 4 bits, 256 cells (alarm {_alarm(256):.0f})"], rows, "llrrr"))
 
 
 # ----------------------------------------------------- uniform from bits
 
 def uniform_from_bits():
     rows = []
-    for raw in (0, 1 << 63, (1 << 64) - (1 << 11), (1 << 64) - 1):
+    for raw in (0, 1 << 63, (1 << 64) - (1 << 11), (1 << 64) - (1 << 10), (1 << 64) - 1):
         top = (raw >> 11) / (1 << 53)
         naive = float(raw) / float(1 << 64)
         rows.append((_hex(raw), f"{top!r}", f"{naive!r}"))
     head = ["raw 64-bit value", "top 53 bits / 2^53", "float(raw) / 2^64"]
     out = _table(head, rows, "lrr")
-    out += ("\n\nThe spacing of the grid of values (raw >> 11) / 2^53 is 2^-53 = "
+    # smallest raw value whose conversion to a double divided by 2^64 gives 1.0 (the conversion is monotone, so bisect)
+    lo, hi = 0, (1 << 64) - 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if float(mid) / float(1 << 64) >= 1.0:
+            hi = mid
+        else:
+            lo = mid + 1
+    bad = (1 << 64) - lo
+    out += (f"\n\nThe smallest raw value for which float(raw) / 2^64 equals 1.0 is {_hex(lo)}: the {bad} raw values "
+            f"{_hex(lo)} to 0xffffffffffffffff all convert to 2^64, so the quotient is 1.0 with probability "
+            f"{bad} / 2^64 = 2^{bad.bit_length() - 1 - 64}. "
+            "The spacing of the grid of values (raw >> 11) / 2^53 is 2^-53 = "
             f"{2.0 ** -53:.3e}; the largest value is 1 - 2^-53 = {1 - 2.0 ** -53!r}. "
             f"For a 32-bit float the same recipe takes the top 24 bits: the grid is 2^-24 = {2.0 ** -24:.3e} and the largest value {1 - 2.0 ** -24!r}.")
     return out
 
 
 def one_sided_range():
-    rng = SplitMix64(_seed("one_sided_range"))
+    rng = _gen("one_sided_range")
     lo33 = hi33 = lo32 = hi32 = None
     neg33 = neg32 = 0
     n = 100000
@@ -425,7 +455,9 @@ def one_sided_range():
         neg32 += v32 < 0
     rows = [("top 31 bits (shift by 33), divided by 2^31, minus 1", f"{lo33:.6f}", f"{hi33:.6f}", f"{neg33 / n:.4f}"),
             ("top 32 bits (shift by 32), divided by 2^31, minus 1", f"{lo32:.6f}", f"{hi32:.6f}", f"{neg32 / n:.4f}")]
-    return _table(["recipe for a value meant to lie in [-1, 1)", "smallest of 100,000", "largest of 100,000", "share below 0"], rows, "lrrr")
+    return (f"{_gen_line('one_sided_range')} The LCG state s starts as the first draw `next()`; then each of the 100,000 steps sets "
+            f"s = (a s + c) mod 2^64 with a = {a}, c = {c} and reads the new s with both recipes (same s for both rows).\n\n"
+            + _table(["recipe for a value meant to lie in [-1, 1)", "smallest of 100,000", "largest of 100,000", "share below 0"], rows, "lrrr"))
 
 
 # ------------------------------------------------------ integers in 0..n
@@ -457,7 +489,7 @@ def modulo_bias_by_n():
 
 def rejection_integer_counts():
     bits, n, wanted = 3, 6, 60000
-    rng = SplitMix64(_seed("rejection_integer_counts"))
+    rng = _gen("rejection_integer_counts")
     counts, drawn = [0] * n, 0
     plain = [0] * n
     while sum(counts) < wanted:
@@ -467,7 +499,10 @@ def rejection_integer_counts():
         if r >= (1 << bits) % n:
             counts[r % n] += 1
     rows = [(k, plain[k], counts[k]) for k in range(n)]
-    out = _table(["result", f"remainder only ({drawn:,} draws)", f"with rejection ({wanted:,} kept)"], rows)
+    out = (f"{_gen_line('rejection_integer_counts')} Each draw is r = `next()` >> 61 (the top 3 bits, a value in 0 .. 7); "
+           "the remainder-only column counts r mod 6 for every draw, the rejection column counts r mod 6 only for draws with r >= 2; "
+           f"drawing stops at {wanted:,} kept.\n\n"
+           + _table(["result", f"remainder only ({drawn:,} draws)", f"with rejection ({wanted:,} kept)"], rows))
     out += f"\n\nThe rejecting sampler used {drawn:,} draws for {wanted:,} results, {drawn / wanted:.4f} per result (the prediction is {8 / 6:.4f})."
     return out
 
@@ -484,7 +519,7 @@ def discrete_sampling():
     for v in p:
         acc += v
         cum.append(acc)
-    rng = SplitMix64(_seed("discrete_sampling"))
+    rng = _gen("discrete_sampling")
     n = 20000
     counts = [0] * len(p)
     for _ in range(n):
@@ -498,7 +533,9 @@ def discrete_sampling():
                 lo = mid + 1
         counts[lo] += 1
     rows = [(k, f"{logits[k]:.1f}", f"{p[k]:.4f}", f"{cum[k]:.4f}", counts[k], f"{counts[k] / n:.4f}") for k in range(len(p))]
-    out = _table(["token", "logit", "p", "cumulative p", f"draws of {n:,}", "frequency"], rows)
+    out = (f"{_gen_line('discrete_sampling')} Each of the {n:,} draws is one `uniform()`; the outcome is the first token whose "
+           "cumulative p is above it (the last token if rounding leaves none).\n\n"
+           + _table(["token", "logit", "p", "cumulative p", f"draws of {n:,}", "frequency"], rows))
     return out
 
 
@@ -506,7 +543,9 @@ def inverse_cdf_exponential():
     lam = 2.0
     rows = [(f"{u:.2f}", f"{abs(-math.log(1 - u) / lam):.4f}", f"{1 - math.exp(-lam * (-math.log(1 - u) / lam)):.2f}") for u in (0.0, 0.10, 0.50, 0.90, 0.99)]
     out = _table(["u", "x = -ln(1 - u) / 2", "F(x) = 1 - e^(-2x), which equals u"], rows)
-    rng = SplitMix64(_seed("inverse_cdf_exponential"))
+    rng = _gen("inverse_cdf_exponential")
+    out += ("\n\n" + _gen_line("inverse_cdf_exponential") + " The second table uses 50,000 draws, each x = -ln(1 - uniform()) / 2; "
+            "the variance divisor is 50,000.")
     n = 50000
     xs = [-math.log(1.0 - rng.uniform()) / lam for _ in range(n)]
     mean = sum(xs) / n
@@ -522,7 +561,7 @@ def inverse_cdf_exponential():
 # --------------------------------------------------------------- Gaussians
 
 def _box_muller_pairs(n, seed_name):
-    rng = SplitMix64(_seed(seed_name))
+    rng = _gen(seed_name)
     out = []
     for _ in range(n):
         u1, u2 = rng.uniform(), rng.uniform()
@@ -533,11 +572,11 @@ def _box_muller_pairs(n, seed_name):
 
 def _gaussian_samples(n=20000):
     """The standard-normal samples of the chapter's figure and table: 2n values from n Box-Muller pairs."""
-    return [z for pair in _box_muller_pairs(n, "box_muller_samples") for z in pair]
+    return [z for pair in _box_muller_pairs(n, "box_muller_check") for z in pair]
 
 
 def box_muller_one_pair():
-    rng = SplitMix64(_seed("box_muller_one_pair"))
+    rng = _gen("box_muller_one_pair")
     rows = []
     for _ in range(3):
         u1, u2 = rng.uniform(), rng.uniform()
@@ -546,11 +585,13 @@ def box_muller_one_pair():
         th = 2 * math.pi * u2
         rows.append((f"{u1:.4f}", f"{u2:.4f}", f"{r2:.4f}", f"{r:.4f}", f"{th:.4f}", f"{r * math.cos(th):.4f}", f"{r * math.sin(th):.4f}",
                      f"{(r * math.cos(th)) ** 2 + (r * math.sin(th)) ** 2:.4f}"))
-    return _table(["u1", "u2", "R^2 = -2 ln(1 - u1)", "R", "angle = 2 pi u2", "z1 = R cos", "z2 = R sin", "z1^2 + z2^2"], rows)
+    return (f"{_gen_line('box_muller_one_pair')} Three pairs, each u1 = `uniform()` then u2 = `uniform()`; "
+            "the columns are computed from the unrounded u1 and u2, and shown to 4 decimals.\n\n"
+            + _table(["u1", "u2", "R^2 = -2 ln(1 - u1)", "R", "angle = 2 pi u2", "z1 = R cos", "z2 = R sin", "z1^2 + z2^2"], rows))
 
 
 def box_muller_check():
-    pairs = _box_muller_pairs(20000, "box_muller_samples")
+    pairs = _box_muller_pairs(20000, "box_muller_check")
     zs = [z for p in pairs for z in p]
     n = len(zs)
     mean = sum(zs) / n
@@ -560,25 +601,30 @@ def box_muller_check():
             ("covariance of z1 and z2", f"{cov:.4f}", "0")]
     for k in (1, 2, 3):
         rows.append((f"share with absolute value at most {k}", f"{sum(1 for z in zs if abs(z) <= k) / n:.4f}", f"{math.erf(k / math.sqrt(2)):.4f}"))
-    return f"{len(pairs):,} pairs, {n:,} values.\n\n" + _table(["quantity", "measured", "exact"], rows)
+    return (f"{_gen_line('box_muller_check')} {len(pairs):,} pairs, {n:,} values: each pair is u1 = `uniform()`, u2 = `uniform()`, "
+            "then z1 = R cos, z2 = R sin as in the formulas. Variance divisor n = 40,000 (about the mean); "
+            "covariance = the mean of z1 z2 over the pairs.\n\n" + _table(["quantity", "measured", "exact"], rows))
 
 
 def tail_reach():
     rows = []
-    for label, smallest in (("53-bit uniform, 1 - u in [2^-53, 1]", 2.0 ** -53),
-                            ("32-bit uniform, 1 - u in [2^-32, 1]", 2.0 ** -32),
-                            ("24-bit uniform (float32 grid), 1 - u in [2^-24, 1]", 2.0 ** -24),
-                            ("53-bit uniform with u clamped to at least 10^-12", 1e-12)):
+    for label, smallest, log_of in (("53-bit uniform, 1 - u in [2^-53, 1]", 2.0 ** -53, "ln(1 - u)"),
+                                    ("32-bit uniform, 1 - u in [2^-32, 1]", 2.0 ** -32, "ln(1 - u)"),
+                                    ("24-bit uniform (float32 grid), 1 - u in [2^-24, 1]", 2.0 ** -24, "ln(1 - u)"),
+                                    ("53-bit uniform, radius from ln u with u clamped to at least 10^-12", 1e-12, "ln u")):
         reach = math.sqrt(-2.0 * math.log(smallest))
         tail = math.erfc(reach / math.sqrt(2))
-        rows.append((label, f"{reach:.3f}", f"{tail:.2e}"))
-    return _table(["uniform source", "largest absolute z it can produce", "Gaussian probability beyond that"], rows, "lrr")
+        rows.append((label, log_of, f"{smallest:.3e}", f"{reach:.3f}", f"{tail:.2e}"))
+    return ("The largest radius is R = sqrt(-2 ln t) for the smallest argument t the logarithm can receive. "
+            "The \"Gaussian probability beyond that\" is the two-sided tail P(|Z| > R) = erfc(R / sqrt(2)) in every row.\n\n"
+            + _table(["uniform source", "radius uses", "smallest argument t of the logarithm", "largest absolute z it can produce",
+                      "Gaussian probability beyond that"], rows, "llrrr"))
 
 
 # ------------------------------------------------- rejection sampling (general)
 
 def rejection_general():
-    rng = SplitMix64(_seed("rejection_general"))
+    rng = _gen("rejection_general")
     f = lambda x: 6.0 * x * (1.0 - x)       # density on [0, 1]; its largest value is 1.5 at x = 1/2
     M = 1.5
     n, kept, drawn = 40000, [], 0
@@ -594,14 +640,16 @@ def rejection_general():
     for lo, hi in zip(edges, edges[1:]):
         cnt = sum(1 for x in kept if lo <= x < hi)
         rows.append((f"[{lo:.1f}, {hi:.1f})", f"{cnt / n:.4f}", f"{cdf(hi) - cdf(lo):.4f}", f"{(hi - lo) :.1f}"))
-    out = _table(["interval", "share of accepted", "exact probability", "share if the proposal were kept as is"], rows)
+    out = (f"{_gen_line('rejection_general')} Each proposal draws x = `uniform()` and then y = 1.5 `uniform()`; "
+           "x is kept when y < 6 x (1 - x), until 40,000 are kept. An interval is [lo, hi).\n\n"
+           + _table(["interval", "share of accepted", "exact probability", "share if the proposal were kept as is"], rows))
     out += (f"\n\n{drawn:,} proposals gave {n:,} accepted values: acceptance {n / drawn:.4f} against the predicted 1/M = {1 / M:.4f}. "
             f"The accepted values have mean {sum(kept) / n:.4f} (exact 0.5000).")
     return out
 
 
 def disc_and_polar():
-    rng = SplitMix64(_seed("disc_and_polar"))
+    rng = _gen("disc_and_polar")
     tries = accepted = 0
     zs = []
     while len(zs) < 40000:
@@ -620,7 +668,10 @@ def disc_and_polar():
             ("acceptance", f"{accepted / tries:.4f}", f"pi/4 = {math.pi / 4:.4f}"),
             ("mean of the 40,000 outputs", f"{mean:.4f}", "0"), ("variance", f"{var:.4f}", "1"),
             ("share with absolute value at most 2", f"{sum(1 for z in zs if abs(z) <= 2) / n:.4f}", f"{math.erf(2 / math.sqrt(2)):.4f}")]
-    return _table(["quantity", "measured", "exact"], rows, "lrr")
+    return (f"{_gen_line('disc_and_polar')} Each try draws v1 = 2 `uniform()` - 1 and then v2 = 2 `uniform()` - 1; "
+            "it is kept when 0 < s = v1^2 + v2^2 < 1, giving the two outputs v1 k and v2 k with k = sqrt(-2 ln(s) / s); "
+            "tries continue until 40,000 outputs exist. Variance divisor n = 40,000 (about the mean).\n\n"
+            + _table(["quantity", "measured", "exact"], rows, "lrr"))
 
 
 # ---------------------------------------------------------------- shuffles
@@ -689,13 +740,15 @@ def shuffle_bias_by_n():
 
 
 def shuffle_empirical():
-    rng = SplitMix64(_seed("shuffle_empirical"))
+    rng = _gen("shuffle_empirical")
     n = 60000
     counts = {p: 0 for p in permutations(range(3))}
     for _ in range(n):
         counts[tuple(rng.shuffle([0, 1, 2]))] += 1
     rows = [(" ".join(map(str, p)), c, f"{c / n:.4f}") for p, c in counts.items()]
-    return _table(["order", f"count in {n:,} shuffles", "frequency"], rows)
+    return (f"{_gen_line('shuffle_empirical')} {n:,} shuffles one after the other: each shuffles a fresh array [0, 1, 2] with the same generator, "
+            "and the final array is the order.\n\n"
+            + _table(["order", f"count in {n:,} shuffles", "frequency"], rows))
 
 
 # ---------------------------------------------------- seeds and streams
@@ -719,7 +772,13 @@ def shared_vs_split():
             w, order = run(extra, split)
             rows.append(("one shared generator" if not split else "one stream per purpose", 4 + extra,
                          " ".join(f"{v:+.3f}" for v in w[:4]), " ".join(map(str, order))))
-    return _table(["design", "weights drawn", "first four weights", "data order"], rows, "lrll")
+    return (f"Run seed {_hex(seed)} ({seed}). A generator \"seeded with s\" has state s before its first draw. "
+            "One shared generator: seeded with the run seed; the weights come first (each weight is 2 `uniform()` - 1, in order), "
+            "then the data order is `shuffle` of a fresh array [0, 1, 2, 3, 4, 5] with the same generator. "
+            "One stream per purpose: the weights come from a generator seeded with derive_seed(run seed, \"init\") and the data order "
+            "from a different generator seeded with derive_seed(run seed, \"order\") (rule in the chapter). "
+            "The weights column shows the first four weights.\n\n"
+            + _table(["design", "weights drawn", "first four weights", "data order"], rows, "lrll"))
 
 
 def streams_are_positions():
@@ -729,22 +788,26 @@ def streams_are_positions():
     xs = [a.next_u64() for _ in range(6)]
     ys = [b.next_u64() for _ in range(3)]
     rows = [(i, _hex(xs[i]), _hex(ys[i - 3]) if i >= 3 else "") for i in range(6)]
-    out = _table(["draw", f"stream from state s", "stream from state s + 3 GAMMA"], rows, "rll")
+    out = (f"State s = run seed = {_hex(seed)} ({seed}); a generator seeded with s has state s before its first draw. "
+           "The first stream draws six raw values; the second is seeded with (s + 3 GAMMA) mod 2^64 and draws three.\n\n"
+           + _table(["draw", f"stream from state s", "stream from state s + 3 GAMMA"], rows, "rll"))
     out += f"\n\nThe second stream is the first one three positions later: {'yes' if ys == xs[3:6] else 'no'}."
     names = ("init", "order", "dropout", "init2")
     rows = []
     for nm in names:
         g = SplitMix64(_derive(seed, nm))
         rows.append((f"`{nm}`", _hex(_derive(seed, nm)), _hex(g.next_u64())))
-    out += "\n\n" + _table(["stream name", "derived seed", "first draw"], rows, "lrr")
+    out += ("\n\nDerived seeds under the same run seed s, by derive_seed(s, name) of the chapter; "
+            "the first draw is that of a generator seeded with the derived seed.\n\n"
+            + _table(["stream name", "derived seed", "first draw"], rows, "lrr"))
     return out
 
 
 def hidden_luck():
     """Two arms run the same procedure; and two arms that differ by a small real change."""
-    seeds = bookrng.stream("randomness.hidden_luck")
+    seeds = _gen("hidden_luck")
     n = 400
-    pairs = [(seeds.getrandbits(64), seeds.getrandbits(64)) for _ in range(n)]
+    pairs = [(seeds.next_u64(), seeds.next_u64()) for _ in range(n)]
     same = [(_sgd_run(a, lr=0.01)[3], _sgd_run(b, lr=0.01)[3]) for a, b in pairs]
     diff_own = [(_sgd_run(a, lr=0.01)[3], _sgd_run(b, lr=0.0105)[3]) for a, b in pairs]
     diff = [(_sgd_run(a, lr=0.01)[3], _sgd_run(a, lr=0.0105)[3]) for a, _ in pairs]
@@ -758,7 +821,11 @@ def hidden_luck():
         return (label, f"{wins / len(ps):.3f}", f"{dm:+.4f}", f"{dsd / math.sqrt(len(ps)):.4f}")
     rows = [summary(same, "B = A's procedure, own seed"), summary(diff_own, "B = learning rate 0.0105, own seed"),
             summary(diff, "B = learning rate 0.0105, A's seed")]
-    out = f"Final loss of the toy run over {n} seeds: mean {m:.4f}, standard deviation {sd:.4f}, smallest {min(losses):.4f}, largest {max(losses):.4f}.\n\n"
+    out = (f"{_gen_line('hidden_luck')} The run seeds come from this generator: pair k (k = 0 .. {n - 1}) is its raw draws 2k and 2k + 1 "
+           "(`next()`), run A uses the first as its seed and run B the second (or the first again in the last row). "
+           "Each run is the toy run of the first table with the learning rate stated; the loss is its final loss. "
+           "Standard error = sample standard deviation (divisor n - 1) of the differences over sqrt(n).\n\n")
+    out += f"Final loss of the toy run over {n} seeds (the A runs): mean {m:.4f}, standard deviation {sd:.4f}, smallest {min(losses):.4f}, largest {max(losses):.4f}.\n\n"
     out += _table(["comparison (400 pairs)", "share of pairs where B has the lower loss", "mean of (loss B - loss A)", "standard error of that mean"], rows, "lrrr")
     first = [(f"{a:.4f}", f"{b:.4f}", "B" if b < a else "A") for a, b in same[:5]]
     out += "\n\nThe first five identical-procedure pairs:\n\n" + _table(["loss A", "loss B", "winner"], first, "rrl")
@@ -766,7 +833,7 @@ def hidden_luck():
 
 
 def float_order():
-    rng = SplitMix64(_seed("float_order"))
+    rng = _gen("float_order")
     xs = [rng.uniform() - 0.5 + 1e-3 * (i % 7) for i in range(100000)]
     fwd = 0.0
     for v in xs:
@@ -784,7 +851,10 @@ def float_order():
     ex = math.fsum(xs)
     rows = [("left to right", repr(fwd), f"{fwd - ex:+.2e}"), ("right to left", repr(bwd), f"{bwd - ex:+.2e}"),
             ("pairwise tree", repr(pw), f"{pw - ex:+.2e}"), ("exact (fsum)", repr(ex), "0")]
-    return "The same 100,000 draws, added in three orders.\n\n" + _table(["order of the additions", "sum", "difference from exact"], rows, "lrr")
+    return (f"{_gen_line('float_order')} The 100,000 values are x_i = `uniform()` - 0.5 + 0.001 (i mod 7) for i = 0 .. 99999, one draw each in order. "
+            "Left to right adds x_0 first; right to left adds x_99999 first (both start from 0.0); "
+            "the pairwise tree sums a list of length at most 2 directly and otherwise sums its first floor(len/2) values and the rest separately, "
+            "then adds the two results. The exact sum is the correctly rounded sum of the stored doubles (Python `math.fsum`).\n\n") + _table(["order of the additions", "sum", "difference from exact"], rows, "lrr")
 
 
 def _unxorshift_right(y, k):
@@ -797,7 +867,7 @@ def _unxorshift_right(y, k):
 def predict_from_output():
     seed = _seed("predict_from_output")
     g = SplitMix64(seed)
-    observed = g.next_u64()
+    observed = g.next_u64()    # draw 1
     z = _unxorshift_right(observed, 31)
     z = (z * pow(C2, -1, 1 << 64)) & M64
     z = _unxorshift_right(z, 27)
@@ -809,7 +879,8 @@ def predict_from_output():
         actual = g.next_u64()
         guess = clone.next_u64()
         rows.append((i + 2, _hex(guess), _hex(actual), "yes" if guess == actual else "no"))
-    head = (f"One observed output `{_hex(observed)}` was undone step by step (xor-shift, multiply by the inverse of C2 modulo 2^64, "
+    head = (f"{_gen_line('predict_from_output')} Draw 1 is the observed output; draws 2 to 4 are the later ones. "
+            f"One observed output `{_hex(observed)}` was undone step by step (xor-shift, multiply by the inverse of C2 modulo 2^64, "
             f"xor-shift, multiply by the inverse of C1, xor-shift) to the state `{_hex(state)}`.\n\n")
     return head + _table(["draw number", "predicted from the one output", "actual", "equal"], rows, "rllr")
 

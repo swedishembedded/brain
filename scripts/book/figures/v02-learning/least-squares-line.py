@@ -23,9 +23,9 @@ def render() -> str:
     vs, ys = lr._xy()
     w, b = lr._closed_form()[:2]
     mse = lr._mse(lr._line_design(vs), ys, [b, w])
-    p = Plot((0.5, 2.8), (20.0, 95.0), width=620, height=380, xlabel="sensor voltage v (V)",
+    p = Plot((0.2, 2.9), (0.0, 95.0), width=620, height=380, xlabel="sensor voltage v (V)",
              ylabel="temperature y (deg C)", title="Least-squares line and its residuals")
-    xs = [0.5, 2.8]
+    xs = [0.2, 2.9]
     p.line(xs, [w * x + b for x in xs], color=0, width=3.0, label=f"y = {w:.2f} v + {b:.2f}  (MSE {mse:.2f})")
     for k, (v, t) in enumerate(zip(vs, ys)):
         p.line([v, v], [t, w * v + b], color=3, width=2.6, dash=False, label="residuals" if k == 0 else "")

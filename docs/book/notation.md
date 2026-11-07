@@ -71,6 +71,7 @@ one and keeps to it.
 | $\mathrm{proj}_{\mathbf{u}}\mathbf{v}$, $\mathrm{cos\_sim}(\mathbf{a}, \mathbf{b})$ | the projection of $\mathbf{v}$ on $\mathbf{u}$; the cosine similarity of two vectors |
 | $\mathrm{i}$ | the imaginary unit, $\mathrm{i}^2 = -1$ (the pseudocode writes `1i`) |
 | $\mathrm{Re}\,z$, $\mathrm{Im}\,z$, $\bar z$ | real part, imaginary part and complex conjugate of $z$ |
+| $\omega$, $X[k]$, $\mathbf{F}$ | in Chapter 14 only: $\omega = e^{-2\pi\mathrm{i}/N}$ is the primitive $N$-th root of unity, $X[k] = \sum_n x[n]\,\omega^{kn}$ the DFT of the signal $x$, and $\mathbf{F}$ the matrix with entries $\omega^{kn}$ (so $\mathbf{F}^H$ is its conjugate transpose, $\langle u, v\rangle$ the inner product conjugating its first argument) |
 
 A tensor has a **number of axes** (its order), written $R$ in Chapter 5; the
 word *rank* is kept for matrices, as in the table above.
@@ -118,18 +119,22 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\max$, $\min$ | largest, smallest of the numbers listed |
 | $\mathrm{sign}(x)$ | $+1$ for $x \ge 0$ and $-1$ for $x < 0$, so $\mathrm{sign}(0) = +1$ (the pseudocode page explains why) |
 | $\mathrm{erf}(x)$ | the error function $\frac{2}{\sqrt\pi}\int_0^x e^{-s^2}ds$ |
-| $\varepsilon$ | machine epsilon: the gap between 1 and the next larger floating-point number ($2^{-52}$ in 64 bits); $u = \varepsilon/2$ is the unit round-off |
-| $\mathrm{fl}(x)$ | the floating-point number a computer stores for $x$ |
+| $\varepsilon$, $\varepsilon_{\mathrm{mach}}$ | machine epsilon: the gap between 1 and the next larger floating-point number ($2^{1-p}$, which is $2^{-52}$ in 64 bits); Chapter 15 writes $\varepsilon_{\mathrm{mach}}$ |
+| $u$ | the unit round-off $2^{-p} = \varepsilon_{\mathrm{mach}}/2$: the largest relative error of rounding one number (Chapter 15) |
+| $\mathrm{fl}(x)$ | the floating-point number a computer stores for $x$ (the exact result rounded to the nearest, ties to even) |
+| $\delta$, $\theta_i$ | in Chapter 15, the relative error of one rounding ($\lvert\delta\rvert \le u$) and the accumulated relative error of the $i$-th term of a sum |
+| $\mathrm{lse}(z)$ | log-sum-exp: $\log \sum_i e^{z_i}$ (Chapter 15) |
 | $s(x)$ | the logistic sigmoid, written $s$ in Chapter 7 (the same function as $\sigma(x)$) |
 | $D_+(h)$, $D_0(h)$ | the forward and the central difference quotient with step $h$ (Chapter 7) |
 | $x_n$, $e_n$ | the $n$-th iterate of an iteration and its error $x_n - x^\star$ (Chapter 7) |
 | $\mathbf{w}^\star$ | the minimiser of a loss; $\mathbf{e} = \mathbf{w} - \mathbf{w}^\star$ is the error from it (Chapters 8, 9) |
 | $\kappa$ | the condition number of a bowl: largest curvature divided by the smallest (Chapter 8) |
+| $\kappa_f(x)$ | the relative condition number of a function at $x$, $\lvert x f'(x)/f(x)\rvert$ (Chapter 15) |
 | $S_n^{\text{left}}$, $T_n$ | the left Riemann sum and the trapezoid rule with $n$ panels (Chapter 9) |
 | $x(t)$, $\mathbf{x}(t)$ | the state of a differential equation at time $t$ (Chapter 9; $t$ is time here) |
 | $O(\cdot)$, $\Theta(\cdot)$, $\Omega(\cdot)$ | growth rates of a cost (Chapter 16) |
 | $\oplus$, $\gg$ | bitwise exclusive-or, and shift right (the pseudocode's `xor`, `>>`) |
-| $\gamma$ | a decay factor, e.g. in a learning-rate schedule (Chapter 2) |
+| $\gamma$ | a decay factor, e.g. in a learning-rate schedule (Chapter 2); in Volume II, Chapter 2, the factor $\gamma = \max_i \lvert 1 - \eta\lambda_i \rvert$ by which gradient descent on a quadratic shrinks the error per step |
 
 ## Probability and statistics
 
@@ -153,9 +158,11 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\mathcal{N}(\mu, \sigma^2)$ | Gaussian with mean $\mu$, variance $\sigma^2$ |
 | $\phi(z)$, $\Phi(z)$ | density and cumulative distribution function of $\mathcal{N}(0, 1)$ |
 | $\chi^2$ | the chi-square statistic or distribution |
+| $X^2$, $O_j$, $E$ | Pearson's chi-square statistic $X^2 = \sum_j (O_j - E)^2/E$ of the observed counts $O_j$ against the expected count $E$ (Chapter 17) |
 | $H(p)$ | entropy |
 | $H(p, q)$ | cross-entropy of $q$ relative to $p$ |
 | $H(X \mid Y)$, $I(X; Y)$ | conditional entropy and mutual information |
+| $H(X, Y)$ | joint entropy of two random variables $X$, $Y$ (the entropy of their joint distribution; two distributions $p, q$ as arguments, $H(p, q)$, mean cross-entropy) |
 | $D_{\mathrm{KL}}(p \,\Vert\, q)$ | Kullback-Leibler divergence |
 
 ## Learning
@@ -167,6 +174,11 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\mathcal{D} = \{(\mathbf{x}_n, y_n)\}_{n=1}^N$ | a dataset of $N$ examples |
 | $\hat{y}$ | a prediction (the hat marks an estimate) |
 | $L$, $\mathcal{L}$ | loss for one example, loss averaged over a batch or dataset |
+| $\mathcal{H}$ | the hypothesis space: all functions $f_\theta$ reached by varying $\theta$ (Volume II, Chapter 1) |
+| $E(\theta)$ | the average absolute error of $f_\theta$ on the known rows, with an argument (Volume II, Chapter 1; Chapter 2 of that volume replaces it by the loss $\mathcal{L}$) |
+| $\ell(\hat y, y)$, $\mathrm{MSE}$ | the loss of one prediction against its label, so $L = \ell(f_\theta(\mathbf{x}), y)$, and the mean squared error $\frac{1}{N}\sum_n (\hat y_n - y_n)^2$ (Volume II, Chapter 2) |
+| $\mathbf{X}$, $\mathbf{y}$, $\mathbf{w}$, $d$ | the feature matrix of shape $[N, d]$ (with a first column of ones when there is an intercept), the label vector of shape $[N]$, the weights of a model that is linear in its parameters ($\theta = \mathbf{w}$ there) and the number of features (Volume II) |
+| $\tau$, $\tau_g$, $\tau_\ell$ | tolerance of a stopping rule: in general, on the gradient norm, on the change of the loss (Volume II, Chapter 2) |
 | $\eta$ | learning rate; $\eta_{\max}$, $\eta_{\min}$ are the largest and smallest rate of a schedule |
 | $t$ | training step, or time in a sequence or a diffusion process |
 | $\sigma(x)$ | the logistic sigmoid $1/(1+e^{-x})$ (always written with an argument) |
@@ -184,10 +196,11 @@ is meant, and these rules decide the rest.
 | $H$ | italic $H$ in a shape is the number of heads or the height of an image; bold $\mathbf{H}$ is the Hessian; $H(p)$ with an argument is entropy |
 | $\Omega$ | alone, the sample space; followed by a function, $\Omega(n)$, a growth rate |
 | rank | the rank of a matrix is its number of independent columns; a tensor has a number of axes, never a rank |
-| hat | on a vector, $\hat{\mathbf{u}}$ is a unit vector; on a scalar or parameter ($\hat y$, $\hat p$) it is an estimate |
-| $\varepsilon$ | machine epsilon (Chapters 1 and 7); in Chapters 11 and 12 a tolerance in the law of large numbers, and the standard Gaussian noise vector of a diffusion step. Finite-difference and gradient-descent steps are written $h$ and $\eta$ |
+| hat | on a vector, $\hat{\mathbf{u}}$ is a unit vector; on a scalar or parameter ($\hat y$, $\hat p$) it is an estimate. The one vector exception is $\hat{\mathbf{y}} = \mathbf{X}\mathbf{w}$ (Volume II), the vector of predictions, an estimate of the labels $\mathbf{y}$ |
+| $\varepsilon$ | machine epsilon (Chapters 1 and 7); in Chapters 11 and 12 a tolerance in the law of large numbers, and the standard Gaussian noise vector of a diffusion step. In Volume II, Chapter 2, the Gaussian noise added to a label; the tolerances of its stopping rules are $\tau$. Finite-difference and gradient-descent steps are written $h$ and $\eta$ |
 | $\varphi$, $\phi$ | in Chapters 11 and 12 the standard Gaussian density (written $\varphi$ or $\phi$ alike); in Chapter 8 $\varphi(t)$ is the loss along a line |
 | $\lambda$ | an eigenvalue (Chapter 6); in Chapters 8 and 9 the curvature of the loss along an eigenvector of the Hessian, which is the eigenvalue |
+| $u$ | the unit round-off $2^{-p}$ (Chapter 15); in Chapter 17 a uniform random number in $[0, 1)$, written $u$, $u_1$, $u_2$. The Chapter 17 constant of the SplitMix64 generator is written `GAMMA`, never $\gamma$ |
 
 ## Units
 

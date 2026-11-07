@@ -13,11 +13,11 @@ Each public function without arguments returns a markdown string that the
 chapter embeds between `<!-- worked: project_numlib.<name> -->` markers: the
 acceptance tests, every expected value computed here by the library itself.
 
-Randomness: the library carries its own generator (SplitMix64). The only
-outside source is a named `bookrng` stream, used for the seeds the tests start
-from and for the independent reference values the tests are compared with; no
-module in the book carries a seed literal. The one literal state, zero, is the
-edge case a generator must handle and not a choice of seed.
+Randomness: the library carries its own generator (SplitMix64). Every test that
+draws random numbers takes its seed from `bookrng.seed_of("project_numlib.<test>")`
+and prints it with its draw order; no module in the book carries a seed literal
+and nothing here uses `bookrng.stream`. The one literal state, zero, is the edge
+case a generator must handle and not a choice of seed.
 
 Swedish Embedded AB implements solutions for verifiable numerical libraries.
 If your team needs expertise in numerical computing and machine learning
@@ -48,8 +48,13 @@ def _hex(v):
 
 
 def _seed(name):
-    """A 64-bit seed for the test called `name`, drawn from its frozen bookrng stream."""
-    return bookrng.stream("project_numlib." + name).getrandbits(64)
+    """The 64-bit seed of the test called `name`: the seed of the book's generator of that name."""
+    return bookrng.seed_of("project_numlib." + name)
+
+
+def _gen(name):
+    """The book's generator for the test `name`, started at its printed seed."""
+    return bookrng.generator("project_numlib." + name)
 
 
 def _g(v):
@@ -300,6 +305,23 @@ def matmul(a, b):
     return NDArray(c, (m, n)), ops
 
 
+def matmul_p_descending(a, b):
+    """The same product with each sum over p accumulated from p = k - 1 down to 0: a genuinely different
+    order of the additions, hence different rounding. Returns (C, multiply-adds)."""
+    (m, k), (k2, n) = a.shape, b.shape
+    if k != k2:
+        raise ValueError("inner dimensions differ")
+    c, ops = [], 0
+    for i in range(m):
+        for j in range(n):
+            acc = 0
+            for p in range(k - 1, -1, -1):
+                acc += a.get(i, p) * b.get(p, j)
+                ops += 1
+            c.append(acc)
+    return NDArray(c, (m, n)), ops
+
+
 def matmul_cases():
     a = _matrix([[1, 2, 3], [4, 5, 6]])
     b = _matrix([[7, 8], [9, 10], [11, 12]])
@@ -325,15 +347,23 @@ def matmul_cases():
 
 
 def matmul_float_agreement():
-    rng = SplitMix64(_seed("matmul_float"))
+    rng = _gen("matmul_float")
     a = NDArray([rng.uniform() - 0.5 for _ in range(16 * 16)], (16, 16))
     b = NDArray([rng.uniform() - 0.5 for _ in range(16 * 16)], (16, 16))
     c1, _ = matmul_naive(a, b)
     c2, _ = matmul(a, b)
-    worst = max(abs(x - y) for x, y in zip(c1.to_list(), c2.to_list()))
-    return (f"Two [16, 16] matrices with entries uniform in [-0.5, 0.5) from the seed {_hex(_seed('matmul_float'))} "
-            f"(A first, then B, row-major). The largest difference between the two loop orders is below "
-            f"1e-14: {worst < 1e-14}.")
+    c3, _ = matmul_p_descending(a, b)
+    same = max(abs(x - y) for x, y in zip(c1.to_list(), c2.to_list()))
+    other = max(abs(x - y) for x, y in zip(c1.to_list(), c3.to_list()))
+    return (f"Two [16, 16] matrices from the generator seeded with {_hex(_seed('matmul_float'))}: each entry is "
+            f"`uniform()` - 0.5, drawn in row-major order, all 256 entries of A first and then all 256 of B. "
+            f"Each output element is a sum of 16 products.\n\n"
+            f"- Loop orders i, j, p (`matmul_naive`) and i, p, j (`matmul`): every element accumulates its products in the "
+            f"same order p = 0, 1, ..., 15 starting from 0, so the two results are identical bit for bit; largest difference "
+            f"{_g(same)} (must be exactly 0).\n"
+            f"- A third version that accumulates each element from p = 15 down to p = 0 changes the order of the additions; "
+            f"largest difference from `matmul_naive` {_e(other)} (must be below 1e-14; a different order of additions may or may "
+            f"not change a given element, so the size printed is that of this reference only).")
 
 
 def operation_counts():
@@ -367,6 +397,40 @@ def kahan_sum(xs):
     return s
 
 
+def kahan_wrong_sign(xs):
+    """Mistake 1: the lost part stored with the opposite sign, c = y - (t - s), so it is added twice over."""
+    s, c = 0.0, 0.0
+    for x in xs:
+        y = x - c
+        t = s + y
+        c = y - (t - s)
+        s = t
+    return s
+
+
+def kahan_not_carried(xs):
+    """Mistake 2: c is reset to zero at the start of every step instead of being carried to the next one."""
+    s = 0.0
+    for x in xs:
+        c = 0.0
+        y = x - c
+        t = s + y
+        c = (t - s) - y
+        s = t
+    return s
+
+
+def kahan_wrong_correction(xs):
+    """Mistake 3: the carried part is added to the next term instead of subtracted, y = x + c."""
+    s, c = 0.0, 0.0
+    for x in xs:
+        y = x + c
+        t = s + y
+        c = (t - s) - y
+        s = t
+    return s
+
+
 def logsumexp(zs):
     if len(zs) == 0:
         raise ValueError("the log-sum-exp of nothing is undefined")
@@ -375,10 +439,20 @@ def logsumexp(zs):
         return -math.inf
     if m == math.inf:
         return math.inf
-    s = 0.0
+    s = 0.0                      # a plain left-to-right sum; kahan_sum gives the same digits on the table
     for z in zs:
         s += math.exp(z - m)
     return m + math.log(s)
+
+
+def exact_sum(xs):
+    """The correctly rounded sum of the stored doubles. Each finite double is an integer n over a power of two d
+    (float.as_integer_ratio); put all terms over the largest d, add the integers exactly, divide once
+    (Python's int / int rounds to nearest, ties to even)."""
+    ratios = [x.as_integer_ratio() for x in xs]
+    big = max(d for _, d in ratios)
+    total = sum(n * (big // d) for n, d in ratios)
+    return total / big
 
 
 def compensated_sums():
@@ -388,16 +462,35 @@ def compensated_sums():
              ("1.0, then 1e-8 repeated 10^6 times, then -1.0", [1.0] + [1e-8] * n + [-1.0])]
     rows = []
     for name, xs in cases:
-        exact = math.fsum(xs)
+        exact = exact_sum(xs)
+        assert exact == math.fsum(xs)
         scale = math.fsum(abs(x) for x in xs)
         ns, ks = naive_sum(xs), kahan_sum(xs)
         rows.append((name, _g(exact), _g(ns), _e(abs(ns - exact) / scale), _g(ks),
                      _e(abs(ks - exact) / scale)))
     out = _table(["input", "exact sum", "left to right", "error / sum of absolute values", "compensated", "error / sum of absolute values"],
                  rows, "lrrrrr")
-    out += ("\n\nThe exact sum is the correctly rounded sum of the stored 64-bit numbers. The compensated "
+    out += ("\n\nThe exact sum is computed this way: every 64-bit float is an integer over a power of two, so put all the "
+            "terms over the largest of those powers of two, add the integers exactly (with unbounded integers, or a "
+            "rational type), and round the exact total once to the nearest 64-bit float, ties to even. This module does so "
+            "(and checks it against `math.fsum`). The compensated "
             "error divided by the sum of absolute values must stay below 2.3e-16 (twice the unit round-off "
-            "of 1.1e-16), whatever the length.")
+            "of 1.1e-16), whatever the length. The error of a result r is |r - exact|, computed in 64-bit floats.")
+    variants = (("Kahan as in the chapter", kahan_sum), ("c = y - (t - s), the sign reversed", kahan_wrong_sign),
+                ("c reset to 0 at every step (never carried)", kahan_not_carried),
+                ("y = x + c, the carried part added instead of subtracted", kahan_wrong_correction))
+    rows = []
+    for label, fn in variants:
+        cells = [label]
+        for _, xs in cases:
+            exact = exact_sum(xs)
+            scale = math.fsum(abs(x) for x in xs)
+            err = abs(fn(xs) - exact) / scale
+            cells.append(f"{err:.3e} ({'passes' if err < 2.3e-16 else 'fails'})")
+        rows.append(tuple(cells))
+    out += ("\n\nThe acceptance test catches genuine mistakes in the update. Error divided by the sum of absolute values "
+            "on the three inputs above, in the same order, with the test result:\n\n"
+            + _table(["variant", "input 1", "input 2", "input 3"], rows, "lrrr"))
     return out
 
 
@@ -443,19 +536,21 @@ class _Scripted(SplitMix64):
 
 def splitmix_vectors():
     rows = []
-    for label, seed in (("zero (the edge case)", 0), ("a drawn seed", _seed("vectors"))):
+    for label, seed in (("zero (the edge case)", 0), ("a given seed", _seed("vectors"))):
         r = SplitMix64(seed)
         rows.append((label, _hex(seed), " ".join(_hex(r.next_u64()) for _ in range(4))))
-    out = _table(["seed", "value", "the first four next_u64 outputs"], rows, "llr")
+    out = ("Each line below starts a new generator at the stated seed (state = seed before the first call) and "
+           "makes the stated calls in order; `next_u64` is `next`.\n\n"
+           + _table(["seed", "value", "the first four next_u64 outputs"], rows, "llr"))
     seed = _seed("vectors")
     r = SplitMix64(seed)
-    out += f"\n\nFrom the drawn seed, uniform() x 4: {_flist([r.uniform() for _ in range(4)])}."
+    out += f"\n\nFrom the given seed, uniform() x 4: {_flist([r.uniform() for _ in range(4)])}."
     r = SplitMix64(seed)
-    out += f"\n\nFrom the drawn seed, integer(6) x 12: {_list([r.integer(6) for _ in range(12)])}."
+    out += f"\n\nFrom the given seed, integer(6) x 12: {_list([r.integer(6) for _ in range(12)])}."
     r = SplitMix64(seed)
-    out += f"\n\nFrom the drawn seed, normal() x 5: {_flist([r.normal() for _ in range(5)])}."
+    out += f"\n\nFrom the given seed, normal() x 5: {_flist([r.normal() for _ in range(5)])}."
     r = SplitMix64(seed)
-    out += f"\n\nFrom the drawn seed, shuffle of 0 .. 9: {_list(r.shuffle(list(range(10))))}."
+    out += f"\n\nFrom the given seed, shuffle of 0 .. 9: {_list(r.shuffle(list(range(10))))}."
     return out
 
 
@@ -475,13 +570,16 @@ def sampler_scripts():
     s = _Scripted([1 << 63, 0])
     rows.append(("uniform() on raw values 2^63, 0", "", f"returns {_g(s.uniform())} then {_g(s.uniform())}"))
     u1, u2 = 0.5, 0.25
-    s = _Scripted([int(u1 * (1 << 53)) << 11, int(u2 * (1 << 53)) << 11])
+    raw1, raw2 = int(u1 * (1 << 53)) << 11, int(u2 * (1 << 53)) << 11
+    s = _Scripted([raw1, raw2])
     z1 = s.normal()
     z2 = s.normal()
-    rows.append(("normal() twice on the uniforms u1 = 0.5, u2 = 0.25", "radius sqrt(-2 ln 0.5), angle pi / 2",
+    rows.append((f"normal() twice on the raw values {raw1} and {raw2} (the uniforms u1 = 0.5, u2 = 0.25)", "radius sqrt(-2 ln 0.5), angle pi / 2",
                  f"returns {_g(z1)} then {_g(z2)} using {s.used} raw values"))
     out = _table(["call", "rule", "result"], rows, "lll")
-    return out + "\n\nTolerance for the two normal values: 1e-12 absolute."
+    return (out + "\n\nA scripted source replays the listed raw values in order for `next`; \"consuming\" counts calls of `next`. "
+            "`integer(1)` has threshold 0, so it consumes exactly one raw value and returns 0. "
+            "Tolerance for the two normal values: 1e-12 absolute.")
 
 
 def shuffle_scripts():
@@ -491,13 +589,13 @@ def shuffle_scripts():
     out = (f"shuffle of 0, 1, 2, 3 when the three calls integer(4), integer(3), integer(2) are all fed the raw "
            f"value 4 (the remainders are 0, 1, 0, so the swaps are with j = 0, 1, 0): {_list(got)}, using {s.used} raw values.")
     counts = {}
-    rng = SplitMix64(_seed("shuffle_counts"))
+    rng = _gen("shuffle_counts")
     trials = 60000
     for _ in range(trials):
         o = tuple(rng.shuffle([0, 1, 2]))
         counts[o] = counts.get(o, 0) + 1
     rows = [(" ".join(map(str, o)), c, f"{c / trials:.4f}") for o, c in sorted(counts.items())]
-    out += (f"\n\nSix orders of three items, {trials:,} shuffles from the seed {_hex(_seed('shuffle_counts'))}; "
+    out += (f"\n\nSix orders of three items, {trials:,} shuffles one after the other, each of a fresh [0, 1, 2], from one generator seeded with {_hex(_seed('shuffle_counts'))}; "
             f"each count must lie within 5 standard deviations ({5 * math.sqrt(trials / 6 * 5 / 6):.0f}) of "
             f"{trials // 6:,}:\n\n" + _table(["order", "count", "frequency"], rows, "lrr"))
     return out
@@ -505,17 +603,20 @@ def shuffle_scripts():
 
 def normal_moments():
     n = 100_000
-    rng = SplitMix64(_seed("moments"))
+    rng = _gen("moments")
     xs = [rng.normal() for _ in range(n)]
-    mean = kahan_sum(xs) / n
-    var = kahan_sum([(x - mean) ** 2 for x in xs]) / (n - 1)
+    mean = naive_sum(xs) / n
+    var = naive_sum([(x - mean) ** 2 for x in xs]) / (n - 1)
     within1 = sum(1 for x in xs if abs(x) <= 1) / n
     rows = [("mean", f"{mean:.6f}", "0", f"{4 / math.sqrt(n):.4f} (4 standard errors)"),
             ("variance", f"{var:.6f}", "1", f"{4 * math.sqrt(2 / n):.4f}"),
             ("share with absolute value at most 1", f"{within1:.5f}", "0.68269", "0.0066")]
-    return (f"{n:,} values from normal(), seed {_hex(_seed('moments'))}. The measured column is what this "
-            f"reference produced; your values must equal it to 1e-9 if your generator is bit-exact, and must "
-            f"in any case lie within the stated distance of the exact value.\n\n"
+    return (f"{n:,} consecutive calls of normal() on one generator seeded with {_hex(_seed('moments'))}. The mean is the "
+            f"plain left-to-right sum divided by n; the variance is the plain sum of (x - mean)^2 divided by n - 1 "
+            f"(divisor n - 1); the share is the fraction of values with |x| <= 1. The measured column is what this "
+            f"reference produced: a bit-exact generator must match it to half a unit of the last printed digit "
+            f"(5e-7 for the mean and the variance, 5e-6 for the share), and any generator must lie within the stated distance of the "
+            f"exact value.\n\n"
             + _table(["quantity", "measured", "exact", "allowed distance"], rows, "lrrr"))
 
 
@@ -531,7 +632,8 @@ def derivative(f, x):
 
 
 def gradient(f, x):
-    """Central-difference gradient of f: list -> float, one coordinate at a time."""
+    """Central-difference gradient of f: list -> float, one coordinate at a time, each with the step rule of
+    `derivative` applied to that coordinate: h_i = eps^(1/3) max(1, |x_i|), divided by the difference of the two points used."""
     g = []
     for i in range(len(x)):
         h = EPS ** (1.0 / 3.0) * max(1.0, abs(x[i]))
@@ -682,19 +784,24 @@ def make_line_data(seed):
     return xs, ys
 
 
+def _plain_mean(vs):
+    """Plain left-to-right sum from 0.0 in index order, divided by the count: the summation order of the task."""
+    return naive_sum(vs) / len(vs)
+
+
 def line_loss(p, xs, ys):
-    return mean([(p[0] * x + p[1] - y) ** 2 for x, y in zip(xs, ys)])
+    return _plain_mean([(p[0] * x + p[1] - y) ** 2 for x, y in zip(xs, ys)])
 
 
 def line_gradient(p, xs, ys):
     r = [p[0] * x + p[1] - y for x, y in zip(xs, ys)]
-    return [2.0 * mean([ri * x for ri, x in zip(r, xs)]), 2.0 * mean(r)]
+    return [2.0 * _plain_mean([ri * x for ri, x in zip(r, xs)]), 2.0 * _plain_mean(r)]
 
 
 def fit_line_closed(xs, ys):
-    mx, my = mean(xs), mean(ys)
-    sxy = kahan_sum([(x - mx) * (y - my) for x, y in zip(xs, ys)])
-    sxx = kahan_sum([(x - mx) ** 2 for x in xs])
+    mx, my = _plain_mean(xs), _plain_mean(ys)
+    sxy = naive_sum([(x - mx) * (y - my) for x, y in zip(xs, ys)])
+    sxx = naive_sum([(x - mx) ** 2 for x in xs])
     slope = sxy / sxx
     return slope, my - slope * mx
 
@@ -714,9 +821,16 @@ def integration_run():
     ana = line_gradient(start, xs, ys)
     num = gradient(lambda q: line_loss(q, xs, ys), start)
     out = (f"Data: n = {N_POINTS} points, x_i = 4 i / 49, y_i = 2 x_i + 1 + 0.5 z_i, where z_0, z_1, ... are the "
-           f"first fifty normal() draws of the generator seeded with {_hex(seed)}.\n\n"
+           f"first fifty normal() draws of the generator seeded with {_hex(seed)}, taken in order; x_i is computed as "
+           f"4.0 * i / 49 and y_i as ((2 x_i) + 1) + 0.5 z_i. Every sum below (the means, the loss, the gradient, the "
+           f"closed-form sums) is a plain left-to-right sum starting from 0.0 in index order, not `kahan_sum`, and a mean "
+           f"is such a sum divided by n. The residual of point i is r_i = (a x_i + b) - y_i; the loss is the mean of r_i^2; "
+           f"the gradient entries are 2 times the mean of r_i x_i and 2 times the mean of r_i; a step replaces a by "
+           f"a - 0.05 g_a and b by b - 0.05 g_b, both gradient entries having been computed before either value changes. "
+           f"The numerical gradient uses the step rule of `derivative` on each coordinate. "
+           f"The lines about sizes below are tested by their stated bounds, not digit for digit.\n\n"
            f"- first three points: {_flist([xs[0], ys[0]])}, {_flist([xs[1], ys[1]])}, {_flist([xs[2], ys[2]])}\n"
-           f"- mean of y: {_g(mean(ys))}\n"
+           f"- mean of y: {_g(_plain_mean(ys))}\n"
            f"- gradient of the mean squared residual at (0, 0): analytic {_flist(ana)}, "
            f"numerical {_flist(num)}, check passes: {close(ana, num, 1e-6, 1e-8)}")
     p = fit_line_steps(xs, ys)
@@ -726,14 +840,14 @@ def integration_run():
             f"intercept {_g(p[1])}, mean squared residual {_g(line_loss(p, xs, ys))}\n"
             f"- the closed-form slope and intercept (slope = sum (x - mean x)(y - mean y) / sum (x - mean x)^2): "
             f"{_g(q[0])}, {_g(q[1])}; largest difference from the stepped values {_e(max(abs(p[0] - q[0]), abs(p[1] - q[1])))} "
-            f"(must be below 1e-6)\n"
-            f"- gradient at the stepped values: {_flist(ana)} (both entries below 1e-6 in absolute value)")
+            f"(must be below 1e-12)\n"
+            f"- gradient at the stepped values: {_flist(ana)} (both entries must be below 1e-12 in absolute value)")
     pairs = list(zip(xs, ys))
 
     def slope_of(sample):
         return fit_line_closed([s[0] for s in sample], [s[1] for s in sample])[0]
 
-    lo, hi = bootstrap_interval(pairs, slope_of, 2000, 0.95, SplitMix64(_seed("integration.bootstrap")))
+    lo, hi = bootstrap_interval(pairs, slope_of, 2000, 0.95, _gen("integration.bootstrap"))
     out += (f"\n- 95 percent bootstrap interval of the slope, resampling whole (x, y) pairs, 2000 resamples, generator "
             f"seeded with {_hex(_seed('integration.bootstrap'))}: [{_g(lo)}, {_g(hi)}]; it "
             f"{'contains' if lo <= TRUE_SLOPE <= hi else 'does not contain'} the true slope 2.")

@@ -1,33 +1,29 @@
-<!-- source-sha256: 477a12e063f5d241a54c09912b2c70d2114d096d90e4fb3df9c65177a35c999c -->
+<!-- source-sha256: cd355e7530ad8acc0f5889b4baad7c7145b8cc4c35b516050731eb0075fa965c -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
 <rect width="620" height="380" fill="#ffffff"/>
-<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
-<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.5</text>
-<line x1="176.26" y1="334" x2="176.26" y2="30" stroke="#edf2f7"/>
-<text x="176.26" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
-<line x1="294.52" y1="334" x2="294.52" y2="30" stroke="#edf2f7"/>
-<text x="294.52" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1.5</text>
-<line x1="412.78" y1="334" x2="412.78" y2="30" stroke="#edf2f7"/>
-<text x="412.78" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
-<line x1="531.04" y1="334" x2="531.04" y2="30" stroke="#edf2f7"/>
-<text x="531.04" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2.5</text>
+<line x1="219.19" y1="334" x2="219.19" y2="30" stroke="#edf2f7"/>
+<text x="219.19" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="420.67" y1="334" x2="420.67" y2="30" stroke="#edf2f7"/>
+<text x="420.67" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
 <line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
-<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
-<line x1="58" y1="252.93" x2="602" y2="252.93" stroke="#edf2f7"/>
-<text x="52" y="256.93" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">40</text>
-<line x1="58" y1="171.87" x2="602" y2="171.87" stroke="#edf2f7"/>
-<text x="52" y="175.87" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">60</text>
-<line x1="58" y1="90.8" x2="602" y2="90.8" stroke="#edf2f7"/>
-<text x="52" y="94.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">80</text>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="270" x2="602" y2="270" stroke="#edf2f7"/>
+<text x="52" y="274" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<line x1="58" y1="206" x2="602" y2="206" stroke="#edf2f7"/>
+<text x="52" y="210" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">40</text>
+<line x1="58" y1="142" x2="602" y2="142" stroke="#edf2f7"/>
+<text x="52" y="146" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">60</text>
+<line x1="58" y1="78" x2="602" y2="78" stroke="#edf2f7"/>
+<text x="52" y="82" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">80</text>
 <rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
 <clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
-<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="3.0" points="58,311.02 602,100.58"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="124.23,303.6 124.23,285.4"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="244.85,236.72 244.85,238.74"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="285.06,218.48 285.06,223.19"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="285.06,214.43 285.06,223.19"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="348.92,183.62 348.92,198.48"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="398.59,173.08 398.59,179.27"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="424.61,172.68 424.61,169.2"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="495.57,137.01 495.57,141.75"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="535.77,135.79 535.77,126.2"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="545.23,132.55 545.23,122.54"/><circle cx="124.23" cy="303.6" r="4" fill="#2f855a"/><circle cx="244.85" cy="236.72" r="4" fill="#2f855a"/><circle cx="285.06" cy="218.48" r="4" fill="#2f855a"/><circle cx="285.06" cy="214.43" r="4" fill="#2f855a"/><circle cx="348.92" cy="183.62" r="4" fill="#2f855a"/><circle cx="398.59" cy="173.08" r="4" fill="#2f855a"/><circle cx="424.61" cy="172.68" r="4" fill="#2f855a"/><circle cx="495.57" cy="137.01" r="4" fill="#2f855a"/><circle cx="535.77" cy="135.79" r="4" fill="#2f855a"/><circle cx="545.23" cy="132.55" r="4" fill="#2f855a"/></g>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="3.0" points="58,291.49 602,66.64"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="102.33,291.12 102.33,273.17"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="209.11,229.04 209.11,229.03"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="340.07,166.96 340.07,174.9"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="346.12,156.4 346.12,172.4"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="380.37,150 380.37,158.25"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="400.52,145.52 400.52,149.92"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="412.61,136.56 412.61,144.92"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="458.95,126 458.95,125.77"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="481.11,120.24 481.11,116.61"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.6" points="557.67,108.08 557.67,84.96"/><circle cx="102.33" cy="291.12" r="4" fill="#2f855a"/><circle cx="209.11" cy="229.04" r="4" fill="#2f855a"/><circle cx="340.07" cy="166.96" r="4" fill="#2f855a"/><circle cx="346.12" cy="156.4" r="4" fill="#2f855a"/><circle cx="380.37" cy="150" r="4" fill="#2f855a"/><circle cx="400.52" cy="145.52" r="4" fill="#2f855a"/><circle cx="412.61" cy="136.56" r="4" fill="#2f855a"/><circle cx="458.95" cy="126" r="4" fill="#2f855a"/><circle cx="481.11" cy="120.24" r="4" fill="#2f855a"/><circle cx="557.67" cy="108.08" r="4" fill="#2f855a"/></g>
 <text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">sensor voltage v (V)</text>
 <text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">temperature y (deg C)</text>
 <text x="310" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Least-squares line and its residuals</text>
 <line x1="432" y1="40" x2="452" y2="40" stroke="#2b6cb0" stroke-width="2"/>
-<text x="458" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">y = 22.57 v + 14.38  (MSE 5.60)</text>
+<text x="458" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">y = 26.02 v + 8.08  (MSE 13.15)</text>
 <line x1="432" y1="58" x2="452" y2="58" stroke="#9b2c2c" stroke-width="2"/>
 <text x="458" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">residuals</text>
 <circle cx="442" cy="76" r="3.5" fill="#2f855a"/>

@@ -266,6 +266,8 @@ gradient direction reaches $7.6158$, which is $\lVert\nabla L\rVert$ at this
 point. A brute-force search confirms that no direction does better:
 
 <!-- worked: multivariable.cauchy_schwarz_gradient -->
+Each direction is u = (cos t, sin t) with t = 2 pi times one uniform draw of the book's generator (Volume I, chapter 17), seed 18266694207942227462; 100000 draws in order.
+
 | quantity | value |
 |---|---:|
 | length of the gradient | 7.6158 |
@@ -1086,12 +1088,14 @@ random $\pm1$ directional check and a per-entry check with brain's tolerances
 ($4\times10^{-3}$ absolute, $8\times10^{-2}$ relative), over $1000$ random problems:
 
 <!-- worked: multivariable.gradcheck_toy -->
+One generator (Volume I, chapter 17), seed 10372158813470712557, draws the 1000 problems one after another: for each, X row by row, then t, then w, all with normal(), then the four directions, each entry +1 when integer(2) is 1 and -1 otherwise.
+
 | check | result over 1000 random problems |
 |---|---:|
-| relative size of the missing part, mean of ||missing|| / ||gradient|| | 0.321 |
-| best-of-4 random +-1 directions: bug accepted (check passes) | 547 of 1000 |
-| per-entry check: at least one entry fails | 986 of 1000 |
-| per-entry check: mean share of the 24 entries that fail | 0.732 |
+| relative size of the missing part, mean of ||missing|| / ||gradient|| | 0.310 |
+| best-of-4 random +-1 directions: bug accepted (check passes) | 579 of 1000 |
+| per-entry check: at least one entry fails | 984 of 1000 |
+| per-entry check: mean share of the 24 entries that fail | 0.729 |
 <!-- /worked -->
 
 The missing part is about a third of the gradient in size, and the directional

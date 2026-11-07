@@ -4,7 +4,7 @@
 """Contours of the sensor line's mean squared error with gradient descent at three learning rates.
 
 The contours are exact level sets of the quadratic bowl (ellipses built from the eigen-decomposition of the
-Hessian) and every path is produced by the chapter's update rule from (w, b) = (0, 0).
+Hessian) and every path is produced by the chapter's update rule from (w, b) = (0, 30).
 
 Swedish Embedded AB implements solutions for tuning optimisation procedures so that training converges. If your
 team needs expertise in learning rates and conditioning, you can procure our services by sending an email to
@@ -19,8 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import linear_regression as lr  # noqa: E402
 from svgplot import Plot  # noqa: E402
 
-STEPS = {0.01: 200, 0.20: 60, 0.23: 7}
-COLORS = {0.01: 1, 0.20: 2, 0.23: 3}
+STEPS = {0.01: 200, 0.20: 60, 0.24: 7}
+COLORS = {0.01: 1, 0.20: 2, 0.24: 3}
 
 
 def _contour(q, level):

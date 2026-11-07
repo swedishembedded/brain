@@ -598,13 +598,25 @@ $X[0]/N$). The question of the opening is answered.
 
 Real measurements are noisy, and the method still finds the frequencies. The figure
 shows 64 samples over one second: a hum at $3$ Hz of amplitude $2$, a tone at $11$ Hz of
-amplitude $1$, and Gaussian noise of standard deviation $0.3$ (Chapter 11), drawn from a
-frozen random stream. In the time domain nothing is evident. In the spectrum, two
+amplitude $1$, and Gaussian noise of standard deviation $0.3$ (Chapter 11). The sample at index
+$n = 0, \dots, 63$ is $2\cos(2\pi\cdot 3n/64) + \cos(2\pi\cdot 11n/64 + 1) + 0.3\,z_n$ with
+$z_n$ the $n$-th call of `rng.normal()`, 64 calls in sample order from the book's
+SplitMix64 generator with seed `0ad16a14ce1679e1` (hexadecimal; 779520848101276129).
+In the time domain nothing is evident. In the spectrum, two
 stems stand far above a low floor, at the planted frequencies and with
-amplitudes close to the planted ones ($2.01$ and $0.96$): the noise is spread evenly
+amplitudes close to the planted ones (the table below): the noise is spread evenly
 over all frequencies, and each frequency receives only a little of it.
 
-![Top: 64 noisy samples of a signal over one second, wandering between about -3 and 3. Bottom: its amplitude spectrum for k = 0 to 32, with two tall stems at k = 3 (amplitude 2.01) and k = 11 (amplitude 0.96) over a low floor of noise.](img/signal-spectrum.svg)
+<!-- worked: fourier.noisy_spectrum -->
+| amplitude 2 abs X[k] / N | value |
+|---|---:|
+| k = 3 (planted 2) | 2.04 |
+| k = 11 (planted 1) | 0.989 |
+| largest of k = 1 .. 32 except 3 and 11 | 0.131 |
+| mean of k = 1 .. 32 except 3 and 11 | 0.066 |
+<!-- /worked -->
+
+![Top: 64 noisy samples of a signal over one second, wandering between about -3 and 3. Bottom: its amplitude spectrum for k = 0 to 32, with two tall stems at k = 3 (amplitude 2.04) and k = 11 (amplitude 0.989) over a low floor of noise.](img/signal-spectrum.svg)
 
 Two special frequencies have simple meanings. $X[0] = \sum_n x[n]$ is the sum of
 all samples, $N$ times the average level. And for even $N$, $X[N/2] = \sum_n
@@ -655,7 +667,7 @@ $1, -i, -1, i, 1, -i, -1, i$. So $X[2] = 3 - i - 4 + i + 5 - 9i - 2 + 6i
 (the alternating sum). All eight outputs:
 
 <!-- worked: fourier.dft_eight_points -->
-The DFT of x = (3, 1, 4, 1, 5, 9, 2, 6).
+The DFT of x = (3, 1, 4, 1, 5, 9, 2, 6). Parts below 1e-12 in magnitude are flushed to +0 before the phase is taken, and atan2(0, -3) = 180 degrees.
 
 | k | real part | imaginary part | abs X[k] | phase (degrees) | conjugate of X[8-k] |
 |---|---:|---:|---:|---:|---:|
@@ -668,6 +680,13 @@ The DFT of x = (3, 1, 4, 1, 5, 9, 2, 6).
 | 6 | 2 | 3 | 3.606 | 56.31 | 2 + 3i |
 | 7 | -4.121 | -7.192 | 8.289 | -119.8 | -4.121 - 7.192i |
 <!-- /worked -->
+
+The magnitude and phase columns come from the complex value of each $X[k]$ with
+every part below $10^{-12}$ in magnitude flushed to $+0$ **before** the phase is
+taken: rounding leaves $X[4] = -3$ with an imaginary part of about $10^{-15}$ of
+either sign, and its phase would otherwise print as $+180$ or $-180$ by accident.
+With the flush, $X[4] = -3 + 0\mathrm{i}$ and `atan2(0, -3)` is $\pi$, that is
+$180^\circ$ (the pseudocode page defines `atan2(0, x)` for $x < 0$ as $\pi$).
 
 The last column is a check on a symmetry: for a real signal, $X[N - k]$ is the
 complex conjugate of $X[k]$. The reason is that $\omega^{(N-k)n} = \omega^{Nn}
@@ -759,6 +778,11 @@ $\langle \mathbf{w}_k, \mathbf{x}\rangle / \langle \mathbf{w}_k, \mathbf{w}_k\ra
 = X[k]/N$, where $\mathbf{w}_k[n] = \omega^{-kn}$. The Fourier transform
 re-expresses the same signal in a different basis, one made of waves.
 
+The table checks the inverse formula, then the **conjugate trick**
+$x[n] = \tfrac{1}{N}\,\overline{\operatorname{DFT}(\overline{X})}[n]$ (each bar conjugates every
+entry, $\operatorname{DFT}$ is the forward transform; the reason follows the table), then
+the energy:
+
 <!-- worked: fourier.dft_inverse_roundtrip -->
 | quantity | value |
 |---|---|
@@ -773,8 +797,7 @@ re-expresses the same signal in a different basis, one made of waves.
 
 The table shows three things. The round trip returns the signal to within
 rounding. The inverse can also be computed with the *forward* transform: take the
-conjugate of the spectrum, transform, conjugate the result and divide by $N$
-(because $\overline{\omega^{kn}} = \omega^{-kn}$, conjugating turns a forward
+conjugate of the spectrum, transform, conjugate the result and divide by $N$ (because $\overline{\omega^{kn}} = \omega^{-kn}$, conjugating turns a forward
 transform into an inverse one), the **conjugate trick** that lets one forward routine
 serve both directions. And the energy is preserved up to the factor $N$:
 $\sum_n |x[n]|^2 = \tfrac{1}{N}\sum_k |X[k]|^2$ (here both sides are $173$), the
@@ -932,8 +955,8 @@ $t = -i\cdot 3 = -3i$, and $X[2] = 2 - 3i$, $X[6] = 2 + 3i$.)
 The two half-length transforms can be split again, and again, until length $1$,
 where the transform of a single sample is the sample itself ($\omega^0 = 1$ and the
 sum has one term). This needs $N$ to be a power of two, $N = 2^p$, for the splitting
-to continue all the way down. In the book's pseudocode, with `complex` meaning a pair
-of reals as defined in this chapter:
+to continue all the way down. In the book's pseudocode, with `complex` and the imaginary unit `1i` as defined on the
+[pseudocode page](../pseudocode.md) (the letter `i` stays an ordinary index):
 
 ```text
 function fft(x: array<complex>[N]) -> array<complex>[N]:
@@ -949,7 +972,7 @@ function fft(x: array<complex>[N]) -> array<complex>[N]:
     O = fft(odd)
     X = zeros(complex, [N])
     for k in 0 .. N / 2:
-        t = exp(-2 * pi * i * k / N) * O[k]        # one twiddle multiplication
+        t = exp(-2 * pi * 1i * k / N) * O[k]        # one twiddle multiplication
         X[k] = E[k] + t
         X[k + N / 2] = E[k] - t
     return X
@@ -975,10 +998,14 @@ $$
 
 (two additions per butterfly and $N/2$ butterflies per level). The counters in
 the reference implementation count the operations actually performed and agree
-exactly with these formulas:
+exactly with these formulas. The multiplications counted include the trivial ones by
+$\omega^0 = 1$ (for $N = 8$, $7$ of the $12$ multiplications are by $\omega^0$), so the count
+is $\tfrac{N}{2}\log_2 N$ and not the smaller number a program would get by skipping them. The
+input of each row is $N$ calls of `rng.normal()` in turn (the counts do not depend on the values), from one
+generator, seed `f4c93e94fc6813c8` (hexadecimal; 17638698225184019400), rows in the order $N = 8, 16, 64, 256, 1024, 4096$:
 
 <!-- worked: fourier.operation_counts -->
-Complex multiplications by the definition (N rows of N products), and multiplications and additions counted while the recursive FFT ran; they equal (N/2) log2 N and N log2 N exactly.
+Complex multiplications by the definition (N rows of N products), and multiplications and additions counted while the recursive FFT ran, trivial twiddle multiplications by w^0 = 1 included; they equal (N/2) log2 N and N log2 N exactly.
 
 | N | DFT multiplications N^2 | FFT multiplications | FFT additions | N^2 / FFT multiplications |
 |---|---:|---:|---:|---:|
@@ -1020,7 +1047,7 @@ function fft_in_place(x: inout array<complex>[N]):
             start = b * size
             for k in 0 .. size / 2:
                 u = x[start + k]
-                t = exp(-2 * pi * i * k / size) * x[start + k + size / 2]
+                t = exp(-2 * pi * 1i * k / size) * x[start + k + size / 2]
                 x[start + k] = u + t
                 x[start + k + size / 2] = u - t
         size = size * 2
@@ -1053,7 +1080,10 @@ itself, and the stages touch memory in regular patterns, which is why it maps
 well onto hardware.
 
 The fast transform is the same function as the slow one, not an approximation
-of it. The two differ only by rounding:
+of it. The two differ only by rounding. Each row's signal is $N$ calls of
+`rng.normal()` in turn, one generator for all rows in the order $N = 8, 64, 256, 1024$, seed
+`daebf9d60e1ad71f` (hexadecimal; 15774976817550251807); the tolerance reported is
+$10^{-12}$ for the largest absolute difference over all entries:
 
 <!-- worked: fourier.fft_accuracy -->
 Random Gaussian signals; largest difference in double precision.
@@ -1235,10 +1265,25 @@ Signal length N = 4096. Direct: N M real multiplications. Through the FFT: three
 | 4,096 | 16,777,216 | 8,192 | 671,744 | 25 |
 <!-- /worked -->
 
+The costs of the table are exact integers under this cost model: direct $NM$ real
+multiplications; transform route $4\,(3\cdot\tfrac{L}{2}\log_2 L + L)$ with $L$ the smallest power of
+two at least $N + M - 1$. The crossover is the smallest $M$ at which the direct cost exceeds the
+transform route's:
+
+<!-- worked: fourier.convolution_crossover -->
+Cost model of the previous table, N = 4096. Kernel lengths with equal cost: 164. The first M at which the transform route is strictly cheaper (direct cost N M above FFT route cost) is M = 165, and it stays cheaper for every M up to 4096.
+
+| kernel length M | direct | transform length L | FFT route | verdict |
+|---:|---:|---:|---:|---|
+| 164 | 671,744 | 8,192 | 671,744 | equal cost |
+| 165 | 675,840 | 8,192 | 671,744 | transform route strictly cheaper |
+<!-- /worked -->
+
 The table is the honest picture. For a short kernel such as $3$ or $9$ weights,
 sliding is far cheaper: the transform route pays for three whole transforms
 regardless of how short the kernel is. As the kernel grows the balance tips: here
-somewhere between $129$ and $513$ weights, and at a kernel as long as the signal the
+the two routes cost exactly the same at $M = 164$ ($4096 \cdot 164 = 671{,}744$) and the
+transform route is strictly cheaper from $M = 165$ on (the table below), and at a kernel as long as the signal the
 transform route is $25$ times cheaper. This is what "makes convolution cheap"
 means: for long kernels the cost drops from the product $NM$ to about $L\log_2 L$.
 (Counts of multiplications ignore memory traffic and the extra work of padding,
@@ -1440,7 +1485,7 @@ Answers are at the end of the chapter.
 6. **[Calculate]** Convolve $x = (1, 2, 3)$ with $h = (1, -1)$ linearly. Pad both to length $4$ and compute the circular convolution. Verify the convolution theorem at $k = 0$ (the DFT of the output at $k = 0$ is the sum of the output; the product is $X[0]H[0]$).
 7. **[Implement]** Write `dft`, `idft` (from the formula, with exponents reduced modulo $N$) and the complex inner product. Reproduce `fourier.dft_eight_points`, `fourier.dft_orthogonality` and `fourier.dft_inverse_roundtrip`, including the conjugate trick.
 8. **[Implement]** Write the recursive radix-2 FFT with a counter of multiplications and additions. Reproduce `fourier.fft_split` and `fourier.operation_counts`, and then write the in-place version with bit reversal and reproduce `fourier.butterfly_schedule`.
-9. **[Implement]** Implement convolution through the transform with zero padding to a power of two. Reproduce `fourier.convolution_theorem`, `fourier.convolution_via_fft` and `fourier.convolution_cost`, and then find the kernel length at which the transform route first beats sliding for a signal of $4096$ samples.
+9. **[Implement]** Implement convolution through the transform with zero padding to a power of two. Reproduce `fourier.convolution_theorem`, `fourier.convolution_via_fft` and `fourier.convolution_cost`, and then find, with the cost model of that table, the smallest kernel length at which the transform route is strictly cheaper than sliding for a signal of $4096$ samples (reproduce `fourier.convolution_crossover`).
 10. **[Investigate]** Reproduce `fourier.dft_leakage`, then sweep the frequency of a cosine from $3.0$ to $4.0$ cycles per window in steps of $0.1$ and plot the amplitude estimate at $k = 3$ and $k = 4$. Where does the leakage vanish, and how does the width of the spread depend on the window length $N$?
 11. **[Investigate]** Compute $|H[k]|$ for moving averages of $3$, $5$ and $9$ weights and for the difference kernel $(1, -1)$, and plot them against $k$. Which are low-pass and which high-pass? Relate the difference kernel to a derivative (Chapter 7) and explain why it amplifies fast waves.
 12. **[Investigate]** Following `fourier.truncated_reconstruction`, keep only the lowest $K$ frequencies of (a) a slow ramp of $64$ samples and (b) a signal that jumps from $0$ to $1$ halfway. How quickly does the error fall with $K$ for each, and what does that say about when keeping low frequencies is a good approximation?

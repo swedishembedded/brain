@@ -57,7 +57,7 @@ function make(values: array<real>[S], shape: array<int>[R]) -> Array     # row-m
 function get(a: Array, index: array<int>[R]) -> real                    # require every index in bounds
 function set(a: inout Array, index: array<int>[R], value: real) -> none
 function transpose(a: Array, i: int, j: int) -> Array                     # swap two axes of shape and strides
-function slice(a: Array, start, stop, step: array<int>[R]) -> Array      # half-open, step >= 1
+function slice(a: Array, start, stop, step: array<int>[R]) -> Array      # half-open, 0 <= start <= stop <= dim, step >= 1
 function broadcast_shape(p: array<int>[P], q: array<int>[Q]) -> array<int>[max(P, Q)]
 function broadcast_to(a: Array, shape: array<int>[R]) -> Array           # stride 0 on stretched axes
 function add(a: Array, b: Array) -> Array                                # require equal shapes
@@ -65,7 +65,7 @@ function to_list(a: Array) -> array<real>[numel]                         # eleme
 function reshape(a: Array, shape: array<int>[Q]) -> Array                # view if contiguous, else copy
 ```
 
-`add` accepts only equal shapes. To add a column to a row you call `broadcast_to` on both, which is Chapter 5's explicit-broadcast policy. This is not a limitation to be fixed later; it is the design, because a silent broadcast is the origin of the attention-heads bug of that chapter.
+`slice` requires `0 <= start[k] <= stop[k] <= shape[k]` and `step[k] >= 1` on every axis (anything else is an error); `start[k] == stop[k]` gives an empty axis of size $0$. `reshape` of a contiguous view keeps the view's offset. `add` accepts only equal shapes. To add a column to a row you call `broadcast_to` on both, which is Chapter 5's explicit-broadcast policy. This is not a limitation to be fixed later; it is the design, because a silent broadcast is the origin of the attention-heads bug of that chapter.
 
 **Why it matters later.** Every tensor in Volumes III to XVI is this record. The transpose that costs nothing, the slice that aliases, and the reshape that sometimes copies explain why a model's layout change is free in one place and a copy of gigabytes in another (Volume IV), and why a kernel needs the strides as arguments.
 
@@ -123,7 +123,7 @@ function matmul(a: Array, b: Array) -> (Array, int):
     # computed from the strides directly; must accept transposed views
 ```
 
-The point of the pair is the standard method for checking an optimised routine: keep the slow obvious one as the oracle, and compare on inputs that exercise the awkward cases, here transposed (non-contiguous) operands. Compare exactly on integer-valued inputs, where every sum is exact in floating point, and with a tolerance on real-valued ones, where changing the loop order changes the rounding (Chapter 15). Add a function that, given three shapes, returns the cost of each of the two ways to bracket a product of three matrices; this is the same count used for sizing real models.
+The point of the pair is the standard method for checking an optimised routine: keep the slow obvious one as the oracle, and compare on inputs that exercise the awkward cases, here transposed (non-contiguous) operands. Compare exactly on integer-valued inputs, where every sum is exact in floating point. On real-valued inputs the two functions above also agree exactly, which is worth knowing rather than assuming: in both loop orders each output element accumulates its products in the same order, $p = 0, 1, \dots, k - 1$, starting from $0$, so every rounding happens at the same place. A difference in the rounding appears only when the order of the additions along $p$ changes (a version that sums from $p = k - 1$ down, a blocked version, a version split over workers, as in Volume IV), and then a tolerance is needed (Chapter 15). The check below includes one such order-changing version. Add a function that, given three shapes, returns the cost of each of the two ways to bracket a product of three matrices; this is the same count used for sizing real models.
 
 **Why it matters later.** The matrix product is the dominant cost of everything in Volumes III to VI. Volume IV, "Making Matrix Multiplication Fast", starts from exactly this loop nest and asks what the memory system does with it. The method of keeping a naive oracle beside a fast kernel returns in every kernel chapter.
 
@@ -142,7 +142,10 @@ Generated inputs A[i, j] = (3 i + 2 j) mod 5 - 2 with shape [4, 3] and B[j, k] =
 <!-- /worked -->
 
 <!-- worked: project_numlib.matmul_float_agreement -->
-Two [16, 16] matrices with entries uniform in [-0.5, 0.5) from the seed 0x0a0f4a8b93cf06ab (A first, then B, row-major). The largest difference between the two loop orders is below 1e-14: True.
+Two [16, 16] matrices from the generator seeded with 0x9c5e17297e131301: each entry is `uniform()` - 0.5, drawn in row-major order, all 256 entries of A first and then all 256 of B. Each output element is a sum of 16 products.
+
+- Loop orders i, j, p (`matmul_naive`) and i, p, j (`matmul`): every element accumulates its products in the same order p = 0, 1, ..., 15 starting from 0, so the two results are identical bit for bit; largest difference 0.0 (must be exactly 0).
+- A third version that accumulates each element from p = 15 down to p = 0 changes the order of the additions; largest difference from `matmul_naive` 2.220e-16 (must be below 1e-14; a different order of additions may or may not change a given element, so the size printed is that of this reference only).
 <!-- /worked -->
 
 <!-- worked: project_numlib.operation_counts -->
@@ -160,7 +163,7 @@ Chain of A [10, 100], B [100, 5], C [5, 50]: (A B) C costs 10*100*5 + 10*5*50 = 
 
 - Counting the additions that initialise the accumulator, or only the multiplications; fix the unit (one multiply-add) and document it.
 - Testing only square, contiguous, small-integer inputs. A routine that reads `b.strides[0]` where it meant `b.strides[1]` passes on a symmetric matrix.
-- Comparing floating-point results with `==` after changing the loop order. Use `close` (Pseudocode Conventions) with a tolerance derived from the bound of Chapter 15: for a sum of $k$ products of numbers of size $1$, a few times $k \cdot 1.1 \times 10^{-16}$.
+- Comparing floating-point results with `==` after changing the order of the additions along $p$ (a blocked, reversed or parallel version). Use `close` (Pseudocode Conventions) with a tolerance derived from the bound of Chapter 15: for a sum of $k$ products of numbers of size $1$, a few times $k \cdot 1.1 \times 10^{-16}$. Between the two loop orders of this milestone the result must be identical, and a nonzero difference there is a bug.
 
 ### Milestone 3: reductions that survive: compensated sum and log-sum-exp
 
@@ -171,7 +174,7 @@ function kahan_sum(x: array<real>[N]) -> real          # Chapter 15: running tot
 function logsumexp(z: array<real>[N]) -> real:
     require N > 0, "the log-sum-exp of nothing is undefined"
     # m = max(z); if m is minus infinity return minus infinity (all terms are zero)
-    # return m + log(sum(exp(z[i] - m)))
+    # return m + log(sum(exp(z[i] - m)))      # the sum is a plain left-to-right sum; kahan_sum is not needed
 ```
 
 Two details beyond the chapter. First, the language must not be allowed to "optimise" the compensation away: if your compiler has a fast-math mode, leave it off for this file, and let the acceptance test be the proof. Second, define what happens at the edges of `logsumexp`: a list of $-\infty$ must return $-\infty$ without computing $-\infty - (-\infty)$, which is not a number.
@@ -187,7 +190,16 @@ Two details beyond the chapter. First, the language must not be allowed to "opti
 | 10^6 copies of 0.1 | 100000.0 | 100000.00000133288 | 1.333e-11 | 100000.0 | 0.000e+00 |
 | 1.0, then 1e-8 repeated 10^6 times, then -1.0 | 0.01 | 0.00999999993922529 | 3.024e-11 | 0.010000000000000009 | 4.315e-18 |
 
-The exact sum is the correctly rounded sum of the stored 64-bit numbers. The compensated error divided by the sum of absolute values must stay below 2.3e-16 (twice the unit round-off of 1.1e-16), whatever the length.
+The exact sum is computed this way: every 64-bit float is an integer over a power of two, so put all the terms over the largest of those powers of two, add the integers exactly (with unbounded integers, or a rational type), and round the exact total once to the nearest 64-bit float, ties to even. This module does so (and checks it against `math.fsum`). The compensated error divided by the sum of absolute values must stay below 2.3e-16 (twice the unit round-off of 1.1e-16), whatever the length. The error of a result r is |r - exact|, computed in 64-bit floats.
+
+The acceptance test catches genuine mistakes in the update. Error divided by the sum of absolute values on the three inputs above, in the same order, with the test result:
+
+| variant | input 1 | input 2 | input 3 |
+|---|---:|---:|---:|
+| Kahan as in the chapter | 0.000e+00 (passes) | 0.000e+00 (passes) | 4.315e-18 (passes) |
+| c = y - (t - s), the sign reversed | 1.000e-10 (fails) | 1.892e-11 (fails) | 3.024e-11 (fails) |
+| c reset to 0 at every step (never carried) | 1.000e-10 (fails) | 1.333e-11 (fails) | 3.024e-11 (fails) |
+| y = x + c, the carried part added instead of subtracted | 1.000e-10 (fails) | 1.892e-11 (fails) | 3.024e-11 (fails) |
 <!-- /worked -->
 
 <!-- worked: project_numlib.logsumexp_cases -->
@@ -212,7 +224,7 @@ The first case is the clearest: each of the $10^6$ terms $10^{-16}$ is smaller t
 
 **Common mistakes.**
 
-- Writing Kahan's update as `c = t - s - y` and letting an optimiser reassociate it. The test with $10^6$ copies of $10^{-16}$ catches this at once.
+- Getting the compensation wrong. Three genuine mistakes, each shown in the last table of the check to fail the test on all three inputs: storing the lost part with the opposite sign (`c = y - (t - s)` instead of `c = (t - s) - y`), resetting `c` to zero at the start of every step so it is never carried, and adding the carried part instead of subtracting it (`y = x + c`). Separately, the correct line `c = (t - s) - y` is reduced to zero by a compiler that reassociates floating-point expressions (fast-math), which turns the compensated sum back into the plain one; the test with $10^6$ copies of $10^{-16}$ catches that at once.
 - Subtracting the maximum of the absolute values rather than the maximum of the values. For $z = (-1000, 0)$ the shift is $1000$, the exponents become $-2000$ and $-1000$, both underflow to zero, and the logarithm of zero follows.
 - Returning `log(0)` for a list of $-\infty$ and getting a silent $-\infty$ by accident in one language and an exception in another; test the case.
 
@@ -237,28 +249,30 @@ function normal(g: inout Generator) -> real      # Box-Muller; the sine half of 
 function shuffle(a: inout array<T>[n], g: inout Generator) -> none     # Fisher-Yates, i = n-1 down to 1, j = integer(g, i+1)
 ```
 
-The constants are in Chapter 17: $\gamma$ = `0x9E3779B97F4A7C15`, and the two multipliers `0xBF58476D1CE4E5B9` and `0x94D049BB133111EB`; the mixing steps are shifts by $30$, $27$ and $31$. Two choices are fixed here so that every implementation produces the same numbers. `normal` uses $u_1$ then $u_2$ as the two uniforms of a pair, computes $R = \sqrt{-2\ln(1 - u_1)}$ with angle $2\pi u_2$, returns $R\cos$ first and holds $R\sin$ for the next call. `shuffle` draws exactly one `integer(g, i + 1)` per position, from the last position down to position $1$.
+The constants are in Chapter 17: `GAMMA` = `0x9E3779B97F4A7C15`, and the two multipliers `0xBF58476D1CE4E5B9` and `0x94D049BB133111EB`; the mixing steps are shifts by $30$, $27$ and $31$. `integer(g, n)` needs the integer $2^{64}$ (Pseudocode Conventions: `int` is exact): in a language with only $64$-bit unsigned integers, compute the threshold $2^{64} \bmod n$ as $(2^{64} - n) \bmod n$ and treat $n = 2^{64}$ separately (threshold $0$, the result is the raw value). `integer(g, 1)` has threshold $0$, so it consumes one raw value and returns $0$. Two choices are fixed here so that every implementation produces the same numbers. `normal` uses $u_1$ then $u_2$ as the two uniforms of a pair, computes $R = \sqrt{-2\ln(1 - u_1)}$ with angle $2\pi u_2$, returns $R\cos$ first and holds $R\sin$ for the next call. `shuffle` draws exactly one `integer(g, i + 1)` per position, from the last position down to position $1$.
 
-**Why it matters later.** Every experiment in Volumes II to XVI starts from a seed, and a result you cannot reproduce is a result you cannot debug. The tests below are bit-exact on purpose: unlike almost everything else in this volume, the generator's output is an integer sequence that either matches or does not, and a match is a strong sign that the shifts, the constants and the order of operations are all right.
+**Why it matters later.** Every experiment in Volumes II to XVI starts from a seed, and a result you cannot reproduce is a result you cannot debug. Every seed below is simply given: a generator started at a seed has the state equal to that seed before its first call, and each test names the calls it makes, in order. The tests below are bit-exact on purpose: unlike almost everything else in this volume, the generator's output is an integer sequence that either matches or does not, and a match is a strong sign that the shifts, the constants and the order of operations are all right.
 
 **Check.** First the raw outputs, then each sampler.
 
 <!-- worked: project_numlib.splitmix_vectors -->
+Each line below starts a new generator at the stated seed (state = seed before the first call) and makes the stated calls in order; `next_u64` is `next`.
+
 | seed | value | the first four next_u64 outputs |
 |---|---|---:|
 | zero (the edge case) | 0x0000000000000000 | 0xe220a8397b1dcdaf 0x6e789e6aa1b965f4 0x06c45d188009454f 0xf88bb8a8724c81ec |
-| a drawn seed | 0xeee92eed57282b7f | 0x93379858eda86297 0x939d0883af1d4726 0xa832c83cb81404be 0xde42c506dd64e365 |
+| a given seed | 0x1ae7878f7339b9d1 | 0x82019ab349bc3cfe 0x99b68c4bee5953ab 0x62bccf3ef31e161b 0xfeeb97c64a796cba |
 
-From the drawn seed, uniform() x 4: [0.5750670640096884, 0.5766148873800505, 0.6570248745193368, 0.8682063237914863].
+From the given seed, uniform() x 4: [0.5078369796481049, 0.6004417119387189, 0.38569350516183243, 0.99578236189925].
 
-From the drawn seed, integer(6) x 12: [1, 0, 0, 3, 4, 0, 2, 1, 0, 5, 2, 1].
+From the given seed, integer(6) x 12: [4, 3, 1, 4, 1, 0, 2, 0, 1, 5, 2, 2].
 
-From the drawn seed, normal() x 5: [-1.1596169234912463, -0.6057527805223613, 0.9893695432072155, -1.0776560753760402, 0.9246539343033024].
+From the given seed, normal() x 5: [-0.9613924817297547, -0.7025774309350237, 0.9868325022600138, -0.02615738378654303, -1.1335887696961318].
 
-From the drawn seed, shuffle of 0 .. 9: [5, 8, 9, 7, 3, 4, 2, 6, 0, 1].
+From the given seed, shuffle of 0 .. 9: [6, 5, 8, 2, 9, 1, 7, 3, 0, 4].
 <!-- /worked -->
 
-The samplers are tested apart from the mixing by feeding them chosen raw values, so that a failure points at the right function:
+The samplers are tested apart from the mixing by feeding them chosen raw values (the `next` of the generator is replaced by a script that returns the listed raw values in order, whatever the generator record holds), so that a failure points at the right function:
 
 <!-- worked: project_numlib.sampler_scripts -->
 | call | rule | result |
@@ -267,36 +281,36 @@ The samplers are tested apart from the mixing by feeding them chosen raw values,
 | integer(3) on raw values 0, 1, 2, 3 | threshold = 2^64 mod 3 = 1 | returns 1 after consuming 2 raw values |
 | uniform() on raw value 2^64 - 1 | top 53 bits / 2^53 | returns 0.9999999999999999 |
 | uniform() on raw values 2^63, 0 |  | returns 0.5 then 0.0 |
-| normal() twice on the uniforms u1 = 0.5, u2 = 0.25 | radius sqrt(-2 ln 0.5), angle pi / 2 | returns 7.209557076787946e-17 then 1.1774100225154747 using 2 raw values |
+| normal() twice on the raw values 9223372036854775808 and 4611686018427387904 (the uniforms u1 = 0.5, u2 = 0.25) | radius sqrt(-2 ln 0.5), angle pi / 2 | returns 7.209557076787946e-17 then 1.1774100225154747 using 2 raw values |
 
-Tolerance for the two normal values: 1e-12 absolute.
+A scripted source replays the listed raw values in order for `next`; "consuming" counts calls of `next`. `integer(1)` has threshold 0, so it consumes exactly one raw value and returns 0. Tolerance for the two normal values: 1e-12 absolute.
 <!-- /worked -->
 
 <!-- worked: project_numlib.shuffle_scripts -->
 shuffle of 0, 1, 2, 3 when the three calls integer(4), integer(3), integer(2) are all fed the raw value 4 (the remainders are 0, 1, 0, so the swaps are with j = 0, 1, 0): [2, 3, 1, 0], using 3 raw values.
 
-Six orders of three items, 60,000 shuffles from the seed 0x946ba0054de053f3; each count must lie within 5 standard deviations (456) of 10,000:
+Six orders of three items, 60,000 shuffles one after the other, each of a fresh [0, 1, 2], from one generator seeded with 0xfbdd73e5b79c0300; each count must lie within 5 standard deviations (456) of 10,000:
 
 | order | count | frequency |
 |---|---:|---:|
-| 0 1 2 | 10063 | 0.1677 |
-| 0 2 1 | 9975 | 0.1663 |
-| 1 0 2 | 10044 | 0.1674 |
-| 1 2 0 | 9909 | 0.1651 |
-| 2 0 1 | 10070 | 0.1678 |
-| 2 1 0 | 9939 | 0.1656 |
+| 0 1 2 | 10020 | 0.1670 |
+| 0 2 1 | 9927 | 0.1655 |
+| 1 0 2 | 10038 | 0.1673 |
+| 1 2 0 | 10130 | 0.1688 |
+| 2 0 1 | 9990 | 0.1665 |
+| 2 1 0 | 9895 | 0.1649 |
 <!-- /worked -->
 
-The statistical test is a safeguard, not a proof: it checks that the mean and variance of the Gaussian are right to within what chance allows, and the share within one standard deviation matches $\operatorname{erf}(1/\sqrt{2})$.
+The statistical test is a safeguard, not a proof: it checks that the mean and variance of the Gaussian are right to within what chance allows, and the share within one standard deviation matches $\operatorname{erf}(1/\sqrt{2})$. The printed digits fix the tolerance of the bit-exact comparison: half a unit of the last printed digit, so $5 \times 10^{-7}$ for the mean and the variance (six decimals, variance with divisor $n - 1$) and $5 \times 10^{-6}$ for the share (five decimals).
 
 <!-- worked: project_numlib.normal_moments -->
-100,000 values from normal(), seed 0x1b2d73cf7089ac50. The measured column is what this reference produced; your values must equal it to 1e-9 if your generator is bit-exact, and must in any case lie within the stated distance of the exact value.
+100,000 consecutive calls of normal() on one generator seeded with 0xa2728c3aacc691ca. The mean is the plain left-to-right sum divided by n; the variance is the plain sum of (x - mean)^2 divided by n - 1 (divisor n - 1); the share is the fraction of values with |x| <= 1. The measured column is what this reference produced: a bit-exact generator must match it to half a unit of the last printed digit (5e-7 for the mean and the variance, 5e-6 for the share), and any generator must lie within the stated distance of the exact value.
 
 | quantity | measured | exact | allowed distance |
 |---|---:|---:|---:|
-| mean | -0.001638 | 0 | 0.0126 (4 standard errors) |
-| variance | 0.992686 | 1 | 0.0179 |
-| share with absolute value at most 1 | 0.68638 | 0.68269 | 0.0066 |
+| mean | 0.000529 | 0 | 0.0126 (4 standard errors) |
+| variance | 0.997224 | 1 | 0.0179 |
+| share with absolute value at most 1 | 0.68284 | 0.68269 | 0.0066 |
 <!-- /worked -->
 
 **Common mistakes.**
@@ -318,7 +332,8 @@ function derivative(f: function(real) -> real, x: real) -> real:
     return (f(xp) - f(xm)) / (xp - xm)        # divide by the step the arithmetic took
 
 function gradient(f: function(array<real>[N]) -> real, x: array<real>[N]) -> array<real>[N]:
-    # one central difference per coordinate, perturbing only that coordinate
+    # one central difference per coordinate, perturbing only that coordinate, with the step rule of derivative applied
+    # to that coordinate: h_i = eps^(1/3) * max(1, abs(x[i])), points x[i] +- h_i, divided by their difference
 
 function close(a: array<real>[N], b: array<real>[N], rtol: real, atol: real) -> bool
 ```
@@ -401,7 +416,7 @@ Twenty-five latencies in milliseconds: [18.9, 19.8, 22.7, 23.5, 25.9, 27.5, 28.3
 | standard error of the mean | 5.2047597446952345 |
 | normal-formula 95 percent interval mean -+ 1.96 se | [42.56667090039734, 62.96932909960266] |
 | median (position 0.5 (n - 1), interpolated) | 52.3 |
-| bootstrap interval of the mean, 2000 resamples, seed 0xaf99f7c164fe2124 | [43.2677, 63.04159999999999] |
+| bootstrap interval of the mean, 2000 resamples, seed 0x50f69f39ba1345b4 | [42.7829, 63.20119999999999] |
 | bootstrap interval of the median, same seed | [36.4, 67.0] |
 
 Ten identical values (3.0): standard error 0.0, bootstrap interval [3.0, 3.0].
@@ -409,7 +424,7 @@ Ten identical values (3.0): standard error 0.0, bootstrap interval [3.0, 3.0].
 The bootstrap draws, for each resample, n indices in order from integer(n), each used as the next value of the resample; the sorted statistics are read at positions 0.025 (R - 1) and 0.975 (R - 1) with linear interpolation. Tolerance: 1e-9 for a bit-exact generator.
 <!-- /worked -->
 
-The normal-formula interval and the bootstrap interval of the mean agree to within about a unit, as they did in Chapter 12; the difference is simulation noise plus the mild skew of the data. The interval of the median is wide, and is the same interval as in Chapter 12, for the same reason.
+The normal-formula interval and the bootstrap interval of the mean agree to within about a quarter of a millisecond at each end, as they did in Chapter 12; the difference is simulation noise plus the mild skew of the data. The interval of the median is wide, and is the same interval as in Chapter 12, for the same reason.
 
 **Common mistakes.**
 
@@ -435,23 +450,25 @@ $$
 $$
 Check the analytic gradient against `gradient` at the starting point $(0, 0)$ with `close`, `rtol = 1e-6`, `atol = 1e-8`, and stop with an error if the check fails. (Never step against a gradient you have not checked.)
 3. From $(a, b) = (0, 0)$ take $3000$ steps, each replacing $(a, b)$ by $(a, b) - 0.05\,\nabla L(a, b)$. This is the direction in which $L$ falls fastest (Chapter 8), taken with a small fixed step.
-4. Compare the result with the closed-form straight line through the points: slope $\sum_i (x_i - \bar x)(y_i - \bar y) \big/ \sum_i (x_i - \bar x)^2$ and intercept $\bar y - \text{slope}\cdot\bar x$. These are the values at which both partial derivatives vanish, and the stepped values must agree to $10^{-6}$.
+4. Compare the result with the closed-form straight line through the points: slope $\sum_i (x_i - \bar x)(y_i - \bar y) \big/ \sum_i (x_i - \bar x)^2$ and intercept $\bar y - \text{slope}\cdot\bar x$. These are the values at which both partial derivatives vanish, and the stepped values must agree with them to $10^{-12}$.
 5. Report a $95\%$ bootstrap interval for the slope. The units are the $(x_i, y_i)$ pairs, the statistic is the closed-form slope, there are $2000$ resamples, and the generator is a second one with the given second seed. The closed form is used inside the resamples because it is the quantity step 3 converges to, as step 4 has just verified, and it is $3000$ times cheaper.
+
+**Summation order.** Every sum in this task (the means, the loss, the gradient, the sums of the closed form) is a plain left-to-right sum in index order starting from $0.0$, divided by $n$ where a mean is meant; the compensated sum is not used here, so that the residual sizes below are those of one stated order. The residual of point $i$ is $r_i = (a x_i + b) - y_i$, the entries of the gradient are $2$ times the mean of $r_i x_i$ and $2$ times the mean of $r_i$, and $x_i$ is computed as $4.0 \cdot i / 49$ and $y_i$ as $((2 x_i) + 1) + 0.5 z_i$. A step computes both gradient entries before changing either value.
 
 **Why it matters later.** This is the shape of every experiment in the rest of the book, in miniature: generate data from a known truth, fit by following a checked gradient, and report the answer with its uncertainty. Volume II names the pieces and generalises them. The fact that the true slope $2$ is known lets you ask whether the interval does its job; the extension below asks for that over many repetitions.
 
 **Check.**
 
 <!-- worked: project_numlib.integration_run -->
-Data: n = 50 points, x_i = 4 i / 49, y_i = 2 x_i + 1 + 0.5 z_i, where z_0, z_1, ... are the first fifty normal() draws of the generator seeded with 0x40828d277338dad3.
+Data: n = 50 points, x_i = 4 i / 49, y_i = 2 x_i + 1 + 0.5 z_i, where z_0, z_1, ... are the first fifty normal() draws of the generator seeded with 0xee2df5014fee1a4d, taken in order; x_i is computed as 4.0 * i / 49 and y_i as ((2 x_i) + 1) + 0.5 z_i. Every sum below (the means, the loss, the gradient, the closed-form sums) is a plain left-to-right sum starting from 0.0 in index order, not `kahan_sum`, and a mean is such a sum divided by n. The residual of point i is r_i = (a x_i + b) - y_i; the loss is the mean of r_i^2; the gradient entries are 2 times the mean of r_i x_i and 2 times the mean of r_i; a step replaces a by a - 0.05 g_a and b by b - 0.05 g_b, both gradient entries having been computed before either value changes. The numerical gradient uses the step rule of `derivative` on each coordinate. The lines about sizes below are tested by their stated bounds, not digit for digit.
 
-- first three points: [0.0, 0.8663724171920144], [0.08163265306122448, 0.8784860821574205], [0.16326530612244897, 1.5834288408267119]
-- mean of y: 4.953031710134613
-- gradient of the mean squared residual at (0, 0): analytic [-25.37503930582669, -9.906063420269225], numerical [-25.37503930581351, -9.906063420474158], check passes: True
-- after 3000 steps of size 0.05 against the gradient from (0, 0): slope 2.0042846382288526, intercept 0.944462433676907, mean squared residual 0.301953443212281
-- the closed-form slope and intercept (slope = sum (x - mean x)(y - mean y) / sum (x - mean x)^2): 2.004284638228851, 0.944462433676911; largest difference from the stepped values 3.997e-15 (must be below 1e-6)
-- gradient at the stepped values: [3.0198066269804257e-15, -9.192646643896295e-16] (both entries below 1e-6 in absolute value)
-- 95 percent bootstrap interval of the slope, resampling whole (x, y) pairs, 2000 resamples, generator seeded with 0x57bc835c1a222ba7: [1.882669969129146, 2.136087609065885]; it contains the true slope 2.
+- first three points: [0.0, 0.09260678228575903], [0.08163265306122448, 1.454014127758748], [0.16326530612244897, 0.4866118588985201]
+- mean of y: 4.992342863230464
+- gradient of the mean squared residual at (0, 0): analytic [-25.52671648444706, -9.984685726460928], numerical [-25.52671648491968, -9.984685727485806], check passes: True
+- after 3000 steps of size 0.05 against the gradient from (0, 0): slope 2.002278724593641, intercept 0.9877854140431813, mean squared residual 0.2960145940850941
+- the closed-form slope and intercept (slope = sum (x - mean x)(y - mean y) / sum (x - mean x)^2): 2.0022787245936398, 0.9877854140431843; largest difference from the stepped values 2.998e-15 (must be below 1e-12)
+- gradient at the stepped values: [3.2862601528904635e-15, -8.881784197001252e-16] (both entries must be below 1e-12 in absolute value)
+- 95 percent bootstrap interval of the slope, resampling whole (x, y) pairs, 2000 resamples, generator seeded with 0x04b462cf8895c323: [1.8749999057354618, 2.121799586388773]; it contains the true slope 2.
 <!-- /worked -->
 
 **Common mistakes.**
@@ -472,21 +489,22 @@ The tests are the blocks printed in the milestones above, collected here as a ch
 | 1 | broadcast shapes; sum of column and row | as printed; `add` of unequal shapes refused | exact |
 | 2 | products of the two integer cases, both loop orders, transposed operand | as printed | exact |
 | 2 | multiply-add counts, chain costs | as printed | exact |
-| 2 | two $[16, 16]$ random matrices, naive against fast | largest difference below $10^{-14}$ | stated |
-| 3 | compensated sums of the three inputs | error divided by sum of absolute values below $2.3 \times 10^{-16}$ | stated |
+| 2 | two $[16, 16]$ random matrices: naive against fast (same order of additions along $p$) | largest difference exactly $0$ | exact |
+| 2 | the same matrices, naive against the version summing $p$ downwards | largest difference below $10^{-14}$ (the printed size is that of the reference only) | stated |
+| 3 | compensated sums of the three inputs, against the exactly rounded sum | error divided by sum of absolute values below $2.3 \times 10^{-16}$; the three wrong update rules fail | stated |
 | 3 | log-sum-exp table | as printed | $10^{-12}$ relative |
 | 3 | empty list | error raised | |
-| 4 | SplitMix64 outputs, seed $0$ and the drawn seed | as printed | bit-exact |
-| 4 | uniform, integer, shuffle sequences from the drawn seed | as printed | exact (floats to $10^{-15}$) |
-| 4 | normal sequence from the drawn seed; the scripted normal | as printed | $10^{-12}$ |
+| 4 | SplitMix64 outputs, seed $0$ and the given seed | as printed | bit-exact |
+| 4 | uniform, integer, shuffle sequences from the given seed | as printed | exact (floats to $10^{-15}$) |
+| 4 | normal sequence from the given seed; the scripted normal | as printed | $10^{-12}$ |
 | 4 | scripted integer, uniform and shuffle calls | as printed, including the number of raw values consumed | exact |
 | 4 | counts of the six orders of three items | each within five standard deviations | stated |
-| 4 | moments of $10^5$ normal values | as printed for a bit-exact generator | $10^{-9}$; otherwise stated distance |
+| 4 | moments of $10^5$ normal values (variance with divisor $n - 1$, plain sums) | as printed for a bit-exact generator | half a unit of the last printed digit ($5 \times 10^{-7}$, $5 \times 10^{-6}$ for the share); otherwise the stated distance |
 | 5 | derivative table | relative error below $10^{-6}$ in every row | stated |
 | 5 | gradient check | correct gradient passes; gradient with a term missing fails | stated |
 | 6 | mean, variance, standard error, median | as printed | $10^{-9}$ |
 | 6 | bootstrap intervals, identical values | as printed | $10^{-9}$ for a bit-exact generator |
-| 7 | the integration run | as printed | $10^{-9}$ for the data and first fit; $10^{-6}$ between stepped and closed form |
+| 7 | the integration run, plain left-to-right sums | data, gradients, fit and interval as printed; stepped against closed form and the gradient at the stepped values below $10^{-12}$ | $10^{-9}$ for the data, the fit and the interval; the size bounds are tested as stated |
 
 Two conventions apply to the whole list. A number printed with a seed was computed from a generator started at that seed and fed through your own generator, so a mismatch in a sampler's numbers with a matching raw sequence points at the sampler, and a mismatch in the raw sequence points at the mixing; test in that order. And where the table says "stated", the criterion is part of the test, not a number to copy: those are the statements that remain true on any correct implementation, including one that uses a different generator.
 

@@ -199,12 +199,14 @@ measured in bits (with $\ln$ in nats). A term with $p_k = 0$ is dropped, which
 is the convention $0 \log 0 = 0$: an outcome that never happens contributes
 nothing to the average, even though its own surprise would be infinite.
 
-The entropy of a few small distributions, in both units:
+The entropy of a few small distributions, in both units (the column `outcomes` counts
+the entries of the list, including a zero-probability one, so it is also the $K$ whose
+$\log_2 K$ is in the last column):
 
 <!-- worked: information.entropy_examples -->
 | distribution | outcomes | H in bits | H in nats | log_2 of outcome count |
 |---|---:|---:|---:|---:|
-| certain outcome (1, 0) | 1 | 0.0000 | 0.0000 | 1.0000 |
+| certain outcome (1, 0) | 2 | 0.0000 | 0.0000 | 1.0000 |
 | fair coin | 2 | 1.0000 | 0.6931 | 1.0000 |
 | coin with P(heads) = 0.9 | 2 | 0.4690 | 0.3251 | 1.0000 |
 | fair die | 6 | 2.5850 | 1.7918 | 2.5850 |
@@ -270,12 +272,14 @@ chance):
 | (0.7, 0.1, 0.1, 0.1) | 1.3568 |
 | (0.97, 0.01, 0.01, 0.01) | 0.2419 |
 | (0.25, 0.25, 0.5, 0) | 1.5000 |
-| best of 10,000 random distributions | 1.9984 |
+| best of 10,000 random distributions | 1.9991 |
 | mean of those 10,000 | 1.5637 |
 <!-- /worked -->
 
+Generator: the book's SplitMix64, seed 0x54010653beeb681d. Each of the 10,000 random distributions takes four calls of `rng.uniform()` in turn, `u`, and turns each into the exponential weight `-ln(1 - u)`; the four weights are divided by their sum. Entropies are in bits.
+
 No random distribution reaches $2$ bits, and the best of ten thousand comes
-within $0.002$ of it. The picture of the coin says the same for two outcomes: the
+within $0.0009$ of it. The picture of the coin says the same for two outcomes: the
 arch peaks in the middle. Why should it be true for any number of outcomes? An
 exchange argument gives the intuition. Take two outcomes with probabilities
 $a < b$ and move a small amount of probability from the larger to the smaller.
@@ -292,21 +296,22 @@ uniform is always more predictable.
 A language model that has read "the cat sat on the" assigns probabilities to the
 next word. Take the five-word distribution of Chapter 11 (obtained from the
 scores $(3, 2, 1, -1, 0)$ by the softmax) and two other contexts over the same
-five words, from a model that is nearly sure to one that cannot decide:
+five words (the scores are listed in the table; probabilities are printed to five
+decimals, entropies are computed from the unrounded probabilities), from a model that is nearly sure to one that cannot decide:
 
 <!-- worked: information.next_token_entropy -->
-| context | mat | floor | sofa | moon | the | H in bits |
-|---|---:|---:|---:|---:|---:|---:|
-| confident context | 0.990 | 0.007 | 0.002 | 0.000 | 0.001 | 0.097 |
-| the chapter's context | 0.636 | 0.234 | 0.086 | 0.012 | 0.032 | 1.443 |
-| undecided context | 0.250 | 0.226 | 0.205 | 0.152 | 0.168 | 2.298 |
-| uniform guess | 0.200 | 0.200 | 0.200 | 0.200 | 0.200 | 2.322 |
+| context | scores z | mat | floor | sofa | moon | the | H in bits |
+|---|---|---:|---:|---:|---:|---:|---:|
+| confident context | (6, 1, 0, -2, -1) | 0.98964 | 0.00667 | 0.00245 | 0.00033 | 0.00090 | 0.0973 |
+| the chapter's context | (3, 2, 1, -1, 0) | 0.63641 | 0.23412 | 0.08613 | 0.01166 | 0.03168 | 1.4427 |
+| undecided context | (0.4, 0.3, 0.2, -0.1, 0) | 0.24997 | 0.22619 | 0.20466 | 0.15162 | 0.16756 | 2.2979 |
+| uniform guess | (0, 0, 0, 0, 0) | 0.20000 | 0.20000 | 0.20000 | 0.20000 | 0.20000 | 2.3219 |
 <!-- /worked -->
 
 The entropy tells the three contexts apart in one number. The confident context
-has $0.097$ bits: the answer is "mat", almost always. The undecided one has
-$2.298$ bits, just under the $\log_2 5 = 2.322$ of a uniform guess. The context
-of Chapter 11 sits in between at $1.443$ bits, about one and a half yes/no
+has $0.0973$ bits: the answer is "mat", almost always. The undecided one has
+$2.2979$ bits, just under the $\log_2 5 = 2.3219$ of a uniform guess. The context
+of Chapter 11 sits in between at $1.4427$ bits, about one and a half yes/no
 questions per word. Entropy is a property of the *distribution* the model
 outputs, not of the word that then occurs: it measures how much the model
 itself is unsure, before the next word is revealed.
@@ -328,10 +333,15 @@ day. Can the average cost be lower if frequent symbols get shorter words?
 A way to build such a code by hand is the following, due to Huffman. Start with
 the symbols as leaves, each labelled with its probability. Repeatedly take the two
 nodes of smallest probability, join them under a new node whose probability is
-their sum, and label the two branches $0$ and $1$. Stop when one node remains;
-the code word of a symbol is the sequence of branch labels from the root to its
-leaf. For the weather this joins the two rarest symbols first ($0.1 + 0.2$), then
-the result with *cloud* ($0.3 + 0.3$), then everything with *sun*:
+their sum, and label the branch to the node taken *first* with $0$ and the
+branch to the node taken *second* with $1$. When several nodes have the same
+probability, the one created earlier is taken first (the symbols count as
+created in the order *sun*, *cloud*, *rain*, *snow*, before any merged node).
+Stop when one node remains; the code word of a symbol is the sequence of branch
+labels from the root to its leaf. For the weather this joins the two rarest symbols first ($0.1 + 0.2$), then
+the result with *cloud* ($0.3 + 0.3$), then everything with *sun*. The second merge is a genuine tie: the leaf *cloud*
+and the node made by merge 1 both have probability $0.3$, so by the rule the
+older one, *cloud*, is taken first and gets the branch $0$:
 
 <!-- worked: information.code_weather -->
 | merge | least likely | next least likely | new node |
@@ -357,7 +367,8 @@ The code words have lengths $1, 2, 3, 3$: short for the likely symbol, long for
 the unlikely ones. The average length is the expectation of the length, a sum of
 the table's last column, $0.40 + 0.60 + 0.60 + 0.30 = 1.90$ bits per day, better
 than the fixed $2.00$. The code is a prefix code because the symbols are the
-leaves of the tree: no leaf lies on the path to another. Try it on ten days:
+leaves of the tree: no leaf lies on the path to another. Reading the table from the second merge on, *snow* (taken first at merge 1)
+gets $0$ and *rain* gets $1$ under their node. Try it on ten days:
 
 <!-- worked: information.encode_message -->
 |  |  |
@@ -369,7 +380,9 @@ leaves of the tree: no leaf lies on the path to another. Try it on ten days:
 <!-- /worked -->
 
 The ten days cost $19$ bits instead of $20$ and decode back to the original, one
-word at a time.
+word at a time. Taking the *merged* node first at the tie would give *cloud* $11$,
+*rain* $101$ and *snow* $100$: different words, the same lengths $1, 2, 3, 3$ and
+the same average $1.90$ (Exercise 8 asks for this check).
 
 Compare the average length $1.90$ with the entropy $1.846$ of the same
 distribution (column $-\log_2 p$ in the table gives the ideal length of each
@@ -504,12 +517,14 @@ normalising):
 <!-- worked: information.gibbs_random -->
 | sharpening exponent | pairs | smallest KL | mean KL | largest KL | negative values |
 |---|---:|---:|---:|---:|---:|
-| 1.0 | 5000 | 0.0064 | 1.1518 | 7.0785 | 0 |
-| 2.0 | 5000 | 0.0053 | 3.0945 | 20.8263 | 0 |
-| 4.0 | 5000 | 0.0001 | 6.9668 | 46.7497 | 0 |
+| 1.0 | 5000 | 0.0010 | 1.1631 | 7.2592 | 0 |
+| 2.0 | 5000 | 0.0230 | 3.0880 | 18.2272 | 0 |
+| 4.0 | 5000 | 0.0024 | 6.8402 | 45.1569 | 0 |
 
 KL(p || p) for one random p: 0.0000.
 <!-- /worked -->
+
+Generator: the book's SplitMix64, seed 0x53316817d2c2f7a6. One generator, rows in the order exponent 1, 2, 4. A distribution on five outcomes takes five calls of `rng.uniform()` in turn; each `u` gives the weight `(-ln(1 - u))^s` for the row's exponent `s`, and the weights are divided by their sum. A pair is `p` drawn first, then `q`; each row uses 5000 pairs in turn. The last line draws one more `p` (exponent 1) from the same generator after the third row. KL is in bits.
 
 No pair is negative; the smallest values are tiny, and the divergence of a
 distribution from itself is exactly $0$. An experiment is evidence, not proof.
@@ -610,7 +625,8 @@ with $p$ the data and $q$ the model, so a model is pushed hard toward covering
 everything that occurs in the data.
 
 A pseudocode for the three quantities, in the conventions of
-[Pseudocode Conventions](../pseudocode.md), in nats:
+[Pseudocode Conventions](../pseudocode.md). All three use `log`, the natural logarithm, so
+they return **nats**; divide by `log(2)` for bits:
 
 ```text
 function entropy(p: array<real>[K]) -> real:
@@ -997,7 +1013,7 @@ Answers are at the end of the chapter.
 6. **[Calculate]** Two binary variables have the joint table $p(0,0) = 0.4$, $p(0,1) = 0.1$, $p(1,0) = 0.1$, $p(1,1) = 0.4$. Compute $I(X; Y)$ from the definition and as $H(X) - H(X \mid Y)$.
 7. **[Implement]** Write `entropy`, `cross_entropy` and `kl_divergence` (with the zero conventions) in your language and reproduce `information.entropy_examples`, `information.cross_entropy_models` and `information.perplexity_effective_choices`.
 8. **[Implement]** Implement Huffman's construction with a priority queue and reproduce `information.code_weather` (merges, code lengths $1, 2, 3, 3$ and average length $1.90$). Show that a different tie-breaking rule can change the code words but not the average length.
-9. **[Implement]** Compute the mutual information of the spam table from the counts of Chapter 10 and reproduce `information.mutual_information_table` and `information.mutual_information_entropies`, including the identity $I = H(X) + H(Y) - H(X, Y)$.
+9. **[Implement]** Compute the mutual information of the spam table (the counts of Chapter 10 are $1000$ times the probabilities in this chapter's tables: $180$ flagged spam, $40$ flagged ham, $20$ unflagged spam and $760$ unflagged ham) and reproduce `information.mutual_information_table` and `information.mutual_information_entropies`, including the identity $I = H(X) + H(Y) - H(X, Y)$.
 10. **[Investigate]** Estimate the entropy of the weather distribution from $n$ random days for $n = 5, 20, 100, 1000$ by computing the entropy of the observed frequencies, repeating each $n$ many times. Is the estimate too high or too low on average? Does it approach the true $1.846$ bits, and how fast?
 11. **[Investigate]** Divide the scores $(3, 2, 1, -1, 0)$ of the five-word example by a number $T$ before the softmax and compute the entropy for $T = 0.1, 0.5, 1, 2, 10$. What happens as $T \to 0$ and as $T \to \infty$, and why does it follow from this chapter?
 12. **[Investigate]** Fix $p = (0.5, 0.5)$ and $q = (0.5 + \epsilon,\ 0.5 - \epsilon)$ and compute both KL directions for small $\epsilon$. Then do it for $p = (0.99, 0.01)$ and $q = (1 - \delta, \delta)$ as $\delta \to 0$. Which direction blows up, and what does the answer say about a model that gives too little probability to a rare but real event?

@@ -27,6 +27,9 @@ from functools import lru_cache
 import bookrng
 import learning_problem as lp
 
+SECOND_METER_NAME = "linear_regression.second_meter"
+POWER_LAW_NAME = "linear_regression.power_law"
+
 TOL = 1e-3          # "converged": the loss is within this of its minimum (squared degrees)
 START = [30.0, 0.0]  # weights (w0, w1): the constant guess "30 degrees", slope zero
 STEP_CAP = 200_000  # a run that has not converged by then is reported as such
@@ -265,15 +268,16 @@ def rescored_attempts():
     vs, ys = _xy()
     x = _line_design(vs)
     w_ls, b_ls = _closed_form()[:2]
-    cases = [("attempt 1 (hand)", 24.0, 9.0), ("attempt 2 (hand)", 20.0, 15.0), ("attempt 3 (hand)", 20.0, 18.0),
-             ("best of the grid", 19.5, 20.0), ("least squares", w_ls, b_ls)]
+    w_grid, b_grid = lp._best_line(lp._train())[:2]
+    cases = [(f"attempt {k + 1} (hand)", w, b) for k, (w, b) in enumerate(lp.ATTEMPTS)]
+    cases += [("best of the grid", w_grid, b_grid), ("least squares", w_ls, b_ls)]
     body = []
     for name, w, b in cases:
         wv = [b, w]
         mse = _mse(x, ys, wv)
         body.append((name, f"{w:.3f}", f"{b:.3f}", f"{_mae(x, ys, wv):.2f}", f"{mse:.2f}", f"{math.sqrt(mse):.2f}"))
     return ("The same lines as the previous chapter, scored by the average absolute error E, by the mean squared "
-            "error and by its square root (in degrees).\n\n"
+            "error and by its square root (in degrees). Weights are shown to 3 decimals, scores to 2.\n\n"
             + _table(["line", "w", "b", "E (deg C)", "MSE (deg C^2)", "sqrt(MSE) (deg C)"], body))
 
 
@@ -287,7 +291,9 @@ def constant_model():
     for name, c in cands:
         body.append((name, f"{sum(abs(c - t) for t in ys) / len(ys):.3f}", f"{sum((c - t) ** 2 for t in ys) / len(ys):.3f}"))
     return ("A model with no feature at all: it answers one constant c for every voltage. Both losses over the ten "
-            "labels.\n\n" + _table(["c", "mean absolute error", "MSE"], body))
+            "labels of the sensor table. The median of ten labels is the mean of the 5th and 6th smallest; the "
+            "candidates c are the median and the mean at full precision (shown to 2 decimals), and 50 and 60.\n\n"
+            + _table(["c", "mean absolute error", "MSE"], body))
 
 
 def mse_first_attempt():
@@ -301,7 +307,7 @@ def mse_first_attempt():
         body.append((f"{v:.2f}", f"{t:.1f}", f"{p:.2f}", f"{r:+.2f}", f"{r * r:.4f}"))
     body.append(("", "", "", "total", f"{tot:.4f}"))
     body.append(("", "", "", f"MSE = total / {len(ys)}", f"{tot / len(ys):.4f}"))
-    return "Attempt 1 (w = 24, b = 9) with squared errors.\n\n" + _table(
+    return "Attempt 1 (w = 24, b = 9) with squared errors, computed from the unrounded predictions.\n\n" + _table(
         ["v", "label y", "prediction", "prediction - y", "squared"], body)
 
 
@@ -329,7 +335,8 @@ def closed_form_line():
             ("slope w = S_vy / S_vv", f"{w:.4f}"), ("intercept b = mean y - w mean v", f"{b:.4f}"),
             ("MSE at (w, b)", f"{_mse(x, ys, [b, w]):.4f}"),
             ("dMSE/dw at (w, b)", f"{g[1]:.1e}"), ("dMSE/db at (w, b)", f"{g[0]:.1e}")]
-    return _table(["quantity", "value"], rows, "lr")
+    return ("Gradient entries and the sums below are zero up to rounding noise: a reproduction agrees when their size is "
+            "below 1e-9, whatever digits it prints.\n\n" + _table(["quantity", "value"], rows, "lr"))
 
 
 def line_residuals():
@@ -338,7 +345,8 @@ def line_residuals():
     body = [(f"{v:.2f}", f"{t:.1f}", f"{w * v + b:.2f}", f"{t - (w * v + b):+.2f}") for v, t in zip(vs, ys)]
     sr = sum(t - (w * v + b) for v, t in zip(vs, ys))
     body.append(("", "", "sum of residuals", f"{sr:+.1e}"))
-    return ("The least-squares line and its residuals (label minus prediction).\n\n"
+    return ("The least-squares line and its residuals (label minus prediction). The sum of residuals is zero up to rounding "
+            "noise (agreement: size below 1e-9).\n\n"
             + _table(["v", "label y", "prediction", "residual y - prediction"], body))
 
 
@@ -385,15 +393,21 @@ def projection_check():
             ("r . r", f"{sum(e * e for e in r):.4f}"),
             ("y_hat . y_hat + r . r", f"{sum(p * p for p in yh) + sum(e * e for e in r):.4f}"),
             ("y_hat . r", f"{sum(p * e for p, e in zip(yh, r)):+.1e}")]
-    return ("The fitted vector y_hat = X w and the residual r = y - X w, as vectors in 10 dimensions.\n\n"
+    return ("The fitted vector y_hat = X w and the residual r = y - X w, as vectors in 10 dimensions. The two dot products "
+            "with the columns of X and the last one are zero up to rounding noise (agreement: size below 1e-9); "
+            "the other rows are shown to 4 decimals.\n\n"
             + _table(["quantity", "value"], rows, "lr"))
 
 
 # ----------------------------------------- when X^T X breaks: collinearity
 
+METER_SD = 0.003
+
+
 def _second_meter(vs):
-    rng = bookrng.stream("linear_regression.second_meter")
-    return [round(v + rng.gauss(0.0, 0.003), 4) for v in vs]
+    """The second meter's readings: for each voltage in table order, v + METER_SD * rng.normal(), rounded to 4 decimals."""
+    rng = bookrng.generator(SECOND_METER_NAME)
+    return [round(v + METER_SD * rng.normal(), 4) for v in vs]
 
 
 def collinear_features():
@@ -406,7 +420,10 @@ def collinear_features():
     out.append("Case A: the third column is the voltage in millivolts, exactly 1000 v.")
     out.append("")
     wl = _closed_form()[0]
-    out.append(f"Elimination on X^T X: {'a pivot vanishes, so X^T X has no inverse' if _solve(ge, _matvec(_transpose(xe), ys)) is None else 'a solution was found'}"
+    out.append(f"The millivolt column is computed as 1000.0 * v in floating point. Elimination with partial pivoting on "
+               f"X^T X declares a pivot vanishing when it is smaller than 1e-12 times the largest entry of its column "
+               f"(or 1e-12, if that entry is below 1); the rank counts eigenvalues above 1e-9 of the largest. "
+               f"Elimination on X^T X: {'a pivot vanishes, so X^T X has no inverse' if _solve(ge, _matvec(_transpose(xe), ys)) is None else 'a solution was found'}"
                f" (rank {_rank(ge)} of 3). Every (w1, w2) with w1 + 1000 w2 = {wl:.4f} gives the same predictions, for example "
                f"({wl:.4f}, 0) and (0, {wl / 1000:.7f}).")
     out.append("")
@@ -418,16 +435,23 @@ def collinear_features():
     ys2[4] += 0.5
     w_a = _least_squares(xn, ys)
     w_b = _least_squares(xn, ys2)
-    p = lambda w: w[0] + w[1] * 1.80 + w[2] * 1.80
-    out.append("Case B: the third column is a second meter reading the same voltage, differing by a few millivolts "
-               "(Gaussian disagreement of standard deviation 0.003 V). Labels of the second run: row 5 raised by 0.5.")
+    p = lambda w: w[0] + (w[1] + w[2]) * lp.ASK_V
+    out.append(f"Case B: the third column is a second meter reading the same voltage, differing by a few millivolts. "
+               f"{lp._generator_line(SECOND_METER_NAME)} For the ten rows in table order, one `rng.normal()` each, the "
+               f"second meter reads v + {METER_SD} * rng.normal() rounded to 4 decimals. Labels of the second run: "
+               f"row 5 raised by 0.5.")
+    out.append("")
+    out.append(_table(["row n"] + [str(i + 1) for i in range(len(vs))],
+                      [("meter 1 (V)",) + tuple(f"{v:.2f}" for v in vs), ("meter 2 (V)",) + tuple(f"{v:.4f}" for v in v2)]))
     out.append("")
     out.append(_table(
-        ["labels", "b", "w (meter 1)", "w' (meter 2)", "prediction at 1.80 V on both"],
+        ["labels", "b", "w (meter 1)", "w' (meter 2)", f"prediction at {lp.ASK_V:.2f} V on both"],
         [("original", f"{w_a[0]:.2f}", f"{w_a[1]:.1f}", f"{w_a[2]:.1f}", f"{p(w_a):.2f}"),
          ("row 5 + 0.5", f"{w_b[0]:.2f}", f"{w_b[1]:.1f}", f"{w_b[2]:.1f}", f"{p(w_b):.2f}")]))
     out.append("")
-    out.append(f"Eigenvalues of X^T X: {', '.join(_sci(l, 3) for l in lam)}; condition number {_sci(lam[0] / lam[-1], 3)}.")
+    out.append(f"Eigenvalues of X^T X in case B: {', '.join(_sci(l, 3) for l in lam)}; condition number "
+               f"{_sci(lam[0] / lam[-1], 3)}. Weights are shown to 1 decimal (2 for b); they are the solution of the "
+               f"normal equations by elimination with partial pivoting, accurate to far more digits than shown.")
     return "\n".join(out)
 
 
@@ -484,7 +508,12 @@ def curvature():
     return _table(["quantity", "value"], rows, "lr")
 
 
-RATES = (("too small", 0.01), ("good", 0.20), ("too large", 0.23))
+RATES = (("too small", 0.01), ("good", 0.20), ("too large", 0.24))
+
+
+def _wnum(v):
+    """A weight to 2 decimals (thousands separated), or in 3-digit scientific form from 10^6 in size."""
+    return _sci(v, 2) if abs(v) >= 1e6 else f"{v:,.2f}"
 
 
 def gd_three_rates():
@@ -496,12 +525,16 @@ def gd_three_rates():
         row = [str(k)]
         for name, _ in RATES:
             wv = paths[name][k]
-            row += [f"({wv[1]:.2f}, {wv[0]:.2f})", _sci(_mse(x, ys, wv), 2)]
+            row += [f"({_wnum(wv[1])}, {_wnum(wv[0])})", _sci(_mse(x, ys, wv), 2)]
         body.append(tuple(row))
     heads = ["step k"]
     for name, eta in RATES:
         heads += [f"(w, b), eta={eta}", "MSE"]
     return ("Gradient descent from (w, b) = (0, 30), the constant guess of 30 degrees, on the ten sensor rows, unscaled voltage. "
+            "Row k shows the weights after k updates w <- w - eta * gradient (k = 0 is the start), with learning rates "
+            "0.01, 0.2 and 0.24, and the MSE there. Weights and MSE values are shown to 2 decimals (thousands separated by commas), and numbers of "
+            "10^6 or more in size as a mantissa with 3 significant digits times a power of ten. The eta = 0.24 "
+            "column diverges (it grows by a factor of about 1.08 per step), so its late rows agree only in their leading digits. "
             f"The minimum is at ({q.w_star[1]:.2f}, {q.w_star[0]:.2f}) with MSE {_mse(x, ys, q.w_star):.4f}.\n\n"
             + _table(heads, body))
 
@@ -509,7 +542,7 @@ def gd_three_rates():
 def stability_table():
     x, ys, q = _raw()
     lam1, lam2 = q.lams
-    etas = [0.01, 0.05, 0.10, 0.20, q.best_eta, 0.22, 0.23]
+    etas = [0.01, 0.05, 0.10, 0.20, q.best_eta, 0.23, 0.24]
     g0 = q.gap(START)
     body = []
     for eta in etas:
@@ -522,7 +555,10 @@ def stability_table():
             bound_s = "none"
         body.append((f"{eta:.4f}", f"{f1:.4f}", f"{f2:.4f}", f"{worst:.4f}", bound_s, _steps_to_tol(q, START, eta)))
     return (f"Curvatures lambda_max = {lam1:.4f}, lambda_min = {lam2:.4f}; 2 / lambda_max = {2 / lam1:.4f}. "
-            f"Steps until the loss is within {TOL} of its minimum, from (w, b) = (0, 30).\n\n"
+            f"Steps k: the smallest k with loss(w_k) - minimum < {TOL}, from (w, b) = (0, 30); a run whose loss "
+            f"exceeds 1e12 above the minimum is reported as diverging, and one that needs more than {STEP_CAP:,} steps "
+            f"as such. Bound: ceil(ln({TOL} / gap_0) / (2 ln(worst factor))) with gap_0 = {g0:.1f} the starting "
+            f"loss minus the minimum.\n\n"
             + _table(["learning rate", "|1 - eta lambda_max|", "|1 - eta lambda_min|", "worst factor",
                       "bound from the worst factor", "steps measured"], body))
 
@@ -534,7 +570,8 @@ def convergence_rate():
     path = _descend(x, ys, START, eta, 400)
     gaps = [q.gap(w) for w in path]
     body = [(str(k), f"{gaps[k]:.3e}", f"{gaps[k + 1] / gaps[k]:.4f}") for k in (0, 1, 2, 5, 10, 50, 100, 300)]
-    return (f"Gradient descent at learning rate {eta}. The factors are |1 - eta lambda| = "
+    return (f"Gradient descent at learning rate {eta} from (w, b) = (0, 30). With gap_k the loss at step k minus the "
+            f"minimum, the table lists gap_k and gap_(k+1) / gap_k. The factors are |1 - eta lambda| = "
             f"{abs(1 - eta * q.lams[0]):.4f} and {abs(1 - eta * q.lams[1]):.4f}; the predicted late ratio is the square of the "
             f"larger, {worst ** 2:.4f}.\n\n"
             + _table(["step k", "loss - minimum", "ratio of the next gap to this one"], body))
@@ -549,8 +586,9 @@ def stopping_criteria():
         kb, wb, _ = q.run(START, eta, lambda k, w, g, p, gn: gn < 1e-3)
         rows.append((f"{eta}", f"{ka:,}", _sci(q.gap(wa), 2), f"{q.dist(wa):.4f}",
                      f"{kb:,}", _sci(q.gap(wb), 2), f"{q.dist(wb):.4f}"))
-    return (f"Two stopping rules from (w, b) = (0, 30): stop when the loss changes by less than 1e-6 in a step, or when the "
-            f"gradient norm is below 1e-3. For the second, the distance to the minimum is at most 1e-3 / lambda_min = "
+    return (f"Two stopping rules from (w, b) = (0, 30). Loss-change rule: stop at the first k >= 1 for which "
+            f"|loss(w_(k-1)) - loss(w_k)| < 1e-6. Gradient rule: stop at the first k >= 0 for which the Euclidean norm of "
+            f"the gradient at w_k is below 1e-3. The step count is k, the number of updates made. For the second, the distance to the minimum is at most 1e-3 / lambda_min = "
             f"{1e-3 / lam_min:.4f}.\n\n"
             + _table(["learning rate", "loss-change rule: steps", "loss - minimum", "distance to minimum",
                       "gradient rule: steps", "loss - minimum", "distance to minimum"], rows))
@@ -573,8 +611,12 @@ def scaling_conditioning():
         measured = _steps_to_tol(q, START, eta)
         body.append((name, _sci(q.lams[0], 3), _sci(q.lams[-1], 3), _sci(q.kappa, 3), _sci(eta, 3), measured,
                      f"{predicted:,}"))
-    return (f"Same ten rows, same model, three ways of writing the voltage (z-score: mean {mv:.3f}, standard "
-            f"deviation {sv:.3f}). Best learning rate and steps to get the loss within {TOL} of its minimum, from (w, b) = (0, 30).\n\n"
+    return (f"Same ten rows, same model, three ways of writing the voltage (z-score z = (v - mean) / s with mean "
+            f"{mv:.3f} and standard deviation s = {sv:.3f}, divisor N - 1 = 9; millivolts are 1000 v). Best learning rate "
+            f"2 / (lambda_max + lambda_min) and steps k, the smallest k with loss(w_k) - minimum < {TOL}, from (w, b) = "
+            f"(0, 30) in the units of the column (for z-scores, the weights of the column of ones and of z are "
+            f"started at 30 and 0); a run is cut off at {STEP_CAP:,} steps. The predicted bound is "
+            f"ceil(ln({TOL} / gap_0) / (2 ln((kappa - 1) / (kappa + 1)))).\n\n"
             + _table(["feature", "lambda_max", "lambda_min", "condition number", "best eta", "steps measured",
                       "steps predicted (bound)"], body))
 
@@ -586,10 +628,10 @@ def scaled_fit_matches():
     w_raw = w1 / s
     b_raw = w0 - w1 * m / s
     wr, br = _closed_form()[:2]
-    return _table(["fit", "slope", "intercept", "prediction at 1.80 V"],
-                  [("z-scored: (w1, w0) = " + f"({w1:.4f}, {w0:.4f})", "", "", f"{w0 + w1 * (1.8 - m) / s:.4f}"),
-                   ("mapped back: w1 / s, w0 - w1 m / s", f"{w_raw:.4f}", f"{b_raw:.4f}", f"{w_raw * 1.8 + b_raw:.4f}"),
-                   ("raw volts, closed form", f"{wr:.4f}", f"{br:.4f}", f"{wr * 1.8 + br:.4f}")], "lrrr")
+    return _table(["fit", "slope", "intercept", f"prediction at {lp.ASK_V:.2f} V"],
+                  [("z-scored: (w1, w0) = " + f"({w1:.4f}, {w0:.4f})", "", "", f"{w0 + w1 * (lp.ASK_V - m) / s:.4f}"),
+                   ("mapped back: w1 / s, w0 - w1 m / s", f"{w_raw:.4f}", f"{b_raw:.4f}", f"{w_raw * lp.ASK_V + b_raw:.4f}"),
+                   ("raw volts, closed form", f"{wr:.4f}", f"{br:.4f}", f"{wr * lp.ASK_V + br:.4f}")], "lrrr")
 
 
 # ---------------------------------------------------- linear in disguise
@@ -609,8 +651,11 @@ def polynomial_fit():
         cond_z = _cond(_gram(_poly_design(zs, deg)))
         body.append((name, "(" + ", ".join(f"{c:.2f}" for c in w) + ")", f"{_mse(x, ys, w):.3f}",
                      f"{_mse(xf, fy, w):.3f}", _sci(cond_raw, 2), _sci(cond_z, 2)))
-    return ("Polynomial features of the voltage, fitted by the normal equations on the ten rows. Weights are "
-            "(w0, w1, ...) from the constant term up; the fresh rows are the 2000 of the previous chapter.\n\n"
+    return ("Polynomial features of the voltage (columns 1, v, v^2, ...), fitted by the normal equations on the ten rows. "
+            "Weights are (w0, w1, ...) from the constant term up; the fresh rows are the 2000 of the previous chapter "
+            "(rounded as there, scored without refitting). MSE is shown to 3 decimals. cond(X^T X) is the largest "
+            "eigenvalue over the smallest; the last column builds the columns from the z-score of v (mean and "
+            "standard deviation of the ten voltages, divisor 9) instead of v.\n\n"
             + _table(["model", "weights", "MSE, 10 known rows", "MSE, 2000 fresh rows",
                       "cond(X^T X), raw v", "cond(X^T X), z-scored v"], body))
 
@@ -621,10 +666,10 @@ def _cond(a):
 
 
 def power_law_log_fit():
-    rng = bookrng.stream("linear_regression.power_law")
+    rng = bookrng.generator(POWER_LAW_NAME)
     e_true, a_true, alpha_true = 0.5, 10.0, 0.3
     sizes = [1e3, 3e3, 1e4, 3e4, 1e5, 3e5, 1e6]
-    losses = [(e_true + a_true * n ** (-alpha_true)) * (1 + 0.01 * rng.gauss(0.0, 1.0)) for n in sizes]
+    losses = [(e_true + a_true * n ** (-alpha_true)) * (1 + 0.01 * rng.normal()) for n in sizes]
     out = []
     cands = []
     for e in (0.0, 0.25, 0.5, 0.6):
@@ -640,11 +685,15 @@ def power_law_log_fit():
         sst = sum((b - my) ** 2 for b in ys)
         cands.append((e, -slope, math.exp(icpt), 1 - sse / sst))
     body1 = [(f"{n:,.0f}", f"{l:.4f}") for n, l in zip(sizes, losses)]
-    out.append("Seven (size, loss) points generated from L = 0.5 + 10 N^-0.3 with multiplicative noise of one percent.")
+    out.append(f"Seven (size, loss) points generated from L = 0.5 + 10 N^-0.3 with multiplicative noise of one percent: "
+               f"{lp._generator_line(POWER_LAW_NAME)} For the sizes in the order listed, one `rng.normal()` each, the loss "
+               f"is (0.5 + 10 N^-0.3) * (1 + 0.01 * rng.normal()).")
     out.append("")
     out.append(_table(["N", "loss L"], body1))
     out.append("")
-    out.append("For each candidate floor E, a straight-line fit of log(L - E) against log N (slope = -alpha, intercept = log A):")
+    out.append("For each candidate floor E, an ordinary least-squares line (closed form of the chapter, natural logarithms) "
+               "of log(L - E) against log N (slope = -alpha, intercept = log A); R^2 = 1 - SS_res / SS_tot of that "
+               "line, with SS_tot the sum of squares of log(L - E) about its mean:")
     out.append("")
     out.append(_table(["candidate E", "alpha", "A", "R^2 of the log-space fit"],
                       [(f"{e:.2f}", f"{al:.4f}", f"{a:.3f}", f"{r2:.5f}") for e, al, a, r2 in cands]))

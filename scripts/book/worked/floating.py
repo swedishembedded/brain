@@ -32,6 +32,7 @@ import bookrng
 
 getcontext().prec = 60
 
+UNIFORM_NAME = "floating.sum_uniform"   # names the generator of the uniform summands
 U32 = 2.0 ** -24   # unit round-off of the 32-bit format
 U64 = 2.0 ** -53   # unit round-off of the 64-bit format
 INF = math.inf
@@ -195,9 +196,14 @@ def million_tenths():
             ["32-bit, left to right", _g(_naive32(xs), 9), _sci(_rel(_naive32(xs), exact))],
             ["32-bit, pairwise", _g(_pairwise32(xs), 9), _sci(_rel(_pairwise32(xs), exact))],
             ["32-bit, compensated (Kahan)", _g(_kahan32(xs), 9), _sci(_rel(_kahan32(xs), exact))],
-            ["32-bit terms added in a 64-bit accumulator", _g(f32(_sum64(xs)), 9), _sci(_rel(f32(_sum64(xs)), exact))]]
-    return (f"The sum of 10^6 copies of the stored value of 0.1 (exact sum of the stored 32-bit copies: "
-            f"{float(exact):.6f}).\n\n" + _table(["method", "computed sum", "relative error"], rows, "lrr"))
+            ["32-bit terms added in a 64-bit accumulator, total rounded to 32 bits", _g(f32(_sum64(xs)), 9),
+             _sci(_rel(f32(_sum64(xs)), exact))]]
+    return (f"The sum of 10^6 copies of the stored value of 0.1. Relative errors are measured against the exact "
+            f"sum of the stored copies, computed in exact rational arithmetic (a Fraction): "
+            f"{float(exact):.6f} for the 32-bit copies of 0.1 ({_g(float(tenth32), 12)} each) and, for the first row, "
+            f"{float(n * Fraction(0.1)):.15f} for the 64-bit copies. The 64-bit accumulator of the last row holds "
+            f"{_sum64(xs):.9f} before it is rounded to the nearest 32-bit number.\n\n"
+            + _table(["method", "computed sum", "relative error"], rows, "lrr"))
 
 
 # --------------------------------------------------------- the toy format
@@ -302,15 +308,20 @@ def rounding_error_table():
 
 def rounding_agreement():
     """Check the exact rounder against the hardware conversion on random doubles."""
-    rng = bookrng.stream("floating.rounding_agreement")
+    name = "floating.rounding_agreement"
+    rng = bookrng.generator(name)
     n, bad = 20000, 0
     for _ in range(n):
-        x = rng.uniform(-1, 1) * 10.0 ** rng.uniform(-30, 30)
+        a = rng.uniform()
+        b_ = rng.uniform()
+        x = (2.0 * a - 1.0) * 10.0 ** (60.0 * b_ - 30.0)
         a = _round32(Fraction(x))
         b = f32(x)
         if (a == "inf" or a == "-inf") or Fraction(b) != a:
             bad += 1
-    return f"Exact rounding of {n} random doubles to 32 bits against the hardware conversion: {bad} disagreements."
+    return (f"Exact rounding of {n} random doubles to 32 bits against the hardware conversion: {bad} disagreements. "
+            f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x}. Each double is x = (2a - 1) * 10^(60b - 30) "
+            f"from two draws, a then b, both `uniform()`.")
 
 
 def ties_to_even():
@@ -380,14 +391,15 @@ def _sum_errors(kind, ns):
     """Relative errors of naive, pairwise, and Kahan 32-bit sums at the prefix lengths in ns.
 
     kind "tenths": every term is the stored 32-bit value of 0.1.
-    kind "uniform": terms drawn uniformly from (0, 1) and rounded to 32 bits.
+    kind "uniform": terms drawn uniformly from [0, 1) by the book generator and rounded to 32 bits;
+    the row for n sums the first n terms of one list of max(ns) draws.
     """
     n_max = max(ns)
     if kind == "tenths":
         xs = [f32(0.1)] * n_max
     else:
-        rng = bookrng.stream("floating.sum_uniform")
-        xs = [f32(rng.random()) for _ in range(n_max)]
+        rng = bookrng.generator(UNIFORM_NAME)
+        xs = [f32(rng.uniform()) for _ in range(n_max)]
     out = {}
     s, k_s, c = 0.0, 0.0, 0.0
     marks = set(ns)
@@ -417,13 +429,17 @@ def sum_error_curves(ns):
 def sum_methods():
     rows = []
     for kind, label, ns in (("tenths", "copies of 0.1", (10 ** 3, 10 ** 4, 10 ** 5, 10 ** 6)),
-                            ("uniform", "uniform in (0, 1)", (10 ** 3, 10 ** 4, 10 ** 5))):
+                            ("uniform", "uniform in [0, 1)", (10 ** 3, 10 ** 4, 10 ** 5))):
         errs = _sum_errors(kind, ns)
         for n in ns:
             ex, a, b, c = errs[n]
             rows.append([label, f"10^{round(math.log10(n))}", _sci(float(ex), 4), _sci((n - 1) * U32, 1),
                          _sci(float(a)), _sci(float(b)), _sci(float(c))])
-    return ("Relative error of a 32-bit sum of n terms, against the exact sum of the stored terms.\n\n"
+    return ("Relative error of a 32-bit sum of n terms, against the exact sum of the stored terms (exact rational "
+            "arithmetic). Copies of 0.1: the 32-bit number nearest 0.1, n times. Uniform: the first n of 10^5 values "
+            f"`uniform()` drawn in order from the book's SplitMix64 with seed {bookrng.seed_of(UNIFORM_NAME):#018x}, "
+            "each rounded to 32 bits; the three row sizes use prefixes of the same list. Pairwise is the layer-by-layer "
+            "algorithm below.\n\n"
             + _table(["terms", "n", "exact sum", "worst-case bound (n-1)u", "left to right", "pairwise", "Kahan"], rows,
                      "llrrrrr"))
 
@@ -442,8 +458,11 @@ def kahan_trace():
         exact += Fraction(x)
         rows.append([step, _sci(y, 3), f"{t - 1:.4e}", _sci(c_new, 3), f"{naive - 1:.4e}", f"{float(exact - 1):.4e}"])
         s, c = t, c_new
-    return (f"Start at s = 1 in 32 bits and add x = {x:.6e} eight times (half the gap above 1 is "
-            f"{U32:.3e}, so one such x alone is lost). Columns show the part above 1.\n\n"
+    return (f"The loop of `kahan_sum` started from s = 1, c = 0 (instead of s = 0, c = 0) in 32 bits, adding "
+            f"x = f32(4e-8) = {float(x):.10e} eight times (half the gap above 1 is "
+            f"{U32:.3e}, so one such x alone is lost). Columns show the part above 1: 'Kahan s - 1' is the stored s minus 1 "
+            f"(exact, by Sterbenz), 'left to right' is the plain 32-bit sum started at 1, and 'exact sum - 1' is "
+            f"k * f32(4e-8) for step k in exact rational arithmetic, the sum of the stored copies, not k * 4e-8.\n\n"
             + _table(["step", "y = x - c", "Kahan s - 1", "new c", "left to right s - 1", "exact sum - 1"], rows))
 
 
@@ -479,29 +498,36 @@ def one_plus_x():
         stable = math.expm1(x)
         rows.append([f"1e-{k}", repr(d) if d != 0 else "0.0", _sci(float(abs(Decimal(d) - Decimal(x)) / Decimal(x))),
                      _sci(float(abs(Decimal(naive) - ex) / ex)), _sci(float(abs(Decimal(stable) - ex) / ex))])
-    return ("In 64 bits. The first error column compares (1 + x) - 1 with x; the other two compare e^x - 1 "
-            "computed naively and with `expm1` against the true value.\n\n"
+    return ("In 64 bits. x is the 64-bit number nearest the decimal shown. The first error column compares (1 + x) - 1 "
+            "with that stored x; the other two compare e^x - 1 computed naively and with `expm1` against the true "
+            "value of e^x - 1 at the same stored x, computed in 60-digit decimal arithmetic. Errors are relative.\n\n"
             + _table(["x", "(1 + x) - 1", "relative error", "exp(x) - 1: error", "expm1(x): error"], rows))
 
 
 def sterbenz():
-    rng = bookrng.stream("floating.sterbenz")
+    name = "floating.sterbenz"
+    rng = bookrng.generator(name)
     n = 100000
     near_bad = far_bad = 0
     for _ in range(n):
-        y = f32(rng.uniform(1.0, 2.0) * 2.0 ** rng.randint(-20, 20))
-        x = f32(y * rng.uniform(0.5, 2.0))
+        y = f32((1.0 + rng.uniform()) * 2.0 ** (rng.integer(41) - 20))
+        x = f32(y * (0.5 + 1.5 * rng.uniform()))
         if not (y / 2 <= x <= 2 * y):
             x = y
         d = x - y                      # exact in 64 bits for 32-bit operands of similar size
         if f32(d) != d:
             near_bad += 1
-        x2 = f32(y * rng.uniform(4.0, 5.0))
+        x2 = f32(y * (4.0 + rng.uniform()))
         d2 = x2 - y
         if f32(d2) != d2:
             far_bad += 1
     return (f"Subtracting two 32-bit numbers x, y: when y/2 <= x <= 2y the stored difference was inexact in "
-            f"{near_bad} of {n} random cases; when x is 4 to 5 times y it was inexact in {far_bad} of {n}.")
+            f"{near_bad} of {n} random cases; when x is 4 to 5 times y it was inexact in {far_bad} of {n}. "
+            f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x}. Each case draws, in this order, "
+            f"`uniform()` a, `integer(41)` k, `uniform()` b, `uniform()` c: y = f32((1 + a) * 2^(k - 20)), "
+            f"x = f32(y * (0.5 + 1.5 b)) (replaced by y if that falls outside [y/2, 2y]), "
+            f"and for the second count x = f32(y * (4 + c)). The difference x - y is exact in 64 bits for these "
+            f"operands, and 'inexact' means it is not a 32-bit number.")
 
 
 def quadratic():
@@ -516,7 +542,9 @@ def quadratic():
         exact = (-D + (D * D - 4 * Decimal(c)).sqrt()) / 2
         rows.append([f"1e{k}", _g(naive, 10), _g(stable, 10), _g(float(exact), 10),
                      _sci(float(abs(Decimal(naive) - exact) / abs(exact))), _sci(float(abs(Decimal(stable) - exact) / abs(exact)))])
-    return ("The smaller-magnitude root of x^2 + b x + 1 = 0, in 64 bits.\n\n"
+    return ("The smaller-magnitude root of x^2 + b x + 1 = 0, in 64 bits (b exactly 10^k, c = 1). The true root is "
+            "(-b + sqrt(b^2 - 4)) / 2 evaluated in 60-digit decimal arithmetic from the same b; the errors are "
+            "relative.\n\n"
             + _table(["b", "(-b + sqrt(b^2 - 4)) / 2", "c / q with q = -(b + sqrt(b^2 - 4)) / 2", "true root",
                       "error of the first", "error of the second"], rows))
 
@@ -548,17 +576,24 @@ def variance():
     n = 1000
     for name, rnd, offsets in (("32-bit", f32, (1e1, 1e2, 1e3, 1e4)), ("64-bit", lambda v: v, (1e4, 1e8, 1e9))):
         for off in offsets:
-            rng = bookrng.stream(f"floating.variance.{name}.{off:g}")
-            data = [rnd(off + rng.gauss(0.0, 1.0)) for _ in range(n)]
+            gen_name = f"floating.variance.{name}.{off:g}"
+            rng = bookrng.generator(gen_name)
+            data = [rnd(off + rng.normal()) for _ in range(n)]
             fr = [Fraction(x) for x in data]
             mu = sum(fr) / n
             true = sum((x - mu) ** 2 for x in fr) / n
             a, b, c = _var_methods(data, rnd)
             rows.append([name, f"10^{round(math.log10(off))}", f"{float(true):.6f}", f"{a:.6g}", _sci(float(_rel(a, true))),
-                         _sci(float(_rel(b, true))), _sci(float(_rel(c, true)))])
-    return (f"Variance of {n} values offset + a standard normal, population form (divide by n).\n\n"
+                         _sci(float(_rel(b, true))), _sci(float(_rel(c, true))),
+                         f"{bookrng.seed_of(gen_name):#018x}"])
+    return (f"Variance of {n} values offset + z, z standard normal, population form (divide by n). The values are "
+            f"rounded to the format after the addition. Each row has its own generator, the book's SplitMix64 with the "
+            f"seed in the last column; the {n} values are its first {n} `normal()` draws in order. The true variance and "
+            f"all errors are against the exact rational variance of the stored values (mean of the squared deviations "
+            f"from the exact mean). Each format's arithmetic rounds every operation to that format; the one-pass "
+            f"formula accumulates sum x and sum x^2 left to right, divides both by n, and subtracts.\n\n"
             + _table(["format", "offset", "true variance", "E[X^2] - E[X]^2", "its error", "two-pass error",
-                      "Welford error"], rows))
+                      "Welford error", "seed"], rows))
 
 
 # ------------------------------------------------ conditioning
@@ -694,7 +729,12 @@ def lse_table():
             row += [_g(lse_naive(zs, rnd), 8), _g(lse_stable(zs, rnd), 8)]
         row.append(_g(lse_exact(zs), 8))
         rows.append(row)
-    return _table(["z", "32-bit naive", "32-bit shifted", "64-bit naive", "64-bit shifted", "exact"], rows)
+    return ("32-bit exp and log are the exact function (evaluated in 64 bits) rounded to the nearest 32-bit number, "
+            "and every sum, difference and addition is rounded to 32 bits; the 64-bit columns use 64-bit exp and log. "
+            "Entries are printed with 8 significant digits; a library `expf` or `logf` may differ in the last "
+            "32-bit digit by one unit in the last place. The exact column is computed with 60-digit decimal arithmetic. "
+            "The last row has two scores, the others three.\n\n"
+            + _table(["z", "32-bit naive", "32-bit shifted", "64-bit naive", "64-bit shifted", "exact"], rows))
 
 
 def logaddexp(a, b):
@@ -738,12 +778,13 @@ def cross_entropy_row():
 # ------------------------------------------------ accumulation precision
 
 def cosine_accumulation():
-    rng = bookrng.stream("floating.cosine")
+    name = "floating.cosine"
+    rng = bookrng.generator(name)
     d, trials = 512, 200
     err32, err64 = [], []
     for _ in range(trials):
-        a = [f32(rng.gauss(0.0, 1.0)) for _ in range(d)]
-        b = [f32(x + 0.1 * rng.gauss(0.0, 1.0)) for x in a]
+        a = [f32(rng.normal()) for _ in range(d)]
+        b = [f32(x + 0.1 * rng.normal()) for x in a]
         fa, fb = [Fraction(x) for x in a], [Fraction(x) for x in b]
         dot = sum(x * y for x, y in zip(fa, fb))
         na, nb = sum(x * x for x in fa), sum(x * x for x in fb)
@@ -765,7 +806,9 @@ def cosine_accumulation():
     rows = [["32-bit products and sums", _sci(sum(err32) / trials), _sci(max(err32))],
             ["64-bit sums of the same 32-bit inputs, result rounded to 32 bits", _sci(sum(err64) / trials), _sci(max(err64))]]
     return (f"Cosine of {trials} pairs of 512-dimensional vectors (the second is the first plus noise of one tenth of its standard deviation, "
-            f"cosine near 0.995), against the exact value.\n\n" + _table(["accumulation", "mean abs. error", "max abs. error"], rows, "lrr"))
+            f"cosine near 0.995), against the exact value (exact rational sums, one final evaluation in 64 bits). "
+            f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x}; each trial draws {d} `normal()` values "
+            f"for the first vector (rounded to 32 bits), then {d} for the noise, b = f32(a + 0.1 z).\n\n" + _table(["accumulation", "mean abs. error", "max abs. error"], rows, "lrr"))
 
 
 # ------------------------------------------------ the sum 0.1 + 0.2

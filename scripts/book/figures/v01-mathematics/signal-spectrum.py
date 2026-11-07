@@ -4,8 +4,8 @@
 """A noisy two-tone signal and its amplitude spectrum.
 
 The top panel is 64 samples taken over one second: a 3 Hz hum of amplitude 2,
-an 11 Hz tone of amplitude 1 and Gaussian noise (the chapter's frozen random
-stream). The bottom panel is 2 abs(X[k]) / 64 from the chapter's DFT for
+an 11 Hz tone of amplitude 1 and Gaussian noise (the book's SplitMix64 generator, fourier.noisy_signal).
+The bottom panel is 2 abs(X[k]) / 64 from the chapter's DFT for
 k = 0 to 32 (frequency k Hz): two tall stems stand out of the noise floor.
 
 Swedish Embedded AB implements solutions for finding the frequencies that

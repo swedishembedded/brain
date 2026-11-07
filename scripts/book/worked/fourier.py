@@ -218,12 +218,30 @@ def _problem_signal():
             for j in range(n)]
 
 
+NOISY_NAME = "fourier.noisy_signal"
+COUNTS_NAME = "fourier.operation_counts"
+ACCURACY_NAME = "fourier.fft_accuracy"
+
+
 def _noisy_signal(n=64):
     """The figure's signal: 64 samples in one second, a 3 Hz hum of amplitude 2
-    and an 11 Hz tone of amplitude 1 with phase 1 rad, plus Gaussian noise."""
-    rng = bookrng.stream("fourier.noisy_signal")
+    and an 11 Hz tone of amplitude 1 with phase 1 rad, plus Gaussian noise of
+    standard deviation 0.3: one rng.normal() per sample, in sample order."""
+    rng = bookrng.generator(NOISY_NAME)
     return [2 * math.cos(2 * math.pi * 3 * j / n) + 1.0 * math.cos(2 * math.pi * 11 * j / n + 1.0)
-            + 0.3 * rng.gauss(0, 1) for j in range(n)]
+            + 0.3 * rng.normal() for j in range(n)]
+
+
+def noisy_spectrum():
+    """Amplitudes 2 abs(X[k]) / N of the noisy signal at the planted frequencies and elsewhere."""
+    n = 64
+    X = _fft(_noisy_signal(n))
+    amp = [(1 if k in (0, n // 2) else 2) * abs(X[k]) / n for k in range(n // 2 + 1)]
+    others = [a for k, a in enumerate(amp) if k not in (0, 3, 11)]
+    rows = [("k = 3 (planted 2)", _g(amp[3], 3)), ("k = 11 (planted 1)", _g(amp[11], 3)),
+            ("largest of k = 1 .. 32 except 3 and 11", _g(max(others), 3)),
+            ("mean of k = 1 .. 32 except 3 and 11", _g(sum(others) / len(others), 3))]
+    return _table(["amplitude 2 abs X[k] / N", "value"], rows, "lr")
 
 
 DEMO_X = [3, 1, 4, 1, 5, 9, 2, 6]
@@ -469,10 +487,12 @@ def dft_eight_points():
     n = len(x)
     rows = []
     for k in range(n):
+        re = X[k].real if abs(X[k].real) > 1e-12 else 0.0   # flush BEFORE the phase
         im = X[k].imag if abs(X[k].imag) > 1e-12 else 0.0
-        rows.append((k, _g(X[k].real), _g(X[k].imag), _g(abs(X[k])), _g(_deg(math.atan2(im, X[k].real))),
+        rows.append((k, _g(X[k].real), _g(X[k].imag), _g(abs(X[k])), _g(_deg(math.atan2(im, re))),
                      _c(X[n - k].conjugate() if k else X[0].conjugate())))
-    return (f"The DFT of x = {_vec(x)}.\n\n"
+    return (f"The DFT of x = {_vec(x)}. Parts below 1e-12 in magnitude are flushed to +0 before the "
+            "phase is taken, and atan2(0, -3) = 180 degrees.\n\n"
             + _table(["k", "real part", "imaginary part", "abs X[k]", "phase (degrees)", "conjugate of X[8-k]"], rows))
 
 
@@ -605,24 +625,25 @@ def butterfly_schedule():
 
 def operation_counts():
     rows = []
-    rng = bookrng.stream("fourier.operation_counts")
+    rng = bookrng.generator(COUNTS_NAME)
     for p in (3, 4, 6, 8, 10, 12):
         n = 1 << p
-        x = [rng.gauss(0, 1) for _ in range(n)]
+        x = [rng.normal() for _ in range(n)]
         cnt = {"mul": 0, "add": 0}
         _fft(x, cnt)
         assert cnt["mul"] == n // 2 * p and cnt["add"] == n * p
         rows.append((f"{n:,}", f"{n * n:,}", f"{cnt['mul']:,}", f"{cnt['add']:,}", _g(n * n / cnt["mul"], 3)))
     return ("Complex multiplications by the definition (N rows of N products), and multiplications and additions "
-            "counted while the recursive FFT ran; they equal (N/2) log2 N and N log2 N exactly.\n\n"
+            "counted while the recursive FFT ran, trivial twiddle multiplications by w^0 = 1 included; they equal "
+            "(N/2) log2 N and N log2 N exactly.\n\n"
             + _table(["N", "DFT multiplications N^2", "FFT multiplications", "FFT additions", "N^2 / FFT multiplications"], rows))
 
 
 def fft_accuracy():
-    rng = bookrng.stream("fourier.fft_accuracy")
+    rng = bookrng.generator(ACCURACY_NAME)
     rows = []
     for n in (8, 64, 256, 1024):
-        x = [rng.gauss(0, 1) for _ in range(n)]
+        x = [rng.normal() for _ in range(n)]
         direct, fast, itr = _dft(x), _fft(x), _fft_iterative(x)
         rows.append((n, _below(_max_abs_diff(fast, direct)), _below(_max_abs_diff(itr, direct)),
                      _below(_max_abs_diff(_idft(fast), x))))
@@ -712,17 +733,35 @@ def filter_gain():
                       "input x gain"], rows))
 
 
+def _convolution_costs(n, m):
+    """(direct, transform length L, FFT route) in real multiplications for a signal of n and a kernel of m."""
+    length = 1
+    while length < n + m - 1:
+        length *= 2
+    p = length.bit_length() - 1
+    return n * m, length, 4 * (3 * (length // 2) * p + length)
+
+
+def convolution_crossover():
+    n = 4096
+    equal = [m for m in range(1, n + 1) if _convolution_costs(n, m)[0] == _convolution_costs(n, m)[2]]
+    first = next(m for m in range(1, n + 1) if _convolution_costs(n, m)[0] > _convolution_costs(n, m)[2])
+    assert all(_convolution_costs(n, m)[0] > _convolution_costs(n, m)[2] for m in range(first, n + 1))
+    d_prev, _, f_prev = _convolution_costs(n, first - 1)
+    d_first, length, f_first = _convolution_costs(n, first)
+    rows = [(first - 1, f"{d_prev:,}", f"{length:,}", f"{f_prev:,}", "equal cost" if d_prev == f_prev else "sliding cheaper"),
+            (first, f"{d_first:,}", f"{length:,}", f"{f_first:,}", "transform route strictly cheaper")]
+    return (f"Cost model of the previous table, N = {n}. Kernel lengths with equal cost: {', '.join(map(str, equal))}. "
+            f"The first M at which the transform route is strictly cheaper (direct cost N M above FFT route cost) is "
+            f"M = {first}, and it stays cheaper for every M up to {n}.\n\n"
+            + _table(["kernel length M", "direct", "transform length L", "FFT route", "verdict"], rows, "rrrrl"))
+
+
 def convolution_cost():
     n = 4096
     rows = []
     for m in (3, 9, 33, 129, 513, 4096):
-        length = 1
-        while length < n + m - 1:
-            length *= 2
-        p = length.bit_length() - 1
-        direct = n * m
-        complex_mults = 3 * (length // 2) * p + length
-        fast = 4 * complex_mults
+        direct, length, fast = _convolution_costs(n, m)
         rows.append((f"{m:,}", f"{direct:,}", f"{length:,}", f"{fast:,}", _g(direct / fast, 3)))
     return ("Signal length N = 4096. Direct: N M real multiplications. Through the FFT: three transforms of length L and "
             "L pointwise complex products, a complex product counted as 4 real multiplications.\n\n"

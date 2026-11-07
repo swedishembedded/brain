@@ -33,10 +33,14 @@ learning does not do one operation. A training run does billions, and an error
 too small to see in one of them can still decide the result of all of them.
 Here is the smallest example. A running total of a million small steps, each
 one tenth, is one hundred thousand. We add the stored value of $0.1$ one
-million times in several ways:
+million times in several ways. Two of the methods, pairwise and compensated
+(Kahan) summation, are defined in the section "Errors accumulate: summation"; for now read
+them as two careful orders of adding the same numbers. Every error in the table is measured against the exact
+sum of the stored numbers, computed in exact rational arithmetic (for example Python's `Fraction`, or integer
+arithmetic on a scaled value), so that only the rounding of the additions is counted:
 
 <!-- worked: floating.million_tenths -->
-The sum of 10^6 copies of the stored value of 0.1 (exact sum of the stored 32-bit copies: 100000.001490).
+The sum of 10^6 copies of the stored value of 0.1. Relative errors are measured against the exact sum of the stored copies, computed in exact rational arithmetic (a Fraction): 100000.001490 for the 32-bit copies of 0.1 (0.10000000149 each) and, for the first row, 100000.000000000000000 for the 64-bit copies. The 64-bit accumulator of the last row holds 100000.001490116 before it is rounded to the nearest 32-bit number.
 
 | method | computed sum | relative error |
 |---|---:|---:|
@@ -44,7 +48,7 @@ The sum of 10^6 copies of the stored value of 0.1 (exact sum of the stored 32-bi
 | 32-bit, left to right | 100958.344 | 9.58e-03 |
 | 32-bit, pairwise | 100000 | 1.49e-08 |
 | 32-bit, compensated (Kahan) | 100000 | 1.49e-08 |
-| 32-bit terms added in a 64-bit accumulator | 100000 | 1.49e-08 |
+| 32-bit terms added in a 64-bit accumulator, total rounded to 32 bits | 100000 | 1.49e-08 |
 <!-- /worked -->
 
 In 64-bit arithmetic the error is $10^{-11}$ and nobody would notice. In 32-bit
@@ -53,7 +57,10 @@ $100958$ instead of $100000$. The loss of accuracy is not random noise; it is
 a systematic drift, and it comes from nothing more than the rule "round each
 addition to the nearest representable number". Yet two other methods, which
 add exactly the same 32-bit numbers, are right to the last digit the format can
-show.
+show. (Their error of $1.49 \times 10^{-8}$ is not an error of the additions: the exact sum of the
+stored copies is $100000.00149\ldots$, which is not a 32-bit number, and the nearest 32-bit number is
+$100000$. The last row adds the 32-bit terms in a 64-bit accumulator and rounds that total to 32 bits at the
+end, which gives the same $100000$.)
 
 Two questions follow, and they organise this chapter. What exactly are the
 numbers a computer has, and how big is the error that each operation commits?
@@ -358,7 +365,7 @@ module also contains a second, independent rounder written from the text above
 using exact fractions, and compares it with the hardware conversion:
 
 <!-- worked: floating.rounding_agreement -->
-Exact rounding of 20000 random doubles to 32 bits against the hardware conversion: 0 disagreements.
+Exact rounding of 20000 random doubles to 32 bits against the hardware conversion: 0 disagreements. Generator: the book's SplitMix64, seed 0xab72908388d0f139. Each double is x = (2a - 1) * 10^(60b - 30) from two draws, a then b, both `uniform()`.
 <!-- /worked -->
 
 ### Arithmetic: one rounding per operation
@@ -537,7 +544,7 @@ addition of the same $0.1$ is rounded to the same grid in the same direction,
 and the errors add up like the worst case. Here are the measurements.
 
 <!-- worked: floating.sum_methods -->
-Relative error of a 32-bit sum of n terms, against the exact sum of the stored terms.
+Relative error of a 32-bit sum of n terms, against the exact sum of the stored terms (exact rational arithmetic). Copies of 0.1: the 32-bit number nearest 0.1, n times. Uniform: the first n of 10^5 values `uniform()` drawn in order from the book's SplitMix64 with seed 0x1715ad6d00aba70a, each rounded to 32 bits; the three row sizes use prefixes of the same list. Pairwise is the layer-by-layer algorithm below.
 
 | terms | n | exact sum | worst-case bound (n-1)u | left to right | pairwise | Kahan |
 |---|---|---:|---:|---:|---:|---:|
@@ -545,16 +552,18 @@ Relative error of a 32-bit sum of n terms, against the exact sum of the stored t
 | copies of 0.1 | 10^4 | 1.0000e+03 | 6.0e-04 | 9.71e-05 | 1.49e-08 | 1.49e-08 |
 | copies of 0.1 | 10^5 | 1.0000e+04 | 6.0e-03 | 1.44e-04 | 1.49e-08 | 1.49e-08 |
 | copies of 0.1 | 10^6 | 1.0000e+05 | 6.0e-02 | 9.58e-03 | 1.49e-08 | 1.49e-08 |
-| uniform in (0, 1) | 10^3 | 5.1676e+02 | 6.0e-05 | 5.48e-08 | 6.33e-08 | 5.48e-08 |
-| uniform in (0, 1) | 10^4 | 5.0072e+03 | 6.0e-04 | 6.59e-07 | 2.34e-08 | 2.34e-08 |
-| uniform in (0, 1) | 10^5 | 5.0032e+04 | 6.0e-03 | 1.04e-07 | 2.63e-08 | 2.63e-08 |
+| uniform in [0, 1) | 10^3 | 4.9850e+02 | 6.0e-05 | 1.58e-07 | 9.71e-08 | 2.54e-08 |
+| uniform in [0, 1) | 10^4 | 4.9786e+03 | 6.0e-04 | 4.17e-08 | 5.64e-08 | 4.17e-08 |
+| uniform in [0, 1) | 10^5 | 4.9954e+04 | 6.0e-03 | 5.15e-06 | 1.00e-08 | 1.00e-08 |
 <!-- /worked -->
 
 The left-to-right column for $0.1$'s grows with $n$ and reaches almost one
-percent at a million terms (the bound is six). On random data the error is
-much smaller, and there is no systematic drift. Pairwise summation and
-compensated summation, to which we now turn, do not grow with $n$ at all on
-the $0.1$'s.
+percent at a million terms (the bound is six). On random data the left-to-right
+error shows no systematic drift and stays far below the bound: between $0.7u$ and $86u$ in the three
+uniform rows (here $u = 5.96 \times 10^{-8}$). Kahan summation is below $u$ in every row and pairwise
+summation below $2u$, while left to right is the worst of the three at $n = 10^3$ and $n = 10^5$, ties with Kahan
+at $n = 10^4$ and beats pairwise there. On the $0.1$'s, the two methods to which we now turn
+do not grow with $n$ at all.
 
 ### Two cures that cost nothing in precision
 
@@ -575,20 +584,19 @@ function pairwise_sum(x: array<f32>[N]) -> f32:
     require N > 0, "a sum of nothing has no first term"
     layer = copy(x)                         # array<f32>[N]
     while len(layer) > 1:
-        m = len(layer) // 2
-        next = zeros(f32, [m + len(layer) % 2])
+        m = len(layer) // 2                 # integer division: the number of pairs
+        next = zeros(f32, [m + len(layer) mod 2])
         for i in 0 .. m:
             next[i] = layer[2 * i] + layer[2 * i + 1]
-        if len(layer) % 2 == 1:
+        if len(layer) mod 2 == 1:
             next[m] = layer[len(layer) - 1]
         layer = next
     return layer[0]
 ```
 
 (For the $0.1$'s the exact doubling at each level makes pairwise summation look
-better than it is in general; the random rows of the table show its more
-typical behaviour: its advantage over left to right depends on the data, from
-none at $n = 10^3$ to a factor of about 28 at $n = 10^4$.)
+better than it is in general; the random rows of the table show its more typical behaviour: its error
+stays below $10^{-7}$, but it is not always the smallest, and at $n = 10^4$ it is larger than that of left to right.)
 
 **Compensated summation** takes a different route: keep the running total, and
 a second number that remembers what each addition lost. It is due to Kahan.
@@ -605,8 +613,8 @@ idea is to feed that loss into the next addition rather than throw it away:
 ```text
 function kahan_sum(x: array<f32>[N]) -> f32:
     require N > 0, "a sum of nothing has no first term"
-    s = 0.0                        # running total
-    c = 0.0                        # what has been lost so far, as a negative number
+    s = 0.0                        # f32: running total
+    c = 0.0                        # f32: what has been lost so far, as a negative number
     for i in 0 .. N:
         y = x[i] - c               # the term, corrected by the previous loss
         t = s + y                  # rounded: low bits of y are lost here
@@ -615,13 +623,15 @@ function kahan_sum(x: array<f32>[N]) -> f32:
     return s
 ```
 
-A trace shows it working. Start at $s = 1$ in 32 bits and add $x = 4 \times
-10^{-8}$ eight times. Half the gap above $1$ is $u = 5.96 \times 10^{-8}$, so
+A trace shows it working. Run the loop of `kahan_sum` from the starting state $s = 1$, $c = 0$ (the
+function itself starts from $s = 0$; the trace only changes the starting total) in 32 bits and add
+$x = 4 \times 10^{-8}$ eight times, where $x$ is the 32-bit number nearest $4 \times 10^{-8}$,
+$3.9999999757 \times 10^{-8}$. Half the gap above $1$ is $u = 5.96 \times 10^{-8}$, so
 one $x$ alone is smaller than half a gap and is lost entirely by an ordinary
 addition:
 
 <!-- worked: floating.kahan_trace -->
-Start at s = 1 in 32 bits and add x = 4.000000e-08 eight times (half the gap above 1 is 5.960e-08, so one such x alone is lost). Columns show the part above 1.
+The loop of `kahan_sum` started from s = 1, c = 0 (instead of s = 0, c = 0) in 32 bits, adding x = f32(4e-8) = 3.9999999757e-08 eight times (half the gap above 1 is 5.960e-08, so one such x alone is lost). Columns show the part above 1: 'Kahan s - 1' is the stored s minus 1 (exact, by Sterbenz), 'left to right' is the plain 32-bit sum started at 1, and 'exact sum - 1' is k * f32(4e-8) for step k in exact rational arithmetic, the sum of the stored copies, not k * 4e-8.
 
 | step | y = x - c | Kahan s - 1 | new c | left to right s - 1 | exact sum - 1 |
 |---|---:|---:|---:|---:|---:|
@@ -705,7 +715,7 @@ Evaluate $(1 + x) - 1$ for smaller and smaller $x$. In exact arithmetic the
 answer is $x$.
 
 <!-- worked: floating.one_plus_x -->
-In 64 bits. The first error column compares (1 + x) - 1 with x; the other two compare e^x - 1 computed naively and with `expm1` against the true value.
+In 64 bits. x is the 64-bit number nearest the decimal shown. The first error column compares (1 + x) - 1 with that stored x; the other two compare e^x - 1 computed naively and with `expm1` against the true value of e^x - 1 at the same stored x, computed in 60-digit decimal arithmetic. Errors are relative.
 
 | x | (1 + x) - 1 | relative error | exp(x) - 1: error | expm1(x): error |
 |---|---:|---:|---:|---:|
@@ -743,7 +753,7 @@ The subtraction itself is not guilty. There is a theorem (Sterbenz) that if $y/2
 *exactly*, with no rounding at all. A test on random 32-bit numbers:
 
 <!-- worked: floating.sterbenz -->
-Subtracting two 32-bit numbers x, y: when y/2 <= x <= 2y the stored difference was inexact in 0 of 100000 random cases; when x is 4 to 5 times y it was inexact in 71411 of 100000.
+Subtracting two 32-bit numbers x, y: when y/2 <= x <= 2y the stored difference was inexact in 0 of 100000 random cases; when x is 4 to 5 times y it was inexact in 71464 of 100000. Generator: the book's SplitMix64, seed 0xe348a8227d344ab3. Each case draws, in this order, `uniform()` a, `integer(41)` k, `uniform()` b, `uniform()` c: y = f32((1 + a) * 2^(k - 20)), x = f32(y * (0.5 + 1.5 b)) (replaced by y if that falls outside [y/2, 2y]), and for the second count x = f32(y * (4 + c)). The difference x - y is exact in 64 bits for these operands, and 'inexact' means it is not a 32-bit number.
 <!-- /worked -->
 
 Within a factor of two the stored difference was never inexact; outside it
@@ -772,7 +782,7 @@ the large root $q = -(b + \sqrt{b^2 - 4c})/2$ (no subtraction: both terms are
 negative) and then the small root as $c/q$.
 
 <!-- worked: floating.quadratic -->
-The smaller-magnitude root of x^2 + b x + 1 = 0, in 64 bits.
+The smaller-magnitude root of x^2 + b x + 1 = 0, in 64 bits (b exactly 10^k, c = 1). The true root is (-b + sqrt(b^2 - 4)) / 2 evaluated in 60-digit decimal arithmetic from the same b; the errors are relative.
 
 | b | (-b + sqrt(b^2 - 4)) / 2 | c / q with q = -(b + sqrt(b^2 - 4)) / 2 | true root | error of the first | error of the second |
 |---|---:|---:|---:|---:|---:|
@@ -796,43 +806,43 @@ lost to cancellation. Compare three methods on $1000$ numbers equal to an
 offset plus a standard normal variable, so that the true variance is about $1$:
 
 <!-- worked: floating.variance -->
-Variance of 1000 values offset + a standard normal, population form (divide by n).
+Variance of 1000 values offset + z, z standard normal, population form (divide by n). The values are rounded to the format after the addition. Each row has its own generator, the book's SplitMix64 with the seed in the last column; the 1000 values are its first 1000 `normal()` draws in order. The true variance and all errors are against the exact rational variance of the stored values (mean of the squared deviations from the exact mean). Each format's arithmetic rounds every operation to that format; the one-pass formula accumulates sum x and sum x^2 left to right, divides both by n, and subtracts.
 
-| format | offset | true variance | E[X^2] - E[X]^2 | its error | two-pass error | Welford error |
-|---|---:|---:|---:|---:|---:|---:|
-| 32-bit | 10^1 | 0.931372 | 0.931366 | 6.41e-06 | 2.70e-07 | 2.42e-07 |
-| 32-bit | 10^2 | 1.064524 | 1.06055 | 3.74e-03 | 5.56e-08 | 3.92e-07 |
-| 32-bit | 10^3 | 0.902852 | 1.5625 | 7.31e-01 | 9.69e-07 | 4.83e-07 |
-| 32-bit | 10^4 | 1.032536 | 32 | 3.00e+01 | 1.23e-05 | 1.11e-04 |
-| 64-bit | 10^4 | 0.968590 | 0.96859 | 2.07e-07 | 5.02e-16 | 3.65e-13 |
-| 64-bit | 10^8 | 0.976609 | 14 | 1.33e+01 | 1.31e-15 | 1.28e-09 |
-| 64-bit | 10^9 | 1.094648 | 896 | 8.18e+02 | 1.75e-15 | 8.35e-09 |
+| format | offset | true variance | E[X^2] - E[X]^2 | its error | two-pass error | Welford error | seed |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 32-bit | 10^1 | 1.027065 | 1.02712 | 5.64e-05 | 9.85e-08 | 6.79e-07 | 0x2e4f8e4638e8c5c3 |
+| 32-bit | 10^2 | 1.034514 | 1.04297 | 8.17e-03 | 3.60e-07 | 7.06e-07 | 0xd9cd5d0d23999691 |
+| 32-bit | 10^3 | 1.011911 | 1.4375 | 4.21e-01 | 2.89e-07 | 1.94e-06 | 0xc4d5fa469bac185e |
+| 32-bit | 10^4 | 1.052178 | -56 | 5.42e+01 | 6.96e-06 | 1.56e-04 | 0x94cf2c25b2c19213 |
+| 64-bit | 10^4 | 1.006720 | 1.00672 | 2.27e-07 | 4.43e-16 | 1.55e-13 | 0xabd981c9e503f214 |
+| 64-bit | 10^8 | 0.991809 | -6 | 7.05e+00 | 9.46e-15 | 1.67e-09 | 0x7ed9e4d912c7d932 |
+| 64-bit | 10^9 | 0.959095 | 0 | 1.00e+00 | 1.48e-14 | 1.14e-08 | 0x9a3385ab0d905451 |
 <!-- /worked -->
 
 In 32 bits the one-pass formula has lost everything by an offset of $10^3$
 ($\mu^2/\sigma^2 = 10^6$: six of the 7 digits the format holds are gone, leaving about one), and returns a variance
-of $1.56$ where the truth is $0.90$; at $10^4$ it returns $32$. In 64 bits the
-same collapse happens at $10^8$ and $10^9$. The **two-pass** method, which first
+of $1.44$ where the truth is $1.01$; at $10^4$ it returns $-56$, a negative variance. In 64 bits the
+same collapse happens at $10^8$ (it returns $-6$) and at $10^9$ (it returns $0$). The **two-pass** method, which first
 computes the mean and then sums $(x_i - \bar{x})^2$, subtracts the mean *before*
 squaring, so that the numbers being squared are of the size of the spread; it
-is accurate to $10^{-5}$ or better in every row in 32 bits and to about $10^{-15}$ in 64 bits. **Welford's** one-pass method keeps
+is accurate to $10^{-5}$ or better in every row in 32 bits and to about $10^{-14}$ in 64 bits. **Welford's** one-pass method keeps
 a running mean and a running sum of squared deviations from the current mean:
 
 ```text
 function variance_welford(x: array<f32>[N]) -> f32:
     require N > 0, "the variance of no values is undefined"
-    mean = 0.0                      # running mean of the first k values
-    m2 = 0.0                        # running sum of squared deviations from the running mean
-    for k in 1 .. N + 1:
-        d = x[k - 1] - mean
-        mean = mean + d / k
-        m2 = m2 + d * (x[k - 1] - mean)
+    mean = 0.0                      # f32: running mean of the first i + 1 values
+    m2 = 0.0                        # f32: running sum of squared deviations from the running mean
+    for i in 0 .. N:
+        d = x[i] - mean
+        mean = mean + d / (i + 1)
+        m2 = m2 + d * (x[i] - mean)
     return m2 / N                   # population variance
 ```
 
 It never forms a square of a large number, so it needs only one pass and
 survives offsets that destroy the one-pass formula (at offset $10^8$ in 64 bits its
-error is $10^{-9}$ where the one-pass formula's is $13$). On this data it is less
+error is $1.7 \times 10^{-9}$ where the one-pass formula's is $7$). On this data it is less
 accurate than two-pass (the running mean carries rounding errors of its own),
 which is the usual trade: two-pass when the data can be read twice, Welford when
 it cannot.
@@ -1050,6 +1060,8 @@ to zero for $z$ below about $-104$, so scores that are entirely reasonable make 
 infinite or zero.
 
 <!-- worked: floating.lse_table -->
+32-bit exp and log are the exact function (evaluated in 64 bits) rounded to the nearest 32-bit number, and every sum, difference and addition is rounded to 32 bits; the 64-bit columns use 64-bit exp and log. Entries are printed with 8 significant digits; a library `expf` or `logf` may differ in the last 32-bit digit by one unit in the last place. The exact column is computed with 60-digit decimal arithmetic. The last row has two scores, the others three.
+
 | z | 32-bit naive | 32-bit shifted | 64-bit naive | 64-bit shifted | exact |
 |---|---:|---:|---:|---:|---:|
 | [1, 2, 3] | 3.4076059 | 3.4076059 | 3.407606 | 3.407606 | 3.407606 |
@@ -1196,12 +1208,12 @@ loses the last two. The same experiment, run here on pairs of 512-dimensional
 vectors with a cosine near $0.995$ and 200 random trials:
 
 <!-- worked: floating.cosine_accumulation -->
-Cosine of 200 pairs of 512-dimensional vectors (the second is the first plus noise of one tenth of its standard deviation, cosine near 0.995), against the exact value.
+Cosine of 200 pairs of 512-dimensional vectors (the second is the first plus noise of one tenth of its standard deviation, cosine near 0.995), against the exact value (exact rational sums, one final evaluation in 64 bits). Generator: the book's SplitMix64, seed 0x75c7e1bcf07f2c79; each trial draws 512 `normal()` values for the first vector (rounded to 32 bits), then 512 for the noise, b = f32(a + 0.1 z).
 
 | accumulation | mean abs. error | max abs. error |
 |---|---:|---:|
-| 32-bit products and sums | 2.91e-07 | 1.10e-06 |
-| 64-bit sums of the same 32-bit inputs, result rounded to 32 bits | 1.42e-08 | 2.97e-08 |
+| 32-bit products and sums | 2.94e-07 | 1.08e-06 |
+| 64-bit sums of the same 32-bit inputs, result rounded to 32 bits | 1.54e-08 | 2.97e-08 |
 <!-- /worked -->
 
 The mean error of the 32-bit accumulation is about five units of $u$ and its
@@ -1345,10 +1357,10 @@ against `max(1, nan)`, and the unsorted list) are the same fact in miniature.
 4. **[Calculate]** For $f(x) = 1 - \cos x$ at $x = 10^{-3}$ compute $\kappa_f$ and say whether the problem is well-conditioned. How many digits does the formula $1 - \cos x$ lose in 64 bits, and what stable rewriting (use $\cos x = 1 - 2\sin^2(x/2)$) avoids the loss?
 5. **[Calculate]** Compute $\mathrm{lse}(0, 0, 0, 0)$ and $\mathrm{lse}(5, 5)$ by hand and check against the two bounds of the section. Then show that $\mathrm{lse}(z + c) = \mathrm{lse}(z) + c$ for every constant $c$.
 6. **[Calculate]** For the central difference of $f(x) = \sin x$ at $x = 1$ in 32 bits, take $|f| = \sin 1$ and $M_3 = |f'''(1)| = \cos 1$ and compute the best step $h^*$ and the best error from the formulas of the section.
-7. **[Implement]** Emulate 32-bit arithmetic in your language (round every result to the nearest 32-bit float, using a cast or `struct`). Reproduce `floating.million_tenths` and `floating.sum_methods` for the $0.1$'s (the uniform rows depend on a particular random stream, so reproduce only their pattern: left to right worst, pairwise and Kahan best).
+7. **[Implement]** Emulate 32-bit arithmetic in your language (round every result to the nearest 32-bit float, using a cast or `struct`). Reproduce `floating.million_tenths` and `floating.sum_methods` for the $0.1$'s (the uniform rows are reproduced exactly with the generator and the draw order printed above the table: seed `0x1715ad6d00aba70a`, the first $n$ of $10^5$ draws, each rounded to 32 bits; the error is measured against the exact rational sum of the stored values).
 8. **[Implement]** Implement Kahan summation as in the pseudocode and reproduce `floating.kahan_trace`. Then compile or run it with the most aggressive optimisation your language offers and say whether the trace changes.
-9. **[Implement]** Implement the naive and the stable evaluations of `floating.one_plus_x` (use your language's `expm1` for the stable one) and of `floating.quadratic`, and reproduce their error columns to one significant digit.
-10. **[Implement]** Implement the unshifted and shifted log-sum-exp in 32 and 64 bits and reproduce `floating.lse_table` and `floating.mixture_loglik`.
+9. **[Implement]** Implement the naive and the stable evaluations of `floating.one_plus_x` (use your language's `expm1` for the stable one) and of `floating.quadratic`, and reproduce their error columns to one significant digit. Take the true values from exact rational arithmetic or from decimal arithmetic with at least 40 digits, applied to the stored double $x$ (or $b$), not to the decimal text.
+10. **[Implement]** Implement the unshifted and shifted log-sum-exp in 32 and 64 bits and reproduce `floating.lse_table` and `floating.mixture_loglik`. Compute the 32-bit exp and log in 64 bits and round the result to 32 bits, and compare the table to 8 significant digits, allowing one unit in the last place in the 32-bit columns.
 11. **[Investigate]** Add $1.0$ repeatedly to a 32-bit zero. Where does the sum stop changing, and why? Repeat with $0.1$ in place of $1.0$ and with Kahan summation. Explain each stopping point from the gap of the format.
 12. **[Investigate]** Choose a function that is not $e^x$ (for example $\tanh$ or $\log$) and a point, and find the best central-difference step in 32 and 64 bits by scanning $h = 2^{-j}$ as in `floating.numdiff_optimum`. Compare with $(3u|f|/M_3)^{1/3}$ using a numerical estimate of the third derivative, and say when the constant matters.
 
@@ -1408,7 +1420,7 @@ worth their complexity.
 
 1. The decimals $0.1$ and $0.2$ are rounded to stored numbers (each slightly above its value; $0.2$ is exactly twice the stored $0.1$), and then their exact sum, $0.3000000000000000166\ldots$, lies exactly halfway between two adjacent stored numbers, so the addition rounds, by the tie rule, to the upper one. The decimal $0.3$ is stored as the lower neighbour. Each rounding is within $u$; the difference is one gap, the smallest possible.
 2. $2^{24} + 1$ is a tie between $2^{24}$ and $2^{24} + 2$ (the gap there is $2$), and it rounds to the even one, $2^{24}$. So $s + 1 = s$ and $s + 2 = 16777218$. A loop adding $1.0$ one at a time stops at $16777216$ and then stays there forever.
-3. Each operation is accurate in the *relative* sense, but the two terms are both about $10^{18}$, so their absolute error is about $10^{18} \times 10^{-16} = 100$, while the difference they produce is about $1$. The relative error of the result is therefore of order $100$. The table for offset $10^9$ shows a computed variance of $896$ against a true $1.09$, a relative error of $818$.
+3. Each operation is accurate in the *relative* sense, but the two terms are both about $10^{18}$, so their absolute error is about $10^{18} \times 10^{-16} = 100$, while the difference they produce is about $1$. The relative error of the result is therefore of order $100$. The table for offset $10^9$ shows a computed variance of $0$ against a true $0.959$, a relative error of $1$ (every digit lost); at offset $10^8$ the computed variance is even negative.
 4. The subtraction is exact (Sterbenz) *given* the stored $x$; its result is the difference of the stored operands. But the stored $x$ is already rounded, with a relative error up to $u$, i.e. an absolute error up to $u$ on the number $1.00000001$; the difference is $10^{-8}$, so that error is a relative error $10^8 u$ in the result, which is what $\kappa = 10^8$ says. The subtraction faithfully passes on the earlier error.
 5. At $h = 10^{-4}$ the error is about $4.5 \times 10^{-9}$ (truncation). At $h = 10^{-10}$ it is about $9 \times 10^{-7}$ (round-off $u e/h$): the larger step is a hundred times more accurate here. In 32 bits the best step is near $(3u)^{1/3} = 5.6 \times 10^{-3}$, and the best error is of order $10^{-5}$.
 6. Whenever the scores are far apart: for $z = (1000, -1000)$ the mean is $0$, the exponents stay at $\pm 1000$, and $e^{1000}$ overflows. Only the maximum guarantees that the largest exponent is $0$ and every other is negative.

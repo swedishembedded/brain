@@ -220,17 +220,20 @@ def directional_scan():
 def cauchy_schwarz_gradient():
     g = grad(P_MAIN)
     gn = _norm(g)
-    rng = bookrng.stream("multivariable.cauchy_schwarz_gradient")
+    name = "multivariable.cauchy_schwarz_gradient"
+    rng = bookrng.generator(name)
     worst, best = 0.0, 0.0
     for _ in range(100000):
-        th = rng.uniform(0.0, 2.0 * math.pi)
+        th = 2.0 * math.pi * rng.uniform()
         d = _dot(g, [math.cos(th), math.sin(th)])
         worst, best = min(worst, d), max(best, d)
-    return _table(["quantity", "value"], [
+    return (f"Each direction is u = (cos t, sin t) with t = 2 pi times one uniform draw of the book's "
+            f"generator (Volume I, chapter 17), seed {bookrng.seed_of(name)}; 100000 draws in order.\n\n"
+            + _table(["quantity", "value"], [
         ["length of the gradient", _fx(gn, 4)],
         ["largest grad . u over 100000 random unit u", _fx(best, 4)],
         ["smallest grad . u over the same u", _fx(worst, 4)],
-    ])
+    ]))
 
 
 def contour_tangent():
@@ -651,11 +654,12 @@ def gradcheck_toy():
     n, m = 24, 6
     trials = 1000
     dir_pass, entry_caught, frac_bad, rel_missing = 0, 0, 0.0, 0.0
+    name = "multivariable.gradcheck_toy"
+    rng = bookrng.generator(name)
     for trial in range(trials):
-        rng = bookrng.stream(f"multivariable.gradcheck_toy.{trial}")
-        X = [[rng.gauss(0, 1) for _ in range(n)] for _ in range(m)]
-        t = [rng.gauss(0, 1) for _ in range(m)]
-        w = [rng.gauss(0, 1) for _ in range(n)]
+        X = [[rng.normal() for _ in range(n)] for _ in range(m)]
+        t = [rng.normal() for _ in range(m)]
+        w = [rng.normal() for _ in range(n)]
 
         def L(v):
             return 0.5 * sum((_dot(x, v) - tk) ** 2 for x, tk in zip(X, t))
@@ -666,7 +670,7 @@ def gradcheck_toy():
         rel_missing += _norm([a - b for a, b in zip(g_true, g_bug)]) / _norm(g_true)
         best = None
         for _ in range(4):
-            v = [rng.choice((-1.0, 1.0)) for _ in range(n)]
+            v = [1.0 if rng.integer(2) else -1.0 for _ in range(n)]
             analytic = _dot(g_bug, v)
             numeric = (L([a + eps * b for a, b in zip(w, v)]) - L([a - eps * b for a, b in zip(w, v)])) / (2 * eps)
             err = abs(analytic - numeric)
@@ -685,9 +689,12 @@ def gradcheck_toy():
                 bad += 1
         entry_caught += bad > 0
         frac_bad += bad / n
-    return _table(["check", "result over 1000 random problems"], [
+    return ("One generator (Volume I, chapter 17), seed " + str(bookrng.seed_of(name)) + ", draws the "
+            "1000 problems one after another: for each, X row by row, then t, then w, all with normal(), "
+            "then the four directions, each entry +1 when integer(2) is 1 and -1 otherwise.\n\n"
+            + _table(["check", "result over 1000 random problems"], [
         ["relative size of the missing part, mean of ||missing|| / ||gradient||", _fx(rel_missing / trials, 3)],
         ["best-of-4 random +-1 directions: bug accepted (check passes)", f"{dir_pass} of {trials}"],
         ["per-entry check: at least one entry fails", f"{entry_caught} of {trials}"],
         ["per-entry check: mean share of the 24 entries that fail", _fx(frac_bad / trials, 3)],
-    ], "lr")
+    ], "lr"))

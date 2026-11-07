@@ -12,7 +12,7 @@ is a function with open parameters, and learning is choosing them with data. The
 complaint: the only way we had to choose was to try thousands of lines on a grid
 and keep the one with the smallest "average off by", and the cost of that grows
 as $m^k$ with $k$ parameters. The workshop that built the temperature sensor
-still wants an answer for a sensor that reads $1.80$ V, and it would like to
+still wants an answer for a sensor that reads $1.75$ V, and it would like to
 get it without computing $58{,}081$ scores.
 
 There are really three questions hiding in that complaint, and this chapter
@@ -30,23 +30,23 @@ answers them in order.
    that will train every network in this book. We study it here on the one
    problem where we can see all of it: the line.
 
-The data are the ten sensor rows of chapter 1.
+The data are the ten sensor rows of chapter 1 (their generator and seed are given there, in the section "Too small, too big").
 
 <!-- worked: learning_problem.sensor_table -->
-N = 10 measured rows (sorted by voltage).
+N = 10 measured rows (sorted by voltage; the source that produced them and the order of its draws are written out in the section "Too small, too big").
 
 | row n | voltage v (V) | temperature y (deg C) |
 |---|---:|---:|
-| 1 | 0.78 | 27.5 |
-| 2 | 1.29 | 44.0 |
-| 3 | 1.46 | 48.5 |
-| 4 | 1.46 | 49.5 |
-| 5 | 1.73 | 57.1 |
-| 6 | 1.94 | 59.7 |
-| 7 | 2.05 | 59.8 |
-| 8 | 2.35 | 68.6 |
-| 9 | 2.52 | 68.9 |
-| 10 | 2.56 | 69.7 |
+| 1 | 0.42 | 13.4 |
+| 2 | 0.95 | 32.8 |
+| 3 | 1.60 | 52.2 |
+| 4 | 1.63 | 55.5 |
+| 5 | 1.80 | 57.5 |
+| 6 | 1.90 | 58.9 |
+| 7 | 1.96 | 61.7 |
+| 8 | 2.19 | 65.0 |
+| 9 | 2.30 | 66.8 |
+| 10 | 2.68 | 70.6 |
 <!-- /worked -->
 
 You may use from earlier chapters: the model, its parameters and the idea of a
@@ -60,7 +60,7 @@ stability of Euler's method (chapter 9); and z-scores (chapter 12).
 Six questions to answer from memory. The answers are at the end of the chapter.
 If one is hard, go back to the chapter named before reading on.
 
-1. (Chapter 1 of this volume, "The Learning Problem".) The score of chapter 1 for the line $f(v) = 24v + 9$ was $3.10$ degrees. If we change the line to $f(v) = 20v + 18$, which things change: the ten rows, the parameters, the score?
+1. (Chapter 1 of this volume, "The Learning Problem".) The score of chapter 1 for the line $f(v) = 24v + 9$ was $4.29$ degrees. If we change the line to $f(v) = 20v + 18$, which things change: the ten rows, the parameters, the score?
 2. (Volume I, chapter 8, "Gradients, Jacobians and Many Variables", the gradient.) For $L(w_1, w_2) = w_1^2 + 3 w_1 w_2$, what is the gradient at $(1, 1)$, and in which direction does $L$ fall fastest?
 3. (Volume I, chapter 4, "Matrices as Linear Maps", transpose and shapes.) A matrix $\mathbf{X}$ has shape $[10, 2]$ and $\mathbf{y}$ has shape $[10]$. What are the shapes of $\mathbf{X}^\top$, $\mathbf{X}^\top\mathbf{X}$ and $\mathbf{X}^\top\mathbf{y}$?
 4. (Volume I, chapter 4, "Matrices as Linear Maps", elimination.) Solve $2 w_1 + w_2 = 4$, $w_1 + 3 w_2 = 7$ by subtracting a multiple of one equation from the other, and say what has to be true of the pivot for this to work.
@@ -100,28 +100,28 @@ Take chapter 1's first attempt, $w = 24$, $b = 9$, and score it with the new
 rule. Each row's difference is squared, and the squares are averaged.
 
 <!-- worked: linear_regression.mse_first_attempt -->
-Attempt 1 (w = 24, b = 9) with squared errors.
+Attempt 1 (w = 24, b = 9) with squared errors, computed from the unrounded predictions.
 
 | v | label y | prediction | prediction - y | squared |
 |---|---:|---:|---:|---:|
-| 0.78 | 27.5 | 27.72 | +0.22 | 0.0484 |
-| 1.29 | 44.0 | 39.96 | -4.04 | 16.3216 |
-| 1.46 | 48.5 | 44.04 | -4.46 | 19.8916 |
-| 1.46 | 49.5 | 44.04 | -5.46 | 29.8116 |
-| 1.73 | 57.1 | 50.52 | -6.58 | 43.2964 |
-| 1.94 | 59.7 | 55.56 | -4.14 | 17.1396 |
-| 2.05 | 59.8 | 58.20 | -1.60 | 2.5600 |
-| 2.35 | 68.6 | 65.40 | -3.20 | 10.2400 |
-| 2.52 | 68.9 | 69.48 | +0.58 | 0.3364 |
-| 2.56 | 69.7 | 70.44 | +0.74 | 0.5476 |
-|  |  |  | total | 140.1932 |
-|  |  |  | MSE = total / 10 | 14.0193 |
+| 0.42 | 13.4 | 19.08 | +5.68 | 32.2624 |
+| 0.95 | 32.8 | 31.80 | -1.00 | 1.0000 |
+| 1.60 | 52.2 | 47.40 | -4.80 | 23.0400 |
+| 1.63 | 55.5 | 48.12 | -7.38 | 54.4644 |
+| 1.80 | 57.5 | 52.20 | -5.30 | 28.0900 |
+| 1.90 | 58.9 | 54.60 | -4.30 | 18.4900 |
+| 1.96 | 61.7 | 56.04 | -5.66 | 32.0356 |
+| 2.19 | 65.0 | 61.56 | -3.44 | 11.8336 |
+| 2.30 | 66.8 | 64.20 | -2.60 | 6.7600 |
+| 2.68 | 70.6 | 73.32 | +2.72 | 7.3984 |
+|  |  |  | total | 215.3744 |
+|  |  |  | MSE = total / 10 | 21.5374 |
 <!-- /worked -->
 
-The average absolute difference of this line was $3.10$; its MSE is $14.02$ and
-its root is $3.74$ degrees. Look at the column of squares: the five rows where the line is
-off by $4$ to $7$ degrees contribute nearly all of the total, and the rows
-it gets nearly right ($0.22$ and $0.58$ off) contribute almost nothing. That
+The average absolute difference of this line was $4.29$; its MSE is $21.54$ and
+its root is $4.64$ degrees. Look at the column of squares: the four rows where the line is
+off by more than $5$ degrees contribute $146.85$ of the total $215.37$ (68 percent), and the row
+it gets nearly right ($1.00$ off) contributes $1.0$. That
 is the first property of this loss, and the reason it is a choice and not a
 formality.
 
@@ -178,18 +178,18 @@ A fair test of a loss is the simplest model of all: one that ignores the voltage
 and always answers the same number $c$. Which $c$ does each loss prefer?
 
 <!-- worked: linear_regression.constant_model -->
-A model with no feature at all: it answers one constant c for every voltage. Both losses over the ten labels.
+A model with no feature at all: it answers one constant c for every voltage. Both losses over the ten labels of the sensor table. The median of ten labels is the mean of the 5th and 6th smallest; the candidates c are the median and the mean at full precision (shown to 2 decimals), and 50 and 60.
 
 | c | mean absolute error | MSE |
 |---|---:|---:|
-| 50.0 | 11.430 | 187.655 |
-| median 58.40 | 10.010 | 168.671 |
-| mean 55.33 | 10.364 | 159.246 |
-| 60.0 | 10.110 | 181.055 |
+| 50.0 | 14.200 | 287.444 |
+| median 58.20 | 11.160 | 298.268 |
+| mean 53.44 | 12.384 | 275.610 |
+| 60.0 | 11.380 | 318.644 |
 <!-- /worked -->
 
-The squared error is smallest at the mean of the labels, $55.33$, and the
-absolute error is smallest at the median, $58.40$ (the midpoint of the two
+The squared error is smallest at the mean of the labels, $53.44$, and the
+absolute error is smallest at the median, $58.20$ (the midpoint of the two
 middle labels). Both facts have one-line proofs. The derivative of
 $\frac{1}{N}\sum_n (c - y_n)^2$ is $\frac{2}{N}\sum_n (c - y_n)$, which is zero
 at $c = \bar{y}$, the sample mean of chapter 12. The absolute loss has slope
@@ -204,7 +204,7 @@ condition on and a conditional mean once the features enter.
 Return to the model $\hat{y} = w v + b$ and the loss
 
 $$
-M(w, b) = \frac{1}{N}\sum_{n=1}^{N}\bigl(w v_n + b - y_n\bigr)^2 .
+\mathrm{MSE}(w, b) = \frac{1}{N}\sum_{n=1}^{N}\bigl(w v_n + b - y_n\bigr)^2 .
 $$
 
 This is a function of two numbers, the same kind of object as the two-knob loss
@@ -219,9 +219,9 @@ $n$ (this is the residual of chapter 3, with the sign convention
 "prediction minus label" used in the tables below). Then
 
 $$
-\frac{\partial M}{\partial b} = \frac{2}{N}\sum_n r_n ,
+\frac{\partial\,\mathrm{MSE}}{\partial b} = \frac{2}{N}\sum_n r_n ,
 \qquad
-\frac{\partial M}{\partial w} = \frac{2}{N}\sum_n r_n v_n ,
+\frac{\partial\,\mathrm{MSE}}{\partial w} = \frac{2}{N}\sum_n r_n v_n ,
 $$
 
 because the derivative of $r_n^2$ is $2 r_n$ times the derivative of $r_n$, and
@@ -257,21 +257,23 @@ of voltage (both unnormalised: the factors of $N - 1$ cancel), the quantities of
 the sensor:
 
 <!-- worked: linear_regression.closed_form_line -->
+Gradient entries and the sums below are zero up to rounding noise: a reproduction agrees when their size is below 1e-9, whatever digits it prints.
+
 | quantity | value |
 |---|---:|
-| mean of v | 1.8140 |
-| mean of y | 55.3300 |
-| S_vv = sum (v - mean v)^2 | 3.0152 |
-| S_vy = sum (v - mean v)(y - mean y) | 68.0648 |
-| slope w = S_vy / S_vv | 22.5736 |
-| intercept b = mean y - w mean v | 14.3815 |
-| MSE at (w, b) | 5.5994 |
-| dMSE/dw at (w, b) | -3.1e-14 |
-| dMSE/db at (w, b) | -1.7e-14 |
+| mean of v | 1.7430 |
+| mean of y | 53.4400 |
+| S_vv = sum (v - mean v)^2 | 3.8754 |
+| S_vy = sum (v - mean v)(y - mean y) | 100.8538 |
+| slope w = S_vy / S_vv | 26.0240 |
+| intercept b = mean y - w mean v | 8.0801 |
+| MSE at (w, b) | 13.1481 |
+| dMSE/dw at (w, b) | 3.8e-15 |
+| dMSE/db at (w, b) | 3.2e-15 |
 <!-- /worked -->
 
 The two gradient entries at the solution are zero to the rounding of the
-arithmetic (about $10^{-14}$), as they must be. We should also check that the
+arithmetic (below $10^{-9}$ in size, as the header of the table says; the digits printed after that are noise), as they must be. We should also check that the
 point is a minimum and not a maximum or a saddle: the second derivatives are
 $\partial^2 M/\partial b^2 = 2$, $\partial^2 M/\partial w^2 = \frac{2}{N}\sum_n v_n^2$
 and the cross derivative is $2\bar{v}$. The determinant of this Hessian
@@ -289,21 +291,21 @@ a scatter plot in a spreadsheet.
 The residuals of the least-squares line:
 
 <!-- worked: linear_regression.line_residuals -->
-The least-squares line and its residuals (label minus prediction).
+The least-squares line and its residuals (label minus prediction). The sum of residuals is zero up to rounding noise (agreement: size below 1e-9).
 
 | v | label y | prediction | residual y - prediction |
 |---|---:|---:|---:|
-| 0.78 | 27.5 | 31.99 | -4.49 |
-| 1.29 | 44.0 | 43.50 | +0.50 |
-| 1.46 | 48.5 | 47.34 | +1.16 |
-| 1.46 | 49.5 | 47.34 | +2.16 |
-| 1.73 | 57.1 | 53.43 | +3.67 |
-| 1.94 | 59.7 | 58.17 | +1.53 |
-| 2.05 | 59.8 | 60.66 | -0.86 |
-| 2.35 | 68.6 | 67.43 | +1.17 |
-| 2.52 | 68.9 | 71.27 | -2.37 |
-| 2.56 | 69.7 | 72.17 | -2.47 |
-|  |  | sum of residuals | +8.5e-14 |
+| 0.42 | 13.4 | 19.01 | -5.61 |
+| 0.95 | 32.8 | 32.80 | -0.00 |
+| 1.60 | 52.2 | 49.72 | +2.48 |
+| 1.63 | 55.5 | 50.50 | +5.00 |
+| 1.80 | 57.5 | 54.92 | +2.58 |
+| 1.90 | 58.9 | 57.53 | +1.37 |
+| 1.96 | 61.7 | 59.09 | +2.61 |
+| 2.19 | 65.0 | 65.07 | -0.07 |
+| 2.30 | 66.8 | 67.94 | -1.14 |
+| 2.68 | 70.6 | 77.82 | -7.22 |
+|  |  | sum of residuals | -1.6e-14 |
 <!-- /worked -->
 
 They sum to zero (the first gradient condition, $\sum r_n = 0$, in numbers), the
@@ -312,32 +314,33 @@ curved pattern that a line cannot follow. The picture draws each residual as a
 vertical segment from the point to the line. The loss is the average of the
 squares of those segment lengths.
 
-![The ten measured rows as dots, the least-squares line drawn solid, and the vertical segment from each dot to the line. The segments are the residuals: longest at the lowest voltage, where the line overshoots, and at the middle voltages, where it undershoots; of moderate length at the right, where it overshoots again.](img/least-squares-line.svg)
+![The ten measured rows as dots, the least-squares line drawn solid, and the vertical segment from each dot to the line. The segments are the residuals: longest at the highest voltage and at the lowest, where the line overshoots, shorter in the middle, where it mostly undershoots.](img/least-squares-line.svg)
 
 ### How it compares with the grid search
 
 Score the lines of chapter 1, and the new line, with both losses.
 
 <!-- worked: linear_regression.rescored_attempts -->
-The same lines as the previous chapter, scored by the average absolute error E, by the mean squared error and by its square root (in degrees).
+The same lines as the previous chapter, scored by the average absolute error E, by the mean squared error and by its square root (in degrees). Weights are shown to 3 decimals, scores to 2.
 
 | line | w | b | E (deg C) | MSE (deg C^2) | sqrt(MSE) (deg C) |
 |---|---:|---:|---:|---:|---:|
-| attempt 1 (hand) | 24.000 | 9.000 | 3.10 | 14.02 | 3.74 |
-| attempt 2 (hand) | 20.000 | 15.000 | 4.67 | 24.00 | 4.90 |
-| attempt 3 (hand) | 20.000 | 18.000 | 2.27 | 8.70 | 2.95 |
-| best of the grid | 19.500 | 20.000 | 1.86 | 8.45 | 2.91 |
-| least squares | 22.574 | 14.382 | 2.04 | 5.60 | 2.37 |
+| attempt 1 (hand) | 24.000 | 9.000 | 4.29 | 21.54 | 4.64 |
+| attempt 2 (hand) | 20.000 | 15.000 | 5.82 | 40.03 | 6.33 |
+| attempt 3 (hand) | 20.000 | 18.000 | 4.22 | 27.55 | 5.25 |
+| best of the grid | 27.250 | 7.000 | 2.77 | 14.85 | 3.85 |
+| least squares | 26.024 | 8.080 | 2.81 | 13.15 | 3.63 |
 <!-- /worked -->
 
 Two observations. First, the least-squares line has the smallest MSE of any
-line in the table, $5.60$ against $8.45$ for the grid's best, and it did not need
+line in the table, $13.15$ against $14.85$ for the grid's best, and it did not need
 the $58{,}081$ evaluations of the grid: it is a handful of sums. Second, it does
 *not* have the smallest average absolute error: the grid search, which minimised
-that loss, reaches $1.86$ and the least-squares line has $2.04$. Each method is
-best at the loss it was built for. The least-squares line tolerates two
-or three larger misses (the lowest-voltage row is $4.49$ off) in exchange for
-smaller misses elsewhere, and that is the trade the squared error asks for.
+that loss, reaches $2.77$ and the least-squares line has $2.81$. Each method is
+best at the loss it was built for. The grid's line lets the highest-voltage row be
+$9.4$ degrees off in exchange for six rows within $1.7$; the least-squares line
+has no miss above $7.22$, at the price of smaller misses spread over more rows, and
+that is the trade the squared error asks for: one large miss costs more than several small ones.
 
 ## Many features: the design matrix and the normal equations
 
@@ -414,8 +417,8 @@ At attempt 1 (b = 9, w = 24): the formula (2/N) X^T (X w - y) against central di
 
 | component | formula | finite difference |
 |---|---:|---:|
-| dMSE/db (intercept) | -5.58800 | -5.58800 |
-| dMSE/dw (slope) | -9.27644 | -9.27644 |
+| dMSE/db (intercept) | -5.21600 | -5.21600 |
+| dMSE/dw (slope) | -10.66028 | -10.66028 |
 <!-- /worked -->
 
 ### The normal equations
@@ -439,23 +442,23 @@ We solve the system.
 For the sensor, with the design matrix of ones and voltages:
 
 <!-- worked: linear_regression.design_matrix_system -->
-X has shape [10, 2]: a column of ones and the column of voltages. First three rows: [1, 0.78], [1, 1.29], [1, 1.46].
+X has shape [10, 2]: a column of ones and the column of voltages. First three rows: [1, 0.42], [1, 0.95], [1, 1.60].
 
 ```text
 X^T X  (shape [2, 2])                 X^T y  (shape [2])
-[   10.0000    18.1400 ]            [   553.3000 ]
-[   18.1400    35.9212 ]            [  1071.7510 ]
+[   10.0000    17.4300 ]            [   534.4000 ]
+[   17.4300    34.2559 ]            [  1032.3130 ]
 ```
 
 Elimination (Volume I, chapter 4):
 
 ```text
-R2 <- R2 - 1.8140 R1     [ 0  3.0152 | 68.0648 ]
-back substitution: w1 = 68.0648 / 3.0152 = 22.5736
-                   w0 = (553.3000 - 18.1400 * 22.5736) / 10 = 14.3815
+R2 <- R2 - 1.7430 R1     [ 0  3.8754 | 100.8538 ]
+back substitution: w1 = 100.8538 / 3.8754 = 26.0240
+                   w0 = (534.4000 - 17.4300 * 26.0240) / 10 = 8.0801
 ```
 
-Closed form of the previous section: w = 22.5736, b = 14.3815.
+Closed form of the previous section: w = 26.0240, b = 8.0801.
 <!-- /worked -->
 
 The entries of $\mathbf{X}^\top\mathbf{X}$ are the sums the one-dimensional
@@ -480,11 +483,19 @@ function fit_least_squares(X: array<real>[N, d], y: array<real>[N])
                 A[i, j] = A[i, j] + X[n, i] * X[n, j]
         for n in 0 .. N:
             c[i] = c[i] + X[n, i] * y[n]
-    return solve(A, c)                  # elimination, chapter 4: fails if a pivot is 0
+    return solve(A, c, true)            # elimination with partial pivoting, chapter 4
 ```
 
 Forming $\mathbf{A}$ costs $N d^2$ multiply-adds and solving costs about $d^3/3$.
 Both numbers are tabulated at the end of the next section, where they matter.
+
+The `solve` of chapter 4 refuses a matrix only when a pivot is exactly zero, the
+right test in exact arithmetic. In floating point a singular
+$\mathbf{X}^\top\mathbf{X}$ leaves a pivot of rounding noise instead of a zero, so
+wherever this chapter's tables need to detect a vanishing pivot they use the same
+elimination with this test in place of the exact one: the pivot counts as zero when
+its absolute value is below $10^{-12}$ times the larger of $1$ and the
+largest absolute entry of its column in the matrix being eliminated.
 
 ### The same answer as a picture: projection
 
@@ -512,24 +523,24 @@ vectors in ten dimensions that nobody can draw), compute the residual vector and
 products:
 
 <!-- worked: linear_regression.projection_check -->
-The fitted vector y_hat = X w and the residual r = y - X w, as vectors in 10 dimensions.
+The fitted vector y_hat = X w and the residual r = y - X w, as vectors in 10 dimensions. The two dot products with the columns of X and the last one are zero up to rounding noise (agreement: size below 1e-9); the other rows are shown to 4 decimals.
 
 | quantity | value |
 |---|---:|
-| sum of residuals  (ones column . r) | +1.1e-14 |
-| sum of v * residual  (voltage column . r) | -4.3e-14 |
-| y . y | 32206.5500 |
-| y_hat . y_hat | 32150.5561 |
-| r . r | 55.9939 |
-| y_hat . y_hat + r . r | 32206.5500 |
-| y_hat . r | -8.7e-13 |
+| sum of residuals  (ones column . r) | +6.2e-14 |
+| sum of v * residual  (voltage column . r) | +6.2e-14 |
+| y . y | 31314.4400 |
+| y_hat . y_hat | 31182.9587 |
+| r . r | 131.4813 |
+| y_hat . y_hat + r . r | 31314.4400 |
+| y_hat . r | +2.2e-12 |
 <!-- /worked -->
 
 The residual is orthogonal to the column of ones (its entries sum to zero) and to
 the column of voltages, to rounding; it is also orthogonal to the fitted vector
 itself. The right angle gives a theorem of Pythagoras in ten dimensions:
 $\lVert\mathbf{y}\rVert^2 = \lVert\hat{\mathbf{y}}\rVert^2 + \lVert\mathbf{r}\rVert^2$,
-the last three rows of the table. And $\lVert\mathbf{r}\rVert^2 = 55.99$ is $N$ times
+the last three rows of the table. And $\lVert\mathbf{r}\rVert^2 = 131.48$ is $N$ times
 the MSE, so the minimal loss is the squared length of what the model cannot reach.
 
 ## When the normal equations break
@@ -552,23 +563,28 @@ answer. But the answer is not trustworthy.
 <!-- worked: linear_regression.collinear_features -->
 Case A: the third column is the voltage in millivolts, exactly 1000 v.
 
-Elimination on X^T X: a pivot vanishes, so X^T X has no inverse (rank 2 of 3). Every (w1, w2) with w1 + 1000 w2 = 22.5736 gives the same predictions, for example (22.5736, 0) and (0, 0.0225736).
+The millivolt column is computed as 1000.0 * v in floating point. Elimination with partial pivoting on X^T X declares a pivot vanishing when it is smaller than 1e-12 times the largest entry of its column (or 1e-12, if that entry is below 1); the rank counts eigenvalues above 1e-9 of the largest. Elimination on X^T X: a pivot vanishes, so X^T X has no inverse (rank 2 of 3). Every (w1, w2) with w1 + 1000 w2 = 26.0240 gives the same predictions, for example (26.0240, 0) and (0, 0.0260240).
 
-Case B: the third column is a second meter reading the same voltage, differing by a few millivolts (Gaussian disagreement of standard deviation 0.003 V). Labels of the second run: row 5 raised by 0.5.
+Case B: the third column is a second meter reading the same voltage, differing by a few millivolts. Generator: the book's SplitMix64, seed 0xe44a83d6174254b9 (16450105544460620985). For the ten rows in table order, one `rng.normal()` each, the second meter reads v + 0.003 * rng.normal() rounded to 4 decimals. Labels of the second run: row 5 raised by 0.5.
 
-| labels | b | w (meter 1) | w' (meter 2) | prediction at 1.80 V on both |
+| row n | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| meter 1 (V) | 0.42 | 0.95 | 1.60 | 1.63 | 1.80 | 1.90 | 1.96 | 2.19 | 2.30 | 2.68 |
+| meter 2 (V) | 0.4172 | 0.9544 | 1.6006 | 1.6271 | 1.7989 | 1.9017 | 1.9598 | 2.1917 | 2.2971 | 2.6812 |
+
+| labels | b | w (meter 1) | w' (meter 2) | prediction at 1.75 V on both |
 |---|---:|---:|---:|---:|
-| original | 14.43 | -38.7 | 61.3 | 54.98 |
-| row 5 + 0.5 | 14.50 | -34.6 | 57.1 | 55.03 |
+| original | 8.05 | 99.0 | -72.9 | 53.62 |
+| row 5 + 0.5 | 8.08 | 109.3 | -83.2 | 53.67 |
 
-Eigenvalues of X^T X: 81.126, 0.7439, 2.164 x 10^-5; condition number 3.749 x 10^6.
+Eigenvalues of X^T X in case B: 77.512, 1.000, 2.631 x 10^-5; condition number 2.946 x 10^6. Weights are shown to 1 decimal (2 for b); they are the solution of the normal equations by elimination with partial pivoting, accurate to far more digits than shown.
 <!-- /worked -->
 
 In case B, change one label by half a degree (well inside the thermometer's
-noise) and the two weights move by several units each, in opposite directions:
-the first is large and negative, the second large and positive, and their sum,
-which is what the predictions depend on, stays near the slope $22.6$ of the
-single-feature line. The predictions at $1.80$ V are nearly the same in both
+noise) and the two weights move by about ten units each, in opposite directions:
+the first is large and positive ($99.0$, then $109.3$), the second large and negative ($-72.9$, then $-83.2$), and their sum,
+which is what the predictions depend on, stays at $26.1$, near the slope $26.0$ of the
+single-feature line. The predictions at $1.75$ V are nearly the same in both
 runs; the individual weights are meaningless. The cause is the condition number
 of chapter 8. The eigenvalues of $\mathbf{X}^\top\mathbf{X}$ are the squares of
 the singular values of $\mathbf{X}$ (chapter 6), so forming $\mathbf{X}^\top\mathbf{X}$
@@ -696,46 +712,46 @@ goes. First the curvature of the bowl, which the next section turns into a rule.
 <!-- worked: linear_regression.curvature -->
 | quantity | value |
 |---|---:|
-| Hessian (2/N) X^T X | [[2.0000, 3.6280], [3.6280, 7.1842]] |
-| eigenvalues | 9.0510 and 0.1333 |
-| condition number | 67.92 |
-| largest stable learning rate 2 / lambda_max | 0.2210 |
-| best learning rate 2 / (lambda_max + lambda_min) | 0.2178 |
-| loss at the start (w, b) = (0, 30) minus the minimum | 795.3 |
+| Hessian (2/N) X^T X | [[2.0000, 3.4860], [3.4860, 6.8512]] |
+| eigenvalues | 8.6724 and 0.1787 |
+| condition number | 48.52 |
+| largest stable learning rate 2 / lambda_max | 0.2306 |
+| best learning rate 2 / (lambda_max + lambda_min) | 0.2260 |
+| loss at the start (w, b) = (0, 30) minus the minimum | 811.9 |
 <!-- /worked -->
 
 <!-- worked: linear_regression.gd_three_rates -->
-Gradient descent from (w, b) = (0, 30), the constant guess of 30 degrees, on the ten sensor rows, unscaled voltage. The minimum is at (22.57, 14.38) with MSE 5.5994.
+Gradient descent from (w, b) = (0, 30), the constant guess of 30 degrees, on the ten sensor rows, unscaled voltage. Row k shows the weights after k updates w <- w - eta * gradient (k = 0 is the start), with learning rates 0.01, 0.2 and 0.24, and the MSE there. Weights and MSE values are shown to 2 decimals (thousands separated by commas), and numbers of 10^6 or more in size as a mantissa with 3 significant digits times a power of ten. The eta = 0.24 column diverges (it grows by a factor of about 1.08 per step), so its late rows agree only in their leading digits. The minimum is at (26.02, 8.08) with MSE 13.1481.
 
-| step k | (w, b), eta=0.01 | MSE | (w, b), eta=0.2 | MSE | (w, b), eta=0.23 | MSE |
+| step k | (w, b), eta=0.01 | MSE | (w, b), eta=0.2 | MSE | (w, b), eta=0.24 | MSE |
 |---|---:|---:|---:|---:|---:|---:|
-| 0 | (0.00, 30.00) | 800.86 | (0.00, 30.00) | 800.86 | (0.00, 30.00) | 800.86 |
-| 1 | (1.06, 30.51) | 670.06 | (21.10, 40.13) | 538.99 | (24.27, 41.65) | 927.15 |
-| 2 | (2.02, 30.96) | 561.85 | (4.53, 30.90) | 366.50 | (-1.29, 27.69) | 1,075.47 |
-| 5 | (4.42, 32.09) | 336.98 | (16.91, 35.26) | 127.58 | (30.12, 41.57) | 1,693.05 |
-| 10 | (7.19, 33.34) | 157.04 | (12.72, 30.10) | 39.59 | (-10.76, 17.18) | 3,665.51 |
-| 20 | (10.06, 34.46) | 59.65 | (15.95, 26.84) | 19.03 | (-38.68, -2.53) | 17,528.39 |
-| 50 | (12.11, 34.47) | 39.85 | (19.70, 19.96) | 8.22 | (-563.68, -281.52) | 1.95 x 10^6 |
-| 100 | (12.88, 33.23) | 35.52 | (21.83, 15.83) | 5.78 | (-29641.28, -15247.59) | 5.04 x 10^9 |
-| 200 | (14.09, 30.87) | 28.52 | (22.52, 14.48) | 5.60 | (-76552946.46, -39389404.57) | 3.35 x 10^16 |
+| 0 | (0.00, 30.00) | 825.04 | (0.00, 30.00) | 825.04 | (0.00, 30.00) | 825.04 |
+| 1 | (1.02, 30.47) | 704.71 | (20.38, 39.38) | 485.71 | (24.45, 41.25) | 940.14 |
+| 2 | (1.95, 30.89) | 604.29 | (6.30, 30.80) | 300.22 | (-0.72, 26.64) | 1,076.61 |
+| 5 | (4.30, 31.93) | 392.12 | (16.32, 32.62) | 107.74 | (31.25, 39.33) | 1,652.03 |
+| 10 | (7.08, 33.07) | 216.46 | (15.37, 27.19) | 57.42 | (-8.41, 13.00) | 3,508.90 |
+| 20 | (10.09, 34.03) | 114.80 | (18.96, 21.54) | 33.80 | (-34.78, -8.91) | 16,568.60 |
+| 50 | (12.57, 33.53) | 87.28 | (23.66, 12.60) | 15.47 | (-548.01, -287.86) | 1.81 x 10^6 |
+| 100 | (13.83, 31.41) | 75.07 | (25.64, 8.81) | 13.21 | (-28,596.63, -14,945.33) | 4.52 x 10^9 |
+| 200 | (15.83, 27.59) | 56.44 | (26.01, 8.10) | 13.15 | (-7.16 x 10^7, -3.74 x 10^7) | 2.83 x 10^16 |
 <!-- /worked -->
 
 The three columns behave in three different ways.
 
 **Too small ($\eta = 0.01$).** The loss falls at every step and never overshoots,
-but after $200$ steps it is still at $28.5$ against a minimum of $5.60$, and
-the slope has reached $14.1$ of its final $22.6$. The path is safe and
+but after $200$ steps it is still at $56.44$ against a minimum of $13.15$, and
+the slope has reached $15.83$ of its final $26.02$. The path is safe and
 inefficient, which for a model with millions of parameters means days of training
 instead of hours.
 
 **Good ($\eta = 0.2$).** The loss falls fast at first and then settles; by step
-$100$ it is within $0.2$ of the minimum, and by step $200$ the weights are within $0.1$ of
-the exact line. Early on the path overshoots a little (the slope
-is $21.1$ after one step and $4.5$ after two), a sign that the step is large
+$100$ it is within $0.07$ of the minimum, and by step $200$ the weights are within $0.02$ of
+the exact line. Early on the path overshoots (the slope
+is $20.38$ after one step and $6.30$ after two), a sign that the step is large
 for one of the two directions of the bowl.
 
-**Too large ($\eta = 0.23$).** The loss rises. It is $927$ after one step, $3{,}665$
-after ten, and about $5 \times 10^9$ after a hundred. The slope swings from side
+**Too large ($\eta = 0.24$).** The loss rises. It is $940$ after one step, $3{,}509$
+after ten, and about $4.5 \times 10^9$ after a hundred. The slope swings from side
 to side with growing amplitude and the weights run away. This is not an accident
 of this data set: the next section shows it is the unavoidable behaviour for any
 learning rate above a limit that we can compute in advance. A loss that
@@ -744,14 +760,14 @@ rises is the signal.
 The picture draws the same three runs on the contours of the loss: the paths
 across the long valley. The $\eta = 0.01$ path creeps. The $\eta = 0.2$ path
 zigzags across the valley with swings that shrink while it moves along the valley
-floor. The $\eta = 0.23$ path (only seven steps shown) swings across the valley
+floor. The $\eta = 0.24$ path (only seven steps shown) swings across the valley
 by more at each step and leaves the frame.
 
-![Contours of the mean squared error of the sensor line in the plane of slope w and intercept b, drawn as long narrow ellipses sloping down to the right, with the minimum at (22.57, 14.38). Three paths start at (0, 30): eta 0.01 moves slowly along the valley, eta 0.2 zigzags across the valley while advancing to the minimum, and eta 0.23 swings across the valley with growing amplitude and leaves the plot.](img/descent-paths.svg)
+![Contours of the mean squared error of the sensor line in the plane of slope w and intercept b, drawn as long narrow ellipses sloping down to the right, with the minimum at (26.02, 8.08). Three paths start at (0, 30): eta 0.01 moves slowly along the valley, eta 0.2 zigzags across the valley while advancing to the minimum, and eta 0.24 swings across the valley with growing amplitude and leaves the plot.](img/descent-paths.svg)
 
 ## How large a step: the stability limit
 
-Why did $0.2$ work and $0.23$ not? The loss of a linear model is exactly a
+Why did $0.2$ work and $0.24$ not? The loss of a linear model is exactly a
 quadratic, so the question has an exact answer, the same one as in chapters 8 and
 9 with one new ingredient: the Hessian of the MSE is known.
 
@@ -796,32 +812,32 @@ This is the stability limit of Euler's method from chapter 9, with the largest
 curvature of the bowl playing the part of the rate $\lambda$. Above it the factor
 $1 - \eta\lambda_{\max}$ is below $-1$, and the component of the error along
 the steepest direction is multiplied by more than $1$ in size and changes sign at
-every step: it alternates and grows, which is the swinging of the $\eta = 0.23$ run.
+every step: it alternates and grows, which is the swinging of the $\eta = 0.24$ run.
 
-Everything is in the table for our bowl: $\lambda_{\max} = 9.05$, so the limit is
-$2/9.05 = 0.2210$, and $0.23$ lies above it and $0.2$ below. The factors for the
+Everything is in the table for our bowl: $\lambda_{\max} = 8.67$, so the limit is
+$2/8.67 = 0.2306$, and $0.24$ lies above it and $0.2$ below. The factors for the
 two eigen-directions, and the number of steps that the run needs to bring the loss
-to within $0.001$ of its minimum:
+to within $0.001$ of its minimum (the header of the table defines the count exactly):
 
 <!-- worked: linear_regression.stability_table -->
-Curvatures lambda_max = 9.0510, lambda_min = 0.1333; 2 / lambda_max = 0.2210. Steps until the loss is within 0.001 of its minimum, from (w, b) = (0, 30).
+Curvatures lambda_max = 8.6724, lambda_min = 0.1787; 2 / lambda_max = 0.2306. Steps k: the smallest k with loss(w_k) - minimum < 0.001, from (w, b) = (0, 30); a run whose loss exceeds 1e12 above the minimum is reported as diverging, and one that needs more than 200,000 steps as such. Bound: ceil(ln(0.001 / gap_0) / (2 ln(worst factor))) with gap_0 = 811.9 the starting loss minus the minimum.
 
 | learning rate | |1 - eta lambda_max| | |1 - eta lambda_min| | worst factor | bound from the worst factor | steps measured |
 |---|---:|---:|---:|---:|---:|
-| 0.0100 | 0.9095 | 0.9987 | 0.9987 | 5,095 | 3,965 |
-| 0.0500 | 0.5475 | 0.9933 | 0.9933 | 1,017 | 791 |
-| 0.1000 | 0.0949 | 0.9867 | 0.9867 | 507 | 395 |
-| 0.2000 | 0.8102 | 0.9733 | 0.9733 | 252 | 196 |
-| 0.2178 | 0.9710 | 0.9710 | 0.9710 | 231 | 231 |
-| 0.2200 | 0.9912 | 0.9707 | 0.9912 | 771 | 768 |
-| 0.2300 | 1.0817 | 0.9694 | 1.0817 | none | diverges |
+| 0.0100 | 0.9133 | 0.9982 | 0.9982 | 3,803 | 3,184 |
+| 0.0500 | 0.5664 | 0.9911 | 0.9911 | 758 | 635 |
+| 0.1000 | 0.1328 | 0.9821 | 0.9821 | 378 | 316 |
+| 0.2000 | 0.7345 | 0.9643 | 0.9643 | 187 | 157 |
+| 0.2260 | 0.9596 | 0.9596 | 0.9596 | 166 | 166 |
+| 0.2300 | 0.9947 | 0.9589 | 0.9947 | 1,271 | 1,260 |
+| 0.2400 | 1.0814 | 0.9571 | 1.0814 | none | diverges |
 <!-- /worked -->
 
 Read the table by columns. The factor along the steep direction,
 $\lvert 1 - \eta\lambda_{\max}\rvert$, is small for moderate $\eta$ and rises to $1$
 at the limit and beyond it. The factor along the flat direction,
-$\lvert 1 - \eta\lambda_{\min}\rvert$, is within $0.03$ of $1$ for *every* allowed
-learning rate, because $\lambda_{\min} = 0.133$ is tiny: no allowed step size
+$\lvert 1 - \eta\lambda_{\min}\rvert$, is within $0.05$ of $1$ for *every* allowed
+learning rate, because $\lambda_{\min} = 0.179$ is tiny: no allowed step size
 makes progress fast along the valley floor. The worst of the two factors sets the
 speed. It is smallest, and the descent fastest, when the two are equal in
 size: $1 - \eta\lambda_{\min} = -(1 - \eta\lambda_{\max})$, which gives
@@ -833,12 +849,12 @@ $$
 $$
 
 where $\kappa = \lambda_{\max}/\lambda_{\min}$ is the condition number of chapter
-8. For the sensor, $\kappa = 67.9$ and the best rate is $0.2178$, with a factor of
-$0.9710$ per step: even with the best learning rate the error shrinks only by
-$3\%$ per step, because the bowl is $68$ times more curved in one direction than
+8. For the sensor, $\kappa = 48.5$ and the best rate is $0.2260$, with a factor of
+$0.9596$ per step: even with the best learning rate the error shrinks only by
+$4\%$ per step, because the bowl is $49$ times more curved in one direction than
 in the other. The last column of the table also shows how narrow the useful range
-is. At $0.2200$, just under the limit, the steep direction's factor is $0.9912$ and the run needs
-$768$ steps; at $0.2300$ it diverges. Past $\eta^\star$ the steep direction oscillates
+is. At $0.2300$, just under the limit, the steep direction's factor is $0.9947$ and the run needs
+$1{,}260$ steps; at $0.2400$ it diverges. Past $\eta^\star$ the steep direction oscillates
 and sets the pace. In practice one picks a rate somewhat below the limit rather
 than the optimum, which is not known without the Hessian; for a model with millions of parameters nobody
 knows it.
@@ -857,35 +873,35 @@ $$
 
 so each component of the excess shrinks by $(1 - \eta\lambda_i)^2$ per step.
 Late in the run the fast components have died, and the slowest one dominates: the
-excess falls by the same ratio $\rho^2$ at every step, with
-$\rho = \max_i\lvert 1 - \eta\lambda_i\rvert$. A sequence that shrinks by a fixed
+excess falls by the same ratio $\gamma^2$ at every step, with
+$\gamma = \max_i\lvert 1 - \eta\lambda_i\rvert$. A sequence that shrinks by a fixed
 factor per step is called **geometric** (in optimisation, *linear*, because its
 logarithm is a straight line against the step number, as the figure below shows).
 
 <!-- worked: linear_regression.convergence_rate -->
-Gradient descent at learning rate 0.2. The factors are |1 - eta lambda| = 0.8102 and 0.9733; the predicted late ratio is the square of the larger, 0.9474.
+Gradient descent at learning rate 0.2 from (w, b) = (0, 30). With gap_k the loss at step k minus the minimum, the table lists gap_k and gap_(k+1) / gap_k. The factors are |1 - eta lambda| = 0.7345 and 0.9643; the predicted late ratio is the square of the larger, 0.9298.
 
 | step k | loss - minimum | ratio of the next gap to this one |
 |---|---:|---:|
-| 0 | 7.953e+02 | 0.6707 |
-| 1 | 5.334e+02 | 0.6766 |
-| 2 | 3.609e+02 | 0.6847 |
-| 5 | 1.220e+02 | 0.7276 |
-| 10 | 3.399e+01 | 0.8513 |
-| 50 | 2.622e+00 | 0.9474 |
-| 100 | 1.760e-01 | 0.9474 |
-| 300 | 3.572e-06 | 0.9474 |
+| 0 | 8.119e+02 | 0.5820 |
+| 1 | 4.726e+02 | 0.6075 |
+| 2 | 2.871e+02 | 0.6436 |
+| 5 | 9.459e+01 | 0.7934 |
+| 10 | 4.427e+01 | 0.9165 |
+| 50 | 2.324e+00 | 0.9298 |
+| 100 | 6.099e-02 | 0.9298 |
+| 300 | 2.892e-08 | 0.9298 |
 <!-- /worked -->
 
-At $\eta = 0.2$ the ratio of consecutive excesses starts at $0.67$, while the fast
-direction (factor $0.8102$, squared $0.6565$) is still alive, and by step $50$ it
-has risen to $0.9474 = 0.9733^2$ and stays there, to four digits. The theory
-predicts the number of steps: the excess is at most $\rho^{2k}$ times its starting value,
-so it is below a tolerance $\varepsilon$ once
-$k \ge \ln(\varepsilon/\text{excess}_0)\,/\,(2\ln\rho)$. That is the column "bound from the worst factor" of the
+At $\eta = 0.2$ the ratio of consecutive excesses starts at $0.58$, while the fast
+direction (factor $0.7345$, squared $0.5395$) is still alive, and by step $50$ it
+has risen to $0.9298$, the square of the slow factor ($0.9643$), and stays there, to four digits. The theory
+predicts the number of steps: the excess is at most $\gamma^{2k}$ times its starting value,
+so it is below a tolerance $\tau$ once
+$k \ge \ln(\tau/\text{excess}_0)\,/\,(2\ln\gamma)$. That is the column "bound from the worst factor" of the
 stability table, and the measured steps are always below it (they coincide when
 the starting error lies along the slow direction). The count grows with $\kappa$:
-for $\rho = (\kappa - 1)/(\kappa + 1) \approx 1 - 2/\kappa$ the step count is
+for $\gamma = (\kappa - 1)/(\kappa + 1) \approx 1 - 2/\kappa$ the step count is
 proportional to $\kappa$.
 
 ### When to stop
@@ -894,30 +910,30 @@ A program has to decide to stop, since the iteration never reaches the minimum
 exactly. Three stopping rules are in use, usually together.
 
 - **A step limit.** Stop after a fixed number of steps. It guarantees the program ends and is the only rule that does not need the loss to behave.
-- **A small gradient.** Stop when $\lVert\nabla\mathcal{L}\rVert < \varepsilon_g$. At the minimum the gradient is zero, so a small gradient means we are near a critical point. For our quadratic we can say how near: $\lVert\nabla\mathcal{L}\rVert = \lVert\mathbf{H}\mathbf{e}\rVert \ge \lambda_{\min}\lVert\mathbf{e}\rVert$, so $\lVert\mathbf{e}\rVert \le \lVert\nabla\mathcal{L}\rVert/\lambda_{\min}$.
-- **A small change in the loss.** Stop when $\lvert\mathcal{L}_{k} - \mathcal{L}_{k+1}\rvert < \varepsilon_\ell$. This is the easiest rule to write, and the one that can mislead.
+- **A small gradient.** Stop when $\lVert\nabla\mathcal{L}\rVert < \tau_g$. At the minimum the gradient is zero, so a small gradient means we are near a critical point. For our quadratic we can say how near: $\lVert\nabla\mathcal{L}\rVert = \lVert\mathbf{H}\mathbf{e}\rVert \ge \lambda_{\min}\lVert\mathbf{e}\rVert$, so $\lVert\mathbf{e}\rVert \le \lVert\nabla\mathcal{L}\rVert/\lambda_{\min}$.
+- **A small change in the loss.** Stop when $\lvert\mathcal{L}_{k} - \mathcal{L}_{k+1}\rvert < \tau_\ell$. This is the easiest rule to write, and the one that can mislead.
 
-Run the last two on the same problem with three learning rates.
+Run the last two on the same problem with three learning rates. A step count in the table is the number of updates made when the rule fires, the `k` at which `gradient_descent` above returns.
 
 <!-- worked: linear_regression.stopping_criteria -->
-Two stopping rules from (w, b) = (0, 30): stop when the loss changes by less than 1e-6 in a step, or when the gradient norm is below 1e-3. For the second, the distance to the minimum is at most 1e-3 / lambda_min = 0.0075.
+Two stopping rules from (w, b) = (0, 30). Loss-change rule: stop at the first k >= 1 for which |loss(w_(k-1)) - loss(w_k)| < 1e-6. Gradient rule: stop at the first k >= 0 for which the Euclidean norm of the gradient at w_k is below 1e-3. The step count is k, the number of updates made. For the second, the distance to the minimum is at most 1e-3 / lambda_min = 0.0056.
 
 | learning rate | loss-change rule: steps | loss - minimum | distance to minimum | gradient rule: steps | loss - minimum | distance to minimum |
 |---|---:|---:|---:|---:|---:|---:|
-| 0.2 | 271 | 1.71 x 10^-5 | 0.0160 | 300 | 3.57 x 10^-6 | 0.0073 |
-| 0.02 | 2,296 | 1.86 x 10^-4 | 0.0529 | 3,028 | 3.74 x 10^-6 | 0.0075 |
-| 0.002 | 18,655 | 0.0019 | 0.1677 | 30,311 | 3.75 x 10^-6 | 0.0075 |
+| 0.2 | 216 | 1.31 x 10^-5 | 0.0121 | 238 | 2.64 x 10^-6 | 0.0054 |
+| 0.02 | 1,866 | 1.39 x 10^-4 | 0.0394 | 2,412 | 2.78 x 10^-6 | 0.0056 |
+| 0.002 | 15,462 | 0.0014 | 0.1250 | 24,151 | 2.80 x 10^-6 | 0.0056 |
 <!-- /worked -->
 
-The gradient rule stops with the loss under $4 \times 10^{-6}$ above its minimum and the weights within
-$0.0075$ of the truth for all three learning rates, as the bound promised, at
+The gradient rule stops with the loss under $3 \times 10^{-6}$ above its minimum and the weights within
+$0.0056$ of the truth for all three learning rates, as the bound promised, at
 the price of more steps. The loss-change rule is cheaper and its quality depends on
-$\eta$: at $\eta = 0.2$ the final error is $0.016$ away, and at $\eta = 0.002$ it is $0.168$
-away with a loss $0.0019$ above its minimum, about five hundred times worse than the gradient rule
+$\eta$: at $\eta = 0.2$ the final error is $0.012$ away, and at $\eta = 0.002$ it is $0.125$
+away with a loss $0.0014$ above its minimum, about five hundred times worse than the gradient rule
 for the same nominal tolerance. The reason is in the slow direction: there the
 loss falls by a fraction $2\eta\lambda_{\min}$ of the remaining excess each step, so
-a per-step change of $\varepsilon_\ell$ means an excess of about
-$\varepsilon_\ell/(2\eta\lambda_{\min})$: for $\eta = 0.002$ that is $1875$ times
+a per-step change of $\tau_\ell$ means an excess of about
+$\tau_\ell/(2\eta\lambda_{\min})$: for $\eta = 0.002$ that is about $1400$ times
 the tolerance. A small step size makes the loss change small *because the steps are small*, not because the
 minimum is near. The loss-change rule is to be trusted only when the
 learning rate is large enough for the loss change to mean something, and the
@@ -926,13 +942,13 @@ no stopping rule makes a badly conditioned problem fast.
 
 ## Feature scaling
 
-The condition number $\kappa = 67.9$ of the sensor line came from the data, not
+The condition number $\kappa = 48.5$ of the sensor line came from the data, not
 from the model, and the data can be rewritten. Two things are wrong with the
 design matrix $[1, v]$.
 
 First, the columns are not at a right angle: the voltages are all positive and
-centred near $1.8$, so the column of voltages is largely a copy of the column of
-ones. (Their cosine, chapter 3, is $\sum v/\sqrt{N\sum v^2} = 0.957$.) A change
+centred near $1.7$, so the column of voltages is largely a copy of the column of
+ones. (Their cosine, chapter 3, is $\sum v/\sqrt{N\sum v^2} = 0.942$.) A change
 in the intercept and a change in the slope can nearly cancel in their effect on
 the predictions, which is the long valley: the near-collinearity of the previous
 section, in a mild form. **Centring** the feature (subtracting its mean) makes the column
@@ -950,34 +966,34 @@ $\mathbf{X}^\top\mathbf{X}$ is diagonal (its entries are $N$ and $N - 1$), so
 $\mathbf{H} = \mathrm{diag}(2,\ 2(N-1)/N)$ and its two curvatures are almost equal.
 
 <!-- worked: linear_regression.scaling_conditioning -->
-Same ten rows, same model, three ways of writing the voltage (z-score: mean 1.814, standard deviation 0.579). Best learning rate and steps to get the loss within 0.001 of its minimum, from (w, b) = (0, 30).
+Same ten rows, same model, three ways of writing the voltage (z-score z = (v - mean) / s with mean 1.743 and standard deviation s = 0.656, divisor N - 1 = 9; millivolts are 1000 v). Best learning rate 2 / (lambda_max + lambda_min) and steps k, the smallest k with loss(w_k) - minimum < 0.001, from (w, b) = (0, 30) in the units of the column (for z-scores, the weights of the column of ones and of z are started at 30 and 0); a run is cut off at 200,000 steps. The predicted bound is ceil(ln(0.001 / gap_0) / (2 ln((kappa - 1) / (kappa + 1)))).
 
 | feature | lambda_max | lambda_min | condition number | best eta | steps measured | steps predicted (bound) |
 |---|---:|---:|---:|---:|---:|---:|
-| volts, raw | 9.051 | 0.1333 | 67.922 | 0.2178 | 231 | 231 |
-| millivolts, raw | 7.184 x 10^6 | 0.1679 | 4.279 x 10^7 | 2.784 x 10^-7 | > 200,000 | 145,353,341 |
+| volts, raw | 8.672 | 0.1787 | 48.518 | 0.2260 | 166 | 166 |
+| millivolts, raw | 6.851 x 10^6 | 0.2263 | 3.028 x 10^7 | 2.919 x 10^-7 | > 200,000 | 103,005,353 |
 | z-scored | 2.000 | 1.800 | 1.111 | 0.5263 | 3 | 3 |
 <!-- /worked -->
 
 Volts, millivolts and z-scores describe the *same ten rows*, and the same line
 fits all three. Their conditioning could hardly differ more. In millivolts the
-condition number is $4.3 \times 10^{7}$, the stable learning rate is below
+condition number is $3.0 \times 10^{7}$, the stable learning rate is below
 $10^{-6}$, and the run is not within tolerance after $200{,}000$ steps (the bound says
-$1.5 \times 10^{8}$). In volts it is $67.9$ and takes $231$ steps. After z-scoring it is $1.11$ and the loss is
+$1.0 \times 10^{8}$). In volts it is $48.5$ and takes $166$ steps. After z-scoring it is $1.11$ and the loss is
 within tolerance in three. The comparison of the two cases that can be run is in the picture.
 
-![Base-ten logarithm of the loss above its minimum against iteration number, for gradient descent at its best learning rate from the same start. The raw-volts line falls slowly and crosses the line marking a gap of 0.001 near step 231; the z-scored line drops almost vertically to the floor of rounding noise within a few steps.](img/scaling-convergence.svg)
+![Base-ten logarithm of the loss above its minimum against iteration number, for gradient descent at its best learning rate from the same start. The raw-volts line falls slowly and crosses the line marking a gap of 0.001 near step 166; the z-scored line drops almost vertically to the floor of rounding noise within a few steps.](img/scaling-convergence.svg)
 
 Nothing was lost in the change: a fit in z-score units can be mapped back.
 Since $\hat{y} = w_0 + w_1(v - \bar{v})/s$, the slope in volts is $w_1/s$ and the
 intercept $w_0 - w_1\bar{v}/s$.
 
 <!-- worked: linear_regression.scaled_fit_matches -->
-| fit | slope | intercept | prediction at 1.80 V |
+| fit | slope | intercept | prediction at 1.75 V |
 |---|---:|---:|---:|
-| z-scored: (w1, w0) = (13.0659, 55.3300) |  |  | 55.0140 |
-| mapped back: w1 / s, w0 - w1 m / s | 22.5736 | 14.3815 | 55.0140 |
-| raw volts, closed form | 22.5736 | 14.3815 | 55.0140 |
+| z-scored: (w1, w0) = (17.0770, 53.4400) |  |  | 53.6222 |
+| mapped back: w1 / s, w0 - w1 m / s | 26.0240 | 8.0801 | 53.6222 |
+| raw volts, closed form | 26.0240 | 8.0801 | 53.6222 |
 <!-- /worked -->
 
 One rule has to be kept for later chapters: **the mean and standard deviation
@@ -999,25 +1015,25 @@ parabola, found there by a grid search of $241{,}865$ settings, comes out of one
 $3 \times 3$ elimination.
 
 <!-- worked: linear_regression.polynomial_fit -->
-Polynomial features of the voltage, fitted by the normal equations on the ten rows. Weights are (w0, w1, ...) from the constant term up; the fresh rows are the 2000 of the previous chapter.
+Polynomial features of the voltage (columns 1, v, v^2, ...), fitted by the normal equations on the ten rows. Weights are (w0, w1, ...) from the constant term up; the fresh rows are the 2000 of the previous chapter (rounded as there, scored without refitting). MSE is shown to 3 decimals. cond(X^T X) is the largest eigenvalue over the smallest; the last column builds the columns from the z-score of v (mean and standard deviation of the ten voltages, divisor 9) instead of v.
 
 | model | weights | MSE, 10 known rows | MSE, 2000 fresh rows | cond(X^T X), raw v | cond(X^T X), z-scored v |
 |---|---:|---:|---:|---:|---:|
-| line | (14.38, 22.57) | 5.599 | 15.040 | 67.92 | 1.11 |
-| parabola | (-4.68, 46.83, -6.94) | 1.115 | 1.938 | 4,922.36 | 6.57 |
-| cubic | (-9.20, 56.55, -13.25, 1.26) | 1.086 | 2.109 | 606,141.96 | 56.25 |
+| line | (8.08, 26.02) | 13.148 | 14.084 | 48.52 | 1.11 |
+| parabola | (-6.41, 49.52, -7.72) | 0.599 | 1.733 | 1,444.73 | 7.97 |
+| cubic | (-4.31, 43.48, -3.35, -0.92) | 0.544 | 1.965 | 115,038.33 | 83.20 |
 <!-- /worked -->
 
-The parabola is $(w_0, w_1, w_2) = (-4.68, 46.83, -6.94)$, close to the grid's
-$(-5, 47, -7)$ and it cut the error on the fresh rows from $15.04$ for the line to
-$1.94$. The cubic fits the ten known rows a little better than the parabola
-($1.086$ against $1.115$), as any larger family must, and it does *worse* on the
-fresh rows ($2.11$ against $1.94$): the extra freedom has begun to fit the noise,
+The parabola is $(w_0, w_1, w_2) = (-6.41, 49.52, -7.72)$, close to the grid's
+$(-6, 50, -8)$ and it cut the error on the fresh rows from $14.08$ for the line to
+$1.73$. The cubic fits the ten known rows a little better than the parabola
+($0.544$ against $0.599$), as any larger family must, and it does *worse* on the
+fresh rows ($1.97$ against $1.73$): the extra freedom has begun to fit the noise,
 the pattern of chapter 1 that the generalization chapter develops. The last two
 columns show the other lesson of the section: powers of $v$ are strongly correlated, and the
-condition number of $\mathbf{X}^\top\mathbf{X}$ grows from $68$ for the line to
-$4.9 \times 10^3$ for the parabola and $6.1 \times 10^5$ for the cubic. Applying
-the z-score to $v$ before taking its powers brings them to $1.1$, $6.6$ and $56$.
+condition number of $\mathbf{X}^\top\mathbf{X}$ grows from $49$ for the line to
+$1.4 \times 10^3$ for the parabola and $1.2 \times 10^5$ for the cubic. Applying
+the z-score to $v$ before taking its powers brings them to $1.1$, $8.0$ and $83$.
 Feature scaling is not a courtesy: it decides whether the method works.
 
 Fitting a *power law* is another disguise, and the one brain's scaling studies
@@ -1026,36 +1042,36 @@ $L = E + A N^{-\alpha}$ (a floor $E$ plus a power), then
 $\log(L - E) = \log A - \alpha\log N$: a straight line in the logarithms of both
 quantities, with slope $-\alpha$. For a candidate floor $E$ the problem is a
 line fit. Seven noisy points are generated here from $L = 0.5 + 10N^{-0.3}$ with
-$1\%$ noise, and a line is fitted for four candidate floors:
+$1\%$ noise (generator, seed and draw order in the header of the table), and a line is fitted for four candidate floors:
 
 <!-- worked: linear_regression.power_law_log_fit -->
-Seven (size, loss) points generated from L = 0.5 + 10 N^-0.3 with multiplicative noise of one percent.
+Seven (size, loss) points generated from L = 0.5 + 10 N^-0.3 with multiplicative noise of one percent: Generator: the book's SplitMix64, seed 0x1377ca06b334a36f (1402811939074384751). For the sizes in the order listed, one `rng.normal()` each, the loss is (0.5 + 10 N^-0.3) * (1 + 0.01 * rng.normal()).
 
 | N | loss L |
 |---|---:|
-| 1,000 | 1.7321 |
-| 3,000 | 1.4175 |
-| 10,000 | 1.1160 |
-| 30,000 | 0.9542 |
-| 100,000 | 0.8190 |
-| 300,000 | 0.7323 |
-| 1,000,000 | 0.6634 |
+| 1,000 | 1.7667 |
+| 3,000 | 1.4174 |
+| 10,000 | 1.1280 |
+| 30,000 | 0.9460 |
+| 100,000 | 0.8212 |
+| 300,000 | 0.7278 |
+| 1,000,000 | 0.6573 |
 
-For each candidate floor E, a straight-line fit of log(L - E) against log N (slope = -alpha, intercept = log A):
+For each candidate floor E, an ordinary least-squares line (closed form of the chapter, natural logarithms) of log(L - E) against log N (slope = -alpha, intercept = log A); R^2 = 1 - SS_res / SS_tot of that line, with SS_tot the sum of squares of log(L - E) about its mean:
 
 | candidate E | alpha | A | R^2 of the log-space fit |
 |---|---:|---:|---:|
-| 0.00 | 0.1398 | 4.269 | 0.97699 |
-| 0.25 | 0.1867 | 5.087 | 0.98809 |
-| 0.50 | 0.2937 | 9.407 | 0.99967 |
-| 0.60 | 0.4080 | 21.435 | 0.98759 |
+| 0.00 | 0.1431 | 4.423 | 0.97663 |
+| 0.25 | 0.1910 | 5.326 | 0.98824 |
+| 0.50 | 0.3014 | 10.153 | 0.99978 |
+| 0.60 | 0.4228 | 24.634 | 0.98411 |
 <!-- /worked -->
 
 Only a floor near the truth, $E = 0.5$, gives a straight line in the logarithms:
 the quality measure $R^2 = 1 - \mathrm{SS}_{\mathrm{res}}/\mathrm{SS}_{\mathrm{tot}}$
 (the share of the variance of the log-losses that the line explains; the metrics
-chapter treats it properly) is $0.99967$ there and lower for the others,
-and the fit recovers $\alpha = 0.294$ (truth $0.3$) and $A = 9.4$ (truth $10$). The
+chapter treats it properly) is $0.99978$ there and lower for the others,
+and the fit recovers $\alpha = 0.301$ (truth $0.3$) and $A = 10.2$ (truth $10$). The
 loss is no longer the loss in degrees: least squares in log space minimises the
 squares of *relative* errors, so every size counts equally rather than the
 largest losses dominating. That is a modelling decision, made by the transformation, and
@@ -1185,13 +1201,13 @@ Answers are at the end of the chapter.
 
 1. **[Calculate]** For the line $w = 20$, $b = 15$ (attempt 2 of chapter 1) compute the residuals on rows 1, 5 and 10 of the sensor table, their squares, and compare the average of the three squares with the line's MSE from `linear_regression.rescored_attempts`. Why is an average over three rows not a good guide to the average over ten?
 2. **[Calculate]** For the four rows $(v, y) = (0, 1), (1, 3), (2, 4), (3, 8)$ compute $\bar{v}$, $\bar{y}$, $S_{vv}$, $S_{vy}$, the least-squares slope and intercept, and the MSE. Then build $\mathbf{X}^\top\mathbf{X}$ and $\mathbf{X}^\top\mathbf{y}$ and solve by elimination to confirm.
-3. **[Calculate]** Derive the least-squares estimate for a model with no intercept, $\hat{y} = w v$, from $\partial M/\partial w = 0$. Apply it to the four rows of exercise 2 and compare the MSE with the model with an intercept. Which is smaller, and must it be?
+3. **[Calculate]** Derive the least-squares estimate for a model with no intercept, $\hat{y} = w v$, from $\partial\,\mathrm{MSE}/\partial w = 0$. Apply it to the four rows of exercise 2 and compare the MSE with the model with an intercept. Which is smaller, and must it be?
 4. **[Calculate]** For $\mathbf{X}$ with columns $(1, 1, 1)$ and $(1, 2, 3)$ and $\mathbf{y} = (2, 2, 5)$, compute $\mathbf{X}^\top\mathbf{X}$, its eigenvalues $\lambda_i$ of $\mathbf{H} = \frac{2}{3}\mathbf{X}^\top\mathbf{X}$, the stability limit and the best learning rate. Start from $\mathbf{w} = (0, 0)$ and do two steps of gradient descent with that best rate by hand.
 5. **[Calculate]** Show that for z-scored features with an intercept, $\mathbf{X}^\top\mathbf{X}$ is diagonal and find its entries for $N$ rows when the feature is standardised with divisor $N - 1$. What is the condition number as a function of $N$?
 6. **[Implement]** Implement `fit_least_squares` (normal equations with your own elimination) and reproduce `linear_regression.closed_form_line` and `linear_regression.design_matrix_system` from the ten rows of `learning_problem.sensor_table`. Then break it on purpose with the millivolt column of `linear_regression.collinear_features`, case A, and make your solver report the vanishing pivot.
 7. **[Implement]** Implement `gradient_descent` with a finite-difference check of its gradient, and reproduce `linear_regression.gradient_check` and the rows $k = 0, 1, 2, 5, 10$ of `linear_regression.gd_three_rates` from the start $(w, b) = (0, 30)$.
 8. **[Implement]** Compute the eigenvalues of $\mathbf{H} = \frac{2}{N}\mathbf{X}^\top\mathbf{X}$ (power iteration of chapter 6 for the largest, and the trace and determinant for the $2\times 2$ case), then reproduce the two columns of `linear_regression.stability_table` that come from them and its "steps measured" column.
-9. **[Implement]** Reproduce `linear_regression.scaling_conditioning` for volts and z-scores, and `linear_regression.scaled_fit_matches`: fit in z-score units, map the weights back and verify that the prediction at $1.80$ V is unchanged.
+9. **[Implement]** Reproduce `linear_regression.scaling_conditioning` for volts and z-scores, and `linear_regression.scaled_fit_matches`: fit in z-score units, map the weights back and verify that the prediction at $1.75$ V is unchanged.
 10. **[Investigate]** Fit the parabola of `linear_regression.polynomial_fit` by gradient descent on the raw $(1, v, v^2)$ columns with the largest stable learning rate. How many steps does it need to reach the closed-form loss to within $0.001$, and how many with z-scored $v$? Report both condition numbers.
 11. **[Investigate]** Replace the squared loss by the absolute loss in gradient descent on the sensor line (the slope of $\lvert r\rvert$ is $\mathrm{sign}(r)$). Run it with a fixed learning rate and with one that is divided by $k$ at step $k$. What happens near the minimum, and how does it relate to the smoothness argument for the squared loss?
 12. **[Investigate]** Create $N = 20$ rows from a line with noise of your own, and fit with the two-meter design of `linear_regression.collinear_features`, case B, using several values of the disagreement between the meters (0.1, 0.01, 0.001). Plot the weights against the disagreement and the condition number against the disagreement, and say how they scale.
@@ -1255,14 +1271,14 @@ shows; it needs a model whose output is a probability, and a loss that fits it.
 
 **Check your understanding.**
 
-1. It is best in the sense of the squared error: it has the smallest MSE of all lines on these rows. A different loss, such as the absolute error, can prefer a different line (the grid's line had a smaller average absolute error, $1.86$ against $2.04$), and a line that is best on these ten rows is not guaranteed to be the best on new ones.
+1. It is best in the sense of the squared error: it has the smallest MSE of all lines on these rows. A different loss, such as the absolute error, can prefer a different line (the grid's line had a smaller average absolute error, $2.77$ against $2.81$), and a line that is best on these ten rows is not guaranteed to be the best on new ones.
 2. Both have an average absolute error of $3$ ($12/4 = 3$). Model A has MSE $(4 \cdot 9)/4 = 9$ and model B has MSE $144/4 = 36$: the squared error prefers A, the model without a large miss.
 3. Computing the inverse costs about $d^3$ against $d^3/3$ for elimination and is less accurate, and the inverse is not what is wanted: only its product with $\mathbf{X}^\top\mathbf{y}$ is. The program should call a solver on the system, and check for a vanishing pivot.
 4. It is the first gradient condition, $\partial\mathrm{MSE}/\partial b = \frac{2}{N}\sum r_n = 0$, which holds because the design matrix has a column of ones. A sum of $3.2$ would mean the fit is not a least-squares solution: the intercept is missing, the solve failed, or gradient descent has not converged.
 5. Stable: $0 < \eta < 2/10 = 0.2$. Best: $2/(10 + 0.1) = 0.198$. The worst factor is $(\kappa - 1)/(\kappa + 1)$ with $\kappa = 100$, that is $99/101 = 0.980$ per step in the error, $0.961$ in the loss.
-6. The most likely explanation is a learning rate above the stability limit (the slow growth of the oscillation in the steep direction makes the loss fall at first and rise later, as in the $\eta = 0.23$ run); an exact minimum would have the loss stay flat, not rise. Halve the learning rate and run again.
+6. The most likely explanation is a learning rate above the stability limit (the slow growth of the oscillation in the steep direction makes the loss fall at first and rise later, as in the $\eta = 0.24$ run); an exact minimum would have the loss stay flat, not rise. Halve the learning rate and run again.
 7. The loss falls by a fraction of about $2\eta\lambda_{\min}$ of its excess per step in the slow direction, so a per-step change below $10^{-6}$ occurs at an excess of $10^{-6}/(2\eta\lambda_{\min})$, which is $100$ times larger at the smaller rate: the run stops earlier in terms of distance from the minimum.
-8. The least-squares line is unchanged as a function (the slope in mV is $1/1000$ of the slope in volts and the predictions are the same). The condition number of $\mathbf{X}^\top\mathbf{X}$ grows enormously (to $4.3 \times 10^7$ for the sensor, in the table) and the largest stable rate drops to $2/\lambda_{\max}$ of the new, much larger, curvature (below $10^{-6}$).
+8. The least-squares line is unchanged as a function (the slope in mV is $1/1000$ of the slope in volts and the predictions are the same). The condition number of $\mathbf{X}^\top\mathbf{X}$ grows enormously (to $3.0 \times 10^7$ for the sensor, in the table) and the largest stable rate drops to $2/\lambda_{\max}$ of the new, much larger, curvature (below $10^{-6}$).
 
 ## References
 

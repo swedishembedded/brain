@@ -18,29 +18,29 @@ temperature, read its voltage, and read the temperature on a trusted reference
 thermometer at the same moment. Here are the ten measurements.
 
 <!-- worked: learning_problem.sensor_table -->
-N = 10 measured rows (sorted by voltage).
+N = 10 measured rows (sorted by voltage; the source that produced them and the order of its draws are written out in the section "Too small, too big").
 
 | row n | voltage v (V) | temperature y (deg C) |
 |---|---:|---:|
-| 1 | 0.78 | 27.5 |
-| 2 | 1.29 | 44.0 |
-| 3 | 1.46 | 48.5 |
-| 4 | 1.46 | 49.5 |
-| 5 | 1.73 | 57.1 |
-| 6 | 1.94 | 59.7 |
-| 7 | 2.05 | 59.8 |
-| 8 | 2.35 | 68.6 |
-| 9 | 2.52 | 68.9 |
-| 10 | 2.56 | 69.7 |
+| 1 | 0.42 | 13.4 |
+| 2 | 0.95 | 32.8 |
+| 3 | 1.60 | 52.2 |
+| 4 | 1.63 | 55.5 |
+| 5 | 1.80 | 57.5 |
+| 6 | 1.90 | 58.9 |
+| 7 | 1.96 | 61.7 |
+| 8 | 2.19 | 65.0 |
+| 9 | 2.30 | 66.8 |
+| 10 | 2.68 | 70.6 |
 <!-- /worked -->
 
 The sensors will soon be installed in machines where there is no reference
 thermometer, only the voltage. The question the workshop actually has is this:
-a sensor reads $1.80$ V. What temperature is it?
+a sensor reads $1.75$ V. What temperature is it?
 
-There is no row in the table with $1.80$ V. Row 5 says that $1.73$ V was
-$57.1$ degrees and row 6 says that $1.94$ V was $59.7$, so the answer is
-somewhere near $58$, and you can say that without being able to
+There is no row in the table with $1.75$ V. Row 4 says that $1.63$ V was
+$55.5$ degrees and row 5 says that $1.80$ V was $57.5$, so the answer is
+somewhere near $57$, and you can say that without being able to
 write down a rule for how you got there. That small act, producing an answer
 for an input you have never seen from a handful of inputs you have, is what
 this volume is about. This chapter builds the vocabulary for it precisely:
@@ -73,8 +73,8 @@ reading on.
 
 ## Examples, features and labels
 
-Look at one row of the table: a voltage of $1.73$ V and a temperature of
-$57.1$ degrees. The two numbers play different roles, and the vocabulary is
+Look at one row of the table: a voltage of $1.80$ V and a temperature of
+$57.5$ degrees. The two numbers play different roles, and the vocabulary is
 about telling the roles apart.
 
 The voltage is what we will always have: it is the thing that is measured
@@ -228,8 +228,8 @@ of the dataset to choose the parameters. For that, we need a way to say
 whether a particular choice is good, and the simplest sensible one is to ask
 how far off the predictions are on the examples we have.
 
-Take the line through the first and last measurement: $\theta = (24, 9)$, the
-same one as above. For each of the ten rows, the model predicts a temperature
+Take a line drawn by eye through the cloud of the ten points: $\theta = (24, 9)$,
+the same one as above. For each of the ten rows, the model predicts a temperature
 from the voltage, and we put the prediction next to the label. The difference
 between them, ignoring its sign, is how far off the prediction is on that row,
 and the average of those ten numbers is how far off the model is on this
@@ -240,18 +240,18 @@ Attempt 1: w = 24, b = 9.
 
 | v | label y | prediction | prediction - y | off by |
 |---|---:|---:|---:|---:|
-| 0.78 | 27.5 | 27.7 | +0.2 | 0.2 |
-| 1.29 | 44.0 | 40.0 | -4.0 | 4.0 |
-| 1.46 | 48.5 | 44.0 | -4.5 | 4.5 |
-| 1.46 | 49.5 | 44.0 | -5.5 | 5.5 |
-| 1.73 | 57.1 | 50.5 | -6.6 | 6.6 |
-| 1.94 | 59.7 | 55.6 | -4.1 | 4.1 |
-| 2.05 | 59.8 | 58.2 | -1.6 | 1.6 |
-| 2.35 | 68.6 | 65.4 | -3.2 | 3.2 |
-| 2.52 | 68.9 | 69.5 | +0.6 | 0.6 |
-| 2.56 | 69.7 | 70.4 | +0.7 | 0.7 |
-|  |  |  | total | 31.0 |
-|  |  |  | average over N = 10 | 3.10 |
+| 0.42 | 13.4 | 19.1 | +5.7 | 5.7 |
+| 0.95 | 32.8 | 31.8 | -1.0 | 1.0 |
+| 1.60 | 52.2 | 47.4 | -4.8 | 4.8 |
+| 1.63 | 55.5 | 48.1 | -7.4 | 7.4 |
+| 1.80 | 57.5 | 52.2 | -5.3 | 5.3 |
+| 1.90 | 58.9 | 54.6 | -4.3 | 4.3 |
+| 1.96 | 61.7 | 56.0 | -5.7 | 5.7 |
+| 2.19 | 65.0 | 61.6 | -3.4 | 3.4 |
+| 2.30 | 66.8 | 64.2 | -2.6 | 2.6 |
+| 2.68 | 70.6 | 73.3 | +2.7 | 2.7 |
+|  |  |  | total | 42.9 |
+|  |  |  | average over N = 10 | 4.29 |
 <!-- /worked -->
 
 Writing that average as a function of the parameters,
@@ -260,7 +260,7 @@ $$
 E(\theta) = \frac{1}{N} \sum_{n=1}^{N} \bigl| f_\theta(\mathbf{x}_n) - y_n \bigr| ,
 $$
 
-the first attempt scores $E(24, 9) = 3.10$ degrees. This number, a single
+the first attempt scores $E(24, 9) = 4.29$ degrees. This number, a single
 measure of how well one setting of the parameters explains the data, is what
 makes the search for parameters a well-defined problem: **learning is finding
 $\theta$ for which $E(\theta)$ is small.** The next chapter gives such
@@ -270,7 +270,8 @@ method that finds the best parameters of a line without trying them. Here the
 only requirement is that a smaller $E$ means a better fit to these rows.
 
 Now try to improve on it by hand. The table showed where the line is wrong: it
-is below the data in the middle and close to it at both ends. Three attempts,
+is below the data through the middle (eight of the ten predictions are too low)
+and above it at the two ends. Three attempts,
 each a change a person might try after reading the previous score: the second
 lowers $w$ to pull the right-hand end down and raises $b$ to lift the middle,
 and the third keeps that $w$ and raises $b$ a little more.
@@ -278,15 +279,17 @@ and the third keeps that $w$ and raises $b$ a little more.
 <!-- worked: learning_problem.hand_tuning -->
 | attempt | w | b | average off by (deg C) |
 |---|---:|---:|---:|
-| 1 | 24 | 9 | 3.10 |
-| 2 | 20 | 15 | 4.67 |
-| 3 | 20 | 18 | 2.27 |
+| 1 | 24 | 9 | 4.29 |
+| 2 | 20 | 15 | 5.82 |
+| 3 | 20 | 18 | 4.22 |
 <!-- /worked -->
 
 The second attempt is worse than the first. Both knobs moved at once, and their
 effects interact: a lower $w$ with a higher $b$ is a different line that pivots
-through a different point, and here it ended up below the data nearly everywhere.
-The third attempt, with $w$ held and only $b$ raised, is better than the first. This is
+through a different point, and here it ended up below the data on eight of the
+ten rows and far above it at the lowest voltage. The third attempt, with $w$
+held and only $b$ raised, is better than the first, though only just ($4.22$
+against $4.29$). This is
 the character of the problem: with two parameters one can still tune by eye,
 with a table of errors and some patience; with seven billion nobody can, and a
 procedure has to do it.
@@ -297,20 +300,21 @@ at every point of the grid.
 
 ```text
 function best_on_grid(x: array<real>[N], y: array<real>[N],
-                      w_values: list<real>, b_values: list<real>)
+                      w_values: array<real>[P], b_values: array<real>[Q])
         -> (real, real, real):
-    require len(x) == len(y) and len(x) > 0, "need matching, non-empty data"
-    require len(w_values) > 0 and len(b_values) > 0, "need a non-empty grid"
+    require N > 0 and P > 0 and Q > 0, "need data and a non-empty grid"
     best_w = w_values[0]
     best_b = b_values[0]
     best_e = infinity
-    for w in w_values:
-        for b in b_values:
+    for i in 0 .. P:
+        for j in 0 .. Q:
+            w = w_values[i]
+            b = b_values[j]
             total = 0.0
             for n in 0 .. N:
                 total = total + abs((w * x[n] + b) - y[n])
             e = total / N
-            if e < best_e:
+            if e < best_e:                  # strict: the first of equal settings wins
                 best_w = w
                 best_b = b
                 best_e = e
@@ -318,12 +322,12 @@ function best_on_grid(x: array<real>[N], y: array<real>[N],
 ```
 
 <!-- worked: learning_problem.grid_search -->
-Grid: w from 0 to 60 in steps of 0.25 (241 values), b from -20 to 40 in steps of 0.25 (241 values): 58081 settings, 580810 single predictions.
+Grid: w = 0 + 0.25 i for i = 0, ..., 240 (from 0 to 60, 241 values), b = -20 + 0.25 j for j = 0, ..., 240 (from -20 to 40, 241 values): 58081 settings, 580810 single predictions. The settings are visited with w in the outer loop and b in the inner one, both ascending, and a setting replaces the best so far only when its average is strictly smaller (the first of equal settings wins). Averages are shown to 2 decimals.
 
 |  | w | b | average off by (deg C) |
 |---|---:|---:|---:|
-| best of the grid | 19.5 | 20 | 1.86 |
-| attempt 3 by hand | 20 | 18 | 2.27 |
+| best of the grid | 27.25 | 7 | 2.77 |
+| attempt 3 by hand | 20 | 18 | 4.22 |
 <!-- /worked -->
 
 The search found a better line than any of the three attempts, and it paid for
@@ -342,8 +346,8 @@ The figure shows the four lines of the table inside the data.
 ## Too small, too big
 
 The grid search found the best line, but is a line the right hypothesis space?
-Run the same kind of search over parabolas (a grid in three parameters; its
-size is in the table below), and build the lookup table, which needs no search.
+Run the same kind of search over parabolas (a grid in three parameters, described
+below the table), and build the lookup table, which needs no search.
 Then score all three the way we scored the first attempt, on the ten rows that
 were used to choose them.
 
@@ -353,28 +357,46 @@ Here the source of the data is a program, so we can draw two thousand more rows
 from the same source, never looked at while choosing parameters, and score the
 three on those as well.
 
+The program is the book playing the part of nature, and for the sake of
+reproduction it is written out here. The learner never uses it to choose
+parameters; it only supplies the rows. It also produced the ten rows of the
+first table and the data sets of the section after this one.
+
+<!-- worked: learning_problem.data_source -->
+The source (the learner never sees these lines): voltage v uniform on [0.4, 2.8], temperature y = -6 + 50 v - 8 v^2 + 1.2 z with z a standard Gaussian sample. A row is made by two draws in this order: v = 0.4 + 2.4 * rng.uniform(), then z = rng.normal(); v is then rounded to 2 decimals and y (computed from the unrounded v) to 1. `rng.normal()` is the Box-Muller sample of the randomness chapter, which draws two uniforms for every second call and holds the second result for the call after.
+
+| data set | generator seed | rows | how they are used |
+|---|---:|---:|---|
+| sensor table | 0xa95942cd28758354 | 10 | the ten known rows, sorted by (v, y) for display |
+| fresh rows | 0x0fe67df3a852f39e | 2000 | scoring only, never used to choose parameters |
+| five resampled data sets | 0x799f7c35126cfcea | 50 | one generator; data set 1 takes the first 10 rows, data set 2 the next 10, and so on |
+<!-- /worked -->
+
 <!-- worked: learning_problem.hypothesis_spaces -->
-Best member of each space found on the 10 known rows; then scored on 2000 fresh rows from the same source.
+Best member of each space found on the 10 known rows (the line and parabola by the grids of the text, the lookup table by storing the rows); then scored on 2000 fresh rows from the same source (seed 0x0fe67df3a852f39e). The lookup table answers with the label of the stored row whose voltage is closest to the question; a question exactly between two stored voltages goes to the lower one, and the two stored rows with equal voltage are tried in order of increasing label, so the first (lower) label answers. Averages are shown to 2 decimals.
 
 | hypothesis space | numbers that define a member | average off by on the 10 known rows | average off by on 2000 fresh rows |
 |---|---:|---:|---:|
-| line  w v + b | 2 | 1.86 | 3.70 |
-| parabola  a v^2 + w v + b | 3 | 0.73 | 1.19 |
-| lookup table (nearest stored row) | 20 | 0.10 | 3.30 |
+| line  w v + b | 2 | 2.77 | 3.19 |
+| parabola  a v^2 + w v + b | 3 | 0.68 | 0.98 |
+| lookup table (nearest stored row) | 20 | 0.00 | 3.14 |
 <!-- /worked -->
 
 <!-- worked: learning_problem.parabola_grid -->
-Best parabola on the grid (241865 settings): a = -7.0, w = 47.0, b = -5.0, average off by 0.73 deg C on the known rows.
+Parabola grid: a from -14 to 2 in steps of 0.25 (65 values), w from 20 to 80 in steps of 1 (61 values), b from -30 to 30 in steps of 1 (61 values); a is the outer loop, then w, then b, all ascending, strict improvement only, as for the line.
+
+Best parabola on the grid (241865 settings): a = -8.0, w = 50.0, b = -6.0, average off by 0.68 deg C on the known rows.
 <!-- /worked -->
 
 Read the table by columns. On the ten known rows the ordering is exactly what
-the sizes suggest: the more parameters, the smaller the error, down to $0.10$
-for the lookup table (not zero only because two of the stored voltages, $1.46$
-V, have different temperatures and the table has to answer one value for both).
-On the fresh rows the ordering changes. The parabola is best at $1.19$ degrees,
-although on the known rows the lookup table looked far better. The line is stuck at $3.70$: no setting of it can
+the sizes suggest: the more parameters, the smaller the error, down to $0.00$
+for the lookup table (a stored voltage is its own nearest neighbour, so every
+known row is answered with its own label; had two stored voltages been equal
+with different temperatures, the table would have had to pick one).
+On the fresh rows the ordering changes. The parabola is best at $0.98$ degrees,
+although on the known rows the lookup table looked far better. The line is stuck at $3.19$: no setting of it can
 bend, and the sensor's curve bends. And the lookup table has become almost as
-bad as the line, $3.30$, even though it was nearly perfect on the rows it was
+bad as the line, $3.14$, even though it was perfect on the rows it was
 built from.
 
 The reason is the same one in each case, and it is worth stating plainly. The
@@ -443,21 +465,23 @@ five different datasets of ten rows from the same source and pick the best line
 for each.
 
 <!-- worked: learning_problem.resampled_lines -->
-| dataset | best w | best b | off by on its own 10 rows | off by on 2000 fresh rows |
-|---|---:|---:|---:|---:|
-| 1 | 15.25 | 30.5 | 2.10 | 5.93 |
-| 2 | 26.75 | 7.5 | 2.49 | 3.12 |
-| 3 | 19.75 | 20.5 | 3.16 | 3.72 |
-| 4 | 21.75 | 16.75 | 2.84 | 3.23 |
-| 5 | 22.25 | 13.75 | 2.28 | 3.26 |
+Generator: the book's SplitMix64, seed 0x799f7c35126cfcea (8763859967270517994). One generator; data set k takes the next 10 rows (two draws per row, as in the source of the previous section), and the line is the best of the grid of this chapter (same grid, same tie rule). Fresh rows: the 2000 above.
+
+| dataset | lowest voltage (V) | highest voltage (V) | best w | best b | off by on its own 10 rows | off by on 2000 fresh rows |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 0.46 | 2.60 | 27.75 | 6.75 | 2.90 | 3.29 |
+| 2 | 0.41 | 2.62 | 26.25 | 4 | 3.14 | 4.65 |
+| 3 | 0.77 | 2.50 | 24.5 | 10.5 | 1.85 | 3.00 |
+| 4 | 0.69 | 2.63 | 19.25 | 21.5 | 2.69 | 3.97 |
+| 5 | 0.58 | 2.78 | 24 | 10 | 2.63 | 3.33 |
 <!-- /worked -->
 
 Five datasets from one source give five different best lines, with $w$ anywhere
-from $15$ to $27$, and the fifth column shows that the lines are not equally
-good on new rows: dataset 1, whose ten voltages happened to include none below $1.06$ V, chose a
-line that is much worse on fresh data than the others do, because nothing in its
-rows showed it the steep low end of the curve. Nothing was done wrong: the line
-is the best one for its ten rows, and the ten rows were a poor sample. A model's parameters carry the uncertainty of the data they came from.
+from $19.25$ to $27.75$, and the last column shows that the lines are not equally
+good on new rows: dataset 2 chose a line that is worse on fresh data ($4.65$
+degrees) than any of the others ($3.00$ to $3.97$), although its voltages
+cover the range as well as the others do. Nothing was done wrong: the line
+is the best one for its ten rows, and ten noisy rows are a small sample. A model's parameters carry the uncertainty of the data they came from.
 More data narrows this spread, in the way chapter 12's standard error shrinks as
 the sample grows, and it is the main reason the large models of the later
 volumes want datasets of billions of examples.
@@ -509,43 +533,69 @@ against a label, and the model is a description of the data instead.
 A concrete case. The workshop records two numbers from each of twelve machines
 (the vibration frequency and amplitude, say) and suspects there are two kinds of
 machine, but nobody has written down which is which. The twelve rows are
-two-feature vectors, with no labels. A procedure that finds two groups can be
+two-feature vectors, with no labels, listed here with the recipe that produced
+them.
+
+<!-- worked: learning_problem.readings_table -->
+Generator: the book's SplitMix64, seed 0xe99380969c0c4dcd (16830937616765177293). Source: 6 rows around (1.0, 1.2), then 6 around (3.6, 3.0); each row is two draws in this order, x = cx + 0.45 * rng.normal() then y = cy + 0.45 * rng.normal(), rounded to 2 decimals; the 12 rows are then permuted by `shuffle` of the randomness chapter (Fisher-Yates, one `rng.integer(i + 1)` for i = 11 down to 1). The learner is given only this table.
+
+| n | feature 1 | feature 2 |
+|---|---:|---:|
+| 1 | 3.79 | 3.40 |
+| 2 | 1.22 | 0.78 |
+| 3 | 1.33 | 1.61 |
+| 4 | 0.74 | 0.66 |
+| 5 | 4.10 | 3.26 |
+| 6 | 3.50 | 2.67 |
+| 7 | 0.57 | 0.46 |
+| 8 | 3.42 | 2.99 |
+| 9 | 3.97 | 2.25 |
+| 10 | 0.66 | 0.71 |
+| 11 | 2.85 | 2.62 |
+| 12 | 1.25 | 1.29 |
+<!-- /worked -->
+ A procedure that finds two groups can be
 written with nothing beyond the vectors of chapter 3 (the distance between two
 of them) and averages. Pick two starting centres. Then repeat two steps:
 assign every row to the nearest centre, and move each centre to the mean of the
 rows assigned to it. Stop when the assignment no longer changes. The starting
-centres here are deliberately poor, both in the lower left corner.
+centres here are deliberately poor, both in the lower left corner, and the
+rules that the description leaves open are fixed in the header of the table: a
+tie goes to centre A, and a centre that gets no rows stays where it is.
 
 <!-- worked: learning_problem.grouping_loop -->
+Start: centre A = (0.0, 0.0), centre B = (1.0, 0.5). A round assigns each row to the centre with the smaller squared distance (A on a tie), then moves each centre to the mean of its rows (a centre with no rows stays). Rounds stop after the first round whose assignment equals the previous round's, or after 10 rounds. The table shows, for each round, the centres used by its assignment.
+
 | round | centre A | centre B | points assigned to A and B |
 |---|---:|---:|---:|
-| 1 | (0.00, 0.00) | (1.00, 0.50) | 1 and 11 |
-| 2 | (-0.12, 1.34) | (2.37, 2.17) | 4 and 8 |
-| 3 | (0.50, 1.05) | (2.99, 2.62) | 6 and 6 |
-| 4 | (0.84, 1.14) | (3.48, 3.06) | 6 and 6 |
+| 1 | (0.00, 0.00) | (1.00, 0.50) | 0 and 12 |
+| 2 | (0.00, 0.00) | (2.28, 1.89) | 4 and 8 |
+| 3 | (0.80, 0.65) | (3.03, 2.51) | 6 and 6 |
+| 4 | (0.96, 0.92) | (3.60, 2.87) | 6 and 6 |
 <!-- /worked -->
 
-The first round puts almost everything in one group, because both centres are on
-the same side of the data. Moving the centres to the group means pulls them
-apart, the second round splits four and eight, the third splits six and six,
-and in the fourth the assignment does not change: the procedure has stopped. The
+The first round puts every row in one group, because both centres are on
+the same side of the data: centre A gets nothing and stays at the origin, while
+centre B moves to the mean of all twelve rows. That pulls the centres apart, the
+second round splits four and eight, the third splits six and six, and in the
+fourth the assignment does not change: the procedure has stopped. The
 groups it found, with the rows that fell into each:
 
 <!-- worked: learning_problem.grouping_points -->
 | n | feature 1 | feature 2 | group found |
 |---|---:|---:|---|
-| 1 | 3.51 | 3.22 | B |
-| 2 | 1.54 | 0.82 | A |
-| 3 | 2.83 | 3.65 | B |
-| 4 | 3.97 | 2.98 | B |
-| 5 | 0.77 | 1.27 | A |
-| 6 | -0.12 | 1.34 | A |
-| 7 | 1.04 | 0.88 | A |
-| 8 | 0.32 | 0.70 | A |
-| 9 | 3.56 | 2.80 | B |
-| 10 | 3.34 | 2.43 | B |
-| 11 | 3.66 | 3.29 | B |
-| 12 | 1.51 | 1.80 | A |
+| 1 | 3.79 | 3.40 | B |
+| 2 | 1.22 | 0.78 | A |
+| 3 | 1.33 | 1.61 | A |
+| 4 | 0.74 | 0.66 | A |
+| 5 | 4.10 | 3.26 | B |
+| 6 | 3.50 | 2.67 | B |
+| 7 | 0.57 | 0.46 | A |
+| 8 | 3.42 | 2.99 | B |
+| 9 | 3.97 | 2.25 | B |
+| 10 | 0.66 | 0.71 | A |
+| 11 | 2.85 | 2.62 | B |
+| 12 | 1.25 | 1.29 | A |
 <!-- /worked -->
 
 ![Twelve unlabelled readings coloured by the group the procedure found, with the final group centres as large dark dots and the earlier positions of the centres as small grey dots.](img/groups-found.svg)
@@ -580,23 +630,25 @@ buttons alternately for ten steps to find out, compares the average reward
 each one has paid, and then keeps pressing the one that looked better.
 
 <!-- worked: learning_problem.button_game -->
+Generator: the book's SplitMix64, seed 0x82293971ebaab7f0 (9379090860423690224). Button A pays with probability 0.3, button B with 0.7; one `rng.uniform()` per press, rewarded (1) when it is below the button's probability. Steps 1 to 10 alternate A, B, A, ...; the 10 later steps press the button with the larger average (A on a tie), one `rng.uniform()` each, continuing the same generator.
+
 | step | button pressed | reward |
 |---|---:|---:|
 | 1 | A | 0 |
 | 2 | B | 1 |
 | 3 | A | 0 |
-| 4 | B | 0 |
-| 5 | A | 1 |
+| 4 | B | 1 |
+| 5 | A | 0 |
 | 6 | B | 1 |
-| 7 | A | 0 |
-| 8 | B | 0 |
-| 9 | A | 1 |
+| 7 | A | 1 |
+| 8 | B | 1 |
+| 9 | A | 0 |
 | 10 | B | 1 |
 
-Average reward: A 0.4, B 0.6. The agent now presses B for 10 more steps and collects 9 reward. Total over 20 steps: 14.
+Average reward: A 0.2, B 1.0. The agent now presses B for 10 more steps and collects 8 reward. Total over 20 steps: 14.
 <!-- /worked -->
 
-The agent measured B as better ($0.6$ against $0.4$, the true values being
+The agent measured B as better ($1.0$ against $0.2$, the true values being
 $0.7$ and $0.3$), chose it, and collected most of the possible reward in the
 second half. Ten presses is a small sample, in the sense of chapter 12: with a
 slightly different run of luck it might have preferred A. Every part of this tiny
@@ -640,7 +692,7 @@ that are hotter, older or built differently.
 **Common mistakes.**
 
 - Reporting the error on the rows used to choose the parameters as if it were the
-  error on new data. The lookup table's $0.10$ against its $3.30$ is the whole
+  error on new data. The lookup table's $0.00$ against its $3.14$ is the whole
   lesson.
 - Taking a bigger hypothesis space to be better by definition. It contains more
   functions, including the one that is right, and a great many that are wrong
@@ -718,15 +770,15 @@ Answers are at the end of the chapter.
 1. **Explain.** In $\hat{y} = f_\theta(\mathbf{x})$, which of $\hat{y}$, $\mathbf{x}$ and $\theta$ are changed (a) when we ask the same model about a new example and (b) when we say the model is learning?
 2. **Predict.** The line $f(v) = 24 v + 9$ is asked about $v = 2.20$ V. What does it predict? If the true temperature was $62.0$ degrees, by how much is it off?
 3. **Find the error.** "A parabola has three parameters and a line has two, so the best parabola is guaranteed to have a smaller error than the best line on any rows." For which rows is the claim true, and for which is it not necessarily true? (Hint: use the fact that the lines are parabolas with $a = 0$.)
-4. **Explain.** The lookup table scores $0.10$ degrees on the known rows and $3.30$ on fresh rows. A colleague says that this proves the lookup table is a bad model. What does it show, and what would you want to know before calling it bad?
-5. **Find the error.** "Dataset 1 of the five resampled datasets chose a very different line from the others, so there must have been a bug in its search." What is the more likely explanation, and what does it say about the parameters?
+4. **Explain.** The lookup table scores $0.00$ degrees on the known rows and $3.14$ on fresh rows. A colleague says that this proves the lookup table is a bad model. What does it show, and what would you want to know before calling it bad?
+5. **Find the error.** "Dataset 2 of the five resampled datasets chose a line that does much worse on fresh rows than the others, so there must have been a bug in its search." What is the more likely explanation, and what does it say about the parameters?
 6. **Predict.** A grid for a model with $k = 3$ parameters has $m = 100$ values per parameter. How many settings does it contain, and how many for $k = 10$?
 7. **Explain.** For each of the following, say which of the three settings it is and what the data or feedback consists of: (a) grouping customers by their purchases with no categories given; (b) predicting a stock's next price from its history; (c) a robot learning to balance by being told only whether it fell.
 8. **Explain.** Why does the "data comes from a distribution" assumption make the average error on the known rows an estimate rather than the answer?
 
 ## Exercises
 
-1. **[Calculate]** For the line $f(v) = 24v + 9$ compute by hand the prediction and the off-by amount for rows 1, 5 and 10 of the sensor table, and check them against the table of `learning_problem.first_attempt`. Then compute the average error of the same line on only those three rows, and say whether the difference from $3.10$ is a surprise.
+1. **[Calculate]** For the line $f(v) = 24v + 9$ compute by hand the prediction and the off-by amount for rows 1, 5 and 10 of the sensor table, and check them against the table of `learning_problem.first_attempt`. Then compute the average error of the same line on only those three rows, and say whether the difference from $4.29$ is a surprise.
 
 2. **[Calculate]** Starting from $\theta = (20, 18)$ (attempt 3), raise $w$ by $1$ and recompute the average error over the ten rows. Then lower $b$ by $1$ in the original and recompute. Which single change is better, and what does the comparison say about trying one parameter at a time?
 
@@ -736,15 +788,15 @@ Answers are at the end of the chapter.
 
 5. **[Calculate]** Do two rounds of the grouping loop by hand on the four one-feature rows $1, 2, 8, 9$ with starting centres $1$ and $2$. Give the assignment, the new centres, and say whether a third round changes anything.
 
-6. **[Implement]** In your language, generate the sensor dataset of this chapter's described source (voltage drawn uniformly from $[0.4, 2.8]$ V, temperature $-6 + 50v - 8v^2$ plus Gaussian noise of standard deviation $1.2$, rounded to two and one decimals) with any random generator, and implement the grid search of the pseudocode. Reproduce the structure of `learning_problem.grid_search` (a best line whose average error is clearly below that of the three hand attempts); your numbers will differ because your random generator does.
+6. **[Implement]** Implement the book's generator (chapter "Randomness on a Deterministic Machine"), the source of `learning_problem.data_source` and the grid search of the pseudocode. Seed the generator with the seed printed for the sensor table, draw the ten rows in the stated order and check that sorted by voltage they are the table of `learning_problem.sensor_table`; then reproduce `learning_problem.grid_search` (the grid, the best setting and its average error $2.77$, to the digits printed) and the three hand attempts of `learning_problem.hand_tuning`.
 
-7. **[Implement]** Implement the grouping loop of this chapter and reproduce `learning_problem.grouping_loop` and `learning_problem.grouping_points`: take the twelve rows of the second table as input, start from the centres $(0, 0)$ and $(1, 0.5)$, and your centres and group sizes round by round must match, to the digits printed.
+7. **[Implement]** Implement the grouping loop of this chapter and reproduce `learning_problem.grouping_loop` and `learning_problem.grouping_points`: take the twelve rows of `learning_problem.readings_table` as input (or regenerate them from the seed and recipe printed there), start from the centres $(0, 0)$ and $(1, 0.5)$ with the tie and empty-group rules of the table header, and your centres and group sizes round by round must match, to the digits printed.
 
-8. **[Implement]** Implement the decision rule of the button game: from the ten rewards of the table of `learning_problem.button_game` (use them as input rather than generating them), reproduce the two average rewards and the button chosen. Then run your own game for $10^5$ steps with the explore-then-choose rule, with exploration lengths $2$, $10$ and $100$, and report how often the agent picks the wrong button. Which length is best, and why does the answer depend on how close the two probabilities are?
+8. **[Implement]** Implement the decision rule of the button game: first from the ten rewards of the table of `learning_problem.button_game` (use them as input), reproduce the two average rewards and the button chosen; then regenerate the whole table, including the ten later presses, from the seed and the draw order printed in its header. Then run your own game for $10^5$ steps with the explore-then-choose rule, with exploration lengths $2$, $10$ and $100$, and report how often the agent picks the wrong button. Which length is best, and why does the answer depend on how close the two probabilities are?
 
-9. **[Investigate]** Reproduce the three rows of `learning_problem.hypothesis_spaces` with your own data from exercise 6. Then add a fourth hypothesis space: cubic polynomials. Does the error on the fresh rows fall below the parabola's? Repeat with a dataset of $N = 100$ rows instead of $10$ and say what changed.
+9. **[Investigate]** Reproduce the three rows of `learning_problem.hypothesis_spaces` with your implementation of exercise 6 (the fresh rows come from the seed printed in `learning_problem.data_source`), including the parabola grid of `learning_problem.parabola_grid`. Then add a fourth hypothesis space: cubic polynomials. Does the error on the fresh rows fall below the parabola's? Repeat with a dataset of $N = 100$ rows instead of $10$ and say what changed.
 
-10. **[Investigate]** Redo `learning_problem.resampled_lines` with $N = 100$ rows per dataset instead of $10$. Report the range of the best $w$ across five datasets and compare with the range at $N = 10$. How does the spread seem to scale with $N$, and what does chapter 12 predict?
+10. **[Investigate]** Reproduce `learning_problem.resampled_lines` (seed and draw order in its header), then redo it with $N = 100$ rows per dataset instead of $10$. Report the range of the best $w$ across five datasets and compare with the range at $N = 10$. How does the spread seem to scale with $N$, and what does chapter 12 predict?
 
 11. **[Investigate]** Make the fresh rows come from a slightly different distribution (for example, voltages from $[2.0, 3.2]$ V, partly outside the range of the known rows) and score the line, the parabola and the lookup table on them. Which of the three degrades most, and why?
 
@@ -759,12 +811,12 @@ space**, chosen before the data is seen. Learning is using the dataset to choose
 $\theta$, which needs a number that says how far off a choice is, here the
 average of the absolute differences between predictions and labels on the known
 rows. By hand, and then by trying a grid of $58{,}081$ settings, we improved a
-line's score from $3.10$ to $1.86$ degrees, and saw that the grid's cost grows
+line's score from $4.29$ to $2.77$ degrees, and saw that the grid's cost grows
 as $m^k$ and so cannot be the method.
 
 Comparing three hypothesis spaces showed that bigger is not simply better. The
 line was too small to hold the curve of the sensor. The lookup table of twenty
-numbers was almost perfect on the rows it was chosen on and almost as poor as the
+numbers was perfect on the rows it was chosen on and almost as poor as the
 line on new ones, because it stored the noise of those rows. The goal must
 therefore be stated against new examples: the data are draws from an unknown
 distribution, the quantity we want is an expectation under it, the average on the
@@ -810,8 +862,8 @@ exactly, and replaces the grid by following the gradient.
 1. (a) Only $\mathbf{x}$ (and so $\hat{y}$) changes; $\theta$ stays fixed. (b) Only $\theta$ changes, and with it the whole function $f_\theta$; the data stay as they are.
 2. $24 \cdot 2.20 + 9 = 61.8$ degrees. It is off by $\lvert 61.8 - 62.0 \rvert = 0.2$.
 3. It is true for the rows used to choose the parameters, when the error is the one being minimised: every line is a parabola with $a = 0$, so the best parabola on those rows is at least as good as the best line (up to the grid's resolution). It does not follow for new rows: the extra parameter is fitted to the noise of the known rows too and can make the predictions worse on others.
-4. It shows only that the table is excellent on rows it was built from and mediocre on others, so the known-row score is not informative about new rows. Before judging it, ask for the error on fresh rows from the same source (it was $3.30$) and compare with the alternatives on those (the parabola was $1.19$). On those rows it is worse than the parabola and about as poor as the line.
-5. The more likely explanation is a poor sample: its ten voltages included none below $1.06$ V, so nothing in its rows showed the steep low end of the curve and the best line for those rows was a poor one there. The parameters depend on the particular rows drawn, so they vary from dataset to dataset.
+4. It shows only that the table is excellent on rows it was built from and mediocre on others, so the known-row score is not informative about new rows. Before judging it, ask for the error on fresh rows from the same source (it was $3.14$) and compare with the alternatives on those (the parabola was $0.98$). On those rows it is worse than the parabola and about as poor as the line.
+5. The more likely explanation is a small, noisy sample: the search returned the best line for its ten rows (its error on those rows, $3.14$, is the largest of the five, but that is the best any line can do on them), and ten noisy rows do not pin the line down. The parameters depend on the particular rows drawn, so they vary from dataset to dataset, and so does the quality of the line on new rows.
 6. $100^3 = 10^6$ settings, and $100^{10} = 10^{20}$ for $k = 10$.
 7. (a) Unsupervised: features only, the structure (the customer groups) is to be found. (b) Supervised: the label is the next price, which the history itself supplies. (c) Reinforcement: no examples of correct actions, only a reward signal (a fall or not) after the agent acts.
 8. We care about new draws from the distribution, and the known rows are only $N$ of them. Their average error is the expectation under the empirical distribution of the sample, which varies with the sample and, for parameters chosen on these same rows, is also biased toward being too small. It is an estimate of the quantity we want, not the quantity itself.
