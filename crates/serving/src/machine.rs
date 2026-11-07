@@ -82,7 +82,9 @@ impl Machine {
             Some(s) => all_gpus.iter().copied().filter(|(i, _)| s.gpus.contains(i)).collect(),
             None => all_gpus.clone(),
         };
-        let cpu_schedulable = set.map(|s| s.cpu_enabled()).unwrap_or(true);
+        // The software Vulkan adapter (`--device software`) computes in host memory, so a server on it budgets the
+        // host's RAM exactly as a CPU server does; without this nothing could be placed on it.
+        let cpu_schedulable = set.map(|s| s.cpu_enabled() || s.software).unwrap_or(true);
         // Devices whose bytes physically ARE the CPU's RAM: this fallback's
         // synthesized GPUs, plus any real GPU the device registry classifies as
         // integrated (an Arc/Xe iGPU reporting real VRAM via query_gpu_mem - the
