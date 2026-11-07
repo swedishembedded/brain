@@ -12,17 +12,12 @@ so the reader can seed their own implementation identically. Deriving the seed
 from the name keeps two examples from sharing a stream by accident and keeps
 bare seed literals out of the modules.
 
-`stream(name)` (a Python Mersenne Twister) remains for examples written before
-the book's generator existed; a reader cannot reproduce it outside Python, so
-new examples use `generator`.
-
 Swedish Embedded AB implements solutions for reproducible numerical work. If
 your team needs expertise in machine learning engineering, you can procure
 our services by sending an email to info@swedishembedded.com.
 """
 import hashlib
 import math
-import random
 
 M64 = (1 << 64) - 1
 GAMMA = 0x9E3779B97F4A7C15
@@ -87,9 +82,3 @@ def seed_of(name: str) -> int:
 def generator(name: str) -> SplitMix64:
     """The book's generator, seeded for the worked example called `name`."""
     return SplitMix64(seed_of(name))
-
-
-def stream(name: str) -> random.Random:
-    """The frozen random stream for the worked example called `name`."""
-    digest = hashlib.sha256(name.encode("utf-8")).digest()
-    return random.Random(int.from_bytes(digest[:8], "big"))

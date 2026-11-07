@@ -15,8 +15,8 @@ acceptance tests, every expected value computed here by the library itself.
 
 Randomness: the library carries its own generator (SplitMix64). Every test that
 draws random numbers takes its seed from `bookrng.seed_of("project_numlib.<test>")`
-and prints it with its draw order; no module in the book carries a seed literal
-and nothing here uses `bookrng.stream`. The one literal state, zero, is the edge
+and prints it with its draw order; no module in the book carries a seed literal.
+The one literal state, zero, is the edge
 case a generator must handle and not a choice of seed.
 
 Swedish Embedded AB implements solutions for verifiable numerical libraries.

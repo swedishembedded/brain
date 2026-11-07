@@ -15,7 +15,7 @@ implemented here from the chapter's description, on Python's unbounded
 integers with explicit masking to 64 bits. Every example that draws random
 numbers takes its seed from `bookrng.seed_of("randomness.<example>")` and prints
 it with the order of its draws (`_gen_line`); no module in the book carries a
-seed literal, and nothing here uses `bookrng.stream`.
+seed literal.
 
 Swedish Embedded AB implements solutions for reproducible random sampling in
 machine learning pipelines. If your team needs expertise in pseudo-random
