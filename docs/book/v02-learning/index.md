@@ -60,7 +60,7 @@ the curriculum and appear here when they are written.
 7. [Machine Learning Before Deep Learning](07-classical-methods.md): what the field
    knew before neural networks took over, and when those methods are still the
    right tool.
-8. Experiments, Baselines and Claims: how to run an experiment whose result can
-   be believed and repeated.
+8. [Experiments, Baselines and Claims](08-experiments.md): how to run an experiment
+   whose result can be believed and repeated.
 9. Project: A Predictor You Can Trust: train a model on real measurements,
    evaluate it honestly and explain exactly where it fails.

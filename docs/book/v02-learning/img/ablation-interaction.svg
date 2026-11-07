@@ -1,0 +1,30 @@
+<!-- source-sha256: 31e38930a875a344e2a775029ebce9f8e59ccb07b54efc9029cda0a709dd9870 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 380" width="560" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="380" fill="#ffffff"/>
+<line x1="165.56" y1="334" x2="165.56" y2="30" stroke="#edf2f7"/>
+<text x="165.56" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">inputs not centred</text>
+<line x1="300" y1="334" x2="300" y2="30" stroke="#edf2f7"/>
+<text x="300" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle"></text>
+<line x1="434.44" y1="334" x2="434.44" y2="30" stroke="#edf2f7"/>
+<text x="434.44" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">inputs centred</text>
+<line x1="58" y1="300.22" x2="542" y2="300.22" stroke="#edf2f7"/>
+<text x="52" y="304.22" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">68</text>
+<line x1="58" y1="232.67" x2="542" y2="232.67" stroke="#edf2f7"/>
+<text x="52" y="236.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">70</text>
+<line x1="58" y1="165.11" x2="542" y2="165.11" stroke="#edf2f7"/>
+<text x="52" y="169.11" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">72</text>
+<line x1="58" y1="97.56" x2="542" y2="97.56" stroke="#edf2f7"/>
+<text x="52" y="101.56" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">74</text>
+<line x1="58" y1="30" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">76</text>
+<rect x="58" y="30" width="484" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.4" points="165.56,174.4 434.44,127.11"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="165.56,192.69 165.56,156.11"/><circle cx="165.56" cy="174.4" r="4.5" fill="#2b6cb0"/><text x="149.42" y="177.78" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" text-anchor="end">71.7</text><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="434.44,131.84 434.44,122.38"/><circle cx="434.44" cy="127.11" r="4.5" fill="#2b6cb0"/><text x="450.58" y="130.49" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" text-anchor="start">73.1</text><polyline fill="none" stroke="#c05621" stroke-width="2.4" points="165.56,261.72 434.44,86.27"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="165.56,295.24 165.56,228.19"/><circle cx="165.56" cy="261.72" r="4.5" fill="#c05621"/><text x="149.42" y="265.09" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" text-anchor="end">69.1</text><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="434.44,89.46 434.44,83.08"/><circle cx="434.44" cy="86.27" r="4.5" fill="#c05621"/><text x="450.58" y="89.65" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" text-anchor="start">74.3</text></g>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">mean test accuracy (%) over 100 seeds</text>
+<text x="280" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Ablation 2 x 2: the interaction feature helps only after centring</text>
+<line x1="372" y1="40" x2="392" y2="40" stroke="#2b6cb0" stroke-width="2"/>
+<text x="398" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">without the interaction feature</text>
+<line x1="372" y1="58" x2="392" y2="58" stroke="#c05621" stroke-width="2"/>
+<text x="398" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">with the interaction feature</text>
+</svg>

@@ -179,6 +179,7 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\bar{x}$, $\bar{X}$ | the sample mean |
 | $s$, $s^2$ | the sample standard deviation and variance (divisor $n - 1$ unless the text says $n$) |
 | $\mathrm{SE}$ | standard error: the standard deviation of an estimate |
+| $D_i$, $\bar{D}$, $s_D$ | the difference between two systems' scores on example $i$ (second minus first), its sample mean (the gain) and its sample standard deviation, divisor $n - 1$ (Volume I, chapter 12; Volume II, chapter 8, where $\bar{D}/s_D$ is the standardised effect) |
 | $\mathrm{PPL}$ | perplexity, $\exp(H(p, q))$ with the entropy in nats (Chapter 13) |
 | $\hat{p}$, $\hat\theta$ | an estimate computed from data (the hat marks an estimate) |
 | $\alpha$ | significance level of a test, or confidence level $1 - \alpha$ |

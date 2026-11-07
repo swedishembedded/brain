@@ -358,6 +358,7 @@ navigation:
           - docs/book/v02-learning/05-generalization.md
           - docs/book/v02-learning/06-metrics.md
           - docs/book/v02-learning/07-classical-methods.md
+          - docs/book/v02-learning/08-experiments.md
       - title: "Volume III: Building Neural Networks from Nothing"
         pages:
           - docs/book/v03-neural-networks/index.md

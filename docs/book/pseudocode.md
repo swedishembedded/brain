@@ -259,6 +259,7 @@ Gaussian value (initially empty). The calls are:
 | `rng.integer(n)` | an `int` in `0 .. n-1` (`0, ..., n-1`), the remainder `r mod n` of the first raw value `r >= 2^64 mod n` (rejection sampling) |
 | `rng.normal()` | a sample of $\mathcal{N}(0, 1)$ by Box-Muller. A call with no held value draws `u1 = rng.uniform()` then `u2 = rng.uniform()`, sets `R = sqrt(-2 * log(1 - u1))`, holds `R * sin(2 * pi * u2)` and returns `R * cos(2 * pi * u2)`; the next call returns the held value without drawing anything |
 | `shuffle(a, rng)` | permutes the array `a` in place: for `i` from `n-1` down to `1`, `j = rng.integer(i + 1)` and `swap a[i], a[j]` |
+| `Generator(s)` | a new generator whose state is the `u64` `s` before its first draw (a seed `s` below $2^{64}$; there is no held Gaussian value yet) |
 
 Two runs with generators created from the same seed produce the same numbers.
 `os_entropy()` returns a `u64` taken from the operating system, the only

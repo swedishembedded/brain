@@ -55,6 +55,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 5. [Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md): How do we know a model has learned the pattern rather than memorized the examples?
 6. [Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md): Which number tells us whether a model is good, and why is accuracy so often the wrong one?
 7. [Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md): What did the field know before neural networks took over, and when are those methods still the right tool?
+8. [Experiments, Baselines and Claims](v02-learning/08-experiments.md): How do we run an experiment whose result we can believe and someone else can repeat?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 

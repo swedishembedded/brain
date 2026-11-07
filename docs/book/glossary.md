@@ -8,6 +8,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## A
 
+**ablation**: removing or adding the components of a method one at a time (or in a grid) under the same protocol to see which of them produce the result; when components interact, the grid is the report and shares of the gain are not defined. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
+
 **accuracy**: the share of a classifier's decisions that are right, $(\mathrm{TP} + \mathrm{TN})/N$; equivalently the average of the per-class success rates weighted by the class shares, so a rare class barely affects it. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **algorithm**: a finite list of definite steps that turns any input of a stated kind into an output of a stated kind, whose correctness can be argued with an invariant that holds before and after every pass of its loops. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
@@ -17,6 +19,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## B
 
 **backward pass**: visiting the nodes of the graph in reverse order, multiplying the gradient that arrives from the next quantity by the local derivative and adding contributions where a value is used more than once. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
+
+**baseline**: a method run under the same protocol as the new one, trivial (no features), simple (an earlier chapter's method fitted properly) or the previous best, whose result the new one must beat to count as progress. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
 **batch dimension**: an extra, usually first, axis of a tensor that indexes independent examples processed together, so that each example is one contiguous block. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
@@ -60,6 +64,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **confidence interval**: a range computed from a sample, $\bar{x} \pm 1.96\,\mathrm{SE}$ at level $95\%$, built by a recipe that contains the true value in about that share of repeated experiments. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
+**controlled experiment**: a comparison in which the two arms differ only in the thing the claim is about, with the data, recipe, seeds, compute, tuning effort and metric held the same, so that a difference can be attributed to that thing. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
+
 **convergence**: the approach of the iterates to the minimiser and of the loss to its minimum; for a quadratic loss it is geometric, with a speed set by the learning rate and the condition number. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
 **convexity**: the property that no chord joining two points of the curve lies below the curve, equivalent for twice-differentiable functions to a non-negative second derivative; every critical point of a convex function is a global minimum. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
@@ -101,6 +107,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **dot product**: the number $\sum_i a_i b_i$ obtained from two vectors of equal length, equal to $\lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert\cos\theta$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 ## E
+
+**effect size**: the size of a difference in the metric's own units (points of accuracy), or standardised as the mean difference over the standard deviation of the differences; it says how much a result matters, where a test says only whether chance could explain it. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
 **eigenvalue**: the number $\lambda$ by which a matrix stretches one of its eigenvectors, $\mathbf{A}\mathbf{v} = \lambda\mathbf{v}$; the roots of $\det(\mathbf{A} - \lambda\mathbf{I}) = 0$. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
@@ -327,6 +335,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **reinforcement learning (overview)**: learning by an agent that acts in an environment and receives rewards, without being told the right action; full treatment in Volume XII. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **rejection sampling**: drawing a candidate from an easy distribution, keeping it only if it passes a test and otherwise drawing again, so that the kept values have the distribution the test selects; it gives unbiased integers and samples from densities with no invertible cumulative distribution, at the cost of the discarded draws. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
+
+**reporting uncertainty**: stating with a result its intervals over seeds and over the test sample, the numbers of seeds and examples, what was tuned on which split, and how many variants were tried, so that a reader can judge how far to trust it. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
 **reproducibility**: the property that running again from the same recorded inputs (seed, data, code, settings) gives the same results exactly, which requires the same draws in the same order and the same floating-point arithmetic. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
