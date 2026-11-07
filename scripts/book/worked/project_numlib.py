@@ -28,10 +28,7 @@ import math
 
 import bookrng
 
-M64 = (1 << 64) - 1
-GAMMA = 0x9E3779B97F4A7C15
-C1 = 0xBF58476D1CE4E5B9
-C2 = 0x94D049BB133111EB
+M64, GAMMA, C1, C2 = bookrng.M64, bookrng.GAMMA, bookrng.C1, bookrng.C2
 EPS = 2.0 ** -52          # machine epsilon of a 64-bit float, the gap above 1
 
 
@@ -425,49 +422,10 @@ def logsumexp_cases():
 
 # ------------------------------------------------- milestone 4: the generator
 
-def _mix(z):
-    z = ((z ^ (z >> 30)) * C1) & M64
-    z = ((z ^ (z >> 27)) * C2) & M64
-    return z ^ (z >> 31)
-
-
-class SplitMix64:
-    def __init__(self, seed):
-        self.state = seed & M64
-        self._spare = None
-
-    def next_u64(self):
-        self.state = (self.state + GAMMA) & M64
-        return _mix(self.state)
-
-    def uniform(self):
-        return (self.next_u64() >> 11) / float(1 << 53)
-
-    def integer(self, n):
-        """Uniform in 0 .. n-1 by rejection: raw values below 2^64 mod n are refused."""
-        if not 0 < n <= (1 << 64):
-            raise ValueError("no integer in an empty range")
-        threshold = (1 << 64) % n
-        while True:
-            r = self.next_u64()
-            if r >= threshold:
-                return r % n
-
-    def normal(self):
-        """Box-Muller; the sine partner of each pair is held for the next call."""
-        if self._spare is not None:
-            z, self._spare = self._spare, None
-            return z
-        u1, u2 = self.uniform(), self.uniform()
-        r = math.sqrt(-2.0 * math.log(1.0 - u1))
-        self._spare = r * math.sin(2.0 * math.pi * u2)
-        return r * math.cos(2.0 * math.pi * u2)
-
-    def shuffle(self, items):
-        for i in range(len(items) - 1, 0, -1):
-            j = self.integer(i + 1)
-            items[i], items[j] = items[j], items[i]
-        return items
+# The milestone's generator is the book's one SplitMix64 (bookrng), the same
+# code every chapter's random examples use.
+_mix = bookrng._mix
+SplitMix64 = bookrng.SplitMix64
 
 
 class _Scripted(SplitMix64):

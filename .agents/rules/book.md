@@ -80,6 +80,20 @@ the chapter where a reader should first meet it.
   library only, randomness only from `bookrng.stream(<name>)` so that no
   module carries a seed literal, written from the chapter's own description (it is the second,
   independent implementation). `make generate/book/worked` fills it in.
+- **Every worked example is reproducible from the page.** It prints, or
+  names exactly, all of its inputs: data, constants, starting values, step
+  sizes and loop bounds. Random inputs come from `bookrng.generator(<name>)`
+  (the book's own SplitMix64, as its randomness chapter specifies), and the
+  page states the seed (`bookrng.seed_of(<name>)`) and the order in which the
+  values are drawn; before that chapter, also print the drawn values when
+  they are few. Each table states its tolerance or prints enough digits to
+  compare against, and every number quoted in prose matches the table it
+  comes from.
+- **Pseudocode uses only what `docs/book/pseudocode.md` defines.** A chapter
+  that needs a new operation (`sign`, `sort`, bit shifts, complex arithmetic)
+  defines it there in the same change, including edge cases such as
+  `sign(0)`. Every symbol is in `docs/book/notation.md`, and no symbol or
+  word carries two meanings without the text saying so.
 - **Figures are generated SVG.** Structure diagrams are Graphviz sources
   (`scripts/book/figures/<volume dir>/<name>.dot`); anything that plots numbers
   is a Python `render()` using `scripts/book/svgplot.py` and computing its data
@@ -127,4 +141,6 @@ A chapter is done when `make check/book check/generated/book docs/check` pass,
 looked at, and an independent reader (a fresh agent given only the book, not
 the repository) has implemented its [Implement] exercises in a language other
 than Rust from the text alone and reproduced the worked examples. Record the
-outcome in the ledger.
+outcome in the ledger. Each finished volume gets such a reader pass across
+all its chapters and its project; the volume is done when every finding is
+fixed or recorded as open in the ledger.
