@@ -1,0 +1,31 @@
+<!-- source-sha256: f9d66e33e618247e9c7ca7f2e538b37014f351c9562cd273495ef53af44231d1 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 408" width="800" height="408"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="408" fill="#ffffff"/>
+<rect x="40" y="23" width="200" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140" y="46.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  Layers</text>
+<text x="140" y="62.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">forward, backward, saved state</text>
+<rect x="300" y="23" width="200" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="46.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3  Optimizers</text>
+<text x="400" y="62.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">SGD to Lion, schedule, clip</text>
+<rect x="560" y="23" width="200" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="660" y="46.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4  Initialisation</text>
+<text x="660" y="62.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">He, Xavier, fan-in</text>
+<rect x="40" y="119" width="200" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2  Gradient checker</text>
+<text x="140" y="158.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per entry, directional</text>
+<rect x="300" y="119" width="200" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5  Training loop</text>
+<text x="400" y="158.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">log, stop, checkpoint, resume</text>
+<rect x="300" y="215" width="200" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="238.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6  Two models</text>
+<text x="400" y="254.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">classifier and autoencoder</text>
+<rect x="300" y="311" width="200" height="54" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">7  Debugging</text>
+<text x="400" y="350.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">three planted defects</text>
+<line x1="140" y1="80" x2="140" y2="116" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="400" y1="80" x2="400" y2="116" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M200,77 L200,101 Q200,111 210,111 L335,111 Q340,111 340,116 L340,116" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M660,77 L660,136 Q660,146 650,146 L503,146" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="400" y1="176" x2="400" y2="212" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M140,173 L140,232 Q140,242 150,242 L297,242" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="400" y1="272" x2="400" y2="308" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

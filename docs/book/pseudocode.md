@@ -305,6 +305,7 @@ Gaussian value (initially empty). The calls are:
 | `rng.normal()` | a sample of $\mathcal{N}(0, 1)$ by Box-Muller. A call with no held value draws `u1 = rng.uniform()` then `u2 = rng.uniform()`, sets `R = sqrt(-2 * log(1 - u1))`, holds `R * sin(2 * pi * u2)` and returns `R * cos(2 * pi * u2)`; the next call returns the held value without drawing anything |
 | `shuffle(a, rng)` | permutes the array `a` in place: for `i` from `n-1` down to `1`, `j = rng.integer(i + 1)` and `swap a[i], a[j]` |
 | `Generator(s)` | a new generator whose state is the `u64` `s` before its first draw (a seed `s` below $2^{64}$; there is no held Gaussian value yet) |
+| `rng.state` | the current `u64` state of the generator. `Generator(rng.state)` continues the stream exactly where `rng` stands, provided no Gaussian value is held (`uniform`, `integer` and `shuffle` never hold one; after an odd number of `normal` calls the held value is also state and must be saved with it). Volume III, Chapter 14 stores it in a checkpoint |
 | `derive_seed(run_seed, name)` | the seed of the stream called `name` under a run seed: `h = mix(run_seed)`, then `h = mix(h xor b)` for each byte `b` of the UTF-8 name in order, and `h` is the result in `0 .. 2^64 - 1`, where `mix` is the three scrambling lines of the SplitMix64 step without the state advance (Volume I, chapter 17, which gives the code and printed values). `Generator(derive_seed(s, "init"))` is the stream "init" of run seed `s` |
 
 Two runs with generators created from the same seed produce the same numbers.

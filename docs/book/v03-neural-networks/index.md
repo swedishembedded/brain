@@ -41,9 +41,6 @@ with a run that is going badly.
 
 ## Chapters
 
-The chapters that exist in this edition are linked; the others are specified
-in the curriculum and appear here when they are written.
-
 1. [The Neuron and the Perceptron](01-perceptron.md): what an artificial
    neuron is, and what a single one can never learn.
 2. [Multilayer Networks](02-mlp.md): why stacking layers with a nonlinearity between them
@@ -73,3 +70,7 @@ in the curriculum and appear here when they are written.
     why a loss curve looks wrong.
 13. [First Complete Models](13-first-models.md): what it takes to build,
     train and verify a small network end to end.
+14. [Project: A Neural Network Library with Proven Gradients](14-project-neural-network.md):
+    build the layers, the checker, the optimizers and the training loop in your
+    own language, prove every gradient, train two models and find three planted
+    defects.

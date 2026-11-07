@@ -73,4 +73,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 11. [Regularization in Neural Networks](v03-neural-networks/11-regularization.md): How do we stop a network with millions of parameters from memorizing its training set?
 12. [Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md): When a loss curve looks wrong, how do we find out why?
 13. [First Complete Models](v03-neural-networks/13-first-models.md): What does it take to build, train and verify a small network end to end?
+14. [Project: A Neural Network Library with Proven Gradients](v03-neural-networks/14-project-neural-network.md): Can you build a small neural network library whose every gradient is checked, and train it to solve a problem?
 <!-- /contents -->
