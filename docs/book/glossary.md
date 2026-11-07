@@ -50,6 +50,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **confidence interval**: a range computed from a sample, $\bar{x} \pm 1.96\,\mathrm{SE}$ at level $95\%$, built by a recipe that contains the true value in about that share of repeated experiments. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
+**convergence**: the approach of the iterates to the minimiser and of the loss to its minimum; for a quadratic loss it is geometric, with a speed set by the learning rate and the condition number. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
+
 **convexity**: the property that no chord joining two points of the curve lies below the curve, equivalent for twice-differentiable functions to a non-negative second derivative; every critical point of a convex function is a global minimum. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **convolution theorem**: the fact that the discrete Fourier transform of a circular convolution of two signals is the pointwise product of their transforms, so that convolution acts independently on each frequency and a long convolution can be computed with three fast transforms. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
@@ -122,6 +124,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **gradient**: the vector of all the partial derivatives of a scalar function, the same shape as its inputs; it points in the direction of steepest ascent and its length is the steepest rate of change. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
+**gradient descent**: the iteration that repeatedly moves the parameters a small step against the gradient of the loss, $\mathbf{w} \leftarrow \mathbf{w} - \eta\nabla\mathcal{L}(\mathbf{w})$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
+
 ## H
 
 **hashing**: computing from a value, by a fixed rule, a fixed-size number used as the address of the value in a table (giving expected constant-time lookup when the rule spreads the keys) or as a fingerprint that changes if any byte of the value changes. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
@@ -162,6 +166,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **law of large numbers**: the statement that the average of $n$ independent draws with finite variance converges to their expectation, with the probability of an error above any fixed amount going to zero as $n$ grows. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
+**learning rate**: the positive number $\eta$ that scales the step of gradient descent; too small is slow, above $2/\lambda_{\max}$ the iteration diverges on a quadratic loss. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
+
+**least squares**: the method of choosing parameters that minimise the sum of the squared differences between predictions and labels. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
+
 **limit**: the value a quantity approaches as its input gets close to a point without reaching it; $\lim_{h\to 0} g(h) = L$ means $g(h)$ can be made as close to $L$ as we like by taking $h$ small enough and nonzero. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **linear map**: a function of vectors that commutes with addition and scaling, and is determined by what it does to the unit vectors. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
@@ -169,6 +177,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **log-sum-exp**: the function $\log \sum_i e^{z_i}$, computed stably as $m + \log \sum_i e^{z_i - m}$ with $m = \max_i z_i$ so that no exponential overflows and the sum is at least $1$; it is the logarithm of a sum of probabilities given their logarithms, and the denominator of the log of a softmax. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **logarithm**: the exponent to which a base must be raised to give a number; it is the inverse of the exponent and turns a product into a sum, $\log(uv) = \log u + \log v$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
+
+**loss function**: a rule that scores one prediction against its label with a non-negative number, zero for a perfect prediction; its average over the data is the quantity learning minimises. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
 **low-rank approximation**: replacing a matrix by one of small rank, best obtained by keeping the largest singular values; it stores $r(m + n)$ numbers instead of $mn$ and its error is the dropped singular values. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
@@ -183,6 +193,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **matrix multiplication**: the matrix of the composition of two linear maps, $(\mathbf{B}\mathbf{A})_{ij} = \sum_l B_{il}A_{lj}$, defined when the inner sizes agree. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
 **matrix-vector product**: the vector whose entries are the dot products of the rows of a matrix with the input vector, equivalently a weighted sum of the matrix's columns. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
+
+**mean squared error**: the average over the examples of the squared difference between prediction and label, $\frac{1}{N}\sum_n (\hat{y}_n - y_n)^2$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
 **memory complexity**: the amount of memory, counted in cells and measured at the peak, that an algorithm needs as a function of its input size; it can be traded against time by storing a result instead of recomputing it, or the reverse. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
@@ -203,6 +215,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **Newton's method**: the iteration that replaces a function by its tangent line (or, for minimisation, by a quadratic with the same slope and curvature) and jumps to its zero (or bottom), $x \leftarrow x - f(x)/f'(x)$ or $x \leftarrow x - f'(x)/f''(x)$; its error is squared at each step near a simple root. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **norm**: the length of a vector; the L2 norm is $\sqrt{\mathbf{a}\cdot\mathbf{a}}$, and the L1 and max norms measure total and largest-entry size. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
+
+**normal equations**: the system $\mathbf{X}^\top\mathbf{X}\mathbf{w} = \mathbf{X}^\top\mathbf{y}$ obtained by setting the gradient of the squared error to zero; it says the residual is orthogonal (normal) to every column of the design matrix. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
 **numerical integration**: approximating an integral by a weighted sum of function values, such as rectangles, trapezoids or Simpson's rule, whose error falls as a fixed power of the panel width. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 

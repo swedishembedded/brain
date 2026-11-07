@@ -49,6 +49,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume II: What Does It Mean to Learn?](v02-learning/index.md)
 
 1. [The Learning Problem](v02-learning/01-learning-problem.md): What exactly is a model, what is it learning, and from what?
+2. [Linear Regression and the First Descent](v02-learning/02-linear-regression.md): How do we find the straight line that best explains our measurements, and what does 'best' mean?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 

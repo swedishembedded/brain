@@ -45,7 +45,7 @@ the curriculum and appear here when they are written.
 1. [The Learning Problem](01-learning-problem.md): what a model is, what it
    learns and from what, and the three settings (labels, no labels, rewards) in
    which the same idea appears.
-2. Linear Regression and the First Descent: how to find the straight line that
+2. [Linear Regression and the First Descent](02-linear-regression.md): how to find the straight line that
    best explains a set of measurements, and what "best" means.
 3. Classification and Logistic Regression: how a model outputs a probability
    for a yes-or-no question, and how it is trained.
