@@ -39,6 +39,8 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import deps  # noqa: E402
 ROOT = HERE.parents[1]
 SRC = HERE / "figures"
 BOOK = ROOT / "docs" / "book"
@@ -57,11 +59,11 @@ def target(src: Path) -> Path:
 
 
 def digest(src: Path) -> str:
-    data = src.read_bytes()
-    # A Python figure also depends on the shared plotting and diagram helpers.
+    # A Python figure depends on every book module it imports: the plotting
+    # and diagram helpers and the worked modules whose data it draws.
     if src.suffix == ".py":
-        data += (HERE / "svgplot.py").read_bytes() + (HERE / "svgdiagram.py").read_bytes()
-    return hashlib.sha256(data).hexdigest()
+        return deps.digest(src)
+    return hashlib.sha256(src.read_bytes()).hexdigest()
 
 
 def dot_svg(source: str, where: str = "<dot>") -> str:

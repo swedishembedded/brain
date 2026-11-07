@@ -17,8 +17,14 @@ algorithms (no third-party packages), so every printed number has been
 computed by an implementation written outside the engine, in a second
 language, from the chapter's own description.
 
-    scripts/book/worked.py           # regenerate every block in place
-    scripts/book/worked.py --check   # exit 1 if any block is stale
+    scripts/book/worked.py              # regenerate every block in place
+    scripts/book/worked.py --check      # exit 1 if any block is stale
+    scripts/book/worked.py --no-cache   # recompute everything (with either mode)
+
+A function's output is cached (build/book/worked-cache.json) under a hash of
+its module and every book module that module imports, so an unchanged
+module is not recomputed; the outputs are deterministic, so a cached value
+is the value the function would return. `--no-cache` recomputes everything.
 
 Swedish Embedded AB implements solutions for verifiable technical writing
 and numerical correctness. If your team needs expertise in machine learning
@@ -26,6 +32,7 @@ engineering, you can procure our services by sending an email to
 info@swedishembedded.com.
 """
 import importlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -35,34 +42,80 @@ ROOT = HERE.parents[1]
 BOOK = ROOT / "docs" / "book"
 BLOCK = re.compile(r"(<!-- worked: ([a-z0-9_]+)\.([a-z0-9_]+) -->\n)(.*?)(<!-- /worked -->)", re.S)
 
+CACHE = ROOT / "build" / "book" / "worked-cache.json"
+
 sys.path.insert(0, str(HERE / "worked"))
+sys.path.insert(0, str(HERE))
+import deps  # noqa: E402
 
 
-def regenerate(text: str, where: str) -> str:
+class Cache:
+    """Worked outputs keyed by (module digest, function name)."""
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self.data = {}
+        if enabled and CACHE.is_file():
+            try:
+                self.data = json.loads(CACHE.read_text(encoding="utf-8"))
+            except ValueError:
+                self.data = {}
+        self.keys = {}
+
+    def key(self, module: str) -> str:
+        if module not in self.keys:
+            path = HERE / "worked" / f"{module}.py"
+            self.keys[module] = deps.digest(path) if path.is_file() else ""
+        return self.keys[module]
+
+    def get(self, module, func):
+        entry = self.data.get(module)
+        if self.enabled and entry and entry.get("key") == self.key(module):
+            return entry["outputs"].get(func)
+        return None
+
+    def put(self, module, func, value):
+        entry = self.data.get(module)
+        if not entry or entry.get("key") != self.key(module):
+            entry = self.data[module] = {"key": self.key(module), "outputs": {}}
+        entry["outputs"][func] = value
+
+    def save(self):
+        if self.enabled:
+            CACHE.parent.mkdir(parents=True, exist_ok=True)
+            CACHE.write_text(json.dumps(self.data), encoding="utf-8")
+
+
+def regenerate(text: str, where: str, cache: Cache) -> str:
     def repl(m):
         module, func = m.group(2), m.group(3)
-        try:
-            fn = getattr(importlib.import_module(module), func)
-        except (ImportError, AttributeError) as e:
-            sys.exit(f"{where}: worked block {module}.{func}: {e}")
-        body = fn().strip("\n") + "\n"
+        body = cache.get(module, func)
+        if body is None:
+            try:
+                fn = getattr(importlib.import_module(module), func)
+            except (ImportError, AttributeError) as e:
+                sys.exit(f"{where}: worked block {module}.{func}: {e}")
+            body = fn().strip("\n") + "\n"
+            cache.put(module, func, body)
         return f"{m.group(1)}{body}{m.group(5)}"
     return BLOCK.sub(repl, text)
 
 
 def main() -> int:
     check = "--check" in sys.argv
+    cache = Cache(enabled="--no-cache" not in sys.argv)
     stale, blocks = [], 0
     for page in sorted(BOOK.rglob("*.md")):
         text = page.read_text(encoding="utf-8")
         blocks += len(BLOCK.findall(text))
-        new = regenerate(text, str(page.relative_to(ROOT)))
+        new = regenerate(text, str(page.relative_to(ROOT)), cache)
         if new != text:
             if check:
                 stale.append(str(page.relative_to(ROOT)))
             else:
                 page.write_text(new, encoding="utf-8")
                 print(f"updated {page.relative_to(ROOT)}")
+    cache.save()
     if stale:
         print("stale worked examples in:\n  " + "\n  ".join(stale), file=sys.stderr)
         print("run `make generate/book/worked`", file=sys.stderr)
