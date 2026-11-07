@@ -23,7 +23,7 @@ The library is also what the rest of the book quietly assumes. Volume III checks
 
 How the project is organised. Each milestone says what to build (in the book's pseudocode, which fixes the interface and nothing else), why it matters later, a check you run before moving on, and the mistakes that readers actually make. The **acceptance tests** at the end give concrete inputs and the exact outputs a correct library produces, written so that any implementation in any language can be tested against them. Every expected value was computed by a second, independent implementation, `scripts/book/worked/project_numlib.py`, and is regenerated whenever the book is built.
 
-![Seven boxes in a row labelled with the milestones 1 to 7. Arrows show that milestone 2 and milestone 5 use milestone 1, milestone 5 also uses milestones 2 and 3, milestone 6 uses 3 and 4, and the integration task, highlighted, uses 4, 5 and 6.](img/numlib-milestones.svg)
+![Seven boxes labelled with the milestones 1 to 7, placed in four layers with no crossing arrows. Arrows show that milestone 2 and milestone 5 use milestone 1, milestone 5 also uses milestones 2 and 3, milestone 6 uses 3 and 4, and the integration task, highlighted, uses 4, 5 and 6.](img/numlib-milestones.svg)
 
 The figure shows which milestone calls which, so the order 1 to 7 is a valid build order. Build and test each before starting the next; a failure in milestone 7 that traces back to milestone 1 costs an afternoon, and the same failure caught by milestone 1's own check costs a minute.
 

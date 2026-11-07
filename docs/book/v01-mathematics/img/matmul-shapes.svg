@@ -1,56 +1,30 @@
-<!-- source-sha256: 3b38b74d12d3dae48a1597c389176c780de69435793133226e80ba6482ff9413 -->
-<svg width="751pt" height="134pt"
-viewBox="0.00 0.00 751.00 134.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(10.8 123.55)">
-<polygon fill="white" stroke="none" points="-10.8,10.8 -10.8,-123.55 739.89,-123.55 739.89,10.8 -10.8,10.8"/>
-<g id="node1" class="node">
-<path fill="#e2e8f0" stroke="#4a5568" d="M127.75,-112.75C127.75,-112.75 18.75,-112.75 18.75,-112.75 12.75,-112.75 6.75,-106.75 6.75,-100.75 6.75,-100.75 6.75,-83 6.75,-83 6.75,-77 12.75,-71 18.75,-71 18.75,-71 127.75,-71 127.75,-71 133.75,-71 139.75,-77 139.75,-83 139.75,-83 139.75,-100.75 139.75,-100.75 139.75,-106.75 133.75,-112.75 127.75,-112.75"/>
-<text xml:space="preserve" text-anchor="middle" x="73.25" y="-98.3" font-family="Helvetica,sans-Serif" font-size="11.00">A</text>
-<text xml:space="preserve" text-anchor="middle" x="73.25" y="-87.05" font-family="Helvetica,sans-Serif" font-size="11.00">[m, k]</text>
-<text xml:space="preserve" text-anchor="middle" x="73.25" y="-75.8" font-family="Helvetica,sans-Serif" font-size="11.00">m rows, each of length k</text>
-</g>
-<g id="node3" class="node">
-<ellipse fill="#fefcbf" stroke="#4a5568" cx="314.05" cy="-55.88" rx="94.05" ry="29.52"/>
-<text xml:space="preserve" text-anchor="middle" x="314.05" y="-62.3" font-family="Helvetica,sans-Serif" font-size="11.00">C[i][j] =</text>
-<text xml:space="preserve" text-anchor="middle" x="314.05" y="-51.05" font-family="Helvetica,sans-Serif" font-size="11.00">row i of A . column j of B</text>
-<text xml:space="preserve" text-anchor="middle" x="314.05" y="-39.8" font-family="Helvetica,sans-Serif" font-size="11.00">(k multiply&#45;adds)</text>
-</g>
-<g id="edge1" class="edge">
-<path fill="none" stroke="#1a202c" d="M140.13,-81.94C164.59,-78.26 192.81,-74 219.28,-70.01"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="219.56,-72.8 227.06,-68.84 218.73,-67.26 219.56,-72.8"/>
-<text xml:space="preserve" text-anchor="middle" x="183.25" y="-79.16" font-family="Helvetica,sans-Serif" font-size="10.00">k shared</text>
-</g>
-<g id="node2" class="node">
-<path fill="#e2e8f0" stroke="#4a5568" d="M134.5,-41.75C134.5,-41.75 12,-41.75 12,-41.75 6,-41.75 0,-35.75 0,-29.75 0,-29.75 0,-12 0,-12 0,-6 6,0 12,0 12,0 134.5,0 134.5,0 140.5,0 146.5,-6 146.5,-12 146.5,-12 146.5,-29.75 146.5,-29.75 146.5,-35.75 140.5,-41.75 134.5,-41.75"/>
-<text xml:space="preserve" text-anchor="middle" x="73.25" y="-27.3" font-family="Helvetica,sans-Serif" font-size="11.00">B</text>
-<text xml:space="preserve" text-anchor="middle" x="73.25" y="-16.05" font-family="Helvetica,sans-Serif" font-size="11.00">[k, n]</text>
-<text xml:space="preserve" text-anchor="middle" x="73.25" y="-4.8" font-family="Helvetica,sans-Serif" font-size="11.00">n columns, each of length k</text>
-</g>
-<g id="edge2" class="edge">
-<path fill="none" stroke="#1a202c" d="M146.87,-31.52C169.62,-34.85 195.07,-38.58 219.07,-42.1"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="218.38,-44.83 226.7,-43.22 219.19,-39.29 218.38,-44.83"/>
-<text xml:space="preserve" text-anchor="middle" x="183.25" y="-40.42" font-family="Helvetica,sans-Serif" font-size="10.00">k shared</text>
-</g>
-<g id="node4" class="node">
-<path fill="#c6f6d5" stroke="#4a5568" d="M559.09,-76.75C559.09,-76.75 512.34,-76.75 512.34,-76.75 506.34,-76.75 500.34,-70.75 500.34,-64.75 500.34,-64.75 500.34,-47 500.34,-47 500.34,-41 506.34,-35 512.34,-35 512.34,-35 559.09,-35 559.09,-35 565.09,-35 571.09,-41 571.09,-47 571.09,-47 571.09,-64.75 571.09,-64.75 571.09,-70.75 565.09,-76.75 559.09,-76.75"/>
-<text xml:space="preserve" text-anchor="middle" x="535.72" y="-62.3" font-family="Helvetica,sans-Serif" font-size="11.00">C = A B</text>
-<text xml:space="preserve" text-anchor="middle" x="535.72" y="-51.05" font-family="Helvetica,sans-Serif" font-size="11.00">[m, n]</text>
-<text xml:space="preserve" text-anchor="middle" x="535.72" y="-39.8" font-family="Helvetica,sans-Serif" font-size="11.00">m*n entries</text>
-</g>
-<g id="edge3" class="edge">
-<path fill="none" stroke="#1a202c" d="M408.52,-55.88C437.06,-55.88 467.09,-55.88 490.7,-55.88"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="490.56,-58.68 498.56,-55.88 490.56,-53.08 490.56,-58.68"/>
-<text xml:space="preserve" text-anchor="middle" x="454.22" y="-56.88" font-family="Helvetica,sans-Serif" font-size="10.00">k disappears</text>
-</g>
-<g id="node5" class="node">
-<polygon fill="#ffffff" stroke="#4a5568" points="723.09,-73.88 608.09,-73.88 608.09,-37.88 729.09,-37.88 729.09,-67.88 723.09,-73.88"/>
-<polyline fill="none" stroke="#4a5568" points="723.09,-73.88 723.09,-67.88"/>
-<polyline fill="none" stroke="#4a5568" points="729.09,-67.88 723.09,-67.88"/>
-<text xml:space="preserve" text-anchor="middle" x="668.59" y="-56.67" font-family="Helvetica,sans-Serif" font-size="11.00">cost: m*n entries x k</text>
-<text xml:space="preserve" text-anchor="middle" x="668.59" y="-45.42" font-family="Helvetica,sans-Serif" font-size="11.00">= m*n*k multiply&#45;adds</text>
-</g>
-<g id="edge4" class="edge">
-<path fill="none" stroke="#1a202c" stroke-dasharray="5,2" d="M571.44,-55.88C582.58,-55.88 595.24,-55.88 607.64,-55.88"/>
-</g>
-</g>
+<!-- source-sha256: 76cb1c7c16ba243ad138f6c6e41fd18d4b57f7a3d19e4646539df416a1e01f89 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 380" width="760" height="380"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="760" height="380" fill="#ffffff"/>
+<rect x="105" y="18" width="230" height="76" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="220" y="44.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">A</text>
+<text x="220" y="60.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[m, k]</text>
+<text x="220" y="76.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">m rows, each of length k</text>
+<rect x="405" y="18" width="230" height="76" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="44.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B</text>
+<text x="520" y="60.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[k, n]</text>
+<text x="520" y="76.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">n columns, each of length k</text>
+<ellipse cx="370" cy="192" rx="170" ry="46" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="370" y="180.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">C[i][j] =</text>
+<text x="370" y="196.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">row i of A · column j of B</text>
+<text x="370" y="212.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(k multiply-adds)</text>
+<rect x="255" y="284" width="230" height="76" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="370" y="310.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">C = A B</text>
+<text x="370" y="326.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[m, n]</text>
+<text x="370" y="342.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">m*n entries</text>
+<line x1="220" y1="97" x2="220" y2="167.35" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="229" y="136.38" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">k shared</text>
+<line x1="520" y1="97" x2="520" y2="167.35" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="511" y="136.38" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">k shared</text>
+<line x1="370" y1="241" x2="370" y2="281" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="379" y="265.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">k disappears</text>
+<path d="M530,294 H738 L750,306 V350 H530 Z" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<path d="M738,294 V306 H750" fill="none" stroke="#4a5568" stroke-width="1.2"/>
+<text x="544" y="318.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">cost: m*n entries x k</text>
+<text x="544" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">= m*n*k multiply-adds</text>
+<line x1="485" y1="322" x2="530" y2="322" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
 </svg>

@@ -32,7 +32,7 @@ def _arm_labels(svg: str, labels: dict) -> str:
 def render() -> str:
     arms = (("plain", "plain pipeline"), ("both", "centring + interaction"))
     p = Plot((0.4, 2.6), (60, 77), width=560, height=380, ylabel="test accuracy (%)",
-             title=f"Test accuracy over {e.N_SEEDS} seeds, same data, same test rows")
+             title=f"Test accuracy over {e.N_RUNS} seeds, same data, same test rows")
     for i, (key, _) in enumerate(arms):
         acc = [100 * a for a in e._seed_accuracies(key)]
         xs = [i + 1 + ((k * 0.6180339887) % 1.0 - 0.5) * 0.55 for k in range(len(acc))]

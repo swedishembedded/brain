@@ -58,9 +58,9 @@ def target(src: Path) -> Path:
 
 def digest(src: Path) -> str:
     data = src.read_bytes()
-    # A Python figure also depends on the shared plotting helper.
+    # A Python figure also depends on the shared plotting and diagram helpers.
     if src.suffix == ".py":
-        data += (HERE / "svgplot.py").read_bytes()
+        data += (HERE / "svgplot.py").read_bytes() + (HERE / "svgdiagram.py").read_bytes()
     return hashlib.sha256(data).hexdigest()
 
 

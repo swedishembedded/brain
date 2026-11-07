@@ -579,7 +579,7 @@ $\mathbf{h} = \tanh(\mathbf{u})$ entry by entry, and
 $L = \tfrac{1}{2}\lVert\mathbf{h} - \mathbf{t}\rVert^2$. Each link has a Jacobian, and
 the figure shows their shapes.
 
-![A chain of four boxes, x of size 2, u = W x of size 3, h = tanh(u) of size 3 and the loss L of size 1, joined by arrows labelled with the Jacobians W of shape 3 by 2, diag of one minus h squared of shape 3 by 3 and the row h minus t of shape 1 by 3. A note states that dL/dx is the product of the three Jacobians with shapes 1 by 3, 3 by 3, 3 by 2, giving 1 by 2.](img/jacobian-chain.svg)
+![A vertical chain of four boxes, x of size 2, u = W x of size 3, h = tanh(u) of size 3 and the loss L of size 1, joined by arrows labelled with the Jacobians W of shape 3 by 2, diag of one minus h squared of shape 3 by 3 and the row h minus t of shape 1 by 3. A note states that dL/dx is the product of the three Jacobians with shapes 1 by 3, 3 by 3, 3 by 2, giving 1 by 2.](img/jacobian-chain.svg)
 
 The tanh acts on each entry alone, so its Jacobian is diagonal: entry $i$ of the
 output depends only on entry $i$ of the input, with slope $1 - h_i^2$ (Chapter 7).

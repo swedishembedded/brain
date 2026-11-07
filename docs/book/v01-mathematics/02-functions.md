@@ -431,7 +431,7 @@ each stage's range to check it lands inside the next stage's domain, is how to
 verify a composition without trying every input. A function written as
 $\log(a^2)$ instead would fail at $a = 0$.
 
-![A vertical pipeline of nine boxes: x (any real) goes through f1 (a = 3x - 2) to a (any real), through f2 (b = a squared) to b (b at least 0), through f3 (add 1) to b + 1 (at least 1), through f4 (c = log of b + 1) to c (at least 0).](img/composition-pipeline.svg)
+![A pipeline of nine nodes that snakes through three rows of three: x (any real) goes through f1 (a = 3x - 2) to a (any real), through f2 (b = a squared) to b (b at least 0), through f3 (add 1) to b + 1 (at least 1), through f4 (c = log of b + 1) to c (at least 0).](img/composition-pipeline.svg)
 
 **Figure 2.** A composition as a pipeline. Rounded boxes are functions; ovals
 are values with the set each lies in. Every oval's set is inside the domain of

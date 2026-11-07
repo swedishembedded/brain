@@ -1,4 +1,4 @@
-<!-- source-sha256: 0e04053b1fe45a1e5216a92e3e306fcba6c5d8300d83cfe78be8294ea276e760 -->
+<!-- source-sha256: f6a4f7a1a5d55efd7a76876355144b14b5185cf328e16221db746e02e8469297 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 642 400" width="642" height="400">
 <rect width="642" height="400" fill="#ffffff"/>
 <text x="70" y="22" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="start" font-weight="bold">A, shape [3, 4]: entry (i, j) holds 10 i + j; colour = row i</text>

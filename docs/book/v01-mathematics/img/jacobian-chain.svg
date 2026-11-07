@@ -1,57 +1,31 @@
-<!-- source-sha256: 2afd60ae8acd700bc4d2d67f10128df42135e00a4da1a44ac9c8c758cc901a7e -->
-<svg width="714pt" height="199pt"
-viewBox="0.00 0.00 714.00 199.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(10.8 187.8)">
-<polygon fill="white" stroke="none" points="-10.8,10.8 -10.8,-187.8 702.8,-187.8 702.8,10.8 -10.8,10.8"/>
-<g id="node1" class="node">
-<path fill="#e2e8f0" stroke="#4a5568" d="M42,-174C42,-174 12,-174 12,-174 6,-174 0,-168 0,-162 0,-162 0,-150 0,-150 0,-144 6,-138 12,-138 12,-138 42,-138 42,-138 48,-138 54,-144 54,-150 54,-150 54,-162 54,-162 54,-168 48,-174 42,-174"/>
-<text xml:space="preserve" text-anchor="middle" x="27" y="-156.8" font-family="Helvetica,sans-Serif" font-size="11.00">x</text>
-<text xml:space="preserve" text-anchor="middle" x="27" y="-145.55" font-family="Helvetica,sans-Serif" font-size="11.00">[2]</text>
-</g>
-<g id="node2" class="node">
-<path fill="#e2e8f0" stroke="#4a5568" d="M178.25,-174C178.25,-174 148.25,-174 148.25,-174 142.25,-174 136.25,-168 136.25,-162 136.25,-162 136.25,-150 136.25,-150 136.25,-144 142.25,-138 148.25,-138 148.25,-138 178.25,-138 178.25,-138 184.25,-138 190.25,-144 190.25,-150 190.25,-150 190.25,-162 190.25,-162 190.25,-168 184.25,-174 178.25,-174"/>
-<text xml:space="preserve" text-anchor="middle" x="163.25" y="-156.8" font-family="Helvetica,sans-Serif" font-size="11.00">u = W x</text>
-<text xml:space="preserve" text-anchor="middle" x="163.25" y="-145.55" font-family="Helvetica,sans-Serif" font-size="11.00">[3]</text>
-</g>
-<g id="edge1" class="edge">
-<path fill="none" stroke="#1a202c" d="M54.2,-156C74.9,-156 103.99,-156 126.78,-156"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="126.6,-158.8 134.6,-156 126.6,-153.2 126.6,-158.8"/>
-<text xml:space="preserve" text-anchor="middle" x="95.12" y="-167.5" font-family="Helvetica,sans-Serif" font-size="10.00">J1 = W</text>
-<text xml:space="preserve" text-anchor="middle" x="95.12" y="-157" font-family="Helvetica,sans-Serif" font-size="10.00">[3, 2]</text>
-</g>
-<g id="node3" class="node">
-<path fill="#e2e8f0" stroke="#4a5568" d="M373.25,-174C373.25,-174 328,-174 328,-174 322,-174 316,-168 316,-162 316,-162 316,-150 316,-150 316,-144 322,-138 328,-138 328,-138 373.25,-138 373.25,-138 379.25,-138 385.25,-144 385.25,-150 385.25,-150 385.25,-162 385.25,-162 385.25,-168 379.25,-174 373.25,-174"/>
-<text xml:space="preserve" text-anchor="middle" x="350.62" y="-156.8" font-family="Helvetica,sans-Serif" font-size="11.00">h = tanh(u)</text>
-<text xml:space="preserve" text-anchor="middle" x="350.62" y="-145.55" font-family="Helvetica,sans-Serif" font-size="11.00">[3]</text>
-</g>
-<g id="edge2" class="edge">
-<path fill="none" stroke="#1a202c" d="M190.42,-156C220.56,-156 270.54,-156 306.46,-156"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="306.22,-158.8 314.22,-156 306.22,-153.2 306.22,-158.8"/>
-<text xml:space="preserve" text-anchor="middle" x="253.12" y="-167.5" font-family="Helvetica,sans-Serif" font-size="10.00">J2 = diag(1 &#45; h^2)</text>
-<text xml:space="preserve" text-anchor="middle" x="253.12" y="-157" font-family="Helvetica,sans-Serif" font-size="10.00">[3, 3]</text>
-</g>
-<g id="node4" class="node">
-<path fill="#c6f6d5" stroke="#4a5568" d="M624.12,-174C624.12,-174 559.38,-174 559.38,-174 553.38,-174 547.38,-168 547.38,-162 547.38,-162 547.38,-150 547.38,-150 547.38,-144 553.38,-138 559.38,-138 559.38,-138 624.12,-138 624.12,-138 630.12,-138 636.12,-144 636.12,-150 636.12,-150 636.12,-162 636.12,-162 636.12,-168 630.12,-174 624.12,-174"/>
-<text xml:space="preserve" text-anchor="middle" x="591.75" y="-156.8" font-family="Helvetica,sans-Serif" font-size="11.00">L = 1/2 |h &#45; t|^2</text>
-<text xml:space="preserve" text-anchor="middle" x="591.75" y="-145.55" font-family="Helvetica,sans-Serif" font-size="11.00">[1]</text>
-</g>
-<g id="edge3" class="edge">
-<path fill="none" stroke="#1a202c" d="M385.63,-156C425.32,-156 491.42,-156 537.83,-156"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="537.61,-158.8 545.61,-156 537.61,-153.2 537.61,-158.8"/>
-<text xml:space="preserve" text-anchor="middle" x="438.38" y="-167.5" font-family="Helvetica,sans-Serif" font-size="10.00">J3 = (h &#45; t)^T</text>
-<text xml:space="preserve" text-anchor="middle" x="438.38" y="-157" font-family="Helvetica,sans-Serif" font-size="10.00">[1, 3]</text>
-</g>
-<g id="node5" class="node">
-<polygon fill="#fefcbf" stroke="#4a5568" points="686,-66 491.5,-66 491.5,0 692,0 692,-60 686,-66"/>
-<polyline fill="none" stroke="#4a5568" points="686,-66 686,-60"/>
-<polyline fill="none" stroke="#4a5568" points="692,-60 686,-60"/>
-<text xml:space="preserve" text-anchor="middle" x="591.75" y="-51.55" font-family="Helvetica,sans-Serif" font-size="11.00">dL/dx = J3 J2 J1</text>
-<text xml:space="preserve" text-anchor="middle" x="591.75" y="-40.3" font-family="Helvetica,sans-Serif" font-size="11.00">[1,3] [3,3] [3,2] = [1,2]</text>
-<text xml:space="preserve" text-anchor="middle" x="591.75" y="-16.05" font-family="Helvetica,sans-Serif" font-size="11.00">backward: grad_x = J1^T J2^T grad_h</text>
-<text xml:space="preserve" text-anchor="middle" x="591.75" y="-4.8" font-family="Helvetica,sans-Serif" font-size="11.00">[2,3] [3,3] [3] = [2]</text>
-</g>
-<g id="edge4" class="edge">
-<path fill="none" stroke="#1a202c" stroke-dasharray="5,2" d="M591.75,-137.75C591.75,-113.88 591.75,-90.02 591.75,-66.15"/>
-</g>
-</g>
+<!-- source-sha256: 2c5dad669605c62b0259e6d3cb063128fb6fb86870aa8e5f06f6259a365b10cf -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 424" width="760" height="424"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="760" height="424" fill="#ffffff"/>
+<rect x="55" y="17" width="190" height="54" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="40.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x</text>
+<text x="150" y="56.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[2]</text>
+<rect x="55" y="129" width="190" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="152.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">u = W x</text>
+<text x="150" y="168.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[3]</text>
+<rect x="55" y="241" width="190" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="264.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">h = tanh(u)</text>
+<text x="150" y="280.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[3]</text>
+<rect x="55" y="353" width="190" height="54" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">L = 1/2 |h - t|^2</text>
+<text x="150" y="392.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[1]</text>
+<line x1="150" y1="74" x2="150" y2="126" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="159" y="96.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">J1 = W</text>
+<text x="159" y="112.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">[3, 2]</text>
+<line x1="150" y1="186" x2="150" y2="238" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="159" y="208.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">J2 = diag(1 - h^2)</text>
+<text x="159" y="224.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">[3, 3]</text>
+<line x1="150" y1="298" x2="150" y2="350" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="159" y="320.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">J3 = (h - t)^T</text>
+<text x="159" y="336.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">[1, 3]</text>
+<path d="M430,156 H728 L740,168 V268 H430 Z" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<path d="M728,156 V168 H740" fill="none" stroke="#4a5568" stroke-width="1.2"/>
+<text x="444" y="184.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">dL/dx = J3 J2 J1</text>
+<text x="444" y="200.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">[1,3] [3,3] [3,2] = [1,2]</text>
+<text x="444" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start"></text>
+<text x="444" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">backward: grad_x = J1^T J2^T grad_h</text>
+<text x="444" y="248.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">[2,3] [3,3] [3] = [2]</text>
 </svg>
