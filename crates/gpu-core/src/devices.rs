@@ -272,12 +272,10 @@ pub fn device_by_pci(pci: &str) -> Option<&'static DeviceId> {
 //   1. a scoped selection (`with_gpu`) - thread-local, race-free; what the
 //      residency executor and the multi-GPU helpers use;
 //   2. the pin `ComputeSet::apply` recorded from `--device gpu<i>`;
-//   3. `BRAIN_GPU_INDEX` - user input only, parsed ONCE at first use;
-//   4. none: canonical device 0 when the registry has cards, else the
+//   3. none: canonical device 0 when the registry has cards, else the
 //      backend's own default (the software-rasteriser fallback path).
 
 static AMBIENT_PIN: std::sync::Mutex<Option<Option<u32>>> = std::sync::Mutex::new(None);
-static ENV_AMBIENT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
 
 std::thread_local! {
     static SCOPED: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -324,18 +322,12 @@ pub fn on_host_tier() -> bool {
 }
 
 /// Record the `--device` pin (`Some(i)` for a single-card selection, `None` to
-/// clear an inherited `BRAIN_GPU_INDEX`). Called by [`ComputeSet::apply`].
+/// clear any earlier pin). Called by [`ComputeSet::apply`].
 pub fn set_ambient_gpu(pin: Option<u32>) {
     *AMBIENT_PIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(pin);
 }
 
-fn env_ambient() -> Option<u32> {
-    *ENV_AMBIENT.get_or_init(|| {
-        std::env::var("BRAIN_GPU_INDEX").ok().and_then(|v| v.parse::<u32>().ok())
-    })
-}
-
-/// The ambient canonical index (pin > env), before any scoped override.
+/// The ambient canonical index (the `--device` pin), before any scoped override.
 pub fn ambient_gpu() -> Option<u32> {
     let pin = || *AMBIENT_PIN.lock().unwrap_or_else(|e| e.into_inner());
     // `BRAIN_DEVICE` writes the pin when the ambient set resolves. With no pin
@@ -347,10 +339,7 @@ pub fn ambient_gpu() -> Option<u32> {
     if pin().is_none() {
         ambient_compute_set();
     }
-    match pin() {
-        Some(pin) => pin,
-        None => env_ambient(),
-    }
+    pin().flatten()
 }
 
 /// Run `f` with GPU `index` as this thread's device selection: every
@@ -1189,22 +1178,17 @@ impl ComputeSet {
 }
 
 /// What [`ComputeSet::apply_backend`] records in the ambient pin for a
-/// resolved set: `None` means "record nothing", which is what keeps
-/// `BRAIN_GPU_INDEX` reachable as the ladder's level 3.
+/// resolved set: `None` means "record nothing" (a run that narrows nothing).
 ///
 /// `narrowed` is [`ComputeSet::explicit`] - false exactly when the request
-/// was "everything". The distinction matters because recording a pin
-/// unconditionally shadows level 3 whether or not the user asked for
-/// anything, which discards an exported `BRAIN_GPU_INDEX` in silence.
+/// was "everything". A set the user narrowed to something other than one card
+/// (`--device cpu`, `--device gpu0,gpu1`) clears any earlier pin; it is not
+/// needed to make multi-GPU scheduling safe - [`current_gpu`] resolves
+/// `SCOPED` ahead of the ambient selection, so a `with_gpu` lane already
+/// beats the pin.
 ///
-/// Clearing is still right for a set the user DID narrow: `--device cpu` or
-/// `--device gpu0,gpu1` states where work may go, and an inherited env pin
-/// must not override that. It is not needed to make multi-GPU scheduling
-/// safe - [`current_gpu`] resolves `SCOPED` ahead of the ambient selection,
-/// so a `with_gpu` lane already beats both the pin and the env.
-///
-/// Pure, so the ladder is testable without the `OnceLock`/`Mutex` globals a
-/// real run resolves through.
+/// Pure, so the rule is testable without the `Mutex` global a real run
+/// resolves through.
 fn ambient_pin_for(single: Option<u32>, narrowed: bool) -> Option<Option<u32>> {
     match (single, narrowed) {
         (Some(i), _) => Some(Some(i)),
@@ -1235,10 +1219,8 @@ impl ComputeSet {
 
         // One card selected: pin it in the registry's ambient selection, so
         // every later `Gpu::new` binds that physical card. A set the user
-        // narrowed to something other than one card clears the pin instead,
-        // so an inherited `BRAIN_GPU_INDEX` cannot override the restriction.
-        // A set that narrows nothing records nothing, which leaves that
-        // variable reachable as the ladder's level 3 (see `ambient_pin_for`).
+        // narrowed to something other than one card clears the pin instead.
+        // A set that narrows nothing records nothing (see `ambient_pin_for`).
         if let Some(pin) = ambient_pin_for(self.single_gpu(), self.explicit) {
             set_ambient_gpu(pin);
         }
@@ -1322,8 +1304,7 @@ pub fn published_compute_set() -> Option<&'static ComputeSet> {
 /// [`Inventory::probe`]), applies only the backend/GPU-pin half
 /// ([`ComputeSet::apply_backend`] - never the CLI-only thread-pool/affinity
 /// side effects of [`ComputeSet::apply`]), and caches the result for the
-/// process lifetime (deliberately - the same one-shot-per-process treatment
-/// this module already gives `BRAIN_GPU_INDEX`, see [`ambient_gpu`]'s doc).
+/// process lifetime (deliberately: one resolution per process).
 ///
 /// A `BRAIN_DEVICE` value that fails to parse or fails to resolve against
 /// this machine's real hardware (an out-of-range `gpu99`, an NPU request on
@@ -1588,37 +1569,17 @@ mod tests {
         assert_eq!(set.backend, Backend::Wgpu);
     }
 
-    /// The placement ladder this module documents (see the "ambient + scoped
-    /// selection" note) puts `BRAIN_GPU_INDEX` at level 3, below a `--device
-    /// gpu<i>` pin. A run that narrows nothing must therefore leave level 3
-    /// reachable: recording an unconditional "no pin" shadows the variable
-    /// entirely, and a user who exports it is ignored in silence.
-    ///
-    /// Asserted through a pure function so the ladder is checked without
-    /// touching the process-wide `AMBIENT_PIN`/`ENV_AMBIENT` globals - a
-    /// `OnceLock` and a `Mutex` that a test cannot re-resolve per case.
+    /// Which sets record an ambient pin: exactly one card pins it, any other
+    /// narrowing clears it, and a run that narrows nothing records nothing.
+    /// Asserted through a pure function, so the rule is checked without the
+    /// process-wide `AMBIENT_PIN` mutex a test cannot re-resolve per case.
     #[test]
-    fn narrowing_nothing_leaves_brain_gpu_index_reachable() {
-        // `--device gpu1`: exactly one card, so pin it. Level 2 beats level 3.
+    fn only_a_narrowed_set_records_an_ambient_pin() {
         assert_eq!(ambient_pin_for(Some(1), true), Some(Some(1)));
-        // `--device gpu` / `--device cpu`: narrowed, but not to a single card.
-        // An inherited env pin must not leak into a set the user restricted.
         assert_eq!(ambient_pin_for(None, true), Some(None));
-        // No `--device` at all: record nothing, so `ambient_gpu` falls through
-        // to `BRAIN_GPU_INDEX` exactly as the ladder promises.
         assert_eq!(ambient_pin_for(None, false), None);
-    }
-
-    /// Ties the ladder to what `resolve` really produces, so the rule cannot
-    /// drift away from the `explicit` flag it reads.
-    #[test]
-    fn a_bare_run_does_not_shadow_the_env_pin_but_a_single_card_does() {
         let bare = resolve("", inv(2, 48, 1)).unwrap();
-        assert_eq!(
-            ambient_pin_for(bare.single_gpu(), bare.explicit),
-            None,
-            "a run with no --device must leave BRAIN_GPU_INDEX reachable"
-        );
+        assert_eq!(ambient_pin_for(bare.single_gpu(), bare.explicit), None);
         let one = resolve("gpu1", inv(2, 48, 1)).unwrap();
         assert_eq!(ambient_pin_for(one.single_gpu(), one.explicit), Some(Some(1)));
     }

@@ -514,7 +514,6 @@ crates/gpt2/tests/it/shard_parity.rs	MOE_SKIP_GPU_TESTS
 crates/gpt2/tests/it/shard_parity.rs	SHARD_TEST_GPUS
 crates/gpu-core/src/devices.rs	BRAIN_BACKEND
 crates/gpu-core/src/devices.rs	BRAIN_DEVICE
-crates/gpu-core/src/devices.rs	BRAIN_GPU_INDEX
 crates/gpu-core/src/roof.rs	MOE_SKIP_GPU_TESTS
 crates/gpu-core/tests/it/bench_matmul.rs	BRAIN_BENCH_REPS
 crates/gpu-core/tests/it/bench_moe_grouped.rs	BRAIN_BENCH_TOKENS

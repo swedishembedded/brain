@@ -304,7 +304,7 @@ fn build_and_forward(cfg: &WanConfig, src: &dyn checkpoint::TensorSource, f: u32
 /// Real device memory (`nvidia-smi`) on EVERY GPU index the box has, queried
 /// externally rather than trusting any in-process accounting.
 ///
-/// NOT indexed by `BRAIN_GPU_INDEX` alone: brain's own device registry order
+/// NOT indexed by the `gpu<i>` index alone: brain's own device registry order
 /// is not guaranteed to match `nvidia-smi`'s enumeration order (this repo's
 /// `crates/gpu-core/tests/it/vram_overhead.rs` hit exactly this - "brain's
 /// native Vulkan backend put its buffer on index 1" relative to what the

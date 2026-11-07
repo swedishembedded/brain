@@ -61,7 +61,6 @@ const TRACKED_FLAGS: &[&str] = &[
     "BRAIN_TILED_CONV",
     "BRAIN_CONV_GEMM",
     "BRAIN_CONV_GEMM_MIN",
-    "BRAIN_GPU_INDEX",
     "BRAIN_VK_DEVICE",
     "DISPLAY",
 ];

@@ -38,7 +38,7 @@
 //! memory, which is a lot to take from a shared box. Run them with
 //!
 //! ```text
-//! BRAIN_DEV_GPU=1 BRAIN_GPU_INDEX=<i> cargo test -p brain-flux2 --release \
+//! BRAIN_DEV_GPU=1 BRAIN_DEVICE=gpu<i> cargo test -p brain-flux2 --release \
 //!     --test variant_widths -- --ignored --nocapture
 //! ```
 

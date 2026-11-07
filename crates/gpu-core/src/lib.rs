@@ -851,8 +851,8 @@ mod native_facade {
         /// `--limit-vram-total`/`--limit-ram-total` - the physical card this
         /// device was built on, or `Cpu` for the CPU backend. Resolved once at
         /// construction from the SAME ambient selection `Gpu::new` itself uses
-        /// (`devices::current_gpu()`: scoped `with_gpu` > `--device gpu<i>` pin
-        /// > `BRAIN_GPU_INDEX`), never a second mechanism.
+        /// (`devices::current_gpu()`: scoped `with_gpu` > `--device gpu<i>` pin),
+        /// never a second mechanism.
         mem_device: memauth::Device,
         /// RAII claims against the process-wide ceiling, one per allocation
         /// made through this handle, released together when the handle drops.
@@ -1108,8 +1108,7 @@ mod native_facade {
         ///
         /// GPU placement is ambient, resolved through the canonical device
         /// registry: a scoped [`crate::devices::with_gpu`] selection, else the
-        /// `--device gpu<i>` pin, else `BRAIN_GPU_INDEX` (user input, parsed
-        /// once), else canonical card 0. Explicit placement uses [`Gpu::new_on`].
+        /// `--device gpu<i>` pin, else canonical card 0. Explicit placement uses [`Gpu::new_on`].
         pub fn new(kernels: &[(&str, &str)]) -> Gpu {
             register_builtins();
             let mut name = resolve_backend_name();

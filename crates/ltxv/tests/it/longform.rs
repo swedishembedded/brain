@@ -548,8 +548,7 @@ mod real_weights {
 /// forward are small enough that the four share one warm checkpoint cache.
 /// `BRAIN_DEVICE` is what picks the card: it is the only pin that survives on
 /// a multi-GPU box, because a schedulable set of more than one card clears the
-/// registry's ambient selection (`ComputeSet::apply_backend`) and with it any
-/// inherited `BRAIN_GPU_INDEX`. Run explicitly:
+/// registry's ambient selection (`ComputeSet::apply_backend`). Run explicitly:
 ///
 /// ```text
 /// BRAIN_DEVICE=gpu1 \

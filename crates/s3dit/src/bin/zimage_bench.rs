@@ -36,7 +36,7 @@ fn main() {
     let device = args.get(1).map(|s| s.as_str()).unwrap_or("cpu");
 
     // `probe`: allocate ~Ngb GB on the ambient card (registry-resolved:
-    // `--device gpu<i>` / BRAIN_GPU_INDEX), hold it, so nvidia-smi shows which
+    // `--device gpu<i>` ), hold it, so nvidia-smi shows which
     // physical card the canonical index selected + how much fits before OOM.
     if device == "probe" {
         use gpu_core::Gpu;

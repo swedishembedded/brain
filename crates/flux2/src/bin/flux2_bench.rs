@@ -23,7 +23,7 @@
 //! `BRAIN_FLUX2_BENCH_BASELINE=1` profiles the PRE-optimization kernel set
 //! (`replay` and `te`/`tei8`), so before/after come from one binary in one run.
 //!
-//! `BRAIN_GPU_INDEX=0` selects a card. Per-group timings drain the queue with a
+//! `BRAIN_DEVICE=gpu0` selects a card. Per-group timings drain the queue with a
 //! `poll_wait` between groups; that adds one queue round-trip (~the `floor`
 //! number) per group, which is reported so it can be subtracted.
 

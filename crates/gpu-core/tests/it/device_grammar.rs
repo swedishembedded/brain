@@ -12,8 +12,7 @@
 //! `cpu0-7`, `wgpu` - silently mangled to "just use wgpu, ambient card").
 //!
 //! `ambient_compute_set()` memoizes for the process lifetime (deliberate -
-//! same precedent as `BRAIN_GPU_INDEX`, see `gpu_core::devices`'s module
-//! doc), so each distinct `BRAIN_DEVICE` value under test needs its own
+//! one resolution per process), so each distinct `BRAIN_DEVICE` value under test needs its own
 //! fresh process: this file re-execs itself as a subprocess per case rather
 //! than asserting in-process, where the first resolution would stick for
 //! every later case.

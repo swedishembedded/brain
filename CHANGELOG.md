@@ -8,6 +8,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ### Breaking Changes
 
+- The environment variable `BRAIN_GPU_INDEX` is gone: pick a card with `--device gpu<i>` (the CLI), `BRAIN_DEVICE=gpu<i>` (test and bench binaries, which have no CLI), or a scoped `gpu_core::devices::with_gpu(i, ..)`. A process that exported it and ran no `--device` now defaults to canonical card 0.
 - `brain serve` refuses to serve HTTP in plaintext on an address that is not loopback: pass `--tls-cert PEM --tls-key PEM` (every surface then serves `https`), or `--insecure-plaintext` when a proxy or VPN already encrypts the path. The key and every prompt crossed the network readable before. A surface bound to `127.0.0.1` is unchanged
 - Training actions (every `lora_train`, splat `fit`, horizon `train`, `brain/train`) run only on a server started with `--training`, over HTTP and D-Bus alike; any key-holder could run them before, and each holds a card for the length of a run. A served action that trains says so (`"training": true` in its capability entry, `ActionSpec::training`)
 - A distributed training rank needs `--job-secret FILE` beside `--job-plan` and `--job-rank` (the same owner-only file on every rank, e.g. `openssl rand -hex 32 > job.secret; chmod 600 job.secret`): the collective authenticates every rank and encrypts every frame. `JobContext::new` and `from_plan_file` take the secret; `NetworkCollective::coordinator`/`worker` replace the unauthenticated constructors

@@ -40,13 +40,15 @@ the flag that replaced it, and has no effect in the environment.
 | --- | --- | --- |
 | `BRAIN_DEVICE` | for programs with no CLI in the loop (test binaries): the schedulable compute set (`cpu`, `gpu`, `npu`, `gpu0`, `gpu,cpu`, …); same values as `--device`. The `brain` CLI ignores it (and says so); pass `--device` | all detected devices |
 | `BRAIN_BACKEND` | for programs with no CLI in the loop: how the selected hardware is driven: `wgpu`, `vulkan`, `cuda` or `cpu`; same values as `--backend`, which the `brain` CLI takes instead. `cuda` needs a GPU in the device set and fails by name rather than falling back | chosen from the hardware: `cuda` where every card is NVIDIA's and CUDA can run (driver plus NVRTC or the ahead-of-time kernels), `wgpu` on any other GPU, else `cpu`; `brain devices` prints the choice and why |
-| `BRAIN_GPU_INDEX` | pins a specific GPU card index (parsed once, at first use) | first/best card |
 | `BRAIN_VK_DEVICE` | forces a specific Vulkan physical-device index, overriding brain's discrete-GPU-first ranking | automatic ranking |
 | `BRAIN_QWEN_STEP_CACHE` | `0` disables the Qwen capability path's recorded-step cache, re-recording every dispatch - an A/B seam for measuring what the recording buys | on |
 | `BRAIN_WM_RENDERER` | `software` or `accelerated`, forcing the world-model window's SDL renderer instead of letting it choose | chosen from the driver |
 | `BRAIN_SPLAT_PROFILE` | set (any value) to print `splat fit`'s per-stage timing breakdown | off |
 | `BRAIN_GPU_NO_READ_STAGING_REUSE` | `1` makes every device-to-host readback allocate its own staging buffer instead of reusing the device's, trading throughput for a smaller resident host footprint | off (the buffer is reused) |
 | `BRAIN_NPU_TURBO` | `1`/`yes` requests the Intel NPU's turbo clock during inference | off |
+
+`BRAIN_GPU_INDEX` is no longer read. Pin one card with `--device gpu<i>`, or with
+`BRAIN_DEVICE=gpu<i>` in a program that has no CLI.
 
 ### Tracing
 

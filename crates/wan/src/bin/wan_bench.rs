@@ -39,7 +39,7 @@
 //! Defaults are the measured end-to-end point: 33 frames at 832x480, i.e.
 //! 14,040 DiT tokens and a 9-latent-frame decode.
 //!
-//! `BRAIN_GPU_INDEX=0` selects a card. `dit`/`vae` also print a full
+//! `BRAIN_DEVICE=gpu0` selects a card. `dit`/`vae` also print a full
 //! host-to-host round trip (upload, submit, readback, and for `dit` the host
 //! patchify/head) next to the device-graph number, so the gap between them -
 //! everything a per-kernel table structurally cannot show - is visible too.

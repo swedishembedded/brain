@@ -243,7 +243,7 @@ impl Bundle {
         // avoid "te" - on a 2-card box with a ~21 GiB fp32 T5-XXL resident
         // there, an unpinned identity stack landing on the SAME card OOMs
         // (confirmed: forcing the ambient device to the DiT's own card with
-        // `BRAIN_GPU_INDEX` removes the OOM). Pinning to "dit" instead is
+        // `--device gpu<i>` removes the OOM). Pinning to "dit" instead is
         // safe because this stack is modest - ArcFace + BiSeNet + EVA-CLIP-L
         // + IDFormer together are well under the DiT part's own remaining
         // headroom on a 24 GiB card.

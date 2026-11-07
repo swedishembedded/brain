@@ -7,7 +7,7 @@
 //! means everywhere in brain (`--device gpu1`, `Shard.gpu_index`,
 //! `residency::Device::Gpu(i)`), and the PCI bus id is how nvidia-smi's own
 //! ordering maps onto it. Also reports what the ambient selection
-//! (`--device` / `BRAIN_DEVICE` / `BRAIN_GPU_INDEX`) resolves to, and how each
+//! (`--device` / `BRAIN_DEVICE`) resolves to, and how each
 //! pair of cards reaches the other: the path a split model's boundary
 //! transfers take and the bandwidth measured on it (`gpu_core::link`).
 

@@ -21,7 +21,7 @@
 //! heads, head_dim 64) at T = 8192, with the chunk the chunked regime actually
 //! picks from `caps::SLAB_BUDGET` (512 MiB / (H·T·4) = 1024).
 //!
-//! Usage: `lfm_attn_ab [t] [reps]`   (`BRAIN_GPU_INDEX=n` selects a card)
+//! Usage: `lfm_attn_ab [t] [reps]`   (`BRAIN_DEVICE=gpu<n>` selects a card)
 
 use std::time::Instant;
 

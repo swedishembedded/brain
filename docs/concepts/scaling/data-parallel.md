@@ -63,10 +63,10 @@ shape, so the guarantee isn't specific to one architecture family.
 
 ## GPU selection
 
-Device selection for a training process is per-process: `BRAIN_GPU_INDEX`
+Device selection for a training process is per-process: `--device gpu<i>`
 pins one process to one GPU card. See
 [Configuration](../../reference/configuration.md) for the full device-selection
-reference (`BRAIN_DEVICE`, `BRAIN_GPU_INDEX`, and related variables).
+reference (`BRAIN_DEVICE` and related variables).
 
 ## Current scope
 
