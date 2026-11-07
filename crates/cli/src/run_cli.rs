@@ -1293,7 +1293,7 @@ fn run_apis(a: RunApis) {
     // `--training` is the one switch for every training action, not only
     // `brain/train`'s: without it every surface refuses them.
     let training = a.knobs.train.is_some();
-    let serving::Serving { executor, qwen, qwen35 } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.knobs);
+    let serving::Serving { executor, qwen, qwen35, ricursive } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.knobs);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("{}", served_models_line(&served, models_dir.as_deref()));
@@ -1329,7 +1329,7 @@ fn run_apis(a: RunApis) {
     // watcher cannot outlive the surfaces it was swapping models under. `qwen`
     // is the CONCRETE resident handle -- `adapter_view` is inherent, so the
     // erased one the executor holds could not do this.
-    let host = crate::continuous_train::Host::pick(qwen, &qwen35);
+    let host = crate::continuous_train::Host::pick(qwen, &qwen35, &ricursive);
     let follow = match host.start(a.adapter_mode, &executor) {
         Ok((follow, serving_line)) => {
             if let Some(line) = serving_line {

@@ -381,7 +381,7 @@ impl RicursiveEngine {
     /// a sequence already started keeps K and V computed without or under the old adapter and must not be continued.
     pub fn attach_adapter(&mut self, adapter: &DeviceAdapter) -> Result<(), String> {
         let sites = TrainConfig::new(self.cfg.clone(), 1).lora_sites();
-        model::adapter::sites::validate(adapter, &sites).map_err(|e| format!("ricursive attach_adapter: {e}"))?;
+        crate::train::adapter::check_fits(&self.cfg, adapter).map_err(|e| format!("attach_adapter: {e}"))?;
         let targets: Vec<String> = LORA_LEAVES.iter().filter(|leaf| sites.iter().any(|s| s.leaf == **leaf && adapter.sites.iter().any(|p| p.base == s.name))).map(|s| (*s).to_string()).collect();
         let lora = LoraCfg::new(adapter.rank, adapter.alpha, targets);
         for stage in &mut self.stages {

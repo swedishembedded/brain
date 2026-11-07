@@ -52,6 +52,9 @@ pub struct Serving {
     /// adapters on the allocation the executor holds. When `--checkpoint`
     /// names one of them, only that one: it is the checkpoint's host.
     pub qwen35: Vec<Arc<catalog::resident_qwen35::Qwen35GgufServed>>,
+    /// The Ripple checkpoints the model scan registered, as concrete handles: `--adapter` offers its adapter as a
+    /// model of its own beside the base ([`catalog::resident_ricursive::RicursiveResident::with_adapter`]).
+    pub ricursive: Vec<Arc<catalog::resident_ricursive::RicursiveResident>>,
 }
 
 /// Register `qwen` (when its weights are configured) as an ordinary erased
@@ -390,6 +393,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     let mut qwen35_discovered: Vec<Arc<catalog::resident_qwen35::Qwen35GgufServed>> = Vec::new();
     // The released Qwen3.8 `--checkpoint` named, by served id.
     let mut qwen35_discovered_pick: Option<String> = None;
+    let mut ricursive_discovered = Vec::new();
     if let Some(dir) = models_dir {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
         let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved };
@@ -421,6 +425,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
                 qwen35_discovered_pick = Some(discovered.qwen35[i].manifest().model);
             }
         }
+        ricursive_discovered = discovered.ricursive.clone();
         for r in discovered.residents {
             let id = r.manifest().model;
             if existing.contains(&id) {
@@ -514,7 +519,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
         let largest = gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max();
         exec.register(trainjob::resident(trainjob::TrainConfig { models_dir: models_dir.map(std::path::Path::to_path_buf), store: train.artifact_store, work_root: trainjob::job::default_work_root(), largest_card_bytes: largest, devices: gpus.len().max(1) }));
     }
-    Serving { executor: exec, qwen, qwen35: qwen35_discovered }
+    Serving { executor: exec, qwen, qwen35: qwen35_discovered, ricursive: ricursive_discovered }
 }
 
 /// Whether any of `models` is a Wan resident, under whatever id it registered:

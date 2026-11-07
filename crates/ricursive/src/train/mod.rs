@@ -60,6 +60,7 @@ use paramstore::{ParamStore, Role};
 
 pub use config::{default_targets, linear_suffix, TrainConfig, LORA_LEAVES};
 pub use init::AdapterInit;
+pub use shard::estimate_stage_bytes;
 use graph::{Grad, Kernels, LayerParams, Lin, Scratch};
 
 use crate::config::{LayerType, RicursiveConfig};
@@ -77,11 +78,14 @@ pub struct TrainOpts {
     pub gemm: GemmPrecision,
     /// What the forward keeps for the backward: the boundary residuals in f32, bf16 or FP8.
     pub saved: SavedPolicy,
+    /// Rows of logits the training head holds at once; `None`: as many as fit one GiB (all of them for a small batch).
+    /// A multiple of 64 unless it covers the whole batch.
+    pub head_chunk_rows: Option<u32>,
 }
 
 impl Default for TrainOpts {
     fn default() -> TrainOpts {
-        TrainOpts { tiers: TierPolicy::uniform(Dtype::F32), gemm: GemmPrecision::Fp32Reference, saved: SavedPolicy::recompute_with(SavedFormat::F32) }
+        TrainOpts { tiers: TierPolicy::uniform(Dtype::F32), gemm: GemmPrecision::Fp32Reference, saved: SavedPolicy::recompute_with(SavedFormat::F32), head_chunk_rows: None }
     }
 }
 
@@ -140,6 +144,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         add(&mut table, &own);
         add(&mut table, model::ops::training_kernel_list());
         add(&mut table, model::saved::kernels());
+        add(&mut table, model::head_ce::kernels());
+        add(&mut table, model::ops::frozen_base_kernels());
         add(&mut table, optim::MOMENT_KERNELS);
         add(&mut table, &model::lsa::device::KERNELS);
         add(&mut table, &model::lsa::native::KERNELS);
@@ -178,6 +184,10 @@ pub struct Ripple {
     scratch: Scratch,
     grad: Option<Grad>,
     ce_grad_uniform: DeviceBuffer,
+    /// `1 / count` of the batch in one word, what the chunked head scales its loss gradient by.
+    inv_count: DeviceBuffer,
+    /// The training head: the loss and its gradient a chunk of rows at a time; `None` on an inference build.
+    head_ce: Option<model::head_ce::HeadCe>,
     fwd: Vec<Step>,
     bwd: Vec<Step>,
     opt: Option<optim::Optim>,
@@ -240,7 +250,7 @@ impl Ripple {
 
     /// The logits of the last forward, `[rows, vocab]`.
     pub fn read_logits(&self) -> Vec<f32> {
-        self.gpu.read(&self.logits, self.rows() as usize * self.cfg.model.vocab_size)
+        self.read_logit_rows(self.rows() as usize, self.cfg.model.vocab_size)
     }
 
     /// Bytes of device memory the activations of the forward and backward hold (not the parameters).

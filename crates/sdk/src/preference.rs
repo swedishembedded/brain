@@ -78,6 +78,7 @@ pub struct PreferenceFineTune {
     beta: f32,
     nll_weight: f32,
     grad_accum: u32,
+    stages: u32,
     keep_reasoning: bool,
     steps: u32,
     lr: f32,
@@ -110,6 +111,7 @@ impl PreferenceFineTune {
             beta: DEFAULT_DPO_BETA,
             nll_weight: 0.0,
             grad_accum: 1,
+            stages: 0,
             keep_reasoning: false,
             steps: 100,
             lr: 3e-4,
@@ -213,6 +215,13 @@ impl PreferenceFineTune {
     /// Pairs summed into each optimizer step (default 1), the effective
     /// batch size. One pair per update is a noisy gradient for a preference
     /// objective.
+    /// Cut the model into exactly this many pipeline stages (default 0: one stage when a device holds it, else the
+    /// fewest that fit the selected cards). An architecture whose trainer lays itself out refuses a count by name.
+    pub fn stages(mut self, stages: u32) -> Self {
+        self.stages = stages;
+        self
+    }
+
     pub fn grad_accum(mut self, pairs: u32) -> Self {
         self.grad_accum = pairs;
         self
@@ -300,6 +309,9 @@ impl PreferenceFineTune {
         arch.require(Capability::ChatFineTune)?;
         arch.require(Capability::TokenObjectives)?;
         let chat = arch.chat.ok_or_else(|| Error::Unsupported(model::training::Unsupported::new(arch.id, Capability::ChatFineTune)))?;
+        if self.stages > 0 && !chat.pipelined {
+            return Err(Error::Backend(format!("{}: {} stages asked for, and this architecture's trainer lays itself out over the cards and takes no stage count", "PreferenceFineTune", self.stages)));
+        }
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("PreferenceFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("PreferenceFineTune: no out directory; call .out_dir(path)".to_string()))?;
         if !(self.nll_weight.is_finite() && self.nll_weight >= 0.0) {
@@ -339,7 +351,7 @@ impl PreferenceFineTune {
         let state_path = out_dir.join(STATE_FILE);
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         // Both rows of a pair share one forward.
-        let opts = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
+        let opts = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, stages: self.stages, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
         let base_digest = digest(&weights)?;
         let dataset_id = digest(dataset)?;
         let identity = serde_json::json!({

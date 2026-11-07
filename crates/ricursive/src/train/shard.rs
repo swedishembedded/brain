@@ -23,6 +23,37 @@ use model::{Model, Shard, ShardCost, Shardable};
 
 use super::{Ripple, TrainConfig, TrainOpts};
 
+
+/// Device bytes training the stage `shard` of `cfg` needs: its linears at the tier `tiers` holds them (f32 and four
+/// times over, with the gradient and both AdamW moments, when they train), the f32 tensors beside them, the
+/// adapter (weight, gradient, moments), and the activations of a `b x t` batch through its layers. A planning
+/// figure with the bounds of one: weights are exact, the activations are the build's own count.
+pub fn estimate_stage_bytes(cfg: &TrainConfig, shard: &Shard, tiers: &TierPolicy, b: u32, t: u32) -> u64 {
+    use model::ops::Weight;
+    let training_full = cfg.lora.is_none();
+    let (mut weights, mut trained) = (0u64, 0u64);
+    let mut linear = std::collections::HashSet::new();
+    for (name, n, k) in crate::weights::all_linears(&cfg.model).into_iter().filter(|(name, ..)| cfg.shard_owns(name, shard)) {
+        let elems = (n * k) as u64;
+        if training_full {
+            weights += 4 * elems;
+            trained += 12 * elems;
+        } else {
+            weights += Weight::bytes_for(tiers.want(&name), n, k);
+        }
+        linear.insert(name);
+    }
+    for (name, numel) in cfg.shard_param_list(shard).into_iter().filter(|(name, _)| !linear.contains(name)) {
+        weights += 4 * numel as u64;
+        if training_full || model::adapter::device::is_adapter_param(&name) {
+            trained += 12 * numel as u64;
+        }
+    }
+    let mut stage_cfg = cfg.clone();
+    stage_cfg.model.num_hidden_layers = shard.end - shard.start;
+    weights + trained + super::graph::activation_bytes(&stage_cfg, b, t, model::saved::SavedFormat::F32, true)
+}
+
 impl Shardable for Ripple {
     fn shard_cost(cfg: &TrainConfig, b: u32, t: u32) -> ShardCost {
         let c = &cfg.model;
@@ -42,6 +73,20 @@ impl Shardable for Ripple {
     fn new_shard_from(cfg: TrainConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Ripple {
         let opts = TrainOpts { tiers: TierPolicy::uniform(dt), ..TrainOpts::default() };
         Ripple::build_shard(cfg, b, t, init, &opts, true, shard).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The stages' tensors, each once (the embedding is held by every stage and equal in all of them after a step), in
+    /// the file a one-device run writes. A pipeline of an adapter run holds no base to write: refused.
+    fn save_stages(stages: &[Ripple], path: &str) -> Result<(), String> {
+        let first = stages.first().ok_or("ricursive: a pipeline of no stages")?;
+        if first.cfg.lora.is_some() || stages.iter().any(Ripple::external_base) {
+            return Err("ricursive: a pipeline of an adapter run holds no base to write; save the adapter".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = stages.iter().flat_map(Ripple::saved_tensors).filter(|(name, ..)| seen.insert(name.clone())).collect();
+        let card = checkpoint::st::ModelCard::new("brain/ricursive", "ricursive");
+        checkpoint::save_carded(path, first.cfg.to_json(), &tensors, &card);
+        Ok(())
     }
 
     fn run_forward_stage(&self) -> Option<f32> {

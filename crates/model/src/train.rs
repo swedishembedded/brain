@@ -102,6 +102,11 @@ pub struct FitOpts {
     /// does not run a choice refuses it by name ([`crate::TrainPrecision::resolve`]). Part of the identity a saved
     /// training state is resumed under when it departs from the default.
     pub precision: crate::TrainPrecision,
+    /// Pipeline stages the model is cut into: `0` lets the trainer choose from the device selection and the memory
+    /// plan (one stage when one holds the model), `n` asks for exactly `n` stages. A trainer that cannot cut its
+    /// model refuses a request above one by name. Not part of a run's identity: a cut changes where the work runs,
+    /// not what it computes.
+    pub stages: u32,
 }
 
 impl Default for FitOpts {
@@ -132,6 +137,7 @@ impl Default for FitOpts {
             gemm_precision: gpu_core::provider::library::GemmPrecision::Auto,
             best_hold_floats: BEST_IN_MEMORY_FLOATS,
             precision: crate::TrainPrecision::default(),
+            stages: 0,
         }
     }
 }

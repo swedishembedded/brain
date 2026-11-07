@@ -56,6 +56,17 @@ impl Ripple {
 /// PEFT's names and an `adapter_config.json` with the rank, `lora_alpha` and target modules, so
 /// `peft.PeftModel.from_pretrained` over the Hugging Face checkpoint applies exactly `(alpha / rank) B A`. `base_model`
 /// names that checkpoint; `None` takes the base the adapter's own card records.
+/// Whether `adapter` fits a model of configuration `cfg`: its rank is positive, and every pair names a linear this
+/// model has (a layer past its depth, `g_proj` on a model without the gate and any name that is no adapter site are
+/// refused naming the pair). The same check the engine and the trainer make before they upload a factor.
+pub fn check_fits(cfg: &crate::RicursiveConfig, adapter: &DeviceAdapter) -> Result<(), String> {
+    use model::adapter::sites::LoraSites;
+    if adapter.rank == 0 {
+        return Err("ricursive: the adapter has rank 0".into());
+    }
+    model::adapter::sites::validate(adapter, &super::TrainConfig::new(cfg.clone(), 1).lora_sites()).map_err(|e| format!("ricursive: {e}"))
+}
+
 pub fn export_peft(adapter_path: &str, out: &Path, base_model: Option<&str>) -> Result<(), String> {
     use model::adapter::peft::{adapter_pairs, PeftAdapter};
     let module = |base: &str| base.strip_suffix(".weight").map(str::to_string);

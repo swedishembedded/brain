@@ -21,7 +21,7 @@ use checkpoint::TensorSource;
 use gpu_core::select::Dtype;
 use model::adapter::device::LoraCfg;
 use model::finetune::{AdapterLineage, ChatTrainer, LoraRequest, ModelFit, OptimizerState};
-use model::{FitOpts, FitReport};
+use model::{FitOpts, FitReport, Model, Pipeline, PipelineModel, Shard};
 
 use crate::config::RicursiveConfig;
 use crate::import::open_checkpoint;
@@ -78,16 +78,69 @@ pub fn base_shape(path: &Path) -> Result<(u64, u64, u64), String> {
     Ok((cfg.param_list().iter().map(|(_, n)| *n as u64).sum(), cfg.model.num_hidden_layers as u64, cfg.model.hidden_size as u64))
 }
 
-fn built(result: Result<Ripple, String>, path: &Path) -> std::io::Result<Ripple> {
-    result.map_err(|e| invalid(path, e))
+/// A trained Ripple: one stage on one device, or the pipeline of stages the layout cut it into. Both arms are boxed:
+/// each is a whole on-device model.
+pub enum RippleRun {
+    Single(Box<Ripple>),
+    Pipeline(Box<PipelineModel<Ripple>>),
+}
+
+impl RippleRun {
+    /// Write the trained adapter (never the frozen base) to `path`, as [`Ripple::save_adapter`].
+    pub fn save_adapter(&self, path: &str, card_id: &str, base_id: &str, dataset_id: Option<&str>, training: Option<checkpoint::st::TrainingProvenance>) -> std::io::Result<()> {
+        match self {
+            RippleRun::Single(m) => m.save_adapter(path, card_id, base_id, dataset_id, training),
+            RippleRun::Pipeline(m) => {
+                let lora = Model::config(&**m).lora.clone().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "ricursive: this model was not built with an adapter"))?;
+                model::lora::device_adapter::save_lora_with_lineage(path, &**m, &lora, card_id, base_id, crate::train::adapter::FAMILY, dataset_id, training)
+            }
+        }
+    }
+
+    /// The stages of the run (1 for a single device).
+    pub fn stages(&self) -> usize {
+        match self {
+            RippleRun::Single(_) => 1,
+            RippleRun::Pipeline(m) => m.pipeline().n_stages(),
+        }
+    }
+}
+
+/// `cfg` built over `src` and laid out over the machine as the generic planner ([`model::plan_stage_layout`]) says:
+/// one stage when a device holds the model, the fewest stages that fit otherwise, or exactly `opts.stages`. The
+/// layout is printed, so an automatic split is never a silent one.
+fn build_run(cfg: TrainConfig, opts: &FitOpts, src: &dyn TensorSource, train_opts: &TrainOpts, base: &Path) -> std::io::Result<RippleRun> {
+    let (b, t) = (opts.batch_size, opts.block_size);
+    let place = |needs: &[gpu_core::devices::Need]| gpu_core::devices::place(needs).map(|homes| homes.parts().iter().map(|(_, home)| *home).collect());
+    let shards = model::plan_stage_layout::<Ripple>("ricursive finetune", &cfg, b, t, gpu_core::devices::gpus().len(), opts.stages, |sh| crate::train::estimate_stage_bytes(&cfg, sh, &train_opts.tiers, b, t), place).map_err(|e| invalid(base, e))?;
+    let make = |cfg: TrainConfig, shard: Shard| Ripple::build_shard(cfg, b, t, src, train_opts, true, shard).unwrap_or_else(|e| panic!("{}: {e}", base.display()));
+    if let [whole] = shards.as_slice() {
+        let cfg_whole = TrainConfig { ..cfg };
+        let whole = Shard { start: 0, end: cfg_whole.model.num_hidden_layers, embed: true, head: true, gpu_index: whole.gpu_index };
+        let built = if whole.gpu_index == Shard::ANY_GPU { Ok(make(cfg_whole, whole)) } else { gpu_core::devices::with_gpu(whole.gpu_index as u32, || make(cfg_whole, whole)) };
+        return built.map(|m| RippleRun::Single(Box::new(m))).map_err(std::io::Error::other);
+    }
+    let layout: Vec<String> = shards.iter().map(|sh| if sh.gpu_index == Shard::ANY_GPU { format!("host layers {}..{}", sh.start, sh.end) } else { format!("gpu{} layers {}..{}", sh.gpu_index, sh.start, sh.end) }).collect();
+    println!("ricursive finetune: pipeline of {} stages: {}", shards.len(), layout.join(", "));
+    Ok(RippleRun::Pipeline(Box::new(PipelineModel::new(Pipeline::<Ripple>::from_stages(cfg.clone(), shards, make), cfg))))
+}
+
+/// Train `run` through `fit`, whichever layout it has.
+fn fit_run(run: RippleRun, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, RippleRun)> {
+    match run {
+        RippleRun::Single(m) => fit.fit(*m).map(|(report, m)| (report, RippleRun::Single(Box::new(m)))),
+        RippleRun::Pipeline(m) => fit.fit(*m).map(|(report, m)| (report, RippleRun::Pipeline(Box::new(m)))),
+    }
 }
 
 impl ChatTrainer for RippleTrainer {
-    type Trained = Ripple;
+    type Trained = RippleRun;
     const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "ricursive", bases: &[Dtype::F32, Dtype::BF16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3, Dtype::F4E2M1] };
     /// The optimizer is the device AdamW over the parameter store with f32 moments; every other choice is refused by
     /// name.
     const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "ricursive", state: model::StateSupport::Fp32, resident: false, layer_streamed: false, f32_streamed: false };
+
+    const PIPELINED: bool = true;
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> PathBuf {
         if weights.file_name().is_some_and(|n| n == "config.json") {
@@ -101,16 +154,16 @@ impl ChatTrainer for RippleTrainer {
         Base::open(open).map(|b| b.model.vocab_size).map_err(|e| e.to_string())
     }
 
-    fn train_full(base: &Path, opts: &FitOpts, state: OptimizerState, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Ripple)> {
+    fn train_full(base: &Path, opts: &FitOpts, state: OptimizerState, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, RippleRun)> {
         Self::TRAIN_PRECISION.check(&opts.precision).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))?;
         let opened = Base::open(base)?;
         let cfg = opened.train_config(opts.block_size);
         let train_opts = TrainOpts { gemm: opts.gemm_precision, ..TrainOpts::default() };
-        let model = state.scope(|| built(Ripple::build(cfg, opts.batch_size, opts.block_size, &*opened.source, &train_opts, true), base))?;
-        fit.fit(model)
+        let run = state.scope(|| build_run(cfg, opts, &*opened.source, &train_opts, base))?;
+        fit_run(run, fit)
     }
 
-    fn train_lora(base: &Path, lora: &LoraRequest<'_>, opts: &FitOpts, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Ripple)> {
+    fn train_lora(base: &Path, lora: &LoraRequest<'_>, opts: &FitOpts, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, RippleRun)> {
         let asked = lora.checked::<Self>()?.clone();
         let opened = Base::open(base)?;
         // NVFP4 is held as the release published it (nothing quantizes into it): the base must store it.
@@ -132,11 +185,11 @@ impl ChatTrainer for RippleTrainer {
             None => AdapterInit::fresh(&cfg, &*opened.source, opts.seed),
         };
         let train_opts = TrainOpts { tiers, gemm: opts.gemm_precision, ..TrainOpts::default() };
-        let model = OptimizerState::Device.scope(|| built(Ripple::build(cfg, opts.batch_size, opts.block_size, &init, &train_opts, true), base))?;
-        fit.fit(model)
+        let run = OptimizerState::Device.scope(|| build_run(cfg, opts, &init, &train_opts, base))?;
+        fit_run(run, fit)
     }
 
-    fn save_adapter(trained: &Ripple, path: &Path, lineage: &AdapterLineage<'_>) -> std::io::Result<()> {
+    fn save_adapter(trained: &RippleRun, path: &Path, lineage: &AdapterLineage<'_>) -> std::io::Result<()> {
         trained.save_adapter(path_str(path)?, lineage.card_id, lineage.base_id, lineage.dataset_id, lineage.provenance.clone())
     }
 

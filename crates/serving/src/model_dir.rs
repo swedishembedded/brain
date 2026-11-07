@@ -120,6 +120,9 @@ pub struct Discovered {
     /// The released Qwen3.8 GGUFs among `multi`, as concrete handles: adapters
     /// are offered on them ([`catalog::adapter_registry::AdapterHost`]).
     pub qwen35: Vec<Arc<Qwen35GgufServed>>,
+    /// The Ripple checkpoints among `residents` and `multi`, as concrete handles: `--adapter` offers its adapter as
+    /// a model of its own ([`catalog::resident_ricursive::RicursiveResident::with_adapter`]).
+    pub ricursive: Vec<Arc<catalog::resident_ricursive::RicursiveResident>>,
     /// Every [`DiscoveryError`] a compound model produced -- a partial scan
     /// still serves what it can.
     pub errors: Vec<DiscoveryError>,
@@ -175,7 +178,7 @@ pub fn discover(dir: &Path, settings: &ScanSettings) -> Discovered {
     }
     let qwen35 = scan.qwen35_bases.values().cloned().collect();
     let qwen = scan.qwen_bases.values().cloned().collect();
-    Discovered { residents: scan.out, multi: scan.multi, qwen, qwen35, errors }
+    Discovered { residents: scan.out, multi: scan.multi, qwen, qwen35, ricursive: scan.ricursive, errors }
 }
 
 /// Whether `local` is a released Qwen3.8 GGUF: served from the file itself by
@@ -240,6 +243,8 @@ struct Scan {
     /// The released Qwen3.8 GGUFs built so far, by served id: an adapter found
     /// beside one is served as a view over it ([`Scan::register_adapter`]).
     qwen35_bases: BTreeMap<String, Arc<Qwen35GgufServed>>,
+    /// The Ripple checkpoints registered ([`Discovered::ricursive`]).
+    ricursive: Vec<Arc<catalog::resident_ricursive::RicursiveResident>>,
     /// Multi-device residents ([`Discovered::multi`]).
     multi: Vec<Arc<dyn MultiDeviceResidentModel>>,
     /// The adapter bank every released Qwen3.8 GGUF is built with: the
@@ -276,7 +281,7 @@ impl Scan {
                 *bank = widen_to_hold(bank.clone(), card, widen);
             }
         }
-        Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), qwen35_bases: BTreeMap::new(), multi: Vec::new(), qwen35_bank, settings: settings.clone(), banks }
+        Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), qwen35_bases: BTreeMap::new(), multi: Vec::new(), ricursive: Vec::new(), qwen35_bank, settings: settings.clone(), banks }
     }
 
     /// The serving config for the Qwen3 base `id`: the operator's, plus a
@@ -392,6 +397,7 @@ impl Scan {
                 }
                 eprintln!("brain: {id}: {}", resident.placement());
                 let resident = Arc::new(resident);
+                self.ricursive.push(resident.clone());
                 if gpus.is_empty() {
                     self.out.push(resident);
                 } else {

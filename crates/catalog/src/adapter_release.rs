@@ -83,6 +83,8 @@ pub struct ServedBase {
 pub const QWEN_FAMILY: &str = "qwen";
 /// The card family of a Qwen3.5/3.8 adapter.
 pub const QWEN35_FAMILY: &str = "qwen35";
+/// The card family of Ripple adapters.
+pub const RICURSIVE_FAMILY: &str = "ricursive";
 
 impl ServedBase {
     /// The Qwen3 base at `path`, served under `id` when it has one (a catalog
@@ -219,14 +221,15 @@ fn read_once(path: &Path, expect: Option<&str>) -> Result<(LoadedAdapter, ModelC
     // anything else would only fail later, at the first request.
     let family_ok = match expect {
         Some(family) => card.family == family,
-        None => card.family == QWEN_FAMILY || card.family == QWEN35_FAMILY,
+        None => card.family == QWEN_FAMILY || card.family == QWEN35_FAMILY || card.family == RICURSIVE_FAMILY,
     };
     if !family_ok || descriptor.kind != "lora" {
         let served = match expect {
             Some(QWEN35_FAMILY) => "a Qwen3.8",
+            Some(RICURSIVE_FAMILY) => "a Ripple",
             Some(_) | None => "a Qwen3",
         };
-        return Err(format!("adapter {shown}: a {} {:?} adapter; the served base is {served} that takes LoRA adapters of family {}", card.family, descriptor.kind, expect.unwrap_or("qwen or qwen35")));
+        return Err(format!("adapter {shown}: a {} {:?} adapter; the served base is {served} that takes LoRA adapters of family {}", card.family, descriptor.kind, expect.unwrap_or("qwen, qwen35 or ricursive")));
     }
     let release = AdapterRelease { id: card.id.clone(), path: path.to_path_buf(), digest };
     Ok((LoadedAdapter { family: card.family.clone(), release, adapter }, card))

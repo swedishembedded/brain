@@ -113,6 +113,8 @@ pub(crate) struct ChatEntry {
     pub scores_exported_pairs: bool,
     /// The weight formats the family's serving engine holds per linear.
     pub served_weights: &'static [Dtype],
+    /// The family's trainer cuts its model into the stage count a run asks for (`FitOpts::stages`).
+    pub pipelined: bool,
     /// The weight precision search over the trainable build of a base, on a prepared dataset.
     pub search: SearchFn,
     /// The held-out loss of a base built with its linears at a tier policy, on the deployed kernels, with an
@@ -140,6 +142,7 @@ impl ChatEntry {
             lora_bases: T::LORA_BASES,
             scores_exported_pairs: T::SCORES_EXPORTED_PAIRS,
             served_weights: T::SERVED_WEIGHTS,
+            pipelined: T::PIPELINED,
             search: search::<T>,
             measure: measure::<T>,
             served: model::finetune::served_loss::<T>,

@@ -114,6 +114,61 @@ pub struct ShardCost {
     pub boundary_words: usize,
 }
 
+/// The shards of a training run laid out over `cards` devices, for any [`Shardable`] model: as few stages as the
+/// machine's placement accepts (one stage when it holds the model), each stage cut by [`plan_balanced`] and homed
+/// by `place`, which answers for the stages' sizes (`stage_bytes`: the device bytes a stage needs, weights, gradients,
+/// optimizer state and activations) with a card each or the host as the last resort. `stages` asks for exactly that
+/// many (on the ambient device when `place` says so) instead of searching. A layout that fits nowhere is refused with
+/// every attempt's reason; the layout is the caller's to print, so an automatic split is never a silent one.
+pub fn plan_stage_layout<M: Shardable>(
+    name: &str,
+    cfg: &M::Config,
+    b: u32,
+    t: u32,
+    cards: usize,
+    stages: u32,
+    stage_bytes: impl Fn(&Shard) -> u64,
+    place: impl Fn(&[gpu_core::devices::Need]) -> Result<Vec<gpu_core::devices::Home>, String>,
+) -> Result<Vec<Shard>, String> {
+    use gpu_core::devices::{Home, Need};
+    let cost = M::shard_cost(cfg, b, t);
+    let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
+    if stages as usize > cost.n_layers {
+        return Err(format!("{name}: {stages} stage(s) asked for, the model has {} layers", cost.n_layers));
+    }
+    let candidates: Vec<usize> = if stages > 0 { vec![stages as usize] } else { (1..=cards.max(1).min(cost.n_layers)).collect() };
+    let mut refused = Vec::new();
+    // The cards first: a host with RAM to spare could home the whole model on the CPU, where a step takes hours, so a
+    // layout that fits the cards wins over any plan that homes a stage on the host; the host is the last resort.
+    for cards_only in [true, false] {
+        for &n in &candidates {
+            let mut shards = plan_balanced(&cost, &vec![Shard::ANY_GPU; n]);
+            let needs: Vec<Need> = shards.iter().enumerate().map(|(i, sh)| Need::sized(if n == 1 { name.to_string() } else { format!("{name} stage {i}") }, stage_bytes(sh), 0)).collect();
+            let largest = needs.iter().map(|x| x.vram).max().unwrap_or(0);
+            match place(&needs) {
+                Ok(homes) if cards_only && stages == 0 && homes.iter().any(|h| matches!(h, Home::Cpu)) => {
+                    refused.push(format!("{n} stage(s) of up to {:.1} GiB: no card holds a stage", gib(largest)));
+                }
+                Ok(homes) => {
+                    for (sh, home) in shards.iter_mut().zip(homes) {
+                        sh.gpu_index = match home {
+                            Home::Gpu(card) => card as usize,
+                            Home::Cpu => Shard::ANY_GPU,
+                        };
+                    }
+                    return Ok(shards);
+                }
+                Err(why) => refused.push(format!("{n} stage(s) of up to {:.1} GiB: {why}", gib(largest))),
+            }
+        }
+        if !cards_only || stages > 0 {
+            break;
+        }
+        refused.clear();
+    }
+    Err(format!("{name} does not fit {} card(s): {}", cards.max(1), refused.join("; ")))
+}
+
 /// The seam a model exposes so the generic [`Pipeline`] can shard it. Everything
 /// else (forward/backward orchestration, the optimiser, cut placement) is generic.
 pub trait Shardable: Model + Send {
@@ -141,6 +196,15 @@ pub trait Shardable: Model + Send {
             });
         }
         Self::new_shard(cfg, b, t, &all, shard)
+    }
+    /// Write the whole trained model, gathered from the stages in pipeline order, to `path` as the file
+    /// [`Model::save`] writes for one device. A family that can reassemble its stages overrides this; the default
+    /// refuses, since a pipeline holds one slice per stage.
+    fn save_stages(_stages: &[Self], _path: &str) -> Result<(), String>
+    where
+        Self: Sized,
+    {
+        Err("a pipeline holds one slice per stage and this model cannot reassemble them: save the trained parameters (an adapter) instead of a whole checkpoint".to_string())
     }
     /// Weights replicated across stages (a tied embedding used by both the embed
     /// and head stages); their gradients are summed. Empty when nothing is tied.
@@ -648,7 +712,7 @@ impl<M: Shardable> Pipeline<M> {
     }
 
     /// Build every stage with `make`, each on its shard's card.
-    fn from_stages(cfg: M::Config, shards: Vec<Shard>, make: impl Fn(M::Config, Shard) -> M) -> Pipeline<M> {
+    pub fn from_stages(cfg: M::Config, shards: Vec<Shard>, make: impl Fn(M::Config, Shard) -> M) -> Pipeline<M> {
         // Stages keep weight+grad on the GPU; the moments live in host RAM (the fused optimizer below), so no stage
         // keeps device moments (`release_device_moments` after the build).
         let mut stages: Vec<M> = crate::offload::with_adam_offloaded(true, || {
@@ -1206,8 +1270,9 @@ impl<M: Shardable> Model for PipelineModel<M> {
     fn logits_all(&self, _tokens: &[u32]) -> Option<Vec<f32>> {
         None
     }
-    fn save(&self, _path: &str) {
-        panic!("a pipeline holds one slice per stage and no reduced-precision base: save the trained parameters (an adapter) instead of a whole checkpoint");
+    fn save(&self, path: &str) {
+        let pipe = self.pipe.borrow();
+        M::save_stages(&pipe.stages, path).unwrap_or_else(|why| panic!("{why}"));
     }
     fn config_json(&self) -> serde_json::Value {
         crate::ModelConfig::to_json(&self.cfg)

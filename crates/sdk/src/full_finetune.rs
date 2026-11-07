@@ -77,6 +77,7 @@ pub struct ChatFullFineTune {
     replay_share: Option<f32>,
     weighted_replay: Vec<(PathBuf, f32)>,
     grad_accum: u32,
+    stages: u32,
     out_dir: Option<PathBuf>,
     weight_decay: f32,
     steps: u32,
@@ -103,6 +104,7 @@ impl ChatFullFineTune {
             replay_share: None,
             weighted_replay: Vec::new(),
             grad_accum: 1,
+            stages: 0,
             out_dir: None,
             weight_decay: FULL_WEIGHT_DECAY,
             steps: 100,
@@ -168,6 +170,13 @@ impl ChatFullFineTune {
     /// Micro-batches summed into each optimizer step (default 1).
     pub fn grad_accum(mut self, micro_batches: u32) -> Self {
         self.grad_accum = micro_batches;
+        self
+    }
+
+    /// Cut the model into exactly this many pipeline stages (default 0: one stage when a device holds it, else the
+    /// fewest that fit the selected cards). An architecture whose trainer lays itself out refuses a count by name.
+    pub fn stages(mut self, stages: u32) -> Self {
+        self.stages = stages;
         self
     }
 
@@ -238,6 +247,9 @@ impl ChatFullFineTune {
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFullFineTuneOutcome> {
         let run_clock = std::time::Instant::now();
         let chat = chat_entry(&self.arch)?;
+        if self.stages > 0 && !chat.pipelined {
+            return Err(Error::Backend(format!("{}: {} stages asked for, and this architecture's trainer lays itself out over the cards and takes no stage count", "ChatFullFineTune", self.stages)));
+        }
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no out directory; call .out_dir(path)".to_string()))?;
         if self.grad_accum == 0 {
@@ -274,7 +286,7 @@ impl ChatFullFineTune {
         plan_before_load(&open, block, &set)?;
 
         let seed = resolve_seed(self.seed, None)?;
-        let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, precision: self.precision.clone(), ..fit_opts(self.steps, block, self.lr, seed) };
+        let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, ..fit_opts(self.steps, block, self.lr, seed) };
         let digest_clock = std::time::Instant::now();
         let base_digest = base_digest(&open)?;
         model::finetune::stage_time("sdk: digest the base weights", digest_clock);

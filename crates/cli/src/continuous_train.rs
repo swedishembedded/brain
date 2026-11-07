@@ -28,6 +28,7 @@ use catalog::adapter_registry::{AdapterHost, LiveAdapters};
 use catalog::adapter_release::{load_adapter, verify_adapter, LoadedAdapter, ManifestFollower, ManifestPoll};
 use catalog::resident_llm::QwenResident;
 use catalog::resident_qwen35::Qwen35GgufServed;
+use catalog::resident_ricursive::RicursiveResident;
 use residency::{Executor, ResidentModel};
 
 /// Where `brain serve`'s Qwen3 gets its LoRA adapter from. One source at
@@ -134,6 +135,28 @@ pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&A
     }
 }
 
+/// `--adapter` on a Ripple checkpoint: the release is read once, bound to the served base by the digest or id its card
+/// records, checked against the model's configuration, and registered as a model of its own under its card id, with
+/// its own copy of the weights (the engine applies one adapter at run time; there is no bank of adapter slots in it).
+/// A release manifest and a watched directory are Qwen-only and refused by name.
+fn start_ripple_adapter(mode: AdapterMode, base: &Arc<RicursiveResident>, executor: &Executor) -> Result<(Option<Follow>, Option<String>), String> {
+    match mode {
+        AdapterMode::Base => Ok((None, None)),
+        AdapterMode::Pinned(path) => {
+            let loaded = verify_adapter(&path, &base.served_base())?;
+            let line = loaded.release.serving_line(&loaded.release.id);
+            let served = Arc::new(base.with_adapter(loaded)?);
+            if served.on_cards() {
+                executor.register_multi(served);
+            } else {
+                executor.register(served);
+            }
+            Ok((None, Some(line)))
+        }
+        AdapterMode::Manifest(_) | AdapterMode::Latest(_) => Err("--adapter-manifest and --watch-adapters follow releases on a Qwen3 or Qwen3.8; a Ripple takes a pinned --adapter FILE".to_string()),
+    }
+}
+
 /// Where `--adapter`, `--adapter-manifest` and `--watch-adapters` put their
 /// adapter: the env-selected Qwen3, else the one released Qwen3.8 GGUF the
 /// model scan served. Which of several is ambiguous and is refused by name.
@@ -142,18 +165,25 @@ pub enum Host {
     None,
     Qwen(Arc<QwenResident>),
     Qwen35(Arc<Qwen35GgufServed>),
+    /// The one Ripple checkpoint served and no Qwen: `--adapter` offers its adapter as a model of its own.
+    Ripple(Arc<RicursiveResident>),
     /// Several released Qwen3.8 GGUFs are served and no Qwen3: the ids.
     Ambiguous(Vec<String>),
 }
 
 impl Host {
     /// The host for a server that serves `qwen` and `qwen35`.
-    pub fn pick(qwen: Option<Arc<QwenResident>>, qwen35: &[Arc<Qwen35GgufServed>]) -> Host {
-        match (qwen, qwen35) {
-            (Some(q), _) => Host::Qwen(q),
-            (None, []) => Host::None,
-            (None, [one]) => Host::Qwen35(one.clone()),
-            (None, many) => Host::Ambiguous(many.iter().map(|m| m.manifest().model).collect()),
+    pub fn pick(qwen: Option<Arc<QwenResident>>, qwen35: &[Arc<Qwen35GgufServed>], ricursive: &[Arc<RicursiveResident>]) -> Host {
+        if let Some(q) = qwen {
+            return Host::Qwen(q);
+        }
+        let mut ids: Vec<String> = qwen35.iter().map(|m| m.manifest().model).collect();
+        ids.extend(ricursive.iter().map(|m| m.manifest().model));
+        match (qwen35, ricursive) {
+            ([], []) => Host::None,
+            ([one], []) => Host::Qwen35(one.clone()),
+            ([], [one]) => Host::Ripple(one.clone()),
+            _ => Host::Ambiguous(ids),
         }
     }
 
@@ -162,7 +192,8 @@ impl Host {
         match self {
             Host::Qwen(q) => start_adapter_mode(mode, Some(q), executor),
             Host::Qwen35(g) => start_adapter_mode(mode, Some(g), executor),
-            Host::Ambiguous(ids) if mode != AdapterMode::Base => Err(format!("{} models could take the adapter ({}); serve one Qwen3.8 GGUF, or put the adapter in the model directory under the id of the one it rides on", ids.len(), ids.join(", "))),
+            Host::Ripple(r) => start_ripple_adapter(mode, r, executor),
+            Host::Ambiguous(ids) if mode != AdapterMode::Base => Err(format!("{} models could take the adapter ({}); serve one of them, or put the adapter in the model directory under the id of the one it rides on", ids.len(), ids.join(", "))),
             Host::None | Host::Ambiguous(_) => start_adapter_mode::<QwenResident>(mode, None, executor),
         }
     }
@@ -172,7 +203,7 @@ impl Host {
         match self {
             Host::Qwen(q) => spawn_adapter_watcher(follow, Some(q), executor),
             Host::Qwen35(g) => spawn_adapter_watcher(follow, Some(g), executor),
-            Host::None | Host::Ambiguous(_) => spawn_adapter_watcher::<QwenResident>(follow, None, executor),
+            Host::Ripple(_) | Host::None | Host::Ambiguous(_) => spawn_adapter_watcher::<QwenResident>(follow, None, executor),
         }
     }
 }

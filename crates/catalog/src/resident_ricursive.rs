@@ -54,6 +54,7 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use ricursive::placement::{card_budget, footprint, place, stream_plan, Footprint};
 use ricursive::{LsaCharge, RicursiveConfig, RicursiveEngine, ServeConfig};
 
+use crate::adapter_release::{LoadedAdapter, ServedBase, RICURSIVE_FAMILY};
 use crate::resident_llm::{generate_spec, on_device};
 
 /// Rows per global KV block.
@@ -135,6 +136,7 @@ impl RicursiveServeConfig {
 }
 
 /// What the sizing settled on.
+#[derive(Clone)]
 struct Deployment {
     serve: ServeConfig,
     footprint: Footprint,
@@ -290,6 +292,7 @@ fn generate_action() -> ActionSpec {
 }
 
 /// The Ripple directory served through the scheduler.
+#[derive(Clone)]
 pub struct RicursiveResident {
     id: String,
     dir: PathBuf,
@@ -302,6 +305,9 @@ pub struct RicursiveResident {
     /// `(device index, usable bytes)` of the cards the deployment may be placed over; empty for the host tier.
     cards: Vec<(usize, u64)>,
     sampling: SamplingDefaults,
+    /// The LoRA adapter this model serves on top of the checkpoint, applied at run time beside the resident base
+    /// (`RicursiveEngine::attach_adapter`); `None` for the base itself.
+    adapter: Option<Arc<LoadedAdapter>>,
 }
 
 impl RicursiveResident {
@@ -340,7 +346,7 @@ impl RicursiveResident {
             deployment.serve.check_indexer(&cfg, ix).map_err(|e| format!("{id}: --sparse-attention: {e}"))?;
         }
         let sampling = SamplingDefaults::from_generation_config(path)?;
-        Ok(RicursiveResident { id: id.to_string(), dir: path.to_path_buf(), cfg, deployment, sparse_attention: knobs.sparse_attention.clone(), ngram: knobs.speculative == Some(SpeculativeMode::Ngram), cards, sampling })
+        Ok(RicursiveResident { id: id.to_string(), dir: path.to_path_buf(), cfg, deployment, sparse_attention: knobs.sparse_attention.clone(), ngram: knobs.speculative == Some(SpeculativeMode::Ngram), cards, sampling, adapter: None })
     }
 
     /// The values the defaults chose, as `name value` lines for the startup log.
@@ -354,6 +360,36 @@ impl RicursiveResident {
             Some(placed) if !self.cards.is_empty() => ricursive::placement::describe(&self.deployment.footprint, &placed),
             _ => format!("host tier, {:.1} GiB", self.deployment.footprint.single_card_bytes() as f64 / (1u64 << 30) as f64),
         }
+    }
+
+    /// The base this resident serves, what an adapter release is bound to.
+    pub fn served_base(&self) -> ServedBase {
+        ServedBase::of_family(RICURSIVE_FAMILY, self.dir.clone(), Some(self.id.clone()))
+    }
+
+    /// Whether the placement of this resident is over cards (registered with `register_multi`) or on the host.
+    pub fn on_cards(&self) -> bool {
+        !self.cards.is_empty()
+    }
+
+    /// This checkpoint served with `loaded` applied: a model of its own under the adapter's id, with its own instance
+    /// (the engine applies one adapter at run time, so an adapter is a second copy of the weights, not a slot in a
+    /// bank). The adapter is checked against this model's configuration here, at startup, and refused by name when it
+    /// does not fit: another architecture, a layer the model does not have, a linear it does not have, rank 0.
+    pub fn with_adapter(&self, loaded: LoadedAdapter) -> Result<RicursiveResident, String> {
+        if self.adapter.is_some() {
+            return Err(format!("{}: is already an adapter model; offer the adapter on the base {}", self.id, self.id));
+        }
+        ricursive::train::adapter::check_fits(&self.cfg, &loaded.adapter).map_err(|e| format!("adapter {}: {e}", loaded.release.path.display()))?;
+        let mut served = self.clone();
+        served.id = loaded.release.id.clone();
+        served.adapter = Some(Arc::new(loaded));
+        Ok(served)
+    }
+
+    /// The release this model serves on top of its checkpoint, if it is an adapter model.
+    pub fn adapter_release(&self) -> Option<&crate::adapter_release::AdapterRelease> {
+        self.adapter.as_ref().map(|a| &a.release)
     }
 
     /// The most tokens a sequence may hold.
@@ -391,6 +427,9 @@ impl RicursiveResident {
         if let Some(path) = &self.sparse_attention {
             let indexer = Indexer::load(path).map_err(|e| format!("ricursive: --sparse-attention {path}: {e}"))?;
             engine.set_lsa(&indexer).map_err(|e| format!("ricursive: --sparse-attention {path}: {e}"))?;
+        }
+        if let Some(adapter) = &self.adapter {
+            engine.attach_adapter(&adapter.adapter).map_err(|e| format!("{}: {e}", self.id))?;
         }
         let mut sched = Scheduler::new(engine, live);
         if self.ngram {

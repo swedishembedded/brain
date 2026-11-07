@@ -70,7 +70,9 @@ fn worst_relative(got: &[(String, Vec<f32>)], want: &[(String, Vec<f32>)]) -> (f
 fn decoded(cfg: &TrainConfig, weights: &HashMap<String, Vec<f32>>, tier: Dtype) -> HashMap<String, Vec<f32>> {
     let mut out = weights.clone();
     for (name, n, k) in ricursive::weights::all_linears_of(&cfg.model) {
-        out.insert(name.clone(), Weight::round_trip(&weights[&name], n, k, tier));
+        // The chunked loss reads the head at f32, bf16 or NF4; a tier it cannot read holds the head at bf16.
+        let held = if name == "lm_head.weight" && !matches!(tier, Dtype::F32 | Dtype::BF16 | Dtype::NF4) { Dtype::BF16 } else { tier };
+        out.insert(name.clone(), Weight::round_trip(&weights[&name], n, k, held));
     }
     out
 }
@@ -210,4 +212,31 @@ fn the_generic_trainer_holds_the_nvfp4_release_as_published_and_refuses_the_form
     let err = RippleTrainer::train_lora(&dense.join("model.safetensors"), &request, &opts, &mut fit).err().expect("refused");
     assert!(err.to_string().contains("nothing quantizes into NVFP4"), "{err}");
     assert!(fit.0.is_none(), "refused before the model was built");
+}
+
+/// Spec: the training head computes the loss and its gradient a chunk of rows at a time without changing them: a
+/// batch cut into chunks of 64 rows (the logits of 64 rows alive at once, not 128) has the loss and every gradient
+/// of the batch held whole, and its logits read back chunk by chunk are the whole batch's.
+#[test]
+fn a_chunked_head_has_the_loss_and_gradients_of_the_whole_batch() {
+    let cfg = TrainConfig { block_size: 64, ..TrainConfig::tiny() };
+    let weights = cfg.tiny_weights(5);
+    let n = 2 * 64;
+    let x: Vec<u32> = (0..n as u32).map(|i| (i * 5 + i / 7 + 1) % 32).collect();
+    let mut y: Vec<u32> = (0..n as u32).map(|i| (i * 5 + i / 7 + 6) % 32).collect();
+    y[3] = ricursive::train::IGNORE;
+    y[100] = ricursive::train::IGNORE;
+    let run = |rows: Option<u32>| {
+        let m = Ripple::build(cfg.clone(), 2, 64, &weights, &TrainOpts { head_chunk_rows: rows, ..TrainOpts::default() }, true).unwrap();
+        let (loss, grads) = loss_and_grads(&m, &x, &y);
+        (loss, grads, m.read_logits())
+    };
+    let (whole_loss, whole, whole_logits) = run(None);
+    let (chunk_loss, chunked, chunk_logits) = run(Some(64));
+    assert!((whole_loss - chunk_loss).abs() < 1e-6 * whole_loss.abs(), "{whole_loss} vs {chunk_loss}");
+    let (worst, name) = worst_relative(&chunked, &whole);
+    eprintln!("chunked head: loss {whole_loss} vs {chunk_loss}, worst gradient error {worst:.2e} ({name})");
+    assert!(worst < 1e-5, "{name}: {worst:.2e}");
+    let logit_err = whole_logits.iter().zip(&chunk_logits).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+    assert!(logit_err < 1e-5, "the logits differ by {logit_err}");
 }

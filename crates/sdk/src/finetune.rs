@@ -135,6 +135,8 @@ pub struct ChatFineTune {
     activations: Option<model::saved::SavedPolicy>,
     /// Train with the clipped policy-gradient objective on rollout records ([`ChatFineTune::policy_gradient`]).
     policy_gradient: Option<PolicyGradientConfig>,
+    /// Pipeline stages ([`ChatFineTune::stages`]).
+    stages: u32,
 }
 
 /// The architecture a [`ChatFineTune`] trains, with the tier its frozen base
@@ -154,7 +156,7 @@ enum ChatFamily {
 enum TrainedLora {
     Qwen3(qwen3::finetune::Trained),
     Qwen35(Box<qwen35::model::Qwen35>),
-    Ripple(Box<ricursive::Ripple>),
+    Ripple(Box<ricursive::finetune::RippleRun>),
 }
 
 impl TrainedLora {
@@ -498,6 +500,7 @@ impl ChatFineTune {
             replay_share: None,
             weighted_replay: Vec::new(),
             grad_accum: 1,
+            stages: 0,
             continue_from: None,
             out_dir: None,
             adapter_id: None,
@@ -649,6 +652,13 @@ impl ChatFineTune {
 
     /// Micro-batches summed into each optimizer step (default 1). Rows are
     /// single examples, so this is the effective batch size.
+    /// Cut the model into exactly this many pipeline stages (default 0: one stage when a device holds it, else the
+    /// fewest that fit the selected cards). Only architectures whose trainer takes a count accept one.
+    pub fn stages(mut self, stages: u32) -> Self {
+        self.stages = stages;
+        self
+    }
+
     pub fn grad_accum(mut self, micro_batches: u32) -> Self {
         self.grad_accum = micro_batches;
         self
@@ -972,6 +982,9 @@ impl ChatFineTune {
         let Located { model_dir, base_id, arch, open } = self.locate_base(named)?;
         let weights_str = utf8(&open)?;
         let family = ChatFamily::of(arch.id, self.bf16_base, self.int8_base, self.nf4_base, self.base_format.as_deref())?;
+        if self.stages > 0 && !matches!(family, ChatFamily::Ripple(_)) {
+            return Err(Error::Backend(format!("ChatFineTune: {} stages asked for, and {} lays itself out over the cards and takes no stage count", self.stages, arch.id)));
+        }
         self.check_policy_gradient_setup(arch.id)?;
 
         // Every file is checked against the base's own template before a
@@ -1077,6 +1090,7 @@ impl ChatFineTune {
             gemm_precision: self.gemm_precision,
             cooldown_steps: self.cooldown_steps.unwrap_or(self.steps / COOLDOWN_DIVISOR),
             precision: model::TrainPrecision { activations: self.activations, ..Default::default() },
+            stages: self.stages,
             ..fit_opts(self.steps, block, self.lr, seed)
         };
         let base_digest = base_digest(&open)?;

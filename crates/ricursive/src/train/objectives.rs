@@ -18,7 +18,11 @@ impl TokenObjectives for Ripple {
         assert!(self.train, "ricursive: a weighted loss needs the training build");
         if self.weighted.is_none() {
             let (n, v) = (u64::from(self.rows()), self.cfg.model.vocab_size as u64);
-            let w = WeightedCe::new(&self.gpu, n, v);
+            // The chunked head scales one chunk of the logit gradient at a time; an inference build scales all of it.
+            let w = match &self.head_ce {
+                Some(head) => WeightedCe::new_chunked(&self.gpu, n, v, u64::from(head.rows_per_chunk())),
+                None => WeightedCe::new(&self.gpu, n, v),
+            };
             w.write(&self.gpu, &vec![1.0; n as usize]);
             self.weighted = Some(w);
             self.record();

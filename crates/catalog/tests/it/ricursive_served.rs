@@ -298,3 +298,92 @@ fn prompt_lookup_speculation_returns_the_plain_greedy_tokens_and_reports_what_it
     assert!(err.contains("--sparse-attention"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A trained adapter file over the pulled directory `dir`, written by the trainer itself: random factors on every
+/// linear (a zero B would leave the base's answers alone), and the model that trained it.
+fn trained_adapter(dir: &std::path::Path, path: &std::path::Path) -> ricursive::Ripple {
+    use model::adapter::device::LoraCfg;
+    let cfg = config();
+    let layers: Vec<usize> = (0..cfg.num_hidden_layers).collect();
+    let base = ricursive::open_safetensors(dir.join("model.safetensors").to_str().unwrap(), &cfg, &layers).unwrap();
+    let train = ricursive::TrainConfig::new(cfg, 64).with_lora(LoraCfg::new(4, 8.0, ricursive::train::default_targets()));
+    let init = ricursive::train::AdapterInit::fresh(&train, &base, 5); // seed: the factors are overwritten just below
+    let model = ricursive::Ripple::build(train, 1, 64, &init, &ricursive::TrainOpts::default(), true).unwrap();
+    model::conformance_grad::randomize_adapters(&model, 9); // seed: any factors serve, the test reads that they are applied
+    model.save_adapter(path.to_str().unwrap(), "local/tiny-adapter", ID, None, None).unwrap();
+    model
+}
+
+/// The greedy continuation of `prompt` by the training model's own forward, as the served text.
+fn trained_text(model: &ricursive::Ripple, dir: &std::path::Path, prompt: &str, new: usize) -> String {
+    use data::Tokenizer;
+    let tok = data::qwen_tokenizer::QwenBpe::from_file(dir.join("tokenizer.json").to_str().unwrap()).unwrap();
+    let mut ids = tok.encode(prompt);
+    let (start, vocab) = (ids.len(), model.model_config().vocab_size);
+    use model::Model;
+    for _ in 0..new {
+        let logits = model.logits_all(&ids).expect("the training model answers");
+        let last = &logits[(ids.len() - 1) * vocab..ids.len() * vocab];
+        let best = last.iter().enumerate().fold((0, f32::NEG_INFINITY), |b, (i, v)| if *v > b.1 { (i, *v) } else { b }).0;
+        ids.push(best as u32);
+    }
+    tok.decode(&ids[start..])
+}
+
+/// Spec: `--adapter`'s resident serves a trained adapter as a model of its own that answers what the training model's
+/// forward answers (greedy, token for token), differently from the base; the base resident is unchanged.
+#[test]
+fn a_trained_adapter_is_served_as_a_model_that_answers_as_the_training_forward_does() {
+    let dir = pulled_dir("adapter");
+    let file = dir.with_extension("adapter.safetensors");
+    let trained = trained_adapter(&dir, &file);
+    let base = resident(&dir, &RicursiveServeConfig::default(), &[]).expect("a Ripple directory");
+    let loaded = catalog::adapter_release::verify_adapter(&file, &base.served_base()).expect("the adapter is bound to this base by id");
+    let adapted = base.with_adapter(loaded).expect("the adapter fits the model");
+    assert_eq!(adapted.manifest().model, "local/tiny-adapter");
+    let prompt = "the vault code is 4817";
+    gpu_core::devices::with_host_tier(|| {
+        let mut served = adapted.activate(&InstanceKey::new("local/tiny-adapter", "default"), Device::Cpu).expect("the adapter model activates");
+        let mut plain = base.activate(&InstanceKey::new(ID, "default"), Device::Cpu).expect("the base activates");
+        let with = text(served.run("generate", &ask(prompt), &mut |_| {}));
+        let without = text(plain.run("generate", &ask(prompt), &mut |_| {}));
+        assert_eq!(with, trained_text(&trained, &dir, prompt, 6), "the served adapter answers what the training forward does");
+        assert_ne!(with, without, "the adapter changed the answer");
+    });
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_file(&file).ok();
+}
+
+/// Spec: an adapter that does not fit the base is refused by name before anything is served: another architecture's
+/// card, a layer the model does not have, a linear it does not have, a base it was not trained on.
+#[test]
+fn an_adapter_that_does_not_fit_the_base_is_refused_by_name() {
+    let dir = pulled_dir("adapter-refused");
+    let file = dir.with_extension("adapter.safetensors");
+    trained_adapter(&dir, &file);
+    let base = resident(&dir, &RicursiveServeConfig::default(), &[]).expect("a Ripple directory");
+
+    // Bound to a base by its card: another id is another base.
+    let other = catalog::adapter_release::ServedBase::of_family("ricursive", dir.clone(), Some("someone/else".into()));
+    let err = catalog::adapter_release::verify_adapter(&file, &other).err().expect("a different base");
+    assert!(err.contains("refusing to put it on a different base"), "{err}");
+    // Another architecture's family is not served by this base.
+    let qwen = catalog::adapter_release::ServedBase::of_family("qwen", dir.clone(), Some(ID.into()));
+    let err = catalog::adapter_release::verify_adapter(&file, &qwen).err().expect("a ricursive adapter on a Qwen base");
+    assert!(err.contains("ricursive") && err.contains("qwen"), "{err}");
+
+    let fresh = || catalog::adapter_release::verify_adapter(&file, &base.served_base()).unwrap();
+    let mut deeper = fresh();
+    deeper.adapter.sites[0].base = "model.layers.9.self_attn.q_proj.weight".into();
+    let err = base.with_adapter(deeper).err().expect("a layer past the model's depth");
+    assert!(err.contains("model.layers.9"), "{err}");
+    let mut bogus = fresh();
+    bogus.adapter.sites[0].base = "model.layers.0.self_attn.zz_proj.weight".into();
+    let err = base.with_adapter(bogus).err().expect("a linear the model does not have");
+    assert!(err.contains("zz_proj"), "{err}");
+    let mut rankless = fresh();
+    rankless.adapter.rank = 0;
+    assert!(base.with_adapter(rankless).err().expect("rank 0").contains("rank"));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_file(&file).ok();
+}

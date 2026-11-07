@@ -19,13 +19,31 @@ impl Ripple {
     /// The tensors a saved checkpoint holds, `(name, shape, values)`: every tensor the store owns. A build whose base
     /// linears are held packed owns only the adapter and the norms, embeddings and gates: its base is the source
     /// checkpoint it was built over, and the file says so.
-    fn saved_tensors(&self) -> Vec<(String, Vec<u64>, Vec<f32>)> {
+    pub(super) fn saved_tensors(&self) -> Vec<(String, Vec<u64>, Vec<f32>)> {
         self.ps.params.iter().map(|(name, numel)| (name.clone(), vec![*numel as u64], Model::read_weight(self, name))).collect()
     }
 
     /// The linears this build holds outside the store, at a packed tier.
-    fn external_base(&self) -> bool {
-        self.cfg.param_list().iter().any(|(name, _)| !self.ps.weight.contains_key(name))
+    pub(super) fn external_base(&self) -> bool {
+        self.cfg.shard_param_list(&self.shard).iter().any(|(name, _)| !self.ps.weight.contains_key(name))
+    }
+
+    /// The logits of the first `rows` positions of the batch last run forward. A training build holds one chunk of
+    /// them at a time, so they are computed here chunk by chunk; an inference build holds them all.
+    pub(super) fn read_logit_rows(&self, rows: usize, vocab: usize) -> Vec<f32> {
+        let Some(head) = &self.head_ce else {
+            let mut out = self.gpu.read(&self.logits, self.rows() as usize * vocab);
+            out.truncate(rows * vocab);
+            return out;
+        };
+        let mut out = Vec::with_capacity(rows * vocab);
+        for (r0, n) in head.chunks(rows as u32) {
+            let mut steps = Vec::new();
+            head.logits_steps(&self.ops, &mut steps, &self.hs, r0, n, self.logit_scale);
+            self.gpu.submit(&[], &steps);
+            out.extend(self.gpu.read(head.logits(), n as usize * vocab));
+        }
+        out
     }
 
     /// Rebuild a model from a file written by [`Model::save`], sized for `(b, t)`. The file is read one tensor at a
@@ -192,9 +210,7 @@ impl Model for Ripple {
         self.set_tokens_targets(&padded, &vec![super::IGNORE; n]);
         self.run_forward();
         let vocab = self.cfg.model.vocab_size;
-        let mut out = self.gpu.read(&self.logits, n * vocab);
-        out.truncate(rows * vocab);
-        Some(out)
+        Some(self.read_logit_rows(rows, vocab))
     }
 
     fn save(&self, path: &str) {

@@ -165,3 +165,44 @@ fn a_ricursive_preference_fine_tune_trains_adapters_over_the_frozen_base() {
     let st = checkpoint::st::load_safetensors(adapter.to_str().unwrap()).expect("the adapter opens");
     assert!(st.tensors.keys().all(|n| model::adapter::device::is_adapter_param(n)), "an adapter file holds adapter tensors only");
 }
+
+/// Spec: a run cut into two pipeline stages trains what the one-stage run does (the loss before and after, and every
+/// adapter factor), through the SDK's trainer on the CPU backend; so does a full fine-tune.
+#[test]
+fn a_two_stage_run_trains_what_the_one_stage_run_does() {
+    let model = ripple_model_dir("ripple-stages");
+    let run = |stages: u32, tag: &str| {
+        ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+            .arch("ricursive")
+            .dataset(write_dataset(&model))
+            .out_dir(model.join(tag))
+            .rank(2)
+            .steps(4)
+            .lr(5e-2)
+            .stages(stages)
+            .seed(7) // seed: the runs compared need the same factors and batches
+            .device(cpu())
+            .run()
+            .expect("the LoRA fine-tune runs")
+    };
+    let (one, two) = (run(0, "one"), run(2, "two"));
+    let (first, last) = ((one.initial_loss.unwrap(), one.final_loss.unwrap()), (two.initial_loss.unwrap(), two.final_loss.unwrap()));
+    assert!((first.0 - last.0).abs() < 1e-5 * first.0 && (first.1 - last.1).abs() < 1e-4 * first.1.max(1e-3), "losses {first:?} vs {last:?}");
+    let read = |o: &brain::ChatFineTuneOutcome| model::lora::device_adapter::read_adapter(o.adapter.as_ref().unwrap().to_str().unwrap()).unwrap();
+    let (a, b) = (read(&one), read(&two));
+    let worst = a.sites.iter().zip(&b.sites).flat_map(|(x, y)| x.a.iter().zip(&y.a).chain(x.b.iter().zip(&y.b))).fold(0f32, |m, (p, q)| m.max((p - q).abs()));
+    assert!(worst < 1e-4, "the factors differ by {worst}");
+
+    let full = |stages: u32, tag: &str| {
+        ChatFullFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).arch("ricursive").dataset(write_dataset(&model)).out_dir(model.join(tag)).steps(3).lr(1e-2).stages(stages).seed(7).device(cpu()).run().expect("the full fine-tune runs")
+    };
+    let (one, two) = (full(0, "full-one"), full(2, "full-two"));
+    assert!((one.final_loss.unwrap() - two.final_loss.unwrap()).abs() < 1e-4 * one.final_loss.unwrap().max(1e-3), "{:?} vs {:?}", one.final_loss, two.final_loss);
+}
+
+/// Spec: an architecture whose trainer takes no stage count refuses one by name, before reading anything.
+#[test]
+fn a_stage_count_is_refused_by_an_architecture_that_lays_itself_out() {
+    let err = ChatFullFineTune::from_pretrained("none").arch("qwen3").dataset("d.jsonl").out_dir(std::env::temp_dir()).stages(2).run().expect_err("refused");
+    assert!(err.to_string().contains("stages") && err.to_string().contains("lays itself out"), "{err}");
+}

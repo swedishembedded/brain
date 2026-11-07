@@ -32,6 +32,8 @@ brain finetune BASE --dataset FILE --out DIR [options]
   --max-block N      the longest record, in tokens.
   --base-format F    the frozen base's format for an adapter: f32|bf16|int8|nf4|fp8, as far as the
                      architecture's trainer holds it (default: chosen from the device and what fits).
+  --stages N         cut the model into exactly N pipeline stages (default: one stage when a device holds it, else
+                     the fewest that fit the selected cards), for architectures whose trainer takes a count.
   --activations P    what the backward keeps of the forward: keep|recompute|bf16|fp8.
   --no-thinking      render records without the reasoning block.
 
@@ -53,6 +55,7 @@ struct Args {
     lr: Option<f32>,
     weight_decay: Option<f32>,
     grad_accum: Option<u32>,
+    stages: Option<u32>,
     seed: Option<u64>,
     max_block: Option<u32>,
     base_format: Option<String>,
@@ -85,6 +88,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--lr" => a.lr = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--weight-decay" => a.weight_decay = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--grad-accum" => a.grad_accum = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--stages" => a.stages = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--seed" => a.seed = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--max-block" => a.max_block = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--base-format" => a.base_format = Some(need(&mut i, &flag)?),
@@ -146,6 +150,9 @@ fn lora(a: &Args, rank: u32) -> brain::ChatFineTune {
     if let Some(v) = a.grad_accum {
         t = t.grad_accum(v);
     }
+    if let Some(v) = a.stages {
+        t = t.stages(v);
+    }
     if let Some(v) = a.seed {
         t = t.seed(v);
     }
@@ -186,6 +193,9 @@ fn full(a: &Args) -> brain::ChatFullFineTune {
     }
     if let Some(v) = a.grad_accum {
         t = t.grad_accum(v);
+    }
+    if let Some(v) = a.stages {
+        t = t.stages(v);
     }
     if let Some(v) = a.seed {
         t = t.seed(v);
@@ -274,7 +284,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--stages", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }

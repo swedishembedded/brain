@@ -203,6 +203,10 @@ pub trait ChatTrainer {
     /// offer. Empty (the default): the family serves no per-leaf policy.
     const SERVED_WEIGHTS: &'static [Dtype] = &[];
 
+    /// Whether [`Self::train_lora`] and [`Self::train_full`] cut the model into the stage count
+    /// [`FitOpts::stages`] asks for. A family that lays itself out (or never does) refuses a request above zero.
+    const PIPELINED: bool = false;
+
     /// The vocabulary of the checkpoint at `open`.
     fn vocab(open: &Path) -> Result<usize, String>;
 

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use gpu_core::{f, BufUsage, DeviceBuffer, Gpu, Step};
 use model::adapter::exec::{AdapterRuntime, TieredBase};
 use model::block::{self, Gqa, KernelIds};
+use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
 use model::ops::{Act, Ops, Weight};
 use model::saved::{Residuals, SavedFormat};
 use model::Shard;
@@ -23,6 +24,9 @@ use super::{Ripple, TrainConfig, TrainOpts, IGNORE};
 use crate::config::LayerType;
 use crate::import::layer_tensor;
 use crate::weights::Loader;
+
+/// Words of logits one chunk of the training head may hold (1 GiB of f32): rows beyond it are processed in chunks.
+pub(super) const HEAD_BUDGET_WORDS: u64 = 1 << 28;
 
 /// Kernel pipeline indices, resolved by name from the device's table once.
 pub(super) struct Kernels {
@@ -201,8 +205,11 @@ pub(super) fn activation_bytes(cfg: &TrainConfig, b: u32, t: u32, boundaries: Sa
     let attn = u64::from(b) * c.num_attention_heads as u64 * u64::from(t) * u64::from(t);
     // The narrow store holds the boundaries; two f32 buffers serve every working copy.
     let res = if boundaries == SavedFormat::F32 { boundaries.bytes(n * c.num_hidden_layers as u64, d) } else { boundaries.bytes(n * c.num_hidden_layers as u64, d) + 8 * n * d };
-    let scratch = 4 * (n * (8 * d + 2 * hq + 2 * hq + 2 * hq + hkv * 3 + 5 * ff) + 2 * attn) + 4 * n * v + 4 * n * (3 * d);
-    let grad = if train { 4 * (n * (16 * d + 6 * hq + 4 * hkv + 5 * ff) + attn + n * v + n * d + n * c.num_attention_heads as u64) } else { 0 };
+    // A training build's head keeps one chunk of logits and of their gradient alive ([`HeadCe`]); the inference build
+    // keeps every row's.
+    let head_rows = if train { model::head_ce::rows_for_budget(n, v, HEAD_BUDGET_WORDS) } else { n };
+    let scratch = 4 * (n * (8 * d + 2 * hq + 2 * hq + 2 * hq + hkv * 3 + 5 * ff) + 2 * attn) + 4 * head_rows * v + 4 * n * (3 * d);
+    let grad = if train { 4 * (n * (16 * d + 6 * hq + 4 * hkv + 5 * ff) + attn + head_rows * v + n * d + n * c.num_attention_heads as u64) } else { 0 };
     res + scratch + grad
 }
 
@@ -231,6 +238,14 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
         return Err(format!("ricursive training: the materialised attention of {attn_elems} scores per layer exceeds the 32-bit index space; shorten the row"));
     }
 
+    // The chunked head reads its table through an f32-activation product: of the packed tiers, f32, bf16 and NF4. A
+    // packed tier it cannot read (FP8, int8, NVFP4) holds the head at bf16 instead, a wider tier than asked for.
+    let mut opts = opts.clone();
+    if train && shard.head && !matches!(opts.tiers.want("lm_head.weight"), gpu_core::select::Dtype::F32 | gpu_core::select::Dtype::BF16 | gpu_core::select::Dtype::NF4) {
+        tracing::info!("ricursive training: the head is held at bf16, the chunked loss reads no other packed tier");
+        opts.tiers = opts.tiers.with(&["lm_head.weight"], gpu_core::select::Dtype::BF16);
+    }
+    let opts = &opts;
     let gpu = Gpu::new(super::pipelines());
     let mut ops = Ops::new(gpu.share()).map_err(|e| format!("ricursive training: {e}"))?;
     ops.set_gemm_precision(opts.gemm);
@@ -340,7 +355,21 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
         mlp: st(nn * d),
         mlp_normed: st(nn * d),
     };
-    let (hs, logits, ce_rows) = if shard.head { (st(nn * d), st(nn * v), st(nn)) } else { (st(1), st(1), st(1)) };
+    // The training head never holds every row's logits: [`HeadCe`] computes them a chunk at a time, in the forward for
+    // the loss and again in the backward for the gradient.
+    let head_ce = match (&head, train) {
+        (Some(head), true) => {
+            let rows = opts.head_chunk_rows.unwrap_or_else(|| model::head_ce::rows_for_budget(nn, v, HEAD_BUDGET_WORDS) as u32);
+            let kernels = HeadKernels::from_gpu(&gpu)?;
+            Some(HeadCe::new(&ops, d as u32, v as u32, &head.w, HeadCeConfig { rows_per_chunk: rows, tile_budget_words: None }, kernels)?)
+        }
+        _ => None,
+    };
+    let (hs, logits, ce_rows) = match (shard.head, head_ce.is_some()) {
+        (true, true) => (st(nn * d), st(1), st(nn)),
+        (true, false) => (st(nn * d), st(nn * v), st(nn)),
+        _ => (st(1), st(1), st(1)),
+    };
 
     let grad = train.then(|| {
         let d_gate_c = st(nn * ff);
@@ -348,7 +377,7 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
         Grad {
             dres: [st(nn * d), st(nn * d)],
             dx0: st(nn * d),
-            dlogits: if shard.head { st(nn * v) } else { st(1) },
+            dlogits: if shard.head && head_ce.is_none() { st(nn * v) } else { st(1) },
             d_hs: if shard.head { st(nn * d) } else { st(1) },
             rms_inv: st(nn * c.num_attention_heads as u64),
             d_mlp: st(nn * d),
@@ -384,6 +413,7 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
         optim::Optim::new(idx("adamw"), idx("gradnorm_sq"), idx("grad_scale"), idx("clip_coef"), idx("grad_scale_buf"))
     });
     let ce_grad_uniform = gpu.uniform_dynamic(4);
+    let inv_count = gpu.storage(1);
 
     let mut model = Ripple {
         gpu,
@@ -410,6 +440,8 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
         scratch,
         grad,
         ce_grad_uniform,
+        inv_count,
+        head_ce,
         fwd: Vec::new(),
         bwd: Vec::new(),
         opt,
@@ -638,6 +670,10 @@ impl Ripple {
         }
         let Some(head) = &self.head else { return s };
         s.push(self.rmsnorm_fwd(&self.res[layers], "model.norm.weight", &self.hs, d, n));
+        if let Some(chunked) = &self.head_ce {
+            chunked.forward_steps(&self.ops, &mut s, &self.hs, n, &self.targets, &self.ce_rows, self.logit_scale);
+            return s;
+        }
         let act = self.act(&mut s, &self.hs, d, &[&head.w]);
         self.ops.matmul(&mut s, &head.w, &act, &self.logits, 0);
         if self.logit_scale != 1.0 {
@@ -654,7 +690,15 @@ impl Ripple {
         let layers = c.num_hidden_layers;
         let mut s = Vec::new();
         // The head stage starts the chain from the loss; any other receives the gradient of its output boundary.
-        if let Some(head) = &self.head {
+        if let (Some(head), Some(chunked)) = (&self.head, &self.head_ce) {
+            // The chunked head recomputes each chunk's logits, turns them into the loss gradient (scaled by 1/count, then by
+            // the per-token weights of a weighted loss) and applies the head: no row's logits outlive its chunk.
+            let dw = self.is_trainable(&head.name).then(|| model::head_ce::HeadGrad { buf: self.ps.g(&head.name), dtype: model::ops::GradDtype::F32 });
+            let row_weights = self.weighted.as_ref().map(|w| RowWeights { weights: w.weights(), scratch: w.scratch() });
+            chunked.backward_steps(&self.ops, &mut s, &HeadBackward { hidden: &self.hs, d_hidden: &g.d_hs, n, labels: &self.targets, grad_scale: GradScale::Buf(&self.inv_count), logit_scale: self.logit_scale, row_weights, dw, forward_state_held: false });
+            self.res.restore(&self.gpu, &mut s, layers);
+            self.rmsnorm_bwd(&mut s, &self.res[layers], "model.norm.weight", &g.d_hs, &g.dres[layers % 2], d, n);
+        } else if let Some(head) = &self.head {
             s.push(self.gpu.step_buf(self.k.ce_grad, &self.ce_grad_uniform, &[&self.logits, &self.targets, &g.dlogits], n * v));
             if self.logit_scale != 1.0 {
                 s.push(self.gpu.step(self.k.grad_scale, &[&g.dlogits], &[n * v, f(self.logit_scale)], n * v));
@@ -705,6 +749,7 @@ impl Ripple {
     pub(super) fn run_backward(&self) {
         let g = self.grad.as_ref().expect("a backward needs the training build");
         self.gpu.write(&self.ce_grad_uniform, &[self.rows(), self.cfg.model.vocab_size as u32, IGNORE, f(self.count.get())]);
+        self.gpu.write(&self.inv_count, &[(1.0 / self.count.get()).to_bits()]);
         self.gpu.submit(&[&g.dx0], &self.bwd);
     }
 }

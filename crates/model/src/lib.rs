@@ -131,7 +131,7 @@ pub use grid::{Coord, Grid, LocalGroups};
 pub use parallel::DataParallel;
 pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 #[cfg(not(target_arch = "wasm32"))]
-pub use shard::{plan_balanced, Pipeline, PipelineModel, Shard, ShardCost, Shardable, StreamPlan};
+pub use shard::{plan_balanced, plan_stage_layout, Pipeline, PipelineModel, Shard, ShardCost, Shardable, StreamPlan};
 
 pub use objective::{Objective, StepVerdict};
 pub use trainprec::{apply_train_precision, OptimizerParts, OptimizerState, ResidentRequest, StateSupport, TrainPrecision, TrainPrecisionSupport};
