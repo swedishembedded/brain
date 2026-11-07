@@ -273,7 +273,7 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   sparsely and densely, and the keys the sparse reads selected beside the
   keys dense attention would have read for the same rows - their ratio is
   the share of attention actually read.
-  For ultra-long contexts an indexer can carry a tree (`qwen_lsa distill
+  For ultra-long contexts an indexer can carry a tree (`brain lsa distill
   --tree SPEC`, or `prefill --tree SPEC` to time one): node buckets over the
   buckets, grown as a sequence reaches each page end and shared across a
   cached prefix like index pages, and a beam down them per query, so a
@@ -283,19 +283,22 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   The indexer is made for one checkpoint and
   refused on another; keep it outside the checkpoint's directory, whose
   reader takes every safetensors file there as model weights. Off by default. Make an
-  indexer with the `qwen_lsa` tool built beside `brain`:
-  `qwen_lsa distill --checkpoint DIR --corpus TEXTDIR --out indexer.safetensors`
+  indexer with `brain lsa`, which works for any architecture whose engine
+  can capture its attention (Qwen3 over every layer, Ripple over its global
+  layers; the architecture is read from the checkpoint's `config.json`):
+  `brain lsa distill --checkpoint DIR --corpus TEXTDIR --out indexer.safetensors`
   trains it against the model's own attention (D-LSA);
-  `qwen_lsa eval --checkpoint DIR --corpus TEXTDIR --indexer FILE` reports
+  `brain lsa eval --checkpoint DIR --corpus TEXTDIR --indexer FILE` reports
   the share of dense attention it keeps and the held-out loss, and
-  `qwen_lsa prefill --model Qwen/Qwen3-4B --indexer FILE` times prefill
+  `brain lsa prefill --model Qwen/Qwen3-4B --indexer FILE` times prefill
   dense against sparse and prints the measured crossover (`--dense-until N`
   overrides it; `0` reads every chunk sparsely); `--indexer random` times a
   random projection built for the checkpoint, `--profile` prints each run's
   per-kernel device time and its split into index, read, sparse and dense
   attention and host work, and `--device gpu1` picks the card. `--model`
   resolves a checkout in the model store (`--checkpoint DIR` takes a path)
-  and loads the upstream safetensors as they are.
+  and loads the upstream safetensors as they are. This replaces the
+  `qwen_lsa` binary, whose modes and flags it keeps.
 - `--kv-offload-gb N` - host RAM the serving engine may use to park
   preempted sessions' KV cache (default `0`, off). See below.
 - `--weight-format int8` / `--weight-format f32` - quantize the 7

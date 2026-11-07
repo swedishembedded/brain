@@ -40,7 +40,7 @@ head layout; clustering, selection and the sparse read are written once.
 - [x] End-to-end prefill, Qwen3-0.6B, every layer sparse, int8 KV (the
       served default), one sequence of another repository's documentation, 512-row chunks,
       P40 (wgpu, no other job on the card), the distilled indexer at top_k
-      1024, top_p 256, window 512 (`qwen_lsa prefill --kv-cache int8`):
+      1024, top_p 256, window 512 (`brain lsa prefill --kv-cache int8`):
       | T | dense | sparse | speedup |
       |---|---|---|---|
       | 2048 | 0.85 s | 0.85 s | 0.99x |
@@ -58,7 +58,7 @@ head layout; clustering, selection and the sparse read are written once.
       than dense tiles while the selection holds most causal keys anyway.
       Index pages are built by the device Ward, one dispatch per closed
       block for every layer.
-- [x] Across the Qwen3 family (`qwen_lsa prefill --model Qwen/Qwen3-* --indexer
+- [x] Across the Qwen3 family (`brain lsa prefill --model Qwen/Qwen3-* --indexer
       random`, upstream safetensors where the store has them; int8 KV, top_k
       1024, top_p 256, window 512, one sequence, P40; 8B and 14B with int8
       linears, as serving loads them). Speedup of sparse over dense prefill:
@@ -152,7 +152,7 @@ head layout; clustering, selection and the sparse read are written once.
       attention timed against the sparse read and attention at growing
       positions on the device in use; prefill chunks ending at or below the
       crossover read densely and skip index building
-      (`set_lsa_dense_until` overrides it, `qwen_lsa prefill --dense-until`).
+      (`set_lsa_dense_until` overrides it, `brain lsa prefill --dense-until`).
 - [x] Serving metrics: `lsa_read` adds each row's selected keys and live
       keys to 64-bit device counters (one atomic per row, read only when a
       snapshot asks); `PagedDecoder::sparse_attention_stats` carries them
@@ -174,7 +174,7 @@ head layout; clustering, selection and the sparse read are written once.
 - [x] Tree read on the device and in serving: `lsa_read_tree` runs the
       host tree's beam per query row (a radix select of the best by score,
       then the lower id, over arbitrary candidate lists); an indexer may carry
-      a `TreeConfig` (`qwen_lsa distill --tree SPEC`); the engine grows node
+      a `TreeConfig` (`brain lsa distill --tree SPEC`); the engine grows node
       pages as a sequence reaches each page end, keys them by the pages under
       them so cached prefixes share them, builds them from the bucket key sums
       the device Ward keeps (read back once per index page) and charges them
@@ -198,17 +198,17 @@ head layout; clustering, selection and the sparse read are written once.
       projections and the temperature through the row normalisation, Adam,
       layers in parallel; `Engine::capture_attention` keeps each layer's
       rotated queries and keys of a dense prefill as teacher material;
-      `qwen_lsa distill | eval | prefill` drives it on a real checkpoint (PCA
+      `brain lsa distill | eval | prefill` (formerly `qwen_lsa`) drives it on a real checkpoint (PCA
       initialisation, retention of dense attention, held-out loss, prefill
       timing). Gates: gradients against central differences; held-out KL
       2.14 -> 0.0006 on a learnable teacher, recovering its temperature.
-      Run on Qwen3-0.6B (`qwen_lsa distill`, brain's `crates` sources, 48
+      Run on Qwen3-0.6B (`brain lsa distill`, brain's `crates` sources, 48
       documents of 8192 tokens, 64 sampled queries each, 2 epochs, lr 2e-3,
       PCA initialisation, about 40 s a document on a P40 and 48 cores):
       mean KL over the 28 layers 0.770 (epoch 1) -> 0.686 (epoch 2), the
       same documents scoring lower on their second pass; learned
       temperatures 0.090-0.094.
-      Held-out evaluation (`qwen_lsa eval`, another repository's
+      Held-out evaluation (`brain lsa eval`, another repository's
       documentation, 6 documents of 8192 tokens, top_k 1024, top_p 256,
       PCA fitted on the training corpus):
       | selection | dense attention kept | next-token loss, last 256 positions |
@@ -307,6 +307,13 @@ every-key sparse vs dense 8.98e-7, narrow-beam tree vs flat 4.39e-2. lavapipe
 reports `workgroup_reductions` true; no capability declaration was wrong and no
 kernel defect surfaced. The timings are lavapipe's and say nothing about a GPU.
 
+- [x] Generic D-LSA tooling (`model::lsa::capture`): the `AttentionCapture`
+      contract (geometry and index-time rope, sparse-capable layers, a
+      chunked dense capture with LSA set aside, held-out log-probabilities)
+      implemented by the Qwen3 engine and Ripple's, the distiller, PCA and
+      random initialisation restricted to capable layers, retention and loss
+      evaluation, and `brain lsa distill|eval|prefill` over them.
+
 ## Not yet done
 
 - [ ] Run the new geometries' device gates (`brain-model` lib `paged_sparse`,
@@ -323,7 +330,13 @@ kernel defect surfaced. The timings are lavapipe's and say nothing about a GPU.
       shared window as a dense sliding tile (it is a fifth of every
       selection), and more bytes in flight per workgroup.
 - [ ] D-LSA on the generic trainer (`ModelFit`) and device kernels for the
-      distillation arithmetic, which is host math today.
+      distillation arithmetic, which is host math today. Left open: the
+      distillation is a per-layer analytic-gradient loop over a teacher built
+      from captured queries and keys, with no model forward to differentiate,
+      so it does not take a `ModelFit` visitor naturally; the device work is
+      the teacher (an attention-mass softmax over all keys) and the KL step,
+      two new kernels with a gradcheck. The host cost per 32k-token sample of
+      a 65B global layer is measured in `ripple.md`.
 - [ ] N-LSA at short contexts: the window as a dense banded tile in the
       training kernels (it is half of every selection), so training below
       8k stops paying gathers for it.

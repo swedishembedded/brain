@@ -89,6 +89,7 @@ way.
 | `brain import FILE` | GGUF import with no architecture token - dispatches on the file's own `general.architecture` header instead of the command line |
 | `brain quantize SRC` | the export direction: any safetensors/GGUF checkpoint to a quantized GGUF, with no per-architecture code at all |
 | `brain optimize BASE` | the weight format of every linear of a chat model, searched within a byte budget and accepted only on held-out measurements - see [Optimizing a model](../guides/serving/optimizing.md) |
+| `brain lsa distill\|eval\|prefill` | latent sparse attention for any architecture whose engine captures its attention (qwen3, ricursive): distil an indexer against the model's own attention, evaluate indexers (attention retained, held-out loss), time dense against sparse prefill; replaces the `qwen_lsa` binary - see the [Qwen3 page](models/qwen3.md) |
 | `brain prune BASE` | remove the least important channels of a chat model's prunable dimensions and write the narrower checkpoint - see [Optimizing a model](../guides/serving/optimizing.md#removing-channels---brain-prune) |
 
 `models`, `flops`, `perf`, `bench`, `devices` and `roofline` sound similar but

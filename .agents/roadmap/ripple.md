@@ -48,7 +48,7 @@ them as they are (`Rope::None`); nothing has to be un-rotated.
 | paged serving under the generic `Scheduler` | `PagedDecoder` engines: `qwen3/serve.rs` (growing KV), `qwen35/serve_ring.rs` (fixed ring per sequence) | no engine mixes a 1024-row ring for local layers with growing paged KV for global ones; prefix reuse must share global pages and snapshot the rings |
 | LSA index, selection, sparse paged read | `model::lsa` (per-layer `Option` projections, `Rope::None`, flat and tree reads, int8/fp8 KV) | wired into `qwen3/serve.rs` only: `set_lsa`, crossover, kernel set and memory charge live in the Qwen3 engine and must move to a shared place before a second engine can use them |
 | sparse attention kernels for 80/8/128 | per-KV-head `paged_sparse_flash_gqa` with a `GROUP` knob compiled for 2, 4, 5, 8; whole-row kernel requires `64 % n_heads == 0` | group 10 not compiled; whole-row prefill refuses 80 heads (roadmap `lsa.md`: templated workgroup) |
-| D-LSA distillation | `model::lsa::distill` (host math) and the `qwen_lsa` tool | model-agnostic capture of a layer's Q/K, so a Ripple indexer can be distilled over the 16 global layers; device distillation (`lsa.md`) |
+| D-LSA distillation | `model::lsa::distill` (host math) and `brain lsa` | model-agnostic capture of a layer's Q/K, so a Ripple indexer can be distilled over the 16 global layers; device distillation (`lsa.md`) |
 | speculative decoding | DFlash2 in `crates/qwen35` | binding the Ripple DFlash2 drafter to a Ripple target |
 | training | gradcheck, LoRA, `ModelFit` | backward for value residual lerp, sigmoid gate, clipped SwiGLU (clamp masks), PeriNorm order |
 
@@ -81,7 +81,11 @@ serve other work; CUDA parity and performance follow on the same gates.
        executes none of the LSA kernels: the device gates (full-budget
        equivalence, prefix reuse, batching, real layers) skip there and are
        still to be run on a GPU.
-4. [ ] D-LSA indexer capture and distillation for Ripple's global layers.
+4. [x] D-LSA indexer capture and distillation, generic: any engine meeting
+       `model::lsa::capture::AttentionCapture` (Qwen3, Ripple) is captured,
+       PCA/random-initialised, distilled and evaluated by `brain lsa`;
+       Ripple's indexer covers its 16 global layers. Tooling and a tiny-scale
+       gate done; the real long-context run is the GPU phase below.
 5. [ ] NVFP4 release loading (MLP W4A4, attention bf16), quantized KV.
 6. [ ] Backward, gradcheck, LoRA; N-LSA after D-LSA.
 7. [ ] CUDA parity and the measured long-context numbers (both GH200s,
@@ -150,6 +154,46 @@ sparse full-budget one) do not run there: the real checkpoint binds a 200 MiB
 weight matrix and lavapipe caps a storage binding at 128 MiB, so
 `create_bind_group` rejects it. They stay CPU-JIT or card gates; the sparse one
 needs a card (it skips on the JIT).
+
+Step 4, D-LSA tooling. `AttentionCapture` (geometry with the index-time
+rope, `sparse_capable`, a chunked dense capture of keys and the queries at
+requested positions with LSA set aside, `position_logprobs`, `set_lsa`) is
+implemented by `qwen3::serve::Engine` and `RicursiveEngine`; random, PCA and
+distilled indexers get `None` for non-capable layers. CPU backend unless noted:
+
+| gate | result |
+|---|---|
+| capture of the tiny global layer vs the step-1 forward's normed, unrotated Q and K | max_abs 1.1e-6 (1.6e-6 on the software adapter), sliding layers `None` |
+| tiny Ripple, 24 synthetic texts of 64 tokens, held-out retention of dense attention at top_p 3, top_k 6 (window and sinks alone 0.245) | random 0.403, PCA 0.422, distilled 0.412; distilled beats random on all five dumps tried (+0.006 to +0.015); PCA stays ahead of distilled at this scale |
+| same, software adapter, next-token loss vs dense (dense 8.399) | gap random 0.211, distilled 0.155 |
+| real layers 0+4 (`brain lsa`, 3 documents of 80 tokens from this repo, 2 epochs, cluster 8, window 8) | mean KL 0.758 to 0.264; retained share random 0.509, PCA 0.513, distilled 0.513 (window and sinks 0.217) |
+| PCA indexer for the real global layer, saved and loaded | geometry `rope_base` 0, `sparse_layers` [1] (layer 4 of the checkpoint is layer 1 of the two-layer mapping), equal after the round trip |
+
+Host cost of distilling a 65B global layer (one thread, Ripple's 80 heads over
+8 KV heads of 128): the teacher costs 46 ms per query at 8k keys, so about
+0.19 s per query at 32k; 64 queries on each of 16 layers is about 190 s per
+32k-token sample, plus the retention evaluation at the same cost, because
+`teacher_targets` runs layer after layer on one thread (the Adam step is
+parallel over layers). Across 16 cores that is about 12 s. The capture itself
+no longer holds every query: it keeps the sampled positions (all positions of
+a 32k text would be 1.3 GB a layer, 21 GB for 16), the keys are 134 MB a
+layer. The remaining blocker for the real run is the engine, not the
+arithmetic: it holds f32 weights resident (about 260 GB for 80 layers).
+
+### GPU phase runbook
+
+```
+brain lsa distill --arch ricursive --checkpoint <Ripple-65B directory> \
+    --corpus <directory of source files> --out ripple-lsa.safetensors \
+    --tokens 32768 --train-docs 48 --epochs 3 --queries 64 --top-k 1024 --top-p 256 --device gpu0
+brain lsa eval --arch ricursive --checkpoint <directory> --corpus <directory> \
+    --indexer random,pca,ripple-lsa.safetensors --tokens 32768 --skip-docs 48 --held-docs 6
+```
+
+Needs a placement that holds the model (quantized or layer-streamed weights in
+the engine, not yet there) and the host parallelism above for the teacher.
+Serve with the artifact through the engine's `set_lsa`; the catalog entry
+comes later.
 
 ## Open items for the later steps
 
