@@ -1,89 +1,44 @@
-<!-- source-sha256: 6037a53bec564b80a63edf6072ac3c1159c5fc1bc585beeb31c9ca48bd2263d5 -->
-<svg width="520pt" height="338pt"
-viewBox="0.00 0.00 520.00 338.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(10.8 326.8)">
-<polygon fill="white" stroke="none" points="-10.8,10.8 -10.8,-326.8 509.55,-326.8 509.55,10.8 -10.8,10.8"/>
-<g id="clust1" class="cluster">
-<polygon fill="white" stroke="#a0aec0" points="8,-8 8,-130 334.25,-130 334.25,-8 8,-8"/>
-<text xml:space="preserve" text-anchor="middle" x="115.38" y="-115.55" font-family="Helvetica,sans-Serif" font-size="11.00">reinforcement: acting and being rewarded</text>
-</g>
-<g id="clust2" class="cluster">
-<polygon fill="white" stroke="#a0aec0" points="39.12,-138 39.12,-219 490.75,-219 490.75,-138 39.12,-138"/>
-<text xml:space="preserve" text-anchor="middle" x="139" y="-204.55" font-family="Helvetica,sans-Serif" font-size="11.00">unsupervised: examples without labels</text>
-</g>
-<g id="clust3" class="cluster">
-<polygon fill="white" stroke="#a0aec0" points="24.5,-227 24.5,-308 479.12,-308 479.12,-227 24.5,-227"/>
-<text xml:space="preserve" text-anchor="middle" x="110.88" y="-293.55" font-family="Helvetica,sans-Serif" font-size="11.00">supervised: examples with labels</text>
-</g>
-<g id="node1" class="node">
-<path fill="#e2e8f0" stroke="#4a5568" d="M143.75,-59C143.75,-59 28,-59 28,-59 22,-59 16,-53 16,-47 16,-47 16,-35 16,-35 16,-29 22,-23 28,-23 28,-23 143.75,-23 143.75,-23 149.75,-23 155.75,-29 155.75,-35 155.75,-35 155.75,-47 155.75,-47 155.75,-53 149.75,-59 143.75,-59"/>
-<text xml:space="preserve" text-anchor="middle" x="85.88" y="-41.8" font-family="Helvetica,sans-Serif" font-size="11.00">agent</text>
-<text xml:space="preserve" text-anchor="middle" x="85.88" y="-30.55" font-family="Helvetica,sans-Serif" font-size="11.00">(a policy with parameters)</text>
-</g>
-<g id="node2" class="node">
-<path fill="#ffffff" stroke="#4a5568" d="M314.25,-59C314.25,-59 263,-59 263,-59 257,-59 251,-53 251,-47 251,-47 251,-35 251,-35 251,-29 257,-23 263,-23 263,-23 314.25,-23 314.25,-23 320.25,-23 326.25,-29 326.25,-35 326.25,-35 326.25,-47 326.25,-47 326.25,-53 320.25,-59 314.25,-59"/>
-<text xml:space="preserve" text-anchor="middle" x="288.62" y="-36.17" font-family="Helvetica,sans-Serif" font-size="11.00">environment</text>
-</g>
-<g id="edge1" class="edge">
-<path fill="none" stroke="#1a202c" d="M155.93,-40.54C177.71,-40.46 201.86,-40.41 224,-40.5 229.65,-40.52 235.59,-40.56 241.47,-40.59"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="241.08,-43.39 249.1,-40.65 241.12,-37.79 241.08,-43.39"/>
-<text xml:space="preserve" text-anchor="middle" x="198.88" y="-41.5" font-family="Helvetica,sans-Serif" font-size="10.00">action</text>
-</g>
-<g id="edge2" class="edge">
-<path fill="none" stroke="#1a202c" d="M250.78,-49.15C242.05,-50.75 232.73,-52.18 224,-53 204.98,-54.78 184.48,-54.28 165.26,-52.74"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="165.67,-49.97 157.45,-52.05 165.17,-55.55 165.67,-49.97"/>
-<text xml:space="preserve" text-anchor="middle" x="198.88" y="-65.63" font-family="Helvetica,sans-Serif" font-size="10.00">observation</text>
-<text xml:space="preserve" text-anchor="middle" x="198.88" y="-55.13" font-family="Helvetica,sans-Serif" font-size="10.00">and reward</text>
-</g>
-<g id="node3" class="node">
-<path fill="#ffffff" stroke="#4a5568" d="M112.62,-189C112.62,-189 59.12,-189 59.12,-189 53.12,-189 47.12,-183 47.12,-177 47.12,-177 47.12,-165 47.12,-165 47.12,-159 53.12,-153 59.12,-153 59.12,-153 112.62,-153 112.62,-153 118.62,-153 124.62,-159 124.62,-165 124.62,-165 124.62,-177 124.62,-177 124.62,-183 118.62,-189 112.62,-189"/>
-<text xml:space="preserve" text-anchor="middle" x="85.88" y="-171.8" font-family="Helvetica,sans-Serif" font-size="11.00">rows x</text>
-<text xml:space="preserve" text-anchor="middle" x="85.88" y="-160.55" font-family="Helvetica,sans-Serif" font-size="11.00">features only</text>
-</g>
-<g id="node4" class="node">
-<path fill="#e2e8f0" stroke="#4a5568" d="M314.25,-189C314.25,-189 263,-189 263,-189 257,-189 251,-183 251,-177 251,-177 251,-165 251,-165 251,-159 257,-153 263,-153 263,-153 314.25,-153 314.25,-153 320.25,-153 326.25,-159 326.25,-165 326.25,-165 326.25,-177 326.25,-177 326.25,-183 320.25,-189 314.25,-189"/>
-<text xml:space="preserve" text-anchor="middle" x="288.62" y="-171.8" font-family="Helvetica,sans-Serif" font-size="11.00">model of the</text>
-<text xml:space="preserve" text-anchor="middle" x="288.62" y="-160.55" font-family="Helvetica,sans-Serif" font-size="11.00">structure</text>
-</g>
-<g id="edge3" class="edge">
-<path fill="none" stroke="#1a202c" d="M125.11,-171C158.21,-171 206.18,-171 241.43,-171"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="241.04,-173.8 249.04,-171 241.04,-168.2 241.04,-173.8"/>
-<text xml:space="preserve" text-anchor="middle" x="198.88" y="-182.5" font-family="Helvetica,sans-Serif" font-size="10.00">choose</text>
-<text xml:space="preserve" text-anchor="middle" x="198.88" y="-172" font-family="Helvetica,sans-Serif" font-size="10.00">parameters</text>
-</g>
-<g id="node5" class="node">
-<path fill="#fefcbf" stroke="#4a5568" d="M470.75,-189C470.75,-189 384.25,-189 384.25,-189 378.25,-189 372.25,-183 372.25,-177 372.25,-177 372.25,-165 372.25,-165 372.25,-159 378.25,-153 384.25,-153 384.25,-153 470.75,-153 470.75,-153 476.75,-153 482.75,-159 482.75,-165 482.75,-165 482.75,-177 482.75,-177 482.75,-183 476.75,-189 470.75,-189"/>
-<text xml:space="preserve" text-anchor="middle" x="427.5" y="-171.8" font-family="Helvetica,sans-Serif" font-size="11.00">groups, summaries,</text>
-<text xml:space="preserve" text-anchor="middle" x="427.5" y="-160.55" font-family="Helvetica,sans-Serif" font-size="11.00">unusual rows</text>
-</g>
-<g id="edge4" class="edge">
-<path fill="none" stroke="#1a202c" d="M326.67,-171C337.77,-171 350.28,-171 362.6,-171"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="362.44,-173.8 370.44,-171 362.44,-168.2 362.44,-173.8"/>
-</g>
-<g id="node6" class="node">
-<path fill="#ffffff" stroke="#4a5568" d="M127.25,-278C127.25,-278 44.5,-278 44.5,-278 38.5,-278 32.5,-272 32.5,-266 32.5,-266 32.5,-254 32.5,-254 32.5,-248 38.5,-242 44.5,-242 44.5,-242 127.25,-242 127.25,-242 133.25,-242 139.25,-248 139.25,-254 139.25,-254 139.25,-266 139.25,-266 139.25,-272 133.25,-278 127.25,-278"/>
-<text xml:space="preserve" text-anchor="middle" x="85.88" y="-260.8" font-family="Helvetica,sans-Serif" font-size="11.00">rows (x, y)</text>
-<text xml:space="preserve" text-anchor="middle" x="85.88" y="-249.55" font-family="Helvetica,sans-Serif" font-size="11.00">features and labels</text>
-</g>
-<g id="node7" class="node">
-<path fill="#e2e8f0" stroke="#4a5568" d="M323.25,-278C323.25,-278 254,-278 254,-278 248,-278 242,-272 242,-266 242,-266 242,-254 242,-254 242,-248 248,-242 254,-242 254,-242 323.25,-242 323.25,-242 329.25,-242 335.25,-248 335.25,-254 335.25,-254 335.25,-266 335.25,-266 335.25,-272 329.25,-278 323.25,-278"/>
-<text xml:space="preserve" text-anchor="middle" x="288.62" y="-260.8" font-family="Helvetica,sans-Serif" font-size="11.00">model f</text>
-<text xml:space="preserve" text-anchor="middle" x="288.62" y="-249.55" font-family="Helvetica,sans-Serif" font-size="11.00">with parameters</text>
-</g>
-<g id="edge5" class="edge">
-<path fill="none" stroke="#1a202c" d="M139.62,-260C168.24,-260 203.58,-260 232.55,-260"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="232.2,-262.8 240.2,-260 232.2,-257.2 232.2,-262.8"/>
-<text xml:space="preserve" text-anchor="middle" x="198.88" y="-271.5" font-family="Helvetica,sans-Serif" font-size="10.00">choose</text>
-<text xml:space="preserve" text-anchor="middle" x="198.88" y="-261" font-family="Helvetica,sans-Serif" font-size="10.00">parameters</text>
-</g>
-<g id="node8" class="node">
-<path fill="#fefcbf" stroke="#4a5568" d="M459.12,-278C459.12,-278 395.88,-278 395.88,-278 389.88,-278 383.88,-272 383.88,-266 383.88,-266 383.88,-254 383.88,-254 383.88,-248 389.88,-242 395.88,-242 395.88,-242 459.12,-242 459.12,-242 465.12,-242 471.12,-248 471.12,-254 471.12,-254 471.12,-266 471.12,-266 471.12,-272 465.12,-278 459.12,-278"/>
-<text xml:space="preserve" text-anchor="middle" x="427.5" y="-260.8" font-family="Helvetica,sans-Serif" font-size="11.00">prediction for a</text>
-<text xml:space="preserve" text-anchor="middle" x="427.5" y="-249.55" font-family="Helvetica,sans-Serif" font-size="11.00">new x</text>
-</g>
-<g id="edge6" class="edge">
-<path fill="none" stroke="#1a202c" d="M335.58,-260C348.08,-260 361.71,-260 374.51,-260"/>
-<polygon fill="#1a202c" stroke="#1a202c" points="374.15,-262.8 382.15,-260 374.15,-257.2 374.15,-262.8"/>
-</g>
-</g>
+<!-- source-sha256: a149bd0c9c31a42a83f79d5f70bde6fff3a928c305d1e3a410c0e1649c42974d -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 452" width="780" height="452"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="452" fill="#ffffff"/>
+<rect x="20" y="16" width="740" height="128" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Supervised: examples with labels</text>
+<rect x="45" y="65" width="180" height="54" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="135" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rows (x, y)</text>
+<text x="135" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">features and labels</text>
+<rect x="300" y="65" width="180" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">model f</text>
+<text x="390" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">with parameters</text>
+<rect x="555" y="65" width="180" height="54" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="645" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">prediction</text>
+<text x="645" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">for a new x</text>
+<line x1="228" y1="92" x2="297" y2="92" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="262.5" y="83.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">fit</text>
+<line x1="483" y1="92" x2="552" y2="92" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="517.5" y="83.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">predict</text>
+<rect x="20" y="162" width="740" height="128" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="184" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Unsupervised: examples without labels</text>
+<rect x="45" y="211" width="180" height="54" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="135" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rows x</text>
+<text x="135" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">features only</text>
+<rect x="300" y="211" width="180" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">model of the</text>
+<text x="390" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">structure</text>
+<rect x="555" y="211" width="180" height="54" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="645" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">groups, summaries,</text>
+<text x="645" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">unusual rows</text>
+<line x1="228" y1="238" x2="297" y2="238" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="262.5" y="229.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">fit</text>
+<line x1="483" y1="238" x2="552" y2="238" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="517.5" y="229.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">apply</text>
+<rect x="20" y="308" width="740" height="128" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="330" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Reinforcement: acting and being rewarded</text>
+<rect x="80" y="357" width="220" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="190" y="380.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">agent</text>
+<text x="190" y="396.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a policy with parameters</text>
+<rect x="500" y="357" width="180" height="54" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="590" y="388.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">environment</text>
+<line x1="303" y1="372" x2="497" y2="372" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="363.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">action</text>
+<line x1="497" y1="396" x2="303" y2="396" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="413.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">observation and reward</text>
 </svg>
