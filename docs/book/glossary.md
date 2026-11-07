@@ -84,6 +84,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **decision boundary**: the set of inputs where the model switches its decision, for a linear logit the line, plane or flat sheet $\mathbf{w}\cdot\mathbf{x} = 0$ (at threshold $1/2$), which separates the two predicted classes. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
+**decision tree**: a model that asks a sequence of yes-or-no questions, each a threshold on one feature chosen to make the answers as informative about the class as possible, and predicts the class held at the leaf reached. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
+
 **derivative**: the limit of the difference quotient $\frac{f(x+h) - f(x)}{h}$ as $h \to 0$; the slope of the tangent to the curve of $f$ at $x$, and the rate at which $f$ changes when $x$ changes. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **determinant**: the signed factor by which a square matrix scales area or volume ($ad - bc$ for a $2 \times 2$); zero exactly when the matrix crushes space and has no inverse. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
@@ -103,6 +105,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **eigenvalue**: the number $\lambda$ by which a matrix stretches one of its eigenvectors, $\mathbf{A}\mathbf{v} = \lambda\mathbf{v}$; the roots of $\det(\mathbf{A} - \lambda\mathbf{I}) = 0$. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
 **eigenvector**: a nonzero vector that a matrix sends to a multiple of itself, so that the map only stretches (or flips) it. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
+
+**ensemble**: a set of models whose predictions are combined by a vote or an average; trained independently on resampled data (bagging, random forests) it lowers variance, trained in sequence on what is left (boosting) it lowers bias. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
 **entropy**: the expected surprise of a distribution, $H(p) = -\sum_k p_k \log p_k$; it is $0$ for a certain outcome, at most $\log K$ for $K$ outcomes, and the lower bound on the average length of a code for data from the distribution. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
@@ -180,6 +184,12 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## K
 
+**k-means**: the method that finds $k$ group centres by alternately assigning each row to its nearest centre and moving each centre to the mean of its rows (Lloyd's algorithm), lowering the total squared distance to the centres at every step. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
+
+**k-nearest neighbours**: a classifier that stores the training rows and predicts the most common label among the $k$ rows nearest to a new one; $k$ trades bias against variance. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
+
+**kernel method**: a method that fits a linear model on a (possibly enormous) feature map of the inputs while computing only the kernel, the dot product of the features of two rows, as in kernel ridge regression and the support vector machine. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
+
 **KL divergence**: the excess of the cross-entropy over the entropy, $D_{\mathrm{KL}}(p \,\Vert\, q) = \sum_k p_k \log(p_k/q_k)$; it is never negative, zero only when $q = p$, and not symmetric in its arguments. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
 ## L
@@ -248,6 +258,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## N
 
+**naive Bayes**: a classifier that applies Bayes' rule with the assumption that the features are independent given the class, so that the class probabilities come from simple counts or per-feature distributions. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
+
 **negative log-likelihood**: minus the natural logarithm of the likelihood, a sum over independent examples of the surprise at each observed label; the loss that maximum likelihood minimises. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
 **Newton's method**: the iteration that replaces a function by its tangent line (or, for minimisation, by a quadratic with the same slope and curvature) and jumps to its zero (or bottom), $x \leftarrow x - f(x)/f'(x)$ or $x \leftarrow x - f'(x)/f''(x)$; its error is squared at each step near a simple root. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
@@ -289,6 +301,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **prediction**: the value $\hat{y} = f_\theta(\mathbf{x})$ a model returns for an example. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **prefix sum**: the list of running totals of an array, either inclusive (including the element at each position) or exclusive (stopping just before it), used to turn probabilities into a cumulative distribution and lengths into offsets. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
+
+**principal component analysis**: finding the directions along which centred rows vary most, the eigenvectors of their covariance matrix, so that rows can be summarised by their positions along the first few. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
 **prior**: a probability distribution over the parameters stating what is believed about them before the data are seen. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 

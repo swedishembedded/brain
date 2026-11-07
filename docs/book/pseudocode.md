@@ -38,7 +38,7 @@ record View:
     offset: int
 ```
 
-`v.offset` reads a field. A function may return several values as a tuple,
+`v.offset` reads a field, and a record value is built by naming the type and listing its fields in order (`View(storage, offset)`). A function may return several values as a tuple,
 `-> (t: real, r: array<real>[n])`, written `return (t, r)` and received as
 `(t, r) = f(x)`. Single letters such as `T` in `array<T>[n]` stand for any
 element type, the same one everywhere in the signature.
@@ -216,6 +216,9 @@ return value
 
 `else if` is `else` followed by an `if`; at most one branch runs. A loop
 over an empty range (`for i in 0 .. 0`) runs zero times.
+
+A function may call itself (**recursion**); a recursive function states the case in which it returns without calling itself, and
+every call works on a strictly smaller input, so that the calls end. Volume II builds decision trees this way.
 
 A `parallel for` promises that no iteration reads anything another
 iteration writes. If an algorithm needs iterations to combine results, it
