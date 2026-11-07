@@ -89,6 +89,11 @@ the chapter where a reader should first meet it.
   they are few. Each table states its tolerance or prints enough digits to
   compare against, and every number quoted in prose matches the table it
   comes from.
+- **Only stable numbers get full digits.** Every run in a multi-run table
+  prints its seed. A run that diverges or is chaotic (a blow-up, a limit
+  cycle, NaN) is printed as its qualitative outcome or to its stable digits,
+  never to full precision another implementation cannot match. A number
+  that depends on a library function names it exactly.
 - **Pseudocode uses only what `docs/book/pseudocode.md` defines.** A chapter
   that needs a new operation (`sign`, `sort`, bit shifts, complex arithmetic)
   defines it there in the same change, including edge cases such as
