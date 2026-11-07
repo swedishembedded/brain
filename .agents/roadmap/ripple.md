@@ -74,9 +74,13 @@ serve other work; CUDA parity and performance follow on the same gates.
        equals full-recompute logits across the window boundary; prefix
        reuse. Done on the CPU backend as `ricursive::RicursiveEngine`; not in
        the catalog and not reachable from the CLI yet.
-3. [ ] LSA lifted out of the Qwen3 engine into a shared engine-side
-       component; Ripple's 16 global layers read sparsely; group-10 sparse
-       kernel; gate: full-budget selection equals dense output.
+3. [x] LSA lifted out of the Qwen3 engine into a shared engine-side
+       component (`model::lsa::binding`); Ripple's 16 global layers read
+       sparsely (`RicursiveEngine::set_lsa`); whole-row and group-10 kernels
+       compiled. Written and statically validated on the CPU backend, which
+       executes none of the LSA kernels: the device gates (full-budget
+       equivalence, prefix reuse, batching, real layers) skip there and are
+       still to be run on a GPU.
 4. [ ] D-LSA indexer capture and distillation for Ripple's global layers.
 5. [ ] NVFP4 release loading (MLP W4A4, attention bf16), quantized KV.
 6. [ ] Backward, gradcheck, LoRA; N-LSA after D-LSA.
@@ -119,6 +123,22 @@ Not measured: CUDA or Vulkan parity (GPUs were busy), any prompt longer than 13
 real tokens, a real window-exclusion case on real weights (13 tokens is below
 the 1024 window; the window is gated by the tiny model only), layers other than
 0 and 4, throughput of any kind.
+
+Step 3, CPU backend. The LSA kernels are workgroup-cooperative and the CPU JIT
+cannot execute them (`@cpu no`), so on this box: the refusals (an indexer that
+covers a sliding layer, other geometry, rotated heads, a tree, an engine opened
+without the kernels, and the backend's own refusal by name) pass; every variant
+of the per-KV-head kernel (groups 1 to 10) and of the whole-row kernel (16, 32,
+40, 64, 80 heads and two others) parses and validates under naga within 16 KiB of
+workgroup memory; Qwen3's serve conformance and LSA tests build and pass
+by skipping their device parts. Not run, written and waiting for a GPU:
+`ricursive` tests `a_budget_past_the_context_equals_dense_through_prefill_chunks_and_decode`,
+`a_small_budget_reads_fewer_keys_than_dense_attention`,
+`prefix_reuse_and_batching_match_cold_and_alone_runs_with_sparse_attention`,
+`sparse_attention_at_a_full_budget_decodes_real_layers_0_and_4_as_the_reference`,
+and the `brain-model` `paged_sparse` device tests for the new geometries. The
+engine-level sparse-equals-oracle gate is the kernel's (per layer, against
+`lsa::attend`), not a Ripple logits comparison.
 
 ## Open items for the later steps
 

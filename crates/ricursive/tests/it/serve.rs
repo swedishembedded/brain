@@ -34,9 +34,9 @@ const TINY: &str = "golden/ricursive/tiny";
 /// computes rope angles on the device where the reference reads a host table,
 /// and attends through different kernels; the measured worst case is in the
 /// roadmap ledger.
-const TOLERANCE: f32 = 1e-5;
+pub(crate) const TOLERANCE: f32 = 1e-5;
 
-fn tiny_dir() -> Option<String> {
+pub(crate) fn tiny_dir() -> Option<String> {
     let dir = brain_testutil::testdata(TINY);
     if Path::new(&dir).join("ricursive_tiny_weights.safetensors").exists() {
         Some(dir)
@@ -46,26 +46,30 @@ fn tiny_dir() -> Option<String> {
     }
 }
 
-fn tiny_config(dir: &str) -> RicursiveConfig {
+pub(crate) fn tiny_config(dir: &str) -> RicursiveConfig {
     RicursiveConfig::from_file(&format!("{dir}/config.json")).expect("config")
 }
 
-fn weights(dir: &str, cfg: &RicursiveConfig) -> checkpoint::remap::RemapSource<'static> {
+pub(crate) fn weights(dir: &str, cfg: &RicursiveConfig) -> checkpoint::remap::RemapSource<'static> {
     let layers: Vec<usize> = (0..cfg.num_hidden_layers).collect();
     open_safetensors(&format!("{dir}/ricursive_tiny_weights.safetensors"), cfg, &layers).expect("open weights")
 }
 
-fn serve_config(prefill_chunk: u32, prefix_slots: u32) -> ServeConfig {
-    ServeConfig { block_size: 4, num_blocks: 160, max_seq_len: 96, max_batch: 6, prefix_slots, prefill_chunk }
+pub(crate) fn serve_config(prefill_chunk: u32, prefix_slots: u32) -> ServeConfig {
+    ServeConfig { block_size: 4, num_blocks: 160, max_seq_len: 96, max_batch: 6, prefix_slots, prefill_chunk, sparse_attention: false }
 }
 
-fn engine(dir: &str, prefill_chunk: u32, prefix_slots: u32) -> RicursiveEngine {
+pub(crate) fn engine(dir: &str, prefill_chunk: u32, prefix_slots: u32) -> RicursiveEngine {
+    engine_with(dir, serve_config(prefill_chunk, prefix_slots))
+}
+
+pub(crate) fn engine_with(dir: &str, serve: ServeConfig) -> RicursiveEngine {
     let cfg = tiny_config(dir);
-    RicursiveEngine::from_source(cfg.clone(), Box::new(weights(dir, &cfg)), serve_config(prefill_chunk, prefix_slots), None).expect("engine")
+    RicursiveEngine::from_source(cfg.clone(), Box::new(weights(dir, &cfg)), serve, None).expect("engine")
 }
 
 /// A reproducible token stream inside the tiny vocabulary.
-fn stream(seed: u32, n: usize, vocab: u32) -> Vec<u32> {
+pub(crate) fn stream(seed: u32, n: usize, vocab: u32) -> Vec<u32> {
     let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(12345);
     (0..n)
         .map(|_| {
@@ -78,7 +82,7 @@ fn stream(seed: u32, n: usize, vocab: u32) -> Vec<u32> {
 }
 
 /// The reference's logits at the last position of `ids`, by recomputing the whole prefix.
-fn recompute_last(dir: &str, ids: &[u32]) -> Vec<f32> {
+pub(crate) fn recompute_last(dir: &str, ids: &[u32]) -> Vec<f32> {
     let cfg = tiny_config(dir);
     let w = weights(dir, &cfg);
     let vocab = cfg.vocab_size;
@@ -86,14 +90,14 @@ fn recompute_last(dir: &str, ids: &[u32]) -> Vec<f32> {
     out.logits[(ids.len() - 1) * vocab..].to_vec()
 }
 
-fn check_row(label: &str, got: &[f32], want: &[f32], worst: &mut f32) {
+pub(crate) fn check_row(label: &str, got: &[f32], want: &[f32], worst: &mut f32) {
     let err = scaled_error(label, got, want);
     assert!(err <= TOLERANCE, "{label}: scaled error {err:.3e} exceeds {TOLERANCE:.0e}");
     *worst = worst.max(err);
 }
 
 /// Prefill `prompt` through `prefill_chunk` slices of `budget` tokens; the last hidden row.
-fn prefill_in_slices(e: &mut RicursiveEngine, table: &mut BlockTable, prompt: &[u32], budget: usize) -> Vec<f32> {
+pub(crate) fn prefill_in_slices(e: &mut RicursiveEngine, table: &mut BlockTable, prompt: &[u32], budget: usize) -> Vec<f32> {
     loop {
         if let PrefillProgress::Done(h) = e.prefill_chunk(table, prompt, budget) {
             return h;

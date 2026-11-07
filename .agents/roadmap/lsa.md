@@ -266,10 +266,35 @@ head layout; clustering, selection and the sparse read are written once.
       the training model's loss (0.8361 both, largest single answer 2.7e-6
       apart).
 
+- [x] Engine binding (`model::lsa::binding`): the engine-agnostic half of
+      attaching LSA to a paged decoder, lifted out of `qwen3::serve`. Kernels
+      by geometry (`kernel_pipelines` registers the per-KV-head and whole-row
+      kernels of the shapes an engine needs, any group; `resolve_kernels`
+      picks among the registered), `LsaBinding` (attachment that refuses an
+      indexer covering a layer the engine reads densely, per-chunk prepare and
+      dense-now state, chunk limit, stats, page release, `retain_pages` for
+      prefix snapshots, `measure_crossover` over the engine's own buffers), and
+      the memory charge. Two engines use it: Qwen3 (flat and tree, f32 and
+      packed KV) and Ripple's global layers (flat, f32).
+- [x] Whole-row sparse kernel for any head count: the workgroup is `HEADS *
+      TPH` threads (`paged_sparse::rows_geometry`; WG and the workgroup size
+      are template knobs) and the key tile shrinks to fit 16 KiB of workgroup
+      memory, so Qwen3-14B's 40 heads (80 threads) and Ripple's 80 (160
+      threads, 4-key tile) have one; the shapes already validated keep their
+      workgroup. Group 10 (80 heads over 8 KV heads) runs the per-KV-head
+      kernel unchanged. Gated here only statically: every variant parses and
+      validates under naga and its workgroup memory is summed (group 10 14776
+      bytes, 80 heads whole-row 9040). The device gates against the scalar
+      oracle (group 10 and 5, f32; packed bit-identity at 80/8/128; whole-row
+      at 40, 64 and 80 heads) exist and skip on a backend without workgroup
+      barriers: they have not run yet.
+
 ## Not yet done
 
-- [ ] Whole-row sparse prefill kernel for query-head counts that do not
-      divide 64 (Qwen3-14B's 40): a templated workgroup size.
+- [ ] Run the new geometries' device gates (`make test/one P=brain-model
+      T=paged_sparse` lib tests, `brain-ricursive` `lsa`) on a GPU: the CPU JIT
+      executes none of the LSA kernels.
+
 - [ ] Tensor-core sparse attention: a native (`gpu_core::provider::cuda`)
       kernel over a block of consecutive queries and the union of their
       selections, offered like the native flash prefill and picked up by the

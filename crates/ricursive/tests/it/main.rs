@@ -6,6 +6,7 @@
 //! process-wide state (the current directory, environment variables): the
 //! others run beside it.
 
+mod lsa;
 mod parity;
 mod real_weight_parity;
 mod serve;

@@ -72,6 +72,9 @@
 
 use checkpoint::TensorSource;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use model::lsa::binding::{self, Attachment, HeadShape, LsaBinding};
+use model::lsa::engine::{KeyPools, KvGeometry, LayerBuffers, LsaStats};
+use model::lsa::indexer::{IndexGeometry, Indexer};
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
 use model::serve::{AdapterId, PagedDecoder, PrefillProgress};
 use model::snapshot_prefix::{Entry, SnapshotPrefixCache};
@@ -104,6 +107,9 @@ pub struct ServeConfig {
     pub prefix_slots: u32,
     /// Prompt rows per prefill forward; sizes the ring slack.
     pub prefill_chunk: u32,
+    /// Register the sparse-attention kernels ([`RicursiveEngine::set_lsa`] needs them; an engine that never reads
+    /// sparsely leaves them out of its device).
+    pub sparse_attention: bool,
 }
 
 impl ServeConfig {
@@ -133,6 +139,14 @@ pub fn global_kv_bytes_per_token(cfg: &RicursiveConfig) -> u64 {
 pub fn ring_bytes_per_slot(cfg: &RicursiveConfig, prefill_chunk: u32) -> u64 {
     let sliding = cfg.layer_types.iter().filter(|t| **t == LayerType::Sliding).count() as u64;
     sliding * 2 * u64::from(ring_rows(cfg, prefill_chunk)) * cfg.kv_dim() as u64 * 4
+}
+
+/// Device bytes [`RicursiveEngine::set_lsa`] allocates for `indexer` on an engine sized by `serve`: the
+/// projections, the index pages for the block pool's cluster blocks and the scratch of the widest forward. What a
+/// memory planner charges beside [`global_kv_bytes_per_token`] and [`ring_bytes_per_slot`], before loading.
+pub fn lsa_device_bytes(indexer: &Indexer, serve: &ServeConfig) -> u64 {
+    let kv = KvGeometry { block_size: serve.block_size, max_blocks_per_seq: serve.max_seq_len.div_ceil(serve.block_size) };
+    LsaBinding::device_bytes_for(indexer, kv, serve.max_batch.max(serve.prefill_chunk), serve.num_blocks)
 }
 
 /// What resuming from a cached prompt needs beyond its blocks and ring snapshot.
@@ -188,6 +202,10 @@ pub struct RicursiveEngine {
     scores: DeviceBuffer,
     probs: DeviceBuffer,
     max_blocks_per_seq: u32,
+    /// Latent sparse attention over the global layers ([`Self::set_lsa`]).
+    lsa: Option<LsaBinding>,
+    /// Every layer's key pool, as the index pages read them.
+    key_pools: Vec<DeviceBuffer>,
 }
 
 impl RicursiveEngine {
@@ -197,6 +215,11 @@ impl RicursiveEngine {
         serve.validate()?;
         let mut table: Vec<(&str, &str)> = KERNELS.to_vec();
         table.extend(SERVE_EXTRA);
+        if serve.sparse_attention {
+            if let Some(shape) = Self::global_shape(&cfg) {
+                table.extend(binding::kernel_pipelines(&[shape], &[], &[], false));
+            }
+        }
         let gpu = Gpu::open(device, &table);
 
         let mut up = Uploader::new(&gpu);
@@ -210,7 +233,7 @@ impl RicursiveEngine {
         let ring_rows = ring_rows(&cfg, serve.prefill_chunk);
         let ring_slots = u64::from(serve.max_batch + serve.prefix_slots);
         let kv = cfg.kv_dim() as u64;
-        let pools = cfg
+        let pools: Vec<KvPool> = cfg
             .layer_types
             .iter()
             .map(|kind| {
@@ -222,6 +245,7 @@ impl RicursiveEngine {
             })
             .collect();
 
+        let key_pools = pools.iter().map(|p: &KvPool| p.k.clone()).collect();
         let max_rows = u64::from(serve.max_batch.max(serve.prefill_chunk));
         let max_keys = u64::from(serve.max_seq_len.max(cfg.sliding_window as u32));
         let scratch = max_rows * cfg.num_attention_heads as u64 * max_keys;
@@ -234,6 +258,8 @@ impl RicursiveEngine {
             ring_free: (0..serve.max_batch).rev().collect(),
             cache: SnapshotPrefixCache::new(serve.prefix_slots),
             max_blocks_per_seq: serve.max_seq_len.div_ceil(serve.block_size),
+            lsa: None,
+            key_pools,
             cfg,
             serve,
             src,
@@ -246,6 +272,74 @@ impl RicursiveEngine {
 
     pub fn config(&self) -> &RicursiveConfig {
         &self.cfg
+    }
+
+    /// The attention shape of the global layers (`None` for a model without any).
+    fn global_shape(cfg: &RicursiveConfig) -> Option<HeadShape> {
+        cfg.layer_types.contains(&LayerType::Full).then_some(HeadShape { n_heads: cfg.num_attention_heads as u32, n_kv_heads: cfg.num_key_value_heads as u32, head_dim: cfg.head_dim as u32 })
+    }
+
+    /// The geometry an indexer for this model carries: global layers apply no RoPE, so the heads the index reads
+    /// are unrotated (`rope_base` 0), and an indexer built with a RoPE base is built for other heads.
+    fn index_geometry(cfg: &RicursiveConfig) -> IndexGeometry {
+        IndexGeometry { n_layers: cfg.num_hidden_layers, n_heads: cfg.num_attention_heads, n_kv_heads: cfg.num_key_value_heads, head_dim: cfg.head_dim, rope_base: 0.0 }
+    }
+
+    fn kv_geometry(&self) -> KvGeometry {
+        KvGeometry { block_size: self.serve.block_size, max_blocks_per_seq: self.max_blocks_per_seq }
+    }
+
+    /// Read the global layers' attention through latent sparse attention: each query reads the keys `indexer`
+    /// selects instead of every cached key. Only global layers can read sparsely (a sliding layer already reads
+    /// its window); an indexer that covers one, was built for another geometry or for rotated heads, reads
+    /// through a tree, or is attached to an engine opened without [`ServeConfig::sparse_attention`] is refused.
+    /// Index pages are built from the cached keys as cluster blocks close, shared over prefix snapshots with the
+    /// blocks they index, freed with them, and charged by [`lsa_device_bytes`].
+    pub fn set_lsa(&mut self, indexer: &Indexer) -> Result<(), String> {
+        if !self.serve.sparse_attention {
+            return Err("ricursive: this engine was opened without ServeConfig::sparse_attention, so its device holds no sparse-attention kernels".into());
+        }
+        if indexer.tree.is_some() {
+            return Err("ricursive: an indexer that reads through a tree is not supported by this engine (its node pages are not shared over prefix snapshots)".into());
+        }
+        let shape = Self::global_shape(&self.cfg).ok_or("ricursive: the model has no global layer to read sparsely")?;
+        let capable: Vec<bool> = self.cfg.layer_types.iter().map(|t| *t == LayerType::Full).collect();
+        let attachment = Attachment {
+            geometry: Self::index_geometry(&self.cfg),
+            packed: None,
+            kv: self.kv_geometry(),
+            max_rows: self.serve.max_batch.max(self.serve.prefill_chunk),
+            page_capacity: binding::page_capacity(self.serve.num_blocks, self.serve.block_size, indexer.cfg.cluster_block as u32),
+            yarn_inv_freq: None,
+            sparse_capable: Some(&capable),
+        };
+        // Geometry and layer coverage are refused before any device work, whatever the backend.
+        indexer.check_model(&attachment.geometry)?;
+        let kernels = binding::resolve_kernels(&self.gpu, shape, None, false)?;
+        self.lsa = Some(LsaBinding::attach(&self.gpu, indexer, kernels, &attachment)?);
+        Ok(())
+    }
+
+    /// What latent sparse attention holds and has done (one small readback), or `None` while every layer reads
+    /// densely.
+    pub fn lsa_stats(&self) -> Option<LsaStats> {
+        self.lsa.as_ref().map(|a| a.stats(&self.gpu))
+    }
+
+    /// Override the prefill position up to which chunks read densely (0, the default: every chunk reads sparsely;
+    /// this engine has no fused dense prefill to measure a crossover against).
+    pub fn set_lsa_dense_until(&mut self, position: u32) {
+        if let Some(lsa) = self.lsa.as_mut() {
+            lsa.set_dense_until(position);
+        }
+    }
+
+    /// Release `table`'s index pages and blocks.
+    fn drop_table(&mut self, table: &mut BlockTable) {
+        if let Some(lsa) = self.lsa.as_mut() {
+            lsa.release(table);
+        }
+        table.release(&mut self.alloc);
     }
 
     /// The device handle, for profiling.
@@ -368,7 +462,15 @@ impl RicursiveEngine {
                     let bs = self.serve.block_size;
                     s.push(gpu.step(K_KV_APPEND, &[&k, &idx.global_blocks, &idx.global_offsets, &pool.k], &[n, kv_dim, bs], n * kv_dim));
                     s.push(gpu.step(K_KV_APPEND, &[&v, &idx.global_blocks, &idx.global_offsets, &pool.v], &[n, kv_dim, bs], n * kv_dim));
-                    self.attend(&mut s, &q, pool, &idx.global_table, &idx.global_lens, n, bs, self.serve.max_seq_len, self.max_blocks_per_seq)
+                    match self.lsa.as_ref().filter(|a| a.reads_sparsely(l)) {
+                        Some(lsa) => {
+                            let ctx = gpu.storage(u64::from(n) * u64::from(q_dim));
+                            let bufs = LayerBuffers { q: &q, pos: &idx.positions, seqlen: &idx.global_lens, block_tables: &idx.global_table, pool_k: &pool.k, pool_v: &pool.v, scales: None, ctx: &ctx };
+                            lsa.record_layer(gpu, &mut s, l, n, &bufs).map_err(|e| format!("ricursive: latent sparse attention: {e}"))?;
+                            ctx
+                        }
+                        None => self.attend(&mut s, &q, pool, &idx.global_table, &idx.global_lens, n, bs, self.serve.max_seq_len, self.max_blocks_per_seq),
+                    }
                 }
             };
             let ctx = match &w.g {
@@ -385,6 +487,9 @@ impl RicursiveEngine {
             x = w.feed_forward(&c).record(gpu, &mut s, &x1, n);
         }
         gpu.submit(&[], &s);
+        if let Some(lsa) = &self.lsa {
+            lsa.end_forward();
+        }
         Ok(x)
     }
 
@@ -466,20 +571,28 @@ impl RicursiveEngine {
         }
         let (row, evicted) = self.cache.take_row(table.kv_namespace(), prompt);
         if let Some(mut gone) = evicted {
-            gone.release(&mut self.alloc);
+            self.drop_table(&mut gone);
         }
         let Some(row) = row else { return };
         self.copy_ring(Self::ring_slot(table), self.snapshot_slot(row));
-        let shared = table.fork(&mut self.alloc);
+        let mut shared = table.fork(&mut self.alloc);
+        if let Some(lsa) = self.lsa.as_mut() {
+            // The snapshot holds the index pages of the blocks it holds, so they outlive the sequence with them.
+            lsa.retain_pages(table, &mut shared).unwrap_or_else(|e| panic!("ricursive: latent sparse attention: {e}"));
+        }
         let retired = self.cache.insert(Entry::new(prompt.to_vec(), shared, row, Resume { last_hidden: hidden.to_vec() }));
         for mut gone in retired {
-            gone.release(&mut self.alloc);
+            self.drop_table(&mut gone);
         }
     }
 
     /// Prefill `prompt[from..to]` (at most one ring-slack chunk) into `table`; the last row's final-norm hidden state
     /// when `last`.
     fn prefill_slice(&mut self, table: &mut BlockTable, prompt: &[u32], from: usize, to: usize, last: bool) -> Option<Vec<f32>> {
+        if let Some(lsa) = self.lsa.as_mut() {
+            let pools = KeyPools { keys: &self.key_pools, scales: None };
+            lsa.prepare_chunk(&self.gpu, table, from as u32, (to - from) as u32, pools).unwrap_or_else(|e| panic!("ricursive serve: latent sparse attention: {e}"));
+        }
         let start = table.reserve((to - from) as u32, &mut self.alloc).unwrap_or_else(|e| panic!("ricursive serve: {e}"));
         assert_eq!(start as usize, from, "ricursive serve: the table holds {start} rows but the prompt resumes at {from}");
         let (blocks, ring) = (table.blocks().to_vec(), Self::ring_slot(table));
@@ -502,6 +615,16 @@ impl RicursiveEngine {
             return Vec::new();
         }
         assert!(tables.len() <= self.serve.max_batch as usize, "ricursive serve: {} sequences exceed max_batch {}", tables.len(), self.serve.max_batch);
+        if let Some(lsa) = self.lsa.as_mut() {
+            let mut rows: Vec<(&mut BlockTable, u32, u32)> = tables
+                .iter_mut()
+                .map(|t| {
+                    let cached = t.len();
+                    (&mut **t, cached, 1)
+                })
+                .collect();
+            lsa.prepare_rows(&self.gpu, &mut rows, KeyPools { keys: &self.key_pools, scales: None }).unwrap_or_else(|e| panic!("ricursive serve: latent sparse attention: {e}"));
+        }
         let mut owned = Vec::with_capacity(tables.len());
         for (t, &input) in tables.iter_mut().zip(inputs) {
             t.append(&mut self.alloc).unwrap_or_else(|e| panic!("ricursive serve: {e}"));
@@ -561,7 +684,7 @@ impl PagedDecoder for RicursiveEngine {
         let before = self.alloc.free_blocks();
         while self.alloc.free_blocks() - before < want {
             let Some(mut gone) = self.cache.evict_lru() else { break };
-            gone.release(&mut self.alloc);
+            self.drop_table(&mut gone);
         }
         self.alloc.free_blocks() - before
     }
@@ -569,7 +692,7 @@ impl PagedDecoder for RicursiveEngine {
         if let Some(slot) = t.take_state_row() {
             self.ring_free.push(slot);
         }
-        t.release(&mut self.alloc);
+        self.drop_table(t);
     }
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
         loop {
@@ -594,7 +717,9 @@ impl PagedDecoder for RicursiveEngine {
         let mut hidden = None;
         let mut at = done;
         while at < end {
-            let to = end.min(at + self.serve.prefill_chunk as usize);
+            // A chunk stays inside one cluster block, so every query's closed blocks are indexed before it runs.
+            let limit = self.lsa.as_ref().map_or(usize::MAX, |a| a.chunk_limit(at as u32) as usize);
+            let to = end.min(at.saturating_add(self.serve.prefill_chunk as usize).min(at.saturating_add(limit)));
             hidden = self.prefill_slice(table, prompt, at, to, to == prompt.len());
             at = to;
         }
@@ -642,6 +767,9 @@ impl PagedDecoder for RicursiveEngine {
     }
     fn decode_window_capacity(&self) -> usize {
         1
+    }
+    fn sparse_attention_stats(&self) -> Option<LsaStats> {
+        self.lsa_stats()
     }
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY.min(self.cfg.vocab_size)

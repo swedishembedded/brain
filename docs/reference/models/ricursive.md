@@ -26,7 +26,9 @@ clipped SwiGLU feed-forward.
 reuse, and it passes the shared serving conformance suite. It is not in the
 model catalog: `brain serve` and the capability interface do not know it yet.
 Weights are resident f32, so it needs a machine that holds them; there is no
-quantization and no sparse attention yet. The registry row is the model's name
+quantization yet. Its global layers can read through latent sparse attention
+(`RicursiveEngine::set_lsa`, an indexer covering only global layers), which
+needs a device that runs workgroup-barrier kernels. The registry row is the model's name
 and its Hugging Face class.
 
 The sliding layers keep a fixed ring of recent keys per sequence and the
