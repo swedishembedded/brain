@@ -119,6 +119,12 @@ PCTL_RE='\bp(50|95|99)\b[^0-9a-zA-Z\n]{0,20}[0-9][0-9.,]*[[:space:]]?(ms|s|%)\b'
 SOFT_PCT_RE="$NUM"'[[:space:]]?%'
 SOFT_X_RE="$NUM"'[×x](?![0-9a-zA-Z}])'
 CONTEXT_RE='measur|profil|\bwall\b|laten|throughput|speedup|speed-up|\bfaster\b|\bslower\b|benchmark|median|\bmean\b|\bpeak\b|regress(ed|ion)?|baseline|roofline|\bflop|decode (loop|step)|training step|step time|per-kernel|per-frame|per-page|inference time|resident instance|wall-clock|wall time'
+# The textbook (docs/book) is full of statistics: an accuracy of 89% beside
+# "mean", "median", "baseline", "regression" or "measured" is a statistical
+# result there, not a claim about speed. Its percentages and multipliers are
+# gated on performance vocabulary only, a REDUCTION of CONTEXT_RE; durations,
+# rates and percentiles (above) are denied in the book exactly as elsewhere.
+BOOK_CONTEXT_RE='profil|\bwall\b|laten|throughput|speedup|speed-up|\bfaster\b|\bslower\b|benchmark|\bpeak\b|roofline|\bflop|decode (loop|step)|step time|per-kernel|per-frame|per-page|inference time|resident instance|wall-clock|wall time'
 # Code prose reports a measurement with different words than a doc paragraph
 # does, and a rate unit anywhere nearby is itself the strongest cue there is.
 # An EXTENSION of CONTEXT_RE, never a restatement of it, so the two scopes
@@ -139,7 +145,9 @@ has_context() {
   local f="$1" ln="$2" start end
   start=$((ln - 4)); [ "$start" -lt 1 ] && start=1
   end=$((ln + 2))
-  sed -n "${start},${end}p" "$f" | grep -qiE "$CONTEXT_RE"
+  local ctx="$CONTEXT_RE"
+  case "$f" in docs/book/*) ctx="$BOOK_CONTEXT_RE" ;; esac
+  sed -n "${start},${end}p" "$f" | grep -qiE "$ctx"
 }
 
 # ---------------------------------------------------------------- prose ----
