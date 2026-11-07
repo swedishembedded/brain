@@ -119,6 +119,12 @@ the chapter where a reader should first meet it.
   `knowledge #N`. Mine the evidence with `scripts/book/history.py extract`
   (writes `scratchpad/book/history.jsonl`) and read the commit itself before
   citing it. Describe what the commit shows, not what it was hoped to show.
+- **Speed is stated as work, not time.** The hardware-independent cost of a
+  computation is the arithmetic it needs (FLOPs) and the data it must move
+  (bytes); an improvement is fewer of either, or a higher achieved fraction
+  of the device's own roofline. Seconds depend on the machine and are only
+  ever a dated observation of a stated setup. Derive or count the FLOPs and
+  bytes of an algorithm before quoting any time for it.
 - **Measurements are history.** A number about speed or throughput is stated
   as a dated observation of a specific setup ("in July 2026, on one GPU, ...")
   and carries the perf-number gate's reviewed-exception comment
