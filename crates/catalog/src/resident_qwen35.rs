@@ -632,8 +632,8 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
             held
         }
     };
-    let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
-    if devices.is_empty() {
+    let offered: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
+    if offered.is_empty() {
         return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
     }
     let build_on = |devices: &[(Device, u64)], kv, mode, prefix_slots, cap| {
@@ -650,7 +650,6 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
             None => r,
         }
     };
-    let build = |kv, mode, prefix_slots, cap| build_on(&devices, kv, mode, prefix_slots, cap);
     // A candidate fits when the operator's context places, or, with the context
     // left to the cards, when it leaves at least the floor.
     let floor = DEFAULT_CONTEXT_FLOOR.min(model_cfg.max_position_embeddings.max(1));
@@ -664,9 +663,16 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
             },
         }
     };
+    let probe_cap = cfg.ctx.unwrap_or(1).max(1);
+    // The cards one replica spans: the fewest leading ones that hold the model at its leanest. Every default below is
+    // sized to that group, not to everything offered; sized to everything, the longest context and the KV pool would fill
+    // the whole box, and a model that fits one card would span all of them as a single instance (one set of decode slots,
+    // a cross-card hop per token) with no card left for another replica.
+    let group = card_group(&offered, |cards| fits(build_on(cards, cfg.kv.unwrap_or(model::kv_tier::KvTier::INT8), SpeculativeMode::Off, 0, probe_cap)).is_ok());
+    let devices = offered[..group].to_vec();
+    let build = |kv, mode, prefix_slots, cap| build_on(&devices, kv, mode, prefix_slots, cap);
     // Chosen in the order they matter to throughput, each with the ones not yet
     // chosen at their leanest: the KV tier, then speculation, then the prompt cache.
-    let probe_cap = cfg.ctx.unwrap_or(1).max(1);
     let kv = given_or_chosen(cfg.kv, "--kv-cache", KV_DEFAULTS, hw, &mut chosen, |kv| fits(build(kv, SpeculativeMode::Off, 0, probe_cap)));
     // The FP8 directory's own MTP head drafts when the scheduler has measured that a round of drafts beats plain decoding at the batch
     // it is serving (it times both, per batch size), so the default is `auto`.
@@ -707,16 +713,18 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     // KV pool and prefix cache sized for its cards, built when demand needs it (see `ResidentModel::replicas`). Every
     // replica serves the context the first one fixed, so the manifest is true of all of them.
     let mut replicas = vec![resident];
-    let mut remaining: Vec<(Device, u64)> = devices.iter().copied().filter(|(d, _)| !replicas[0].placement().iter().any(|(used, ..)| used == d)).collect();
+    let mut remaining: Vec<(Device, u64)> = offered.iter().copied().filter(|(d, _)| !replicas[0].placement().iter().any(|(used, ..)| used == d)).collect();
     let cap = replicas[0].cap();
     while !remaining.is_empty() {
-        let candidate = build_on(&remaining, kv, mode, prefix_slots, cap);
+        // The next replica takes the next group of cards, as many as the first did.
+        let next = &remaining[..group.min(remaining.len())];
+        let candidate = build_on(next, kv, mode, prefix_slots, cap);
         let pool = match cfg.ctx {
             Some(ctx) => candidate.longest_pool(ctx),
             None => candidate.pool_rows_for_context(cap),
         };
         let Ok(pool) = pool else { break };
-        let replica = finish(build_on(&remaining, kv, mode, prefix_slots, cap).with_kv_pool_rows(pool));
+        let replica = finish(build_on(next, kv, mode, prefix_slots, cap).with_kv_pool_rows(pool));
         if replica.unservable_reason().is_some() {
             break;
         }
@@ -729,6 +737,12 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         chosen.push(format!("{} replicas ({}): one per group of cards that holds the model, each with its own KV pool and prefix cache, the next built when the running ones are full", replicas.len(), cards.join(", ")));
     }
     Ok(Qwen35GgufServed::new(replicas, bank, gguf_path, id, chosen))
+}
+
+/// How many leading cards of `offered` one replica spans: the fewest on which `holds` the model (all of them when no
+/// prefix does, so the refusal that follows names the whole box).
+fn card_group<T>(offered: &[T], mut holds: impl FnMut(&[T]) -> bool) -> usize {
+    (1..=offered.len()).find(|&n| holds(&offered[..n])).unwrap_or(offered.len())
 }
 
 /// The operator's value, else the best-ranked default of `rules` that `fits`,
@@ -1172,6 +1186,36 @@ mod tests {
         assert!(r.cap() > 1_000_000, "a tiny model on a 2 GiB budget leaves room for a huge context: {}", r.cap());
         let placed: u64 = r.placement().iter().map(|p| p.3).sum();
         assert!(placed <= 2 * GIB, "the context must be charged into a placement that fits the usable bytes: {placed}");
+        std::fs::remove_file(path).ok();
+    }
+
+    /// A replica spans the fewest cards that hold the model, however much more the whole box could hold.
+    #[test]
+    fn a_replica_spans_the_fewest_cards_that_hold_the_model() {
+        let cards = [24 * GIB, 24 * GIB, 24 * GIB];
+        let floor = |need: u64| move |group: &[u64]| group.iter().sum::<u64>() >= need;
+        assert_eq!(card_group(&cards, floor(20 * GIB)), 1, "fits one card: one replica per card, not one instance over all three");
+        assert_eq!(card_group(&cards, floor(30 * GIB)), 2, "needs two cards");
+        assert_eq!(card_group(&cards, floor(100 * GIB)), 3, "fits no prefix: all the cards, and the refusal names the box");
+        assert_eq!(card_group::<u64>(&[], floor(1)), 0);
+    }
+
+    /// **A model that fits one card is served one replica per card.** Given two cards, the context is sized to what ONE
+    /// card holds beside the weights, not to what both hold together: a context sized to the pair would need the pair,
+    /// and the model would be one instance spanning both cards (one set of decode slots, a cross-card hop per token)
+    /// with no card left for a second replica.
+    #[test]
+    fn a_model_that_fits_one_card_gets_one_replica_per_card() {
+        let path = write_servable_gguf("replicas");
+        let cfg = Qwen35GgufServeConfig { speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Off), ..Qwen35GgufServeConfig::default() };
+        let card = 4 * GIB;
+        let one = gguf_resident(&path, "t/one", &[(0, card)], RESERVED, &cfg).expect("builds");
+        let two = gguf_resident(&path, "t/two", &[(0, card), (1, card)], RESERVED, &cfg).expect("builds");
+        assert_eq!(two.replicas(), 2, "one replica per card: {:?}", two.replica_placements());
+        for (replica, device, ..) in two.replica_placements() {
+            assert_eq!(device, Device::Gpu(replica as u32), "replica {replica} sits on its own card, whole");
+        }
+        assert_eq!(two.cap(), one.cap(), "every card holds what a lone card would: the context is sized per replica");
         std::fs::remove_file(path).ok();
     }
 
