@@ -75,7 +75,7 @@ in the curriculum and appear here when they are written.
     as a sum of waves, and why that makes convolution cheap.
 15. [Floating Point and Numerical Error](15-floating-point.md): why a computer gets
     arithmetic slightly wrong, and when slightly wrong becomes completely wrong.
-16. Algorithms, Cost and Complexity: predicting how long a computation takes
+16. [Algorithms, Cost and Complexity](16-algorithms.md): predicting how long a computation takes
     and how much memory it needs before running it.
 17. Randomness on a Deterministic Machine: how a deterministic computer
     produces random numbers, and how to make random experiments repeatable.

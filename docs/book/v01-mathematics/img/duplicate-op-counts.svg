@@ -1,0 +1,23 @@
+<!-- source-sha256: 5f13c9a1885c1ff7a79c58e6ad3f1fd437484dc33bf1c518ddfd4a58b288dce0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 380" width="600" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="380" fill="#ffffff"/>
+<line x1="92.93" y1="334" x2="92.93" y2="30" stroke="#edf2f7"/>
+<text x="92.93" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="267.6" y1="334" x2="267.6" y2="30" stroke="#edf2f7"/>
+<text x="267.6" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="442.27" y1="334" x2="442.27" y2="30" stroke="#edf2f7"/>
+<text x="442.27" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="58" y1="267.91" x2="582" y2="267.91" stroke="#edf2f7"/>
+<text x="52" y="271.91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="179.8" x2="582" y2="179.8" stroke="#edf2f7"/>
+<text x="52" y="183.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="91.68" x2="582" y2="91.68" stroke="#edf2f7"/>
+<text x="52" y="95.68" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<rect x="58" y="30" width="524" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="76.01,292.27 128.59,264.42 181.17,237.27 233.75,210.44 286.33,183.76 338.91,157.16 391.49,130.6 444.07,104.06 496.65,77.52 549.23,50.99"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="76.01,295.22 128.59,276.75 181.17,260.41 233.75,243.14 286.33,226.74 338.91,210.7 391.49,195.12 444.07,179.92 496.65,164.74 549.23,149.77"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="76.01,299.69 128.59,288.56 181.17,272.91 233.75,260.8 286.33,247.02 338.91,234.44 391.49,221.38 444.07,207.98 496.65,194.72 549.23,181.66"/><text x="540.49" y="39.98" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c05621" text-anchor="end">all pairs (slope 2)</text><text x="540.49" y="136.55" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#2b6cb0" text-anchor="end">sort (slope a little above 1)</text><text x="540.49" y="230.12" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#2f855a" text-anchor="end">hash set (slope 1)</text></g>
+<text x="320" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log10 of the list length n</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">log10 of the operations counted</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Finding a repeated token id: operations vs n</text>
+</svg>
