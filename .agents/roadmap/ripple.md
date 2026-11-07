@@ -62,13 +62,13 @@ storage; int8/fp8 KV halves it.
 Correctness first, on the CPU backend (`BRAIN_DEVICE=cpu`), while the GPUs
 serve other work; CUDA parity and performance follow on the same gates.
 
-1. [ ] `crates/ricursive`: config, `ARCHS` row, importer that refuses
+1. [x] `crates/ricursive`: config, `ARCHS` row, importer that refuses
        missing/unknown tensors, f32 forward on any backend. Gate: a
        random-weight tiny config (2 local + 1 global, window smaller than
        the prompt) matches `modeling_ricursive.py` logits; real-weight
        per-layer parity on layers 0 (local) and 4 (global) plus embed/head,
        fetched by tensor (no full 130 GB download: the project drive has
-       ~60 GB free).
+       ~60 GB free). Done on the CPU backend; CUDA parity is step 7.
 2. [ ] Paged hybrid engine under the generic `Scheduler`: ring KV for local
        layers, paged KV for global ones; serving conformance suite; decode
        equals full-recompute logits across the window boundary; prefix
@@ -84,4 +84,41 @@ serve other work; CUDA parity and performance follow on the same gates.
 
 ## Measured
 
-Nothing yet.
+Step 1, CPU backend (`BRAIN_DEVICE=cpu`), f32 forward against the official
+`modeling_ricursive.py` run in fp32 on CPU (torch 2.14, transformers 5.21; the
+reference imports unchanged). Error is `max|got - want| / max|want|` per tap,
+over the embeddings, each layer's `o_proj` output and residual stream, the final
+norm and the logits.
+
+| gate | taps | worst scaled error | tolerance | largest absolute error |
+|---|---|---|---|---|
+| tiny random weights (3 layers sliding/sliding/full, window 4, 12 tokens, clamp 0.5 firing on both branches) | 9 | 8.2e-7 | 1e-5 | 1.1e-5 (`attn_out.2`, scale 34) |
+| real layers 0 and 4 (width 5120, FFN 40960, 13 tokens, bf16 weights promoted to f32, real embed/norm/`lm_head`) | 7 | 6.2e-6 (logits) | 5e-5 | 1.3e-4 (`final_hidden`, scale 43); logits 8.1e-5 at scale 13 |
+
+The tiny fixture is dumped with a random seed (recorded in its manifest), so its
+worst case varies a little between dumps. The real run takes about 8 s on the
+shared CPU node. Mutating the window by one key, or doubling the gate cap,
+fails the tiny gate at scaled errors 0.5 and 0.12.
+
+Not measured: CUDA or Vulkan parity (GPUs were busy), any prompt longer than 13
+real tokens, a real window-exclusion case on real weights (13 tokens is below
+the 1024 window; the window is gated by the tiny model only), layers other than
+0 and 4.
+
+## Open items for the later steps
+
+- `Layer::record` materializes `[heads, t, t]` scores and probabilities, so
+  memory is quadratic in the prompt. The paged engine (step 2) replaces it with
+  the flash prefill and ring/paged KV; the layer's pieces (explicit type,
+  window, RoPE table optional) were kept separable for that.
+- The value-residual lerp uses `edm_mix` with per-row coefficients
+  `(1 - s, s)` (an f32 rounding apart from `x0 + s (xn - x0)`); a fused
+  QK-norm + RoPE + lerp kernel is the decode-path candidate.
+- The half-split RoPE table and device upload in `ricursive::rope` repeat
+  `gemma4::rope` and `ltxv::rope`; moving the shared part into `model` is a
+  cleanup for whoever touches the next RoPE consumer.
+- The global layers' Q/K leave `Layer::record` RMS-normed and unrotated, which
+  is exactly what the LSA index (step 3) reads.
+- Real-weight inputs live under `testdata/ricursive/ripple-65b-partial/`; they
+  are not in the fetch mirror yet, so the real-weight test skips by name on a
+  box without them.
