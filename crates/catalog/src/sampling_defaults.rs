@@ -62,6 +62,12 @@ impl ResidentModel for CheckpointSampling {
     fn replicas(&self) -> usize {
         self.inner.replicas()
     }
+    fn replica_routing(&self) -> Option<residency::affinity::ReplicaRouting> {
+        self.inner.replica_routing()
+    }
+    fn prefix_chain(&self, inv: &Invocation) -> residency::affinity::PrefixChain {
+        self.inner.prefix_chain(inv)
+    }
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         self.inner.activate(key, device)
     }

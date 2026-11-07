@@ -1541,7 +1541,7 @@ fn run_req(req: RunReq, done: &Sender<Msg>, failed_jobs: &mut Option<(Vec<Pendin
         RunTarget::Single { work: Claimed::Hot(h), device } => (h, Ran::Single(device)),
         // Deferred activation happens HERE, on the device's own lane: a slow
         // or wedged build stalls this device only, never the dispatcher.
-        RunTarget::Single { work: Claimed::Build(m), device } => match m.activate(&key, device) {
+        RunTarget::Single { work: Claimed::Build(m), device } => match timed_build(&key, &format!("{device:?}"), || m.activate(&key, device)) {
             Ok(inst) => {
                 let h: InstanceHandle = Arc::new(Mutex::new(inst));
                 let _ = done.send(Msg::Built { key: key.clone(), handle: h.clone() });
@@ -1579,7 +1579,7 @@ fn run_req(req: RunReq, done: &Sender<Msg>, failed_jobs: &mut Option<(Vec<Pendin
         // above, and more load-bearing here: a multi-device weight stream
         // (tens of GiB across several GPUs) is exactly the "can take
         // seconds" case that rule exists for.
-        RunTarget::Multi { work: ClaimedMulti::Build(m), devices } => match m.activate_multi(&key, &devices) {
+        RunTarget::Multi { work: ClaimedMulti::Build(m), devices } => match timed_build(&key, &devices.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join("+"), || m.activate_multi(&key, &devices)) {
             Ok(inst) => {
                 let h: InstanceHandle = Arc::new(Mutex::new(inst));
                 let _ = done.send(Msg::BuiltMulti { key: key.clone(), handle: h.clone() });
@@ -1597,6 +1597,18 @@ fn run_req(req: RunReq, done: &Sender<Msg>, failed_jobs: &mut Option<(Vec<Pendin
     // span devices internally; nothing here needs to know that.
     run_group(&handle, &action, jobs, &inbox);
     (false, ran)
+}
+
+/// Build an instance and say so on stderr: which instance (a replica is named by its key), on which cards, and how
+/// long the build took. A server that builds replicas on demand makes the first request that needs one wait for it,
+/// so the operator needs the cost where they read the log, not only at `-vv`.
+fn timed_build<T>(key: &InstanceKey, cards: &str, build: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let started = Instant::now();
+    let built = build();
+    if built.is_ok() {
+        eprintln!("brain: built {key} on {cards} in {:.1} s", started.elapsed().as_secs_f64());
+    }
+    built
 }
 
 fn run_group(handle: &InstanceHandle, action: &str, jobs: Vec<Pending>, inbox: &Arc<Inbox>) {
@@ -2174,6 +2186,105 @@ mod tests {
         let one = wall(1, SLOTS - 1);
         let two = wall(2, 2 * (SLOTS - 1));
         assert!(two < one.mul_f64(1.25), "16 requests on two replicas took {two:?}, 8 on one took {one:?}: the replicas did not overlap");
+    }
+
+    /// **Two replicas of `B` slots serve `2B` requests at once.** A multi-device model with a replica per card, filling its
+    /// replicas in turn and routing by prefix, runs 16 identical-prompt requests on two 8-slot replicas as 16 concurrent
+    /// decodes, not as two waves of 8.
+    #[test]
+    fn two_replicas_of_b_slots_run_2b_requests_at_once() {
+        use crate::model::JobFeed;
+        const SLOTS: usize = 8;
+        struct Rep {
+            running: Arc<AtomicU32>,
+            peak: Arc<AtomicU32>,
+        }
+        struct RepInst {
+            running: Arc<AtomicU32>,
+            peak: Arc<AtomicU32>,
+        }
+        impl ResidentModel for Rep {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("mrep", "replicated multi", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("mrep", "default")
+            }
+            fn replicas(&self) -> usize {
+                2
+            }
+            fn replica_routing(&self) -> Option<crate::affinity::ReplicaRouting> {
+                Some(crate::affinity::ReplicaRouting { slots: SLOTS, cached_prompts: SLOTS })
+            }
+            fn prefix_chain(&self, _inv: &Invocation) -> crate::affinity::PrefixChain {
+                crate::affinity::PrefixChain::rooted(b"the same system prompt")
+            }
+            fn batch_limit(&self) -> Option<usize> {
+                Some(SLOTS)
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(0, 0)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Err("registered as multi-device".into())
+            }
+        }
+        impl MultiDeviceResidentModel for Rep {
+            fn estimate_multi(&self, k: &InstanceKey) -> MultiDeviceCost {
+                MultiDeviceCost::new(vec![(Device::Gpu(k.replica_index() as u32), 14 * GB)], 0)
+            }
+            fn activate_multi(&self, _k: &InstanceKey, _d: &[Device]) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(RepInst { running: self.running.clone(), peak: self.peak.clone() }))
+            }
+        }
+        impl Instance for RepInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                Ok(Outcome::new())
+            }
+            fn run_open(&mut self, _a: &str, invs: &[Invocation], _p: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+                let mut active: Vec<(usize, u32)> = (0..invs.len()).map(|i| (i, 10)).collect();
+                let mut next = invs.len();
+                self.running.fetch_add(active.len() as u32, Ordering::SeqCst);
+                loop {
+                    for _ in feed.take(SLOTS.saturating_sub(active.len())) {
+                        active.push((next, 10));
+                        next += 1;
+                        self.running.fetch_add(1, Ordering::SeqCst);
+                    }
+                    self.peak.fetch_max(self.running.load(Ordering::SeqCst), Ordering::SeqCst);
+                    if active.is_empty() {
+                        if feed.close() {
+                            return true;
+                        }
+                        continue;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                    for a in active.iter_mut() {
+                        a.1 -= 1;
+                    }
+                    let (done, rest): (Vec<_>, Vec<_>) = active.into_iter().partition(|a| a.1 == 0);
+                    active = rest;
+                    for (i, _) in done {
+                        self.running.fetch_sub(1, Ordering::SeqCst);
+                        feed.finish(i, Ok(Outcome::new()));
+                    }
+                }
+            }
+        }
+        let (running, peak) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 16 * GB, 0).set(Device::Gpu(1), 16 * GB, 0);
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        exec.register_multi(Arc::new(Rep { running, peak: peak.clone() }));
+        let (tx, rx) = channel();
+        for _ in 0..2 * SLOTS {
+            let tx = tx.clone();
+            exec.submit(Job::new("mrep", "run", Invocation::new()).reply(move |r| tx.send(r).unwrap()));
+        }
+        for _ in 0..2 * SLOTS {
+            rx.recv_timeout(Duration::from_secs(30)).expect("every request is answered").unwrap();
+        }
+        assert_eq!(peak.load(Ordering::SeqCst) as usize, 2 * SLOTS, "requests in flight at once across both replicas");
     }
 
     /// A model of three replicas, one per card, that fills its replicas in turn (two requests each) and follows its prefix
