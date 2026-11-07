@@ -24,6 +24,9 @@
 #    checks that the real tokenizer, template and bf16 tensors serve (a two-layer model does not answer
 #    sensibly; only the plumbing and the prompt are asserted). Skips by name without the partial checkpoint.
 #
+# `brain ricursive finetune` (the generic `brain finetune --arch ricursive`) trains a LoRA adapter over the scripted model
+# on the CPU backend, writes it, and a second run continues it at its own rank; a full fine-tune writes a checkpoint.
+#
 # Run: make test/e2e/ripple   (or: BRAIN_BIN=./target/fast/brain bats tests/e2e/ripple.bats)
 #
 # SAFETY: teardown kills ONLY the PIDs this file recorded (never pkill / killall).
@@ -163,4 +166,44 @@ teardown_file() {
   chat $((PORT + 3)) "$body" >"$SCRATCH/partial.json"
   jq -e '.choices[0].finish_reason == "length" and .usage.completion_tokens == 3 and .usage.prompt_tokens > 150' "$SCRATCH/partial.json"
   grep -q "layers-0-4" "$SCRATCH/serve-$((PORT + 3)).log"
+}
+
+# A three-record chat dataset for the fine-tune tests below.
+write_finetune_data() {
+  local data="$SCRATCH/finetune.jsonl"
+  jq -nc '{messages: [{role: "user", content: "What is two plus two?", train: false}, {role: "assistant", content: "Four.", train: true}], tools: []}' >"$data"
+  jq -nc '{messages: [{role: "user", content: "Name a colour.", train: false}, {role: "assistant", content: "Blue.", train: true}], tools: []}' >>"$data"
+  jq -nc '{messages: [{role: "user", content: "Say hello.", train: false}, {role: "assistant", content: "Hello!", train: true}], tools: []}' >>"$data"
+}
+
+@test "a LoRA fine-tune trains an adapter over the served checkpoint, and a second run continues it at its own rank" {
+  write_finetune_data
+  local base="$SCRATCH/scripted/$MODEL"
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora" --lora 4 --steps 6 --lr 5e-2 --seed 3 --device cpu
+  [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
+  grep -q '^status: Completed, 6 steps, loss ' <<<"$output"
+  [ -s "$SCRATCH/lora/adapter.safetensors" ]
+  # The line reads `loss A -> B`: the adapter learned the three answers.
+  local first last
+  first=$(sed -n 's/^status: .* loss \([0-9.]*\) -> .*/\1/p' <<<"$output")
+  last=$(sed -n 's/^status: .* -> \([0-9.]*\)$/\1/p' <<<"$output")
+  awk -v a="$first" -v b="$last" 'BEGIN { exit !(b < a) }'
+  # Continued at its own rank; a different rank is refused by name.
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora2" --lora 4 --continue "$SCRATCH/lora/adapter.safetensors" --steps 2 --seed 3 --device cpu
+  [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora3" --lora 8 --continue "$SCRATCH/lora/adapter.safetensors" --steps 1 --device cpu
+  [ "$status" -ne 0 ]
+  grep -qi 'rank' <<<"$output"
+}
+
+@test "a full fine-tune trains every weight and writes a checkpoint directory; an adapter flag without --lora is refused" {
+  write_finetune_data
+  local base="$SCRATCH/scripted/$MODEL"
+  run "$BRAIN" finetune "$base" --arch ricursive --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/full" --steps 3 --lr 1e-3 --seed 3 --device cpu
+  [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
+  grep -q '^checkpoint: ' <<<"$output"
+  find "$SCRATCH/full" -name model.safetensors | grep -q .
+  run "$BRAIN" finetune "$base" --arch ricursive --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/refused" --alpha 8
+  [ "$status" -eq 2 ]
+  grep -q -- '--lora' <<<"$output"
 }

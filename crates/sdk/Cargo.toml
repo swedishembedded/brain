@@ -108,7 +108,7 @@ decision = ["device", "dep:brain-model", "dep:brain-decide", "dep:brain-decision
 # gate and its sign test - is exported here too: a caller that trains has to
 # decide whether the result replaces what it had. `brain-rl` already links
 # `brain-promote`, so naming it adds no crate to this surface's build.
-study = ["device", "dep:brain-rl", "dep:brain-modelopt", "dep:brain-promote", "dep:brain-data", "dep:brain-checkpoint", "dep:brain-model", "dep:brain-loader", "dep:brain-qwen3", "dep:brain-qwen35", "dep:brain-qwen35moe", "dep:serde_json", "dep:serde"]
+study = ["device", "dep:brain-rl", "dep:brain-modelopt", "dep:brain-promote", "dep:brain-data", "dep:brain-checkpoint", "dep:brain-model", "dep:brain-loader", "dep:brain-qwen3", "dep:brain-qwen35", "dep:brain-qwen35moe", "dep:brain-ricursive", "dep:serde_json", "dep:serde"]
 
 # --- `brain::ContinualReader`: a model that keeps reading a directory and can
 #     say what it gained and what that cost. Builds on `study`'s architecture
@@ -235,6 +235,7 @@ brain-neuro = { workspace = true, optional = true }
 brain-qwen3 = { workspace = true, optional = true }
 brain-qwen35 = { workspace = true, optional = true }
 brain-qwen35moe = { workspace = true, optional = true }
+brain-ricursive = { workspace = true, optional = true }
 brain-rl = { workspace = true, optional = true }
 # `ModelOptimizer`: the weight precision search and its measurement visitors.
 brain-modelopt = { workspace = true, optional = true }

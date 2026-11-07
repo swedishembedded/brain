@@ -17,6 +17,7 @@ mod chat_finetune;
 mod chat_finetune_policy_gradient;
 mod chat_finetune_qwen35;
 mod chat_finetune_qwen35moe;
+mod chat_finetune_ricursive;
 mod chat_full_finetune;
 mod chat_pipeline;
 mod continual_reader;

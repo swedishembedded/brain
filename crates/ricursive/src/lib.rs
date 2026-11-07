@@ -26,10 +26,12 @@
 //! - [`model`]: embedding, layer stack, final norm and head.
 //! - [`weights`]: the weight tiers and the one loader that puts them on a device.
 //! - [`train`]: the trainable model (`Ripple`), its configuration and the kernels it registers.
+//! - [`finetune`]: Ripple as a `model::finetune::ChatTrainer`, the generic trainers' entry.
 //! - [`placement`]: byte-exact per-layer costs and the placement over devices.
 //! - [`policy`]: what Ripple honours of the model-agnostic serving policy.
 
 pub mod config;
+pub mod finetune;
 pub mod import;
 pub mod layer;
 pub mod model;

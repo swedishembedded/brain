@@ -555,6 +555,7 @@ dependencies = [
  "brain-qwen3tts",
  "brain-qwen3vl",
  "brain-recon",
+ "brain-ricursive",
  "brain-rl",
  "brain-rlcd",
  "brain-rrdbnet",

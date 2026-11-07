@@ -35,6 +35,11 @@ boundary a Rust replay needs. Two modes, each writing its own directory with a
                                                                       of each AdamW step and `final.<name>`
            <out>/tiny_train/ricursive_tiny_train_weights.safetensors  the model's initial weights
            <out>/tiny_train/config.json                               its config
+  real-lora  the truncated real model of `real` with a rank-8 LoRA adapter on every linear of both layers
+         (q, k, v, o, g, gate, up, down), the adapter's A and B seeded here and dumped with the batch: the loss,
+         the gradient of every A and B in full, one `torch.optim.AdamW` step on them (the base frozen) and the
+         loss and factors after it. Writes
+           <out>/real_lora/ricursive_real_lora.safetensors
   real-grads  the truncated real model of `real`, one backward on a short
          prompt: the loss and, per parameter, the gradient's L2 norm and
          4096 evenly strided entries (the full gradients are 10 GB). Writes
@@ -326,6 +331,78 @@ def real_grads(args, cfg_mod, mdl_mod):
 
 
 
+# The adapter of the `real-lora` gate: rank, alpha (scale alpha / rank) and the AdamW step; its factors are drawn from --seed
+# (random unless given, recorded in the manifest) and dumped, the Rust test reads them back.
+LORA = dict(rank=8, alpha=16.0, lr=1e-3)
+LORA_LEAVES = ("q_proj", "k_proj", "v_proj", "o_proj", "g_proj", "gate_proj", "up_proj", "down_proj")
+
+
+class LoraLinear(torch.nn.Module):
+    """`base(x) + alpha / rank * (x A^T) B^T`, the base frozen."""
+
+    def __init__(self, base, a, b, scale):
+        super().__init__()
+        self.base, self.scale = base, scale
+        self.a, self.b = torch.nn.Parameter(a), torch.nn.Parameter(b)
+
+    def forward(self, x):
+        h = torch.nn.functional.linear(x, self.a)
+        return self.base(x) + self.scale * torch.nn.functional.linear(h, self.b)
+
+
+def real_lora(args, cfg_mod, mdl_mod):
+    from tokenizers import Tokenizer
+
+    _cfg, model = real_model(args, cfg_mod, mdl_mod)
+    for p in model.parameters():
+        p.requires_grad_(False)
+    gen = torch.Generator().manual_seed(args.seed)
+    scale = LORA["alpha"] / LORA["rank"]
+    sites = []  # (canonical weight name, module owner, leaf)
+    for li, layer in enumerate(model.model.layers):
+        for leaf in LORA_LEAVES:
+            owner = layer.mlp if leaf.endswith(("gate_proj", "up_proj", "down_proj")) else layer.self_attn
+            base = getattr(owner, leaf)
+            out_f, in_f = base.weight.shape
+            # A has the scale of a trained adapter's, B is nonzero (a zero B would leave A without a gradient).
+            a = torch.randn(LORA["rank"], in_f, generator=gen) / in_f ** 0.5
+            b = 0.02 * torch.randn(out_f, LORA["rank"], generator=gen)
+            setattr(owner, leaf, LoraLinear(base, a, b, scale))
+            group = "mlp" if owner is layer.mlp else "self_attn"
+            sites.append((f"model.layers.{li}.{group}.{leaf}.weight", owner, leaf))
+    ids = torch.tensor([Tokenizer.from_file(args.tokenizer).encode(REAL_PROMPT).ids])
+    targets = training_batch(ids)
+    tensors = {"input_ids": ids[0].to(torch.float32), "targets": targets.to(torch.float32)}
+    for name, owner, leaf in sites:
+        m = getattr(owner, leaf)
+        tensors[f"a.{name}"], tensors[f"b.{name}"] = m.a.detach().clone(), m.b.detach().clone()
+    params = [p for n, o, l in sites for p in (getattr(o, l).a, getattr(o, l).b)]
+    loss = loss_of(model, ids, targets)
+    loss.backward()
+    tensors["loss"] = loss.detach().reshape(1)
+    for name, owner, leaf in sites:
+        m = getattr(owner, leaf)
+        assert m.a.grad is not None and m.b.grad is not None and m.a.grad.abs().max().item() > 0, f"{name}: dead adapter gradient"
+        tensors[f"grad_a.{name}"], tensors[f"grad_b.{name}"] = m.a.grad.detach().clone(), m.b.grad.detach().clone()
+    opt = torch.optim.AdamW(params, lr=LORA["lr"], betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
+    opt.step()
+    opt.zero_grad(set_to_none=True)
+    for name, owner, leaf in sites:
+        m = getattr(owner, leaf)
+        tensors[f"after_a.{name}"], tensors[f"after_b.{name}"] = m.a.detach().clone(), m.b.detach().clone()
+    tensors["loss_after"] = loss_of(model, ids, targets).detach().reshape(1)
+    print(f"  prompt {ids.shape[1]} tokens, loss {loss.item():.6f} -> {tensors['loss_after'].item():.6f} after one AdamW step", flush=True)
+    out = os.path.join(args.out, "real_lora")
+    os.makedirs(out, exist_ok=True)
+    manifest = {"ricursive_real_lora.safetensors": save(os.path.join(out, "ricursive_real_lora.safetensors"), tensors), "lora": LORA}
+    identity = dict(
+        vocab_size=model.config.vocab_size, hidden_size=model.config.hidden_size, intermediate_size=model.config.intermediate_size,
+        num_hidden_layers=model.config.num_hidden_layers, num_attention_heads=model.config.num_attention_heads,
+        num_key_value_heads=model.config.num_key_value_heads, head_dim=model.config.head_dim, sliding_window=model.config.sliding_window,
+    )
+    finish(out, manifest, identity, args, checkpoint="ricursiveAI/Ripple-65B-Preview", files=[args.checkpoint])
+
+
 def real(args, cfg_mod, mdl_mod):
     with open(args.config) as f:
         full = json.load(f)
@@ -389,7 +466,7 @@ def finish(out, manifest, identity, args, checkpoint, files):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["tiny", "real", "grads", "real-grads"])
+    ap.add_argument("mode", choices=["tiny", "real", "grads", "real-grads", "real-lora"])
     ap.add_argument("--modeling-dir", required=True, help="directory holding modeling_ricursive.py and configuration_ricursive.py")
     ap.add_argument("--out", required=True)
     ap.add_argument("--checkpoint", help="real: the partial safetensors holding embed, norm, lm_head and layers 0 and 4")
@@ -401,9 +478,9 @@ def main():
         args.seed = secrets.randbits(31)
     print(f"seed {args.seed}", flush=True)
     cfg_mod, mdl_mod = load_reference(os.path.abspath(args.modeling_dir))
-    if args.mode in ("real", "real-grads") and not (args.checkpoint and args.config and args.tokenizer):
+    if args.mode in ("real", "real-grads", "real-lora") and not (args.checkpoint and args.config and args.tokenizer):
         ap.error("the real modes need --checkpoint, --config and --tokenizer")
-    {"tiny": tiny, "real": real, "grads": grads, "real-grads": real_grads}[args.mode](args, cfg_mod, mdl_mod)
+    {"tiny": tiny, "real": real, "grads": grads, "real-grads": real_grads, "real-lora": real_lora}[args.mode](args, cfg_mod, mdl_mod)
 
 
 if __name__ == "__main__":

@@ -170,6 +170,21 @@ impl StudyArch for Qwen35Moe {
     }
 }
 
+pub(crate) struct Ripple;
+impl StudyArch for Ripple {
+    type M = ricursive::Ripple;
+    const ID: &'static str = "ricursive";
+    const FAMILY: &'static str = "ricursive";
+    const TOKEN_OBJECTIVES: bool = true;
+    const CHAT_LORA_FINE_TUNE: bool = true;
+    fn lora(rank: u32, alpha: f32) -> LoraCfg {
+        LoraCfg::new(rank, alpha, ricursive::train::default_targets())
+    }
+    fn study_config(base: &ricursive::TrainConfig, lora: LoraCfg, block: u32) -> ricursive::TrainConfig {
+        ricursive::TrainConfig { block_size: block, lora: Some(lora), ..base.clone() }
+    }
+}
+
 /// One architecture's row in [`ARCHS`]: its identity, what it provides, and
 /// the monomorphised entry points the generic machinery runs through.
 ///
@@ -247,6 +262,7 @@ const ARCHS: &[ArchEntry] = &[
     ArchEntry::of::<Qwen3>().with_chat_trainer::<qwen3::finetune::Qwen3Trainer>().with_id("qwen2"),
     ArchEntry::of::<Qwen35>().with_chat_trainer::<qwen35::finetune::Qwen35Trainer>(),
     ArchEntry::of::<Qwen35Moe>().with_chat_trainer::<qwen35moe::finetune::Qwen35MoeTrainer>(),
+    ArchEntry::of::<Ripple>().with_chat_trainer::<ricursive::finetune::RippleTrainer>(),
 ];
 
 /// The row for architecture `id`, or the refusal listing the known ids.

@@ -50,6 +50,7 @@ mod pid_cli;
 mod placement;
 mod plan_cli;
 mod pull_cli;
+mod finetune_cli;
 mod optimize_cli;
 mod prune_cli;
 mod quantize_cli;

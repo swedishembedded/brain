@@ -195,6 +195,9 @@ enum Resolved {
     /// `brain optimize <BASE> --dataset … --out …` -- the weight precision
     /// search; the architecture is a flag of the SDK call, not a token.
     Optimize { rest: Vec<String> },
+    /// `brain finetune <BASE> --dataset … --out …` -- supervised fine-tuning through the SDK's generic trainers; the
+    /// architecture is a flag of the SDK call, not a token.
+    Finetune { rest: Vec<String> },
     /// `brain prune <BASE> --dataset … --out …` -- structured pruning.
     Prune { rest: Vec<String> },
     /// `brain lsa distill|eval|prefill …` -- latent sparse attention for any engine that captures its attention; the
@@ -251,6 +254,9 @@ fn resolve(argv: &[String]) -> Resolved {
     if first == "optimize" {
         return Resolved::Optimize { rest: argv[1..].to_vec() };
     }
+    if crate::args::canon_verb(first) == "finetune" {
+        return Resolved::Finetune { rest: argv[1..].to_vec() };
+    }
     if first == "prune" {
         return Resolved::Prune { rest: argv[1..].to_vec() };
     }
@@ -270,6 +276,7 @@ pub fn dispatch(argv: &[String], help: &str) {
         Resolved::ImportFile { rest } => crate::import_gguf_cli::run_import_gguf(&rest),
         Resolved::QuantizeFile { rest } => quantize_cli::run_quantize(&rest),
         Resolved::Optimize { rest } => optimize_cli::run_optimize(&rest),
+        Resolved::Finetune { rest } => crate::finetune_cli::run_finetune(&rest),
         Resolved::Prune { rest } => prune_cli::run_prune(&rest),
         Resolved::Lsa { rest } => crate::lsa_cli::run_lsa(&rest),
         Resolved::Unknown(tok) => {
@@ -316,6 +323,9 @@ const ARCH_HANDLER_VERBS: &[(&str, &[&str])] = &[
     ("wan", &["t2v", "text2video", "finetune"]),
     ("ltxv", &["t2v", "text2video", "upscale", "v2v", "dfr", "t2a", "extend"]),
 ];
+
+/// Architectures without a dedicated CLI module that `brain finetune` trains through the SDK's generic trainers.
+const GENERIC_FINETUNE_ARCHS: &[&str] = &["ricursive"];
 
 /// Whether `verb` is one `arch` is known to accept, checked before any
 /// weight acquisition is attempted.
@@ -440,6 +450,13 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
     if let Some((_, handler)) = ARCH_HANDLERS.iter().find(|(id, _)| *id == arch) {
         let rest = if attempt_fetch { maybe_inject_default_weights(arch, rest) } else { rest };
         return handler(&rest);
+    }
+    // `brain ricursive finetune ...` is `brain finetune --arch ricursive ...`: the generic trainers serve this
+    // architecture, which has no dedicated CLI module of its own.
+    if GENERIC_FINETUNE_ARCHS.contains(&arch) && rest.first().is_some_and(|v| crate::args::canon_verb(v) == "finetune") {
+        let mut args = rest[1..].to_vec();
+        args.extend(["--arch".to_string(), arch.to_string()]);
+        crate::finetune_cli::run_finetune(&args);
     }
     if let Some((_, model)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch) {
         // A resolver-migrated architecture resolves its own `--<role>`
