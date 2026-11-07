@@ -23,7 +23,8 @@ use gpu_core::{f, DeviceBuffer, Gpu, Transient};
 use paramstore::upload::Uploader;
 
 use crate::config::{LayerType, RicursiveConfig};
-use crate::layer::{Layer, KERNELS, K_MATMUL, K_RMSNORM};
+use crate::layer::Layer;
+use crate::ops::{KERNELS, K_MATMUL, K_RMSNORM};
 use model::rope_table::{half_split_table, DeviceRope};
 
 /// `embed_tokens(ids) * embed_scale`, `[ids.len(), hidden]`.

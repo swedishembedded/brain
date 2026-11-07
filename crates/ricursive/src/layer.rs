@@ -33,43 +33,15 @@
 //! call it per layer with a layer type and window of its own choosing.
 
 use checkpoint::TensorSource;
-use gpu_core::{f, DeviceBuffer, Gpu, Step, Transient};
+use gpu_core::{DeviceBuffer, Gpu, Step, Transient};
+use model::rope_table::DeviceRope;
 use paramstore::upload::Uploader;
 
 use crate::config::{LayerType, RicursiveConfig};
 use crate::import::layer_tensor;
-use model::rope_table::DeviceRope;
-
-pub(crate) const K_MATMUL: usize = 0;
-pub(crate) const K_RMSNORM: usize = 1;
-const K_ROPE2D: usize = 2;
-const K_GQA_SCORES_WIN: usize = 3;
-const K_ATTN_SOFTMAX: usize = 4;
-const K_GQA_APPLY: usize = 5;
-const K_SIGMOID: usize = 6;
-const K_MUL: usize = 7;
-const K_ADD2: usize = 8;
-const K_SILU_MUL: usize = 9;
-const K_CLAMP_RANGE: usize = 10;
-const K_MIX: usize = 11;
-
-/// Every kernel the forward dispatches, in the order of the `K_*` indices.
-pub const KERNELS: [(&str, &str); 12] = [
-    ("matmul", kernels::MATMUL),
-    ("rmsnorm", kernels::RMSNORM),
-    ("rope2d", kernels::ROPE2D),
-    ("gqa_scores_win", kernels::GQA_SCORES_WIN),
-    ("attn_softmax", kernels::ATTN_SOFTMAX),
-    ("gqa_apply", kernels::GQA_APPLY),
-    ("sigmoid", kernels::SIGMOID),
-    ("mul", kernels::MUL),
-    ("add2", kernels::ADD2),
-    ("silu_mul", kernels::SILU_MUL),
-    ("clamp_range", kernels::CLAMP_RANGE),
-    // `y = a[row] * x + b[row] * f` with per-row coefficients: the value
-    // residual's lerp, `x0 + s * (xn - x0) = (1 - s) * x0 + s * xn`.
-    ("edm_mix", kernels::EDM_MIX),
-];
+use crate::ops::{self, FeedForward};
+pub use crate::ops::KERNELS;
+use crate::ops::{K_ADD2, K_GQA_APPLY, K_GQA_SCORES_WIN, K_MUL, K_ATTN_SOFTMAX};
 
 /// Read all `n` elements of a small tensor (a gain vector or a scalar).
 pub(crate) fn read_small(src: &dyn TensorSource, name: &str, n: usize) -> Result<Vec<f32>, String> {
@@ -87,22 +59,72 @@ fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-/// Device-resident weights of one layer.
-struct Weights {
-    input_ln: DeviceBuffer,
-    post_attn_ln: DeviceBuffer,
-    pre_ff_ln: DeviceBuffer,
-    post_ff_ln: DeviceBuffer,
-    q: DeviceBuffer,
-    k: DeviceBuffer,
-    v: DeviceBuffer,
-    o: DeviceBuffer,
-    g: Option<DeviceBuffer>,
-    q_norm: DeviceBuffer,
-    k_norm: DeviceBuffer,
-    gate: DeviceBuffer,
-    up: DeviceBuffer,
-    down: DeviceBuffer,
+/// Device-resident weights of one layer, in f32.
+pub(crate) struct LayerWeights {
+    pub input_ln: DeviceBuffer,
+    pub post_attn_ln: DeviceBuffer,
+    pub pre_ff_ln: DeviceBuffer,
+    pub post_ff_ln: DeviceBuffer,
+    pub q: DeviceBuffer,
+    pub k: DeviceBuffer,
+    pub v: DeviceBuffer,
+    pub o: DeviceBuffer,
+    pub g: Option<DeviceBuffer>,
+    pub q_norm: DeviceBuffer,
+    pub k_norm: DeviceBuffer,
+    pub gate: DeviceBuffer,
+    pub up: DeviceBuffer,
+    pub down: DeviceBuffer,
+    /// `sigmoid(value_res_lambda)`, or `None` when the model has no value residual.
+    pub value_mix: Option<f32>,
+}
+
+impl LayerWeights {
+    /// Stream layer `layer` of `src` (canonical names, see [`crate::import`])
+    /// through `up` onto its device.
+    pub(crate) fn load(up: &mut Uploader<'_>, cfg: &RicursiveConfig, src: &dyn TensorSource, layer: usize) -> Result<LayerWeights, String> {
+        let h = cfg.hidden_size;
+        let mut load = |suffix: &str, numel: usize| -> Result<DeviceBuffer, String> {
+            let name = layer_tensor(layer, suffix);
+            let buf = up.tensor(src, &name, numel)?;
+            src.advise_drop(&name);
+            Ok(buf)
+        };
+        let w = LayerWeights {
+            input_ln: load("input_layernorm.weight", h)?,
+            post_attn_ln: load("post_attention_layernorm.weight", h)?,
+            pre_ff_ln: load("pre_feedforward_layernorm.weight", h)?,
+            post_ff_ln: load("post_feedforward_layernorm.weight", h)?,
+            q: load("self_attn.q_proj.weight", cfg.q_dim() * h)?,
+            k: load("self_attn.k_proj.weight", cfg.kv_dim() * h)?,
+            v: load("self_attn.v_proj.weight", cfg.kv_dim() * h)?,
+            o: load("self_attn.o_proj.weight", h * cfg.q_dim())?,
+            g: if cfg.use_gated_attention { Some(load("self_attn.g_proj.weight", cfg.q_dim() * h)?) } else { None },
+            q_norm: load("self_attn.q_norm.weight", cfg.head_dim)?,
+            k_norm: load("self_attn.k_norm.weight", cfg.head_dim)?,
+            gate: load("mlp.gate_proj.weight", cfg.intermediate_size * h)?,
+            up: load("mlp.up_proj.weight", cfg.intermediate_size * h)?,
+            down: load("mlp.down_proj.weight", h * cfg.intermediate_size)?,
+            value_mix: None,
+        };
+        let value_mix = if cfg.use_valres { Some(sigmoid(read_small(src, &layer_tensor(layer, "self_attn.value_res_lambda"), 1)?[0])) } else { None };
+        Ok(LayerWeights { value_mix, ..w })
+    }
+
+    /// The feed-forward sub-block's weights and flags.
+    pub(crate) fn feed_forward<'a>(&'a self, cfg: &RicursiveConfig) -> FeedForward<'a> {
+        FeedForward {
+            pre_ln: &self.pre_ff_ln,
+            post_ln: &self.post_ff_ln,
+            gate: &self.gate,
+            up: &self.up,
+            down: &self.down,
+            hidden: cfg.hidden_size as u32,
+            inter: cfg.intermediate_size as u32,
+            eps: cfg.rms_norm_eps,
+            clip: cfg.ffn_clamp_threshold,
+        }
+    }
 }
 
 /// The layer's outputs on the device.
@@ -124,43 +146,17 @@ pub struct Layer {
     gpu: Gpu,
     cfg: RicursiveConfig,
     kind: LayerType,
-    w: Weights,
-    /// `sigmoid(value_res_lambda)`, or `None` when the model has no value residual.
-    value_mix: Option<f32>,
+    w: LayerWeights,
 }
 
 impl Layer {
-    /// Stream layer `layer` of `src` (canonical names, see [`crate::import`])
-    /// onto `gpu`. The result is a [`Transient`]: dropping it reclaims the
-    /// layer's device memory before the next layer is uploaded.
+    /// Stream layer `layer` of `src` onto `gpu`. The result is a
+    /// [`Transient`]: dropping it reclaims the layer's device memory before the
+    /// next layer is uploaded.
     pub fn on<'g>(gpu: &'g Gpu, cfg: &RicursiveConfig, src: &dyn TensorSource, layer: usize) -> Result<Transient<'g, Layer>, String> {
         let g = gpu.share();
-        let mut up = Uploader::new(&g);
-        let h = cfg.hidden_size;
-        let mut load = |suffix: &str, numel: usize| -> Result<DeviceBuffer, String> {
-            let name = layer_tensor(layer, suffix);
-            let buf = up.tensor(src, &name, numel)?;
-            src.advise_drop(&name);
-            Ok(buf)
-        };
-        let w = Weights {
-            input_ln: load("input_layernorm.weight", h)?,
-            post_attn_ln: load("post_attention_layernorm.weight", h)?,
-            pre_ff_ln: load("pre_feedforward_layernorm.weight", h)?,
-            post_ff_ln: load("post_feedforward_layernorm.weight", h)?,
-            q: load("self_attn.q_proj.weight", cfg.q_dim() * h)?,
-            k: load("self_attn.k_proj.weight", cfg.kv_dim() * h)?,
-            v: load("self_attn.v_proj.weight", cfg.kv_dim() * h)?,
-            o: load("self_attn.o_proj.weight", h * cfg.q_dim())?,
-            g: if cfg.use_gated_attention { Some(load("self_attn.g_proj.weight", cfg.q_dim() * h)?) } else { None },
-            q_norm: load("self_attn.q_norm.weight", cfg.head_dim)?,
-            k_norm: load("self_attn.k_norm.weight", cfg.head_dim)?,
-            gate: load("mlp.gate_proj.weight", cfg.intermediate_size * h)?,
-            up: load("mlp.up_proj.weight", cfg.intermediate_size * h)?,
-            down: load("mlp.down_proj.weight", h * cfg.intermediate_size)?,
-        };
-        let value_mix = if cfg.use_valres { Some(sigmoid(read_small(src, &layer_tensor(layer, "self_attn.value_res_lambda"), 1)?[0])) } else { None };
-        Ok(Transient::on(gpu, Layer { gpu: g, cfg: cfg.clone(), kind: cfg.layer_type(layer), w, value_mix }))
+        let w = LayerWeights::load(&mut Uploader::new(&g), cfg, src, layer)?;
+        Ok(Transient::on(gpu, Layer { gpu: g, cfg: cfg.clone(), kind: cfg.layer_type(layer), w }))
     }
 
     pub fn kind(&self) -> LayerType {
@@ -176,31 +172,6 @@ impl Layer {
         }
     }
 
-    /// `out[m, n] = x[m, k] @ w[n, k]^T`.
-    fn linear(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, m: u32, k: u32, n: u32) -> DeviceBuffer {
-        let out = self.gpu.storage(u64::from(m) * u64::from(n));
-        s.push(self.gpu.step(K_MATMUL, &[x, w, &out], &[m, k, n], m * n));
-        out
-    }
-
-    fn rmsnorm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, gain: &DeviceBuffer, dim: u32, rows: u32) -> DeviceBuffer {
-        let out = self.gpu.storage(u64::from(dim) * u64::from(rows));
-        s.push(self.gpu.step(K_RMSNORM, &[x, gain, &out], &[dim, rows, f(self.cfg.rms_norm_eps)], rows));
-        out
-    }
-
-    fn binary(&self, s: &mut Vec<Step>, kernel: usize, a: &DeviceBuffer, b: &DeviceBuffer, n: u32) -> DeviceBuffer {
-        let out = self.gpu.storage(u64::from(n));
-        s.push(self.gpu.step(kernel, &[a, b, &out], &[n], n));
-        out
-    }
-
-    fn clamp(&self, s: &mut Vec<Step>, x: &DeviceBuffer, lo: f32, hi: f32, n: u32) -> DeviceBuffer {
-        let out = self.gpu.storage(u64::from(n));
-        s.push(self.gpu.step(K_CLAMP_RANGE, &[x, &out], &[n, f(lo), f(hi)], n));
-        out
-    }
-
     /// Record the layer over `t` tokens starting at position 0.
     ///
     /// `x` is the residual stream entering the layer and `x0` the value
@@ -210,69 +181,45 @@ impl Layer {
         let c = &self.cfg;
         let (hidden, heads, kv_heads, hd) = (c.hidden_size as u32, c.num_attention_heads as u32, c.num_key_value_heads as u32, c.head_dim as u32);
         let (q_dim, kv_dim) = (c.q_dim() as u32, c.kv_dim() as u32);
-        let w = &self.w;
+        let (gpu, w) = (&self.gpu, &self.w);
 
-        let xn = self.rmsnorm(s, x, &w.input_ln, hidden, t);
-        let q_pre = self.linear(s, &xn, &w.q, t, hidden, q_dim);
-        let k_pre = self.linear(s, &xn, &w.k, t, hidden, kv_dim);
-        let v_in = match self.value_mix {
-            Some(mix) => {
-                // (1 - mix) * x0 + mix * xn, the same coefficients on every row.
-                let coeffs: Vec<f32> = (0..t).flat_map(|_| [1.0 - mix, mix]).collect();
-                let ab = self.gpu.storage(coeffs.len() as u64);
-                self.gpu.write_f32(&ab, &coeffs);
-                let lerped = self.gpu.storage(u64::from(t) * u64::from(hidden));
-                s.push(self.gpu.step(K_MIX, &[x0, &xn, &ab, &lerped], &[t * hidden, hidden], t * hidden));
-                lerped
-            }
+        let xn = ops::rmsnorm(gpu, s, x, &w.input_ln, hidden, t, c.rms_norm_eps);
+        let q_pre = ops::linear(gpu, s, &xn, &w.q, t, hidden, q_dim);
+        let k_pre = ops::linear(gpu, s, &xn, &w.k, t, hidden, kv_dim);
+        let v_in = match w.value_mix {
+            Some(mix) => ops::value_mix(gpu, s, x0, &xn, mix, t, hidden),
             None => xn.clone(),
         };
-        let v = self.linear(s, &v_in, &w.v, t, hidden, kv_dim);
+        let v = ops::linear(gpu, s, &v_in, &w.v, t, hidden, kv_dim);
 
-        let q = self.rmsnorm(s, &q_pre, &w.q_norm, hd, t * heads);
-        let k = self.rmsnorm(s, &k_pre, &w.k_norm, hd, t * kv_heads);
+        let q = ops::rmsnorm(gpu, s, &q_pre, &w.q_norm, hd, t * heads, c.rms_norm_eps);
+        let k = ops::rmsnorm(gpu, s, &k_pre, &w.k_norm, hd, t * kv_heads, c.rms_norm_eps);
         if self.kind == LayerType::Sliding {
             let rope = rope.expect("a sliding layer needs its RoPE table");
-            s.push(rope.apply(&self.gpu, K_ROPE2D, &q, t, heads, q_dim));
-            s.push(rope.apply(&self.gpu, K_ROPE2D, &k, t, kv_heads, kv_dim));
+            s.push(rope.apply(gpu, ops::K_ROPE2D, &q, t, heads, q_dim));
+            s.push(rope.apply(gpu, ops::K_ROPE2D, &k, t, kv_heads, kv_dim));
         }
 
         let group = heads / kv_heads;
-        let scores = self.gpu.storage(u64::from(heads) * u64::from(t) * u64::from(t));
-        let probs = self.gpu.storage(u64::from(heads) * u64::from(t) * u64::from(t));
-        let ctx = self.gpu.storage(u64::from(t) * u64::from(q_dim));
-        s.push(self.gpu.step(K_GQA_SCORES_WIN, &[&q, &k, &scores], &[1, heads, kv_heads, t, hd, group, self.window(t)], heads * t * t));
-        s.push(self.gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, heads, t], heads * t));
-        s.push(self.gpu.step(K_GQA_APPLY, &[&probs, &v, &ctx], &[1, heads, kv_heads, t, hd, group], heads * t * hd));
+        let scores = gpu.storage(u64::from(heads) * u64::from(t) * u64::from(t));
+        let probs = gpu.storage(u64::from(heads) * u64::from(t) * u64::from(t));
+        let ctx = gpu.storage(u64::from(t) * u64::from(q_dim));
+        s.push(gpu.step(K_GQA_SCORES_WIN, &[&q, &k, &scores], &[1, heads, kv_heads, t, hd, group, self.window(t)], heads * t * t));
+        s.push(gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, heads, t], heads * t));
+        s.push(gpu.step(K_GQA_APPLY, &[&probs, &v, &ctx], &[1, heads, kv_heads, t, hd, group], heads * t * hd));
 
         let ctx = match &w.g {
             Some(wg) => {
-                let gate = self.linear(s, &xn, wg, t, hidden, q_dim);
-                let gate = {
-                    let out = self.gpu.storage(u64::from(t) * u64::from(q_dim));
-                    s.push(self.gpu.step(K_SIGMOID, &[&gate, &out], &[t * q_dim], t * q_dim));
-                    out
-                };
-                self.binary(s, K_MUL, &ctx, &gate, t * q_dim)
+                let gate = ops::linear(gpu, s, &xn, wg, t, hidden, q_dim);
+                let gate = ops::sigmoid(gpu, s, &gate, t * q_dim);
+                ops::binary(gpu, s, K_MUL, &ctx, &gate, t * q_dim)
             }
             None => ctx,
         };
-        let attn_out = self.linear(s, &ctx, &w.o, t, q_dim, hidden);
-        let attn_normed = self.rmsnorm(s, &attn_out, &w.post_attn_ln, hidden, t);
-        let x1 = self.binary(s, K_ADD2, x, &attn_normed, t * hidden);
-
-        let ff_dim = c.intermediate_size as u32;
-        let m = self.rmsnorm(s, &x1, &w.pre_ff_ln, hidden, t);
-        let mut gate = self.linear(s, &m, &w.gate, t, hidden, ff_dim);
-        let mut up = self.linear(s, &m, &w.up, t, hidden, ff_dim);
-        if let Some(limit) = c.ffn_clamp_threshold {
-            gate = self.clamp(s, &gate, -f32::MAX, limit, t * ff_dim);
-            up = self.clamp(s, &up, -limit, limit, t * ff_dim);
-        }
-        let act = self.binary(s, K_SILU_MUL, &gate, &up, t * ff_dim);
-        let mlp = self.linear(s, &act, &w.down, t, ff_dim, hidden);
-        let mlp_normed = self.rmsnorm(s, &mlp, &w.post_ff_ln, hidden, t);
-        let out = self.binary(s, K_ADD2, &x1, &mlp_normed, t * hidden);
+        let attn_out = ops::linear(gpu, s, &ctx, &w.o, t, q_dim, hidden);
+        let attn_normed = ops::rmsnorm(gpu, s, &attn_out, &w.post_attn_ln, hidden, t, c.rms_norm_eps);
+        let x1 = ops::binary(gpu, s, K_ADD2, x, &attn_normed, t * hidden);
+        let out = w.feed_forward(c).record(gpu, s, &x1, t);
         LayerBuffers { hidden: out, attn_out }
     }
 

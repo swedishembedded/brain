@@ -1,4 +1,4 @@
-# Ripple-65B (forward parity only, not served)
+# Ripple-65B (library engine, not yet served)
 
 Ripple-65B (`RicursiveForCausalLM`, `model_type: ricursive`) is an 80-layer
 dense decoder that mixes two kinds of attention layer, four of one then one of
@@ -15,17 +15,25 @@ clipped SwiGLU feed-forward.
 | Config and two-way tensor import from the released safetensors | [x] |
 | f32 prefill forward (every position's logits) on every backend | [x] |
 | Parity with the reference implementation (random weights, real layers) | [x] |
-| Serving (KV cache, batching) | [ ] |
+| Paged serving engine under the generic scheduler (library) | [x] |
+| Serving over the CLI, HTTP API or D-Bus | [ ] |
 | Quantized weights | [ ] |
-| CLI | [ ] |
-| HTTP API | [ ] |
-| D-Bus | [ ] |
 | Training | [ ] |
 
-**Read that table before relying on this.** The crate computes a prefill over a
-prompt and returns logits; it keeps no KV cache, so it cannot generate, and it
-holds one layer's weights in f32 at a time. The registry row is the model's
-name and its Hugging Face class; it does not make the model servable.
+**Read that table before relying on this.** `RicursiveEngine` implements
+`model::serve::PagedDecoder`, so a program can run it under
+`model::serve::Scheduler` with continuous batching, chunked prefill and prefix
+reuse, and it passes the shared serving conformance suite. It is not in the
+model catalog: `brain serve` and the capability interface do not know it yet.
+Weights are resident f32, so it needs a machine that holds them; there is no
+quantization and no sparse attention yet. The registry row is the model's name
+and its Hugging Face class.
+
+The sliding layers keep a fixed ring of recent keys per sequence and the
+global layers keep a growing paged cache, so the memory a sequence costs is a
+fixed ring plus a per-token share of the global layers
+(`ricursive::ring_bytes_per_slot`, `ricursive::global_kv_bytes_per_token`).
+A cached prompt is reused at the length it was filed at.
 
 ## Using it as a library
 
@@ -36,6 +44,11 @@ let weights = ricursive::open_safetensors("model.safetensors", &cfg, &layers)?;
 let out = ricursive::RicursiveModel::new(cfg, &weights, None).forward(&token_ids)?;
 // out.logits is [tokens, vocab]; out.layer_outputs holds every layer's output.
 ```
+
+To serve it, build a `ricursive::RicursiveEngine` from the same source and a
+`ricursive::ServeConfig` (block size, block count, sequence limit, live
+sequences, cached prompts, prefill chunk) and hand it to
+`model::serve::Scheduler::new`.
 
 The importer refuses a checkpoint with a missing tensor, an unknown tensor, a
 wrong shape or a non-float dtype, naming the tensor, before it reads any
