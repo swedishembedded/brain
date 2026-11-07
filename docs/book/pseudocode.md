@@ -18,7 +18,8 @@ Every value has a type, and the book always states it when it matters.
 |---|---|
 | `int` | a mathematical integer: arithmetic on `int` values is exact, so `2^64` is a legal value even where your language's native integer is narrower (a 64-bit language computes `2^64 mod n` as `(2^64 - n) mod n`) |
 | `u64` | an unsigned 64-bit integer, `0 .. 2^64 - 1`; see "Unsigned 64-bit integers" below |
-| `f32`, `f16`, `bf16` | floating-point numbers of the stated format (Volume IV) |
+| `u8`, `u16`, `u32` | unsigned integers of 8, 16 and 32 bits, `0 .. 2^n - 1`; see "Fixed-width integers and bit patterns" below |
+| `f32`, `f16`, `bf16` | floating-point numbers of the stated format (Volume IV, chapter 1) |
 | `real` | a floating-point number whose format does not matter to the algorithm; implement it as `f32` unless told otherwise. A literal such as `0.0` takes the type of the variable it is stored in |
 | `complex` | a pair of `real` numbers, see "Complex numbers" below |
 | `bool` | `true` or `false` |
@@ -159,7 +160,7 @@ row of `x: [T, D]`".
 | `erf(x)` | the error function $\frac{2}{\sqrt\pi}\int_0^x e^{-s^2}ds$, odd, with `erf(0) = 0` and limits $\pm 1$; the standard Gaussian cumulative distribution is $\Phi(z) = \frac12\bigl(1 + \mathrm{erf}(z/\sqrt2)\bigr)$. Use the library routine of your language (a reproduction agrees to the printed digits; its series is not needed) |
 | `atan2(y, x)` | the angle in radians, in $(-\pi, \pi]$, of the point with horizontal coordinate `x` and vertical coordinate `y` (the angle from the positive horizontal axis, anticlockwise); `atan2(0, 0)` is `0` |
 | `is_finite(x)` | true when `x` is neither `infinity`, `-infinity` nor not-a-number, false otherwise (so `is_finite(0.0 / 1.0)` is true and `is_finite(infinity - infinity)` is false); it is the test that a value can still be used in arithmetic (Volume III, chapter 12) |
-| `pi`, `infinity` | the constant $\pi$ and positive infinity (`-infinity` is its negative) |
+| `pi`, `infinity`, `nan` | the constant $\pi$, positive infinity (`-infinity` is its negative) and the not-a-number value (`is_finite(nan)` is false, `nan == nan` is false) |
 | `and`, `or`, `not` | logical operations on `bool`; `and` and `or` stop at the first operand that decides the result |
 | `x if c else y` | `x` when the condition `c` is true, otherwise `y`; only the chosen operand is evaluated |
 
@@ -195,6 +196,26 @@ A value of type `u64` is an integer in `0 .. 2^64 - 1`.
 
 `reverse_bits(i, b)` is the integer whose `b`-bit binary form is the form of
 `i` read backwards (`reverse_bits(1, 3)` is `4`, since `001` becomes `100`).
+
+## Fixed-width integers and bit patterns
+
+The types `u8`, `u16` and `u32` behave like `u64` with $2^n$ in place of
+$2^{64}$ (Volume IV, chapter 1): `+`, `-` and `*` wrap, taking the true result
+modulo $2^n$; `a and b`, `a or b` and `a xor b` act on the $n$ bits
+independently; `not a` flips all $n$ bits (`2^n - 1 - a`); `a >> k` is
+`a // 2^k`; `u8(x)`, `u16(x)` and `u32(x)` convert an `int` in range, like `u64(x)`; and `a << k` is `(a * 2^k) mod 2^n`, so bits shifted past the top
+are lost. Shift counts satisfy `0 <= k < n`. Literals may be written in
+hexadecimal (`0x7FFF`) or binary (`0b0101`).
+
+| Operation | Meaning |
+|---|---|
+| `pattern(x, n)` | the `n`-bit pattern of the integer `x`, that is `x mod 2^n`; for a negative `x` this is `2^n + x` (`pattern(-1, 8) = 255`) |
+| `signed(a, n)` | the value of the `n`-bit pattern `a` read as a two's complement number: `a` if `a < 2^(n-1)`, otherwise `a - 2^n` (`signed(255, 8) = -1`, `signed(128, 8) = -128`) |
+| `bits(x)`, `from_bits(a)` | for an `f32` value `x`, the `u32` holding its 32 stored bits (sign, exponent, fraction, in that order from the top); and the `f32` whose stored bits are the `u32` `a`. Each undoes the other. Volume IV, chapter 1 defines the layout |
+| `round_even(x)` | the integer nearest to `x`, **ties to the even integer** (`round_even(2.5) = 2`, `round_even(3.5) = 4`, `round_even(-2.5) = -2`, `round_even(0.4) = 0`); it returns an `int` and is the rule the book calls round to nearest even |
+| `exponent_of(x)` | for `x > 0`, the integer `e` with `2^e <= x < 2^(e+1)` (`exponent_of(0.75) = -1`, `exponent_of(8) = 3`); computed exactly, never as a rounded `floor(log2(x))` |
+
+`clamp(x, l, u)` is `min(max(x, l), u)` (Volume III, chapter 2).
 
 ## Complex numbers
 

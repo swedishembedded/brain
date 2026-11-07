@@ -379,6 +379,10 @@ navigation:
           - docs/book/v03-neural-networks/12-training-dynamics.md
           - docs/book/v03-neural-networks/13-first-models.md
           - docs/book/v03-neural-networks/14-project-neural-network.md
+      - title: "Volume IV: How Computers Actually Execute Machine Learning"
+        pages:
+          - docs/book/v04-computation/index.md
+          - docs/book/v04-computation/01-number-formats.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

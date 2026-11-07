@@ -289,6 +289,14 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\hat{\mathbf{x}}$, $\mathbf{z}$, $L_{\mathrm{rec}}$, $s_k$, $\mathrm{pat}_k$, $\mathrm{pos}_j$, $S$, $N_{\mathrm{ep}}$ | in Volume III, Chapter 13, an autoencoder's output (its reconstruction of the input $\mathbf{x}$; the hat marks the network's estimate), its bottleneck vector (the code), the reconstruction loss $\frac{1}{BD}\sum(\hat{x} - x)^2$; the strength $s_k$ of the $k$-th of the three causes of the sensor data, the pattern $\mathrm{pat}_k$ it multiplies and the position $\mathrm{pos}_j = j/15$ of sensor $j$; the number of steps in an epoch, $S = N/B$, and the number of epochs $N_{\mathrm{ep}}$ (the $E$ of Chapter 11 is a number of steps between evaluations) |
 | $y_t$, $y^\ast_t$, $e_t$, $u_t$, $u^\ast_t$, $T_{\mathrm{p}}$, $G_{\mathrm{p}}$, $\Delta t$, $K_{\mathrm{p}}$, $K_{\mathrm{i}}$, $\zeta_{\mathrm{d}}$, $\omega_{\mathrm{n}}$, $\delta_u$ | in Volume III, Chapter 13, for the controlled plant: its measured level at step $t$, the setpoint, the error $e_t = y^\ast_t - y_t$, the command (clamped to $[-1, 1]$) and the expert's command; the plant's time constant and gain (the subscript keeps $T_{\mathrm{p}}$ apart from the length $T$ of a sequence) and the time step $\Delta t = 0.05$; the proportional and integral gains of the PI controller; the damping and natural frequency of its pole placement; and a command error of the learned controller |
 
+## Computation
+
+| Symbol | Meaning |
+|---|---|
+| $n_e$, $n_m$ | the number of exponent bits and of fraction bits of a floating-point format (Volume IV, chapter 1); the significand has $p = n_m + 1$ bits, so $\varepsilon = 2^{-n_m}$ and $u = 2^{-(n_m+1)}$ |
+| $E$, $f$, $s$ | the stored exponent field (an unsigned integer), the stored fraction field and the sign bit of a floating-point code, with value $(-1)^s (1 + f/2^{n_m})\,2^{E - \mathrm{bias}}$ for a normal number, $\mathrm{bias} = 2^{n_e - 1} - 1$ (Volume IV, chapter 1) |
+| $\Delta$, $q$, $q_0$ | the scale of an integer format, an integer code and the zero point, so that a stored code $q$ stands for $\Delta\,(q - q_0)$, with $q_0 = 0$ when there is no zero point (Volume IV, chapter 1) |
+
 ## Symbols with more than one meaning
 
 A few letters carry more than one meaning in the book. The text says which

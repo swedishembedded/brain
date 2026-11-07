@@ -50,11 +50,15 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Bernoulli distribution**: the distribution of a single yes/no outcome coded as $1$ or $0$, equal to $1$ with probability $p$; its mean is $p$ and its variance is $p(1-p)$. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
+**bf16 format**: the 16-bit floating-point layout of 1 sign bit, 8 exponent bits (the exponent field of fp32) and 7 fraction bits: fp32's range with 2.4 digits, obtained from an fp32 by dropping the low 16 bits (with rounding). *([Bits and Number Formats](v04-computation/01-number-formats.md))*
+
 **bias correction**: dividing an exponential average that started at zero by $1 - \beta^t$, which removes the start-up bias toward zero so that the early averages and the first steps have the right size. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **bias-variance tradeoff**: the exact split of the expected squared error into noise, squared bias (what the model family cannot express) and variance (how much the fit moves between training sets), and the fact that making a model more flexible lowers the first of the last two and raises the second. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **binary cross-entropy**: the loss $-[y\log\hat{p} + (1 - y)\log(1 - \hat{p})]$ for a yes-or-no label $y$ and predicted probability $\hat{p}$, the cross-entropy of a Bernoulli outcome; in terms of the logit $z$ it is $\mathrm{softplus}(z) - y z$. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
+
+**binary representation**: writing a non-negative whole number as bits, each with a place value that is a power of 2, so that $n$ bits give the $2^n$ numbers $0 \dots 2^n - 1$ and arithmetic on them wraps modulo $2^n$. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
 
 **bootstrap**: a method that estimates the sampling distribution of a statistic by repeatedly drawing a sample of the same size with replacement from the sample itself and recomputing the statistic, giving a standard error or interval without a formula. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
@@ -192,6 +196,12 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **forward-mode differentiation**: computing derivatives by carrying the derivative with respect to one input forward through the graph, which costs one pass per input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
+**fp16 format**: the 16-bit floating-point layout of 1 sign bit, 5 exponent bits (bias 15) and 10 fraction bits: about 3.3 digits, but a largest finite number of only 65504 and a smallest subnormal of $6 \times 10^{-8}$. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
+
+**fp32 format**: the 32-bit floating-point layout of 1 sign bit, 8 exponent bits (bias 127) and 23 fraction bits, with about 7 decimal digits and a range of 83 decades. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
+
+**fp8 format**: either of the two 8-bit floating-point layouts, E4M3 (4 exponent, 3 fraction bits, no infinity, one NaN pattern, largest finite number 448) and E5M2 (5 exponent, 2 fraction bits, IEEE infinities and NaNs, largest finite number 57344), used with a scale per block of values. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
+
 **function**: a rule that assigns exactly one output to each input from its domain; the range is the set of outputs that actually occur. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 **function notation**: the writing $f(x)$ for the output of the rule $f$ at the input $x$, and $f(x; w, b)$ to separate inputs from parameters. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
@@ -241,6 +251,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **information content**: the surprise of an event, $-\log_2 p$ bits (or $-\ln p$ nats) for an event of probability $p$, the only measure for which certain events carry zero, rarer events carry more and independent events add. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
 **integer**: a whole number, positive, negative or zero, with no fractional part; the exact numbers of counting and naming. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
+
+**integer-quantized format**: a storage format that keeps each number as a small integer code (8 or 4 bits) and recovers it as a shared scale times the code (less a zero point where the range is not symmetric). *([Bits and Number Formats](v04-computation/01-number-formats.md))*
 
 **integral**: the limit of the Riemann sums $\sum f(t_i)\,\Delta t$ as the width goes to zero, written $\int_a^b f(t)\,dt$; the signed area between the graph of $f$ and the axis. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
@@ -515,6 +527,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **transpose**: the matrix $\mathbf{A}^\top$ with rows and columns swapped; $(\mathbf{A}\mathbf{B})^\top = \mathbf{B}^\top\mathbf{A}^\top$. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
+
+**two's complement**: the representation of negative whole numbers in which the pattern of $-x$ is $2^n - x$ (the bits of $x$ inverted, plus one), so that the same addition works for both signs, the top bit is the sign, and the range is $-2^{n-1} \dots 2^{n-1} - 1$. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
 
 ## U
 

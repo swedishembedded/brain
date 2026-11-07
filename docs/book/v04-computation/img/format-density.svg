@@ -1,0 +1,40 @@
+<!-- source-sha256: f260a2303caf00dafd1203c02443d6c9f8788b9f02e1c6949451e328f7187b44 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 360" width="600" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="360" fill="#ffffff"/>
+<line x1="70.48" y1="314" x2="70.48" y2="30" stroke="#edf2f7"/>
+<text x="70.48" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-40</text>
+<line x1="195.24" y1="314" x2="195.24" y2="30" stroke="#edf2f7"/>
+<text x="195.24" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-20</text>
+<line x1="320" y1="314" x2="320" y2="30" stroke="#edf2f7"/>
+<text x="320" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="444.76" y1="314" x2="444.76" y2="30" stroke="#edf2f7"/>
+<text x="444.76" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="569.52" y1="314" x2="569.52" y2="30" stroke="#edf2f7"/>
+<text x="569.52" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">40</text>
+<line x1="58" y1="300.48" x2="582" y2="300.48" stroke="#edf2f7"/>
+<text x="52" y="304.48" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="232.86" x2="582" y2="232.86" stroke="#edf2f7"/>
+<text x="52" y="236.86" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="165.24" x2="582" y2="165.24" stroke="#edf2f7"/>
+<text x="52" y="169.24" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="97.62" x2="582" y2="97.62" stroke="#edf2f7"/>
+<text x="52" y="101.62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">3</text>
+<line x1="58" y1="30" x2="582" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<rect x="58" y="30" width="524" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="67.36,300.48 73.6,235.95 79.83,165.83 86.07,123.66 92.31,123.23 98.55,122.68 104.79,122.27 111.02,123.23 117.26,122.75 123.5,122.13 129.74,123.31 135.98,122.82 142.21,122.06 148.45,123.31 154.69,122.82 160.93,122.2 167.17,123.16 173.4,122.89 179.64,122.27 185.88,122.96 192.12,123.02 198.36,122.27 204.6,122.89 210.83,123.02 217.07,122.4 223.31,122.68 229.55,123.09 235.79,122.47 242.02,122.61 248.26,123.16 254.5,122.54 260.74,122.4 266.98,123.23 273.21,122.61 279.45,122.27 285.69,123.31 291.93,122.68 298.17,122.13 304.4,123.38 310.64,122.75 316.88,122.06 323.12,123.38 329.36,122.82 335.6,122.13 341.83,123.16 348.07,122.89 354.31,122.2 360.55,123.09 366.79,122.96 373.02,122.27 379.26,122.89 385.5,123.02 391.74,122.4 397.98,122.75 404.21,123.09 410.45,122.4 416.69,122.61 422.93,123.16 429.17,122.47 435.4,122.54 441.64,123.16 447.88,122.61 454.12,122.34 460.36,123.23 466.6,122.68 472.83,122.2 479.07,123.31 485.31,122.75 491.55,122.06 497.79,123.38 504.02,122.82 510.26,122.06 516.5,123.31 522.74,122.82 528.98,122.2 535.21,123.09 541.45,122.96 547.69,122.27 553.93,122.96 560.17,140.4"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="273.21,300.48 279.45,220.95 285.69,153.14 291.93,85.52 298.17,61.11 304.4,62.26 310.64,61.68 316.88,60.99 323.12,62.31 329.36,61.75 335.6,61.07 341.83,62.15 348.07,66.9"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="291.93,247.86 298.17,222.98 304.4,225.15 310.64,225.15 316.88,225.15 323.12,225.15 329.36,222.98 335.6,225.15 341.83,225.15 348.07,230.06"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="304.4,253.21 310.64,208.4 316.88,203.69 323.12,204.8 329.36,203.69 335.6,215.6"/></g>
+<text x="320" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">decade k: values v with 10^k &lt;= v &lt; 10^(k+1)</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">log10 of the number of values</text>
+<text x="320" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Representable positive numbers per power of ten</text>
+<rect x="496.85" y="38" width="77.15" height="78" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="504.85" y1="53" x2="524.85" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="530.85" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">bf16</text>
+<line x1="504.85" y1="70" x2="524.85" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="530.85" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">fp16</text>
+<line x1="504.85" y1="87" x2="524.85" y2="87" stroke="#2f855a" stroke-width="2"/>
+<text x="530.85" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">E5M2</text>
+<line x1="504.85" y1="104" x2="524.85" y2="104" stroke="#9b2c2c" stroke-width="2"/>
+<text x="530.85" y="108" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">E4M3</text>
+</svg>

@@ -74,4 +74,8 @@ historical sections draw on in the [Chronology](history/chronology.md).
 12. [Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md): When a loss curve looks wrong, how do we find out why?
 13. [First Complete Models](v03-neural-networks/13-first-models.md): What does it take to build, train and verify a small network end to end?
 14. [Project: A Neural Network Library with Proven Gradients](v03-neural-networks/14-project-neural-network.md): Can you build a small neural network library whose every gradient is checked, and train it to solve a problem?
+
+### [Volume IV: How Computers Actually Execute Machine Learning](v04-computation/index.md)
+
+1. [Bits and Number Formats](v04-computation/01-number-formats.md): How many bits does a number need, and what do we lose with each bit we remove?
 <!-- /contents -->
