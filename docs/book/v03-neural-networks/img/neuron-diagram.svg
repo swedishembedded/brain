@@ -1,0 +1,33 @@
+<!-- source-sha256: 5c210cbd9eb02a234384f29213b94a24060bce47707a226e8b07e75970ea982c -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 255" width="780" height="255"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="255" fill="#ffffff"/>
+<rect x="285" y="75" width="150" height="150" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="360" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">weighted sum</text>
+<text x="360" y="154.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">z = w . x + b</text>
+<text x="360" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">= +0.10</text>
+<ellipse cx="90" cy="80" rx="65" ry="23" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="90" y="76.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x1 = 0.9</text>
+<text x="90" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">vibration</text>
+<line x1="158" y1="80" x2="282" y2="80" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="220" y="71.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">w1 = 0.8</text>
+<ellipse cx="90" cy="150" rx="65" ry="23" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="90" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x2 = 0.5</text>
+<text x="90" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">temperature rise</text>
+<line x1="158" y1="150" x2="282" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="220" y="141.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">w2 = 0.4</text>
+<ellipse cx="90" cy="220" rx="65" ry="23" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="90" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x3 = 0.3</text>
+<text x="90" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">flow loss</text>
+<line x1="158" y1="220" x2="282" y2="220" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="220" y="211.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">w3 = 0.6</text>
+<ellipse cx="360" cy="28" rx="60" ry="17" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="360" y="32.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bias b = -1</text>
+<line x1="360" y1="48" x2="360" y2="72" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="470" y="115" width="100" height="70" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">activation</text>
+<text x="520" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">g = step</text>
+<line x1="438" y1="150" x2="467" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="680" cy="150" rx="60" ry="28" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="680" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">y = 1</text>
+<text x="680" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(bearing wear)</text>
+<line x1="573" y1="150" x2="617" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

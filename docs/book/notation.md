@@ -75,7 +75,7 @@ one and keeps to it.
 | $\lambda$, $\boldsymbol{\Lambda}$ | an eigenvalue; the diagonal matrix of eigenvalues |
 | $\mathbf{U}$, $\boldsymbol{\Sigma}$, $\mathbf{V}$ | the factors of the singular value decomposition $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$; $\sigma_i$ is the $i$-th singular value |
 | $\mathbf{A}_r$ | the rank-$r$ truncation of $\mathbf{A}$ (keep the $r$ largest singular values) |
-| $\tilde{\mathbf{x}}$, $\tilde{\mathbf{W}}$ | in Chapter 4, the input with a 1 appended, $(\mathbf{x}, 1)$, and the weight matrix with the bias as an extra last column, $[\mathbf{W}\,|\,\mathbf{b}]$ |
+| $\tilde{\mathbf{x}}$, $\tilde{\mathbf{W}}$ | in Chapter 4, the input with a 1 appended, $(\mathbf{x}, 1)$, and the weight matrix with the bias as an extra last column, $[\mathbf{W}\,|\,\mathbf{b}]$; Volume III, Chapter 1 uses $\tilde{\mathbf{x}}$ again for the input with a 1 appended and $\tilde{\mathbf{w}} = (\mathbf{w}, b)$ for the weights with the bias appended |
 | $\mathrm{op}(\mathbf{A})$, $\mathrm{ld}$ | in Chapter 5, $\mathbf{A}$ or its transpose according to a flag; the leading dimension, the stride between columns (or rows) of a stored matrix |
 | $\operatorname{trace}\,\mathbf{A}$ | the same as $\mathrm{tr}\,\mathbf{A}$ (Chapter 6 writes it out) |
 | $\overline{z}$, $\overline{\cdot}$ | the complex conjugate, as $\bar z$; a long bar over an expression, such as $\overline{\operatorname{DFT}(\overline{X})}$, conjugates every entry (Chapter 14) |
@@ -147,6 +147,7 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\varepsilon$, $\varepsilon_{\mathrm{mach}}$ | machine epsilon: the gap between 1 and the next larger floating-point number ($2^{1-p}$, which is $2^{-52}$ in 64 bits); Chapter 15 writes $\varepsilon_{\mathrm{mach}}$ |
 | $t$ | time, a training step or the time argument of a function (Chapters 7, 9; Volume II, Chapter 2); in Volume II, Chapters 3 and 6 the probability threshold of a classifier, with $\mathrm{logit}(t)$ the matching threshold on the logit |
 | $u$ | the unit round-off $2^{-p} = \varepsilon_{\mathrm{mach}}/2$: the largest relative error of rounding one number (Chapter 15) |
+| $\gamma$ | a decay factor (Chapter 2) or, in Volume II, the contraction factor of gradient descent on a quadratic (Chapter 2) and the width of the Gaussian kernel (Chapter 7); in Volume III, Chapter 1, the margin of a separator. The text says which |
 | $\mathrm{fl}(x)$ | the floating-point number a computer stores for $x$ (the exact result rounded to the nearest, ties to even) |
 | $\delta$, $\theta_i$ | in Chapter 15, the relative error of one rounding ($\lvert\delta\rvert \le u$) and the accumulated relative error of the $i$-th term of a sum |
 | $\mathrm{lse}(z)$ | log-sum-exp: $\log \sum_i e^{z_i}$ (Chapter 15) |
@@ -233,6 +234,9 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $M$, $q_n$, $v_m$, $h_m$ | in Volume II, Chapter 7, the number of trees or boosting rounds, the weight of example $n$ (the weights sum to one), the vote weight of round $m$ and the weak classifier of round $m$ |
 | $\boldsymbol{\psi}(\mathbf{x})$, $\mathcal{K}(\mathbf{x}, \mathbf{x}')$, $\mathbf{K}$, $\gamma$, $\mathbf{c}$ | in Volume II, Chapter 7, a feature map, the kernel $\boldsymbol{\psi}(\mathbf{x})\cdot\boldsymbol{\psi}(\mathbf{x}')$ it defines, the Gram matrix $K_{nm} = \mathcal{K}(\mathbf{x}_n, \mathbf{x}_m)$ of the training rows, the width parameter of the Gaussian kernel $\exp(-\gamma\lVert\mathbf{x} - \mathbf{x}'\rVert^2)$ (not the decay factor of Chapter 2), and the dual coefficients of kernel ridge regression |
 | $\nu_n$, $\alpha$ | in Volume II, Chapter 7, the multiplier of training row $n$ in the support vector machine (the literature writes $\alpha_n$), and the pseudo-count that Laplace smoothing adds to every count (not a significance level) |
+| $g$, $\mathrm{step}(z)$, $b$ | in Volume III, Chapter 1, the activation function of a neuron, $y = g(\mathbf{w}\cdot\mathbf{x} + b)$; the step function, $\mathrm{step}(z) = 1$ for $z \ge 0$ and $0$ otherwise (so $\mathrm{step}(0) = 1$, the convention of the threshold rule of Volume II, Chapter 3); and the bias $b$ of one neuron (not the shift $b$ of a recalibrated probability, Volume II, Chapter 6) |
+| $y \in \{-1, +1\}$, $t \in \{0, 1\}$ | in Volume III, Chapter 1, the label of an example in the perceptron's mistake rule and its proof, and the same label written as a target $0$ or $1$ when the rule is compared with logistic regression, $t = (y + 1)/2$ |
+| $R$, $\gamma$, $\mathbf{s}$, $k$ | in Volume III, Chapter 1, the largest length $\lVert\tilde{\mathbf{x}}_n\rVert$ of an input with a 1 appended, the margin of a separator ($\gamma = \min_n y_n\,\mathbf{s}\cdot\tilde{\mathbf{x}}_n$ for a unit vector $\mathbf{s}$; not the Gaussian-kernel width of Volume II, Chapter 7), a unit vector in the space of $\tilde{\mathbf{w}}$ that separates the data, and the number of updates made so far (not a number of folds or neighbours) |
 
 ## Symbols with more than one meaning
 

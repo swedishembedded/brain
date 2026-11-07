@@ -1,0 +1,41 @@
+<!-- source-sha256: 494d4a1d75a6d973419e0bc60f16dca131658293e7f1fbddd0b4a2d8763fdd7f -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 462" width="420" height="462">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="420" height="462" fill="#ffffff"/>
+<line x1="58" y1="374" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-0.5</text>
+<line x1="144" y1="374" x2="144" y2="30" stroke="#edf2f7"/>
+<text x="144" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="230" y1="374" x2="230" y2="30" stroke="#edf2f7"/>
+<text x="230" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.5</text>
+<line x1="316" y1="374" x2="316" y2="30" stroke="#edf2f7"/>
+<text x="316" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="402" y1="374" x2="402" y2="30" stroke="#edf2f7"/>
+<text x="402" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1.5</text>
+<line x1="58" y1="374" x2="402" y2="374" stroke="#edf2f7"/>
+<text x="52" y="378" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-0.5</text>
+<line x1="58" y1="288" x2="402" y2="288" stroke="#edf2f7"/>
+<text x="52" y="292" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="202" x2="402" y2="202" stroke="#edf2f7"/>
+<text x="52" y="206" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="116" x2="402" y2="116" stroke="#edf2f7"/>
+<text x="52" y="120" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="30" x2="402" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.5</text>
+<rect x="58" y="30" width="344" height="344" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="344" height="344"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,116 402,460"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,-56 402,288"/><polyline fill="none" stroke="#6b46c1" stroke-width="2.0" points="230,374 230,30"/><circle cx="144" cy="288" r="6" fill="#9b2c2c"/><circle cx="316" cy="116" r="6" fill="#9b2c2c"/><circle cx="144" cy="116" r="6" fill="#2f855a"/><circle cx="316" cy="288" r="6" fill="#2f855a"/></g>
+<text x="230" y="410" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">x1</text>
+<text x="14" y="202" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 202)">x2</text>
+<text x="230" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">XOR: no line gets all four points</text>
+<line x1="27.52" y1="433" x2="47.52" y2="433" stroke="#2b6cb0" stroke-width="2"/>
+<text x="53.52" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">x1 + x2 - 0.5 = 0: 3 of 4 right</text>
+<line x1="219.86" y1="433" x2="239.86" y2="433" stroke="#c05621" stroke-width="2"/>
+<text x="245.86" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">x1 + x2 - 1.5 = 0: 1 of 4 right</text>
+<line x1="43.44" y1="450" x2="63.44" y2="450" stroke="#6b46c1" stroke-width="2"/>
+<text x="69.44" y="454" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">x1 - 0.5 = 0: 2 of 4 right</text>
+<circle cx="220.7" cy="450" r="3.5" fill="#9b2c2c"/>
+<text x="236.7" y="454" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">XOR = 0</text>
+<circle cx="312.06" cy="450" r="3.5" fill="#2f855a"/>
+<text x="328.06" y="454" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">XOR = 1</text>
+</svg>

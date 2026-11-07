@@ -44,8 +44,8 @@ with a run that is going badly.
 The chapters that exist in this edition are linked; the others are specified
 in the curriculum and appear here when they are written.
 
-1. The Neuron and the Perceptron: what an artificial neuron is, and what a
-   single one can never learn.
+1. [The Neuron and the Perceptron](01-perceptron.md): what an artificial
+   neuron is, and what a single one can never learn.
 2. Multilayer Networks: why stacking layers with a nonlinearity between them
    lets a network represent almost anything.
 3. Softmax, Logits and Cross-Entropy: how a network chooses among many

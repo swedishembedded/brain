@@ -1,0 +1,39 @@
+<!-- source-sha256: e98ca248473ad6d129c46312e8d60e3ac068a75f43a8345e7dd9da73c9b1e8d8 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 485" width="560" height="485">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="485" fill="#ffffff"/>
+<line x1="58" y1="414" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="430" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-1</text>
+<line x1="138.67" y1="414" x2="138.67" y2="30" stroke="#edf2f7"/>
+<text x="138.67" y="430" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="219.33" y1="414" x2="219.33" y2="30" stroke="#edf2f7"/>
+<text x="219.33" y="430" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="300" y1="414" x2="300" y2="30" stroke="#edf2f7"/>
+<text x="300" y="430" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="380.67" y1="414" x2="380.67" y2="30" stroke="#edf2f7"/>
+<text x="380.67" y="430" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="461.33" y1="414" x2="461.33" y2="30" stroke="#edf2f7"/>
+<text x="461.33" y="430" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="542" y1="414" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="542" y="430" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="58" y1="325.38" x2="542" y2="325.38" stroke="#edf2f7"/>
+<text x="52" y="329.38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="207.23" x2="542" y2="207.23" stroke="#edf2f7"/>
+<text x="52" y="211.23" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="89.08" x2="542" y2="89.08" stroke="#edf2f7"/>
+<text x="52" y="93.08" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<rect x="58" y="30" width="484" height="384" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="384"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#a0aec0" stroke-width="1.5" stroke-dasharray="6 4" points="58,286 232.78,414"/><polyline fill="none" stroke="#a0aec0" stroke-width="1.5" stroke-dasharray="6 4" points="58,266.31 259.67,414"/><polyline fill="none" stroke="#a0aec0" stroke-width="1.5" stroke-dasharray="6 4" points="58,266.31 360.5,414"/><polyline fill="none" stroke="#a0aec0" stroke-width="1.5" stroke-dasharray="6 4" points="58,89.08 279.83,414"/><polyline fill="none" stroke="#2b6cb0" stroke-width="3.0" points="58,89.08 501.67,414"/><circle cx="380.67" cy="148.15" r="3.5" fill="#2f855a"/><circle cx="461.33" cy="266.31" r="3.5" fill="#2f855a"/><circle cx="380.67" cy="89.08" r="3.5" fill="#2f855a"/><circle cx="138.67" cy="325.38" r="3.5" fill="#9b2c2c"/><circle cx="219.33" cy="325.38" r="3.5" fill="#9b2c2c"/><circle cx="138.67" cy="207.23" r="3.5" fill="#9b2c2c"/><text x="390.35" y="136.34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">P1</text><text x="148.35" y="313.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">P2</text><text x="471.01" y="254.49" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">P3</text><text x="229.01" y="313.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">P4</text><text x="390.35" y="77.26" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">P5</text><text x="148.35" y="195.42" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">P6</text><text x="232.78" y="396.28" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">1</text><text x="259.67" y="396.28" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">2</text><text x="360.5" y="396.28" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">3</text><text x="279.83" y="396.28" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">4</text><text x="501.67" y="396.28" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#2b6cb0" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">5</text></g>
+<text x="300" y="450" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">x1</text>
+<text x="14" y="222" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 222)">x2</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Perceptron boundary after each update</text>
+<line x1="36.74" y1="473" x2="56.74" y2="473" stroke="#a0aec0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="62.74" y="477" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">earlier boundaries</text>
+<line x1="186.18" y1="473" x2="206.18" y2="473" stroke="#2b6cb0" stroke-width="2"/>
+<text x="212.18" y="477" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">final boundary (update 5)</text>
+<circle cx="374.44" cy="473" r="3.5" fill="#2f855a"/>
+<text x="390.44" y="477" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">label +1</text>
+<circle cx="462.28" cy="473" r="3.5" fill="#9b2c2c"/>
+<text x="478.28" y="477" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">label -1</text>
+</svg>

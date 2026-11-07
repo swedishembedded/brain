@@ -60,5 +60,6 @@ historical sections draw on in the [Chronology](history/chronology.md).
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 
+1. [The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md): What is an artificial neuron, and what can a single one never learn?
 4. [Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md): How do we compute the gradient of one loss with respect to millions of parameters in about the cost of one forward pass?
 <!-- /contents -->

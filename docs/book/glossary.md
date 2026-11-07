@@ -12,7 +12,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **accuracy**: the share of a classifier's decisions that are right, $(\mathrm{TP} + \mathrm{TN})/N$; equivalently the average of the per-class success rates weighted by the class shares, so a rare class barely affects it. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
+**activation function**: the fixed one-input function $g$ a neuron applies to its weighted sum to produce its output, for example the identity, the sigmoid or the step. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
+
 **algorithm**: a finite list of definite steps that turns any input of a stated kind into an output of a stated kind, whose correctness can be argued with an invariant that holds before and after every pass of its loops. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
+
+**artificial neuron**: a function of an input vector that forms a weighted sum of its entries plus a bias and passes the total through an activation function, $y = g(\mathbf{w}\cdot\mathbf{x} + b)$; the weights and the bias are what is learned. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
 
 **asymptotic complexity**: the growth rate of an algorithm's cost as the size of its input grows, stated with $O$, $\Omega$ and $\Theta$ so that constants and lower-order terms are dropped and only the shape (such as $n$, $n \log n$ or $n^2$) remains. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
@@ -220,6 +224,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **linear map**: a function of vectors that commutes with addition and scaling, and is determined by what it does to the unit vectors. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
+**linear separability**: the property of labelled points that some line (plane, flat sheet) puts all points of one class on one side and all points of the other on the other; equivalently, the labelling is computed by a single threshold neuron. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
+
 **log-sum-exp**: the function $\log \sum_i e^{z_i}$, computed stably as $m + \log \sum_i e^{z_i - m}$ with $m = \max_i z_i$ so that no exponential overflows and the sum is at least $1$; it is the logarithm of a sum of probabilities given their logarithms, and the denominator of the log of a softmax. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **logarithm**: the exponent to which a base must be raised to give a number; it is the inverse of the exponent and turns a product into a sum, $\log(uv) = \log u + \log v$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
@@ -297,6 +303,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **parameter**: one of the numbers that set a model's behaviour; fixed while the model predicts and changed while it learns. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **partial derivative**: the derivative of a function of several variables with respect to one of them while all the others are held fixed, $\partial L/\partial w_j$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**perceptron**: a neuron with a step activation together with Rosenblatt's rule for learning its weights, which adds each misclassified example, signed by its label, to the weights and the bias and repeats over the data until a pass has no mistake. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
 
 **perplexity**: the exponential of the cross-entropy, $\exp H(p, q)$ with natural logarithms, the number of equally likely choices that would give the same average surprise. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
@@ -415,3 +423,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **vector addition**: adding two vectors of the same length entry by entry; as arrows it is the parallelogram rule. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
+
+## X
+
+**XOR problem**: the fact that the exclusive-or of two bits, whose two classes sit on opposite diagonals of a square, is not linearly separable and so no single threshold neuron computes it. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
