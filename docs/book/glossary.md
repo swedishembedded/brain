@@ -168,6 +168,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## L
 
+**L1 regularization**: adding to the loss a penalty proportional to the sum of the absolute values of the weights, which is the effect of a Laplace prior and sets some weights exactly to zero. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
+
+**L2 regularization**: adding to the loss a penalty proportional to the sum of the squared weights, which is the effect of a Gaussian prior on the weights and shrinks them smoothly toward zero. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
+
 **label**: the answer attached to an example, the quantity a supervised model is asked to predict. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **law of large numbers**: the statement that the average of $n$ independent draws with finite variance converges to their expectation, with the probability of an error above any fixed amount going to zero as $n$ grows. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
@@ -175,6 +179,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **learning rate**: the positive number $\eta$ that scales the step of gradient descent; too small is slow, above $2/\lambda_{\max}$ the iteration diverges on a quadratic loss. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
 **least squares**: the method of choosing parameters that minimise the sum of the squared differences between predictions and labels. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
+
+**likelihood**: the probability (or density) that a model with a given parameter assigns to the observed data, read as a function of the parameter; it is not the probability of the parameter. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
 **limit**: the value a quantity approaches as its input gets close to a point without reaching it; $\lim_{h\to 0} g(h) = L$ means $g(h)$ can be made as close to $L$ as we like by taking $h$ small enough and nonzero. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
@@ -202,6 +208,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **matrix-vector product**: the vector whose entries are the dot products of the rows of a matrix with the input vector, equivalently a weighted sum of the matrix's columns. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
+**maximum a posteriori**: choosing the parameter at the peak of the posterior, equivalently minimising the negative log-likelihood plus the negative log of the prior. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
+
+**maximum likelihood estimation**: choosing the parameter under which the observed data were most probable, equivalently the one that minimises the negative log-likelihood. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
+
 **mean squared error**: the average over the examples of the squared difference between prediction and label, $\frac{1}{N}\sum_n (\hat{y}_n - y_n)^2$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
 **memory complexity**: the amount of memory, counted in cells and measured at the peak, that an algorithm needs as a function of its input size; it can be traded against time by storing a result instead of recomputing it, or the reverse. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
@@ -219,6 +229,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **mutual information**: the divergence of the joint distribution of two variables from the product of their marginals, $I(X; Y) = H(X) - H(X \mid Y)$, the amount by which learning one reduces the uncertainty of the other; it is zero only for independent variables. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
 ## N
+
+**negative log-likelihood**: minus the natural logarithm of the likelihood, a sum over independent examples of the surprise at each observed label; the loss that maximum likelihood minimises. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
 **Newton's method**: the iteration that replaces a function by its tangent line (or, for minimisation, by a quadratic with the same slope and curvature) and jumps to its zero (or bottom), $x \leftarrow x - f(x)/f'(x)$ or $x \leftarrow x - f'(x)/f''(x)$; its error is squared at each step near a simple root. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
@@ -255,6 +267,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **prediction**: the value $\hat{y} = f_\theta(\mathbf{x})$ a model returns for an example. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **prefix sum**: the list of running totals of an array, either inclusive (including the element at each position) or exclusive (stopping just before it), used to turn probabilities into a cumulative distribution and lengths into offsets. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
+
+**prior**: a probability distribution over the parameters stating what is believed about them before the data are seen. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
 **probability distribution**: the assignment of a probability to each value of a random variable, written as a table for finitely many values or as a density whose area over an interval is the probability. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 

@@ -49,8 +49,9 @@ the curriculum and appear here when they are written.
    best explains a set of measurements, and what "best" means.
 3. [Classification and Logistic Regression](03-logistic-regression.md): how a model outputs a probability
    for a yes-or-no question, and how it is trained.
-4. Maximum Likelihood, Priors and Regularization: why the losses in use are the
-   right ones, and what it means to prefer simple explanations.
+4. [Maximum Likelihood, Priors and Regularization](04-likelihood.md): why the
+   losses in use are the right ones, and what it means to prefer simple
+   explanations.
 5. Generalization, Overfitting and Honest Evaluation: how to know that a model
    has learned the pattern rather than memorized the examples.
 6. Measuring Models: Metrics and Calibration: which number says whether a model

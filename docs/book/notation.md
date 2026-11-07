@@ -164,6 +164,8 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $H(X \mid Y)$, $I(X; Y)$ | conditional entropy and mutual information |
 | $H(X, Y)$ | joint entropy of two random variables $X$, $Y$ (the entropy of their joint distribution; two distributions $p, q$ as arguments, $H(p, q)$, mean cross-entropy) |
 | $D_{\mathrm{KL}}(p \,\Vert\, q)$ | Kullback-Leibler divergence |
+| $\mathrm{Lik}(\theta)$, $\mathrm{NLL}(\theta)$ | the likelihood of the parameters $\theta$ for the observed data, $p(\mathcal{D}\mid\theta)$, and its negative natural logarithm, the negative log-likelihood (Volume II, Chapter 4) |
+| $\sigma_w$, $\beta_w$ | the standard deviation of a Gaussian prior on each weight, and the scale of a Laplace prior $\frac{1}{2\beta_w}e^{-\lvert w\rvert/\beta_w}$ (Volume II, Chapter 4; $\beta_w$ with its subscript is unrelated to the moment coefficients of the optimisers of Volume III) |
 
 ## Learning
 
@@ -179,6 +181,7 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\ell(\hat y, y)$, $\mathrm{MSE}$ | the loss of one prediction against its label, so $L = \ell(f_\theta(\mathbf{x}), y)$, and the mean squared error $\frac{1}{N}\sum_n (\hat y_n - y_n)^2$ (Volume II, Chapter 2) |
 | $\mathbf{X}$, $\mathbf{y}$, $\mathbf{w}$, $d$ | the feature matrix of shape $[N, d]$ (with a first column of ones when there is an intercept), the label vector of shape $[N]$, the weights of a model that is linear in its parameters ($\theta = \mathbf{w}$ there) and the number of features (Volume II) |
 | $\tau$, $\tau_g$, $\tau_\ell$ | tolerance of a stopping rule: in general, on the gradient norm, on the change of the loss (Volume II, Chapter 2) |
+| $\lambda$, $J(\mathbf{w})$, $S(a, \lambda)$ | in Volume II, Chapter 4: the strength of a penalty added to a loss, the penalised objective ($J_{\mathrm{L2}}$ with $\frac{\lambda}{2}\lVert\mathbf{w}\rVert^2$, $J_{\mathrm{L1}}$ with $\lambda\lVert\mathbf{w}\rVert_1$), and the soft-threshold function $S(a, \lambda) = \mathrm{sign}(a)\max(\lvert a\rvert - \lambda, 0)$ (the pseudocode writes it out, because $\mathrm{sign}(0) = +1$ and the product is still $0$ there) |
 | $\eta$ | learning rate; $\eta_{\max}$, $\eta_{\min}$ are the largest and smallest rate of a schedule |
 | $t$ | training step, or time in a sequence or a diffusion process |
 | $\sigma(x)$ | the logistic sigmoid $1/(1+e^{-x})$ (always written with an argument) |
@@ -202,7 +205,7 @@ is meant, and these rules decide the rest.
 | hat | on a vector, $\hat{\mathbf{u}}$ is a unit vector; on a scalar or parameter ($\hat y$, $\hat p$) it is an estimate. The one vector exception is $\hat{\mathbf{y}} = \mathbf{X}\mathbf{w}$ (Volume II), the vector of predictions, an estimate of the labels $\mathbf{y}$ |
 | $\varepsilon$ | machine epsilon (Chapters 1 and 7); in Chapters 11 and 12 a tolerance in the law of large numbers, and the standard Gaussian noise vector of a diffusion step. In Volume II, Chapter 2, the Gaussian noise added to a label; the tolerances of its stopping rules are $\tau$. Finite-difference and gradient-descent steps are written $h$ and $\eta$ |
 | $\varphi$, $\phi$ | in Chapters 11 and 12 the standard Gaussian density (written $\varphi$ or $\phi$ alike); in Chapter 8 $\varphi(t)$ is the loss along a line |
-| $\lambda$ | an eigenvalue (Chapter 6); in Chapters 8 and 9 the curvature of the loss along an eigenvector of the Hessian, which is the eigenvalue |
+| $\lambda$ | an eigenvalue (Chapter 6); in Chapters 8 and 9 the curvature of the loss along an eigenvector of the Hessian, which is the eigenvalue; in Volume II, Chapter 4, the strength of a regularization penalty (written $\lambda$ there and never an eigenvalue) |
 | $u$ | the unit round-off $2^{-p}$ (Chapter 15); in Chapter 17 a uniform random number in $[0, 1)$, written $u$, $u_1$, $u_2$. The Chapter 17 constant of the SplitMix64 generator is written `GAMMA`, never $\gamma$ |
 
 ## Units
