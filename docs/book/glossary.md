@@ -48,6 +48,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **eigenvector**: a nonzero vector that a matrix sends to a multiple of itself, so that the map only stretches (or flips) it. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
+**Euler's method**: the rule $x_{i+1} = x_i + h\,f(t_i, x_i)$ that follows the slope of an ODE for a short step $h$ and repeats; with a gradient as the slope it is gradient descent. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
+
 **exponent**: the count of repeated factors in $b^n$, extended to zero, negative and fractional counts by the rule $b^m b^n = b^{m+n}$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **exponential function**: a function $b^x$ that multiplies by the same factor for each unit step in $x$, growing if $b > 1$ and decaying if $b < 1$. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
@@ -62,6 +64,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **function notation**: the writing $f(x)$ for the output of the rule $f$ at the input $x$, and $f(x; w, b)$ to separate inputs from parameters. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
+**fundamental theorem of calculus**: the rate of change of the accumulated area $\int_a^x f(t)\,dt$ is $f(x)$, so $\int_a^b f = F(b) - F(a)$ for any antiderivative $F$ with $F' = f$. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
+
 ## G
 
 **gradient**: the vector of all the partial derivatives of a scalar function, the same shape as its inputs; it points in the direction of steepest ascent and its length is the steepest rate of change. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
@@ -75,6 +79,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **identity matrix**: the square matrix with ones on the diagonal and zeros elsewhere, which leaves every vector unchanged. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
 **integer**: a whole number, positive, negative or zero, with no fractional part; the exact numbers of counting and naming. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
+
+**integral**: the limit of the Riemann sums $\sum f(t_i)\,\Delta t$ as the width goes to zero, written $\int_a^b f(t)\,dt$; the signed area between the graph of $f$ and the axis. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
 **inverse function**: the function $f^{-1}$ that undoes $f$, so $f^{-1}(f(x)) = x$; it exists when $f$ is one-to-one. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
@@ -112,7 +118,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **norm**: the length of a vector; the L2 norm is $\sqrt{\mathbf{a}\cdot\mathbf{a}}$, and the L1 and max norms measure total and largest-entry size. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
+**numerical integration**: approximating an integral by a weighted sum of function values, such as rectangles, trapezoids or Simpson's rule, whose error falls as a fixed power of the panel width. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
+
 ## O
+
+**ordinary differential equation**: an equation $dx/dt = f(t, x)$ that gives the rate of change of an unknown function of one variable in terms of the function itself; its solution is a curve that follows the prescribed slopes from a given starting value. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
 **orthogonal matrix**: a square matrix whose columns are orthonormal, so that $\mathbf{Q}^\top\mathbf{Q} = \mathbf{I}$, its inverse is its transpose, and it preserves lengths and angles. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 

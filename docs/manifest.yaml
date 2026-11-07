@@ -338,6 +338,7 @@ navigation:
           - docs/book/v01-mathematics/06-decompositions.md
           - docs/book/v01-mathematics/07-derivatives.md
           - docs/book/v01-mathematics/08-multivariable-calculus.md
+          - docs/book/v01-mathematics/09-integrals-and-odes.md
       - title: "Volume III: Building Neural Networks from Nothing"
         pages:
           - docs/book/v03-neural-networks/index.md

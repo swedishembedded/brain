@@ -60,8 +60,8 @@ in the curriculum and appear here when they are written.
    output moves when its input moves a tiny bit.
 8. [Gradients, Jacobians and Many Variables](08-multivariable-calculus.md): which way to
    move millions of numbers at once to make a quantity smaller.
-9. Integrals and Differential Equations: adding up infinitely many small
-   pieces, and following a system that changes continuously.
+9. [Integrals and Differential Equations](09-integrals-and-odes.md): adding up infinitely
+   many small pieces, and following a system that changes continuously.
 10. Probability: Reasoning Under Uncertainty: putting numbers on uncertainty
     and updating them on evidence.
 11. The Distributions Machine Learning Uses: the few distributions that keep
