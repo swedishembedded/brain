@@ -1019,7 +1019,9 @@ impl ArtifactRecipe for TransformersRecipe {
         // `generation_config.json` names the model's stop tokens (its
         // `eos_token_id` may be a list), which the tokenizer files do not.
         let mut artifacts = vec![artifact("config.json", "config.json")];
-        for f in ["generation_config.json", "tokenizer.json", "tokenizer_config.json"] {
+        // `chat_template.jinja` / `chat_template.json` hold a template that outranks the one inline in
+        // `tokenizer_config.json` (a release may leave an older one there).
+        for f in ["generation_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "chat_template.json"] {
             if listing.iter().any(|l| l == f) {
                 artifacts.push(artifact(f, f));
             }
@@ -2031,5 +2033,28 @@ mod tests {
         let listing: Vec<String> = ["config.json", "vocab.json", "merges.txt", "preprocessor_config.json"].into_iter().map(String::from).collect();
         let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
         assert_eq!(matched.id(), "qwen3asr");
+    }
+
+    /// `ricursiveAI/Ripple-65B-Preview` (real listing): the sixteen shards, their index, the tokenizer files and the
+    /// standalone `chat_template.jinja` that outranks the template inline in `tokenizer_config.json` are fetched; the
+    /// inference sources and the remote modeling code are not weights and stay on the hub.
+    #[test]
+    fn a_ripple_pull_fetches_the_chat_template_file_beside_the_shards() {
+        let r = ModelRef::new("ricursiveAI", "Ripple-65B-Preview", None);
+        let mut listing: Vec<String> = [".gitattributes", "LICENSE", "README.md", "chat_template.jinja", "config.json", "configuration_ricursive.py", "inference/server/model.py", "model.safetensors.index.json", "modeling_ricursive.py", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        listing.extend((1..=16).map(|i| format!("model-{i:05}-of-00016.safetensors")));
+        let mut hub = crate::hub::FakeHub::new();
+        hub.add_file("ricursiveAI", "Ripple-65B-Preview", "main", "config.json", br#"{"architectures":["RicursiveForCausalLM"],"model_type":"ricursive"}"#.to_vec());
+        let picked = select(recipes(), &r, &listing).expect("one recipe claims the repo");
+        assert_eq!(picked.id(), "transformers");
+        let files: Vec<String> = picked.artifacts(&r, &listing, &hub).expect("a supported architecture").into_iter().map(|a| a.file).collect();
+        for want in ["config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "model.safetensors.index.json", "model-00001-of-00016.safetensors", "model-00016-of-00016.safetensors"] {
+            assert!(files.iter().any(|f| f == want), "{want} is fetched: {files:?}");
+        }
+        assert_eq!(files.len(), 5 + 16, "config, tokenizer, tokenizer config, template, index and sixteen shards");
+        assert!(!files.iter().any(|f| f.ends_with(".py")), "remote code is never fetched: {files:?}");
     }
 }
