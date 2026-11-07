@@ -339,6 +339,17 @@ impl Residuals {
         }
     }
 
+    /// Write boundary `l` from the host (the input a pipeline stage receives from the previous one) and, when the
+    /// stream is held narrow, round it through the store (as [`Self::round_trip`] does for a boundary a layer wrote), so
+    /// the forward continues from the value a later [`Self::restore`] decodes.
+    pub fn ingest(&self, gpu: &Gpu, l: usize, data: &[f32]) {
+        gpu.write_f32(&self.bufs[l], data);
+        if let Some(store) = &self.store {
+            store.store(gpu, l - self.live.start, &self.bufs[l]);
+            store.load(gpu, l - self.live.start, &self.bufs[l]);
+        }
+    }
+
     /// Decode boundary `l` into its working buffer before a step reads it (no step with f32 boundaries).
     pub fn restore(&self, gpu: &Gpu, s: &mut Vec<Step>, l: usize) {
         if let Some(store) = &self.store {

@@ -262,10 +262,10 @@ pub struct NativeSelector {
 impl NativeSelector {
     /// Scratch for `shape`'s selections under `cfg` (its `index_dim` is the
     /// native width, `n_kv_heads * head_dim`; `shape.width` is
-    /// [`row_width`]), heads rotated by half-split RoPE at `rope_base`.
-    pub fn new(g: &Gpu, cfg: LsaConfig, shape: NativeShape, rope_base: f32) -> Result<NativeSelector, String> {
+    /// [`row_width`]), heads rotated as `rope` says (`Rope::None` for an attention that does not rotate them).
+    pub fn new(g: &Gpu, cfg: LsaConfig, shape: NativeShape, rope: Rope) -> Result<NativeSelector, String> {
         shape.check()?;
-        let heads = IndexHeads { n_kv_heads: shape.n_kv_heads, head_dim: shape.head_dim, rope: Rope::Base(rope_base), index_dim: cfg.index_dim as u32, identity: true };
+        let heads = IndexHeads { n_kv_heads: shape.n_kv_heads, head_dim: shape.head_dim, rope, index_dim: cfg.index_dim as u32, identity: true };
         heads.check(shape.n_heads)?;
         let cb = cfg.cluster_block as u32;
         let blocks = shape.t / cb;
@@ -341,6 +341,21 @@ impl NativeSelector {
         self.inversion.record(g, ids, index, &mut steps);
         Ok(steps)
     }
+}
+
+/// The selection of a window-only attention: each query reads its last `cfg.window` keys and the first `cfg.sink`
+/// positions, the baseline N-LSA is compared with (nothing here depends on the keys' values).
+pub fn window_selection(cfg: &LsaConfig, t: usize) -> Selection {
+    let width = cfg.window + cfg.sink;
+    let mut ids = vec![-1i32; t * width];
+    let mut lens = vec![0u32; t];
+    for i in 0..t {
+        let start = (i + 1).saturating_sub(cfg.window);
+        let row: Vec<i32> = (start..=i).chain(0..cfg.sink.min(start)).map(|j| j as i32).collect();
+        ids[i * width..][..row.len()].copy_from_slice(&row);
+        lens[i] = row.len() as u32;
+    }
+    Selection { width, ids, lens }
 }
 
 /// The selection inverted per key on the device: a (key row, query) pair per

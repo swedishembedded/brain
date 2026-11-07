@@ -25,6 +25,7 @@ use data::rng::Rng;
 use model::adapter::device::LoraCfg;
 use model::adapter::sites::LoraSites;
 use model::adapter::{LinearSite, TargetSpec};
+use model::Shard;
 
 use crate::config::RicursiveConfig;
 use crate::import::manifest;
@@ -159,6 +160,25 @@ impl TrainConfig {
             }
         }
         list
+    }
+
+    /// Whether the stage `shard` holds the tensor `name`: its layers' tensors, the final norm and head on the head
+    /// stage, and the embedding on the embed stage and on every stage when the value residual reads it (`x0` is
+    /// recomputed from the tokens there, so no extra tensor crosses a stage boundary).
+    pub fn shard_owns(&self, name: &str, shard: &Shard) -> bool {
+        if let Some(rest) = name.strip_prefix("model.layers.") {
+            return rest.split('.').next().and_then(|n| n.parse::<usize>().ok()).is_some_and(|l| shard.owns(l));
+        }
+        match name {
+            "model.embed_tokens.weight" => shard.embed || self.model.use_valres,
+            "model.norm.weight" | "lm_head.weight" => shard.head,
+            _ => true,
+        }
+    }
+
+    /// [`Self::param_list`] restricted to the tensors the stage `shard` holds.
+    pub fn shard_param_list(&self, shard: &Shard) -> Vec<(String, usize)> {
+        self.param_list().into_iter().filter(|(name, _)| self.shard_owns(name, shard)).collect()
     }
 
     /// Seeded initial weights: Normal(0, 0.02) projections (the residual-output ones scaled down by the depth),

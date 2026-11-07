@@ -41,7 +41,9 @@ mod config;
 mod graph;
 mod init;
 mod io;
+mod nlsa;
 mod objectives;
+mod shard;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -53,6 +55,7 @@ use model::adapter::device::LoraCfg;
 use model::adapter::exec::AdapterRuntime;
 use model::ops::{Ops, TierPolicy, Weight};
 use model::saved::{Residuals, SavedFormat, SavedPolicy};
+use model::Shard;
 use paramstore::{ParamStore, Role};
 
 pub use config::{default_targets, linear_suffix, TrainConfig, LORA_LEAVES};
@@ -138,6 +141,9 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         add(&mut table, model::ops::training_kernel_list());
         add(&mut table, model::saved::kernels());
         add(&mut table, optim::MOMENT_KERNELS);
+        add(&mut table, &model::lsa::device::KERNELS);
+        add(&mut table, &model::lsa::native::KERNELS);
+        add(&mut table, &gpu_core::sort::KERNELS);
         model::adapter::exec::add_kernels(&mut table);
         table
     })
@@ -148,6 +154,7 @@ pub struct Ripple {
     gpu: Gpu,
     ops: Ops,
     cfg: TrainConfig,
+    shard: Shard,
     b: u32,
     t: u32,
     train: bool,
@@ -156,7 +163,7 @@ pub struct Ripple {
     /// Every linear by weight name, at the tier it is held in (a trainable one shares the store's buffer).
     weights: HashMap<String, Weight>,
     layers: Vec<LayerParams>,
-    head: Lin,
+    head: Option<Lin>,
     adapter: Option<AdapterRuntime>,
     k: Kernels,
     tokens: DeviceBuffer,
@@ -174,6 +181,7 @@ pub struct Ripple {
     fwd: Vec<Step>,
     bwd: Vec<Step>,
     opt: Option<optim::Optim>,
+    nlsa: Option<nlsa::NativeLsa>,
     /// Per-position loss weights, once [`model::training::TokenObjectives::enable_weighted_loss`] opted in.
     weighted: Option<model::lossw::WeightedCe>,
     /// The factor the logits are multiplied by before the softmax (the sampler-temperature correction).
@@ -191,6 +199,12 @@ impl Ripple {
     }
 
     /// Rows per step, `b * t`.
+    /// Stage `shard` of the model for a pipeline: only its layers, and the embedding, norm and head it needs.
+    pub fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, opts: &TrainOpts, train: bool, shard: Shard) -> Result<Ripple, String> {
+        cfg.validate()?;
+        graph::build_shard(cfg, b, t, src, opts, train, shard)
+    }
+
     fn rows(&self) -> u32 {
         self.b * self.t
     }

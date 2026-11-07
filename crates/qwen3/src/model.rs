@@ -534,20 +534,6 @@ struct NativeLsa {
     stats: DeviceBuffer,
 }
 
-/// The window-and-sinks selection of `t` queries (no long-range keys).
-fn window_selection(cfg: &model::lsa::LsaConfig, t: usize) -> model::lsa::Selection {
-    let width = cfg.window + cfg.sink;
-    let mut ids = vec![-1i32; t * width];
-    let mut lens = vec![0u32; t];
-    for i in 0..t {
-        let start = (i + 1).saturating_sub(cfg.window);
-        let row: Vec<i32> = (start..=i).chain(0..cfg.sink.min(start)).map(|j| j as i32).collect();
-        ids[i * width..][..row.len()].copy_from_slice(&row);
-        lens[i] = row.len() as u32;
-    }
-    model::lsa::Selection { width, ids, lens }
-}
-
 /// Backward GEMM pickers: tiled `matmul_{dx,dw}_reg` (bit-identical to naive, and a large fraction of the card's
 /// fp32 peak) once both output dims fill a 128-tile, else naive. Small LoRA-rank matmuls fall back automatically.
 /// `BRAIN_QWEN_NAIVE_MM=1` forces naive.
@@ -3072,10 +3058,10 @@ impl Qwen {
             let [scan_block, scan_add, sort_hist, sort_scatter] = gpu_core::sort::KERNELS.map(|(n, _)| n);
             let sort = gpu_core::sort::SortKernels { scan: gpu_core::sort::ScanKernels { scan_block: pipe(scan_block)?, scan_add: pipe(scan_add)? }, sort_hist: pipe(sort_hist)?, sort_scatter: pipe(sort_scatter)? };
             let ids = model::lsa::native::SelectKernels { index_vectors: pipe(vectors)?, read: pipe(read)?, ward: pipe(ward)?, pairs: name(3)?, offsets: name(4)?, sort };
-            Some((model::lsa::native::NativeSelector::new(&self.gpu, cfg, shape, c.rope_theta)?, ids))
+            Some((model::lsa::native::NativeSelector::new(&self.gpu, cfg, shape, model::lsa::device::Rope::Base(c.rope_theta))?, ids))
         } else {
             // The window and sinks never change: packed once.
-            let packed = shape.pack(&vec![window_selection(&cfg, self.t as usize); self.b as usize])?;
+            let packed = shape.pack(&vec![model::lsa::native::window_selection(&cfg, self.t as usize); self.b as usize])?;
             for buf in &index {
                 self.gpu.write(buf, &packed);
             }

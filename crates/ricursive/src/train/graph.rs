@@ -16,6 +16,7 @@ use model::adapter::exec::{AdapterRuntime, TieredBase};
 use model::block::{self, Gqa, KernelIds};
 use model::ops::{Act, Ops, Weight};
 use model::saved::{Residuals, SavedFormat};
+use model::Shard;
 use paramstore::ParamStore;
 
 use super::{Ripple, TrainConfig, TrainOpts, IGNORE};
@@ -206,7 +207,16 @@ pub(super) fn activation_bytes(cfg: &TrainConfig, b: u32, t: u32, boundaries: Sa
 }
 
 pub(super) fn build(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, opts: &TrainOpts, train: bool) -> Result<Ripple, String> {
+    let shard = Shard::whole(cfg.model.num_hidden_layers);
+    build_shard(cfg, b, t, src, opts, train, shard)
+}
+
+/// The stage `shard` of the model: only its layers (and the embedding, norm and head it needs) are allocated.
+pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, opts: &TrainOpts, train: bool, shard: Shard) -> Result<Ripple, String> {
     let c = cfg.model.clone();
+    if shard.start >= shard.end || shard.end > c.num_hidden_layers || (shard.start == 0) != shard.embed {
+        return Err(format!("ricursive training: stage {}..{} (embed {}) does not fit {} layers", shard.start, shard.end, shard.embed, c.num_hidden_layers));
+    }
     if b == 0 || t == 0 {
         return Err("ricursive training: batch and sequence must be positive".into());
     }
@@ -227,14 +237,14 @@ pub(super) fn build(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint::Tens
 
     // Which linears are held packed (outside the store). Training a packed linear is a straight-through dead end:
     // only an adapter build, whose base is frozen, may hold one.
-    let linear_shapes: Vec<(String, usize, usize)> = crate::weights::all_linears(&c);
+    let linear_shapes: Vec<(String, usize, usize)> = crate::weights::all_linears(&c).into_iter().filter(|(name, ..)| cfg.shard_owns(name, &shard)).collect();
     let packed: std::collections::HashSet<String> = linear_shapes.iter().filter(|(name, ..)| opts.tiers.want(name) != gpu_core::select::Dtype::F32).map(|(name, ..)| name.clone()).collect();
     if train && cfg.lora.is_none() && !packed.is_empty() {
         return Err(format!("ricursive training: a full fine-tune trains f32 weights; {} linear(s) are asked for as {} (train an adapter over a packed base instead)", packed.len(), opts.tiers.describe()));
     }
 
     let roles: Vec<(String, usize, paramstore::Role)> = cfg
-        .param_list()
+        .shard_param_list(&shard)
         .into_iter()
         .filter(|(name, _)| !packed.contains(name))
         .map(|(name, numel)| {
@@ -259,7 +269,7 @@ pub(super) fn build(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint::Tens
         Lin { name, leaf, w }
     };
     let mut layers = Vec::with_capacity(c.num_hidden_layers);
-    for l in 0..c.num_hidden_layers {
+    for l in shard.start..shard.end {
         let mut linears: HashMap<&'static str, Lin> = cfg.layer_linears(l).into_iter().map(|(leaf, name, ..)| (leaf, lin(leaf, name, &mut weights))).collect();
         let take = |leaf: &str, linears: &mut HashMap<&'static str, Lin>| linears.remove(leaf).unwrap_or_else(|| panic!("ricursive training: layer {l} has no {leaf}"));
         let name = |suffix: &str| layer_tensor(l, suffix);
@@ -282,7 +292,7 @@ pub(super) fn build(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint::Tens
             lam: c.use_valres.then(|| name("self_attn.value_res_lambda")),
         });
     }
-    let head = Lin { name: "lm_head.weight".into(), leaf: "lm_head", w: weights["lm_head.weight"].clone() };
+    let head = shard.head.then(|| Lin { name: "lm_head.weight".into(), leaf: "lm_head", w: weights["lm_head.weight"].clone() });
 
     let (nn, d, hq, hkv, ff, v) = (u64::from(b) * u64::from(t), c.hidden_size as u64, c.q_dim() as u64, c.kv_dim() as u64, c.intermediate_size as u64, c.vocab_size as u64);
     let max_out = hq.max(ff).max(d).max(hkv);
@@ -292,9 +302,11 @@ pub(super) fn build(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint::Tens
     let tokens = gpu.buffer("tokens", nn * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
     let targets = gpu.buffer("targets", nn * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
     let x0 = st(nn * d);
+    // Boundary `l` is held by the stage that writes it (`shard.end` included) and by the one that reads it as its input.
+    let live = shard.start.max(1)..shard.end + 1;
     let mut bufs = vec![st(1)];
-    bufs.extend((0..c.num_hidden_layers).map(|_| st(nn * d)));
-    let mut res = Residuals::new(bufs, 1..c.num_hidden_layers + 1);
+    bufs.extend((1..=c.num_hidden_layers).map(|l| if live.contains(&l) { st(nn * d) } else { st(1) }));
+    let mut res = Residuals::new(bufs, live);
     if opts.saved.boundary_format() != SavedFormat::F32 {
         res.quantize(&gpu, opts.saved.boundary_format(), nn as u32, d as u32)?;
     }
@@ -328,9 +340,7 @@ pub(super) fn build(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint::Tens
         mlp: st(nn * d),
         mlp_normed: st(nn * d),
     };
-    let hs = st(nn * d);
-    let logits = st(nn * v);
-    let ce_rows = st(nn);
+    let (hs, logits, ce_rows) = if shard.head { (st(nn * d), st(nn * v), st(nn)) } else { (st(1), st(1), st(1)) };
 
     let grad = train.then(|| {
         let d_gate_c = st(nn * ff);
@@ -338,8 +348,8 @@ pub(super) fn build(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint::Tens
         Grad {
             dres: [st(nn * d), st(nn * d)],
             dx0: st(nn * d),
-            dlogits: st(nn * v),
-            d_hs: st(nn * d),
+            dlogits: if shard.head { st(nn * v) } else { st(1) },
+            d_hs: if shard.head { st(nn * d) } else { st(1) },
             rms_inv: st(nn * c.num_attention_heads as u64),
             d_mlp: st(nn * d),
             d_act: st(nn * ff),
@@ -379,6 +389,7 @@ pub(super) fn build(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint::Tens
         gpu,
         ops,
         cfg,
+        shard,
         b,
         t,
         train,
@@ -402,6 +413,7 @@ pub(super) fn build(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint::Tens
         fwd: Vec::new(),
         bwd: Vec::new(),
         opt,
+        nlsa: None,
         weighted: None,
         logit_scale: 1.0,
     };
@@ -487,9 +499,9 @@ impl Ripple {
     }
 
     /// The forward of layer `l` from the stream `h_in` into `h_out`, over the shared scratch.
-    pub(super) fn layer_fwd(&self, s: &mut Vec<Step>, l: usize, h_in: &DeviceBuffer, h_out: &DeviceBuffer) {
+    pub(super) fn layer_fwd(&self, s: &mut Vec<Step>, l: usize, h_in: &DeviceBuffer, h_out: &DeviceBuffer, recompute: bool) {
         let c = &self.cfg.model;
-        let (lp, sc, gpu, ids) = (&self.layers[l], &self.scratch, &self.gpu, &self.k.ids);
+        let (lp, sc, gpu, ids) = (&self.layers[l - self.shard.start], &self.scratch, &self.gpu, &self.k.ids);
         let (n, d, hq, hkv, hd, ff) = (self.rows(), c.hidden_size as u32, c.q_dim() as u32, c.kv_dim() as u32, c.head_dim as u32, c.intermediate_size as u32);
         let (heads, kv_heads) = (c.num_attention_heads as u32, c.num_key_value_heads as u32);
 
@@ -510,8 +522,11 @@ impl Ripple {
             s.push(block::rope_fwd(gpu, ids, &sc.q, n, heads, hd, hq, self.t, c.rope_theta));
             s.push(block::rope_fwd(gpu, ids, &sc.k, n, kv_heads, hd, hkv, self.t, c.rope_theta));
         }
-        let ga = Gqa { b: self.b, t: self.t, n_heads: heads, n_kv_heads: kv_heads, head_dim: hd };
-        s.extend(block::gqa_fwd_win(gpu, self.k.gqa_scores_win, ids, &ga, self.window(lp.kind), &sc.q, &sc.k, &sc.v, &sc.scores, &sc.probs, &sc.ctx));
+        // A global layer under native sparse attention reads its selection; every other layer reads its window (or all keys).
+        if self.native_fwd(s, l, recompute).is_none() {
+            let ga = Gqa { b: self.b, t: self.t, n_heads: heads, n_kv_heads: kv_heads, head_dim: hd };
+            s.extend(block::gqa_fwd_win(gpu, self.k.gqa_scores_win, ids, &ga, self.window(lp.kind), &sc.q, &sc.k, &sc.v, &sc.scores, &sc.probs, &sc.ctx));
+        }
         let attended = match &lp.g {
             Some(g) => {
                 self.lin_fwd(s, &sc.xn, g, &sc.g_pre);
@@ -542,7 +557,7 @@ impl Ripple {
     /// the layer's output, `dh_in` receives the gradient of `h_in`. `x0`'s gradient accumulates into `dx0`.
     pub(super) fn layer_bwd(&self, s: &mut Vec<Step>, l: usize, h_in: &DeviceBuffer, dh_out: &DeviceBuffer, dh_in: &DeviceBuffer) {
         let c = &self.cfg.model;
-        let (lp, sc, gpu, ids) = (&self.layers[l], &self.scratch, &self.gpu, &self.k.ids);
+        let (lp, sc, gpu, ids) = (&self.layers[l - self.shard.start], &self.scratch, &self.gpu, &self.k.ids);
         let g = self.grad.as_ref().expect("a backward needs the training build");
         let (n, d, hq, hkv, hd, ff) = (self.rows(), c.hidden_size as u32, c.q_dim() as u32, c.kv_dim() as u32, c.head_dim as u32, c.intermediate_size as u32);
         let (heads, kv_heads) = (c.num_attention_heads as u32, c.num_key_value_heads as u32);
@@ -574,8 +589,10 @@ impl Ripple {
             }
             None => &g.d_ctx2,
         };
-        let ga = Gqa { b: self.b, t: self.t, n_heads: heads, n_kv_heads: kv_heads, head_dim: hd };
-        s.extend(block::gqa_bwd(gpu, ids, &ga, &sc.q, &sc.k, &sc.v, &sc.probs, d_ctx, &g.d_scores, &g.d_q, &g.d_k, &g.d_v));
+        if self.native_bwd(s, l, d_ctx).is_none() {
+            let ga = Gqa { b: self.b, t: self.t, n_heads: heads, n_kv_heads: kv_heads, head_dim: hd };
+            s.extend(block::gqa_bwd(gpu, ids, &ga, &sc.q, &sc.k, &sc.v, &sc.probs, d_ctx, &g.d_scores, &g.d_q, &g.d_k, &g.d_v));
+        }
         if lp.kind == LayerType::Sliding {
             s.push(block::rope_bwd(gpu, ids, &g.d_q, n, heads, hd, hq, self.t, c.rope_theta));
             s.push(block::rope_bwd(gpu, ids, &g.d_k, n, kv_heads, hd, hkv, self.t, c.rope_theta));
@@ -607,17 +624,22 @@ impl Ripple {
         let c = &self.cfg.model;
         let (n, d, v) = (self.rows(), c.hidden_size as u32, c.vocab_size as u32);
         let layers = c.num_hidden_layers;
-        let mut s = vec![self.gpu.step(self.k.embed, &[&self.tokens, self.ps.w("model.embed_tokens.weight"), &self.x0], &[d, n], n * d)];
-        if let Some(scale) = c.embed_scale {
-            s.push(self.gpu.step(self.k.grad_scale, &[&self.x0], &[n * d, f(scale)], n * d));
+        let mut s = Vec::new();
+        // The embedding feeds the stream on the first stage and every layer's value residual on any stage.
+        if self.shard.embed || c.use_valres {
+            s.push(self.gpu.step(self.k.embed, &[&self.tokens, self.ps.w("model.embed_tokens.weight"), &self.x0], &[d, n], n * d));
+            if let Some(scale) = c.embed_scale {
+                s.push(self.gpu.step(self.k.grad_scale, &[&self.x0], &[n * d, f(scale)], n * d));
+            }
         }
-        for l in 0..layers {
-            self.layer_fwd(&mut s, l, self.boundary(l), &self.res[l + 1]);
+        for l in self.shard.start..self.shard.end {
+            self.layer_fwd(&mut s, l, self.boundary(l), &self.res[l + 1], false);
             self.res.round_trip(&self.gpu, &mut s, l + 1);
         }
+        let Some(head) = &self.head else { return s };
         s.push(self.rmsnorm_fwd(&self.res[layers], "model.norm.weight", &self.hs, d, n));
-        let act = self.act(&mut s, &self.hs, d, &[&self.head.w]);
-        self.ops.matmul(&mut s, &self.head.w, &act, &self.logits, 0);
+        let act = self.act(&mut s, &self.hs, d, &[&head.w]);
+        self.ops.matmul(&mut s, &head.w, &act, &self.logits, 0);
         if self.logit_scale != 1.0 {
             s.push(self.gpu.step(self.k.grad_scale, &[&self.logits], &[n * v, f(self.logit_scale)], n * v));
         }
@@ -630,36 +652,46 @@ impl Ripple {
         let g = self.grad.as_ref().expect("a backward needs the training build");
         let (n, d, v) = (self.rows(), c.hidden_size as u32, c.vocab_size as u32);
         let layers = c.num_hidden_layers;
-        let mut s = vec![self.gpu.step_buf(self.k.ce_grad, &self.ce_grad_uniform, &[&self.logits, &self.targets, &g.dlogits], n * v)];
-        if self.logit_scale != 1.0 {
-            s.push(self.gpu.step(self.k.grad_scale, &[&g.dlogits], &[n * v, f(self.logit_scale)], n * v));
+        let mut s = Vec::new();
+        // The head stage starts the chain from the loss; any other receives the gradient of its output boundary.
+        if let Some(head) = &self.head {
+            s.push(self.gpu.step_buf(self.k.ce_grad, &self.ce_grad_uniform, &[&self.logits, &self.targets, &g.dlogits], n * v));
+            if self.logit_scale != 1.0 {
+                s.push(self.gpu.step(self.k.grad_scale, &[&g.dlogits], &[n * v, f(self.logit_scale)], n * v));
+            }
+            let dlogits = match &self.weighted {
+                Some(w) => w.hook(&self.gpu, &mut s, self.k.scale_row, &g.dlogits),
+                None => &g.dlogits,
+            };
+            if self.is_trainable(&head.name) {
+                self.ops.matmul_dw(&mut s, &self.hs, dlogits, n, v, d, self.ps.g(&head.name));
+            }
+            self.ops.matmul_dx(&mut s, &head.w, dlogits, n, &g.d_hs, false);
+            self.res.restore(&self.gpu, &mut s, layers);
+            self.rmsnorm_bwd(&mut s, &self.res[layers], "model.norm.weight", &g.d_hs, &g.dres[layers % 2], d, n);
         }
-        let dlogits = match &self.weighted {
-            Some(w) => w.hook(&self.gpu, &mut s, self.k.scale_row, &g.dlogits),
-            None => &g.dlogits,
-        };
-        if self.is_trainable(&self.head.name) {
-            self.ops.matmul_dw(&mut s, &self.hs, dlogits, n, v, d, self.ps.g(&self.head.name));
-        }
-        self.ops.matmul_dx(&mut s, &self.head.w, dlogits, n, &g.d_hs, false);
-        self.res.restore(&self.gpu, &mut s, layers);
-        self.rmsnorm_bwd(&mut s, &self.res[layers], "model.norm.weight", &g.d_hs, &g.dres[layers % 2], d, n);
-        for l in (0..layers).rev() {
+        for l in (self.shard.start..self.shard.end).rev() {
             if l >= 1 {
                 self.res.restore(&self.gpu, &mut s, l);
             }
             let h_in = self.boundary(l);
-            self.layer_fwd(&mut s, l, h_in, &self.res[l + 1]);
+            self.layer_fwd(&mut s, l, h_in, &self.res[l + 1], true);
             self.layer_bwd(&mut s, l, h_in, &g.dres[(l + 1) % 2], &g.dres[l % 2]);
         }
         // x0 is both layer 0's input and every layer's value source: its gradient is the stream's plus the sum of
-        // the value paths', scaled back through the embedding's multiplier.
-        s.push(self.gpu.step(self.k.axpy, &[&g.dres[0], &g.dx0], &[n * d, f(1.0)], n * d));
-        if let Some(scale) = c.embed_scale {
-            s.push(self.gpu.step(self.k.grad_scale, &[&g.dres[0]], &[n * d, f(scale)], n * d));
-        }
+        // the value paths', scaled back through the embedding's multiplier. A later stage holds its own copy of the
+        // embedding for the value paths alone; the pipeline sums the copies' gradients.
+        let dx0 = if self.shard.embed {
+            s.push(self.gpu.step(self.k.axpy, &[&g.dres[0], &g.dx0], &[n * d, f(1.0)], n * d));
+            &g.dres[0]
+        } else {
+            &g.dx0
+        };
         if self.is_trainable("model.embed_tokens.weight") {
-            s.push(self.gpu.step(self.k.emb_bwd, &[&self.tokens, &g.dres[0], self.ps.g("model.embed_tokens.weight")], &[n, d, v], v * d));
+            if let Some(scale) = c.embed_scale {
+                s.push(self.gpu.step(self.k.grad_scale, &[dx0], &[n * d, f(scale)], n * d));
+            }
+            s.push(self.gpu.step(self.k.emb_bwd, &[&self.tokens, dx0, self.ps.g("model.embed_tokens.weight")], &[n, d, v], v * d));
         }
         s
     }

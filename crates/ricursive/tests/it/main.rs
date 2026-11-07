@@ -19,6 +19,8 @@ mod taps;
 mod tiers;
 mod train_fit;
 mod train_lora;
+mod train_nlsa;
 mod train_parity;
+mod train_pipeline;
 mod train_real;
 mod train_tiers;
