@@ -204,6 +204,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **hashing**: computing from a value, by a fixed rule, a fixed-size number used as the address of the value in a table (giving expected constant-time lookup when the rule spreads the keys) or as a fingerprint that changes if any byte of the value changes. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
+**he-initialization**: drawing the weights of a ReLU layer with variance $2/n_{\mathrm{in}}$, the factor 2 compensating for the ReLU zeroing half of the second moment. *([Initialization: Where Training Starts](v03-neural-networks/09-initialization.md))*
+
 **Hessian**: the symmetric matrix of second partial derivatives of a scalar function; $\mathbf{u}^\top\mathbf{H}\mathbf{u}$ is the curvature along the unit direction $\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **hidden layer**: a layer of units between the input and the output whose values are not given by the data; it computes a new description of the input from which the next layer can compute the answer with a simpler rule. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
@@ -462,6 +464,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **supervised learning**: learning from examples that all carry labels, in order to predict the label of a new example. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
+**symmetry-breaking**: starting the units of a layer with different weights, by random draws, so that their gradients differ; units that start identical stay identical forever. *([Initialization: Where Training Starts](v03-neural-networks/09-initialization.md))*
+
 ## T
 
 **tanh-activation**: the hyperbolic tangent used as a neuron's activation, a smooth step from $-1$ to $1$ equal to $2\sigma(2z) - 1$ with slope $1 - \tanh^2(z)$, centred on zero and saturating for large $|z|$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
@@ -492,6 +496,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **variance**: the expected squared deviation from the mean, $\mathbb{E}[X^2] - \mathbb{E}[X]^2$, which scales by $a^2$ under multiplication by $a$ and adds over independent variables; its square root is the standard deviation. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
+**variance-preservation**: choosing the scale of the weights so that the typical size of activations (and of gradients) is the same in every layer, neither shrinking nor growing with depth. *([Initialization: Where Training Starts](v03-neural-networks/09-initialization.md))*
+
 **vector**: an ordered list of real numbers, read as data (the features of one example) or as an arrow with a length and a direction. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **vector addition**: adding two vectors of the same length entry by entry; as arrows it is the parallelogram rule. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
@@ -499,5 +505,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 ## X
+
+**xavier-initialization**: drawing the weights of a layer with variance $2/(n_{\mathrm{in}} + n_{\mathrm{out}})$, the harmonic mean of the forward-preserving and backward-preserving variances, for units that behave like the identity near zero. *([Initialization: Where Training Starts](v03-neural-networks/09-initialization.md))*
 
 **XOR problem**: the fact that the exclusive-or of two bits, whose two classes sit on opposite diagonals of a square, is not linearly separable and so no single threshold neuron computes it. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*

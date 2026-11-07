@@ -68,4 +68,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 6. [Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md): How do we know a backward pass is right without trusting the person who wrote it?
 7. [Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md): Once we have a gradient, what is the smartest way to use it?
 8. [Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md): Why should the step size change during training, and what do we do when a gradient explodes?
+9. [Initialization: Where Training Starts](v03-neural-networks/09-initialization.md): Why does the random starting point decide whether a deep network trains at all?
 <!-- /contents -->

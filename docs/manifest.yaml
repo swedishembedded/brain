@@ -373,6 +373,7 @@ navigation:
           - docs/book/v03-neural-networks/06-gradient-checking.md
           - docs/book/v03-neural-networks/07-optimizers.md
           - docs/book/v03-neural-networks/08-schedules-and-clipping.md
+          - docs/book/v03-neural-networks/09-initialization.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

@@ -63,8 +63,8 @@ in the curriculum and appear here when they are written.
 8. [Learning-Rate Schedules and Gradient Clipping](08-schedules-and-clipping.md):
    why the step size should change during training, and what to do when a
    gradient explodes.
-9. Initialization: Where Training Starts: why the random starting point
-   decides whether a deep network trains at all.
+9. [Initialization: Where Training Starts](09-initialization.md): why the random
+   starting point decides whether a deep network trains at all.
 10. Normalization Layers: how rescaling activations inside a network makes it
     train faster and more stably.
 11. Regularization in Neural Networks: how to stop a network with millions of
