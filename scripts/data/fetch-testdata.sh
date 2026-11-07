@@ -307,6 +307,8 @@ ORIGIN="tools/goldens/ltxv_{vae,audio,upsampler,duration_head,na_decoder,schedul
 golden_tree "ltxv"         "golden/ltxv"
 ORIGIN="tools/goldens/gemma4_dump_reference.py, against Lightricks/LTX-2.5's gemma4-12b-with-proj text encoder in the store"
 golden_tree "gemma4"       "golden/gemma4"
+ORIGIN="tools/goldens/ricursive_dump_reference.py (tiny needs only the reference modeling code; real needs the partial Ripple-65B checkpoint under testdata/ricursive/ripple-65b-partial/)"
+golden_tree "ricursive"    "golden/ricursive"
 ORIGIN="tools/goldens/timesfm3_dump_reference.py, against google/timesfm-3.0-pytorch in the store (the tiny-config rungs need no checkpoint at all)"
 golden_tree "timesfm3"     "golden/timesfm3"
 

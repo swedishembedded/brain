@@ -1,0 +1,28 @@
+[package]
+name = "brain-ricursive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ripple (RicursiveForCausalLM): hybrid sliding-window/global decoder with value residual, sigmoid-gated attention and clipped SwiGLU. Config, two-way-coverage safetensors import and an exact f32 prefill forward on any brain backend, parity-gated against the reference implementation."
+
+[lib]
+name = "ricursive"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+# `paramstore::upload::Uploader`: the bounded disk-to-device weight mover, so a
+# layer streams into device buffers one chunk at a time with no whole-tensor
+# fp32 copy on the host.
+brain-paramstore.workspace = true
+# `model::rope_scaling::base_inv_freq`: the reciprocal-power frequency table
+# computed in f32 exactly as the reference does.
+brain-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

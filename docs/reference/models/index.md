@@ -156,6 +156,7 @@ surface yet - real, verified code, but not something you can run as a model
 today. Each has its own page with the full status:
 
 - [`instantid`](instantid.md) - identity-conditioned image generation (SDXL)
+- [`ricursive`](ricursive.md) - Ripple-65B, a hybrid sliding-window/global decoder (prefill forward only, no KV cache)
 
 ## Components
 

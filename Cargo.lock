@@ -2608,6 +2608,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-ricursive"
+version = "5.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-testutil",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "brain-rknpu"
 version = "5.1.0"
 dependencies = [

@@ -122,6 +122,7 @@ navigation:
           - docs/reference/models/flux1.md
           - docs/reference/models/t5encoder.md
           - docs/reference/models/gemma4.md
+          - docs/reference/models/ricursive.md
           - docs/reference/models/sdxlunet.md
           - docs/reference/models/controlnet.md
           - docs/reference/models/supir.md

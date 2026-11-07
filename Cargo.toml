@@ -155,6 +155,7 @@ default-members = [
     "crates/wan",
     "crates/ltxv",
     "crates/gemma4",
+    "crates/ricursive",
     "crates/minimaxh3",
     "crates/zipdepth",
     "crates/splat",
@@ -348,6 +349,7 @@ brain-imgpipe = { path = "crates/imgpipe" }
 brain-wan = { path = "crates/wan" }
 brain-ltxv = { path = "crates/ltxv" }
 brain-gemma4 = { path = "crates/gemma4" }
+brain-ricursive = { path = "crates/ricursive" }
 brain-minimaxh3 = { path = "crates/minimaxh3" }
 brain-zipdepth = { path = "crates/zipdepth" }
 brain-splat = { path = "crates/splat" }
