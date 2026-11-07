@@ -23,20 +23,23 @@
 //
 // Dispatch: n invocations.
 //
-// The integration is forward Euler on `tau dv/dt = (v_rest - v) + R*I`:
+// The integration is the exact (exponential) step of the linear membrane
+// equation over one tick. With no synaptic conductance that equation is
+// `tau dv/dt = (v_rest - v) + R*I`, and for a constant input the update
 //
-//     v <- v + a * (v_rest - v + r * (isyn + drive))
+//     v <- v_inf + (v - v_inf) * exp(-a),   v_inf = v_rest + r * I
 //
-// which is worth writing down because it has an EXACT discrete solution for a
-// constant input, not merely an approximate one:
+// is its EXACT solution, not an approximation of it:
 //
-//     v_k = v_inf + (v_0 - v_inf) * (1 - a)^k,   v_inf = v_rest + r*I
+//     v_k = v_inf + (v_0 - v_inf) * exp(-a k)
 //
-// That is what `neuro`'s analytic gate compares against, to the fp32 noise
-// floor rather than to a tolerance. Gradcheck does not apply to a runtime
-// whose learning rule is local rather than differentiated, so an exact
-// closed form for the forward dynamics is the substitute, and it only exists
-// because the discretisation was chosen to have one.
+// That is what `neuro`'s analytic gate (`LifParams::analytic_v`) compares
+// against, to the fp32 noise floor rather than to a tolerance. Gradcheck does
+// not apply to a runtime whose learning rule is local rather than
+// differentiated, so an exact closed form for the forward dynamics is the
+// substitute. (The first version was forward Euler, whose `(1 - a)^k` closed
+// form served the same purpose; conductance synapses made the leak grow with
+// the input and forward Euler unstable, see the conductance step below.)
 //
 // ADAPTATION is the second state variable, and it is what lets a network of
 // these oscillate at all. `adapt` decays geometrically every tick and jumps by
