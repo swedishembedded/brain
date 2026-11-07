@@ -22,11 +22,15 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## C
 
+**catastrophic cancellation**: the loss of leading digits when two nearly equal numbers that carry rounding errors are subtracted; the subtraction is exact but promotes the earlier errors to the leading digits of a much smaller result, losing about $\log_{10}$ of the ratio of the operands to the result. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
+
 **categorical distribution**: a table of $K$ non-negative probabilities summing to $1$, one per outcome of a choice among $K$ possibilities such as the next word; the case $K = 2$ is the Bernoulli distribution. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **central limit theorem**: the statement that the average of many independent draws with finite variance, shifted by the mean and divided by $\sigma/\sqrt{n}$, has a distribution that approaches the standard Gaussian whatever the distribution of the draws. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **chain rule**: the derivative of a composition is the derivative of the outer function, evaluated at the inner value, times the derivative of the inner function: $(f\circ g)'(x) = f'(g(x))\,g'(x)$. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
+**compensated summation**: a way of adding many numbers in which a second variable carries the rounding error of each addition into the next, so that the error of the total stays near $2u$ times the sum of absolute values however many terms there are (Kahan's algorithm). *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **complex number**: a point of the plane written $a + bi$, added like a vector and multiplied by the rule $(ac - bd) + (ad + bc)i$, which turns by the angle of one factor and stretches by its length; $i = (0, 1)$ is a quarter turn and $i^2 = -1$. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
@@ -90,6 +94,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **fast Fourier transform**: an algorithm for the discrete Fourier transform that splits the samples into even and odd indices and combines the two half-size transforms with one twiddle multiplication per output pair, using about $\tfrac N2\log_2 N$ multiplications instead of $N^2$ and giving the same result up to rounding. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
+**floating-point number**: a number stored as a sign, an exponent in a fixed range and a significand of fixed precision $p$ bits, $(-1)^s(1 + f/2^{p-1})2^e$; it keeps the same number of significant digits at every scale, so the absolute gap between neighbours doubles with each binade. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
+
 **forward pass**: computing every value of the computational graph in order, from the inputs to the loss. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **forward-mode differentiation**: computing derivatives by carrying the derivative with respect to one input forward through the graph, which costs one pass per input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
@@ -144,11 +150,15 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **linear map**: a function of vectors that commutes with addition and scaling, and is determined by what it does to the unit vectors. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
+**log-sum-exp**: the function $\log \sum_i e^{z_i}$, computed stably as $m + \log \sum_i e^{z_i - m}$ with $m = \max_i z_i$ so that no exponential overflows and the sum is at least $1$; it is the logarithm of a sum of probabilities given their logarithms, and the denominator of the log of a softmax. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
+
 **logarithm**: the exponent to which a base must be raised to give a number; it is the inverse of the exponent and turns a product into a sum, $\log(uv) = \log u + \log v$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **low-rank approximation**: replacing a matrix by one of small rank, best obtained by keeping the largest singular values; it stores $r(m + n)$ numbers instead of $mn$ and its error is the dropped singular values. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
 ## M
+
+**machine epsilon**: the gap between $1$ and the next larger floating-point number, $2^{1-p}$ ($1.19 \times 10^{-7}$ in 32 bits, $2.22 \times 10^{-16}$ in 64 bits); twice the unit round-off $u = 2^{-p}$, which is the bound on the relative error of one rounding. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **matrix**: a table of numbers with $m$ rows and $n$ columns, which is also a linear map from $n$ numbers to $m$ numbers. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
@@ -184,6 +194,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **orthogonality**: the property of two vectors having dot product 0, that is, being at right angles. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
+**overflow and underflow**: overflow is an exact result too large for the format, stored as infinity; underflow is a nonzero result too small, stored with fewer and fewer significant digits (subnormal numbers) and finally as zero. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
+
 ## P
 
 **paired test**: a comparison of two systems scored on the same examples through the per-example differences, whose standard error is smaller than an unpaired one when the systems' answers are correlated; the paired z-test and the exact sign test are two of them. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
@@ -215,6 +227,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **reverse-mode differentiation**: computing derivatives by carrying a row vector from the single output back through the chain of Jacobians, so one sweep gives the gradient with respect to every input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **rotation matrix**: an orthogonal matrix with determinant $+1$; in the plane $\begin{pmatrix}\cos\theta&-\sin\theta\\\sin\theta&\cos\theta\end{pmatrix}$, and rotations compose by adding their angles. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
+
+**rounding error**: the difference between an exact result and the stored number nearest to it; for round to nearest, ties to even, its relative size is at most $u$ for results inside the normal range, and every arithmetic operation commits one. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **row-major layout**: storing a tensor in memory with the last index changing fastest, so that the element $(i_0, \dots, i_{R-1})$ sits at offset $\sum_k i_k s_k$ with $s_k$ the product of the sizes to its right. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 

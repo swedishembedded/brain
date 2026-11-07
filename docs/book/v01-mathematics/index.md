@@ -73,8 +73,8 @@ in the curriculum and appear here when they are written.
     costs.
 14. [Complex Numbers, Frequencies and the Fourier Transform](14-fourier.md): writing any signal
     as a sum of waves, and why that makes convolution cheap.
-15. Floating Point and Numerical Error: why a computer gets arithmetic
-    slightly wrong, and when slightly wrong becomes completely wrong.
+15. [Floating Point and Numerical Error](15-floating-point.md): why a computer gets
+    arithmetic slightly wrong, and when slightly wrong becomes completely wrong.
 16. Algorithms, Cost and Complexity: predicting how long a computation takes
     and how much memory it needs before running it.
 17. Randomness on a Deterministic Machine: how a deterministic computer

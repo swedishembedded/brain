@@ -41,6 +41,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 12. [Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md): How much can a finite sample tell us, and how do we know whether a difference is real?
 13. [Information, Entropy and Surprise](v01-mathematics/13-information-theory.md): How many bits does it take to describe what we expect to see, and what does it cost to expect the wrong thing?
 14. [Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md): How can any signal be written as a sum of waves, and why does that make convolution cheap?
+15. [Floating Point and Numerical Error](v01-mathematics/15-floating-point.md): Why does a computer get arithmetic slightly wrong, and when does slightly wrong become completely wrong?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 
