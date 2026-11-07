@@ -241,6 +241,17 @@ impl LoraSites for TrainConfig {
     }
 }
 
+impl model::adapter::bank::AdapterServing for TrainConfig {
+    fn attention_leaves(&self) -> Vec<&'static str> {
+        vec!["q_proj", "k_proj", "v_proj", "o_proj"]
+    }
+    /// Ripple's adapters correct all eight linears when trained with the default recipe; a bank offered without
+    /// `--adapter-targets` takes them all.
+    fn default_slots(&self) -> u32 {
+        4
+    }
+}
+
 impl model::ModelConfig for TrainConfig {
     fn param_list(&self) -> Vec<(String, usize)> {
         TrainConfig::param_list(self)

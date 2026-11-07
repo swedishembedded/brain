@@ -54,6 +54,7 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use ricursive::placement::{card_budget, footprint, place, stream_plan, Footprint};
 use ricursive::{LsaCharge, RicursiveConfig, RicursiveEngine, ServeConfig};
 
+use crate::adapter_registry::{AdaptedInstance, AdapterBankSettings, AdapterHost, AdapterRegistry};
 use crate::adapter_release::{LoadedAdapter, ServedBase, RICURSIVE_FAMILY};
 use crate::resident_llm::{generate_spec, on_device};
 
@@ -100,6 +101,8 @@ pub struct RicursiveServeConfig {
     /// `--speculative`: `None`, `Off` and `Auto` decode plainly (the release offers no drafter this engine runs),
     /// `Ngram` drafts by prompt lookup and verifies in one batched step. `Mtp` and `Dflash` are refused.
     pub speculative: Option<SpeculativeMode>,
+    /// `--adapter*`: the bank of adapter slots built beside the base; `None`: none (adapter flags build one).
+    pub adapter_bank: Option<AdapterBankSettings>,
     /// Why the policy could not be honoured, when it could not (the resident then refuses to build, naming it).
     pub refused: Option<String>,
 }
@@ -155,6 +158,8 @@ fn pool_blocks(ctx: u32, max_batch: u32, prefix_slots: u32) -> u32 {
 /// Everything about the checkpoint the sizing reads.
 struct Checkpoint {
     cfg: RicursiveConfig,
+    /// The engine's adapter bank for `knobs.adapter_bank` on this model.
+    bank: Option<model::adapter::bank::AdapterBankConfig>,
     tiers: TierPolicy,
     max_positions: u32,
 }
@@ -198,6 +203,7 @@ fn size(ck: &Checkpoint, knobs: &RicursiveServeConfig, lsa: Option<&Indexer>, ca
         let mut serve = ServeConfig::new(BLOCK_SIZE, pool_blocks(ctx, max_batch, prefix_slots), ctx, max_batch, prefix_slots, PREFILL_CHUNK);
         serve.kv_cache = kv;
         serve.weights = knobs.weights.clone();
+        serve.adapter_bank = ck.bank.clone();
         serve.sparse_attention = lsa.is_some();
         serve
     };
@@ -305,9 +311,9 @@ pub struct RicursiveResident {
     /// `(device index, usable bytes)` of the cards the deployment may be placed over; empty for the host tier.
     cards: Vec<(usize, u64)>,
     sampling: SamplingDefaults,
-    /// The LoRA adapter this model serves on top of the checkpoint, applied at run time beside the resident base
-    /// (`RicursiveEngine::attach_adapter`); `None` for the base itself.
-    adapter: Option<Arc<LoadedAdapter>>,
+    /// The adapter bank this server offers over the base (`--adapter*` flags); `None`: no adapters.
+    bank: Option<AdapterBankSettings>,
+    adapters: Arc<std::sync::OnceLock<Arc<AdapterRegistry>>>,
 }
 
 impl RicursiveResident {
@@ -340,13 +346,14 @@ impl RicursiveResident {
         drop(src);
         let indexer = knobs.sparse_attention.as_deref().map(Indexer::load).transpose().map_err(|e| format!("{id}: --sparse-attention: {e}"))?;
         let cards: Vec<(usize, u64)> = gpus.iter().map(|&(i, total)| (i as usize, card_budget(total).saturating_sub(reserved))).collect();
-        let ck = Checkpoint { cfg: cfg.clone(), tiers, max_positions };
+        let bank = knobs.adapter_bank.as_ref().map(|b| b.bank_config(&ricursive::TrainConfig::new(cfg.clone(), 1))).transpose().map_err(|e| format!("{id}: {e}"))?;
+        let ck = Checkpoint { cfg: cfg.clone(), bank, tiers, max_positions };
         let deployment = size(&ck, knobs, indexer.as_ref(), &cards).map_err(|e| format!("{id}: {e}"))?;
         if let Some(ix) = &indexer {
             deployment.serve.check_indexer(&cfg, ix).map_err(|e| format!("{id}: --sparse-attention: {e}"))?;
         }
         let sampling = SamplingDefaults::from_generation_config(path)?;
-        Ok(RicursiveResident { id: id.to_string(), dir: path.to_path_buf(), cfg, deployment, sparse_attention: knobs.sparse_attention.clone(), ngram: knobs.speculative == Some(SpeculativeMode::Ngram), cards, sampling, adapter: None })
+        Ok(RicursiveResident { id: id.to_string(), dir: path.to_path_buf(), cfg, deployment, sparse_attention: knobs.sparse_attention.clone(), ngram: knobs.speculative == Some(SpeculativeMode::Ngram), cards, sampling, bank: knobs.adapter_bank.clone(), adapters: Arc::default() })
     }
 
     /// The values the defaults chose, as `name value` lines for the startup log.
@@ -362,9 +369,10 @@ impl RicursiveResident {
         }
     }
 
-    /// The base this resident serves, what an adapter release is bound to.
-    pub fn served_base(&self) -> ServedBase {
-        ServedBase::of_family(RICURSIVE_FAMILY, self.dir.clone(), Some(self.id.clone()))
+    /// The registry of the adapters this base offers, made on first use: hashing the base to bind an adapter to it is
+    /// the registry's first act, and a server that offers no adapter never pays it.
+    fn registry(&self) -> &Arc<AdapterRegistry> {
+        self.adapters.get_or_init(|| AdapterRegistry::new(self.bank.clone(), ServedBase::of_family(RICURSIVE_FAMILY, self.dir.clone(), Some(self.id.clone()))))
     }
 
     /// Whether the placement of this resident is over cards (registered with `register_multi`) or on the host.
@@ -372,24 +380,15 @@ impl RicursiveResident {
         !self.cards.is_empty()
     }
 
-    /// This checkpoint served with `loaded` applied: a model of its own under the adapter's id, with its own instance
-    /// (the engine applies one adapter at run time, so an adapter is a second copy of the weights, not a slot in a
-    /// bank). The adapter is checked against this model's configuration here, at startup, and refused by name when it
-    /// does not fit: another architecture, a layer the model does not have, a linear it does not have, rank 0.
-    pub fn with_adapter(&self, loaded: LoadedAdapter) -> Result<RicursiveResident, String> {
-        if self.adapter.is_some() {
-            return Err(format!("{}: is already an adapter model; offer the adapter on the base {}", self.id, self.id));
+    /// The instance of this resident on the cards its placement chose (the host tier without one), built now: what a
+    /// caller outside the executor (the CLI's one-shot action, the SDK's pipeline) runs requests through.
+    pub fn open_instance(&self) -> Result<Box<dyn Instance>, String> {
+        let key = InstanceKey::new(&self.id, "default");
+        if self.cards.is_empty() {
+            return self.activate(&key, Device::Cpu);
         }
-        ricursive::train::adapter::check_fits(&self.cfg, &loaded.adapter).map_err(|e| format!("adapter {}: {e}", loaded.release.path.display()))?;
-        let mut served = self.clone();
-        served.id = loaded.release.id.clone();
-        served.adapter = Some(Arc::new(loaded));
-        Ok(served)
-    }
-
-    /// The release this model serves on top of its checkpoint, if it is an adapter model.
-    pub fn adapter_release(&self) -> Option<&crate::adapter_release::AdapterRelease> {
-        self.adapter.as_ref().map(|a| &a.release)
+        let devices: Vec<Device> = self.estimate_multi(&key).devices().collect();
+        self.activate_multi(&key, &devices)
     }
 
     /// The most tokens a sequence may hold.
@@ -428,14 +427,15 @@ impl RicursiveResident {
             let indexer = Indexer::load(path).map_err(|e| format!("ricursive: --sparse-attention {path}: {e}"))?;
             engine.set_lsa(&indexer).map_err(|e| format!("ricursive: --sparse-attention {path}: {e}"))?;
         }
-        if let Some(adapter) = &self.adapter {
-            engine.attach_adapter(&adapter.adapter).map_err(|e| format!("{}: {e}", self.id))?;
-        }
         let mut sched = Scheduler::new(engine, live);
         if self.ngram {
             sched.set_drafter(Box::new(NgramDrafter::new(NGRAM_ORDER)));
         }
-        Ok(Box::new(ScheduledInstance::new(front, sched, live)))
+        Ok(match &self.bank {
+            // Base and adapter rows of one batch over the one resident copy of the weights.
+            Some(_) => Box::new(AdaptedInstance::new(front, sched, live, self.registry().clone())),
+            None => Box::new(ScheduledInstance::new(front, sched, live)),
+        })
     }
 }
 
@@ -519,13 +519,7 @@ impl Action for GenerateAction {
             let dir = self.state.weights.as_ref().ok_or("ricursive: no model on this machine (brain pull ricursiveAI/Ripple-65B-Preview-NVFP4)")?;
             let gpus = gpu_core::capacity::available_gpus();
             let resident = RicursiveResident::from_hf_dir(&dir.to_string_lossy(), MODEL, &RicursiveServeConfig::default(), &gpus, 0)?;
-            let key = InstanceKey::new(MODEL, "default");
-            *live = Some(if gpus.is_empty() {
-                resident.activate(&key, Device::Cpu)?
-            } else {
-                let devices: Vec<Device> = resident.estimate_multi(&key).devices().collect();
-                resident.activate_multi(&key, &devices)?
-            });
+            *live = Some(resident.open_instance()?);
         }
         live.as_mut().expect("built above").run("generate", inv, progress)
     }
@@ -579,6 +573,30 @@ impl brain_modelstore::resolve::ArchSpec for RicursiveSpec {
     fn validate(&self, assembly: &capability::Assembly) -> Result<(), String> {
         assembly.roles.get("weights").ok_or("ricursive validate: assembly has no weights role")?;
         assembly.roles.get("tokenizer").ok_or("ricursive validate: assembly has no tokenizer role")?;
+        Ok(())
+    }
+}
+
+impl AdapterHost for RicursiveResident {
+    fn adapters(&self) -> &Arc<AdapterRegistry> {
+        self.registry()
+    }
+
+    /// The view of `adapter`, refused by name when it does not fit this model (a layer it does not have, a linear it
+    /// does not have, rank 0): the registry checks the bank's settings, the model's own sites are checked here.
+    fn adapter_view(self: &Arc<Self>, adapter: LoadedAdapter) -> Result<crate::adapter_registry::AdapterView<Self>, String> {
+        ricursive::train::adapter::check_fits(&self.cfg, &adapter.adapter).map_err(|e| format!("adapter {}: {e}", adapter.release.path.display()))?;
+        let lease = self.registry().attach(adapter)?;
+        Ok(crate::adapter_registry::AdapterView::new(self.clone(), lease))
+    }
+
+    fn register_view(self: &Arc<Self>, executor: &residency::Executor, adapter: LoadedAdapter) -> Result<(), String> {
+        let view = Arc::new(self.adapter_view(adapter)?);
+        if self.on_cards() {
+            executor.register_multi(view);
+        } else {
+            executor.register(view);
+        }
         Ok(())
     }
 }

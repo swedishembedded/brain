@@ -31,10 +31,10 @@ scheduler, tokenizer, chat-template, reply-parsing and policy paths.
 | LoRA over a bf16, fp8, nf4 or int8 base, or the ModelOpt NVFP4 release as published; the adapter exports as a PEFT directory | [x] |
 | Pipeline-parallel training over several devices (`model::Pipeline`) | [x] |
 | Native sparse attention training (N-LSA) on the global layers | [x] |
-| `brain serve --adapter FILE`: a trained adapter as a model of its own beside the base (its own copy of the weights) | [x] |
+| Trained adapters served from a bank over ONE resident base (`--adapter`, `--adapter-manifest`, `--watch-adapters`, adapters in the model store, `--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`): one batch mixes the base and several adapters, selected per request by model id; `TextGenerationPipeline::adapter` | [x] |
 | Training stages laid out over the selected cards from the memory plan (`--stages N` for an exact count) | [x] |
 | Loss over the vocabulary a chunk of rows at a time (no `[rows, vocab]` logits) | [x] |
-| Layer-streamed or resident low-precision full fine-tuning of the 65B; a bank of adapter slots in `brain serve`; norms and `value_res_lambda` trained beside an adapter | [ ] |
+| Layer-streamed or resident low-precision full fine-tuning of the 65B; norms and `value_res_lambda` trained beside an adapter | [ ] |
 
 ## Serving it
 
@@ -159,9 +159,11 @@ boundary, in f32 or narrowed, and refuses `keep` by name), `--continue FILE` con
 `--stages N` cuts the model into N pipeline stages (default: one when a device holds it, else the fewest that fit the
 selected cards, printed). `--native-sparse` (with `--lsa-window`, `--lsa-sink`, `--lsa-top-k`, `--lsa-top-p`,
 `--lsa-cluster-block`, `--lsa-window-only`) trains the global layers with native sparse attention on a device that runs
-workgroup-barrier kernels, and is refused by name elsewhere. The trained adapter is served with
-`brain serve --adapter DIR/adapter.safetensors`: it must have been trained on this checkpoint (its card records the
-base) and fit the model, and is offered under its card id (`--adapter-id`). A variant of the adapter Ripple does not train (rank-stabilised, LoRA+, frozen A) is refused by name.
+workgroup-barrier kernels, and is refused by name elsewhere. A trained adapter is served with
+`brain serve --adapter DIR/adapter.safetensors` (or from a watched directory or the model store): it must have been
+trained on this checkpoint (its card records the base) and fit the model, and is offered as a model under its card id
+(`--adapter-id`, a reference of the form `vendor/repo:owner:name:tag`). All adapters and the base share one copy of the
+weights; the adapters' slots on each device are part of the memory plan. A variant of the adapter Ripple does not train (rank-stabilised, LoRA+, frozen A) is refused by name.
 
 Every operation has a backward, checked against finite differences and against PyTorch autograd of the
 released `modeling_ricursive.py` on random weights and on the real layers 0 and 4. The value residual reads the

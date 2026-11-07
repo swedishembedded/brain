@@ -82,19 +82,18 @@
 
 use checkpoint::TensorSource;
 use gpu_core::{DeviceBuffer, Gpu};
-use model::adapter::device::LoraCfg;
+use model::adapter::bank::{AdapterBank, AdapterBankConfig, AdapterError, AdapterInfo, BankedEngine, UnloadStatus, VerifiedAdapter};
 use model::adapter::sites::LoraSites;
 use model::kv_tier::KvTier;
 use model::lsa::binding::{self, Attachment, HeadShape, LsaBinding};
 use model::lsa::capture::{AttentionCapture, LayerCapture};
 use model::lsa::engine::{KeyPools, KvGeometry, LsaStats};
 use model::lsa::indexer::{IndexGeometry, Indexer};
-use model::lora::device_adapter::DeviceAdapter;
 use model::ops::{Ops, TierPolicy};
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
 use model::paged_sparse::PackedKv;
 use model::serve::rows::RowsForward;
-use model::serve::{AdapterId, PagedDecoder, PrefillProgress};
+use model::serve::{AdapterAvailability, AdapterId, PagedDecoder, PrefillProgress};
 use model::shard::StreamPlan;
 use model::snapshot_prefix::{Entry, SnapshotPrefixCache};
 
@@ -102,8 +101,8 @@ use crate::config::{LayerType, RicursiveConfig};
 use crate::layer::LayerWeights;
 use crate::model::embed;
 use crate::ops::pipelines;
-use crate::train::{TrainConfig, LORA_LEAVES};
-use crate::stage::{AdapterPairs, Geometry, HostIndex, RowPlan, Stage, StageHead};
+use crate::train::TrainConfig;
+use crate::stage::{Geometry, HostIndex, RowPlan, Stage, StageHead};
 use crate::weights::{resolve_tiers, Loader, WeightReport};
 
 /// The shortest prompt worth a snapshot: copying a slot's rings for a handful
@@ -145,12 +144,17 @@ pub struct ServeConfig {
     /// score scratch and so no cap on the context a dense read spans; `false` pins the three-kernel triad, the reference
     /// (and what a device without workgroup barriers, the CPU JIT, always runs).
     pub fused_attention: bool,
+    /// Serve adapters from a bank over the one resident base: `slots` adapters on each device, up to `r_max` rank,
+    /// correcting the named linears, each row of a batch by its own adapter ([`RicursiveEngine::enable_adapters`]).
+    /// The bank is part of the footprint ([`crate::placement::footprint`]): its bytes are charged to the stage that holds
+    /// each layer. `None`: no adapters.
+    pub adapter_bank: Option<AdapterBankConfig>,
 }
 
 impl ServeConfig {
     /// A config with the given sizes, weights as stored and an f32 KV cache.
     pub fn new(block_size: u32, num_blocks: u32, max_seq_len: u32, max_batch: u32, prefix_slots: u32, prefill_chunk: u32) -> ServeConfig {
-        ServeConfig { block_size, num_blocks, max_seq_len, max_batch, prefix_slots, prefill_chunk, sparse_attention: false, weights: None, kv_cache: KvTier::F32, dense_keys: None, fused_attention: true }
+        ServeConfig { block_size, num_blocks, max_seq_len, max_batch, prefix_slots, prefill_chunk, sparse_attention: false, weights: None, kv_cache: KvTier::F32, dense_keys: None, fused_attention: true, adapter_bank: None }
     }
 
     fn validate(&self, cfg: &RicursiveConfig) -> Result<(), String> {
@@ -331,6 +335,7 @@ impl RicursiveEngine {
                 extra = binding::kernel_pipelines(&[shape], &[], &packed, false);
             }
         }
+        extra.extend(model::dispatch::LORA_BANK_PIPELINES);
         let table = pipelines(&cfg, &extra);
         let tiers = resolve_tiers(&cfg, src.as_ref(), serve.weights.as_ref());
         let ring_rows = ring_rows(&cfg, serve.prefill_chunk);
@@ -355,7 +360,8 @@ impl RicursiveEngine {
             stages.push(stage);
         }
         tracing::info!(stages = plan.describe(), weights = weight_report.describe(), kv = %serve.kv_cache, "ricursive engine loaded");
-        Ok(RicursiveEngine {
+        let bank = serve.adapter_bank.clone();
+        let mut engine = RicursiveEngine {
             alloc: BlockAllocator::new(serve.num_blocks, serve.block_size),
             ring_rows,
             ring_free: (0..serve.max_batch).rev().collect(),
@@ -370,44 +376,77 @@ impl RicursiveEngine {
             cfg,
             serve,
             src,
-        })
+        };
+        if let Some(cfg) = bank {
+            engine.enable_adapters(cfg).map_err(|e| format!("ricursive serve: {e}"))?;
+        }
+        Ok(engine)
     }
 
-    /// Apply `adapter` (a LoRA written by [`crate::train::Ripple::save_adapter`]) on top of the resident base, at run
-    /// time and without touching the base: after each targeted linear the shared adapter runtime adds
-    /// `scale * (x A^T) B^T`, the arithmetic the trainer differentiated, so the engine answers what the training
-    /// model does. Every pair is checked against this model's adapter sites by name and shape before anything is
-    /// uploaded. Prefixes cached under the previous adapter are dropped (their K and V were computed under it);
-    /// a sequence already started keeps K and V computed without or under the old adapter and must not be continued.
-    pub fn attach_adapter(&mut self, adapter: &DeviceAdapter) -> Result<(), String> {
-        let sites = TrainConfig::new(self.cfg.clone(), 1).lora_sites();
-        crate::train::adapter::check_fits(&self.cfg, adapter).map_err(|e| format!("attach_adapter: {e}"))?;
-        let targets: Vec<String> = LORA_LEAVES.iter().filter(|leaf| sites.iter().any(|s| s.leaf == **leaf && adapter.sites.iter().any(|p| p.base == s.name))).map(|s| (*s).to_string()).collect();
-        let lora = LoraCfg::new(adapter.rank, adapter.alpha, targets);
-        for stage in &mut self.stages {
-            let range = stage.range.clone();
-            let pairs: AdapterPairs<'_> = adapter
-                .sites
-                .iter()
-                .filter(|p| sites.iter().any(|s| s.name == p.base && s.layer.is_some_and(|l| range.contains(&l))))
-                .map(|p| (p.base.clone(), p.a.as_slice(), p.b.as_slice()))
-                .collect();
-            stage.set_adapter(Some((&lora, &pairs)));
+    /// Allocate the adapter bank beside the resident base: `cfg.slots` adapters of up to `cfg.r_max` rank on each
+    /// stage's device, for the sites of that stage's layers. Adapters are then registered with
+    /// [`Self::load_adapter`] and addressed per request through the scheduler (`submit_for_adapter`): one batch holds
+    /// base rows and rows of several adapters, each corrected by its own, over this one copy of the weights.
+    pub fn enable_adapters(&mut self, cfg: AdapterBankConfig) -> Result<(), AdapterError> {
+        if self.stages.iter().any(|s| s.bank().is_some()) {
+            return Err(AdapterError::BadConfig("the adapter bank is already enabled".into()));
         }
-        self.flush_prefix_cache();
+        let rows = self.serve.prefill_chunk.max(self.serve.max_batch);
+        let sites = TrainConfig::new(self.cfg.clone(), 1).lora_sites();
+        let banks = self.stages.iter().map(|s| AdapterBank::new_for_layers(s.gpu(), &sites, cfg.clone(), rows, s.range.clone())).collect::<Result<Vec<_>, _>>()?;
+        for (stage, bank) in self.stages.iter_mut().zip(banks) {
+            *stage.bank_mut() = Some(bank);
+        }
         Ok(())
     }
 
-    /// Serve the base again; prefixes cached under the adapter are dropped.
-    pub fn detach_adapter(&mut self) {
-        for stage in &mut self.stages {
-            stage.set_adapter(None);
-        }
-        self.flush_prefix_cache();
+    /// Device bytes of the adapter bank across the stages; 0 without one.
+    pub fn adapter_bank_bytes(&self) -> u64 {
+        self.stages.iter().filter_map(|s| s.bank()).map(AdapterBank::bytes).sum()
     }
 
-    fn flush_prefix_cache(&mut self) {
-        while let Some(mut gone) = self.cache.evict_lru() {
+    /// Register a verified adapter and return the id the scheduler addresses it by (also its KV namespace, never
+    /// reused). Host memory only: the adapter reaches a slot on every stage when the scheduler first asks about it.
+    /// The adapter is checked against the model first ([`crate::train::adapter::check_fits`]) and against every
+    /// stage's bank.
+    pub fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
+        if self.stages.iter().all(|s| s.bank().is_none()) {
+            return Err(AdapterError::NoBank);
+        }
+        crate::train::adapter::check_fits(&self.cfg, &adapter.adapter).map_err(AdapterError::Incompatible)?;
+        let mut id = None;
+        for stage in &mut self.stages {
+            let got = stage.bank_mut().as_mut().ok_or(AdapterError::NoBank)?.register(adapter.clone())?;
+            if id.replace(got).is_some_and(|first| first != got) {
+                return Err(AdapterError::BadConfig("the stages' banks disagree on an adapter's id".into()));
+            }
+        }
+        id.ok_or(AdapterError::NoBank)
+    }
+
+    /// Unload an adapter on every stage and purge its cached prefixes; while a sequence still runs under it, it only
+    /// stops admitting new ones and the unload completes with the last of them.
+    pub fn unload_adapter(&mut self, id: AdapterId) -> Result<UnloadStatus, AdapterError> {
+        let mut purged = None;
+        for stage in &mut self.stages {
+            purged = stage.bank_mut().as_mut().ok_or(AdapterError::NoBank)?.unload(id)?;
+        }
+        match purged {
+            Some(ns) => {
+                self.purge_namespace(ns);
+                Ok(UnloadStatus::Unloaded)
+            }
+            None => Ok(UnloadStatus::Draining),
+        }
+    }
+
+    /// Every registered adapter, oldest first.
+    pub fn adapters(&self) -> Vec<AdapterInfo> {
+        self.stages.iter().find_map(|s| s.bank()).map_or_else(Vec::new, AdapterBank::infos)
+    }
+
+    fn purge_namespace(&mut self, ns: KvNamespace) {
+        for mut gone in self.cache.evict_namespace(ns) {
             self.drop_table(&mut gone);
         }
     }
@@ -726,8 +765,8 @@ impl RicursiveEngine {
         }
         let start = table.reserve((to - from) as u32, &mut self.alloc).unwrap_or_else(|e| panic!("ricursive serve: {e}"));
         assert_eq!(start as usize, from, "ricursive serve: the table holds {start} rows but the prompt resumes at {from}");
-        let (blocks, ring) = (table.blocks().to_vec(), Self::ring_slot(table));
-        let rows: Vec<RowPlan<'_>> = (from..to).map(|p| RowPlan { token: prompt[p], pos: p as u32, ring, blocks: &blocks }).collect();
+        let (blocks, ring, namespace) = (table.blocks().to_vec(), Self::ring_slot(table), table.kv_namespace());
+        let rows: Vec<RowPlan<'_>> = (from..to).map(|p| RowPlan { token: prompt[p], pos: p as u32, ring, blocks: &blocks, namespace }).collect();
         self.forward_hidden(&rows).unwrap_or_else(|e| panic!("{e}"))
     }
 
@@ -839,9 +878,9 @@ impl RicursiveEngine {
         for (t, &input) in tables.iter_mut().zip(inputs) {
             t.append(&mut self.alloc).unwrap_or_else(|e| panic!("ricursive serve: {e}"));
             assert!(t.len() <= self.serve.max_seq_len, "ricursive serve: sequence outgrew the limit of {} tokens", self.serve.max_seq_len);
-            owned.push((input, t.len() - 1, Self::ring_slot(t), t.blocks().to_vec()));
+            owned.push((input, t.len() - 1, Self::ring_slot(t), t.blocks().to_vec(), t.kv_namespace()));
         }
-        let rows: Vec<RowPlan<'_>> = owned.iter().map(|(token, pos, ring, blocks)| RowPlan { token: *token, pos: *pos, ring: *ring, blocks }).collect();
+        let rows: Vec<RowPlan<'_>> = owned.iter().map(|(token, pos, ring, blocks, namespace)| RowPlan { token: *token, pos: *pos, ring: *ring, blocks, namespace: *namespace }).collect();
         let x = self.forward_hidden(&rows).unwrap_or_else(|e| panic!("{e}"));
         let n = rows.len();
         let logits = self.head(&x, n as u32).1;
@@ -871,7 +910,7 @@ impl RowsForward for RicursiveEngine {
         assert!(self.lsa.is_empty(), "ricursive serve: a verify step cannot run beside latent sparse attention (spec_max_draft is 0 then)");
         let total: usize = rows.iter().map(Vec::len).sum();
         assert!(total <= self.spec_row_budget(), "ricursive serve: a verify of {total} rows exceeds the forward's {}", self.spec_row_budget());
-        let mut plans: Vec<(u32, u32, u32, usize)> = Vec::with_capacity(total);
+        let mut plans: Vec<(u32, u32, u32, usize, KvNamespace)> = Vec::with_capacity(total);
         let mut blocks: Vec<Vec<u32>> = Vec::with_capacity(tables.len());
         for (i, (t, row)) in tables.iter_mut().zip(rows).enumerate() {
             assert!(row.len() <= self.serve.prefill_chunk as usize, "ricursive serve: a verify row run of {} exceeds the ring slack of {}", row.len(), self.serve.prefill_chunk);
@@ -881,9 +920,9 @@ impl RowsForward for RicursiveEngine {
             }
             assert!(t.len() <= self.serve.max_seq_len, "ricursive serve: sequence outgrew the limit of {} tokens", self.serve.max_seq_len);
             blocks.push(t.blocks().to_vec());
-            plans.extend(row.iter().enumerate().map(|(j, &token)| (token, first + j as u32, Self::ring_slot(t), i)));
+            plans.extend(row.iter().enumerate().map(|(j, &token)| (token, first + j as u32, Self::ring_slot(t), i, t.kv_namespace())));
         }
-        let row_plans: Vec<RowPlan<'_>> = plans.iter().map(|&(token, pos, ring, seq)| RowPlan { token, pos, ring, blocks: &blocks[seq] }).collect();
+        let row_plans: Vec<RowPlan<'_>> = plans.iter().map(|&(token, pos, ring, seq, namespace)| RowPlan { token, pos, ring, blocks: &blocks[seq], namespace }).collect();
         let x = self.forward_hidden(&row_plans).unwrap_or_else(|e| panic!("{e}"));
         let k = cands.clamp(1, self.topk_capacity());
         let logits = self.head(&x, total as u32).1;
@@ -921,6 +960,40 @@ impl PagedDecoder for RicursiveEngine {
             return 0;
         }
         self.cache.peek(namespace, prompt).map_or(0, |i| self.cache.entry(i).tokens.len() as u32 / self.serve.block_size)
+    }
+    fn adapter_availability(&mut self, adapter: AdapterId) -> AdapterAvailability {
+        let mut answer = AdapterAvailability::Resident;
+        let mut purge = Vec::new();
+        for stage in &mut self.stages {
+            // Every stage is asked, so each continues its own upload.
+            let Some((got, gone)) = stage.bank_availability(adapter) else { return AdapterAvailability::Unknown };
+            match got {
+                AdapterAvailability::Resident => {}
+                other if answer == AdapterAvailability::Resident => answer = other,
+                _ => {}
+            }
+            purge.extend(gone);
+        }
+        for ns in purge {
+            self.purge_namespace(ns);
+        }
+        answer
+    }
+    fn pin_adapter(&mut self, adapter: AdapterId) {
+        for stage in &mut self.stages {
+            stage.bank_mut().as_mut().expect("pin_adapter on an engine without an adapter bank").pin(adapter);
+        }
+    }
+    fn unpin_adapter(&mut self, adapter: AdapterId) {
+        let mut purge = None;
+        for stage in &mut self.stages {
+            if let Some(ns) = stage.bank_mut().as_mut().and_then(|b| b.unpin(adapter)) {
+                purge = Some(ns);
+            }
+        }
+        if let Some(ns) = purge {
+            self.purge_namespace(ns);
+        }
     }
     fn reclaim_prefix(&mut self, want: u32) -> u32 {
         let before = self.alloc.free_blocks();
@@ -1054,5 +1127,14 @@ impl AttentionCapture for RicursiveEngine {
 impl LsaPools {
     fn key_pools(&self) -> KeyPools<'_> {
         KeyPools { keys: &self.keys, scales: self.scales.as_deref() }
+    }
+}
+
+impl BankedEngine for RicursiveEngine {
+    fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
+        RicursiveEngine::load_adapter(self, adapter)
+    }
+    fn unload_adapter(&mut self, id: AdapterId) -> Result<UnloadStatus, AdapterError> {
+        RicursiveEngine::unload_adapter(self, id)
     }
 }

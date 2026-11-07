@@ -110,6 +110,9 @@ serve other work; CUDA parity and performance follow on the same gates.
        faces through the generic trainer, pipeline and objectives; LoRA/QLoRA through `model::adapter` served by
        the engine; full fine-tuning; N-LSA on the global layers; `brain finetune` and the SDK fine-tuners. Measured
        on the CPU backend and the software Vulkan adapter below; no card has trained it (step 8).
+7c. [x] Adapters served from a bank over one shared base (generalised `model::adapter::bank` / `catalog::adapter_registry`,
+       no Ripple copy): per-request selection by model id, a batch mixing base and several adapters on any number of
+       stages, `--adapter`, `--adapter-manifest`, `--watch-adapters`, model-store adapters, `TextGenerationPipeline::adapter`.
 7b. [x] `brain serve --adapter` for Ripple, training across pipeline stages from the memory plan (generic
        `model::plan_stage_layout`), the chunked head, native sparse attention as a model-agnostic trainer option.
        Open: a bank of adapter slots, norms and `value_res_lambda` beside an adapter (Open items).
@@ -462,7 +465,13 @@ each layer is rebuilt in the backward.
 | SDK `ChatFineTune` (LoRA), `ChatFullFineTune`, `PreferenceFineTune` on a tiny Ripple | loss falls in each; the DPO margin starts at ln 2; an adapter file holds adapter tensors only; a variant this model does not train and a held-out set it does not score are refused by name |
 | training head: loss and gradient a chunk of 64 rows at a time vs the batch whole (2 x 64 rows) | loss identical (3.887103), worst gradient error 1.8e-7; the parity, gradcheck and real-layer gates above run through it |
 | two stages through the SDK trainer (`stages(2)`; the generic layout planner `model::plan_stage_layout`) vs one, LoRA and full fine-tune, CPU | losses before and after equal within 1e-5 and 1e-4 relative, every adapter factor within 1e-4; `brain ricursive finetune --stages 2` prints the layout and trains the one-stage loss |
-| `brain serve --adapter` (catalog resident `RicursiveResident::with_adapter`) vs the training model's forward | the served greedy tokens equal the training model's, the base resident unchanged; a card of another family, another base id, a layer past the depth, a linear the model lacks and rank 0 are each refused by name; HTTP chat over the served adapter in `tests/e2e/ripple.bats` |
+| adapter bank, one batch of a base row and the rows of two adapters over one resident base (`train_bank`), one stage and two | every row equals that row decoded alone (0.0) and the training model's forward with that adapter (worst 4.3e-7); the adapters change the answer (scaled difference 1.0); loading and unloading while serving (eviction among 3 adapters in 2 slots, draining, purging) |
+| the shared serving conformance suite with the bank on (batching, no head-of-line blocking, prefix reuse, speculation, adapters never share KV with the base, embedded prompts apart) | passes |
+| the catalog resident: two adapters and the base from ONE instance (`RicursiveResident`, `AdaptedInstance`), a batch of the three vs each alone vs the training forward's greedy tokens | equal token for token; an adapter of another family, base, layer, linear, rank 0 or above the bank's rank cap, or a server with no bank, is refused by name; the bank's bytes are in the placement |
+| adapters offered, replaced and withdrawn on a running executor (`LiveAdapters`, the data plane of the manifest and the watcher) | answers at once beside the base; a new release under a card id replaces the old; a withdrawn adapter is an unknown model; the base is unchanged |
+| model-store adapters (`discover`) | two adapters of a Ripple base are served as views of one resident, batching with it and budgeted as it |
+| `tests/e2e/ripple.bats`: two adapters (one pinned, one in the store) and the base answer chat requests from one `brain serve`; the instance is built once; an adapter promoted into a `--watch-adapters` directory is listed and answers while the server runs | pass |
+| `TextGenerationPipeline::builder(dir).adapter(file)` over a Ripple | the adapter answers what the training forward does; `attach_adapter` switches to another and `detach_adapter` returns to the base bit for bit, no reload |
 | native sparse attention as a trainer option (`--native-sparse`, `native_sparse_attention`) at a full budget vs dense, software adapter, Ripple and Qwen3 | Ripple LoRA losses (3.9267719, 2.2625196) dense vs (3.9267719, 2.2625198) sparse; Qwen3 equal within 1e-3; refused by name on the CPU backend ("workgroup-barrier") and by architectures that do not declare it |
 | `brain ricursive finetune` / `brain finetune --arch ricursive` end to end (`tests/e2e/ripple.bats`, `--device cpu`) | a LoRA run on the scripted model lowers the loss and writes the adapter, a second run continues it at its own rank and a different rank is refused; a full run writes a checkpoint |
 
@@ -574,11 +583,13 @@ engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
 
 ## Open items for the later steps
 
-- Training and serving of adapters, step 7b. `brain serve --adapter FILE` serves the adapter as a model of its own
-  with its own instance of the weights (the engine applies one adapter at run time): two adapters are two copies of
-  the 65B. A bank of adapter slots with per-row adapter indices in the decode tapes, as the Qwen engines have it, would
-  share one copy and batch base and adapters together; `--adapter-manifest`, `--watch-adapters`, an adapter found in
-  the model store, and the SDK's `TextGenerationPipeline::adapter` are not wired for Ripple.
+- Adapter serving, step 7c. The bank is allocated per stage with `slots` x `rank_cap` x (in + out) f32 per targeted
+  linear (`--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`; Ripple's default is all eight linears, 4 slots of
+  rank 16): 3.75 GiB at 65B for four rank-16 slots on every linear (48 MiB a layer, computed from the released config; 1.9 GiB for two slots, 15 GiB for four at rank 64), charged to the stage that holds each layer; to be measured on a card.
+  Not wired: the grouped correction of the linears that read one activation (q, k, v, g and gate, up: two dispatches per
+  linear instead of per group, `AdapterServing::input_groups`), and KV-clip calibration warnings do not apply (no calibration
+  yet). A sequence running under an adapter keeps its K and V in the adapter's namespace, so a prefix is shared among rows of
+  the same adapter only.
 - Training: norms and `value_res_lambda` (and `g_proj` as a full tensor) train alongside an adapter only in a full
   fine-tune. The adapter policy (`model::adapter`) has no "also train these tensors" notion: an adapter file holds
   factors only, and the engine and the serving path apply factors only. Adding it means a `modules_to_save` list in

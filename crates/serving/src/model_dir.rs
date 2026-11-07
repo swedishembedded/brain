@@ -243,8 +243,11 @@ struct Scan {
     /// The released Qwen3.8 GGUFs built so far, by served id: an adapter found
     /// beside one is served as a view over it ([`Scan::register_adapter`]).
     qwen35_bases: BTreeMap<String, Arc<Qwen35GgufServed>>,
-    /// The Ripple checkpoints registered ([`Discovered::ricursive`]).
+    /// The Ripple checkpoints registered ([`Discovered::ricursive`]), by served id.
     ricursive: Vec<Arc<catalog::resident_ricursive::RicursiveResident>>,
+    ricursive_bases: BTreeMap<String, Arc<catalog::resident_ricursive::RicursiveResident>>,
+    /// The adapter bank each Ripple base that has adapters in the store is built with, by base id.
+    ricursive_banks: BTreeMap<String, AdapterBankSettings>,
     /// Multi-device residents ([`Discovered::multi`]).
     multi: Vec<Arc<dyn MultiDeviceResidentModel>>,
     /// The adapter bank every released Qwen3.8 GGUF is built with: the
@@ -281,7 +284,18 @@ impl Scan {
                 *bank = widen_to_hold(bank.clone(), card, widen);
             }
         }
-        Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), qwen35_bases: BTreeMap::new(), multi: Vec::new(), ricursive: Vec::new(), qwen35_bank, settings: settings.clone(), banks }
+        // A Ripple adapter is trained on all eight linears of a layer by default: a bank nobody sized takes all of them,
+        // grown to the highest rank the store's adapters hold.
+        let mut ricursive_banks: BTreeMap<String, AdapterBankSettings> = BTreeMap::new();
+        for local in adapters {
+            let Some((base, card)) = local.card.as_ref().filter(|c| brain_family(&c.family) == "ricursive").and_then(|c| Some((base_id_of(&c.id)?, c))) else { continue };
+            let operator = settings.ricursive.adapter_bank.clone();
+            let bank = ricursive_banks.entry(base).or_insert_with(|| operator.clone().unwrap_or(AdapterBankSettings { targets: AdapterTargets::ALL, ..Default::default() }));
+            if operator.is_none() {
+                *bank = widen_to_hold(bank.clone(), card, Widen { rank: true, targets: false });
+            }
+        }
+        Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), qwen35_bases: BTreeMap::new(), multi: Vec::new(), ricursive: Vec::new(), ricursive_bases: BTreeMap::new(), ricursive_banks, qwen35_bank, settings: settings.clone(), banks }
     }
 
     /// The serving config for the Qwen3 base `id`: the operator's, plus a
@@ -304,18 +318,20 @@ impl Scan {
         let named = base_id_of(&card.id);
         let on_qwen = named.as_ref().and_then(|b| self.qwen_bases.get(b).cloned());
         let on_qwen35 = named.as_ref().and_then(|b| self.qwen35_bases.get(b).cloned()).or_else(|| self.released_base_of(card));
-        if on_qwen.is_none() && on_qwen35.is_none() {
-            eprintln!("brain: skip {shown} (its base is not served as a Qwen3 or Qwen3.8 model, so adapter {} has nothing to ride on)", card.id);
+        let on_ricursive = named.as_ref().and_then(|b| self.ricursive_bases.get(b).cloned());
+        if on_qwen.is_none() && on_qwen35.is_none() && on_ricursive.is_none() {
+            eprintln!("brain: skip {shown} (its base is not served as a Qwen3, Qwen3.8 or Ripple model, so adapter {} has nothing to ride on)", card.id);
             return;
         }
         if !self.seen.insert(card.id.clone()) {
             eprintln!("brain: skip {shown} (duplicate model id '{}')", card.id);
             return;
         }
-        let kept = match (on_qwen, on_qwen35) {
-            (Some(base), _) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| self.out.push(Arc::new(view))),
-            (None, Some(base)) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| self.multi.push(Arc::new(view))),
-            (None, None) => unreachable!("checked above"),
+        let kept = match (on_qwen, on_qwen35, on_ricursive) {
+            (Some(base), ..) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| self.out.push(Arc::new(view))),
+            (None, Some(base), _) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| self.multi.push(Arc::new(view))),
+            (None, None, Some(base)) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| if base.on_cards() { self.multi.push(Arc::new(view)) } else { self.out.push(Arc::new(view)) }),
+            (None, None, None) => unreachable!("checked above"),
         };
         if let Err(e) = kept {
             self.seen.remove(&card.id);
@@ -390,7 +406,8 @@ impl Scan {
     /// server with cards stages it over the fewest that hold it; one with none runs it on the host tier.
     fn register_ricursive(&mut self, weights: &str, id: &str) {
         let ScanSettings { gpus, reserved, ricursive, .. } = &self.settings;
-        match catalog::resident_ricursive::RicursiveResident::from_hf_dir(weights, id, ricursive, gpus, *reserved) {
+        let knobs = catalog::resident_ricursive::RicursiveServeConfig { adapter_bank: self.ricursive_banks.get(id).cloned().or_else(|| ricursive.adapter_bank.clone()), ..ricursive.clone() };
+        match catalog::resident_ricursive::RicursiveResident::from_hf_dir(weights, id, &knobs, gpus, *reserved) {
             Ok(resident) => {
                 for line in resident.chosen_defaults() {
                     eprintln!("brain: {id}: default {line}");
@@ -398,6 +415,7 @@ impl Scan {
                 eprintln!("brain: {id}: {}", resident.placement());
                 let resident = Arc::new(resident);
                 self.ricursive.push(resident.clone());
+                self.ricursive_bases.insert(id.to_string(), resident.clone());
                 if gpus.is_empty() {
                     self.out.push(resident);
                 } else {
@@ -1563,6 +1581,38 @@ mod tests {
         let resident = residents.iter().find(|r| r.manifest().model == "ricursiveAI/Ripple-65B-Preview").unwrap();
         assert_eq!(resident.manifest().max_context_tokens, Some(1024));
         assert!(resident.manifest().actions.iter().any(|a| a.name == "generate"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Adapters in the store ride on a Ripple the way they ride on a Qwen3: each is a view of the one base resident
+    /// (its instance key, its placement), found beside the base by the id its card names, and the base is built with a
+    /// bank that holds them all.
+    #[test]
+    fn discover_serves_the_stores_ripple_adapters_as_views_of_one_base() {
+        use brain_testutil::adapters::{write_lora_adapter_of, Linear};
+        let root = tmp_dir("discover-ripple-adapters");
+        let repo = root.join("ricursiveAI").join("Ripple-tiny");
+        write_tiny_ripple(&repo);
+        let base_id = "ricursiveAI/Ripple-tiny";
+        let linears = [Linear { base: "model.layers.0.self_attn.q_proj.weight".into(), out: 32, inn: 32 }, Linear { base: "model.layers.1.mlp.down_proj.weight".into(), out: 32, inn: 48 }];
+        let adapter_ids = ["lab-alpha", "lab-beta"].map(|name| format!("{base_id}:{name}:sft:v1"));
+        for (i, (name, id)) in ["lab-alpha", "lab-beta"].iter().zip(&adapter_ids).enumerate() {
+            let dir = repo.join("adapters").join(name).join("sft").join("v1");
+            std::fs::create_dir_all(&dir).unwrap();
+            write_lora_adapter_of("ricursive", &dir.join("adapter.brain.safetensors"), id, base_id, 4 + 2 * i as u32, &linears, 3 + i as u64);
+        }
+        let found = discover(&root, &ScanSettings::default());
+        assert!(found.errors.is_empty(), "{:?}", found.errors);
+        let got = ids(&found.residents);
+        for id in adapter_ids.iter().map(String::as_str).chain([base_id]) {
+            assert!(got.iter().any(|g| g == id), "{id} is not served: {got:?}");
+        }
+        assert_eq!(found.ricursive.len(), 1, "one resident holds the weights, whatever number of adapters");
+        let by_id = |id: &str| found.residents.iter().find(|r| r.manifest().model == id).unwrap();
+        let inv = capability::Invocation::new();
+        let key = by_id(base_id).instance_key("generate", &inv);
+        assert!(adapter_ids.iter().all(|id| by_id(id).instance_key("generate", &inv) == key), "the adapters batch with the base");
+        assert!(adapter_ids.iter().all(|id| by_id(id).estimate(&key).vram == by_id(base_id).estimate(&key).vram), "and are budgeted as the base, whose placement holds the bank");
         let _ = std::fs::remove_dir_all(&root);
     }
 

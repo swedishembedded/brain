@@ -226,12 +226,21 @@ impl TextGenerationOptions {
 /// `brain`'s text-generation pipeline. See this module's doc for how it
 /// tells a local checkpoint path apart from a hub id.
 pub struct TextGenerationPipeline {
-    engine: Engine,
+    engine: Backend,
+}
+
+/// What a pipeline runs: a Qwen3 decoder, or a Ripple through the resident the server runs.
+enum Backend {
+    Qwen(Box<Engine>),
+    Ripple(Box<crate::text_ricursive::RippleText>),
 }
 
 impl std::fmt::Debug for TextGenerationPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TextGenerationPipeline").field("capacity", &self.engine.capacity).field("identity", &self.engine.identity).finish()
+        match &self.engine {
+            Backend::Qwen(e) => f.debug_struct("TextGenerationPipeline").field("capacity", &e.capacity).field("identity", &e.identity).finish(),
+            Backend::Ripple(r) => f.debug_struct("TextGenerationPipeline").field("ricursive", &true).field("identity", &r.identity).finish(),
+        }
     }
 }
 
@@ -265,50 +274,74 @@ impl TextGenerationPipeline {
     /// doc.
     pub fn generate_with(&self, prompt: &str, opts: TextGenerationOptions) -> Result<GeneratedText> {
         let inv = opts.into_invocation(prompt)?;
-        let mut req = qwen3::chat::parse_request_as(&self.engine.tok, &self.engine.format, &inv).map_err(Error::Backend)?;
+        let engine = match &self.engine {
+            Backend::Qwen(engine) => engine,
+            // The resident parses the request, checks it against its context and runs it under the adapter in use.
+            Backend::Ripple(ripple) => return generated_text_from_outcome(ripple.run(inv)?),
+        };
+        let mut req = qwen3::chat::parse_request_as(&engine.tok, &engine.format, &inv).map_err(Error::Backend)?;
 
-        let need = req.ids.len() as u64 + req.bound_to(self.engine.capacity as usize) as u64;
-        if need > self.engine.capacity as u64 {
+        let need = req.ids.len() as u64 + req.bound_to(engine.capacity as usize) as u64;
+        if need > engine.capacity as u64 {
             return Err(Error::Backend(format!(
                 "qwen3: prompt + max_new_tokens ({need} tokens) exceeds this pipeline's built capacity ({} tokens) -- rebuild with .capacity({need}) or larger",
-                self.engine.capacity
+                engine.capacity
             )));
         }
 
         // Nothing here can cancel, so the whole prompt is one prefill chunk:
         // the single prefill call, with no per-chunk readback to pay for.
-        let outcome = self.engine.run(&req, &capability::CancelToken::default(), req.ids.len(), &mut |_| {});
+        let outcome = engine.run(&req, &capability::CancelToken::default(), req.ids.len(), &mut |_| {});
         generated_text_from_outcome(outcome)
     }
 
     /// What this pipeline loaded, by content - see [`crate::chat::ModelIdentity`].
     pub fn identity(&self) -> &crate::chat::ModelIdentity {
-        &self.engine.identity
+        match &self.engine {
+            Backend::Qwen(e) => &e.identity,
+            Backend::Ripple(r) => &r.identity,
+        }
     }
 
     /// The storage tier the decoder's linears were built at: `"fp32"` or
     /// `"int8"`.
     pub fn precision(&self) -> &'static str {
-        self.engine.precision.name()
+        match &self.engine {
+            Backend::Qwen(e) => e.precision.name(),
+            Backend::Ripple(_) => "as stored",
+        }
     }
 
     /// Apply the LoRA adapter at `path` to the resident base from the next
     /// generation on, replacing any adapter already applied - no reload. See
     /// [`crate::ChatPipeline::attach_adapter`].
     pub fn attach_adapter(&mut self, path: impl AsRef<str>) -> Result<()> {
-        self.engine.attach_adapter(path.as_ref())
+        match &mut self.engine {
+            Backend::Qwen(e) => e.attach_adapter(path.as_ref()),
+            Backend::Ripple(r) => r.attach_adapter(path.as_ref()),
+        }
     }
 
     /// Remove the applied adapter: generations run on exactly the base
     /// again. `false` when none was applied. See
     /// [`crate::ChatPipeline::detach_adapter`].
     pub fn detach_adapter(&mut self) -> Result<bool> {
-        self.engine.detach_adapter()
+        match &mut self.engine {
+            Backend::Qwen(e) => e.detach_adapter(),
+            Backend::Ripple(r) => Ok(r.detach_adapter()),
+        }
     }
 
     /// The loaded engine, for the chat surface built on this same load.
+    ///
+    /// # Panics
+    ///
+    /// On a Ripple pipeline: the chat surface is the Qwen3 decoder's; a Ripple chats through `brain serve`.
     pub(crate) fn into_engine(self) -> Engine {
-        self.engine
+        match self.engine {
+            Backend::Qwen(e) => *e,
+            Backend::Ripple(_) => panic!("a Ripple pipeline has no ChatPipeline: chat over Ripple is served by `brain serve` (reasoning, tool calls and the template are the server's)"),
+        }
     }
 }
 
@@ -670,7 +703,17 @@ impl TextGenerationPipelineBuilder {
     pub fn load(self) -> Result<TextGenerationPipeline> {
         let TextGenerationPipelineBuilder { weights, adapter, tokenizer, device, capacity, download_policy, precision } = self;
 
-        crate::device::apply(&device)?;
+        let set = crate::device::resolve(&device)?;
+
+        if crate::text_ricursive::is_ripple(&weights) {
+            if let Some(p) = &precision {
+                return Err(Error::Backend(format!("ricursive: {weights}: precision {} asked for, and a Ripple is held as its checkpoint stores it (the weight format is a serving flag of `brain serve`)", p.name())));
+            }
+            // The cards this load may use, with their sizes; none on the CPU backend or the software adapter.
+            let gpus: Vec<(u32, u64)> = gpu_core::capacity::gpu_totals().into_iter().filter(|(i, _)| set.gpus.contains(i)).collect();
+            let ripple = crate::text_ricursive::RippleText::load(&weights, tokenizer.as_deref(), capacity, &gpus, adapter.as_deref())?;
+            return Ok(TextGenerationPipeline { engine: Backend::Ripple(Box::new(ripple)) });
+        }
 
         let (weights, resolved_tokenizer) = if Path::new(&weights).exists() {
             check_local_weights_architecture(&weights)?;
@@ -752,7 +795,7 @@ impl TextGenerationPipelineBuilder {
             Some(path) => engine.attach_adapter(path)?,
             None => {}
         }
-        Ok(TextGenerationPipeline { engine })
+        Ok(TextGenerationPipeline { engine: Backend::Qwen(Box::new(engine)) })
     }
 }
 

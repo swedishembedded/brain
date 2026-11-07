@@ -12,11 +12,10 @@
 //! to info@swedishembedded.com.
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
-use model::adapter::exec::{AdapterRuntime, ParamAccess};
+use model::adapter::bank::AdapterBank;
 use model::ops::{Ops, Weight};
 
 use crate::config::RicursiveConfig;
-use crate::import::layer_tensor;
 
 pub(crate) const K_RMSNORM: usize = 0;
 pub(crate) const K_ROPE2D: usize = 1;
@@ -75,8 +74,6 @@ pub fn pipelines(cfg: &RicursiveConfig, extra: &[(&'static str, &'static str)]) 
     }
     let mut table: Vec<(&'static str, &'static str)> = OWN_KERNELS.to_vec();
     add(&mut table, model::ops::training_kernel_list());
-    // The adapter runtime of an attached adapter accumulates its correction with these two.
-    add(&mut table, &[("axpy", kernels::AXPY), ("grad_scale", kernels::GRAD_SCALE)]);
     // The fused decode attention is specialised for this model's own head shape (80 query heads over 8 kv heads of
     // 128 is a group of 10), at every KV tier; the paged triad stays the CPU JIT's path and the reference.
     let fused = model::kv_tier::kernel_list_for(&table, &[flash_shape(cfg)]);
@@ -153,23 +150,19 @@ pub(crate) fn value_mix(gpu: &Gpu, s: &mut Vec<Step>, x0: &DeviceBuffer, xn: &De
     out
 }
 
-/// An attached adapter's runtime correction of one layer's linears: after a targeted linear `y = x W^T` the shared
-/// adapter runtime adds `scale * (x A^T) B^T` to `y`, the arithmetic the trainer differentiates, so a trained adapter
-/// serves exactly what it trained.
+/// The adapter bank's correction of one layer's linears: after a targeted linear `y = x W^T` the bank adds each row's own
+/// adapter's `scale * (x A^T) B^T` to `y` (nothing for a base row), the arithmetic the trainer differentiates, in two
+/// dispatches whatever number of distinct adapters the batch holds.
 pub(crate) struct LayerAdapter<'a> {
-    pub rt: &'a AdapterRuntime,
-    pub factors: &'a dyn ParamAccess,
+    pub bank: &'a AdapterBank,
     pub layer: usize,
 }
 
 impl LayerAdapter<'_> {
     /// Add the correction of the linear `leaf` (an HF module leaf, `q_proj` ...) for the activation rows `x`
-    /// (`[rows, k]`) to its output `y` (`[rows, n]`); nothing when the adapter does not target `leaf`.
-    pub(crate) fn correct(&self, ops: &Ops, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, y: &DeviceBuffer, rows: u32, k: u32, n: u32) {
-        if self.rt.hits(leaf) {
-            let name = layer_tensor(self.layer, &crate::train::linear_suffix(leaf));
-            self.rt.forward(ops.tensor_gemm(), s, self.factors, &name, x, y, rows, k, n);
-        }
+    /// (`[rows, k]`) to its output `y` (`[rows, n]`); nothing when the bank does not target `leaf`.
+    pub(crate) fn correct(&self, ops: &Ops, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, y: &DeviceBuffer, rows: u32, _k: u32, n: u32) {
+        self.bank.correct(ops.gpu(), s, self.layer, leaf, x, y, rows, n, 0);
     }
 }
 

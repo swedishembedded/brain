@@ -9,6 +9,7 @@
 //! actually has, and for serving the result. If your team needs expertise in parameter-efficient fine-tuning of
 //! language models then you can procure our services by sending an email to info@swedishembedded.com.
 
+use model::adapter::bank::{AdapterBankConfig, VerifiedAdapter};
 use model::adapter::device::LoraCfg;
 use model::conformance_grad::randomize_adapters;
 use model::paged::BlockTable;
@@ -162,24 +163,26 @@ fn a_trained_adapter_served_by_the_engine_gives_the_training_models_logits() {
     assert_eq!(loaded.rank, 2);
 
     let mut engine = model.engine(serve_config(4, 0));
-    let serve_last = |engine: &mut ricursive::RicursiveEngine| {
-        let mut table = BlockTable::new();
+    let serve_last = |engine: &mut ricursive::RicursiveEngine, ns: model::paged::KvNamespace| {
+        let mut table = BlockTable::with_namespace(ns);
         let hidden = prefill_in_slices(engine, &mut table, &prompt, 5);
         let logits = engine.logits(&hidden);
         engine.release_table(&mut table);
         logits
     };
-    let base_logits = serve_last(&mut engine);
-    engine.attach_adapter(&loaded).unwrap();
-    let served = serve_last(&mut engine);
+    let base_logits = serve_last(&mut engine, model::paged::BASE_KV_NAMESPACE);
+    engine.enable_adapters(AdapterBankConfig::new(1, 2, &LORA_LEAVES)).unwrap();
+    let id = engine.load_adapter(VerifiedAdapter { label: "test/adapter".into(), digest: "sha256:test".into(), adapter: loaded }).unwrap();
+    assert_eq!(engine.adapter_availability(id), model::serve::AdapterAvailability::Resident);
+    engine.pin_adapter(id);
+    let served = serve_last(&mut engine, id.kv_namespace());
+    engine.unpin_adapter(id);
 
     let moved = scaled_error("adapter vs base", &served, &base_logits);
     assert!(moved > 1e-3, "the adapter changes what the engine answers ({moved:.2e})");
     let err = scaled_error("served vs trained", &served, &trained);
-    assert!(err <= 5e-6, "the engine with the adapter attached answers what the training model does: {err:.2e}");
-
-    engine.detach_adapter();
-    assert_eq!(serve_last(&mut engine), base_logits, "detached, the base again, bit for bit");
+    assert!(err <= 5e-6, "the engine's bank answers what the training model does: {err:.2e}");
+    assert_eq!(serve_last(&mut engine, model::paged::BASE_KV_NAMESPACE), base_logits, "a base sequence beside the loaded adapter answers the base, bit for bit");
 }
 
 /// Spec: a refused adapter says why and changes nothing: the wrong rank of a site, an unknown site.
@@ -187,9 +190,10 @@ fn a_trained_adapter_served_by_the_engine_gives_the_training_models_logits() {
 fn an_adapter_that_does_not_fit_the_model_is_refused_by_name() {
     let model = synthetic(&["sliding_attention", "full_attention"], Shape { heads: 4, kv_heads: 2, head_dim: 16 });
     let mut engine = model.engine(serve_config(4, 0));
+    engine.enable_adapters(AdapterBankConfig::new(1, 2, &LORA_LEAVES)).unwrap();
     let bad = model::lora::device_adapter::DeviceAdapter { rank: 2, alpha: 4.0, sites: vec![model::lora::device_adapter::AdapterSite { base: "model.layers.9.self_attn.q_proj.weight".into(), a: vec![0.0; 2 * 64], b: vec![0.0; 64 * 2] }] };
-    let err = engine.attach_adapter(&bad).unwrap_err();
-    assert!(err.contains("model.layers.9.self_attn.q_proj.weight"), "{err}");
+    let err = engine.load_adapter(VerifiedAdapter { label: "bad".into(), digest: "sha256:bad".into(), adapter: bad }).expect_err("a layer the model does not have");
+    assert!(err.to_string().contains("model.layers.9.self_attn.q_proj.weight"), "{err}");
 }
 
 /// Spec: the PEFT export carries every pair under PEFT's names and a config naming the rank, alpha and modules.

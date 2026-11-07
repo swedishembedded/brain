@@ -136,8 +136,8 @@ teardown_file() {
 @test "a Ripple served with a sparse-attention indexer on the software adapter answers the same call" {
   [ -n "${BRAIN_LAVAPIPE_ENV:-}" ] && [ -f "$BRAIN_LAVAPIPE_ENV" ] || skip "set BRAIN_LAVAPIPE_ENV to the lavapipe environment file (.agents/rules/testing.md)"
   mkdir -p "$SCRATCH/corpus"
-  head -c 6000 "$REPO/AGENTS.md" >"$SCRATCH/corpus/a.txt"
-  head -c 6000 "$REPO/docs/reference/models/ricursive.md" >"$SCRATCH/corpus/b.txt"
+  head -c 6000 "$REPO/AGENTS.md" | iconv -c -f UTF-8 -t UTF-8 >"$SCRATCH/corpus/a.txt"
+  head -c 6000 "$REPO/docs/reference/models/ricursive.md" | iconv -c -f UTF-8 -t UTF-8 >"$SCRATCH/corpus/b.txt"
   "$BRAIN" lsa distill --arch ricursive --checkpoint "$SCRATCH/scripted/$MODEL" --corpus "$SCRATCH/corpus" --out "$SCRATCH/indexer.safetensors" \
     --tokens 1024 --train-docs 2 --epochs 1 --queries 8 --top-k 32 --top-p 16 --index-dim 8 --cluster-block 16 --window 16 --sink 2 --device cpu >"$SCRATCH/distill.log" 2>&1 || { cat "$SCRATCH/distill.log" >&3; false; }
   [ -f "$SCRATCH/indexer.safetensors" ]
@@ -179,7 +179,7 @@ write_finetune_data() {
 @test "a LoRA fine-tune trains an adapter over the served checkpoint, and a second run continues it at its own rank" {
   write_finetune_data
   local base="$SCRATCH/scripted/$MODEL"
-  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora" --lora 4 --adapter-id local/ripple-lora --steps 6 --lr 5e-2 --seed 3 --device cpu
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora" --lora 4 --adapter-id "$MODEL:lab:one:v1" --steps 6 --lr 5e-2 --seed 3 --device cpu
   [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
   grep -q '^status: Completed, 6 steps, loss ' <<<"$output"
   [ -s "$SCRATCH/lora/adapter.safetensors" ]
@@ -242,17 +242,47 @@ write_finetune_data() {
   grep -q -- '--lora' <<<"$output"
 }
 
-@test "the trained adapter is served beside its base with --adapter and answers a chat request" {
+@test "two trained adapters and the base are served from one process over one resident base" {
   [ -s "$SCRATCH/lora/adapter.safetensors" ] || skip "the LoRA fine-tune test did not leave an adapter"
-  local port=$((PORT + 4))
+  write_finetune_data
+  local base="$SCRATCH/scripted/$MODEL" one="$MODEL:lab:one:v1" two="$MODEL:lab:two:v1" port=$((PORT + 4))
+  # The second adapter lives in the model store, beside the base, where a scan finds it; the first is pinned with --adapter.
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora-two" --lora 4 --adapter-id "$two" --steps 6 --lr 5e-2 --seed 5 --device cpu
+  [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
+  mkdir -p "$base/adapters/lab/two/v1"
+  cp "$SCRATCH/lora-two/adapter.safetensors" "$base/adapters/lab/two/v1/adapter.brain.safetensors"
   start_server "$SCRATCH/scripted" "$port" --device cpu --adapter "$SCRATCH/lora/adapter.safetensors"
-  grep -q 'brain serve: .* adapter=local/ripple-lora digest=sha256:' "$SCRATCH/serve-$port.log"
-  curl -fsS -H "Authorization: Bearer $(key_of "$port")" "http://127.0.0.1:$port/v1/models" | jq -e --arg a local/ripple-lora --arg m "$MODEL" '[.data[].id] | (index($a) != null and index($m) != null)'
-  local body
-  body=$(jq -n '{model: "local/ripple-lora", messages: [{role: "user", content: "Say hello."}], max_tokens: 8, temperature: 0}')
-  chat "$port" "$body" >"$SCRATCH/adapter-chat.json"
-  jq -e '.model == "local/ripple-lora" and (.usage.completion_tokens > 0) and (.choices[0].finish_reason != null)' "$SCRATCH/adapter-chat.json"
-  # The base is still served beside it.
+  grep -q "brain serve: .* adapter=$one digest=sha256:" "$SCRATCH/serve-$port.log"
+  curl -fsS -H "Authorization: Bearer $(key_of "$port")" "http://127.0.0.1:$port/v1/models" | jq -e --arg a "$one" --arg b "$two" --arg m "$MODEL" '[.data[].id] | (index($a) != null and index($b) != null and index($m) != null)'
+  local id body
+  for id in "$MODEL" "$one" "$two"; do
+    body=$(jq -n --arg m "$id" '{model: $m, messages: [{role: "user", content: "Say hello."}], max_tokens: 8, temperature: 0}')
+    chat "$port" "$body" >"$SCRATCH/chat-$port.json"
+    jq -e --arg m "$id" '.model == $m and (.usage.completion_tokens > 0) and (.choices[0].finish_reason != null)' "$SCRATCH/chat-$port.json"
+  done
+  # One base: the executor built ONE instance (one copy of the weights) for the three models, and placed one base.
+  [ "$(grep -c "brain: built $MODEL\[default\]" "$SCRATCH/serve-$port.log")" -eq 1 ]
+  [ "$(grep -c "brain: $MODEL: host tier" "$SCRATCH/serve-$port.log")" -eq 1 ]
+  ! grep -q "brain: built $one" "$SCRATCH/serve-$port.log"
+}
+
+@test "an adapter promoted into a watched directory is offered by the running server, beside the base" {
+  [ -s "$SCRATCH/lora/adapter.safetensors" ] || skip "the LoRA fine-tune test did not leave an adapter"
+  local port=$((PORT + 5)) one="$MODEL:lab:one:v1" body
+  mkdir -p "$SCRATCH/watch"
+  start_server "$SCRATCH/scripted" "$port" --device cpu --watch-adapters "$SCRATCH/watch"
+  ! curl -fsS -H "Authorization: Bearer $(key_of "$port")" "http://127.0.0.1:$port/v1/models" | jq -e --arg a "$one" '[.data[].id] | index($a) != null'
+  cp "$SCRATCH/lora/adapter.safetensors" "$SCRATCH/watch/adapter-000001.safetensors.part"
+  mv "$SCRATCH/watch/adapter-000001.safetensors.part" "$SCRATCH/watch/adapter-000001.safetensors"
+  local listed=1
+  for _ in $(seq 1 60); do
+    if curl -fsS -H "Authorization: Bearer $(key_of "$port")" "http://127.0.0.1:$port/v1/models" | jq -e --arg a "$one" '[.data[].id] | index($a) != null' >/dev/null; then listed=0; break; fi
+    sleep 0.5
+  done
+  [ "$listed" -eq 0 ] || { cat "$SCRATCH/serve-$port.log" >&3; return 1; }
+  body=$(jq -n --arg m "$one" '{model: $m, messages: [{role: "user", content: "Say hello."}], max_tokens: 8, temperature: 0}')
+  chat "$port" "$body" | jq -e --arg m "$one" '.model == $m and (.usage.completion_tokens > 0)'
   body=$(jq -n --arg m "$MODEL" '{model: $m, messages: [{role: "user", content: "Say hello."}], max_tokens: 8, temperature: 0}')
   chat "$port" "$body" | jq -e '.choices[0].finish_reason != null'
+  [ "$(grep -c "brain: built $MODEL\[default\]" "$SCRATCH/serve-$port.log")" -eq 1 ]
 }

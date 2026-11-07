@@ -14,7 +14,7 @@
 
 use model::adapter::bank::AdapterServing;
 
-use crate::adapter_release::{QWEN35_FAMILY, QWEN_FAMILY};
+use crate::adapter_release::{QWEN35_FAMILY, QWEN_FAMILY, RICURSIVE_FAMILY};
 
 /// What a served model family calls its linears: the leaves an adapter may
 /// correct and the `attention` group, as the family's [`AdapterServing`]
@@ -42,6 +42,7 @@ impl ServedFamily {
         match tag {
             QWEN_FAMILY => Some(ServedFamily::of(QWEN_FAMILY, &qwen3::config::QwenConfig::tiny())),
             QWEN35_FAMILY => Some(ServedFamily::of(QWEN35_FAMILY, &qwen35::config::Qwen35Config::tiny())),
+            RICURSIVE_FAMILY => Some(ServedFamily::of(RICURSIVE_FAMILY, &ricursive::TrainConfig::tiny())),
             _ => None,
         }
     }

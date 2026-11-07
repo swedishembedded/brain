@@ -103,7 +103,7 @@ impl Follow {
 /// for a model the operator did not ask for. A manifest that does not
 /// exist yet offers the base alone until one is published.
 pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&Arc<R>>, executor: &Executor) -> Result<(Option<Follow>, Option<String>), String> {
-    let required = |flag: &str| resident.ok_or_else(|| format!("{flag} needs a served Qwen3 or Qwen3.8 to put the adapter on; name a Qwen3 checkpoint with --checkpoint <dir-or-file>, or serve one released Qwen3.8 GGUF from the model directory"));
+    let required = |flag: &str| resident.ok_or_else(|| format!("{flag} needs a served Qwen3, Qwen3.8 or Ripple to put the adapter on; name a Qwen3 checkpoint with --checkpoint <dir-or-file>, or serve one released Qwen3.8 GGUF from the model directory"));
     match mode {
         AdapterMode::Base => Ok((None, None)),
         AdapterMode::Latest(dir) => Ok((Some(Follow::latest(dir)), None)),
@@ -132,28 +132,6 @@ pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&A
             };
             Ok((Some(Follow { source: FollowSource::Manifest(follower), served }), line))
         }
-    }
-}
-
-/// `--adapter` on a Ripple checkpoint: the release is read once, bound to the served base by the digest or id its card
-/// records, checked against the model's configuration, and registered as a model of its own under its card id, with
-/// its own copy of the weights (the engine applies one adapter at run time; there is no bank of adapter slots in it).
-/// A release manifest and a watched directory are Qwen-only and refused by name.
-fn start_ripple_adapter(mode: AdapterMode, base: &Arc<RicursiveResident>, executor: &Executor) -> Result<(Option<Follow>, Option<String>), String> {
-    match mode {
-        AdapterMode::Base => Ok((None, None)),
-        AdapterMode::Pinned(path) => {
-            let loaded = verify_adapter(&path, &base.served_base())?;
-            let line = loaded.release.serving_line(&loaded.release.id);
-            let served = Arc::new(base.with_adapter(loaded)?);
-            if served.on_cards() {
-                executor.register_multi(served);
-            } else {
-                executor.register(served);
-            }
-            Ok((None, Some(line)))
-        }
-        AdapterMode::Manifest(_) | AdapterMode::Latest(_) => Err("--adapter-manifest and --watch-adapters follow releases on a Qwen3 or Qwen3.8; a Ripple takes a pinned --adapter FILE".to_string()),
     }
 }
 
@@ -192,7 +170,7 @@ impl Host {
         match self {
             Host::Qwen(q) => start_adapter_mode(mode, Some(q), executor),
             Host::Qwen35(g) => start_adapter_mode(mode, Some(g), executor),
-            Host::Ripple(r) => start_ripple_adapter(mode, r, executor),
+            Host::Ripple(r) => start_adapter_mode(mode, Some(r), executor),
             Host::Ambiguous(ids) if mode != AdapterMode::Base => Err(format!("{} models could take the adapter ({}); serve one of them, or put the adapter in the model directory under the id of the one it rides on", ids.len(), ids.join(", "))),
             Host::None | Host::Ambiguous(_) => start_adapter_mode::<QwenResident>(mode, None, executor),
         }
@@ -203,7 +181,8 @@ impl Host {
         match self {
             Host::Qwen(q) => spawn_adapter_watcher(follow, Some(q), executor),
             Host::Qwen35(g) => spawn_adapter_watcher(follow, Some(g), executor),
-            Host::Ripple(_) | Host::None | Host::Ambiguous(_) => spawn_adapter_watcher::<QwenResident>(follow, None, executor),
+            Host::Ripple(r) => spawn_adapter_watcher(follow, Some(r), executor),
+            Host::None | Host::Ambiguous(_) => spawn_adapter_watcher::<QwenResident>(follow, None, executor),
         }
     }
 }

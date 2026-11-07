@@ -86,12 +86,21 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
     let pool_bytes = 2 * kv.plane_bytes(u64::from(serve.num_blocks) * u64::from(serve.block_size), kv_dim, hd);
     let globals = cfg.layer_types.iter().filter(|t| **t == LayerType::Full).count() as u64;
 
+    // The adapter bank is charged to the stage that holds each layer, and its row scratch to every stage.
+    let rows_max = serve.prefill_chunk.max(serve.max_batch);
+    let (bank_by_layer, bank_scratch) = match &serve.adapter_bank {
+        Some(bank) => {
+            let train = crate::train::TrainConfig::new(cfg.clone(), 1);
+            (bank.device_bytes_by_layer(&train, cfg.num_hidden_layers), bank.row_scratch_bytes(rows_max))
+        }
+        None => (Vec::new(), 0),
+    };
     let mut weights = 0u64;
     let per_layer: Vec<u64> = (0..cfg.num_hidden_layers)
         .map(|l| {
             let w: u64 = layer_linears(cfg).into_iter().map(|(suffix, n, k)| Weight::bytes_for(tiers.want(&layer_tensor(l, suffix)), n, k)).sum::<u64>() + small_tensor_bytes(cfg);
             weights += w;
-            w + match cfg.layer_type(l) {
+            w + bank_by_layer.get(l).copied().unwrap_or(0) + match cfg.layer_type(l) {
                 LayerType::Sliding => ring_bytes,
                 LayerType::Full => pool_bytes + lsa.per_global_layer,
             }
@@ -115,7 +124,7 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
     let n_slide = cfg.layer_types.len() as u64 - globals;
     Footprint {
         bytes: LayerBytes { per_layer, embed: 0, head },
-        per_stage: scores + activations + tiles + lsa.per_stage,
+        per_stage: scores + activations + tiles + lsa.per_stage + bank_scratch,
         weights,
         kv_global: pool_bytes * globals,
         kv_rings: ring_bytes * n_slide,

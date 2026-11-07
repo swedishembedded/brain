@@ -950,6 +950,13 @@ pub fn run_serve(args: &[String]) {
             eprintln!("brain serve: {e}");
             std::process::exit(2);
         }
+        // Ripple's trainer adapts all eight linears of a layer by default: without `--adapter-targets` its bank
+        // corrects them all rather than the attention four.
+        let mut ripple_bank = adapter_bank.clone();
+        if !qwen_cfg.adapter_targets_named {
+            ripple_bank.targets = catalog::adapter_registry::AdapterTargets::ALL;
+        }
+        ricursive_cfg.adapter_bank = Some(ripple_bank);
         qwen_cfg.adapter_bank = Some(adapter_bank);
     }
     apply_policy(&policy, &mut qwen_cfg, &mut qwen35_cfg, &mut ricursive_cfg, &mut ocr_cfg);

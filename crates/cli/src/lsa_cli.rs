@@ -363,7 +363,13 @@ fn documents(dir: &str, tok: &dyn Tokenizer, tokens: usize, want: usize) -> Resu
     let mut stream: Vec<u32> = Vec::new();
     let mut docs = Vec::new();
     for f in files {
-        let Ok(text) = std::fs::read_to_string(&f) else { continue };
+        let Ok(bytes) = std::fs::read(&f) else { continue };
+        // A file cut mid-character (`head -c` on UTF-8 text) is still a document: decode what is there and say so,
+        // rather than dropping it and failing later with "holds only N documents".
+        let text = String::from_utf8_lossy(&bytes);
+        if matches!(text, std::borrow::Cow::Owned(_)) {
+            eprintln!("brain lsa: {} is not valid UTF-8; invalid bytes are read as U+FFFD", f.display());
+        }
         stream.extend(tok.encode(&text));
         stream.extend(tok.encode("\n\n"));
         while stream.len() >= tokens {

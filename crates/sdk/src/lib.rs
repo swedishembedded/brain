@@ -305,6 +305,8 @@ mod restore;
 mod segment;
 #[cfg(feature = "text")]
 mod text;
+#[cfg(feature = "text")]
+mod text_ricursive;
 #[cfg(feature = "three-d")]
 mod three_d;
 #[cfg(feature = "text")]

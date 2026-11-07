@@ -301,7 +301,7 @@ fn prompt_lookup_speculation_returns_the_plain_greedy_tokens_and_reports_what_it
 
 /// A trained adapter file over the pulled directory `dir`, written by the trainer itself: random factors on every
 /// linear (a zero B would leave the base's answers alone), and the model that trained it.
-fn trained_adapter(dir: &std::path::Path, path: &std::path::Path) -> ricursive::Ripple {
+fn trained_adapter(dir: &std::path::Path, path: &std::path::Path, card: &str, seed: u64) -> ricursive::Ripple {
     use model::adapter::device::LoraCfg;
     let cfg = config();
     let layers: Vec<usize> = (0..cfg.num_hidden_layers).collect();
@@ -309,8 +309,8 @@ fn trained_adapter(dir: &std::path::Path, path: &std::path::Path) -> ricursive::
     let train = ricursive::TrainConfig::new(cfg, 64).with_lora(LoraCfg::new(4, 8.0, ricursive::train::default_targets()));
     let init = ricursive::train::AdapterInit::fresh(&train, &base, 5); // seed: the factors are overwritten just below
     let model = ricursive::Ripple::build(train, 1, 64, &init, &ricursive::TrainOpts::default(), true).unwrap();
-    model::conformance_grad::randomize_adapters(&model, 9); // seed: any factors serve, the test reads that they are applied
-    model.save_adapter(path.to_str().unwrap(), "local/tiny-adapter", ID, None, None).unwrap();
+    model::conformance_grad::randomize_adapters(&model, seed);
+    model.save_adapter(path.to_str().unwrap(), card, ID, None, None).unwrap();
     model
 }
 
@@ -330,44 +330,61 @@ fn trained_text(model: &ricursive::Ripple, dir: &std::path::Path, prompt: &str, 
     tok.decode(&ids[start..])
 }
 
-/// Spec: `--adapter`'s resident serves a trained adapter as a model of its own that answers what the training model's
-/// forward answers (greedy, token for token), differently from the base; the base resident is unchanged.
+const A: &str = "ricursiveAI/Ripple-tiny:lab:alpha:v1";
+const B: &str = "ricursiveAI/Ripple-tiny:lab:beta:v1";
+
+fn banked(dir: &std::path::Path) -> std::sync::Arc<RicursiveResident> {
+    let knobs = RicursiveServeConfig { adapter_bank: Some(catalog::adapter_registry::AdapterBankSettings { slots: 2, rank_cap: 4, targets: catalog::adapter_registry::AdapterTargets::ALL }), max_batch: Some(4), ..Default::default() };
+    std::sync::Arc::new(resident(dir, &knobs, &[]).expect("a Ripple directory"))
+}
+
+fn on(inv: Invocation, id: &str) -> Invocation {
+    inv.set(catalog::adapter_registry::ADAPTER_PARAM, serde_json::json!(id))
+}
+
+/// Spec: two trained adapters and the base are served from ONE resident instance: a batch holding a request for each
+/// answers every one as it is answered alone, and the adapters' answers are the training model's greedy forward, token for
+/// token, and differ from the base's.
 #[test]
-fn a_trained_adapter_is_served_as_a_model_that_answers_as_the_training_forward_does() {
-    let dir = pulled_dir("adapter");
-    let file = dir.with_extension("adapter.safetensors");
-    let trained = trained_adapter(&dir, &file);
-    let base = resident(&dir, &RicursiveServeConfig::default(), &[]).expect("a Ripple directory");
-    let loaded = catalog::adapter_release::verify_adapter(&file, &base.served_base()).expect("the adapter is bound to this base by id");
-    let adapted = base.with_adapter(loaded).expect("the adapter fits the model");
-    assert_eq!(adapted.manifest().model, "local/tiny-adapter");
+fn two_adapters_and_the_base_are_served_from_one_instance_as_the_training_forward_does() {
+    use catalog::adapter_registry::AdapterHost;
+    let dir = pulled_dir("adapters");
+    let (fa, fb) = (dir.with_extension("a.safetensors"), dir.with_extension("b.safetensors"));
+    let (train_a, train_b) = (trained_adapter(&dir, &fa, A, 9), trained_adapter(&dir, &fb, B, 10));
+    let base = banked(&dir);
+    let (va, vb) = (base.adapter_view(catalog::adapter_release::verify_adapter(&fa, &base.served_base()).unwrap()).unwrap(), base.adapter_view(catalog::adapter_release::verify_adapter(&fb, &base.served_base()).unwrap()).unwrap());
+    assert_eq!((va.id(), vb.id()), (A, B));
     let prompt = "the vault code is 4817";
     gpu_core::devices::with_host_tier(|| {
-        let mut served = adapted.activate(&InstanceKey::new("local/tiny-adapter", "default"), Device::Cpu).expect("the adapter model activates");
-        let mut plain = base.activate(&InstanceKey::new(ID, "default"), Device::Cpu).expect("the base activates");
-        let with = text(served.run("generate", &ask(prompt), &mut |_| {}));
-        let without = text(plain.run("generate", &ask(prompt), &mut |_| {}));
-        assert_eq!(with, trained_text(&trained, &dir, prompt, 6), "the served adapter answers what the training forward does");
-        assert_ne!(with, without, "the adapter changed the answer");
+        let mut one = base.activate(&InstanceKey::new(ID, "default"), Device::Cpu).expect("the base activates once");
+        let alone: Vec<String> = [None, Some(A), Some(B)].iter().map(|id| text(one.run("generate", &id.map_or(ask(prompt), |id| on(ask(prompt), id)), &mut |_| {}))).collect();
+        let together: Vec<String> = one.run_batch("generate", &[ask(prompt), on(ask(prompt), A), on(ask(prompt), B)], &mut |_, _| {}).into_iter().map(text).collect();
+        assert_eq!(together, alone, "a batch answers each request as it is answered alone");
+        assert_eq!(alone[1], trained_text(&train_a, &dir, prompt, 6), "adapter a answers what the training forward does");
+        assert_eq!(alone[2], trained_text(&train_b, &dir, prompt, 6), "adapter b answers what the training forward does");
+        assert!(alone[0] != alone[1] && alone[1] != alone[2], "the adapters changed the answers: {alone:?}");
+        // An adapter that was never offered is an unknown model, not the base's answer.
+        assert!(one.run("generate", &on(ask(prompt), "ricursiveAI/Ripple-tiny:lab:gamma:v1"), &mut |_| {}).is_err());
     });
     std::fs::remove_dir_all(&dir).ok();
-    std::fs::remove_file(&file).ok();
+    std::fs::remove_file(&fa).ok();
+    std::fs::remove_file(&fb).ok();
 }
 
 /// Spec: an adapter that does not fit the base is refused by name before anything is served: another architecture's
-/// card, a layer the model does not have, a linear it does not have, a base it was not trained on.
+/// card, a layer the model does not have, a linear it does not have, rank 0, a base it was not trained on, a rank above the
+/// bank's.
 #[test]
 fn an_adapter_that_does_not_fit_the_base_is_refused_by_name() {
+    use catalog::adapter_registry::AdapterHost;
     let dir = pulled_dir("adapter-refused");
     let file = dir.with_extension("adapter.safetensors");
-    trained_adapter(&dir, &file);
-    let base = resident(&dir, &RicursiveServeConfig::default(), &[]).expect("a Ripple directory");
+    trained_adapter(&dir, &file, A, 9);
+    let base = banked(&dir);
 
-    // Bound to a base by its card: another id is another base.
     let other = catalog::adapter_release::ServedBase::of_family("ricursive", dir.clone(), Some("someone/else".into()));
     let err = catalog::adapter_release::verify_adapter(&file, &other).err().expect("a different base");
     assert!(err.contains("refusing to put it on a different base"), "{err}");
-    // Another architecture's family is not served by this base.
     let qwen = catalog::adapter_release::ServedBase::of_family("qwen", dir.clone(), Some(ID.into()));
     let err = catalog::adapter_release::verify_adapter(&file, &qwen).err().expect("a ricursive adapter on a Qwen base");
     assert!(err.contains("ricursive") && err.contains("qwen"), "{err}");
@@ -375,15 +392,82 @@ fn an_adapter_that_does_not_fit_the_base_is_refused_by_name() {
     let fresh = || catalog::adapter_release::verify_adapter(&file, &base.served_base()).unwrap();
     let mut deeper = fresh();
     deeper.adapter.sites[0].base = "model.layers.9.self_attn.q_proj.weight".into();
-    let err = base.with_adapter(deeper).err().expect("a layer past the model's depth");
-    assert!(err.contains("model.layers.9"), "{err}");
+    assert!(base.adapter_view(deeper).err().expect("a layer past the model's depth").contains("model.layers.9"));
     let mut bogus = fresh();
     bogus.adapter.sites[0].base = "model.layers.0.self_attn.zz_proj.weight".into();
-    let err = base.with_adapter(bogus).err().expect("a linear the model does not have");
-    assert!(err.contains("zz_proj"), "{err}");
+    assert!(base.adapter_view(bogus).err().expect("a linear the model does not have").contains("zz_proj"));
     let mut rankless = fresh();
     rankless.adapter.rank = 0;
-    assert!(base.with_adapter(rankless).err().expect("rank 0").contains("rank"));
+    assert!(base.adapter_view(rankless).err().expect("rank 0").contains("rank"));
+    let narrow = std::sync::Arc::new(resident(&dir, &RicursiveServeConfig { adapter_bank: Some(catalog::adapter_registry::AdapterBankSettings { slots: 1, rank_cap: 2, targets: catalog::adapter_registry::AdapterTargets::ALL }), ..Default::default() }, &[]).unwrap());
+    let err = narrow.adapter_view(catalog::adapter_release::verify_adapter(&file, &narrow.served_base()).unwrap()).err().expect("above the bank's rank cap");
+    assert!(err.contains("--adapter-rank-cap"), "{err}");
+    // A server started without an adapter bank offers no adapter at all.
+    let bare = std::sync::Arc::new(resident(&dir, &RicursiveServeConfig::default(), &[]).unwrap());
+    let loaded = catalog::adapter_release::verify_adapter(&file, &bare.served_base()).unwrap();
+    assert!(bare.adapter_view(loaded).err().expect("no bank").contains("--adapter-slots"));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_file(&file).ok();
+}
+
+/// Spec: the bank is part of the placement: the footprint grows by the bank's bytes, which are the bytes the engine
+/// allocates.
+#[test]
+fn the_adapter_bank_is_charged_in_the_placement() {
+    let dir = pulled_dir("adapter-bytes");
+    let key = InstanceKey::new(ID, "default");
+    let plain = resident(&dir, &RicursiveServeConfig::default(), &[]).unwrap().estimate(&key).vram;
+    let with = banked(&dir).estimate(&key).vram;
+    let bank = model::adapter::bank::AdapterBankConfig::new(2, 4, &["q_proj", "k_proj", "v_proj", "o_proj", "g_proj", "gate_proj", "up_proj", "down_proj"]);
+    let wanted = bank.device_bytes(&ricursive::TrainConfig::new(config(), 1), 256);
+    assert_eq!(with - plain, wanted, "the placement charges the bank's bytes");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn executor(models: Vec<std::sync::Arc<dyn ResidentModel>>) -> residency::Executor {
+    let mut budgets = residency::budget::Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    residency::Executor::start(models, budgets, residency::Policy::default())
+}
+
+fn say(exec: &residency::Executor, model: &str) -> Result<String, String> {
+    exec.run_blocking(model, "generate", ask("the vault code is 4817"), |_| {}).map(|o| o.outputs["text"].as_str().expect("text output").to_string())
+}
+
+/// Spec: adapters come and go while the server runs (the data plane under `--adapter-manifest` and `--watch-adapters`):
+/// one offered after the instance was built answers at once beside the base, one withdrawn is an unknown model and
+/// leaves the engine's bank, and a new release under a card id replaces the one served under it. Ripple's resident
+/// is driven by the same `LiveAdapters` the Qwen residents are.
+#[test]
+fn adapters_are_offered_replaced_and_withdrawn_on_a_running_server() {
+    use catalog::adapter_registry::{AdapterHost, LiveAdapters};
+    let dir = pulled_dir("adapters-live");
+    let files: Vec<std::path::PathBuf> = (0..3).map(|i| dir.with_extension(format!("{i}.safetensors"))).collect();
+    trained_adapter(&dir, &files[0], A, 9);
+    trained_adapter(&dir, &files[1], B, 10);
+    trained_adapter(&dir, &files[2], A, 11); // a second release under the card id of the first
+    let base = banked(&dir);
+    let exec = executor(vec![base.clone()]);
+    let live = LiveAdapters::new(base.clone(), exec.clone());
+    let offer = |file: &std::path::Path| live.serve(catalog::adapter_release::verify_adapter(file, &base.served_base()).unwrap()).expect("the adapter is offered");
+
+    let plain = say(&exec, ID).expect("the base answers");
+    assert!(say(&exec, A).unwrap_err().starts_with("no model"), "an adapter not yet offered is an unknown model");
+    offer(&files[0]);
+    let first = say(&exec, A).expect("an adapter offered to a running server answers");
+    assert_ne!(first, plain);
+    assert_eq!(say(&exec, ID).unwrap(), plain, "and the base is unchanged beside it");
+    offer(&files[1]);
+    let second = say(&exec, B).unwrap();
+    assert_ne!(second, first);
+    // The same card id under a new digest is the new release.
+    offer(&files[2]);
+    let replaced = say(&exec, A).unwrap();
+    assert_ne!(replaced, first, "the new release under the id answers differently");
+    live.retire(B);
+    assert!(say(&exec, B).unwrap_err().starts_with("no model"), "a withdrawn adapter is an unknown model");
+    assert_eq!(say(&exec, A).unwrap(), replaced, "the others are untouched");
+    exec.shutdown();
+    std::fs::remove_dir_all(&dir).ok();
+    files.iter().for_each(|f| drop(std::fs::remove_file(f)));
 }

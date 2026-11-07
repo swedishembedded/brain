@@ -17,6 +17,7 @@ mod synthetic;
 mod fused;
 mod taps;
 mod tiers;
+mod train_bank;
 mod train_fit;
 mod train_lora;
 mod train_nlsa;

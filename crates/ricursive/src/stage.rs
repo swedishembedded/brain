@@ -17,11 +17,10 @@
 
 use std::ops::Range;
 
-use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
-use model::adapter::device::LoraCfg;
-use model::adapter::exec::{AdapterRuntime, ParamAccess};
+use model::adapter::bank::AdapterBank;
+use model::paged::{KvNamespace, BASE_KV_NAMESPACE};
 use model::kv_tier::{FlashDecodeShape, KvAppend, KvKernels, KvLayer, PrefillShape};
 use model::lsa::binding::LsaBinding;
 use model::lsa::engine::LayerBuffers;
@@ -57,6 +56,8 @@ pub(crate) struct RowPlan<'a> {
     pub ring: u32,
     /// The sequence's global blocks.
     pub blocks: &'a [u32],
+    /// The KV namespace of the sequence: the base's, or the adapter it runs under.
+    pub namespace: KvNamespace,
 }
 
 /// The per-row indices of a forward, built once on the host and uploaded to each stage's device.
@@ -71,6 +72,8 @@ pub(crate) struct HostIndex {
     ring_lens: Vec<u32>,
     /// Whether every row is a position of one sequence (a prefill chunk), as the fused prefill kernel requires.
     one_sequence: bool,
+    /// The KV namespace (the adapter, or the base) each row runs under.
+    namespaces: Vec<KvNamespace>,
 }
 
 impl HostIndex {
@@ -87,6 +90,7 @@ impl HostIndex {
             ring_table: vec![0u32; n * w as usize],
             ring_lens: Vec::with_capacity(n),
             one_sequence: rows.iter().all(|r| r.ring == rows[0].ring),
+            namespaces: rows.iter().map(|r| r.namespace).collect(),
         };
         for (i, row) in rows.iter().enumerate() {
             ix.positions.push(row.pos);
@@ -149,28 +153,6 @@ pub(crate) struct StageHead {
     pub lm_head: Weight,
 }
 
-/// The pairs `(base weight name, A [r, in], B [out, r])` of the sites an adapter corrects.
-pub(crate) type AdapterPairs<'a> = Vec<(String, &'a [f32], &'a [f32])>;
-
-/// The factors of an attached adapter on one stage's device, by the tensor names the shared adapter runtime reads.
-pub(crate) struct Factors(HashMap<String, DeviceBuffer>);
-
-impl ParamAccess for Factors {
-    fn weight(&self, name: &str) -> &DeviceBuffer {
-        self.0.get(name).unwrap_or_else(|| panic!("ricursive: the attached adapter has no factor {name}"))
-    }
-
-    fn grad(&self, _name: &str) -> Option<&DeviceBuffer> {
-        None
-    }
-}
-
-/// An adapter applied at run time to this stage's layers, beside the resident base.
-pub(crate) struct StageAdapter {
-    lora: LoraCfg,
-    factors: Factors,
-}
-
 /// See the module doc.
 pub(crate) struct Stage {
     pub ops: Ops,
@@ -181,8 +163,8 @@ pub(crate) struct Stage {
     pub kv: Vec<KvLayer>,
     pub kernels: KvKernels,
     pub head: Option<StageHead>,
-    /// The attached adapter's factors for this stage's layers, applied after every targeted linear.
-    adapter: Option<StageAdapter>,
+    /// The bank of adapters served beside this stage's layers, one adapter per row of a batch.
+    bank: Option<AdapterBank>,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
     /// Attention runs the fused paged flash kernels (no score slabs) rather than the triad.
@@ -216,26 +198,27 @@ impl Stage {
         let max_keys = u64::from(g.dense_keys().max(cfg.sliding_window as u32));
         // The fused kernels keep their partial states per call; only the triad needs the score slabs.
         let scratch = if fused { 1 } else { max_rows * cfg.num_attention_heads as u64 * max_keys };
-        Ok(Stage { scores: gpu.storage(scratch), probs: gpu.storage(scratch), ops, range, layers, kv, kernels, head, fused, adapter: None })
+        Ok(Stage { scores: gpu.storage(scratch), probs: gpu.storage(scratch), ops, range, layers, kv, kernels, head, fused, bank: None })
     }
 
     pub(crate) fn gpu(&self) -> &Gpu {
         self.ops.gpu()
     }
 
-    /// Attach (or, with `None`, detach) an adapter: the factors of the sites in this stage's layers are uploaded to its
-    /// device. `pairs` are `(base weight name, A [r, in], B [out, r])`; the shared adapter runtime applies them.
-    pub(crate) fn set_adapter(&mut self, lora: Option<(&LoraCfg, &AdapterPairs<'_>)>) {
-        self.adapter = lora.map(|(lora, pairs)| {
-            let gpu = self.ops.gpu();
-            let mut map = HashMap::new();
-            for (base, a, b) in pairs {
-                let (an, bn) = model::adapter::device::lora_names(base);
-                map.insert(an, gpu.storage_init("adapter_a", a));
-                map.insert(bn, gpu.storage_init("adapter_b", b));
-            }
-            StageAdapter { lora: lora.clone(), factors: Factors(map) }
-        });
+    /// Whether `id` is usable on this stage now (one quantum of its upload per call), and the namespaces whose
+    /// cached prefixes a completed unload leaves to purge; `None` without a bank.
+    pub(crate) fn bank_availability(&mut self, id: model::serve::AdapterId) -> Option<(model::serve::AdapterAvailability, Vec<KvNamespace>)> {
+        let bank = self.bank.as_mut()?;
+        Some((bank.availability(self.ops.gpu(), id), bank.take_purge()))
+    }
+
+    pub(crate) fn bank(&self) -> Option<&AdapterBank> {
+        self.bank.as_ref()
+    }
+
+    /// The adapter bank of this stage ([`AdapterBank::new_for_layers`]).
+    pub(crate) fn bank_mut(&mut self) -> &mut Option<AdapterBank> {
+        &mut self.bank
     }
 
     pub(crate) fn kv_of(&self, layer: usize) -> &KvLayer {
@@ -289,10 +272,15 @@ impl Stage {
         let mut s: Vec<Step> = Vec::new();
         let mut x = x.clone();
         // The adapter runtime's scratch is sized for this forward's rows.
-        let runtime = self.adapter.as_ref().map(|a| AdapterRuntime::new(gpu, &a.lora, n, q_dim.max(c.intermediate_size as u32).max(hidden)));
+        // A bank corrects each row by its own adapter; a batch of base rows records no correction at all.
+        let banked = self.bank.as_ref().filter(|_| index.namespaces.iter().any(|&ns| ns != BASE_KV_NAMESPACE));
+        if let Some(bank) = banked {
+            let slots: Vec<u32> = index.namespaces.iter().map(|&ns| bank.slot_of(ns)).collect();
+            bank.write_slots(gpu, &slots);
+        }
         for (w, l) in self.layers.iter().zip(self.range.clone()) {
             let layer = self.kv_of(l);
-            let adapter = runtime.as_ref().zip(self.adapter.as_ref()).map(|(rt, a)| LayerAdapter { rt, factors: &a.factors, layer: l });
+            let adapter = banked.map(|bank| LayerAdapter { bank, layer: l });
             let correct = |s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, y: &DeviceBuffer, k: u32, out: u32| {
                 if let Some(a) = &adapter {
                     a.correct(ops, s, leaf, x, y, n, k, out);
