@@ -19,8 +19,8 @@
 // in absolute value, so they are NOT interchangeable for parity.
 //
 // NOT SiLU: `silu.wgsl` is x*sigmoid(x); the 1.702 factor is the whole point.
-// Elementwise over `total`. A matching derivative (`quick_gelu_bwd`) does not
-// exist yet — add it with the CLIP backward, gated by `gradcheck`.
+// Elementwise over `total`. Its derivative is `quick_gelu_bwd.wgsl`, used by
+// the CLIP backward and gated by `gradcheck`.
 
 struct Params {
     total: u32,
