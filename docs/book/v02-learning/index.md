@@ -55,8 +55,8 @@ the curriculum and appear here when they are written.
 5. [Generalization, Overfitting and Honest Evaluation](05-generalization.md): how
    to know that a model has learned the pattern rather than memorized the
    examples.
-6. Measuring Models: Metrics and Calibration: which number says whether a model
-   is good, and why accuracy is so often the wrong one.
+6. [Measuring Models: Metrics and Calibration](06-metrics.md): which number says
+   whether a model is good, and why accuracy is so often the wrong one.
 7. Machine Learning Before Deep Learning: what the field knew before neural
    networks took over, and when those methods are still the right tool.
 8. Experiments, Baselines and Claims: how to run an experiment whose result can

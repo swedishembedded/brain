@@ -1,0 +1,35 @@
+<!-- source-sha256: e829c86a72df4a45932b0e5adfa8a75cfcb274320a0c866609170436e697b94a -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 420" width="560" height="420">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="420" fill="#ffffff"/>
+<line x1="58" y1="374" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="154.8" y1="374" x2="154.8" y2="30" stroke="#edf2f7"/>
+<text x="154.8" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.2</text>
+<line x1="251.6" y1="374" x2="251.6" y2="30" stroke="#edf2f7"/>
+<text x="251.6" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.4</text>
+<line x1="348.4" y1="374" x2="348.4" y2="30" stroke="#edf2f7"/>
+<text x="348.4" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.6</text>
+<line x1="445.2" y1="374" x2="445.2" y2="30" stroke="#edf2f7"/>
+<text x="445.2" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.8</text>
+<line x1="542" y1="374" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="542" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="58" y1="374" x2="542" y2="374" stroke="#edf2f7"/>
+<text x="52" y="378" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="305.2" x2="542" y2="305.2" stroke="#edf2f7"/>
+<text x="52" y="309.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="236.4" x2="542" y2="236.4" stroke="#edf2f7"/>
+<text x="52" y="240.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="167.6" x2="542" y2="167.6" stroke="#edf2f7"/>
+<text x="52" y="171.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="98.8" x2="542" y2="98.8" stroke="#edf2f7"/>
+<text x="52" y="102.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="30" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="484" height="344" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="344"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#a0aec0" stroke-width="1.5" stroke-dasharray="6 4" points="58,374 542,30"/><polyline fill="none" stroke="#c05621" stroke-width="2.2" points="60.28,360.56 125.5,301.8 175.21,291.74 227.24,296.6 275.51,293.73 325.4,254 368.16,284.81 426.07,285.54 473.6,271.53 533.04,182.37"/><circle cx="60.28" cy="360.56" r="3.8" fill="#c05621"/><circle cx="125.5" cy="301.8" r="3.8" fill="#c05621"/><circle cx="175.21" cy="291.74" r="3.8" fill="#c05621"/><circle cx="227.24" cy="296.6" r="3.8" fill="#c05621"/><circle cx="275.51" cy="293.73" r="3.8" fill="#c05621"/><circle cx="325.4" cy="254" r="3.8" fill="#c05621"/><circle cx="368.16" cy="284.81" r="3.8" fill="#c05621"/><circle cx="426.07" cy="285.54" r="3.8" fill="#c05621"/><circle cx="473.6" cy="271.53" r="3.8" fill="#c05621"/><circle cx="533.04" cy="182.37" r="3.8" fill="#c05621"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.2" points="69.76,368.2 126.91,350.38 176.65,327.9 225.96,296.54 274.77,296.52 320.78,268.69 370.86,249.3 421.28,242.95 469.88,184.8 520.58,123.37"/><circle cx="69.76" cy="368.2" r="3.8" fill="#2b6cb0"/><circle cx="126.91" cy="350.38" r="3.8" fill="#2b6cb0"/><circle cx="176.65" cy="327.9" r="3.8" fill="#2b6cb0"/><circle cx="225.96" cy="296.54" r="3.8" fill="#2b6cb0"/><circle cx="274.77" cy="296.52" r="3.8" fill="#2b6cb0"/><circle cx="320.78" cy="268.69" r="3.8" fill="#2b6cb0"/><circle cx="370.86" cy="249.3" r="3.8" fill="#2b6cb0"/><circle cx="421.28" cy="242.95" r="3.8" fill="#2b6cb0"/><circle cx="469.88" cy="184.8" r="3.8" fill="#2b6cb0"/><circle cx="520.58" cy="123.37" r="3.8" fill="#2b6cb0"/><polyline fill="none" stroke="#2f855a" stroke-width="2.2" points="70.85,366.82 127.89,317.12 178.36,288 227.48,265.89 272.15,228.24 322.43,198.75 373.98,163.16 418.18,144.67 469.03,155.09 510.17,51.5"/><circle cx="70.85" cy="366.82" r="3.8" fill="#2f855a"/><circle cx="127.89" cy="317.12" r="3.8" fill="#2f855a"/><circle cx="178.36" cy="288" r="3.8" fill="#2f855a"/><circle cx="227.48" cy="265.89" r="3.8" fill="#2f855a"/><circle cx="272.15" cy="228.24" r="3.8" fill="#2f855a"/><circle cx="322.43" cy="198.75" r="3.8" fill="#2f855a"/><circle cx="373.98" cy="163.16" r="3.8" fill="#2f855a"/><circle cx="418.18" cy="144.67" r="3.8" fill="#2f855a"/><circle cx="469.03" cy="155.09" r="3.8" fill="#2f855a"/><circle cx="510.17" cy="51.5" r="3.8" fill="#2f855a"/><text x="537.16" y="305.2" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c05621" text-anchor="end">raw (a = 1): ECE 0.086</text><text x="537.16" y="329.28" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#2b6cb0" text-anchor="end">scale only, a = 0.30: ECE 0.069</text><text x="537.16" y="353.36" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#2f855a" text-anchor="end">scale and shift: ECE 0.012</text><text x="72.52" y="47.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#718096" text-anchor="start">dashed: perfectly calibrated</text></g>
+<text x="300" y="410" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">mean predicted probability in the bin</text>
+<text x="14" y="202" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 202)">share of defective parts in the bin</text>
+<text x="280" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Reliability diagram, 3000 test parts</text>
+</svg>

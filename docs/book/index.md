@@ -53,6 +53,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 3. [Classification and Logistic Regression](v02-learning/03-logistic-regression.md): How does a model output a probability for a yes-or-no question, and how do we train it?
 4. [Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md): Why are the losses we use the right ones, and what does it mean to prefer simple explanations?
 5. [Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md): How do we know a model has learned the pattern rather than memorized the examples?
+6. [Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md): Which number tells us whether a model is good, and why is accuracy so often the wrong one?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 

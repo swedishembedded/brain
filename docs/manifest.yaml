@@ -356,6 +356,7 @@ navigation:
           - docs/book/v02-learning/03-logistic-regression.md
           - docs/book/v02-learning/04-likelihood.md
           - docs/book/v02-learning/05-generalization.md
+          - docs/book/v02-learning/06-metrics.md
       - title: "Volume III: Building Neural Networks from Nothing"
         pages:
           - docs/book/v03-neural-networks/index.md

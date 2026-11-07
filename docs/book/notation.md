@@ -145,6 +145,7 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\beta$ | in Chapters 6 and 14 only, a rotation angle (as $\alpha$ is); in Volume II the scale $\beta_w$ of a prior |
 | $\mathrm{atol}$, $\mathrm{rtol}$ | absolute and relative tolerance of `close` (the pseudocode page) |
 | $\varepsilon$, $\varepsilon_{\mathrm{mach}}$ | machine epsilon: the gap between 1 and the next larger floating-point number ($2^{1-p}$, which is $2^{-52}$ in 64 bits); Chapter 15 writes $\varepsilon_{\mathrm{mach}}$ |
+| $t$ | time, a training step or the time argument of a function (Chapters 7, 9; Volume II, Chapter 2); in Volume II, Chapters 3 and 6 the probability threshold of a classifier, with $\mathrm{logit}(t)$ the matching threshold on the logit |
 | $u$ | the unit round-off $2^{-p} = \varepsilon_{\mathrm{mach}}/2$: the largest relative error of rounding one number (Chapter 15) |
 | $\mathrm{fl}(x)$ | the floating-point number a computer stores for $x$ (the exact result rounded to the nearest, ties to even) |
 | $\delta$, $\theta_i$ | in Chapter 15, the relative error of one rounding ($\lvert\delta\rvert \le u$) and the accumulated relative error of the $i$-th term of a sum |
@@ -219,6 +220,11 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\mathrm{softplus}(z)$ | $\log(1 + e^z)$, a smooth version of $\max(z, 0)$ (Volume II, Chapter 3) |
 | $\hat{p}$, $\mathbf{S}$ | the predicted probability $\hat{p} = \sigma(z)$ of the label $1$, and the diagonal matrix $\mathrm{diag}(\hat{p}_n(1 - \hat{p}_n))$ in the Hessian of the logistic loss (Volume II, Chapter 3) |
 | $\mathrm{softmax}(\mathbf{z})_i$ | $e^{z_i} / \sum_j e^{z_j}$ |
+| $\mathrm{TP}$, $\mathrm{FP}$, $\mathrm{FN}$, $\mathrm{TN}$ | in Volume II, Chapter 6, the numbers of true positives, false positives, false negatives and true negatives among the decisions of a classifier at one threshold $t$ (a positive is a decision for the label $1$) |
+| $n_+$, $n_-$, $z_i^{+}$, $z_j^{-}$ | the numbers of examples with the label $1$ and with the label $0$, and the scores (usually logits) of the $i$-th of the first and the $j$-th of the second (Volume II, Chapter 6) |
+| $\mathrm{TPR}$, $\mathrm{FPR}$, $F_1$, $\mathrm{AUC}$, $\mathrm{AP}$ | true positive rate $\mathrm{TP}/n_+$ (the recall), false positive rate $\mathrm{FP}/n_-$, the F1 score $2\mathrm{TP}/(2\mathrm{TP} + \mathrm{FP} + \mathrm{FN})$, the area under the ROC curve, and the average precision, the step-wise area under the precision-recall curve (Volume II, Chapter 6) |
+| $\mathrm{ECE}$ | the expected calibration error, $\sum_b \frac{n_b}{N}\lvert\mathrm{freq}_b - \mathrm{conf}_b\rvert$ over bins $b$ of the predicted probability (Volume II, Chapter 6) |
+| $a$, $b$, $c_{\mathrm{FP}}$, $c_{\mathrm{FN}}$ | in Volume II, Chapter 6, the scale and the shift of a recalibrated probability $\sigma(a z + b)$ (the temperature is $1/a$), and the costs of one false positive and of one false negative |
 
 ## Symbols with more than one meaning
 
