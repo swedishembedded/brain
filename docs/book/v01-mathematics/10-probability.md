@@ -55,21 +55,28 @@ before reading on.
 
 We want a number between $0$ and $1$ for "how likely". The most honest source is
 repetition: do the experiment many times and count. Flip a fair coin and record
-the fraction of heads as the flips accumulate (the random choices here come from
-a frozen generator, so the table is reproducible):
+the fraction of heads as the flips accumulate. The random choices come from the
+book's own generator, SplitMix64, which Chapter 17 builds; `rng.uniform()` is its
+call for a real number in $[0, 1)$. Every simulated table in this book prints the
+generator's 64-bit seed and the order of its draws, so that once you have the
+generator you reproduce the table digit for digit (the seed is the first eight
+bytes of the SHA-256 hash of the example's name, read as a big-endian number, but
+you only need the printed value):
 
 <!-- worked: probability.coin_frequencies -->
+Generator: the book's SplitMix64, seed 0x60a34a2606b2623c (6963490976026485308). Flip k is the k-th call of `rng.uniform()` and counts as heads when it is below 0.5; one run of 100,000 flips, read off at the flip counts listed.
+
 | flips | heads | heads / flips | distance from 0.5 |
 |---|---:|---:|---:|
-| 10 | 4 | 0.4000 | 0.1000 |
-| 100 | 46 | 0.4600 | 0.0400 |
-| 1,000 | 466 | 0.4660 | 0.0340 |
-| 10,000 | 4971 | 0.4971 | 0.0029 |
-| 100,000 | 49993 | 0.4999 | 0.0001 |
+| 10 | 6 | 0.6000 | 0.1000 |
+| 100 | 58 | 0.5800 | 0.0800 |
+| 1,000 | 511 | 0.5110 | 0.0110 |
+| 10,000 | 4965 | 0.4965 | 0.0035 |
+| 100,000 | 49941 | 0.4994 | 0.0006 |
 <!-- /worked -->
 
 After ten flips the fraction is far from one half; after a hundred thousand it is
-within a few parts in ten thousand. The fraction does not jump to $0.5$ and stay
+within $0.001$. The fraction does not jump to $0.5$ and stay
 there, and no single row proves anything. But the pattern is stable enough to
 define the thing we are after: the **probability** of an outcome is the number
 that its long-run relative frequency settles towards. Later in this chapter we
@@ -587,16 +594,19 @@ monitor) faces this arithmetic, and a high accuracy figure reported without the
 base rate is meaningless.
 
 **Updating again.** The posterior of one piece of evidence is the prior for the
-next. Suppose a second detector, whose errors are independent of the first one's
-once we know the truth, also raises an alarm:
+next. Suppose a second and then a third detector, each with the same $90\%$ and $10\%$
+rates and with errors independent of the others' once we know the truth, also raise
+an alarm:
 
 <!-- worked: probability.bayes_two_detectors -->
+Prior 0.01; each detector has sensitivity 0.9 and false-alarm rate 0.1, and they err independently given the truth.
+
 | state | P(defective) |
 |---|---:|
 | before any alarm | 0.0100 |
-| after alarm 1 | 0.0833 |
-| after alarm 2 | 0.4500 |
-| after alarm 3 | 0.8804 |
+| after alarm 1 (detector 1) | 0.0833 |
+| after alarm 2 (detector 2) | 0.4500 |
+| after alarm 3 (detector 3) | 0.8804 |
 <!-- /worked -->
 
 Each alarm multiplies the odds of "defective against good" by the same factor.
@@ -651,26 +661,30 @@ The expectation of one die is $3.5$, a value the die can never show: the
 expectation is a centre of mass of the table, not a likely outcome. For two dice
 it is exactly $7$. The word "expectation" suggests a prediction, but it is better
 read as a **long-run average**. Roll two dice $n$ times and average the sums; as
-$n$ grows the average should approach $7$. Three independent runs, each drawn from
-its own frozen random stream:
+$n$ grows the average should approach $7$. Three independent runs (the same experiment
+as the table below, each from its own generator seeded from the names
+`probability.running_average_figure.0` to `.2`):
 
 ![Three jagged lines, the running average of the sum of two dice over 2000 rolls. They start far from 7, swing widely for the first few hundred rolls, and then flatten onto the dashed line at 7.](img/running-average.svg)
 
 <!-- worked: probability.long_run_average -->
+Generator: the book's SplitMix64, seed 0x2ef6cf49c8ba6c36 (3384120085822729270). Roll k uses two calls of `rng.integer(6)`, each plus 1: first the first die, then the second; the sum of the two is the roll. One run of 100,000 rolls, read off at the roll counts listed.
+
 | rolls | average of the sum | distance from 7 |
 |---|---:|---:|
-| 10 | 7.0000 | 0.0000 |
-| 100 | 7.1400 | 0.1400 |
-| 1,000 | 7.0600 | 0.0600 |
-| 10,000 | 7.0671 | 0.0671 |
-| 100,000 | 7.0103 | 0.0103 |
+| 10 | 8.0000 | 1.0000 |
+| 100 | 6.9000 | 0.1000 |
+| 1,000 | 7.0210 | 0.0210 |
+| 10,000 | 7.0109 | 0.0109 |
+| 100,000 | 7.0057 | 0.0057 |
 <!-- /worked -->
 
 The reason is visible in the definition. If the value $x$ occurs in a fraction
 $p(x)$ of the rolls in the long run, then the average over $n$ rolls is
 $\sum_x x\,(\text{count of } x)/n \to \sum_x x\,p(x)$. The convergence is not
-monotone (the run at $1000$ rolls is closer than the one at $10000$ in the table),
-and the figure shows that the early swings are large. How quickly the error
+guaranteed to be monotone (the table's run happens to get closer at every row,
+but the figure's three runs wander back and forth), and the figure shows that the
+early swings are large: ten rolls gave $8.0$ here. How quickly the error
 shrinks is the business of the variance, below.
 
 **Expectation of a function.** The average of $g(X)$ over the outcomes is
@@ -761,10 +775,11 @@ $$
 = \Bigl(\sum_x x\,p(x)\Bigr)\Bigl(\sum_y y\,p(y)\Bigr) = \mathbb{E}[X]\,\mathbb{E}[Y].
 $$
 
-The converse fails: the last two rows of the independence table are independent pairs, and a
-computation like the one above would find equal products there. That equal
-products imply independence is not true in general; the next chapter returns to
-the gap. The asymmetry, that sums are always simple and products need
+The converse fails: equal products do not imply independence. Let $X$ be $-1$, $0$ or
+$1$ with probability $1/3$ each and $Y = X^2$. Then $\mathbb{E}[X] = 0$ and
+$\mathbb{E}[XY] = \mathbb{E}[X^3] = (-1 + 0 + 1)/3 = 0 = \mathbb{E}[X]\,\mathbb{E}[Y]$, yet
+$Y$ is determined by $X$: $P(X = 1, Y = 0) = 0$ while $P(X = 1)\,P(Y = 0) = 1/9$. The
+next chapter returns to the gap. The asymmetry, that sums are always simple and products need
 independence, is the key to the next section.
 
 ## Variance
@@ -892,13 +907,15 @@ Check it by simulation: draw $4000$ such means for each $n$ and measure their
 variance.
 
 <!-- worked: probability.mean_variance_shrinks -->
+Generator: the book's SplitMix64, seed 0x3cbfc3b94f57ea13 (4377432563494939155). One generator for the whole table. A roll is `rng.integer(6) + 1`. Rows in the order n = 1, 4, 16, 64, 256; within a row 4000 means in turn, each the average of its n rolls drawn in turn. Variance of the means: average squared deviation from their average (divisor 4000).
+
 | rolls per mean n | average of the means | variance of the means | Var[X] / n | std of the means |
 |---|---:|---:|---:|---:|
-| 1 | 3.5048 | 2.9650 | 2.9167 | 1.7219 |
-| 4 | 3.4711 | 0.7115 | 0.7292 | 0.8435 |
-| 16 | 3.5019 | 0.1819 | 0.1823 | 0.4265 |
-| 64 | 3.5001 | 0.0450 | 0.0456 | 0.2122 |
-| 256 | 3.5011 | 0.0119 | 0.0114 | 0.1092 |
+| 1 | 3.4515 | 2.8896 | 2.9167 | 1.6999 |
+| 4 | 3.5248 | 0.7546 | 0.7292 | 0.8687 |
+| 16 | 3.4849 | 0.1814 | 0.1823 | 0.4259 |
+| 64 | 3.5004 | 0.0475 | 0.0456 | 0.2180 |
+| 256 | 3.5011 | 0.0113 | 0.0114 | 0.1061 |
 <!-- /worked -->
 
 The averages cluster at $3.5$ in every row, since the expectation of the mean is
@@ -959,7 +976,7 @@ from a distribution given as a table. One uniform number is enough: lay the
 probabilities end to end on $[0, 1)$ and see which segment the number lands in.
 
 ```text
-function sample_discrete(p: array<real>[K], rng) -> int:
+function sample_discrete(p: array<real>[K], rng: Generator) -> int:
     require K > 0 and min(p) >= 0.0 and close(sum(p), 1.0, rtol=1e-6, atol=1e-6)
     u = rng.uniform()               # u in [0, 1)
     acc = 0.0
@@ -975,11 +992,13 @@ $0.99999\ldots$, and a $u$ above it must still return a valid index rather than
 fall off the end. Check the sampler by counting:
 
 <!-- worked: probability.sampling_a_table -->
+Generator: the book's SplitMix64, seed 0xe8d9d1dc21d0d0bc (16778672630135836860). Each of the 20,000 draws is one `rng.uniform()` passed to the `sample_discrete` rule (first symbol whose cumulative probability exceeds u).
+
 | symbol | p | cumulative p | draws of 20,000 | frequency |
 |---|---:|---:|---:|---:|
-| a | 0.50 | 0.50 | 10027 | 0.5013 |
-| b | 0.30 | 0.80 | 6013 | 0.3006 |
-| c | 0.20 | 1.00 | 3960 | 0.1980 |
+| a | 0.50 | 0.50 | 9888 | 0.4944 |
+| b | 0.30 | 0.80 | 6091 | 0.3045 |
+| c | 0.20 | 1.00 | 4021 | 0.2011 |
 <!-- /worked -->
 
 The frequencies are close to $p$, differing by amounts consistent with the
@@ -997,8 +1016,8 @@ $\sigma/\sqrt{n}$ rule. Chapter 17 builds the uniform generator itself.
 - *Treating a density as a probability.* A density may exceed $1$ and depends on
   units; only its integral over an interval is a probability.
 - *Reading a small sample's average as the expectation.* The running average is
-  within about $\sigma/\sqrt{n}$ of the expectation, no closer: the second row of
-  the long-run table is $0.14$ away.
+  within about $\sigma/\sqrt{n}$ of the expectation, no closer: the first row of
+  the long-run table, ten rolls, is $1.0$ away.
 - *Conditioning on an impossible event.* The division by $P(B)$ has no meaning at
   $0$; code that reaches it should stop.
 
@@ -1082,8 +1101,8 @@ Answers are at the end of the chapter.
 5. **[Calculate]** Two dice: let $X$ be the larger of the two values and $Y$ the smaller. Tabulate $p(x, y)$, find both marginals, check $\mathbb{E}[X] + \mathbb{E}[Y] = 7$, and decide whether $X$ and $Y$ are independent.
 6. **[Calculate]** Prove that if $A$ and $B$ are independent then so are $A$ and $B^c$ (hint: $P(A) = P(A \cap B) + P(A \cap B^c)$).
 7. **[Implement]** Implement the counting functions behind the spam table: the joint, the marginals, and the conditionals $P(\text{spam} \mid \text{verdict})$ and $P(\text{verdict} \mid \text{spam})$ with the product-rule check. Reproduce `probability.spam_joint`, `probability.spam_conditionals` and `probability.spam_condition_on_verdict` exactly.
-8. **[Implement]** Implement Bayes' rule for a detector with a given prior, sensitivity and false-alarm rate, both by counting a population of $100000$ and by the formula, and reproduce `probability.bayes_rare_defect`, `probability.bayes_base_rate_sweep` and `probability.bayes_two_detectors`.
-9. **[Implement]** Implement `sample_discrete`, then reproduce the exact-count tables `probability.two_dice_sums` and `probability.variance_of_sums` by enumerating all $36$ outcomes, and the simulated `probability.sampling_a_table` and `probability.mean_variance_shrinks` up to sampling noise (your frequencies and variances should agree with the printed ones to within what the $\sigma/\sqrt{n}$ rule allows, not digit for digit, because your generator differs).
+8. **[Implement]** Implement Bayes' rule for a detector with a given prior, sensitivity and false-alarm rate, both by counting a population of $100000$ and by the formula, and reproduce `probability.bayes_rare_defect` (round each count to the nearest whole part), `probability.bayes_base_rate_sweep` and `probability.bayes_two_detectors` (a third detector with the same rates).
+9. **[Implement]** Implement `sample_discrete`, then reproduce the exact-count tables `probability.two_dice_sums` and `probability.variance_of_sums` by enumerating all $36$ outcomes, and the simulated `probability.sampling_a_table` and `probability.mean_variance_shrinks`. With the generator of Chapter 17, the printed seeds and the stated draw order, the counts and the printed digits reproduce exactly; with another generator, a frequency should fall within about four standard errors $\sqrt{p(1-p)/n}$ of the printed one, and a mean within four of $\sigma/\sqrt{n}$.
 10. **[Investigate]** Run the long-run average experiment (`probability.long_run_average`) for $20$ different generator seeds and record the distance from $7$ at $n = 100$, $1000$ and $10000$. Plot the typical distance against $n$ and compare with $\sigma/\sqrt{n}$, where $\sigma^2 = 35/6$ for the sum of two dice. How often is the distance more than $2\sigma/\sqrt{n}$?
 11. **[Investigate]** In the defect detector, keep the false-alarm rate at $10\%$ but let the sensitivity range from $0.5$ to $1$. At prevalence $1\%$, how much does the posterior after one alarm change? Then keep the sensitivity and vary the false-alarm rate from $0.1$ to $0.001$. Which improvement is worth more at this base rate, and why?
 12. **[Investigate]** Try to break the sampler: give `sample_discrete` a table that sums to $0.999$, then to $1.001$, then with a negative entry. Decide what the `require` line should do in each case, and what a silent clamp would have hidden.

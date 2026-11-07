@@ -11,24 +11,26 @@ Flip a fair coin $30$ times and count the heads. Do it $5000$ times, each run
 fresh, and tally how often each count occurred:
 
 <!-- worked: distributions.coin_sum_counts -->
+Generator: the book's SplitMix64, seed 0x31c7c1ddde98256e (3587048786890335598). Run by run (5000 runs), each run is 30 flips; a flip is one `rng.uniform()` and is heads when it is below 0.5.
+
 | heads in 30 flips | runs of 5000 | bar (one # per 20 runs) |
 |---|---:|---|
-| 8 | 26 | # |
-| 9 | 61 | ### |
-| 10 | 148 | ####### |
-| 11 | 265 | ############# |
-| 12 | 410 | #################### |
-| 13 | 576 | ############################# |
-| 14 | 652 | ################################# |
-| 15 | 738 | ##################################### |
-| 16 | 686 | ################################## |
-| 17 | 570 | ############################ |
-| 18 | 381 | ################### |
-| 19 | 249 | ############ |
-| 20 | 128 | ###### |
-| 21 | 65 | ### |
-| 22 | 22 | # |
-| other (7 or fewer, 23 or more) | 23 |  |
+| 8 | 25 | # |
+| 9 | 70 | #### |
+| 10 | 110 | ###### |
+| 11 | 270 | ############## |
+| 12 | 430 | ###################### |
+| 13 | 525 | ########################## |
+| 14 | 681 | ################################## |
+| 15 | 710 | #################################### |
+| 16 | 681 | ################################## |
+| 17 | 540 | ########################### |
+| 18 | 425 | ##################### |
+| 19 | 268 | ############# |
+| 20 | 147 | ####### |
+| 21 | 51 | ### |
+| 22 | 33 | ## |
+| other (7 or fewer, 23 or more) | 34 |  |
 <!-- /worked -->
 
 Nothing in a single flip suggests this picture. One flip is $0$ or $1$ with equal
@@ -148,13 +150,13 @@ mean $15$, variance $7.5$, standard deviation $2.74$. Counting how many of the
 $5000$ runs landed within one, two and three standard deviations of $15$:
 
 <!-- worked: distributions.coin_sum_sigma -->
-Mean 15 heads, variance 7.5, standard deviation 2.7386.
+Mean 15 heads, variance 7.5, standard deviation 2.7386. The same 5000 runs as the previous table (same generator and seed, 0x31c7c1ddde98256e). A window k sigma wide is the whole numbers within floor(k sigma) of 15.
 
 | window | observed share of the 5000 runs | exact binomial share | bell-curve rule |
 |---|---:|---:|---:|
-| within 1 sigma: 13 to 17 heads | 0.6444 | 0.6384 | 0.6827 |
-| within 2 sigma: 10 to 20 heads | 0.9606 | 0.9572 | 0.9545 |
-| within 3 sigma: 7 to 23 heads | 0.9984 | 0.9986 | 0.9973 |
+| within 1 sigma: 13 to 17 heads | 0.6274 | 0.6384 | 0.6827 |
+| within 2 sigma: 10 to 20 heads | 0.9574 | 0.9572 | 0.9545 |
+| within 3 sigma: 7 to 23 heads | 0.9970 | 0.9986 | 0.9973 |
 <!-- /worked -->
 
 The observed shares sit close to the exact binomial shares (the gap is the
@@ -199,13 +201,15 @@ lists over many draws is the table of frequencies, which is why the mean of the 
 is the probability vector itself:
 
 <!-- worked: distributions.categorical_sampling -->
+Generator: the book's SplitMix64, seed 0xd3309acb11fd4fe5 (15217833337855758309). Each of the 20,000 draws is one `rng.uniform()` passed to the cumulative-table rule. Variance of the indicators: f(1 - f) for the frequency f.
+
 | token | p | draws of 20,000 | frequency = mean of indicator | p(1-p) | variance of the indicators |
 |---|---:|---:|---:|---:|---:|
-| mat | 0.6364 | 12661 | 0.6331 | 0.2314 | 0.2323 |
-| floor | 0.2341 | 4707 | 0.2354 | 0.1793 | 0.1800 |
-| sofa | 0.0861 | 1775 | 0.0887 | 0.0787 | 0.0809 |
-| moon | 0.0117 | 235 | 0.0118 | 0.0115 | 0.0116 |
-| the | 0.0317 | 622 | 0.0311 | 0.0307 | 0.0301 |
+| mat | 0.6364 | 12701 | 0.6351 | 0.2314 | 0.2318 |
+| floor | 0.2341 | 4737 | 0.2369 | 0.1793 | 0.1808 |
+| sofa | 0.0861 | 1695 | 0.0848 | 0.0787 | 0.0776 |
+| moon | 0.0117 | 202 | 0.0101 | 0.0115 | 0.0100 |
+| the | 0.0317 | 665 | 0.0333 | 0.0307 | 0.0321 |
 <!-- /worked -->
 
 The last two columns agree to within sampling noise. The positions are not
@@ -288,6 +292,8 @@ The $1/\sigma$ keeps the area at $1$: a wider curve must be lower. The case
 $\mu = 0$, $\sigma = 1$ is the **standard Gaussian**.
 
 <!-- worked: distributions.gaussian_moments -->
+Simpson's rule with 2000 intervals on [mu - 8 sigma, mu + 8 sigma] (the mean is the integral just computed; any interval count of 200 or more agrees to the printed digits).
+
 | quantity from Simpson's rule, 8 sigma each side | mu = 0, sigma = 1 | mu = 50, sigma = 0.2 |
 |---|---:|---:|
 | area (should be 1) | 1.000000 | 1.000000 |
@@ -325,6 +331,8 @@ worth knowing by heart, because they give a feeling for how far values stray fro
 the mean:
 
 <!-- worked: distributions.sigma_rule -->
+P(-k <= Z <= k) by Simpson's rule with 4000 intervals on [-k, k] for the standard Gaussian density.
+
 | k | P(-k <= Z <= k) | P(outside) | outside once in about this many draws |
 |---|---:|---:|---:|
 | 1 | 0.682689 | 0.317311 | 3 |
@@ -343,8 +351,10 @@ About $68\%$ of the probability lies within one standard deviation of the mean,
 $95\%$ within two and $99.7\%$ within three (the "68-95-99.7 rule"). The rod
 machine therefore produces about $95\%$ of its rods within $0.4$ mm of $50.0$, and
 a rod more than $0.6$ mm off, three standard deviations, about once in $370$. The
-table also lists $1.645$ and $1.96$ and $2.576$, the multipliers that enclose
-exactly $90\%$, $95\%$ and $99\%$; the statistics chapter uses them. Note how
+table also lists $1.645$, $1.96$ and $2.576$, the usual rounded multipliers for
+$90\%$, $95\%$ and $99\%$: they enclose $0.90003$, $0.95000$ and $0.99001$, so they are
+rounded values, and the multipliers that enclose exactly those shares are
+$1.644854$, $1.959964$ and $2.575829$. The statistics chapter uses the rounded ones. Note how
 quickly the tail thins: going from $3$ to $4$ standard deviations changes "one in
 $370$" to "one in $15{,}787$".
 
@@ -357,13 +367,15 @@ the sum is again a Gaussian: the shape is preserved. The same holds for any
 shift and rescaling of a Gaussian, which we derived above for $\mu + \sigma Z$.
 
 <!-- worked: distributions.gaussian_sum -->
+Generator: the book's SplitMix64, seed 0x221e60acd1f15be3 (2458508741963766755). First the 40,000 values of X, each 1 + 2 z with z one `rng.normal()`; then the 40,000 values of Y, each -0.5 + 1.5 z; pair k of X and Y is summed. Sample variance: divisor 40,000.
+
 | variable | sample mean | sample variance | mean predicted | variance predicted |
 |---|---:|---:|---:|---:|
-| X ~ N(1, 2^2) | 1.003 | 3.941 | 1 | 4 |
-| Y ~ N(-0.5, 1.5^2) | -0.505 | 2.260 | -0.5 | 2.25 |
-| X + Y | 0.498 | 6.139 | 0.5 | 6.25 |
+| X ~ N(1, 2^2) | 0.999 | 4.001 | 1 | 4 |
+| Y ~ N(-0.5, 1.5^2) | -0.491 | 2.273 | -0.5 | 2.25 |
+| X + Y | 0.508 | 6.289 | 0.5 | 6.25 |
 
-Share of X + Y within one predicted standard deviation (2.5) of 0.5: 0.6870; the bell-curve rule says 0.6827.
+Share of X + Y within one predicted standard deviation (2.5) of 0.5: 0.6805; the bell-curve rule says 0.6827.
 <!-- /worked -->
 
 The sample variance of the sum is close to the predicted $4 + 2.25 = 6.25$, and
@@ -374,12 +386,14 @@ coordinate of a diffusion model: if $x_0$ is a number and $\varepsilon \sim
 mean $(1 - s)x_0$ and standard deviation $s$:
 
 <!-- worked: distributions.noised_coordinate -->
+Generator: the book's SplitMix64, seed 0xd99ff6d98e6f1575 (15681523841785337205). x0 = 2. The 20,000 noise values are `rng.normal()` calls, drawn once and reused for every noise level s: x = (1 - s) x0 + s * noise. Sample std: divisor 20,000.
+
 | noise level s | predicted mean (1-s) x0 | sample mean | predicted std s | sample std |
 |---|---:|---:|---:|---:|
-| 0.1 | 1.800 | 1.800 | 0.1 | 0.100 |
-| 0.3 | 1.400 | 1.401 | 0.3 | 0.299 |
-| 0.5 | 1.000 | 1.001 | 0.5 | 0.498 |
-| 0.9 | 0.200 | 0.202 | 0.9 | 0.897 |
+| 0.1 | 1.800 | 1.799 | 0.1 | 0.099 |
+| 0.3 | 1.400 | 1.397 | 0.3 | 0.298 |
+| 0.5 | 1.000 | 0.995 | 0.5 | 0.497 |
+| 0.9 | 0.200 | 0.190 | 0.9 | 0.895 |
 <!-- /worked -->
 
 ## Moving together: covariance and correlation
@@ -453,12 +467,14 @@ changes by a factor of $100$ and the correlation does not. What correlation does
 see is only the linear relationship:
 
 <!-- worked: distributions.correlation_shapes -->
+Generator: the book's SplitMix64, seed 0x896ea023049287a2 (9903028702895310754). x takes 2000 equally spaced values from -2 to 2 inclusive (step 4/1999). The noise is `rng.normal()`: 2000 values in order for the third relation, then 2000 more for the fourth. Covariance and variances use divisor 2000.
+
 | relation between x and y | covariance | correlation |
 |---|---:|---:|
 | y = 2x + 1 | 2.6693 | 1.0000 |
 | y = -x | -1.3347 | -1.0000 |
-| y = x + noise (std 1) | 1.3778 | 0.7718 |
-| y independent noise | 0.0028 | 0.0024 |
+| y = x + noise (std 1) | 1.3255 | 0.7514 |
+| y independent noise | 0.0099 | 0.0087 |
 | y = x^2 | 0.0000 | 0.0000 |
 <!-- /worked -->
 
@@ -468,8 +484,8 @@ determined by $x$ through $y = x^2$, also gives zero. Zero correlation means the
 straight-line trend, not that the variables have nothing to do with each other.
 
 **Uncorrelated is not independent.** Chapter 10 proved that independent variables
-satisfy $\mathbb{E}[XY] = \mathbb{E}[X]\mathbb{E}[Y]$, which says that their covariance is zero. The converse fails,
-and the smallest counterexample shows why. Let $X$ be $-1$, $0$ or $1$ with
+satisfy $\mathbb{E}[XY] = \mathbb{E}[X]\mathbb{E}[Y]$, which says that their covariance is zero. The converse fails
+(Chapter 10 gave this example in one line), and the smallest counterexample shows why. Let $X$ be $-1$, $0$ or $1$ with
 probability $1/3$ each, and $Y = X^2$.
 
 <!-- worked: distributions.uncorrelated_not_independent -->
@@ -664,7 +680,12 @@ square root of each eigenvalue; then $\mathbf{A}\mathbf{A}^\top =
 <!-- /worked -->
 
 The eigenvalues are $2.8$ and $0.2$, with eigenvectors along $(3, 2)$ and $(-2, 3)$
-(normalised). The two factors are different matrices, one triangular and one
+(normalised). An eigenvector is only fixed up to its sign, so the table follows a
+convention: the eigenvalues come in descending order, the first unit eigenvector has a
+positive first component, and the second is the first turned a quarter turn anticlockwise,
+$(-q_{12}, q_{11})$, so that $\mathbf{Q}$ is a rotation. Another solver may return an
+eigenvector negated, which negates the matching column of $\mathbf{A}$ but leaves
+$\mathbf{A}\mathbf{A}^\top$ and the distribution of the samples unchanged. The two factors are different matrices, one triangular and one
 built from a rotation and a stretch, and both multiply back to $\boldsymbol{\Sigma}$. The
 pseudocode for sampling follows.
 
@@ -685,7 +706,7 @@ function cholesky(s: array<real>[D, D]) -> array<real>[D, D]:
                 L[i, j] = t / L[j, j]
     return L
 
-function sample_gaussian_cholesky(mu: array<real>[D], L: array<real>[D, D], rng) -> array<real>[D]:
+function sample_gaussian_cholesky(mu: array<real>[D], L: array<real>[D, D], rng: Generator) -> array<real>[D]:
     z = zeros(real, [D])
     for i in 0 .. D:
         z[i] = rng.normal()                  # independent N(0, 1)
@@ -699,15 +720,20 @@ function sample_gaussian_cholesky(mu: array<real>[D], L: array<real>[D, D], rng)
 ```
 
 For the eigen version, compute `(lam, Q) = eigh(s)` with a symmetric eigen-solver
-(Chapter 6) and replace the inner loop by `t = t + Q[i, j] * sqrt(lam[j]) * z[j]`
+(Chapter 6; for a symmetric $2\times2$ matrix with entries $a, b, b, c$ and $b \ne 0$
+the closed form is $\lambda_{1,2} = \tfrac{a+c}{2} \pm \sqrt{(\tfrac{a-c}{2})^2 + b^2}$ with
+eigenvector $(b, \lambda_1 - a)$ for $\lambda_1$, here $(1.2, 0.8)$, which is
+along $(3, 2)$) and replace the inner loop by `t = t + Q[i, j] * sqrt(lam[j]) * z[j]`
 summed over all `j`. Draw $20{,}000$ points both ways and compute their sample
 mean and covariance matrix:
 
 <!-- worked: distributions.mvn_sampling -->
+Generator: the book's SplitMix64, seed 0x381299132efa1755 (4040460123376326485). One generator for the table: the Cholesky samples first, then the eigen samples. Each sample takes two `rng.normal()` calls, z1 then z2, and is mu + L z (Cholesky) or mu + A z (eigen); mu = (1, -0.5), Sigma = [[2, 1.2], [1.2, 1]]. Sample covariance: centre on the sample mean, divisor 20,000.
+
 | method (20,000 samples) | sample mean | Sigma_11 | Sigma_12 | Sigma_22 |
 |---|---:|---:|---:|---:|
-| Cholesky | (1.001, -0.496) | 1.987 | 1.193 | 0.996 |
-| eigen-decomposition | (0.988, -0.508) | 1.978 | 1.190 | 0.999 |
+| Cholesky | (1.014, -0.492) | 2.017 | 1.204 | 0.994 |
+| eigen-decomposition | (1.001, -0.497) | 1.999 | 1.190 | 0.988 |
 | target | (1, -0.5) | 2.000 | 1.200 | 1.000 |
 <!-- /worked -->
 
@@ -752,10 +778,12 @@ $1/2\pi$). The one-dimensional "within one, two, three standard deviations" has 
 two-dimensional analogue:
 
 <!-- worked: distributions.mvn_ellipse_mass -->
+Generator: the book's SplitMix64, seed 0xcb8f069a102c7b73 (14667949770135075699). The 20,000 samples are the Cholesky samples of the previous table's recipe (two `rng.normal()` calls each, z1 then z2); the quadratic form uses the explicit 2x2 inverse of Sigma (adjugate divided by the determinant), which is safe for a fixed 2x2.
+
 | c in (x-mu)^T Sigma^-1 (x-mu) <= c | half-length along v1 | half-length along v2 | share of 20,000 samples inside | 1 - e^(-c/2) |
 |---|---:|---:|---:|---:|
-| 1 | 1.6733 | 0.4472 | 0.3982 | 0.3935 |
-| 4 | 3.3466 | 0.8944 | 0.8642 | 0.8647 |
+| 1 | 1.6733 | 0.4472 | 0.3972 | 0.3935 |
+| 4 | 3.3466 | 0.8944 | 0.8689 | 0.8647 |
 | 9 | 5.0200 | 1.3416 | 0.9891 | 0.9889 |
 <!-- /worked -->
 
@@ -774,13 +802,15 @@ rather than derive). By the variance of a mean in Chapter 10, that average has
 variance $2/D$:
 
 <!-- worked: distributions.high_dim_norm -->
+Generator: the book's SplitMix64, seed 0x32ffccfba4ec6fa0 (3674881202133430176). One generator for the table, rows in the order d = 1, 10, 100, 1000, 10000. A row makes 400 vectors (100 for d = 10000); a vector is d calls of `rng.normal()`. Std: divisor equal to the number of vectors.
+
 | dimension d | mean of squared length / d | std of squared length / d | sqrt(2/d) | mean length | sqrt(d) |
 |---|---:|---:|---:|---:|---:|
-| 1 | 0.9971 | 1.3865 | 1.4142 | 0.807 | 1.000 |
-| 10 | 1.0051 | 0.4446 | 0.4472 | 3.094 | 3.162 |
-| 100 | 1.0074 | 0.1380 | 0.1414 | 10.013 | 10.000 |
-| 1000 | 1.0028 | 0.0457 | 0.0447 | 31.658 | 31.623 |
-| 10000 | 0.9977 | 0.0157 | 0.0141 | 99.881 | 100.000 |
+| 1 | 1.0478 | 1.3639 | 1.4142 | 0.825 | 1.000 |
+| 10 | 0.9877 | 0.4291 | 0.4472 | 3.065 | 3.162 |
+| 100 | 1.0011 | 0.1437 | 0.1414 | 9.980 | 10.000 |
+| 1000 | 0.9993 | 0.0458 | 0.0447 | 31.603 | 31.623 |
+| 10000 | 1.0015 | 0.0131 | 0.0141 | 100.071 | 100.000 |
 <!-- /worked -->
 
 The squared length per coordinate sits at $1$ with a spread of $\sqrt{2/D}$, so in
@@ -822,17 +852,19 @@ Bernoulli variable with $p = 0.3$, so $\sigma^2 = 0.21$, taking $300$ repeats of
 average:
 
 <!-- worked: distributions.lln_bernoulli -->
+Generator: the book's SplitMix64, seed 0xa1936518d852eccb (11642760619065797835). One generator, rows in the order n = 10, 100, 1000, 10000. A row makes 300 means; a mean is n calls of `rng.uniform()`, each counted as 1 when below p = 0.3, averaged. RMS error: root of the mean squared distance of the 300 means from 0.3.
+
 | n draws per mean | RMS error of the mean over 300 repeats | sigma / sqrt(n) | share of repeats with error > 0.05 | Chebyshev bound sigma^2 / (n * 0.05^2) |
 |---|---:|---:|---:|---:|
-| 10 | 0.1499 | 0.1449 | 0.8033 | 1.0000 |
-| 100 | 0.0449 | 0.0458 | 0.2233 | 0.8400 |
-| 1000 | 0.0139 | 0.0145 | 0.0000 | 0.0840 |
-| 10000 | 0.0047 | 0.0046 | 0.0000 | 0.0084 |
+| 10 | 0.1499 | 0.1449 | 0.7500 | 1.0000 |
+| 100 | 0.0474 | 0.0458 | 0.2200 | 0.8400 |
+| 1000 | 0.0157 | 0.0145 | 0.0033 | 0.0840 |
+| 10000 | 0.0048 | 0.0046 | 0.0000 | 0.0084 |
 <!-- /worked -->
 
 The root-mean-square error matches $\sigma/\sqrt{n}$, and the observed share of
 averages more than $0.05$ away is below the Chebyshev bound in every row. The bound
-is loose (at $n = 1000$ it allows $8\%$ and reality is $0$), because it assumes nothing
+is loose (at $n = 1000$ it allows $8\%$ and reality is $0.3\%$), because it assumes nothing
 about the shape of the distribution; the next section shows what the shape really is.
 
 The finite-variance assumption is needed. Take a ratio of two independent standard
@@ -841,16 +873,19 @@ denominator lands near zero, and its expectation does not exist. Averages of suc
 draws never settle:
 
 <!-- worked: distributions.lln_heavy_tail -->
+Generator: the book's SplitMix64, seed 0x931fa52fd9201077 (10601373672778240119). One generator; run 1, then run 2, then run 3, each a continuous sequence of 100,000 steps read off at the listed n. A step makes three `rng.normal()` calls in this order: g (added to the Gaussian sum), then d (the denominator), then q; the ratio q/d is added to the ratio sum (nothing is added if d is exactly 0).
+
 | n | Gaussian, run 1 | run 2 | run 3 | ratio of two Gaussians, run 1 | run 2 | run 3 |
 |---|---:|---:|---:|---:|---:|---:|
-| 100 | -0.0129 | 0.0777 | 0.2373 | -0.700 | 3.653 | -1.028 |
-| 1,000 | 0.0373 | 0.0605 | 0.0017 | 1.186 | 1.987 | -0.198 |
-| 10,000 | 0.0032 | 0.0081 | -0.0141 | -0.442 | -0.401 | -20.729 |
-| 100,000 | 0.0032 | -0.0012 | -0.0048 | 1.157 | -0.284 | -3.425 |
+| 100 | -0.0942 | 0.0724 | 0.0700 | 1.592 | -1.575 | 0.276 |
+| 1,000 | -0.0275 | 0.0504 | 0.0301 | 0.899 | -4.402 | -0.764 |
+| 10,000 | -0.0042 | 0.0064 | 0.0015 | 0.711 | -36.053 | 1.497 |
+| 100,000 | -0.0032 | -0.0012 | 0.0014 | 2.040 | 0.242 | -1.536 |
 <!-- /worked -->
 
 The Gaussian averages (the left three columns) shrink toward $0$ as the law promises.
-The ratio averages (the right three columns) stay of order one and jump, because one
+The ratio averages (the right three columns) never settle: they stay of order one or
+larger and jump (run 2 is at $-36$ for $n = 10{,}000$ and back at $0.24$ for $n = 100{,}000$), because one
 extreme draw can outweigh all the others combined, however many have been taken.
 
 ## The shape of the average: the central limit theorem
@@ -860,7 +895,10 @@ Gaussian whatever the effects are.*
 
 The law of large numbers says where the average goes. It does not say what the error
 looks like, but the opening coin counts suggested the answer: a Gaussian hump. To see how
-general this is, choose a variable that does not look like a bell at all.
+general this is, choose a variable that does not look like a bell at all. Its lopsidedness is
+measured by the **skewness**, the average of the cube of the standardised value,
+$\mathbb{E}\bigl[((X - \mu)/\sigma)^3\bigr]$: $0$ for any symmetric distribution, positive
+for a long tail to the right and negative for a long tail to the left.
 
 <!-- worked: distributions.clt_setup -->
 | value of X | probability |
@@ -890,13 +928,15 @@ distribution that approaches the standard Gaussian as $n$ grows, whatever the
 distribution of the draws. We state it without proof. The numbers say how fast:
 
 <!-- worked: distributions.clt_table -->
+Generator: the book's SplitMix64, seed 0x5b3b5029b5ecfb0b (6573936221153458955). One generator, sizes in the order n = 1, 2, 5, 30, 100. For each n: 10,000 sample means in turn, each the average of n draws of X, one `rng.uniform()` per draw mapped through the cumulative table (0.6, 0.85, 0.95, 1.0). z = (mean - E[X]) / (std[X] / sqrt(n)). Std and skewness of z use divisor 10,000 (skewness: the average of z cubed).
+
 | n | mean of z | std of z | skewness of z | skewness of X / sqrt(n) | share with z in [-1, 1] | share with z in [-2, 2] |
 |---|---:|---:|---:|---:|---:|---:|
-| 1 | 0.003 | 1.001 | 3.559 | 3.544 | 0.950 | 0.950 |
-| 2 | 0.000 | 1.003 | 2.540 | 2.506 | 0.903 | 0.903 |
-| 5 | -0.008 | 0.997 | 1.614 | 1.585 | 0.778 | 0.969 |
-| 30 | 0.004 | 1.001 | 0.672 | 0.647 | 0.677 | 0.962 |
-| 100 | -0.013 | 0.992 | 0.290 | 0.354 | 0.674 | 0.958 |
+| 1 | -0.002 | 1.000 | 3.544 | 3.544 | 0.950 | 0.950 |
+| 2 | -0.002 | 0.998 | 2.506 | 2.506 | 0.903 | 0.903 |
+| 5 | -0.013 | 0.981 | 1.442 | 1.585 | 0.777 | 0.971 |
+| 30 | -0.001 | 0.991 | 0.613 | 0.647 | 0.678 | 0.963 |
+| 100 | 0.016 | 1.000 | 0.370 | 0.354 | 0.674 | 0.956 |
 | bell curve | 0 | 1 | 0 | 0 | 0.683 | 0.954 |
 <!-- /worked -->
 
@@ -905,8 +945,8 @@ deviation $1$ at every $n$), as Chapter 10's rules require. The skewness of the
 standardised average, the average cubed standardised value (a number that is $0$ for
 any symmetric distribution and large for a long one-sided tail), falls in step with
 $1/\sqrt{n}$ times the skewness of one draw: $3.54$, $2.51$, $1.58$, $0.65$ and $0.35$
-(the measured skewness at $n = 100$ is $0.29$; it is itself noisy because it is
-dominated by the few rare large values). The shares within $1$ and $2$ standard
+(the measured values, $3.54$, $2.51$, $1.44$, $0.61$ and $0.37$, differ for $n \ge 5$ because the
+measured skewness is itself noisy: it is dominated by the few rare large values). The shares within $1$ and $2$ standard
 deviations reach $0.68$ and $0.96$ by $n = 30$, close to the $0.683$ and $0.954$ of the
 Gaussian. The skewed variable needed about $30$ draws; a symmetric one, such as the
 coin flip of the opening, needs far fewer, and a variable with very heavy tails can
@@ -938,16 +978,18 @@ If the inputs are standard-sized numbers, $\lVert\mathbf{x}\rVert^2 \approx n$, 
 output's variance grows with the width $n$ unless $\sigma_w^2$ shrinks like $1/n$:
 
 <!-- worked: distributions.init_variance -->
+Generator: the book's SplitMix64, seed 0xfaaff9906e080491 (18063931029122974865). One generator for the table. For n = 16, 64, 256, 1024 in turn: the input x is n calls of `rng.normal()`; then for weight std 1 and then 1/sqrt(n), 1500 outputs y = sum_i w_i x_i, each with n fresh weights w_i = std * `rng.normal()` drawn for i = 0, 1, ... in order. Measured variance: divisor 1500.
+
 | inputs n | weight std | sum of x_i^2 | predicted Var[y] = std^2 * sum of x_i^2 | measured Var[y], 1500 weight draws |
 |---|---:|---:|---:|---:|
-| 16 | 1 | 8.5 | 8.46 | 8.09 |
-| 16 | 1/sqrt(n) | 8.5 | 0.53 | 0.49 |
-| 64 | 1 | 63.0 | 62.96 | 67.43 |
-| 64 | 1/sqrt(n) | 63.0 | 0.98 | 1.04 |
-| 256 | 1 | 258.2 | 258.24 | 263.83 |
-| 256 | 1/sqrt(n) | 258.2 | 1.01 | 0.97 |
-| 1024 | 1 | 1042.1 | 1042.09 | 1005.48 |
-| 1024 | 1/sqrt(n) | 1042.1 | 1.02 | 1.04 |
+| 16 | 1 | 11.4 | 11.42 | 11.10 |
+| 16 | 1/sqrt(n) | 11.4 | 0.71 | 0.72 |
+| 64 | 1 | 58.7 | 58.65 | 58.74 |
+| 64 | 1/sqrt(n) | 58.7 | 0.92 | 0.91 |
+| 256 | 1 | 267.4 | 267.39 | 266.79 |
+| 256 | 1/sqrt(n) | 267.4 | 1.04 | 1.12 |
+| 1024 | 1 | 1057.4 | 1057.41 | 1021.47 |
+| 1024 | 1/sqrt(n) | 1057.4 | 1.03 | 1.01 |
 <!-- /worked -->
 
 With $\sigma_w = 1$ the output variance is about $n$ times the input's, and a stack
@@ -1072,8 +1114,8 @@ Answers are at the end of the chapter.
 5. **[Calculate]** A variable has mean $3$ and variance $16$. How large must $n$ be for Chebyshev's inequality to guarantee that the average of $n$ independent draws is within $0.5$ of $3$ with probability at least $0.95$? Compare with the $n$ for which $\sigma/\sqrt{n}$ is a quarter of $0.5$.
 6. **[Calculate]** Show that for independent $X \sim \mathcal{N}(\mu_1, \sigma_1^2)$ and $Y \sim \mathcal{N}(\mu_2, \sigma_2^2)$ the difference $X - Y$ has mean $\mu_1 - \mu_2$ and variance $\sigma_1^2 + \sigma_2^2$. Why does the variance not subtract?
 7. **[Implement]** Implement the covariance matrix, correlation as cosine similarity and the direction-variance check, and reproduce `distributions.covariance_table`, `distributions.correlation_cosine`, `distributions.covariance_matrix` and `distributions.direction_variance` exactly.
-8. **[Implement]** Implement the repeated-addition binomial table and the Gaussian areas by Simpson's rule, and reproduce `distributions.binomial_from_bernoullis`, `distributions.sigma_rule` and `distributions.gaussian_moments` exactly.
-9. **[Implement]** Implement the two-dimensional Cholesky factor and the eigen factor, and the two samplers, and reproduce `distributions.mvn_factors` exactly. Reproduce `distributions.mvn_sampling` and `distributions.mvn_ellipse_mass` up to sampling noise: your sample covariance and ellipse shares should agree with the printed ones to about two digits, not digit for digit, because your generator differs.
+8. **[Implement]** Implement the repeated-addition binomial table and the Gaussian areas by Simpson's rule (2000 intervals over $\pm 8$ standard deviations for the moments, 4000 over $[-k, k]$ for the areas), and reproduce `distributions.binomial_from_bernoullis`, `distributions.sigma_rule` and `distributions.gaussian_moments` exactly.
+9. **[Implement]** Implement the two-dimensional Cholesky factor and the eigen factor, and the two samplers, and reproduce `distributions.mvn_factors` exactly. Follow the eigenvector convention stated under `distributions.mvn_factors`. With the generator of Chapter 17, the printed seeds and the stated draw order (two `rng.normal()` calls per sample, $z_1$ then $z_2$), `distributions.mvn_sampling` and `distributions.mvn_ellipse_mass` reproduce to the printed digits; with another generator the sample covariance entries should fall within five standard errors of the target ($\sqrt{2/N}\,\Sigma_{ii}$ for a diagonal entry, $\sqrt{(\Sigma_{11}\Sigma_{22} + \Sigma_{12}^2)/N}$ for the off-diagonal one) and the ellipse shares within five standard errors $\sqrt{q(1-q)/N}$ of $q = 1 - e^{-c/2}$.
 10. **[Investigate]** Using `distributions.clt_table` as a guide, replace the lopsided variable by one with two values, $0$ with probability $0.99$ and $1$ with probability $0.01$. How large must $n$ be before the skewness of the standardised average falls below $0.5$? Use the $1/\sqrt{n}$ law first and then check by simulation.
 11. **[Investigate]** Repeat `distributions.high_dim_norm` for the vector $\mathbf{z}$ drawn uniformly from $[-\sqrt{3}, \sqrt{3}]$ instead of Gaussian. What are the mean and variance of one coordinate squared, and does the norm still concentrate at $\sqrt{D}$? What does that say about which facts of the section used the Gaussian shape and which used only the mean and variance?
 12. **[Investigate]** Modify `distributions.init_variance` to apply two layers in sequence, each with $n = 256$ inputs, with $\sigma_w = 1$ and then with $\sigma_w = 1/\sqrt{n}$. What is the output variance after the second layer in each case, and how does it compare with the prediction from the first layer alone?

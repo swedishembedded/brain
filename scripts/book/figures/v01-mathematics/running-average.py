@@ -3,7 +3,7 @@
 
 """Running averages of the two-dice sum converging to its expectation, 7.
 
-Three independent runs, each from its own frozen bookrng stream, are averaged
+Three independent runs, each from its own bookrng generator (names probability.running_average_figure.0 to .2), are averaged
 with the chapter's own `running_average` helper; the dashed line is the
 expectation computed from the probability table.
 

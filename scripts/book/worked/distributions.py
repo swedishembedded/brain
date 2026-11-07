@@ -10,15 +10,17 @@ arguments returns a markdown string that the chapter embeds between
 underscore (or that take arguments) are shared with the chapter's figures, so a
 picture and the table beside it cannot disagree. Small tables are computed
 exactly (fractions or enumeration), areas under the bell curve with Simpson's
-rule, and every simulation draws from a named `bookrng` stream. Gaussian draws
-use Python's `gauss` on such a stream; how a Gaussian is built from uniform
-numbers is the subject of the randomness chapter, not of this one.
+rule, and every simulation draws from the book's SplitMix64 through
+`bookrng.generator(name)`: `uniform()` for a real in [0, 1) and `normal()` for a
+standard Gaussian (Box-Muller, specified in the randomness chapter). Each
+simulated table prints the generator's seed and the order of its draws.
 
 Swedish Embedded AB implements solutions for noise, uncertainty and sampling in
 machine learning systems. If your team needs expertise in probabilistic
 modelling, you can procure our services by sending an email to
 info@swedishembedded.com.
 """
+import functools
 import math
 from fractions import Fraction
 
@@ -75,9 +77,14 @@ def _cov(x, y):
     return sum((a - mx) * (b - my) for a, b in zip(x, y)) / len(x)
 
 
+def _generator_line(name):
+    """The sentence that makes a simulated table reproducible: generator and seed."""
+    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} ({bookrng.seed_of(name)})."
+
+
 def _draw(pmf, rng):
     """One index from a table of probabilities: lay them end to end, see where u lands."""
-    u, acc = rng.random(), 0.0
+    u, acc = rng.uniform(), 0.0
     for k, p in enumerate(pmf):
         acc += p
         if u < acc:
@@ -90,9 +97,14 @@ def _draw(pmf, rng):
 COIN_RUNS, COIN_FLIPS = 5000, 30
 
 
+COIN_NAME = "distributions.coin_sum_counts"
+COIN_DRAWS = ("Run by run (5000 runs), each run is 30 flips; a flip is one `rng.uniform()` and is heads when it is "
+              "below 0.5.")
+
+
 def _coin_head_counts():
-    rng = bookrng.stream("distributions.coin_sum_counts")
-    return [sum(rng.random() < 0.5 for _ in range(COIN_FLIPS)) for _ in range(COIN_RUNS)]
+    rng = bookrng.generator(COIN_NAME)
+    return [sum(rng.uniform() < 0.5 for _ in range(COIN_FLIPS)) for _ in range(COIN_RUNS)]
 
 
 def coin_sum_counts():
@@ -103,7 +115,8 @@ def coin_sum_counts():
         shown += c
         rows.append([k, c, "#" * round(c / 20)])
     rows.append(["other (7 or fewer, 23 or more)", COIN_RUNS - shown, ""])
-    return _table(["heads in 30 flips", "runs of 5000", "bar (one # per 20 runs)"], rows, "lrl")
+    return (f"{_generator_line(COIN_NAME)} {COIN_DRAWS}\n\n"
+            + _table(["heads in 30 flips", "runs of 5000", "bar (one # per 20 runs)"], rows, "lrl"))
 
 
 def coin_sum_sigma():
@@ -117,7 +130,9 @@ def coin_sum_sigma():
         observed = sum(1 for c in counts if lo <= c <= hi) / COIN_RUNS
         exact = sum(math.comb(n, j) for j in range(lo, hi + 1)) / 2 ** n
         rows.append([f"within {k} sigma: {lo} to {hi} heads", _fx(observed), _fx(exact), _fx(rule, 4)])
-    head = f"Mean {n * p:g} heads, variance {n * p * (1 - p):g}, standard deviation {sigma:.4f}.\n\n"
+    head = (f"Mean {n * p:g} heads, variance {n * p * (1 - p):g}, standard deviation {sigma:.4f}. "
+            f"The same 5000 runs as the previous table (same generator and seed, {bookrng.seed_of(COIN_NAME):#018x}). "
+            "A window k sigma wide is the whole numbers within floor(k sigma) of 15.\n\n")
     return head + _table(["window", "observed share of the 5000 runs", "exact binomial share",
                           "bell-curve rule"], rows)
 
@@ -182,7 +197,8 @@ def categorical_softmax():
 
 def categorical_sampling():
     p = _softmax(LOGITS)
-    rng = bookrng.stream("distributions.categorical_sampling")
+    name = "distributions.categorical_sampling"
+    rng = bookrng.generator(name)
     n = 20000
     counts = [0] * len(p)
     for _ in range(n):
@@ -192,8 +208,10 @@ def categorical_sampling():
         onehot_mean = counts[k] / n               # mean of the indicator "token k was drawn"
         rows.append([t, _fx(p[k]), counts[k], _fx(onehot_mean), _fx(p[k] * (1 - p[k])),
                      _fx(onehot_mean * (1 - onehot_mean))])
-    return _table(["token", "p", "draws of 20,000", "frequency = mean of indicator", "p(1-p)",
-                   "variance of the indicators"], rows)
+    return (f"{_generator_line(name)} Each of the 20,000 draws is one `rng.uniform()` passed to the cumulative-table rule. "
+            "Variance of the indicators: f(1 - f) for the frequency f.\n\n"
+            + _table(["token", "p", "draws of 20,000", "frequency = mean of indicator", "p(1-p)",
+                      "variance of the indicators"], rows))
 
 
 def categorical_covariance():
@@ -232,7 +250,9 @@ def gaussian_moments():
     rows = [["area (should be 1)", _fx(a1, 6), _fx(a2, 6)],
             ["mean (integral of x f(x))", _fx(m1, 6), _fx(m2, 6)],
             ["variance (integral of (x - mean)^2 f(x))", _fx(v1, 6), _fx(v2, 6)]]
-    return _table(["quantity from Simpson's rule, 8 sigma each side", "mu = 0, sigma = 1", "mu = 50, sigma = 0.2"], rows)
+    return ("Simpson's rule with 2000 intervals on [mu - 8 sigma, mu + 8 sigma] (the mean is the integral just computed; "
+            "any interval count of 200 or more agrees to the printed digits).\n\n"
+            + _table(["quantity from Simpson's rule, 8 sigma each side", "mu = 0, sigma = 1", "mu = 50, sigma = 0.2"], rows))
 
 
 def gaussian_standardise():
@@ -255,14 +275,16 @@ def sigma_rule():
     for k in (1.0, 1.645, 1.96, 2.0, 2.5, 2.576, 3.0, 4.0):
         inside = _simpson(_phi, -k, k, 4000)
         rows.append([f"{k:g}", _fx(inside, 6), _fx(1 - inside, 6), f"{1 / (1 - inside):,.0f}"])
-    return _table(["k", "P(-k <= Z <= k)", "P(outside)", "outside once in about this many draws"], rows)
+    return ("P(-k <= Z <= k) by Simpson's rule with 4000 intervals on [-k, k] for the standard Gaussian density.\n\n"
+            + _table(["k", "P(-k <= Z <= k)", "P(outside)", "outside once in about this many draws"], rows))
 
 
 def gaussian_sum():
-    rng = bookrng.stream("distributions.gaussian_sum")
+    name = "distributions.gaussian_sum"
+    rng = bookrng.generator(name)
     n = 40000
-    xs = [rng.gauss(1.0, 2.0) for _ in range(n)]
-    ys = [rng.gauss(-0.5, 1.5) for _ in range(n)]
+    xs = [1.0 + 2.0 * rng.normal() for _ in range(n)]
+    ys = [-0.5 + 1.5 * rng.normal() for _ in range(n)]
     ss = [a + b for a, b in zip(xs, ys)]
     m, v = _mean(ss), _var(ss)
     inside = sum(abs(s - 0.5) <= 2.5 for s in ss) / n
@@ -270,18 +292,23 @@ def gaussian_sum():
             ["Y ~ N(-0.5, 1.5^2)", _fx(_mean(ys), 3), _fx(_var(ys), 3), "-0.5", "2.25"],
             ["X + Y", _fx(m, 3), _fx(v, 3), "0.5", "6.25"]]
     tail = f"\n\nShare of X + Y within one predicted standard deviation (2.5) of 0.5: {inside:.4f}; the bell-curve rule says 0.6827."
-    return _table(["variable", "sample mean", "sample variance", "mean predicted", "variance predicted"], rows) + tail
+    head = (f"{_generator_line(name)} First the 40,000 values of X, each 1 + 2 z with z one `rng.normal()`; then the 40,000 "
+            "values of Y, each -0.5 + 1.5 z; pair k of X and Y is summed. Sample variance: divisor 40,000.\n\n")
+    return head + _table(["variable", "sample mean", "sample variance", "mean predicted", "variance predicted"], rows) + tail
 
 
 def noised_coordinate():
-    rng = bookrng.stream("distributions.noised_coordinate")
+    name = "distributions.noised_coordinate"
+    rng = bookrng.generator(name)
     x0, n = 2.0, 20000
-    eps = [rng.gauss(0.0, 1.0) for _ in range(n)]
+    eps = [rng.normal() for _ in range(n)]
     rows = []
     for s in (0.1, 0.3, 0.5, 0.9):
         xs = [(1 - s) * x0 + s * e for e in eps]
         rows.append([f"{s:g}", _fx((1 - s) * x0, 3), _fx(_mean(xs), 3), f"{s:g}", _fx(math.sqrt(_var(xs)), 3)])
-    return _table(["noise level s", "predicted mean (1-s) x0", "sample mean", "predicted std s", "sample std"], rows)
+    return (f"{_generator_line(name)} x0 = 2. The 20,000 noise values are `rng.normal()` calls, drawn once and reused for every "
+            "noise level s: x = (1 - s) x0 + s * noise. Sample std: divisor 20,000.\n\n"
+            + _table(["noise level s", "predicted mean (1-s) x0", "sample mean", "predicted std s", "sample std"], rows))
 
 
 # ----------------------------------------------------------------- covariance
@@ -327,19 +354,23 @@ def correlation_cosine():
 
 
 def correlation_shapes():
-    rng = bookrng.stream("distributions.correlation_shapes")
+    name = "distributions.correlation_shapes"
+    rng = bookrng.generator(name)
     n = 2000
     xs = [i / (n - 1) * 4 - 2 for i in range(n)]
     cases = [("y = 2x + 1", [2 * a + 1 for a in xs]),
              ("y = -x", [-a for a in xs]),
-             ("y = x + noise (std 1)", [a + rng.gauss(0.0, 1.0) for a in xs]),
-             ("y independent noise", [rng.gauss(0.0, 1.0) for _ in xs]),
+             ("y = x + noise (std 1)", [a + rng.normal() for a in xs]),
+             ("y independent noise", [rng.normal() for _ in xs]),
              ("y = x^2", [a * a for a in xs])]
     rows = []
     for name, ys in cases:
         c = _cov(xs, ys)
         rows.append([name, _fx(c, 4), _fx(c / math.sqrt(_var(xs) * _var(ys)), 4)])
-    return _table(["relation between x and y", "covariance", "correlation"], rows)
+    return (f"{_generator_line(name)} x takes 2000 equally spaced values from -2 to 2 inclusive (step 4/1999). "
+            "The noise is `rng.normal()`: 2000 values in order for the third relation, then 2000 more for the fourth. "
+            "Covariance and variances use divisor 2000.\n\n"
+            + _table(["relation between x and y", "covariance", "correlation"], rows))
 
 
 def uncorrelated_not_independent():
@@ -463,7 +494,7 @@ def _sample_cholesky(rng, mu, s, n):
     L = _cholesky2(s)
     out = []
     for _ in range(n):
-        z = (rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.0))
+        z = (rng.normal(), rng.normal())
         out.append([mu[0] + L[0][0] * z[0], mu[1] + L[1][0] * z[0] + L[1][1] * z[1]])
     return out
 
@@ -472,25 +503,31 @@ def _sample_eigen(rng, mu, s, n):
     A = _eigen_factor(s)
     out = []
     for _ in range(n):
-        z = (rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.0))
+        z = (rng.normal(), rng.normal())
         out.append([mu[0] + A[0][0] * z[0] + A[0][1] * z[1], mu[1] + A[1][0] * z[0] + A[1][1] * z[1]])
     return out
 
 
 def mvn_sampling():
     n = 20000
+    gen = "distributions.mvn_sampling"
+    rng = bookrng.generator(gen)
     rows = []
     for name, fn in (("Cholesky", _sample_cholesky), ("eigen-decomposition", _sample_eigen)):
-        pts = fn(bookrng.stream(f"distributions.mvn_sampling.{name}"), MU, SIGMA, n)
+        pts = fn(rng, MU, SIGMA, n)
         s = _empirical_covariance(pts)
         mu = [_mean([p[j] for p in pts]) for j in range(2)]
         rows.append([name, f"({mu[0]:.3f}, {mu[1]:.3f})", _fx(s[0][0], 3), _fx(s[0][1], 3), _fx(s[1][1], 3)])
     rows.append(["target", f"({MU[0]:g}, {MU[1]:g})", _fx(SIGMA[0][0], 3), _fx(SIGMA[0][1], 3), _fx(SIGMA[1][1], 3)])
-    return _table(["method (20,000 samples)", "sample mean", "Sigma_11", "Sigma_12", "Sigma_22"], rows)
+    return (f"{_generator_line(gen)} One generator for the table: the Cholesky samples first, then the eigen samples. "
+            "Each sample takes two `rng.normal()` calls, z1 then z2, and is mu + L z (Cholesky) or mu + A z (eigen); "
+            "mu = (1, -0.5), Sigma = [[2, 1.2], [1.2, 1]]. Sample covariance: centre on the sample mean, divisor 20,000.\n\n"
+            + _table(["method (20,000 samples)", "sample mean", "Sigma_11", "Sigma_12", "Sigma_22"], rows))
 
 
 def mvn_ellipse_mass():
-    pts = _sample_cholesky(bookrng.stream("distributions.mvn_ellipse_mass"), MU, SIGMA, 20000)
+    name = "distributions.mvn_ellipse_mass"
+    pts = _sample_cholesky(bookrng.generator(name), MU, SIGMA, 20000)
     det = SIGMA[0][0] * SIGMA[1][1] - SIGMA[0][1] ** 2
     inv = [[SIGMA[1][1] / det, -SIGMA[0][1] / det], [-SIGMA[1][0] / det, SIGMA[0][0] / det]]
     (l1, l2), _ = _sym2_eigen(SIGMA)
@@ -504,41 +541,52 @@ def mvn_ellipse_mass():
     for c in (1.0, 4.0, 9.0):
         rows.append([f"{c:g}", f"{math.sqrt(c * l1):.4f}", f"{math.sqrt(c * l2):.4f}",
                      _fx(sum(d <= c for d in dist) / len(dist)), _fx(1 - math.exp(-c / 2))])
-    return _table(["c in (x-mu)^T Sigma^-1 (x-mu) <= c", "half-length along v1", "half-length along v2",
-                   "share of 20,000 samples inside", "1 - e^(-c/2)"], rows)
+    return (f"{_generator_line(name)} The 20,000 samples are the Cholesky samples of the previous table's recipe "
+            "(two `rng.normal()` calls each, z1 then z2); the quadratic form uses the explicit 2x2 inverse of Sigma "
+            "(adjugate divided by the determinant), which is safe for a fixed 2x2.\n\n"
+            + _table(["c in (x-mu)^T Sigma^-1 (x-mu) <= c", "half-length along v1", "half-length along v2",
+                      "share of 20,000 samples inside", "1 - e^(-c/2)"], rows))
 
 
 def high_dim_norm():
+    name = "distributions.high_dim_norm"
+    rng = bookrng.generator(name)
     rows = []
     for d in (1, 10, 100, 1000, 10000):
-        rng = bookrng.stream(f"distributions.high_dim_norm.{d}")
         reps = 400 if d <= 1000 else 100
         sq = []
         for _ in range(reps):
-            sq.append(sum(rng.gauss(0.0, 1.0) ** 2 for _ in range(d)) / d)
+            sq.append(sum(rng.normal() ** 2 for _ in range(d)) / d)
         norms = [math.sqrt(s * d) for s in sq]
         rows.append([d, _fx(_mean(sq), 4), _fx(math.sqrt(_var(sq)), 4), _fx(math.sqrt(2 / d), 4),
                      _fx(_mean(norms), 3), _fx(math.sqrt(d), 3)])
-    return _table(["dimension d", "mean of squared length / d", "std of squared length / d", "sqrt(2/d)", "mean length", "sqrt(d)"], rows)
+    return (f"{_generator_line(name)} One generator for the table, rows in the order d = 1, 10, 100, 1000, 10000. "
+            "A row makes 400 vectors (100 for d = 10000); a vector is d calls of `rng.normal()`. "
+            "Std: divisor equal to the number of vectors.\n\n"
+            + _table(["dimension d", "mean of squared length / d", "std of squared length / d", "sqrt(2/d)", "mean length", "sqrt(d)"], rows))
 
 
 def init_variance():
+    name = "distributions.init_variance"
+    rng = bookrng.generator(name)
     rows = []
     for n in (16, 64, 256, 1024):
-        rng = bookrng.stream(f"distributions.init_variance.{n}")
-        x = [rng.gauss(0.0, 1.0) for _ in range(n)]
+        x = [rng.normal() for _ in range(n)]
         norm2 = sum(a * a for a in x)
         for label, sw in (("1", 1.0), ("1/sqrt(n)", 1 / math.sqrt(n))):
-            ys = [sum(rng.gauss(0.0, sw) * a for a in x) for _ in range(1500)]
+            ys = [sum(sw * rng.normal() * a for a in x) for _ in range(1500)]
             rows.append([n, label, _fx(norm2, 1), _fx(sw ** 2 * norm2, 2), _fx(_var(ys), 2)])
-    return _table(["inputs n", "weight std", "sum of x_i^2", "predicted Var[y] = std^2 * sum of x_i^2", "measured Var[y], 1500 weight draws"], rows)
+    return (f"{_generator_line(name)} One generator for the table. For n = 16, 64, 256, 1024 in turn: the input x is n calls "
+            "of `rng.normal()`; then for weight std 1 and then 1/sqrt(n), 1500 outputs y = sum_i w_i x_i, each with n fresh "
+            "weights w_i = std * `rng.normal()` drawn for i = 0, 1, ... in order. Measured variance: divisor 1500.\n\n"
+            + _table(["inputs n", "weight std", "sum of x_i^2", "predicted Var[y] = std^2 * sum of x_i^2", "measured Var[y], 1500 weight draws"], rows))
 
 
 # --------------------------------------------------- large numbers and the CLT
 
 def _chebyshev_row(n, p, eps, reps, rng):
     sigma2 = p * (1 - p)
-    means = [sum(rng.random() < p for _ in range(n)) / n for _ in range(reps)]
+    means = [sum(rng.uniform() < p for _ in range(n)) / n for _ in range(reps)]
     rmse = math.sqrt(sum((m - p) ** 2 for m in means) / reps)
     far = sum(abs(m - p) > eps for m in means) / reps
     return [n, _fx(rmse, 4), _fx(math.sqrt(sigma2 / n), 4), _fx(far, 4), _fx(min(1.0, sigma2 / (n * eps * eps)), 4)]
@@ -546,25 +594,30 @@ def _chebyshev_row(n, p, eps, reps, rng):
 
 def lln_bernoulli():
     p, eps, reps = 0.3, 0.05, 300
-    rng = bookrng.stream("distributions.lln_bernoulli")
+    name = "distributions.lln_bernoulli"
+    rng = bookrng.generator(name)
     rows = [_chebyshev_row(n, p, eps, reps, rng) for n in (10, 100, 1000, 10000)]
-    return _table(["n draws per mean", "RMS error of the mean over 300 repeats", "sigma / sqrt(n)",
-                   "share of repeats with error > 0.05", "Chebyshev bound sigma^2 / (n * 0.05^2)"], rows)
+    return (f"{_generator_line(name)} One generator, rows in the order n = 10, 100, 1000, 10000. A row makes 300 means; "
+            "a mean is n calls of `rng.uniform()`, each counted as 1 when below p = 0.3, averaged. "
+            "RMS error: root of the mean squared distance of the 300 means from 0.3.\n\n"
+            + _table(["n draws per mean", "RMS error of the mean over 300 repeats", "sigma / sqrt(n)",
+                      "share of repeats with error > 0.05", "Chebyshev bound sigma^2 / (n * 0.05^2)"], rows))
 
 
 def lln_heavy_tail():
     checkpoints = (100, 1000, 10000, 100000)
+    name = "distributions.lln_heavy_tail"
+    rng = bookrng.generator(name)
     out = []
     for rep in range(3):
-        rng = bookrng.stream(f"distributions.lln_heavy_tail.{rep}")
         g_sum = r_sum = 0.0
         g_means, r_means = [], []
         n = 0
         for cp in checkpoints:
             while n < cp:
-                g_sum += rng.gauss(0.0, 1.0)
-                den = rng.gauss(0.0, 1.0)
-                r_sum += rng.gauss(0.0, 1.0) / den if den != 0.0 else 0.0
+                g_sum += rng.normal()
+                den = rng.normal()
+                r_sum += rng.normal() / den if den != 0.0 else 0.0
                 n += 1
             g_means.append(g_sum / n)
             r_means.append(r_sum / n)
@@ -572,7 +625,10 @@ def lln_heavy_tail():
     rows = []
     for i, cp in enumerate(checkpoints):
         rows.append([f"{cp:,}"] + [_fx(out[r][0][i], 4) for r in range(3)] + [_fx(out[r][1][i], 3) for r in range(3)])
-    return _table(["n", "Gaussian, run 1", "run 2", "run 3", "ratio of two Gaussians, run 1", "run 2", "run 3"], rows)
+    return (f"{_generator_line(name)} One generator; run 1, then run 2, then run 3, each a continuous sequence of 100,000 steps "
+            "read off at the listed n. A step makes three `rng.normal()` calls in this order: g (added to the Gaussian "
+            "sum), then d (the denominator), then q; the ratio q/d is added to the ratio sum (nothing is added if d is exactly 0).\n\n"
+            + _table(["n", "Gaussian, run 1", "run 2", "run 3", "ratio of two Gaussians, run 1", "run 2", "run 3"], rows))
 
 
 CLT_VALUES = (0, 1, 2, 10)
@@ -586,15 +642,32 @@ def _clt_moments():
     return mu, var, skew
 
 
-def _clt_standardised(n, reps=10000):
-    """Sample means of n draws of the skewed variable, shifted and scaled to mean 0 and std 1."""
+CLT_NAME = "distributions.clt_table"
+CLT_SIZES = (1, 2, 5, 30, 100)
+
+
+@functools.lru_cache(maxsize=None)
+def _clt_runs(reps=10000):
+    """Standardised sample means for each n of CLT_SIZES, from one generator, sizes in order.
+
+    A sample mean is n draws of the skewed variable (one `rng.uniform()` each, cumulative-table rule),
+    averaged, then shifted and scaled to mean 0 and standard deviation 1.
+    """
     mu, var, _ = _clt_moments()
-    rng = bookrng.stream(f"distributions.clt_table.n{n}")
-    out = []
-    for _ in range(reps):
-        s = sum(CLT_VALUES[_draw(CLT_PROBS, rng)] for _ in range(n))
-        out.append((s / n - mu) / math.sqrt(var / n))
-    return out
+    rng = bookrng.generator(CLT_NAME)
+    runs = {}
+    for n in CLT_SIZES:
+        out = []
+        for _ in range(reps):
+            s = sum(CLT_VALUES[_draw(CLT_PROBS, rng)] for _ in range(n))
+            out.append((s / n - mu) / math.sqrt(var / n))
+        runs[n] = out
+    return runs
+
+
+def _clt_standardised(n):
+    """The 10,000 standardised sample means of size n shared by the table and the figure."""
+    return _clt_runs()[n]
 
 
 def clt_setup():
@@ -608,12 +681,17 @@ def clt_setup():
 def clt_table():
     mu, var, skew = _clt_moments()
     rows = []
-    for n in (1, 2, 5, 30, 100):
-        z = _clt_standardised(n)
+    runs = _clt_runs()
+    for n in CLT_SIZES:
+        z = runs[n]
         reps = len(z)
         rows.append([n, _fx(_mean(z), 3), _fx(math.sqrt(_var(z)), 3), _fx(_mean([a ** 3 for a in z]), 3),
                      _fx(skew / math.sqrt(n), 3), _fx(sum(abs(a) <= 1 for a in z) / reps, 3),
                      _fx(sum(abs(a) <= 2 for a in z) / reps, 3)])
     rows.append(["bell curve", "0", "1", "0", "0", "0.683", "0.954"])
-    return _table(["n", "mean of z", "std of z", "skewness of z", "skewness of X / sqrt(n)",
-                   "share with z in [-1, 1]", "share with z in [-2, 2]"], rows)
+    return (f"{_generator_line(CLT_NAME)} One generator, sizes in the order n = 1, 2, 5, 30, 100. For each n: 10,000 sample means "
+            "in turn, each the average of n draws of X, one `rng.uniform()` per draw mapped through the cumulative table "
+            "(0.6, 0.85, 0.95, 1.0). z = (mean - E[X]) / (std[X] / sqrt(n)). Std and skewness of z use divisor 10,000 "
+            "(skewness: the average of z cubed).\n\n"
+            + _table(["n", "mean of z", "std of z", "skewness of z", "skewness of X / sqrt(n)",
+                      "share with z in [-1, 1]", "share with z in [-2, 2]"], rows))

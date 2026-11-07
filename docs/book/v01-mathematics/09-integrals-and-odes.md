@@ -57,8 +57,9 @@ before reading on.
 ## Adding up rectangles
 
 We want a method, not a guess, for turning speed readings into a distance. Take
-the readings every $\Delta t$ seconds, so there are $n = 3/\Delta t$ of them on
-$[0, 3]$. Distance is speed times time when the speed is constant, so over one
+the readings every $\Delta t$ seconds. Each interval of length $\Delta t$ between
+two neighbouring readings is a **panel**, so $[0, 3]$ is cut into $n = 3/\Delta t$
+panels with $n + 1$ readings at their ends. Distance is speed times time when the speed is constant, so over one
 interval of length $\Delta t$ we use a single reading and multiply. Using the
 reading at the left end of each interval gives the **left sum**,
 
@@ -70,19 +71,19 @@ and using the right end gives the right sum, with $v(t_{i+1})$ in place of $v(t_
 Each term is the area of a rectangle of height $v(t_i)$ and width $\Delta t$, so
 the sum is an area, and this is a **Riemann sum**. The speed of the opening
 problem is $v(t) = t(4 - t)$, which gives exactly the readings above. The picture
-shows six readings, that is $\Delta t = 0.5$:
+shows six panels, that is $\Delta t = 0.5$:
 
 ![The curve v(t) = t(4 - t) for t from 0 to 3 with six rectangles whose heights are the speed at the left end of each half-second. The first four rectangles lie below the curve and the last two stick out above it, so the rectangles together cover 8.125 square units while the area under the curve is 9.](img/riemann-rectangles.svg)
 
 The rectangles total $8.125$ metres and the curve encloses $9$. The rectangles on
 the rising part of the curve (up to $t = 2$) lie below it; the last two stick out
 above it, because the speed has started to fall. What happens when the readings
-come more often?
+come more often (more, narrower panels)?
 
 <!-- worked: integrals.riemann_shrinking -->
-Distance travelled in 3 seconds from n readings of v(t) = t (4 - t).
+Distance travelled in 3 seconds from n panels (intervals of width h = 3/n; n + 1 readings, of which each sum uses n) of v(t) = t (4 - t).
 
-| readings n | width h | left sum | right sum | right minus left | average |
+| panels n | width h | left sum | right sum | right minus left | average |
 |---|---:|---:|---:|---:|---:|
 | 3 | 1.0000 | 7.0000 | 10.0000 | 3.0000 | 8.5000 |
 | 6 | 0.5000 | 8.1250 | 9.6250 | 1.5000 | 8.8750 |
@@ -313,8 +314,9 @@ So we need to approximate integrals from function values, with a known error.
 
 ## Numerical integration
 
-**Numerical integration** approximates $\int_a^b f$ by a weighted sum of function
-values. The left sum is one such rule. Its error is large: halving $\Delta t$ halves
+**Numerical integration** (also called *quadrature*, from the old word for finding a
+square of the same area) approximates $\int_a^b f$ by a weighted sum of function
+values. Such a sum is a *quadrature rule*. The left sum is one. Its error is large: halving $\Delta t$ halves
 it. We can do better by choosing which piece of curve each panel represents.
 
 **Trapezoid rule.** The left rectangle replaces the curve over a panel by a
@@ -349,7 +351,7 @@ $1, 4, 2, 4, \dots, 4, 1$ times $\Delta t/3$ ($n$ even). How do the three compar
 Integrate $e^x$ on $[0, 1]$, where the exact answer is $e - 1$:
 
 <!-- worked: integrals.rules_error_order -->
-Error of each rule for the area under e^x on [0, 1] (exact value e - 1 = 1.718282); in brackets, how much the error fell when the number of panels n doubled.
+Absolute error |rule - exact| of each rule for the area under e^x on [0, 1] (exact value e - 1 = 1.718282); in brackets, how much the error fell when the number of panels n doubled.
 
 | panels n | left rectangles | trapezoids | Simpson |
 |---|---:|---:|---:|
@@ -368,9 +370,14 @@ $4$ and Simpson's by $16$. We say the rules have order $1$, $2$ and $4$: the err
 shrinks like $\Delta t^p$. The reasons are Taylor expansions again. Over one panel
 the left rectangle drops the slope term, so each panel is wrong by about
 $\tfrac12 f'(t_i)\Delta t^2$, and over $n = (b - a)/\Delta t$ panels the errors add
-to something proportional to $\Delta t$. The chord of the trapezoid is right to
-first order, and what remains has a different sign on the two sides of each
-panel and mostly cancels between neighbouring panels, leaving $\Delta t^2$.
+to something proportional to $\Delta t$. For the trapezoid, expand
+$f$ about the middle $m$ of a panel: $f(m + s) = f(m) + f'(m)s + \tfrac12 f''(m)s^2 + \dots$.
+The exact area of the panel is $f(m)\Delta t + \tfrac{1}{24}f''(m)\Delta t^3 + \dots$
+(the odd term integrates to zero) and the trapezoid, the average of the two end heights times
+$\Delta t$, is $f(m)\Delta t + \tfrac18 f''(m)\Delta t^3 + \dots$, so each panel is
+wrong by about $-\tfrac1{12}f''(m)\Delta t^3$. Adding $n$ panels, $\sum f''(m_i)\Delta t$ is
+itself a Riemann sum of $f''$, equal to $f'(b) - f'(a)$ by the fundamental theorem, so
+the total is about $-\tfrac1{12}\bigl(f'(b) - f'(a)\bigr)\Delta t^2$: order $2$.
 Simpson's parabola is right through the quadratic term, and by symmetry through
 the cubic one as well, leaving $\Delta t^4$. The last claim is visible exactly:
 
@@ -388,7 +395,9 @@ Error (rule minus exact) of the area under x^k on [0, 1] with two panels.
 
 With two panels, the left rule is exact only for constants, the trapezoid rule for
 lines, and Simpson's rule for every polynomial up to degree three. (Degree three,
-not two, is the lucky cancellation the symmetry gives.) A higher order is worth
+not two, is the lucky cancellation the symmetry gives: the rule's parabola is built to
+match $1$, $s$ and $s^2$ exactly, and for $s^3$ both the exact area over
+$[-\Delta t, \Delta t]$ and the rule's value $\tfrac{\Delta t}{3}(-\Delta t^3 + 0 + \Delta t^3)$ are $0$.) A higher order is worth
 function evaluations. To bring the error on $e^x$ below $10^{-6}$:
 
 <!-- worked: integrals.evaluations_needed -->
@@ -489,10 +498,12 @@ euler(f: (real, real) -> real, t0: real, x0: real, h: real, n: int) -> array<rea
     require n >= 0
     x = zeros(real, [n + 1])
     x[0] = x0
-    for i in 0 .. n - 1
+    for i in 0 .. n
         x[i + 1] = x[i] + h * f(t0 + i * h, x[i])
     return x
 ```
+
+The loop runs for `i = 0, 1, ..., n - 1`: $n$ steps that write `x[1]` to `x[n]`.
 
 Take $dx/dt = -x$, $x(0) = 1$ and a step of $h = 0.5$. At each step the slope is
 $-x_i$, so the new value is $x_i - 0.5\,x_i = 0.5\,x_i$:
@@ -514,7 +525,8 @@ upward (its slope shrinks as $x$ falls) while the tangent keeps going straight
 down. Each step makes the same kind of mistake and the errors carry forward.
 
 **Local and global error.** The error of *one* step, started from the exact
-value, is the **local error**. By the Taylor expansion of Chapter 8 the exact
+value, is the **local error** (in the table below, for $dx/dt = -x$ started at
+$x(0) = 1$, it is $\lvert e^{-h} - (1 - h)\rvert$). By the Taylor expansion of Chapter 8 the exact
 solution is $x(t + h) = x(t) + h\,x'(t) + \tfrac12 h^2 x''(t) + \dots$, and the
 Euler step reproduces the first two terms. So the local error is about
 $\tfrac12 h^2 x''(t)$, of order $h^2$. To reach a fixed time $T$ we take $T/h$
@@ -542,7 +554,7 @@ $x''(0) = 1$), and the global error falls by about $2$: Euler's method has order
 $1$, like the left rectangle. For this particular equation we can see it exactly.
 Each step multiplies $x$ by $1 - h$, so after $t/h$ steps
 $x = (1 - h)^{t/h} = \exp\bigl(\tfrac{t}{h}\ln(1 - h)\bigr)$, and by the Taylor
-expansion $\ln(1 - h) = -h - \tfrac12 h^2 - \dots$, so
+expansion $\ln(1 - h) = -h - \tfrac12 h^2 - \dots$ (integrate $1/(1 - s) = 1 + s + s^2 + \dots$ from $0$ to $h$ and change the sign), so
 $x \approx e^{-t}\bigl(1 - \tfrac12 t h\bigr)$, an error of $\tfrac12 t e^{-t}\,h$:
 the last column converges to its predicted limit $0.1353$.
 
@@ -559,11 +571,11 @@ Euler on dx/dt = -x: each step multiplies x by 1 - h. Value after 10 steps from 
 
 | step h | factor 1 - h | x after 10 steps | behaviour |
 |---|---:|---:|---|
-| 0.5 | +0.50 | +0.0010 | decays, same sign as the true solution |
-| 1.0 | +0.00 | +0.0000 | lands on 0 in one step |
-| 1.5 | -0.50 | +0.0010 | decays, sign flips each step |
-| 2.0 | -1.00 | +1.0000 | never decays, sign flips each step |
-| 2.5 | -1.50 | +57.6650 | grows, sign flips each step |
+| 0.5 | +0.50 | +0.000977 | decays, same sign as the true solution |
+| 1.0 | +0.00 | +0.000000 | lands on 0 in one step |
+| 1.5 | -0.50 | +0.000977 | decays, sign flips each step |
+| 2.0 | -1.00 | +1.000000 | never decays, sign flips each step |
+| 2.5 | -1.50 | +57.665039 | grows, sign flips each step |
 <!-- /worked -->
 
 For $0 < kh < 1$ the path decays like the truth. For $1 < kh < 2$ it still decays
@@ -611,7 +623,9 @@ and the equation is $d\mathbf{x}/dt = \mathbf{f}(t, \mathbf{x})$ with
 $\mathbf{f}:\mathbb{R}\times\mathbb{R}^n \to \mathbb{R}^n$. At every point of the
 space $\mathbf{f}$ gives an arrow, the direction and speed with which the state
 moves there. A function that assigns a vector to every point is a **vector
-field**. Euler's method is unchanged: add $h\,\mathbf{f}$ to the vector. The
+field**. Euler's method is unchanged: add $h\,\mathbf{f}$ to the vector (every
+component of the state is updated with the same formula, and the solvers below
+are applied to vectors the same way, component by component). The
 solution is a path that is tangent to the arrows everywhere.
 
 A small example: $\mathbf{f}(x, y) = (-y, x)$, a field that points around the
@@ -656,7 +670,7 @@ Chapter 8, $\tfrac{d}{dt}L(\mathbf{w}(t)) = \nabla L\cdot\tfrac{d\mathbf{w}}{dt}
 computed from its exact solution, confirms it:
 
 <!-- worked: integrals.loss_rate_along_flow -->
-Along the exact flow from (0, 0): the rate of change of L against minus the squared gradient length.
+Along the exact flow from (0, 0): the rate of change of L against minus the squared gradient length. The central difference is (L(w(t + h)) - L(w(t - h))) / 2h with h = 1e-5, using the closed-form flow (also at t - h = -h for the row t = 0).
 
 | t | w(t) | L(w(t)) | dL/dt by central difference | -|grad L|^2 |
 |---|---:|---:|---:|---:|
@@ -666,11 +680,18 @@ Along the exact flow from (0, 0): the rate of change of L against minus the squa
 | 0.8 | (0.8886, 2.0459) | 0.0025 | -0.0017 | -0.0017 |
 <!-- /worked -->
 
-The exact solution comes from the same split as Chapter 8. Write the error from the
+The exact solution comes from the same split as Chapter 8 (the central difference
+in the table is $(L(\mathbf{w}(t + h)) - L(\mathbf{w}(t - h)))/2h$ with $h = 10^{-5}$,
+evaluating this closed form, also at $t - h = -h$ for the first row). Write the error from the
 minimum as $\mathbf{e} = a\,\mathbf{v}_1 + b\,\mathbf{v}_2$ along the curvature
 directions. The equation $d\mathbf{e}/dt = -\mathbf{H}\mathbf{e}$ separates into
 $\dot a = -\lambda_1 a$ and $\dot b = -\lambda_2 b$, two decay equations solved above:
-$a(t) = a_0 e^{-\lambda_1 t}$ and $b(t) = b_0 e^{-\lambda_2 t}$. The flow is the
+$a(t) = a_0 e^{-\lambda_1 t}$ and $b(t) = b_0 e^{-\lambda_2 t}$. The starting
+parts come from dot products, because the eigenvectors of the symmetric $\mathbf{H}$ are
+orthonormal (Chapter 6): with the unit eigenvectors $\mathbf{v}_1 = (0.3827, 0.9239)$ and
+$\mathbf{v}_2 = (0.9239, -0.3827)$, the start $\mathbf{w}_0 = (0, 0)$ has error
+$\mathbf{e}_0 = \mathbf{w}_0 - \mathbf{w}^\star = (-1, -2)$, so $a_0 = \mathbf{e}_0\cdot\mathbf{v}_1$,
+$b_0 = \mathbf{e}_0\cdot\mathbf{v}_2$ and $\mathbf{w}(t) = \mathbf{w}^\star + a(t)\mathbf{v}_1 + b(t)\mathbf{v}_2$. The flow is the
 sum of two exponentials, one fast and one slow. For our bowl ($\lambda_1 = 11.66$,
 $\lambda_2 = 0.343$) the steep direction is gone after a time of about
 $1/\lambda_1 = 0.09$ and the valley floor takes about $1/\lambda_2 = 2.9$. The
@@ -737,6 +758,31 @@ per step:
 
 - **Heun's method** is the trapezoid rule: take the slope at the start, $k_1 = f(t, x)$; use it to predict where the step lands, $x + h k_1$; read the slope there, $k_2 = f(t + h, x + h k_1)$; and step with the average, $x + h\,(k_1 + k_2)/2$.
 - The **midpoint method** reads the slope in the middle of the step instead: it takes a half Euler step, $k = f(t + h/2,\; x + \tfrac{h}{2}f(t, x))$, and steps with $x + h k$.
+
+```text
+heun(f: (real, real) -> real, t0: real, x0: real, h: real, n: int) -> array<real>[n + 1]
+    require n >= 0
+    x = zeros(real, [n + 1])
+    x[0] = x0
+    for i in 0 .. n
+        t = t0 + i * h
+        k1 = f(t, x[i])
+        k2 = f(t + h, x[i] + h * k1)
+        x[i + 1] = x[i] + h * (k1 + k2) / 2
+    return x
+
+midpoint(f: (real, real) -> real, t0: real, x0: real, h: real, n: int) -> array<real>[n + 1]
+    require n >= 0
+    x = zeros(real, [n + 1])
+    x[0] = x0
+    for i in 0 .. n
+        t = t0 + i * h
+        k = f(t + h / 2, x[i] + (h / 2) * f(t, x[i]))
+        x[i + 1] = x[i] + h * k
+    return x
+```
+
+For a vector state the same code applies with `x[i]`, `k1`, `k2` and `k` as vectors and `+`, `*` acting on every component (the one place where the book allows this implicit broadcast).
 
 Both have local error of order $h^3$ and global error of order $h^2$. Since they
 cost two evaluations per step, the fair comparison fixes the number of evaluations

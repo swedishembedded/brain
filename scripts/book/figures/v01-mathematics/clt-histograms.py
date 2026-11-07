@@ -4,7 +4,7 @@
 """Histograms of standardised sample means of a skewed variable, for n = 1, 2, 5, 30.
 
 Each panel draws the same 10,000 repeats the chapter's table summarises (the
-bookrng stream is shared with the worked module) and overlays the standard
+bookrng generator and its draws are shared with the worked module) and overlays the standard
 Gaussian density. The lopsided shape of n = 1 turns into the bell as n grows.
 
 Swedish Embedded AB implements solutions for explaining probabilistic models to

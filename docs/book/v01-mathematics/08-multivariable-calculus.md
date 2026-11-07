@@ -164,6 +164,8 @@ residual-weighted sum of the inputs. Here it is at six points, beside a central
 difference taken one knob at a time with the other frozen (Chapter 7):
 
 <!-- worked: multivariable.gradient_check_points -->
+Central differences with h = 1e-5, one knob at a time. The last column is the largest absolute difference of the two gradient entries; it is round-off, so its digits depend on h and are compared by order of magnitude.
+
 | point w | L(w) | gradient (formula) | central differences | largest difference |
 |---|---:|---:|---:|---:|
 | (0.0, 0.0) | 29.000 | (-10.000, -24.000) | (-10.000, -24.000) | 2.01e-10 |
@@ -223,7 +225,7 @@ all the directions. Eight directions at $\mathbf{p} = (0.5, 1.5)$, and three
 special ones, compared with a central difference along each:
 
 <!-- worked: multivariable.directional_scan -->
-At p = (0.5, 1.5) the gradient is (-3.00, -7.00) with length 7.6158.
+At p = (0.5, 1.5) the gradient is (-3.00, -7.00) with length 7.6158. Angles are measured anticlockwise from the w1 axis; the perpendicular direction is (-g2, g1)/|g|, the gradient direction turned a quarter turn anticlockwise. Central difference along u: (L(p + h u) - L(p - h u)) / 2h with h = 1e-5.
 
 | unit direction u | u | grad . u | central difference along u |
 |---|---:|---:|---:|
@@ -297,7 +299,7 @@ $\mathbf{c}(t)$ is a path along the contour, then $L(\mathbf{c}(t))$ is constant
 and its derivative, which is $\nabla L\cdot\mathbf{c}'(t)$ by the formula of the
 last section, is zero. The velocity $\mathbf{c}'(t)$ of the path is the tangent of
 the contour, so $\nabla L$ is perpendicular to it (the dot product is zero,
-Chapter 3). Numerically, a short step of length $\varepsilon$ along the tangent at
+Chapter 3). Numerically, a short step of length $h$ along the tangent at
 $\mathbf{p}$ changes the score by far less than the same step along the
 gradient:
 
@@ -313,7 +315,7 @@ At p = (0.5, 1.5), tangent direction (0.9191, -0.3939) (perpendicular to the gra
 
 Along the tangent the change per unit step is not exactly zero for a finite step
 (the contour curves away from its tangent line), but it falls in proportion to
-$\varepsilon$, from $0.017$ to $0.0002$, while the change per unit step along the
+the step length, from $0.017$ to $0.0002$, while the change per unit step along the
 gradient settles at $\lVert\nabla L\rVert = 7.6158$. The valley shape also
 explains the length of the arrows: they are long across the narrow direction,
 where the contours are close together and the score changes quickly, and short
@@ -414,7 +416,7 @@ $\partial f_1/\partial y = x^2$, $\partial f_2/\partial x = 5$ and
 $\partial f_2/\partial y = \cos y$.
 
 <!-- worked: multivariable.jacobian_2x2 -->
-f(x, y) = (x^2 y, 5x + sin y) at (1, 2): f = (2.0000, 5.9093).
+f(x, y) = (x^2 y, 5x + sin y) at (1, 2): f = (2.0000, 5.9093). Central differences with h = 1e-6, one input at a time.
 
 | Jacobian | formula | central differences |
 |---|---:|---:|
@@ -471,7 +473,7 @@ linear approximation. Adding a bias $\mathbf{b}$ changes nothing: a constant has
 derivative $0$.
 
 <!-- worked: multivariable.linear_layer_jacobian -->
-y = W x with W of shape [2, 3] at x = (1.0, 2.0, -1.0): y = (-3.50, 7.00).
+y = W x with W of shape [2, 3] at x = (1.0, 2.0, -1.0): y = (-3.50, 7.00). Central differences with h = 1e-3.
 
 | Jacobian row | row of W | central differences |
 |---|---:|---:|
@@ -584,7 +586,7 @@ the Jacobian of the whole map from $\mathbf{x}$ to $L$ is the product of the thr
 At $\mathbf{x} = (0.6, -0.4)$, with a fixed $\mathbf{W}$ and target $\mathbf{t}$:
 
 <!-- worked: multivariable.chain_jacobian_product -->
-x = (0.6, -0.4), u = W x = (0.7000, 0.4000, -1.1000), h = tanh(u) = (0.6044, 0.3799, -0.8005), L = 1.033521.
+W = [0.5, -1.0; 1.0, 0.5; -0.5, 2.0], target t = (0.2, -0.3, 0.4), L = (1/2)|h - t|^2. x = (0.6, -0.4), u = W x = (0.7000, 0.4000, -1.1000), h = tanh(u) = (0.6044, 0.3799, -0.8005), L = 1.033521. Central differences of L(x) with h = 1e-5.
 
 | factor | shape | value |
 |---|---|---:|
@@ -660,7 +662,7 @@ function. A loss with a nonlinearity inside it has a Hessian that changes from
 point to point, as in this example, $f(x, y) = e^x\cos y$:
 
 <!-- worked: multivariable.hessian_example -->
-f(x, y) = e^x cos y.
+f(x, y) = e^x cos y. Central second differences (f(+h,+h) - f(+h,-h) - f(-h,+h) + f(-h,-h)) / 4h^2 with h = 1e-4.
 
 | point | Hessian (formulas) | central second differences | H[0][1] - H[1][0] |
 |---|---:|---:|---:|
@@ -896,7 +898,8 @@ that is not quadratic the expansion is local. Take $f = e^x\cos y$ about the
 origin, where the gradient is $(1, 0)$ and the Hessian is $\mathrm{diag}(1, -1)$,
 so that the expansion is $1 + x + \tfrac{1}{2}(x^2 - y^2)$. The curvature is
 positive along $x$ and negative along $y$, which makes the origin a *saddle*, not
-a bowl. Step $t(0.5, 1)$ and halve $t$:
+a bowl: a **saddle** is a point where the slope is zero but the surface curves up
+along one direction and down along another, like the middle of a mountain pass. Step $t(0.5, 1)$ and halve $t$:
 
 <!-- worked: multivariable.taylor2_errors -->
 f(x, y) = e^x cos y about the origin, step t (0.5, 1). Gradient (1, 0), Hessian diag(1, -1); second-order polynomial 1 + x + (x^2 - y^2)/2.
@@ -944,22 +947,25 @@ sign, at every step. That is the divergence of $\eta = 0.18$ in the first look. 
 flat direction, $\lambda_2 = 0.343$, has factor $1 - 0.343\eta$, which is within
 $0.06$ of $1$ for every allowed $\eta$, so the error along the valley floor shrinks
 slowly. That is the crawl of $\eta = 0.05$. Start with one unit of error in each
-direction and count the steps until the distance to the minimum is below $0.001$:
+direction (the start is $\mathbf{w}^\star + \mathbf{v}_1 + \mathbf{v}_2$ for the two unit
+eigenvectors, at distance $\sqrt2$ from the minimum) and count the steps $n$ until
+the distance $\lVert\mathbf{w}_n - \mathbf{w}^\star\rVert$ is below $0.001$. The best step size is
+exactly $2/(\lambda_1 + \lambda_2) = 2/12 = 1/6$, which the table prints as $0.1667$:
 
 <!-- worked: multivariable.step_size_limit -->
-Curvatures lambda1 = 11.6569, lambda2 = 0.3431; 2 / lambda1 = 0.1716. Steps from w* plus one unit of error along each curvature direction (distance 1.414) until the distance to the minimum is below 0.001.
+Curvatures lambda1 = 11.6569, lambda2 = 0.3431; 2 / lambda1 = 0.1716; the step size 2/(lambda1 + lambda2) = 2/12 = 1/6 exactly (printed rounded). Start w = w* + v1 + v2 with v1, v2 the unit eigenvectors of H (distance sqrt 2 = 1.414); each step w <- w - eta grad L(w); steps = the first count n with distance |w_n - w*| < 0.001. 'never' means the distance exceeds 10^12 or 100000 steps pass.
 
 | step size eta | |1 - eta lambda1| | |1 - eta lambda2| | worst factor per step | steps needed |
 |---|---:|---:|---:|---:|
 | 0.0200 | 0.7669 | 0.9931 | 0.9931 | 1004 |
 | 0.0500 | 0.4172 | 0.9828 | 0.9828 | 400 |
 | 0.1000 | 0.1657 | 0.9657 | 0.9657 | 198 |
-| 0.1667 | 0.9428 | 0.9428 | 0.9428 | 124 |
+| 1/6 (best, 0.1667) | 0.9428 | 0.9428 | 0.9428 | 124 |
 | 0.1700 | 0.9817 | 0.9417 | 0.9817 | 374 |
 | 0.1800 | 1.0982 | 0.9382 | 1.0982 | never (diverges) |
 <!-- /worked -->
 
-Small step sizes are slow because the flat direction takes many steps; step sizes
+A step size whose worst factor is above $1$ never reaches the target, shown as "never" (the distance has grown past $10^{12}$ or $100000$ steps have passed). Small step sizes are slow because the flat direction takes many steps; step sizes
 near the limit are slow too, or fail outright, because the steep direction
 oscillates; the best step size balances the two factors, $1 - \eta\lambda_2 =
 -(1 - \eta\lambda_1)$, giving $\eta^\star = 2/(\lambda_1 + \lambda_2)$ and the
@@ -972,13 +978,13 @@ only as good as $\kappa$ allows:
 <!-- worked: multivariable.conditioning_compare -->
 | bowl | curvatures | ratio (condition number) | best step 2/(l1 + l2) | shrink factor (k-1)/(k+1) | steps until distance < 0.001 |
 |---|---:|---:|---:|---:|---:|
-| round bowl | 3.000 and 3.000 | 1.0 | 0.3333 | 0.0000 | 1 |
-| mild | 4.000 and 1.000 | 4.0 | 0.4000 | 0.6000 | 15 |
-| this chapter's bowl | 11.657 and 0.343 | 34.0 | 0.1667 | 0.9428 | 124 |
-| severe | 10.000 and 0.010 | 1000.0 | 0.1998 | 0.9980 | 3628 |
+| round bowl | 3.000 and 3.000 | 1.00 | 0.3333 | 0.0000 | 1 |
+| mild | 4.000 and 1.000 | 4.00 | 0.4000 | 0.6000 | 15 |
+| this chapter's bowl | 11.657 and 0.343 | 33.97 | 0.1667 | 0.9428 | 124 |
+| severe | 10.000 and 0.010 | 1000.00 | 0.1998 | 0.9980 | 3628 |
 <!-- /worked -->
 
-A round bowl ($\kappa = 1$) is solved in one step. Our bowl, $\kappa = 34$, needs
+A round bowl ($\kappa = 1$) is solved in one step. Our bowl, $\kappa = 33.97 \approx 34$, needs
 $124$ steps at the best step size, and a bowl with a ratio of $1000$ needs
 thousands. The picture shows what that looks like on the contour map: the path
 jumps back and forth across the narrow direction, a little less each time, while
@@ -1032,7 +1038,7 @@ stored; every method that wants curvature information has to get it indirectly.
 - **Choose the finite-difference step for the number format.** A central
   difference in 32-bit arithmetic has a best step near $4\times10^{-3}$ (Chapter
   7). A difference along a direction $\mathbf{v}$ of $n$ entries of size $1$ moves
-  every entry at once, so the step it takes has length $\epsilon\sqrt{n}$.
+  every entry at once, so the step it takes has length $h\sqrt{n}$.
 - **Curvature, not slope, limits the step.** The slope tells which way to go; the
   largest curvature caps how far: $\eta < 2/\lambda_{\max}$ on a quadratic.
 
@@ -1056,7 +1062,7 @@ pieces: [Backpropagation Derived from Scratch](../v03-neural-networks/04-backpro
 `directional_check` picks a random direction $\mathbf{v}$ of $\pm 1$ entries per
 parameter tensor and compares the analytic $\nabla L\cdot\mathbf{v}$, the formula
 of this chapter's directional-derivative section, with a central difference
-$(L(\mathbf{w} + \epsilon\mathbf{v}) - L(\mathbf{w} - \epsilon\mathbf{v}))/2\epsilon$. Its
+$(L(\mathbf{w} + h\mathbf{v}) - L(\mathbf{w} - h\mathbf{v}))/2h$. Its
 `elementwise_check` perturbs one entry at a time and compares each partial
 derivative, at a cost of two evaluations of the loss per entry.
 
@@ -1133,11 +1139,11 @@ Answers are at the end of the chapter.
 
 6. **[Calculate]** For $L(\mathbf{w}) = \tfrac{1}{2}\lVert\mathbf{X}\mathbf{w} - \mathbf{t}\rVert^2$ with $\mathbf{X} = \begin{pmatrix}1&0\\0&1\\1&1\end{pmatrix}$ and $\mathbf{t} = (1, 2, 4)$, find $\nabla L$ and $\mathbf{H}$ at $\mathbf{w} = (0, 0)$, the extreme curvatures from $\det(\mathbf{H} - \lambda\mathbf{I}) = 0$, the step size limit $2/\lambda_{\max}$ and the best step along the gradient from $(0, 0)$.
 
-7. **[Implement]** Implement the loss, its gradient formula and a central difference per knob, and reproduce `multivariable.gradient_check_points`. Then implement the directional derivative both ways and reproduce `multivariable.directional_scan`, including the three special directions.
+7. **[Implement]** Implement the loss, its gradient formula and a central difference per knob, and reproduce `multivariable.gradient_check_points` (central differences with $h = 10^{-5}$; its last column is round-off, so compare it by order of magnitude). Then implement the directional derivative both ways and reproduce `multivariable.directional_scan`, including the three special directions (the perpendicular one is $(-g_2, g_1)/\lVert\mathbf{g}\rVert$).
 
-8. **[Implement]** Implement the step rule $\mathbf{w}\leftarrow\mathbf{w} - \eta\nabla L$ and reproduce `multivariable.first_steps` (both step sizes) and `multivariable.step_size_limit`, which also needs the two curvature numbers from the quadratic equation of the Hessian section.
+8. **[Implement]** Implement the step rule $\mathbf{w}\leftarrow\mathbf{w} - \eta\nabla L$ and reproduce `multivariable.first_steps` (both step sizes) and `multivariable.step_size_limit`, which also needs the two curvature numbers from the quadratic equation of the Hessian section and the exact step size $1/6$ (not the rounded $0.1667$).
 
-9. **[Implement]** Implement the Jacobian by central differences, one input at a time, and use it to reproduce `multivariable.jacobian_2x2` and `multivariable.linear_layer_jacobian`. Then build the three-link chain with a matrix product and reproduce `multivariable.chain_jacobian_product` and `multivariable.chain_transposed`.
+9. **[Implement]** Implement the Jacobian by central differences, one input at a time (steps $h = 10^{-6}$ for `jacobian_2x2`, $10^{-3}$ for `linear_layer_jacobian`), and use it to reproduce `multivariable.jacobian_2x2` and `multivariable.linear_layer_jacobian`. Then build the three-link chain with a matrix product and reproduce `multivariable.chain_jacobian_product` and `multivariable.chain_transposed`.
 
 10. **[Implement]** Implement Taylor polynomials of $e^x$ and reproduce `multivariable.taylor_exp_partial_sums` and `multivariable.taylor_error_order`. Then implement the second-order multivariable model of $e^x\cos y$ and reproduce `multivariable.taylor2_errors`.
 

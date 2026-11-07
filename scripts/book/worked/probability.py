@@ -168,17 +168,24 @@ def classifier_joint():
 
 # --------------------------------------------------- frequencies and counting
 
+def _generator_line(name):
+    """The sentence that makes a simulated table reproducible: generator, seed, and the rule for what it draws."""
+    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} ({bookrng.seed_of(name)})."
+
 def coin_frequencies():
     """Relative frequency of heads in a growing run of fair-coin flips."""
-    rng = bookrng.stream("probability.coin_frequencies")
+    name = "probability.coin_frequencies"
+    rng = bookrng.generator(name)
     checkpoints = [10, 100, 1000, 10000, 100000]
     heads, flips, rows = 0, 0, []
     for stop in checkpoints:
         while flips < stop:
-            heads += rng.random() < 0.5
+            heads += rng.uniform() < 0.5
             flips += 1
         rows.append([f"{flips:,}", heads, _fx(heads / flips, 4), _fx(abs(heads / flips - 0.5), 4)])
-    return _table(["flips", "heads", "heads / flips", "distance from 0.5"], rows)
+    return (f"{_generator_line(name)} Flip k is the k-th call of `rng.uniform()` and counts as heads when it is "
+            "below 0.5; one run of 100,000 flips, read off at the flip counts listed.\n\n"
+            + _table(["flips", "heads", "heads / flips", "distance from 0.5"], rows))
 
 
 def two_dice_sums():
@@ -370,8 +377,9 @@ def bayes_two_detectors():
     rows = [["before any alarm", _fx(p, 4)]]
     for i in (1, 2, 3):
         p = _posterior(p, 0.9, 0.1)
-        rows.append([f"after alarm {i}", _fx(p, 4)])
-    return _table(["state", "P(defective)"], rows, "lr")
+        rows.append([f"after alarm {i} (detector {i})", _fx(p, 4)])
+    return ("Prior 0.01; each detector has sensitivity 0.9 and false-alarm rate 0.1, and they err independently given the truth.\n\n"
+            + _table(["state", "P(defective)"], rows, "lr"))
 
 
 def bayes_spam_two_ways():
@@ -420,22 +428,28 @@ def expectation_by_table():
 
 
 def running_average(n, name):
-    """Running average of n rolls of the two-dice sum from the stream `name`; returns the list of averages."""
-    rng = bookrng.stream(name)
+    """Running average of n rolls of the two-dice sum from the generator `name`; returns the list of averages.
+
+    A roll is `rng.integer(6) + 1` for the first die, then the same for the second.
+    """
+    rng = bookrng.generator(name)
     total, out = 0, []
     for i in range(1, n + 1):
-        total += rng.randint(1, 6) + rng.randint(1, 6)
+        total += rng.integer(6) + 1 + rng.integer(6) + 1
         out.append(total / i)
     return out
 
 
 def long_run_average():
     """The sample average of the two-dice sum approaches the expectation 7 as rolls accumulate."""
-    avg = running_average(100_000, "probability.long_run_average")
+    name = "probability.long_run_average"
+    avg = running_average(100_000, name)
     rows = []
     for n in [10, 100, 1000, 10_000, 100_000]:
         rows.append([f"{n:,}", _fx(avg[n - 1], 4), _fx(abs(avg[n - 1] - 7), 4)])
-    return _table(["rolls", "average of the sum", "distance from 7"], rows)
+    return (f"{_generator_line(name)} Roll k uses two calls of `rng.integer(6)`, each plus 1: first the first die, then "
+            "the second; the sum of the two is the roll. One run of 100,000 rolls, read off at the roll counts listed.\n\n"
+            + _table(["rolls", "average of the sum", "distance from 7"], rows))
 
 
 def dataset_mean_is_expectation():
@@ -535,25 +549,30 @@ def variance_of_sums():
 
 def mean_variance_shrinks():
     """The variance of the mean of n die rolls is Var[X] / n: simulate 4000 means for each n."""
-    rng = bookrng.stream("probability.mean_variance_shrinks")
+    name = "probability.mean_variance_shrinks"
+    rng = bookrng.generator(name)
     var_x = 35 / 12
     rows = []
     for n in [1, 4, 16, 64, 256]:
-        means = [sum(rng.randint(1, 6) for _ in range(n)) / n for _ in range(4000)]
+        means = [sum(rng.integer(6) + 1 for _ in range(n)) / n for _ in range(4000)]
         m = sum(means) / len(means)
         v = sum((a - m) ** 2 for a in means) / len(means)
         rows.append([n, _fx(m, 4), _fx(v, 4), _fx(var_x / n, 4), _fx(v ** 0.5, 4)])
-    return _table(["rolls per mean n", "average of the means", "variance of the means", "Var[X] / n", "std of the means"], rows)
+    return (f"{_generator_line(name)} One generator for the whole table. A roll is `rng.integer(6) + 1`. Rows in the order "
+            "n = 1, 4, 16, 64, 256; within a row 4000 means in turn, each the average of its n rolls drawn in turn. "
+            "Variance of the means: average squared deviation from their average (divisor 4000).\n\n"
+            + _table(["rolls per mean n", "average of the means", "variance of the means", "Var[X] / n", "std of the means"], rows))
 
 
 def sampling_a_table():
     """Drawing from a probability table with one uniform number (cumulative sums), then counting the draws."""
     probs = [("a", Fraction(1, 2)), ("b", Fraction(3, 10)), ("c", Fraction(1, 5))]
-    rng = bookrng.stream("probability.sampling_a_table")
+    name = "probability.sampling_a_table"
+    rng = bookrng.generator(name)
     counts = {k: 0 for k, _ in probs}
     n = 20_000
     for _ in range(n):
-        u = rng.random()
+        u = rng.uniform()
         acc = 0.0
         for k, p in probs:
             acc += float(p)
@@ -567,4 +586,6 @@ def sampling_a_table():
     for k, p in probs:
         cum += p
         rows.append([k, _fx(p, 2), _fx(cum, 2), counts[k], _fx(counts[k] / n, 4)])
-    return _table(["symbol", "p", "cumulative p", f"draws of {n:,}", "frequency"], rows)
+    return (f"{_generator_line(name)} Each of the {n:,} draws is one `rng.uniform()` passed to the `sample_discrete` "
+            "rule (first symbol whose cumulative probability exceeds u).\n\n"
+            + _table(["symbol", "p", "cumulative p", f"draws of {n:,}", "frequency"], rows))

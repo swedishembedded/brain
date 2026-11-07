@@ -315,7 +315,9 @@ Derivative of x^n at x = 1.5, rule n x^(n-1) against a central difference with h
 The "central difference" column is the two-sided estimate
 $\frac{f(x + h) - f(x - h)}{2h}$ with a small fixed $h$. We use it as an
 independent check on every rule in this chapter; the last section studies how
-accurate it is.
+accurate it is. Unless a table says otherwise, every central difference in this
+chapter uses $h = 10^{-5}$ and 64-bit floats, and "abs difference" is the
+absolute value of the rule minus the central difference.
 
 **Reciprocals and quotients.** Start with $1/g$. Its change is
 $\frac{1}{g(x+h)} - \frac{1}{g(x)} = \frac{g(x) - g(x+h)}{g(x)\,g(x+h)}$, so the
@@ -847,7 +849,7 @@ $10^{-6}$; squaring that gives $10^{-12}$. This is **quadratic convergence**:
 the number of correct digits roughly doubles per step.
 
 <!-- worked: derivatives.newton_sqrt2 -->
-Newton's method for x^2 - 2 from x_0 = 1, fractions kept exact; 1/(2 sqrt 2) = 0.353553.
+Newton's method for x^2 - 2 from x_0 = 1, fractions kept exact; 1/(2 sqrt 2) = 0.353553. Each error is computed as e_n = (x_n^2 - 2) / (x_n + sqrt 2) with x_n^2 - 2 an exact rational.
 
 | n | x_n | error e_n | e_n^2 / (2 x_n) | error e_(n+1) | e_(n+1) / e_n^2 |
 |---|---:|---:|---:|---:|---:|
@@ -858,13 +860,26 @@ Newton's method for x^2 - 2 from x_0 = 1, fractions kept exact; 1/(2 sqrt 2) = 0
 | 4 | 665857/470832 | 1.595e-12 | 8.993e-25 | 8.993e-25 | 0.353553 |
 <!-- /worked -->
 
+The errors cannot be found by subtracting $\sqrt2$ from a 64-bit $x_n$: that
+subtraction has an absolute error near $10^{-16}$ and would print $0$ for $e_5$.
+Because $x_n = p/q$ is an exact fraction, use
+$e_n = x_n - \sqrt2 = \dfrac{x_n^2 - 2}{x_n + \sqrt2}$ (multiply and divide by
+$x_n + \sqrt2$). The numerator $(p^2 - 2q^2)/q^2$ is an exact rational that is
+itself tiny, and only the harmless denominator is rounded; the table was computed
+that way, with $\sqrt2$ to 80 digits. The numerator obeys its own recurrence: with
+$p' = p^2 + 2q^2$ and $q' = 2pq$ (the next fraction), $p'^2 - 2q'^2 = (p^2 - 2q^2)^2$,
+so the integer $p^2 - 2q^2$ is squared at every step.
+
 The fourth and fifth columns are equal in every row: the identity
 $e_{n+1} = e_n^2/(2x_n)$ is exact, not an approximation. The last column
 $e_{n+1}/e_n^2$ tends to $1/(2\sqrt{2}) = 0.3536$. The error $1.6 \times 10^{-12}$
 at step $4$ matches the $4.5\times10^{-12}$ residual $x^2 - 2$ in Chapter 1's
 table (the residual is about $2\sqrt{2}\,e_n$).
 
-**When it fails.** The method is only as good as the tangent. Three ways it
+**When it fails.** The method is only as good as the tangent. (In the table below the
+update is computed exactly as derived, $x - f(x)/f'(x) = x - (x\cdot x - 2)/(2x)$ in
+64-bit floats, and the distance is to the double nearest $\sqrt2$,
+$1.4142135623730951$.) Three ways it
 fails, the first two shown below. If the start is far from the root, the first
 tangent can send us far away; the method then walks back at a *linear* pace (the
 guess halves each step) until it gets close, and only then does squaring begin.
@@ -872,7 +887,7 @@ If the tangent is horizontal, $f'(x_n) = 0$ and the step divides by zero. And on
 a curve with the wrong shape the iterates can cycle.
 
 <!-- worked: derivatives.newton_failures -->
-A far start for x^2 - 2, x_0 = 0.01:
+A far start for x^2 - 2, x_0 = 0.01, 64-bit floats, update x - f(x)/f'(x) = x - (x*x - 2)/(2*x), distance |x_n - 1.4142135623730951| (the double nearest sqrt 2):
 
 | n | x_n | distance to sqrt 2 |
 |---|---:|---:|
@@ -911,7 +926,10 @@ errors $5.5\times10^{-1}$, $7.8\times10^{-2}$, $2.0\times10^{-3}$,
 $1.5\times10^{-6}$, $7.5\times10^{-13}$ square from step to step. The last rows
 reach the floor of 64-bit arithmetic: an error of exactly $0$ and then
 $2.2\times10^{-16}$, the first appearance of the limit the floating-point chapter
-studies. The second table is a cycle: from $0$ the tangent lands at $1$, and from
+studies. Which of the last two rows is exactly $0$ depends on the algebraic form
+of the update: the equivalent averaging form $\tfrac12(x + 2/x)$ rounds
+differently and shows $2.2\times10^{-16}$ already at $n = 12$. Only the digits at
+the floor are form-dependent. The second table is a cycle: from $0$ the tangent lands at $1$, and from
 $1$ it lands back at $0$, forever, although $g$ has a root near $-1.77$.
 
 **Newton's method for a minimum.** A minimum of $f$ is a root of $f'$. Apply the
@@ -1043,29 +1061,34 @@ Derivative of e^x at x = 1 (exactly e), in 64-bit floating point.
 
 ![Base-10 logarithm of the error of the forward and central difference estimates of the derivative of e to the x at x = 1, against minus the base-10 logarithm of the step h. For large steps the forward error falls along a line of slope 1 and the central error along a line of slope 2, following their predicted dashed lines. Near h = 1e-8 for the forward and h = 1e-5 for the central difference each curve turns and rises again.](img/numdiff-error.svg)
 
-From $h = 10^{-2}$ to $10^{-4}$ the errors agree with the predictions to three digits, and the central
+Here $h$ is the 64-bit float nearest to $10^{-k}$, and $e^x$ is the library's
+64-bit exponential (the last digits of rows with $h \le 10^{-9}$ depend on its
+rounding). From $h = 10^{-2}$ to $10^{-4}$ the errors agree with the predictions to three digits, and the central
 difference is far more accurate at the same $h$: at $h = 10^{-4}$ it is off by
 $4.5\times10^{-9}$ where the forward difference is off by $1.4\times10^{-4}$. But
 shrinking $h$ further does not keep helping. The error stops falling, bottoms out,
 and *rises*, to $0.39$ at $h = 10^{-15}$, worse than $h = 1$. The mathematics did
 not change; the arithmetic did. Both $f(x + h)$ and $f(x)$ are stored with a
-relative error of about $\varepsilon$, the spacing of numbers near $1$ (Chapter 1's
-sighting of $1 + 10^{-16} = 1$); their difference is a small number made of the
-digits where they disagree, and the error of those digits is *divided by $h$*, so
-it grows like $\varepsilon/h$ as $h$ shrinks. The total error is a falling
+relative error of at most $u$, the **unit round-off** (half the gap
+$\varepsilon = 2^{-52}$ between $1$ and the next number, so $u = 2^{-53}$ in 64 bits;
+Chapter 1's sighting of $1 + 10^{-16} = 1$ is this limit); their difference is a
+small number made of the digits where they disagree, and the error of those digits
+is *divided by $h$*, so it grows like $u/h$ as $h$ shrinks. The total error is a falling
 truncation term plus a rising round-off term. Balancing them gives the best step:
-for the forward difference $h \approx \sqrt{\varepsilon}$ and for the central
-$h \approx \varepsilon^{1/3}$, to within a constant.
+for the forward difference $h \approx \sqrt{u}$ and for the central
+$h \approx u^{1/3}$, to within a constant.
 
 <!-- worked: derivatives.numdiff_best_step -->
-| format | unit round-off eps | forward: sqrt(eps) | central: eps^(1/3) |
+| format | unit round-off u | forward: sqrt(u) | central: u^(1/3) |
 |---|---:|---:|---:|
-| 64-bit (eps = 2^-53) | 1.11e-16 | 1.05e-08 | 4.81e-06 |
-| 32-bit (eps = 2^-24) | 5.96e-08 | 2.44e-04 | 3.91e-03 |
+| 64-bit (u = 2^-53) | 1.11e-16 | 1.05e-08 | 4.81e-06 |
+| 32-bit (u = 2^-24) | 5.96e-08 | 2.44e-04 | 3.91e-03 |
 <!-- /worked -->
 
 The 64-bit values match the turning points of the figure (the forward error is
-smallest near $10^{-8}$, the central near $10^{-5}$ to $10^{-7}$). The 32-bit row
+smallest at $10^{-8}$, the central at $10^{-5}$ and again at $10^{-7}$, where the
+two errors tie at $5.86\times10^{-11}$; a turning point is only defined to within
+about two decades). The 32-bit row
 is the lesson for neural networks, whose arithmetic is usually single precision or
 less: the best central step is around $4\times10^{-3}$, and the best achievable
 error is then only a few digits. A derivative check in low precision must use a
@@ -1079,7 +1102,7 @@ number format.
 
 - **Check a derivative against a central difference.** Every formula in this
   chapter was checked that way. Evaluate at a handful of points that are not
-  special (not $0$, not $1$), take $h$ near $\varepsilon^{1/3}$ times a scale of
+  special (not $0$, not $1$), take $h$ near $u^{1/3}$ times a scale of
   $|x|$ and compare with a relative tolerance. A mismatch means the formula (or the
   code) is wrong; agreement means only that it is right *at those points*.
 - **Evaluate the outer derivative at the inner value.** In the chain rule the
@@ -1103,7 +1126,7 @@ the derivative $1 - \tanh^2$ that the central differences below confirm.
 `crates/kernels/wgsl/silu_bwd.wgsl` computes $s + x\,s\,(1 - s)$ with
 $s = 1/(1 + e^{-x})$, which is exactly the product-rule example of the chain-rule
 section. `crates/kernels/wgsl/gelu_bwd.wgsl` differentiates $0.5\,x\,(1 + \tanh u)$ with
-$u = k\,(x + 0.044715\,x^3)$ by the product rule and the chain rule, giving
+$u = k\,(x + 0.044715\,x^3)$, $k = \sqrt{2/\pi}$, by the product rule and the chain rule, giving
 $0.5\,(1 + t) + 0.5\,x\,(1 - t^2)\,u'$. Each of the three formulas, recomputed
 here from the rules and compared with a central difference of its forward function:
 
@@ -1134,11 +1157,11 @@ backpropagation chapter returns to).
 **The checker is a central difference.** `crates/gradcheck/src/lib.rs` is brain's
 gate for whether a hand-written backward really is the derivative of its forward.
 It compares the analytic directional derivative with the central difference
-$\big(L(w + \epsilon v) - L(w - \epsilon v)\big)/2\epsilon$ along random directions
+$\big(L(w + h\,v) - L(w - h\,v)\big)/2h$ along random directions
 $v$, and the step follows exactly the rule of the previous section: the
-documentation of `directional_check` says that $\epsilon \approx 5\times10^{-3}$
-suits 32-bit floats, and the double-precision check of one model uses
-$\epsilon = 10^{-5}$. Compare $4\times10^{-3}$ and $5\times10^{-6}$ in the table of
+documentation of `directional_check` says that a step of about
+$5\times10^{-3}$ suits 32-bit floats, and the double-precision check of one model
+uses $10^{-5}$. Compare $4\times10^{-3}$ and $5\times10^{-6}$ in the table of
 best steps. The checker was introduced in commit `afbbae41d` (June 2026) as the
 correctness gate of the first language model's backward.
 
@@ -1209,11 +1232,11 @@ Answers are at the end of the chapter.
 
 7. **[Implement]** Implement the secant slope and reproduce `derivatives.secant_table` (the nine values of $h$) and `derivatives.limit_examples`. Add a column showing the secant slope of $x^3$ at $x = 1$ and check that it tends to $3$.
 
-8. **[Implement]** Write a function `check_derivative(f, df, xs, h)` that compares an analytic derivative to a central difference at each point of `xs`. Use it to reproduce `derivatives.derivative_rules` and `derivatives.chain_numbers` (the four-link table at $x = 0.5$), and then use it to find the bug in a deliberately wrong quotient rule $(f'g + fg')/g^2$.
+8. **[Implement]** Write a function `check_derivative(f, df, xs, h)` that compares an analytic derivative to a central difference at each point of `xs`. Use it to reproduce `derivatives.derivative_rules` and `derivatives.chain_numbers` (the four-link table at $x = 0.5$) with $h = 10^{-5}$ and the pass rule "largest absolute difference below $10^{-6}$", and then use it to find the bug in a deliberately wrong quotient rule $(f'g + fg')/g^2$.
 
-9. **[Implement]** Implement Newton's method for roots with exact fractions and reproduce `derivatives.newton_sqrt2` (the iterates $1$, $3/2$, $17/12$, $577/408$, $665857/470832$ and the error identity). Then reproduce the far-start table and the cycle of `derivatives.newton_failures`.
+9. **[Implement]** Implement Newton's method for roots with exact fractions and reproduce `derivatives.newton_sqrt2` (the iterates $1$, $3/2$, $17/12$, $577/408$, $665857/470832$ and the errors $e_n = (x_n^2 - 2)/(x_n + \sqrt2)$ from the exact numerators). Then reproduce the far-start table and the cycle of `derivatives.newton_failures`.
 
-10. **[Implement]** Implement the forward and central differences of $e^x$ at $x = 1$ and reproduce `derivatives.numdiff_errors` for $h = 10^{-1}, \dots, 10^{-15}$ and `derivatives.numdiff_best_step`. Plot $\log_{10}$ of the error against $-\log_{10} h$ and read off the two slopes and the two turning points.
+10. **[Implement]** Implement the forward and central differences of $e^x$ at $x = 1$ and reproduce `derivatives.numdiff_errors` for $h = 10^{-1}, \dots, 10^{-15}$ and `derivatives.numdiff_best_step`. Form $h$ as the 64-bit float nearest $10^{-k}$. Plot $\log_{10}$ of the error against $-\log_{10} h$ and read off the two slopes (about $-1$ and $-2$ over $h = 10^{-1}$ to $10^{-4}$) and the two turning points (the smallest error: $10^{-8}$ for the forward difference; $10^{-5}$ for the central, which ties with $10^{-7}$).
 
 11. **[Investigate]** For $g(x) = x^3 - 2x + 2$ run Newton's method from $200$ starting values between $-3$ and $3$. Classify each by where it ends (the root near $-1.77$, the cycle $0 \leftrightarrow 1$, or elsewhere) and print the starts in order as a string of symbols. Describe the pattern of the starts that land in the cycle, and explain why a tiny change in a starting point can change the outcome.
 
@@ -1245,8 +1268,8 @@ error is squared at each step, which explains the doubling of correct digits in
 Chapter 1's square-root table, and it fails from a far start, from a flat tangent
 and in cycles, and it finds hilltops as readily as valleys. Estimating a derivative
 from function values has error $\tfrac{1}{2}f''h$ (forward) or $\tfrac{1}{6}f'''h^2$
-(central) and, because of round-off, a best step near $\sqrt{\varepsilon}$ or
-$\varepsilon^{1/3}$ rather than "as small as possible".
+(central) and, because of round-off, a best step near $\sqrt{u}$ or
+$u^{1/3}$ rather than "as small as possible".
 
 The limits of this chapter are the limits of one variable. A real model has
 millions of parameters, so a score depends on them all at once; "the slope" becomes
@@ -1283,6 +1306,6 @@ extends every idea here to that case.
 4. $f''(0) = 6\cdot 0 = 0$, so the test is silent. Compare values on both sides: $f(0.1) = 0.001 > 0 > f(-0.1) = -0.001$, so $0$ is neither a minimum nor a maximum but a shelf.
 5. True: $f'' = e^x > 0$ everywhere, so $e^x$ is convex. False: a convex function need not have a minimum. $e^x$ approaches $0$ as $x \to -\infty$ and never reaches it, and it has no critical point ($e^x \ne 0$). Convexity guarantees that *if* there is a critical point, it is a global minimum.
 6. $x_1 = 1 - (1 - 9)/2 = 5$; $x_2 = 5 - 16/10 = 3.4$; $x_3 = 3.4 - 2.56/6.8 \approx 3.0235$. The errors are $2$, $0.4$ and $0.0235$; each is the previous one squared and divided by $2x$, as in $0.4^2/6.8 = 0.0235$, so from step $2$ on they square from step to step.
-7. Less accurate. The two function values differ only in their last digits, so their difference is mostly round-off, and dividing by $2h = 2\times10^{-15}$ magnifies it; the table shows errors of $10^{-1}$ to $10^{-2}$ for $h \le 10^{-14}$, against $5.9\times10^{-11}$ at $h = 10^{-5}$.
+7. Less accurate. The two function values differ only in their last digits, so their difference is mostly round-off, and dividing by $2h = 2\times10^{-15}$ magnifies it; the table shows errors of $9.3\times10^{-3}$ at $h = 10^{-14}$ and $0.17$ to $0.39$ at $h = 10^{-15}$, against $5.9\times10^{-11}$ at $h = 10^{-5}$.
 8. $(0.25)^{10} \approx 9.5\times10^{-7}$. A product of many small rates vanishes: a change at the start of a deep chain barely moves the end, so the derivative signal that would tell the start how to change is tiny. (Later chapters study this and its remedies.)
 

@@ -186,11 +186,14 @@ def partial_formulas():
 
 
 def gradient_check_points():
+    """Central differences with h = 1e-5, one knob at a time; the last column is round-off."""
     rows = []
     for p in ([0.0, 0.0], [0.5, 1.5], [1.0, 2.0], [2.0, 0.0], [3.0, 4.0], [-1.0, 3.0]):
         g, n = grad(p), central_gradient(loss, p)
         rows.append([_vec(p, 1), _fx(loss(p), 3), _vec(g, 3), _vec(n, 3), _sci(max(abs(a - b) for a, b in zip(g, n)))])
-    return _table(["point w", "L(w)", "gradient (formula)", "central differences", "largest difference"], rows)
+    return ("Central differences with h = 1e-5, one knob at a time. The last column is the largest absolute "
+            "difference of the two gradient entries; it is round-off, so its digits depend on h and are compared by order of magnitude.\n\n"
+            + _table(["point w", "L(w)", "gradient (formula)", "central differences", "largest difference"], rows))
 
 
 # ----------------------------------------------------------- direction
@@ -208,7 +211,9 @@ def directional_scan():
                ("perpendicular to the gradient", [-g[1] / gn, g[0] / gn])]
     for name, u in special:
         rows.append([name, _vec(u, 3), _fx(_dot(g, u), 4), _fx(central_directional(loss, p, u), 4)])
-    return (f"At p = (0.5, 1.5) the gradient is {_vec(g, 2)} with length {_fx(gn, 4)}.\n\n"
+    return (f"At p = (0.5, 1.5) the gradient is {_vec(g, 2)} with length {_fx(gn, 4)}. Angles are measured anticlockwise "
+            "from the w1 axis; the perpendicular direction is (-g2, g1)/|g|, the gradient direction turned a quarter turn anticlockwise. "
+            "Central difference along u: (L(p + h u) - L(p - h u)) / 2h with h = 1e-5.\n\n"
             + _table(["unit direction u", "u", "grad . u", "central difference along u"], rows))
 
 
@@ -296,7 +301,7 @@ def jacobian_2x2():
     j = _jac_2x2(p)
     n = central_jacobian(_f_2x2, p)
     rows = [[f"row {i} (output {i})", _vec(j[i], 4), _vec(n[i], 4)] for i in range(2)]
-    return (f"f(x, y) = (x^2 y, 5x + sin y) at (1, 2): f = {_vec(_f_2x2(p), 4)}.\n\n"
+    return (f"f(x, y) = (x^2 y, 5x + sin y) at (1, 2): f = {_vec(_f_2x2(p), 4)}. Central differences with h = 1e-6, one input at a time.\n\n"
             + _table(["Jacobian", "formula", "central differences"], rows, "lrr"))
 
 
@@ -325,7 +330,7 @@ def linear_layer_jacobian():
     rows = [[f"row {i}", _vec(_W_LINEAR[i], 4), _vec(n[i], 4)] for i in range(2)]
     other = central_jacobian(f, [10.0, -4.0, 7.0], 1e-3)
     same = max(abs(a - b) for r1, r2 in zip(n, other) for a, b in zip(r1, r2))
-    return (f"y = W x with W of shape [2, 3] at x = {_vec(x, 1)}: y = {_vec(f(x), 2)}.\n\n"
+    return (f"y = W x with W of shape [2, 3] at x = {_vec(x, 1)}: y = {_vec(f(x), 2)}. Central differences with h = 1e-3.\n\n"
             + _table(["Jacobian row", "row of W", "central differences"], rows, "lrr")
             + f"\n\nThe same central-difference Jacobian at x = (10, -4, 7) differs from the one above by at most {_sci(same)}.")
 
@@ -373,7 +378,9 @@ def chain_jacobian_product():
     step1 = _matmul(jl, jt)  # [1, 3]
     total = _matmul(step1, jw)  # [1, 2]
     n = central_gradient(_chain_loss, x)
-    return (f"x = {_vec(x, 1)}, u = W x = {_vec(u, 4)}, h = tanh(u) = {_vec(h, 4)}, L = {_fx(loss_v, 6)}.\n\n"
+    return (f"W = {_mat(_W_CHAIN, 1)}, target t = {_vec(_T_CHAIN, 1)}, L = (1/2)|h - t|^2. "
+            f"x = {_vec(x, 1)}, u = W x = {_vec(u, 4)}, h = tanh(u) = {_vec(h, 4)}, L = {_fx(loss_v, 6)}. "
+            "Central differences of L(x) with h = 1e-5.\n\n"
             + _table(["factor", "shape", "value"], [
                 ["dL/dh = (h - t)^T", "[1, 3]", _mat(jl)],
                 ["dh/du = diag(1 - h^2)", "[3, 3]", _mat(jt)],
@@ -509,7 +516,8 @@ def hessian_example():
         h = _hess_saddle(p)
         n = central_hessian(_f_saddle, p)
         rows.append([_vec(p, 1), _mat(h, 4), _mat(n, 4), _fx(h[0][1] - h[1][0], 1)])
-    return ("f(x, y) = e^x cos y.\n\n"
+    return ("f(x, y) = e^x cos y. Central second differences "
+            "(f(+h,+h) - f(+h,-h) - f(-h,+h) + f(-h,-h)) / 4h^2 with h = 1e-4.\n\n"
             + _table(["point", "Hessian (formulas)", "central second differences", "H[0][1] - H[1][0]"], rows, "lrrr"))
 
 
@@ -592,10 +600,15 @@ def step_size_limit():
     for eta in (0.02, 0.05, 0.1, 2.0 / (l1 + l2), 0.17, 0.18):
         factor = max(abs(1 - eta * l1), abs(1 - eta * l2))
         n = _steps_to(lambda w: [a - eta * b for a, b in zip(w, grad(w))])
-        rows.append([_fx(eta, 4), _fx(abs(1 - eta * l1), 4), _fx(abs(1 - eta * l2), 4), _fx(factor, 4),
+        best = abs(eta - 2.0 / (l1 + l2)) < 1e-12
+        rows.append(["1/6 (best, 0.1667)" if best else _fx(eta, 4), _fx(abs(1 - eta * l1), 4),
+                     _fx(abs(1 - eta * l2), 4), _fx(factor, 4),
                      str(n) if n is not None else "never (diverges)"])
-    return (f"Curvatures lambda1 = {_fx(l1, 4)}, lambda2 = {_fx(l2, 4)}; 2 / lambda1 = {_fx(2 / l1, 4)}. "
-            "Steps from w* plus one unit of error along each curvature direction (distance 1.414) until the distance to the minimum is below 0.001.\n\n"
+    return (f"Curvatures lambda1 = {_fx(l1, 4)}, lambda2 = {_fx(l2, 4)}; 2 / lambda1 = {_fx(2 / l1, 4)}; "
+            "the step size 2/(lambda1 + lambda2) = 2/12 = 1/6 exactly (printed rounded). "
+            "Start w = w* + v1 + v2 with v1, v2 the unit eigenvectors of H (distance sqrt 2 = 1.414); "
+            "each step w <- w - eta grad L(w); steps = the first count n with distance |w_n - w*| < 0.001. "
+            "'never' means the distance exceeds 10^12 or 100000 steps pass.\n\n"
             + _table(["step size eta", "|1 - eta lambda1|", "|1 - eta lambda2|", "worst factor per step", "steps needed"], rows))
 
 
@@ -626,7 +639,7 @@ def conditioning_compare():
             e1 *= 1 - eta * a
             e2 *= 1 - eta * b
             k += 1
-        rows.append([name, f"{_fx(a, 3)} and {_fx(b, 3)}", _fx(a / b, 1), _fx(eta, 4), _fx(factor, 4), str(k)])
+        rows.append([name, f"{_fx(a, 3)} and {_fx(b, 3)}", _fx(a / b, 2), _fx(eta, 4), _fx(factor, 4), str(k)])
     return _table(["bowl", "curvatures", "ratio (condition number)", "best step 2/(l1 + l2)", "shrink factor (k-1)/(k+1)", "steps until distance < 0.001"], rows)
 
 

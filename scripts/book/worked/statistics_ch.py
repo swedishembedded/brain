@@ -11,7 +11,9 @@ underscore (or that take arguments) are shared with the chapter's figures, so a
 picture and the table beside it cannot disagree. Small tables are computed
 exactly (fractions or enumeration), areas under the bell with the error
 function, the Student t multiplier by integrating its density, and every
-simulation draws from a named `bookrng` stream. The module is named
+simulation draws from the book's SplitMix64 through `bookrng.generator(name)`
+(`uniform()`, `integer(n)` and `normal()` as the randomness chapter specifies
+them); each simulated table prints the seed and the order of its draws. The module is named
 `statistics_ch` because `statistics` is a standard-library module.
 
 Swedish Embedded AB implements solutions for deciding, from finite test sets,
@@ -90,8 +92,13 @@ Z95 = _z_central(0.95)
 
 
 def _binom(rng, n, p):
-    """Number of successes among n independent trials of probability p."""
-    return sum(rng.random() < p for _ in range(n))
+    """Number of successes among n independent trials of probability p: n calls of `uniform()`, success when below p."""
+    return sum(rng.uniform() < p for _ in range(n))
+
+
+def _generator_line(name):
+    """The sentence that makes a simulated table reproducible: generator and seed."""
+    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} ({bookrng.seed_of(name)})."
 
 
 def _tail_ge(n, k):
@@ -131,17 +138,22 @@ def _unpaired_se(s):
 
 # ------------------------------------------------------------- the problem
 
+NULL_NAME = "statistics.chance_gaps"
+
+
 @lru_cache(maxsize=None)
 def _null_runs():
     """2000 experiments in which both models truly answer right with probability P_NULL."""
-    rng = bookrng.stream("statistics.chance_gaps")
+    rng = bookrng.generator(NULL_NAME)
     return tuple((_binom(rng, N_Q, P_NULL), _binom(rng, N_Q, P_NULL)) for _ in range(2000))
 
 
 def chance_gaps():
     runs = _null_runs()
     rows = [(i + 1, a, _pct(a / N_Q), b, _pct(b / N_Q), f"{100 * (b - a) / N_Q:+.1f}") for i, (a, b) in enumerate(runs[:8])]
-    out = [_table(["run", "A right", "A %", "B right", "B %", "B - A (points)"], rows)]
+    out = [f"{_generator_line(NULL_NAME)} Each of the 2000 runs draws A's 500 questions, then B's 500, one `rng.uniform()` per "
+           "question (right when below 0.708); the first eight runs are listed.", "",
+           _table(["run", "A right", "A %", "B right", "B %", "B - A (points)"], rows)]
     ahead = sum(1 for a, b in runs if b - a >= 4) / len(runs)
     behind = sum(1 for a, b in runs if a - b >= 4) / len(runs)
     out.append("")
@@ -177,32 +189,41 @@ def variance_divisors():
 
 
 def variance_divisor_simulation():
+    name = "statistics.variance_divisor_simulation"
+    rng = bookrng.generator(name)
     rows = []
     for n in (2, 5, 10, 50):
-        rng = bookrng.stream(f"statistics.variance_divisor.{n}")
         sum_n = sum_n1 = 0.0
         reps = 20000
         for _ in range(reps):
-            x = [int(rng.random() * 6) + 1 for _ in range(n)]
+            x = [rng.integer(6) + 1 for _ in range(n)]
             m = _mean(x)
             ss = sum((v - m) ** 2 for v in x)
             sum_n += ss / n
             sum_n1 += ss / (n - 1)
         sigma2 = 35 / 12
         rows.append((n, _fx(sum_n / reps), _fx(sum_n1 / reps), _fx(sigma2), _fx((n - 1) / n * sigma2)))
-    return _table(["n", "average, divisor n", "average, divisor n - 1", "true variance", "(n - 1)/n x true variance"], rows)
+    return (f"{_generator_line(name)} One generator, rows in the order n = 2, 5, 10, 50. Each row makes 20,000 samples; "
+            "a sample is n rolls, each `rng.integer(6) + 1`, drawn in turn; the variance of a sample is computed with "
+            "each divisor and the 20,000 values averaged.\n\n"
+            + _table(["n", "average, divisor n", "average, divisor n - 1", "true variance", "(n - 1)/n x true variance"], rows))
 
 
 # ------------------------------------------------- the sample mean and its SE
 
-@lru_cache(maxsize=None)
-def sample_means(n, p=0.7, repeats=1000):
-    """`repeats` accuracies, each over n independent questions answered right with probability p."""
-    rng = bookrng.stream(f"statistics.sampling_distribution.{n}")
-    return tuple(_binom(rng, n, p) / n for _ in range(repeats))
-
-
 SAMPLE_SIZES = (25, 100, 400, 1600)
+SAMPLING_NAME = "statistics.sampling_distribution"
+
+
+@lru_cache(maxsize=None)
+def _sampling_runs(p=0.7, repeats=1000):
+    """For each n of SAMPLE_SIZES, in order: `repeats` accuracies over n questions answered right with probability p."""
+    rng = bookrng.generator(SAMPLING_NAME)
+    return {n: tuple(_binom(rng, n, p) / n for _ in range(repeats)) for n in SAMPLE_SIZES}
+
+
+def sample_means(n):
+    return _sampling_runs()[n]
 
 
 def sampling_distribution():
@@ -212,7 +233,10 @@ def sampling_distribution():
         sd = math.sqrt(sum((v - _mean(m)) ** 2 for v in m) / len(m))
         pred = math.sqrt(0.7 * 0.3 / n)
         rows.append((n, _fx(_mean(m)), _fx(sd), _fx(pred), _fx(sd / pred, 3)))
-    return _table(["questions n", "average of 1000 accuracies", "spread of the 1000 accuracies", "sqrt(p(1-p)/n)", "ratio"], rows)
+    return (f"{_generator_line(SAMPLING_NAME)} True accuracy p = 0.7. One generator, rows in the order n = 25, 100, 400, 1600; "
+            "a row makes 1000 accuracies, each over n questions drawn in turn (one `rng.uniform()` per question, right when "
+            "below 0.7). Spread: standard deviation with divisor 1000.\n\n"
+            + _table(["questions n", "average of 1000 accuracies", "spread of the 1000 accuracies", "sqrt(p(1-p)/n)", "ratio"], rows))
 
 
 def standard_errors():
@@ -299,10 +323,8 @@ def _wald(k, n):
     return p - Z95 * se, p + Z95 * se
 
 
-@lru_cache(maxsize=None)
-def coverage_intervals(p, n, count, tag):
-    """`count` intervals from independent experiments of n questions at true accuracy p."""
-    rng = bookrng.stream(f"statistics.coverage.{tag}")
+def _coverage_intervals(rng, p, n, count):
+    """`count` Wald intervals from independent experiments of n questions at true accuracy p."""
     out = []
     for _ in range(count):
         lo, hi = _wald(_binom(rng, n, p), n)
@@ -310,29 +332,41 @@ def coverage_intervals(p, n, count, tag):
     return tuple(out)
 
 
+COVERAGE_NAME = "statistics.coverage_table"
+
+
 def coverage_table():
+    rng = bookrng.generator(COVERAGE_NAME)
     rows = []
     for p in (0.7, 0.1):
         for n in (20, 100, 500):
-            ints = coverage_intervals(p, n, 2000, f"table.{p}.{n}")
+            ints = _coverage_intervals(rng, p, n, 2000)
             hit = sum(lo <= p <= hi for lo, hi in ints) / len(ints)
             flat = sum(hi - lo == 0 for lo, hi in ints) / len(ints)
             rows.append((p, n, _fx(hit, 3), _fx(flat, 3)))
-    return _table(["true accuracy", "questions n", "share of 2000 intervals containing it", "share with zero width"], rows)
+    return (f"{_generator_line(COVERAGE_NAME)} One generator, rows in the order listed (p = 0.7 then 0.1; n = 20, 100, 500 "
+            "within each). A row makes 2000 experiments; an experiment draws its n questions in turn (one `rng.uniform()` "
+            "each, right when below p) and forms the 95 percent Wald interval with z = 1.959964; 'contains it' is "
+            "lower <= p <= upper.\n\n"
+            + _table(["true accuracy", "questions n", "share of 2000 intervals containing it", "share with zero width"], rows))
 
 
 FIG_P, FIG_N, FIG_COUNT = 0.7, 100, 100
+FIG_NAME = "statistics.coverage_figure"
 
 
+@lru_cache(maxsize=None)
 def _figure_intervals():
-    return coverage_intervals(FIG_P, FIG_N, FIG_COUNT, "figure.a")
+    return _coverage_intervals(bookrng.generator(FIG_NAME), FIG_P, FIG_N, FIG_COUNT)
 
 
 def coverage_figure_summary():
     ints = _figure_intervals()
     miss = sum(not (lo <= FIG_P <= hi) for lo, hi in ints)
-    return _table(["experiments", "questions each", "true accuracy", "intervals that missed it"],
-                  [(FIG_COUNT, FIG_N, FIG_P, miss)])
+    return (f"{_generator_line(FIG_NAME)} 100 experiments in turn, each 100 questions (one `rng.uniform()` each, right when "
+            "below 0.7), 95 percent Wald intervals as in the previous table.\n\n"
+            + _table(["experiments", "questions each", "true accuracy", "intervals that missed it"],
+                     [(FIG_COUNT, FIG_N, FIG_P, miss)]))
 
 
 def _t_multiplier(df):
@@ -381,11 +415,13 @@ def unpaired_test():
             ("test statistic z", _fx(z, 3)),
             ("two-sided p-value from the Gaussian", _fx(_p_two_sided(z), 3)),
             ("share of 2000 simulated null experiments with |gap| >= 4 questions", _fx(sim, 3))]
-    return _table(["quantity", "value"], rows, "ll")
+    return (f"The simulated share uses the 2000 runs of the first table of this chapter (same generator, seed "
+            f"{bookrng.seed_of(NULL_NAME):#018x}).\n\n" + _table(["quantity", "value"], rows, "ll"))
 
 
 def test_error_rates():
-    rng = bookrng.stream("statistics.test_error_rates")
+    name = "statistics.test_error_rates"
+    rng = bookrng.generator(name)
     reps = 1000
     rows = []
     for label, p_a, p_b in (("both truly 0.700", 0.700, 0.700), ("B truly 3 points better", 0.700, 0.730)):
@@ -404,7 +440,10 @@ def test_error_rates():
         shift = 0.03 / se_n
         power = (1 - _cdf(Z95 - shift)) + _cdf(-Z95 - shift)
         pw.append((n, _fx(se_n, 4), _fx(power, 3)))
-    return (_table(["truth", "questions", "share of 1000 experiments declared different"], rows, "lrr")
+    return (f"{_generator_line(name)} One generator; first row, then second. An experiment draws A's 500 questions, then B's 500 "
+            "(one `rng.uniform()` each, right when below the model's true accuracy), and declares the models different "
+            "when |z| > 1.959964 for the pooled-accuracy z-test; 1000 experiments per row.\n\n"
+            + _table(["truth", "questions", "share of 1000 experiments declared different"], rows, "lrr")
             + "\n\n" + _table(["questions n", "standard error of the difference", "chance of detecting a 3-point gain"], pw))
 
 
@@ -438,8 +477,12 @@ def paired_standard_errors():
         mean_d, se_pair, _ = _paired_summary(s)
         rows.append((s, _fx(pa, 3), _fx(pb, 3), _fx(cov, 4), _fx(rho, 3), _fx(va + vb, 4), _fx(vd_formula, 4), _fx(vd_direct, 4),
                      _fx(_unpaired_se(s), 4), _fx(se_pair, 4)))
-    return _table(["scenario", "acc A", "acc B", "Cov[A, B]", "correlation", "Var A + Var B", "Var A + Var B - 2 Cov",
-                   "Var of per-question difference", "SE if unpaired", "SE paired"], rows)
+    return ("Variances and covariance of the 0/1 answer vectors use divisor n = 500 (the observed questions as the whole "
+            "distribution); 'SE if unpaired' is sqrt((Var A + Var B) / n) with those variances; 'SE paired' is "
+            "sqrt(s_D^2 / n) with s_D^2 the unbiased variance of the per-question differences (divisor n - 1), "
+            "so it is larger than sqrt(Var of difference / n) by the factor sqrt(n / (n - 1)) = 1.001.\n\n"
+            + _table(["scenario", "acc A", "acc B", "Cov[A, B]", "correlation", "Var A + Var B", "Var A + Var B - 2 Cov",
+                      "Var of per-question difference", "SE if unpaired", "SE paired"], rows))
 
 
 def three_tests():
@@ -455,8 +498,11 @@ def three_tests():
                      _fx(z_un, 2), _fx(_p_two_sided(z_un), 3),
                      _fx(z_pair, 2), _fx(_p_two_sided(z_pair), 4),
                      f"{b_only} of {n_disc}", _fx(_tail_ge(n_disc, b_only), 4), _fx(_sign_p_two_sided(n_disc, b_only), 4)))
-    return _table(["scenario", "accuracy A / B %", "B - A", "unpaired z", "unpaired p", "paired z", "paired p",
-                   "B wins of discordant", "sign test one-sided p", "sign test two-sided p"], rows)
+    return ("Unpaired z: the gap divided by sqrt((Var A + Var B) / n) of the previous table. Paired z: the algorithm "
+            "`paired_z` (divisor n - 1). All p-values of the two z-tests are two-sided areas of the standard Gaussian; "
+            "the sign tests are exact binomial (one-sided: B better; two-sided: `sign_test`).\n\n"
+            + _table(["scenario", "accuracy A / B %", "B - A", "unpaired z", "unpaired p", "paired z", "paired p",
+                      "B wins of discordant", "sign test one-sided p", "sign test two-sided p"], rows))
 
 
 def table_two_by_two():
@@ -469,17 +515,18 @@ def table_two_by_two():
 
 def pairing_vs_correlation():
     n, p = N_Q, 0.7
+    name = "statistics.pairing_vs_correlation"
+    rng = bookrng.generator(name)
     rows = []
     for rho in (0.0, 0.3, 0.6, 0.9):
         v = p * (1 - p)
         pmf = [p * p + rho * v, v * (1 - rho), v * (1 - rho), (1 - p) ** 2 + rho * v]   # both, A only, B only, neither
-        rng = bookrng.stream(f"statistics.pairing.{rho}")
         reps = 1000
         diffs = []
         for _ in range(reps):
             net = 0
             for _ in range(n):
-                u = rng.random()
+                u = rng.uniform()
                 if u < pmf[0]:
                     continue
                 if u < pmf[0] + pmf[1]:
@@ -490,7 +537,13 @@ def pairing_vs_correlation():
         m = _mean(diffs)
         sd = math.sqrt(sum((x - m) ** 2 for x in diffs) / reps)
         rows.append((rho, _fx(pmf[1] + pmf[2], 3), _fx(math.sqrt(2 * v * (1 - rho) / n), 4), _fx(sd, 4)))
-    return _table(["correlation of the two models' answers", "share of questions where they disagree", "SE of the gap, formula", "spread of 1000 simulated gaps"], rows)
+    return (f"{_generator_line(name)} Two models of accuracy 0.7 each, answers correlated with coefficient rho; the four cells of "
+            "one question (both right, A only, B only, neither) have probabilities 0.49 + 0.21 rho, 0.21 (1 - rho), "
+            "0.21 (1 - rho), 0.09 + 0.21 rho. One generator, rows in the order rho = 0, 0.3, 0.6, 0.9. A row makes 1000 "
+            "experiments of 500 questions; a question is one `rng.uniform()` u: both right if u is below the first "
+            "cell's probability, A only if below the sum of the first two, B only if below the sum of the first three, "
+            "else neither. The gap is (B-only count minus A-only count) / 500; spread = standard deviation with divisor 1000.\n\n"
+            + _table(["correlation of the two models' answers", "share of questions where they disagree", "SE of the gap, formula", "spread of 1000 simulated gaps"], rows))
 
 
 def sign_test_floor():
@@ -506,18 +559,30 @@ def sign_test_floor():
 
 # ---------------------------------------------------------------- bootstrap
 
+BOOTSTRAP_NAME = "statistics.bootstrap_intervals"
+BOOTSTRAP_RESAMPLES = 2000
+
+
 @lru_cache(maxsize=None)
-def bootstrap_replicates(s, resamples=2000):
-    """Mean per-question difference B - A on each resample of the questions, with replacement."""
-    a, b = _scenario_vectors(s)
-    d = [y - x for x, y in zip(a, b)]
-    n = len(d)
-    rng = bookrng.stream(f"statistics.bootstrap.{s}")
-    out = []
-    for _ in range(resamples):
-        r = rng.random
-        out.append(sum(d[int(r() * n)] for _ in range(n)) / n)
-    return tuple(out)
+def _bootstrap_runs(resamples=BOOTSTRAP_RESAMPLES):
+    """Scenario 1, then scenario 2, from one generator: per resample, n calls of `integer(n)` pick question indices.
+
+    The per-question differences d = B - A are ordered as in `_scenario_vectors`: the 'both right' questions, then
+    'only A right' (-1), then 'only B right' (+1), then 'both wrong'.
+    """
+    rng = bookrng.generator(BOOTSTRAP_NAME)
+    runs = {}
+    for s in (1, 2):
+        a, b = _scenario_vectors(s)
+        d = [y - x for x, y in zip(a, b)]
+        n = len(d)
+        runs[s] = tuple(sum(d[rng.integer(n)] for _ in range(n)) / n for _ in range(resamples))
+    return runs
+
+
+def bootstrap_replicates(s):
+    """Mean per-question difference B - A on each of the resamples (with replacement) of scenario s."""
+    return _bootstrap_runs()[s]
 
 
 def _percentile(sorted_vals, q):
@@ -537,12 +602,22 @@ def bootstrap_intervals():
         boot_se = math.sqrt(sum((x - _mean(reps)) ** 2 for x in reps) / len(reps))
         rows.append((s, "paired, Gaussian", _fx(mean_d, 4), _fx(se, 4), _fx(mean_d - Z95 * se, 4), _fx(mean_d + Z95 * se, 4)))
         rows.append((s, "bootstrap, 2000 resamples", _fx(mean_d, 4), _fx(boot_se, 4), _fx(lo, 4), _fx(hi, 4)))
-    return _table(["scenario", "method", "B - A", "standard error", "95% lower", "95% upper"], rows, "llrrrr")
+    return (f"{_generator_line(BOOTSTRAP_NAME)} One generator: scenario 1's {BOOTSTRAP_RESAMPLES} resamples, then scenario 2's. "
+            "A resample of a scenario's 500 questions makes 500 calls of `rng.integer(500)`, each giving the index of a question "
+            "(questions in the order: both right, only A right, only B right, both wrong); its replicate is the average of the "
+            "chosen B - A differences. The interval ends are the 2.5th and 97.5th percentiles of the sorted replicates by linear "
+            "interpolation at position q (R - 1) for R replicates; the standard error is the standard deviation of the "
+            "replicates (divisor R). The Gaussian rows use the paired standard error with divisor n - 1 for the "
+            "differences and z = 1.959964.\n\n"
+            + _table(["scenario", "method", "B - A", "standard error", "95% lower", "95% upper"], rows, "llrrrr"))
+
+
+LATENCY_NAME = "statistics.latency_sample"
 
 
 def _latencies():
-    rng = bookrng.stream("statistics.latency_sample")
-    return [round(math.exp(rng.gauss(4.0, 0.6)), 1) for _ in range(25)]
+    rng = bookrng.generator(LATENCY_NAME)
+    return [round(math.exp(4.0 + 0.6 * rng.normal()), 1) for _ in range(25)]
 
 
 def _median(v):
@@ -551,19 +626,30 @@ def _median(v):
     return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2
 
 
+MEDIAN_NAME = "statistics.bootstrap_median"
+MEDIAN_RESAMPLES = 10000
+
+
 def bootstrap_median():
-    x = _latencies()
+    x = sorted(_latencies())
     n = len(x)
-    rng = bookrng.stream("statistics.bootstrap_median")
+    rng = bookrng.generator(MEDIAN_NAME)
     meds, means = [], []
-    for _ in range(2000):
-        r = [x[int(rng.random() * n)] for _ in range(n)]
+    for _ in range(MEDIAN_RESAMPLES):
+        r = [x[rng.integer(n)] for _ in range(n)]
         meds.append(_median(r))
         means.append(_mean(r))
     meds.sort()
     means.sort()
     se_mean = math.sqrt(_sample_var(x) / n)
-    out = ["Sorted latencies (ms): " + ", ".join(f"{v:.1f}" for v in sorted(x)), ""]
+    out = [f"Latencies (ms): 25 values, value k = exp(4.0 + 0.6 z) rounded to one decimal with z the k-th `rng.normal()` of the "
+           f"generator below; sorted ascending: " + ", ".join(f"{v:.1f}" for v in x) + ".",
+           f"Latency generator: seed {bookrng.seed_of(LATENCY_NAME):#018x} ({bookrng.seed_of(LATENCY_NAME)}).",
+           f"Bootstrap generator: seed {bookrng.seed_of(MEDIAN_NAME):#018x} ({bookrng.seed_of(MEDIAN_NAME)}). {MEDIAN_RESAMPLES:,} resamples; a resample is 25 calls of "
+           "`rng.integer(25)`, each the index into the ascending latencies above. The median of 25 values is "
+           "the 13th smallest. Interval ends: the 2.5th and 97.5th percentiles of the sorted replicates by linear "
+           "interpolation at position q (R - 1). The Gaussian row for the mean is the estimate plus or minus 1.959964 times s/sqrt(25), s the standard deviation with "
+           "divisor n - 1.", ""]
     out.append(_table(["statistic", "estimate (ms)", "lower end of 95 percent interval", "upper end", "how"],
                       [("mean", _fx(_mean(x), 1), _fx(_mean(x) - Z95 * se_mean, 1), _fx(_mean(x) + Z95 * se_mean, 1), "standard error s/sqrt(n)"),
                        ("mean", _fx(_mean(x), 1), _fx(_percentile(means, 0.025), 1), _fx(_percentile(means, 0.975), 1), "bootstrap"),
@@ -573,37 +659,57 @@ def bootstrap_median():
 
 
 CL_SEQ, CL_FRAMES = 15, 16
+CL_DATASETS, CL_RESAMPLES = 100, 200
 
 
 def _cluster_data(rng):
-    """15 sequences of 16 frames; each sequence has its own success probability."""
-    return [[1 if rng.random() < p else 0 for _ in range(CL_FRAMES)] for p in (rng.uniform(0.3, 0.9) for _ in range(CL_SEQ))]
+    """15 sequences of 16 frames: per sequence, p = 0.3 + 0.6 u (one `uniform()`), then 16 frames, each 1 when a `uniform()` is below p."""
+    data = []
+    for _ in range(CL_SEQ):
+        p = 0.3 + 0.6 * rng.uniform()
+        data.append([1 if rng.uniform() < p else 0 for _ in range(CL_FRAMES)])
+    return data
+
+
+CLUSTER_NAME = "statistics.cluster_bootstrap"
 
 
 def cluster_bootstrap():
-    truth_rng = bookrng.stream("statistics.cluster_truth")
+    rng = bookrng.generator(CLUSTER_NAME)
     overall = []
     for _ in range(2000):
-        data = _cluster_data(truth_rng)
+        data = _cluster_data(rng)
         overall.append(sum(map(sum, data)) / (CL_SEQ * CL_FRAMES))
     m = _mean(overall)
     true_sd = math.sqrt(sum((v - m) ** 2 for v in overall) / len(overall))
-    data = _cluster_data(bookrng.stream("statistics.cluster_data"))
-    frames = [v for seq in data for v in seq]
-    rng = bookrng.stream("statistics.cluster_resample")
-    nf = len(frames)
-    naive, clustered = [], []
-    for _ in range(1000):
-        naive.append(sum(frames[int(rng.random() * nf)] for _ in range(nf)) / nf)
-        clustered.append(sum(sum(data[int(rng.random() * CL_SEQ)]) for _ in range(CL_SEQ)) / nf)
 
     def sd(v):
         mm = _mean(v)
         return math.sqrt(sum((x - mm) ** 2 for x in v) / len(v))
+
+    naive_se, cluster_se = [], []
+    for _ in range(CL_DATASETS):
+        data = _cluster_data(rng)
+        frames = [v for seq in data for v in seq]
+        nf = len(frames)
+        naive, clustered = [], []
+        for _ in range(CL_RESAMPLES):
+            naive.append(sum(frames[rng.integer(nf)] for _ in range(nf)) / nf)
+            clustered.append(sum(sum(data[rng.integer(CL_SEQ)]) for _ in range(CL_SEQ)) / nf)
+        naive_se.append(sd(naive))
+        cluster_se.append(sd(clustered))
     rows = [("spread of the accuracy over 2000 fresh experiments (the target)", _fx(true_sd, 4), ""),
-            ("bootstrap resampling frames", _fx(sd(naive), 4), _fx(sd(naive) / true_sd, 2)),
-            ("bootstrap resampling whole sequences", _fx(sd(clustered), 4), _fx(sd(clustered) / true_sd, 2))]
-    return _table(["method", "standard error of the accuracy", "ratio to the target"], rows, "lrr")
+            (f"bootstrap resampling frames, average over {CL_DATASETS} data sets", _fx(_mean(naive_se), 4), _fx(_mean(naive_se) / true_sd, 2)),
+            (f"bootstrap resampling whole sequences, average over {CL_DATASETS} data sets", _fx(_mean(cluster_se), 4), _fx(_mean(cluster_se) / true_sd, 2))]
+    return (f"{_generator_line(CLUSTER_NAME)} One generator. Experiment: 15 sequences of 16 frames; per sequence one `rng.uniform()` u gives "
+            "its success probability 0.3 + 0.6 u, then 16 `rng.uniform()` calls give its frames (1 when below that probability). "
+            "First 2000 fresh experiments (the target is the standard deviation of their overall accuracy, divisor 2000). "
+            f"Then {CL_DATASETS} more experiments in turn, each a data set; for each, {CL_RESAMPLES} rounds, a round making "
+            "240 calls of `rng.integer(240)` over its frames in order, sequence by sequence ('frames': accuracy of the "
+            "resampled frames) and then 15 calls of `rng.integer(15)` over its sequences ('whole sequences': accuracy of "
+            "the resampled sequences). Each data set's standard error is the standard deviation of its "
+            f"{CL_RESAMPLES} accuracies (divisor {CL_RESAMPLES}); the table averages the {CL_DATASETS} standard errors.\n\n"
+            + _table(["method", "standard error of the accuracy", "ratio to the target"], rows, "lrr"))
 
 
 # ------------------------------------------------------ multiple comparisons
@@ -620,18 +726,19 @@ def family_error():
 
 def best_of_twenty():
     m, runs, p = 20, 400, 0.7
-    rng = bookrng.stream("statistics.best_of_twenty")
+    name = "statistics.best_of_twenty"
+    rng = bookrng.generator(name)
     tests = hits = bonf_hits = 0
     any_sig = any_bonf = 0
     best_gaps = []
     z_bonf = _z_central(1 - 0.05 / m)
     for _ in range(runs):
-        base = [rng.random() < p for _ in range(N_Q)]
+        base = [rng.uniform() < p for _ in range(N_Q)]
         best, sig, bon = -1.0, False, False
         for _ in range(m):
             co = bo = 0
             for bi in base:
-                ci = rng.random() < p
+                ci = rng.uniform() < p
                 if ci and not bi:
                     co += 1
                 elif bi and not ci:
@@ -651,7 +758,11 @@ def best_of_twenty():
             ("20 tests, any declared different at 0.05", _fx(any_sig / runs, 3), _fx(1 - 0.95 ** m, 3)),
             (f"20 tests, any declared different at 0.05/20 (z > {_fx(z_bonf, 2)})", _fx(any_bonf / runs, 3), _fx(1 - (1 - 0.0025) ** m, 3)),
             ("average gap of the best-looking of 20 configurations (points)", _fx(100 * _mean(best_gaps), 2), "0 (true gap)")]
-    return _table(["400 repeats of: baseline and 20 configurations, all truly 0.70", "simulated", "independent-tests formula"], rows, "lrr")
+    return (f"{_generator_line(name)} One generator, 400 repeats in turn. A repeat draws the baseline's 500 answers (one `rng.uniform()` "
+            "each, right when below 0.7), then for each of the 20 configurations its 500 answers in the same question order. "
+            "The test per configuration is the paired z (B wins minus A wins over discordant pairs; variance with divisor n - 1 of "
+            "the per-question differences), compared with 1.959964, or with the Bonferroni z for the level 0.05/20.\n\n"
+            + _table(["400 repeats of: baseline and 20 configurations, all truly 0.70", "simulated", "independent-tests formula"], rows, "lrr"))
 
 
 def holm_example():

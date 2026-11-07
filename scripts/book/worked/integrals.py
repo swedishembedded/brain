@@ -100,8 +100,9 @@ def riemann_shrinking():
         right = rule_sum(speed, 0.0, 3.0, n, "right")
         rows.append((n, f"{h:.4f}", f"{left:.4f}", f"{right:.4f}", f"{right - left:.4f}",
                      f"{(left + right) / 2:.4f}"))
-    return ("Distance travelled in 3 seconds from n readings of v(t) = t (4 - t).\n\n"
-            + _table(["readings n", "width h", "left sum", "right sum", "right minus left", "average"], rows))
+    return ("Distance travelled in 3 seconds from n panels (intervals of width h = 3/n; n + 1 readings, "
+            "of which each sum uses n) of v(t) = t (4 - t).\n\n"
+            + _table(["panels n", "width h", "left sum", "right sum", "right minus left", "average"], rows))
 
 
 def signed_area():
@@ -183,7 +184,7 @@ def rules_error_order():
             cells.append(_sci(err) + _ratio(prev.get(rule), err))
             prev[rule] = err
         rows.append(tuple(cells))
-    return (f"Error of each rule for the area under e^x on [0, 1] (exact value e - 1 = {exact:.6f}); in brackets, "
+    return (f"Absolute error |rule - exact| of each rule for the area under e^x on [0, 1] (exact value e - 1 = {exact:.6f}); in brackets, "
             "how much the error fell when the number of panels n doubled.\n\n"
             + _table(["panels n", "left rectangles", "trapezoids", "Simpson"], rows)
             + "\n\nPredicted fall factors: 2x, 4x, 16x.")
@@ -292,7 +293,7 @@ def euler_stability():
             kind = "never decays, sign flips each step"
         else:
             kind = "grows, sign flips each step"
-        rows.append((h, f"{factor:+.2f}", f"{x:+.4f}", kind))
+        rows.append((h, f"{factor:+.2f}", f"{x:+.6f}", kind))
     return ("Euler on dx/dt = -x: each step multiplies x by 1 - h. Value after 10 steps from x(0) = 1.\n\n"
             + _table(["step h", "factor 1 - h", "x after 10 steps", "behaviour"], rows, align="lrrl"))
 
@@ -392,11 +393,13 @@ def loss_rate_along_flow():
     rows = []
     for t in (0.0, 0.1, 0.3, 0.8):
         w = flow_at([0.0, 0.0], t)
-        eps = 1e-5
-        rate = (_loss(flow_at([0.0, 0.0], t + eps)) - _loss(flow_at([0.0, 0.0], t - eps))) / (2 * eps)
+        h = 1e-5
+        rate = (_loss(flow_at([0.0, 0.0], t + h)) - _loss(flow_at([0.0, 0.0], t - h))) / (2 * h)
         g = _grad(w)
         rows.append((t, f"({w[0]:.4f}, {w[1]:.4f})", _fx(_loss(w), 4), _fx(rate, 4), _fx(-(g[0] ** 2 + g[1] ** 2), 4)))
-    return ("Along the exact flow from (0, 0): the rate of change of L against minus the squared gradient length.\n\n"
+    return ("Along the exact flow from (0, 0): the rate of change of L against minus the squared gradient length. "
+            "The central difference is (L(w(t + h)) - L(w(t - h))) / 2h with h = 1e-5, using the closed-form flow "
+            "(also at t - h = -h for the row t = 0).\n\n"
             + _table(["t", "w(t)", "L(w(t))", "dL/dt by central difference", "-|grad L|^2"], rows))
 
 

@@ -120,6 +120,13 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\mathrm{erf}(x)$ | the error function $\frac{2}{\sqrt\pi}\int_0^x e^{-s^2}ds$ |
 | $\varepsilon$ | machine epsilon: the gap between 1 and the next larger floating-point number ($2^{-52}$ in 64 bits); $u = \varepsilon/2$ is the unit round-off |
 | $\mathrm{fl}(x)$ | the floating-point number a computer stores for $x$ |
+| $s(x)$ | the logistic sigmoid, written $s$ in Chapter 7 (the same function as $\sigma(x)$) |
+| $D_+(h)$, $D_0(h)$ | the forward and the central difference quotient with step $h$ (Chapter 7) |
+| $x_n$, $e_n$ | the $n$-th iterate of an iteration and its error $x_n - x^\star$ (Chapter 7) |
+| $\mathbf{w}^\star$ | the minimiser of a loss; $\mathbf{e} = \mathbf{w} - \mathbf{w}^\star$ is the error from it (Chapters 8, 9) |
+| $\kappa$ | the condition number of a bowl: largest curvature divided by the smallest (Chapter 8) |
+| $S_n^{\text{left}}$, $T_n$ | the left Riemann sum and the trapezoid rule with $n$ panels (Chapter 9) |
+| $x(t)$, $\mathbf{x}(t)$ | the state of a differential equation at time $t$ (Chapter 9; $t$ is time here) |
 | $O(\cdot)$, $\Theta(\cdot)$, $\Omega(\cdot)$ | growth rates of a cost (Chapter 16) |
 | $\oplus$, $\gg$ | bitwise exclusive-or, and shift right (the pseudocode's `xor`, `>>`) |
 | $\gamma$ | a decay factor, e.g. in a learning-rate schedule (Chapter 2) |
@@ -178,6 +185,9 @@ is meant, and these rules decide the rest.
 | $\Omega$ | alone, the sample space; followed by a function, $\Omega(n)$, a growth rate |
 | rank | the rank of a matrix is its number of independent columns; a tensor has a number of axes, never a rank |
 | hat | on a vector, $\hat{\mathbf{u}}$ is a unit vector; on a scalar or parameter ($\hat y$, $\hat p$) it is an estimate |
+| $\varepsilon$ | machine epsilon (Chapters 1 and 7); in Chapters 11 and 12 a tolerance in the law of large numbers, and the standard Gaussian noise vector of a diffusion step. Finite-difference and gradient-descent steps are written $h$ and $\eta$ |
+| $\varphi$, $\phi$ | in Chapters 11 and 12 the standard Gaussian density (written $\varphi$ or $\phi$ alike); in Chapter 8 $\varphi(t)$ is the loss along a line |
+| $\lambda$ | an eigenvalue (Chapter 6); in Chapters 8 and 9 the curvature of the loss along an eigenvector of the Hessian, which is the eigenvalue |
 
 ## Units
 

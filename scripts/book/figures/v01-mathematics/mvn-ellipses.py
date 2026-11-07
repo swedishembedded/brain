@@ -4,7 +4,7 @@
 """Samples from a two-dimensional Gaussian with the ellipses where (x-mu)^T Sigma^-1 (x-mu) = 1, 4, 9.
 
 The points are drawn with the chapter's Cholesky-factor sampler from a bookrng
-stream; the ellipse axes are the eigenvectors of Sigma with half-lengths
+generator; the ellipse axes are the eigenvectors of Sigma with half-lengths
 sqrt(c * lambda), the chapter's own formula.
 
 Swedish Embedded AB implements solutions for explaining probabilistic models to
@@ -25,7 +25,7 @@ from svgplot import Plot  # noqa: E402
 
 def render() -> str:
     mu = ds.MU
-    pts = ds._sample_cholesky(bookrng.stream("distributions.mvn_figure"), mu, ds.SIGMA, 500)
+    pts = ds._sample_cholesky(bookrng.generator("distributions.mvn_figure"), mu, ds.SIGMA, 500)
     (l1, l2), (v1, v2) = ds._sym2_eigen(ds.SIGMA)
     p = Plot((-6.0, 8.0), (-5.0, 6.0), width=560, height=360, xlabel="x1", ylabel="x2",
              title="500 samples and the ellipses for c = 1, 4, 9")

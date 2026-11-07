@@ -368,10 +368,21 @@ def _newton_sqrt2_iterates(steps):
 
 
 def newton_sqrt2():
+    """Errors from the exact identity e_n = (x_n^2 - 2) / (x_n + sqrt 2).
+
+    x_n is a fraction p/q, so x_n^2 - 2 = (p^2 - 2 q^2) / q^2 is an exact rational and is
+    tiny; only the harmless second factor is rounded. Subtracting sqrt(2) from a
+    64-bit x_n cannot show an error below about 1e-16.
+    """
     getcontext().prec = 80
     root = Decimal(2).sqrt()
     xs = _newton_sqrt2_iterates(5)
-    err = [Decimal(x.numerator) / Decimal(x.denominator) - root for x in xs]
+
+    def error(x):
+        numerator = Decimal((x * x - 2).numerator) / Decimal((x * x - 2).denominator)
+        return numerator / (Decimal(x.numerator) / Decimal(x.denominator) + root)
+
+    err = [error(x) for x in xs]
     rows = []
     for n in range(0, 5):
         xd = Decimal(xs[n].numerator) / Decimal(xs[n].denominator)
@@ -379,7 +390,8 @@ def newton_sqrt2():
         rows.append([n, f"{xs[n]}", f"{float(err[n]):.3e}", f"{float(pred):.3e}",
                      f"{float(err[n + 1]):.3e}", f"{float(err[n + 1] / err[n] ** 2):.6f}"])
     limit = 1 / (2 * root)
-    return (f"Newton's method for x^2 - 2 from x_0 = 1, fractions kept exact; 1/(2 sqrt 2) = {float(limit):.6f}.\n\n"
+    return (f"Newton's method for x^2 - 2 from x_0 = 1, fractions kept exact; 1/(2 sqrt 2) = {float(limit):.6f}. "
+            "Each error is computed as e_n = (x_n^2 - 2) / (x_n + sqrt 2) with x_n^2 - 2 an exact rational.\n\n"
             + _table(["n", "x_n", "error e_n", "e_n^2 / (2 x_n)", "error e_(n+1)", "e_(n+1) / e_n^2"], rows))
 
 
@@ -401,7 +413,8 @@ def newton_failures():
         rows.append([n, _fx(x, 4), _fx(g(x), 4), _fx(dg(x), 4)])
         x = newton_root_step(g, dg, x)
     cyc = _table(["n", "x_n", "g(x_n)", "g'(x_n)"], rows)
-    return ("A far start for x^2 - 2, x_0 = 0.01:\n\n" + far + "\n\nA cycle for g(x) = x^3 - 2x + 2, x_0 = 0:\n\n" + cyc)
+    return ("A far start for x^2 - 2, x_0 = 0.01, 64-bit floats, update x - f(x)/f'(x) = x - (x*x - 2)/(2*x), "
+            "distance |x_n - 1.4142135623730951| (the double nearest sqrt 2):\n\n" + far + "\n\nA cycle for g(x) = x^3 - 2x + 2, x_0 = 0:\n\n" + cyc)
 
 
 def newton_minimize():
@@ -468,9 +481,9 @@ def numdiff_errors():
 def numdiff_best_step():
     """Step that balances truncation error against round-off, by order of magnitude."""
     rows = []
-    for name, eps in (("64-bit (eps = 2^-53)", 2.0 ** -53), ("32-bit (eps = 2^-24)", 2.0 ** -24)):
-        rows.append([name, _sci(eps), _sci(eps ** 0.5), _sci(eps ** (1.0 / 3.0))])
-    return _table(["format", "unit round-off eps", "forward: sqrt(eps)", "central: eps^(1/3)"], rows)
+    for name, u in (("64-bit (u = 2^-53)", 2.0 ** -53), ("32-bit (u = 2^-24)", 2.0 ** -24)):
+        rows.append([name, _sci(u), _sci(u ** 0.5), _sci(u ** (1.0 / 3.0))])
+    return _table(["format", "unit round-off u", "forward: sqrt(u)", "central: u^(1/3)"], rows)
 
 
 # ------------------------------------------ activations, for the brain section
