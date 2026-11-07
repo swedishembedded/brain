@@ -47,21 +47,15 @@ stories appear throughout the book, each placed where you have learned
 enough to understand it. The chronology appendix shows the order in which
 things actually happened.
 
-## What this book is not
+## How brain is used
 
-It is not brain's manual. brain's own documentation explains how to install
-it and use it. This book uses brain as evidence: that each idea can be
-implemented, tested, made fast and put in front of users. Every concept is
-taught so that you could implement it without brain, and in another language.
-Where the book points at brain's source code, it does so the way a physics
-text points at an experiment: to show that the theory holds up, not to ask
-you to memorise the apparatus.
-
-It is also not a survey of the latest papers. Model families change every few
-months; the ideas underneath them change far more slowly. The book covers the
-families brain implements in enough depth that you could reproduce them, but
-it organises them by the ideas they share, so that the next family to appear
-will look familiar.
+brain is evidence, not the subject. Every concept is taught so that you
+could implement it without brain, in another language; the engine then
+shows that the idea can be implemented, tested, made fast and put in front
+of users. Model families change every few months, while the ideas
+underneath them change far more slowly, so the book covers the families
+brain implements in enough depth to reproduce them, but organises them by
+the ideas they share. The next family to appear should look familiar.
 
 ## How it is built
 
@@ -85,6 +79,6 @@ precisely.
 The engine this book describes stands on the published work of a great many
 researchers and engineers, whose papers and reference implementations are
 cited where their ideas appear. Any mistakes in explaining their work are
-ours.
+mine.
 
 Martin Schröder

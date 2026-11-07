@@ -3,31 +3,114 @@
 %
 % ---- the book: typesetting on top of header.tex (xelatex, book class) -----
 % Passed after header.tex by scripts/book/pdf.py, so these settings win where
-% the two overlap. The book is a textbook, not a manual: running heads carry
-% the chapter, chapters open on a right-hand page, figures are centred and a
-% little smaller than the text block.
+% the two overlap. A textbook trim size and two-sided layout; one accent
+% colour shared with the SVG figures; serif text with sans-serif display
+% type; chapters that open with their number, title and guiding question;
+% shaded code; set-off quotations; numbered, captioned figures.
 
-\setkeys{Gin}{width=0.9\linewidth,height=0.45\textheight,keepaspectratio}
+% -- Page -------------------------------------------------------------------
+\geometry{paperwidth=7in,paperheight=10in,inner=0.95in,outer=0.75in,
+          top=0.95in,bottom=0.95in,headsep=0.3in,footskip=0.45in}
+\setlength{\parskip}{0.35em}
+\setlength{\parindent}{0pt}
+\linespread{1.06}
 
+% -- Colour and display type -------------------------------------------------
+\usepackage{xcolor}
+\definecolor{accent}{HTML}{2B6CB0}
+\definecolor{accentlight}{HTML}{EBF4FF}
+\definecolor{ink}{HTML}{1A202C}
+\definecolor{muted}{HTML}{4A5568}
+\definecolor{codebg}{HTML}{F7F9FC}
+\newfontfamily\displayfont{NimbusSans}[Scale=MatchUppercase,Extension=.otf,UprightFont=*-Regular,BoldFont=*-Bold,ItalicFont=*-Italic,BoldItalicFont=*-BoldItalic]
+
+\AtBeginDocument{\hypersetup{linkcolor=accent,urlcolor=accent,citecolor=accent}}
+
+% -- Headings ----------------------------------------------------------------
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\displayfont\color{ink}}
+  {\color{accent}\fontsize{13}{15}\selectfont\MakeUppercase{\chaptertitlename}\ \thechapter}
+  {6pt}
+  {\fontsize{24}{28}\selectfont\bfseries}
+  [\vspace{4pt}{\color{accent}\titlerule[1.2pt]}]
+\titleformat{name=\chapter,numberless}[display]
+  {\displayfont\color{ink}}{}{0pt}
+  {\fontsize{24}{28}\selectfont\bfseries}
+  [\vspace{4pt}{\color{accent}\titlerule[1.2pt]}]
+\titlespacing*{\chapter}{0pt}{0pt}{22pt}
+\titleformat{\section}
+  {\displayfont\color{ink}\fontsize{14}{17}\selectfont\bfseries}
+  {\color{accent}\thesection}{0.8em}{}
+\titleformat{\subsection}
+  {\displayfont\color{ink}\fontsize{11.5}{14}\selectfont\bfseries}
+  {\color{accent}\thesubsection}{0.8em}{}
+\titleformat{\subsubsection}
+  {\displayfont\color{muted}\fontsize{10.5}{13}\selectfont\bfseries}
+  {\thesubsubsection}{0.8em}{}
+\titlespacing*{\section}{0pt}{18pt}{6pt}
+\titlespacing*{\subsection}{0pt}{12pt}{4pt}
+
+% Volumes are parts: a page of their own with the volume number and title.
+\titleformat{\part}[display]
+  {\centering\displayfont\color{ink}}
+  {\color{accent}\fontsize{14}{17}\selectfont\MakeUppercase{Volume}\ \thepart}
+  {14pt}
+  {\fontsize{28}{34}\selectfont\bfseries}
+\renewcommand{\thepart}{\Roman{part}}
+
+% -- Running heads -----------------------------------------------------------
 \usepackage{fancyhdr}
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[LE]{\small\nouppercase{\leftmark}}
-\fancyhead[RO]{\small\nouppercase{\rightmark}}
-\fancyfoot[LE,RO]{\small\thepage}
-\fancyfoot[RE,LO]{\footnotesize From First Principles to Intelligent Machines}
-\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\chaptermark}[1]{\markboth{\ifnum\value{secnumdepth}>-1 \thechapter.\ \fi#1}{}}
+\renewcommand{\sectionmark}[1]{\markright{\ifnum\value{secnumdepth}>0 \thesection\ \ \fi#1}}
+\fancyhead[LE]{\displayfont\footnotesize\color{muted}\nouppercase{\leftmark}}
+\fancyhead[RO]{\displayfont\footnotesize\color{muted}\nouppercase{\rightmark}}
+\fancyfoot[LE,RO]{\displayfont\footnotesize\color{muted}\thepage}
+\renewcommand{\headrulewidth}{0pt}
 \renewcommand{\footrulewidth}{0pt}
 \fancypagestyle{plain}{%
   \fancyhf{}%
-  \fancyfoot[LE,RO]{\small\thepage}%
-  \renewcommand{\headrulewidth}{0pt}%
+  \fancyfoot[LE,RO]{\displayfont\footnotesize\color{muted}\thepage}%
 }
 
-% Block quotes are used for definitions and key results: set them off.
-\usepackage{xcolor}
-\definecolor{bookrule}{HTML}{2B6CB0}
+% -- Text blocks -------------------------------------------------------------
+% Quotations carry the chapter's guiding question and set-off remarks.
+\usepackage[most]{tcolorbox}
 \renewenvironment{quote}%
-  {\par\medskip\noindent\begin{minipage}{\linewidth}\leftskip=1.2em\rightskip=1em%
-   \color{black}\small}%
-  {\end{minipage}\par\medskip}
+  {\begin{tcolorbox}[enhanced,breakable,colback=accentlight,colframe=accentlight,
+     borderline west={2pt}{0pt}{accent},arc=0pt,outer arc=0pt,
+     left=9pt,right=8pt,top=5pt,bottom=5pt,before skip=8pt,after skip=8pt]}%
+  {\end{tcolorbox}}
+
+% Code and pseudocode: a light panel with a rule on the left.
+\definecolor{shadecolor}{HTML}{F7F9FC}
+\makeatletter
+\@ifundefined{Shaded}{}{%
+  \renewenvironment{Shaded}%
+    {\begin{tcolorbox}[enhanced,breakable,colback=codebg,colframe=codebg,
+       borderline west={1.5pt}{0pt}{muted!50},arc=0pt,outer arc=0pt,
+       left=7pt,right=5pt,top=3pt,bottom=3pt,before skip=6pt,after skip=6pt]}%
+    {\end{tcolorbox}}}
+\makeatother
+\fvset{fontsize=\small}
+
+% -- Figures and tables ------------------------------------------------------
+\setkeys{Gin}{width=0.92\linewidth,height=0.42\textheight,keepaspectratio}
+\usepackage[font={small},labelfont={bf,color=accent},labelsep=period,
+            justification=centering]{caption}
+\renewcommand{\arraystretch}{1.15}
+
+% -- Lists -------------------------------------------------------------------
+\usepackage{enumitem}
+\setlist{itemsep=1pt,topsep=3pt,parsep=1pt}
+
+% -- Table of contents -------------------------------------------------------
+\usepackage{tocloft}
+\renewcommand{\cftpartfont}{\displayfont\bfseries\color{accent}}
+\renewcommand{\cftchapfont}{\displayfont\small}
+\renewcommand{\cftchappagefont}{\displayfont\small}
+\renewcommand{\cftpartpagefont}{\displayfont\bfseries\color{accent}}
+\setlength{\cftbeforechapskip}{2pt}
+\setlength{\cftbeforepartskip}{10pt}

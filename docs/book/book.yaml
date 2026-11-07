@@ -25,6 +25,7 @@
 title: "From First Principles to Intelligent Machines"
 subtitle: "The mathematics, algorithms and engineering of machine learning, told through the building of brain"
 author: "Martin Schröder"
+author_email: "martin.schroder@swedishembedded.com"
 
 front:
   - preface.md
@@ -34,6 +35,7 @@ front:
 
 back:
   - history/chronology.md
+  - about-the-author.md
 
 volumes:
   - id: v01

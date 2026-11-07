@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bookspec import BOOK, ROOT, load  # noqa: E402
 
 OUT = ROOT / "build" / "book"
+ABOUT = "about-the-author.md"
 ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI"]
 
 spec = importlib.util.spec_from_file_location("build_docs", ROOT / "docs" / "pandoc" / "build-docs.py")
@@ -59,6 +60,53 @@ def source_date() -> str:
     return r.stdout.strip() or docs.FALLBACK_DATE
 
 
+def tex(s: str) -> str:
+    return s.replace("\\", "\\textbackslash{}").replace("&", "\\&").replace("%", "\\%").replace("#", "\\#")
+
+
+def title_header(book) -> Path:
+    """The title page and its reverse (the colophon), from book.yaml."""
+    rev = subprocess.run(["git", "rev-parse", "--short=9", "HEAD"], cwd=ROOT,
+                         capture_output=True, text=True).stdout.strip() or "unknown"
+    out = OUT / "title.tex"
+    out.write_text(rf"""\makeatletter
+\renewcommand{{\maketitle}}{{%
+  \begin{{titlepage}}\raggedright
+    \vspace*{{0.12\textheight}}
+    {{\color{{accent}}\rule{{\linewidth}}{{1.5pt}}}}\par\vspace{{18pt}}
+    {{\displayfont\fontsize{{30}}{{36}}\selectfont\bfseries\color{{ink}} {tex(book.title)}\par}}
+    \vspace{{14pt}}
+    \parbox{{0.86\linewidth}}{{\raggedright\large\itshape\color{{muted}} {tex(book.subtitle)}}}\par
+    \vspace{{18pt}}{{\color{{accent}}\rule{{\linewidth}}{{0.6pt}}}}\par
+    \vspace{{0.18\textheight}}
+    {{\displayfont\Large\color{{ink}} {tex(book.author)}\par}}
+    \vfill
+    {{\displayfont\small\color{{muted}} Swedish Embedded AB\par}}
+  \end{{titlepage}}
+  \thispagestyle{{empty}}
+  {{\small\color{{muted}}
+    \vspace*{{\fill}}
+    \noindent\textbf{{\color{{ink}}{tex(book.title)}}}\\[2pt]
+    {tex(book.subtitle)}\\[10pt]
+    Copyright \textcopyright\ 2026 {tex(book.author)}.\\[4pt]
+    This work is licensed under the Creative Commons Attribution 4.0
+    International License (CC BY 4.0).\\[10pt]
+    Edition of {source_date()}, typeset from source revision \texttt{{{rev}}}.
+    Every worked example in this edition was computed, and every figure
+    generated, from that revision.\\[10pt]
+    Corrections and questions are welcome:
+    \href{{mailto:{book.author_email}}}{{{book.author_email}}}.
+    Each correction is recorded in the history of the source, so every
+    edition can be traced to the one before it.\\[10pt]
+    Published by Swedish Embedded AB, Sweden.
+    \href{{https://swedishembedded.com}}{{swedishembedded.com}}\par}}
+  \cleardoublepage
+}}
+\makeatother
+""", encoding="utf-8")
+    return out
+
+
 def build_markdown() -> Path:
     book = load()
     parts = [f"""---
@@ -78,12 +126,15 @@ toc-title: "Contents"
         written = [ch for ch in v.chapters if ch.written]
         if not written:
             continue
-        title = f"Volume {ROMAN[v.number - 1]}: {v.title}"
-        parts.append(latex(f"\\part{{{title}}}"))
+        parts.append(latex(f"\\part{{{v.title}}}"))
         parts.append(page(v.intro_rel, drop_title=True))
         parts += [page(ch.rel) for ch in written]
+    # Reference material becomes lettered appendices; the author page closes
+    # the book unnumbered.
     parts.append(latex("\\appendix"))
-    parts += [page(rel) for rel in book.back]
+    parts += [page(rel) for rel in book.back if rel != ABOUT]
+    parts.append(latex("\\backmatter"))
+    parts += [page(rel, unnumbered=True) for rel in book.back if rel == ABOUT]
     OUT.mkdir(parents=True, exist_ok=True)
     md = OUT / "brain-book.md"
     md.write_text("".join(parts), encoding="utf-8")
@@ -93,11 +144,12 @@ toc-title: "Contents"
 
 def main() -> int:
     md = build_markdown()
+    title = title_header(load())
     _, bad = docs.build_pdf(
         str(md), pdf=str(OUT / "brain-book.pdf"),
         extra=("--toc-depth=1", "--top-level-division=chapter", "-V", "documentclass=book",
                "-V", "classoption=openright", "-V", "mainfont=P052", "-V", "mathfont=Latin Modern Math",
-               "-H", str(ROOT / "docs" / "pandoc" / "book.tex")))
+               "-H", str(ROOT / "docs" / "pandoc" / "book.tex"), "-H", str(title)))
     if bad:
         print("WARNING: some content overflows the page; see build/book/brain-book.pandoc.log", file=sys.stderr)
     return 0

@@ -65,6 +65,7 @@ class Book:
     title: str
     subtitle: str
     author: str
+    author_email: str
     front: list[str]
     back: list[str]
     volumes: list[Volume]
@@ -89,5 +90,5 @@ def load() -> Book:
                 brain=list(c["brain"]), volume=vol, number=cn,
             ))
         volumes.append(vol)
-    return Book(title=raw["title"], subtitle=raw["subtitle"], author=raw["author"],
+    return Book(title=raw["title"], subtitle=raw["subtitle"], author=raw["author"], author_email=raw["author_email"],
                 front=list(raw["front"]), back=list(raw["back"]), volumes=volumes)
