@@ -28,6 +28,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **chain rule**: the derivative of a composition is the derivative of the outer function, evaluated at the inner value, times the derivative of the inner function: $(f\circ g)'(x) = f'(g(x))\,g'(x)$. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
+**complex number**: a point of the plane written $a + bi$, added like a vector and multiplied by the rule $(ac - bd) + (ad + bc)i$, which turns by the angle of one factor and stretches by its length; $i = (0, 1)$ is a quarter turn and $i^2 = -1$. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
+
 **composition**: feeding the output of one function into another, $(g \circ f)(x) = g(f(x))$; it is associative but not commutative. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 **computational graph**: a record of a calculation as nodes (values) and edges showing which values were used to compute which. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
@@ -39,6 +41,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **confidence interval**: a range computed from a sample, $\bar{x} \pm 1.96\,\mathrm{SE}$ at level $95\%$, built by a recipe that contains the true value in about that share of repeated experiments. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **convexity**: the property that no chord joining two points of the curve lies below the curve, equivalent for twice-differentiable functions to a non-negative second derivative; every critical point of a convex function is a global minimum. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
+**convolution theorem**: the fact that the discrete Fourier transform of a circular convolution of two signals is the pointwise product of their transforms, so that convolution acts independently on each frequency and a long convolution can be computed with three fast transforms. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
 **cosine similarity**: the dot product of two vectors after dividing each by its norm, a number from $-1$ to $1$ that ignores positive scaling. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
@@ -58,6 +62,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **directional derivative**: the rate of change of a function per unit distance in a chosen unit direction $\mathbf{u}$, equal to $\nabla L\cdot\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
+**discrete Fourier transform**: the list $X[k] = \sum_{n=0}^{N-1} x[n]e^{-2\pi i kn/N}$ of correlations of $N$ samples with turning pointers, one per frequency $k$; its modulus gives the amplitude and its angle the phase of the component at that frequency, and the original samples are recovered by the inverse transform. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
+
 **dot product**: the number $\sum_i a_i b_i$ obtained from two vectors of equal length, equal to $\lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert\cos\theta$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 ## E
@@ -70,6 +76,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **estimator**: a rule that turns a sample into a number meant to approximate a quantity of the underlying world; because the sample is random, the number is a random variable with its own distribution, judged by its bias and spread. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
+**Euler's formula**: the identity $e^{it} = \cos t + i\sin t$, which names the point of the unit circle at angle $t$ and turns the law of exponents into the addition of angles. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
+
 **Euler's method**: the rule $x_{i+1} = x_i + h\,f(t_i, x_i)$ that follows the slope of an ODE for a short step $h$ and repeats; with a gradient as the slope it is gradient descent. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
 **expectation**: the probability-weighted average $\sum_x x\,p(x)$ (or $\int x f(x)\,dx$) of a random variable, the value its long-run average approaches; it is linear, $\mathbb{E}[X + Y] = \mathbb{E}[X] + \mathbb{E}[Y]$. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
@@ -79,6 +87,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **exponential function**: a function $b^x$ that multiplies by the same factor for each unit step in $x$, growing if $b > 1$ and decaying if $b < 1$. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 ## F
+
+**fast Fourier transform**: an algorithm for the discrete Fourier transform that splits the samples into even and odd indices and combines the two half-size transforms with one twiddle multiplication per output pair, using about $\tfrac N2\log_2 N$ multiplications instead of $N^2$ and giving the same result up to rounding. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
 **forward pass**: computing every value of the computational graph in order, from the inputs to the loss. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
@@ -221,6 +231,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **shape**: the list of the sizes of a tensor's axes, outermost first; the number of elements is their product. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **singular value decomposition**: the factorisation $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$ of any matrix into a rotation, a stretch by non-negative singular values and a second rotation. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
+
+**sinusoid**: a wave $A\cos(2\pi f t + \varphi)$ described by an amplitude $A$ (its largest value), a frequency $f$ (cycles per second) and a phase $\varphi$ (where in its cycle it stands at time zero); a cosine and a sine are the same sinusoid a quarter period apart. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
 **standard error**: the standard deviation of an estimator over repeated samples, the typical size of its error; for the sample mean it is $\sigma/\sqrt{n}$, estimated by $s/\sqrt{n}$. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 

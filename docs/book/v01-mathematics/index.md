@@ -71,7 +71,7 @@ in the curriculum and appear here when they are written.
 13. [Information, Entropy and Surprise](13-information-theory.md): how many bits it
     takes to describe what we expect to see, and what expecting the wrong thing
     costs.
-14. Complex Numbers, Frequencies and the Fourier Transform: writing any signal
+14. [Complex Numbers, Frequencies and the Fourier Transform](14-fourier.md): writing any signal
     as a sum of waves, and why that makes convolution cheap.
 15. Floating Point and Numerical Error: why a computer gets arithmetic
     slightly wrong, and when slightly wrong becomes completely wrong.

@@ -1,0 +1,116 @@
+<!-- source-sha256: 549a36243aecfb35f5f40afe016e38fc828e9010998751a5fc3337d4f0c36752 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 590 372" width="590" height="372">
+<rect width="590" height="372" fill="#ffffff"/>
+<text x="58" y="60" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">x[0]</text>
+<text x="532" y="60" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="start">X[0]</text>
+<text x="58" y="100" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">x[4]</text>
+<text x="532" y="100" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="start">X[1]</text>
+<text x="58" y="140" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">x[2]</text>
+<text x="532" y="140" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="start">X[2]</text>
+<text x="58" y="180" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">x[6]</text>
+<text x="532" y="180" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="start">X[3]</text>
+<text x="58" y="220" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">x[1]</text>
+<text x="532" y="220" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="start">X[4]</text>
+<text x="58" y="260" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">x[5]</text>
+<text x="532" y="260" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="start">X[5]</text>
+<text x="58" y="300" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">x[3]</text>
+<text x="532" y="300" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="start">X[6]</text>
+<text x="58" y="340" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="end">x[7]</text>
+<text x="532" y="340" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="start">X[7]</text>
+<text x="145.0" y="22" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#2b6cb0" text-anchor="middle">stage 1</text>
+<text x="145.0" y="38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">pairs 1 apart</text>
+<line x1="70" y1="56" x2="220" y2="56" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="70" y1="96" x2="220" y2="96" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="70" y1="56" x2="220" y2="96" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="70" y1="96" x2="220" y2="56" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="70" y1="136" x2="220" y2="136" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="70" y1="176" x2="220" y2="176" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="70" y1="136" x2="220" y2="176" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="70" y1="176" x2="220" y2="136" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="70" y1="216" x2="220" y2="216" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="70" y1="256" x2="220" y2="256" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="70" y1="216" x2="220" y2="256" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="70" y1="256" x2="220" y2="216" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="70" y1="296" x2="220" y2="296" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="70" y1="336" x2="220" y2="336" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="70" y1="296" x2="220" y2="336" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="70" y1="336" x2="220" y2="296" stroke="#2b6cb0" stroke-width="1.6" stroke-opacity="0.75"/>
+<text x="295.0" y="22" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#c05621" text-anchor="middle">stage 2</text>
+<text x="295.0" y="38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">pairs 2 apart</text>
+<line x1="220" y1="56" x2="370" y2="56" stroke="#c05621" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="220" y1="136" x2="370" y2="136" stroke="#c05621" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="220" y1="56" x2="370" y2="136" stroke="#c05621" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="220" y1="136" x2="370" y2="56" stroke="#c05621" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="220" y1="96" x2="370" y2="96" stroke="#c05621" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="220" y1="176" x2="370" y2="176" stroke="#c05621" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="220" y1="96" x2="370" y2="176" stroke="#c05621" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="220" y1="176" x2="370" y2="96" stroke="#c05621" stroke-width="1.6" stroke-opacity="0.75"/>
+<rect x="240" y="160" width="28" height="15" rx="3" fill="#ffffff" stroke="#c05621"/>
+<text x="254" y="171" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#c05621" text-anchor="middle">w^2</text>
+<line x1="220" y1="216" x2="370" y2="216" stroke="#c05621" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="220" y1="296" x2="370" y2="296" stroke="#c05621" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="220" y1="216" x2="370" y2="296" stroke="#c05621" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="220" y1="296" x2="370" y2="216" stroke="#c05621" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="220" y1="256" x2="370" y2="256" stroke="#c05621" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="220" y1="336" x2="370" y2="336" stroke="#c05621" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="220" y1="256" x2="370" y2="336" stroke="#c05621" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="220" y1="336" x2="370" y2="256" stroke="#c05621" stroke-width="1.6" stroke-opacity="0.75"/>
+<rect x="240" y="320" width="28" height="15" rx="3" fill="#ffffff" stroke="#c05621"/>
+<text x="254" y="331" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#c05621" text-anchor="middle">w^2</text>
+<text x="445.0" y="22" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#2f855a" text-anchor="middle">stage 3</text>
+<text x="445.0" y="38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">pairs 4 apart</text>
+<line x1="370" y1="56" x2="520" y2="56" stroke="#2f855a" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="370" y1="216" x2="520" y2="216" stroke="#2f855a" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="370" y1="56" x2="520" y2="216" stroke="#2f855a" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="370" y1="216" x2="520" y2="56" stroke="#2f855a" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="370" y1="96" x2="520" y2="96" stroke="#2f855a" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="370" y1="256" x2="520" y2="256" stroke="#2f855a" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="370" y1="96" x2="520" y2="256" stroke="#2f855a" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="370" y1="256" x2="520" y2="96" stroke="#2f855a" stroke-width="1.6" stroke-opacity="0.75"/>
+<rect x="390" y="240" width="28" height="15" rx="3" fill="#ffffff" stroke="#2f855a"/>
+<text x="404" y="251" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#2f855a" text-anchor="middle">w^1</text>
+<line x1="370" y1="136" x2="520" y2="136" stroke="#2f855a" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="370" y1="296" x2="520" y2="296" stroke="#2f855a" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="370" y1="136" x2="520" y2="296" stroke="#2f855a" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="370" y1="296" x2="520" y2="136" stroke="#2f855a" stroke-width="1.6" stroke-opacity="0.75"/>
+<rect x="390" y="280" width="28" height="15" rx="3" fill="#ffffff" stroke="#2f855a"/>
+<text x="404" y="291" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#2f855a" text-anchor="middle">w^2</text>
+<line x1="370" y1="176" x2="520" y2="176" stroke="#2f855a" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="370" y1="336" x2="520" y2="336" stroke="#2f855a" stroke-width="1.6" stroke-opacity="1.0"/>
+<line x1="370" y1="176" x2="520" y2="336" stroke="#2f855a" stroke-width="1.6" stroke-opacity="0.75"/>
+<line x1="370" y1="336" x2="520" y2="176" stroke="#2f855a" stroke-width="1.6" stroke-opacity="0.75"/>
+<rect x="390" y="320" width="28" height="15" rx="3" fill="#ffffff" stroke="#2f855a"/>
+<text x="404" y="331" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#2f855a" text-anchor="middle">w^3</text>
+<circle cx="70" cy="56" r="3.2" fill="#1a202c"/>
+<circle cx="70" cy="96" r="3.2" fill="#1a202c"/>
+<circle cx="70" cy="136" r="3.2" fill="#1a202c"/>
+<circle cx="70" cy="176" r="3.2" fill="#1a202c"/>
+<circle cx="70" cy="216" r="3.2" fill="#1a202c"/>
+<circle cx="70" cy="256" r="3.2" fill="#1a202c"/>
+<circle cx="70" cy="296" r="3.2" fill="#1a202c"/>
+<circle cx="70" cy="336" r="3.2" fill="#1a202c"/>
+<circle cx="220" cy="56" r="3.2" fill="#1a202c"/>
+<circle cx="220" cy="96" r="3.2" fill="#1a202c"/>
+<circle cx="220" cy="136" r="3.2" fill="#1a202c"/>
+<circle cx="220" cy="176" r="3.2" fill="#1a202c"/>
+<circle cx="220" cy="216" r="3.2" fill="#1a202c"/>
+<circle cx="220" cy="256" r="3.2" fill="#1a202c"/>
+<circle cx="220" cy="296" r="3.2" fill="#1a202c"/>
+<circle cx="220" cy="336" r="3.2" fill="#1a202c"/>
+<circle cx="370" cy="56" r="3.2" fill="#1a202c"/>
+<circle cx="370" cy="96" r="3.2" fill="#1a202c"/>
+<circle cx="370" cy="136" r="3.2" fill="#1a202c"/>
+<circle cx="370" cy="176" r="3.2" fill="#1a202c"/>
+<circle cx="370" cy="216" r="3.2" fill="#1a202c"/>
+<circle cx="370" cy="256" r="3.2" fill="#1a202c"/>
+<circle cx="370" cy="296" r="3.2" fill="#1a202c"/>
+<circle cx="370" cy="336" r="3.2" fill="#1a202c"/>
+<circle cx="520" cy="56" r="3.2" fill="#1a202c"/>
+<circle cx="520" cy="96" r="3.2" fill="#1a202c"/>
+<circle cx="520" cy="136" r="3.2" fill="#1a202c"/>
+<circle cx="520" cy="176" r="3.2" fill="#1a202c"/>
+<circle cx="520" cy="216" r="3.2" fill="#1a202c"/>
+<circle cx="520" cy="256" r="3.2" fill="#1a202c"/>
+<circle cx="520" cy="296" r="3.2" fill="#1a202c"/>
+<circle cx="520" cy="336" r="3.2" fill="#1a202c"/>
+</svg>

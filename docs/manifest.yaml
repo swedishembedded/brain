@@ -343,6 +343,7 @@ navigation:
           - docs/book/v01-mathematics/11-distributions.md
           - docs/book/v01-mathematics/12-statistics.md
           - docs/book/v01-mathematics/13-information-theory.md
+          - docs/book/v01-mathematics/14-fourier.md
       - title: "Volume III: Building Neural Networks from Nothing"
         pages:
           - docs/book/v03-neural-networks/index.md
