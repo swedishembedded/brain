@@ -217,11 +217,27 @@ pub fn emit_chat_events(events: &[ChatEvent], progress: &mut dyn FnMut(Progress)
 }
 
 /// Parse the `stop` param (a JSON array of strings) into non-empty stop strings.
+/// The most stop strings a request may give, and the longest one, in bytes.
+/// Every stop is matched against the output on every decoded token in the
+/// shared decode loop, so their number and length are what a request costs
+/// every other request on the lane.
+pub const MAX_STOPS: usize = 16;
+pub const MAX_STOP_BYTES: usize = 256;
+
 pub fn parse_stops(raw: Option<&str>) -> Result<Vec<String>, String> {
     let Some(raw) = raw.filter(|s| !s.is_empty()) else { return Ok(Vec::new()) };
     let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("qwen: stop JSON: {e}"))?;
     let arr = v.as_array().ok_or("qwen: stop must be a JSON array")?;
-    Ok(arr.iter().filter_map(|s| s.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+    let stops: Vec<String> = arr.iter().filter_map(|s| s.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+    // Tagged invalid-request, so every surface tells the caller why.
+    let invalid = |m: String| capability::tag(capability::FailureClass::InvalidRequest, m);
+    if stops.len() > MAX_STOPS {
+        return Err(invalid(format!("at most {MAX_STOPS} stop strings, got {}", stops.len())));
+    }
+    if let Some(long) = stops.iter().find(|s| s.len() > MAX_STOP_BYTES) {
+        return Err(invalid(format!("a stop string is at most {MAX_STOP_BYTES} bytes, got {}", long.len())));
+    }
+    Ok(stops)
 }
 
 /// If `text` ends with any stop string, the byte index where the earliest such
@@ -963,6 +979,12 @@ mod tests {
         assert_eq!(parse_stops(None).unwrap(), Vec::<String>::new());
         assert_eq!(parse_stops(Some(r#"["\n\n","END"]"#)).unwrap(), vec!["\n\n".to_string(), "END".to_string()]);
         assert!(parse_stops(Some("nope")).is_err());
+        let many = serde_json::to_string(&vec!["x"; MAX_STOPS + 1]).unwrap();
+        let long = serde_json::to_string(&vec!["y".repeat(MAX_STOP_BYTES + 1)]).unwrap();
+        for refused in [many, long] {
+            let err = parse_stops(Some(&refused)).unwrap_err();
+            assert_eq!(capability::classify(&err).map(|(class, _)| class), Some(capability::FailureClass::InvalidRequest), "{err}");
+        }
         let stops = vec!["END".to_string(), "STOP".to_string()];
         assert_eq!(find_stop("all done END", &stops), Some(9));
         assert_eq!(find_stop("mid END dle", &stops), None); // only a trailing match

@@ -76,6 +76,9 @@ pub const RESULT_TTL: Duration = Duration::from_secs(60 * 60);
 pub const DEFAULT_SPOOL_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 /// The chunk the content route streams the file in.
 const CHUNK: usize = 256 * 1024;
+/// How long a client streaming a clip may leave the next chunk untaken
+/// before its stream ends.
+const STALLED_READER: Duration = Duration::from_secs(30);
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -750,11 +753,27 @@ async fn content(State(state): State<AppState>, caller: CallerExt, Path(raw): Pa
     };
     let length = if clip.bytes == 0 { 0 } else { end - start + 1 };
     // Read on a blocking thread, a bounded number of chunks ahead of the
-    // client: memory stays flat whatever the clip's size.
+    // client: memory stays flat whatever the clip's size. A client that stops
+    // reading gets STALLED_READER to take the next chunk, then the stream
+    // ends: it cannot park a blocking thread for as long as it keeps the
+    // connection open.
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
     let path = clip.path.clone();
     tokio::task::spawn_blocking(move || {
-        let send = |item| tx.blocking_send(item).is_ok();
+        let send = |item| {
+            let deadline = std::time::Instant::now() + STALLED_READER;
+            let mut item = item;
+            loop {
+                match tx.try_send(item) {
+                    Ok(()) => return true,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(back)) if std::time::Instant::now() < deadline => {
+                        item = back;
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(_) => return false,
+                }
+            }
+        };
         let mut file = match std::fs::File::open(&path).and_then(|mut f| f.seek(SeekFrom::Start(start)).map(|_| f)) {
             Ok(f) => f,
             Err(e) => {

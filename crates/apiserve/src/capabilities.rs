@@ -362,6 +362,9 @@ impl AsyncJobs {
         }
     }
 
+    /// Cancel a running job, or forget a finished one and its result: a caller
+    /// that has read what it needs frees its slot at once instead of waiting
+    /// out the result's time to live.
     fn cancel(&self, scope: &str, id: Uuid) -> Option<&'static str> {
         let mut entries = self.lock();
         let entry = entries.get_mut(&id).filter(|e| e.scope == scope)?;
@@ -372,8 +375,10 @@ impl AsyncJobs {
             entry.phase = Phase::Cancelled;
             entry.finished = Some(Instant::now());
             entry.record_end();
+            return Some(phase_name(&entry.phase));
         }
-        Some(phase_name(&entry.phase))
+        entries.remove(&id);
+        Some("deleted")
     }
 
     /// The frames of job `id` after `seq`, for `scope`; with a receiver that wakes when there are more, and a

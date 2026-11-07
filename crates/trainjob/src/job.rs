@@ -163,6 +163,9 @@ pub fn resolve_base(models_dir: Option<&Path>, base: &str) -> Result<PathBuf, St
 #[derive(Default)]
 pub struct FootprintCache(Mutex<BTreeMap<FootprintKey, Result<brain::TrainFootprint, String>>>);
 
+/// The most footprints kept at once (a server trains a handful of bases).
+const MAX_FOOTPRINTS: usize = 64;
+
 /// What a footprint depends on: the base, the row length, the architecture and format named, the card.
 type FootprintKey = (PathBuf, u32, Option<String>, Option<String>, Option<u64>);
 
@@ -173,7 +176,17 @@ impl FootprintCache {
             return known.clone();
         }
         let computed = fine_tune_for_footprint(base_dir, request).and_then(|ft| ft.footprint(request.params.max_block, card_bytes).map_err(|e| format!("train: {e}")));
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).insert(key, computed.clone());
+        // Only a footprint that was worked out is kept, and only so many: the
+        // key carries strings a caller chose, and a refusal is cheap to redo,
+        // so neither a stream of invented architectures nor of failures can
+        // grow the table without end.
+        if computed.is_ok() {
+            let mut known = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            if known.len() >= MAX_FOOTPRINTS {
+                known.clear();
+            }
+            known.insert(key, computed.clone());
+        }
         computed
     }
 }

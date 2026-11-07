@@ -108,6 +108,11 @@ fn parse_embedding_request(provider: Provider, body: &Value) -> Result<Embedding
         Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
         Some(Value::String(_)) => return Err(ApiError::invalid_request(provider, "'input' string must not be empty")),
         Some(Value::Array(a)) if a.is_empty() => return Err(ApiError::invalid_request(provider, "'input' array must not be empty")),
+        // Each input is one job: OpenAI's own bound, so a body of a million
+        // one-letter strings is not a million jobs.
+        Some(Value::Array(a)) if a.len() > MAX_EMBEDDING_INPUTS => {
+            return Err(ApiError::invalid_request(provider, format!("'input' holds at most {MAX_EMBEDDING_INPUTS} strings")))
+        }
         Some(Value::Array(a)) => {
             if a.iter().all(|x| x.is_string()) {
                 let strs: Vec<String> = a.iter().map(|x| x.as_str().unwrap_or_default().to_string()).collect();
@@ -383,6 +388,8 @@ async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> 
 /// unbounded input to the tokenizer/model if left unchecked).
 /// Most local tiles a request may ask an image-tiling model for.
 const MAX_TILES: i64 = 64;
+/// The most strings one embeddings request embeds.
+const MAX_EMBEDDING_INPUTS: usize = 2048;
 const MAX_TOOLS: usize = 128;
 const MAX_TOOLS_BYTES: usize = 256 * 1024;
 const MAX_TOOL_NAME_LEN: usize = 64;
@@ -1498,6 +1505,15 @@ mod tests {
     }
 
     use super::*;
+
+    /// One embeddings request embeds a bounded number of strings.
+    #[test]
+    fn an_embeddings_request_carries_a_bounded_number_of_inputs() {
+        let at = |n: usize| json!({"model": "m", "input": vec!["a"; n]});
+        assert!(parse_embedding_request(Provider::OpenAI, &at(MAX_EMBEDDING_INPUTS)).is_ok());
+        let err = parse_embedding_request(Provider::OpenAI, &at(MAX_EMBEDDING_INPUTS + 1)).err().expect("refused");
+        assert!(err.message.contains("at most"), "{}", err.message);
+    }
 
     /// An unseeded image request leaves the seed to each image's action (a
     /// fresh random one); a seeded one gives image `i` the seed `seed + i`.

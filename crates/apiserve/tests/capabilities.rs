@@ -465,6 +465,21 @@ async fn a_job_can_be_cancelled_and_the_model_sees_it() {
     assert_eq!(rig.ledger.lock().unwrap().settled.len(), 1, "settled once, as a call that did not complete");
 }
 
+/// Deleting a finished job forgets it and its result at once, so a caller
+/// that has read what it needs gets its slot back instead of waiting out the
+/// result's time to live.
+#[tokio::test]
+async fn deleting_a_finished_job_forgets_it() {
+    let rig = rig();
+    let (_, created) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-slow", "render", json!({"steps": 1}), json!({})))).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(settled_job(&rig.app, &id, "alice").await["status"], "succeeded");
+    let (status, body) = call(&rig.app, Method::DELETE, &format!("/v1/jobs/{id}"), "alice", None).await;
+    assert_eq!((status, body["status"].as_str()), (StatusCode::OK, Some("deleted")));
+    let (status, _) = call(&rig.app, Method::GET, &format!("/v1/jobs/{id}"), "alice", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn a_job_belongs_to_the_caller_that_made_it() {
     let rig = rig();
