@@ -346,6 +346,7 @@ navigation:
           - docs/book/v01-mathematics/14-fourier.md
           - docs/book/v01-mathematics/15-floating-point.md
           - docs/book/v01-mathematics/16-algorithms.md
+          - docs/book/v01-mathematics/17-randomness.md
       - title: "Volume III: Building Neural Networks from Nothing"
         pages:
           - docs/book/v03-neural-networks/index.md

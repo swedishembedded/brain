@@ -226,6 +226,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **projection**: the closest point to a vector $\mathbf{v}$ on the line through $\mathbf{u}$, namely $\frac{\mathbf{v}\cdot\mathbf{u}}{\mathbf{u}\cdot\mathbf{u}}\mathbf{u}$; what is left over is orthogonal to $\mathbf{u}$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
+**pseudo-random generator**: a deterministic state machine (a state, a rule that advances it, and a rule that turns it into a number) whose outputs are judged by how closely they resemble draws from a uniform distribution, not by being unpredictable to someone who knows the rule. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
+
 ## R
 
 **random variable**: a function from the outcomes of an experiment to numbers, such as the number of heads in three flips; the rule is fixed and the randomness is in which outcome occurs. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
@@ -235,6 +237,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **real number**: any number on the number line, including fractions and irrational numbers such as $\sqrt{2}$; a computer holds only an approximation of most of them. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **reduction algorithm**: an algorithm that combines the elements of an array into one value by repeated use of a binary operation, as a sum, a maximum or an argmax does; it takes $n - 1$ applications, and if the operation is associative they can be regrouped into a tree of depth $\lceil \log_2 n \rceil$. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
+
+**rejection sampling**: drawing a candidate from an easy distribution, keeping it only if it passes a test and otherwise drawing again, so that the kept values have the distribution the test selects; it gives unbiased integers and samples from densities with no invertible cumulative distribution, at the cost of the discarded draws. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
+
+**reproducibility**: the property that running again from the same recorded inputs (seed, data, code, settings) gives the same results exactly, which requires the same draws in the same order and the same floating-point arithmetic. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **reshape-and-view**: reshaping keeps a tensor's line of numbers in row-major order and cuts it into a new shape; a view is a new shape, strides and offset over the same storage, so a reshape of a contiguous array needs no copy. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
@@ -250,13 +256,19 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **sample mean**: the average of the observations in a sample; it is an unbiased estimator of the true mean, and the accuracy, the mean loss and a minibatch gradient are all sample means. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
+**sampling from a distribution**: producing values whose long-run frequencies follow a given distribution from uniform random numbers, by a cumulative-sum lookup for a table, inverting the cumulative distribution, a transform such as Box-Muller, or rejection. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
+
 **saved activations**: the values of the forward pass that are kept in memory because the backward pass reads them. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **scalar multiplication**: multiplying every entry of a vector by one number, which stretches, shrinks or flips the arrow. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
+**seed**: the number from which a generator's starting state is computed; the same seed gives the same stream, and a seed used by a run must be recorded for the run to be repeated. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
+
 **set**: a collection of distinct elements, written with braces and combined by union, intersection and difference. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **shape**: the list of the sizes of a tensor's axes, outermost first; the number of elements is their product. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
+**shuffling**: rearranging a list into an order chosen uniformly among all $n!$ orders, correctly done by swapping each position from the end with a uniformly chosen position at or before it (Fisher-Yates). *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **singular value decomposition**: the factorisation $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$ of any matrix into a rotation, a stretch by non-negative singular values and a second rotation. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 

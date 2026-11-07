@@ -43,6 +43,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 14. [Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md): How can any signal be written as a sum of waves, and why does that make convolution cheap?
 15. [Floating Point and Numerical Error](v01-mathematics/15-floating-point.md): Why does a computer get arithmetic slightly wrong, and when does slightly wrong become completely wrong?
 16. [Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md): How do we predict how long a computation will take and how much memory it needs before we run it?
+17. [Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md): How does a deterministic computer produce random numbers, and how do we make random experiments repeatable?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 

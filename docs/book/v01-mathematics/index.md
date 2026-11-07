@@ -77,5 +77,5 @@ in the curriculum and appear here when they are written.
     arithmetic slightly wrong, and when slightly wrong becomes completely wrong.
 16. [Algorithms, Cost and Complexity](16-algorithms.md): predicting how long a computation takes
     and how much memory it needs before running it.
-17. Randomness on a Deterministic Machine: how a deterministic computer
-    produces random numbers, and how to make random experiments repeatable.
+17. [Randomness on a Deterministic Machine](17-randomness.md): how a deterministic
+    computer produces random numbers, and how to make random experiments repeatable.
