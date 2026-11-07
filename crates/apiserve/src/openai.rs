@@ -285,6 +285,30 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
     handle_generate(state, body, TextSurface::Chat { native }).await
 }
 
+/// The members of the request's `chat_template_kwargs` that no dedicated parameter carries, as JSON text, or `None`
+/// when there are none.
+fn template_kwargs_beyond_the_known(body: &Value) -> Option<String> {
+    const KNOWN: [&str; 5] = ["enable_thinking", "reasoning_effort", "preserve_thinking", "template_flavor", "max_tiles"];
+    let rest: serde_json::Map<String, Value> = body.get("chat_template_kwargs")?.as_object()?.iter().filter(|(k, _)| !KNOWN.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+    (!rest.is_empty()).then(|| Value::Object(rest).to_string())
+}
+
+/// `inv` with its `tools` as the client wrote the array. The parsed request keeps object members in sorted order, and a
+/// chat template prints a tool schema member by member (`tool | tojson`), so the model would be shown `parameters`
+/// before `type` where the client, and the model's training prompts, put `type` first.
+fn with_tools_as_written(raw: &[u8], inv: Invocation) -> Invocation {
+    #[derive(serde::Deserialize)]
+    struct Written<'a> {
+        #[serde(borrow, default)]
+        tools: Option<&'a serde_json::value::RawValue>,
+    }
+    let written = serde_json::from_slice::<Written>(raw).ok().and_then(|w| w.tools).map(|t| t.get().trim()).filter(|t| t.starts_with('['));
+    match written {
+        Some(tools) if inv.get_str("tools").is_some() => inv.set("tools", json!(tools)),
+        _ => inv,
+    }
+}
+
 /// A `suffix` asks for fill-in-the-middle, which only a model whose `generate`
 /// declares it can do; any other model is told so rather than handed a
 /// parameter it would reject or ignore.
@@ -300,6 +324,7 @@ fn check_suffix(provider: Provider, inv: &Invocation, fim: bool) -> Result<(), A
 /// surface's own shape, streamed or not.
 async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> Response {
     let provider = state.provider;
+    let raw = body.clone();
     let body: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return ApiError::invalid_request(provider, format!("invalid JSON body: {e}")).into_response(),
@@ -321,7 +346,7 @@ async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> 
         (body, parsed)
     };
     let (requested, inv, stream) = match parsed {
-        Ok(x) => x,
+        Ok((requested, inv, stream)) => (requested, with_tools_as_written(&raw, inv), stream),
         Err(e) => return e.into_response(),
     };
     let want_usage = || body.get("stream_options").and_then(|o| o.get("include_usage")).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -502,6 +527,13 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
         .or_else(|| body.get("template_flavor").and_then(|v| v.as_str()));
     if let Some(tf) = template_flavor {
         inv = inv.set("template_flavor", json!(tf));
+    }
+
+    // Any other `chat_template_kwargs` member is a variable of the model's own chat template (Ripple's
+    // `clear_thinking`): handed on whole, for a model that declares `chat_template_kwargs` to read, and refused by
+    // one that does not, never dropped.
+    if let Some(extra) = template_kwargs_beyond_the_known(body) {
+        inv = inv.set("chat_template_kwargs", json!(extra));
     }
 
     // image_url/input_audio content parts' REAL bytes -- flatten_message's
@@ -1467,6 +1499,31 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn unknown_template_kwargs_are_handed_on_and_known_ones_are_not_doubled() {
+        let msg = json!([{"role": "user", "content": "hi"}]);
+        let inv = to_invocation(Provider::OpenAI, &json!({"model": "m", "messages": msg, "chat_template_kwargs": {"clear_thinking": true, "enable_thinking": false}})).unwrap().1;
+        assert_eq!(inv.get_str("chat_template_kwargs").as_deref(), Some(r#"{"clear_thinking":true}"#));
+        assert_eq!(inv.get_bool("enable_thinking"), Some(false));
+        let inv = to_invocation(Provider::OpenAI, &json!({"model": "m", "messages": msg, "chat_template_kwargs": {"enable_thinking": false}})).unwrap().1;
+        assert_eq!(inv.get_str("chat_template_kwargs"), None);
+    }
+
+    /// A tool schema reaches the model's template with its members in the order the client wrote them.
+    #[test]
+    fn tools_reach_the_invocation_as_the_client_wrote_them() {
+        let raw = br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","description":"d","parameters":{"type":"object","properties":{"z":{"type":"string"},"a":{"type":"integer"}},"required":["z"]}}}]}"#;
+        let body: Value = serde_json::from_slice(raw).unwrap();
+        let (_, inv, _) = to_invocation(Provider::OpenAI, &body).unwrap();
+        assert!(inv.get_str("tools").unwrap().find("\"function\"").unwrap() < inv.get_str("tools").unwrap().find("\"type\"").unwrap(), "the parsed value sorts its members");
+        let inv = with_tools_as_written(raw, inv);
+        let tools = inv.get_str("tools").unwrap();
+        assert!(tools.starts_with(r#"[{"type":"function","function":{"name":"f","description":"d","parameters":{"type":"object","properties":{"z":"#), "{tools}");
+        // Without tools, or with a body that is not the tools array, the invocation is untouched.
+        let (_, plain, _) = to_invocation(Provider::OpenAI, &json!({"model":"m","messages":[{"role":"user","content":"hi"}]})).unwrap();
+        assert!(with_tools_as_written(br#"{"model":"m"}"#, plain).get_str("tools").is_none());
+    }
 
     #[test]
     fn max_tiles_reaches_the_invocation_from_either_extension_point_and_is_bounded() {
