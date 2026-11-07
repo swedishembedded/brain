@@ -27,7 +27,7 @@ def render() -> str:
     end = s["warmup"] + math.log(s["floor"] / s["peak"]) / math.log(s["gamma"])
     p.vline(s["warmup"])
     p.vline(end)
-    p.text(1, 0.105, "ramp", size=11, color="#4a5568")
+    p.text(12, 0.101, "ramp", size=11, color="#4a5568")
     p.text(30, 0.085, "peak * gamma^(t - 10)", size=11, color="#4a5568")
     p.text(100, 0.02, "floor 0.01", size=11, color="#4a5568")
     return p.svg()

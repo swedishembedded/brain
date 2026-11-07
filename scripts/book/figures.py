@@ -44,7 +44,7 @@ SRC = HERE / "figures"
 BOOK = ROOT / "docs" / "book"
 STAMP = re.compile(r"<!-- source-sha256: ([0-9a-f]{64}) -->")
 DOT_DEFAULTS = ["-Gfontname=Helvetica", "-Nfontname=Helvetica", "-Efontname=Helvetica",
-                "-Gfontsize=11", "-Nfontsize=11", "-Efontsize=10", "-Gbgcolor=white", "-Gpad=0.15"]
+                "-Gfontsize=11", "-Nfontsize=11", "-Efontsize=11", "-Gbgcolor=white", "-Gpad=0.15"]
 
 
 def sources():
@@ -84,6 +84,8 @@ def render_dot(src: Path) -> str:
 
 def render_py(src: Path) -> str:
     sys.path.insert(0, str(HERE))
+    import svgplot
+    svgplot.Plot.context = src.stem
     spec = importlib.util.spec_from_file_location(f"fig_{src.stem}", src)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

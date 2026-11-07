@@ -32,5 +32,9 @@ def render() -> str:
     for p in (0.1, 0.5):
         h = inf.entropy([p, 1 - p])
         plot.points([p], [h], color=3)
-        plot.text(p + 0.02 if p < 0.5 else 0.53, h + 0.09 if p < 0.5 else h - 0.04, f"p = {p}: {h:.3f} bits", size=11)
+        if p < 0.5:  # two short lines in the clear space above the steep branch
+            plot.text(0.02, h + 0.25, f"p = {p}", size=11)
+            plot.text(0.02, h + 0.15, f"{h:.3f} bits", size=11)
+        else:
+            plot.text(p, h + 0.1, f"p = {p}: {h:.3f} bits", anchor="middle", size=11)
     return plot.svg()

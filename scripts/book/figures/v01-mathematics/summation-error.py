@@ -40,5 +40,5 @@ def render() -> str:
     plot.line(xs, [_lg(r[2]) for r in rows], color=0, label="pairwise")
     plot.line(xs, [_lg(r[3]) for r in rows], color=2, dash=True, width=2.2, label="Kahan (same as pairwise)")
     plot.hline(_lg(floating.U32), color="#a0aec0")
-    plot.text(1.1, _lg(floating.U32) + 0.15, "u = 2^-24", size=11, color="#4a5568")
+    plot.text(5.9, _lg(floating.U32) + 0.25, "u = 2^-24", anchor="end", size=11, color="#4a5568")
     return plot.svg()

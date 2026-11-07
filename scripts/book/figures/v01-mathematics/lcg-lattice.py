@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import randomness as rn  # noqa: E402
 from svgplot import FONT, fmt, PALETTE  # noqa: E402
 
-M, N, SIDE, PAD = 4096, 2048, 300, 36
+M, N, SIDE, PAD = 4096, 2048, 300, 42
 
 
 def _lcg_pairs():
@@ -43,7 +43,7 @@ def _panel(pairs, title, subtitle, color):
         f'<rect x="{PAD}" y="{PAD}" width="{SIDE}" height="{SIDE}" fill="#ffffff" stroke="#718096"/>',
         f'<path d="{pts}" stroke="{color}" stroke-width="2.2" stroke-linecap="round" fill="none"/>',
         f'<text x="{PAD + SIDE / 2}" y="18" {FONT} font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">{title}</text>',
-        f'<text x="{PAD + SIDE / 2}" y="31" {FONT} font-size="9" fill="#4a5568" text-anchor="middle">{subtitle}</text>',
+        f'<text x="{PAD + SIDE / 2}" y="34" {FONT} font-size="11" fill="#4a5568" text-anchor="middle">{subtitle}</text>',
         f'<text x="{PAD + SIDE / 2}" y="{PAD + SIDE + 22}" {FONT} font-size="12" fill="#1a202c" text-anchor="middle">x_i</text>',
         f'<text x="{PAD - 8}" y="{PAD + 12}" {FONT} font-size="11" fill="#4a5568" text-anchor="end">1</text>',
         f'<text x="{PAD - 8}" y="{PAD + SIDE}" {FONT} font-size="11" fill="#4a5568" text-anchor="end">0</text>',
@@ -54,7 +54,7 @@ def _panel(pairs, title, subtitle, color):
 
 def render() -> str:
     gap = 30
-    w, h = 2 * (SIDE + PAD) + gap, SIDE + PAD + 34
+    w, h = 2 * (SIDE + PAD) + gap + 14, SIDE + PAD + 34
     seed = rn._seed("lcg_lattice")
     left = _panel(_lcg_pairs(), "LCG a = 257, c = 1, m = 4096", f"x_0 = {seed % M} (seed {seed:#018x} mod 4096)", PALETTE[3])
     right = _panel(_splitmix_pairs(), "SplitMix64, top 12 bits", f"seed {seed:#018x}", PALETTE[0])

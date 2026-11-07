@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import matrices as mx  # noqa: E402
 from svgplot import Plot  # noqa: E402
 
-UNIT = 62  # pixels per unit on both axes, so a unit square stays square
+UNIT = 76  # pixels per unit on both axes, so a unit square stays square
 XLIM, YLIM = (-0.5, 3.5), (-0.5, 2.0)
 GRID = [i / 4 for i in range(5)]
 
@@ -62,8 +62,10 @@ def _panel(A, title, note):
     _arrow(p, (0, 0), c2, "#2f855a")
     p.text(1.02, -0.1, "e1", color="#4a5568")
     p.text(-0.12, 1.02, "e2", anchor="end", color="#4a5568")
-    p.text(c1[0] + 0.05, c1[1] - 0.17, f"A e1 = ({c1[0]:g}, {c1[1]:g})", color="#c05621", size=11)
-    p.text(c2[0] + 0.05, c2[1] + 0.1, f"A e2 = ({c2[0]:g}, {c2[1]:g})", color="#2f855a", size=11)
+    # Image labels sit below the A e1 tip and above-left of the A e2 tip, the
+    # sides both maps leave empty (the image lies above the first column).
+    p.text(c1[0] + 0.1, c1[1] - 0.3, f"A e1 = ({c1[0]:g}, {c1[1]:g})", color="#c05621", size=11)
+    p.text(c2[0] - 0.1, c2[1] + 0.15, f"A e2 = ({c2[0]:g}, {c2[1]:g})", anchor="end", color="#2f855a", size=11)
     p.text(3.45, -0.35, note, anchor="end", size=11, color="#1a202c")
     return p.svg(), w, h
 

@@ -44,7 +44,8 @@ def render() -> str:
     p.vline(hi, color="#2f855a")
     p.vline(0.0, color="#c53030")
     p.vline(sum(reps) / len(reps), color="#2b6cb0", dash=False)
-    p.text(lo, top * 0.95, "2.5%", anchor="end", size=11, color="#2f855a")
-    p.text(hi, top * 0.95, "97.5%", anchor="start", size=11, color="#2f855a")
-    p.text(0.0, top * 0.55, "no difference", anchor="end", size=11, color="#c53030")
+    pad = 0.004 * (HI - LO)  # keep labels off their own guide lines
+    p.text(lo - pad, top * 0.95, "2.5%", anchor="end", size=11, color="#2f855a")
+    p.text(hi + pad, top * 0.95, "97.5%", anchor="start", size=11, color="#2f855a")
+    p.text(0.0 - pad, top * 0.55, "no difference", anchor="end", size=11, color="#c53030")
     return p.svg()

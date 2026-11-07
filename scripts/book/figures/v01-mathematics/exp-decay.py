@@ -26,7 +26,7 @@ def render() -> str:
     for k, g in enumerate((0.99, 0.97, 0.94)):
         p.line(ts, [lr0 * g ** t for t in ts], color=k, label=f"gamma = {g}")
     p.hline(0.01)
-    p.text(2, 0.0115, "ten times lower: 0.01", size=11, color="#4a5568")
+    p.text(90, 0.0115, "ten times lower: 0.01", size=11, color="#4a5568")
     for k, g in enumerate((0.99, 0.97, 0.94)):
         t10 = math.log(10) / -math.log(g)
         p.points([t10], [0.01], color=k)

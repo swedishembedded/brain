@@ -32,6 +32,6 @@ def render() -> str:
     p.line([q[0] for q in path], [q[1] for q in path], color=1, width=1.2)
     p.points([q[0] for q in path], [q[1] for q in path], color=1, r=2.5)
     p.points([mv.W_STAR[0]], [mv.W_STAR[1]], color=2, r=5)
-    p.text(0.05, 3.55, "start (0, 3.5)", size=11)
-    p.text(mv.W_STAR[0] + 0.06, mv.W_STAR[1] + 0.1, "minimum (1, 2)", size=11)
+    p.text(0.05, 3.55, "start (0, 3.5)", size=11, plate=True)
+    p.text(mv.W_STAR[0] + 0.06, mv.W_STAR[1] + 0.1, "minimum (1, 2)", size=11, plate=True)
     return p.svg()

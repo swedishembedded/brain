@@ -1,44 +1,44 @@
-<!-- source-sha256: acf404547dda6436fddab08936168dee06be97216738ea65ebc49fe05dda5d08 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 215" width="900" height="215">
+<!-- source-sha256: 8a88f9f4635ec52858061cae8036a0c1d76f31946e8dbafbf57883251b09be48 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 215" width="780" height="215">
 <defs><marker id="af" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs>
-<rect width="900" height="215" fill="#ffffff"/>
-<rect x="33" y="98" width="124" height="44" rx="9" fill="#e2e8f0" stroke="#4a5568"/>
-<text x="95" y="117" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">u = w1 x</text>
-<text x="95" y="134" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" font-weight="normal">= 0.6000</text>
-<text x="95" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="bold">dL/du = 1.9545</text>
-<line x1="55" y1="58" x2="75" y2="97" stroke="#1a202c" marker-end="url(#af)"/>
-<text x="55" y="52" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle" font-weight="normal">w1 = 0.4</text>
-<line x1="135" y1="58" x2="115" y2="97" stroke="#1a202c" marker-end="url(#af)"/>
-<text x="135" y="52" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle" font-weight="normal">x = 1.5</text>
-<line x1="158" y1="114" x2="201" y2="114" stroke="#1a202c" marker-end="url(#af)"/>
-<line x1="201" y1="160" x2="158" y2="160" stroke="#c53030" stroke-dasharray="5 3" marker-end="url(#ab)"/>
-<rect x="203" y="98" width="124" height="44" rx="9" fill="#e2e8f0" stroke="#4a5568"/>
-<text x="265" y="117" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">h = tanh(u)</text>
-<text x="265" y="134" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" font-weight="normal">= 0.5370</text>
-<text x="265" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="bold">dL/dh = 2.7467</text>
-<line x1="328" y1="114" x2="371" y2="114" stroke="#1a202c" marker-end="url(#af)"/>
-<line x1="371" y1="160" x2="328" y2="160" stroke="#c53030" stroke-dasharray="5 3" marker-end="url(#ab)"/>
-<rect x="373" y="98" width="124" height="44" rx="9" fill="#e2e8f0" stroke="#4a5568"/>
-<text x="435" y="117" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">y = w2 h</text>
-<text x="435" y="134" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" font-weight="normal">= 0.6445</text>
-<text x="435" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="bold">dL/dy = 2.2889</text>
-<line x1="435" y1="58" x2="435" y2="97" stroke="#1a202c" marker-end="url(#af)"/>
-<text x="435" y="52" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle" font-weight="normal">w2 = 1.2</text>
-<line x1="498" y1="114" x2="541" y2="114" stroke="#1a202c" marker-end="url(#af)"/>
-<line x1="541" y1="160" x2="498" y2="160" stroke="#c53030" stroke-dasharray="5 3" marker-end="url(#ab)"/>
-<rect x="543" y="98" width="124" height="44" rx="9" fill="#e2e8f0" stroke="#4a5568"/>
-<text x="605" y="117" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">e = y - t</text>
-<text x="605" y="134" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" font-weight="normal">= 1.1445</text>
-<text x="605" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="bold">dL/de = 2.2889</text>
-<line x1="605" y1="58" x2="605" y2="97" stroke="#1a202c" marker-end="url(#af)"/>
-<text x="605" y="52" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle" font-weight="normal">t = -0.5</text>
-<line x1="668" y1="114" x2="711" y2="114" stroke="#1a202c" marker-end="url(#af)"/>
-<line x1="711" y1="160" x2="668" y2="160" stroke="#c53030" stroke-dasharray="5 3" marker-end="url(#ab)"/>
-<rect x="713" y="98" width="124" height="44" rx="9" fill="#e2e8f0" stroke="#4a5568"/>
-<text x="775" y="117" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">L = e^2</text>
-<text x="775" y="134" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" font-weight="normal">= 1.3098</text>
-<text x="775" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="bold">dL/dL = 1.0000</text>
-<text x="95" y="200" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="normal">dL/dw1 = dL/du * x = 2.9317</text>
-<text x="435" y="200" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="normal">dL/dw2 = dL/dy * h = 1.2293</text>
-<text x="450" y="20" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="bold">Forward values (black, left to right) and gradients of L (red, right to left)</text>
+<rect width="780" height="215" fill="#ffffff"/>
+<rect x="32" y="98" width="116" height="44" rx="9" fill="#e2e8f0" stroke="#4a5568"/>
+<text x="90" y="117" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">u = w1 x</text>
+<text x="90" y="134" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" font-weight="normal">= 0.6000</text>
+<text x="90" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="bold">dL/du = 1.9545</text>
+<line x1="50" y1="58" x2="70" y2="97" stroke="#1a202c" marker-end="url(#af)"/>
+<text x="50" y="52" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle" font-weight="normal">w1 = 0.4</text>
+<line x1="130" y1="58" x2="110" y2="97" stroke="#1a202c" marker-end="url(#af)"/>
+<text x="130" y="52" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle" font-weight="normal">x = 1.5</text>
+<line x1="149" y1="114" x2="180" y2="114" stroke="#1a202c" marker-end="url(#af)"/>
+<line x1="180" y1="160" x2="149" y2="160" stroke="#c53030" stroke-dasharray="5 3" marker-end="url(#ab)"/>
+<rect x="182" y="98" width="116" height="44" rx="9" fill="#e2e8f0" stroke="#4a5568"/>
+<text x="240" y="117" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">h = tanh(u)</text>
+<text x="240" y="134" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" font-weight="normal">= 0.5370</text>
+<text x="240" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="bold">dL/dh = 2.7467</text>
+<line x1="299" y1="114" x2="330" y2="114" stroke="#1a202c" marker-end="url(#af)"/>
+<line x1="330" y1="160" x2="299" y2="160" stroke="#c53030" stroke-dasharray="5 3" marker-end="url(#ab)"/>
+<rect x="332" y="98" width="116" height="44" rx="9" fill="#e2e8f0" stroke="#4a5568"/>
+<text x="390" y="117" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">y = w2 h</text>
+<text x="390" y="134" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" font-weight="normal">= 0.6445</text>
+<text x="390" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="bold">dL/dy = 2.2889</text>
+<line x1="390" y1="58" x2="390" y2="97" stroke="#1a202c" marker-end="url(#af)"/>
+<text x="390" y="52" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle" font-weight="normal">w2 = 1.2</text>
+<line x1="449" y1="114" x2="480" y2="114" stroke="#1a202c" marker-end="url(#af)"/>
+<line x1="480" y1="160" x2="449" y2="160" stroke="#c53030" stroke-dasharray="5 3" marker-end="url(#ab)"/>
+<rect x="482" y="98" width="116" height="44" rx="9" fill="#e2e8f0" stroke="#4a5568"/>
+<text x="540" y="117" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">e = y - t</text>
+<text x="540" y="134" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" font-weight="normal">= 1.1445</text>
+<text x="540" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="bold">dL/de = 2.2889</text>
+<line x1="540" y1="58" x2="540" y2="97" stroke="#1a202c" marker-end="url(#af)"/>
+<text x="540" y="52" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle" font-weight="normal">t = -0.5</text>
+<line x1="599" y1="114" x2="630" y2="114" stroke="#1a202c" marker-end="url(#af)"/>
+<line x1="630" y1="160" x2="599" y2="160" stroke="#c53030" stroke-dasharray="5 3" marker-end="url(#ab)"/>
+<rect x="632" y="98" width="116" height="44" rx="9" fill="#e2e8f0" stroke="#4a5568"/>
+<text x="690" y="117" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="normal">L = e^2</text>
+<text x="690" y="134" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" font-weight="normal">= 1.3098</text>
+<text x="690" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="bold">dL/dL = 1.0000</text>
+<text x="32" y="200" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="start" font-weight="normal">dL/dw1 = dL/du * x = 2.9317</text>
+<text x="390" y="200" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c53030" text-anchor="middle" font-weight="normal">dL/dw2 = dL/dy * h = 1.2293</text>
+<text x="390" y="20" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="middle" font-weight="bold">Forward values (black, left to right) and gradients of L (red, right to left)</text>
 </svg>

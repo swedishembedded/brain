@@ -69,6 +69,6 @@ def render() -> str:
     p.line([w[0] for w in path], [w[1] for w in path], color=1, label="descent, eta = 0.15", width=1.2)
     p.points([w[0] for w in path], [w[1] for w in path], color=1, r=2.5)
     p.points([ig._WSTAR[0]], [ig._WSTAR[1]], color=2, r=5)
-    p.text(ig._WSTAR[0] + 0.08, ig._WSTAR[1] - 0.2, "minimum (1, 2)", size=11)
-    p.text(-0.95, 0.15, "grey arrows: direction of -grad L (fixed length)", size=11, color="#4a5568")
+    p.text(ig._WSTAR[0] + 0.08, ig._WSTAR[1] - 0.2, "minimum (1, 2)", size=11, plate=True)
+    p.text(-0.95, 0.15, "grey arrows: direction of -grad L (fixed length)", size=11, color="#4a5568", plate=True)
     return p.svg()

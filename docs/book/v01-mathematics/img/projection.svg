@@ -1,13 +1,19 @@
-<!-- source-sha256: 9bfbb7e370b0bea3f57638386a69b2922c1a017c43dd97358e99f11a4ecd4d9b -->
+<!-- source-sha256: dc7d22078bec26fa22892dea35a0c963f78444010303810ed68c5af4aad89d17 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 571.0 510.0" width="571.0" height="510.0">
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
 <rect width="571.0" height="510.0" fill="#ffffff"/>
 <line x1="103" y1="464" x2="103" y2="14" stroke="#edf2f7"/>
 <text x="103" y="480" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="193" y1="464" x2="193" y2="14" stroke="#edf2f7"/>
+<text x="193" y="480" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
 <line x1="283" y1="464" x2="283" y2="14" stroke="#edf2f7"/>
 <text x="283" y="480" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="373" y1="464" x2="373" y2="14" stroke="#edf2f7"/>
+<text x="373" y="480" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
 <line x1="463" y1="464" x2="463" y2="14" stroke="#edf2f7"/>
 <text x="463" y="480" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="553" y1="464" x2="553" y2="14" stroke="#edf2f7"/>
+<text x="553" y="480" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
 <line x1="58" y1="419" x2="553" y2="419" stroke="#edf2f7"/>
 <text x="52" y="423" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
 <line x1="58" y1="329" x2="553" y2="329" stroke="#edf2f7"/>
@@ -20,7 +26,7 @@
 <text x="52" y="63" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
 <rect x="58" y="14" width="495" height="450" fill="none" stroke="#718096"/>
 <clipPath id="plot"><rect x="58" y="14" width="495" height="450"/></clipPath>
-<g clip-path="url(#plot)"><polyline fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="6 4" points="58,441.5 553,194"/><polyline fill="none" stroke="#4a5568" stroke-width="1.2" points="440.46,250.27 429.19,227.73 451.73,216.46"/><line x1="103.0" y1="419.0" x2="366.4" y2="67.8" stroke="#2b6cb0" stroke-width="2.2"/><polygon fill="#2b6cb0" points="373.0,59.0 370.0,70.5 362.8,65.1"/><line x1="103.0" y1="419.0" x2="453.2" y2="243.9" stroke="#2f855a" stroke-width="3.4"/><polygon fill="#2f855a" points="463.0,239.0 455.2,247.9 451.1,239.9"/><line x1="103.0" y1="419.0" x2="273.2" y2="333.9" stroke="#c05621" stroke-width="2.2"/><polygon fill="#c05621" points="283.0,329.0 275.2,337.9 271.1,329.9"/><line x1="463.0" y1="239.0" x2="377.9" y2="68.8" stroke="#9b2c2c" stroke-width="2.2"/><polygon fill="#9b2c2c" points="373.0,59.0 381.9,66.8 373.9,70.9"/><text x="364" y="48.2" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#2b6cb0" text-anchor="end">v = (3, 4)</text><text x="292" y="354.2" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c05621" text-anchor="start">u = (2, 1)</text><text x="548.5" y="293" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#2f855a" text-anchor="end">t u = (4, 2), t = 2</text><text x="440.5" y="149" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#9b2c2c" text-anchor="start">r = (-1, 2)</text></g>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="6 4" points="58,441.5 553,194"/><polyline fill="none" stroke="#4a5568" stroke-width="1.2" points="440.46,250.27 429.19,227.73 451.73,216.46"/><line x1="103.0" y1="419.0" x2="366.4" y2="67.8" stroke="#2b6cb0" stroke-width="2.2"/><polygon fill="#2b6cb0" points="373.0,59.0 370.0,70.5 362.8,65.1"/><line x1="103.0" y1="419.0" x2="453.2" y2="243.9" stroke="#2f855a" stroke-width="3.4"/><polygon fill="#2f855a" points="463.0,239.0 455.2,247.9 451.1,239.9"/><line x1="103.0" y1="419.0" x2="273.2" y2="333.9" stroke="#c05621" stroke-width="2.2"/><polygon fill="#c05621" points="283.0,329.0 275.2,337.9 271.1,329.9"/><line x1="463.0" y1="239.0" x2="377.9" y2="68.8" stroke="#9b2c2c" stroke-width="2.2"/><polygon fill="#9b2c2c" points="373.0,59.0 381.9,66.8 373.9,70.9"/><text x="364" y="48.2" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#2b6cb0" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">v = (3, 4)</text><text x="292" y="354.2" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#c05621" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">u = (2, 1)</text><text x="548.5" y="293" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#2f855a" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">t u = (4, 2), t = 2</text><text x="440.5" y="149" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#9b2c2c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">r = (-1, 2)</text></g>
 <text x="305.5" y="500" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">first entry</text>
 <text x="14" y="239" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 239)">second entry</text>
 </svg>

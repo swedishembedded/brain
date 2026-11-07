@@ -52,7 +52,7 @@ def _panel(title, prob, w_star, ball):
         p.line([q[0] for q in pts], [q[1] for q in pts], color=1 if level == star else "#cbd5e0",
                width=2.4 if level == star else 1.2)
     p.points([c[0]], [c[1]], color=5, r=3.0)
-    p.text(c[0] + 0.05, c[1] + 0.08, "unpenalised", size=10)
+    p.text(c[0] + 0.05, c[1] + 0.08, "unpenalised", size=11)
     p.line([q[0] for q in ball], [q[1] for q in ball], color=0, width=2.8)
     p.points([w_star[0]], [w_star[1]], color=3, r=5.0)
     return p.svg()

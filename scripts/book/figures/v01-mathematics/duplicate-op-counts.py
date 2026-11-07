@@ -29,11 +29,7 @@ def render() -> str:
     xs = [math.log10(r[0]) for r in rows]
     plot = Plot((0.8, 3.8), (0.5, 7.4), width=600, height=380, xlabel="log10 of the list length n",
                 ylabel="log10 of the operations counted", title="Finding a repeated token id: operations vs n")
-    plot.line(xs, [math.log10(r[1]) for r in rows], color=1, label="")
-    plot.line(xs, [math.log10(r[2]) for r in rows], color=0, label="")
-    plot.line(xs, [math.log10(r[3]) for r in rows], color=2, label="")
-    last = rows[-1]
-    plot.text(xs[-1] - 0.05, math.log10(last[1]) + 0.25, "all pairs (slope 2)", anchor="end", color="#c05621")
-    plot.text(xs[-1] - 0.05, math.log10(last[2]) + 0.3, "sort (slope a little above 1)", anchor="end", color="#2b6cb0")
-    plot.text(xs[-1] - 0.05, math.log10(last[3]) - 1.1, "hash set (slope 1)", anchor="end", color="#2f855a")
+    plot.line(xs, [math.log10(r[1]) for r in rows], color=1, label="all pairs (slope 2)")
+    plot.line(xs, [math.log10(r[2]) for r in rows], color=0, label="sort (slope a little above 1)")
+    plot.line(xs, [math.log10(r[3]) for r in rows], color=2, label="hash set (slope 1)")
     return plot.svg()

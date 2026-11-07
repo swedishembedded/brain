@@ -40,5 +40,6 @@ def render() -> str:
     for u, tag in ((floating.U32, "32"), (floating.U64, "64")):
         for h, kind in ((2 * math.sqrt(u), "f"), ((3 * u) ** (1 / 3), "c")):
             plot.vline(-math.log10(h), color="#cbd5e0")
-            plot.text(-math.log10(h) + 0.1, -11.6, f"h* {kind}{tag}", size=10, color="#4a5568")
+            # Top of the panel is empty; stagger so neighbouring labels cannot touch.
+            plot.text(-math.log10(h) + 0.1, 2.4 if kind == "c" else 1.8, f"h* {kind}{tag}", size=11, color="#4a5568")
     return plot.svg()

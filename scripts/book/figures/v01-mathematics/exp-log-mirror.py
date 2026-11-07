@@ -28,9 +28,9 @@ def render() -> str:
     p.line([-3.0, 5.0], [-3.0, 5.0], color="#a0aec0", dash=True, label="y = x")
     # (1, e) lies on exp; its mirror (e, 1) lies on log.
     p.points([1.0, math.e], [numbasics.exp_curve(1.0), numbasics.log_curve(math.e)], color=2)
-    p.text(1.1, numbasics.exp_curve(1.0) + 0.15, "(1, e)", size=11, color="#2f855a")
+    p.text(0.9, numbasics.exp_curve(1.0) + 0.1, "(1, e)", anchor="end", size=11, color="#2f855a")
     p.text(math.e + 0.1, 0.75, "(e, 1)", size=11, color="#2f855a")
     p.points([0.0, 1.0], [numbasics.exp_curve(0.0), numbasics.log_curve(1.0)], color=2)
-    p.text(0.1, 1.2, "(0, 1)", size=11, color="#2f855a")
+    p.text(-0.1, 1.3, "(0, 1)", anchor="end", size=11, color="#2f855a")
     p.text(1.1, -0.35, "(1, 0)", size=11, color="#2f855a")
     return p.svg()

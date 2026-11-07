@@ -25,10 +25,11 @@ def render() -> str:
     fold = g._folds_of_dev()
     sizes = [sum(1 for f in fold if f == j) for j in range(g.CV_K)]
     lines = ["digraph kfold {", "  rankdir=LR; nodesep=0.12; ranksep=0.25;",
-             '  node [shape=box, style=filled, fontname="Helvetica", fontsize=11, width=1.1, height=0.4];',
+             '  graph [pad=0.25];',
+             '  node [shape=box, style=filled, fontname="Helvetica", fontsize=11, width=1.25, height=0.42, fixedsize=true];',
              "  edge [style=invis];"]
     for fit in reversed(range(g.CV_K)):   # Graphviz stacks left-to-right chains bottom to top
-        lines.append(f'  fit{fit} [shape=plaintext, fillcolor="#ffffff", style=solid, label="fit {fit + 1}"];')
+        lines.append(f'  fit{fit} [shape=plaintext, width=0.6, fillcolor="#ffffff", style=solid, label="fit {fit + 1}"];')
         prev = f"fit{fit}"
         for j in range(g.CV_K):
             name = f"f{fit}_{j}"

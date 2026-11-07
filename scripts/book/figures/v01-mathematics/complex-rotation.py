@@ -54,7 +54,7 @@ def render() -> str:
     arrow(p, zw, GREEN, 3.2)
     p.text(z[0] + 0.08, z[1] - 0.2, "z = 2 + i", color=BLUE)
     p.text(w[0] + 0.08, w[1] + 0.02, "w = 0.6 + 0.8i", color=ORANGE)
-    p.text(zw[0] + 0.1, zw[1], f"z w = {zw[0]:g} + {zw[1]:g}i", color=GREEN)
+    p.text(zw[0] - 0.1, zw[1], f"z w = {zw[0]:g} + {zw[1]:g}i", anchor="end", color=GREEN)
     mid = (a0 + a1) / 2
     p.text(r * 1.04 * math.cos(mid) + 0.05, r * 1.04 * math.sin(mid) + 0.05,
            f"turn by {math.degrees(a1 - a0):.1f} degrees", anchor="start", color=GREY)

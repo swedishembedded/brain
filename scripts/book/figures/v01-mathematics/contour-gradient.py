@@ -36,6 +36,6 @@ def render() -> str:
         p.points([q[0]], [q[1]], color=1, r=3.5)
         p.arrow(q[0], q[1], q[0] + ARROW_SCALE * g[0], q[1] + ARROW_SCALE * g[1], color="#c05621")
     p.points([mv.W_STAR[0]], [mv.W_STAR[1]], color=2, r=5)
-    p.text(mv.W_STAR[0] + 0.08, mv.W_STAR[1] + 0.12, "minimum (1, 2)", size=11)
-    p.text(-0.95, 3.85, "arrow length = 0.06 x gradient (uphill)", size=11, color="#c05621")
+    p.text(mv.W_STAR[0] + 0.08, mv.W_STAR[1] + 0.12, "minimum (1, 2)", size=11, plate=True)
+    p.text(-0.95, 3.85, "arrow length = 0.06 x gradient (uphill)", size=11, color="#c05621", plate=True)
     return p.svg()

@@ -27,7 +27,7 @@ def render() -> str:
     mu = ds.MU
     pts = ds._sample_cholesky(bookrng.generator("distributions.mvn_figure"), mu, ds.SIGMA, 500)
     (l1, l2), (v1, v2) = ds._sym2_eigen(ds.SIGMA)
-    p = Plot((-6.0, 8.0), (-5.0, 6.0), width=560, height=360, xlabel="x1", ylabel="x2",
+    p = Plot((-4.5, 7.0), (-3.9, 2.9), width=560, height=360, xlabel="x1", ylabel="x2",
              title="500 samples and the ellipses for c = 1, 4, 9")
     p.points([a[0] for a in pts], [a[1] for a in pts], color="#63b3ed", r=1.8)
     for c, color in ((1, "#c05621"), (4, "#2f855a"), (9, "#6b46c1")):
@@ -38,6 +38,6 @@ def render() -> str:
         p.line(xs, ys, color=color, width=2, label=f"c = {c}")
     p.arrow(mu[0], mu[1], mu[0] + 1.2 * v1[0], mu[1] + 1.2 * v1[1], color="#1a202c")
     p.arrow(mu[0], mu[1], mu[0] + 1.2 * v2[0], mu[1] + 1.2 * v2[1], color="#1a202c")
-    p.text(mu[0] + 1.3 * v1[0] + 0.1, mu[1] + 1.3 * v1[1] - 0.45, "v1", size=12)
+    p.text(mu[0] + 1.3 * v1[0] + 0.3, mu[1] + 1.3 * v1[1] - 0.35, "v1", size=12)
     p.text(mu[0] + 1.3 * v2[0] - 0.6, mu[1] + 1.3 * v2[1], "v2", size=12)
     return p.svg()

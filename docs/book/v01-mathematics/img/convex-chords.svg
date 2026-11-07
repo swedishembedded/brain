@@ -1,31 +1,41 @@
-<!-- source-sha256: d2fd04867a73cd1d6a8a2c41d5bfe33525223f01027788d020dca49089e4c2af -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 360" width="520" height="360">
+<!-- source-sha256: 26aa73dcac185aa8dc19b0dd1a876d0af91e0842ea7f439bcf8e130abbfdd531 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 385" width="520" height="385">
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
-<rect width="520" height="360" fill="#ffffff"/>
+<rect width="520" height="385" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-3</text>
 <line x1="132" y1="314" x2="132" y2="30" stroke="#edf2f7"/>
 <text x="132" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-2</text>
+<line x1="206" y1="314" x2="206" y2="30" stroke="#edf2f7"/>
+<text x="206" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-1</text>
 <line x1="280" y1="314" x2="280" y2="30" stroke="#edf2f7"/>
 <text x="280" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="354" y1="314" x2="354" y2="30" stroke="#edf2f7"/>
+<text x="354" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
 <line x1="428" y1="314" x2="428" y2="30" stroke="#edf2f7"/>
 <text x="428" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="502" y1="314" x2="502" y2="30" stroke="#edf2f7"/>
+<text x="502" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
 <line x1="58" y1="286.95" x2="502" y2="286.95" stroke="#edf2f7"/>
 <text x="52" y="290.95" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
-<line x1="58" y1="219.33" x2="502" y2="219.33" stroke="#edf2f7"/>
-<text x="52" y="223.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2.5</text>
-<line x1="58" y1="151.71" x2="502" y2="151.71" stroke="#edf2f7"/>
-<text x="52" y="155.71" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
-<line x1="58" y1="84.1" x2="502" y2="84.1" stroke="#edf2f7"/>
-<text x="52" y="88.1" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">7.5</text>
+<line x1="58" y1="232.86" x2="502" y2="232.86" stroke="#edf2f7"/>
+<text x="52" y="236.86" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="178.76" x2="502" y2="178.76" stroke="#edf2f7"/>
+<text x="52" y="182.76" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="124.67" x2="502" y2="124.67" stroke="#edf2f7"/>
+<text x="52" y="128.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<line x1="58" y1="70.57" x2="502" y2="70.57" stroke="#edf2f7"/>
+<text x="52" y="74.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">8</text>
 <rect x="58" y="30" width="444" height="284" fill="none" stroke="#718096"/>
 <clipPath id="plot"><rect x="58" y="30" width="444" height="284"/></clipPath>
 <g clip-path="url(#plot)"><polyline fill="none" stroke="#4a5568" stroke-width="2.5" points="58,43.52 61.7,51.57 65.4,59.48 69.1,67.26 72.8,74.9 76.5,82.4 80.2,89.78 83.9,97.01 87.6,104.11 91.3,111.08 95,117.9 98.7,124.6 102.4,131.16 106.1,137.58 109.8,143.87 113.5,150.02 117.2,156.04 120.9,161.92 124.6,167.67 128.3,173.28 132,178.76 135.7,184.1 139.4,189.31 143.1,194.38 146.8,199.32 150.5,204.12 154.2,208.78 157.9,213.32 161.6,217.71 165.3,221.97 169,226.1 172.7,230.08 176.4,233.94 180.1,237.66 183.8,241.24 187.5,244.69 191.2,248 194.9,251.18 198.6,254.22 202.3,257.13 206,259.9 209.7,262.54 213.4,265.04 217.1,267.41 220.8,269.64 224.5,271.74 228.2,273.7 231.9,275.52 235.6,277.22 239.3,278.77 243,280.19 246.7,281.48 250.4,282.62 254.1,283.64 257.8,284.52 261.5,285.26 265.2,285.87 268.9,286.34 272.6,286.68 276.3,286.88 280,286.95 283.7,286.88 287.4,286.68 291.1,286.34 294.8,285.87 298.5,285.26 302.2,284.52 305.9,283.64 309.6,282.62 313.3,281.48 317,280.19 320.7,278.77 324.4,277.22 328.1,275.52 331.8,273.7 335.5,271.74 339.2,269.64 342.9,267.41 346.6,265.04 350.3,262.54 354,259.9 357.7,257.13 361.4,254.22 365.1,251.18 368.8,248 372.5,244.69 376.2,241.24 379.9,237.66 383.6,233.94 387.3,230.08 391,226.1 394.7,221.97 398.4,217.71 402.1,213.32 405.8,208.78 409.5,204.12 413.2,199.32 416.9,194.38 420.6,189.31 424.3,184.1 428,178.76 431.7,173.28 435.4,167.67 439.1,161.92 442.8,156.04 446.5,150.02 450.2,143.87 453.9,137.58 457.6,131.16 461.3,124.6 465,117.9 468.7,111.08 472.4,104.11 476.1,97.01 479.8,89.78 483.5,82.4 487.2,74.9 490.9,67.26 494.6,59.48 498.3,51.57 502,43.52"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="95,117.9 354,259.9"/><circle cx="95" cy="117.9" r="3.5" fill="#2b6cb0"/><circle cx="354" cy="259.9" r="3.5" fill="#2b6cb0"/><circle cx="224.5" cy="271.74" r="3" fill="#4a5568"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="169,226.1 465,117.9"/><circle cx="169" cy="226.1" r="3.5" fill="#c05621"/><circle cx="465" cy="117.9" r="3.5" fill="#c05621"/><circle cx="317" cy="280.19" r="3" fill="#4a5568"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="317,280.19 487.2,74.9"/><circle cx="317" cy="280.19" r="3.5" fill="#2f855a"/><circle cx="487.2" cy="74.9" r="3.5" fill="#2f855a"/><circle cx="402.1" cy="213.32" r="3" fill="#4a5568"/></g>
 <text x="280" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">x</text>
 <text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">f(x)</text>
-<text x="260" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Convex: f(x) = x^2, chords sit above the curve</text>
-<line x1="332" y1="40" x2="352" y2="40" stroke="#2b6cb0" stroke-width="2"/>
-<text x="358" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chord from -2.5 to 1</text>
-<line x1="332" y1="58" x2="352" y2="58" stroke="#c05621" stroke-width="2"/>
-<text x="358" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chord from -1.5 to 2.5</text>
-<line x1="332" y1="76" x2="352" y2="76" stroke="#2f855a" stroke-width="2"/>
-<text x="358" y="80" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chord from 0.5 to 2.8</text>
+<text x="280" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Convex: f(x) = x^2, chords sit above the curve</text>
+<line x1="31.78" y1="373" x2="51.78" y2="373" stroke="#2b6cb0" stroke-width="2"/>
+<text x="57.78" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chord from -2.5 to 1</text>
+<line x1="182.43" y1="373" x2="202.43" y2="373" stroke="#c05621" stroke-width="2"/>
+<text x="208.43" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chord from -1.5 to 2.5</text>
+<line x1="342.54" y1="373" x2="362.54" y2="373" stroke="#2f855a" stroke-width="2"/>
+<text x="368.54" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chord from 0.5 to 2.8</text>
 </svg>

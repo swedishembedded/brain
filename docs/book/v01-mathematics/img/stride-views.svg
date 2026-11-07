@@ -1,4 +1,4 @@
-<!-- source-sha256: 75a9b58c3be1c180cd4f35ae8ed732e428b4e404aa17bf4e86f78149dd331057 -->
+<!-- source-sha256: 1a7663b6cdb0845ffcab10c4d31b436482815bb2ea1cf88de617885cbe538ff9 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 516 276" width="516" height="276">
 <rect width="516" height="276" fill="#ffffff"/>
 <text x="20" y="40" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1a202c" text-anchor="start" font-weight="bold">A: shape [3, 4], strides (4, 1)</text>

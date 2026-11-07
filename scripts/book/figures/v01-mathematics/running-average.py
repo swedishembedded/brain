@@ -31,5 +31,5 @@ def render() -> str:
         avg = pr.running_average(N, f"probability.running_average_figure.{k}")
         p.line(xs, avg, color=k, label=f"run {k + 1}", width=1.6)
     p.hline(expectation, color="#2d3748")
-    p.text(N * 0.98, expectation + 0.12, f"E[sum] = {expectation:g}", anchor="end", size=12, color="#2d3748")
+    p.text(N * 0.98, expectation + 0.5, f"E[sum] = {expectation:g}", anchor="end", size=12, color="#2d3748")
     return p.svg()

@@ -36,9 +36,9 @@ def render() -> str:
     for k, _ in BANDS:
         p.vline(k, dash=True)
         p.vline(-k, dash=True)
-    p.items.append(f'<rect x="{fmt(p.x(-3.98))}" y="{fmt(p.y(0.455))}" width="{fmt(p.x(-1.55) - p.x(-3.98))}" '
+    p.items.append(f'<rect x="{fmt(p.x(-3.9))}" y="{fmt(p.y(0.455))}" width="{fmt(p.x(-1.45) - p.x(-3.9))}" '
                    f'height="{fmt(p.y(0.345) - p.y(0.455))}" fill="#ffffff"/>')
     for k, y in ((1.0, 0.435), (2.0, 0.40), (3.0, 0.365)):
         area = ds._simpson(ds._phi, -k, k, 4000)
-        p.text(-3.95, y, f"within {k:g} sigma: {100 * area:.2f}%", size=12, color="#2a4365")
+        p.text(-3.8, y, f"within {k:g} sigma: {100 * area:.2f}%", size=12, color="#2a4365")
     return p.svg()

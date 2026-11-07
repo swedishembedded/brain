@@ -32,5 +32,5 @@ def render() -> str:
     p.points([x for x, _ in fc.QUADRATIC_POINTS], [y for _, y in fc.QUADRATIC_POINTS], color=5, r=5)
     p.text(0.08, 1.35, "(0, 1)", size=11, color="#4a5568")
     p.text(1.08, -0.4, "(1, 0)", size=11, color="#4a5568")
-    p.text(2.08, 3.35, "(2, 3)", size=11, color="#4a5568")
+    p.text(2.1, 2.0, "(2, 3)", size=11, color="#4a5568")
     return p.svg()

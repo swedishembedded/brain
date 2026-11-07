@@ -1,13 +1,21 @@
-<!-- source-sha256: cee681b9420b9dc9eef00a5318a5d9effa6c60499ea756bb0df661e6caed9841 -->
+<!-- source-sha256: 8a6f6430069eca8b9fbc37a5df69adb0123dce2748405c7468ca3f922ed9954d -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 360" width="520" height="360">
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
 <rect width="520" height="360" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-1</text>
 <line x1="132" y1="314" x2="132" y2="30" stroke="#edf2f7"/>
 <text x="132" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="206" y1="314" x2="206" y2="30" stroke="#edf2f7"/>
+<text x="206" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
 <line x1="280" y1="314" x2="280" y2="30" stroke="#edf2f7"/>
 <text x="280" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="354" y1="314" x2="354" y2="30" stroke="#edf2f7"/>
+<text x="354" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
 <line x1="428" y1="314" x2="428" y2="30" stroke="#edf2f7"/>
 <text x="428" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="502" y1="314" x2="502" y2="30" stroke="#edf2f7"/>
+<text x="502" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
 <line x1="58" y1="293.71" x2="502" y2="293.71" stroke="#edf2f7"/>
 <text x="52" y="297.71" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
 <line x1="58" y1="212.57" x2="502" y2="212.57" stroke="#edf2f7"/>
@@ -21,13 +29,14 @@
 <g clip-path="url(#plot)"><circle cx="222.28" cy="262.07" r="5" fill="#2b6cb0"/><circle cx="230.42" cy="228.39" r="5" fill="#2b6cb0"/><circle cx="186.76" cy="266.94" r="5" fill="#2b6cb0"/><circle cx="174.18" cy="275.05" r="5" fill="#2b6cb0"/><circle cx="180.84" cy="264.91" r="5" fill="#2b6cb0"/><circle cx="224.5" cy="241.38" r="5" fill="#2b6cb0"/><circle cx="412.46" cy="155.77" r="5" fill="#c05621"/><circle cx="435.4" cy="161.45" r="5" fill="#c05621"/><circle cx="391" cy="185.39" r="5" fill="#c05621"/><circle cx="385.08" cy="172.41" r="5" fill="#c05621"/><circle cx="425.78" cy="202.43" r="5" fill="#c05621"/><circle cx="342.9" cy="187.42" r="5" fill="#c05621"/><circle cx="203.16" cy="256.46" r="8" fill="#1a202c"/><circle cx="398.77" cy="177.48" r="8" fill="#1a202c"/><circle cx="132" cy="293.71" r="4" fill="#a0aec0"/><circle cx="206" cy="273.43" r="4" fill="#a0aec0"/><circle cx="132" cy="293.71" r="4" fill="#a0aec0"/><circle cx="300.97" cy="216.97" r="4" fill="#a0aec0"/><circle cx="191.01" cy="267.24" r="4" fill="#a0aec0"/><circle cx="355.94" cy="191.83" r="4" fill="#a0aec0"/></g>
 <text x="280" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">feature 1</text>
 <text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">feature 2</text>
-<text x="260" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Groups found without any labels</text>
-<circle cx="342" cy="40" r="3.5" fill="#2b6cb0"/>
-<text x="358" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">group A</text>
-<circle cx="342" cy="58" r="3.5" fill="#c05621"/>
-<text x="358" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">group B</text>
-<circle cx="342" cy="76" r="3.5" fill="#1a202c"/>
-<text x="358" y="80" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">group centres</text>
-<circle cx="342" cy="94" r="3.5" fill="#a0aec0"/>
-<text x="358" y="98" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">earlier centres</text>
+<text x="280" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Groups found without any labels</text>
+<rect x="365.04" y="38" width="128.96" height="78" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<circle cx="383.04" cy="53" r="3.5" fill="#2b6cb0"/>
+<text x="399.04" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">group A</text>
+<circle cx="383.04" cy="70" r="3.5" fill="#c05621"/>
+<text x="399.04" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">group B</text>
+<circle cx="383.04" cy="87" r="3.5" fill="#1a202c"/>
+<text x="399.04" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">group centres</text>
+<circle cx="383.04" cy="104" r="3.5" fill="#a0aec0"/>
+<text x="399.04" y="108" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">earlier centres</text>
 </svg>
