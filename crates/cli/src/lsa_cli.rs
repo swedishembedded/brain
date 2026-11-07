@@ -55,7 +55,7 @@ brain lsa prefill --indexer SPEC (--model REPO | --checkpoint PATH) [options]
            ricursive: --kv-cache f32|bf16|int8|fp8 (default f32) --weights SPEC (int8, fp8, bf16,
            f32 or pattern=format; default: as the checkpoint stores them, so the NVFP4 release
            stays NVFP4). On several cards the layers are staged over the fewest that hold the
-           deployment (distill and prefill; eval needs one card).
+           deployment (each stage reads the global layers it owns sparsely).
 
   --tree size=4,blocks=1024:4096,beam=2048:2048,page=4096,growth=1024[,start=N]
            reads through node bucket levels (qwen3).

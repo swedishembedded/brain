@@ -91,6 +91,11 @@ serve other work; CUDA parity and performance follow on the same gates.
        pools, byte-exact placement over cards, the engine in pipeline stages.
        Done and measured on the CPU backend and the software Vulkan adapter;
        no card has run it (step 7).
+5b. [x] Latent sparse attention across stages (one binding per stage device over the
+       global layers it owns, index pages in per-device domains of the shared block
+       tables) and fused paged flash attention for Ripple's group of 10 (global layers
+       and the rings' windows, all KV tiers). Measured below on the software Vulkan
+       adapter; no card has run it.
 6. [ ] Backward, gradcheck, LoRA; N-LSA after D-LSA.
 7. [ ] CUDA parity and the measured long-context numbers (both GH200s,
        when free).
@@ -284,37 +289,85 @@ needs `Model`, a backward) and is not implemented for Ripple: the adapter is `pl
 
 Placement, published configuration on 96 GiB cards (`capacity::headroom` leaves 83.8 GiB usable
 of 96; `placements_of_the_published_configuration_on_96_gib_cards` prints the whole table), one
-sequence, latent sparse attention charged (`lsa_device_bytes` of a default indexer), the dense
-paged triad capped at 8192 keys (`ServeConfig::dense_keys`), 512-row prefill chunks. Every
-row therefore assumes the global layers read sparsely; a dense read at 128k needs
-`dense_keys` 131072, whose score scratch is 2 x 4 x rows x 80 x 131072 bytes (5.4 GB at 64-row
-chunks, 43 GB at 512), and past that the dense triad is not an option. Fixed bytes per stage 2.9
-to 3.2 GiB (score scratch, activations, tile budget) are on top of the stage bytes:
+sequence, 512-row prefill chunks, fused attention (no score slab; the triad would add
+2 x 4 x rows x 80 x keys bytes, 43 GB at 512 rows and 128k keys), latent sparse attention charged
+per global layer and per stage (`LsaCharge`: 0.2 GiB at 128k, 1.5 GiB at 1M tokens). Fixed bytes per
+stage (activations of the widest forward, the tile budget, the index scratch) are 0.5 to 1.0 GiB on
+top of the stage bytes:
 
 | weights | KV | context | cards | per card (stage bytes) |
 |---|---|---|---|---|
-| bf16 (119.7 GiB) | bf16 | 128k | 2 | 63.7 + 64.8 GiB |
+| bf16 (119.7 GiB) | bf16 | 128k | 2 | 63.6 + 64.8 GiB |
 | bf16 | int8 | 128k | 2 | 61.6 + 62.8 GiB |
-| bf16 | int8 | 1M | 2 | 76.7 + 77.9 GiB (33.0 GiB of KV) |
-| bf16 | bf16 | 1M | 3 | 63.7 + 63.3 + 58.9 GiB (64.0 GiB of KV) |
+| bf16 | int8 | 1M | 2 | 76.6 + 77.8 GiB (33.0 GiB of KV) |
+| bf16 | bf16 | 1M | 3 | 63.6 + 63.2 + 58.8 GiB (64.0 GiB of KV) |
 | NVFP4 release (52.3 GiB) | int8 | 128k | 1 | 57.0 GiB |
 | NVFP4 | bf16 | 128k | 1 | 61.1 GiB |
-| NVFP4 | int8 | 1M | 2 | 43.7 + 43.5 GiB |
-| NVFP4 | bf16 | 1M | 2 | 59.3 + 59.1 GiB |
+| NVFP4 | int8 | 1M | 2 | 43.6 + 43.4 GiB |
+| NVFP4 | bf16 | 1M | 2 | 59.2 + 59.0 GiB |
 | fp8 (59.9 GiB) | int8 | 128k | 1 | 64.6 GiB |
-| int8 (67.3 GiB) | int8 | 128k | 1 | 72.1 GiB |
+| int8 (67.3 GiB) | int8 | 128k | 1 | 72.0 GiB |
 
-**Staged engines cannot read sparsely yet** (open items), so the multi-card rows are placements of
-bytes, not configurations this engine serves at those contexts: a staged engine reads dense, which
-caps its context by the score scratch. One card holds the NVFP4 release with an int8 cache up to about 843k tokens (bf16 cache 442k;
-fp8 weights 614k and 319k). Rings cost 0.4 GiB (bf16) or 0.2 GiB (int8) a slot of the whole stack
-whatever the context. The weights cost matches the published `total_size` and the 65B parameter
-count (`placement` unit tests); the fixed per-stage bytes are an estimate (the activations of the
-widest forward), not a measurement, and the allocator overhead is `capacity::headroom`'s 14%.
+These rows are configurations the engine serves: the multi-card ones read the global layers sparsely through
+one binding per stage (below), or densely through the fused kernels. One card holds the NVFP4 release with an
+int8 cache up to about 921k tokens with the sparse index charged (bf16 cache 479k; fp8 weights 692k and 360k).
+Rings cost 0.4 GiB (bf16) or 0.2 GiB (int8) a slot of the whole stack whatever the context. The weights
+cost matches the published `total_size` and the 65B parameter count (`placement` unit tests); the fixed
+per-stage bytes are an estimate, not a measurement, and the allocator overhead is `capacity::headroom`'s 14%.
 
-Not measured or not run: any card (CUDA parity of the tiers, the native NVFP4 kernels, peer copies,
-throughput of any tier or KV format, loading time), the 80-layer release end to end, int8 on the
-CPU backend (refused), the `brain lsa` staging path (`StreamPlan::cards` probes free card memory),
+Step 5b, latent sparse attention across stages (software Vulkan adapter, two `Gpu` handles of lavapipe
+coexist; a synthetic four-layer model, global layers 1 and 3 on different stages, 26 prompt tokens in
+chunks of 5 and 14 decodes; `tests/it/staged_lsa.rs`). `BlockTable` index pages gain a domain
+(`index_pages_in`), `LsaAttention::set_domain` and `LsaBinding::attach_in_domain` give each binding its own,
+`Indexer::restricted_to` hands each stage its layers, and `LsaBinding::device_bytes_split` charges per
+layer and per device; page allocation, release and snapshot retention run on every stage's binding from the
+shared host-side tables, and no ricursive special case touches the binding.
+
+| gate | result |
+|---|---|
+| two-stage sparse vs single-stage sparse (top_p 2, top_k 3: 796 of 1640 causal keys) | logits scaled error 0 (bit-identical), same keys selected |
+| full budget across stages vs the dense engine | 8.3e-7, every causal key selected |
+| prefix reuse across stages with the index on (24 filed, resumed to 30) | warm equals the single-stage warm run exactly; each stage rebuilds its own pages (2 for the resumed prompt against 1 on one stage), the cache holds 6 pages against 3, reclaiming frees all |
+
+Pages are per stage, so the index pool costs the same bytes per global layer wherever the layer sits.
+
+Step 5b, fused attention. `paged_flash_decode_gqa_hd256` took at most 8 query heads per kv head and only
+256-wide rows at the compact tiers. Its per-head arrays are now sized by `GMAX` (specialised when the group
+passes 8), the softmax runs 8 heads per round of its 128 threads, and the compact tiers' row scale follows the
+head width (`HDS`); `kv_tier::kernel_list_for` and `KvKernels::resolve_for` register a model's own shape
+(`check_flash_shape`: power-of-two head width 16 to 256, group 1 to 128). `RicursiveEngine` reads a global
+layer with `flash_prefill_hd256` for a chunk of one sequence and the split-key decode kernel for a decode
+batch, and the rings' windows with the decode kernel (a row per window), wherever the device has workgroup
+barriers; the CPU JIT keeps the triad (with a warning that names the device), as does
+`ServeConfig::fused_attention: false`.
+
+| gate (software adapter) | result |
+|---|---|
+| fused decode vs f64 attention over the decoded planes, f32 / bf16 / int8 / fp8, (20,2,128) group 10, (40,4,128), (24,2,64) group 12 and the built-in shapes | worst relative error 1.3e-6 to 3.1e-6 |
+| engine, fused vs triad, 5 layers, group 10 at head_dim 128, window 4 wrapped, prefill chunks of 5 and 14 decodes | f32 1.5e-6; bf16 2.4e-4, int8 5.3e-4, fp8 1.4e-6 |
+| same, distance to the f32 cache | triad / fused: bf16 6.31e-3 / 6.28e-3, int8 2.82e-2 / 2.81e-2, fp8 8.03e-2 / 8.03e-2 |
+| shared conformance suite (continuous batching, no head-of-line blocking, prefix reuse) on the fused kernels | passes |
+| dense read past a 16-key score scratch | the triad refuses by name; the fused engine answers as the triad reference (6.4e-7) |
+
+The tier rows of the engine comparison are not noise of the kernels (they are exact against f64 above): the
+triad's bf16, int8 and fp8 variants are gated at 1e-4 per operation, and five random layers amplify that.
+
+Context the dense path then supports (fused kernels, no index, no score slab; only the cache bounds it, found
+by bisection in the same test; the planes index with 32 bits, so one global layer holds at most 4.19M tokens):
+
+| weights | KV | 1 card | 2 cards | 3 cards |
+|---|---|---|---|---|
+| NVFP4 release | bf16 | 491k | 1.85M | 2.89M |
+| NVFP4 release | int8 | 962k | 3.60M | 5.62M |
+| bf16 | bf16 | does not fit | 741k | 1.95M |
+| bf16 | int8 | does not fit | 1.44M | 3.78M |
+
+A dense decode token reads the whole cache (64 GiB of bf16 at 1M tokens), so these are capacity limits;
+decode speed at those lengths is the sparse path's reason and is not measured here.
+
+Not measured or not run: any card (CUDA parity of the tiers, the native NVFP4 kernels, the CUDA build of the
+widened fused kernel, peer copies, throughput of any tier, KV format or attention path, loading time), the 80-layer release end to end, int8 on the
+CPU backend (refused), the `brain lsa` staging path (`StreamPlan::cards` probes free card memory), the fused kernels' speed against the triad,
 and the host-RAM figure of the embedding gather (it reads one row per token from the mapped file).
 
 ### GPU phase runbook
@@ -337,26 +390,22 @@ engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
   release loaded as published (`--checkpoint <Ripple-65B-Preview-NVFP4 directory>`, no
   `--weights`), `--device gpu0`. 52.3 GiB of weights. Distillation and the capture need an f32
   cache (`brain lsa distill`: 128 KiB a token over the 16 global layers, 4 GiB at 32k tokens, fine). Serving
-  and `prefill` timing take `--kv-cache int8` (33 KiB a token: the card holds about 843k tokens
-  with sparse attention charged) or `bf16` (442k). `eval` and `set_lsa` need one stage.
-* **2 GH200, the bf16 release (129 GB)**: `--device gpu0,gpu1`, no `--weights`: the layers are staged
-  over the fewest cards that hold them (bf16 + int8 cache: 2 cards, 62 + 63 GiB at 128k). Dense
-  attention (`dense_keys` set to the context, 64-row chunks), scoring and the D-LSA capture work
-  across stages; latent sparse attention does not, so a 1M context on several cards waits for the
-  open item below and the one-card NVFP4 limit (843k tokens, int8 cache, sparse) is the longest
-  context served today. `--weights fp8` or `int8` from the bf16 release
-  quantizes at load (fp8 59.9 GiB, int8 67.3 GiB resident, 1 card to 128k).
-* First checks on a card, in order: the NVFP4 tile decode and the library bf16 GEMM against the CPU
+  and `prefill` timing take `--kv-cache int8` (33 KiB a token: the card holds about 921k tokens
+  with sparse attention charged, 962k dense) or `bf16` (479k, 491k dense).
+* **2 GH200, the bf16 release (129 GB), or 1M+ tokens**: `--device gpu0,gpu1`, no `--weights`: the layers
+  are staged over the fewest cards that hold them (bf16 + int8 cache: 2 cards, 62 + 63 GiB at 128k, 77 + 78
+  GiB at 1M). Sparse attention (`set_lsa`, `eval`), the D-LSA capture and scoring all work across stages;
+  dense reads run the fused kernels (to 1.44M tokens at bf16 weights and an int8 cache). The NVFP4 release
+  on two cards with an int8 cache holds 1M tokens at 43.6 + 43.4 GiB, or 3.6M dense. `--weights fp8` or
+  `int8` from the bf16 release quantizes at load (fp8 59.9 GiB, int8 67.3 GiB resident, 1 card to 128k).
+* First checks on a card, in order: the fused kernels against the triad (`fused` with `--device gpu0`), the
+  staged sparse read (`staged_lsa` with `--device gpu0`, then across two cards for the peer copy), the NVFP4 tile decode and the library bf16 GEMM against the CPU
   numbers in this file (`real_nvfp4` with `--device gpu0`; set `BRAIN_REQUIRE_CAPABILITIES`), the int8
   tier (`tiers` with `--device gpu0`), peer copy vs host-staged boundary on two cards, then throughput
   per tier with `brain perf` (`kernels.md` section F) before any tuning.
 
 ## Open items for the later steps
 
-- Fused dense attention for group 10: `KvKernels::flash_decode` is specialised for head width 256 and
-  `(128, 1)`; Ripple (128, group 10) keeps the paged triad, whose score scratch is why
-  `ServeConfig::dense_keys` exists. Only a sparse engine can run long contexts today.
-- Latent sparse attention across stages (one binding per stage needs per-stage index pages in the block table): without it a multi-card engine reads its global layers dense and the long-context rows of the placement table (1M tokens on 2 or 3 cards) are not servable.
 - Activation quantization to FP4 (W4A4 as the release was calibrated) as an opt-in beside the float-read default
   would need the static `input_scale`s applied; the checks and the coverage numbers above are the groundwork.
 - The embedding is gathered on the host a row at a time from the mapped file (no device copy); a bf16 device table

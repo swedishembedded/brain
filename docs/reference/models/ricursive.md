@@ -30,8 +30,8 @@ reuse, and it passes the shared serving conformance suite. It is not in the
 model catalog: `brain serve` and the capability interface do not know it yet.
 Its global layers can read through latent sparse attention
 (`RicursiveEngine::set_lsa`, an indexer covering only global layers, over an
-f32, int8 or fp8 cache on a single stage), which needs a device that runs
-workgroup-barrier kernels. The registry row is the model's name and its
+f32, int8 or fp8 cache, also when the layers are split over stages), which
+needs a device that runs workgroup-barrier kernels. The registry row is the model's name and its
 Hugging Face class.
 
 ### Weights, KV cache and devices
@@ -59,7 +59,11 @@ loads it. The D-LSA capture reads unquantized keys and so needs `f32`.
 The layers can be cut into pipeline stages, one device each
 (`RicursiveEngine::from_source_staged`); `ricursive::placement` computes the
 byte-exact cost of each layer at the chosen formats and the fewest cards that
-hold the deployment. Latent sparse attention needs one stage.
+hold the deployment.
+
+Attention runs the fused paged flash kernels (no score slab, so no cap on the context a dense read
+spans, at every KV tier) on a device with workgroup barriers, and the three-kernel reference on the CPU
+backend.
 
 The sliding layers keep a fixed ring of recent keys per sequence and the
 global layers keep a growing paged cache, so the memory a sequence costs is a

@@ -78,7 +78,7 @@
 //! [`global_kv_bytes_per_token`] and [`ring_bytes_per_slot`] are the two KV costs the memory plan charges: the
 //! global KV grows with tokens held, the rings are fixed per slot (live and snapshot) however long the
 //! sequences are. Latent sparse attention ([`RicursiveEngine::set_lsa`]) reads the global layers sparsely over
-//! an f32, int8 or fp8 cache on a single stage; there is no offload in this engine.
+//! an f32, int8 or fp8 cache, one binding per stage; there is no offload in this engine.
 
 use checkpoint::TensorSource;
 use gpu_core::{DeviceBuffer, Gpu};
