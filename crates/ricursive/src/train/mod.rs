@@ -36,8 +36,10 @@
 //! residual stream plus one layer. With an adapter the base is frozen and each linear may be held packed
 //! (bf16, FP8, int8, NVFP4): the backward reads the same packed bytes the forward did.
 
+pub mod adapter;
 mod config;
 mod graph;
+mod init;
 mod io;
 mod objectives;
 
@@ -53,7 +55,8 @@ use model::ops::{Ops, TierPolicy, Weight};
 use model::saved::{Residuals, SavedFormat, SavedPolicy};
 use paramstore::{ParamStore, Role};
 
-pub use config::{default_targets, TrainConfig, LORA_LEAVES};
+pub use config::{default_targets, linear_suffix, TrainConfig, LORA_LEAVES};
+pub use init::AdapterInit;
 use graph::{Grad, Kernels, LayerParams, Lin, Scratch};
 
 use crate::config::{LayerType, RicursiveConfig};
@@ -229,6 +232,11 @@ impl Ripple {
     /// Bytes of device memory the activations of the forward and backward hold (not the parameters).
     pub fn activation_bytes(&self) -> u64 {
         graph::activation_bytes(&self.cfg, self.b, self.t, self.res.format(), self.train)
+    }
+
+    /// The tier linear `name` is held at (`F32` for one in the parameter store), `None` for a name that is no linear.
+    pub fn weight_tier(&self, name: &str) -> Option<Dtype> {
+        self.weights.get(name).map(Weight::dtype)
     }
 
     /// The adapter this model trains, if any.

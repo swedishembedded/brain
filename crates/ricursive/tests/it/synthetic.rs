@@ -26,7 +26,7 @@ pub(crate) struct Model {
 }
 
 impl Model {
-    fn path(&self) -> String {
+    pub(crate) fn path(&self) -> String {
         self.file.path().join("synthetic.safetensors").to_string_lossy().into_owned()
     }
 

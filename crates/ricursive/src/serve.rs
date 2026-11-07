@@ -82,11 +82,14 @@
 
 use checkpoint::TensorSource;
 use gpu_core::{DeviceBuffer, Gpu};
+use model::adapter::device::LoraCfg;
+use model::adapter::sites::LoraSites;
 use model::kv_tier::KvTier;
 use model::lsa::binding::{self, Attachment, HeadShape, LsaBinding};
 use model::lsa::capture::{AttentionCapture, LayerCapture};
 use model::lsa::engine::{KeyPools, KvGeometry, LsaStats};
 use model::lsa::indexer::{IndexGeometry, Indexer};
+use model::lora::device_adapter::DeviceAdapter;
 use model::ops::{Ops, TierPolicy};
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
 use model::paged_sparse::PackedKv;
@@ -99,7 +102,8 @@ use crate::config::{LayerType, RicursiveConfig};
 use crate::layer::LayerWeights;
 use crate::model::embed;
 use crate::ops::pipelines;
-use crate::stage::{Geometry, HostIndex, RowPlan, Stage, StageHead};
+use crate::train::{TrainConfig, LORA_LEAVES};
+use crate::stage::{AdapterPairs, Geometry, HostIndex, RowPlan, Stage, StageHead};
 use crate::weights::{resolve_tiers, Loader, WeightReport};
 
 /// The shortest prompt worth a snapshot: copying a slot's rings for a handful
@@ -367,6 +371,45 @@ impl RicursiveEngine {
             serve,
             src,
         })
+    }
+
+    /// Apply `adapter` (a LoRA written by [`crate::train::Ripple::save_adapter`]) on top of the resident base, at run
+    /// time and without touching the base: after each targeted linear the shared adapter runtime adds
+    /// `scale * (x A^T) B^T`, the arithmetic the trainer differentiated, so the engine answers what the training
+    /// model does. Every pair is checked against this model's adapter sites by name and shape before anything is
+    /// uploaded. Prefixes cached under the previous adapter are dropped (their K and V were computed under it);
+    /// a sequence already started keeps K and V computed without or under the old adapter and must not be continued.
+    pub fn attach_adapter(&mut self, adapter: &DeviceAdapter) -> Result<(), String> {
+        let sites = TrainConfig::new(self.cfg.clone(), 1).lora_sites();
+        model::adapter::sites::validate(adapter, &sites).map_err(|e| format!("ricursive attach_adapter: {e}"))?;
+        let targets: Vec<String> = LORA_LEAVES.iter().filter(|leaf| sites.iter().any(|s| s.leaf == **leaf && adapter.sites.iter().any(|p| p.base == s.name))).map(|s| (*s).to_string()).collect();
+        let lora = LoraCfg::new(adapter.rank, adapter.alpha, targets);
+        for stage in &mut self.stages {
+            let range = stage.range.clone();
+            let pairs: AdapterPairs<'_> = adapter
+                .sites
+                .iter()
+                .filter(|p| sites.iter().any(|s| s.name == p.base && s.layer.is_some_and(|l| range.contains(&l))))
+                .map(|p| (p.base.clone(), p.a.as_slice(), p.b.as_slice()))
+                .collect();
+            stage.set_adapter(Some((&lora, &pairs)));
+        }
+        self.flush_prefix_cache();
+        Ok(())
+    }
+
+    /// Serve the base again; prefixes cached under the adapter are dropped.
+    pub fn detach_adapter(&mut self) {
+        for stage in &mut self.stages {
+            stage.set_adapter(None);
+        }
+        self.flush_prefix_cache();
+    }
+
+    fn flush_prefix_cache(&mut self) {
+        while let Some(mut gone) = self.cache.evict_lru() {
+            self.drop_table(&mut gone);
+        }
     }
 
     fn load_head(loader: &Loader<'_>, ops: &Ops, cfg: &RicursiveConfig, src: &dyn TensorSource) -> Result<StageHead, String> {

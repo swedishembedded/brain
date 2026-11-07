@@ -52,13 +52,13 @@ TABLES = [
      "No architecture offers a full fine-tune over a quantized or fp8 base. Trainable\nparameters, gradients and optimizer moments are held below fp32 only where a\ncell says so.\n"),
     ("Image and video generators", ["flux2", "s3dit", "wan"],
      [("lora_f32", "LoRA, fp32 base"), ("lora_int8", "LoRA, int8 base"), ("other", "Other")], ""),
-    ("Serving adapters and KV tiers", ["qwen3", "qwen35", "qwen35moe"],
+    ("Serving adapters and KV tiers", ["qwen3", "qwen35", "qwen35moe", "ricursive"],
      [("adapter_serving", "Adapters while serving"), ("quant_serving", "Quantized weights while serving"), ("kv_tiers", "KV tiers")], ""),
 ]
 TAIL = """
-A LoRA adapter trains over an FP8 base on qwen3 and qwen35. NVFP4 and MX
-checkpoints have `Weight` storage and execution but no model's LoRA trainer
-offers them as a base yet. The contributor roadmap for these gaps is
+A LoRA adapter trains over an FP8 base on qwen3, qwen35 and ricursive. NVFP4
+and MX checkpoints have `Weight` storage and execution, and only ricursive's
+LoRA trainer offers the NVFP4 release as a base (its "Other" cell). The contributor roadmap for these gaps is
 `.agents/roadmap/quantized-training.md`.
 """
 

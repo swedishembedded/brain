@@ -12,9 +12,11 @@
 //! to info@swedishembedded.com.
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use model::adapter::exec::{AdapterRuntime, ParamAccess};
 use model::ops::{Ops, Weight};
 
 use crate::config::RicursiveConfig;
+use crate::import::layer_tensor;
 
 pub(crate) const K_RMSNORM: usize = 0;
 pub(crate) const K_ROPE2D: usize = 1;
@@ -73,6 +75,8 @@ pub fn pipelines(cfg: &RicursiveConfig, extra: &[(&'static str, &'static str)]) 
     }
     let mut table: Vec<(&'static str, &'static str)> = OWN_KERNELS.to_vec();
     add(&mut table, model::ops::training_kernel_list());
+    // The adapter runtime of an attached adapter accumulates its correction with these two.
+    add(&mut table, &[("axpy", kernels::AXPY), ("grad_scale", kernels::GRAD_SCALE)]);
     // The fused decode attention is specialised for this model's own head shape (80 query heads over 8 kv heads of
     // 128 is a group of 10), at every KV tier; the paged triad stays the CPU JIT's path and the reference.
     let fused = model::kv_tier::kernel_list_for(&table, &[flash_shape(cfg)]);
@@ -149,6 +153,26 @@ pub(crate) fn value_mix(gpu: &Gpu, s: &mut Vec<Step>, x0: &DeviceBuffer, xn: &De
     out
 }
 
+/// An attached adapter's runtime correction of one layer's linears: after a targeted linear `y = x W^T` the shared
+/// adapter runtime adds `scale * (x A^T) B^T` to `y`, the arithmetic the trainer differentiates, so a trained adapter
+/// serves exactly what it trained.
+pub(crate) struct LayerAdapter<'a> {
+    pub rt: &'a AdapterRuntime,
+    pub factors: &'a dyn ParamAccess,
+    pub layer: usize,
+}
+
+impl LayerAdapter<'_> {
+    /// Add the correction of the linear `leaf` (an HF module leaf, `q_proj` ...) for the activation rows `x`
+    /// (`[rows, k]`) to its output `y` (`[rows, n]`); nothing when the adapter does not target `leaf`.
+    pub(crate) fn correct(&self, ops: &Ops, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, y: &DeviceBuffer, rows: u32, k: u32, n: u32) {
+        if self.rt.hits(leaf) {
+            let name = layer_tensor(self.layer, &crate::train::linear_suffix(leaf));
+            self.rt.forward(ops.tensor_gemm(), s, self.factors, &name, x, y, rows, k, n);
+        }
+    }
+}
+
 /// The feed-forward sub-block after the attention residual: `x1 + post_norm(
 /// down(silu(min(gate(m), c)) * clamp(up(m), -c, c)))` with `m = pre_norm(x1)`.
 pub(crate) struct FeedForward<'a> {
@@ -161,6 +185,7 @@ pub(crate) struct FeedForward<'a> {
     pub inter: u32,
     pub eps: f32,
     pub clip: Option<f32>,
+    pub adapter: Option<&'a LayerAdapter<'a>>,
 }
 
 impl FeedForward<'_> {
@@ -169,12 +194,19 @@ impl FeedForward<'_> {
         let m = rmsnorm(gpu, s, x1, self.pre_ln, self.hidden, rows, self.eps);
         let mut gate_up = linears(ops, s, &m, &[self.gate, self.up], rows);
         let (mut up, mut gate) = (gate_up.pop().expect("up"), gate_up.pop().expect("gate"));
+        if let Some(a) = self.adapter {
+            a.correct(ops, s, "gate_proj", &m, &gate, rows, self.hidden, self.inter);
+            a.correct(ops, s, "up_proj", &m, &up, rows, self.hidden, self.inter);
+        }
         if let Some(limit) = self.clip {
             gate = clamp(gpu, s, &gate, -f32::MAX, limit, rows * self.inter);
             up = clamp(gpu, s, &up, -limit, limit, rows * self.inter);
         }
         let act = binary(gpu, s, K_SILU_MUL, &gate, &up, rows * self.inter);
         let mlp = linear(ops, s, &act, self.down, rows);
+        if let Some(a) = self.adapter {
+            a.correct(ops, s, "down_proj", &act, &mlp, rows, self.inter, self.hidden);
+        }
         let mlp_normed = rmsnorm(gpu, s, &mlp, self.post_ln, self.hidden, rows, self.eps);
         binary(gpu, s, K_ADD2, x1, &mlp_normed, rows * self.hidden)
     }

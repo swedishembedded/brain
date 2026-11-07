@@ -71,6 +71,7 @@ crates/qwen3tts/src/import.rs	1	offline importer: one whole tensor per call into
 crates/qwen3tts/src/sft.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen3tts/src/train.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen3vl/src/model.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
+crates/ricursive/src/train/init.rs	2	delegating TensorSource wrapper (the adapter overlay): forwards the call to the wrapped source and materializes nothing itself (knowledge 337 section 1)
 crates/rl/src/continual.rs	6	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/rl/src/improve.rs	6	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/rl/src/reader.rs	6	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)

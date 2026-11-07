@@ -125,7 +125,7 @@ impl LayerWeights {
     }
 
     /// The feed-forward sub-block's weights and flags.
-    pub(crate) fn feed_forward<'a>(&'a self, cfg: &RicursiveConfig) -> FeedForward<'a> {
+    pub(crate) fn feed_forward<'a>(&'a self, cfg: &RicursiveConfig, adapter: Option<&'a crate::ops::LayerAdapter<'a>>) -> FeedForward<'a> {
         FeedForward {
             pre_ln: &self.pre_ff_ln,
             post_ln: &self.post_ff_ln,
@@ -136,6 +136,7 @@ impl LayerWeights {
             inter: cfg.intermediate_size as u32,
             eps: cfg.rms_norm_eps,
             clip: cfg.ffn_clamp_threshold,
+            adapter,
         }
     }
 }
@@ -232,7 +233,7 @@ impl Layer {
         let attn_out = ops::linear(ops, s, &ctx, &w.o, t);
         let attn_normed = ops::rmsnorm(gpu, s, &attn_out, &w.post_attn_ln, hidden, t, c.rms_norm_eps);
         let x1 = ops::binary(gpu, s, K_ADD2, x, &attn_normed, t * hidden);
-        let out = w.feed_forward(c).record(ops, s, &x1, t);
+        let out = w.feed_forward(c, None).record(ops, s, &x1, t);
         LayerBuffers { hidden: out, attn_out }
     }
 

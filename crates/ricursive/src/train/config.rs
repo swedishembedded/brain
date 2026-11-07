@@ -32,6 +32,20 @@ use crate::import::manifest;
 /// The leaves an adapter may target, in the order a layer lists its linears.
 pub const LORA_LEAVES: [&str; 8] = ["q_proj", "k_proj", "v_proj", "o_proj", "g_proj", "gate_proj", "up_proj", "down_proj"];
 
+/// The tensor name of the linear `leaf` within a layer (`self_attn.q_proj.weight`), the suffix of
+/// [`crate::import::layer_tensor`].
+///
+/// # Panics
+///
+/// On a leaf that is not one of [`LORA_LEAVES`]: a caller names its leaves from that list.
+pub fn linear_suffix(leaf: &str) -> String {
+    match leaf {
+        "q_proj" | "k_proj" | "v_proj" | "o_proj" | "g_proj" => format!("self_attn.{leaf}.weight"),
+        "gate_proj" | "up_proj" | "down_proj" => format!("mlp.{leaf}.weight"),
+        other => panic!("ricursive: {other:?} is not an adapter leaf ({LORA_LEAVES:?})"),
+    }
+}
+
 /// The adapter leaves the standard recipe corrects: attention and the feed-forward.
 pub fn default_targets() -> Vec<String> {
     LORA_LEAVES.iter().map(|s| (*s).to_string()).collect()
@@ -62,19 +76,19 @@ impl TrainConfig {
     /// The base linears of layer `layer` as `(leaf, name, out, in)`.
     pub(crate) fn layer_linears(&self, layer: usize) -> Vec<(&'static str, String, usize, usize)> {
         let c = &self.model;
-        let name = |suffix: &str| crate::import::layer_tensor(layer, suffix);
+        let name = |leaf: &str| crate::import::layer_tensor(layer, &linear_suffix(leaf));
         let mut v = vec![
-            ("q_proj", name("self_attn.q_proj.weight"), c.q_dim(), c.hidden_size),
-            ("k_proj", name("self_attn.k_proj.weight"), c.kv_dim(), c.hidden_size),
-            ("v_proj", name("self_attn.v_proj.weight"), c.kv_dim(), c.hidden_size),
-            ("o_proj", name("self_attn.o_proj.weight"), c.hidden_size, c.q_dim()),
+            ("q_proj", name("q_proj"), c.q_dim(), c.hidden_size),
+            ("k_proj", name("k_proj"), c.kv_dim(), c.hidden_size),
+            ("v_proj", name("v_proj"), c.kv_dim(), c.hidden_size),
+            ("o_proj", name("o_proj"), c.hidden_size, c.q_dim()),
         ];
         if c.use_gated_attention {
-            v.push(("g_proj", name("self_attn.g_proj.weight"), c.q_dim(), c.hidden_size));
+            v.push(("g_proj", name("g_proj"), c.q_dim(), c.hidden_size));
         }
-        v.push(("gate_proj", name("mlp.gate_proj.weight"), c.intermediate_size, c.hidden_size));
-        v.push(("up_proj", name("mlp.up_proj.weight"), c.intermediate_size, c.hidden_size));
-        v.push(("down_proj", name("mlp.down_proj.weight"), c.hidden_size, c.intermediate_size));
+        v.push(("gate_proj", name("gate_proj"), c.intermediate_size, c.hidden_size));
+        v.push(("up_proj", name("up_proj"), c.intermediate_size, c.hidden_size));
+        v.push(("down_proj", name("down_proj"), c.hidden_size, c.intermediate_size));
         v
     }
 

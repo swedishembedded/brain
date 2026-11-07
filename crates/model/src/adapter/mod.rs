@@ -20,6 +20,7 @@ pub mod fold;
 pub mod file;
 pub mod kind;
 pub mod pair_file;
+pub mod peft;
 pub mod plan;
 pub mod select;
 pub mod sites;
