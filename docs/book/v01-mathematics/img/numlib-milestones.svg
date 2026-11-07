@@ -1,0 +1,79 @@
+<!-- source-sha256: e7bafd796894ae2403935674fc0a72cd088a510bfec35b9991ece37b868d69c9 -->
+<svg width="625pt" height="200pt"
+viewBox="0.00 0.00 625.00 200.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(10.8 188.8)">
+<polygon fill="white" stroke="none" points="-10.8,10.8 -10.8,-188.8 614.55,-188.8 614.55,10.8 -10.8,10.8"/>
+<g id="node1" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M98.5,-36C98.5,-36 12,-36 12,-36 6,-36 0,-30 0,-24 0,-24 0,-12 0,-12 0,-6 6,0 12,0 12,0 98.5,0 98.5,0 104.5,0 110.5,-6 110.5,-12 110.5,-12 110.5,-24 110.5,-24 110.5,-30 104.5,-36 98.5,-36"/>
+<text xml:space="preserve" text-anchor="middle" x="55.25" y="-18.8" font-family="Helvetica,sans-Serif" font-size="11.00">1 &#160;Strided arrays</text>
+<text xml:space="preserve" text-anchor="middle" x="55.25" y="-7.55" font-family="Helvetica,sans-Serif" font-size="11.00">views, broadcasting</text>
+</g>
+<g id="node2" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M251.62,-70C251.62,-70 164.38,-70 164.38,-70 158.38,-70 152.38,-64 152.38,-58 152.38,-58 152.38,-46 152.38,-46 152.38,-40 158.38,-34 164.38,-34 164.38,-34 251.62,-34 251.62,-34 257.62,-34 263.62,-40 263.62,-46 263.62,-46 263.62,-58 263.62,-58 263.62,-64 257.62,-70 251.62,-70"/>
+<text xml:space="preserve" text-anchor="middle" x="208" y="-52.8" font-family="Helvetica,sans-Serif" font-size="11.00">2 &#160;Matrix multiply</text>
+<text xml:space="preserve" text-anchor="middle" x="208" y="-41.55" font-family="Helvetica,sans-Serif" font-size="11.00">and operation count</text>
+</g>
+<g id="edge1" class="edge">
+<path fill="none" stroke="#1a202c" d="M110.67,-30.27C121.36,-32.68 132.66,-35.23 143.61,-37.7"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="143.05,-40.09 150.42,-39.24 144.13,-35.31 143.05,-40.09"/>
+</g>
+<g id="node5" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M442,-74C442,-74 384.75,-74 384.75,-74 378.75,-74 372.75,-68 372.75,-62 372.75,-62 372.75,-50 372.75,-50 372.75,-44 378.75,-38 384.75,-38 384.75,-38 442,-38 442,-38 448,-38 454,-44 454,-50 454,-50 454,-62 454,-62 454,-68 448,-74 442,-74"/>
+<text xml:space="preserve" text-anchor="middle" x="413.38" y="-56.8" font-family="Helvetica,sans-Serif" font-size="11.00">5 &#160;Derivatives</text>
+<text xml:space="preserve" text-anchor="middle" x="413.38" y="-45.55" font-family="Helvetica,sans-Serif" font-size="11.00">and gradients</text>
+</g>
+<g id="edge2" class="edge">
+<path fill="none" stroke="#1a202c" d="M110.74,-16.9C155.03,-16.69 219.03,-17.94 274.5,-25 304.72,-28.85 338.05,-36.25 364.38,-42.86"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="363.46,-45.16 370.84,-44.51 364.67,-40.41 363.46,-45.16"/>
+</g>
+<g id="edge3" class="edge">
+<path fill="none" stroke="#1a202c" d="M264.04,-53.08C295.33,-53.7 334.14,-54.46 364.22,-55.05"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="363.9,-57.5 370.94,-55.19 363.99,-52.6 363.9,-57.5"/>
+<text xml:space="preserve" text-anchor="middle" x="316.12" y="-55.79" font-family="Helvetica,sans-Serif" font-size="9.00"> &#160;test function</text>
+</g>
+<g id="node3" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M257.62,-124C257.62,-124 158.38,-124 158.38,-124 152.38,-124 146.38,-118 146.38,-112 146.38,-112 146.38,-100 146.38,-100 146.38,-94 152.38,-88 158.38,-88 158.38,-88 257.62,-88 257.62,-88 263.62,-88 269.62,-94 269.62,-100 269.62,-100 269.62,-112 269.62,-112 269.62,-118 263.62,-124 257.62,-124"/>
+<text xml:space="preserve" text-anchor="middle" x="208" y="-106.8" font-family="Helvetica,sans-Serif" font-size="11.00">3 &#160;Stable reductions</text>
+<text xml:space="preserve" text-anchor="middle" x="208" y="-95.55" font-family="Helvetica,sans-Serif" font-size="11.00">compensated sum, lse</text>
+</g>
+<g id="edge4" class="edge">
+<path fill="none" stroke="#1a202c" d="M270.02,-91C300.16,-83.59 336,-74.78 364.18,-67.85"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="364.61,-70.27 370.82,-66.22 363.44,-65.51 364.61,-70.27"/>
+</g>
+<g id="node6" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M457,-130C457,-130 369.75,-130 369.75,-130 363.75,-130 357.75,-124 357.75,-118 357.75,-118 357.75,-106 357.75,-106 357.75,-100 363.75,-94 369.75,-94 369.75,-94 457,-94 457,-94 463,-94 469,-100 469,-106 469,-106 469,-118 469,-118 469,-124 463,-130 457,-130"/>
+<text xml:space="preserve" text-anchor="middle" x="413.38" y="-112.8" font-family="Helvetica,sans-Serif" font-size="11.00">6 &#160;Statistics</text>
+<text xml:space="preserve" text-anchor="middle" x="413.38" y="-101.55" font-family="Helvetica,sans-Serif" font-size="11.00">mean, se, bootstrap</text>
+</g>
+<g id="edge5" class="edge">
+<path fill="none" stroke="#1a202c" d="M270.02,-107.8C294.93,-108.54 323.75,-109.39 348.9,-110.13"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="348.7,-112.57 355.77,-110.33 348.85,-107.67 348.7,-112.57"/>
+</g>
+<g id="node4" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M262.5,-178C262.5,-178 153.5,-178 153.5,-178 147.5,-178 141.5,-172 141.5,-166 141.5,-166 141.5,-154 141.5,-154 141.5,-148 147.5,-142 153.5,-142 153.5,-142 262.5,-142 262.5,-142 268.5,-142 274.5,-148 274.5,-154 274.5,-154 274.5,-166 274.5,-166 274.5,-172 268.5,-178 262.5,-178"/>
+<text xml:space="preserve" text-anchor="middle" x="208" y="-160.8" font-family="Helvetica,sans-Serif" font-size="11.00">4 &#160;Generator</text>
+<text xml:space="preserve" text-anchor="middle" x="208" y="-149.55" font-family="Helvetica,sans-Serif" font-size="11.00">SplitMix64 and samplers</text>
+</g>
+<g id="edge6" class="edge">
+<path fill="none" stroke="#1a202c" d="M274.75,-144.48C298.63,-138.85 325.54,-132.5 349.19,-126.91"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="349.68,-129.31 355.93,-125.32 348.56,-124.54 349.68,-129.31"/>
+</g>
+<g id="node7" class="node">
+<path fill="#fefcbf" stroke="#4a5568" d="M591.75,-130C591.75,-130 512,-130 512,-130 506,-130 500,-124 500,-118 500,-118 500,-106 500,-106 500,-100 506,-94 512,-94 512,-94 591.75,-94 591.75,-94 597.75,-94 603.75,-100 603.75,-106 603.75,-106 603.75,-118 603.75,-118 603.75,-124 597.75,-130 591.75,-130"/>
+<text xml:space="preserve" text-anchor="middle" x="551.88" y="-112.8" font-family="Helvetica,sans-Serif" font-size="11.00">7 &#160;Integration</text>
+<text xml:space="preserve" text-anchor="middle" x="551.88" y="-101.55" font-family="Helvetica,sans-Serif" font-size="11.00">line fit with interval</text>
+</g>
+<g id="edge7" class="edge">
+<path fill="none" stroke="#1a202c" d="M274.78,-159C327.71,-157.16 403.75,-152.2 469,-139 476.92,-137.4 485.14,-135.27 493.19,-132.91"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="493.73,-135.31 499.71,-130.92 492.3,-130.62 493.73,-135.31"/>
+</g>
+<g id="edge8" class="edge">
+<path fill="none" stroke="#1a202c" d="M454.22,-72.35C468.03,-78.01 483.72,-84.45 498.38,-90.46"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="497.14,-92.6 504.54,-92.99 499,-88.07 497.14,-92.6"/>
+</g>
+<g id="edge9" class="edge">
+<path fill="none" stroke="#1a202c" d="M469.11,-112C476.52,-112 484.15,-112 491.63,-112"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="491.16,-114.45 498.16,-112 491.16,-109.55 491.16,-114.45"/>
+</g>
+</g>
+</svg>

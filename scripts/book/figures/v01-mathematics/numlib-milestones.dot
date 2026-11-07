@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+//
+// The seven milestones of the Volume I project and which earlier milestones
+// each one calls. The arrows are the dependencies of the reference library,
+// so the order of the milestones is a valid build order.
+//
+// Swedish Embedded AB implements solutions for building verified numerical
+// libraries. If your team needs expertise in numerical software, you can
+// procure our services by sending an email to info@swedishembedded.com.
+digraph numlib {
+  rankdir=LR;
+  nodesep=0.25; ranksep=0.4;
+  node [shape=box, style="rounded,filled", fillcolor="#e2e8f0", color="#4a5568", fontsize=11];
+  edge [color="#1a202c", arrowsize=0.7];
+
+  m1 [label="1  Strided arrays\nviews, broadcasting"];
+  m2 [label="2  Matrix multiply\nand operation count"];
+  m3 [label="3  Stable reductions\ncompensated sum, lse"];
+  m4 [label="4  Generator\nSplitMix64 and samplers"];
+  m5 [label="5  Derivatives\nand gradients"];
+  m6 [label="6  Statistics\nmean, se, bootstrap"];
+  m7 [label="7  Integration\nline fit with interval", fillcolor="#fefcbf"];
+
+  m1 -> m2;
+  m1 -> m5;
+  m2 -> m5 [label="  test function", fontsize=9];
+  m3 -> m5;
+  m3 -> m6;
+  m4 -> m6;
+  m4 -> m7;
+  m5 -> m7;
+  m6 -> m7;
+}
