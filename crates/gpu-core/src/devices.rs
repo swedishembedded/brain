@@ -753,6 +753,10 @@ pub enum Request {
     VulkanBackend,
     /// Force the wgpu backend explicitly.
     WgpuBackend,
+    /// A software Vulkan adapter (lavapipe, llvmpipe) driven through wgpu, for
+    /// validating GPU kernels on a machine whose cards are unavailable. Never
+    /// a card: it takes no canonical index and no `gpu` token selects it.
+    SoftwareAdapter,
 }
 
 /// A parsed `--device` value. `None` (the flag absent) means *use everything*.
@@ -766,7 +770,7 @@ pub struct DeviceSpec {
 impl DeviceSpec {
     /// Parse a comma-separated `--device` value.
     ///
-    /// Grammar per token: `cpu | gpu | npu | vulkan | wgpu`, each optionally
+    /// Grammar per token: `cpu | gpu | npu | vulkan | wgpu | software`, each optionally
     /// suffixed by an index (`gpu0`) or, for `cpu`, an inclusive range
     /// (`cpu0-7`). Empty input yields an empty spec, which resolves to *all
     /// hardware*.
@@ -801,6 +805,7 @@ impl DeviceSpec {
             backend: probe.gpu_backend,
             source: if self.source.is_empty() { "all".into() } else { self.source.clone() },
             explicit: !self.is_all(),
+            software: false,
         };
 
         if self.is_all() {
@@ -816,16 +821,20 @@ impl DeviceSpec {
         let mut want_vulkan = false;
         let mut want_wgpu = false;
         let mut backend_token = false;
+        let mut want_software = false;
+        let mut named_card = false;
         let mut any_gpu_request = false;
         let mut any_npu_request = false;
         for r in &self.requests {
             match r {
                 Request::AllGpus => {
                     any_gpu_request = true;
+                    named_card = true;
                     set.gpus.extend(0..probe.gpus);
                 }
                 Request::Gpu(i) => {
                     any_gpu_request = true;
+                    named_card = true;
                     if *i >= probe.gpus {
                         return Err(format!(
                             "gpu{i} requested but this machine has {} GPU(s)",
@@ -870,7 +879,22 @@ impl DeviceSpec {
                     any_gpu_request = true;
                     backend_token = true;
                 }
+                Request::SoftwareAdapter => want_software = true,
             }
+        }
+        if want_software {
+            if named_card || want_vulkan {
+                return Err(
+                    "software selects the software Vulkan adapter through wgpu and cannot be combined with \
+                     gpu, gpu<N> or vulkan"
+                        .to_string(),
+                );
+            }
+            // Not a card: it holds no canonical index, so `gpus` stays empty
+            // and nothing schedules work onto a physical device.
+            set.software = true;
+            any_gpu_request = false;
+            backend_token = false;
         }
         // A backend token says how the GPUs are driven, not which: it means
         // every card only when no token named a card, whatever the order.
@@ -893,13 +917,15 @@ impl DeviceSpec {
                 "NPU compute requested but no NPU was found (expected /dev/accel/accel* or /dev/rknpu)".to_string(),
             );
         }
-        if set.gpus.is_empty() && set.cpu_cores.is_empty() && set.npus.is_empty() {
+        if set.gpus.is_empty() && set.cpu_cores.is_empty() && set.npus.is_empty() && !set.software {
             return Err(format!("--device {:?} selects no usable compute", self.source));
         }
 
         // The host backend a `Gpu::new()` builds. NPU-only still needs a host
         // backend for pre/post-processing, and that host work is CPU work.
-        set.backend = if !set.gpus.is_empty() {
+        set.backend = if set.software {
+            Backend::Wgpu
+        } else if !set.gpus.is_empty() {
             if want_vulkan {
                 Backend::Vulkan
             } else if want_wgpu {
@@ -947,8 +973,11 @@ fn parse_token(tok: &str) -> Result<Request, String> {
     if tok == "wgpu" {
         return Ok(Request::WgpuBackend);
     }
+    if tok == "software" {
+        return Ok(Request::SoftwareAdapter);
+    }
     Err(format!(
-        "unknown device {tok:?} - expected cpu | gpu | npu | vulkan | wgpu, \
+        "unknown device {tok:?} - expected cpu | gpu | npu | vulkan | wgpu | software, \
          each optionally indexed (gpu0, cpu21, cpu0-7)"
     ))
 }
@@ -1111,6 +1140,9 @@ pub struct ComputeSet {
     pub source: String,
     /// False when `--device` was absent (i.e. "everything").
     pub explicit: bool,
+    /// True for `--device software`: `Gpu::new` builds on a software Vulkan
+    /// adapter (lavapipe) through wgpu. It is not a card, so `gpus` is empty.
+    pub software: bool,
 }
 
 impl ComputeSet {
@@ -1142,7 +1174,10 @@ impl ComputeSet {
     /// that makes a run's real backend undiscoverable. An explicitly
     /// requested backend is a hard contract.
     pub fn set_backend(&mut self, b: Backend) -> Result<(), String> {
-        if b != Backend::Cpu && !self.gpu_enabled() {
+        if self.software && !matches!(b, Backend::Wgpu) {
+            return Err(format!("--backend {b} cannot drive the software adapter ({:?}); only wgpu can", self.source));
+        }
+        if b != Backend::Cpu && !self.gpu_enabled() && !self.software {
             return Err(format!(
                 "--backend {b} needs a GPU, but --device {:?} selects no GPU",
                 self.source
@@ -1241,6 +1276,14 @@ impl ComputeSet {
 }
 
 // ---- process-wide ambient compute set --------------------------------------
+
+/// True when the process runs on the software Vulkan adapter (`--device
+/// software`). `Gpu::new` then builds there and never on a physical card or the
+/// CPU JIT, whatever a placement policy says.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn software_adapter_selected() -> bool {
+    ambient_compute_set().software
+}
 
 /// The process's resolved `--device`/`BRAIN_DEVICE` compute set: published
 /// explicitly by the CLI ([`publish_compute_set`]), or lazily resolved by
@@ -1465,6 +1508,9 @@ pub fn pin_to_cores(_cores: &[usize]) -> Result<(), String> {
 impl fmt::Display for ComputeSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut parts = Vec::new();
+        if self.software {
+            parts.push("software-adapter".to_string());
+        }
         if !self.gpus.is_empty() {
             parts.push(format!(
                 "gpu[{}]",
@@ -1863,6 +1909,28 @@ mod tests {
         assert_eq!(d[0].index, 0);
         assert_eq!(d[1].identity.name, "B");
         assert_eq!(d[1].index, 1);
+    }
+
+    /// `software` selects the software Vulkan adapter through wgpu. It is not a
+    /// card, so it schedules no GPU and works with or without real ones, and it
+    /// refuses the tokens that name a card or another backend.
+    #[test]
+    fn the_software_token_selects_the_adapter_and_no_card() {
+        for machine in [inv(0, 8, 0), inv(4, 8, 0)] {
+            let set = resolve("software", machine).unwrap();
+            assert!(set.software && set.gpus.is_empty() && !set.gpu_enabled());
+            assert_eq!(set.backend, Backend::Wgpu);
+        }
+        let with_cpu = resolve("software,cpu0-3", inv(0, 8, 0)).unwrap();
+        assert!(with_cpu.software && with_cpu.cpu_cores == vec![0, 1, 2, 3]);
+        for bad in ["software,gpu0", "software,gpu", "software,vulkan"] {
+            assert!(resolve(bad, inv(4, 8, 0)).unwrap_err().contains("software"), "{bad}");
+        }
+        assert!(!resolve("gpu", inv(1, 8, 0)).unwrap().software, "default behaviour is unchanged");
+        assert!(!resolve("", inv(1, 8, 0)).unwrap().software);
+        let mut set = resolve("software", inv(0, 8, 0)).unwrap();
+        assert!(set.set_backend(Backend::Vulkan).is_err() && set.set_backend(Backend::Cuda).is_err());
+        assert!(set.set_backend(Backend::Wgpu).is_ok());
     }
 
     #[test]

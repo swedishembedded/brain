@@ -757,7 +757,9 @@ mod native_facade {
         // ever chosen when no card can hold the part, so honouring a `--device
         // gpu` here would mean allocating exactly the VRAM the placer just
         // decided was not available. See `devices::with_host_tier`.
-        if crate::devices::on_host_tier() {
+        // The software adapter outranks it: `--device software` exists to run
+        // GPU kernels on the host, and the host tier's CPU JIT cannot.
+        if crate::devices::on_host_tier() && !crate::devices::software_adapter_selected() {
             return "cpu";
         }
         match DEFAULT_BACKEND.load(Ordering::Relaxed) {
@@ -1111,6 +1113,9 @@ mod native_facade {
         pub fn new(kernels: &[(&str, &str)]) -> Gpu {
             register_builtins();
             let mut name = resolve_backend_name();
+            if crate::devices::software_adapter_selected() {
+                return Self::new_software(kernels);
+            }
             // No preference was expressed AND the installed placement policy
             // says no card can hold anything right now: build on the host tier
             // rather than on card 0. `selected_device()` returns `None` in
@@ -1151,6 +1156,28 @@ mod native_facade {
             };
             record_caps(inner.as_ref());
             Gpu::wrap(inner, Self::kernel_names(kernels))
+        }
+
+        /// Build on the software Vulkan adapter `--device software` selected,
+        /// announced loudly once: nothing measured on it is a GPU number, and
+        /// it never touches a physical card. Panics when the machine has no
+        /// such adapter, since a silent fall-back would defeat the request.
+        fn new_software(kernels: &[(&str, &str)]) -> Gpu {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                eprintln!(
+                    "brain: WARNING: --device software runs on a SOFTWARE Vulkan adapter (CPU); \
+                     for kernel validation only, no timing from it is a GPU number"
+                );
+            });
+            let kernels = &Self::expanded(kernels, false);
+            let inner: Box<dyn backend_api::Backend> = match backend_wgpu::WgpuBackend::new_software(kernels) {
+                Ok(b) => Box::new(b),
+                Err(e) => panic!("brain: --device software was requested but cannot be built: {e}"),
+            };
+            record_caps(inner.as_ref());
+            // Host memory, not a card's ceiling: the adapter is the CPU.
+            Gpu::wrap_on(inner, Self::kernel_names(kernels), memauth::Device::Cpu)
         }
 
         /// An explicitly selected `cuda` backend, on `dev` when a card was

@@ -1426,6 +1426,35 @@ impl WgpuBackend {
         })
     }
 
+    /// Blocking [`Self::new_software_async`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_software(kernels: &[(&str, &str)]) -> Result<WgpuBackend, String> {
+        let _guard = init_lock();
+        let owned = owned_kernels(kernels);
+        bounded("WgpuBackend::new_software (device/adapter creation)", move || {
+            pollster::block_on(WgpuBackend::new_software_async(&borrowed_kernels(&owned)))
+        })
+    }
+
+    /// Build on a **software** Vulkan adapter (lavapipe, llvmpipe): the first
+    /// adapter whose device type is `Cpu`. The explicit, opt-in counterpart of
+    /// [`Self::new_on_async`], which by design never returns one. It exists to
+    /// validate GPU kernels (workgroup barriers included) on a machine whose
+    /// cards are unavailable; it is slow and its timings are not GPU numbers,
+    /// which is why [`AdapterDesc::software`] is true for it. An error names
+    /// what was enumerated, so a missing ICD is not mistaken for a bug.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn new_software_async(kernels: &[(&str, &str)]) -> Result<WgpuBackend, String> {
+        let instance = instance();
+        let adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY).await;
+        let found: Vec<String> = adapters.iter().map(|a| format!("{} ({:?})", a.get_info().name, a.get_info().device_type)).collect();
+        let Some(adapter) = adapters.iter().find(|a| a.get_info().device_type == wgpu::DeviceType::Cpu) else {
+            return Err(format!("no software Vulkan adapter was found among {found:?} (is a lavapipe ICD on VK_ICD_FILENAMES?)"));
+        };
+        let identity = adapter_identity(adapter, 0);
+        Ok(Self::from_adapter(adapter, kernels, identity).await)
+    }
+
     /// A second handle onto **this** backend's device: same instance, adapter,
     /// queue and compiled pipelines, but its own command stream.
     ///

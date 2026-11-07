@@ -75,6 +75,12 @@ Pass `--device` to any command that runs a model:
   own compiler; YOLOv5 detection, see `docs/reference/models/yolov5.md`).
 - `--device vulkan` - the native Vulkan backend instead of the default wgpu
   backend.
+- `--device software` - a software Vulkan adapter (Mesa lavapipe, on the
+  CPU) driven through wgpu, for checking GPU kernels on a machine whose GPUs
+  are unavailable. It needs a lavapipe ICD (`VK_ICD_FILENAMES`), is not a card
+  (it takes no `gpu<N>` index and cannot be combined with `gpu` or `vulkan`),
+  announces itself once on stderr, and is far too slow to time anything: no
+  number from it is a GPU number.
 
 Device selectors can be combined as a comma-separated union, e.g.
 `--device gpu1,cpu0-3` to use one GPU alongside a slice of CPU cores.
