@@ -69,10 +69,11 @@ serve other work; CUDA parity and performance follow on the same gates.
        per-layer parity on layers 0 (local) and 4 (global) plus embed/head,
        fetched by tensor (no full 130 GB download: the project drive has
        ~60 GB free). Done on the CPU backend; CUDA parity is step 7.
-2. [ ] Paged hybrid engine under the generic `Scheduler`: ring KV for local
+2. [x] Paged hybrid engine under the generic `Scheduler`: ring KV for local
        layers, paged KV for global ones; serving conformance suite; decode
        equals full-recompute logits across the window boundary; prefix
-       reuse.
+       reuse. Done on the CPU backend as `ricursive::RicursiveEngine`; not in
+       the catalog and not reachable from the CLI yet.
 3. [ ] LSA lifted out of the Qwen3 engine into a shared engine-side
        component; Ripple's 16 global layers read sparsely; group-10 sparse
        kernel; gate: full-budget selection equals dense output.
@@ -100,23 +101,51 @@ worst case varies a little between dumps. The real run takes about 8 s on the
 shared CPU node. Mutating the window by one key, or doubling the gate cap,
 fails the tiny gate at scaled errors 0.5 and 0.12.
 
+Step 2, serving engine, CPU backend, f32 (scaled error as above, per logits row):
+
+| gate | rows | worst scaled error | tolerance |
+|---|---|---|---|
+| tiny: prefill then 14 teacher-forced decode steps against recomputing the whole prefix, five (engine chunk, prompt slice) pairs, window 4 wrapped three times, 4-row blocks | 5 x 15 | 6.7e-7 | 1e-5 |
+| tiny: three concurrent sequences (6, 9 and 13 prompt tokens) decoding 8 steps in one batch, against each alone and against recompute | 24 x 2 | 1.1e-6 (batched vs alone: 0, bit-identical) | 1e-5 |
+| tiny: prefix of 20 and of 18 tokens (past the window, block-aligned and not) resumed by a longer prompt and by an exact repeat; the filing sequence keeps decoding through the adoption | 2 x 6 | 1.0e-6 | 1e-5 |
+| real layers 0 and 4: prefill 9 tokens in chunks of 4, decode 4, against the official reference's logits | 5 | 7.5e-6 | 5e-5 |
+
+The shared conformance suite (`model::serve::conformance::run_all`) passes on
+the tiny model with prefix reuse on. Dropping the ring slack, or skipping the
+ring snapshot on a prefix hit, fails the tiny gates (the missing snapshot by
+9e-2 scaled).
+
 Not measured: CUDA or Vulkan parity (GPUs were busy), any prompt longer than 13
 real tokens, a real window-exclusion case on real weights (13 tokens is below
 the 1024 window; the window is gated by the tiny model only), layers other than
-0 and 4.
+0 and 4, throughput of any kind.
 
 ## Open items for the later steps
 
-- `Layer::record` materializes `[heads, t, t]` scores and probabilities, so
-  memory is quadratic in the prompt. The paged engine (step 2) replaces it with
-  the flash prefill and ring/paged KV; the layer's pieces (explicit type,
-  window, RoPE table optional) were kept separable for that.
+- Step 1's `Layer::record` still materializes `[heads, t, t]` scores; the
+  engine does not (its scratch is `rows x heads x keys`, rows being one
+  prefill chunk or the decode batch, keys the window or the sequence limit).
+  It dispatches the paged decode triad because the fused paged flash kernels
+  are not CPU-capable; on a GPU the fused prefill and decode kernels (global
+  layers) and a windowed variant for the rings are the candidates, selected
+  by capability, with the triad as the reference.
+- The ring is `window + prefill_chunk` rows: a chunk writes all its rows
+  before any attends. A sliding row's block table is a list of its ring rows
+  (`block_size` 1), uploaded per forward; a windowed paged kernel that walks
+  the ring itself would drop that table.
+- Prefix reuse is at the filed length only (a snapshot of the rings plus the
+  shared global blocks); branch points (`SnapshotPrefixCache::branch_point`,
+  `hint_shared_prefix`) are not wired, so prompts that share a document and
+  then diverge do not reuse it.
+- LSA (step 3) can sit on the engine's global layers: their K is already
+  RMS-normed and unrotated in the pool, and `BlockTable` carries index pages.
+  The engine's `attend` for a global layer is the one place a sparse read
+  replaces the dense triad; the lifted component needs the block pool, the
+  block tables and `cap` from the engine, and a selection that falls back to
+  dense below a crossover.
 - The value-residual lerp uses `edm_mix` with per-row coefficients
   `(1 - s, s)` (an f32 rounding apart from `x0 + s (xn - x0)`); a fused
   QK-norm + RoPE + lerp kernel is the decode-path candidate.
-- The half-split RoPE table and device upload in `ricursive::rope` repeat
-  `gemma4::rope` and `ltxv::rope`; moving the shared part into `model` is a
-  cleanup for whoever touches the next RoPE consumer.
 - The global layers' Q/K leave `Layer::record` RMS-normed and unrotated, which
   is exactly what the LSA index (step 3) reads.
 - Real-weight inputs live under `testdata/ricursive/ripple-65b-partial/`; they
