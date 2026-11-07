@@ -5,28 +5,10 @@
 //! as `gpt2::sample`, shared so any streaming pump or image-token sampler can
 //! run against any model without depending on gpt internals.
 
-/// A tiny deterministic PRNG (SplitMix64), so sampling is reproducible from a
-/// seed.
-#[derive(Clone, Debug)]
-pub struct Rng {
-    state: u64,
-}
-
-impl Rng {
-    pub fn new(seed: u64) -> Rng {
-        Rng { state: seed.wrapping_add(0x9E37_79B9_7F4A_7C15) }
-    }
-    pub fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-    pub fn next_f32(&mut self) -> f32 {
-        ((self.next_u64() >> 11) as f64 / (1u64 << 53) as f64) as f32
-    }
-}
+/// The sampler's generator is the crate's one SplitMix64 ([`crate::rng::Rng`]),
+/// so sampling is reproducible from a seed and stays in step with everything
+/// else that seeds from it.
+pub use crate::rng::Rng;
 
 /// Sample a token index from `logits`. `temperature <= 0` → greedy argmax;
 /// `top_k == 0` disables top-k filtering. Mirrors `gpt2::sample::sample_logits`.
