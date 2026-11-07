@@ -17,4 +17,7 @@ mod synthetic;
 mod fused;
 mod taps;
 mod tiers;
+mod train_fit;
+mod train_parity;
+mod train_real;
 mod train_tiers;

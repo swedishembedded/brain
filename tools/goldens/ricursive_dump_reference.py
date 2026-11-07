@@ -28,6 +28,18 @@ boundary a Rust replay needs. Two modes, each writing its own directory with a
          and `lm_head`. bf16 weights are promoted to fp32. Writes
            <out>/real/ricursive_real_reduced.safetensors  taps
 
+  grads  the same tiny model, trained one batch: the loss, the gradient of
+         every parameter, and a few steps of `torch.optim.AdamW` with global
+         gradient-norm clipping. Writes
+           <out>/tiny_train/ricursive_tiny_train.safetensors          the batch, loss, `grad.<name>`, the loss
+                                                                      of each AdamW step and `final.<name>`
+           <out>/tiny_train/ricursive_tiny_train_weights.safetensors  the model's initial weights
+           <out>/tiny_train/config.json                               its config
+  real-grads  the truncated real model of `real`, one backward on a short
+         prompt: the loss and, per parameter, the gradient's L2 norm and
+         4096 evenly strided entries (the full gradients are 10 GB). Writes
+           <out>/real_grads/ricursive_real_grads.safetensors
+
 Taps (all float32; token ids are cast exactly): `input_ids`, `hidden.0` (the
 scaled embeddings), `hidden.{k+1}` (decoder layer k's raw output),
 `attn_out.{k}` (layer k's `o_proj` output, before `post_attention_layernorm`),
@@ -143,7 +155,8 @@ def save(path, tensors):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
 
 
-def tiny(args, cfg_mod, mdl_mod):
+def tiny_model(args, cfg_mod, mdl_mod):
+    """The random-weight tiny reference model of `tiny` and `grads`, built from the seed in `args`."""
     torch.manual_seed(args.seed)
     cfg = cfg_mod.RicursiveConfig(**TINY)
     model = mdl_mod.RicursiveForCausalLM(cfg).float().eval()
@@ -155,6 +168,11 @@ def tiny(args, cfg_mod, mdl_mod):
                 p.copy_(1.0 + 0.2 * torch.randn_like(p))
             else:
                 p.copy_(0.35 * torch.randn_like(p))
+    return cfg, model
+
+
+def tiny(args, cfg_mod, mdl_mod):
+    cfg, model = tiny_model(args, cfg_mod, mdl_mod)
     ids = torch.randint(0, TINY["vocab_size"], (1, TINY_PROMPT_LEN))
 
     tensors, taps, logits = run(model, ids)
@@ -187,6 +205,125 @@ def tiny(args, cfg_mod, mdl_mod):
     with open(os.path.join(out, "config.json"), "w") as f:
         json.dump(cfg.to_dict(), f, indent=2, sort_keys=True)
     finish(out, manifest, TINY, args, checkpoint=None, files=[])
+
+
+# AdamW hyper-parameters and clip of the trajectory gate; the Rust test reads them back from the manifest.
+TRAIN = dict(lr=3e-3, beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.1, clip=1.0, steps=3)
+
+
+def training_batch(ids):
+    """Next-token targets for `ids` (1, T): the last position and position 3 are unsupervised (-100)."""
+    targets = torch.cat([ids[0, 1:], torch.tensor([-100])])
+    targets[3] = -100
+    return targets
+
+
+def loss_of(model, ids, targets):
+    """Mean cross-entropy over the supervised positions, as `F.cross_entropy(..., ignore_index=-100)`."""
+    logits = model(input_ids=ids, use_cache=False).logits[0]
+    return torch.nn.functional.cross_entropy(logits, targets, ignore_index=-100)
+
+
+def grads(args, cfg_mod, mdl_mod):
+    cfg, model = tiny_model(args, cfg_mod, mdl_mod)
+    ids = torch.randint(0, TINY["vocab_size"], (1, TINY_PROMPT_LEN))
+    targets = training_batch(ids)
+    model.train()  # the reference has no dropout (attention_dropout is refused at 0); train() only enables autograd hooks
+
+    initial = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    loss = loss_of(model, ids, targets)
+    loss.backward()
+    tensors = {"input_ids": ids[0].to(torch.float32), "targets": targets.to(torch.float32), "loss": loss.detach().reshape(1)}
+    for name, p in model.named_parameters():
+        assert p.grad is not None, f"{name} received no gradient"
+        tensors[f"grad.{name}"] = p.grad.detach().clone()
+    n_dead = [n for n, p in model.named_parameters() if p.grad.abs().max().item() == 0.0]
+    assert not n_dead, f"parameters with an all-zero gradient: {n_dead}"
+
+    # AdamW trajectory: the same batch, a few steps, clip by global norm first (torch's clip_grad_norm_).
+    model.zero_grad(set_to_none=True)
+    opt = torch.optim.AdamW(model.parameters(), lr=TRAIN["lr"], betas=(TRAIN["beta1"], TRAIN["beta2"]), eps=TRAIN["eps"], weight_decay=TRAIN["weight_decay"])
+    losses = []
+    for _ in range(TRAIN["steps"]):
+        opt.zero_grad(set_to_none=True)
+        step_loss = loss_of(model, ids, targets)
+        step_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), TRAIN["clip"])
+        opt.step()
+        losses.append(step_loss.item())
+    tensors["trajectory.loss"] = torch.tensor(losses)
+    tensors["trajectory.loss_after"] = loss_of(model, ids, targets).detach().reshape(1)
+    for name, p in model.named_parameters():
+        tensors[f"final.{name}"] = p.detach().clone()
+    print(f"  loss {loss.item():.6f}, AdamW losses {losses}, after {tensors['trajectory.loss_after'].item():.6f}", flush=True)
+
+    out = os.path.join(args.out, "tiny_train")
+    os.makedirs(out, exist_ok=True)
+    manifest = {}
+    manifest["ricursive_tiny_train.safetensors"] = save(os.path.join(out, "ricursive_tiny_train.safetensors"), tensors)
+    manifest["ricursive_tiny_train_weights.safetensors"] = save(os.path.join(out, "ricursive_tiny_train_weights.safetensors"), initial)
+    with open(os.path.join(out, "config.json"), "w") as f:
+        json.dump(cfg.to_dict(), f, indent=2, sort_keys=True)
+    manifest["train"] = TRAIN
+    finish(out, manifest, TINY, args, checkpoint=None, files=[])
+
+
+def real_model(args, cfg_mod, mdl_mod):
+    """The truncated real model of `real` (layers 0 and 4), fp32 on CPU, ready to differentiate."""
+    with open(args.config) as f:
+        full = json.load(f)
+    layer_types = [full["layer_types"][i] for i in REAL_SOURCE_LAYERS]
+    assert layer_types == ["sliding_attention", "full_attention"], layer_types
+    keys = [
+        "vocab_size", "hidden_size", "intermediate_size", "num_attention_heads",
+        "num_key_value_heads", "head_dim", "max_position_embeddings", "hidden_act",
+        "rms_norm_eps", "rope_theta", "sliding_window", "use_gated_attention",
+        "gate_full_precision", "use_valres", "ffn_clamp_threshold", "embed_scale",
+        "tie_word_embeddings",
+    ]
+    cfg = cfg_mod.RicursiveConfig(
+        num_hidden_layers=len(REAL_SOURCE_LAYERS), layer_types=layer_types, **{k: full[k] for k in keys}
+    )
+    with torch.device("meta"):
+        model = mdl_mod.RicursiveForCausalLM(cfg)
+    rename = {f"model.layers.{src}.": f"model.layers.{dst}." for dst, src in enumerate(REAL_SOURCE_LAYERS)}
+    state = {}
+    with safe_open(args.checkpoint, "pt") as f:
+        for name in f.keys():
+            new = name
+            for old, repl in rename.items():
+                if name.startswith(old):
+                    new = repl + name[len(old):]
+            state[new] = f.get_tensor(name).to(torch.float32)
+    model.load_state_dict(state, strict=True, assign=True)
+    return cfg, model.float()
+
+
+def real_grads(args, cfg_mod, mdl_mod):
+    from tokenizers import Tokenizer
+
+    _cfg, model = real_model(args, cfg_mod, mdl_mod)
+    ids = torch.tensor([Tokenizer.from_file(args.tokenizer).encode(REAL_PROMPT).ids])
+    targets = training_batch(ids)
+    loss = loss_of(model, ids, targets)
+    loss.backward()
+    tensors = {"input_ids": ids[0].to(torch.float32), "targets": targets.to(torch.float32), "loss": loss.detach().reshape(1)}
+    for name, p in model.named_parameters():
+        flat = p.grad.detach().reshape(-1)
+        stride = max(1, flat.numel() // 4096)
+        tensors[f"norm.{name}"] = flat.double().norm().float().reshape(1)
+        tensors[f"sample.{name}"] = flat[::stride][:4096].clone()
+    print(f"  prompt {ids.shape[1]} tokens, loss {loss.item():.6f}", flush=True)
+    out = os.path.join(args.out, "real_grads")
+    os.makedirs(out, exist_ok=True)
+    manifest = {"ricursive_real_grads.safetensors": save(os.path.join(out, "ricursive_real_grads.safetensors"), tensors)}
+    identity = dict(
+        vocab_size=model.config.vocab_size, hidden_size=model.config.hidden_size, intermediate_size=model.config.intermediate_size,
+        num_hidden_layers=model.config.num_hidden_layers, num_attention_heads=model.config.num_attention_heads,
+        num_key_value_heads=model.config.num_key_value_heads, head_dim=model.config.head_dim, sliding_window=model.config.sliding_window,
+    )
+    finish(out, manifest, identity, args, checkpoint="ricursiveAI/Ripple-65B-Preview", files=[args.checkpoint])
+
 
 
 def real(args, cfg_mod, mdl_mod):
@@ -252,7 +389,7 @@ def finish(out, manifest, identity, args, checkpoint, files):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["tiny", "real"])
+    ap.add_argument("mode", choices=["tiny", "real", "grads", "real-grads"])
     ap.add_argument("--modeling-dir", required=True, help="directory holding modeling_ricursive.py and configuration_ricursive.py")
     ap.add_argument("--out", required=True)
     ap.add_argument("--checkpoint", help="real: the partial safetensors holding embed, norm, lm_head and layers 0 and 4")
@@ -264,9 +401,9 @@ def main():
         args.seed = secrets.randbits(31)
     print(f"seed {args.seed}", flush=True)
     cfg_mod, mdl_mod = load_reference(os.path.abspath(args.modeling_dir))
-    if args.mode == "real" and not (args.checkpoint and args.config and args.tokenizer):
-        ap.error("real mode needs --checkpoint, --config and --tokenizer")
-    {"tiny": tiny, "real": real}[args.mode](args, cfg_mod, mdl_mod)
+    if args.mode in ("real", "real-grads") and not (args.checkpoint and args.config and args.tokenizer):
+        ap.error("the real modes need --checkpoint, --config and --tokenizer")
+    {"tiny": tiny, "real": real, "grads": grads, "real-grads": real_grads}[args.mode](args, cfg_mod, mdl_mod)
 
 
 if __name__ == "__main__":
