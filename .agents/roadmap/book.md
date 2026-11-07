@@ -6,7 +6,7 @@
 Scope: The textbook under `docs/book` (*From First Principles to Intelligent Machines*): its specification, tooling, chapters and their verification.
 
 Rules: `.agents/rules/book.md`. Specification: `docs/book/book.yaml`
-(16 volumes, 150 chapters). A chapter is **written** when its file exists and
+(16 volumes, 165 chapters: 150 teaching chapters and 15 projects). A chapter is **written** when its file exists and
 passes the book gates, and **verified** when an independent reader has
 reproduced its worked examples from the text alone in another language.
 
@@ -24,7 +24,16 @@ reproduced its worked examples from the text alone in another language.
 
 ## Chapters
 
-Written and verified chapters are listed per volume as they land.
+- [x] Volume I, Thinking in Mathematics: all 17 chapters and the project
+      written. Verified by two independent C re-implementations from the
+      text alone (`scratchpad/reader/v01`, `scratchpad/reader/v01-recheck`):
+      the first found 2 failing and 14 guessed exercises plus missing
+      inputs, seeds and pseudocode operations; after fixes the recheck
+      passed 227 items and its remaining 9 failures, 19 guesses and 13 text
+      defects were fixed in the following commit. A third pass over the
+      final text has not been run.
+- [ ] Volume II, What Does It Mean to Learn?: chapters 1 to 4 written.
+- [x] Volume III: chapter 4 (backpropagation, the pilot) written.
 
 ## Open
 
