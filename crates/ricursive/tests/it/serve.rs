@@ -21,6 +21,7 @@
 
 use std::path::Path;
 
+use model::kv_tier::KvTier;
 use model::paged::BlockTable;
 use model::serve::conformance::{self, Conformance};
 use model::serve::{PagedDecoder, PrefillProgress};
@@ -56,7 +57,7 @@ pub(crate) fn weights(dir: &str, cfg: &RicursiveConfig) -> checkpoint::remap::Re
 }
 
 pub(crate) fn serve_config(prefill_chunk: u32, prefix_slots: u32) -> ServeConfig {
-    ServeConfig { block_size: 4, num_blocks: 160, max_seq_len: 96, max_batch: 6, prefix_slots, prefill_chunk, sparse_attention: false }
+    ServeConfig::new(4, 160, 96, 6, prefix_slots, prefill_chunk)
 }
 
 pub(crate) fn engine(dir: &str, prefill_chunk: u32, prefix_slots: u32) -> RicursiveEngine {
@@ -239,10 +240,10 @@ fn the_memory_plan_charges_global_kv_per_token_and_rings_per_slot() {
     let e = engine(&dir, 8, 2);
     let (global, rings) = e.kv_bytes();
     // 1 global layer of 3, K and V, kv_dim 32 f32 per row.
-    assert_eq!(ricursive::global_kv_bytes_per_token(&cfg), 2 * 32 * 4);
-    assert_eq!(global, ricursive::global_kv_bytes_per_token(&cfg) * u64::from(serve.num_blocks * serve.block_size));
+    assert_eq!(ricursive::global_kv_bytes_per_token(&cfg, KvTier::F32), 2 * 32 * 4);
+    assert_eq!(global, ricursive::global_kv_bytes_per_token(&cfg, KvTier::F32) * u64::from(serve.num_blocks * serve.block_size));
     // 2 sliding layers, window 4 plus the chunk's 8 slack rows, live and snapshot slots.
-    assert_eq!(ricursive::ring_bytes_per_slot(&cfg, 8), 2 * 2 * (4 + 8) * 32 * 4);
-    assert_eq!(rings, ricursive::ring_bytes_per_slot(&cfg, 8) * u64::from(serve.max_batch + serve.prefix_slots));
+    assert_eq!(ricursive::ring_bytes_per_slot(&cfg, 8, KvTier::F32), 2 * 2 * (4 + 8) * 32 * 4);
+    assert_eq!(rings, ricursive::ring_bytes_per_slot(&cfg, 8, KvTier::F32) * u64::from(serve.max_batch + serve.prefix_slots));
     assert_eq!(e.kv_pool_bytes(), global + rings);
 }

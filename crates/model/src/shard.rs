@@ -226,6 +226,7 @@ pub fn plan_balanced(cost: &ShardCost, gpus: &[usize]) -> Vec<Shard> {
 /// even fit?" rather than "which split is most even?". A resident model
 /// deciding placement from real, queried VRAM needs actual bytes and a
 /// per-device ceiling, which is what this type carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayerBytes {
     /// Device bytes for each layer, in layer order. Per-layer rather than one
     /// uniform figure because real checkpoints are not uniform (a quantized

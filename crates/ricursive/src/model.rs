@@ -20,12 +20,14 @@
 
 use checkpoint::TensorSource;
 use gpu_core::{f, DeviceBuffer, Gpu, Transient};
+use model::ops::{Ops, TierPolicy, Weight};
+use model::rope_table::{half_split_table, DeviceRope};
 use paramstore::upload::Uploader;
 
 use crate::config::{LayerType, RicursiveConfig};
 use crate::layer::Layer;
-use crate::ops::{KERNELS, K_MATMUL, K_RMSNORM};
-use model::rope_table::{half_split_table, DeviceRope};
+use crate::ops::{self, pipelines, K_RMSNORM};
+use crate::weights::Loader;
 
 /// `embed_tokens(ids) * embed_scale`, `[ids.len(), hidden]`.
 ///
@@ -50,12 +52,12 @@ pub fn embed(src: &dyn TensorSource, cfg: &RicursiveConfig, ids: &[u32]) -> Resu
 
 /// Final `norm` and `lm_head`, weights resident.
 pub struct Head {
-    gpu: Gpu,
+    ops: Ops,
     hidden: u32,
     vocab: u32,
     eps: f32,
     norm: DeviceBuffer,
-    lm_head: DeviceBuffer,
+    lm_head: Weight,
 }
 
 /// The head's outputs for each input row.
@@ -67,13 +69,12 @@ pub struct HeadOutput {
 }
 
 impl Head {
-    pub fn on<'g>(gpu: &'g Gpu, cfg: &RicursiveConfig, src: &dyn TensorSource) -> Result<Transient<'g, Head>, String> {
-        let g = gpu.share();
-        let mut up = Uploader::new(&g);
-        let norm = up.tensor(src, "model.norm.weight", cfg.hidden_size)?;
-        let lm_head = up.tensor(src, "lm_head.weight", cfg.vocab_size * cfg.hidden_size)?;
+    pub fn on<'g>(gpu: &'g Gpu, cfg: &RicursiveConfig, src: &dyn TensorSource, tiers: &TierPolicy) -> Result<Transient<'g, Head>, String> {
+        let ops = Ops::new(gpu.share())?;
+        let norm = Uploader::new(ops.gpu()).tensor(src, "model.norm.weight", cfg.hidden_size)?;
+        let lm_head = Loader::new(&ops, src, tiers).linear("lm_head.weight", cfg.vocab_size, cfg.hidden_size)?;
         src.advise_drop("lm_head.weight");
-        Ok(Transient::on(gpu, Head { gpu: g, hidden: cfg.hidden_size as u32, vocab: cfg.vocab_size as u32, eps: cfg.rms_norm_eps, norm, lm_head }))
+        Ok(Transient::on(gpu, Head { ops, hidden: cfg.hidden_size as u32, vocab: cfg.vocab_size as u32, eps: cfg.rms_norm_eps, norm, lm_head }))
     }
 
     /// Normalize `x` (`[rows, hidden]`) and project it to the vocabulary.
@@ -81,16 +82,14 @@ impl Head {
         let n = rows * self.hidden as usize;
         assert_eq!(x.len(), n, "activations must be [rows, hidden]");
         let rows = rows as u32;
-        let x_buf = self.gpu.storage(n as u64);
-        self.gpu.write_f32(&x_buf, x);
-        let normed = self.gpu.storage(n as u64);
-        let logits = self.gpu.storage(u64::from(rows) * u64::from(self.vocab));
-        let steps = [
-            self.gpu.step(K_RMSNORM, &[&x_buf, &self.norm, &normed], &[self.hidden, rows, f(self.eps)], rows),
-            self.gpu.step(K_MATMUL, &[&normed, &self.lm_head, &logits], &[rows, self.hidden, self.vocab], rows * self.vocab),
-        ];
-        self.gpu.submit(&[], &steps);
-        HeadOutput { final_hidden: self.gpu.read(&normed, n), logits: self.gpu.read(&logits, rows as usize * self.vocab as usize) }
+        let gpu = self.ops.gpu();
+        let x_buf = gpu.storage(n as u64);
+        gpu.write_f32(&x_buf, x);
+        let normed = gpu.storage(n as u64);
+        let mut steps = vec![gpu.step(K_RMSNORM, &[&x_buf, &self.norm, &normed], &[self.hidden, rows, f(self.eps)], rows)];
+        let logits = ops::linear(&self.ops, &mut steps, &normed, &self.lm_head, rows);
+        gpu.submit(&[], &steps);
+        HeadOutput { final_hidden: gpu.read(&normed, n), logits: gpu.read(&logits, rows as usize * self.vocab as usize) }
     }
 }
 
@@ -113,6 +112,7 @@ pub struct RicursiveModel<'s> {
     cfg: RicursiveConfig,
     src: &'s dyn TensorSource,
     device: Option<String>,
+    tiers: TierPolicy,
 }
 
 impl<'s> RicursiveModel<'s> {
@@ -120,7 +120,14 @@ impl<'s> RicursiveModel<'s> {
     /// [`crate::open_safetensors`]). `device` is a `--device` selection;
     /// `None` takes the process default.
     pub fn new(cfg: RicursiveConfig, src: &'s dyn TensorSource, device: Option<&str>) -> RicursiveModel<'s> {
-        RicursiveModel { cfg, src, device: device.map(str::to_string) }
+        RicursiveModel { cfg, src, device: device.map(str::to_string), tiers: TierPolicy::uniform(gpu_core::select::Dtype::F32) }
+    }
+
+    /// Hold the linears at the tiers `tiers` gives them instead of f32, the reference this model is by default
+    /// ([`crate::resolve_tiers`] gives the tiers a checkpoint stores).
+    pub fn with_tiers(mut self, tiers: TierPolicy) -> RicursiveModel<'s> {
+        self.tiers = tiers;
+        self
     }
 
     pub fn config(&self) -> &RicursiveConfig {
@@ -136,7 +143,7 @@ impl<'s> RicursiveModel<'s> {
         let t = ids.len();
         let embeddings = embed(self.src, cfg, ids)?;
 
-        let gpu = Gpu::open(self.device.as_deref(), &KERNELS);
+        let gpu = Gpu::open(self.device.as_deref(), &pipelines(&[]));
         let rope = cfg.layer_types.contains(&LayerType::Sliding).then(|| DeviceRope::upload(&gpu, &half_split_table(cfg.head_dim, cfg.rope_theta, t)));
 
         let mut x = embeddings.clone();
@@ -144,7 +151,7 @@ impl<'s> RicursiveModel<'s> {
         let mut attn_outputs = Vec::with_capacity(cfg.num_hidden_layers);
         for l in 0..cfg.num_hidden_layers {
             let started = std::time::Instant::now();
-            let layer = Layer::on(&gpu, cfg, self.src, l)?;
+            let layer = Layer::on(&gpu, cfg, self.src, l, &self.tiers)?;
             let built = started.elapsed();
             let out = layer.forward(&x, &embeddings, rope.as_ref(), t);
             tracing::debug!(layer = l, kind = ?layer.kind(), build_ms = built.as_millis() as u64, total_ms = started.elapsed().as_millis() as u64, "ricursive layer");
@@ -153,7 +160,7 @@ impl<'s> RicursiveModel<'s> {
             attn_outputs.push(out.attn_out);
         }
 
-        let head = Head::on(&gpu, cfg, self.src)?;
+        let head = Head::on(&gpu, cfg, self.src, &self.tiers)?;
         let HeadOutput { final_hidden, logits } = head.forward(&x, t);
         Ok(Forward { embeddings, layer_outputs, attn_outputs, final_hidden, logits })
     }

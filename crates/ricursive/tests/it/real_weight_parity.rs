@@ -97,7 +97,7 @@ fn the_serving_engine_decodes_real_layers_0_and_4_as_the_reference() {
     let (ids, vocab) = (taps.input_ids(), cfg.vocab_size);
     let want = taps.get("logits");
     let weights = open_safetensors(&checkpoint, &cfg, &SOURCE_LAYERS).expect("open checkpoint");
-    let serve = ServeConfig { block_size: 16, num_blocks: 4, max_seq_len: 32, max_batch: 2, prefix_slots: 0, prefill_chunk: 4, sparse_attention: false };
+    let serve = ServeConfig::new(16, 4, 32, 2, 0, 4);
     let mut engine = RicursiveEngine::from_source(cfg, Box::new(weights), serve, None).expect("engine");
 
     let (prompt, rest) = ids.split_at(9);
@@ -150,7 +150,7 @@ fn sparse_attention_at_a_full_budget_decodes_real_layers_0_and_4_as_the_referenc
     let mut indexer = model::lsa::indexer::Indexer::random(lsa, geometry, 5).expect("indexer");
     indexer.layers[0] = None; // layer 0 slides
     let weights = open_safetensors(&checkpoint, &cfg, &SOURCE_LAYERS).expect("open checkpoint");
-    let serve = ServeConfig { block_size: 8, num_blocks: 8, max_seq_len: 32, max_batch: 2, prefix_slots: 0, prefill_chunk: 4, sparse_attention: true };
+    let serve = ServeConfig { sparse_attention: true, ..ServeConfig::new(8, 8, 32, 2, 0, 4) };
     let mut engine = RicursiveEngine::from_source(cfg, Box::new(weights), serve, None).expect("engine");
     engine.set_lsa(&indexer).expect("set_lsa");
     engine.set_lsa_dense_until(0);

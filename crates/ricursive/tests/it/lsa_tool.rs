@@ -20,7 +20,7 @@ use ricursive::{open_safetensors, RicursiveConfig, RicursiveEngine, ServeConfig}
 use crate::serve::{engine_with, stream, tiny_config, tiny_dir, weights};
 
 fn tiny_engine(dir: &str) -> RicursiveEngine {
-    engine_with(dir, ServeConfig { block_size: 4, num_blocks: 200, max_seq_len: 96, max_batch: 2, prefix_slots: 0, prefill_chunk: 8, sparse_attention: true })
+    engine_with(dir, ServeConfig { sparse_attention: true, ..ServeConfig::new(4, 200, 96, 2, 0, 8) })
 }
 
 fn lsa_config(top_p: usize, top_k: usize) -> LsaConfig {
@@ -189,7 +189,7 @@ fn a_pca_indexer_for_the_real_global_layer_round_trips_through_the_artifact() {
     let layers = [0usize, 4];
     let cfg = RicursiveConfig::from_file(&config).unwrap().truncated(&layers).unwrap();
     let weights = ricursive::open_checkpoint(&checkpoint, &cfg, &layers).unwrap();
-    let serve = ServeConfig { block_size: 8, num_blocks: 16, max_seq_len: 64, max_batch: 1, prefix_slots: 0, prefill_chunk: 8, sparse_attention: true };
+    let serve = ServeConfig { sparse_attention: true, ..ServeConfig::new(8, 16, 64, 1, 0, 8) };
     let mut e = RicursiveEngine::from_source(cfg.clone(), Box::new(weights), serve, None).unwrap();
     assert_eq!(e.sparse_capable(), [false, true]);
 

@@ -225,7 +225,7 @@ fn the_memory_charge_covers_projections_pages_and_scratch() {
     let ix = indexer(&cfg, lsa_config(3, 6), 37);
     let serve = ServeConfig { sparse_attention: true, ..serve_config(4, 0) };
     let small = ricursive::lsa_device_bytes(&ix, &serve);
-    let big = ricursive::lsa_device_bytes(&ix, &ServeConfig { num_blocks: serve.num_blocks * 2, ..serve });
+    let big = ricursive::lsa_device_bytes(&ix, &ServeConfig { num_blocks: serve.num_blocks * 2, ..serve.clone() });
     assert!(small > 0 && big > small, "pages scale with the block pool: {small} then {big}");
     if lsa_runs_here() {
         let mut e = engine_with(&dir, serve);

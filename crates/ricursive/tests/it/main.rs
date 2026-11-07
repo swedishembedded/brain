@@ -9,6 +9,8 @@
 mod lsa;
 mod lsa_tool;
 mod parity;
+mod real_nvfp4;
 mod real_weight_parity;
 mod serve;
 mod taps;
+mod tiers;

@@ -10,6 +10,11 @@
 //! memory-bounded checkpoint loading then you can procure our services by
 //! sending an email to info@swedishembedded.com.
 //!
+//! The checkpoint is read through its packed view ([`checkpoint::packed`]), so every tensor reaches the device in
+//! the encoding it is stored in (bf16, FP8, the ModelOpt NVFP4 of the official `Ripple-65B-Preview-NVFP4`
+//! release) with no conversion step and no whole-tensor f32 copy; quantization sidecars (`weight_scale`,
+//! `weight_scale_2`, `input_scale`) belong to the weight they sit beside and are not tensors of their own.
+//!
 //! The canonical tensor names are the checkpoint's own (`model.layers.N...`),
 //! with layers numbered `0..num_hidden_layers` of the config in use. A run over
 //! a few real layers of the checkpoint (a config [`truncated`] to them) maps
@@ -26,14 +31,16 @@
 
 use std::collections::HashMap;
 
-use checkpoint::mmap::MmapSafetensors;
-use checkpoint::weightio::WeightReader;
+use checkpoint::packed::{quant_sidecars, CodecRegistry, PackedReader, PackedSource, QuantEncoding};
 use checkpoint::remap::{Fetch, RemapSource};
+use checkpoint::weightio::WeightReader;
+use checkpoint::TensorSource;
 
 use crate::config::RicursiveConfig;
 
-/// Tensor dtypes the f32 forward can decode.
-const FLOAT_DTYPES: [&str; 3] = ["F32", "BF16", "F16"];
+/// Tensor dtypes the forward can decode: plain floats, and the block-scaled encodings the packed view holds
+/// resident as stored (see [`dtype_label`]).
+const FLOAT_DTYPES: [&str; 6] = ["F32", "BF16", "F16", "NVFP4", "F8_E4M3", "F8_E5M2"];
 
 /// Name of tensor `suffix` of layer `layer` in the checkpoint.
 pub fn layer_tensor(layer: usize, suffix: &str) -> String {
@@ -105,45 +112,103 @@ pub fn validate_layout(
     Ok(())
 }
 
+/// The dtype name [`validate_layout`] sees for a tensor the packed view describes: the safetensors dtype for
+/// plain floats, `NVFP4` for ModelOpt NVFP4 (stored as `U8` codes), `F8_E4M3` / `F8_E5M2` for scaled FP8.
+fn dtype_label(enc: &QuantEncoding, raw: &str) -> String {
+    use checkpoint::packed::{Element, FloatFormat};
+    if *enc == QuantEncoding::nvfp4() {
+        return "NVFP4".to_string();
+    }
+    match (&enc.element, enc.scales.is_empty()) {
+        (Element::Float(FloatFormat::E4M3Fn), false) => "F8_E4M3".to_string(),
+        (Element::Float(FloatFormat::E5M2), false) => "F8_E5M2".to_string(),
+        _ => raw.to_string(),
+    }
+}
+
+/// The static activation scales a ModelOpt W4A4 / W8A8 release stores beside its quantized weights
+/// (`<module>.input_scale`): what the checkpoint says its activations were calibrated to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActivationScales {
+    /// Modules with a stored scale.
+    pub count: usize,
+    /// Quantized weights of the release that have none (a mix of W4A4 and weight-only modules is refused).
+    pub quantized_without: usize,
+    /// Smallest and largest stored scale, `(min, max)`; `(0, 0)` when there are none.
+    pub range: (f32, f32),
+}
+
+/// Read and check the `input_scale` sidecars of the checkpoint at `path`: each is one finite, positive scalar,
+/// and a release that has them has them for every quantized weight. Brain holds the activations in bf16 or
+/// f32 whatever the release was calibrated for (W4A16 where the reference is W4A4, see [`crate::weights`]), so
+/// the scales are validated here and not applied; nothing is ignored unread.
+pub fn activation_scales(path: &str) -> Result<ActivationScales, String> {
+    let p = std::path::Path::new(path);
+    let reader = if p.is_dir() { WeightReader::open_hf_dir(p) } else { WeightReader::open(path) }.map_err(|e| format!("ricursive import: cannot open {path}: {e}"))?;
+    let names: std::collections::HashSet<String> = reader.names().map(str::to_string).collect();
+    let (mut count, mut bounds) = (0usize, (f32::INFINITY, 0f32));
+    for name in names.iter().filter(|n| n.ends_with(".input_scale")) {
+        let numel = reader.shape(name).map(|s| s.iter().product::<u64>());
+        if numel != Some(1) {
+            return Err(format!("ricursive import: {name} has {numel:?} elements, expected one static scale ({path})"));
+        }
+        let mut value = f32::NAN;
+        reader.with_tensor_chunks(name, 1, &mut |_, v| value = v[0]);
+        if !(value.is_finite() && value > 0.0) {
+            return Err(format!("ricursive import: {name} is {value}, a static activation scale must be finite and positive ({path})"));
+        }
+        count += 1;
+        bounds = (bounds.0.min(value), bounds.1.max(value));
+    }
+    // A quantized weight is a `<module>.weight` with a `weight_scale` beside it.
+    let quantized: Vec<&String> = names.iter().filter(|n| n.ends_with(".weight") && names.contains(&format!("{n}_scale"))).collect();
+    let without = quantized.iter().filter(|n| !names.contains(&format!("{}.input_scale", n.trim_end_matches(".weight")))).count();
+    if count > 0 && without > 0 {
+        return Err(format!("ricursive import: {without} quantized weights have no input_scale while {count} others do; refusing a release that mixes static-activation and weight-only modules ({path})"));
+    }
+    Ok(ActivationScales { count, quantized_without: without, range: if count == 0 { (0.0, 0.0) } else { bounds } })
+}
+
+/// Open `path` (a safetensors file or a Hugging Face directory, sharded or not) as a packed source in canonical names.
+///
+/// `source_layers[i]` is the file layer that serves canonical layer `i`; pass `0..num_hidden_layers` for a complete checkpoint.
+fn open_packed(path: &str, cfg: &RicursiveConfig, source_layers: &[usize]) -> Result<RemapSource<'static>, String> {
+    if source_layers.len() != cfg.num_hidden_layers {
+        return Err(format!("ricursive import: {} source layers for a {}-layer config", source_layers.len(), cfg.num_hidden_layers));
+    }
+    let p = std::path::Path::new(path);
+    let raw = if p.is_dir() { WeightReader::open_hf_dir(p) } else { WeightReader::open(path) }.map_err(|e| format!("ricursive import: cannot open {path}: {e}"))?;
+    let packed = PackedSource::identity_lenient(Box::new(PackedReader::open(p).map_err(|e| format!("ricursive import: cannot open {path}: {e}"))?), CodecRegistry::reference());
+    // The tensors of the model: everything stored except the sidecars of a quantized weight.
+    let sidecars = quant_sidecars(&raw);
+    let present: Vec<String> = raw.names().filter(|n| !sidecars.contains(*n)).map(str::to_string).collect();
+    let shape_of = |n: &str| packed.descriptor(n).map(|d| d.shape.iter().map(|x| *x as usize).collect()).or_else(|| raw.shape(n).map(|s| s.iter().map(|d| *d as usize).collect()));
+    let dtype_of = |n: &str| {
+        let stored = raw.dtype(n)?;
+        Some(packed.descriptor(n).map_or_else(|| stored.to_string(), |d| dtype_label(&d.encoding, stored)))
+    };
+    validate_layout(cfg, source_layers, &present, shape_of, dtype_of).map_err(|e| format!("{e} ({path})"))?;
+    let scales = activation_scales(path)?;
+    if scales.count > 0 {
+        tracing::info!(count = scales.count, min = scales.range.0, max = scales.range.1, "ricursive: static activation scales validated (the engine holds activations in float; they are not applied)");
+    }
+    let identity: Vec<usize> = (0..cfg.num_hidden_layers).collect();
+    let plan: HashMap<String, Fetch> = manifest(cfg, &identity).into_iter().zip(manifest(cfg, source_layers)).map(|((canonical, _), (in_file, _))| (canonical, Fetch::Whole(in_file))).collect();
+    Ok(RemapSource::owning(Box::new(packed), plan))
+}
+
 /// Open the safetensors file at `path` as a source in canonical names.
 ///
 /// `source_layers[i]` is the file layer that serves canonical layer `i`; pass
 /// `0..num_hidden_layers` for a complete checkpoint.
 pub fn open_safetensors(path: &str, cfg: &RicursiveConfig, source_layers: &[usize]) -> Result<RemapSource<'static>, String> {
-    if source_layers.len() != cfg.num_hidden_layers {
-        return Err(format!("ricursive import: {} source layers for a {}-layer config", source_layers.len(), cfg.num_hidden_layers));
-    }
-    let file = MmapSafetensors::open(path)?;
-    validate_layout(cfg, source_layers, file.names(), |n| file.shape(n).map(<[usize]>::to_vec), |n| file.dtype(n).map(str::to_string)).map_err(|e| format!("{e} ({path})"))?;
-    let identity: Vec<usize> = (0..cfg.num_hidden_layers).collect();
-    let plan: HashMap<String, Fetch> = manifest(cfg, &identity)
-        .into_iter()
-        .zip(manifest(cfg, source_layers))
-        .map(|((canonical, _), (in_file, _))| (canonical, Fetch::Whole(in_file)))
-        .collect();
-    Ok(RemapSource::owning(Box::new(file), plan))
+    open_packed(path, cfg, source_layers)
 }
 
 /// [`open_safetensors`] for a checkpoint that is a single safetensors file or a Hugging Face directory (sharded,
 /// with `model.safetensors.index.json`): the same validation, the same canonical names.
 pub fn open_checkpoint(path: &str, cfg: &RicursiveConfig, source_layers: &[usize]) -> Result<RemapSource<'static>, String> {
-    if source_layers.len() != cfg.num_hidden_layers {
-        return Err(format!("ricursive import: {} source layers for a {}-layer config", source_layers.len(), cfg.num_hidden_layers));
-    }
-    let p = std::path::Path::new(path);
-    let reader = if p.is_dir() { WeightReader::open_hf_dir(p) } else { WeightReader::open(path) }.map_err(|e| format!("ricursive import: cannot open {path}: {e}"))?;
-    let present: Vec<String> = reader.names().map(str::to_string).collect();
-    validate_layout(
-        cfg,
-        source_layers,
-        &present,
-        |n| reader.shape(n).map(|s| s.iter().map(|d| *d as usize).collect()),
-        |n| reader.dtype(n).map(str::to_string),
-    )
-    .map_err(|e| format!("{e} ({path})"))?;
-    let identity: Vec<usize> = (0..cfg.num_hidden_layers).collect();
-    let plan: HashMap<String, Fetch> = manifest(cfg, &identity).into_iter().zip(manifest(cfg, source_layers)).map(|((canonical, _), (in_file, _))| (canonical, Fetch::Whole(in_file))).collect();
-    Ok(RemapSource::owning(Box::new(reader), plan))
+    open_packed(path, cfg, source_layers)
 }
 
 #[cfg(test)]

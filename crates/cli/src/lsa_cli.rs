@@ -255,7 +255,7 @@ impl Opener for RippleOpener {
     fn open(&self, max_tokens: u32) -> Result<Self::Engine, String> {
         let src = ricursive::open_checkpoint(&self.path, &self.cfg, &self.source_layers)?;
         let block_size = BLOCK;
-        let serve = ricursive::ServeConfig { block_size, num_blocks: 2 * max_tokens.div_ceil(block_size) + 8, max_seq_len: max_tokens, max_batch: 1, prefix_slots: 0, prefill_chunk: 64, sparse_attention: true };
+        let serve = ricursive::ServeConfig { sparse_attention: true, ..ricursive::ServeConfig::new(block_size, 2 * max_tokens.div_ceil(block_size) + 8, max_tokens, 1, 0, 64) };
         ricursive::RicursiveEngine::from_source(self.cfg.clone(), Box::new(src), serve, None)
     }
 }
