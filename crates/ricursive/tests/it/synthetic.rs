@@ -10,7 +10,7 @@
 
 use data::rng::Lcg;
 use model::shard::{Shard, ShardCost, StreamPlan};
-use ricursive::{manifest, open_safetensors, RicursiveConfig, RicursiveEngine, ServeConfig};
+use ricursive::{manifest, RicursiveConfig, RicursiveEngine, ServeConfig};
 
 /// The attention shape of a synthetic model.
 #[derive(Clone, Copy)]
@@ -30,9 +30,9 @@ impl Model {
         self.file.path().join("synthetic.safetensors").to_string_lossy().into_owned()
     }
 
-    fn source(&self) -> Box<checkpoint::remap::RemapSource<'static>> {
+    fn source(&self) -> Box<dyn checkpoint::TensorSource + Send + Sync> {
         let layers: Vec<usize> = (0..self.cfg.num_hidden_layers).collect();
-        Box::new(open_safetensors(&self.path(), &self.cfg, &layers).expect("open"))
+        ricursive::open_shared_checkpoint(&self.path(), &self.cfg, &layers).expect("open")
     }
 
     pub fn engine(&self, serve: ServeConfig) -> RicursiveEngine {

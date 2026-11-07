@@ -56,6 +56,12 @@ pub(crate) fn weights(dir: &str, cfg: &RicursiveConfig) -> checkpoint::remap::Re
     open_safetensors(&format!("{dir}/ricursive_tiny_weights.safetensors"), cfg, &layers).expect("open weights")
 }
 
+/// [`weights`] as a source an engine can own.
+pub(crate) fn shared_weights(dir: &str, cfg: &RicursiveConfig) -> Box<dyn checkpoint::TensorSource + Send + Sync> {
+    let layers: Vec<usize> = (0..cfg.num_hidden_layers).collect();
+    ricursive::open_shared_checkpoint(&format!("{dir}/ricursive_tiny_weights.safetensors"), cfg, &layers).expect("open weights")
+}
+
 pub(crate) fn serve_config(prefill_chunk: u32, prefix_slots: u32) -> ServeConfig {
     ServeConfig::new(4, 160, 96, 6, prefix_slots, prefill_chunk)
 }
@@ -66,7 +72,7 @@ pub(crate) fn engine(dir: &str, prefill_chunk: u32, prefix_slots: u32) -> Ricurs
 
 pub(crate) fn engine_with(dir: &str, serve: ServeConfig) -> RicursiveEngine {
     let cfg = tiny_config(dir);
-    RicursiveEngine::from_source(cfg.clone(), Box::new(weights(dir, &cfg)), serve, None).expect("engine")
+    RicursiveEngine::from_source(cfg.clone(), shared_weights(dir, &cfg), serve, None).expect("engine")
 }
 
 /// A reproducible token stream inside the tiny vocabulary.

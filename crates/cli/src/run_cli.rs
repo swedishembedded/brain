@@ -282,7 +282,16 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
   --kv-cache TIER        KV-cache storage: f32|bf16|int8|fp8. Default: the
                          model's own (int8 for the Qwen3 engine; for the
                          released Qwen3.8 GGUFs the fastest that fits the
-                         cards, int8 first).
+                         cards, int8 first; for Ripple bf16, or int8 with
+                         --sparse-attention).
+  --sparse-attention FILE
+                         read the attention layers an indexer covers through
+                         latent sparse attention, for the models that support it
+                         (Qwen3 over every layer, Ripple over its global
+                         layers); `brain lsa distill` writes the indexer for a
+                         model. An indexer built for another model, or a KV
+                         cache sparse attention cannot read, is refused at
+                         startup.
   --act-precision auto|f32|bf16
                          element type of the activations between the FP8
                          matrix products, for the models that support it (the
@@ -426,15 +435,21 @@ fn policy_flag(policy: &mut model::policy::ServePolicy, flag: &str, value: &str)
 /// Hand the model-agnostic policy to every serving family. A family that cannot
 /// honour a precision choice refuses at build time, naming itself; the server
 /// refuses to start only when NO family can honour it.
-fn apply_policy(policy: &model::policy::ServePolicy, qwen: &mut catalog::resident_llm::QwenServeConfig, qwen35: &mut catalog::resident_qwen35::Qwen35ServeConfig, ocr: &mut ocrserve::OcrServeConfig) {
+fn apply_policy(
+    policy: &model::policy::ServePolicy,
+    qwen: &mut catalog::resident_llm::QwenServeConfig,
+    qwen35: &mut catalog::resident_qwen35::Qwen35ServeConfig,
+    ricursive: &mut catalog::resident_ricursive::RicursiveServeConfig,
+    ocr: &mut ocrserve::OcrServeConfig,
+) {
     if *policy == model::policy::ServePolicy::default() {
         return;
     }
     eprintln!("brain serve: serving policy: {}", policy.describe());
-    match (qwen.apply_policy(policy), qwen35.apply_policy(policy), ocr.apply_policy(policy)) {
-        (Err(a), Err(b), Err(c)) => policy_error(&format!("no served model family can honour this policy: {a}; {b}; {c}")),
-        (a, b, c) => {
-            for r in [a, b, c] {
+    match (qwen.apply_policy(policy), qwen35.apply_policy(policy), ricursive.apply_policy(policy), ocr.apply_policy(policy)) {
+        (Err(a), Err(b), Err(c), Err(d)) => policy_error(&format!("no served model family can honour this policy: {a}; {b}; {c}; {d}")),
+        (a, b, c, d) => {
+            for r in [a, b, c, d] {
                 match r {
                     Ok(notes) => notes.iter().for_each(|n| eprintln!("brain serve: note: {n}")),
                     Err(why) => eprintln!("brain serve: note: {why} (that family will not serve)"),
@@ -680,6 +695,7 @@ pub fn run_serve(args: &[String]) {
     // resident - two different models, so the flags are name-spaced apart.
     let mut qwen35_cfg = catalog::resident_qwen35::Qwen35ServeConfig::default();
     let mut policy = model::policy::ServePolicy::default();
+    let mut ricursive_cfg = catalog::resident_ricursive::RicursiveServeConfig::default();
     let mut ocr_cfg = ocrserve::OcrServeConfig::default();
     // `--decision-model` / `--decision-default`: the decision models served
     // beyond those the model store holds, and the one `auto` resolves to.
@@ -930,7 +946,7 @@ pub fn run_serve(args: &[String]) {
         }
         qwen_cfg.adapter_bank = Some(adapter_bank);
     }
-    apply_policy(&policy, &mut qwen_cfg, &mut qwen35_cfg, &mut ocr_cfg);
+    apply_policy(&policy, &mut qwen_cfg, &mut qwen35_cfg, &mut ricursive_cfg, &mut ocr_cfg);
 
     // Each bound ADDRESS reports its own `Gate::bound` call (`apiserve::serve_all`
     // spawns one listener per address), not each dialect flag - so a dialect
@@ -997,7 +1013,7 @@ pub fn run_serve(args: &[String]) {
             ready,
             deadlines,
             adapter_mode,
-            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, decision: decision_cfg, ocr: ocr_cfg, train },
+            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, train },
         });
     }
 

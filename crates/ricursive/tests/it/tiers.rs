@@ -30,7 +30,7 @@ use model::serve::PagedDecoder;
 use model::shard::{Shard, StreamPlan};
 use ricursive::{manifest, open_safetensors, RicursiveEngine, ServeConfig};
 
-use crate::serve::{prefill_in_slices, serve_config, stream, tiny_config, tiny_dir, weights};
+use crate::serve::{prefill_in_slices, serve_config, shared_weights, stream, tiny_config, tiny_dir, weights};
 use crate::taps::scaled_error;
 
 /// `(label, logits row)` of a scripted run: a prefill row then one row per decode step.
@@ -87,7 +87,7 @@ fn worst_scaled(label: &str, got: &Trace, want: &Trace) -> f32 {
 
 fn open_engine(dir: &str, serve: ServeConfig) -> Result<RicursiveEngine, String> {
     let cfg = tiny_config(dir);
-    RicursiveEngine::from_source(cfg.clone(), Box::new(weights(dir, &cfg)), serve, None)
+    RicursiveEngine::from_source(cfg.clone(), shared_weights(dir, &cfg), serve, None)
 }
 
 /// The tiny weights with every linear replaced by what the device decodes its `tier` upload to (the engine's own
@@ -120,7 +120,7 @@ fn dequantized_checkpoint(dir: &str, tier: Dtype, into: &Path) -> String {
 fn engine_over(dir: &str, file: &str, serve: ServeConfig) -> RicursiveEngine {
     let cfg = tiny_config(dir);
     let layers: Vec<usize> = (0..cfg.num_hidden_layers).collect();
-    RicursiveEngine::from_source(cfg.clone(), Box::new(open_safetensors(file, &cfg, &layers).expect("open")), serve, None).expect("engine")
+    RicursiveEngine::from_source(cfg.clone(), ricursive::open_shared_checkpoint(file, &cfg, &layers).expect("open"), serve, None).expect("engine")
 }
 
 fn uniform(tier: Dtype) -> Option<TierPolicy> {
@@ -375,7 +375,7 @@ fn a_two_stage_engine_reproduces_the_single_stage_logits() {
     let single = run(&mut open_engine(&dir, serve_config(4, 2)).unwrap(), &ids);
     let plan = two_stages();
     assert_eq!(plan.n_stages(), 2);
-    let staged_engine = |serve: ServeConfig| RicursiveEngine::from_source_staged(cfg.clone(), Box::new(weights(&dir, &cfg)), serve, None, &plan).expect("staged engine");
+    let staged_engine = |serve: ServeConfig| RicursiveEngine::from_source_staged(cfg.clone(), shared_weights(&dir, &cfg), serve, None, &plan).expect("staged engine");
     let mut staged = staged_engine(serve_config(4, 2));
     assert_eq!(staged.stage_plan().n_stages(), 2);
     let got = run(&mut staged, &ids);
@@ -412,7 +412,7 @@ fn attention_capture_and_scoring_work_across_stages_and_refuse_a_compact_cache()
     let positions: Vec<u32> = vec![3, 9, 15, 19];
     let mut one = open_engine(&dir, serve_config(4, 0)).unwrap();
     let plan = two_stages();
-    let mut two = RicursiveEngine::from_source_staged(cfg.clone(), Box::new(weights(&dir, &cfg)), serve_config(4, 0), None, &plan).expect("staged engine");
+    let mut two = RicursiveEngine::from_source_staged(cfg.clone(), shared_weights(&dir, &cfg), serve_config(4, 0), None, &plan).expect("staged engine");
     let (a, b) = (one.capture_attention(&ids, &positions).unwrap(), two.capture_attention(&ids, &positions).unwrap());
     let (a, b) = (a[2].as_ref().unwrap(), b[2].as_ref().unwrap());
     assert!(a.q == b.q && a.k == b.k, "the staged capture is the single-stage capture");

@@ -265,14 +265,14 @@ impl RippleOpener {
 
     /// The engine for prompts of `max_tokens`, its cache at `kv`, staged over the cards the device selection offers.
     fn engine(&self, max_tokens: u32, kv: model::kv_tier::KvTier) -> Result<ricursive::RicursiveEngine, String> {
-        let src = ricursive::open_checkpoint(&self.path, &self.cfg, &self.source_layers)?;
+        let src = ricursive::open_shared_checkpoint(&self.path, &self.cfg, &self.source_layers)?;
         let block_size = BLOCK;
         let mut serve = ricursive::ServeConfig { sparse_attention: true, kv_cache: kv, ..ricursive::ServeConfig::new(block_size, 2 * max_tokens.div_ceil(block_size) + 8, max_tokens, 1, 0, 64) };
         serve.apply_policy(&model::policy::ServePolicy { kv_cache: None, ..self.policy.clone() })?;
-        let tiers = ricursive::resolve_tiers(&self.cfg, &src, serve.weights.as_ref());
+        let tiers = ricursive::resolve_tiers(&self.cfg, src.as_ref(), serve.weights.as_ref());
         let plan = ricursive::placement::auto_plan(&self.cfg, &serve, &tiers, ricursive::LsaCharge::default(), None)?;
         println!("ricursive: {} layers over {} stage(s) [{}], weights {}, KV {}", self.cfg.num_hidden_layers, plan.n_stages(), plan.describe(), tiers.summary(), serve.kv_cache);
-        ricursive::RicursiveEngine::from_source_staged(self.cfg.clone(), Box::new(src), serve, None, &plan)
+        ricursive::RicursiveEngine::from_source_staged(self.cfg.clone(), src, serve, None, &plan)
     }
 }
 

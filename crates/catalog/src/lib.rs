@@ -78,6 +78,7 @@ pub mod resident_omni;
 pub mod resident_pulid;
 pub mod resident_edgerock;
 pub mod resident_qwen35;
+pub mod resident_ricursive;
 pub mod resident_qwen_embed;
 pub mod resident_qwen35moe;
 pub mod resident_qwen3vl;
@@ -502,6 +503,18 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(resident_edgerock::EdgeRockProvider::new(weights)) as Arc<dyn Provider>)
             },
             spec: Some(("edgerock", &qwen35::spec::EdgeRockSpec)),
+            resident: None,
+        },
+        // Ripple-65B: the pulled Hugging Face directory, resolved through `resident_ricursive::RicursiveSpec`; served by
+        // `resident_ricursive::RicursiveResident`, which the model-dir scan registers under the pulled id (over every
+        // selected card as one staged model, or on the host tier).
+        ModelEntry {
+            manifest: resident_ricursive::manifest,
+            provider: |assembly: &Assembly| {
+                let weights = assembly.roles.get("weights").cloned();
+                Ok(Arc::new(resident_ricursive::RicursiveProvider::new(weights)) as Arc<dyn Provider>)
+            },
+            spec: Some(("ricursive", &resident_ricursive::RicursiveSpec)),
             resident: None,
         },
         // The timeline model: a directory a caller trained and saved (no

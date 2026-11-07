@@ -89,6 +89,8 @@ pub struct ServeKnobs {
     /// the model scan serves through the multi-card INT8 resident, and `fp32`
     /// sizes the brain-checkpoint resident.
     pub qwen35: catalog::resident_qwen35::Qwen35ServeConfig,
+    /// Ripple: the model-agnostic policy flags it honours (`--weight-format`, `--kv-cache`, `--sparse-attention`, `--ctx`, `--max-batch`).
+    pub ricursive: catalog::resident_ricursive::RicursiveServeConfig,
     /// Which decision models to serve beyond the ones the model store holds,
     /// and which one `"auto"` resolves to.
     pub decision: catalog::resident_decision::DecisionServeConfig,
@@ -140,7 +142,7 @@ pub struct TrainKnobs {
 /// resident, and `knobs.decision` naming the decision models served beyond
 /// those the store holds.
 pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std::path::Path>, policy: Policy, knobs: ServeKnobs) -> Serving {
-    let ServeKnobs { qwen: qwen_cfg, qwen35, decision, ocr, train } = knobs;
+    let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, train } = knobs;
     // Process-wide, before any OCR model is built: the models read it when they load.
     ocrserve::configure(ocr);
     let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
@@ -390,7 +392,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     let mut qwen35_discovered_pick: Option<String> = None;
     if let Some(dir) = models_dir {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
-        let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), gpus: gpus.clone(), reserved };
+        let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved };
         let discovered = crate::model_dir::discover(dir, &settings);
         // The env-selected resident and a model-dir entry may be the same
         // checkpoint. Two residents would be two instances: two copies of the

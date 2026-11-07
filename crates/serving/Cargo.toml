@@ -47,3 +47,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+brain-ricursive.workspace = true

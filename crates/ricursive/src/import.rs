@@ -31,7 +31,7 @@
 
 use std::collections::HashMap;
 
-use checkpoint::packed::{quant_sidecars, CodecRegistry, PackedReader, PackedSource, QuantEncoding};
+use checkpoint::packed::{quant_sidecars, Binding, CodecRegistry, PackedReader, PackedSource, QuantEncoding};
 use checkpoint::remap::{Fetch, RemapSource};
 use checkpoint::weightio::WeightReader;
 use checkpoint::TensorSource;
@@ -172,7 +172,9 @@ pub fn activation_scales(path: &str) -> Result<ActivationScales, String> {
 /// Open `path` (a safetensors file or a Hugging Face directory, sharded or not) as a packed source in canonical names.
 ///
 /// `source_layers[i]` is the file layer that serves canonical layer `i`; pass `0..num_hidden_layers` for a complete checkpoint.
-fn open_packed(path: &str, cfg: &RicursiveConfig, source_layers: &[usize]) -> Result<RemapSource<'static>, String> {
+/// The checkpoint at `path` read through its packed view, validated against the manifest `cfg` declares, and the
+/// `(canonical name, name in the file)` pair of every tensor of the model.
+fn open_validated(path: &str, cfg: &RicursiveConfig, source_layers: &[usize]) -> Result<(PackedSource, Vec<(String, String)>), String> {
     if source_layers.len() != cfg.num_hidden_layers {
         return Err(format!("ricursive import: {} source layers for a {}-layer config", source_layers.len(), cfg.num_hidden_layers));
     }
@@ -193,8 +195,24 @@ fn open_packed(path: &str, cfg: &RicursiveConfig, source_layers: &[usize]) -> Re
         tracing::info!(count = scales.count, min = scales.range.0, max = scales.range.1, "ricursive: static activation scales validated (the engine holds activations in float; they are not applied)");
     }
     let identity: Vec<usize> = (0..cfg.num_hidden_layers).collect();
-    let plan: HashMap<String, Fetch> = manifest(cfg, &identity).into_iter().zip(manifest(cfg, source_layers)).map(|((canonical, _), (in_file, _))| (canonical, Fetch::Whole(in_file))).collect();
+    let pairs = manifest(cfg, &identity).into_iter().zip(manifest(cfg, source_layers)).map(|((canonical, _), (in_file, _))| (canonical, in_file)).collect();
+    Ok((packed, pairs))
+}
+
+fn open_packed(path: &str, cfg: &RicursiveConfig, source_layers: &[usize]) -> Result<RemapSource<'static>, String> {
+    let (packed, pairs) = open_validated(path, cfg, source_layers)?;
+    let plan: HashMap<String, Fetch> = pairs.into_iter().map(|(canonical, in_file)| (canonical, Fetch::Whole(in_file))).collect();
     Ok(RemapSource::owning(Box::new(packed), plan))
+}
+
+/// [`open_checkpoint`] as a source that can move between threads, which an engine a server runs on its own worker
+/// needs: the same validation and canonical names, with the file's own tensor names bound to them in the packed view
+/// directly instead of through a [`RemapSource`].
+pub fn open_shared_checkpoint(path: &str, cfg: &RicursiveConfig, source_layers: &[usize]) -> Result<Box<dyn TensorSource + Send + Sync>, String> {
+    let (_, pairs) = open_validated(path, cfg, source_layers)?;
+    let reader = PackedReader::open(std::path::Path::new(path)).map_err(|e| format!("ricursive import: cannot open {path}: {e}"))?;
+    let bindings = pairs.into_iter().map(|(canonical, in_file)| (canonical, Binding::new(in_file)));
+    Ok(Box::new(PackedSource::new(Box::new(reader), CodecRegistry::reference(), bindings)?))
 }
 
 /// Open the safetensors file at `path` as a source in canonical names.

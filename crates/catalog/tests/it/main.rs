@@ -18,6 +18,7 @@ mod multi_adapter;
 mod npu_model_parity;
 mod resident_packed;
 mod ricursive_chat;
+mod ricursive_served;
 mod scheduled_batch;
 mod served_bounds;
 mod served_paths;

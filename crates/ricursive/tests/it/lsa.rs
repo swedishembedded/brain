@@ -266,6 +266,6 @@ fn a_full_budget_over_a_packed_kv_cache_equals_the_dense_read_of_the_same_cache(
     }
     let mut bf16 = engine_with(&dir, ServeConfig { kv_cache: model::kv_tier::KvTier::BF16, ..serve_config(8, 0) });
     assert!(bf16.set_lsa(&ix).unwrap_err().contains("sparse_attention"), "an engine opened without the kernels refuses");
-    let refused = RicursiveEngine::from_source(cfg.clone(), Box::new(crate::serve::weights(&dir, &cfg)), ServeConfig { sparse_attention: true, kv_cache: model::kv_tier::KvTier::BF16, ..serve_config(8, 0) }, None);
+    let refused = RicursiveEngine::from_source(cfg.clone(), crate::serve::shared_weights(&dir, &cfg), ServeConfig { sparse_attention: true, kv_cache: model::kv_tier::KvTier::BF16, ..serve_config(8, 0) }, None);
     assert!(refused.err().expect("refused").contains("f32, int8 or fp8"));
 }

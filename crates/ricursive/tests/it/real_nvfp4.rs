@@ -272,7 +272,7 @@ fn the_serving_engine_holds_the_nvfp4_release_as_stored_and_decodes_as_the_prefi
     let want = RicursiveModel::new(f.cfg.clone(), &src, None).with_tiers(tiers).forward(ids).expect("forward").logits;
     let vocab = f.cfg.vocab_size;
 
-    let mut engine = RicursiveEngine::from_source(f.cfg.clone(), Box::new(open_safetensors(&f.nvfp4, &f.cfg, &SOURCE_LAYERS).unwrap()), ServeConfig::new(16, 4, 32, 2, 0, 4), None).expect("engine");
+    let mut engine = RicursiveEngine::from_source(f.cfg.clone(), ricursive::open_shared_checkpoint(&f.nvfp4, &f.cfg, &SOURCE_LAYERS).unwrap(), ServeConfig::new(16, 4, 32, 2, 0, 4), None).expect("engine");
     let report = engine.weight_report().clone();
     eprintln!("resident weights: {}", report.describe());
     assert_eq!(report.count(Dtype::F4E2M1), 6, "three MLP linears in each of the two layers");

@@ -39,7 +39,7 @@ pub(crate) mod stage;
 pub mod weights;
 
 pub use config::{LayerType, RicursiveConfig};
-pub use import::{manifest, open_checkpoint, open_safetensors, validate_layout};
+pub use import::{manifest, open_checkpoint, open_safetensors, open_shared_checkpoint, validate_layout};
 pub use layer::{Layer, LayerBuffers, LayerOutput};
 pub use model::{embed, Forward, Head, HeadOutput, RicursiveModel};
 pub use ops::pipelines;

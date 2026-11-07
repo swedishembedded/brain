@@ -95,6 +95,8 @@ pub struct ScanSettings {
     /// The Qwen3.8 knobs: `fp32` sizes the brain-checkpoint resident, `gguf`
     /// the released-GGUF residents.
     pub qwen35: catalog::resident_qwen35::Qwen35ServeConfig,
+    /// Ripple's knobs: the model-agnostic policy flags it honours.
+    pub ricursive: catalog::resident_ricursive::RicursiveServeConfig,
     /// `(index, TOTAL bytes)` of every GPU the process may use - already
     /// narrowed by `--device`. Empty means no model that needs a GPU can be
     /// served, and none is listed.
@@ -188,6 +190,16 @@ fn is_released_qwen35(local: &brain_modelstore::LocalModel) -> bool {
 /// engine.
 fn hf_qwen35_dir(local: &brain_modelstore::LocalModel) -> Option<PathBuf> {
     if local.card.as_ref().is_none_or(|c| brain_family(&c.family) != "qwen35") {
+        return None;
+    }
+    let dir = local.roles.as_ref()?.get("weights")?;
+    (dir.is_dir() && dir.join("config.json").is_file()).then(|| dir.clone())
+}
+
+/// The Hugging Face directory of a Ripple release (bf16 or NVFP4) that `local` names as its `weights` role: served by
+/// [`catalog::resident_ricursive::RicursiveResident`], every tensor held as the release stores it.
+fn hf_ricursive_dir(local: &brain_modelstore::LocalModel) -> Option<PathBuf> {
+    if local.card.as_ref().is_none_or(|c| c.family != "ricursive") {
         return None;
     }
     let dir = local.roles.as_ref()?.get("weights")?;
@@ -368,6 +380,31 @@ impl Scan {
         }
     }
 
+    /// Serve the Ripple directory `weights` as the model `id`, or leave it out with the reason (a checkpoint that does
+    /// not match its config, an indexer for another model, a deployment that places on no selection of the cards). A
+    /// server with cards stages it over the fewest that hold it; one with none runs it on the host tier.
+    fn register_ricursive(&mut self, weights: &str, id: &str) {
+        let ScanSettings { gpus, reserved, ricursive, .. } = &self.settings;
+        match catalog::resident_ricursive::RicursiveResident::from_hf_dir(weights, id, ricursive, gpus, *reserved) {
+            Ok(resident) => {
+                for line in resident.chosen_defaults() {
+                    eprintln!("brain: {id}: default {line}");
+                }
+                eprintln!("brain: {id}: {}", resident.placement());
+                let resident = Arc::new(resident);
+                if gpus.is_empty() {
+                    self.out.push(resident);
+                } else {
+                    self.multi.push(resident);
+                }
+            }
+            Err(reason) => {
+                eprintln!("brain: skip {id} ({weights}: {reason})");
+                self.seen.remove(id);
+            }
+        }
+    }
+
     /// Serve the released Qwen3.8 GGUF at `weights` as the multi-card model
     /// `id`, or leave it out with the reason: only a model that can load is
     /// listed, and the id is freed for a later duplicate to claim.
@@ -478,6 +515,10 @@ fn register_compound(local: &brain_modelstore::LocalModel, scan: &mut Scan, erro
     }
     if let Some(dir) = hf_qwen35_dir(local) {
         scan.register_released_qwen35(&dir.to_string_lossy(), &id);
+        return;
+    }
+    if let Some(dir) = hf_ricursive_dir(local) {
+        scan.register_ricursive(&dir.to_string_lossy(), &id);
         return;
     }
     match build_for_local(local, scan.qwen_cfg_for(&id), scan.settings.qwen35.fp32) {
@@ -1476,6 +1517,62 @@ mod tests {
         let resident = residents.iter().find(|r| r.manifest().model == "rockmatrix-ai/EdgeRock").expect("discovered");
         assert_eq!(resident.manifest().max_context_tokens, Some(4096));
         assert!(resident.manifest().actions.iter().any(|a| a.name == "generate"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A tiny Ripple repository directory as a pull leaves it: `config.json`, a weights file with the real tensor
+    /// names, a byte-level `tokenizer.json`. No manifest: the store recognizes the architecture the config declares.
+    fn write_tiny_ripple(repo_dir: &Path) {
+        std::fs::create_dir_all(repo_dir).unwrap();
+        let config = serde_json::json!({
+            "architectures": ["RicursiveForCausalLM"], "model_type": "ricursive", "vocab_size": 264, "hidden_size": 32, "intermediate_size": 48, "num_hidden_layers": 2,
+            "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 16, "sliding_window": 8, "use_valres": true, "use_gated_attention": true,
+            "embed_scale": 4.0, "max_position_embeddings": 1024, "layer_types": ["sliding_attention", "full_attention"],
+        });
+        std::fs::write(repo_dir.join("config.json"), config.to_string()).unwrap();
+        let cfg = ricursive::RicursiveConfig::from_json(&config.to_string()).unwrap();
+        let tensors: Vec<brain_testutil::hfquant::Raw> = ricursive::manifest(&cfg, &[0, 1])
+            .into_iter()
+            .map(|(name, dims)| brain_testutil::hfquant::f32_raw(&name, &dims, &vec![0.01; dims.iter().product()]))
+            .collect();
+        brain_testutil::hfquant::write_safetensors(&repo_dir.join("model.safetensors"), &tensors);
+        // The scan only needs the tokenizer file to exist; the instance reads it when it is built.
+        std::fs::write(repo_dir.join("tokenizer.json"), "{}").unwrap();
+    }
+
+    /// Both Ripple releases and a local copy are found by the architecture their config declares (the bf16 and the NVFP4
+    /// repositories, whatever a local directory is called): served under the pulled id, on the host tier when the
+    /// process has no card, with the context of the model's position limit.
+    #[test]
+    fn discover_serves_a_downloaded_ripple_directory_under_its_pulled_id() {
+        let root = tmp_dir("discover-ripple-dir");
+        for repo in ["Ripple-65B-Preview", "Ripple-65B-Preview-NVFP4"] {
+            write_tiny_ripple(&root.join("ricursiveAI").join(repo));
+        }
+        write_tiny_ripple(&root.join("local").join("my-ripple"));
+        let Discovered { residents, multi, errors, .. } = discover(&root, &ScanSettings::default());
+        assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
+        assert!(multi.is_empty(), "no card, so no staged model");
+        assert_eq!(ids(&residents), ["local/my-ripple", "ricursiveAI/Ripple-65B-Preview", "ricursiveAI/Ripple-65B-Preview-NVFP4"]);
+        let resident = residents.iter().find(|r| r.manifest().model == "ricursiveAI/Ripple-65B-Preview").unwrap();
+        assert_eq!(resident.manifest().max_context_tokens, Some(1024));
+        assert!(resident.manifest().actions.iter().any(|a| a.name == "generate"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With cards the same directory is one staged model for `register_multi`, not a host resident, and a deployment
+    /// no selection of the cards holds is left out with its reason.
+    #[test]
+    fn discover_stages_a_ripple_directory_over_the_cards_and_leaves_out_one_that_does_not_fit() {
+        let root = tmp_dir("discover-ripple-cards");
+        write_tiny_ripple(&root.join("ricursiveAI").join("Ripple-65B-Preview"));
+        let roomy = ScanSettings { gpus: vec![(0, 8 * GIB)], reserved: 0, ..Default::default() };
+        let found = discover(&root, &roomy);
+        assert_eq!(found.multi.iter().map(|m| m.manifest().model).collect::<Vec<_>>(), ["ricursiveAI/Ripple-65B-Preview"]);
+        assert!(found.residents.iter().all(|r| r.manifest().model != "ricursiveAI/Ripple-65B-Preview"));
+        // 2 GiB is the floor the allocator keeps free: nothing is left for the model on a card that size.
+        let full = ScanSettings { gpus: vec![(0, 2 * GIB)], reserved: 0, ..Default::default() };
+        assert!(discover(&root, &full).multi.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

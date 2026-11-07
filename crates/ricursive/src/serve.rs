@@ -166,6 +166,29 @@ impl ServeConfig {
         Ok(())
     }
 
+    /// Refuse, before any device work, an indexer this deployment cannot read through: one built for another model
+    /// geometry or for rotated heads, one that reads through a tree, one covering a sliding layer (which already reads
+    /// its window) or no global layer, a cluster block that is not a whole number of KV blocks, or a KV cache sparse
+    /// attention cannot read. What [`RicursiveEngine::set_lsa`] would refuse, asked at startup instead of at the first
+    /// request.
+    pub fn check_indexer(&self, cfg: &RicursiveConfig, indexer: &Indexer) -> Result<(), String> {
+        indexer.check_model(&RicursiveEngine::index_geometry_of(cfg))?;
+        if indexer.tree.is_some() {
+            return Err("an indexer that reads through a tree is not supported by this engine".into());
+        }
+        packed_kv(self.kv_cache).map_err(|e| format!("latent sparse attention reads an f32, int8 or fp8 cache: {e}"))?;
+        if let Some(l) = (0..cfg.num_hidden_layers).find(|&l| cfg.layer_type(l) == LayerType::Sliding && indexer.layers.get(l).is_some_and(Option::is_some)) {
+            return Err(format!("the indexer covers layer {l}, a sliding layer that already reads its window"));
+        }
+        if !(0..cfg.num_hidden_layers).any(|l| cfg.layer_type(l) == LayerType::Full && indexer.layers.get(l).is_some_and(Option::is_some)) {
+            return Err("the indexer covers no global layer".into());
+        }
+        if !indexer.cfg.cluster_block.is_multiple_of(self.block_size as usize) {
+            return Err(format!("the indexer's cluster_block {} is not a whole number of KV blocks of {}", indexer.cfg.cluster_block, self.block_size));
+        }
+        Ok(())
+    }
+
     /// Apply the model-agnostic serving policy (`--weights`, `--kv-cache`): a choice this model cannot honour is
     /// refused by name ([`crate::POLICY`]).
     pub fn apply_policy(&mut self, policy: &model::policy::ServePolicy) -> Result<(), String> {
@@ -263,7 +286,7 @@ struct StageLsa {
 pub struct RicursiveEngine {
     cfg: RicursiveConfig,
     serve: ServeConfig,
-    src: Box<dyn TensorSource>,
+    src: Box<dyn TensorSource + Send + Sync>,
     plan: StreamPlan,
     stages: Vec<Stage>,
     tiers: TierPolicy,
@@ -282,7 +305,7 @@ pub struct RicursiveEngine {
 impl RicursiveEngine {
     /// Load every layer of `src` (canonical names, see [`crate::open_safetensors`]) onto the device selected by
     /// `device` (`None`: the process default) and size the KV pools. One stage holds the whole model.
-    pub fn from_source(cfg: RicursiveConfig, src: Box<dyn TensorSource>, serve: ServeConfig, device: Option<&str>) -> Result<RicursiveEngine, String> {
+    pub fn from_source(cfg: RicursiveConfig, src: Box<dyn TensorSource + Send + Sync>, serve: ServeConfig, device: Option<&str>) -> Result<RicursiveEngine, String> {
         let plan = StreamPlan::single(cfg.num_hidden_layers);
         Self::from_source_staged(cfg, src, serve, device, &plan)
     }
@@ -291,7 +314,7 @@ impl RicursiveEngine {
     /// to compute one): stage `i` opens its own device under the plan's placement scope (`device` selects the
     /// backend as in `Gpu::open`), holds only its layers and their KV, and passes the residual stream on. The last
     /// stage owns the final norm and `lm_head`.
-    pub fn from_source_staged(cfg: RicursiveConfig, src: Box<dyn TensorSource>, serve: ServeConfig, device: Option<&str>, plan: &StreamPlan) -> Result<RicursiveEngine, String> {
+    pub fn from_source_staged(cfg: RicursiveConfig, src: Box<dyn TensorSource + Send + Sync>, serve: ServeConfig, device: Option<&str>, plan: &StreamPlan) -> Result<RicursiveEngine, String> {
         serve.validate(&cfg)?;
         if plan.n_stages() == 0 || plan.n_layers() != cfg.num_hidden_layers || plan.stages()[0].start != 0 || plan.stages().windows(2).any(|w| w[0].end != w[1].start) {
             return Err(format!("ricursive serve: the stage plan {} does not tile the model's {} layers", plan.describe(), cfg.num_hidden_layers));
@@ -403,6 +426,12 @@ impl RicursiveEngine {
     /// are unrotated (`rope_base` 0), and an indexer built with a RoPE base is built for other heads.
     fn index_geometry(cfg: &RicursiveConfig) -> IndexGeometry {
         IndexGeometry { n_layers: cfg.num_hidden_layers, n_heads: cfg.num_attention_heads, n_kv_heads: cfg.num_key_value_heads, head_dim: cfg.head_dim, rope_base: 0.0 }
+    }
+
+    /// [`Self::index_geometry`] for a config, so an indexer file can be checked against the model before any engine
+    /// is opened.
+    pub fn index_geometry_of(cfg: &RicursiveConfig) -> IndexGeometry {
+        Self::index_geometry(cfg)
     }
 
     fn kv_geometry(&self) -> KvGeometry {

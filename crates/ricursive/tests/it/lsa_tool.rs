@@ -188,9 +188,9 @@ fn a_pca_indexer_for_the_real_global_layer_round_trips_through_the_artifact() {
 
     let layers = [0usize, 4];
     let cfg = RicursiveConfig::from_file(&config).unwrap().truncated(&layers).unwrap();
-    let weights = ricursive::open_checkpoint(&checkpoint, &cfg, &layers).unwrap();
+    let weights = ricursive::open_shared_checkpoint(&checkpoint, &cfg, &layers).unwrap();
     let serve = ServeConfig { sparse_attention: true, ..ServeConfig::new(8, 16, 64, 1, 0, 8) };
-    let mut e = RicursiveEngine::from_source(cfg.clone(), Box::new(weights), serve, None).unwrap();
+    let mut e = RicursiveEngine::from_source(cfg.clone(), weights, serve, None).unwrap();
     assert_eq!(e.sparse_capable(), [false, true]);
 
     let captured = e.capture_attention(&doc, &[5, 17, 39]).unwrap();

@@ -96,9 +96,9 @@ fn the_serving_engine_decodes_real_layers_0_and_4_as_the_reference() {
     let taps = Taps::read(&format!("{golden}/ricursive_real_reduced.safetensors"));
     let (ids, vocab) = (taps.input_ids(), cfg.vocab_size);
     let want = taps.get("logits");
-    let weights = open_safetensors(&checkpoint, &cfg, &SOURCE_LAYERS).expect("open checkpoint");
+    let weights = ricursive::open_shared_checkpoint(&checkpoint, &cfg, &SOURCE_LAYERS).expect("open checkpoint");
     let serve = ServeConfig::new(16, 4, 32, 2, 0, 4);
-    let mut engine = RicursiveEngine::from_source(cfg, Box::new(weights), serve, None).expect("engine");
+    let mut engine = RicursiveEngine::from_source(cfg, weights, serve, None).expect("engine");
 
     let (prompt, rest) = ids.split_at(9);
     let mut table = BlockTable::new();
@@ -149,9 +149,9 @@ fn sparse_attention_at_a_full_budget_decodes_real_layers_0_and_4_as_the_referenc
     let geometry = model::lsa::indexer::IndexGeometry { n_layers: cfg.num_hidden_layers, n_heads: cfg.num_attention_heads, n_kv_heads: cfg.num_key_value_heads, head_dim: cfg.head_dim, rope_base: 0.0 };
     let mut indexer = model::lsa::indexer::Indexer::random(lsa, geometry, 5).expect("indexer");
     indexer.layers[0] = None; // layer 0 slides
-    let weights = open_safetensors(&checkpoint, &cfg, &SOURCE_LAYERS).expect("open checkpoint");
+    let weights = ricursive::open_shared_checkpoint(&checkpoint, &cfg, &SOURCE_LAYERS).expect("open checkpoint");
     let serve = ServeConfig { sparse_attention: true, ..ServeConfig::new(8, 8, 32, 2, 0, 4) };
-    let mut engine = RicursiveEngine::from_source(cfg, Box::new(weights), serve, None).expect("engine");
+    let mut engine = RicursiveEngine::from_source(cfg, weights, serve, None).expect("engine");
     engine.set_lsa(&indexer).expect("set_lsa");
     engine.set_lsa_dense_until(0);
 
