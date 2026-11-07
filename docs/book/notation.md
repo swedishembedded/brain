@@ -182,6 +182,9 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $\eta$ | learning rate; $\eta_{\max}$, $\eta_{\min}$ are the largest and smallest rate of a schedule |
 | $t$ | training step, or time in a sequence or a diffusion process |
 | $\sigma(x)$ | the logistic sigmoid $1/(1+e^{-x})$ (always written with an argument) |
+| $z$, $\mathrm{logit}(p)$ | in Volume II, Chapter 3, the logit of an example, $z = \mathbf{w}\cdot\mathbf{x}$ (with the intercept inside $\mathbf{w}$), and the function $\mathrm{logit}(p) = \log\frac{p}{1-p}$ that gives the logit of a probability; $\sigma$ is its inverse |
+| $\mathrm{softplus}(z)$ | $\log(1 + e^z)$, a smooth version of $\max(z, 0)$ (Volume II, Chapter 3) |
+| $\hat{p}$, $\mathbf{S}$ | the predicted probability $\hat{p} = \sigma(z)$ of the label $1$, and the diagonal matrix $\mathrm{diag}(\hat{p}_n(1 - \hat{p}_n))$ in the Hessian of the logistic loss (Volume II, Chapter 3) |
 | $\mathrm{softmax}(\mathbf{z})_i$ | $e^{z_i} / \sum_j e^{z_j}$ |
 
 ## Symbols with more than one meaning

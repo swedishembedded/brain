@@ -47,7 +47,7 @@ the curriculum and appear here when they are written.
    which the same idea appears.
 2. [Linear Regression and the First Descent](02-linear-regression.md): how to find the straight line that
    best explains a set of measurements, and what "best" means.
-3. Classification and Logistic Regression: how a model outputs a probability
+3. [Classification and Logistic Regression](03-logistic-regression.md): how a model outputs a probability
    for a yes-or-no question, and how it is trained.
 4. Maximum Likelihood, Priors and Regularization: why the losses in use are the
    right ones, and what it means to prefer simple explanations.

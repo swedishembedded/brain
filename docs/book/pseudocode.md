@@ -137,6 +137,7 @@ row of `x: [T, D]`".
 | `min(a, b, ...)`, `max(a, b, ...)` | smallest and largest of two or more scalars |
 | `floor(x)`, `ceil(x)` | the largest integer not above `x`, the smallest integer not below `x`; both return an `int` |
 | `sqrt`, `exp`, `log`, `sin`, `cos` | the usual functions; `log` is the natural logarithm and `sin`, `cos` take radians |
+| `log1p(x)` | `log(1 + x)` for `x > -1`, computed so that it stays accurate when `x` is tiny (Volume I, Chapter 15); where `1 + x` would round to 1, `log1p(x)` still returns about `x` |
 | `log2(x)`, `log10(x)` | logarithms to base 2 and 10 |
 | `atan2(y, x)` | the angle in radians, in $(-\pi, \pi]$, of the point with horizontal coordinate `x` and vertical coordinate `y` (the angle from the positive horizontal axis, anticlockwise); `atan2(0, 0)` is `0` |
 | `pi`, `infinity` | the constant $\pi$ and positive infinity (`-infinity` is its negative) |

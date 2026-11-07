@@ -22,6 +22,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Bernoulli distribution**: the distribution of a single yes/no outcome coded as $1$ or $0$, equal to $1$ with probability $p$; its mean is $p$ and its variance is $p(1-p)$. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
+**binary cross-entropy**: the loss $-[y\log\hat{p} + (1 - y)\log(1 - \hat{p})]$ for a yes-or-no label $y$ and predicted probability $\hat{p}$, the cross-entropy of a Bernoulli outcome; in terms of the logit $z$ it is $\mathrm{softplus}(z) - y z$. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
+
 **bootstrap**: a method that estimates the sampling distribution of a statistic by repeatedly drawing a sample of the same size with replacement from the sample itself and recomputing the statistic, giving a standard error or interval without a formula. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **broadcasting**: the rule that aligns two shapes from the right and treats an axis of size 1 as stretched to match the other, by giving it stride 0, so that arrays of different shapes combine without copying. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
@@ -35,6 +37,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **central limit theorem**: the statement that the average of many independent draws with finite variance, shifted by the mean and divided by $\sigma/\sqrt{n}$, has a distribution that approaches the standard Gaussian whatever the distribution of the draws. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **chain rule**: the derivative of a composition is the derivative of the outer function, evaluated at the inner value, times the derivative of the inner function: $(f\circ g)'(x) = f'(g(x))\,g'(x)$. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
+**classification**: predicting which of a fixed set of categories an example belongs to, from its features, learned from labelled examples; with two categories, labelled $0$ and $1$, it is binary classification. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
 **compensated summation**: a way of adding many numbers in which a second variable carries the rounding error of each addition into the next, so that the error of the total stays near $2u$ times the sum of absolute values however many terms there are (Kahan's algorithm). *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
@@ -67,6 +71,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## D
 
 **dataset**: a collection of $N$ examples, each a vector of features paired with a label, written as the pairs $(\mathbf{x}_n, y_n)$. *([The Learning Problem](v02-learning/01-learning-problem.md))*
+
+**decision boundary**: the set of inputs where the model switches its decision, for a linear logit the line, plane or flat sheet $\mathbf{w}\cdot\mathbf{x} = 0$ (at threshold $1/2$), which separates the two predicted classes. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
 **derivative**: the limit of the difference quotient $\frac{f(x+h) - f(x)}{h}$ as $h \to 0$; the slope of the tangent to the curve of $f$ at $x$, and the rate at which $f$ changes when $x$ changes. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
@@ -177,6 +183,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **log-sum-exp**: the function $\log \sum_i e^{z_i}$, computed stably as $m + \log \sum_i e^{z_i - m}$ with $m = \max_i z_i$ so that no exponential overflows and the sum is at least $1$; it is the logarithm of a sum of probabilities given their logarithms, and the denominator of the log of a softmax. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **logarithm**: the exponent to which a base must be raised to give a number; it is the inverse of the exponent and turns a product into a sum, $\log(uv) = \log u + \log v$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
+
+**logit**: the logarithm of the odds of an event, $\log\frac{p}{1-p}$, a number on the whole real line that a weighted sum of features can model; the model's $z = \mathbf{w}\cdot\mathbf{x}$ is the logit of its predicted probability. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
 **loss function**: a rule that scores one prediction against its label with a non-negative number, zero for a perfect prediction; its average over the data is the quantity learning minimises. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
@@ -299,6 +307,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **shape**: the list of the sizes of a tensor's axes, outermost first; the number of elements is their product. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **shuffling**: rearranging a list into an order chosen uniformly among all $n!$ orders, correctly done by swapping each position from the end with a uniformly chosen position at or before it (Fisher-Yates). *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
+
+**sigmoid**: the function $\sigma(z) = 1/(1 + e^{-z})$ that maps any real number to $(0, 1)$ and is the inverse of the logit; its slope is $\sigma(1 - \sigma)$, at most $1/4$. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
 **singular value decomposition**: the factorisation $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$ of any matrix into a rotation, a stretch by non-negative singular values and a second rotation. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
