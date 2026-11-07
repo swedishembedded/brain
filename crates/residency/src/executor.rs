@@ -788,7 +788,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         // because scheduling stalled. Own catch_unwind too: `assign`'s
         // eviction fallback can ALSO drop a Hot instance.
         shed_cancelled(&mut queue, &stats);
-        refill_open_groups(&mut queue, &open_groups, &mut running_jobs, &stats);
+        refill_open_groups(&mut queue, &open_groups, &running, &mut running_jobs, &stats);
         if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs, &mut open_groups);
         })) {
@@ -1267,7 +1267,11 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         // BuiltMulti flips it to false (see on_msg's Msg::Built/BuiltMulti arms).
         let building = !matches!(target, RunTarget::Single { work: Claimed::Hot(_), .. } | RunTarget::Multi { work: ClaimedMulti::Hot(_), .. });
         if building {
-            crate::log::info(&format!("model activating: {ckey}"));
+            let cards = match &target {
+                RunTarget::Single { device, .. } => format!("{device:?}"),
+                RunTarget::Multi { devices, .. } => devices.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join("+"),
+            };
+            crate::log::info(&format!("model activating: {ckey} on {cards}"));
         }
         for j in jobs.iter() {
             running_jobs.push(RunningJob { id: j.id, model: j.model.clone(), action: j.action.clone(), key: ckey.clone(), enqueued: j.enqueued, building });
@@ -1300,8 +1304,9 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
 /// Move queued jobs into the running groups that accept them: for every open
 /// group, the oldest queued jobs of its instance and action, up to its room.
 ///
-/// A group stops taking late jobs the moment a job of ANOTHER instance is
-/// waiting: the device would otherwise be held by a busy model for as long as
+/// A group stops taking late jobs the moment a job of ANOTHER instance that is not running is
+/// waiting (one that is running, such as a sibling replica on its own card, needs no device this group holds, and is
+/// fed by its own group; blocking on it would starve both groups for as long as each had jobs queued): the device would otherwise be held by a busy model for as long as
 /// its own traffic keeps coming, and the scheduler's age and fairness policy
 /// would never get to pick the waiting model. The group then drains and the
 /// policy chooses the next one.
@@ -1325,12 +1330,12 @@ fn shed_cancelled(queue: &mut Vec<Pending>, stats: &Arc<Mutex<Stats>>) {
     }
 }
 
-fn refill_open_groups(queue: &mut Vec<Pending>, open_groups: &HashMap<InstanceKey, OpenGroup>, running_jobs: &mut Vec<RunningJob>, stats: &Arc<Mutex<Stats>>) {
+fn refill_open_groups(queue: &mut Vec<Pending>, open_groups: &HashMap<InstanceKey, OpenGroup>, running: &HashSet<InstanceKey>, running_jobs: &mut Vec<RunningJob>, stats: &Arc<Mutex<Stats>>) {
     for (key, group) in open_groups {
         if !queue.iter().any(|p| &p.key == key && p.action == group.action) {
             continue;
         }
-        if let Some(other) = queue.iter().find(|p| &p.key != key) {
+        if let Some(other) = queue.iter().find(|p| &p.key != key && !running.contains(&p.key)) {
             crate::log::debug(&format!("group {key} takes no late job: {} ({}) of instance {} is waiting", other.model, other.action, other.key));
             continue;
         }
@@ -2079,6 +2084,96 @@ mod tests {
         built.sort_unstable();
         assert_eq!(built, vec![0, 1], "both replicas are built, one per job");
         assert!(elapsed < Duration::from_millis(280), "the two jobs ran one after the other ({elapsed:?}), not on two replicas");
+    }
+
+    /// **Replicas of a continuously batching model decode concurrently.** `n` requests streaming in over two replicas finish in
+    /// about the time `n / 2` take on one: a replica's running group keeps taking its own late jobs while the other replica's
+    /// jobs wait in the queue (they wait for that replica's group, not for this one's card).
+    #[test]
+    fn replicas_of_a_batching_model_decode_in_parallel() {
+        use crate::model::JobFeed;
+        const SLOTS: usize = 8;
+        const STEPS: u32 = 20;
+        struct Open {
+            replicas: usize,
+        }
+        struct OpenInst;
+        impl ResidentModel for Open {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("open", "continuous", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("open", "default")
+            }
+            fn replicas(&self) -> usize {
+                self.replicas
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(14 * GB, 0)
+            }
+            fn batch_limit(&self) -> Option<usize> {
+                Some(SLOTS)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                // Loading weights takes long enough for the rest of the requests to arrive.
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(Box::new(OpenInst))
+            }
+        }
+        impl Instance for OpenInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                Ok(Outcome::new())
+            }
+            // Every step costs the same however many requests it carries: a decode step is bound by the weights.
+            fn run_open(&mut self, _a: &str, invs: &[Invocation], _p: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+                let mut active: Vec<(usize, u32)> = (0..invs.len()).map(|i| (i, STEPS)).collect();
+                let mut next = invs.len();
+                loop {
+                    for _ in feed.take(SLOTS.saturating_sub(active.len())) {
+                        active.push((next, STEPS));
+                        next += 1;
+                    }
+                    if active.is_empty() {
+                        if feed.close() {
+                            return true;
+                        }
+                        continue;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                    for a in active.iter_mut() {
+                        a.1 -= 1;
+                    }
+                    let (done, rest): (Vec<_>, Vec<_>) = active.into_iter().partition(|a| a.1 == 0);
+                    active = rest;
+                    for (i, _) in done {
+                        feed.finish(i, Ok(Outcome::new()));
+                    }
+                }
+            }
+        }
+        // Wall time for a first wave of one request per replica, then (once their groups run) `late` more all at once: the
+        // later wave reaches the dispatcher in one round, with jobs queued for every replica at the same time.
+        let wall = |replicas: usize, late: usize| {
+            let mut budgets = Budgets::new();
+            budgets.set(Device::Gpu(0), 16 * GB, 0).set(Device::Gpu(1), 16 * GB, 0);
+            let exec = Executor::start(vec![Arc::new(Open { replicas })], budgets, Policy::default());
+            let (tx, rx) = channel();
+            let submit = || {
+                let tx = tx.clone();
+                exec.submit(Job::new("open", "run", Invocation::new()).reply(move |r| tx.send(r).unwrap()));
+            };
+            let t = Instant::now();
+            (0..replicas).for_each(|_| submit());
+            std::thread::sleep(Duration::from_millis(150));
+            (0..late).for_each(|_| submit());
+            for _ in 0..replicas + late {
+                rx.recv_timeout(Duration::from_secs(30)).expect("every request is answered").unwrap();
+            }
+            t.elapsed()
+        };
+        let one = wall(1, SLOTS - 1);
+        let two = wall(2, 2 * (SLOTS - 1));
+        assert!(two < one.mul_f64(1.25), "16 requests on two replicas took {two:?}, 8 on one took {one:?}: the replicas did not overlap");
     }
 
     /// A model of three replicas, one per card, that fills its replicas in turn (two requests each) and follows its prefix
