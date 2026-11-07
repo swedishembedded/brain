@@ -566,6 +566,16 @@ impl ChatFormat {
         }
     }
 
+    /// The checkpoint's own chat template, whatever markup it writes: for a model whose template differs from the
+    /// Qwen renderer's although it shares ChatML's tokens (the Qwen renderer is taken for any template that opens
+    /// `<|im_start|>`, see [`Self::for_checkpoint`]).
+    ///
+    /// # Errors
+    /// The directory ships no chat template, or it does not compile.
+    pub fn own_template(dir: &std::path::Path) -> Result<ChatFormat, String> {
+        data::chat_template::ChatTemplate::from_model_dir(dir).map(|t| ChatFormat::Template(Box::new(t))).map_err(|e| format!("{}: {e}", dir.display()))
+    }
+
     /// The token this format closes an assistant turn with, when that is not
     /// the checkpoint's own eos: ChatML's `<|im_end|>`.
     pub fn end_of_turn(&self) -> Option<&'static str> {
@@ -592,9 +602,11 @@ pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<Rendere
     let chat = messages.is_some() || inv.get_bool("chat").unwrap_or(true);
     // The scanner reads tool calls in the wire form the template teaches the
     // model: Qwen3.8's `<function=...>` XML when the template writes it,
-    // otherwise the JSON `<tool_call>` payload.
+    // otherwise the JSON `<tool_call>` payload, and drops the framing newlines
+    // a template that writes its reply parts on separate lines puts there.
     let flavor = match template {
         Some(t) if t.source().contains("<function=") => qwen_chat::TemplateFlavor::Qwen38,
+        Some(t) if t.frames_replies_with_newlines() => qwen_chat::TemplateFlavor::JsonFramed,
         _ => qwen_chat::TemplateFlavor::Qwen3,
     };
     if !chat {
@@ -615,22 +627,42 @@ pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<Rendere
         }
         None => turns.push(json!({"role": "user", "content": inv.get_str("prompt").unwrap_or_default()})),
     }
-    let turns = data::chat_template::parse_json_ordered(&serde_json::Value::Array(turns).to_string()).map_err(|e| e.to_string())?;
-    let tools = (!tools.is_empty())
-        .then(|| data::chat_template::parse_json_ordered(&format!("[{}]", tools.join(","))).map_err(|e| e.to_string()))
-        .transpose()?;
-    let mut extra = std::collections::BTreeMap::new();
+    let turns = t.conversation(&turns).map_err(|e| e.to_string())?;
+    // The schemas as the request wrote them, key order and all: `tojson` in a template prints them in that order,
+    // which `parse_tools`' re-serialization (sorted keys) would change. A `tool_choice` of `none` emptied `tools`.
+    let tools = match (tools.is_empty(), inv.get_str("tools")) {
+        (false, Some(raw)) => Some(data::chat_template::parse_json_ordered(&raw).map_err(|e| format!("tools JSON: {e}"))?),
+        _ => None,
+    };
+    let mut extra = template_kwargs(inv)?;
     let text = if inv.get_bool("enable_thinking") == Some(false) {
         // However this model's template reaches no-think mode (see
         // `ChatTemplate::render_no_think`), the caller only says so.
         t.render_no_think(turns, tools, &extra)
     } else {
-        extra.insert("enable_thinking".to_string(), data::chat_template::Value::from(true));
+        extra.entry("enable_thinking".to_string()).or_insert_with(|| data::chat_template::Value::from(true));
         t.render(turns, tools, true, &extra)
     }
     .map_err(|e| e.to_string())?;
     let thinking_open = text.trim_end_matches('\n').ends_with("<think>");
     Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open, raw: false })
+}
+
+/// The extra variables a request hands its chat template (`chat_template_kwargs` of the OpenAI extension): a JSON
+/// object whose members the template reads by name. A template that reads `enable_thinking` gets `true` unless these name it.
+fn template_kwargs(inv: &Invocation) -> Result<std::collections::BTreeMap<String, data::chat_template::Value>, String> {
+    let Some(raw) = inv.get_str("chat_template_kwargs").filter(|s| !s.is_empty()) else { return Ok(Default::default()) };
+    let parsed = data::chat_template::parse_json_ordered(&raw).map_err(|e| format!("chat_template_kwargs: {e}"))?;
+    if parsed.kind() != data::chat_template::ValueKind::Map {
+        return Err("chat_template_kwargs must be a JSON object".to_string());
+    }
+    let keys = parsed.try_iter().map_err(|e| format!("chat_template_kwargs: {e}"))?;
+    keys.map(|key| {
+        let name = key.as_str().ok_or("chat_template_kwargs: names must be strings")?.to_string();
+        let value = parsed.get_item(&key).map_err(|e| format!("chat_template_kwargs.{name}: {e}"))?;
+        Ok((name, value))
+    })
+    .collect()
 }
 
 /// [`parse_request`] in `format` (see [`render_prompt_as`]).
@@ -679,7 +711,13 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
 /// from text). Stop strings are not applied: they end a decode, and a
 /// finished reply has already ended.
 pub fn parse_reply(inv: &Invocation, text: &str) -> Result<Outcome, String> {
-    let prompt = render_prompt(inv)?;
+    parse_reply_as(&ChatFormat::Qwen, inv, text)
+}
+
+/// [`parse_reply`] for a request rendered in `format` (see [`render_prompt_as`]): the flavor and the open think
+/// block the prompt decided are the ones the reply is scanned with.
+pub fn parse_reply_as(format: &ChatFormat, inv: &Invocation, text: &str) -> Result<Outcome, String> {
+    let prompt = render_prompt_as(format, inv)?;
     let seq = SeqState {
         stops: Vec::new(),
         cancel: CancelToken::default(),

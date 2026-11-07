@@ -37,6 +37,8 @@ use std::ops::Range;
 use minijinja::Environment;
 /// The value type templates render and [`parse_json_ordered`] produces.
 pub use minijinja::Value;
+/// What kind of value a [`Value`] is (a map, a string, ...).
+pub use minijinja::value::ValueKind;
 
 #[derive(Debug)]
 pub struct TemplateError(pub(crate) String);
@@ -231,11 +233,11 @@ impl ChatTemplate {
     /// downloads it alongside `tokenizer.json` whenever the upstream repo
     /// ships one), so this needs no separate import-time wiring.
     ///
-    /// **Falls back to a standalone template file** when
-    /// `tokenizer_config.json` has no inline `chat_template` field (or is
-    /// itself absent): `chat_template.json` (`{"chat_template": "..."}`,
-    /// checked first) then `chat_template.jinja` (a bare Jinja file, no JSON
-    /// wrapper). Real, current `transformers` resolution: recently-published
+    /// **Prefers a standalone template file** to `tokenizer_config.json`'s
+    /// inline `chat_template` (and uses one when the config has none or is
+    /// itself absent): `chat_template.jinja` (a bare Jinja file, no JSON
+    /// wrapper) first, then `chat_template.json` (`{"chat_template": "..."}`).
+    /// Real, current `transformers` resolution: recently-published
     /// checkpoints moved the template OUT of `tokenizer_config.json` into one
     /// of these two standalone files - a checkpoint that ships only
     /// `chat_template.json` is common now, not an edge case (confirmed
@@ -257,26 +259,24 @@ impl ChatTemplate {
         let inline = tcfg.as_ref().and_then(|c| c.get("chat_template")).and_then(|v| v.as_str()).map(str::to_string);
         let json_path = dir.join("chat_template.json");
         let jinja_path = dir.join("chat_template.jinja");
-        let src = match inline {
-            Some(s) => s,
-            None => {
-                let from_json = std::fs::read_to_string(&json_path)
-                    .ok()
-                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                    .and_then(|v| v.get("chat_template").and_then(|v| v.as_str()).map(str::to_string));
-                match from_json {
-                    Some(s) => s,
-                    None => std::fs::read_to_string(&jinja_path).map_err(|_| {
-                        TemplateError(format!(
-                            "no chat template found: checked \"chat_template\" in {} and {}, and the bare file {}",
-                            tcfg_path.display(),
-                            json_path.display(),
-                            jinja_path.display()
-                        ))
-                    })?,
-                }
-            }
+        // The standalone files win over the config's inline string, as in `transformers`: a release that ships
+        // `chat_template.jinja` may leave an older, simpler template in `tokenizer_config.json` (Ripple's has no
+        // tools), and the file is the one its authors render with.
+        let from_jinja = std::fs::read_to_string(&jinja_path).ok();
+        let from_json = || {
+            std::fs::read_to_string(&json_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|v| v.get("chat_template").and_then(|v| v.as_str()).map(str::to_string))
         };
+        let src = from_jinja.or_else(from_json).or(inline).ok_or_else(|| {
+            TemplateError(format!(
+                "no chat template found: checked \"chat_template\" in {} and {}, and the bare file {}",
+                tcfg_path.display(),
+                json_path.display(),
+                jinja_path.display()
+            ))
+        })?;
         let mut t = Self::compile(&src)?;
         // The SAME tokenizer_config.json declares the special tokens many
         // templates reference (`{{ bos_token }}` heads Llama/Mistral prompts)
@@ -331,9 +331,46 @@ impl ChatTemplate {
     /// through (Qwen3's `arguments is string` branch). The messages handed to
     /// it must then carry the arguments parsed, as `transformers` does for a
     /// served request, or rendering fails on the first tool call.
+    ///
+    /// A template that serializes the arguments itself (`arguments | tojson`) with no branch for text
+    /// (`arguments is string`) reads objects too: handed the JSON text it would encode it a second time.
     #[must_use]
     pub fn reads_argument_objects(&self) -> bool {
-        self.source.contains("arguments|items") || self.source.contains("arguments | items")
+        let src = &self.source;
+        let iterates = src.contains("arguments|items") || src.contains("arguments | items");
+        let serializes = (src.contains("arguments|tojson") || src.contains("arguments | tojson")) && !src.contains("arguments is string");
+        iterates || serializes
+    }
+
+    /// Whether this template writes an assistant turn with one framing newline between its parts, the layout
+    /// `<think>\n{reasoning}\n</think>\n{content}` and `{content}\n<tool_call>`, read off a probe conversation.
+    /// A reply generated in that layout is scanned back with the framing newlines removed
+    /// ([`crate::qwen_chat::TemplateFlavor::JsonFramed`]), or rendering the parsed message again would add them a
+    /// second time on every turn.
+    #[must_use]
+    pub fn frames_replies_with_newlines(&self) -> bool {
+        let render = |assistant: &str| {
+            let probe = parse_json_ordered(&format!(r#"[{{"role":"user","content":"q"}},{assistant}]"#)).ok()?;
+            self.render(probe, None, false, &BTreeMap::new()).ok()
+        };
+        let reasoned = render(r#"{"role":"assistant","reasoning_content":"PROBE-REASONING","content":"PROBE-CONTENT"}"#);
+        let calling = render(r#"{"role":"assistant","content":"PROBE-CONTENT","tool_calls":[{"id":"c","type":"function","function":{"name":"probe_tool","arguments":{"a":1}}}]}"#);
+        let framed = |text: &Option<String>, needle: &str| text.as_deref().is_some_and(|t| t.contains(needle));
+        framed(&reasoned, "<think>\nPROBE-REASONING\n</think>\nPROBE-CONTENT") && framed(&calling, "PROBE-CONTENT\n<tool_call>\n")
+    }
+
+    /// The conversation of a served request as this template reads it: `turns` are the request's messages as
+    /// JSON (a tool call's `arguments` the JSON text a client sent), and the result is the ordered value to
+    /// render, with each call's arguments parsed (key order kept) when [`Self::reads_argument_objects`].
+    /// Arguments that are not JSON stay text, as `transformers` leaves them.
+    ///
+    /// # Errors
+    /// The messages cannot be turned into template values.
+    pub fn conversation(&self, turns: &[serde_json::Value]) -> Result<Value, TemplateError> {
+        if !self.reads_argument_objects() {
+            return parse_json_ordered(&serde_json::Value::Array(turns.to_vec()).to_string());
+        }
+        Ok(Value::from(turns.iter().map(|turn| with_argument_objects(turn, false)).collect::<Vec<_>>()))
     }
 
     /// Render `messages` (a JSON array of `{role, content, tool_calls?,
@@ -541,6 +578,25 @@ fn is_leading_system(messages: &[Value], i: usize) -> bool {
 
 /// The context variables that turn reasoning off in the templates that have a
 /// switch: `enable_thinking` (Qwen3, Qwen3.8) and `thinking` (DeepSeek-V3.1).
+/// `node` as a template value, with the `arguments` of every tool call under it parsed as JSON where they are
+/// JSON text. `in_call` marks `node` as a tool call (or its `function`), whose `arguments` field is the one parsed.
+fn with_argument_objects(node: &serde_json::Value, in_call: bool) -> Value {
+    let Some(object) = node.as_object() else { return Value::from_serialize(node) };
+    let fields: BTreeMap<String, Value> = object
+        .iter()
+        .map(|(key, value)| {
+            let converted = match (key.as_str(), value) {
+                ("tool_calls", serde_json::Value::Array(calls)) => Value::from(calls.iter().map(|call| with_argument_objects(call, true)).collect::<Vec<_>>()),
+                ("function", _) if in_call => with_argument_objects(value, true),
+                ("arguments", serde_json::Value::String(text)) if in_call => parse_json_ordered(text).unwrap_or_else(|_| Value::from(text.as_str())),
+                _ => Value::from_serialize(value),
+            };
+            (key.clone(), converted)
+        })
+        .collect();
+    Value::from_serialize(&fields)
+}
+
 fn no_think_switches() -> BTreeMap<String, Value> {
     BTreeMap::from([("enable_thinking".to_string(), Value::from(false)), ("thinking".to_string(), Value::from(false))])
 }
@@ -772,8 +828,7 @@ mod tests {
     /// SPEC: a checkpoint shipping a BARE `chat_template.jinja` (no JSON
     /// wrapper at all - the other real `transformers` convention) loads from
     /// that file when neither `tokenizer_config.json` nor `chat_template.json`
-    /// has the template. Checked in preference order: inline field, then
-    /// `chat_template.json`, then `chat_template.jinja` last.
+    /// has the template.
     #[test]
     fn from_model_dir_falls_back_to_bare_chat_template_jinja() {
         let dir = std::env::temp_dir().join(format!("brain-chat-template-standalone-jinja-{}", std::process::id()));
@@ -783,6 +838,26 @@ mod tests {
         let t = ChatTemplate::from_model_dir(&dir).expect("load");
         let messages = parse_json_ordered(r#"[{"role":"user","content":"hi"}]"#).unwrap();
         assert_eq!(t.render(messages, None, false, &BTreeMap::new()).unwrap(), "<|user|>hi");
+    }
+
+    /// SPEC: the standalone files outrank `tokenizer_config.json`'s inline string, `chat_template.jinja` first,
+    /// as in `transformers`. Ripple ships a tools-aware `chat_template.jinja` beside a `tokenizer_config.json`
+    /// whose inline template is a plain ChatML loop with no tools and no reasoning.
+    #[test]
+    fn from_model_dir_prefers_the_standalone_template_files_to_the_inline_one() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-template-precedence-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tokenizer_config.json"), r#"{"chat_template": "inline"}"#).unwrap();
+        let render = || {
+            let messages = parse_json_ordered(r#"[{"role":"user","content":"hi"}]"#).unwrap();
+            ChatTemplate::from_model_dir(&dir).expect("load").render(messages, None, false, &BTreeMap::new()).unwrap()
+        };
+        assert_eq!(render(), "inline");
+        std::fs::write(dir.join("chat_template.json"), r#"{"chat_template": "json"}"#).unwrap();
+        assert_eq!(render(), "json");
+        std::fs::write(dir.join("chat_template.jinja"), "jinja").unwrap();
+        assert_eq!(render(), "jinja");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// SPEC: with NO `tokenizer_config.json` at all, a standalone

@@ -119,6 +119,12 @@ pub enum TemplateFlavor {
     Qwen3,
     /// The Qwen3.8-generation template (Qwen3.8 checkpoints, e.g. 27B).
     Qwen38,
+    /// JSON `<tool_call>` payloads like [`Self::Qwen3`], from a template that puts each part of a reply on its own
+    /// line: `<think>\n{reasoning}\n</think>\n{content}` and `\n<tool_call>`. The scan direction drops exactly
+    /// those framing newlines (the one after `</think>`, the one before a `<tool_call>`), so a parsed reply renders
+    /// back to the tokens that were generated instead of gaining a newline per turn. Only a prompt rendered by such
+    /// a template selects it (`ChatTemplate::frames_replies_with_newlines`); the scanner does not sniff for it.
+    JsonFramed,
 }
 
 /// Rendering knobs the Jinja template reads from the caller's generation
@@ -886,6 +892,11 @@ pub struct ChatScanner {
     /// block (prefilled `<think>\n`) - there the framing newline belonged
     /// to the prompt, not to the generation.
     think_lead_nl: bool,
+    /// [`TemplateFlavor::JsonFramed`]: the `</think>` just closed, so the newline the template writes after it
+    /// (if the next text starts with one) is framing, not content.
+    close_newline_due: bool,
+    /// The closing brace of the current JSON call object was seen in the gap before `</tool_call>`.
+    call_object_closed: bool,
     tool_calls: Vec<ToolCallMsg>,
     next_index: u32,
     /// `call_<hex>` drawn once per scanner (one per response); a call's id is
@@ -926,6 +937,8 @@ impl ChatScanner {
             content: String::new(),
             reasoning: String::new(),
             think_lead_nl: false,
+            close_newline_due: false,
+            call_object_closed: false,
             tool_calls: Vec::new(),
             next_index: 0,
             id_prefix: format!("call_{:016x}", crate::rng::random_seed()),
@@ -1093,6 +1106,7 @@ impl ChatScanner {
     }
 
     fn close_call(&mut self, out: &mut Vec<ChatEvent>) {
+        self.call_object_closed = false;
         out.push(ChatEvent::ToolCallEnd { index: self.next_index });
         self.tool_calls.push(ToolCallMsg {
             id: self.call_id(),
@@ -1125,6 +1139,15 @@ impl ChatScanner {
                     return;
                 }
                 St::Content => {
+                    if self.close_newline_due {
+                        if self.pending.is_empty() {
+                            return;
+                        }
+                        self.close_newline_due = false;
+                        if self.pending.starts_with('\n') {
+                            self.pending.remove(0);
+                        }
+                    }
                     if !self.scan_for_marker(out, &MARKERS_CONTENT, false) {
                         return;
                     }
@@ -1137,7 +1160,7 @@ impl ChatScanner {
                 St::CallHeader => {
                     let chars: Vec<char> = self.pending.chars().collect();
                     let outcome = match self.flavor {
-                        TemplateFlavor::Qwen3 => parse_header(&chars),
+                        TemplateFlavor::Qwen3 | TemplateFlavor::JsonFramed => parse_header(&chars),
                         TemplateFlavor::Qwen38 => parse_xml_header(&chars),
                     };
                     match outcome {
@@ -1157,7 +1180,7 @@ impl ChatScanner {
                             self.cur_args.clear();
                             out.push(ChatEvent::ToolCallStart { index: self.next_index, id: self.call_id(), name });
                             self.state = match self.flavor {
-                                TemplateFlavor::Qwen3 => St::CallArgs { in_string: false, escape: false, depth: 0, started: false },
+                                TemplateFlavor::Qwen3 | TemplateFlavor::JsonFramed => St::CallArgs { in_string: false, escape: false, depth: 0, started: false },
                                 TemplateFlavor::Qwen38 => St::XmlBetween,
                             };
                         }
@@ -1294,12 +1317,21 @@ impl ChatScanner {
                             out.push(ChatEvent::Reasoning(text));
                         }
                     } else {
-                        self.content.push_str(&text);
-                        out.push(ChatEvent::Content(text));
+                        // The newline a framing template writes before `<tool_call>` is not content.
+                        if marker == "<tool_call>" && self.flavor == TemplateFlavor::JsonFramed && text.ends_with('\n') {
+                            text.pop();
+                        }
+                        if !text.is_empty() {
+                            self.content.push_str(&text);
+                            out.push(ChatEvent::Content(text));
+                        }
                     }
                 }
                 if marker == "<think>" {
                     self.think_lead_nl = true;
+                }
+                if marker == "</think>" {
+                    self.close_newline_due = self.flavor == TemplateFlavor::JsonFramed;
                 }
                 self.pending.drain(..marker.len());
                 self.state = if marker == "<think>" {
@@ -1318,7 +1350,11 @@ impl ChatScanner {
                 } else {
                     withheld_suffix_len(&self.pending, markers)
                 };
-                let emit_len = self.pending.len() - keep;
+                let mut emit_len = self.pending.len() - keep;
+                // A newline last in the content may be the framing one before a `<tool_call>` still to come.
+                if !reasoning && self.flavor == TemplateFlavor::JsonFramed && self.pending[..emit_len].ends_with('\n') {
+                    emit_len -= 1;
+                }
                 if emit_len > 0 {
                     let mut text: String = self.pending.drain(..emit_len).collect();
                     if reasoning {
@@ -1375,8 +1411,23 @@ impl ChatScanner {
 
     /// The first `len` bytes of `pending` are about to be dropped as the gap before `</tool_call>`: fine when it is
     /// the whitespace the model writes there, an anomaly when it is anything else.
+    ///
+    /// A JSON call is `{"name": ..., "arguments": ...}`: the scan ends the arguments at their own closing brace, so
+    /// the call object's `}` is the one non-blank thing the gap is meant to hold.
     fn note_discarded_tail(&mut self, len: usize) {
-        if !self.pending[..len].trim().is_empty() {
+        let json_call = self.flavor != TemplateFlavor::Qwen38;
+        let mut stray = false;
+        for ch in self.pending[..len].chars() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            if ch == '}' && json_call && !self.call_object_closed {
+                self.call_object_closed = true;
+            } else {
+                stray = true;
+            }
+        }
+        if stray {
             self.note(ScanAnomaly::DiscardedToolCallTail);
         }
     }
@@ -2167,6 +2218,74 @@ mod tests {
         }
         scanner.finish(&mut events);
         scanner
+    }
+
+    const FRAMED_CALL: &str = "<tool_call>\n{\"name\": \"f\", \"arguments\": {\"a\": 1}}\n</tool_call>";
+
+    /// What a [`TemplateFlavor::JsonFramed`] scan of `text` reports: reasoning, content and the calls as
+    /// `name(arguments)`, fed `chunk` characters at a time.
+    fn framed(text: &str, chunk: usize) -> (String, String, Vec<String>) {
+        let s = scan_all(text, false, TemplateFlavor::JsonFramed, chunk);
+        (s.reasoning().to_string(), s.content().to_string(), s.tool_calls().iter().map(|c| format!("{}({})", c.name, c.arguments)).collect())
+    }
+
+    /// The reply layout of a template that frames each part with one newline: reasoning and answer lose the
+    /// newline the template adds around `</think>`, a call loses the one before `<tool_call>`, however the text
+    /// is cut into chunks. The expectations are the reference parser's (`ripple_format.py`'s reasoning and tool
+    /// detectors), case for case.
+    #[test]
+    fn a_framed_reply_scans_without_its_framing_newlines() {
+        let call = "f({\"a\": 1})".to_string();
+        type Expected<'a> = (&'a str, &'a str, Vec<String>);
+        let cases: Vec<(String, Expected)> = vec![
+            ("<think>\nplan\n</think>\nanswer".into(), ("plan", "answer", vec![])),
+            ("no thinking here".into(), ("", "no thinking here", vec![])),
+            ("<think>\nplan\n</think>\n".into(), ("plan", "", vec![])),
+            ("<think>\nplan\n</think>\n\nanswer".into(), ("plan", "\nanswer", vec![])),
+            ("<think>\nline one\nline two\n</think>\nlast line\n".into(), ("line one\nline two", "last line\n", vec![])),
+            ("<think>\nplan\n</think>\n\n".to_string() + FRAMED_CALL, ("plan", "", vec![call.clone()])),
+            ("<think>\nplan\n</think>\nChecking.\n".to_string() + FRAMED_CALL, ("plan", "Checking.", vec![call.clone()])),
+            ("<think>\nplan\n</think>\nChecking.\n\n".to_string() + FRAMED_CALL, ("plan", "Checking.\n", vec![call.clone()])),
+            (format!("Checking.\n{FRAMED_CALL}"), ("", "Checking.", vec![call.clone()])),
+            (format!("{FRAMED_CALL}\n{FRAMED_CALL}"), ("", "", vec![call.clone(), call.clone()])),
+            (format!("<think>\nplan\n</think>\n\n{FRAMED_CALL}\n{FRAMED_CALL}"), ("plan", "", vec![call.clone(), call.clone()])),
+            ("<think>\nstill reason".into(), ("still reason", "", vec![])),
+            ("<think>\nplan\n</think>".into(), ("plan", "", vec![])),
+            ("answer ending in a newline\n".into(), ("", "answer ending in a newline\n", vec![])),
+        ];
+        for (text, (reasoning, content, calls)) in cases {
+            let want = (reasoning.to_string(), content.to_string(), calls);
+            for chunk in [1, 2, 5, usize::MAX] {
+                assert_eq!(framed(&text, chunk), want, "{text:?} in chunks of {chunk}");
+            }
+        }
+    }
+
+    /// The same scan emits its pieces as the model produces them: a call streams as a start (its name), argument
+    /// fragments that concatenate to the arguments, and an end, with no framing newline in any content delta.
+    #[test]
+    fn a_framed_reply_streams_deltas_without_framing_newlines() {
+        let text = format!("<think>\nplan\n</think>\nChecking.\n{FRAMED_CALL}");
+        let mut scanner = ChatScanner::with_flavor(false, TemplateFlavor::JsonFramed);
+        let mut events = Vec::new();
+        for ch in text.chars() {
+            scanner.push(&ch.to_string(), &mut events);
+        }
+        scanner.finish(&mut events);
+        let joined = |pick: fn(&ChatEvent) -> Option<&str>| events.iter().filter_map(|e| pick(e)).collect::<String>();
+        assert_eq!(joined(|e| if let ChatEvent::Reasoning(t) = e { Some(t) } else { None }), "plan");
+        assert_eq!(joined(|e| if let ChatEvent::Content(t) = e { Some(t) } else { None }), "Checking.");
+        assert_eq!(joined(|e| if let ChatEvent::ToolCallArgs { fragment, .. } = e { Some(fragment) } else { None }), "{\"a\": 1}");
+        let shape: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                ChatEvent::ToolCallStart { name, .. } => Some(name.as_str()),
+                ChatEvent::ToolCallEnd { .. } => Some("end"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shape, ["f", "end"]);
+        assert!(scanner.anomalies().is_empty(), "{:?}", scanner.anomalies());
     }
 
     const XML_CALL: &str = "<tool_call>\n<function=f>\n<parameter=a>\n1\n</parameter>\n</function>\n</tool_call>";
