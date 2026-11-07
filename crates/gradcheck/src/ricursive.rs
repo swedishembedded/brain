@@ -48,8 +48,17 @@ pub fn check_ricursive(seed: u64) -> Report {
 
 /// Entry-by-entry check of the tensors a reverse pass folds: the embedding rows the batch touches (and one it does
 /// not), and every layer's value-residual gate.
+///
+/// The feed-forward clamp is off here. At the tiny model's activation scale a perturbation of one embedding entry
+/// (scaled by the embedding multiplier and carried through every layer's value path) moves hundreds of
+/// activations across a clamp's kink, and a finite difference across a kink reads a slope that exists on neither
+/// side: the error shrinks with the step (0.19 at 2e-3, 0.06 at 2e-4 on the weights of the PyTorch fixture, whose
+/// analytic gradients equal autograd's to 4.5e-5), so it is the difference that is wrong, not the gradient. The
+/// clamp's backward is held by [`check_ricursive`] (a direction averages the kinks out), by
+/// `clamp_range_bwd`'s own kernel test and by that PyTorch comparison.
 pub fn check_ricursive_folded(seed: u64) -> Report {
-    let cfg = TrainConfig::tiny();
+    let mut cfg = TrainConfig::tiny();
+    cfg.model.ffn_clamp_threshold = None;
     let layers = cfg.model.num_hidden_layers;
     let model = tiny(cfg, seed);
     let (x, _) = batch(32);
