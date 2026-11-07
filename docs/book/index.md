@@ -32,6 +32,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 3. [Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md): How can a list of numbers have a length and a direction, and how do we measure how alike two lists are?
 4. [Matrices as Linear Maps](v01-mathematics/04-matrices.md): What does it mean to multiply a matrix by a vector, and why is that the central operation of machine learning?
 5. [Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md): How are vectors, matrices and higher-dimensional arrays actually laid out in memory and indexed?
+6. [Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md): What hidden structure does a matrix have, and how can a big matrix be approximated by small ones?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 
