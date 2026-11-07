@@ -139,7 +139,7 @@ teardown_file() {
   head -c 6000 "$REPO/AGENTS.md" >"$SCRATCH/corpus/a.txt"
   head -c 6000 "$REPO/docs/reference/models/ricursive.md" >"$SCRATCH/corpus/b.txt"
   "$BRAIN" lsa distill --arch ricursive --checkpoint "$SCRATCH/scripted/$MODEL" --corpus "$SCRATCH/corpus" --out "$SCRATCH/indexer.safetensors" \
-    --tokens 1024 --train-docs 2 --epochs 1 --queries 8 --top-k 32 --top-p 16 --index-dim 8 --cluster-block 16 --window 16 --sink 2 --device cpu >"$SCRATCH/distill.log" 2>&1
+    --tokens 1024 --train-docs 2 --epochs 1 --queries 8 --top-k 32 --top-p 16 --index-dim 8 --cluster-block 16 --window 16 --sink 2 --device cpu >"$SCRATCH/distill.log" 2>&1 || { cat "$SCRATCH/distill.log" >&3; false; }
   [ -f "$SCRATCH/indexer.safetensors" ]
   # shellcheck disable=SC1090
   (
