@@ -1832,14 +1832,16 @@ pub fn emit_held_out_records(base: &str, dataset: &Path, out: &Path, thinking: b
     // The trainer reads its records from a file; so does this, through the SAME
     // reader, so the rendering (per-answer examples, the no-think block) cannot
     // differ from the run's.
-    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let tmp = std::env::temp_dir().join(format!("brain-held-out-{}-{}.jsonl", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    // Staged where only this user can read it (`capability::scratch`): the
+    // records are someone's training data.
+    let scratch = capability::scratch::scratch_dir("held-out").map_err(|e| Error::Backend(format!("a scratch directory for the held-out records: {e}")))?;
+    let tmp = scratch.join("held-out.jsonl");
     std::fs::write(&tmp, held.iter().map(|r| r.as_str()).collect::<Vec<_>>().join("\n")).map_err(|e| Error::Backend(format!("{}: {e}", tmp.display())))?;
     let no_think = if thinking { None } else { tmpl.no_think_block() };
     let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
     let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: false, images: &data::chat::TextOnly::TRAINER };
     let samples = asked.read(&tmp);
-    std::fs::remove_file(&tmp).ok();
+    std::fs::remove_dir_all(&scratch).ok();
     let samples = samples?;
     let (mut tokens, mut positions, mut lines) = (0usize, 0usize, String::new());
     for (at, sample) in samples.iter().enumerate() {

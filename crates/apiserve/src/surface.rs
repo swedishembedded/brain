@@ -175,32 +175,11 @@ pub fn write_keys(surfaces: &[Surface], path: &Path) -> std::io::Result<()> {
     write_private(path, body.as_bytes())
 }
 
-/// Make `dir` a directory only this user can write into: created owner-only
-/// when missing, refused when it exists but belongs to another user or others
-/// may write to it. A client trusts the URL a connection record names, so a
-/// record must never sit where someone else could plant or replace one (the
-/// per-user temp-dir fallback lives in a shared `/tmp`).
-pub fn private_dir(dir: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-        let meta = std::fs::symlink_metadata(dir)?;
-        // SAFETY: geteuid has no preconditions and cannot fail.
-        let me = unsafe { libc::geteuid() };
-        if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o022 != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("{} is not a directory owned by this user and closed to others", dir.display()),
-            ));
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::create_dir_all(dir)
-    }
-}
+/// Make `dir` a directory only this user can enter: the one implementation,
+/// `capability::scratch::private_dir`. A client trusts the URL a connection
+/// record names, so a record must never sit where someone else could plant,
+/// replace or read one (the per-user temp-dir fallback lives in a shared `/tmp`).
+pub use capability::scratch::private_dir;
 
 /// Write `body` to `path` readable by its owner only. A secret is never
 /// visible to anyone else, not even for the moment between create and chmod:

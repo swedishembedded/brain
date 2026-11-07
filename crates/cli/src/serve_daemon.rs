@@ -40,6 +40,8 @@
 #[cfg(unix)]
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::io::{self, Read, Seek, Write};
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
@@ -170,9 +172,12 @@ pub enum Claim {
 /// Try to claim the single-server lock, writing our pid into it on success.
 pub fn claim(path: &Path) -> io::Result<Claim> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        // The state directory holds the lock, the log (which can carry the
+        // API keys) and the connection records: only this user may enter it,
+        // and one another user made first is refused, never used.
+        capability::scratch::private_dir(parent)?;
     }
-    let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
+    let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o600).open(path)?;
     // LOCK_NB: report the conflict rather than blocking behind a healthy
     // server, so `brain serve -d` fails fast the way `docker run` does on a
     // taken port.
@@ -363,7 +368,7 @@ pub fn lifecycle(mut argv: Vec<String>, subcommand: usize) -> Vec<String> {
 /// signal being waited on.
 pub fn detach_process(ready: &Path, pid_file: &Path, log: &Path, timeout: Duration) -> io::Result<()> {
     if let Some(parent) = log.parent() {
-        std::fs::create_dir_all(parent)?;
+        capability::scratch::private_dir(parent)?;
     }
     // A ready file left by a previous run would make the wait below return
     // instantly against a server that is not up yet.
@@ -425,7 +430,7 @@ pub fn detach_process(ready: &Path, pid_file: &Path, log: &Path, timeout: Durati
 /// relative path the caller already resolved (a `--models-dir`, a
 /// `--ready-file`, a checkpoint path on the command line).
 fn redirect_stdio(log: &Path) -> io::Result<()> {
-    let out = OpenOptions::new().create(true).append(true).open(log)?;
+    let out = OpenOptions::new().create(true).append(true).mode(0o600).open(log)?;
     let null = OpenOptions::new().read(true).open("/dev/null")?;
     unsafe {
         libc::dup2(null.as_raw_fd(), libc::STDIN_FILENO);
@@ -452,7 +457,7 @@ impl LogTail {
     /// now on is echoed; the previous run's log is not this run's progress.
     /// Created if absent, since the daemon has not opened it yet.
     fn from_end(path: &Path) -> LogTail {
-        let opened = OpenOptions::new().read(true).append(true).create(true).open(path);
+        let opened = OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path);
         LogTail(opened.ok().and_then(|mut f| f.seek(io::SeekFrom::End(0)).ok().map(|_| f)))
     }
 
@@ -529,7 +534,8 @@ mod tests {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("brain-serve-daemon-{tag}-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // A state directory must be this user's alone, as the server's is.
+        capability::scratch::private_dir(&dir).unwrap();
         dir
     }
 

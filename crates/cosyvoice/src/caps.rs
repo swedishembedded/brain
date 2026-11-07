@@ -145,19 +145,23 @@ struct ScratchWav(std::path::PathBuf);
 
 impl ScratchWav {
     fn write(samples: &[f32], sample_rate: u32) -> Result<ScratchWav, String> {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let path = std::env::temp_dir().join(format!("brain-cosyvoice-ref-{}-{nanos}.wav", std::process::id()));
+        // A caller's voice sample: staged where only this user can read it,
+        // in a directory made for this one call (`capability::scratch`).
+        let dir = capability::scratch::scratch_dir("cosyvoice-ref").map_err(|e| format!("cosyvoice synth: a scratch directory for the reference clip: {e}"))?;
+        let path = dir.join("ref.wav");
         audio::wav::write(&path, samples, sample_rate).map_err(|e| format!("cosyvoice synth: writing the reference clip to a scratch wav: {e}"))?;
         Ok(ScratchWav(path))
     }
     fn path_str(&self) -> &str {
-        self.0.to_str().expect("std::env::temp_dir() joined with an ASCII filename is always valid UTF-8")
+        self.0.to_str().expect("the scratch root joined with ASCII names is valid UTF-8")
     }
 }
 
 impl Drop for ScratchWav {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if let Some(dir) = self.0.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 

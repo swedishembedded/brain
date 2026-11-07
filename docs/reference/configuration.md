@@ -201,7 +201,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_QWEN3ASR_WINDOW` / `BRAIN_QWEN3ASR_MAXNEW` | Qwen3-ASR window (s) / max tokens | 30 / 200 |
 | `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` | forecast horizon / sample count | 64 / 1 |
 | `BRAIN_MOCK_DELAY_MS` | mock model artificial latency | 0 |
-| `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache dir (ASR/NPU) | `$TMPDIR/brain_ov_cache` |
 | `BRAIN_GPT2` | stdio-loop GPT checkpoint (also `--gpt`) | fake echo model |
 
 The Qwen3 and Qwen3.8 serving sizes are `brain serve` flags, not variables:
@@ -221,7 +220,6 @@ page under `docs/reference/models/`.
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup | `$XDG_DATA_HOME/brain/models` |
-| `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache directory | `$TMPDIR/brain_ov_cache` |
 | `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |
 | `BRAIN_QWEN3TTS_RES` | resources base for `brain qwen3tts serve`'s default paths | unset |
 | `BRAIN_HUB_ENDPOINT` | additional allowed host for model downloads (checked before the standard `HF_ENDPOINT`), both as a base URL and as a redirect target - never a blanket "trust any redirect" | the standard hub host only |

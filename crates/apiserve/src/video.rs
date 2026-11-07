@@ -364,7 +364,10 @@ pub struct VideoJobs {
 
 impl Default for VideoJobs {
     fn default() -> VideoJobs {
-        VideoJobs::new(std::env::temp_dir().join(format!("brain-videos-{}", std::process::id())), DEFAULT_SPOOL_BYTES)
+        // Under this user's private root when there is one; `private_dir` at
+        // first use refuses a spool someone else made either way.
+        let root = capability::scratch::private_root().unwrap_or_else(|_| std::env::temp_dir());
+        VideoJobs::new(root.join(format!("videos-{}", std::process::id())), DEFAULT_SPOOL_BYTES)
     }
 }
 
@@ -519,12 +522,17 @@ impl Drop for VideoJobs {
     }
 }
 
+/// `dir`, made a directory only this user can enter
+/// (`capability::scratch::private_dir`): a spool another local user made first
+/// is refused, never written into.
 fn create_private_dir(dir: &FsPath) -> Result<(), String> {
-    crate::surface::private_dir(dir).map_err(|e| format!("the video spool {}: {e}", dir.display()))
+    capability::scratch::private_dir(dir).map_err(|e| format!("the video spool {}: {e}", dir.display()))
 }
 
+/// Where uploaded clips are staged for decoding, under this user's private root.
 fn private_temp_dir() -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join(format!("brain-video-inputs-{}", std::process::id()));
+    let root = capability::scratch::private_root().map_err(|e| format!("the private scratch root: {e}"))?;
+    let dir = root.join(format!("video-inputs-{}", std::process::id()));
     create_private_dir(&dir)?;
     Ok(dir)
 }

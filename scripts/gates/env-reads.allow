@@ -51,7 +51,6 @@ crates/capability/src/lib.rs	BRAIN_TEST_HOST_SERVED
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_UNSET
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_WEIGHTS
 crates/catalog/src/resident_asr.rs	BRAIN_NEMOTRONASR
-crates/catalog/src/resident_asr.rs	BRAIN_OV_CACHE
 crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR
 crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR_MAXNEW
 crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR_WINDOW

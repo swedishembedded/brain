@@ -823,6 +823,7 @@ name = "brain-capability"
 version = "5.1.0"
 dependencies = [
  "brain-seed",
+ "libc",
  "serde_json",
 ]
 
@@ -2232,6 +2233,7 @@ name = "brain-npu"
 version = "5.1.0"
 dependencies = [
  "brain-backend-api",
+ "brain-capability",
  "brain-checkpoint",
  "brain-chronos2",
  "brain-cosyvoice",

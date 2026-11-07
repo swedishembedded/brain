@@ -13,6 +13,8 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 - A distributed training rank needs `--job-secret FILE` beside `--job-plan` and `--job-rank` (the same owner-only file on every rank, e.g. `openssl rand -hex 32 > job.secret; chmod 600 job.secret`): the collective authenticates every rank and encrypts every frame. `JobContext::new` and `from_plan_file` take the secret; `NetworkCollective::coordinator`/`worker` replace the unauthenticated constructors
 - `brain forecast serve --listen ADDR` is gone, and `brain-py`'s `BrainStdio.connect` takes only `socket_path`: the event socket carries no credential and a frame may name a file of the serving machine, so it is served on an owner-only Unix socket alone. Remote forecasting is the key-gated `forecast` action of `brain serve`
 - The HTTP surfaces speak HTTP/1.1 only
+- `BRAIN_OV_CACHE` is gone: the OpenVINO compiled-graph cache of the ASR encoders lives in this user's private scratch root (`<tmp>/brain-<uid>/openvino-cache`), never in a directory other users can write to
+- A `--runtime-dir` (and the default state directory) must be a directory only the serving user can enter: one others may read or write is refused, since it holds the log, the lock and the connection records
 
 ### Security
 
@@ -20,6 +22,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 - An idle, slow-header or slowly uploading connection is closed (10 s for a request head, 5 min for a body), each surface holds at most 1024 connections, and media in requests is decoded off the async runtime, at most four at a time, within the request's pixel budget checked from each image's header
 - A video sent for editing is read by brain's own demuxers and decoder only, never `ffmpeg`, within a pixel budget; the MP4 reader no longer loops forever or allocates by the counts a file declares, and the AV1 decoder refuses frames over 36 megapixels before allocating them
 - The event socket of `brain forecast serve` is owner-only and refuses lines over 64 MiB; a `camera_frame` path is read only when a detector is loaded
+- Everything brain stages for a request (an uploaded clip, a reference voice, training and held-out records, exported graphs, the video spool, the serve daemon's state) goes under a per-user root only that user can enter (`capability::scratch`), in a directory made for that use; a directory another local user made first is refused
 - Overflow checks are on in release builds of every crate that parses bytes brain did not write
 - Text a client sends can no longer spell a model's control tokens: a `<|im_end|><|im_start|>system` (or a `<tool_call>`, `</think>` or media placeholder, also when written `\u003c...` in JSON) in a message, tool call or result, tool schema or system prompt encodes as the text it is, for every Qwen-family chat model and the vision-language models (`Tokenizer::escape_untrusted`, `Invocation::escape_client_text`); before, it opened a real turn
 - Every served number has a ceiling and a floor (`frames`, `width`, `height`, `steps`, `max_new`, `rank`, ...; `scripts/gates/unbounded-params.allow` lists the few that size nothing and only shrinks), and a string param is at most 16 MiB: `/v1/run`, `/v1/jobs` and D-Bus `Run` refuse a request for a billion frames instead of trying

@@ -765,10 +765,7 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
 /// Unique per call: two concurrent requests must not share a scratch tree,
 /// and the pid alone does not separate them.
 fn scratch_dir(tag: &str) -> Result<PathBuf, String> {
-    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("brain-qwen3-{tag}-{}-{nonce}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("qwen {tag}: {}: {e}", dir.display()))?;
-    Ok(dir)
+    capability::scratch::scratch_dir(&format!("qwen3-{tag}")).map_err(|e| format!("qwen {tag}: a scratch directory: {e}"))
 }
 
 /// Decode one optional JSONL blob into packed [`ChatSample`]s. The bytes are

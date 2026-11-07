@@ -416,8 +416,7 @@ impl npu::NpuModel for FincastNpuModel<'_> {
     /// pre-migration `fincast_export::export_external` +
     /// `FincastSession::load_path` path).
     fn compile(&self, cfg: &npu::openvino::NpuConfig) -> Result<npu::openvino::NpuGraph, String> {
-        let dir = std::env::temp_dir().join(format!("brain-fincast-npumodel-{}-{}", std::process::id(), self.cache_key()));
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let dir = capability::scratch::scratch_dir("fincast-npumodel").map_err(|e| e.to_string())?;
         let onnx_path = dir.join("model.onnx");
         let op = onnx_path.to_str().ok_or("non-utf8 temp path")?;
         let mut g = onnx::GraphBuilder::new(&self.cache_key());

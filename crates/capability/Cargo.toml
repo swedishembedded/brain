@@ -13,3 +13,5 @@ path = "src/lib.rs"
 # `Invocation::seed` parses the request's `seed` with the shared seed rules.
 brain-seed.workspace = true
 serde_json.workspace = true
+# `scratch::private_dir`: the effective uid a private directory must belong to.
+libc.workspace = true

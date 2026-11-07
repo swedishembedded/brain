@@ -41,7 +41,9 @@ With no surface flag, `brain serve` serves the OpenAI-compatible API on
   loopback, for when a TLS-terminating proxy or a VPN already encrypts the
   path. See **Transport security** below.
 - `--runtime-dir DIR` - where the pid file, log and connection record live
-  (default `$XDG_RUNTIME_DIR/brain`, else `<tmpdir>/brain-<uid>`). A server under
+  (default `$XDG_RUNTIME_DIR/brain`, else `<tmpdir>/brain-<uid>`). It must be a
+  directory only the serving user can enter (it is created `0700`); one
+  others may read or write is refused. A server under
   its own `DIR` is not found by clients looking in the default one.
 - `--checkpoint PATH`, `--tokenizer PATH` - also serve this Qwen3 checkpoint
   (file or repo directory), with this `tokenizer.json` when none is beside it.

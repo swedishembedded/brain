@@ -30,11 +30,13 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 /// OpenVINO config for the ASR encoders: prefer the NPU, fall back to CPU-OpenVINO
 /// where no NPU is present (the graph is device-precision-independent). A model
 /// cache dir is set so the heavy first compile of the 0.6 B / 1.7 B-tower encoder
-/// is written once and reloaded on later runs (`BRAIN_OV_CACHE` overrides).
+/// is written once and reloaded on later runs, under this user's private root
+/// (`capability::scratch`): a compiled graph is code, and must not be readable
+/// or replaceable by another local user. Without a private root, nothing is
+/// cached.
 fn asr_npu_cfg() -> NpuConfig {
-    let cache = std::env::var("BRAIN_OV_CACHE").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir().join("brain_ov_cache"));
-    let _ = std::fs::create_dir_all(&cache);
-    NpuConfig { device: NpuDevice::Npu, allow_fallback: true, cache_dir: Some(cache), ..Default::default() }
+    let cache = capability::scratch::private_root().ok().map(|root| root.join("openvino-cache")).filter(|dir| capability::scratch::private_dir(dir).is_ok());
+    NpuConfig { device: NpuDevice::Npu, allow_fallback: true, cache_dir: cache, ..Default::default() }
 }
 
 // ---------------------------------------------------------------- Nemotron
@@ -122,8 +124,7 @@ impl NemotronNpuInstance {
             prompt_intermediate: cfg.prompt_intermediate,
             decoder_hidden: cfg.decoder_hidden,
         };
-        let tmp = std::env::temp_dir().join(format!("brain_nemotron_npu_{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).map_err(|e| format!("tmp dir: {e}"))?;
+        let tmp = capability::scratch::scratch_dir("nemotron-npu").map_err(|e| format!("a scratch directory: {e}"))?;
         Ok(NemotronNpuInstance { model, detok, weights, topo, graphs: RefCell::new(HashMap::new()), tmp, device: RefCell::new("npu".into()) })
     }
 

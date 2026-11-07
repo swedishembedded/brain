@@ -71,8 +71,7 @@ fn prepare_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>) -> Res
             Ok((onnx, None, fresh))
         }
         None => {
-            let dir = std::env::temp_dir().join(format!("brain_qwen_npu_{}", std::process::id()));
-            std::fs::create_dir_all(&dir).map_err(map)?;
+            let dir = capability::scratch::scratch_dir("qwen-npu").map_err(map)?;
             let onnx = dir.join("qwen.onnx");
             eprintln!("npu: exporting ONNX decoder for seq={cap} (one-time, ~30s; no --npu-cache, so not reused)…");
             export_qwen_fp32(&checkpoint::weightio::WeightReader::open(weights_path).map_err(map)?, onnx.to_str().unwrap(), cap).map_err(map)?;

@@ -38,6 +38,7 @@ use serde_json::{json, Value};
 pub mod blob;
 pub mod bounds;
 pub mod failure;
+pub mod scratch;
 pub mod hot;
 pub mod presentation;
 pub mod video;
