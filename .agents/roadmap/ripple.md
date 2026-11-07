@@ -110,6 +110,9 @@ serve other work; CUDA parity and performance follow on the same gates.
        faces through the generic trainer, pipeline and objectives; LoRA/QLoRA through `model::adapter` served by
        the engine; full fine-tuning; N-LSA on the global layers; `brain finetune` and the SDK fine-tuners. Measured
        on the CPU backend and the software Vulkan adapter below; no card has trained it (step 8).
+7b. [x] `brain serve --adapter` for Ripple, training across pipeline stages from the memory plan (generic
+       `model::plan_stage_layout`), the chunked head, native sparse attention as a model-agnostic trainer option.
+       Open: a bank of adapter slots, norms and `value_res_lambda` beside an adapter (Open items).
 8. [ ] CUDA parity and the measured long-context numbers (both GH200s,
        when free).
 
@@ -457,6 +460,10 @@ each layer is rebuilt in the backward.
 | N-LSA on the global layer, full budget vs dense (`train_nlsa`, software adapter, 2 x 64 tokens) | loss 3.759443 both, worst gradient difference 3.2e-7 of the largest; window-only 3.771009 |
 | N-LSA, sparse budget (window 8, sinks 2, top_k 16, top_p 8) | 40 AdamW steps: loss 3.7757 -> 0.0004 |
 | SDK `ChatFineTune` (LoRA), `ChatFullFineTune`, `PreferenceFineTune` on a tiny Ripple | loss falls in each; the DPO margin starts at ln 2; an adapter file holds adapter tensors only; a variant this model does not train and a held-out set it does not score are refused by name |
+| training head: loss and gradient a chunk of 64 rows at a time vs the batch whole (2 x 64 rows) | loss identical (3.887103), worst gradient error 1.8e-7; the parity, gradcheck and real-layer gates above run through it |
+| two stages through the SDK trainer (`stages(2)`; the generic layout planner `model::plan_stage_layout`) vs one, LoRA and full fine-tune, CPU | losses before and after equal within 1e-5 and 1e-4 relative, every adapter factor within 1e-4; `brain ricursive finetune --stages 2` prints the layout and trains the one-stage loss |
+| `brain serve --adapter` (catalog resident `RicursiveResident::with_adapter`) vs the training model's forward | the served greedy tokens equal the training model's, the base resident unchanged; a card of another family, another base id, a layer past the depth, a linear the model lacks and rank 0 are each refused by name; HTTP chat over the served adapter in `tests/e2e/ripple.bats` |
+| native sparse attention as a trainer option (`--native-sparse`, `native_sparse_attention`) at a full budget vs dense, software adapter, Ripple and Qwen3 | Ripple LoRA losses (3.9267719, 2.2625196) dense vs (3.9267719, 2.2625198) sparse; Qwen3 equal within 1e-3; refused by name on the CPU backend ("workgroup-barrier") and by architectures that do not declare it |
 | `brain ricursive finetune` / `brain finetune --arch ricursive` end to end (`tests/e2e/ripple.bats`, `--device cpu`) | a LoRA run on the scripted model lowers the loss and writes the adapter, a second run continues it at its own rank and a different rank is refused; a full run writes a checkpoint |
 
 How a stage is cut: with the value residual every stage holds the embedding table and recomputes `x0` from the
@@ -500,26 +507,27 @@ brain finetune ricursiveAI/Ripple-65B-Preview-NVFP4 --arch ricursive --dataset c
     --lora 16 --alpha 32 --base-format nvfp4 --activations recompute --steps 200 --lr 1e-4 --max-block 4096 \
     --device gpu0
 
-# The bf16 release (129 GB) does not fit one card, and the generic LoRA trainer builds one stage: it needs
-# model::Pipeline<Ripple> (tested against one stage, not yet built by RippleTrainer::train_lora; Open items).
-# Until then the one-card runs are the NVFP4 release above, or --base-format nf4/fp8 from a card that holds the
-# base once quantized (the load reads the bf16 tensors one at a time).
+# The bf16 release (129 GB) does not fit one card: the trainer lays the model out over the selected cards from the
+# memory plan (model::plan_stage_layout), prints the layout ("pipeline of 2 stages: gpu0 layers 0..40, ...") and
+# trains through model::Pipeline<Ripple>; --stages N asks for exactly N stages.
+brain finetune ricursiveAI/Ripple-65B-Preview --arch ricursive --dataset chat.jsonl --out run-lora-bf16 \
+    --lora 16 --base-format bf16 --activations bf16 --max-block 4096 --device gpu0,gpu1
 
-# serve the result: the adapter is a PEFT-exportable file (ricursive::train::adapter::export_peft) and
-# RicursiveEngine::attach_adapter applies it beside the resident base
+# N-LSA continued training of the dense release: the global layers read their selection only (a model trained
+# dense reads it as a restriction: start from a budget near the context and tighten it). Needs barrier kernels.
+brain finetune ricursiveAI/Ripple-65B-Preview-NVFP4 --arch ricursive --dataset long.jsonl --out run-nlsa \
+    --lora 16 --base-format nvfp4 --native-sparse --lsa-window 4096 --lsa-sink 4 --lsa-top-k 16384 --lsa-top-p 1024 \
+    --lsa-cluster-block 512 --max-block 65536 --device gpu0
+
+# serve the result beside its base (its own instance; a model id of the adapter's card id, see --adapter-id):
+brain serve --models-dir <models> --openai 8080 --adapter run-lora/adapter.safetensors --device gpu0
+# the adapter also exports as a PEFT directory (ricursive::train::adapter::export_peft)
 ```
 
-First checks on a card, in order: `train_lora` and `train_pipeline` with `--device gpu0` / `gpu0,gpu1` against
+First checks on a card, in order: `train_lora`, `train_pipeline` and `train_tiers::a_chunked_head_*` with `--device gpu0` / `gpu0,gpu1` against
 the CPU numbers above; the real-weight step (`train_real_lora`, set the testdata link) on a card against the
 CPU loss 13.992954 and gradients; one `brain finetune` step with `--kernel-profile` against the GH200 roofline
 (`kernels.md` section F) before any tuning, with the head in view (below).
-
-N-LSA continued training of the dense release (the global layers only; a model trained dense reads the
-selection as a restriction, so start from a budget near the context and tighten it): there is no verb yet, so
-use the library: `Ripple::enable_native_lsa(LsaConfig { window, sink, top_k, top_p, cluster_block, .. }, true)` on
-the model the trainer built, then the usual fit loop; start with a budget past the row (equal to dense) and
-step it down while the held-out loss follows. It needs a device that runs workgroup-barrier kernels (a GPU, or
-`--device software` for the tiny gates).
 
 Serving (step 6), after `brain pull`:
 
@@ -566,29 +574,30 @@ engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
 
 ## Open items for the later steps
 
-- Training, step 7. The LM head and the loss are not chunked: logits and their gradient are `[rows, vocab]`
-  floats each (rows = batch x block), 5 GB each at 8192 rows of the 100k vocabulary, and Qwen's `HeadCe` chunks
-  them. Fine for the first GPU runs at moderate blocks; a long-row run needs `HeadCe` in `Ripple` (with the
-  weighted loss, the log-probability readout and the logit scale it already carries).
-- Training: `RippleTrainer::train_lora` builds one stage on one device; building `model::Pipeline<Ripple>` over
-  the selected cards (as Qwen3's trainer does) is what trains the bf16 release across two GH200s. The pipeline
-  itself is tested against one stage.
-- Training: one adapter per run; `brain serve` has no adapter bank for Ripple (`RicursiveEngine::attach_adapter`
-  applies one at run time; a served multi-adapter instance needs the batched per-row adapter slots the Qwen
-  engines have, and a catalog entry that takes `--adapter`). No `brain` verb serves a trained adapter yet.
-- Training: the attention gate (`g_proj`) and the norms and `value_res_lambda` train as full parameters only in a
-  full fine-tune; the adapter policy has no "also train these tensors" mode, so a LoRA run leaves them frozen.
+- Training and serving of adapters, step 7b. `brain serve --adapter FILE` serves the adapter as a model of its own
+  with its own instance of the weights (the engine applies one adapter at run time): two adapters are two copies of
+  the 65B. A bank of adapter slots with per-row adapter indices in the decode tapes, as the Qwen engines have it, would
+  share one copy and batch base and adapters together; `--adapter-manifest`, `--watch-adapters`, an adapter found in
+  the model store, and the SDK's `TextGenerationPipeline::adapter` are not wired for Ripple.
+- Training: norms and `value_res_lambda` (and `g_proj` as a full tensor) train alongside an adapter only in a full
+  fine-tune. The adapter policy (`model::adapter`) has no "also train these tensors" notion: an adapter file holds
+  factors only, and the engine and the serving path apply factors only. Adding it means a `modules_to_save` list in
+  the adapter file's card, the tensors in the file (PEFT represents them as `modules_to_save`), the trainer's roles,
+  the engine applying them and the continue path reading them: a change to the shared format, not to Ripple.
 - Training: an adapter trains over an NVFP4 base only as the ModelOpt release stores it (nothing quantizes into
   NVFP4), and a full fine-tune needs a float base (f32 weights, AdamW on the device); layer-streamed and
   resident bf16/fp8 full fine-tuning (`Model::set_resident`) are not wired, so the 65B cannot be fully
-  fine-tuned yet. `PolicyGradient` fine-tuning and held-out scoring before and after are wired for Qwen families
-  only.
+  fine-tuned yet (a pipeline of float stages writes a full checkpoint, `Shardable::save_stages`).
+  `PolicyGradient` fine-tuning and held-out scoring before and after are wired for Qwen families only. The chunked
+  head holds an FP8, int8 or NVFP4-stored `lm_head` at bf16 (it reads f32, bf16 and NF4 tables).
 - Training: on the CPU backend `matmul_dx` with a very large contraction (the head's, vocabulary 152k) is a
   naive strided loop, 25 s a step for a toy model, so toy tests use a 32-token vocabulary; a GPU does not
   have the problem.
-- N-LSA has a library entry (`Ripple::enable_native_lsa`) and no CLI verb or SDK option; the selection's index
-  space is the NoPE queries and keys as they are (no learned projection), so an indexer distilled for serving
-  (D-LSA) is a separate artifact from the N-LSA model.
+- N-LSA is a trainer option (`--native-sparse`, `.native_sparse_attention(cfg, long_range)`) for models that
+  declare it (Qwen3 and Ripple); its index space is the NoPE queries and keys as they are (no learned projection),
+  so an indexer distilled for serving (D-LSA) is a separate artifact from the N-LSA model. Not measured at
+  context lengths where it pays (the Qwen3 crossover is near 8k tokens); a sparse-budget pipeline stage is built but
+  only the one-stage run is checked against dense.
 - Real-weight training numbers on a card (tokens/s against the GH200 roofline, the two-card pipeline's bubble,
   N-LSA's crossover against the dense flash path at Ripple's head dimension) are step 8.
 

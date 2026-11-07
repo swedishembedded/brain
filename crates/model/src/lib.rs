@@ -137,7 +137,7 @@ pub use objective::{Objective, StepVerdict};
 pub use trainprec::{apply_train_precision, OptimizerParts, OptimizerState, ResidentRequest, StateSupport, TrainPrecision, TrainPrecisionSupport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use score::{example_rows, score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
-pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
+pub use train::{cosine_lr, generate, FitOpts, LrSchedule, NativeSparse, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
 pub use train::{build_or_resume, causal_lm, causal_lm_examples, fit, fit_controlled, fit_controlled_sharded, fit_controlled_sync, fit_distributed, fit_from, fit_with, load_dataset, load_dataset_with_images, load_dataset_with_itos, load_rollout_dataset, AdapterSnapshots, CheckpointIdentity, FitControl, FitReport, GradSync, StepReport, StepWork};
 
@@ -415,6 +415,12 @@ pub trait Model {
         let mut model = Self::new(cfg, b, t, init);
         model.set_resident(resident)?;
         Ok(model)
+    }
+
+    /// Train the global-attention layers with native sparse attention ([`NativeSparse`]), before the first step. A
+    /// model that has such layers and the kernels overrides this; the default refuses by name.
+    fn enable_native_sparse_attention(&mut self, _sparse: NativeSparse) -> Result<(), String> {
+        Err("this model has no native sparse attention training".to_string())
     }
 
     /// Keep what `policy` names of the forward for the backward ([`saved::SavedPolicy`]): every layer's intermediates,

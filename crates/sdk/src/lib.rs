@@ -174,6 +174,11 @@ pub use model::IGNORE as IGNORE_TARGET;
 #[cfg(feature = "study")]
 pub use model::TrainPrecision;
 #[cfg(feature = "study")]
+/// Native sparse attention training for a fine-tune: [`NativeSparse`] and the [`LsaConfig`] it carries.
+pub use model::lsa::LsaConfig;
+#[cfg(feature = "study")]
+pub use model::NativeSparse;
+#[cfg(feature = "study")]
 /// What one optimizer step of a run measured: its phases' seconds and its
 /// token accounting (see [`ChatFineTuneOutcome::step_work`]).
 pub use model::StepWork;

@@ -46,6 +46,7 @@ impl Ripple {
     /// name where they are not available.
     pub fn enable_native_lsa(&mut self, cfg: LsaConfig, long_range: bool) -> Result<(), String> {
         let c = &self.cfg.model;
+        native::require_barrier_kernels(&self.gpu)?;
         if !(self.shard.start..self.shard.end).any(|l| c.layer_type(l) == LayerType::Full) {
             return Err("ricursive native sparse attention: this build has no global layer".into());
         }

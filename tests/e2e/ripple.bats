@@ -209,6 +209,27 @@ write_finetune_data() {
   awk -v a="$one" -v b="$two" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= 1e-3 * a + 1e-4) }'
 }
 
+@test "native sparse attention training runs on the software adapter and is refused by name on the CPU backend" {
+  write_finetune_data
+  local base="$SCRATCH/scripted/$MODEL" flags=(--lora 4 --steps 3 --lr 5e-2 --seed 3 --native-sparse --lsa-window 16 --lsa-sink 2 --lsa-top-k 64 --lsa-top-p 64 --lsa-cluster-block 8)
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/nlsa-cpu" "${flags[@]}" --device cpu
+  [ "$status" -ne 0 ]
+  grep -q 'workgroup-barrier' <<<"$output"
+  [ -n "${BRAIN_LAVAPIPE_ENV:-}" ] && [ -f "$BRAIN_LAVAPIPE_ENV" ] || skip "set BRAIN_LAVAPIPE_ENV to the lavapipe environment file (.agents/rules/testing.md)"
+  (
+    source "$BRAIN_LAVAPIPE_ENV"
+    run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/nlsa" "${flags[@]}" --device software
+    [ "$status" -eq 0 ] || { echo "$output" >&3; exit 1; }
+    grep -q '^status: Completed, 3 steps' <<<"$output"
+  )
+}
+
+@test "a native sparse attention budget flag without --native-sparse is refused" {
+  run "$BRAIN" finetune "$SCRATCH/scripted/$MODEL" --arch ricursive --dataset x --out y --lsa-window 8
+  [ "$status" -eq 2 ]
+  grep -q -- '--native-sparse' <<<"$output"
+}
+
 @test "a full fine-tune trains every weight and writes a checkpoint directory; an adapter flag without --lora is refused" {
   write_finetune_data
   local base="$SCRATCH/scripted/$MODEL"

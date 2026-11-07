@@ -137,6 +137,8 @@ pub struct ChatFineTune {
     policy_gradient: Option<PolicyGradientConfig>,
     /// Pipeline stages ([`ChatFineTune::stages`]).
     stages: u32,
+    /// Native sparse attention training ([`ChatFineTune::native_sparse_attention`]).
+    native_sparse: Option<model::NativeSparse>,
 }
 
 /// The architecture a [`ChatFineTune`] trains, with the tier its frozen base
@@ -501,6 +503,7 @@ impl ChatFineTune {
             weighted_replay: Vec::new(),
             grad_accum: 1,
             stages: 0,
+            native_sparse: None,
             continue_from: None,
             out_dir: None,
             adapter_id: None,
@@ -656,6 +659,14 @@ impl ChatFineTune {
     /// fewest that fit the selected cards). Only architectures whose trainer takes a count accept one.
     pub fn stages(mut self, stages: u32) -> Self {
         self.stages = stages;
+        self
+    }
+
+    /// Train the global-attention layers with native sparse attention (N-LSA): each query reads its selection of
+    /// `cfg` (window, sinks, clustered long-range keys) only. Qwen3 and Ripple take it; the others are refused by name,
+    /// and so is a device without workgroup-barrier kernels (use a GPU or `software`).
+    pub fn native_sparse_attention(mut self, cfg: model::lsa::LsaConfig, long_range: bool) -> Self {
+        self.native_sparse = Some(model::NativeSparse { cfg, long_range });
         self
     }
 
@@ -985,6 +996,9 @@ impl ChatFineTune {
         if self.stages > 0 && !matches!(family, ChatFamily::Ripple(_)) {
             return Err(Error::Backend(format!("ChatFineTune: {} stages asked for, and {} lays itself out over the cards and takes no stage count", self.stages, arch.id)));
         }
+        if self.native_sparse.is_some() && !matches!(family, ChatFamily::Qwen3(_) | ChatFamily::Ripple(_)) {
+            return Err(Error::Backend(format!("ChatFineTune: native sparse attention training is not available for {}", arch.id)));
+        }
         self.check_policy_gradient_setup(arch.id)?;
 
         // Every file is checked against the base's own template before a
@@ -1091,6 +1105,7 @@ impl ChatFineTune {
             cooldown_steps: self.cooldown_steps.unwrap_or(self.steps / COOLDOWN_DIVISOR),
             precision: model::TrainPrecision { activations: self.activations, ..Default::default() },
             stages: self.stages,
+            native_sparse: self.native_sparse,
             ..fit_opts(self.steps, block, self.lr, seed)
         };
         let base_digest = base_digest(&open)?;

@@ -115,6 +115,8 @@ pub(crate) struct ChatEntry {
     pub served_weights: &'static [Dtype],
     /// The family's trainer cuts its model into the stage count a run asks for (`FitOpts::stages`).
     pub pipelined: bool,
+    /// The family's model trains with native sparse attention on request (`FitOpts::native_sparse`).
+    pub native_sparse: bool,
     /// The weight precision search over the trainable build of a base, on a prepared dataset.
     pub search: SearchFn,
     /// The held-out loss of a base built with its linears at a tier policy, on the deployed kernels, with an
@@ -143,6 +145,7 @@ impl ChatEntry {
             scores_exported_pairs: T::SCORES_EXPORTED_PAIRS,
             served_weights: T::SERVED_WEIGHTS,
             pipelined: T::PIPELINED,
+            native_sparse: T::NATIVE_SPARSE,
             search: search::<T>,
             measure: measure::<T>,
             served: model::finetune::served_loss::<T>,

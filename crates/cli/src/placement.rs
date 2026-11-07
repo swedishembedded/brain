@@ -30,6 +30,8 @@ pub fn install() {
     // `Home::Cpu` and then panicked inside a model that cannot run int8 there
     // at all. No `--device` (`compute_set()` still `None` this early, or a
     // ComputeSet with CPU enabled) keeps the historical "everything" default.
-    let cpu_allowed = crate::compute_set().map(|s| s.cpu_enabled()).unwrap_or(true);
+    // The software Vulkan adapter computes in host memory, so the host tier answers for it (a placer with no card and
+    // no host refused every part, and a training run on `--device software` found no home for its model).
+    let cpu_allowed = crate::compute_set().map(|s| s.cpu_enabled() || s.software).unwrap_or(true);
     loader::install_default_placer(gpus, cpu_allowed);
 }

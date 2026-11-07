@@ -207,6 +207,10 @@ pub trait ChatTrainer {
     /// [`FitOpts::stages`] asks for. A family that lays itself out (or never does) refuses a request above zero.
     const PIPELINED: bool = false;
 
+    /// Whether this family's model takes native sparse attention training ([`crate::Model::enable_native_sparse_attention`]).
+    /// A request for it is refused by name before the base is read where this is false.
+    const NATIVE_SPARSE: bool = false;
+
     /// The vocabulary of the checkpoint at `open`.
     fn vocab(open: &Path) -> Result<usize, String>;
 

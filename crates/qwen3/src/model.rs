@@ -4375,6 +4375,11 @@ impl model::training::TokenObjectives for Qwen {
 }
 
 impl model::Model for Qwen {
+    fn enable_native_sparse_attention(&mut self, sparse: model::NativeSparse) -> Result<(), String> {
+        model::lsa::native::require_barrier_kernels(&self.gpu)?;
+        self.enable_native_lsa(sparse.cfg, sparse.long_range)
+    }
+
     fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
     }

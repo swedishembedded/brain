@@ -206,3 +206,49 @@ fn a_stage_count_is_refused_by_an_architecture_that_lays_itself_out() {
     let err = ChatFullFineTune::from_pretrained("none").arch("qwen3").dataset("d.jsonl").out_dir(std::env::temp_dir()).stages(2).run().expect_err("refused");
     assert!(err.to_string().contains("stages") && err.to_string().contains("lays itself out"), "{err}");
 }
+
+fn lsa(top_k: usize, window: usize) -> brain::LsaConfig {
+    brain::LsaConfig { index_dim: 0, pool_size: 2, bucket_size: 4, bucket_cap: 8, cluster_block: 8, top_p: top_k, top_k, sink: 2, window, early: None }
+}
+
+/// Spec: native sparse attention is a trainer option any model that declares support takes: at a budget past the row
+/// it trains what dense attention does (the same losses before and after), here on the software Vulkan adapter, the
+/// device of this test run that has the workgroup-barrier kernels.
+#[test]
+fn native_sparse_attention_at_a_full_budget_trains_what_dense_attention_does() {
+    if !gpu_core::testgpu::dev(&[]).caps().workgroup_reductions {
+        brain_testutil::skip_unavailable("N-LSA: this backend does not run workgroup-barrier kernels (set BRAIN_DEVICE=software)");
+        return;
+    }
+    let model = ripple_model_dir("ripple-nlsa");
+    let software = brain::Device::parse("software").unwrap();
+    let run = |sparse: bool, tag: &str| {
+        let t = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).arch("ricursive").dataset(write_dataset(&model)).out_dir(model.join(tag)).rank(2).steps(4).lr(5e-2).seed(7).device(software.clone());
+        (if sparse { t.native_sparse_attention(lsa(1024, 16), true) } else { t }).run().expect("the LoRA fine-tune runs")
+    };
+    let (dense, sparse) = (run(false, "dense"), run(true, "sparse"));
+    let (d, s) = ((dense.initial_loss.unwrap(), dense.final_loss.unwrap()), (sparse.initial_loss.unwrap(), sparse.final_loss.unwrap()));
+    eprintln!("dense {d:?}, native sparse at a full budget {s:?}");
+    assert!((d.0 - s.0).abs() < 1e-4 * d.0 && (d.1 - s.1).abs() < 1e-3 * d.1.max(1e-2), "dense {d:?} vs sparse {s:?}");
+}
+
+/// Spec: the option is refused by name where it cannot run: on a device without the barrier kernels, and by an
+/// architecture whose model does not declare it.
+#[test]
+fn native_sparse_attention_is_refused_where_it_cannot_run() {
+    if !gpu_core::testgpu::dev(&[]).caps().workgroup_reductions {
+        let model = ripple_model_dir("ripple-nlsa-cpu");
+        let err = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+            .arch("ricursive")
+            .dataset(write_dataset(&model))
+            .out_dir(model.join("run"))
+            .native_sparse_attention(lsa(1024, 16), true)
+            .steps(1)
+            .device(cpu())
+            .run()
+            .expect_err("the CPU backend runs no barrier kernels");
+        assert!(err.to_string().contains("workgroup-barrier"), "{err}");
+    }
+    let err = ChatFullFineTune::from_pretrained("none").arch("qwen35").dataset("d.jsonl").out_dir(std::env::temp_dir()).native_sparse_attention(lsa(1024, 16), true).run().expect_err("qwen35 does not declare it");
+    assert!(err.to_string().contains("native sparse attention"), "{err}");
+}

@@ -807,6 +807,7 @@ pub struct Qwen3Trainer;
 impl model::finetune::ChatTrainer for Qwen3Trainer {
     type Trained = Trained;
     const SCORES_EXPORTED_PAIRS: bool = true;
+    const NATIVE_SPARSE: bool = true;
     const LORA_BASES: model::policy::TrainBases = TRAIN_BASES;
     /// `serve::Engine::check_tiers`' serving tiers less f16 and q4, which no qwen3 base is trained over.
     const SERVED_WEIGHTS: &'static [Dtype] = &[Dtype::F32, Dtype::BF16, Dtype::I8, Dtype::NF4];

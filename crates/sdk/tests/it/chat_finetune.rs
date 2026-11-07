@@ -340,3 +340,24 @@ fn score_tokens_matches_the_trainers_logprobs_and_applies_the_logit_scale() {
     let refused = brain::score_tokens(weights_str, None, &tokens, &targets[..3], 1.0, &cpu()).unwrap_err().to_string();
     assert!(refused.contains("as many targets as tokens"), "{refused}");
 }
+
+/// Spec: Qwen3 declares native sparse attention training too: through the same option, at a budget past the row a
+/// LoRA run has the losses dense attention gives (software Vulkan adapter, the device of this run with barrier kernels).
+#[test]
+fn qwen3_native_sparse_attention_at_a_full_budget_trains_what_dense_attention_does() {
+    if !gpu_core::testgpu::dev(&[]).caps().workgroup_reductions {
+        brain_testutil::skip_unavailable("N-LSA: this backend does not run workgroup-barrier kernels (set BRAIN_DEVICE=software)");
+        return;
+    }
+    let model = chat_model_dir("nlsa");
+    let software = brain::Device::parse("software").unwrap();
+    let lsa = brain::LsaConfig { index_dim: 0, pool_size: 2, bucket_size: 4, bucket_cap: 8, cluster_block: 8, top_p: 1024, top_k: 1024, sink: 2, window: 16, early: None };
+    let run = |sparse: bool, tag: &str| {
+        let train = write_dataset(&model, "train.jsonl", &[("cab", "bad"), ("fed", "deaf"), ("ace", "face"), ("bag", "gab")]);
+        let t = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).dataset(train).out_dir(model.join(tag)).rank(2).steps(3).lr(1e-2).seed(7).device(software.clone());
+        (if sparse { t.native_sparse_attention(lsa, true) } else { t }).run().expect("the LoRA fine-tune runs")
+    };
+    let (dense, sparse) = (run(false, "dense"), run(true, "sparse"));
+    let (d, s) = (dense.final_loss.unwrap(), sparse.final_loss.unwrap());
+    assert!((d - s).abs() < 1e-3 * d.abs().max(1e-2), "dense {d} vs sparse {s}");
+}

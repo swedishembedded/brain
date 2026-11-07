@@ -44,6 +44,16 @@ pub const KERNELS: [(&str, &str); 5] = [
     ("lsa_native_offsets", kernels::LSA_NATIVE_OFFSETS),
 ];
 
+/// Refuse by name a device that does not run the workgroup-barrier kernels native sparse attention is made of (the CPU
+/// JIT); a GPU or the software Vulkan adapter does.
+pub fn require_barrier_kernels(g: &Gpu) -> Result<(), String> {
+    if g.caps().workgroup_reductions {
+        Ok(())
+    } else {
+        Err(format!("native sparse attention needs workgroup-barrier kernels, which the {} backend does not run; train on a GPU, or on the software Vulkan adapter (--device software) to check a small run", gpu_core::backend_name()))
+    }
+}
+
 /// Largest head the kernels hold.
 pub const MAX_HEAD_DIM: u32 = 256;
 /// Most query heads per KV head the kernels hold.

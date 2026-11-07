@@ -26,6 +26,16 @@ use data::loader::{BatchConfig, TokenDataset};
 /// `gpt2::model::IGNORE` so the masked-CE path is identical across models.
 pub const IGNORE: u32 = 0xFFFF_FFFF;
 
+/// Native sparse attention training (N-LSA) for a run: each query of a global-attention layer reads only its selection
+/// of `cfg` (window, sinks and the clusters the index finds), exactly as dense attention restricted to those keys.
+/// `long_range: false` keeps only the window and sinks, the baseline under the same machinery. A model that declares
+/// support ([`crate::Model::enable_native_sparse_attention`]) takes it; every other refuses it by name.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeSparse {
+    pub cfg: crate::lsa::LsaConfig,
+    pub long_range: bool,
+}
+
 /// Training-loop options (the CLI-facing hyperparameters), independent of any
 /// particular architecture. This is `gpt2::train::TrainOpts` lifted to the model
 /// crate.
@@ -107,6 +117,8 @@ pub struct FitOpts {
     /// model refuses a request above one by name. Not part of a run's identity: a cut changes where the work runs,
     /// not what it computes.
     pub stages: u32,
+    /// Train the global-attention layers with native sparse attention ([`NativeSparse`]); `None`: dense attention.
+    pub native_sparse: Option<NativeSparse>,
 }
 
 impl Default for FitOpts {
@@ -138,6 +150,7 @@ impl Default for FitOpts {
             best_hold_floats: BEST_IN_MEMORY_FLOATS,
             precision: crate::TrainPrecision::default(),
             stages: 0,
+            native_sparse: None,
         }
     }
 }
@@ -1738,6 +1751,9 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     obj.prepare(&mut model)?;
     // The run's optimizer-state precision reaches every model here, before any step or resume.
     crate::trainprec::apply_train_precision(&mut model, &opts.precision, std::any::type_name::<M>()).map_err(std::io::Error::other)?;
+    if let Some(sparse) = opts.native_sparse {
+        model.enable_native_sparse_attention(sparse).map_err(|why| std::io::Error::other(format!("{}: {why}", std::any::type_name::<M>())))?;
+    }
     model.pin_rounding_seed(opts.seed);
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
     let mut first_step = 0u32;

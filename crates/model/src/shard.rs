@@ -1193,6 +1193,11 @@ impl<M: Shardable> Model for PipelineModel<M> {
     fn init_weights(cfg: &Self::Config, seed: u64) -> HashMap<String, Vec<f32>> {
         M::init_weights(cfg, seed)
     }
+    /// Every stage takes the request: each reads only its own layers, and a stage with none of the global layers skips it.
+    fn enable_native_sparse_attention(&mut self, sparse: crate::NativeSparse) -> Result<(), String> {
+        let mut pipeline = self.pipe.borrow_mut();
+        (0..pipeline.n_stages()).try_for_each(|i| pipeline.stage_mut(i).enable_native_sparse_attention(sparse))
+    }
     /// Every stage takes the policy, so a pipelined build refuses exactly what one card's build refuses.
     fn set_saved_policy(&mut self, policy: crate::saved::SavedPolicy) -> Result<(), String> {
         let pipeline = self.pipeline_mut();

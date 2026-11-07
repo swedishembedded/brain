@@ -34,6 +34,12 @@ brain finetune BASE --dataset FILE --out DIR [options]
                      architecture's trainer holds it (default: chosen from the device and what fits).
   --stages N         cut the model into exactly N pipeline stages (default: one stage when a device holds it, else
                      the fewest that fit the selected cards), for architectures whose trainer takes a count.
+  --native-sparse    train the global-attention layers with native sparse attention (N-LSA): each query reads only
+                     its window, sinks and clustered long-range keys. Qwen3 and Ripple take it; it needs a device
+                     that runs workgroup-barrier kernels (a GPU, or --device software for a small check).
+  --lsa-window N --lsa-sink N --lsa-top-k N --lsa-top-p N --lsa-cluster-block N
+                     the selection's budget (defaults: the paper's D-LSA configuration).
+  --lsa-window-only  with --native-sparse: window and sinks only, no long-range keys (the baseline).
   --activations P    what the backward keeps of the forward: keep|recompute|bf16|fp8.
   --no-thinking      render records without the reasoning block.
 
@@ -56,6 +62,13 @@ struct Args {
     weight_decay: Option<f32>,
     grad_accum: Option<u32>,
     stages: Option<u32>,
+    native_sparse: bool,
+    lsa_window: Option<usize>,
+    lsa_sink: Option<usize>,
+    lsa_top_k: Option<usize>,
+    lsa_top_p: Option<usize>,
+    lsa_cluster_block: Option<usize>,
+    lsa_window_only: bool,
     seed: Option<u64>,
     max_block: Option<u32>,
     base_format: Option<String>,
@@ -88,6 +101,13 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--lr" => a.lr = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--weight-decay" => a.weight_decay = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--grad-accum" => a.grad_accum = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--native-sparse" => a.native_sparse = true,
+            "--lsa-window-only" => a.lsa_window_only = true,
+            "--lsa-window" => a.lsa_window = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--lsa-sink" => a.lsa_sink = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--lsa-top-k" => a.lsa_top_k = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--lsa-top-p" => a.lsa_top_p = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--lsa-cluster-block" => a.lsa_cluster_block = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--stages" => a.stages = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--seed" => a.seed = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--max-block" => a.max_block = Some(number(&need(&mut i, &flag)?, &flag)?),
@@ -103,6 +123,14 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     }
     if a.base.is_empty() {
         return Err("brain finetune: no base given".to_string());
+    }
+    // The budget flags shape the selection; without --native-sparse they would be ignored.
+    if !a.native_sparse {
+        for (flag, given) in [("--lsa-window", a.lsa_window.is_some()), ("--lsa-sink", a.lsa_sink.is_some()), ("--lsa-top-k", a.lsa_top_k.is_some()), ("--lsa-top-p", a.lsa_top_p.is_some()), ("--lsa-cluster-block", a.lsa_cluster_block.is_some()), ("--lsa-window-only", a.lsa_window_only)] {
+            if given {
+                return Err(format!("brain finetune: {flag} shapes native sparse attention; give --native-sparse"));
+            }
+        }
     }
     if a.lora.is_none() {
         // Each of these shapes an adapter; a full fine-tune that was given one would silently ignore it.
@@ -153,6 +181,9 @@ fn lora(a: &Args, rank: u32) -> brain::ChatFineTune {
     if let Some(v) = a.stages {
         t = t.stages(v);
     }
+    if let Some((cfg, long_range)) = sparse(a) {
+        t = t.native_sparse_attention(cfg, long_range);
+    }
     if let Some(v) = a.seed {
         t = t.seed(v);
     }
@@ -197,6 +228,9 @@ fn full(a: &Args) -> brain::ChatFullFineTune {
     if let Some(v) = a.stages {
         t = t.stages(v);
     }
+    if let Some((cfg, long_range)) = sparse(a) {
+        t = t.native_sparse_attention(cfg, long_range);
+    }
     if let Some(v) = a.seed {
         t = t.seed(v);
     }
@@ -207,6 +241,24 @@ fn full(a: &Args) -> brain::ChatFullFineTune {
         t = t.train_precision(model::TrainPrecision { activations: Some(v), ..Default::default() });
     }
     t
+}
+
+/// The native sparse attention the flags ask for: the paper's configuration with the budget flags laid over it.
+fn sparse(a: &Args) -> Option<(brain::LsaConfig, bool)> {
+    a.native_sparse.then(|| {
+        let d = brain::LsaConfig::default();
+        (
+            brain::LsaConfig {
+                window: a.lsa_window.unwrap_or(d.window),
+                sink: a.lsa_sink.unwrap_or(d.sink),
+                top_k: a.lsa_top_k.unwrap_or(d.top_k),
+                top_p: a.lsa_top_p.unwrap_or(d.top_p),
+                cluster_block: a.lsa_cluster_block.unwrap_or(d.cluster_block),
+                ..d
+            },
+            !a.lsa_window_only,
+        )
+    })
 }
 
 fn losses(initial: Option<f32>, last: Option<f32>) -> String {
@@ -284,7 +336,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--stages", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }

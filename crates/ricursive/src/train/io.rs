@@ -72,6 +72,18 @@ impl Model for Ripple {
         cfg.init_weights(seed)
     }
 
+    /// A stage without a global layer has nothing to sparsify; a model with none at all refuses by name.
+    fn enable_native_sparse_attention(&mut self, sparse: model::NativeSparse) -> Result<(), String> {
+        let c = &self.cfg.model;
+        if !(0..c.num_hidden_layers).any(|l| c.layer_type(l) == crate::LayerType::Full) {
+            return Err("ricursive: this model has no global-attention layer for native sparse attention to train".to_string());
+        }
+        if !(self.shard.start..self.shard.end).any(|l| c.layer_type(l) == crate::LayerType::Full) {
+            return Ok(());
+        }
+        self.enable_native_lsa(sparse.cfg, sparse.long_range)
+    }
+
     fn token_objectives(&self) -> Option<&dyn model::training::TokenObjectives> {
         Some(self)
     }

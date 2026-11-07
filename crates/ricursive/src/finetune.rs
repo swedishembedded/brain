@@ -141,6 +141,7 @@ impl ChatTrainer for RippleTrainer {
     const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "ricursive", state: model::StateSupport::Fp32, resident: false, layer_streamed: false, f32_streamed: false };
 
     const PIPELINED: bool = true;
+    const NATIVE_SPARSE: bool = true;
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> PathBuf {
         if weights.file_name().is_some_and(|n| n == "config.json") {

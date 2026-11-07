@@ -78,6 +78,7 @@ pub struct ChatFullFineTune {
     weighted_replay: Vec<(PathBuf, f32)>,
     grad_accum: u32,
     stages: u32,
+    native_sparse: Option<model::NativeSparse>,
     out_dir: Option<PathBuf>,
     weight_decay: f32,
     steps: u32,
@@ -105,6 +106,7 @@ impl ChatFullFineTune {
             weighted_replay: Vec::new(),
             grad_accum: 1,
             stages: 0,
+            native_sparse: None,
             out_dir: None,
             weight_decay: FULL_WEIGHT_DECAY,
             steps: 100,
@@ -180,6 +182,14 @@ impl ChatFullFineTune {
         self
     }
 
+    /// Train the global-attention layers with native sparse attention (N-LSA): each query reads its selection of
+    /// `cfg` (window, sinks, clustered long-range keys) only. Architectures that declare support take it; the others
+    /// are refused by name, and so is a device without workgroup-barrier kernels (use a GPU or `software`).
+    pub fn native_sparse_attention(mut self, cfg: model::lsa::LsaConfig, long_range: bool) -> Self {
+        self.native_sparse = Some(model::NativeSparse { cfg, long_range });
+        self
+    }
+
     /// Where the checkpoint directory and the packed dataset go (required).
     /// One directory per run.
     pub fn out_dir(mut self, dir: impl Into<PathBuf>) -> Self {
@@ -247,6 +257,9 @@ impl ChatFullFineTune {
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFullFineTuneOutcome> {
         let run_clock = std::time::Instant::now();
         let chat = chat_entry(&self.arch)?;
+        if self.native_sparse.is_some() && !chat.native_sparse {
+            return Err(Error::Backend("ChatFullFineTune: native sparse attention training is not available for this architecture".to_string()));
+        }
         if self.stages > 0 && !chat.pipelined {
             return Err(Error::Backend(format!("{}: {} stages asked for, and this architecture's trainer lays itself out over the cards and takes no stage count", "ChatFullFineTune", self.stages)));
         }
@@ -286,7 +299,7 @@ impl ChatFullFineTune {
         plan_before_load(&open, block, &set)?;
 
         let seed = resolve_seed(self.seed, None)?;
-        let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, ..fit_opts(self.steps, block, self.lr, seed) };
+        let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, ..fit_opts(self.steps, block, self.lr, seed) };
         let digest_clock = std::time::Instant::now();
         let base_digest = base_digest(&open)?;
         model::finetune::stage_time("sdk: digest the base weights", digest_clock);
