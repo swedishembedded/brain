@@ -78,4 +78,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume IV: How Computers Actually Execute Machine Learning](v04-computation/index.md)
 
 1. [Bits and Number Formats](v04-computation/01-number-formats.md): How many bits does a number need, and what do we lose with each bit we remove?
+2. [The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md): Why does the same arithmetic run ten times faster when the data is arranged differently?
 <!-- /contents -->

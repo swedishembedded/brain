@@ -66,6 +66,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## C
 
+**cache hierarchy**: the stack of memories between a core's registers and main memory, each level larger and slower than the one above it and holding copies of the lines most recently used from the level below. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
+
+**cache line**: the aligned block of memory, 64 bytes on most chips, that is fetched and kept in a cache as a unit when any of its bytes is needed. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
+
 **calibration**: the property that a model's probabilities match frequencies, so that among the examples given probability $p$ about a share $p$ are positive; measured with a reliability diagram and the expected calibration error. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **catastrophic cancellation**: the loss of leading digits when two nearly equal numbers that carry rounding errors are subtracted; the subtraction is exact but promotes the earlier errors to the leading digits of a much smaller result, losing about $\log_{10}$ of the ratio of the operands to the result. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
@@ -108,6 +112,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **covariance**: the expected product of the deviations of two variables from their means, $\mathbb{E}[XY] - \mathbb{E}[X]\mathbb{E}[Y]$, positive when they tend to move together; it is the cross term in the variance of a sum and the entry of the covariance matrix. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
+**CPU core**: one unit of a processor that fetches, decodes and executes instructions in a pipeline, with its own registers and first-level caches, sharing the rest of the memory system with the other cores of the chip. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
+
 **critical point**: a point where the derivative is zero, so the tangent is horizontal; it may be a minimum, a maximum or neither. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **cross-entropy**: the expected surprise under a belief $q$ of data drawn from $p$, $H(p, q) = -\sum_k p_k \log q_k$, the average code length paid for believing $q$; it is never below $H(p)$. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
@@ -119,6 +125,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **data augmentation**: training on altered copies of the examples, with their labels kept, where the alteration encodes a known invariance of the task; an alteration that changes the true label adds wrong training data. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
 
 **data leakage**: any route by which information about the rows used for scoring reaches the fitting (duplicates, statistics computed from all the rows, the future, the same subject on both sides), which makes the score too good to be true. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
+**data-parallel loop**: a loop in which no iteration reads anything another iteration writes, so its iterations can be run in any order or at the same time with the same result; the `parallel for` of the book's pseudocode. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 
 **dataset**: a collection of $N$ examples, each a vector of features paired with a label, written as the pairs $(\mathbf{x}_n, y_n)$. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
@@ -486,6 +494,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **silu**: the sigmoid linear unit $z\,\sigma(z)$ (also called swish), the input times the logistic sigmoid of the input, smooth, with a slope that overshoots $1$ before settling to it. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
+**SIMD**: single instruction, multiple data: an instruction that applies the same operation to all the lanes of a wide register at once, for example eight f32 additions in one 256-bit instruction. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
+
 **singular value decomposition**: the factorisation $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$ of any matrix into a rotation, a stretch by non-negative singular values and a second rotation. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
 **sinusoid**: a wave $A\cos(2\pi f t + \varphi)$ described by an amplitude $A$ (its largest value), a frequency $f$ (cycles per second) and a phase $\varphi$ (where in its cycle it stands at time zero); a cosine and a sine are the same sinusoid a quarter period apart. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
@@ -521,6 +531,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **test set**: rows used once, after every choice is made, to report the final score of the chosen model; looking at it more than once turns it into a validation set. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **test-dimension choice**: choosing the sizes of the model a test runs on (batch, features, widths, heads) all different and above 1, so that bugs that confuse two sizes or depend on a size of 1 change the result. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
+
+**thread parallelism**: using several threads, each running on its own core with its own registers and first caches and sharing the later caches and memory, to carry out the pieces of one computation at the same time. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 
 **train-vs-eval-mode**: the two behaviours of a layer that has a state of its own: in train mode batch normalization uses the batch statistics and updates its running averages, in eval mode it uses the running averages and changes nothing. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 

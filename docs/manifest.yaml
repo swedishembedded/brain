@@ -383,6 +383,7 @@ navigation:
         pages:
           - docs/book/v04-computation/index.md
           - docs/book/v04-computation/01-number-formats.md
+          - docs/book/v04-computation/02-cpu.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

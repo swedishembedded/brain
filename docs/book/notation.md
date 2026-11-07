@@ -296,6 +296,7 @@ $\mathbf{H}$ is the Hessian matrix, and $H(p)$, with an argument, is entropy.
 | $n_e$, $n_m$ | the number of exponent bits and of fraction bits of a floating-point format (Volume IV, chapter 1); the significand has $p = n_m + 1$ bits, so $\varepsilon = 2^{-n_m}$ and $u = 2^{-(n_m+1)}$ |
 | $E$, $f$, $s$ | the stored exponent field (an unsigned integer), the stored fraction field and the sign bit of a floating-point code, with value $(-1)^s (1 + f/2^{n_m})\,2^{E - \mathrm{bias}}$ for a normal number, $\mathrm{bias} = 2^{n_e - 1} - 1$ (Volume IV, chapter 1) |
 | $\Delta$, $q$, $q_0$ | the scale of an integer format, an integer code and the zero point, so that a stored code $q$ stands for $\Delta\,(q - q_0)$, with $q_0 = 0$ when there is no zero point (Volume IV, chapter 1) |
+| $n_{\mathrm{lane}}$, $t_{\mathrm{lat}}$, $r_{\mathrm{iss}}$, $s_{\mathrm{line}}$, $n_{\mathrm{sets}}$, $n_{\mathrm{ways}}$ | in Volume IV, Chapter 2, the number of lanes of a vector register, the latency of an instruction in cycles, the number of instructions of a kind a core starts per cycle (the issue rate), the size of a cache line in bytes (64), and the number of sets and of ways per set of a cache, so that a cache of $C$ bytes has $C = n_{\mathrm{sets}}\,n_{\mathrm{ways}}\,s_{\mathrm{line}}$ |
 
 ## Symbols with more than one meaning
 
