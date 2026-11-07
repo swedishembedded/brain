@@ -27,7 +27,7 @@ def dot_source(tree) -> str:
         counter[0] += 1
         counts = ", ".join(f"{cl.CLASS_NAMES[c]}:{n}" for c, n in enumerate(node["counts"]))
         if "feature" in node:
-            lines.append(f'n{i} [label="x{node["feature"] + 1} <= {node["threshold"]:.2f}\\nentropy {node["impurity"]:.2f} bits\\n[{counts}]"];')
+            lines.append(f'n{i} [label="x{node["feature"] + 1} <= {node["threshold"]:.3f}\\nentropy {node["impurity"]:.2f} bits\\n[{counts}]"];')
             left, right = walk(node["left"]), walk(node["right"])
             lines.append(f'n{i} -> n{left} [label="yes"];')
             lines.append(f'n{i} -> n{right} [label="no"];')

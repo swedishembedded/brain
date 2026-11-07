@@ -44,7 +44,7 @@ somewhere near $57$, and you can say that without being able to
 write down a rule for how you got there. That small act, producing an answer
 for an input you have never seen from a handful of inputs you have, is what
 this volume is about. This chapter builds the vocabulary for it precisely:
-what the table is, what a **model** is, what it means for a model to be
+what the table is, what a model is, what it means for a model to be
 chosen using data, what makes a choice good, and the three broad situations
 (with labels, without them, and with only rewards) in which the same idea
 appears.
@@ -116,7 +116,7 @@ vectors $\mathbf{x}_n$ as rows gives a matrix $\mathbf{X}$ of shape $[N, d]$
 (the layout of chapter 5: the first axis counts examples), and the labels form
 a vector $\mathbf{y}$ of shape $[N]$. This is how every dataset in the rest of
 the book is held in memory, and it is why the first axis of an array in this
-book is so often called the batch: it is the axis of examples.
+book is so often called the batch dimension (chapter 5): it is the axis of examples.
 
 Two things about labels are worth saying early. First, a label does not have
 to be a number measured on a scale. It can be one choice out of a short list
@@ -211,8 +211,10 @@ show how.
 - **Lookup tables.** Keep the ten rows. To answer a new voltage, find the
   stored row with the closest voltage and return its temperature. The numbers
   that define this model are the ten stored voltages and the ten stored
-  temperatures: twenty parameters. Its members are staircases that jump from
-  one stored label to the next.
+  temperatures: twenty parameters. (In general, $N$ stored examples of $d$
+  features each are $N$ feature vectors of $d$ numbers and $N$ labels, so
+  $N(d + 1)$ parameters.) Its members are staircases that jump from one stored
+  label to the next.
 
 By the counting of chapter 2 (a family with $k$ parameters can pass through $k$
 chosen points), the lookup table can reproduce any ten points exactly. A line
@@ -336,10 +338,11 @@ pass over the data. For a grid of $m$ values per parameter and $k$ parameters
 the count is $m^k$ settings, which is already hopeless at ten parameters and
 unthinkable at seven billion. Every learning method in this book can be read as
 a way around that count: a rule that, from the current parameters and the
-data, says which way to change them (the gradient of Volume I, used in the next
-chapter), so that the search takes a few steps instead of visiting everything.
+data, says which way to change them (the slope of $E$ with respect to every
+parameter at once, the gradient of Volume I, chapter 8, which the next chapter
+uses), so that the search takes a few steps instead of visiting everything.
 
-The figure shows the four lines of the table inside the data.
+The figure shows the three hand-tuned lines and the best line of the grid search inside the data.
 
 ![The ten measured rows as dots, with three hand-tuned lines drawn dashed and the best line found by the grid search drawn solid. Each line is labelled with its two parameters and its average error on the ten rows.](img/candidate-lines.svg)
 
@@ -363,7 +366,7 @@ parameters; it only supplies the rows. It also produced the ten rows of the
 first table and the data sets of the section after this one.
 
 <!-- worked: learning_problem.data_source -->
-The source (the learner never sees these lines): voltage v uniform on [0.4, 2.8], temperature y = -6 + 50 v - 8 v^2 + 1.2 z with z a standard Gaussian sample. A row is made by two draws in this order: v = 0.4 + 2.4 * rng.uniform(), then z = rng.normal(); v is then rounded to 2 decimals and y (computed from the unrounded v) to 1. `rng.normal()` is the Box-Muller sample of the randomness chapter, which draws two uniforms for every second call and holds the second result for the call after.
+The source (the learner never sees these lines): voltage v uniform on [0.4, 2.8], temperature y = -6 + 50 v - 8 v^2 + 1.2 z with z a standard Gaussian sample, evaluated left to right in double precision. A row is made by two draws in this order: v = 0.4 + 2.4 * rng.uniform(), then z = rng.normal(); v is then rounded to 2 decimals and y (computed from the unrounded v) to 1, with `round` of the pseudocode page (ties away from zero). `rng.normal()` is the Box-Muller sample defined on the pseudocode page: it draws two uniforms for every second call and holds the second result for the call after. Because a row makes one `rng.uniform()` call and one `rng.normal()` call, the held value is used by every second row, and it stays held across the row boundary and across the ten-row blocks of the last line below (it is never discarded or reset); only a new generator starts with nothing held.
 
 | data set | generator seed | rows | how they are used |
 |---|---:|---:|---|
@@ -537,7 +540,7 @@ two-feature vectors, with no labels, listed here with the recipe that produced
 them.
 
 <!-- worked: learning_problem.readings_table -->
-Generator: the book's SplitMix64, seed 0xe99380969c0c4dcd (16830937616765177293). Source: 6 rows around (1.0, 1.2), then 6 around (3.6, 3.0); each row is two draws in this order, x = cx + 0.45 * rng.normal() then y = cy + 0.45 * rng.normal(), rounded to 2 decimals; the 12 rows are then permuted by `shuffle` of the randomness chapter (Fisher-Yates, one `rng.integer(i + 1)` for i = 11 down to 1). The learner is given only this table.
+Generator: the book's SplitMix64, seed 0xe99380969c0c4dcd (16830937616765177293). Source: 6 rows around (1.0, 1.2), then 6 around (3.6, 3.0); each row is two draws in this order, x = cx + 0.45 * rng.normal() then y = cy + 0.45 * rng.normal(), rounded to 2 decimals (`round` of the pseudocode page); the 12 rows, in this generation order, are then permuted in place by `shuffle(rows, rng)` of the pseudocode page (Fisher-Yates, one `rng.integer(i + 1)` for i = 11 down to 1, continuing the same generator), and row n below is the element at position n - 1 after the shuffle. The learner is given only this table.
 
 | n | feature 1 | feature 2 |
 |---|---:|---:|
@@ -554,24 +557,67 @@ Generator: the book's SplitMix64, seed 0xe99380969c0c4dcd (16830937616765177293)
 | 11 | 2.85 | 2.62 |
 | 12 | 1.25 | 1.29 |
 <!-- /worked -->
- A procedure that finds two groups can be
+
+A procedure that finds two groups can be
 written with nothing beyond the vectors of chapter 3 (the distance between two
 of them) and averages. Pick two starting centres. Then repeat two steps:
 assign every row to the nearest centre, and move each centre to the mean of the
 rows assigned to it. Stop when the assignment no longer changes. The starting
-centres here are deliberately poor, both in the lower left corner, and the
-rules that the description leaves open are fixed in the header of the table: a
-tie goes to centre A, and a centre that gets no rows stays where it is.
+centres here are deliberately poor, both in the lower left corner. In the
+pseudocode the open rules are fixed: the distance is the squared distance
+(it picks the same nearest centre as the distance itself), a tie goes to the
+centre with the lower index, the sum of a mean runs over the rows in table order,
+and a centre that gets no rows stays where it is.
+
+```text
+function group_rows(X: array<real>[N, d], start: array<real>[K, d], max_rounds: int)
+        -> (array<real>[K, d], array<int>[N]):
+    require N > 0 and K > 0 and d > 0 and max_rounds > 0, "need rows, centres and rounds"
+    centres = copy(start)
+    previous = [-1 for n in 0 .. N]          # no assignment yet, so round 0 always differs
+    assign = [0 for n in 0 .. N]
+    for step in 0 .. max_rounds:
+        for n in 0 .. N:                     # step 1: nearest centre
+            best = infinity
+            for k in 0 .. K:
+                dist = 0.0
+                for j in 0 .. d:
+                    dist = dist + (X[n, j] - centres[k, j]) ^ 2
+                if dist < best:              # strict: on a tie the lower index wins
+                    best = dist
+                    assign[n] = k
+        changed = false
+        for n in 0 .. N:
+            if assign[n] != previous[n]:
+                changed = true
+        if not changed:
+            break                            # centres are those the last assignment used
+        previous = copy(assign)
+        for k in 0 .. K:                     # step 2: move each centre to the mean of its rows
+            count = 0
+            total = zeros(real, [d])
+            for n in 0 .. N:
+                if assign[n] == k:
+                    count = count + 1
+                    for j in 0 .. d:
+                        total[j] = total[j] + X[n, j]
+            if count > 0:
+                for j in 0 .. d:
+                    centres[k, j] = total[j] / count
+    return (centres, assign)
+```
+
+The table shows, for each round, the centres its assignment used.
 
 <!-- worked: learning_problem.grouping_loop -->
-Start: centre A = (0.0, 0.0), centre B = (1.0, 0.5). A round assigns each row to the centre with the smaller squared distance (A on a tie), then moves each centre to the mean of its rows (a centre with no rows stays). Rounds stop after the first round whose assignment equals the previous round's, or after 10 rounds. The table shows, for each round, the centres used by its assignment.
+Start: centre A = (0.0, 0.0), centre B = (1.0, 0.5). A round assigns each row to the centre with the smaller squared distance (A on a tie), then moves each centre to the mean of its rows (the sum of the rows in table order, divided by their number; a centre with no rows stays). Rounds stop after the first round whose assignment equals the previous round's, or after 10 rounds. The table shows, for each round, the centres used by its assignment, to 5 decimals: every exact centre of this run is either a decimal with at most 5 places or far from a rounding tie, so the order of summation does not change a printed digit.
 
 | round | centre A | centre B | points assigned to A and B |
 |---|---:|---:|---:|
-| 1 | (0.00, 0.00) | (1.00, 0.50) | 0 and 12 |
-| 2 | (0.00, 0.00) | (2.28, 1.89) | 4 and 8 |
-| 3 | (0.80, 0.65) | (3.03, 2.51) | 6 and 6 |
-| 4 | (0.96, 0.92) | (3.60, 2.87) | 6 and 6 |
+| 1 | (0.00000, 0.00000) | (1.00000, 0.50000) | 0 and 12 |
+| 2 | (0.00000, 0.00000) | (2.28333, 1.89167) | 4 and 8 |
+| 3 | (0.79750, 0.65250) | (3.02625, 2.51125) | 6 and 6 |
+| 4 | (0.96167, 0.91833) | (3.60500, 2.86500) | 6 and 6 |
 <!-- /worked -->
 
 The first round puts every row in one group, because both centres are on
@@ -651,10 +697,32 @@ Average reward: A 0.2, B 1.0. The agent now presses B for 10 more steps and coll
 The agent measured B as better ($1.0$ against $0.2$, the true values being
 $0.7$ and $0.3$), chose it, and collected most of the possible reward in the
 second half. Ten presses is a small sample, in the sense of chapter 12: with a
-slightly different run of luck it might have preferred A. Every part of this tiny
-game returns in Volume XII at a larger size, including the tension it shows
-between spending steps to learn which button is better and spending them to
-collect the reward.
+slightly different run of luck it might have preferred A. How often that
+happens depends on how long the agent explores and on how far apart the buttons
+are. The next table repeats the game many times with the same rule, exploring
+for $L$ presses and then choosing, for two pairs of buttons, and also gives the
+reward per step the rule earns over a game of 200 steps, in which the
+exploration presses count too.
+
+<!-- worked: learning_problem.explore_study -->
+Generator: the book's SplitMix64, seed 0xdcc19debefc421a6 (15907168995514786214). One generator for the whole table. For each pair of probabilities (A, B), in the order listed, and for each exploration length L = 2, 10, 100 in that order, play 2000 games one after the other. A game presses A, B, A, ... for L presses, one `rng.uniform()` per press, rewarded when it is below the pressed button's probability, then compares the two reward totals (each button was pressed L / 2 times, so totals compare as averages do): it picks B only when B's total is strictly larger, and A otherwise (so a tie is a wrong pick, since B is the better button in both pairs). Only the exploration presses are drawn. The count column is reproduced exactly. The next column is the exact probability of a wrong pick (sums of binomial probabilities, no simulation), which the simulated rate matches up to sampling error. The last column is the expected reward per step of a game of 200 steps (the L exploration presses, then the rest on the picked button), from the exact probability. Four decimals.
+
+| probabilities of A and B | L | wrong picks in 2000 games | rate | exact probability | expected reward per step over 200 steps |
+|---|---:|---:|---:|---:|---:|
+| 0.3 and 0.7 | 2 | 1027 | 0.5135 | 0.5100 | 0.4960 |
+| 0.3 and 0.7 | 10 | 326 | 0.1630 | 0.1503 | 0.6329 |
+| 0.3 and 0.7 | 100 | 0 | 0.0000 | 0.0000 | 0.6000 |
+| 0.5 and 0.6 | 2 | 1417 | 0.7085 | 0.7000 | 0.5302 |
+| 0.5 and 0.6 | 10 | 960 | 0.4800 | 0.4957 | 0.5504 |
+| 0.5 and 0.6 | 100 | 376 | 0.1880 | 0.1815 | 0.5659 |
+<!-- /worked -->
+
+A longer exploration makes a wrong pick rarer, but every exploration press on the
+worse button is a step that could have been spent on the better one. Whether
+that trade is worth it depends on the horizon and on the gap between the
+buttons, which is the tension between spending steps to learn which button is
+better and spending them to collect the reward. Every part of this tiny game
+returns in Volume XII at a larger size.
 
 ### Which setting, and how they combine
 
@@ -680,8 +748,8 @@ over. Before counting $N$, decide what one example is.
 **Keep features in comparable units.** A feature measured in thousands (price in
 kronor) next to one measured in fractions (a rate) will make some learning
 procedures struggle for reasons that have nothing to do with the problem.
-Chapter 12's z-score is the standard remedy and the next chapter shows why it
-matters.
+Chapter 12's z-score (subtract the mean, divide by the standard deviation) is
+the standard remedy, and the next chapter shows why it matters.
 
 **State the question the numbers answer.** The average error on a dataset is
 an estimate of the average error on the distribution the dataset came from.
@@ -727,9 +795,10 @@ after the equals sign. That is this chapter's split of a calculator line into fe
 
 **A model with parameters, trained by a loop.** The model of this chapter is the
 `Model` trait in `crates/model/src/lib.rs`: a type holds its parameters and
-exposes `forward`, which returns the scalar loss for the current batch,
-`backward`, which accumulates the gradient of that loss with respect to the
-parameters, `zero_grads`, and `adamw_step`, which updates the parameters. That
+exposes `forward`, which returns the scalar loss (a score like $E$, smaller is
+better) for the current batch of examples, `backward`, which accumulates the
+gradient of that loss with respect to the parameters (the direction in which
+each parameter should move), `zero_grads`, and `adamw_step`, which updates the parameters. That
 loop (compute how far off, find which way to move every parameter, move) is the
 subject of the next chapter and is derived for networks in
 [Backpropagation Derived from Scratch](../v03-neural-networks/04-backpropagation.md).
@@ -769,7 +838,7 @@ Answers are at the end of the chapter.
 
 1. **Explain.** In $\hat{y} = f_\theta(\mathbf{x})$, which of $\hat{y}$, $\mathbf{x}$ and $\theta$ are changed (a) when we ask the same model about a new example and (b) when we say the model is learning?
 2. **Predict.** The line $f(v) = 24 v + 9$ is asked about $v = 2.20$ V. What does it predict? If the true temperature was $62.0$ degrees, by how much is it off?
-3. **Find the error.** "A parabola has three parameters and a line has two, so the best parabola is guaranteed to have a smaller error than the best line on any rows." For which rows is the claim true, and for which is it not necessarily true? (Hint: use the fact that the lines are parabolas with $a = 0$.)
+3. **Find the error.** "A parabola has three parameters and a line has two, so the best parabola is guaranteed to have a smaller error than the best line on any rows." For which rows is the claim true, and for which is it not necessarily true? (Hint: use the fact that the lines are parabolas with $a = 0$; "best" here means over every setting, not over a grid.)
 4. **Explain.** The lookup table scores $0.00$ degrees on the known rows and $3.14$ on fresh rows. A colleague says that this proves the lookup table is a bad model. What does it show, and what would you want to know before calling it bad?
 5. **Find the error.** "Dataset 2 of the five resampled datasets chose a line that does much worse on fresh rows than the others, so there must have been a bug in its search." What is the more likely explanation, and what does it say about the parameters?
 6. **Predict.** A grid for a model with $k = 3$ parameters has $m = 100$ values per parameter. How many settings does it contain, and how many for $k = 10$?
@@ -780,7 +849,7 @@ Answers are at the end of the chapter.
 
 1. **[Calculate]** For the line $f(v) = 24v + 9$ compute by hand the prediction and the off-by amount for rows 1, 5 and 10 of the sensor table, and check them against the table of `learning_problem.first_attempt`. Then compute the average error of the same line on only those three rows, and say whether the difference from $4.29$ is a surprise.
 
-2. **[Calculate]** Starting from $\theta = (20, 18)$ (attempt 3), raise $w$ by $1$ and recompute the average error over the ten rows. Then lower $b$ by $1$ in the original and recompute. Which single change is better, and what does the comparison say about trying one parameter at a time?
+2. **[Calculate]** Starting from $\theta = (20, 18)$ (attempt 3), raise $w$ by $1$ and recompute the average error over the ten rows. Then, again from $(20, 18)$, lower $b$ by $1$ and recompute. Which single change is better, and what does the comparison say about trying one parameter at a time?
 
 3. **[Calculate]** A model has $d$ features and predicts $\hat{y} = w_1 x_1 + \dots + w_d x_d + b$. How many parameters does it have? How many for the lookup table over $N$ examples of $d$ features each? Evaluate both for $d = 3$ and $N = 5$ (the houses table) and for $d = 1000$ and $N = 10^6$.
 
@@ -790,9 +859,9 @@ Answers are at the end of the chapter.
 
 6. **[Implement]** Implement the book's generator (chapter "Randomness on a Deterministic Machine"), the source of `learning_problem.data_source` and the grid search of the pseudocode. Seed the generator with the seed printed for the sensor table, draw the ten rows in the stated order and check that sorted by voltage they are the table of `learning_problem.sensor_table`; then reproduce `learning_problem.grid_search` (the grid, the best setting and its average error $2.77$, to the digits printed) and the three hand attempts of `learning_problem.hand_tuning`.
 
-7. **[Implement]** Implement the grouping loop of this chapter and reproduce `learning_problem.grouping_loop` and `learning_problem.grouping_points`: take the twelve rows of `learning_problem.readings_table` as input (or regenerate them from the seed and recipe printed there), start from the centres $(0, 0)$ and $(1, 0.5)$ with the tie and empty-group rules of the table header, and your centres and group sizes round by round must match, to the digits printed.
+7. **[Implement]** Implement `group_rows` of this chapter and reproduce `learning_problem.grouping_loop` and `learning_problem.grouping_points`: take the twelve rows of `learning_problem.readings_table` as input (or regenerate them from the seed and recipe printed there), start from the centres $(0, 0)$ and $(1, 0.5)$ with at most 10 rounds, and your centres (to the 5 decimals printed) and group sizes round by round must match.
 
-8. **[Implement]** Implement the decision rule of the button game: first from the ten rewards of the table of `learning_problem.button_game` (use them as input), reproduce the two average rewards and the button chosen; then regenerate the whole table, including the ten later presses, from the seed and the draw order printed in its header. Then run your own game for $10^5$ steps with the explore-then-choose rule, with exploration lengths $2$, $10$ and $100$, and report how often the agent picks the wrong button. Which length is best, and why does the answer depend on how close the two probabilities are?
+8. **[Implement]** Implement the decision rule of the button game: first from the ten rewards of the table of `learning_problem.button_game` (use them as input), reproduce the two average rewards and the button chosen; then regenerate the whole table, including the ten later presses, from the seed and the draw order printed in its header. Then reproduce `learning_problem.explore_study` from the seed and draw order printed in its header: the counts of wrong picks must match exactly, and your exact probabilities and rewards per step to the digits printed. Which length earns the most per step for each pair of buttons, and why does the answer depend on how close the two probabilities are?
 
 9. **[Investigate]** Reproduce the three rows of `learning_problem.hypothesis_spaces` with your implementation of exercise 6 (the fresh rows come from the seed printed in `learning_problem.data_source`), including the parabola grid of `learning_problem.parabola_grid`. Then add a fourth hypothesis space: cubic polynomials. Does the error on the fresh rows fall below the parabola's? Repeat with a dataset of $N = 100$ rows instead of $10$ and say what changed.
 
@@ -861,7 +930,7 @@ exactly, and replaces the grid by following the gradient.
 
 1. (a) Only $\mathbf{x}$ (and so $\hat{y}$) changes; $\theta$ stays fixed. (b) Only $\theta$ changes, and with it the whole function $f_\theta$; the data stay as they are.
 2. $24 \cdot 2.20 + 9 = 61.8$ degrees. It is off by $\lvert 61.8 - 62.0 \rvert = 0.2$.
-3. It is true for the rows used to choose the parameters, when the error is the one being minimised: every line is a parabola with $a = 0$, so the best parabola on those rows is at least as good as the best line (up to the grid's resolution). It does not follow for new rows: the extra parameter is fitted to the noise of the known rows too and can make the predictions worse on others.
+3. It is true for the rows used to choose the parameters, when the error is the one being minimised: every line is a parabola with $a = 0$, so the best parabola over all settings is at least as good as the best line on those rows. (A search over grids need not respect this: the two grids of this chapter have different steps, and the line of the grid search, $w = 27.25$, is not on the parabola grid, whose $w$ values step by 1. Here the parabola wins anyway, $0.68$ against $2.77$.) It does not follow for new rows: the extra parameter is fitted to the noise of the known rows too and can make the predictions worse on others.
 4. It shows only that the table is excellent on rows it was built from and mediocre on others, so the known-row score is not informative about new rows. Before judging it, ask for the error on fresh rows from the same source (it was $3.14$) and compare with the alternatives on those (the parabola was $0.98$). On those rows it is worse than the parabola and about as poor as the line.
 5. The more likely explanation is a small, noisy sample: the search returned the best line for its ten rows (its error on those rows, $3.14$, is the largest of the five, but that is the best any line can do on them), and ten noisy rows do not pin the line down. The parameters depend on the particular rows drawn, so they vary from dataset to dataset, and so does the quality of the line on new rows.
 6. $100^3 = 10^6$ settings, and $100^{10} = 10^{20}$ for $k = 10$.

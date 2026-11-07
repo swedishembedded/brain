@@ -45,7 +45,7 @@ PARTS_LAW = (-6.0, 1.2, 1.0)
 N_PARTS = 60
 X_MAX = 5.0
 
-ETA_SCALE = 1.0        # learning rate = ETA_SCALE / L, L = lambda_max(X^T X / N) / 4
+ETA_SCALE = 1.0        # learning rate = ETA_SCALE / lam_cap, lam_cap = lambda_max(X^T X / N) / 4
 GRAD_TOL = 1e-5        # "converged": the gradient norm is below this
 STEP_CAP = 200_000
 
@@ -187,7 +187,7 @@ def _gram(x, weights=None):
     return g
 
 
-def _eigenvalues(a, sweeps=60):
+def _eigenvalues(a, sweeps=20):
     """Eigenvalues of a small symmetric matrix by cyclic Jacobi rotations, ascending."""
     n = len(a)
     a = [list(r) for r in a]
@@ -249,7 +249,7 @@ def _descend(x, y, w0, eta, steps, record=()):
 
 
 def _smoothness(x):
-    """L = lambda_max(X^T X / N) / 4, an upper bound on the largest curvature of the loss."""
+    """lambda_cap = lambda_max(X^T X / N) / 4, an upper bound on the largest curvature of the loss."""
     n = len(x)
     g = [[v / n for v in r] for r in _gram(x)]
     return _eigenvalues(g)[-1] / 4.0
@@ -257,34 +257,43 @@ def _smoothness(x):
 
 @lru_cache(maxsize=None)
 def _fit_parts():
-    """Train on the sixty parts from w = 0 with eta = ETA_SCALE / L until the gradient is tiny.
+    """Train on the sixty parts from w = 0 with eta = ETA_SCALE / lambda_cap until the gradient is tiny.
 
-    Returns (w, steps, eta, L, x, y).
+    Returns (w, steps, eta, lambda_cap, x, y).
     """
     x, y = _design(_parts())
-    big_l = _smoothness(x)
-    eta = ETA_SCALE / big_l
+    lam_cap = _smoothness(x)
+    eta = ETA_SCALE / lam_cap
     w = [0.0, 0.0, 0.0]
     for k in range(1, STEP_CAP + 1):
         g = _gradient(x, y, w)
         if math.sqrt(_dot(g, g)) < GRAD_TOL:
-            return tuple(w), k - 1, eta, big_l, x, y
+            return tuple(w), k - 1, eta, lam_cap, x, y
         w = [wi - eta * gi for wi, gi in zip(w, g)]
-    return tuple(w), STEP_CAP, eta, big_l, x, y
+    return tuple(w), STEP_CAP, eta, lam_cap, x, y
+
+
+NEWTON_ITERATIONS = 30
+
+
+def _hessian(x, w):
+    """(1/N) X^T S X with S = diag(p (1 - p))."""
+    s = [p * (1.0 - p) for p in _probs(x, w)]
+    return [[v / len(x) for v in r] for r in _gram(x, s)]
 
 
 def _fit_one_feature(rows):
-    """Logistic fit of (x, y) rows with one feature, same rule as the parts fit."""
+    """The minimiser of the mean cross-entropy for (x, y) rows with one feature.
+
+    Newton's method from w = 0: w <- w - solve(H, g), NEWTON_ITERATIONS times. The loss is convex and the data
+    are not separable, so the iteration converges to the unique minimiser (gradient norm far below 1e-12).
+    """
     x = [[1.0, r[0]] for r in rows]
     y = [float(r[1]) for r in rows]
-    big_l = _smoothness(x)
-    eta = ETA_SCALE / big_l
     w = [0.0, 0.0]
-    for k in range(1, STEP_CAP + 1):
-        g = _gradient(x, y, w)
-        if math.sqrt(_dot(g, g)) < GRAD_TOL:
-            break
-        w = [wi - eta * gi for wi, gi in zip(w, g)]
+    for _ in range(NEWTON_ITERATIONS):
+        step = _solve(_hessian(x, w), _gradient(x, y, w))
+        w = [wi - si for wi, si in zip(w, step)]
     return w
 
 
@@ -305,7 +314,7 @@ def one_feature_table():
     rows = _one_feature()
     out = [_generator_line(ONE_NAME),
            f"Draw order, part by part (N = {N_ONE}): x = round(5 u1, 1) with u1 = uniform(), then u2 = uniform(); "
-           f"y = 1 (rejected) when u2 < sigmoid({ONE_LAW[0]} + {ONE_LAW[1]} x). Rows are shown sorted by x.",
+           f"y = 1 (rejected) when u2 < sigmoid({ONE_LAW[0]} + {ONE_LAW[1]} x). Rows are shown sorted by x and numbered in that order.",
            ""]
     out.append(_table(["part", "x (0.01 mm)", "y"], [(i + 1, f"{x:.1f}", y) for i, (x, y) in enumerate(rows)]))
     return "\n".join(out)
@@ -336,12 +345,19 @@ def linear_fit_on_labels():
 def logistic_fit_one_feature():
     rows = _one_feature()
     far = rows + (FAR_PART,)
-    out = []
+    out, fits = [], []
     for name, data in (("twelve parts", rows), (f"plus one part at x = {FAR_PART[0]:.1f}", far)):
         w = _fit_one_feature(data)
+        fits.append(w)
         errs = sum(1 for x, y in data if (1 if w[0] + w[1] * x >= 0 else 0) != y)
         out.append((name, f"{w[0]:.4f}", f"{w[1]:.4f}", f"{-w[0] / w[1]:.3f}", f"{errs} of {len(data)}"))
-    return _table(["fit", "w0", "w1", "x where p = 0.5", "rows misclassified"], out)
+    shift = [abs(a - b) for a, b in zip(*fits)]
+    out.append(("absolute change of the weights", _sci(shift[0], 1), _sci(shift[1], 1), "", ""))
+    head = (f"Weights that minimise the mean binary cross-entropy of the next sections, found by Newton's method from "
+            f"w = (0, 0): {NEWTON_ITERATIONS} updates w <- w - solve(H, g, true), with the gradient g and Hessian H of the sections "
+            "\"The gradient\" and \"Convexity: one valley\" (the gradient norm is then below 1e-12). The last row "
+            "needs a solution that accurate; the others are printed to four decimals.\n\n")
+    return head + _table(["fit", "w0", "w1", "x where p = 0.5", "rows misclassified"], out)
 
 
 def odds_table():
@@ -413,7 +429,10 @@ def descent_squared_vs_bce():
     bce = run(lambda w: sigmoid(w) - 1)
     rows = [(k, f"{se[k]:.4f}", f"{(sigmoid(se[k]) - 1) ** 2:.5f}", f"{bce[k]:.4f}", f"{bce_from_logit(bce[k], 1):.5f}")
             for k in sorted(record)]
-    return _table(["step k", "w (squared error)", "its loss", "w (BCE)", "its loss"], rows)
+    head = ("One part with x = 1 and y = 1, no intercept, so z = w. Start w = -6, eta = 1. Each step is "
+            "w <- w - eta g with g = 2 (p - 1) p (1 - p) for the squared error (p - y)^2 and g = p - 1 for the "
+            "BCE; row k shows w after k steps.\n\n")
+    return head + _table(["step k", "w (squared error)", "its loss", "w (BCE)", "its loss"], rows)
 
 
 def gradient_check():
@@ -448,7 +467,7 @@ def parts_table():
 
 
 def training_run():
-    w, steps, eta, big_l, x, y = _fit_parts()
+    w, steps, eta, lam_cap, x, y = _fit_parts()
     record = (0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
     record = tuple(k for k in record if k <= steps)
     _, seen = _descend(x, y, [0.0, 0.0, 0.0], eta, max(record), record)
@@ -460,7 +479,7 @@ def training_run():
     g = _gradient(x, y, list(w))
     rows.append((f"{steps} (stop)", f"{w[0]:.4f}", f"{w[1]:.4f}", f"{w[2]:.4f}", f"{_loss(x, y, list(w)):.6f}",
                  f"{math.sqrt(_dot(g, g)):.2e}"))
-    head = (f"Start w = (0, 0, 0). L = lambda_max(X^T X / N) / 4 = {big_l:.6f}, learning rate eta = 1/L = {eta:.6f}, "
+    head = (f"Start w = (0, 0, 0). lambda_cap = lambda_max(X^T X / N) / 4 = {lam_cap:.6f}, learning rate eta = 1/lambda_cap = {eta:.6f}, "
             f"stop when the gradient norm is below {GRAD_TOL:g}.\n\n")
     return head + _table(["step k", "w0", "w1", "w2", "loss", "gradient norm"], rows)
 
@@ -493,7 +512,7 @@ def threshold_table():
 
 
 def hessian_psd():
-    w, _, _, big_l, x, y = _fit_parts()
+    w, _, _, lam_cap, x, y = _fit_parts()
     rows = []
     for name, ww in (("w = (0, 0, 0)", [0.0, 0.0, 0.0]), ("w = (-3, 0.5, 0.5)", [-3.0, 0.5, 0.5]),
                      ("fitted w", list(w)), ("w = (-30, 6, 6)", [-30.0, 6.0, 6.0])):
@@ -501,8 +520,10 @@ def hessian_psd():
         g = [[v / len(x) for v in r] for r in _gram(x, s)]
         ev = _eigenvalues(g)
         rows.append((name, _sci(ev[0], 2), _sci(ev[1], 2), _sci(ev[2], 2)))
-    head = ("Hessian of the mean loss, H = (1/N) X^T S X with S = diag(p (1 - p)), on the sixty parts. "
-            f"Bound L = {big_l:.6f}.\n\n")
+    head = ("Hessian of the mean loss, H = (1/N) X^T S X with S = diag(p (1 - p)), on the sixty parts; eigenvalues by "
+            "jacobi_eigen(H, 20). "
+            f"Bound lambda_cap = {lam_cap:.6f}; fitted w = ({w[0]:.4f}, {w[1]:.4f}, {w[2]:.4f}), "
+            "the weights at the stop of the run in \"Training by gradient descent\".\n\n")
     return head + _table(["where", "smallest eigenvalue", "middle", "largest"], rows)
 
 
@@ -592,16 +613,16 @@ def reading_the_fit():
 
 
 def margin_loss():
-    """A logistic loss on a margin u: loss = softplus(-u) = -log sigmoid(u), gradient weight sigmoid(-u)."""
-    beta, count = 0.5, 8.0
-    chosen_new, chosen_ref, rejected_new, rejected_ref = -2.0, -3.0, -4.0, -3.5
-    u = beta * ((chosen_new - chosen_ref) - (rejected_new - rejected_ref))
-    rows = [("margin u = beta ((a - a_ref) - (b - b_ref))", f"{u:.6f}"),
-            ("loss softplus(-u)", f"{softplus(-u):.6f}"),
-            ("same as -log(sigmoid(u))", f"{-math.log(sigmoid(u)):.6f}"),
-            ("slope magnitude sigmoid(-u)", f"{sigmoid(-u):.6f}"),
-            ("weight beta sigmoid(-u) count", f"{beta * sigmoid(-u) * count:.6f}"),
-            ("loss at u = 0 (ln 2)", f"{softplus(0.0):.6f}")]
-    head = (f"beta = {beta}, count = {count:g}, a = {chosen_new}, a_ref = {chosen_ref}, "
-            f"b = {rejected_new}, b_ref = {rejected_ref}.\n\n")
+    """A logistic loss on a margin m: loss = softplus(-m) = -log sigmoid(m), gradient weight sigmoid(-m)."""
+    beta_pref, count = 0.5, 8.0
+    lp_chosen, lp_chosen_ref, lp_rejected, lp_rejected_ref = -2.0, -3.0, -4.0, -3.5
+    m = beta_pref * ((lp_chosen - lp_chosen_ref) - (lp_rejected - lp_rejected_ref))
+    rows = [("margin m = beta_pref ((lp_chosen - lp_chosen_ref) - (lp_rejected - lp_rejected_ref))", f"{m:.6f}"),
+            ("loss softplus(-m)", f"{softplus(-m):.6f}"),
+            ("same as -log(sigmoid(m))", f"{-math.log(sigmoid(m)):.6f}"),
+            ("slope magnitude sigmoid(-m)", f"{sigmoid(-m):.6f}"),
+            ("weight beta_pref sigmoid(-m) count", f"{beta_pref * sigmoid(-m) * count:.6f}"),
+            ("loss at m = 0 (ln 2)", f"{softplus(0.0):.6f}")]
+    head = (f"beta_pref = {beta_pref}, count = {count:g}, lp_chosen = {lp_chosen}, lp_chosen_ref = {lp_chosen_ref}, "
+            f"lp_rejected = {lp_rejected}, lp_rejected_ref = {lp_rejected_ref}.\n\n")
     return head + _table(["quantity", "value"], rows, "lr")

@@ -11,7 +11,7 @@ A coin is flipped ten times and the sequence is H H T H H T H T H H: seven heads
 
 Suppose the coin has bias $\theta$ and the flips are independent. The probability of this exact sequence is a product of ten numbers, $\theta$ for each head and $1 - \theta$ for each tail: $\theta^7(1-\theta)^3$. Compute it for two candidate biases by hand. At $\theta = 0.5$ it is $0.5^{10} = 0.000977$. At $\theta = 0.7$ it is $0.7^7 \times 0.3^3 = 0.0022236$. The data we saw are about $2.3$ times as probable if the coin has bias $0.7$ as if it is fair. That ratio is a reason to prefer $0.7$, and the whole chapter grows from taking it seriously.
 
-Two puzzles from the previous chapters get answered along the way. Chapter 2 minimised the mean squared error and chapter 3 the binary cross-entropy, and each time the justification was "it works": the first is smooth and has a closed-form minimiser, the second does not saturate. Both were also promised a deeper reason, and here it is: each is the probability of the data under an assumption about how the data arose, read backwards. The second puzzle is the one chapter 3 ended on. Data that a straight boundary separates have no best weights; gradient descent pushes them to infinity. Something has to say that huge weights are implausible, and saying it with probability turns out to be exactly the penalty on weights that practitioners call regularization.
+Two puzzles from the previous chapters get answered along the way. Chapter 2 minimised the mean squared error and chapter 3 the binary cross-entropy, and each time the justification was "it works": the first is smooth and has a closed-form minimiser, the second does not saturate. Both were also promised a deeper reason, and here it is: each is the probability of the data under an assumption about how the data arose, read backwards. The second puzzle is the one chapter 3 ended on. Data that a straight boundary separates have no best weights; gradient descent pushes them to infinity. Something has to say that huge weights are implausible, and saying it with probability turns out to be exactly an added penalty on the size of the weights, the practice called regularization (defined where it arises, below).
 
 ## Before you begin
 
@@ -111,7 +111,7 @@ The second derivative, $-h/\theta^2 - t/(1-\theta)^2$, is negative for every $\t
 The same fraction of heads from more flips has the same maximum and a narrower peak. The next table keeps $70\%$ heads and changes the number of flips; each entry is the likelihood relative to its value at $\theta = 0.7$ (computed through logarithms, for a reason the next section gives), on a grid of step $0.001$.
 
 <!-- worked: likelihood.coin_data_sizes -->
-Relative likelihood Lik(theta) / Lik(0.7), theta on a grid of step 0.001.
+Relative likelihood Lik(theta) / Lik(0.7), computed through logarithms on the grid theta = i/1000, i = 1 .. 999 (the end points 0 and 1 are left out because ln 0 is undefined). The column 'theta with relative >= 1/2' gives the smallest and largest grid value whose relative likelihood is at least 1/2; argmax is the grid value with the largest likelihood.
 
 | n | heads | argmax | at 0.5 | at 0.6 | at 0.8 | theta with relative >= 1/2 | sqrt(0.7*0.3/n) |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -122,7 +122,7 @@ Relative likelihood Lik(theta) / Lik(0.7), theta on a grid of step 0.001.
 
 ![The relative likelihood of the coin bias for 10, 100 and 1000 flips with the same 70 percent heads: all three peak at 0.7 and the peak narrows as the number of flips grows.](img/coin-likelihood.svg)
 
-With ten flips a fair coin is entirely credible: its likelihood is $0.4392$ of the best. With a hundred flips it has fallen to $2.67 \times 10^{-4}$ of the best, and with a thousand to $1.84 \times 10^{-36}$. The width of the region where the relative likelihood is at least a half shrinks by a factor of about three each time the number of flips grows tenfold, the square-root law of chapter 12. The last column of the table is the standard error of the sample proportion from that chapter, and it explains the widths: near its peak the likelihood is close to a bell curve (the second derivative of the log-likelihood at the peak is $-n/(\hat\theta(1 - \hat\theta))$), and a bell with standard deviation $s$ falls to a half at $\sqrt{2\ln 2}\,s \approx 1.177\,s$ from its centre. For $n = 100$ that is $1.177 \times 0.0458 = 0.054$, matching the table's interval $0.645$ to $0.751$ around $0.7$. The likelihood carries its own measure of how much the data say, which the point estimate alone throws away; the prior in the second half of the chapter is the second place where that width matters.
+With ten flips a fair coin is entirely credible: its likelihood is $0.4392$ of the best. With a hundred flips it has fallen to $2.67 \times 10^{-4}$ of the best, and with a thousand to $1.84 \times 10^{-36}$. The width of the region where the relative likelihood is at least a half shrinks by a factor of about three each time the number of flips grows tenfold, the square-root law of chapter 12. The last column of the table is the standard error of the sample proportion from that chapter, and it explains the widths: near its peak the likelihood is close to a bell curve (the second derivative of the log-likelihood at the peak is $-n/(\hat\theta(1 - \hat\theta))$), and a bell with standard deviation $s$ falls to a half at $\sqrt{2\ln 2}\,s \approx 1.177\,s$ from its centre. For $n = 100$ that is $1.177 \times 0.0458 = 0.054$, matching the table's interval $0.645$ to $0.751$ around $0.7$. The likelihood carries its own measure of how much the data say, which the point estimate alone throws away; the starting belief about the parameter that the second half of the chapter introduces is the second place where that width matters.
 
 ## Logarithms, and the negative log-likelihood as a loss
 
@@ -166,14 +166,14 @@ $$
 \mathrm{NLL}(\mu, \sigma^2) = \frac{n}{2}\ln(2\pi\sigma^2) + \frac{1}{2\sigma^2}\sum_{i=1}^{n}(x_i - \mu)^2 .
 $$
 
-Differentiate in $\mu$ and set the result to zero: $-\frac{1}{\sigma^2}\sum_i (x_i - \mu) = 0$, so $\hat\mu = \frac{1}{n}\sum_i x_i = \bar{x}$, the sample mean, whatever $\sigma^2$ is. Then differentiate in the variance $v = \sigma^2$, with $S = \sum_i (x_i - \hat\mu)^2$:
+Differentiate in $\mu$ and set the result to zero: $-\frac{1}{\sigma^2}\sum_i (x_i - \mu) = 0$, so $\hat\mu = \frac{1}{n}\sum_i x_i = \bar{x}$, the sample mean, whatever $\sigma^2$ is. Then differentiate in the variance $v = \sigma^2$, with $Q = \sum_i (x_i - \hat\mu)^2$, the sum of squared deviations from the sample mean:
 
 $$
-\frac{\partial\,\mathrm{NLL}}{\partial v} = \frac{n}{2v} - \frac{S}{2v^2} = 0
-\;\Longrightarrow\; \hat{\sigma}^2_{\mathrm{ML}} = \frac{S}{n}.
+\frac{\partial\,\mathrm{NLL}}{\partial v} = \frac{n}{2v} - \frac{Q}{2v^2} = 0
+\;\Longrightarrow\; \hat{\sigma}^2_{\mathrm{ML}} = \frac{Q}{n}.
 $$
 
-The maximum likelihood variance divides by $n$, not by $n - 1$. For these readings $\bar{x} = 20.1667$, $S = 1.1933$, so the maximum likelihood variance is $0.1989$ and the unbiased estimate of chapter 12 is $0.2387$. The table evaluates the NLL at the claimed minimum and at several other points.
+The maximum likelihood variance divides by $n$, not by $n - 1$. For these readings $\bar{x} = 20.1667$, $Q = 1.1933$, so the maximum likelihood variance is $0.1989$ and the unbiased estimate of chapter 12 is $0.2387$. The table evaluates the NLL at the claimed minimum and at several other points.
 
 <!-- worked: likelihood.gaussian_mle -->
 Readings: 20.3, 19.8, 20.9, 20.1, 19.5, 20.4 (n = 6). Sum of squared deviations from the mean: 1.1933.
@@ -196,7 +196,7 @@ Chapter 12 showed that dividing by $n$ underestimates the variance on average: t
 
 <!-- worked: likelihood.variance_bias -->
 Generator: the book's SplitMix64, seed 0x1ac5475f8760fcf7 (1929026491016871159).
-Draw order: for each of 20000 repetitions, 5 calls of normal() (a sample from N(0, 1)); the true variance is 1.
+One generator is created once and serves all 20000 repetitions. Draw order: for each repetition in turn, 5 calls of normal() (a sample from N(0, 1)); the true variance is 1. Because 5 is odd, the second value that Box-Muller produces with every other call is held and carries over into the next repetition (the generator is never re-created or re-seeded between repetitions). Each sample of 5 gives the sum of squared deviations from its own mean, divided by 5 and by 4; the table averages each over the 20000 repetitions.
 
 | divisor | average estimate | expected value |
 |---|---:|---:|
@@ -204,7 +204,7 @@ Draw order: for each of 20000 repetitions, 5 calls of normal() (a sample from N(
 | 1/(n-1) (unbiased) | 1.0036 | 1.0000 |
 <!-- /worked -->
 
-With $n = 5$ the maximum likelihood variance averages $0.8029$ over the repetitions, close to $(n - 1)/n = 0.8$, and the $1/(n-1)$ version averages $1.0036$. The two statements do not contradict each other because they answer different questions. MLE is "the parameter that makes the data most probable"; unbiasedness is "an estimate that is right on average over many datasets". The bias of the maximum likelihood estimate shrinks like $1/n$ and is irrelevant for the large datasets of machine learning; for a handful of readings the choice of divisor is a choice of goal.
+The one generator runs through all $20000$ repetitions without being restarted, so the Box-Muller value held after an odd number of draws carries from one repetition into the next. With $n = 5$ the maximum likelihood variance averages $0.8029$ over the repetitions, close to $(n - 1)/n = 0.8$, and the $1/(n-1)$ version averages $1.0036$. The two statements do not contradict each other because they answer different questions. MLE is "the parameter that makes the data most probable"; unbiasedness is "an estimate that is right on average over many datasets". The bias of the maximum likelihood estimate shrinks like $1/n$ and is irrelevant for the large datasets of machine learning; for a handful of readings the choice of divisor is a choice of goal.
 
 ## The losses of chapters 2 and 3 are negative log-likelihoods
 
@@ -219,7 +219,7 @@ $$
 For a fixed noise level $\sigma$ this is a positive multiple of the mean squared error plus a number that does not depend on $\theta$. Minimising one is minimising the other: **the parameters of maximum likelihood under Gaussian noise are the least-squares parameters.** The table checks the identity on six measurements and six candidate lines, with $\sigma = 1$.
 
 <!-- worked: likelihood.gaussian_nll_is_mse -->
-Data (x, y): (0, 1.1), (1, 2.9), (2, 5.2), (3, 6.8), (4, 9.1), (5, 10.9). Line y = w0 + w1 x, sigma = 1, N = 6, N/2 log(2 pi) = 5.5136.
+Data (x, y): (0, 1.1), (1, 2.9), (2, 5.2), (3, 6.8), (4, 9.1), (5, 10.9). Line y = w0 + w1 x, sigma = 1, N = 6, N/2 log(2 pi) = 5.5136. MSE is the mean of the squared residuals; NLL is N/2 log(2 pi) + (sum of squared residuals) / 2; the last column recomputes it from the MSE as an arithmetic check of the identity.
 
 | (w0, w1) | MSE | NLL | N/2 log(2 pi) + N/2 MSE |
 |---|---:|---:|---:|
@@ -234,6 +234,8 @@ Order from best to worst by MSE: 1, 6, 2, 3, 4, 5; by NLL: 1, 6, 2, 3, 4, 5.
 
 Least-squares line: w0 = 1.0571, w1 = 1.9771, MSE = 0.0185, sqrt(MSE) = 0.1359.
 
+NLL = N log sigma + N/2 log(2 pi) + N MSE / (2 sigma^2) for the least-squares line, at six values of sigma listed in this order; the third is sigma = sqrt(MSE) computed from the unrounded MSE.
+
 | sigma | NLL of the least-squares line |
 |---|---:|
 | 0.1000 | -2.7590 |
@@ -244,7 +246,7 @@ Least-squares line: w0 = 1.0571, w1 = 1.9771, MSE = 0.0185, sqrt(MSE) = 0.1359.
 | 1.0000 | 5.5691 |
 <!-- /worked -->
 
-The last two columns agree to all digits printed, and the lines come out in the same order under both measures. The second table shows what the noise level does. For the least-squares line, the NLL as a function of $\sigma$ is smallest at $\sigma = 0.1359$, which is $\sqrt{\mathrm{MSE}}$ at the best line. To see why, apply the maximum likelihood variance of the last section to the residuals: $\hat\sigma^2 = \mathrm{MSE}_{\min}$, and the NLL there is $\frac{N}{2}(\ln(2\pi\,\mathrm{MSE}_{\min}) + 1)$. The model's assumed noise level and its best-fitting line are estimated together, and the estimated noise is the typical size of the residuals, as chapter 2's reading of the loss suggested.
+The last two columns agree to all digits printed (the last recomputes the NLL from the MSE, so the agreement checks the arithmetic of the identity, and the MSE column carries the information), and the lines come out in the same order under both measures. The second table shows what the noise level does; its rows are in the order listed, with the maximum likelihood value inserted third. For the least-squares line, the NLL as a function of $\sigma$ is smallest at $\sigma = 0.1359$, which is $\sqrt{\mathrm{MSE}}$ of the unrounded $\mathrm{MSE}$ at the best line (the rounded $0.0185$ would give $0.1360$). To see why, apply the maximum likelihood variance of the last section to the residuals: $\hat\sigma^2 = \mathrm{MSE}_{\min}$, and the NLL there is $\frac{N}{2}(\ln(2\pi\,\mathrm{MSE}_{\min}) + 1)$. The model's assumed noise level and its best-fitting line are estimated together, and the estimated noise is the typical size of the residuals, as chapter 2's reading of the loss suggested.
 
 The words "up to constants" hide a condition. The constant can be dropped only while $\sigma$ is fixed. A model that predicts its own noise level, $\sigma(\mathbf{x})$ per example, must keep the $\ln\sigma$ term: without it the loss would be minimised by declaring every example hopelessly noisy, because $(y - f)^2/(2\sigma^2)$ goes to zero as $\sigma$ grows. The term $\ln\sigma$ is the price that keeps the claim of noise honest.
 
@@ -285,7 +287,7 @@ $$
 p(\theta \mid \mathcal{D}) = \frac{p(\mathcal{D} \mid \theta)\,p(\theta)}{p(\mathcal{D})} \;\propto\; \mathrm{Lik}(\theta)\,p(\theta),
 $$
 
-where the symbol $\propto$ means "equal up to a factor that does not depend on $\theta$". The denominator $p(\mathcal{D})$ is that kind of factor, so for choosing a $\theta$ it never matters. The left side, the posterior, is the belief after the data: the likelihood, tilted toward what the prior found plausible.
+where the symbol $\propto$ means "equal up to a factor that does not depend on $\theta$". The denominator $p(\mathcal{D})$ is that kind of factor, so for choosing a $\theta$ it never matters. The left side is the **posterior**, the belief about $\theta$ after the data: the likelihood, tilted toward what the prior found plausible.
 
 ### A prior on the coin, as imaginary flips
 
@@ -306,7 +308,7 @@ $$
 $$
 
 <!-- worked: likelihood.coin_map -->
-7 heads, 3 tails (maximum likelihood 0.7000):
+7 heads, 3 tails (maximum likelihood 0.7000); the grid argmax maximises the log-posterior (h + a - 1) ln(theta) + (t + b - 1) ln(1 - theta) over theta = i/1000, i = 1 .. 999; the posterior mean is (h + a)/(h + t + a + b):
 
 | prior | pseudo-counts | posterior counts | MAP | grid argmax | posterior mean |
 |---|---|---:|---:|---:|---:|
@@ -316,7 +318,7 @@ $$
 | Beta(20, 20) | 19 heads, 19 tails | 26/48 | 0.5417 | 0.542 | 0.5400 |
 | Beta(8, 2) | 7 heads, 1 tails | 14/18 | 0.7778 | 0.778 | 0.7500 |
 
-70 heads, 30 tails (maximum likelihood 0.7000):
+70 heads, 30 tails (maximum likelihood 0.7000); the grid argmax maximises the log-posterior (h + a - 1) ln(theta) + (t + b - 1) ln(1 - theta) over theta = i/1000, i = 1 .. 999; the posterior mean is (h + a)/(h + t + a + b):
 
 | prior | pseudo-counts | posterior counts | MAP | grid argmax | posterior mean |
 |---|---|---:|---:|---:|---:|
@@ -466,9 +468,9 @@ function lasso_cd(X: array<real>[N, D], y: array<real>[N], lam: real, tol: real,
     return (w, max_sweeps)
 ```
 
-A test of an implementation is that the objective never increases between updates, and that at the result every weight satisfies the one-weight condition: $|\rho_j| \leq \lambda$ where $w_j = 0$ and $\rho_j - c_j w_j = \lambda\,\mathrm{sign}(w_j)$ where it is not (here $\mathrm{sign}$ is the usual sign, and only used where $w_j \neq 0$).
+A test of an implementation is that the objective never increases between updates, and that at the result every weight satisfies the one-weight condition: $|\rho_j| \leq \lambda$ where $w_j = 0$ and $\rho_j - c_j w_j = \lambda\,\mathrm{sign}(w_j)$ where it is not (here $\mathrm{sign}$ is the book's sign function and is only evaluated where $w_j \neq 0$, so its value $+1$ at $0$ never matters).
 
-Twenty examples with eight features, of which only three matter, show both penalties on the same data. The ridge solution is the formula above; the lasso is the pseudocode above. In both, $\lambda$ increases down the table.
+Twenty examples with eight features, of which only three matter, show both penalties on the same data. The ridge solution is the formula above; the lasso is the pseudocode above, run from $\mathbf{w} = \mathbf{0}$ afresh at every $\lambda$ with `tol` $= 10^{-12}$ and `max_sweeps` $= 100000$. In both, $\lambda$ increases down the table.
 
 <!-- worked: likelihood.lasso_path -->
 Generator: the book's SplitMix64, seed 0x41c428236c6fe664 (4738956840508843620).
@@ -485,7 +487,7 @@ Ridge: minimise 1/2 sum (y - X w)^2 + lambda/2 ||w||^2.
 | 20 | 0.831 | -0.607 | 0.256 | -0.016 | 0.652 | -0.283 | 0.000 | -0.099 | 0 |
 | 40 | 0.485 | -0.378 | 0.195 | -0.012 | 0.437 | -0.208 | -0.024 | -0.086 | 0 |
 
-Lasso: minimise 1/2 sum (y - X w)^2 + lambda ||w||_1 by cyclic coordinate descent from w = 0, stopping when no weight changes by 1e-12; 0 is an exact zero.
+Lasso: minimise 1/2 sum (y - X w)^2 + lambda ||w||_1 by cyclic coordinate descent from w = 0, tol = 1e-12, max_sweeps = 100000 (never reached here); a sweep updates w1 .. w8 in order, and the run stops after the first sweep in which the largest absolute change of a weight is below tol (the sweeps column counts that last sweep); 0 is an exact zero.
 
 | lambda | w1 | w2 | w3 | w4 | w5 | w6 | w7 | w8 | exact zeros | sweeps |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -504,7 +506,7 @@ Ridge shrinks everything together: $w_1$ falls from $3.157$ to $0.485$ and the w
 ![Left, elliptical loss contours meeting the L1 diamond at its corner on the w2 axis, where w1 is exactly 0. Right, the same loss meeting a circle of equal radius at a point where both weights are nonzero.](img/penalty-contours.svg)
 
 <!-- worked: likelihood.penalty_corners -->
-Loss 1/2 (w - c)^T A (w - c) with c = (1.2, 1.9) and A = [[1.0, 0.6], [0.6, 1.0]]. The L1 row minimises loss + lambda ||w||_1; the L2 row minimises loss + lambda/2 ||w||^2 with lambda found by bisection so that ||w||_2 equals the L1 solution's.
+Loss 1/2 (w - m)^T A (w - m) with m = (1.2, 1.9) (its minimiser) and A = [[1.0, 0.6], [0.6, 1.0]]; with b = A m the loss is 1/2 w^T A w - b.w plus a constant. The L1 row minimises loss + lambda ||w||_1 with lambda = 2 by cyclic coordinate descent from w = (0, 0): w_j = S(b_j - A_jk w_k, lambda) / A_jj for j = 1 then 2 (k the other index), until the largest change in a sweep is below 1e-12. The L2 row minimises loss + lambda/2 ||w||^2, whose solution is (A + lambda I) w = b, with lambda found by bisection on [0, 100] (200 halvings; ||w||_2 falls as lambda grows) so that ||w||_2 equals the length of the L1 solution.
 
 | penalty | lambda | w1 | w2 | loss |
 |---|---:|---:|---:|---:|
@@ -513,7 +515,7 @@ Loss 1/2 (w - c)^T A (w - c) with c = (1.2, 1.9) and A = [[1.0, 0.6], [0.6, 1.0]
 | L2 | 4.0713 | 0.4060 | 0.4686 | 2.0216 |
 <!-- /worked -->
 
-The loss is $\frac12(\mathbf{w}-\mathbf{c})^\top\mathbf{A}(\mathbf{w}-\mathbf{c})$ with its minimum at $\mathbf{c} = (1.2, 1.9)$, and the two weights are correlated through $\mathbf{A}$. With $\lambda = 2$ the L1 solution is $(0, 0.62)$, a corner, with $w_1$ exactly zero. A ridge solution with the same Euclidean length $0.62$ (found by bisection on $\lambda$, here $4.0713$) is $(0.4060, 0.4686)$, with both weights nonzero and a lower loss, $2.0216$ against $2.4608$, as it must be since it minimises the loss over the circle, of which the L1 solution is one point.
+The loss is $\frac12(\mathbf{w}-\mathbf{m})^\top\mathbf{A}(\mathbf{w}-\mathbf{m})$ with its minimum at $\mathbf{m} = (1.2, 1.9)$, and the two weights are correlated through $\mathbf{A}$. Written as $\frac12\mathbf{w}^\top\mathbf{A}\mathbf{w} - \mathbf{b}\cdot\mathbf{w}$ plus a constant with $\mathbf{b} = \mathbf{A}\mathbf{m}$, it is the loss of the many-weight paragraph with $\rho_j = b_j - A_{jk}w_k$ ($k$ the other index) and $c_j = A_{jj}$, so the L1 solution is found by the same coordinate descent, and the L2 solution solves $(\mathbf{A} + \lambda\mathbf{I})\mathbf{w} = \mathbf{b}$. With $\lambda = 2$ the L1 solution is $(0, 0.62)$, a corner, with $w_1$ exactly zero. A ridge solution with the same Euclidean length $0.62$ (found by bisection on $\lambda$, here $4.0713$) is $(0.4060, 0.4686)$, with both weights nonzero and a lower loss, $2.0216$ against $2.4608$, as it must be since it minimises the loss over the circle, of which the L1 solution is one point.
 
 ## Regularization fixes the separable fit
 
@@ -529,7 +531,7 @@ so each step first multiplies the weights by the factor $1 - \eta\lambda$, sligh
 
 ```text
 function train_logistic_l2(X: array<real>[N, D], y: array<real>[N], eta: real, lam: real,
-                           steps: int) -> w: array<real>[D]:
+                           steps: int) -> array<real>[D]:
     require N > 0 and D > 0 and eta > 0 and lam >= 0 and steps >= 0, "bad inputs"
     for n in 0 .. N:
         require y[n] == 0 or y[n] == 1, "labels must be 0 or 1"
@@ -542,20 +544,20 @@ function train_logistic_l2(X: array<real>[N, D], y: array<real>[N], eta: real, l
     return w
 ```
 
-(The sigmoid is the two-branch function of chapter 3. The residuals are all computed before any weight changes, so the update is a gradient step and not a cycle through coordinates.)
+(`sigmoid` is the two-branch function of chapter 3, defined on the pseudocode page. The residuals are all computed before any weight changes, so the update is a gradient step and not a cycle through coordinates.)
 
 <!-- worked: likelihood.separable_regularized -->
-Data (x, y): (0.5, 0), (1.0, 0), (2.0, 1), (3.0, 1), with a constant 1 column; start w = (0, 0), eta = 0.5. Objective: mean binary cross-entropy + lambda/2 (w0^2 + w1^2).
+Data (x, y): (0.5, 0), (1.0, 0), (2.0, 1), (3.0, 1); the features of an example are (1, x), so w0 is the intercept and w1 multiplies x; start w = (0, 0), eta = 0.5. Objective: mean binary cross-entropy + lambda/2 (w0^2 + w1^2). 'k' counts completed gradient steps. The columns w0 .. p at x=2 are taken after k = 100000 steps. The gradient norm is the Euclidean length of the gradient of the penalised objective (the data term plus lambda w) at that w; where it is below 1e-12 it is printed as '< 1e-12', because such values are floating-point round-off that depends on the order of summation.
 
 | lambda | norm at k=1000 | norm at k=10000 | norm at k=100000 | w0 | w1 | boundary -w0/w1 | p at x=1 | p at x=2 | gradient norm |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 0 | 10.9720 | 18.9164 | 27.1733 | -22.5370 | 15.1813 | 1.4845 | 0.0006 | 0.9996 | 7.20 x 10^-5 |
-| 0.001 | 9.0103 | 9.6009 | 9.6009 | -7.9184 | 5.4294 | 1.4584 | 0.0766 | 0.9498 | 1.25 x 10^-15 |
-| 0.01 | 4.5071 | 4.5071 | 4.5071 | -3.6775 | 2.6058 | 1.4113 | 0.2551 | 0.8226 | 5.99 x 10^-16 |
-| 0.1 | 1.3686 | 1.3686 | 1.3686 | -1.0067 | 0.9272 | 1.0858 | 0.4801 | 0.7001 | 2.24 x 10^-16 |
+| 0.001 | 9.0103 | 9.6009 | 9.6009 | -7.9184 | 5.4294 | 1.4584 | 0.0766 | 0.9498 | < 1e-12 |
+| 0.01 | 4.5071 | 4.5071 | 4.5071 | -3.6775 | 2.6058 | 1.4113 | 0.2551 | 0.8226 | < 1e-12 |
+| 0.1 | 1.3686 | 1.3686 | 1.3686 | -1.0067 | 0.9272 | 1.0858 | 0.4801 | 0.7001 | < 1e-12 |
 <!-- /worked -->
 
-The first row reproduces chapter 3: the norm keeps growing ($10.9720$, $18.9164$, $27.1733$) and the gradient norm is still $7.20 \times 10^{-5}$ after $10^5$ steps, so the fit has not converged and never will. With any $\lambda > 0$ the descent reaches a stationary point and stays there: at $\lambda = 0.01$ the norm is $4.5071$ at $10^3$ steps and still $4.5071$ at $10^5$, and the gradient norm of every penalised row is below $10^{-14}$. The probabilities stop short of the extremes, and more strongly the larger the penalty: the model's probability that the part at $x = 1$ is rejected is $0.0006$ unpenalised, $0.0766$ at $\lambda = 0.001$, $0.2551$ at $0.01$ and $0.4801$ at $0.1$, which says what four examples can honestly say. The corresponding prior widths, from $\sigma_w^2 = 1/(N\lambda)$ with $N = 4$, are $15.8$, $5.0$ and $1.6$ for the three penalties: the more the model is told to doubt large weights, the less confidently it separates the parts. The boundary moves too, from $1.4845$ to $1.0858$ at $\lambda = 0.1$; this is partly because both weights are penalised, the intercept included, which pulls the boundary away from the midpoint of the classes. Penalising the intercept is a choice, discussed below, and the first investigation exercise asks for the comparison.
+The gradient norm is the length of the gradient of the penalised objective, $\lambda\mathbf{w}$ included, at the final weights; $k$ counts completed steps, and the feature order is the constant $1$ first, so $w_0$ is the intercept and $w_1$ the weight of $x$. The first row reproduces chapter 3: the norm keeps growing ($10.9720$, $18.9164$, $27.1733$) and the gradient norm is still $7.20 \times 10^{-5}$ after $10^5$ steps, so the fit has not converged and never will. With any $\lambda > 0$ the descent reaches a stationary point and stays there: at $\lambda = 0.01$ the norm is $4.5071$ at $10^3$ steps and still $4.5071$ at $10^5$, and the gradient norm of every penalised row is below $10^{-12}$, which is round-off: the table prints the bound and not the digits, because the digits of a residue that small depend on the order of summation. The probabilities stop short of the extremes, and more strongly the larger the penalty: the model's probability that the part at $x = 1$ is rejected is $0.0006$ unpenalised, $0.0766$ at $\lambda = 0.001$, $0.2551$ at $0.01$ and $0.4801$ at $0.1$, which says what four examples can honestly say. The corresponding prior widths, from $\sigma_w^2 = 1/(N\lambda)$ with $N = 4$, are $15.8$, $5.0$ and $1.6$ for the three penalties: the more the model is told to doubt large weights, the less confidently it separates the parts. The boundary moves too, from $1.4845$ to $1.0858$ at $\lambda = 0.1$; this is partly because both weights are penalised, the intercept included, which pulls the boundary away from the midpoint of the classes. Penalising the intercept is a choice, discussed below, and Exercise 11 asks for the comparison.
 
 ## Making it work
 
@@ -604,7 +606,7 @@ Answers are at the end of the chapter.
 7. **[Implement]** Reproduce `likelihood.coin_likelihood`, `likelihood.likelihood_vs_probability` and `likelihood.log_trick` in your own language, in 64-bit floating point. Verify the area $1/11$ with the trapezoid rule of $1000$ panels, and the underflow at $10000$ flips.
 8. **[Implement]** Reproduce `likelihood.gaussian_mle` (including the grid search) and `likelihood.variance_bias` with the book's generator and the draw order printed there.
 9. **[Implement]** Generate the eight points of `likelihood.ridge_data_table` and reproduce `likelihood.ridge_path` by solving $(\mathbf{X}^\top\mathbf{X} + \lambda\mathbf{I})\mathbf{w} = \mathbf{X}^\top\mathbf{y}$ with your own elimination.
-10. **[Implement]** Reproduce `likelihood.soft_threshold_1d` and `likelihood.lasso_path` (coordinate descent, cold start at each $\lambda$). Check after each run that the optimality conditions stated after the pseudocode hold to $10^{-9}$.
+10. **[Implement]** Reproduce `likelihood.soft_threshold_1d` and `likelihood.lasso_path` (coordinate descent, cold start at each $\lambda$, `tol` $= 10^{-12}$, `max_sweeps` $= 100000$). Check after each run that the optimality conditions stated after the pseudocode hold to $10^{-9}$.
 11. **[Implement]** Reproduce `likelihood.separable_regularized` from the chapter 3 data. Then repeat it with the intercept excluded from the penalty and report the boundary at each $\lambda$.
 12. **[Investigate]** Add a copy of the first feature to the lasso data (so that two columns are identical) and rerun ridge and lasso at $\lambda = 5$. How do the two penalties divide the weight between the copies, and what does it say about which one is deterministic about redundant features?
 

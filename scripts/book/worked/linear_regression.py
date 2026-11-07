@@ -99,19 +99,35 @@ def _gram(x):
     return _matmul(_transpose(x), x)
 
 
-def _solve(a, b):
-    """Solve A w = b by Gaussian elimination with partial pivoting; None if a pivot vanishes."""
+def _vanish_threshold(a):
+    """A pivot counts as zero below this size: 1e-12 times the larger of 1 and the largest absolute entry of A."""
+    return 1e-12 * max(1.0, max(abs(e) for r in a for e in r))
+
+
+def _pivots(a, b):
+    """Elimination with partial pivoting: the pivots (after each row swap) and the upper-triangular system [U | c]."""
     n = len(a)
     m = [list(r) + [bb] for r, bb in zip(a, b)]
+    pivots = []
     for c in range(n):
         piv = max(range(c, n), key=lambda r: abs(m[r][c]))
-        if abs(m[piv][c]) < 1e-12 * max(1.0, max(abs(m[r][c]) for r in range(n))):
-            return None
         m[c], m[piv] = m[piv], m[c]
+        pivots.append(m[c][c])
+        if abs(m[c][c]) < _vanish_threshold(a):
+            break
         for r in range(c + 1, n):
             f = m[r][c] / m[c][c]
             for k in range(c, n + 1):
                 m[r][k] -= f * m[c][k]
+    return pivots, m
+
+
+def _solve(a, b):
+    """Solve A w = b by Gaussian elimination with partial pivoting; None if a pivot vanishes."""
+    n = len(a)
+    pivots, m = _pivots(a, b)
+    if len(pivots) < n or abs(pivots[-1]) < _vanish_threshold(a):
+        return None
     w = [0.0] * n
     for r in range(n - 1, -1, -1):
         w[r] = (m[r][n] - sum(m[r][k] * w[k] for k in range(r + 1, n))) / m[r][r]
@@ -342,12 +358,12 @@ def closed_form_line():
 def line_residuals():
     vs, ys = _xy()
     w, b = _closed_form()[:2]
-    body = [(f"{v:.2f}", f"{t:.1f}", f"{w * v + b:.2f}", f"{t - (w * v + b):+.2f}") for v, t in zip(vs, ys)]
-    sr = sum(t - (w * v + b) for v, t in zip(vs, ys))
+    body = [(f"{v:.2f}", f"{t:.1f}", f"{w * v + b:.2f}", f"{(w * v + b) - t:+.2f}") for v, t in zip(vs, ys)]
+    sr = sum((w * v + b) - t for v, t in zip(vs, ys))
     body.append(("", "", "sum of residuals", f"{sr:+.1e}"))
-    return ("The least-squares line and its residuals (label minus prediction). The sum of residuals is zero up to rounding "
-            "noise (agreement: size below 1e-9).\n\n"
-            + _table(["v", "label y", "prediction", "residual y - prediction"], body))
+    return ("The least-squares line and its residuals r = prediction - label, the sign convention of the whole chapter. "
+            "The sum of residuals is zero up to rounding noise (agreement: size below 1e-9, whatever digits it prints).\n\n"
+            + _table(["v", "label y", "prediction", "residual (prediction - y)"], body))
 
 
 # ------------------------------------------------ many features: the matrix
@@ -384,7 +400,7 @@ def projection_check():
     x = _line_design(vs)
     w = _least_squares(x, ys)
     yh = _matvec(x, w)
-    r = [t - p for t, p in zip(ys, yh)]
+    r = [p - t for t, p in zip(ys, yh)]
     xt = _transpose(x)
     rows = [("sum of residuals  (ones column . r)", f"{sum(r):+.1e}"),
             ("sum of v * residual  (voltage column . r)", f"{sum(a * b for a, b in zip(xt[1], r)):+.1e}"),
@@ -393,8 +409,8 @@ def projection_check():
             ("r . r", f"{sum(e * e for e in r):.4f}"),
             ("y_hat . y_hat + r . r", f"{sum(p * p for p in yh) + sum(e * e for e in r):.4f}"),
             ("y_hat . r", f"{sum(p * e for p, e in zip(yh, r)):+.1e}")]
-    return ("The fitted vector y_hat = X w and the residual r = y - X w, as vectors in 10 dimensions. The two dot products "
-            "with the columns of X and the last one are zero up to rounding noise (agreement: size below 1e-9); "
+    return ("The fitted vector y_hat = X w and the residual r = X w - y (prediction minus label), as vectors in 10 dimensions. The two dot products "
+            "with the columns of X and the last one are zero up to rounding noise (agreement: size below 1e-9, whatever digits it prints); "
             "the other rows are shown to 4 decimals.\n\n"
             + _table(["quantity", "value"], rows, "lr"))
 
@@ -420,11 +436,15 @@ def collinear_features():
     out.append("Case A: the third column is the voltage in millivolts, exactly 1000 v.")
     out.append("")
     wl = _closed_form()[0]
+    pivots, _ = _pivots(ge, _matvec(_transpose(xe), ys))
+    vanished = _solve(ge, _matvec(_transpose(xe), ys)) is None
     out.append(f"The millivolt column is computed as 1000.0 * v in floating point. Elimination with partial pivoting on "
-               f"X^T X declares a pivot vanishing when it is smaller than 1e-12 times the largest entry of its column "
-               f"(or 1e-12, if that entry is below 1); the rank counts eigenvalues above 1e-9 of the largest. "
-               f"Elimination on X^T X: {'a pivot vanishes, so X^T X has no inverse' if _solve(ge, _matvec(_transpose(xe), ys)) is None else 'a solution was found'}"
-               f" (rank {_rank(ge)} of 3). Every (w1, w2) with w1 + 1000 w2 = {wl:.4f} gives the same predictions, for example "
+               f"X^T X (the pivot of each column is the entry of largest size at or below the diagonal of the partly "
+               f"eliminated matrix; threshold {_vanish_threshold(ge):.1e} = 1e-12 times the largest absolute entry of X^T X "
+               f"as formed): the first two pivots are {pivots[0]:.4g} and {pivots[1]:.4g}, and the third is "
+               f"{'rounding noise, below the threshold, so X^T X has no inverse' if vanished else 'above the threshold'}. "
+               f"The rank is the number of eigenvalues of X^T X larger than 1e-9 times the largest eigenvalue: "
+               f"rank {_rank(ge)} of 3. Every (w1, w2) with w1 + 1000 w2 = {wl:.4f} gives the same predictions, for example "
                f"({wl:.4f}, 0) and (0, {wl / 1000:.7f}).")
     out.append("")
     # near copy: a second meter with a small disagreement
@@ -451,7 +471,8 @@ def collinear_features():
     out.append("")
     out.append(f"Eigenvalues of X^T X in case B: {', '.join(_sci(l, 3) for l in lam)}; condition number "
                f"{_sci(lam[0] / lam[-1], 3)}. Weights are shown to 1 decimal (2 for b); they are the solution of the "
-               f"normal equations by elimination with partial pivoting, accurate to far more digits than shown.")
+               f"normal equations by elimination with partial pivoting and the same threshold, accurate to far more digits than "
+               f"shown; the eigenvalues come from a symmetric eigensolver such as `jacobi_eigen`.")
     return "\n".join(out)
 
 
@@ -503,12 +524,20 @@ def curvature():
             ("eigenvalues", f"{q.lams[0]:.4f} and {q.lams[1]:.4f}"),
             ("condition number", f"{q.kappa:.2f}"),
             ("largest stable learning rate 2 / lambda_max", f"{eta_max:.4f}"),
-            ("best learning rate 2 / (lambda_max + lambda_min)", f"{q.best_eta:.4f}"),
+            ("best learning rate eta* = 2 / (lambda_max + lambda_min)", f"{q.best_eta:.6f}"),
             ("loss at the start (w, b) = (0, 30) minus the minimum", f"{q.gap(START):.1f}")]
     return _table(["quantity", "value"], rows, "lr")
 
 
 RATES = (("too small", 0.01), ("good", 0.20), ("too large", 0.24))
+
+
+def _sig(x, digits):
+    """x with `digits` significant digits: plain for moderate sizes, mantissa x 10^e otherwise."""
+    if 1e-3 <= abs(x) < 1e6:
+        return f"{x:.{digits}g}"
+    m, e = f"{x:.{digits - 1}e}".split("e")
+    return f"{m} x 10^{int(e)}"
 
 
 def _wnum(v):
@@ -553,12 +582,14 @@ def stability_table():
             bound_s = f"{bound:,}"
         else:
             bound_s = "none"
-        body.append((f"{eta:.4f}", f"{f1:.4f}", f"{f2:.4f}", f"{worst:.4f}", bound_s, _steps_to_tol(q, START, eta)))
+        label = f"{eta:.6f} (eta*)" if eta == q.best_eta else f"{eta:.4f}"
+        body.append((label, f"{f1:.4f}", f"{f2:.4f}", f"{worst:.4f}", bound_s, _steps_to_tol(q, START, eta)))
     return (f"Curvatures lambda_max = {lam1:.4f}, lambda_min = {lam2:.4f}; 2 / lambda_max = {2 / lam1:.4f}. "
             f"Steps k: the smallest k with loss(w_k) - minimum < {TOL}, from (w, b) = (0, 30); a run whose loss "
             f"exceeds 1e12 above the minimum is reported as diverging, and one that needs more than {STEP_CAP:,} steps "
             f"as such. Bound: ceil(ln({TOL} / gap_0) / (2 ln(worst factor))) with gap_0 = {g0:.1f} the starting "
-            f"loss minus the minimum.\n\n"
+            f"loss minus the minimum. The row marked eta* uses the unrounded best rate eta* = 2 / (lambda_max + "
+            f"lambda_min) = {q.best_eta:.6f}; every other row uses the rate as printed.\n\n"
             + _table(["learning rate", "|1 - eta lambda_max|", "|1 - eta lambda_min|", "worst factor",
                       "bound from the worst factor", "steps measured"], body))
 
@@ -609,14 +640,14 @@ def scaling_conditioning():
         worst = (q.kappa - 1) / (q.kappa + 1)
         predicted = math.ceil(math.log(TOL / q.gap(START)) / (2 * math.log(worst)))
         measured = _steps_to_tol(q, START, eta)
-        body.append((name, _sci(q.lams[0], 3), _sci(q.lams[-1], 3), _sci(q.kappa, 3), _sci(eta, 3), measured,
-                     f"{predicted:,}"))
+        body.append((name, _sci(q.lams[0], 3), _sci(q.lams[-1], 3), _sci(q.kappa, 3), _sig(eta, 6), measured,
+                     f"{predicted:,}" if predicted < 10**6 else _sci(predicted, 2)))
     return (f"Same ten rows, same model, three ways of writing the voltage (z-score z = (v - mean) / s with mean "
             f"{mv:.3f} and standard deviation s = {sv:.3f}, divisor N - 1 = 9; millivolts are 1000 v). Best learning rate "
-            f"2 / (lambda_max + lambda_min) and steps k, the smallest k with loss(w_k) - minimum < {TOL}, from (w, b) = "
+            f"eta* = 2 / (lambda_max + lambda_min), used unrounded (shown to 6 significant digits), and steps k, the smallest k with loss(w_k) - minimum < {TOL}, from (w, b) = "
             f"(0, 30) in the units of the column (for z-scores, the weights of the column of ones and of z are "
             f"started at 30 and 0); a run is cut off at {STEP_CAP:,} steps. The predicted bound is "
-            f"ceil(ln({TOL} / gap_0) / (2 ln((kappa - 1) / (kappa + 1)))).\n\n"
+            f"ceil(ln({TOL} / gap_0) / (2 ln((kappa - 1) / (kappa + 1)))), shown with 3 significant digits when it is 10^6 or more.\n\n"
             + _table(["feature", "lambda_max", "lambda_min", "condition number", "best eta", "steps measured",
                       "steps predicted (bound)"], body))
 
@@ -652,10 +683,13 @@ def polynomial_fit():
         body.append((name, "(" + ", ".join(f"{c:.2f}" for c in w) + ")", f"{_mse(x, ys, w):.3f}",
                      f"{_mse(xf, fy, w):.3f}", _sci(cond_raw, 2), _sci(cond_z, 2)))
     return ("Polynomial features of the voltage (columns 1, v, v^2, ...), fitted by the normal equations on the ten rows. "
-            "Weights are (w0, w1, ...) from the constant term up; the fresh rows are the 2000 of the previous chapter "
-            "(rounded as there, scored without refitting). MSE is shown to 3 decimals. cond(X^T X) is the largest "
-            "eigenvalue over the smallest; the last column builds the columns from the z-score of v (mean and "
-            "standard deviation of the ten voltages, divisor 9) instead of v.\n\n"
+            "Weights are (w0, w1, ...) from the constant term up. The fresh rows are the 2000 rows of the source of the previous chapter, "
+            f"drawn from the book's SplitMix64 with seed {bookrng.seed_of(lp.FRESH_NAME):#018x} ({bookrng.seed_of(lp.FRESH_NAME)}). Each row is made by two draws in this order: v = {lp.V_LO} + {lp.V_HI - lp.V_LO:.1f} * "
+            f"rng.uniform(), then z = rng.normal(); y = {lp.LAW[0]:g} + {lp.LAW[1]:g} v - {-lp.LAW[2]:g} v^2 + {lp.NOISE_SD} z "
+            "computed from the unrounded v; then v is rounded to 2 decimals and y to 1. The fits are not repeated on them: the "
+            "weights found on the ten rows are scored on the fresh rows. MSE is shown to 3 decimals. cond(X^T X) is the largest "
+            "eigenvalue over the smallest; the last column builds the columns 1, z, z^2, ... from the z-score z = (v - mean) / s "
+            "of v (mean and standard deviation s of the ten voltages, divisor 9) instead of from v.\n\n"
             + _table(["model", "weights", "MSE, 10 known rows", "MSE, 2000 fresh rows",
                       "cond(X^T X), raw v", "cond(X^T X), z-scored v"], body))
 
@@ -667,9 +701,9 @@ def _cond(a):
 
 def power_law_log_fit():
     rng = bookrng.generator(POWER_LAW_NAME)
-    e_true, a_true, alpha_true = 0.5, 10.0, 0.3
+    floor_true, scale_true, alpha_true = 0.5, 10.0, 0.3
     sizes = [1e3, 3e3, 1e4, 3e4, 1e5, 3e5, 1e6]
-    losses = [(e_true + a_true * n ** (-alpha_true)) * (1 + 0.01 * rng.normal()) for n in sizes]
+    losses = [(floor_true + scale_true * n ** (-alpha_true)) * (1 + 0.01 * rng.normal()) for n in sizes]
     out = []
     cands = []
     for e in (0.0, 0.25, 0.5, 0.6):
@@ -681,20 +715,22 @@ def power_law_log_fit():
         sxy = sum((a - mx) * (b - my) for a, b in zip(xs, ys))
         slope = sxy / sxx
         icpt = my - slope * mx
-        sse = sum((b - (icpt + slope * a)) ** 2 for a, b in zip(xs, ys))
-        sst = sum((b - my) ** 2 for b in ys)
-        cands.append((e, -slope, math.exp(icpt), 1 - sse / sst))
+        ss_res = sum((b - (icpt + slope * a)) ** 2 for a, b in zip(xs, ys))
+        ss_tot = sum((b - my) ** 2 for b in ys)
+        cands.append((e, -slope, math.exp(icpt), 1 - ss_res / ss_tot))
     body1 = [(f"{n:,.0f}", f"{l:.4f}") for n, l in zip(sizes, losses)]
-    out.append(f"Seven (size, loss) points generated from L = 0.5 + 10 N^-0.3 with multiplicative noise of one percent: "
+    out.append(f"Seven (size n_p, loss) points generated from loss = 0.5 + 10 n_p^-0.3 with multiplicative noise of one percent. "
                f"{lp._generator_line(POWER_LAW_NAME)} For the sizes in the order listed, one `rng.normal()` each, the loss "
-               f"is (0.5 + 10 N^-0.3) * (1 + 0.01 * rng.normal()).")
+               f"is (0.5 + 10 n_p^-0.3) * (1 + 0.01 * rng.normal()), shown to 4 decimals.")
     out.append("")
-    out.append(_table(["N", "loss L"], body1))
+    out.append(_table(["n_p", "loss"], body1))
     out.append("")
-    out.append("For each candidate floor E, an ordinary least-squares line (closed form of the chapter, natural logarithms) "
-               "of log(L - E) against log N (slope = -alpha, intercept = log A); R^2 = 1 - SS_res / SS_tot of that "
-               "line, with SS_tot the sum of squares of log(L - E) about its mean:")
+    out.append("For each candidate floor, an ordinary least-squares line (closed form of the chapter, natural logarithms, "
+               "unrounded losses) of log(loss - floor) against log n_p (slope = -alpha, intercept = log zeta, so the scale is "
+               "zeta = exp(intercept)); R^2 = 1 - SS_res / SS_tot of that line, with SS_res the sum of the squared "
+               "differences between the seven values of log(loss - floor) and the line, and SS_tot the sum of squares of "
+               "log(loss - floor) about its mean:")
     out.append("")
-    out.append(_table(["candidate E", "alpha", "A", "R^2 of the log-space fit"],
+    out.append(_table(["candidate floor", "alpha", "scale zeta", "R^2 of the log-space fit"],
                       [(f"{e:.2f}", f"{al:.4f}", f"{a:.3f}", f"{r2:.5f}") for e, al, a, r2 in cands]))
     return "\n".join(out)

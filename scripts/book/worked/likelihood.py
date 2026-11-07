@@ -86,6 +86,11 @@ def _sci(x, digits=3):
     return f"{m} x 10^{int(e)}"
 
 
+def _residue(g, floor=1e-12):
+    """A gradient norm, or the statement that it is at round-off level."""
+    return f"< {floor:.0e}" if g < floor else _sci(g, 2)
+
+
 def _rel(x):
     return f"{x:.4f}" if x >= 1e-3 else f"{x:.2e}"
 
@@ -265,7 +270,10 @@ def coin_data_sizes():
         se = math.sqrt(0.7 * 0.3 / n)
         rows.append((n, h, f"{xs[top]:.3f}", _rel(at[0.5]), _rel(at[0.6]), _rel(at[0.8]),
                      f"{inside[0]:.3f} to {inside[-1]:.3f}", f"{se:.4f}"))
-    head = "Relative likelihood Lik(theta) / Lik(0.7), theta on a grid of step 0.001.\n\n"
+    head = ("Relative likelihood Lik(theta) / Lik(0.7), computed through logarithms on the grid theta = i/1000, "
+            "i = 1 .. 999 (the end points 0 and 1 are left out because ln 0 is undefined). The column 'theta with "
+            "relative >= 1/2' gives the smallest and largest grid value whose relative likelihood is at least 1/2; "
+            "argmax is the grid value with the largest likelihood.\n\n")
     return head + _table(["n", "heads", "argmax", "at 0.5", "at 0.6", "at 0.8", "theta with relative >= 1/2", "sqrt(0.7*0.3/n)"], rows)
 
 
@@ -313,8 +321,12 @@ def variance_bias():
         s_unb += ss / (n - 1)
     rows = [("1/n (maximum likelihood)", f"{s_mle / reps:.4f}", f"{(n - 1) / n:.4f}"),
             ("1/(n-1) (unbiased)", f"{s_unb / reps:.4f}", "1.0000")]
-    head = (f"{_generator_line(BIAS_NAME)}\nDraw order: for each of {reps} repetitions, {n} calls of normal() "
-            f"(a sample from N(0, 1)); the true variance is 1.\n\n")
+    head = (f"{_generator_line(BIAS_NAME)}\nOne generator is created once and serves all {reps} repetitions. Draw order: "
+            f"for each repetition in turn, {n} calls of normal() (a sample from N(0, 1)); the true variance is 1. "
+            f"Because {n} is odd, the second value that Box-Muller produces with every other call is held and carries "
+            f"over into the next repetition (the generator is never re-created or re-seeded between repetitions). "
+            f"Each sample of {n} gives the sum of squared deviations from its own mean, divided by {n} and by {n - 1}; "
+            f"the table averages each over the {reps} repetitions.\n\n")
     return head + _table(["divisor", "average estimate", "expected value"], rows, "lrr")
 
 
@@ -337,7 +349,9 @@ def gaussian_nll_is_mse():
     order_mse = sorted(range(len(stats)), key=lambda i: stats[i][2])
     order_nll = sorted(range(len(stats)), key=lambda i: stats[i][3])
     head = ("Data (x, y): " + ", ".join(f"({x:g}, {y:g})" for x, y in LINE_DATA) +
-            f". Line y = w0 + w1 x, sigma = 1, N = {n}, N/2 log(2 pi) = {n / 2 * math.log(2 * math.pi):.4f}.\n\n")
+            f". Line y = w0 + w1 x, sigma = 1, N = {n}, N/2 log(2 pi) = {n / 2 * math.log(2 * math.pi):.4f}. "
+            "MSE is the mean of the squared residuals; NLL is N/2 log(2 pi) + (sum of squared residuals) / 2; "
+            "the last column recomputes it from the MSE as an arithmetic check of the identity.\n\n")
     t1 = _table(["(w0, w1)", "MSE", "NLL", "N/2 log(2 pi) + N/2 MSE"], rows, "lrrr")
     # least-squares line and the maximum likelihood sigma
     xm = sum(x for x, _ in LINE_DATA) / n
@@ -350,6 +364,8 @@ def gaussian_nll_is_mse():
         nll = n * math.log(s) + n / 2 * math.log(2 * math.pi) + n * mse / (2 * s * s)
         rows2.append((f"{s:.4f}", f"{nll:.4f}"))
     t2 = _table(["sigma", "NLL of the least-squares line"], rows2, "lr")
+    t2 = ("NLL = N log sigma + N/2 log(2 pi) + N MSE / (2 sigma^2) for the least-squares line, at six values of sigma "
+          "listed in this order; the third is sigma = sqrt(MSE) computed from the unrounded MSE.\n\n") + t2
     return (head + t1 + "\n\nOrder from best to worst by MSE: " + ", ".join(str(i + 1) for i in order_mse) +
             "; by NLL: " + ", ".join(str(i + 1) for i in order_nll) + ".\n\n"
             f"Least-squares line: w0 = {w0:.4f}, w1 = {w1:.4f}, MSE = {mse:.4f}, sqrt(MSE) = {math.sqrt(mse):.4f}.\n\n" + t2)
@@ -385,7 +401,9 @@ def coin_map():
             best = max(xs, key=lambda th: coin_loglik(th, h + a - 1, t + b - 1))
             rows.append((f"Beta({a}, {b})", f"{a - 1} heads, {b - 1} tails", f"{h + a - 1}/{h + t + a + b - 2}",
                          f"{map_:.4f}", f"{best:.3f}", f"{mean:.4f}"))
-        out.append(f"{h} heads, {t} tails (maximum likelihood {h / (h + t):.4f}):\n\n" +
+        out.append(f"{h} heads, {t} tails (maximum likelihood {h / (h + t):.4f}); the grid argmax maximises the "
+                   f"log-posterior (h + a - 1) ln(theta) + (t + b - 1) ln(1 - theta) over theta = i/1000, "
+                   f"i = 1 .. 999; the posterior mean is (h + a)/(h + t + a + b):\n\n" +
                    _table(["prior", "pseudo-counts", "posterior counts", "MAP", "grid argmax", "posterior mean"], rows, "llrrrr"))
     return "\n\n".join(out)
 
@@ -469,7 +487,9 @@ def lasso_path():
             f"y_n = x_n . w_true + {LASSO_NOISE} * noise_n with w_true = {LASSO_TRUE}.\n\n")
     t1 = "Ridge: minimise 1/2 sum (y - X w)^2 + lambda/2 ||w||^2.\n\n" + _table(["lambda", *cols, "exact zeros"], ridge_rows)
     t2 = ("Lasso: minimise 1/2 sum (y - X w)^2 + lambda ||w||_1 by cyclic coordinate descent from w = 0, "
-          f"stopping when no weight changes by {CD_TOL:g}; 0 is an exact zero.\n\n" +
+          f"tol = {CD_TOL:g}, max_sweeps = {CD_MAX_SWEEPS} (never reached here); a sweep updates w1 .. w8 in order, "
+          "and the run stops after the first sweep in which the largest absolute change of a weight is below tol "
+          "(the sweeps column counts that last sweep); 0 is an exact zero.\n\n" +
           _table(["lambda", *cols, "exact zeros", "sweeps"], lasso_rows))
     return head + t1 + "\n\n" + t2
 
@@ -484,9 +504,13 @@ def separable_regularized():
         p1 = _sigmoid(w[0] + w[1] * 1.0)
         p2 = _sigmoid(w[0] + w[1] * 2.0)
         rows.append((f"{lam:g}", *[f"{v:.4f}" for v in norms], f"{w[0]:.4f}", f"{w[1]:.4f}", f"{-w[0] / w[1]:.4f}",
-                     f"{p1:.4f}", f"{p2:.4f}", _sci(g, 2)))
-    head = ("Data (x, y): (0.5, 0), (1.0, 0), (2.0, 1), (3.0, 1), with a constant 1 column; start w = (0, 0), eta = 0.5. "
-            "Objective: mean binary cross-entropy + lambda/2 (w0^2 + w1^2).\n\n")
+                     f"{p1:.4f}", f"{p2:.4f}", _residue(g)))
+    head = ("Data (x, y): (0.5, 0), (1.0, 0), (2.0, 1), (3.0, 1); the features of an example are (1, x), so w0 is the "
+            "intercept and w1 multiplies x; start w = (0, 0), eta = 0.5. Objective: mean binary cross-entropy + "
+            "lambda/2 (w0^2 + w1^2). 'k' counts completed gradient steps. The columns w0 .. p at x=2 are taken after "
+            "k = 100000 steps. The gradient norm is the Euclidean length of the gradient of the penalised objective "
+            "(the data term plus lambda w) at that w; where it is below 1e-12 it is printed as '< 1e-12', because "
+            "such values are floating-point round-off that depends on the order of summation.\n\n")
     return head + _table(["lambda", "norm at k=1000", "norm at k=10000", "norm at k=100000", "w0", "w1",
                           "boundary -w0/w1", "p at x=1", "p at x=2", "gradient norm"], rows)
 
@@ -544,7 +568,11 @@ def penalty_corners():
     rows = [("none", "-", f"{p['c'][0]:.4f}", f"{p['c'][1]:.4f}", f"{p['loss'](p['c']):.4f}"),
             ("L1", f"{p['lam1']:g}", f"{p['w_l1'][0]:.4f}", f"{p['w_l1'][1]:.4f}", f"{p['loss'](p['w_l1']):.4f}"),
             ("L2", f"{p['lam2']:.4f}", f"{p['w_l2'][0]:.4f}", f"{p['w_l2'][1]:.4f}", f"{p['loss'](p['w_l2']):.4f}")]
-    head = ("Loss 1/2 (w - c)^T A (w - c) with c = (1.2, 1.9) and A = [[1.0, 0.6], [0.6, 1.0]]. The L1 row minimises "
-            "loss + lambda ||w||_1; the L2 row minimises loss + lambda/2 ||w||^2 with lambda found by bisection "
-            "so that ||w||_2 equals the L1 solution's.\n\n")
+    head = ("Loss 1/2 (w - m)^T A (w - m) with m = (1.2, 1.9) (its minimiser) and A = [[1.0, 0.6], [0.6, 1.0]]; "
+            "with b = A m the loss is 1/2 w^T A w - b.w plus a constant. The L1 row minimises loss + lambda ||w||_1 "
+            "with lambda = 2 by cyclic coordinate descent from w = (0, 0): w_j = S(b_j - A_jk w_k, lambda) / A_jj "
+            "for j = 1 then 2 (k the other index), until the largest change in a sweep is below 1e-12. The L2 row "
+            "minimises loss + lambda/2 ||w||^2, whose solution is (A + lambda I) w = b, with lambda found by "
+            "bisection on [0, 100] (200 halvings; ||w||_2 falls as lambda grows) so that ||w||_2 equals the length "
+            "of the L1 solution.\n\n")
     return head + _table(["penalty", "lambda", "w1", "w2", "loss"], rows)

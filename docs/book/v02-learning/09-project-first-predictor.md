@@ -13,15 +13,15 @@ Eight chapters have taught ideas about learning: a line fitted by solving equati
 2. **Baselines.** A trivial model that uses no features and a simple model that uses one, for both of the targets below.
 3. **Linear regression** for the continuous target, solved by the normal equations and by gradient descent, which must agree.
 4. **A regularized logistic classifier** for the binary outcome, with its penalty chosen by cross-validation.
-5. **Evaluation.** Accuracy, precision, recall and $F_1$ at a threshold derived from costs; the area under the ROC curve computed two ways; a reliability table, the expected calibration error and temperature scaling.
+5. **Evaluation** (Chapter 6). Accuracy, precision, recall and $F_1$ at a threshold derived from costs; the area under the ROC curve computed two ways; a reliability table, the expected calibration error and temperature scaling.
 6. **One classical comparison model**, $k$ nearest neighbours.
-7. **A report.** Effect sizes with bootstrap intervals, a multi-seed study with a paired comparison, an ablation of one design choice, and an honest statement of where the model fails.
+7. **A report** (Chapter 8). Effect sizes with bootstrap intervals, a multi-seed study with a paired comparison, an ablation of one design choice, and an honest statement of where the model fails.
 
 Nothing here is new. Every part was taught; the project asks whether the parts work together, and, more than any chapter, whether you will believe a number before it has been checked. The failures it is designed to expose are the ordinary ones: a split that lets the model recognise a machine instead of learning a pattern, a baseline that is weaker than it looks, a probability that is confident without being right, a comparison that one seed could have reversed, and a test set that quietly stopped resembling the world.
 
 **The data.** A plant keeps 360 pumps in two sites. Each pump is tested four times, and each test records five measurements (load, temperature, vibration, age and humidity) together with two results: whether the pump failed during the following season (`fail`, 0 or 1) and how much it wore (`wear`, a number). The goal is to predict both from the five measurements, for pumps the model has never seen. Site A holds 300 pumps and site B, a second plant with heavier loads, holds 60. The book plays the part of nature: the data are generated from a stated law with the book's own generator (the milestones print the law and the order of every draw), so that you can regenerate every row in your own language and compare your numbers with the ones printed here.
 
-**How the project is organised.** Each milestone says what to build (in the book's pseudocode, which fixes the interface and nothing else), why it matters later, a check you run before moving on, and the mistakes readers actually make. The **acceptance tests** at the end give inputs and the outputs a correct implementation produces, written so that any language can be tested against them. Every expected value was computed by a second, independent implementation, `scripts/book/worked/project_predictor.py`, and is regenerated whenever the book is built. Use only your language's standard library plus the library of Volume I (the generator, the gradient check, `percentile` and the bootstrap).
+**How the project is organised.** Each milestone says what to build (in the book's pseudocode, which fixes the interface and nothing else), why it matters later, a check you run before moving on, and the mistakes readers actually make. The **acceptance tests** at the end give inputs and the outputs a correct implementation produces, written so that any language can be tested against them. Every expected value was computed by a second, independent implementation, `scripts/book/worked/project_predictor.py`, and is regenerated whenever the book is built. Use only your language's standard library plus the library of Volume I (the generator, the gradient check, `percentile`, `correlation` and the bootstrap).
 
 ![Seven boxes labelled with the milestones 1 to 7. Milestone 1 sits at the top with arrows to milestones 2, 3 and 4 in a row below it; milestone 4 leads down to milestone 5 and then to milestone 6 in the right column; milestone 7, highlighted, sits at the bottom centre and receives arrows from milestones 2, 3, 5 and 6.](img/predictor-milestones.svg)
 
@@ -46,46 +46,50 @@ Two letters are used for different things in different milestones, as in Chapter
 
 ### The data you receive
 
-**What to build.** A function that generates the dataset, and nothing else yet. The law is stated here because you must regenerate the data; a real project would not know it, and the project does not use it to choose features or models. It appears again in two places only: as a noise floor to compare the regression against (milestone 3), and in milestone 7, where it explains one failure.
+**What to build.** A function that generates the dataset, and nothing else yet. The law is stated here because you must regenerate the data; a real project would not know it, and the project does not use it to choose features or models. It appears again in two places only: in milestone 3, as the smallest error that any model could reach on a new pump (the noise of the law itself), which the regression is compared with, and in milestone 7, where it explains one failure.
 
 There are $G = 360$ pumps, numbered $0, \dots, 359$. Pumps $0$ to $299$ are site A and pumps $300$ to $359$ are site B. Pump $g$ has four rows, numbered $4g, \dots, 4g + 3$, so there are $1440$ rows. Draw, for $g = 0, \dots, 359$ in order, from one generator:
 
-1. the fingerprint $\mathbf{a} = (a_0, \dots, a_4)$ of the pump: five calls of `rng.normal()`;
-2. the pump effect $u = 1.5 \cdot \mathrm{rng.normal()}$ on the failure probability;
-3. the pump effect $v = 0.4 \cdot \mathrm{rng.normal()}$ on the wear;
-4. for each of the pump's four rows, in order: five calls of `rng.normal()`, the $j$-th giving the measurement $x_j = a_j + 0.2\,\mathrm{rng.normal()}$; then, for pumps of site B only, $x_0 \leftarrow x_0 + 2.0$; then the true logit $z^\star$ of the row and the draw
+1. the **profile** of the pump, $\mathrm{prof}_{g0}, \dots, \mathrm{prof}_{g4}$ (the centre of its measurements, one number per feature): five calls of `rng.normal()`;
+2. the pump effect $\mathrm{eff}^{\mathrm{fail}}_g = 1.5 \cdot \mathrm{rng.normal()}$ on the failure logit;
+3. the pump effect $\mathrm{eff}^{\mathrm{wear}}_g = 0.4 \cdot \mathrm{rng.normal()}$ on the wear;
+4. for each of the pump's four rows, in order: five calls of `rng.normal()`, the $j$-th giving the measurement $x_j = \mathrm{prof}_{gj} + 0.2\,\mathrm{rng.normal()}$; then, for pumps of site B only, $x_0 \leftarrow x_0 + 2.0$; then the true logit $e^\star$ of the row and the draw
 
 $$
-z^\star = -0.5 + 2.0\,x_0 - 1.2\,x_1 + 0.8\,x_2 - 0.8\,x_0^2 + u, \qquad \mathrm{fail} = \begin{cases} 1 & \text{if } \mathrm{rng.uniform()} < \sigma(z^\star), \\ 0 & \text{otherwise;} \end{cases}
+e^\star = -0.5 + 2.0\,x_0 - 1.2\,x_1 + 0.8\,x_2 - 0.8\,x_0^2 + \mathrm{eff}^{\mathrm{fail}}_g, \qquad \mathrm{fail} = \begin{cases} 1 & \text{if } \mathrm{rng.uniform()} < \sigma(e^\star), \\ 0 & \text{otherwise;} \end{cases}
 $$
 
    then one more call of `rng.normal()`, $\varepsilon$, and the wear
 
 $$
-\mathrm{wear} = 3.0 + 2.0\,x_0 - 1.0\,x_1 + 0.5\,x_2 + v + 0.5\,\varepsilon.
+\mathrm{wear} = 3.0 + 2.0\,x_0 - 1.0\,x_1 + 0.5\,x_2 + \mathrm{eff}^{\mathrm{wear}}_g + 0.5\,\varepsilon.
 $$
 
 ```text
 function generate(rng: Generator) -> (X: array<real>[1440, 5], fail: array<int>[1440],
                                       wear: array<real>[1440], pump: array<int>[1440]):
+    X = zeros(real, [1440, 5])
+    fail = zeros(int, [1440])
+    wear = zeros(real, [1440])
+    pump = zeros(int, [1440])
     for g in 0 .. 360:
-        a = [rng.normal() for j in 0 .. 5]            # five draws, in order
-        u = 1.5 * rng.normal()
-        v = 0.4 * rng.normal()
+        profile = [rng.normal() for j in 0 .. 5]       # five draws, in order
+        effect_fail = 1.5 * rng.normal()
+        effect_wear = 0.4 * rng.normal()
         for r in 0 .. 4:
             n = 4 * g + r
             for j in 0 .. 5:
-                X[n, j] = a[j] + 0.2 * rng.normal()
+                X[n, j] = profile[j] + 0.2 * rng.normal()
             if g >= 300:
                 X[n, 0] = X[n, 0] + 2.0
-            zstar = -0.5 + 2.0 * X[n, 0] - 1.2 * X[n, 1] + 0.8 * X[n, 2] - 0.8 * X[n, 0] ^ 2 + u
-            fail[n] = 1 if rng.uniform() < sigmoid(zstar) else 0
-            wear[n] = 3.0 + 2.0 * X[n, 0] - 1.0 * X[n, 1] + 0.5 * X[n, 2] + v + 0.5 * rng.normal()
+            e_true = -0.5 + 2.0 * X[n, 0] - 1.2 * X[n, 1] + 0.8 * X[n, 2] - 0.8 * X[n, 0] ^ 2 + effect_fail
+            fail[n] = 1 if rng.uniform() < sigmoid(e_true) else 0
+            wear[n] = 3.0 + 2.0 * X[n, 0] - 1.0 * X[n, 1] + 0.5 * X[n, 2] + effect_wear + 0.5 * rng.normal()
             pump[n] = g
     return (X, fail, wear, pump)
 ```
 
-(In this chapter $u$ and $v$ name the two pump effects, and $z^\star$ the true logit; the letter $z$ alone is the logit of a fitted model, as in Chapter 3.) Three facts about the source matter for what follows. The rows of one pump are alike (their spread around the fingerprint is $0.2$, while the fingerprints themselves spread by $1$), and the pump effects $u$ and $v$ are shared by its four rows, so the four rows are not four independent examples. Features $x_3$ and $x_4$ have no effect on either result. And the load $x_0$ enters the failure probability through a curved term $-0.8\,x_0^2$, which a model linear in the measurements cannot represent; at site A the curve is gentle over most of the data, at site B, whose loads are $2.0$ higher, it is not.
+(Letters in this chapter: $z_{nj}$ is reserved for the standardised measurements of milestone 1, so the logit that Chapters 3 and 6 write $z$ is written $e$ here, $e^\star$ for the logit of the law and $\sigma(a\,e)$ for a rescaled one; the pump effects carry labels, not the letters $u$ and $v$, which the book uses for other things.) Three facts about the source matter for what follows. The rows of one pump are alike (their spread around the profile is $0.2$, while the profiles themselves spread by $1$), and the pump effects are shared by its four rows, so the four rows are not four independent examples. Features $x_3$ and $x_4$ have no effect on either result. And the load $x_0$ enters the failure probability through a curved term $-0.8\,x_0^2$, which a model linear in the measurements cannot represent; at site A the curve is gentle over most of the data, at site B, whose loads are $2.0$ higher, it is not.
 
 **Why it matters later.** Everything downstream depends on regenerating exactly these rows, and on knowing what the unit of independence is: the pump.
 
@@ -105,7 +109,7 @@ Generator: the book's SplitMix64, seed 0x6678aaee123fc739 (7383839528559036217);
 | 1200 | 300 | +1.684460 | +0.375463 | +0.654254 | +0.920714 | +2.107920 | 0 | +6.328378 |
 | 1439 | 359 | +3.362109 | +0.089771 | +0.760320 | -0.204692 | -1.460333 | 0 | +10.255229 |
 
-Trace of the first draws (pump 0, row 0): fingerprint a = (-0.305871, -0.184682, -0.009254, +1.515063, +1.316486), pump effects u = +0.553026 and v = -0.386881 (the standard deviations 1.5 and 0.4 already applied), true logit z* = -0.682348, label draw 0.784715, target noise draw -0.367455 (before the factor 0.5).
+Trace of the first draws (pump 0, row 0): profile = (-0.305871, -0.184682, -0.009254, +1.515063, +1.316486), pump effects effect_fail = +0.553026 and effect_wear = -0.386881 (the standard deviations 1.5 and 0.4 already applied), true logit e* = -0.682348, label draw 0.784715, target noise draw -0.367455 (before the factor 0.5).
 
 | quantity | value |
 |---|---:|
@@ -113,7 +117,7 @@ Trace of the first draws (pump 0, row 0): fingerprint a = (-0.305871, -0.184682,
 | sum over all rows of x0, x1, x2, x3, x4 | +488.449270, +15.404431, +61.111885, -59.132319, -56.598423 |
 | rows with fail = 1, site A and site B | 468 and 107 |
 | sum of wear over all rows | +5321.495936 |
-| sum of the pump effects u (pumps 0 to 359) and v | +41.163717 and +1.326514 |
+| sum of the pump effects effect_fail (pumps 0 to 359) and effect_wear | +41.163717 and +1.326514 |
 <!-- /worked -->
 
 
@@ -123,7 +127,7 @@ Trace of the first draws (pump 0, row 0): fingerprint a = (-0.305871, -0.184682,
 
 ```text
 function fold_assignment(n: int, k: int, rng: Generator) -> array<int>[n]      # Chapter 5
-function split_pumps(G: int, n_train: int, n_val: int, rng: Generator)
+function split_pumps(G: int, n_train: int, n_val: int, rng: Generator)       # the pumps are 0 .. G - 1
         -> (train: array<int>, val: array<int>, test: array<int>):
     require n_train + n_val < G, "no pumps left for the test set"
     order = [g for g in 0 .. G]
@@ -134,9 +138,9 @@ function fit_standardiser(X: array<real>[N, d]) -> (mean: array<real>[d], sd: ar
         # sd has divisor N; require every sd > 0
 function standardise(X: array<real>[N, d], mean: array<real>[d], sd: array<real>[d]) -> array<real>[N, d]
 function check_disjoint(a: array<int>, b: array<int>):
-    for g in a:
-        for h in b:
-            require g != h, "a pump appears on both sides"
+    for g_a in a:
+        for g_b in b:
+            require g_a != g_b, "a pump appears on both sides"
 ```
 
 Site A has $300$ pumps: `split_pumps(300, 180, 60, rng)` gives $180$ training, $60$ validation and $60$ test pumps. The $60$ pumps of site B are never split; they form the **shift slice** that no earlier step looks at, and the report reads them last. The $180$ training pumps are dealt into $k = 5$ folds of whole pumps: number them $0, \dots, 179$ in ascending pump order, call `fold_assignment(180, 5, rng)` with its own generator, and give every row the fold of its pump. The picture shows the layout.
@@ -163,7 +167,7 @@ Pumps shared between training and validation, training and test, validation and 
 
 Folds of the 180 training pumps: the book's SplitMix64, seed 0xd36d816960b808bd (15234975404058478781); the training pumps, numbered 0 .. 179 in ascending pump order, are shuffled (179 integer draws) and the pump at shuffled position p goes to fold p mod 5. Pumps per fold: [36, 36, 36, 36, 36]. Rows per fold: [144, 144, 144, 144, 144]. First eight training pumps and their folds: 0: 3, 2: 1, 3: 2, 4: 4, 5: 1, 7: 1, 9: 0, 10: 2.
 
-Leakage probe. A model that can only memorise: label each held-out row with the label of its nearest training row (Euclidean distance on the training-standardised features, the first row on a tie). One draw of 240 scored rows is noisy, so the probe is repeated 20 times. Master generator: seed 0x90058fde7b56c620 (10377859102059972128); repetition r uses the r-th raw value (rng.next(), counting from 0) as the seed of its own SplitMix64, which draws, in order, the shuffle of the 1200 site A row numbers (1199 integer draws; random-row protocol: the first 720 shuffled rows train and the next 240 are scored) and then the shuffle of the 300 site A pump numbers (299 integer draws; pump protocol: the rows of the first 180 shuffled pumps train and the rows of the last 60 are scored).
+Leakage probe. A model that can only memorise: label each held-out row with the label of its nearest training row (Euclidean distance on the training-standardised features, the standardiser fitted on the training rows of that protocol; on a tie the training row listed first wins; continuous data have no ties, so this never matters here). One draw of 240 scored rows is noisy, so the probe is repeated 20 times. Master generator: seed 0x90058fde7b56c620 (10377859102059972128); repetition r uses the r-th raw value (rng.next(), counting from 0) as the seed of its own SplitMix64, which draws, in order, the shuffle of the 1200 site A row numbers (1199 integer draws; random-row protocol: the first 720 shuffled rows train, listed in shuffled order, and the next 240 are scored) and then the shuffle of the 300 site A pump numbers (299 integer draws; pump protocol: the rows of the first 180 shuffled pumps train, listed in ascending row number, and the rows of the last 60 shuffled pumps, in ascending row number, are scored). The sd over repetitions has the divisor 20 - 1.
 
 | protocol | mean accuracy of the nearest-row label | sd over repetitions | lowest | highest |
 |---|---:|---:|---:|---:|
@@ -172,15 +176,15 @@ Leakage probe. A model that can only memorise: label each held-out row with the 
 <!-- /worked -->
 
 <!-- worked: project_predictor.standardiser_check -->
-The standardiser is fitted on the 720 training rows (mean, and standard deviation with divisor N) and applied unchanged to the test rows.
+The standardiser is fitted on the 720 training rows (mean, and standard deviation with divisor N) and applied unchanged to the test rows. The mean of the training z is zero up to round-off (about 1e-17, whose digits depend on the order of summation), so the table tests it against 1e-12.
 
-| feature | training mean | training sd | mean of training z | rms of training z | mean of test z |
+| feature | training mean | training sd | abs(mean of training z) below 1e-12 | rms of training z | mean of test z |
 |---|---:|---:|---:|---:|---:|
-| x0 | 0.013543 | 1.041330 | -4.5e-18 | 1.000000 | -0.162007 |
-| x1 | 0.016727 | 0.970340 | 1.0e-17 | 1.000000 | 0.118007 |
-| x2 | 0.078828 | 1.155400 | -7.3e-18 | 1.000000 | 0.014098 |
-| x3 | -0.034371 | 1.008792 | -5.5e-18 | 1.000000 | -0.247290 |
-| x4 | -0.137214 | 0.967832 | 1.6e-18 | 1.000000 | 0.313914 |
+| x0 | 0.013543 | 1.041330 | yes | 1.000000 | -0.162007 |
+| x1 | 0.016727 | 0.970340 | yes | 1.000000 | 0.118007 |
+| x2 | 0.078828 | 1.155400 | yes | 1.000000 | 0.014098 |
+| x3 | -0.034371 | 1.008792 | yes | 1.000000 | -0.247290 |
+| x4 | -0.137214 | 0.967832 | yes | 1.000000 | 0.313914 |
 <!-- /worked -->
 
 Under the random-row protocol the memoriser labels $74.65\%$ of the scored rows correctly, and under the pump protocol $64.10\%$. The pump protocol is the honest number, and the $10.55$ points between them are the leak: with rows of the same pump on both sides, the nearest training row is usually a sibling with a similar label, and the memoriser is rewarded for recognising a pump. The probe's pass criterion is the stated one, not a number to copy: the random-row accuracy must exceed the pump accuracy by more than $5$ points on the average of the $20$ repetitions. A single repetition can show a smaller gap (the sd over repetitions is about $3$ points), which is why the probe is repeated.
@@ -199,15 +203,15 @@ Under the random-row protocol the memoriser labels $74.65\%$ of the scored rows 
 
 ```text
 function mean_probability(y: array<int>[N]) -> real                  # the share of ones, written $\bar y$ in the text
-function best_feature(X: array<real>[N, d], y: array<real>[N]) -> (j: int, r: real)
-        # the feature with the largest |correlation| with y over these rows; on a tie the first
+function best_feature(X: array<real>[N, d], y: array<real>[N]) -> (j: int, rho: real)
+        # the j with the largest abs(correlation(X[:, j], y)) over these rows (rho is that absolute value); on a tie the first
 function bin_table(x: array<real>[N], y: array<int>[N]) -> (cuts: array<real>[3], p: array<real>[4])
         # sort x; cut q is (v[q*N//4 - 1] + v[q*N//4]) / 2 for q = 1, 2, 3; a row goes to bin
         # (the number of cuts it exceeds); p[b] = (ones in bin b + 1) / (rows in bin b + 2)
 function fit_line(x: array<real>[N], y: array<real>[N]) -> (intercept: real, slope: real)   # Chapter 2
 ```
 
-The **trivial** baselines use no features: for `fail` the training share $\bar y$ as the predicted probability of every row, for `wear` the training mean. The **simple** baselines use the one feature that correlates most with the target: a four-bin frequency table for `fail` (every bin predicts its own smoothed share, $(n_1 + 1)/(n + 2)$, so no bin ever says $0$ or $1$), and the least-squares line for `wear`. The feature is chosen on the training rows only.
+The **trivial** baselines use no features: for `fail` the training share $\bar y$ as the predicted probability of every row, for `wear` the training mean. The **simple** baselines use the one feature that correlates most with the target: a four-bin frequency table for `fail` (every bin predicts its own smoothed share, $(n_1 + 1)/(n + 2)$ with $n$ the training rows in the bin and $n_1$ those of them with `fail` $= 1$, so no bin ever says $0$ or $1$), and the least-squares line for `wear`. The feature is chosen on the training rows only.
 
 **Why it matters later.** Milestone 7's numbers mean nothing until a model with no skill and a model a colleague could have written in an afternoon have been scored on the same rows. The simple baselines also show what a single feature is worth, so that later gains can be attributed.
 
@@ -244,7 +248,7 @@ The constant probability, the training share $\bar y = 0.3806$, has a log loss o
 
 - Taking the base rate or the mean from the rows being scored. The baseline then knows the answer it is scored on (Chapter 8).
 - Choosing the best feature on all rows, or on the validation rows.
-- A bin table with a bin that has no training rows (impossible here, but not for a smaller $M$): the smoothing $(n_1 + 1)/(n + 2)$ is what makes an empty bin predict $1/2$ and not divide by zero.
+- A bin table with a bin that has no training rows (impossible here, but not for a smaller $N$): the smoothing $(n_1 + 1)/(n + 2)$ is what makes an empty bin predict $1/2$ and not divide by zero.
 - Reporting a baseline's accuracy without its log loss or its area: the constant model's accuracy of $0.55$ is a statement about the base rate of the validation rows, not about skill.
 
 ### Milestone 3: linear regression two ways
@@ -253,16 +257,16 @@ The constant probability, the training share $\bar y = 0.3806$, has a log loss o
 
 ```text
 function normal_equations(Z: array<real>[N, d], y: array<real>[N]) -> w: array<real>[d + 1]
-        # design [1, Z]; solve (X^T X) w = X^T y by Gaussian elimination with partial pivoting
-function mse_gradient(w: array<real>[p], X: array<real>[N, p], y: array<real>[N]) -> (real, array<real>[p])
+        # X = augment(ones, Z), the design [1, Z]; w = solve(matmul(transpose(X), X), matmul(transpose(X), y), true)
+function mse_gradient(w: array<real>[d + 1], X: array<real>[N, d + 1], y: array<real>[N]) -> (real, array<real>[d + 1])
         # loss = mean of (w . x_n - y_n)^2, gradient = (2 / N) X^T (X w - y)
 function gradient_descent_linear(Z, y, eta: real, steps: int) -> w: array<real>[d + 1]
-        # from w = 0, steps exactly, no stopping rule
+        # from w = 0; steps times: w = w - eta * gradient; no stopping rule
 function to_raw_units(w, mean, sd) -> (intercept: real, slope: array<real>[d])
         # slope_j = w_j / sd_j, intercept = w_0 - sum_j w_j mean_j / sd_j
 ```
 
-Fit on the standardised training rows, $\eta = 0.3$, $100$ steps from zero. The loss is the mean squared error $\frac{1}{N}\sum_n (\mathbf{w}\cdot\tilde{\mathbf{x}}_n - y_n)^2$ of Chapter 2, so its Hessian is $\frac{2}{N}\mathbf{X}^\top\mathbf{X}$. On standardised features that matrix has eigenvalues of order $2$, which is why a step of $0.3$ is stable (the limit is $2/\lambda_{\max}$) and why $100$ steps reach the solution: the error shrinks by a factor of about $1 - \eta\lambda_{\min}$ per step. Check your gradient against a numerical one before trusting either solver.
+Fit on the standardised training rows, $\eta = 0.3$, $100$ steps from zero. The loss is the mean squared error $\frac{1}{N}\sum_n (\mathbf{w}\cdot\tilde{\mathbf{x}}_n - y_n)^2$ of Chapter 2, so its Hessian is $\frac{2}{N}\mathbf{X}^\top\mathbf{X}$. On standardised features that matrix has eigenvalues of order $2$, which is why a step of $0.3$ is stable (the limit is $2/\lambda_{\max}$); the table below shows that $100$ steps reach the solution. Check your gradient against a numerical one before trusting either solver.
 
 **Why it matters later.** Two routes to one answer are the cheapest correctness test there is. When milestone 4 has no closed form, the gradient check and the descent loop are what you will trust, and they are exercised here first, where the answer can be verified.
 
@@ -316,7 +320,7 @@ The two solutions agree to $10^{-8}$ in every weight (they agree in all ten prin
 - Solving the normal equations on unstandardised features and comparing with descent on standardised ones: the weights then differ by the transformation, not by an error. Compare in the same coordinates, then map back.
 - Stopping descent early because the loss "stopped moving" at six digits. Run the stated steps.
 - A step size copied from another problem. Compute $2/\lambda_{\max}$ of the Hessian first (Chapter 2).
-- Dividing the gradient by $M$ in one solver and not in the other.
+- Dividing the gradient by $N$ in one solver and not in the other.
 
 ### Milestone 4: a regularized logistic classifier
 
@@ -330,26 +334,31 @@ function logistic_gradient(w, Z, y, lam) -> array<real>[d + 1]
 function fit_logistic(Z, y, lam, eta: real, steps: int) -> w        # from w = 0, steps exactly
 function cv_log_loss(rows: array<int>, fold: array<int>[len(rows)], lams: array<real>) -> array<real>[len(lams), 5]
         # for each lam and fold j: standardise on the other folds, fit on them, score the log loss on fold j
-function choose(table: array<real>[len(lams), 5], lams: array<real>) -> real   # lam with the smallest mean over folds; the larger lam on a tie
+function choose(table: array<real>[len(values), 5], values: array<real>) -> real
+        # the value (a penalty here, a neighbour count in milestone 6) whose row has the smallest mean over the 5 folds; the larger value on a tie
+function largest_eigenvalue(A: array<real>[d, d], iterations: int) -> real        # power iteration for the step-size check below
+        # v = all ones; repeat `iterations` times: av = matmul(A, v); lam = sqrt(sum(av^2)); v = av / lam; return the last lam
 ```
 
 The loss is the mean binary cross-entropy of Chapter 3 computed from the logit (the softplus form of "Making it numerically safe") plus the L2 penalty of Chapter 4 on the slopes. **The intercept is not penalised**: a prior that pulls the intercept to zero would pull the predicted base rate toward one half, which is a statement about nothing. Chapter 4's separable-data example penalised it for simplicity and said so; here it is left free. The gradient has a component for every weight and one extra term $\lambda w_j$ for each slope, and the descent is Chapter 3's loop with $\eta = 2$ and exactly $100$ steps from $\mathbf{w} = \mathbf{0}$.
 
-The penalty grid is $\lambda \in \{0, 0.003, 0.01, 0.03, 0.1\}$. Inside the cross-validation, **every step that uses data is inside the loop**: the standardiser is fitted on the four training folds of each round and applied to the held-out fold. A step $\eta$ that is stable for one penalty can diverge for a larger one, so the step is checked against the curvature first: the penalised loss has curvature at most $L + \lambda$ with $L = \lambda_{\max}/4$ (Chapter 3), and descent is guaranteed stable below $2/(L + \lambda)$.
+The penalty grid is $\lambda \in \{0, 0.003, 0.01, 0.03, 0.1\}$. Inside the cross-validation, **every step that uses data is inside the loop**: the standardiser is fitted on the four training folds of each round and applied to the held-out fold. A step $\eta$ that is stable for one penalty can diverge for a larger one, so the step is checked against the curvature first: the penalised loss has curvature at most $\lambda_{\mathrm{cap}} + \lambda$ with $\lambda_{\mathrm{cap}} = \lambda_{\max}/4$ (the bound of Chapter 3, with $\lambda_{\max}$ the largest eigenvalue of $\frac{1}{N}\mathbf{X}^\top\mathbf{X}$ for the design $[\mathbf{1}, \mathbf{Z}]$), and descent is guaranteed stable below $2/(\lambda_{\mathrm{cap}} + \lambda)$.
 
 <!-- worked: project_predictor.logistic_step_size -->
-The matrix of the design [1, z] over the 720 training rows, A = X^T X / N (6 by 6); largest eigenvalue by power iteration (300 iterations from the all-ones vector, normalising each time): 1.099815. The curvature bound of the unpenalised loss is L = lambda_max / 4 = 0.274954; the penalty adds lambda to it. Gradient descent with step eta is stable when eta < 2 / (L + lambda); the step 1 / (L + lambda) is the classical choice.
+The matrix of the design [1, z] over the 720 training rows, A = X^T X / N (6 by 6); largest eigenvalue by power iteration (300 iterations from the all-ones vector; each iteration forms A v, takes its Euclidean norm as the eigenvalue estimate and divides A v by it to get the next v; the estimate of the last iteration is used): 1.099815. The curvature bound of the unpenalised loss is lambda_cap = lambda_max / 4 = 0.274954; the penalty adds lambda to it. Gradient descent with step eta is stable when eta < 2 / (lambda_cap + lambda); the step 1 / (lambda_cap + lambda) is the classical choice. The first five penalties are the grid of the cross-validation; 0.3 and 1 are added to show where the guarantee ends.
 
-| lambda | 1 / (L + lambda) | stability limit 2 / (L + lambda) | eta = 2 stable? |
-|---|---:|---:|---|
-| 0 | 3.6370 | 7.2740 | yes |
-| 0.01 | 3.5093 | 7.0187 | yes |
-| 0.1 | 2.6670 | 5.3340 | yes |
-| 0.3 | 1.7393 | 3.4785 | yes |
-| 1 | 0.7843 | 1.5687 | no (outside the guarantee) |
+| lambda | in the grid | 1 / (lambda_cap + lambda) | stability limit 2 / (lambda_cap + lambda) | eta = 2 stable? |
+|---|---|---:|---:|---|
+| 0 | yes | 3.6370 | 7.2740 | yes |
+| 0.003 | yes | 3.5977 | 7.1954 | yes |
+| 0.01 | yes | 3.5093 | 7.0187 | yes |
+| 0.03 | yes | 3.2792 | 6.5584 | yes |
+| 0.1 | yes | 2.6670 | 5.3340 | yes |
+| 0.3 | no | 1.7393 | 3.4785 | yes |
+| 1 | no | 0.7843 | 1.5687 | no (outside the guarantee) |
 <!-- /worked -->
 
-The step $\eta = 2$ lies inside the guarantee for every penalty in the grid, and outside it at $\lambda = 1$, which is why the grid stops at $0.1$.
+The step $\eta = 2$ lies inside the guarantee for every penalty of the grid, and for $0.3$, which is not in the grid; it lies outside at $\lambda = 1$, which is why the grid stops at $0.1$ and not further up.
 
 **Why it matters later.** This is the model that the rest of the project judges. It is also the first model whose gradient you cannot verify by comparing with a closed form; the numerical check is the only protection against a derivative that is wrong in a way the loss never reveals (a missing penalty term still gives a descent that converges, to the wrong place).
 
@@ -405,16 +414,18 @@ function precision_recall_f1(tp: int, fp: int, fn: int) -> (optional real, optio
 function auc_rank(score: array<real>[N], y: array<int>[N]) -> real
         # (sum of the positives' ranks - P (P + 1) / 2) / (P (N - P)), P the number of positives;
         # ranks ascending from 1, tied scores share their average rank
-function roc_points(score, y) -> array<(real, real)>[R]  # (FPR, TPR) from the top, tied scores together
+function roc_points(score, y) -> array<(real, real)>[n_points]  # (FPR, TPR) from the top, tied scores together
 function auc_trapezoid(score, y) -> real
 function reliability_bins(p: array<real>[N], y, n_bins: int) -> array<real>[n_bins, 3]
-        # bin b holds p in [b / n_bins, (b + 1) / n_bins), p = 1 in the last bin; count, mean p, observed share
+        # row b = (count, mean p, observed share) of the rows with b = min(floor(p * n_bins), n_bins - 1), so p = 1 is in the last bin
 function ece(p, y, n_bins) -> real                       # sum over bins of (count / N) |observed - mean p|
-function fit_scale(z: array<real>[N], y) -> a: real       # Chapter 6: doubling, then 80 halvings
+function fit_scale(e: array<real>[N], y) -> a: real       # Chapter 6; slope(a) = mean((sigmoid(a * e) - y) * e)
+        # require slope(0) < 0; lo = 0, hi = 1; up to 60 times: stop if slope(hi) > 0, else lo = hi and hi = 2 * hi (error if it never stops);
+        # then 80 times: mid = (lo + hi) / 2; if slope(mid) < 0 then lo = mid else hi = mid; return (lo + hi) / 2
 function cost_threshold(c_fp: real, c_fn: real) -> real   # c_fp / (c_fp + c_fn)
 ```
 
-The decision threshold comes from the costs, not from a search: with a false alarm costing $c_{\mathrm{FP}} = 1$ and a missed failure $c_{\mathrm{FN}} = 5$, a calibrated probability $p$ should raise the alarm when $(1 - p)\,c_{\mathrm{FP}} < p\,c_{\mathrm{FN}}$, that is, when $p \ge t^\star = c_{\mathrm{FP}}/(c_{\mathrm{FP}} + c_{\mathrm{FN}}) = 1/6$ (Chapter 6). The cost of a decision rule is $(c_{\mathrm{FP}}\,\mathrm{FP} + c_{\mathrm{FN}}\,\mathrm{FN})/N$ per row. Temperature scaling fits one number $a$ on the validation rows and replaces $\sigma(z)$ by $\sigma(a z)$.
+The decision threshold comes from the costs, not from a search: with a false alarm costing $c_{\mathrm{FP}} = 1$ and a missed failure $c_{\mathrm{FN}} = 5$, a calibrated probability $p$ should raise the alarm when $(1 - p)\,c_{\mathrm{FP}} < p\,c_{\mathrm{FN}}$, that is, when $p \ge t^\star = c_{\mathrm{FP}}/(c_{\mathrm{FP}} + c_{\mathrm{FN}}) = 1/6$ (Chapter 6). The cost of a decision rule is $(c_{\mathrm{FP}}\,\mathrm{FP} + c_{\mathrm{FN}}\,\mathrm{FN})/N$ per row. Temperature scaling fits one number $a$ on the validation rows and replaces $\sigma(e)$ by $\sigma(a\,e)$, with $e$ the logit.
 
 **Why it matters later.** The report quotes these numbers with intervals; a metric that is wrong by a tie rule or by a bin edge is wrong in every row of every table after it.
 
@@ -519,7 +530,7 @@ function knn_probabilities(Ztr: array<real>[N, d], ytr: array<int>[N], Zq: array
                            ks: array<int>) -> array<real>[len(ks), Q]
         # for each query: order the training rows by Euclidean distance (equal distances keep row order);
         # for each k: p = (ones among the k nearest + 1) / (k + 2)
-function cv_knn(rows, fold, ks) -> array<real>[len(ks), 5]       # the same folds as milestone 4, the standardiser refitted per round
+function cv_knn(rows, fold, ks) -> array<real>[len(ks), 5]       # the same folds as milestone 4, the standardiser refitted per round; `choose(table, ks)` as in milestone 4 (the larger k on a tie)
 ```
 
 The candidate neighbour counts are $k \in \{1, 5, 15, 31, 61, 121\}$ (this $k$ is the neighbour count of Chapter 7, not the number of folds of Chapter 5, which is $5$ throughout), chosen by the mean log loss over the same five folds of pumps. The probability is the share of the $k$ nearest training labels, smoothed by one pseudo-count for each class so that no probability is $0$ or $1$ (Chapter 7's Laplace smoothing; a log loss of $\infty$ is not a score). Sort the distances once per query and read every $k$ from the same order.
@@ -562,17 +573,44 @@ The fold log loss falls from $0.6731$ at $k = 1$ to $0.5327$ at $k = 61$ and ris
 **What to build.** Four things, in this order, using only choices already made.
 
 1. **The test table.** Read the $240$ test rows once, for the models of milestones 2 to 6, and report log loss, area, ECE, $F_1$, recall and cost per row at the derived threshold. Report the regression on the test rows too.
-2. **Intervals.** A cluster bootstrap over the $60$ test pumps: each resample draws $60$ pump numbers with `rng.integer(60)` in order, takes all four rows of each drawn pump, and recomputes every statistic. The same resamples serve every quantity, so differences are paired. This is the bootstrap of Volume I with the **pump as the unit**, since the four rows of a pump are not independent draws.
-3. **A multi-seed study with an ablation.** Repeat the whole pipeline (split, folds, choice of $\lambda$ and $k$, refit, test) for $16$ runs whose seeds come from one master generator, with a paired comparison of the models over the runs. As the ablation, redo the choice of $\lambda$ and $k$ with random row folds in place of folds of pumps and see what changes.
+2. **Intervals.** A cluster bootstrap over the $60$ test pumps: each resample draws $60$ pump numbers with `rng.integer(60)` in order, takes all four rows of each drawn pump, and recomputes every statistic. The same resamples serve every quantity, so differences are paired. This is the bootstrap of Volume I with the **pump as the unit**, since the four rows of a pump are not independent draws; `cluster_replicates` returns every replicate of every quantity, because the report needs the standard deviation of the replicates and the differences between columns, and Volume I's `bootstrap_interval` is its special case with one quantity.
+3. **A multi-seed study with an ablation.** Repeat the whole pipeline (`run_pipeline`: split, folds, choice of $\lambda$ and $k$, refit, test) for $16$ runs whose seeds come from one master generator, with a paired comparison of the models over the runs. As the ablation, redo the choice of $\lambda$ and $k$ with random row folds in place of folds of pumps and see what changes.
 4. **Where it fails.** Score the shift slice, and say, with numbers, what changed.
 
 ```text
-function bootstrap_interval(x: array<T>[n], statistic: function(array<T>[n]) -> real,
-                            resamples: int, level: real, g: inout Generator) -> (real, real)   # Volume I
-function run_pipeline(seed: u64) -> record
-        # rng = Generator(seed); split_pumps(300, 180, 60, rng); the grouped folds from rng (179 draws);
-        # the row folds from rng (719 draws, ablation only); choose lam and k by grouped folds; refit;
-        # record test log loss and area of both models, the validation scale, and the shift-slice scores
+function cluster_replicates(n_units: int, statistics: function(array<int>[n_units]) -> array<real>[S],
+                            n_resamples: int, g: inout Generator) -> array<real>[n_resamples, S]
+        # replicate r = 0 .. n_resamples - 1 is statistics(picks) with picks = [g.integer(n_units) for i in 0 .. n_units]
+        # (n_units draws, in order, repeats allowed); the replicates are drawn one after the other from the one generator g.
+        # All S numbers of a row come from the same picks, so a difference of two columns is a paired difference.
+        # Here a unit is a test pump (numbered 0 .. 59 in ascending pump order); `statistics` takes the four rows of every
+        # picked pump, pumps in the order of the picks, and returns every score of every model that the report needs
+function percentile_interval(column: array<real>[n_resamples], level: real) -> (real, real)
+        # (percentile(column, (1 - level) / 2), percentile(column, 1 - (1 - level) / 2)); the sd of a column is sd(column)
+record Choice:                         # what one way of drawing the folds chose, and how the choice scored on the test rows
+    lam: real                          # penalty, by choose(): smallest mean fold log loss, the larger on a tie
+    k: int                             # neighbour count, by the same rule
+    cv_logistic: real                  # mean fold log loss of the chosen lam
+    cv_knn: real                       # mean fold log loss of the chosen k
+    test_log_loss_logistic: real       # models refitted on the 720 training rows, scored on the 240 test rows
+    test_log_loss_knn: real
+    test_auc_logistic: real
+    test_auc_knn: real
+record PipelineRun:
+    seed: u64
+    grouped: Choice                    # choices made with the folds of pumps (the pipeline's own)
+    row: Choice                        # the same choices made with random row folds (the ablation only)
+    scale: real                        # a of fit_scale on the 240 validation logits of the grouped-fold logistic model
+    test_log_loss_scaled: real         # log loss on the test rows of sigmoid(a * e), e the logit of the grouped-fold model
+    test_log_loss_constant: real       # the training share of ones for every row
+    site_b_log_loss_logistic: real     # the grouped-fold logistic model on the 240 site B rows
+    site_b_auc_logistic: real
+    site_b_log_loss_constant: real
+function run_pipeline(seed: u64) -> PipelineRun
+        # rng = Generator(seed); then, in this order, all from rng: split_pumps(300, 180, 60, rng) (299 draws);
+        # fold_assignment(180, 5, rng) over the training pumps numbered 0 .. 179 in ascending pump order (179 draws);
+        # fold_assignment(720, 5, rng) over the training rows numbered 0 .. 719 in ascending row number (719 draws,
+        # made in every run); then choose, refit and score as in milestones 4 to 6, once per kind of fold
 ```
 
 **Why it matters.** This is what the whole volume was for. A number is not a result until the reader has the interval, the number of runs, the comparison it was measured against and the place where it stops being true.
@@ -582,7 +620,7 @@ function run_pipeline(seed: u64) -> record
 <!-- worked: project_predictor.test_report -->
 The test rows (240 rows, 60 pumps), read once, with every choice already made on training and validation rows: lambda = 0.01, k = 61, scale a = 0.752044, decision threshold 0.166667 on the scaled probability (and on the other probabilities as they are).
 
-| model | log loss | ROC AUC | ECE | F1 at t | recall at t | cost per row at t |
+| model | log loss | ROC AUC | ECE, 10 bins | F1 at t | recall at t | cost per row at t |
 |---|---:|---:|---:|---:|---:|---:|
 | constant probability | 0.6535 | 0.5000 | 0.0222 | 0.5276 | 1.0000 | 0.6417 |
 | four-bin table on x0 | 0.5688 | 0.7068 | 0.0378 | 0.6194 | 0.9651 | 0.4750 |
@@ -590,7 +628,7 @@ The test rows (240 rows, 60 pumps), read once, with every choice already made on
 | logistic, temperature scaled | 0.5047 | 0.8173 | 0.0676 | 0.6050 | 0.9884 | 0.4792 |
 | k nearest neighbours, k = 61 | 0.5262 | 0.7969 | 0.0631 | 0.5952 | 1.0000 | 0.4875 |
 
-Cluster bootstrap over the 60 test pumps: seed 0x6e7dd69d0d03b2ee (7961755686277460718). One resample is 60 calls of rng.integer(60), each the index (in ascending pump order) of a pump whose four rows are all taken; 1000 resamples from one generator, each statistic recomputed on the same resample (so the differences are paired). Interval ends are the 2.5th and 97.5th percentiles of the sorted replicates by linear interpolation at position q (R - 1); sd is the standard deviation of the replicates (divisor R - 1).
+Cluster bootstrap over the 60 test pumps: seed 0x6e7dd69d0d03b2ee (7961755686277460718). One resample is 60 calls of rng.integer(60), in order, each the index (in ascending pump order) of a pump whose four rows are all taken, the pumps in draw order and the rows of a pump ascending; 1000 resamples from one generator, all six quantities of the table and the quantities they are differences of recomputed on the same resample (so the differences are paired). Interval ends are the `percentile` of the replicates at q = 0.025 and q = 0.975 (linear interpolation at position q (number of replicates - 1)); sd is the standard deviation of the replicates with divisor 1000 - 1.
 
 | quantity | estimate | sd of replicates | 95 percent lower | 95 percent upper |
 |---|---:|---:|---:|---:|
@@ -605,7 +643,7 @@ Cluster bootstrap over the 60 test pumps: seed 0x6e7dd69d0d03b2ee (7961755686277
 On $240$ test rows from $60$ pumps the logistic classifier reaches a ROC area of $0.8173$ and a log loss of $0.4939$, against $0.5000$ and $0.6535$ for the constant model and $0.7068$ and $0.5688$ for the four-bin table on one feature. The bootstrap says how far to trust the first two numbers: $0.7427$ to $0.8841$ for the area and $0.4081$ to $0.5759$ for the log loss. The paired differences are the sharper statement. Against the constant model the log loss is lower by $0.1596$ (interval $-0.2328$ to $-0.0930$), clear of zero. Against $k$ nearest neighbours it is lower by $0.0323$, with an interval, $-0.0644$ to $-0.0008$, that touches zero; and the difference in area, $+0.0204$ (interval $-0.0063$ to $+0.0513$), contains it. On this test set the two models are close, and this table cannot rank them reliably. Two further things the table says. The temperature-scaled probabilities are worse on the test rows ($0.5047$ against $0.4939$ in log loss): a scale fitted on $240$ validation rows from $60$ pumps is itself an estimate, and here it moved the wrong way. And the cost per row at $t = 1/6$ is $0.4667$ for the raw logistic probabilities, against $0.6417$ for raising every alarm and $0.4750$ for the one-feature table, so the decision rule gains little over the simple baseline here.
 
 <!-- worked: project_predictor.regression_test -->
-The 240 test rows, read once, with the weights of milestone 3 (fitted on the training rows only). Interval: the cluster bootstrap over the 60 test pumps as in the classification report (seed 0xa65146519b753764 (11984437399724046180), 1000 resamples, 60 calls of rng.integer(60) each, percentile interval of the RMSE).
+The 240 test rows, read once, with the weights of milestone 3 (fitted on the training rows only). Interval: the cluster bootstrap over the 60 test pumps as in the classification report (seed 0xa65146519b753764 (11984437399724046180), 1000 resamples, 60 calls of rng.integer(60) each, taken as in the classification report; percentile interval of the RMSE at q = 0.025 and 0.975).
 
 | model | test RMSE | R^2 (around the training mean) | RMSE 95 percent lower | RMSE 95 percent upper |
 |---|---:|---:|---:|---:|
@@ -621,7 +659,7 @@ For the continuous target the linear regression has a test RMSE of $0.6294$ (int
 **Sixteen runs.** One test set is one draw. The study below repeats the whole pipeline $16$ times, each with its own split of the $300$ pumps, so that the spread over runs includes the choice of test pumps, of folds and of the neighbour count.
 
 <!-- worked: project_predictor.seed_study -->
-16 runs. Master generator: seed 0x0ffb3472a2ba3e69 (1151571796684324457); run s uses the s-th raw value (rng.next(), counting from 0) as the seed of its own SplitMix64, which draws, in order: the shuffle of the 300 site A pump numbers (299 integer draws; 180 pumps train, 60 validate, 60 test), the shuffle of the 180 training pumps for the grouped folds (179 integer draws), and the shuffle of the 720 training rows for the row folds used only by the ablation below (719 integer draws). In each run the penalty lambda and the neighbour count k are chosen by grouped five-fold cross-validation on the log loss, the models are refitted on the 720 training rows and scored on the 240 test rows and on the 240 rows of site B.
+16 runs. Master generator: seed 0x0ffb3472a2ba3e69 (1151571796684324457); run s uses the s-th raw value (rng.next(), counting from 0) as the seed of its own SplitMix64, which draws, in order: the shuffle of the 300 site A pump numbers (299 integer draws; 180 pumps train, 60 validate, 60 test, each set sorted ascending), the shuffle of the 180 training pumps for the grouped folds (179 integer draws; the pumps numbered 0 .. 179 in ascending pump order, the pump at shuffled position p goes to fold p mod 5), and the shuffle of the 720 training rows for the row folds used only by the ablation below (719 integer draws; the rows numbered 0 .. 719 in ascending row number, the row at shuffled position p goes to fold p mod 5). The 719 draws are made in every run, whether or not the ablation is read. In each run the penalty lambda and the neighbour count k are chosen by grouped five-fold cross-validation on the mean fold log loss (the smallest mean; the larger value on a tie, for lambda and for k alike), the models are refitted on the 720 training rows and scored on the 240 test rows and on the 240 rows of site B. The scale a of 'scaled' is fitted by the doubling-and-bisection routine of milestone 5 on the 240 validation rows of that run, and the 'constant' model is the share of ones among that run's 720 training rows.
 
 | run | seed | lambda | k | test log loss, logistic | k-NN | constant | test AUC, logistic | k-NN | site B log loss | site B AUC |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -642,7 +680,7 @@ For the continuous target the linear regression has a test RMSE of $0.6294$ (int
 | 14 | 0x407c1f62a9485c1e | 0.03 | 61 | 0.4987 | 0.5202 | 0.6718 | 0.8415 | 0.8209 | 0.7953 | 0.6067 |
 | 15 | 0x552a42d5ef74a31d | 0.01 | 31 | 0.5583 | 0.5510 | 0.6554 | 0.7938 | 0.7588 | 0.9424 | 0.5969 |
 
-Over the 16 runs: mean, standard deviation (divisor n - 1) and a bootstrap 95 percent interval of the mean (resample the 16 runs with replacement, 2000 resamples, interval ends at the 2.5th and 97.5th percentiles; each row has its own generator, started at the seed in the last column; a resample is 16 calls of rng.integer(16), each the index of the next run to include).
+Over the 16 runs: mean, standard deviation (divisor n - 1) and a bootstrap 95 percent interval of the mean (resample the 16 runs with replacement, 2000 resamples, interval ends at the 2.5th and 97.5th percentiles of the replicated means; each row has its own generator, started at the seed in the last column; a resample is 16 calls of rng.integer(16), each the index of the next run to include).
 
 | quantity | mean | sd | 95 percent lower | 95 percent upper | bootstrap seed |
 |---|---:|---:|---:|---:|---|
@@ -664,7 +702,7 @@ The logistic classifier's mean test log loss over the $16$ runs is $0.5245$ (sd 
 **The ablation.** Folds drawn at random over rows, instead of over pumps, put the sibling rows of a pump into the training folds of the round that scores it.
 
 <!-- worked: project_predictor.ablation_cv -->
-The 16 runs of the seed study. The design choice: how the folds that select lambda (logistic) and k (k-NN) are drawn. 'CV estimate' is the mean fold log loss of the chosen value, the number a report would claim; 'test' is the log loss of the refitted model on the 240 test rows of the same run, from pumps never seen; gap = CV estimate minus test. The interval is a bootstrap 95 percent interval of the mean gap over the runs (2000 resamples as in the seed study, each row with the generator seed of the last column).
+The 16 runs of the seed study. The design choice: how the folds that select lambda (logistic) and k (k-NN) are drawn (grouped folds: the folds of pumps of the seed study; random row folds: the 720 training rows dealt by the row-fold shuffle of the seed study). The chosen value is the one with the smallest mean fold log loss over the five folds of the drawn kind (the larger value on a tie). 'CV estimate' is that mean fold log loss of the chosen value, the number a report would claim; 'test' is the log loss of the refitted model on the 240 test rows of the same run, from pumps never seen; gap = CV estimate minus test. The interval is a bootstrap 95 percent interval of the mean gap over the runs (2000 resamples as in the seed study, each row with the generator seed of the last column).
 
 | folds | model | mean CV estimate | mean test log loss | mean gap | 95 percent lower | 95 percent upper | bootstrap seed |
 |---|---|---:|---:|---:|---:|---:|---|
@@ -678,9 +716,9 @@ Test log loss of the logistic model chosen with row folds minus the one chosen w
 Test log loss of the k-NN model chosen with row folds minus the one chosen with grouped folds, over the runs: mean +0.03909, 95 percent interval +0.02340 to +0.05488 (bootstrap seed 0xeb6947b8a24d39f4); chosen k differs in 15 runs.
 <!-- /worked -->
 
-![A scatter plot of the test log loss of the k-NN model, vertical, against the cross-validation log loss of the chosen k, horizontal, for 16 runs and two ways of drawing the folds. Points from folds of whole pumps scatter around the dashed diagonal; points from random row folds lie mostly above it, with test log loss between 0.51 and 0.63 against claims between 0.48 and 0.57.](img/predictor-fold-ablation.svg)
+![A scatter plot of the test log loss of the k-NN model, vertical, against the cross-validation log loss of the chosen k, horizontal, for 16 runs and two ways of drawing the folds. Points from folds of whole pumps scatter around the dashed diagonal; points from random row folds lie mostly above it (14 of the 16), with test log loss between 0.51 and 0.71 against claims between 0.48 and 0.57.](img/predictor-fold-ablation.svg)
 
-For the nearest-neighbour model the effect is large. With folds of pumps the cross-validation estimate is $0.5419$ and the test loss $0.5455$, a gap of $-0.0036$ (interval $-0.0199$ to $+0.0128$): honest. With random row folds the estimate is $0.5181$ and the test loss $0.5845$, a gap of $-0.0665$ (interval $-0.0968$ to $-0.0391$): the report would have claimed $0.518$ for a model that delivers $0.585$, and the chosen $k$ differs in $15$ of $16$ runs, ending up in a model whose test log loss is $0.0391$ worse (interval $+0.0234$ to $+0.0549$). For the logistic classifier the same change does nothing visible: the gap is $-0.0112$ (interval $-0.0330$ to $+0.0086$) and the test loss of the chosen model differs by $-0.0003$ (interval $-0.0024$ to $+0.0017$). A model with six parameters cannot memorise pumps; a model that stores the training rows can. The leak of milestone 1's probe costs as much as the model's ability to exploit it. That is no argument for splitting by group only when the model is flexible: you do not know in advance which of your models can exploit a leak, so the split is by group for all of them.
+For the nearest-neighbour model the effect is large. With folds of pumps the cross-validation estimate is $0.5419$ and the test loss $0.5455$, a gap of $-0.0036$ (interval $-0.0199$ to $+0.0128$): honest. With random row folds the estimate is $0.5181$ and the test loss $0.5845$, a gap of $-0.0665$ (interval $-0.0968$ to $-0.0391$): the report would have claimed $0.518$ for a model that delivers $0.585$, and the chosen $k$ differs in $15$ of $16$ runs, ending up in a model whose test log loss is $0.0391$ worse (interval $+0.0234$ to $+0.0549$). For the logistic classifier the same change does nothing visible: the gap is $-0.0112$ (interval $-0.0330$ to $+0.0086$) and the test loss of the chosen model differs by $-0.0003$ (interval $-0.0024$ to $+0.0017$). A model with six parameters cannot memorise pumps; a model that stores the training rows can, and it is the memoriser of milestone 1's probe, rewarded there for recognising a pump. That is no argument for splitting by group only when the model is flexible: you do not know in advance which of your models can exploit a leak, so the split is by group for all of them.
 
 **Where it fails.** Site B was never touched. Its pumps carry loads $2.0$ higher than site A's. Score the model there:
 
@@ -717,12 +755,12 @@ Where the slice differs: the mean of each standardised feature (training statist
 | x3 (age) | -0.0000 | 0.1336 |
 | x4 (humidity) | 0.0000 | -0.0162 |
 
-Range of x0 over the training rows: -2.7576 to 3.2405; site B rows outside it: 17 of 240. Rows with x0 > 2: 17 of 720 training rows, 110 of 240 site B rows.
+Range of the raw (unstandardised) x0 over the training rows: -2.7576 to 3.2405; site B rows outside it: 17 of 240. Rows with raw x0 > 2: 17 of 720 training rows, 110 of 240 site B rows.
 <!-- /worked -->
 
-![Reliability diagram: share of rows with fail = 1 against mean predicted probability in ten bins, for 240 test rows and for 240 rows of site B. The test curve follows the diagonal within noise; the site B curve hovers between 0.33 and 0.57 for predicted probabilities from 0.35 to 0.95, far below the diagonal at the top.](img/predictor-reliability.svg)
+![Reliability diagram: share of rows with fail = 1 against mean predicted probability in ten bins, for 240 test rows and for 240 rows of site B. The test curve stays near the diagonal, its largest departure in a bin of only 17 rows; the site B curve stays between 0.33 and 0.57 for mean predicted probabilities from 0.45 to 0.95, far below the diagonal at the top.](img/predictor-reliability.svg)
 
-The logistic classifier's log loss on site B is $1.0066$, against $0.4939$ on the test rows and $0.6961$ for the constant model: **worse than no model at all.** Its area falls from $0.8173$ to $0.5768$, close to chance. Its mean predicted probability is $0.7181$ where $44.58\%$ of the rows failed, and its ECE rises from $0.0571$ to $0.2934$. The reliability table shows the mechanism: in the two highest bins, $114$ site B rows, the model says $0.86$ to $0.95$ and the failures are $57\%$ and $44\%$. The failure is extrapolation, not noise. The table of feature means shows where the slice differs from training: load, standardised by the training statistics, is $1.7545$ standard deviations higher, and the other four features are within $0.14$. In the training rows only $17$ of $720$ have $x_0 > 2$; at site B $110$ of $240$ do. That is the region where the law's curved term $-0.8\,x_0^2$ bends the failure probability back down (the law is printed above only so that the data can be regenerated; a project without it would find the same fact by plotting the residuals against load) and where a linear logit keeps rising. $k$ nearest neighbours average the outcomes of the training rows closest to each query, which for site B are the highest-load training rows, where the curve has already bent. They are less wrong: their site B log loss is $0.6855$ and their area $0.6859$, against $1.0066$ and $0.5768$ for the logistic model, though neither is good. Over the $16$ runs the picture is the same: the mean site B log loss of the logistic model is $0.9284$, which exceeds the constant model's by $0.2334$ (interval $0.2047$ to $0.2586$), and the mean area is $0.5917$.
+The logistic classifier's log loss on site B is $1.0066$, against $0.4939$ on the test rows and $0.6961$ for the constant model: **worse than no model at all.** Its area falls from $0.8173$ to $0.5768$, close to chance. Its mean predicted probability is $0.7181$ where $44.58\%$ of the rows failed, and its ECE rises from $0.0571$ to $0.2934$. The reliability table shows the mechanism: in the two highest bins, $114$ site B rows, the model says $0.86$ to $0.95$ and the failures are $57\%$ and $44\%$. The failure is extrapolation, not noise. The table of feature means shows where the slice differs from training: load, standardised by the training statistics, is $1.7545$ standard deviations higher, and the other four features are within $0.14$. In the training rows only $17$ of $720$ have a raw load $x_0 > 2$; at site B $110$ of $240$ do. That is the region where the law's curved term $-0.8\,x_0^2$ bends the failure probability back down (the law is printed above only so that the data can be regenerated; a project without it would find the same fact by plotting the residuals against load) and where a linear logit keeps rising. $k$ nearest neighbours average the outcomes of the training rows closest to each query, which for site B are the highest-load training rows, where the curve has already bent. They are less wrong: their site B log loss is $0.6855$ and their area $0.6859$, against $1.0066$ and $0.5768$ for the logistic model, though neither is good. Over the $16$ runs the picture is the same: the mean site B log loss of the logistic model is $0.9284$, which exceeds the constant model's by $0.2334$ (interval $0.2047$ to $0.2586$), and the mean area is $0.5917$.
 
 **The honest statement.** A sentence in the form of Chapter 8's report card, from the numbers above:
 
@@ -743,7 +781,7 @@ The tests are the blocks printed in the milestones above, collected here as a ch
 
 | milestone | test | expected | tolerance |
 |---|---|---|---|
-| data | the first rows, the sums of the features and of `wear`, the pump effects, the counts of `fail` | as printed | $10^{-9}$ for the sums and rows; counts exact |
+| data | the first rows, the sums of the features and of `wear`, the pump effects, the counts of `fail` | as printed (6 decimals) | $5 \times 10^{-7}$, half a unit of the last printed place, for the sums and rows; counts exact |
 | 1 | sizes of the four sets, pumps shared between sets, rows per fold, first pumps of each set and the folds of the first eight training pumps | as printed; zero pumps shared | exact |
 | 1 | standardiser: mean and root mean square of training $z$ | $0$ and $1$ | $10^{-12}$; the printed means of the test $z$ to $10^{-6}$ |
 | 1 | leakage probe, 20 repetitions | means as printed; random-row mean exceeds pump mean by more than $0.05$ | $10^{-4}$ for a bit-exact generator; the stated margin otherwise |
@@ -752,7 +790,7 @@ The tests are the blocks printed in the milestones above, collected here as a ch
 | 4 | step-size table (eigenvalue by power iteration) | as printed | $10^{-6}$ |
 | 4 | gradient check with the penalty; failure of the check without it | as printed | $10^{-6}$ relative |
 | 4 | fold log losses for each penalty, the chosen penalty, the refit weights | as printed; the same $\lambda$ | $10^{-4}$ for log losses; $10^{-6}$ for weights; $\lambda$ exact |
-| 5 | fixture 1: area three ways, ROC points, confusion and cost at three thresholds | as printed | $10^{-10}$ |
+| 5 | fixture 1: area three ways, ROC points, confusion and cost at three thresholds | as printed; the three areas agree with each other | $10^{-12}$ between the three areas; $10^{-10}$ against the printed values |
 | 5 | fixture 2: scale, log loss, ECE with 10 and 5 bins, reliability rows | as printed | $10^{-8}$ |
 | 5 | validation report: scale, log loss, ECE, area, reliability, decisions | as printed | $10^{-4}$ |
 | 6 | fold log losses for each $k$, the chosen $k$, validation scores | as printed; the same $k$ | $10^{-4}$; $k$ exact |
@@ -769,7 +807,7 @@ A compact fingerprint of a correct pipeline, to check at the end:
 <!-- worked: project_predictor.acceptance_fingerprint -->
 | milestone | quantity | value | tolerance |
 |---|---|---:|---|
-| 1 | sum of x0 over all 1440 rows | +488.449270 | 1e-9 |
+| 1 | sum of x0 over all 1440 rows | +488.449270 | 5e-7 |
 | 1 | rows with fail = 1 over all 1440 rows | 575 | exact |
 | 1 | training pumps, first six | 0, 2, 3, 4, 5, 7 | exact |
 | 3 | normal-equation weights, intercept and z0 | 3.03368234, 2.04753554 | 1e-8 |
@@ -816,4 +854,4 @@ These are optional. Each is a bigger test of the same ideas.
 3. $\frac{1}{N}\sum_n(\sigma(\mathbf{w}\cdot\mathbf{x}_n) - y_n)\,x_{nj} + \lambda w_j$. The intercept is usually left out of the penalty: a prior that centres it at zero says that the average outcome is probably one half, which is arbitrary, and leaving it free makes the fit independent of the base rate (Chapter 4).
 4. $t^\star = c_{\mathrm{FP}}/(c_{\mathrm{FP}} + c_{\mathrm{FN}}) = 1/6$. The area under the ROC curve is the share of (positive, negative) pairs in which the positive has the higher score, a tie counting one half (Chapter 6).
 5. Because the two scores in a run are measured on the same pumps, and the same choice of split affects both; the difference of the two removes what they share (Chapter 8). If the models saw different splits, the differences would contain the split noise of both, and pairing would remove nothing.
-6. The bootstrap's interval comes from the claim that the units are independent draws; if they are not, resampling them understates the spread (Volume I, Chapter 12). The four rows of a pump share a fingerprint and the pump effects, so the unit is the pump. In the project a resample is $G$ calls of `rng.integer(G)` over pumps, each bringing its four rows (Volume I, Chapter 17, for the generator).
+6. The bootstrap's interval comes from the claim that the units are independent draws; if they are not, resampling them understates the spread (Volume I, Chapter 12). The four rows of a pump share a fingerprint and the pump effects, so the unit is the pump. In the project a resample of the test set is $60$ calls of `rng.integer(60)`, one per pump, each bringing the four rows of the pump it names (Volume I, Chapter 17, for the generator).

@@ -38,7 +38,7 @@ record View:
     offset: int
 ```
 
-`v.offset` reads a field, and a record value is built by naming the type and listing its fields in order (`View(storage, offset)`). A function may return several values as a tuple,
+`v.offset` reads a field, and a record value is built by naming the type and listing its fields in order (`View(storage, offset)`). A field of a record variable is assigned with `v.offset = 3`; this changes that variable only (a record is a value, so `w = v` makes `w` an independent copy), and a function changes a record argument only when it is marked `inout`. A function that returns a record names the record type in its signature, `-> View`, and every field is set on every path before the `return`. A function may return several values as a tuple,
 `-> (t: real, r: array<real>[n])`, written `return (t, r)` and received as
 `(t, r) = f(x)`. Single letters such as `T` in `array<T>[n]` stand for any
 element type, the same one everywhere in the signature.
@@ -96,7 +96,7 @@ values that shares no storage with `x`.
 
 A list comprehension `[expression for i in 0 .. n]` builds the vector of the
 expression's values for `i = 0, 1, ..., n - 1`, and `[expression for i in 0 ..
-n if condition]` keeps only the values where the condition holds. `[]` is the
+n if condition]` keeps only the values where the condition holds. The same form iterates over the elements of a list, `[expression for x in L]` (and `[expression for x in L if condition]`), in list order. `[]` is the
 empty list and `append x to L` adds `x` at the end of the list `L`; `len(L)`
 is its length. `for index in indices(shape)` visits every index tuple of an
 array of that shape, in row-major order (the last index varies fastest).
@@ -118,6 +118,10 @@ named operations:
 | `argmax(a)`, `argmin(a)` | index of the largest (smallest) element of a vector; on a tie the **first** index wins |
 | `sort(a)` | a new vector with the elements of `a` in ascending order; equal elements keep their original relative order |
 | `argsort(a)`, `argsort(a, descending)` | the vector of indices that puts `a` in ascending (or descending) order; ties keep their original relative order, so `argsort` is stable |
+| `percentile(a, q)` | for a vector `a` with `m >= 1` elements and a fraction `q` in `[0, 1]`: sort `a` ascending into `v`, let `pos = q * (m - 1)`, `lo = floor(pos)`, `hi = min(lo + 1, m - 1)`, and return `v[lo] + (pos - lo) * (v[hi] - v[lo])` (linear interpolation between neighbouring order statistics; Volume I, chapter 12 and the project of chapter 18) |
+| `median(a)` | `percentile(a, 0.5)`: the middle element of an odd count, the average of the two middle elements of an even count. A chapter that needs the lower or upper middle element of an even count says so and does not call it `median` |
+| `sd(a)` | the sample standard deviation of a vector `a` with `m >= 2` elements, with divisor `m - 1`: `sqrt(sum((a[i] - mean(a))^2 for i in 0 .. m) / (m - 1))`. A standardiser that divides by `m` says so in its signature and does not call `sd` |
+| `correlation(a, b)` | the Pearson correlation of two vectors of equal length `m >= 2`: `sum((a[i] - mean(a)) * (b[i] - mean(b))) / sqrt(sum((a[i] - mean(a))^2) * sum((b[i] - mean(b))^2))`, a `real` in `[-1, 1]`; it is an error (`require`) when either vector is constant, because a denominator is then zero. The divisor of the covariance cancels, so none is stated |
 | `map(f, a)` | applies the scalar function `f` to every element |
 | `a + b`, `a * b` on arrays | elementwise, and **only** when the shapes are equal or the text states the broadcast |
 
@@ -144,10 +148,16 @@ row of `x: [T, D]`".
 | `sqrt`, `exp`, `log`, `sin`, `cos` | the usual functions; `log` is the natural logarithm and `sin`, `cos` take radians |
 | `log1p(x)` | `log(1 + x)` for `x > -1`, computed so that it stays accurate when `x` is tiny (Volume I, Chapter 15); where `1 + x` would round to 1, `log1p(x)` still returns about `x` |
 | `log2(x)`, `log10(x)` | logarithms to base 2 and 10 |
+| `round(x, n)` | `x` rounded to `n >= 0` decimal places, **ties away from zero**: take the exact decimal value of `x` as written or computed, find the two multiples of `10^(-n)` that enclose it, and pick the nearer one; when `x` is exactly halfway, pick the one farther from zero (`round(2.5, 0) = 3`, `round(-2.5, 0) = -3`, `round(0.125, 2) = 0.13`). It returns a `real`. The book avoids a printed value that depends on this rule: where a table is rounded, the underlying quantity is not a tie, or the text says which way it was rounded. A binary floating-point number is rarely exactly halfway, so a reproduction compares unrounded values with a tolerance (see "Numerical tolerance") before it rounds |
+| `sigmoid(z)` | the logistic function $1/(1 + e^{-z})$, computed as `1 / (1 + exp(-z))` for `z >= 0` and as `exp(z) / (1 + exp(z))` for `z < 0`, so that `exp` never overflows; the result lies in $(0, 1)$ and `sigmoid(0) = 0.5` (Volume II, chapter 3) |
+| `softplus(z)` | $\log(1 + e^z)$, computed as `max(z, 0) + log1p(exp(-abs(z)))`, which is exact in real arithmetic and cannot overflow; `softplus(0) = log(2)` (Volume II, chapter 3) |
+| `erf(x)` | the error function $\frac{2}{\sqrt\pi}\int_0^x e^{-s^2}ds$, odd, with `erf(0) = 0` and limits $\pm 1$; the standard Gaussian cumulative distribution is $\Phi(z) = \frac12\bigl(1 + \mathrm{erf}(z/\sqrt2)\bigr)$. Use the library routine of your language (a reproduction agrees to the printed digits; its series is not needed) |
 | `atan2(y, x)` | the angle in radians, in $(-\pi, \pi]$, of the point with horizontal coordinate `x` and vertical coordinate `y` (the angle from the positive horizontal axis, anticlockwise); `atan2(0, 0)` is `0` |
 | `pi`, `infinity` | the constant $\pi$ and positive infinity (`-infinity` is its negative) |
 | `and`, `or`, `not` | logical operations on `bool`; `and` and `or` stop at the first operand that decides the result |
 | `x if c else y` | `x` when the condition `c` is true, otherwise `y`; only the chosen operand is evaluated |
+
+**Arithmetic in a stated format.** When a text says an expression is evaluated in `f32` (or another format) *one operation at a time*, each `+`, `-`, `*`, `/` and each call of `sqrt`, `exp`, `log` or `log1p` rounds its exact result, computed from the already rounded inputs, to the nearest number of the format, ties to even. Negation, `abs`, `min`, `max` and comparisons are exact and are not rounding steps. A result beyond the largest finite number becomes `infinity`; tiny results are kept as subnormal numbers (nothing is flushed to zero); `log(0)` is `-infinity`, `1 / infinity` is `0`, and `infinity - infinity` is not a number. Volume II, Chapter 3 uses this to show how a naive loss fails.
 
 Comparison operators are `==`, `!=`, `<`, `<=`, `>`, `>=`. A **chained comparison** `a <= b < c` means `a <= b and b < c`, with `b` evaluated once; it is only used with the operators `<` and `<=` pointing the same way. Operators bind in
 the usual order of arithmetic (`^` first, then `*`, `/`, `//`, `mod`, then
@@ -214,6 +224,8 @@ continue                  # start the next iteration of the innermost loop
 return value
 ```
 
+A range `a .. b` may start anywhere, not only at 0: `for i in r + 1 .. m` visits `r + 1, ..., m - 1`, and it is empty when `a >= b`.
+
 `else if` is `else` followed by an `if`; at most one branch runs. A loop
 over an empty range (`for i in 0 .. 0`) runs zero times.
 
@@ -239,11 +251,38 @@ function name(arg1: type, arg2: type) -> type:
     ...
 ```
 
+A signature too long for one line continues on the following lines, indented; a parameter of function type is written with the types of its arguments and result, `score: function(array<real>[M, d], array<real>[M]) -> real`, and the function passed in must accept exactly those arguments.
+
 Arguments are read-only unless marked `inout`, in which case the function
 may change them and the caller sees the change. A function never changes
 anything that is not an argument marked `inout` or a value it created.
 There is no hidden global state; anything an algorithm needs, including a
 random number generator, is passed in.
+
+## Routines defined in Volume I
+
+Three numerical routines are used by later chapters and defined, with their
+code, in Volume I. A chapter that calls one names it and states the arguments;
+it does not redefine it.
+
+- **Gaussian elimination.** `solve(A, y, partial)` of Volume I, chapter 4
+  ("Solving systems: Gaussian elimination", "The algorithms") returns the
+  `x` with `A x = y` for a square `A: [n, n]`, and stops with an error when
+  `A` is singular. The third argument is the **pivoting rule**: `true` picks,
+  in each column, the row at or below the diagonal with the largest absolute
+  value in that column (partial pivoting); `false` takes the first row whose
+  entry is not zero. Every use in Volume II passes `true`.
+- **Symmetric eigenproblem.** `jacobi_eigen(S, sweeps)` of Volume I, chapter 6
+  ("The algorithms") returns `(values, V)` for a symmetric `S`: the eigenvalues
+  on the diagonal at the end (in no particular order, so a caller sorts them
+  descending with the columns of `V`) and the unit eigenvectors as the columns
+  of `V`. A call states the number of sweeps (`20` is ample for the matrices of
+  the book).
+- **Newton's method.** Volume I, chapter 7 ("Newton's method: using the tangent
+  to jump") derives `x_next = x - f(x) / fprime(x)` for a root of `f`, and
+  `x_next = x - g(x) / gprime(x)` for a minimum of a function with first
+  derivative `g` and second derivative `gprime`. One iteration is one such
+  update; a chapter states the starting value and the stopping rule.
 
 ## Randomness
 
@@ -260,6 +299,7 @@ Gaussian value (initially empty). The calls are:
 | `rng.normal()` | a sample of $\mathcal{N}(0, 1)$ by Box-Muller. A call with no held value draws `u1 = rng.uniform()` then `u2 = rng.uniform()`, sets `R = sqrt(-2 * log(1 - u1))`, holds `R * sin(2 * pi * u2)` and returns `R * cos(2 * pi * u2)`; the next call returns the held value without drawing anything |
 | `shuffle(a, rng)` | permutes the array `a` in place: for `i` from `n-1` down to `1`, `j = rng.integer(i + 1)` and `swap a[i], a[j]` |
 | `Generator(s)` | a new generator whose state is the `u64` `s` before its first draw (a seed `s` below $2^{64}$; there is no held Gaussian value yet) |
+| `derive_seed(run_seed, name)` | the seed of the stream called `name` under a run seed: `h = mix(run_seed)`, then `h = mix(h xor b)` for each byte `b` of the UTF-8 name in order, and `h` is the result in `0 .. 2^64 - 1`, where `mix` is the three scrambling lines of the SplitMix64 step without the state advance (Volume I, chapter 17, which gives the code and printed values). `Generator(derive_seed(s, "init"))` is the stream "init" of run seed `s` |
 
 Two runs with generators created from the same seed produce the same numbers.
 `os_entropy()` returns a `u64` taken from the operating system, the only

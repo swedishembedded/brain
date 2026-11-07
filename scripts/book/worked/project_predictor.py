@@ -625,9 +625,9 @@ def dataset_fingerprint():
     pos_a = sum(d.c[: d.n_site_a])
     pos_b = sum(d.c[d.n_site_a:])
     tr = d.trace
-    out += ("\n\nTrace of the first draws (pump 0, row 0): fingerprint a = (" + ", ".join(f"{v:+.6f}" for v in tr["a"])
-            + f"), pump effects u = {tr['u']:+.6f} and v = {tr['v']:+.6f} (the standard deviations 1.5 and 0.4 already applied), "
-            f"true logit z* = {tr['eta']:+.6f}, label draw {tr['uniform']:.6f}, target noise draw {tr['eps']:+.6f} "
+    out += ("\n\nTrace of the first draws (pump 0, row 0): profile = (" + ", ".join(f"{v:+.6f}" for v in tr["a"])
+            + f"), pump effects effect_fail = {tr['u']:+.6f} and effect_wear = {tr['v']:+.6f} (the standard deviations 1.5 and 0.4 already applied), "
+            f"true logit e* = {tr['eta']:+.6f}, label draw {tr['uniform']:.6f}, target noise draw {tr['eps']:+.6f} "
             "(before the factor 0.5).")
     out += "\n\n" + _table(
         ["quantity", "value"],
@@ -635,7 +635,7 @@ def dataset_fingerprint():
          ("sum over all rows of x0, x1, x2, x3, x4", ", ".join(sums)),
          ("rows with fail = 1, site A and site B", f"{pos_a} and {pos_b}"),
          ("sum of wear over all rows", f"{sum(d.t):+.6f}"),
-         ("sum of the pump effects u (pumps 0 to 359) and v", f"{sum(d.u):+.6f} and {sum(d.v):+.6f}")],
+         ("sum of the pump effects effect_fail (pumps 0 to 359) and effect_wear", f"{sum(d.u):+.6f} and {sum(d.v):+.6f}")],
         "lr")
     return out
 
@@ -680,12 +680,15 @@ def split_and_probe():
             lab = one_nn_labels(standardise(_xs(tr), m, s), _ys(tr), standardise(_xs(te), m, s))
             accs[tag].append(accuracy(lab, _ys(te)))
     out += ("\n\nLeakage probe. A model that can only memorise: label each held-out row with the label of its nearest training "
-            "row (Euclidean distance on the training-standardised features, the first row on a tie). One draw of 240 scored rows is "
+            "row (Euclidean distance on the training-standardised features, the standardiser fitted on the training rows of that protocol; "
+            "on a tie the training row listed first wins; continuous data have no ties, so this never matters here). One draw of 240 scored rows is "
             f"noisy, so the probe is repeated {N_PROBES} times. Master generator: {_seed_line('probe')}; repetition r uses the "
             "r-th raw value (rng.next(), counting from 0) as the seed of its own SplitMix64, which draws, in order, the shuffle "
-            "of the 1200 site A row numbers (1199 integer draws; random-row protocol: the first 720 shuffled rows train and the "
-            "next 240 are scored) and then the shuffle of the 300 site A pump numbers (299 integer draws; pump protocol: the "
-            "rows of the first 180 shuffled pumps train and the rows of the last 60 are scored).\n\n"
+            "of the 1200 site A row numbers (1199 integer draws; random-row protocol: the first 720 shuffled rows train, listed in "
+            "shuffled order, and the next 240 are scored) and then the shuffle of the 300 site A pump numbers (299 integer "
+            "draws; pump protocol: the rows of the first 180 shuffled pumps train, listed in ascending row number, and the rows "
+            "of the last 60 shuffled pumps, in ascending row number, are scored). The sd over repetitions has the divisor "
+            f"{N_PROBES} - 1.\n\n"
             + _table(["protocol", "mean accuracy of the nearest-row label", "sd over repetitions", "lowest", "highest"],
                      [("random rows", _f(mean(accs["rows"])), _f(sd(accs["rows"])), _f(min(accs["rows"])), _f(max(accs["rows"]))),
                       ("whole pumps", _f(mean(accs["pumps"])), _f(sd(accs["pumps"])), _f(min(accs["pumps"])), _f(max(accs["pumps"])))],
@@ -705,11 +708,12 @@ def standardiser_check():
     Zte = standardise(_xs(sp.test), m, s)
     rows = []
     for j in range(D):
-        rows.append((f"x{j}", _f(m[j], 6), _f(s[j], 6), f"{mean([z[j] for z in Ztr]):.1e}",
+        rows.append((f"x{j}", _f(m[j], 6), _f(s[j], 6), "yes" if abs(mean([z[j] for z in Ztr])) < 1e-12 else "NO",
                      _f(math.sqrt(sum(z[j] ** 2 for z in Ztr) / len(Ztr)), 6), _f(mean([z[j] for z in Zte]), 6)))
     return ("The standardiser is fitted on the 720 training rows (mean, and standard deviation with divisor N) and "
-            "applied unchanged to the test rows.\n\n"
-            + _table(["feature", "training mean", "training sd", "mean of training z", "rms of training z", "mean of test z"], rows))
+            "applied unchanged to the test rows. The mean of the training z is zero up to round-off (about 1e-17, whose digits depend "
+            "on the order of summation), so the table tests it against 1e-12.\n\n"
+            + _table(["feature", "training mean", "training sd", "abs(mean of training z) below 1e-12", "rms of training z", "mean of test z"], rows))
 
 
 # ------------------------------------------------------------- baselines
@@ -896,16 +900,21 @@ def logistic_step_size():
     n, p = len(X), len(X[0])
     A = [[sum(r[i] * r[j] for r in X) / n for j in range(p)] for i in range(p)]
     lam_max = largest_eigenvalue(A)
-    big_l = lam_max / 4.0
+    curv = lam_max / 4.0
     rows = []
-    for lam in (0.0, 0.01, 0.1, 0.3, 1.0):
-        limit = 2.0 / (big_l + lam)
-        rows.append((f"{lam:g}", f"{1.0 / (big_l + lam):.4f}", f"{limit:.4f}", "yes" if ETA_LOG < limit else "no (outside the guarantee)"))
+    for lam in LAMBDAS + (0.3, 1.0):
+        limit = 2.0 / (curv + lam)
+        rows.append((f"{lam:g}", "yes" if lam in LAMBDAS else "no", f"{1.0 / (curv + lam):.4f}", f"{limit:.4f}",
+                     "yes" if ETA_LOG < limit else "no (outside the guarantee)"))
     out = (f"The matrix of the design [1, z] over the 720 training rows, A = X^T X / N (6 by 6); largest eigenvalue by power "
-           f"iteration (300 iterations from the all-ones vector, normalising each time): {lam_max:.6f}. The curvature "
-           f"bound of the unpenalised loss is L = lambda_max / 4 = {big_l:.6f}; the penalty adds lambda to it. Gradient "
-           f"descent with step eta is stable when eta < 2 / (L + lambda); the step 1 / (L + lambda) is the classical choice.\n\n")
-    out += _table(["lambda", "1 / (L + lambda)", "stability limit 2 / (L + lambda)", f"eta = {ETA_LOG:g} stable?"], rows, "lrrl")
+           f"iteration (300 iterations from the all-ones vector; each iteration forms A v, takes its Euclidean norm as the "
+           f"eigenvalue estimate and divides A v by it to get the next v; the estimate of the last iteration is used): "
+           f"{lam_max:.6f}. The curvature bound of the unpenalised loss is lambda_cap = lambda_max / 4 = {curv:.6f}; the penalty "
+           f"adds lambda to it. Gradient descent with step eta is stable when eta < 2 / (lambda_cap + lambda); the step "
+           f"1 / (lambda_cap + lambda) is the classical choice. The first five penalties are the grid of the cross-validation; "
+           f"0.3 and 1 are added to show where the guarantee ends.\n\n")
+    out += _table(["lambda", "in the grid", "1 / (lambda_cap + lambda)", "stability limit 2 / (lambda_cap + lambda)", f"eta = {ETA_LOG:g} stable?"],
+                  rows, "llrrl")
     return out
 
 
@@ -1090,7 +1099,7 @@ def test_report():
         tp, fp, fn, tn = confusion(pred, yt)
         _, rec, f1 = prf(tp, fp, fn)
         rows.append((name, ll, _f(auc_rank(score, yt)), e, _f(f1), _f(rec), _f(cost_per_row(pred, yt))))
-    out += _table(["model", "log loss", "ROC AUC", "ECE", "F1 at t", "recall at t", "cost per row at t"], rows)
+    out += _table(["model", "log loss", "ROC AUC", "ECE, 10 bins", "F1 at t", "recall at t", "cost per row at t"], rows)
 
     # cluster bootstrap, paired
     groups = rows_by_pump(test)
@@ -1130,11 +1139,12 @@ def test_report():
             row("ROC AUC, logistic minus k-NN", auc_rank(zt, yt) - auc_rank(pk, yt),
                 [a_ - b_ for a_, b_ in zip(reps["auc_l"], reps["auc_k"])])]
     out += ("\n\nCluster bootstrap over the 60 test pumps: " + _seed_line("bootstrap") +
-            f". One resample is 60 calls of rng.integer(60), each the index (in ascending pump order) of a pump whose four "
-            f"rows are all taken; {BOOT_RESAMPLES} resamples from one generator, each statistic recomputed on the same "
-            "resample (so the differences are paired). Interval ends are the 2.5th and 97.5th percentiles of the sorted "
-            "replicates by linear interpolation at position q (R - 1); sd is the standard deviation of the replicates "
-            "(divisor R - 1).\n\n")
+            f". One resample is 60 calls of rng.integer(60), in order, each the index (in ascending pump order) of a pump whose "
+            f"four rows are all taken, the pumps in draw order and the rows of a pump ascending; {BOOT_RESAMPLES} resamples from one "
+            "generator, all six quantities of the table and the quantities they are differences of recomputed on the same "
+            "resample (so the differences are paired). Interval ends are the `percentile` of the replicates at q = 0.025 and "
+            "q = 0.975 (linear interpolation at position q (number of replicates - 1)); sd is the standard deviation of the "
+            f"replicates with divisor {BOOT_RESAMPLES} - 1.\n\n")
     out += _table(["quantity", "estimate", "sd of replicates", "95 percent lower", "95 percent upper"], rows)
     return out
 
@@ -1175,7 +1185,8 @@ def regression_test():
         return (name, _f(r), _f(r_squared(pred, tte, tbar)), _f(lo), _f(hi))
     out = ("The 240 test rows, read once, with the weights of milestone 3 (fitted on the training rows only). Interval: the "
            "cluster bootstrap over the 60 test pumps as in the classification report (" + _seed_line("bootstrap_regression")
-           + f", {BOOT_RESAMPLES} resamples, 60 calls of rng.integer(60) each, percentile interval of the RMSE).\n\n")
+           + f", {BOOT_RESAMPLES} resamples, 60 calls of rng.integer(60) each, taken as in the classification report; percentile "
+           "interval of the RMSE at q = 0.025 and 0.975).\n\n")
     out += _table(["model", "test RMSE", "R^2 (around the training mean)", "RMSE 95 percent lower", "RMSE 95 percent upper"],
                   [row("constant (training mean)", pred_const),
                    row(f"line on x{jt}", pred_line, "line"),
@@ -1241,11 +1252,16 @@ def seed_study():
     master = _gen("seeds")
     out = (f"{N_RUNS} runs. Master generator: {_seed_line('seeds')}; run s uses the s-th raw value (rng.next(), counting from 0) "
            "as the seed of its own SplitMix64, which draws, in order: the shuffle of the 300 site A pump numbers (299 integer "
-           "draws; 180 pumps train, 60 validate, 60 test), the shuffle of the 180 training pumps for the grouped folds (179 "
-           "integer draws), and the shuffle of the 720 training rows for the row folds used only by the ablation below "
-           "(719 integer draws). In each run the penalty lambda and the neighbour count k are chosen by grouped five-fold "
-           "cross-validation on the log loss, the models are refitted on the 720 training rows and scored on the 240 test "
-           "rows and on the 240 rows of site B.\n\n")
+           "draws; 180 pumps train, 60 validate, 60 test, each set sorted ascending), the shuffle of the 180 training pumps for the "
+           "grouped folds (179 integer draws; the pumps numbered 0 .. 179 in ascending pump order, the pump at shuffled position p "
+           "goes to fold p mod 5), and the shuffle of the 720 training rows for the row folds used only by the ablation below "
+           "(719 integer draws; the rows numbered 0 .. 719 in ascending row number, the row at shuffled position p goes to "
+           "fold p mod 5). The 719 draws are made in every run, whether or not the ablation is read. In each run the penalty "
+           "lambda and the neighbour count k are chosen by grouped five-fold cross-validation on the mean fold log loss (the "
+           "smallest mean; the larger value on a tie, for lambda and for k alike), the models are refitted on the 720 training "
+           "rows and scored on the 240 test rows and on the 240 rows of site B. The scale a of 'scaled' is fitted by the "
+           "doubling-and-bisection routine of milestone 5 on the 240 validation rows of that run, and the 'constant' model is "
+           "the share of ones among that run's 720 training rows.\n\n")
     rows = []
     for i, r in enumerate(runs):
         g = r["group"]
@@ -1271,7 +1287,7 @@ def seed_study():
             summary("site B ROC AUC, logistic", [r["slice_auc"] for r in runs], "seeds.sauc")]
     out += (f"\n\nOver the {N_RUNS} runs: mean, standard deviation (divisor n - 1) and a bootstrap 95 percent interval of the mean "
             f"(resample the {N_RUNS} runs with replacement, {RUN_BOOT_RESAMPLES} resamples, interval ends at the 2.5th and "
-            "97.5th percentiles; each row has its own generator, started at the seed in the last column; a resample is "
+            "97.5th percentiles of the replicated means; each row has its own generator, started at the seed in the last column; a resample is "
             f"{N_RUNS} calls of rng.integer({N_RUNS}), each the index of the next run to include).\n\n")
     out += _table(["quantity", "mean", "sd", "95 percent lower", "95 percent upper", "bootstrap seed"], rows, "lrrrrl")
     wins = sum(1 for a, b in zip(col("test_log"), col("test_knn")) if a < b)
@@ -1291,7 +1307,9 @@ def ablation_cv():
             rows.append((name, model, _f(mean(cv)), _f(mean(te)), _fs(mean(gap)), _f(lo), _f(hi),
                          f"{_seed(f'ablation.{key}.{model}'):#018x}"))
     out = (f"The {N_RUNS} runs of the seed study. The design choice: how the folds that select lambda (logistic) and k (k-NN) "
-           "are drawn. 'CV estimate' is the mean fold log loss of the chosen value, the number a report would claim; 'test' is "
+           "are drawn (grouped folds: the folds of pumps of the seed study; random row folds: the 720 training rows dealt by the "
+           "row-fold shuffle of the seed study). The chosen value is the one with the smallest mean fold log loss over the five "
+           "folds of the drawn kind (the larger value on a tie). 'CV estimate' is that mean fold log loss of the chosen value, the number a report would claim; 'test' is "
            "the log loss of the refitted model on the 240 test rows of the same run, from pumps never seen; gap = CV estimate "
            "minus test. The interval is a bootstrap 95 percent interval of the mean gap over the runs (2000 resamples as in the "
            "seed study, each row with the generator seed of the last column).\n\n")
@@ -1356,8 +1374,9 @@ def shift_slice():
     outside = sum(1 for x in _xs(sl) if x[0] > hi0 or x[0] < lo0)
     above = sum(1 for x in _xs(sl) if x[0] > 2.0)
     train_above = sum(1 for x in _xs(sp.train) if x[0] > 2.0)
-    out += (f"\n\nRange of x0 over the training rows: {lo0:.4f} to {hi0:.4f}; site B rows outside it: {outside} of {len(sl)}. "
-            f"Rows with x0 > 2: {train_above} of {len(sp.train)} training rows, {above} of {len(sl)} site B rows.")
+    out += (f"\n\nRange of the raw (unstandardised) x0 over the training rows: {lo0:.4f} to {hi0:.4f}; site B rows outside it: "
+            f"{outside} of {len(sl)}. Rows with raw x0 > 2: {train_above} of {len(sp.train)} training rows, {above} of "
+            f"{len(sl)} site B rows.")
     return out
 
 
@@ -1370,7 +1389,7 @@ def acceptance_fingerprint():
     cv = main_cv()
     wn = _regression()[5]
     rows = [
-        ("1", "sum of x0 over all 1440 rows", f"{sum(x[0] for x in d.x):+.6f}", "1e-9"),
+        ("1", "sum of x0 over all 1440 rows", f"{sum(x[0] for x in d.x):+.6f}", "5e-7"),
         ("1", "rows with fail = 1 over all 1440 rows", sum(d.c), "exact"),
         ("1", "training pumps, first six", ", ".join(str(g) for g in sp.pumps[0][:6]), "exact"),
         ("3", "normal-equation weights, intercept and z0", f"{wn[0]:.8f}, {wn[1]:.8f}", "1e-8"),

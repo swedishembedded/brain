@@ -20,7 +20,9 @@ models that can be trusted on data they have not seen. If your team needs
 expertise in supervised learning from sensor data, you can procure our
 services by sending an email to info@swedishembedded.com.
 """
+from decimal import Decimal, ROUND_HALF_UP
 from functools import lru_cache
+from math import comb
 
 import bookrng
 
@@ -30,6 +32,7 @@ import bookrng
 LAW = (-6.0, 50.0, -8.0)
 NOISE_SD = 1.2
 V_LO, V_HI = 0.4, 2.8
+V_SPAN = 2.4  # V_HI - V_LO as written in the chapter, so the typed formula and the code agree to the last bit
 N_TRAIN = 10
 N_FRESH = 2000
 ASK_V = 1.75  # the voltage the workshop asks about in the chapter text
@@ -53,6 +56,11 @@ def _generator_line(name):
     return f"Generator: the book's SplitMix64, seed {seed:#018x} ({seed})."
 
 
+def _round(x, places):
+    """The pseudocode page's round(x, n): the exact decimal value of x, nearest multiple of 10^-n, ties away from zero."""
+    return float(Decimal(x).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP))
+
+
 def _draw(rng, n):
     """n rows (voltage, temperature) from the hidden law, rounded as a meter would show them.
 
@@ -61,9 +69,9 @@ def _draw(rng, n):
     """
     rows = []
     for _ in range(n):
-        v = V_LO + (V_HI - V_LO) * rng.uniform()
+        v = V_LO + V_SPAN * rng.uniform()
         t = LAW[0] + LAW[1] * v + LAW[2] * v * v + NOISE_SD * rng.normal()
-        rows.append((round(v, 2), round(t, 1)))
+        rows.append((_round(v, 2), _round(t, 1)))
     return rows
 
 
@@ -167,11 +175,16 @@ def feature_vectors():
 def data_source():
     """The full recipe of the source, so that every row and every fresh row can be regenerated."""
     return (f"The source (the learner never sees these lines): voltage v uniform on [{V_LO}, {V_HI}], temperature "
-            f"y = {LAW[0]:g} + {LAW[1]:g} v - {-LAW[2]:g} v^2 + {NOISE_SD} z with z a standard Gaussian sample. "
-            f"A row is made by two draws in this order: v = {V_LO} + {V_HI - V_LO:.1f} * rng.uniform(), then z = "
-            f"rng.normal(); v is then rounded to 2 decimals and y (computed from the unrounded v) to 1. "
-            f"`rng.normal()` is the Box-Muller sample of the randomness chapter, which draws two uniforms for every second "
-            f"call and holds the second result for the call after.\n\n"
+            f"y = {LAW[0]:g} + {LAW[1]:g} v - {-LAW[2]:g} v^2 + {NOISE_SD} z with z a standard Gaussian sample, "
+            f"evaluated left to right in double precision. "
+            f"A row is made by two draws in this order: v = {V_LO} + {V_SPAN:.1f} * rng.uniform(), then z = "
+            f"rng.normal(); v is then rounded to 2 decimals and y (computed from the unrounded v) to 1, with `round` of the "
+            f"pseudocode page (ties away from zero). "
+            f"`rng.normal()` is the Box-Muller sample defined on the pseudocode page: it draws two uniforms for every second "
+            f"call and holds the second result for the call after. Because a row makes one `rng.uniform()` call and one "
+            f"`rng.normal()` call, the held value is used by every second row, and it stays held across the "
+            f"row boundary and across the ten-row blocks of the last line below (it is never discarded or reset); only a "
+            f"new generator starts with nothing held.\n\n"
             + _table(["data set", "generator seed", "rows", "how they are used"],
                      [("sensor table", f"{bookrng.seed_of(SENSOR_NAME):#018x}", N_TRAIN,
                        "the ten known rows, sorted by (v, y) for display"),
@@ -303,7 +316,7 @@ def _readings():
         for _ in range(6):
             x = cx + GROUP_SD * rng.normal()
             y = cy + GROUP_SD * rng.normal()
-            pts.append((round(x, 2), round(y, 2)))
+            pts.append((_round(x, 2), _round(y, 2)))
     rng.shuffle(pts)
     return tuple(pts)
 
@@ -342,8 +355,10 @@ def readings_table():
     body = [(n + 1, f"{x:.2f}", f"{y:.2f}") for n, (x, y) in enumerate(points)]
     return (f"{_generator_line(GROUPS_NAME)} Source: 6 rows around (1.0, 1.2), then 6 around (3.6, 3.0); each row is "
             f"two draws in this order, x = cx + 0.45 * rng.normal() then y = cy + 0.45 * rng.normal(), rounded to 2 "
-            f"decimals; the 12 rows are then permuted by `shuffle` of the randomness chapter (Fisher-Yates, one "
-            f"`rng.integer(i + 1)` for i = 11 down to 1). The learner is given only this table.\n\n"
+            f"decimals (`round` of the pseudocode page); the 12 rows, in this generation order, are then permuted in place by "
+            f"`shuffle(rows, rng)` of the pseudocode page (Fisher-Yates, one `rng.integer(i + 1)` for i = 11 down to 1, "
+            f"continuing the same generator), and row n below is the element at position n - 1 after the shuffle. "
+            f"The learner is given only this table.\n\n"
             + _table(["n", "feature 1", "feature 2"], body, "lrr"))
 
 
@@ -352,13 +367,15 @@ def grouping_loop():
     body = []
     for i, (centers, assign) in enumerate(history):
         sizes = [assign.count(0), assign.count(1)]
-        body.append((i + 1, f"({centers[0][0]:.2f}, {centers[0][1]:.2f})", f"({centers[1][0]:.2f}, {centers[1][1]:.2f})",
+        body.append((i + 1, f"({centers[0][0]:.5f}, {centers[0][1]:.5f})", f"({centers[1][0]:.5f}, {centers[1][1]:.5f})",
                      f"{sizes[0]} and {sizes[1]}"))
     return (f"Start: centre A = {START_CENTRES[0]}, centre B = {START_CENTRES[1]}. A round assigns each row to the "
             f"centre with the smaller squared distance (A on a tie), then moves each centre to the mean of its rows "
-            f"(a centre with no rows stays). Rounds stop after the first round whose assignment equals the previous "
-            f"round's, or after {MAX_ROUNDS} rounds. The table shows, for each round, the centres used by its "
-            f"assignment.\n\n"
+            f"(the sum of the rows in table order, divided by their number; a centre with no rows stays). Rounds stop "
+            f"after the first round whose assignment equals the previous round's, or after {MAX_ROUNDS} rounds. The "
+            f"table shows, for each round, the centres used by its assignment, to 5 decimals: every exact centre of this "
+            f"run is either a decimal with at most 5 places or far from a rounding tie, so the order of summation does "
+            f"not change a printed digit.\n\n"
             + _table(["round", "centre A", "centre B", "points assigned to A and B"], body))
 
 
@@ -395,3 +412,53 @@ def button_game():
             + f"\n\nAverage reward: A {avg[0]:.1f}, B {avg[1]:.1f}. The agent now presses {'AB'[pick]} "
               f"for 10 more steps and collects {steady} reward. Total over 20 steps: "
               f"{sum(rewards[0]) + sum(rewards[1]) + steady}.")
+
+
+# ----------------------------------------------- how long to explore
+
+EXPLORE_NAME = "learning_problem.explore"
+EXPLORE_PAIRS = ((0.3, 0.7), (0.5, 0.6))
+EXPLORE_LENGTHS = (2, 10, 100)
+EXPLORE_GAMES = 2000
+EXPLORE_HORIZON = 200
+
+
+def _wrong_pick_probability(pa, pb, presses_each):
+    """P(the agent picks A or ties): the number of rewards of B is not above that of A (B is the better button)."""
+    n = presses_each
+    pmf_a = [comb(n, k) * pa ** k * (1 - pa) ** (n - k) for k in range(n + 1)]
+    pmf_b = [comb(n, k) * pb ** k * (1 - pb) ** (n - k) for k in range(n + 1)]
+    return sum(pmf_a[i] * pmf_b[j] for i in range(n + 1) for j in range(i + 1))
+
+
+def explore_study():
+    rng = bookrng.generator(EXPLORE_NAME)
+    body = []
+    for pa, pb in EXPLORE_PAIRS:
+        for length in EXPLORE_LENGTHS:
+            wrong = 0
+            for _ in range(EXPLORE_GAMES):
+                reward = [0, 0]
+                for press in range(length):
+                    arm = press % 2
+                    reward[arm] += 1 if rng.uniform() < (pa, pb)[arm] else 0
+                if reward[1] <= reward[0]:
+                    wrong += 1
+            p_wrong = _wrong_pick_probability(pa, pb, length // 2)
+            per_step = (length / 2 * (pa + pb) + (EXPLORE_HORIZON - length) * ((1 - p_wrong) * pb + p_wrong * pa)) \
+                / EXPLORE_HORIZON
+            body.append((f"{pa} and {pb}", length, wrong, f"{wrong / EXPLORE_GAMES:.4f}", f"{p_wrong:.4f}",
+                         f"{per_step:.4f}"))
+    return (f"{_generator_line(EXPLORE_NAME)} One generator for the whole table. For each pair of probabilities (A, B), "
+            f"in the order listed, and for each exploration length L = 2, 10, 100 in that order, play {EXPLORE_GAMES} "
+            f"games one after the other. A game presses A, B, A, ... for L presses, one `rng.uniform()` per press, "
+            f"rewarded when it is below the pressed button's probability, then compares the two reward totals (each "
+            f"button was pressed L / 2 times, so totals compare as averages do): it picks B only when B's total is "
+            f"strictly larger, and A otherwise (so a tie is a wrong pick, since B is the better button in both pairs). "
+            f"Only the exploration presses are drawn. The count column is reproduced exactly. The next column is the "
+            f"exact probability of a wrong pick (sums of binomial probabilities, no simulation), which the simulated "
+            f"rate matches up to sampling error. The last column is the expected reward per step of a game of "
+            f"{EXPLORE_HORIZON} steps (the L exploration presses, then the rest on the picked button), from the exact "
+            f"probability. Four decimals.\n\n"
+            + _table(["probabilities of A and B", "L", f"wrong picks in {EXPLORE_GAMES} games", "rate",
+                      "exact probability", f"expected reward per step over {EXPLORE_HORIZON} steps"], body))

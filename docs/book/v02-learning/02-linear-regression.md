@@ -26,8 +26,8 @@ answers them in order.
    equations, and the same derivation works for any number of features.
 3. **What do we do when that cannot be done?** When there are too many
    parameters or too much data for a direct solution, we need a method that
-   improves a guess step by step. That method, gradient descent, is the one
-   that will train every network in this book. We study it here on the one
+   improves a guess step by step. That method, which gets its name in its own
+   section below, is the one that will train every network in this book. We study it here on the one
    problem where we can see all of it: the line.
 
 The data are the ten sensor rows of chapter 1 (their generator and seed are given there, in the section "Too small, too big").
@@ -149,7 +149,7 @@ without being told to.
 
 **It is convex in the parameters of a line.** For a model that is a line, the
 prediction is a linear function of $(w, b)$, the square of a linear function is
-a bowl, and an average of bowls is a bowl (the chord inequality of chapter 7
+a bowl (a curve or surface with one lowest point that rises on every side), and an average of bowls is a bowl (the chord inequality of chapter 7
 can be added term by term, so a sum of convex functions is convex). So the MSE of a line has one lowest point and no other valleys. We
 check this by computing the curvature below.
 
@@ -214,9 +214,12 @@ lowest point. We will not compute the lowest point by trying. The chapter 8
 facts are enough: at the lowest point of a smooth function the gradient is zero.
 
 The partial derivatives come from the chain rule of chapter 7. Write
-$r_n = w v_n + b - y_n$ for the difference between prediction and label on row
-$n$ (this is the residual of chapter 3, with the sign convention
-"prediction minus label" used in the tables below). Then
+$r_n = \hat{y}_n - y_n = w v_n + b - y_n$ for the difference between prediction and label on row
+$n$: the **residual** of the row. Every residual in this chapter is
+"prediction minus label", in the formulas and in the tables. (The residual of
+chapter 3, what is left of a vector after a projection, is the label side minus the
+prediction side, the opposite sign; the sign changes no length and no right
+angle, and it is fixed here once so that the gradient and the tables agree.) Then
 
 $$
 \frac{\partial\,\mathrm{MSE}}{\partial b} = \frac{2}{N}\sum_n r_n ,
@@ -291,26 +294,26 @@ a scatter plot in a spreadsheet.
 The residuals of the least-squares line:
 
 <!-- worked: linear_regression.line_residuals -->
-The least-squares line and its residuals (label minus prediction). The sum of residuals is zero up to rounding noise (agreement: size below 1e-9).
+The least-squares line and its residuals r = prediction - label, the sign convention of the whole chapter. The sum of residuals is zero up to rounding noise (agreement: size below 1e-9, whatever digits it prints).
 
-| v | label y | prediction | residual y - prediction |
+| v | label y | prediction | residual (prediction - y) |
 |---|---:|---:|---:|
-| 0.42 | 13.4 | 19.01 | -5.61 |
-| 0.95 | 32.8 | 32.80 | -0.00 |
-| 1.60 | 52.2 | 49.72 | +2.48 |
-| 1.63 | 55.5 | 50.50 | +5.00 |
-| 1.80 | 57.5 | 54.92 | +2.58 |
-| 1.90 | 58.9 | 57.53 | +1.37 |
-| 1.96 | 61.7 | 59.09 | +2.61 |
-| 2.19 | 65.0 | 65.07 | -0.07 |
-| 2.30 | 66.8 | 67.94 | -1.14 |
-| 2.68 | 70.6 | 77.82 | -7.22 |
-|  |  | sum of residuals | -1.6e-14 |
+| 0.42 | 13.4 | 19.01 | +5.61 |
+| 0.95 | 32.8 | 32.80 | +0.00 |
+| 1.60 | 52.2 | 49.72 | -2.48 |
+| 1.63 | 55.5 | 50.50 | -5.00 |
+| 1.80 | 57.5 | 54.92 | -2.58 |
+| 1.90 | 58.9 | 57.53 | -1.37 |
+| 1.96 | 61.7 | 59.09 | -2.61 |
+| 2.19 | 65.0 | 65.07 | +0.07 |
+| 2.30 | 66.8 | 67.94 | +1.14 |
+| 2.68 | 70.6 | 77.82 | +7.22 |
+|  |  | sum of residuals | +1.6e-14 |
 <!-- /worked -->
 
-They sum to zero (the first gradient condition, $\sum r_n = 0$, in numbers), the
-residuals at both ends are negative and in the middle mostly positive: a
-curved pattern that a line cannot follow. The picture draws each residual as a
+They sum to zero (the first gradient condition, $\sum r_n = 0$, in numbers). The
+residuals at both ends are positive (the line is above the labels) and in the middle mostly
+negative (below them): a curved pattern that a line cannot follow. The picture draws each residual as a
 vertical segment from the point to the line. The loss is the average of the
 squares of those segment lengths.
 
@@ -483,7 +486,7 @@ function fit_least_squares(X: array<real>[N, d], y: array<real>[N])
                 A[i, j] = A[i, j] + X[n, i] * X[n, j]
         for n in 0 .. N:
             c[i] = c[i] + X[n, i] * y[n]
-    return solve(A, c, true)            # elimination with partial pivoting, chapter 4
+    return solve(A, c, true)            # partial pivoting, chapter 4; vanishing-pivot test as in the text
 ```
 
 Forming $\mathbf{A}$ costs $N d^2$ multiply-adds and solving costs about $d^3/3$.
@@ -492,10 +495,15 @@ Both numbers are tabulated at the end of the next section, where they matter.
 The `solve` of chapter 4 refuses a matrix only when a pivot is exactly zero, the
 right test in exact arithmetic. In floating point a singular
 $\mathbf{X}^\top\mathbf{X}$ leaves a pivot of rounding noise instead of a zero, so
-wherever this chapter's tables need to detect a vanishing pivot they use the same
-elimination with this test in place of the exact one: the pivot counts as zero when
+wherever this chapter's tables need to detect a vanishing pivot they call
+`solve(A, c, true)` with this test in place of the exact one. The third argument
+`true` is the pivoting rule defined on the pseudocode page (partial pivoting): in
+each column the pivot is the entry of largest absolute value at or below the
+diagonal of the partly eliminated matrix, brought to the diagonal by a row swap.
+The test is applied to each pivot after its swap: the pivot counts as zero when
 its absolute value is below $10^{-12}$ times the larger of $1$ and the
-largest absolute entry of its column in the matrix being eliminated.
+largest absolute entry of the matrix $\mathbf{A}$ as it was passed to the solver,
+and elimination stops at the first pivot that counts as zero.
 
 ### The same answer as a picture: projection
 
@@ -510,9 +518,9 @@ sheet nearest to $\mathbf{y}$.
 
 Chapter 3 found the nearest point on a line: the residual, what is left of
 $\mathbf{y}$, is at a right angle to the line. The same must hold for a sheet:
-the residual $\mathbf{r} = \mathbf{y} - \mathbf{X}\mathbf{w}$ is at a right angle
+the residual vector $\mathbf{r} = \mathbf{X}\mathbf{w} - \mathbf{y}$ (the entries $r_n$ above, prediction minus label; its negative is chapter 3's) is at a right angle
 to every column of $\mathbf{X}$, that is, $\mathbf{X}^\top\mathbf{r} = \mathbf{0}$. Written out,
-$\mathbf{X}^\top(\mathbf{y} - \mathbf{X}\mathbf{w}) = \mathbf{0}$, which is the
+$\mathbf{X}^\top(\mathbf{X}\mathbf{w} - \mathbf{y}) = \mathbf{0}$, which is the
 normal equations rearranged. "Normal" is the old word for "at a right angle", and
 the equations say that the residual is normal to the column space. So the fitted
 vector $\hat{\mathbf{y}} = \mathbf{X}\mathbf{w}$ is the projection of $\mathbf{y}$
@@ -523,17 +531,17 @@ vectors in ten dimensions that nobody can draw), compute the residual vector and
 products:
 
 <!-- worked: linear_regression.projection_check -->
-The fitted vector y_hat = X w and the residual r = y - X w, as vectors in 10 dimensions. The two dot products with the columns of X and the last one are zero up to rounding noise (agreement: size below 1e-9); the other rows are shown to 4 decimals.
+The fitted vector y_hat = X w and the residual r = X w - y (prediction minus label), as vectors in 10 dimensions. The two dot products with the columns of X and the last one are zero up to rounding noise (agreement: size below 1e-9, whatever digits it prints); the other rows are shown to 4 decimals.
 
 | quantity | value |
 |---|---:|
-| sum of residuals  (ones column . r) | +6.2e-14 |
-| sum of v * residual  (voltage column . r) | +6.2e-14 |
+| sum of residuals  (ones column . r) | -6.2e-14 |
+| sum of v * residual  (voltage column . r) | -6.2e-14 |
 | y . y | 31314.4400 |
 | y_hat . y_hat | 31182.9587 |
 | r . r | 131.4813 |
 | y_hat . y_hat + r . r | 31314.4400 |
-| y_hat . r | +2.2e-12 |
+| y_hat . r | -2.2e-12 |
 <!-- /worked -->
 
 The residual is orthogonal to the column of ones (its entries sum to zero) and to
@@ -563,7 +571,7 @@ answer. But the answer is not trustworthy.
 <!-- worked: linear_regression.collinear_features -->
 Case A: the third column is the voltage in millivolts, exactly 1000 v.
 
-The millivolt column is computed as 1000.0 * v in floating point. Elimination with partial pivoting on X^T X declares a pivot vanishing when it is smaller than 1e-12 times the largest entry of its column (or 1e-12, if that entry is below 1); the rank counts eigenvalues above 1e-9 of the largest. Elimination on X^T X: a pivot vanishes, so X^T X has no inverse (rank 2 of 3). Every (w1, w2) with w1 + 1000 w2 = 26.0240 gives the same predictions, for example (26.0240, 0) and (0, 0.0260240).
+The millivolt column is computed as 1000.0 * v in floating point. Elimination with partial pivoting on X^T X (the pivot of each column is the entry of largest size at or below the diagonal of the partly eliminated matrix; threshold 3.4e-05 = 1e-12 times the largest absolute entry of X^T X as formed): the first two pivots are 1.743e+04 and -2.223, and the third is rounding noise, below the threshold, so X^T X has no inverse. The rank is the number of eigenvalues of X^T X larger than 1e-9 times the largest eigenvalue: rank 2 of 3. Every (w1, w2) with w1 + 1000 w2 = 26.0240 gives the same predictions, for example (26.0240, 0) and (0, 0.0260240).
 
 Case B: the third column is a second meter reading the same voltage, differing by a few millivolts. Generator: the book's SplitMix64, seed 0xe44a83d6174254b9 (16450105544460620985). For the ten rows in table order, one `rng.normal()` each, the second meter reads v + 0.003 * rng.normal() rounded to 4 decimals. Labels of the second run: row 5 raised by 0.5.
 
@@ -577,7 +585,7 @@ Case B: the third column is a second meter reading the same voltage, differing b
 | original | 8.05 | 99.0 | -72.9 | 53.62 |
 | row 5 + 0.5 | 8.08 | 109.3 | -83.2 | 53.67 |
 
-Eigenvalues of X^T X in case B: 77.512, 1.000, 2.631 x 10^-5; condition number 2.946 x 10^6. Weights are shown to 1 decimal (2 for b); they are the solution of the normal equations by elimination with partial pivoting, accurate to far more digits than shown.
+Eigenvalues of X^T X in case B: 77.512, 1.000, 2.631 x 10^-5; condition number 2.946 x 10^6. Weights are shown to 1 decimal (2 for b); they are the solution of the normal equations by elimination with partial pivoting and the same threshold, accurate to far more digits than shown; the eigenvalues come from a symmetric eigensolver such as `jacobi_eigen`.
 <!-- /worked -->
 
 In case B, change one label by half a degree (well inside the thermometer's
@@ -707,7 +715,7 @@ loop is the loop that trains a network (Volume III).
 Start where a person would: with the constant guess that the temperature is
 $30$ degrees at every voltage, that is $(w, b) = (0, 30)$. Run the loop on
 the ten rows with three learning rates and print the weights and the loss as it
-goes. First the curvature of the bowl, which the next section turns into a rule.
+goes. (In the vector convention of this chapter the start is $\mathbf{w} = (w_0, w_1) = (30, 0)$; the tables print the pair as (slope, intercept) = $(w, b)$ = $(w_1, w_0)$.) First the curvature of the bowl, which the next section turns into a rule. The eigenvalues of the symmetric matrix $\mathbf{H}$ below, and of the larger matrices of later tables, come from `jacobi_eigen(H, 20)`, the symmetric eigenproblem routine of Volume I, chapter 6 (for a $2 \times 2$ matrix the trace and the determinant give them as well).
 
 <!-- worked: linear_regression.curvature -->
 | quantity | value |
@@ -716,7 +724,7 @@ goes. First the curvature of the bowl, which the next section turns into a rule.
 | eigenvalues | 8.6724 and 0.1787 |
 | condition number | 48.52 |
 | largest stable learning rate 2 / lambda_max | 0.2306 |
-| best learning rate 2 / (lambda_max + lambda_min) | 0.2260 |
+| best learning rate eta* = 2 / (lambda_max + lambda_min) | 0.225959 |
 | loss at the start (w, b) = (0, 30) minus the minimum | 811.9 |
 <!-- /worked -->
 
@@ -792,12 +800,12 @@ $$
 $$
 
 $\mathbf{H}$ is symmetric, so by chapter 6 it has orthogonal eigenvectors
-$\mathbf{v}_i$ with eigenvalues $\lambda_i$ (positive, when $\mathbf{X}^\top\mathbf{X}$
-is invertible). Write the error as $\mathbf{e} = \sum_i a_i\mathbf{v}_i$. Then
-$(\mathbf{I} - \eta\mathbf{H})\mathbf{e} = \sum_i (1 - \eta\lambda_i)a_i\mathbf{v}_i$: each
+$\mathbf{u}_i$ with eigenvalues $\lambda_i$ (positive, when $\mathbf{X}^\top\mathbf{X}$
+is invertible). Write the error as $\mathbf{e} = \sum_i \xi_i\mathbf{u}_i$. Then
+$(\mathbf{I} - \eta\mathbf{H})\mathbf{e} = \sum_i (1 - \eta\lambda_i)\xi_i\mathbf{u}_i$: each
 component of the error is multiplied, independently of the others, by
 $1 - \eta\lambda_i$ at every step. After $k$ steps it is
-$(1 - \eta\lambda_i)^k a_i$.
+$(1 - \eta\lambda_i)^k \xi_i$.
 
 **The stability bound.** For the error to vanish along every direction, every
 factor must have absolute value below $1$: $\lvert 1 - \eta\lambda_i\rvert < 1$,
@@ -814,13 +822,13 @@ $1 - \eta\lambda_{\max}$ is below $-1$, and the component of the error along
 the steepest direction is multiplied by more than $1$ in size and changes sign at
 every step: it alternates and grows, which is the swinging of the $\eta = 0.24$ run.
 
-Everything is in the table for our bowl: $\lambda_{\max} = 8.67$, so the limit is
-$2/8.67 = 0.2306$, and $0.24$ lies above it and $0.2$ below. The factors for the
+Everything is in the table for our bowl: $\lambda_{\max} = 8.6724$, so the limit is
+$2/8.6724 = 0.2306$, and $0.24$ lies above it and $0.2$ below. The factors for the
 two eigen-directions, and the number of steps that the run needs to bring the loss
 to within $0.001$ of its minimum (the header of the table defines the count exactly):
 
 <!-- worked: linear_regression.stability_table -->
-Curvatures lambda_max = 8.6724, lambda_min = 0.1787; 2 / lambda_max = 0.2306. Steps k: the smallest k with loss(w_k) - minimum < 0.001, from (w, b) = (0, 30); a run whose loss exceeds 1e12 above the minimum is reported as diverging, and one that needs more than 200,000 steps as such. Bound: ceil(ln(0.001 / gap_0) / (2 ln(worst factor))) with gap_0 = 811.9 the starting loss minus the minimum.
+Curvatures lambda_max = 8.6724, lambda_min = 0.1787; 2 / lambda_max = 0.2306. Steps k: the smallest k with loss(w_k) - minimum < 0.001, from (w, b) = (0, 30); a run whose loss exceeds 1e12 above the minimum is reported as diverging, and one that needs more than 200,000 steps as such. Bound: ceil(ln(0.001 / gap_0) / (2 ln(worst factor))) with gap_0 = 811.9 the starting loss minus the minimum. The row marked eta* uses the unrounded best rate eta* = 2 / (lambda_max + lambda_min) = 0.225959; every other row uses the rate as printed.
 
 | learning rate | |1 - eta lambda_max| | |1 - eta lambda_min| | worst factor | bound from the worst factor | steps measured |
 |---|---:|---:|---:|---:|---:|
@@ -828,7 +836,7 @@ Curvatures lambda_max = 8.6724, lambda_min = 0.1787; 2 / lambda_max = 0.2306. St
 | 0.0500 | 0.5664 | 0.9911 | 0.9911 | 758 | 635 |
 | 0.1000 | 0.1328 | 0.9821 | 0.9821 | 378 | 316 |
 | 0.2000 | 0.7345 | 0.9643 | 0.9643 | 187 | 157 |
-| 0.2260 | 0.9596 | 0.9596 | 0.9596 | 166 | 166 |
+| 0.225959 (eta*) | 0.9596 | 0.9596 | 0.9596 | 166 | 166 |
 | 0.2300 | 0.9947 | 0.9589 | 0.9947 | 1,271 | 1,260 |
 | 0.2400 | 1.0814 | 0.9571 | 1.0814 | none | diverges |
 <!-- /worked -->
@@ -849,7 +857,9 @@ $$
 $$
 
 where $\kappa = \lambda_{\max}/\lambda_{\min}$ is the condition number of chapter
-8. For the sensor, $\kappa = 48.5$ and the best rate is $0.2260$, with a factor of
+8. For the sensor, $\kappa = 48.5$ and the best rate is $\eta^\star = 0.225959$ (the
+table's row marked $\eta^\star$ uses it unrounded; the rounded $0.2260$ would give the factors
+$0.9600$ and $0.9596$ and one step more), with a factor of
 $0.9596$ per step: even with the best learning rate the error shrinks only by
 $4\%$ per step, because the bowl is $49$ times more curved in one direction than
 in the other. The last column of the table also shows how narrow the useful range
@@ -868,7 +878,7 @@ excess of the loss over its minimum is, since a quadratic equals its second-orde
 expansion,
 
 $$
-\mathcal{L}(\mathbf{w}) - \mathcal{L}(\mathbf{w}^\star) = \tfrac{1}{2}\,\mathbf{e}^\top\mathbf{H}\,\mathbf{e} = \tfrac{1}{2}\sum_i \lambda_i a_i^2 ,
+\mathcal{L}(\mathbf{w}) - \mathcal{L}(\mathbf{w}^\star) = \tfrac{1}{2}\,\mathbf{e}^\top\mathbf{H}\,\mathbf{e} = \tfrac{1}{2}\sum_i \lambda_i \xi_i^2 ,
 $$
 
 so each component of the excess shrinks by $(1 - \eta\lambda_i)^2$ per step.
@@ -957,22 +967,24 @@ of voltages sum to zero and so orthogonal to the column of ones.
 Second, the scales are different: the column of ones has entries $1$ and the
 voltages entries near $2$. Had the workshop logged millivolts, the entries would
 be in the thousands, and the curvature along the slope would be a million times
-the one along the intercept. **Dividing** by the standard deviation puts every
+the one along the intercept. Dividing by the standard deviation puts every
 feature on the same scale.
 
-Together these are the z-score of chapter 12, $z = (v - \bar{v})/s$, applied to
-the features before fitting. With the design matrix $[1, z]$ the matrix
+Together these are the z-score of chapter 12, $z = (v - \bar{v})/s$, with $s$ the
+standard deviation of the voltages (divisor $N - 1$). A feature rewritten this way
+is called **standardised** (or z-scored), and the standardised features are what
+is fitted. With the design matrix $[1, z]$ the matrix
 $\mathbf{X}^\top\mathbf{X}$ is diagonal (its entries are $N$ and $N - 1$), so
 $\mathbf{H} = \mathrm{diag}(2,\ 2(N-1)/N)$ and its two curvatures are almost equal.
 
 <!-- worked: linear_regression.scaling_conditioning -->
-Same ten rows, same model, three ways of writing the voltage (z-score z = (v - mean) / s with mean 1.743 and standard deviation s = 0.656, divisor N - 1 = 9; millivolts are 1000 v). Best learning rate 2 / (lambda_max + lambda_min) and steps k, the smallest k with loss(w_k) - minimum < 0.001, from (w, b) = (0, 30) in the units of the column (for z-scores, the weights of the column of ones and of z are started at 30 and 0); a run is cut off at 200,000 steps. The predicted bound is ceil(ln(0.001 / gap_0) / (2 ln((kappa - 1) / (kappa + 1)))).
+Same ten rows, same model, three ways of writing the voltage (z-score z = (v - mean) / s with mean 1.743 and standard deviation s = 0.656, divisor N - 1 = 9; millivolts are 1000 v). Best learning rate eta* = 2 / (lambda_max + lambda_min), used unrounded (shown to 6 significant digits), and steps k, the smallest k with loss(w_k) - minimum < 0.001, from (w, b) = (0, 30) in the units of the column (for z-scores, the weights of the column of ones and of z are started at 30 and 0); a run is cut off at 200,000 steps. The predicted bound is ceil(ln(0.001 / gap_0) / (2 ln((kappa - 1) / (kappa + 1)))), shown with 3 significant digits when it is 10^6 or more.
 
 | feature | lambda_max | lambda_min | condition number | best eta | steps measured | steps predicted (bound) |
 |---|---:|---:|---:|---:|---:|---:|
-| volts, raw | 8.672 | 0.1787 | 48.518 | 0.2260 | 166 | 166 |
-| millivolts, raw | 6.851 x 10^6 | 0.2263 | 3.028 x 10^7 | 2.919 x 10^-7 | > 200,000 | 103,005,353 |
-| z-scored | 2.000 | 1.800 | 1.111 | 0.5263 | 3 | 3 |
+| volts, raw | 8.672 | 0.1787 | 48.518 | 0.225959 | 166 | 166 |
+| millivolts, raw | 6.851 x 10^6 | 0.2263 | 3.028 x 10^7 | 2.91920 x 10^-7 | > 200,000 | 1.03 x 10^8 |
+| z-scored | 2.000 | 1.800 | 1.111 | 0.526316 | 3 | 3 |
 <!-- /worked -->
 
 Volts, millivolts and z-scores describe the *same ten rows*, and the same line
@@ -1015,7 +1027,7 @@ parabola, found there by a grid search of $241{,}865$ settings, comes out of one
 $3 \times 3$ elimination.
 
 <!-- worked: linear_regression.polynomial_fit -->
-Polynomial features of the voltage (columns 1, v, v^2, ...), fitted by the normal equations on the ten rows. Weights are (w0, w1, ...) from the constant term up; the fresh rows are the 2000 of the previous chapter (rounded as there, scored without refitting). MSE is shown to 3 decimals. cond(X^T X) is the largest eigenvalue over the smallest; the last column builds the columns from the z-score of v (mean and standard deviation of the ten voltages, divisor 9) instead of v.
+Polynomial features of the voltage (columns 1, v, v^2, ...), fitted by the normal equations on the ten rows. Weights are (w0, w1, ...) from the constant term up. The fresh rows are the 2000 rows of the source of the previous chapter, drawn from the book's SplitMix64 with seed 0x0fe67df3a852f39e (1145741640666903454). Each row is made by two draws in this order: v = 0.4 + 2.4 * rng.uniform(), then z = rng.normal(); y = -6 + 50 v - 8 v^2 + 1.2 z computed from the unrounded v; then v is rounded to 2 decimals and y to 1. The fits are not repeated on them: the weights found on the ten rows are scored on the fresh rows. MSE is shown to 3 decimals. cond(X^T X) is the largest eigenvalue over the smallest; the last column builds the columns 1, z, z^2, ... from the z-score z = (v - mean) / s of v (mean and standard deviation s of the ten voltages, divisor 9) instead of from v.
 
 | model | weights | MSE, 10 known rows | MSE, 2000 fresh rows | cond(X^T X), raw v | cond(X^T X), z-scored v |
 |---|---:|---:|---:|---:|---:|
@@ -1037,17 +1049,24 @@ the z-score to $v$ before taking its powers brings them to $1.1$, $8.0$ and $83$
 Feature scaling is not a courtesy: it decides whether the method works.
 
 Fitting a *power law* is another disguise, and the one brain's scaling studies
-use. If the loss of a model falls with its size $N$ as
-$L = E + A N^{-\alpha}$ (a floor $E$ plus a power), then
-$\log(L - E) = \log A - \alpha\log N$: a straight line in the logarithms of both
-quantities, with slope $-\alpha$. For a candidate floor $E$ the problem is a
-line fit. Seven noisy points are generated here from $L = 0.5 + 10N^{-0.3}$ with
-$1\%$ noise (generator, seed and draw order in the header of the table), and a line is fitted for four candidate floors:
+use. If the loss of a model falls with its size $n_{\mathrm{p}}$ (its number of parameters) as
+$\mathcal{L}(n_{\mathrm{p}}) = \mathcal{L}_\infty + \zeta\, n_{\mathrm{p}}^{-\alpha}$ (a floor $\mathcal{L}_\infty$ plus a power
+with scale $\zeta$ and exponent $\alpha$), then
+$\log(\mathcal{L} - \mathcal{L}_\infty) = \log\zeta - \alpha\log n_{\mathrm{p}}$: a straight line in the logarithms of both
+quantities, with slope $-\alpha$. For a candidate floor the problem is a
+line fit. Seven noisy points are generated here from $\mathcal{L} = 0.5 + 10\,n_{\mathrm{p}}^{-0.3}$ with
+$1\%$ noise (generator, seed and draw order in the header of the table), and a line is fitted for four candidate floors.
+To compare the four lines we need one number for how straight the points are in the logarithms. The line leaves a
+residual on each of the seven points (in log space); $\mathrm{SS}_{\mathrm{res}}$ is the sum of their squares. The
+best a model with no slope could do is the mean of the log-losses, and $\mathrm{SS}_{\mathrm{tot}}$ is the sum of the
+squared deviations from it. The ratio
+$R^2 = 1 - \mathrm{SS}_{\mathrm{res}}/\mathrm{SS}_{\mathrm{tot}}$ is $1$ for a line through every point and
+$0$ for a line no better than that mean (the metrics chapter treats it properly):
 
 <!-- worked: linear_regression.power_law_log_fit -->
-Seven (size, loss) points generated from L = 0.5 + 10 N^-0.3 with multiplicative noise of one percent: Generator: the book's SplitMix64, seed 0x1377ca06b334a36f (1402811939074384751). For the sizes in the order listed, one `rng.normal()` each, the loss is (0.5 + 10 N^-0.3) * (1 + 0.01 * rng.normal()).
+Seven (size n_p, loss) points generated from loss = 0.5 + 10 n_p^-0.3 with multiplicative noise of one percent. Generator: the book's SplitMix64, seed 0x1377ca06b334a36f (1402811939074384751). For the sizes in the order listed, one `rng.normal()` each, the loss is (0.5 + 10 n_p^-0.3) * (1 + 0.01 * rng.normal()), shown to 4 decimals.
 
-| N | loss L |
+| n_p | loss |
 |---|---:|
 | 1,000 | 1.7667 |
 | 3,000 | 1.4174 |
@@ -1057,9 +1076,9 @@ Seven (size, loss) points generated from L = 0.5 + 10 N^-0.3 with multiplicative
 | 300,000 | 0.7278 |
 | 1,000,000 | 0.6573 |
 
-For each candidate floor E, an ordinary least-squares line (closed form of the chapter, natural logarithms) of log(L - E) against log N (slope = -alpha, intercept = log A); R^2 = 1 - SS_res / SS_tot of that line, with SS_tot the sum of squares of log(L - E) about its mean:
+For each candidate floor, an ordinary least-squares line (closed form of the chapter, natural logarithms, unrounded losses) of log(loss - floor) against log n_p (slope = -alpha, intercept = log zeta, so the scale is zeta = exp(intercept)); R^2 = 1 - SS_res / SS_tot of that line, with SS_res the sum of the squared differences between the seven values of log(loss - floor) and the line, and SS_tot the sum of squares of log(loss - floor) about its mean:
 
-| candidate E | alpha | A | R^2 of the log-space fit |
+| candidate floor | alpha | scale zeta | R^2 of the log-space fit |
 |---|---:|---:|---:|
 | 0.00 | 0.1431 | 4.423 | 0.97663 |
 | 0.25 | 0.1910 | 5.326 | 0.98824 |
@@ -1067,11 +1086,9 @@ For each candidate floor E, an ordinary least-squares line (closed form of the c
 | 0.60 | 0.4228 | 24.634 | 0.98411 |
 <!-- /worked -->
 
-Only a floor near the truth, $E = 0.5$, gives a straight line in the logarithms:
-the quality measure $R^2 = 1 - \mathrm{SS}_{\mathrm{res}}/\mathrm{SS}_{\mathrm{tot}}$
-(the share of the variance of the log-losses that the line explains; the metrics
-chapter treats it properly) is $0.99978$ there and lower for the others,
-and the fit recovers $\alpha = 0.301$ (truth $0.3$) and $A = 10.2$ (truth $10$). The
+Only a floor near the truth, $\mathcal{L}_\infty = 0.5$, gives a straight line in the logarithms:
+$R^2$ (the share of the variance of the log-losses that the line explains) is $0.99978$ there and lower for the others,
+and the fit recovers $\alpha = 0.301$ (truth $0.3$) and $\zeta = 10.2$ (truth $10$). The
 loss is no longer the loss in degrees: least squares in log space minimises the
 squares of *relative* errors, so every size counts equally rather than the
 largest losses dominating. That is a modelling decision, made by the transformation, and
@@ -1120,15 +1137,16 @@ beside a big model, and the descent step lives at the heart of its optimiser.
 
 **Fitting a scaling law in log space.** `crates/bench/src/scaling.rs` trains the
 same task at several model sizes, measures the final loss at each size and fits
-$L(N) \approx E + A N^{-\alpha}$ to the points. Its `fit_power_law` does what the
+a floor plus a power of the size, the $\mathcal{L}_\infty + \zeta\, n_{\mathrm{p}}^{-\alpha}$ of this chapter (its code calls the floor
+`E`, the scale `A` and the size `N`), to the points. Its `fit_power_law` does what the
 previous section did: it searches 64 candidate floors $E$ between zero and the
 smallest loss observed, and for each runs an ordinary least-squares line in the
 logarithms, `ols`, which computes the closed form of this chapter (slope
-$S_{xy}/S_{xx}$, intercept through the means) and keeps the floor with the best
+the cross sum over the sum of squares, $S_{vy}/S_{vv}$ with generic names, intercept through the means) and keeps the floor with the best
 $R^2$. The reasoning is in its doc comment: with only a handful of points a
 three-parameter fit optimised jointly is unstable, so one parameter is fixed by
 a coarse search and the other two are found exactly. The module's test
-`fits_a_known_power_law` builds $L(N) = 0.5 + 10N^{-0.3}$ from four noiseless
+`fits_a_known_power_law` builds the loss $0.5 + 10\,n_{\mathrm{p}}^{-0.3}$ from four noiseless
 points and checks that $\alpha$ is recovered to within $0.05$. Commit `f6069a024`
 (24 June 2026) introduced the harness. Its default sweep trains three model sizes,
 and that is worth a reader's caution drawn from this chapter's arithmetic: a fit
@@ -1139,7 +1157,7 @@ when it is given more sizes than free numbers.
 
 **The same closed form with an error bar.** `crates/bench/src/metrics.rs`
 holds `ols_slope_ci`, which fits a line by the same two formulas and adds the
-standard error of the slope, $\sqrt{(\mathrm{SSE}/(n-2))/S_{xx}}$, and a $95\%$
+standard error of the slope, $\sqrt{(\mathrm{SS}_{\mathrm{res}}/(n-2))/S_{vv}}$ (in this chapter's names), and a $95\%$
 interval from a small table of $t$ values (chapter 12). It came with commit
 `05446791a` (6 September 2026), the multi-cycle continual-learning harness, and
 `crates/rl/src/continual.rs` calls it on a twelve-point series of a plasticity
@@ -1199,15 +1217,15 @@ Answers are at the end of the chapter.
 
 ## Exercises
 
-1. **[Calculate]** For the line $w = 20$, $b = 15$ (attempt 2 of chapter 1) compute the residuals on rows 1, 5 and 10 of the sensor table, their squares, and compare the average of the three squares with the line's MSE from `linear_regression.rescored_attempts`. Why is an average over three rows not a good guide to the average over ten?
+1. **[Calculate]** For the line $w = 20$, $b = 15$ (attempt 2 of chapter 1) compute the residuals (prediction minus label) on rows 1, 5 and 10 of the sensor table, their squares, and compare the average of the three squares with the line's MSE from `linear_regression.rescored_attempts`. Why is an average over three rows not a good guide to the average over ten?
 2. **[Calculate]** For the four rows $(v, y) = (0, 1), (1, 3), (2, 4), (3, 8)$ compute $\bar{v}$, $\bar{y}$, $S_{vv}$, $S_{vy}$, the least-squares slope and intercept, and the MSE. Then build $\mathbf{X}^\top\mathbf{X}$ and $\mathbf{X}^\top\mathbf{y}$ and solve by elimination to confirm.
 3. **[Calculate]** Derive the least-squares estimate for a model with no intercept, $\hat{y} = w v$, from $\partial\,\mathrm{MSE}/\partial w = 0$. Apply it to the four rows of exercise 2 and compare the MSE with the model with an intercept. Which is smaller, and must it be?
 4. **[Calculate]** For $\mathbf{X}$ with columns $(1, 1, 1)$ and $(1, 2, 3)$ and $\mathbf{y} = (2, 2, 5)$, compute $\mathbf{X}^\top\mathbf{X}$, its eigenvalues $\lambda_i$ of $\mathbf{H} = \frac{2}{3}\mathbf{X}^\top\mathbf{X}$, the stability limit and the best learning rate. Start from $\mathbf{w} = (0, 0)$ and do two steps of gradient descent with that best rate by hand.
-5. **[Calculate]** Show that for z-scored features with an intercept, $\mathbf{X}^\top\mathbf{X}$ is diagonal and find its entries for $N$ rows when the feature is standardised with divisor $N - 1$. What is the condition number as a function of $N$?
-6. **[Implement]** Implement `fit_least_squares` (normal equations with your own elimination) and reproduce `linear_regression.closed_form_line` and `linear_regression.design_matrix_system` from the ten rows of `learning_problem.sensor_table`. Then break it on purpose with the millivolt column of `linear_regression.collinear_features`, case A, and make your solver report the vanishing pivot.
+5. **[Calculate]** Show that for a standardised feature (its z-score with divisor $N - 1$) and an intercept, $\mathbf{X}^\top\mathbf{X}$ is diagonal and find its entries for $N$ rows. What is the condition number as a function of $N$?
+6. **[Implement]** Implement `fit_least_squares` (normal equations with your own elimination) and reproduce `linear_regression.closed_form_line` and `linear_regression.design_matrix_system` from the ten rows of `learning_problem.sensor_table`. Use `solve(A, c, true)` with the vanishing-pivot test of the section on the normal equations. Then break it on purpose with the millivolt column of `linear_regression.collinear_features`, case A, and make your solver report the vanishing pivot.
 7. **[Implement]** Implement `gradient_descent` with a finite-difference check of its gradient, and reproduce `linear_regression.gradient_check` and the rows $k = 0, 1, 2, 5, 10$ of `linear_regression.gd_three_rates` from the start $(w, b) = (0, 30)$.
-8. **[Implement]** Compute the eigenvalues of $\mathbf{H} = \frac{2}{N}\mathbf{X}^\top\mathbf{X}$ (power iteration of chapter 6 for the largest, and the trace and determinant for the $2\times 2$ case), then reproduce the two columns of `linear_regression.stability_table` that come from them and its "steps measured" column.
-9. **[Implement]** Reproduce `linear_regression.scaling_conditioning` for volts and z-scores, and `linear_regression.scaled_fit_matches`: fit in z-score units, map the weights back and verify that the prediction at $1.75$ V is unchanged.
+8. **[Implement]** Compute the eigenvalues of $\mathbf{H} = \frac{2}{N}\mathbf{X}^\top\mathbf{X}$ with `jacobi_eigen(H, 20)` (Volume I, chapter 6, "The algorithms"; for the $2\times 2$ case the trace and determinant give them as well), then reproduce the two factor columns of `linear_regression.stability_table` that come from them and its "steps measured" column, using the unrounded $\eta^\star$ in its marked row. The same routine, applied to $\mathbf{X}^\top\mathbf{X}$ ($3 \times 3$ in case B of `linear_regression.collinear_features`, up to $4 \times 4$ for the cubic of `linear_regression.polynomial_fit`), gives their eigenvalue and condition-number columns.
+9. **[Implement]** Reproduce `linear_regression.scaling_conditioning` for volts and z-scores (best rate used unrounded), and `linear_regression.scaled_fit_matches`: fit in z-score units, map the weights back and verify that the prediction at $1.75$ V is unchanged.
 10. **[Investigate]** Fit the parabola of `linear_regression.polynomial_fit` by gradient descent on the raw $(1, v, v^2)$ columns with the largest stable learning rate. How many steps does it need to reach the closed-form loss to within $0.001$, and how many with z-scored $v$? Report both condition numbers.
 11. **[Investigate]** Replace the squared loss by the absolute loss in gradient descent on the sensor line (the slope of $\lvert r\rvert$ is $\mathrm{sign}(r)$). Run it with a fixed learning rate and with one that is divided by $k$ at step $k$. What happens near the minimum, and how does it relate to the smoothness argument for the squared loss?
 12. **[Investigate]** Create $N = 20$ rows from a line with noise of your own, and fit with the two-meter design of `linear_regression.collinear_features`, case B, using several values of the disagreement between the meters (0.1, 0.01, 0.001). Plot the weights against the disagreement and the condition number against the disagreement, and say how they scale.

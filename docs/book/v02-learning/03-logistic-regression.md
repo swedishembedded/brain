@@ -11,11 +11,11 @@ A workshop turns out machine parts and inspects every one. An inspector measures
 
 The previous chapter predicted a number on a scale: a temperature. Here the answer is one of two outcomes. A model that answers with one of a fixed set of categories, rather than a number on a scale, is a **classifier**, and the task of building one from labelled examples is **classification**. The label $y$ of a part is $1$ if it was rejected and $0$ if it passed. When there are exactly two classes, as here, the label takes the values $0$ and $1$ and the task is *binary* classification; the word is used for any number of classes, and the last section points at what changes for many.
 
-Twelve parts were measured and inspected. The values below are produced as the book's randomness chapter specifies (the generator and the order of its draws are printed with the table).
+Twelve parts were measured and inspected. The values below are produced as the book's randomness chapter specifies (the generator and the order of its draws are printed with the table). The draw order mentions the function `sigmoid`, $\sigma(z) = 1/(1 + e^{-z})$, which turns any number $z$ into a number between $0$ and $1$; here it is the chance that a part with this measurement is rejected. The chapter derives it in "The sigmoid: undoing the logit"; until then it is only a smooth S-shaped curve from $0$ to $1$. The part numbers are positions after sorting by $x$, not positions in the draw.
 
 <!-- worked: logistic_regression.one_feature_table -->
 Generator: the book's SplitMix64, seed 0x7b350638aa531ef5 (8878009080876310261).
-Draw order, part by part (N = 12): x = round(5 u1, 1) with u1 = uniform(), then u2 = uniform(); y = 1 (rejected) when u2 < sigmoid(-5.5 + 2.2 x). Rows are shown sorted by x.
+Draw order, part by part (N = 12): x = round(5 u1, 1) with u1 = uniform(), then u2 = uniform(); y = 1 (rejected) when u2 < sigmoid(-5.5 + 2.2 x). Rows are shown sorted by x and numbered in that order.
 
 | part | x (0.01 mm) | y |
 |---|---:|---:|
@@ -33,7 +33,7 @@ Draw order, part by part (N = 12): x = round(5 u1, 1) with u1 = uniform(), then 
 | 12 | 4.0 | 1 |
 <!-- /worked -->
 
-(The generating law that appears in the draw order is nature's, written down here only so that the table can be reproduced; the learner never sees it.) The pattern is plain but not clean: large errors are mostly rejected and small ones mostly passed, yet one part at $x = 1.2$ was rejected and one at $x = 2.7$ passed. No threshold on $x$ gets all twelve right. A model has to say that the chance of rejection rises with $x$ and that it is neither $0$ nor $1$ in the middle.
+(The generating law that appears in the draw order is nature's, written down here only so that the table can be reproduced; the learner never sees it.) The pattern is plain but not clean: large errors are mostly rejected and small ones mostly passed, yet one part at $x = 1.2$ was rejected and one at $x = 2.7$ passed. No single cut-off value of $x$, with every part above it called rejected and every part below it called passed, gets all twelve right. A model has to say that the chance of rejection rises with $x$ and that it is neither $0$ nor $1$ in the middle.
 
 This chapter builds that model in four steps, each answering a question the previous step raises.
 
@@ -42,13 +42,13 @@ This chapter builds that model in four steps, each answering a question the prev
 3. **What should we minimise?** A score for a probability against an observed yes or no. It is the cross-entropy of Volume I applied to a coin with two sides, and we show why the squared error of chapter 2 is the wrong choice here.
 4. **How do we get the weights?** Gradient descent again, with a gradient so simple that it is worth deriving twice, a check that the problem has one valley, and the numerical care that a loss made of logarithms of probabilities demands.
 
-You may use from earlier chapters: gradient descent, the learning rate and the design matrix with a column of ones (chapter 2 of this volume); the dot product (Volume I, chapter 3); the logarithm (chapter 1); the derivative of the sigmoid (chapter 7); convexity and the Hessian (chapters 7 and 8); the Bernoulli distribution (chapter 11); cross-entropy (chapter 13); and log-sum-exp and floating-point overflow (chapter 15).
+You may use from earlier chapters: gradient descent, the learning rate and the design matrix with a column of ones (chapter 2 of this volume); the dot product (Volume I, chapter 3); the logarithm (chapter 1); the derivative of the sigmoid (chapter 7); the gradient, convexity and the Hessian (chapters 7 and 8); the Bernoulli distribution (chapter 11); cross-entropy (chapter 13); and log-sum-exp and floating-point overflow (chapter 15).
 
 ## Before you begin
 
 Six questions to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
 
-1. (Chapter 2 of this volume, "Linear Regression and the First Descent", gradient descent.) For $L(w) = (w - 1)^2$, write one step of gradient descent from $w = 2$ with learning rate $\eta = 0.25$. What is the new $w$ and what is the loss before and after?
+1. (Chapter 2 of this volume, "Linear Regression and the First Descent", gradient descent.) For $\mathcal{L}(w) = (w - 1)^2$, write one step of gradient descent from $w = 2$ with learning rate $\eta = 0.25$. What is the new $w$ and what is the loss before and after?
 2. (Volume I, chapter 11, "The Distributions Machine Learning Uses", the Bernoulli distribution.) A Bernoulli variable takes the value $1$ with probability $q = 0.3$. What is the probability of the value $0$, and what is the mean? Write the probability of an observed value $y \in \{0, 1\}$ as one formula in $q$ and $y$.
 3. (Volume I, chapter 13, "Information, Entropy and Surprise", cross-entropy.) For a target distribution $p = (1, 0)$ and a model $q = (0.8, 0.2)$, compute $H(p, q) = -\sum_k p_k \log q_k$ in nats. What is its value when $q = (1, 0)$, and what happens when $q = (0, 1)$?
 4. (Volume I, chapter 1, "Numbers, Quantities and Notation", the logarithm.) Use $\log(ab) = \log a + \log b$ and $\log(1/a) = -\log a$ to show that $\log 0.25 = -\log 4$. What is $\log$ of a number between $0$ and $1$: positive, zero or negative?
@@ -57,7 +57,7 @@ Six questions to answer from memory. The answers are at the end of the chapter. 
 
 ## A first attempt: a line through the labels
 
-The tool we already own is linear regression, and the labels are numbers, $0$ and $1$. The least-squares line through the twelve points $(x, y)$ is a legitimate thing to compute: it is the closed form of chapter 2, slope $S_{xy}/S_{xx}$ and a line through the means. To turn its value into a decision we pick the value $0.5$, halfway between the labels, and call a part rejected when the line is at or above it. Then we ask what happens when one part, a grossly oversize one at $x = 15$ (a clear reject, $y = 1$), is added to the data.
+The tool we already own is linear regression, and the labels are numbers, $0$ and $1$. The least-squares line through the twelve points $(x, y)$ is a legitimate thing to compute: it is the closed form of chapter 2, slope $S_{xy}/S_{xx}$ and a line through the means. To turn its value into a **decision** (a yes-or-no call: reject or pass) we compare it with the value $0.5$, halfway between the labels, and call a part rejected when the line is at or above it. A comparison value of this kind is called a *threshold*. A part is *misclassified* when the decision differs from its label, and the last column of the table counts them. Then we ask what happens when one part, a grossly oversize one at $x = 15$ (a clear reject, $y = 1$), is added to the data.
 
 <!-- worked: logistic_regression.linear_fit_on_labels -->
 | fit | intercept | slope | prediction at x = 0 | prediction at x = 5 | x where line = 0.5 | rows misclassified |
@@ -74,16 +74,19 @@ Two things are wrong, and both are visible in the table.
 
 **A point that is clearly on the right side drags the decision to the wrong place.** The part at $x = 15$ is a reject and the model should be more sure of it, not less. But squared error asks the line to be close to $1$ out at $x = 15$ as well, and the only way a line can do that is to flatten. The slope falls from $0.3303$ to $0.0583$, the point where the line crosses $0.5$ moves from $2.192$ to $2.518$, and two rejected parts that were called correctly, those at $2.4$ and $2.5$, are now called passes: four mistakes of thirteen instead of two of twelve. Evidence that the model should be confident about changes its mind about parts nowhere near it.
 
-The green curve in the figure is what we are about to build. Its value never leaves $(0, 1)$, it rises steeply where the labels change and levels off where they do not, so a far point agrees with it and cannot move it. The table that follows shows both facts for the curve's own fit.
+The green curve in the figure is what we are about to build. Its value never leaves $(0, 1)$, it rises steeply where the labels change and levels off where they do not, so a far point agrees with it and cannot move it. The table that follows shows both facts for the curve's own fit: the weights $w_0, w_1$ of $\sigma(w_0 + w_1 x)$ that minimise the mean binary cross-entropy defined in the sections below. The first line of the table says how they were computed; the decision rule is the same as before, reject when the curve is at or above $0.5$.
 
 <!-- worked: logistic_regression.logistic_fit_one_feature -->
+Weights that minimise the mean binary cross-entropy of the next sections, found by Newton's method from w = (0, 0): 30 updates w <- w - solve(H, g, true), with the gradient g and Hessian H of the sections "The gradient" and "Convexity: one valley" (the gradient norm is then below 1e-12). The last row needs a solution that accurate; the others are printed to four decimals.
+
 | fit | w0 | w1 | x where p = 0.5 | rows misclassified |
 |---|---:|---:|---:|---:|
-| twelve parts | -3.9634 | 1.8679 | 2.122 | 2 of 12 |
-| plus one part at x = 15.0 | -3.9633 | 1.8678 | 2.122 | 2 of 13 |
+| twelve parts | -3.9640 | 1.8682 | 2.122 | 2 of 12 |
+| plus one part at x = 15.0 | -3.9640 | 1.8682 | 2.122 | 2 of 13 |
+| absolute change of the weights | 9.6 x 10^-10 | 4.8 x 10^-10 |  |  |
 <!-- /worked -->
 
-The weights change in the fourth decimal and the decision point does not move. By the end of the chapter we will be able to say why.
+The two fits agree in all four printed decimals and the decision point does not move. The last row prints how far apart they really are: the far part changes each weight by less than $10^{-9}$. (A fit that stopped early would show a larger difference, but that would be an artifact of stopping, not a property of the model.) By the end of the chapter we will be able to say why the change is so small (Check your understanding, question 2).
 
 ## From probability to a linear score
 
@@ -216,7 +219,7 @@ is the loss we minimise. Numbers: for $y = 1$ and $\hat{p} = 0.9$ it is $-\log 0
 
 ### The same loss, written in the logit
 
-Everything above is in terms of $\hat{p}$, but $\hat{p}$ is computed from $z$, and for both clarity and numerical safety it helps to write the loss as a function of $z$ directly. Use $\log\sigma(z) = -\log(1 + e^{-z})$ and $\log(1 - \sigma(z)) = \log\sigma(-z) = -\log(1 + e^{z})$. Introduce the function
+Everything above is in terms of $\hat{p}$, but $\hat{p}$ is computed from $z$, and for both clarity and numerical safety it helps to write the loss as a function of $z$ directly. Use $\log\sigma(z) = -\log(1 + e^{-z})$ and $\log(1 - \sigma(z)) = \log\sigma(-z) = -\log(1 + e^{z})$. Introduce the function **softplus**,
 
 $$
 \mathrm{softplus}(z) = \log(1 + e^{z}),
@@ -238,7 +241,7 @@ for both values of $y$ (check: $y = 0$ gives $\mathrm{softplus}(z)$, $y = 1$ giv
 
 ### Why not the squared error?
 
-Chapter 2 minimised the squared difference between prediction and label, and $(\hat{p} - y)^2$ is a perfectly good way to score a probability against a $0$ or $1$ (the statisticians call it the Brier score). Why leave it behind? Take one part with label $y = 1$ and compare the two losses and their slopes with respect to the logit $z$.
+Chapter 2 minimised the squared difference between prediction and label, and $(\hat{p} - y)^2$ is a perfectly good way to score a probability against a $0$ or $1$ (the statisticians call it the Brier score). Why leave it behind? Take one part with label $y = 1$ and compare the two losses and their slopes with respect to the logit $z$. The table abbreviates the binary cross-entropy of the next section as BCE, $-\log\hat{p}$ for $y = 1$, and the squared error as SE, $(\hat{p} - 1)^2$. By the chain rule (derived in "The gradient" below) the slope of BCE is $\hat{p} - 1$ and the slope of SE is $2(\hat{p} - 1)\,\hat{p}(1 - \hat{p})$.
 
 <!-- worked: logistic_regression.single_example_losses -->
 | z | p | BCE | squared error | dBCE/dz | dSE/dz |
@@ -270,9 +273,11 @@ There is a second, deeper reason. Chapter 2 showed that the squared error of a *
 | 4 | 0.00032 | +0.00124 | 0.01815 | +0.01766 |
 <!-- /worked -->
 
-The squared error has negative curvature for $w \le -1$ and positive curvature from $w = 0$ on: it is a ramp that turns over into a bowl, not a bowl. The cross-entropy's curvature is positive in every row, and it equals $\sigma(w)(1 - \sigma(w))$ (compare the third column of the sigmoid table), so it is never negative; we prove that in general below. The practical consequence is shown by running gradient descent on each from the same bad start, $w = -6$, with $\eta = 1$:
+The squared error has negative curvature for $w \le -1$ and positive curvature from $w = 0$ on: it is a ramp that turns over into a bowl, not a bowl. The cross-entropy's curvature is positive in every row, and it equals $\sigma(w)(1 - \sigma(w))$ (compare the column $s(1 - s)$ of the sigmoid table), so it is never negative; we prove that in general below. The practical consequence is shown by running gradient descent on each from the same bad start, $w = -6$, with $\eta = 1$ (the part, the step rule and the recorded steps are printed with the table):
 
 <!-- worked: logistic_regression.descent_squared_vs_bce -->
+One part with x = 1 and y = 1, no intercept, so z = w. Start w = -6, eta = 1. Each step is w <- w - eta g with g = 2 (p - 1) p (1 - p) for the squared error (p - y)^2 and g = p - 1 for the BCE; row k shows w after k steps.
+
 | step k | w (squared error) | its loss | w (BCE) | its loss |
 |---|---:|---:|---:|---:|
 | 0 | -6.0000 | 0.99506 | -6.0000 | 6.00248 |
@@ -284,7 +289,7 @@ The squared error has negative curvature for $w \le -1$ and positive curvature f
 | 2000 | 4.4010 | 0.00015 | 7.5960 | 0.00050 |
 <!-- /worked -->
 
-After ten steps the cross-entropy run has crossed zero and is at loss $0.25$; the squared-error run has moved from $-6.0000$ to $-5.9497$ and has a loss of $0.99481$, hardly different from where it began. It does reach the solution eventually (by step $500$ it is at $w = 3.43$), because the bad plateau is crossed slowly, but "eventually" took fifty times as many steps. On a real model with thousands of weights the plateau is not always crossed.
+After ten steps the cross-entropy run has crossed zero and is at loss $0.25$; the squared-error run has moved from $-6.0000$ to $-5.9497$ and has a loss of $0.99481$, hardly different from where it began. It does reach the solution eventually (by step $500$ it is at $w = 3.43$), because the bad plateau is crossed slowly, but at step $100$ its loss is still $0.99037$ against $0.01084$ for the cross-entropy run. On a real model with thousands of weights the plateau is not always crossed.
 
 ## The gradient
 
@@ -379,16 +384,18 @@ $$
 
 a sum of non-negative terms: the Hessian is positive semidefinite everywhere, which is the second-derivative test for convexity in many variables. Every point with zero gradient is a global minimum. If the columns of $\mathbf{X}$ are independent, every $\hat{p}_n(1 - \hat{p}_n)$ is strictly positive and the only $\mathbf{v}$ with $\mathbf{v}^\top\mathbf{H}\mathbf{v} = 0$ is $\mathbf{0}$: the loss is strictly convex and has at most one minimiser. (At most: whether it has one at all is the subject of a later section.)
 
-The matrix $\mathbf{S}$ has entries at most $1/4$, since $\hat{p}(1 - \hat{p})\le 1/4$. Hence $\mathbf{v}^\top\mathbf{H}\mathbf{v} \le \frac{1}{4N}\mathbf{v}^\top\mathbf{X}^\top\mathbf{X}\mathbf{v}$ and the largest eigenvalue of $\mathbf{H}$ never exceeds
+The matrix $\mathbf{S}$ has entries at most $1/4$, since $\hat{p}(1 - \hat{p})\le 1/4$. Hence $\mathbf{v}^\top\mathbf{H}\mathbf{v} \le \frac{1}{4N}\mathbf{v}^\top\mathbf{X}^\top\mathbf{X}\mathbf{v}$ and the largest eigenvalue of $\mathbf{H}$ never exceeds the **curvature cap**
 
 $$
-L = \tfrac{1}{4}\,\lambda_{\max}\!\big(\tfrac{1}{N}\mathbf{X}^\top\mathbf{X}\big).
+\lambda_{\mathrm{cap}} = \tfrac{1}{4}\,\lambda_{\max}\!\big(\tfrac{1}{N}\mathbf{X}^\top\mathbf{X}\big)
 $$
 
-By chapter 2, gradient descent on a quadratic with largest curvature $\lambda_{\max}$ is stable for $\eta < 2/\lambda_{\max}$; the loss here is not quadratic, but its curvature is bounded by $L$ everywhere, and a step of $\eta = 1/L$ is a safe choice. The table evaluates the Hessian's eigenvalues at four values of $\mathbf{w}$ on the sixty parts, computed with the symmetric eigenvalue routine of chapter 6.
+(the subscript is a label; the letter $L$ is not used for it because the notation page lists $L$ for a loss).
+
+By chapter 2, gradient descent on a quadratic with largest curvature $\lambda_{\max}$ is stable for $\eta < 2/\lambda_{\max}$; the loss here is not quadratic, but its curvature is bounded by $\lambda_{\mathrm{cap}}$ everywhere, and a step of $\eta = 1/\lambda_{\mathrm{cap}}$ is a safe choice. The table evaluates the Hessian's eigenvalues at four values of $\mathbf{w}$ on the sixty parts, computed with `jacobi_eigen(H, 20)`, the symmetric eigenvalue routine of Volume I, chapter 6 (also used for $\lambda_{\max}$ in the cap). The row "fitted w" uses the weights at the stop of the run in the next section, printed in the table's first line to four decimals.
 
 <!-- worked: logistic_regression.hessian_psd -->
-Hessian of the mean loss, H = (1/N) X^T S X with S = diag(p (1 - p)), on the sixty parts. Bound L = 3.916414.
+Hessian of the mean loss, H = (1/N) X^T S X with S = diag(p (1 - p)), on the sixty parts; eigenvalues by jacobi_eigen(H, 20). Bound lambda_cap = 3.916414; fitted w = (-9.6185, 1.7694, 1.7584), the weights at the stop of the run in "Training by gradient descent".
 
 | where | smallest eigenvalue | middle | largest |
 |---|---:|---:|---:|
@@ -398,7 +405,7 @@ Hessian of the mean loss, H = (1/N) X^T S X with S = diag(p (1 - p)), on the six
 | w = (-30, 6, 6) | 7.81 x 10^-5 | 0.0564 | 0.3423 |
 <!-- /worked -->
 
-Every eigenvalue is positive. At $\mathbf{w} = \mathbf{0}$ every $\hat{p} = 1/2$, $\mathbf{S} = \frac{1}{4}\mathbf{I}$ and the largest eigenvalue is exactly the bound $L$; elsewhere it is smaller. Notice the last row. As the weights grow, the probabilities approach $0$ and $1$, the products $\hat{p}(1 - \hat{p})$ shrink and *all* the curvature drains away. We return to this.
+Every eigenvalue is positive. At $\mathbf{w} = \mathbf{0}$ every $\hat{p} = 1/2$, $\mathbf{S} = \frac{1}{4}\mathbf{I}$ and the largest eigenvalue is exactly the cap $\lambda_{\mathrm{cap}}$; elsewhere it is smaller. Notice the last row. As the weights grow, the probabilities approach $0$ and $1$, the products $\hat{p}(1 - \hat{p})$ shrink and *all* the curvature drains away. We return to this.
 
 ## Training by gradient descent
 
@@ -435,10 +442,10 @@ function train_logistic(X: array<real>[N, D], y: array<real>[N], eta: real, tau:
 
 The shapes are $\mathbf{X}: [N, D]$ with $D = d + 1$ (the column of ones included), $\mathbf{y}: [N]$, the residual vector $[N]$, the gradient and the weights $[D]$. The check on the gradient is made *before* the update, so the value returned for $k$ is the number of updates performed: `train_logistic` called with `max_steps` $= 0$ returns $\mathbf{0}$ and $0$. The cost of a step is two passes over the matrix, $O(N D)$, and the memory is $O(N + D)$ beyond the data.
 
-We run it on the sixty parts with the learning rate $\eta = 1/L$ from the previous section (so $\eta = 0.255336$ for $L = 3.916414$) and the stopping rule "gradient norm below $10^{-5}$", starting from $\mathbf{w} = \mathbf{0}$ (so that every $\hat{p}$ starts at $1/2$ and the initial loss is $\log 2$).
+We run it on the sixty parts with the learning rate $\eta = 1/\lambda_{\mathrm{cap}}$ from the previous section (so $\eta = 0.255336$ for $\lambda_{\mathrm{cap}} = 3.916414$) and the stopping rule "gradient norm below $10^{-5}$", starting from $\mathbf{w} = \mathbf{0}$ (so that every $\hat{p}$ starts at $1/2$ and the initial loss is $\log 2$).
 
 <!-- worked: logistic_regression.training_run -->
-Start w = (0, 0, 0). L = lambda_max(X^T X / N) / 4 = 3.916414, learning rate eta = 1/L = 0.255336, stop when the gradient norm is below 1e-05.
+Start w = (0, 0, 0). lambda_cap = lambda_max(X^T X / N) / 4 = 3.916414, learning rate eta = 1/lambda_cap = 0.255336, stop when the gradient norm is below 1e-05.
 
 | step k | w0 | w1 | w2 | loss | gradient norm |
 |---|---:|---:|---:|---:|---:|
@@ -490,9 +497,9 @@ Fitted w = (-9.6185, 1.7694, 1.7584). The boundary w0 + w1 x1 + w2 x2 = 0 is the
 | (0.5, 4.5) | -0.8212 | 0.3055 | pass |
 <!-- /worked -->
 
-![The sixty parts in the plane of diameter error and roughness: green dots (passed) lie mostly below a purple diagonal line, red dots (rejected) mostly above it. Four dashed grey lines parallel to it mark the probabilities 0.1 and 0.25 below it and 0.75 and 0.9 above it.](img/logistic-boundary.svg)
+![The sixty parts in the plane of diameter error and roughness: green dots (passed) lie mostly below a solid purple diagonal line, red dots (rejected) mostly above it. Four dashed grey lines parallel to it mark the probabilities 0.1 and 0.25 below it and 0.75 and 0.9 above it.](img/logistic-boundary.svg)
 
-The five dashed lines are the sets where the model's probability is $0.1, 0.25, 0.75, 0.9$ (together with the boundary at $0.5$): the set where $\hat{p} = p_0$ is where $z = \mathrm{logit}(p_0)$, which is again a line, with the same direction as the boundary. The probability changes only in one direction, across the lines, and not along them; the model has no other structure. The distance between neighbouring lines is a fixed amount of $z$ divided by $\lVert(w_1, w_2)\rVert$: it is the same for all parts, so confidence changes quickly where the weights are large. The picture also shows the points that a straight boundary cannot satisfy: green dots on the reject side near $(3.4, 3.3)$, $(4.4, 1.1)$ and $(2.4, 3.4)$, and red dots on the pass side near $(2.7, 0.8)$ and $(2.1, 2.6)$. They are the five mistakes at the threshold $1/2$ counted in the next table.
+The four dashed lines are the sets where the model's probability is $0.1, 0.25, 0.75, 0.9$ (the solid line is the boundary at $0.5$): the set where $\hat{p} = p_0$ is where $z = \mathrm{logit}(p_0)$, which is again a line, with the same direction as the boundary. The probability changes only in one direction, across the lines, and not along them; the model has no other structure. The distance between neighbouring lines is a fixed amount of $z$ divided by $\lVert(w_1, w_2)\rVert$: it is the same for all parts, so confidence changes quickly where the weights are large. The picture also shows the points that a straight boundary cannot satisfy: green dots on the reject side near $(3.4, 3.3)$, $(4.4, 1.1)$ and $(2.4, 3.4)$, and red dots on the pass side near $(2.7, 0.8)$ and $(2.1, 2.6)$. They are the five mistakes at the threshold $1/2$ counted in the next table.
 
 The threshold now has real content. Moving it moves the line parallel to itself, as predicted, and changes which mistakes the workshop makes:
 
@@ -539,7 +546,7 @@ Loss of a part with label y = 0 whose logit is z (the true value is softplus(z))
 | 100 | 1.000000000 | 0 | inf | 100.00000 |
 <!-- /worked -->
 
-(Each 32-bit entry is the exact result of one operation rounded to the nearest 32-bit number. The "naive" columns compute $\log(\sigma(z))$ and $-\log(1 - \sigma(z))$ with $\sigma(z) = 1/(1 + e^{-z})$ in that order; the "stable" columns use the formulas below.)
+(Every 32-bit entry is computed one operation at a time: the exact result of the operation on its already-rounded inputs is rounded to the nearest 32-bit number, ties to even, with overflow giving $\infty$ and no flush of tiny values to zero. The operations that round are each `+`, `-`, `/`, `exp`, `log` and `log1p`; negation, `abs`, `min`, `max` and comparisons are exact. The "naive" column of the first table is `log(1 / (1 + exp(-z)))`, three rounded operations (`exp`, `+`, `/`) and then the `log`, with the quotient taken as $0$ when the denominator is $\infty$; the "naive" column of the second is `-log(1 - p)` with `p` as just computed, and $\log 0 = -\infty$. The "stable" columns are `min(z, 0) - log1p(exp(-abs(z)))` (first table, which is $-\mathrm{softplus}(-z)$) and `max(z, 0) + log1p(exp(-abs(z)))` (second table), again one rounding per operation. The "exact" column is $-\log(1 + e^{-z})$ in 60-digit decimal arithmetic.)
 
 The first table's naive column is $-\infty$ where the answer is a perfectly ordinary $-100$, and $0$ where the answer is about $-10^{-9}$. The second table shows the worse mistake. A part whose label is $0$ and whose logit is $17$ (the model is confidently wrong) has a loss of exactly $17$; the naive formula divides to $1 - p = 0$ and returns $+\infty$, and an infinite loss, or the "not a number" that follows $\infty - \infty$, enters the average and ruins it. Even where the result is finite, at $z = 15$, the naive value $14.84377$ is off in the second digit: $1 - \hat{p}$ was computed by subtracting two nearly equal numbers, the cancellation of Volume I, chapter 15.
 
@@ -583,7 +590,7 @@ The weights never settle. Over the last three factors of $10$ in the number of s
 
 The reason is the loss itself. If $\mathbf{w}$ classifies every example correctly then every $z_n$ has the sign of its label, and scaling $\mathbf{w}$ to $c\mathbf{w}$ with $c > 1$ pushes every $\hat{p}_n$ nearer to its correct end, strictly lowering the loss. So no finite $\mathbf{w}$ is optimal: the infimum is approached only as $\lVert\mathbf{w}\rVert \to \infty$. This is the case of the strictly convex loss that has no minimiser, and it is the last row of the Hessian table seen from the other side: as the weights grow, the curvature $\hat{p}(1 - \hat{p})$ vanishes, descent slows, and the gradient is small long before the weights are meaningful. It means the stopping rule on the gradient norm of this chapter does not detect convergence on such data; the run ends because the gradient has become small, at an arbitrary size of $\mathbf{w}$.
 
-The consequence for use is practical. Separable data are common when there are few examples or many features (twelve examples can usually be separated by a hyperplane in a hundred dimensions), and the weights of such a fit are a number decided by how long you ran the loop. The fitted probabilities are then extreme: $\hat{p} = 0.0006$ and $0.9996$ at the two nearest points after $10^5$ steps, for four examples. The cure is to stop the weights from growing by adding to the loss a penalty that increases with $\lVert\mathbf{w}\rVert$, so that a finite minimum exists again. That is regularization, and the next chapter derives it from probability instead of introducing it as a patch. (That the direction of $\mathbf{w}$ in this process converges to the boundary with the widest margin between the classes is a known result of Soudry and colleagues, listed in the references; the table is consistent with it, since the boundary approaches the midpoint $1.5$.)
+The consequence for use is practical. Separable data are common when there are few examples or many features (twelve examples can usually be separated by a flat sheet, the many-dimensional version of a line, in a hundred dimensions), and the weights of such a fit are a number decided by how long you ran the loop. The fitted probabilities are then extreme: $\hat{p} = 0.0006$ and $0.9996$ at the two nearest points after $10^5$ steps, for four examples. The cure is to stop the weights from growing by adding to the loss a penalty that increases with $\lVert\mathbf{w}\rVert$, so that a finite minimum exists again. That is regularization, and the next chapter derives it from probability instead of introducing it as a patch. (That the direction of $\mathbf{w}$ in this process converges to the boundary with the widest empty strip (the maximum margin) between the classes is a known result of Soudry and colleagues, listed in the references; the table is consistent with it, since the boundary approaches the midpoint $1.5$.)
 
 ## More than two classes
 
@@ -597,7 +604,7 @@ A part is passed or rejected; an image shows one of a thousand objects. For $C$ 
 
 **Initialise at zero.** For logistic regression with a column of ones, $\mathbf{w} = \mathbf{0}$ is a valid start: the loss is convex, so no symmetry has to be broken, and $\hat{p} = 1/2$ everywhere. (For networks, Volume III, the answer is different.)
 
-**Scale the features.** The learning rate $1/L$ depends on $\lambda_{\max}(\mathbf{X}^\top\mathbf{X}/N)$, and chapter 2's lesson about conditioning applies unchanged.
+**Scale the features.** The learning rate $1/\lambda_{\mathrm{cap}}$ depends on $\lambda_{\max}(\mathbf{X}^\top\mathbf{X}/N)$, and chapter 2's lesson about conditioning applies unchanged.
 
 **Look at the probabilities, not only the decisions.** A model can classify well while its probabilities are badly wrong (the separable case is an example); chapter 6 develops the tools to measure it.
 
@@ -616,19 +623,19 @@ Logistic regression as a stand-alone model is not what brain is for, but every p
 
 **Binary cross-entropy on logits.** `crates/kernels/wgsl/bce_logits.wgsl` is the boxed formula of this chapter: its header derives the loss as `max(z, 0) - z * t + log(1 + exp(-abs(z)))`, softplus minus $t z$, per element, and `crates/kernels/wgsl/bce_logits_grad.wgsl` computes $\sigma(z) - t$ with the two-branch sigmoid. The target $t$ is allowed to be any number in $[0, 1]$, not only $0$ or $1$: the derivation above never used $y\in\{0, 1\}$ except to simplify, and the formula $\mathrm{softplus}(z) - t z$ is the cross-entropy against a Bernoulli target of weight $t$ whatever $t$ is. The YOLOv8 detector (`crates/yolov8/src/loss.rs`) uses exactly this: for every anchor point and every class it asks one yes-or-no question, "is there an object of this class here?", with a sigmoid per class rather than a softmax across classes; the matched class's target is a soft alignment score between $0$ and $1$ and every other class's is $0$. The kernels were added with commit `18a52f117` (25 June 2026), among the building blocks of the from-scratch detector, and the loss's test file `crates/yolov8/tests/it/p1_loss.rs` pins them in the same two ways this chapter did: `bce_logits_value_golden` checks that at $z = 0$ the loss is $\log 2$ for both labels, and `bce_logits_grad_finite_difference` compares the gradient kernel with central differences on random logits and soft targets.
 
-The same loss, one level removed, trains a language model on preferences. `crates/rl/src/objective/dpo.rs` implements the direct preference objective, and its core function `pair_term` is this chapter's loss on a margin. For two answers to the same prompt, one chosen and one rejected, it forms a margin $u$ from how much training has raised the chosen answer's log-probability relative to a frozen reference, minus the same for the rejected one, times a constant $\beta$. The loss is $-\log\sigma(u)$, that is $\mathrm{softplus}(-u)$, logistic regression with the label always $1$ and the margin as the logit, and the gradient is scaled by $\sigma(-u)$, the "probability that the model is wrong". The functions `sigmoid` (two-branch) and `softplus` (with `ln_1p`) in that file are the stable forms of this chapter. The test `pair_term_matches_the_hand_computed_dpo_loss` pins one number, reproduced here ($a$ and $b$ are the summed log-probabilities of the chosen and the rejected answer under the model being trained, $a_{\mathrm{ref}}$ and $b_{\mathrm{ref}}$ under the reference, and `count` is the number of supervised positions in the pair):
+The same loss, one level removed, trains a language model on preferences. `crates/rl/src/objective/dpo.rs` implements the direct preference objective, and its core function `pair_term` is this chapter's loss on a margin. For two answers to the same prompt, one chosen and one rejected, it forms a margin $m$, a number that is large when the model prefers the chosen answer more strongly than a frozen reference model does: how much training has raised the chosen answer's log-probability relative to the reference, minus the same for the rejected one, times a constant $\beta_{\mathrm{pref}}$. The loss is $-\log\sigma(m)$, that is $\mathrm{softplus}(-m)$, logistic regression with the label always $1$ and the margin as the logit, and the gradient is scaled by $\sigma(-m)$, the "probability that the model is wrong". The functions `sigmoid` (two-branch) and `softplus` (with `ln_1p`) in that file are the stable forms of this chapter. The test `pair_term_matches_the_hand_computed_dpo_loss` pins one number, reproduced here (`lp_chosen` and `lp_rejected` are the summed log-probabilities of the chosen and the rejected answer under the model being trained, `lp_chosen_ref` and `lp_rejected_ref` under the reference, and `count` is the number of supervised positions in the pair):
 
 <!-- worked: logistic_regression.margin_loss -->
-beta = 0.5, count = 8, a = -2.0, a_ref = -3.0, b = -4.0, b_ref = -3.5.
+beta_pref = 0.5, count = 8, lp_chosen = -2.0, lp_chosen_ref = -3.0, lp_rejected = -4.0, lp_rejected_ref = -3.5.
 
 | quantity | value |
 |---|---:|
-| margin u = beta ((a - a_ref) - (b - b_ref)) | 0.750000 |
-| loss softplus(-u) | 0.386871 |
-| same as -log(sigmoid(u)) | 0.386871 |
-| slope magnitude sigmoid(-u) | 0.320821 |
-| weight beta sigmoid(-u) count | 1.283285 |
-| loss at u = 0 (ln 2) | 0.693147 |
+| margin m = beta_pref ((lp_chosen - lp_chosen_ref) - (lp_rejected - lp_rejected_ref)) | 0.750000 |
+| loss softplus(-m) | 0.386871 |
+| same as -log(sigmoid(m)) | 0.386871 |
+| slope magnitude sigmoid(-m) | 0.320821 |
+| weight beta_pref sigmoid(-m) count | 1.283285 |
+| loss at m = 0 (ln 2) | 0.693147 |
 <!-- /worked -->
 
 The test asserts the loss $0.386871$, the weight $1.283285$ and, at a zero margin, $\log 2$. Commit `24f5be517` (6 September 2026) added the objective. Volume XII teaches the method; what matters here is that the loss and the arithmetic are the ones above.
@@ -640,7 +647,7 @@ The test asserts the loss $0.386871$, the weight $1.283285$ and, at a zero margi
 Answers are at the end of the chapter.
 
 1. **Explain.** The first line of the table of linear fits predicts $-0.2238$ at $x = 0$. Is this a bug in the fit, and what does it say about using the line's value as a probability?
-2. **Predict.** A thirteenth part with $x = 15$ and $y = 1$ changed the logistic weights only in the fourth decimal. What is $\hat{p}$ at $x = 15$ for the twelve-part fit, and what does the gradient contribution $(\hat{p} - y)x$ of that part look like?
+2. **Predict.** A thirteenth part with $x = 15$ and $y = 1$ left the logistic weights unchanged in every printed decimal. What is $\hat{p}$ at $x = 15$ for the twelve-part fit, and what does the gradient contribution $(\hat{p} - y)x$ of that part look like?
 3. **Find the error.** "Squared error is more robust than cross-entropy for classification: its loss never exceeds $1$ for a part, while cross-entropy goes to infinity on a mislabelled part." Say what the argument gets wrong, using the row $z = -8$ of the loss table.
 4. **Find the error.** A student computes the gradient of the cross-entropy as $(\hat{p} - y)\,\hat{p}(1 - \hat{p})\,x_j$, "because we must multiply by the slope of the sigmoid". What does that formula correspond to, and what would training do on a part with $\hat{p} = 0.0003$ and $y = 1$?
 5. **Predict.** At threshold $t = 0.9$, where does the decision boundary lie relative to the one at $t = 0.5$, in terms of $z$, and are more or fewer parts rejected?
@@ -652,21 +659,21 @@ Answers are at the end of the chapter.
 1. **[Calculate]** Convert probability $0.8$ to odds and logit, and logit $-1.5$ to a probability and odds. Verify by hand that $\mathrm{logit}(1 - p) = -\mathrm{logit}(p)$ for $p = 0.8$.
 2. **[Calculate]** Prove $\sigma(-z) = 1 - \sigma(z)$ and $\sigma'(z) = \sigma(z)(1 - \sigma(z))$ starting from $\sigma(z) = (1 + e^{-z})^{-1}$, and show that $\mathrm{softplus}'(z) = \sigma(z)$.
 3. **[Calculate]** A model gives $\hat{p} = (0.9, 0.2, 0.5)$ to three parts with labels $(1, 0, 1)$. Compute the three binary cross-entropies and their mean. Then, for the part with $\mathbf{x} = (1, 2, 3)$, $\hat{p} = 0.5$ and $y = 1$, compute $(\hat{p} - y)\mathbf{x}$ and the weights after one gradient step with $\eta = 0.5$ from $\mathbf{w} = \mathbf{0}$ on this part alone.
-4. **[Calculate]** For $\mathbf{X} = \begin{pmatrix} 1 & 0 \\ 1 & 2 \end{pmatrix}$, compute the Hessian of the mean loss at $\mathbf{w} = \mathbf{0}$, its eigenvalues and the learning rate $1/L$. Show that both eigenvalues are positive.
+4. **[Calculate]** For $\mathbf{X} = \begin{pmatrix} 1 & 0 \\ 1 & 2 \end{pmatrix}$, compute the Hessian of the mean loss at $\mathbf{w} = \mathbf{0}$, its eigenvalues and the learning rate $1/\lambda_{\mathrm{cap}}$. Show that both eigenvalues are positive.
 5. **[Calculate]** For the weights $\mathbf{w} = (-3, 2, 1)$ write the decision boundary, say on which side the part $(1, 2)$ lies, give its signed distance from the line at $t = 1/2$, and give the boundary for $t = 0.9$.
 6. **[Calculate]** Compute $\log\sigma(-3)$ in two ways: as $\log(\sigma(-3))$ with a calculator, and as $-\mathrm{softplus}(3)$ using the stable formula of this chapter. Then say which of $z = -3$, $z = -100$ would give the wrong answer in 32-bit arithmetic by the naive method and why.
-7. **[Implement]** Implement `train_logistic` from the pseudocode and reproduce `logistic_regression.gradient_check` and the rows $k = 0, 1, 2, 5, 10, 20$ of `logistic_regression.training_run` from `logistic_regression.parts_table` (generate the sixty parts yourself with the book's generator and the draw order printed there).
+7. **[Implement]** Implement `train_logistic` from the pseudocode (with the two-branch `sigmoid` above) and reproduce `logistic_regression.gradient_check` and the rows $k = 0, 1, 2, 5, 10, 20$ of `logistic_regression.training_run` from `logistic_regression.parts_table` (generate the sixty parts yourself with the book's generator and the draw order printed there).
 8. **[Implement]** Implement the 32-bit arithmetic of `logistic_regression.naive_vs_stable` (round the exact result of each operation to the nearest 32-bit number) and reproduce both tables, including the $-\infty$ and $+\infty$ entries.
 9. **[Implement]** Reproduce `logistic_regression.separable_growth` and the table of `logistic_regression.nonconvex_squared_error`, then extend the first to $10^6$ steps and report the norm of $\mathbf{w}$ against $\log_{10} k$.
-10. **[Investigate]** Rescale $x_1$ and $x_2$ of the sixty parts to z-scores (chapter 12) and train with the learning rate $1/L$ of the new design matrix and the same stopping rule. How many steps does it take? Compare the ratio of the largest to smallest eigenvalue of the Hessian at the solution with the value $\approx 700$ found above, and map the weights back to the original units to verify that the boundary is the same line.
+10. **[Investigate]** Rescale $x_1$ and $x_2$ of the sixty parts to z-scores (chapter 12) and train with the learning rate $1/\lambda_{\mathrm{cap}}$ of the new design matrix and the same stopping rule. How many steps does it take? Compare the ratio of the largest to smallest eigenvalue of the Hessian at the solution with the value $\approx 700$ found above, and map the weights back to the original units to verify that the boundary is the same line.
 11. **[Investigate]** Suppose passing a bad part costs ten times as much as rejecting a good one. For every threshold of `logistic_regression.threshold_table` compute the total cost on the sixty parts, and find the threshold of lowest cost. Derive from the model's probabilities, with the cost ratio $10$, the threshold at which rejecting and passing have equal expected cost, and compare it with your search.
-12. **[Investigate]** Flip the label of the part at $x = 2.0$ in `logistic_regression.separable_growth` so that the data are no longer separable. Run the same descent to $10^5$ steps. Do the weights converge? What is the probability the model gives that part at the end, and how does it compare with the separable run?
+12. **[Investigate]** In the data of `logistic_regression.separable_growth` change the label of the part at $x = 3.0$ from $1$ to $0$, so that the labels in order of $x$ are $0, 0, 1, 0$ and no threshold on $x$ separates them. Run the same descent ($\eta = 0.5$, start $\mathbf{w} = \mathbf{0}$) until the gradient norm is below $10^{-5}$, or for at most $10^5$ steps. Does it stop before the cap, and do the weights settle? What probability does the fitted model give to the part at $x = 3.0$ and to the part at $x = 2.0$, and how do these compare with the last row of the separable table?
 
 ## Summary
 
 A **classification** model outputs one of a set of categories, and the useful form of the answer is a probability. A line fitted by least squares to $0$ and $1$ labels is not one: it leaves $[0, 1]$ and one confident point can move its decision by moving the whole slope. Odds turn a probability into a ratio and their logarithm, the **logit**, turns it into an unbounded number that a weighted sum can match. Assuming the logit is linear, $z = \mathbf{w}\cdot\mathbf{x}$, and inverting it gives the **sigmoid**, $\hat{p} = 1/(1 + e^{-z})$, a probability that always lies in $(0, 1)$ and whose slope is $\hat{p}(1 - \hat{p})$. With the threshold $1/2$ the model's decisions change where $z = 0$: the **decision boundary** is a straight line, a plane or a flat sheet, and other thresholds move it parallel to itself.
 
-The loss is the **binary cross-entropy**, $-[y\log\hat{p} + (1 - y)\log(1 - \hat{p})]$, which is the cross-entropy of chapter 13 for a Bernoulli outcome and equals $\mathrm{softplus}(z) - y z$ in the logit. Unlike the squared error it does not saturate with the sigmoid: the sigmoid's slope cancels against the logarithm and the gradient is $(\hat{p} - y)\mathbf{x}$ per part and $\frac{1}{N}\mathbf{X}^\top(\sigma(\mathbf{X}\mathbf{w}) - \mathbf{y})$ over the data, with a Hessian $\frac{1}{N}\mathbf{X}^\top\mathbf{S}\mathbf{X}$ that is positive semidefinite and bounded by $L = \frac{1}{4}\lambda_{\max}(\mathbf{X}^\top\mathbf{X}/N)$, so the loss is convex and gradient descent with $\eta = 1/L$ is safe. On the sixty parts it reaches a gradient below $10^{-5}$ in $12203$ steps, slowly because the Hessian's eigenvalues differ by a factor of about $700$. A computation that forms $\hat{p}$ and then its logarithm fails in finite precision; the softplus evaluated as $\max(z, 0) + \mathrm{log1p}(e^{-\lvert z\rvert})$, from the logit, does not.
+The loss is the **binary cross-entropy**, $-[y\log\hat{p} + (1 - y)\log(1 - \hat{p})]$, which is the cross-entropy of chapter 13 for a Bernoulli outcome and equals $\mathrm{softplus}(z) - y z$ in the logit. Unlike the squared error it does not saturate with the sigmoid: the sigmoid's slope cancels against the logarithm and the gradient is $(\hat{p} - y)\mathbf{x}$ per part and $\frac{1}{N}\mathbf{X}^\top(\sigma(\mathbf{X}\mathbf{w}) - \mathbf{y})$ over the data, with a Hessian $\frac{1}{N}\mathbf{X}^\top\mathbf{S}\mathbf{X}$ that is positive semidefinite and bounded by $\lambda_{\mathrm{cap}} = \frac{1}{4}\lambda_{\max}(\mathbf{X}^\top\mathbf{X}/N)$, so the loss is convex and gradient descent with $\eta = 1/\lambda_{\mathrm{cap}}$ is safe. On the sixty parts it reaches a gradient below $10^{-5}$ in $12203$ steps, slowly because the Hessian's eigenvalues differ by a factor of about $700$. A computation that forms $\hat{p}$ and then its logarithm fails in finite precision; the softplus evaluated as $\max(z, 0) + \mathrm{log1p}(e^{-\lvert z\rvert})$, from the logit, does not.
 
 The limits of the chapter are in the data and in the model. A separable training set has no minimiser: the weights grow like $\log k$ and the probabilities go to $0$ and $1$ with nothing to hold them, so the fit says more than the data can support; and the model draws only straight boundaries and sees one probability per class. The next chapter, *Maximum Likelihood, Priors and Regularization*, answers the first problem and explains this chapter's loss: it shows that the cross-entropy and the squared error are both the negative logarithm of the probability the model gives to the data, under different assumptions, and that adding a penalty on the weights is a prior belief about them.
 
@@ -692,7 +699,7 @@ The limits of the chapter are in the data and in the model. A separable training
 **Check your understanding.**
 
 1. It is not a bug: a straight line must leave any bounded interval, so some inputs always give values outside $[0, 1]$. It says that the value of a regression line is a score that can be compared with a threshold, not a probability, and a program that uses it as one (a cost, a product of chances) is wrong.
-2. At $x = 15$ the twelve-part fit has $z = -3.9634 + 1.8679\cdot 15 = 24.055$, so $\hat{p} = \sigma(24.055)$ differs from $1$ by about $e^{-24}$, roughly $4 \times 10^{-11}$. The part's gradient contribution $(\hat{p} - 1)\cdot(1, 15)$ is about $-4\times 10^{-11}$ times $(1, 15)$: nothing. A part the model already classifies with certainty, correctly, produces no gradient. That is why the cross-entropy fit is not moved by the far part and the squared-error line is.
+2. At $x = 15$ the twelve-part fit has $z = -3.9640 + 1.8682\cdot 15 \approx 24.06$, so $\hat{p} = \sigma(z)$ differs from $1$ by about $e^{-24.06}$, roughly $4 \times 10^{-11}$. The part's gradient contribution $(\hat{p} - 1)\cdot(1, 15)$ is about $-4\times 10^{-11}$ times $(1, 15)$: nothing, and the change of the weights it causes (last row of the table, below $10^{-9}$) is of that size divided by the small curvature of the other twelve parts. A part the model already classifies with certainty, correctly, produces no gradient. That is why the cross-entropy fit is not moved by the far part and the squared-error line is.
 3. The argument looks at the size of the loss and forgets its slope. At $z = -8$ the squared error is $0.99933$ (almost its maximum) *and its slope is $-0.00067$*: the model is wrong and receives no instruction to improve. A bounded loss with a vanishing slope makes the confident mistake hard to fix; that is not robustness. (If the label really is wrong, the cross-entropy does pull strongly on the weights, a separate problem of label noise that a later chapter takes up.)
 4. It is the gradient of the *squared error*, $2(\hat{p} - y)\hat{p}(1 - \hat{p})x_j$, up to the factor $2$: the sigmoid's slope has been kept instead of cancelled. At $\hat{p} = 0.0003$ and $y = 1$ the factor $\hat{p}(1 - \hat{p}) \approx 0.0003$ makes the gradient about $0.0003$ times the correct one: training barely moves, the saturation of the loss table.
 5. The decision boundary moves to $z = \mathrm{logit}(0.9) = 2.1972$ (the table of thresholds), a line parallel to the one at $z = 0$ on the side where $z$ is larger. A part is rejected only when $z \ge 2.1972$, so fewer parts are rejected: in the threshold table the good parts rejected fall from $3$ to $1$ and the bad parts passed rise from $2$ to $14$.

@@ -39,6 +39,13 @@ SEEDS_NAME = "experiments.seeds"
 N_RUNS = 100                       # paired runs; seeds N_RUNS .. 2 N_RUNS - 1 are the unpaired partners
 LR, EPOCHS, INIT_SD = 0.03, 3, 0.5  # the recipe every experiment uses unless it says otherwise
 CLAIM_POINTS = 1.2                  # the claimed gain, in points of accuracy
+L2_GRID = (0.0, 0.1, 1.0, 10.0)     # penalties tried by the previous best
+
+
+def _at_least_claim(d):
+    """True when a gain d (a fraction) is at least CLAIM_POINTS points. Accuracy differences on 1000 rows are whole
+    multiples of 0.001, so the comparison uses a tolerance of 1e-9 and means 'at least 12 more correct answers'."""
+    return d >= CLAIM_POINTS / 100 - 1e-9
 
 PIPELINES = ("plain", "interaction", "centring", "both")  # the second and third are the two parts of "both"
 PIPELINE_LABELS = {"plain": "plain", "interaction": "interaction only", "centring": "centring only",
@@ -288,7 +295,6 @@ def _newton_logistic(F, y, l2, steps=30):
         for i in range(d - 1):
             grad[i] += l2 * theta[i]
             hess[i][i] += l2
-        hess[d - 1][d - 1] += 1e-9
         step = _solve(hess, grad)
         theta = [theta[i] - step[i] for i in range(d)]
         if max(abs(v) for v in step) < 1e-10:
@@ -331,7 +337,7 @@ def _naive_bayes_accuracy(train, test):
     for c in (0, 1):
         rows = [r[0] for r in train if r[1] == c]
         mu = [_mean([r[j] for r in rows]) for j in range(4)]
-        var = [_mean([(r[j] - mu[j]) ** 2 for r in rows]) + 1e-9 for j in range(4)]
+        var = [_mean([(r[j] - mu[j]) ** 2 for r in rows]) for j in range(4)]
         stats[c] = (len(rows) / len(train), mu, var)
 
     def logp(c, x):
@@ -402,9 +408,10 @@ def _previous_best():
     Qtr = [_quadratic(r[0], means) for r in train]
     Qva = [_quadratic(r[0], means) for r in val]
     Qte = [_quadratic(r[0], means) for r in test]
-    fits = {l: _newton_logistic(Qtr, ytr, l) for l in (0.0, 0.1, 1.0, 10.0)}
-    best_l = max(fits, key=lambda l: (_accuracy([_score(*fits[l], f) for f in Qva], val), -l))
-    return best_l, tuple(_score(*fits[best_l], f) for f in Qte)
+    fits = {l: _newton_logistic(Qtr, ytr, l) for l in L2_GRID}
+    val_acc = {l: _accuracy([_score(*fits[l], f) for f in Qva], val) for l in L2_GRID}
+    best_l = max(L2_GRID, key=lambda l: (val_acc[l], -l))
+    return best_l, tuple(_score(*fits[best_l], f) for f in Qte), val_acc
 
 
 @lru_cache(maxsize=None)
@@ -438,7 +445,7 @@ def _ladder_data():
         runs = [_fixed_scores(pipe, sd) for sd in _run_seeds()[:N_RUNS]]
         rows.append((short, label + f" (mean of {N_RUNS} seeds)", _mean([_accuracy(r, test) for r in runs]), n,
                      _mean([_log_loss(r, test) for r in runs])))
-    best_l, zq = _previous_best()
+    best_l, zq, _ = _previous_best()
     rows.append(("previous best", f"previous best: logistic regression on all products, L2 {best_l:g} chosen on validation", _accuracy(zq, test), n, _log_loss(zq, test)))
     rows.append(("true rule, these rows", "the rule that generated the labels, on these 1000 rows", _mean([1.0 if (r[2] >= 0) == (r[1] == 1) else 0.0 for r in test]), n, None))
     rows.append(("ceiling", f"the same rule on {CEILING_N:,} fresh rows (the ceiling)", _ceiling_accuracy(), CEILING_N, None))
@@ -450,14 +457,32 @@ def baseline_ladder():
     for _, label, acc, rows_n, loss in _ladder_data():
         h = _wald(acc, rows_n)
         rows.append((label, _pts(acc), f"{_pts(acc - h)} to {_pts(acc + h)}", "-" if loss is None else f"{loss:.3f}"))
-    return ("Every row is scored on the same 1000 test rows; the interval is the Wald interval of the accuracy (Volume I, chapter 12). "
-            "Log loss is the mean negative log-likelihood in nats of the predicted probability (Volume II, chapter 4), shown where the model outputs one. "
-            f"The two SGD rows average the {N_RUNS} paired seeds of the seed table (accuracy and log loss are each averaged over the seeds; the interval is the test-sample interval of the average accuracy). "
-            f"The interval of the last row uses its {CEILING_N:,} rows. Convergence: Newton's method on the logistic loss, at most 30 steps, stopping when the largest "
-            "change of a parameter is below 1e-10. k nearest neighbours: readings standardised by the training mean and standard deviation (divisor N), "
-            "Euclidean distance, k from (1, 5, 15, 31, 61, 101), the best validation accuracy, the smaller k on a tie. The previous best uses the four centred readings "
-            "and their ten products x_i x_j with i <= j, with the L2 penalty from (0, 0.1, 1, 10) that has the best validation accuracy (the smaller on a tie).\n\n"
-            + _table(["method", "test accuracy %", "95% interval (accuracy %)", "log loss"], rows, "lrrr"))
+    val_acc = _previous_best()[2]
+    grid = ", ".join(f"{l:g}: {_pts(val_acc[l])}" for l in L2_GRID)
+    return (
+        "Every row is scored on the same 1000 test rows except the last. A classifier with a logit z predicts label 1 when z >= 0 and label 0 otherwise. "
+        "The interval is the Wald interval of the accuracy a (Volume I, chapter 12): a +- 1.96 sqrt(a (1 - a) / n), with n the number of rows scored (1000, "
+        f"or {CEILING_N:,} in the last row), shown in points. For the two SGD rows a is the average accuracy over the {N_RUNS} paired seeds of the seed table and "
+        "n is 1000; accuracy and log loss are each averaged over the seeds. Log loss is the mean negative log-likelihood in nats of the predicted probability "
+        "(Volume II, chapter 4), shown where the model outputs one; for the majority class it is the loss of the constant probability equal to the training share of label 1.\n\n"
+        "Majority class: predict the more frequent label of the training rows (label 0 if the shares are equal). "
+        "Naive Bayes (Volume II, chapter 7) on the four raw readings: per class the average and the variance with divisor N_c of each reading, "
+        "the prior equal to the class's share of the training rows, no smoothing; predict 1 when the log score of class 1 is strictly greater than that of class 0. "
+        "k nearest neighbours: readings standardised by the training average and standard deviation (divisor N), Euclidean distance, ties in distance broken by the "
+        "lower training row index, a vote of the k nearest rows (predict 1 when more than k/2 of them have label 1), "
+        "k chosen from (1, 5, 15, 31, 61, 101) by the best validation accuracy, the smaller k on a tie. "
+        "Convergence: Newton's method (Volume I, chapter 7) on the logistic loss: from all-zero parameters (weights and bias), "
+        "each step solves H step = g by Gaussian elimination with partial pivoting, where g and H are the gradient and the Hessian of the loss "
+        "summed over the training rows (the Hessian is X^T S X of Volume II, chapter 3, with lambda added on the diagonal for each weight when the row has a penalty; the parameters are the weights followed by the bias), and subtracts the step from the parameters; "
+        "at most 30 steps, stopping after a step whose largest absolute parameter change is below 1e-10. "
+        "The previous best uses the four centred readings and their ten products x_i x_j with i <= j (14 features), "
+        "and minimises the summed training log loss plus (lambda / 2) times the sum of the squared weights (the objective J_L2 of Volume II, chapter 4; the bias is not penalised), "
+        f"with lambda from {{0, 0.1, 1, 10}} chosen by the best validation accuracy, the smaller lambda on a tie. Validation accuracy % by lambda: {grid}.\n\n"
+        + _table(["method", "test accuracy %", "95% interval (accuracy %)", "log loss"], rows, "lrrr")
+        + f"\n\nThe last row is the true logit rule, 'predict 1 when the true logit z of the row is at least 0', on {CEILING_N:,} fresh rows. "
+        f"{_generator_line(CEILING_NAME)} The rows come from this one generator in the recipe of the dataset: for each row four calls of `rng.normal()`, "
+        "then one `rng.uniform()`, with the same logit and label rule. The accuracy of this row is itself an estimate: its Wald interval has half-width "
+        f"{100 * _wald(_ceiling_accuracy(), CEILING_N):.1f} points, so it is a measurement of the ceiling and not the ceiling itself.")
 
 
 def product_correlations():
@@ -476,7 +501,7 @@ def product_correlations():
             ("raw product against raw reading 2", _correlation(cols[names[2]], cols[names[1]])),
             ("centred product against centred reading 1", _correlation(cols[names[5]], cols[names[3]])),
             ("centred product against centred reading 2", _correlation(cols[names[5]], cols[names[4]]))]
-    return ("Correlation coefficient over the 200 training rows (the training means are those of the dataset table).\n\n"
+    return ("Pearson correlation coefficient over the 200 training rows (the training means are those of the dataset table).\n\n"
             + _table(["pair of features", "correlation"], [(a, f"{b:+.3f}") for a, b in rows], "lr"))
 
 
@@ -498,12 +523,12 @@ def _tuning_results():
         data = (_draw_rows(rng, N_TRAIN), _draw_rows(rng, N_VAL), _draw_rows(rng, N_TEST))
         _, val, test = data
 
-        def search(first_lr=None):
+        def search():
             """Returns the test accuracy of the best-on-validation try after 1, 4 and 16 tries (nested prefixes)."""
             best = None
             res = {}
             for t in range(TUNE_TRIES):
-                lr = first_lr if (t == 0 and first_lr is not None) else TUNE_LR_LOW * TUNE_LR_RANGE ** rng.uniform()
+                lr = TUNE_LR_LOW * TUNE_LR_RANGE ** rng.uniform()
                 seed = rng.next_u64()
                 zt, zv = _fit_scores("plain", seed, lr, EPOCHS, data)
                 va = _accuracy(zv, val)
@@ -525,20 +550,22 @@ def tuning_effort():
     for ka, kb in TUNE_PROTOCOLS:
         if ka == 1:
             diffs = [b[kb] - a_fixed for a_fixed, _, b in res]
-            who = f"A: its fixed recipe (lr {TUNE_LR_BASELINE:g})"
+            who = f"A: its fixed recipe (learning rate {TUNE_LR_BASELINE:g})"
         else:
             diffs = [b[kb] - a[ka] for _, a, b in res]
             who = f"A: {ka} tries"
         m, sd, se, lo, hi = _interval(diffs)
-        ahead = sum(1 for d in diffs if d >= CLAIM_POINTS / 100) / len(diffs)
+        ahead = sum(1 for d in diffs if _at_least_claim(d)) / len(diffs)
         rows.append((who, f"B: {kb} tr{'y' if kb == 1 else 'ies'}", _pts(m, 2, True), f"{100 * se:.2f}", f"{100 * lo:+.2f} to {100 * hi:+.2f}", f"{ahead:.2f}"))
     base = _mean([a for a, _, _ in res])
     return (f"{_generator_line(TUNE_NAME)} {TUNE_REPS} repetitions from one generator. A repetition draws {N_TRAIN} training, {N_VAL} validation and {N_TEST} test rows "
-            f"(recipe of the dataset), then one `next()` for A's fixed run (lr {TUNE_LR_BASELINE:g}, {EPOCHS} epochs), then B's {TUNE_TRIES} tries, then A's {TUNE_TRIES} tries; "
+            f"(recipe of the dataset), then one `next()` for A's fixed run (learning rate {TUNE_LR_BASELINE:g}, {EPOCHS} epochs), then B's {TUNE_TRIES} tries, then A's {TUNE_TRIES} tries; "
             "a try is u = `uniform()` (learning rate 0.003 x 100^u), then a run seed = `next()`. All runs use the plain pipeline, so A and B are the same method. "
             "A search keeps the try with the best validation accuracy (the earlier try on a tie) and reports its test accuracy; "
             "'k tries' means the first k tries of that search. The difference is B minus A in points of test accuracy; "
-            "the interval is the 95% t interval over the repetitions; the last column is the share of repetitions in which B's reported accuracy is at least 1.2 points above A's.\n\n"
+            "standard error = sd (divisor n - 1) / sqrt(100); the interval is the 95% t interval over the repetitions, mean +- t SE with the multiplier "
+            f"{_t95(TUNE_REPS - 1):.5f} (Student t, {TUNE_REPS - 1} degrees of freedom); the last column is the share of repetitions in which B's reported accuracy is at least 1.2 points above A's "
+            "(at least 12 more correct answers on the 1000 test rows).\n\n"
             f"Mean test accuracy of A's fixed recipe over the repetitions: {_pts(base)}%.\n\n"
             + _table(["A gets", "B gets", "mean B - A (points)", "standard error", "95% interval (points)", "share with B ahead by 1.2 or more"], rows, "llrrrr"))
 
@@ -564,12 +591,13 @@ def seed_spread():
         m, s, se, lo, hi = _interval(d)
         cmp_rows.append((name, _pts(m, 2, True), _pts(s, 2),
                          f"{sum(1 for x in d if x > 0) / len(d):.2f}", f"{sum(1 for x in d if x < 0) / len(d):.2f}",
-                         f"{sum(1 for x in d if x >= CLAIM_POINTS / 100) / len(d):.2f}"))
+                         f"{sum(1 for x in d if _at_least_claim(x)) / len(d):.2f}"))
     corr = _correlation(pa, pb)
     return (f"{_generator_line(SEEDS_NAME)} Run seed k is the raw draw k of this generator (`next()`, counting from 0); the {N_RUNS} paired runs use draws 0 .. {N_RUNS - 1} "
-            f"for both pipelines, the partner runs of the second comparison use draws {N_RUNS} .. {2 * N_RUNS - 1} for the candidate. Same data, same recipe "
+            f"for both pipelines, the partner runs of the different-seeds comparison use draws {N_RUNS} .. {2 * N_RUNS - 1} for the candidate. Same data, same recipe "
             f"(learning rate {LR:g}, {EPOCHS} epochs); the test set is the same {N_TEST} rows every time, so every difference below comes from the seed (initial weights and data order) alone. "
-            "Standard deviations use the divisor n - 1.\n\n"
+            "Standard deviations use the divisor n - 1. 'Ahead by 1.2 or more' means at least 12 more correct answers out of 1000. "
+            "The correlation is the Pearson correlation of the 100 paired accuracies.\n\n"
             + _table(["pipeline", f"mean test accuracy % over {N_RUNS} seeds", "standard deviation (points)", "lowest %", "highest %", "range (points)"], rows, "lrrrrr")
             + f"\n\nCorrelation over the seeds between the two pipelines' accuracies at the same seed: {corr:.3f}.\n\n"
             + _table(["comparison (100 pairs)", "mean of B - A (points)", "standard deviation of B - A (points)", "share of pairs with B ahead",
@@ -623,7 +651,8 @@ def effect_vs_n():
     parts = [f"{_generator_line(EFFECT_NAME)} One generator, the tiny-effect scenario first and then the large-effect one; within a scenario the sizes in the order of the table, "
              "each size a fresh sample. A question is one `rng.uniform()` u: both right if u is below p11, only A right if below p11 + p10, only B right if below p11 + p10 + p01, "
              "else both wrong. D = +1 when only B is right, -1 when only A is. D-bar is the mean of D, SE is s_D / sqrt(n) (s_D with divisor n - 1), z = D-bar / SE, "
-             "p is the two-sided Gaussian area outside |z|, the interval is D-bar +- 1.96 SE, and the last column is D-bar / s_D (the standardised effect)."]
+             "p is the two-sided Gaussian area outside |z|, the interval is D-bar +- 1.96 SE, and the last column is D-bar / s_D (the standardised effect). "
+             "When s_D = 0 (every D is 0) the statistic has no value: the book sets z = 0, p = 1 and D-bar / s_D = 0, so the experiment counts as not significant."]
     for name, (p11, p10, p01, p00) in EFFECT_SCENARIOS:
         true = p01 - p10
         var = (p01 + p10) - true * true
@@ -684,7 +713,8 @@ def significance_repeated():
             for name, n, ez, share, mg, sg, true in _repeated_rows()]
     return (f"{_generator_line(REPEAT_NAME)} The two scenarios of the previous table, the tiny effect first; within a scenario the sizes n = 50, 200, 1000 in turn, "
             f"each {REPEAT_REPS} repeated experiments in a row, an experiment being n questions drawn as before (one `rng.uniform()` each). 'Expected z' is (true standardised effect) x sqrt(n). "
-            "'Significant' means z > 1.96 (a two-sided p below 0.05 with B ahead).\n\n"
+            "'Significant' means z > 1.96 (a two-sided p below 0.05 with B ahead); an experiment with s_D = 0 (every D is 0) is given z = 0 and is not significant. "
+            "s_D uses the divisor n - 1. The mean gain over the significant ones is shown as - when none is significant.\n\n"
             + _table(["scenario", "n", "expected z", f"share of {REPEAT_REPS} experiments significant", "mean gain over all (points)",
                       "mean gain over the significant ones (points)", "true gain (points)"], rows, "llrrrrr"))
 
@@ -730,8 +760,8 @@ def ablation_table():
     drop_c = _mean([y - x for x, y in zip(i, b)])
     total = _mean([y - x for x, y in zip(p, b)])
     return (f"The {N_RUNS} paired runs of the seed table: the four pipelines are trained with the same {N_RUNS} run seeds and scored on the same {N_TEST} test rows. "
-            "Standard error = sd (divisor n - 1) / sqrt(100); intervals are 95% t intervals (99 degrees of freedom, multiplier "
-            f"{_t95(99):.3f}) of the per-seed values.\n\n"
+            "Standard error = sd (divisor n - 1) / sqrt(100); intervals are mean +- t SE, 95% t intervals with the multiplier "
+            f"{_t95(99):.5f} (Student t, 99 degrees of freedom) of the per-seed values.\n\n"
             + _table(["pipeline", "centring", "interaction", "mean test accuracy %", "standard error (points)", "95% interval (accuracy %)"], rows, "lllrrr")
             + "\n\nPaired differences over the seeds (points of accuracy):\n\n"
             + _table(["change", "mean difference (points)", "standard error", "95% interval"], crows, "lrrr")
@@ -801,12 +831,14 @@ def failure_modes():
     for name, key in spec:
         d = [r[key] for r in res]
         m, s, se, lo, hi = _interval(d)
-        rows.append((name, _pts(m, 2, True), f"{100 * se:.2f}", f"{sum(1 for x in d if x >= CLAIM_POINTS / 100) / len(d):.2f}"))
+        rows.append((name, _pts(m, 2, True), f"{100 * se:.2f}", f"{sum(1 for x in d if _at_least_claim(x)) / len(d):.2f}"))
     return (f"{_generator_line(FAIL_NAME)} {FAIL_REPS} repetitions from one generator. A repetition draws {N_TRAIN} training, {N_VAL} validation and {N_TEST} test rows, "
             f"then {FAIL_RUNS} run seeds for A and {FAIL_RUNS} for B (one `next()` each), then one more `next()` for the long run of the last row. A and B are the same method: the plain pipeline, learning rate {LR:g}, "
             f"{EPOCHS} epochs, except in the last row, where B uses {FAIL_LONG_EPOCHS} epochs. 'Best' means the highest test value. In the metric row the claimed gain is the largest of the three "
-            "differences (accuracy, F1 of label 1 at the threshold 0, area under the ROC curve), each in points, for the first seed of each method. "
-            "Standard error = sd (divisor n - 1) / sqrt(60). The last column is the share of repetitions in which the reported gain is at least 1.2 points.\n\n"
+            "differences (accuracy; F1 = 2 TP / (2 TP + FP + FN) of label 1 with a positive decision when the logit is at least 0, and 0 when TP = 0; "
+            "area under the ROC curve = the share of (label 1, label 0) pairs in which the label 1 row has the larger logit, a tie counting one half), each in points, for the first seed of each method (chapter 6 defines the metrics). "
+            "Standard error = sd (divisor n - 1) / sqrt(60). The last column is the share of repetitions in which the reported gain is at least 1.2 points (a tolerance of 1e-9 on the comparison; "
+            "for accuracy that means 12 more correct answers).\n\n"
             + _table(["protocol", "mean reported gain of B over A (points)", "standard error", "share of repetitions with gain >= 1.2"], rows, "lrrr"))
 
 
@@ -845,5 +877,5 @@ def report_card():
             "For each baseline the per-example difference D = (candidate's share of the 100 seeds that classify the example correctly) - (the baseline's correct, 0 or 1; for the "
             "plain SGD baseline also its share of seeds). Gain = mean of D in points. 'Test-sample interval' is gain +- 1.96 SE with SE = s_D / sqrt(1000) "
             "(divisor n - 1): the uncertainty from having only 1000 test rows, for the seed-averaged models. 'Seed interval' is the 95% t interval of the "
-            "per-seed gain over the 100 paired seeds: the uncertainty from the training randomness, on these 1000 rows.\n\n"
+            f"per-seed gain over the 100 paired seeds (mean +- {_t95(99):.5f} SE, 99 degrees of freedom): the uncertainty from the training randomness, on these 1000 rows.\n\n"
             + _table(["baseline", "gain of the candidate (points)", "seed interval (points)", "test-sample interval (points)"], rows, "lrrr"))

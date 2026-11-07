@@ -9,7 +9,7 @@
 
 A factory inspects 100000 parts a month, and one part in a hundred is defective. A vendor offers a defect detector and advertises it as "99% accurate". The line manager asks what it would take to beat that, and an engineer answers with a rule that needs no sensor and no model: *never raise an alarm*. Of the 100000 parts, 99000 are good, so the rule is right on 99000 of them, and its accuracy is $0.99$. It also never finds a single defect.
 
-The detector of Volume I, chapter 10, raises an alarm on $90\%$ of defective parts and on $10\%$ of good ones. Counted on the same 100000 parts:
+The detector of Volume I, chapter 10, raises an alarm on $90\%$ of defective parts and on $10\%$ of good ones. Beside the accuracy (the share of parts classified correctly), the table below reports three numbers that the chapter defines properly later: the precision (of the parts that raise an alarm, the share that are defective), the recall (of the defective parts, the share that raise an alarm) and the F1 score (one number that is small when either of those two is small). Counted on the same 100000 parts:
 
 <!-- worked: metrics.accuracy_under_imbalance -->
 100000 parts, 1% defective (1000); the detector alarms on 90% of defective parts and on 10% of good ones, counts rounded to whole parts.
@@ -25,7 +25,7 @@ The detector of Volume I, chapter 10, raises an alarm on $90\%$ of defective par
 | detector | 0.9000 | 0.0833 | 0.9000 | 0.1525 |
 | never alarm | 0.9900 | undefined | 0.0000 | 0.0000 |
 
-Precision by Bayes' rule, recall x prevalence / (recall x prevalence + false alarm rate x (1 - prevalence)) = 0.0833.
+Precision by Bayes' rule, recall x prevalence / (recall x prevalence + false alarm rate x (1 - prevalence)) = 0.0833. F1 is computed from the counts, 2 TP / (2 TP + FP + FN), which is defined whenever there is a defective part or an alarm: for 'never alarm' it is 0 / 1000 = 0 although its precision is undefined.
 <!-- /worked -->
 
 The detector that finds nine defects in ten has an accuracy of $0.90$, nine points *below* a rule that finds none. Nothing is wrong with the arithmetic: accuracy counts every part equally, and when 99 parts in 100 are good, what happens to the good parts decides the number. Yet the detector is the one the factory wants. The same table also shows two other numbers, precision and recall, that tell the two stories apart, and the rest of this chapter builds the tools for asking what a model is *for* before choosing the number that scores it.
@@ -62,15 +62,15 @@ $$
 \text{accuracy} = \frac{\mathrm{TP} + \mathrm{TN}}{\mathrm{TP} + \mathrm{FP} + \mathrm{FN} + \mathrm{TN}}.
 $$
 
-It is the probability that a randomly chosen example is classified correctly. To see what controls its value, split it by class. Let $\pi = P(y = 1)$ be the share of positives (the base rate of Volume I, chapter 10). A random example is a positive with probability $\pi$, and then it is right with probability $\mathrm{TP}/n_+$, the share of positives found; it is a negative with probability $1 - \pi$, and then right with probability $\mathrm{TN}/n_-$. So
+It is the probability that a randomly chosen example is classified correctly. To see what controls its value, split it by class. Let $\xi = P(y = 1)$ be the share of positives (the base rate of Volume I, chapter 10; the letter $\xi$ is used because $\pi$ is the constant 3.14159... and $\rho$ is the correlation). A random example is a positive with probability $\xi$, and then it is right with probability $\mathrm{TP}/n_+$, the share of positives found; it is a negative with probability $1 - \xi$, and then right with probability $\mathrm{TN}/n_-$. So
 
 $$
-\text{accuracy} = \pi \cdot \frac{\mathrm{TP}}{n_+} + (1 - \pi) \cdot \frac{\mathrm{TN}}{n_-},
+\text{accuracy} = \xi \cdot \frac{\mathrm{TP}}{n_+} + (1 - \xi) \cdot \frac{\mathrm{TN}}{n_-},
 $$
 
-where $n_+ = \mathrm{TP} + \mathrm{FN}$ and $n_- = \mathrm{FP} + \mathrm{TN}$ count the positive and negative examples. Accuracy is a weighted average of the success rate on each class, with the *class shares* as the weights. In the factory, $\pi = 0.01$: the detector's accuracy is $0.01 \times 0.9 + 0.99 \times 0.9 = 0.90$, and the rule that never alarms has $0.01 \times 0 + 0.99 \times 1 = 0.99$. The class that is rare gets one percent of the vote.
+where $n_+ = \mathrm{TP} + \mathrm{FN}$ and $n_- = \mathrm{FP} + \mathrm{TN}$ count the positive and negative examples. Accuracy is a weighted average of the success rate on each class, with the *class shares* as the weights. In the factory, $\xi = 0.01$: the detector's accuracy is $0.01 \times 0.9 + 0.99 \times 0.9 = 0.90$, and the rule that never alarms has $0.01 \times 0 + 0.99 \times 1 = 0.99$. The class that is rare gets one percent of the vote.
 
-Two consequences follow, and both will recur. First, a classifier is always compared with the **majority-class rule**, which always answers with the more common class and whose accuracy is $\max(\pi, 1 - \pi)$. (Such a reference point is called a baseline; chapter 8 of this volume makes it a habit of every experiment.) An accuracy of $0.95$ on data with $\pi = 0.02$ is worse than this rule's $0.98$; the same accuracy at $\pi = 0.5$ is excellent. Second, accuracy gives a false positive and a false negative the same weight. When a missed defect costs ten times a false alarm, or the reverse, a number that treats them as equal is answering a question nobody asked.
+Two consequences follow, and both will recur. First, a classifier is always compared with the **majority-class rule**, which always answers with the more common class and whose accuracy is $\max(\xi, 1 - \xi)$. (Such a reference point is called a baseline; chapter 8 of this volume makes it a habit of every experiment.) An accuracy of $0.95$ on data with $\xi = 0.02$ is worse than this rule's $0.98$; the same accuracy at $\xi = 0.5$ is excellent. Second, accuracy gives a false positive and a false negative the same weight. When a missed defect costs ten times a false alarm, or the reverse, a number that treats them as equal is answering a question nobody asked.
 
 ## Precision and recall
 
@@ -95,10 +95,10 @@ Recall is also the **true positive rate**, $\mathrm{TPR}$. The matching quantity
 The table of the problem section shows why the vendor's phrase is empty and why precision matters. Of the 10800 alarms, only 900 are real. This is the base-rate arithmetic of Volume I, chapter 10, and precision is its output. Bayes' rule written for a classifier says: take $P(y = 1 \mid \text{positive}) = P(\text{positive} \mid y = 1)\,P(y = 1) / P(\text{positive})$ and expand the denominator over the two classes,
 
 $$
-\text{precision} = \frac{\mathrm{TPR}\cdot \pi}{\mathrm{TPR}\cdot \pi + \mathrm{FPR}\cdot (1 - \pi)}.
+\text{precision} = \frac{\mathrm{TPR}\cdot \xi}{\mathrm{TPR}\cdot \xi + \mathrm{FPR}\cdot (1 - \xi)}.
 $$
 
-With $\mathrm{TPR} = 0.9$, $\mathrm{FPR} = 0.1$ and $\pi = 0.01$ this is $0.009/0.108 = 0.0833$, the number the factory table printed twice, once by counting and once by this formula. The two rates $\mathrm{TPR}$ and $\mathrm{FPR}$ describe the detector alone; the base rate $\pi$ describes the population it is pointed at. Precision combines them, so it changes when the population changes even if the detector does not. Recall and the false positive rate do not: each is a probability *given the label*. That asymmetry decides which curve is used for which question in the sections below.
+With $\mathrm{TPR} = 0.9$, $\mathrm{FPR} = 0.1$ and $\xi = 0.01$ this is $0.009/0.108 = 0.0833$, the number the factory table printed twice, once by counting and once by this formula. The two rates $\mathrm{TPR}$ and $\mathrm{FPR}$ describe the detector alone; the base rate $\xi$ describes the population it is pointed at. Precision combines them, so it changes when the population changes even if the detector does not. Recall and the false positive rate do not: each is a probability *given the label*. That asymmetry decides which curve is used for which question in the sections below.
 
 Each number protects against a different failure. Low recall means defects ship to customers. Low precision means inspectors spend their day re-checking good parts, and, as the factory table shows, that cost grows as defects become rarer. Which matters more is a fact about the factory, not about mathematics.
 
@@ -119,13 +119,13 @@ Draw order, part by part: x1, ..., x20 = rng.normal() in that order (so ten Box-
 Model: logistic regression with an intercept and all 20 measurements (no penalty), weights set to zero, 3000 plain gradient steps of size 0.5 on the mean cross-entropy of the 100 training parts. The norm of the 21 weights is 12.9800; the weight of x1 is 6.9072, of x2 is 2.3599, and the largest weight of the other 18 measurements is 2.3347 in absolute value. Training cross-entropy 0.0733, validation cross-entropy 0.4664.
 <!-- /worked -->
 
-The training cross-entropy is $0.0733$ and the validation cross-entropy $0.4664$: the gap of an overfitted model. The weight of the first measurement is $6.9072$ where the law that made the data has $2.5$, and the norm of the weights is $12.98$. The weights have grown the way chapter 3's separable example grew: with $12$ positives and $21$ weights the training set is close to separable (its cross-entropy is already $0.0733$), and plain gradient descent keeps stretching the logits. The model ranks parts well (the next sections measure how well) and says its probabilities in an overconfident voice (the second half measures that). The training set is used only to fit the weights; the validation set will choose thresholds and fit calibrations; the test set will be used to report.
+The training cross-entropy is $0.0733$ and the validation cross-entropy $0.4664$: the gap of an overfitted model. The weight of the first measurement is $6.9072$ where the law that made the data has $2.5$, and the norm of the weights is $12.98$. The weights have grown the way chapter 3's separable example grew: with $12$ positives and $21$ weights the training set is close to separable (its cross-entropy is already $0.0733$), and plain gradient descent keeps stretching the logits. The model ranks parts well (the next sections measure how well, with a number called the area under the ROC curve) and states its probabilities with more confidence than the data justify (the second half measures that and repairs it). The training set is used only to fit the weights; the validation set will choose thresholds and fit a correction to the probabilities; the test set will be used to report.
 
 ## Moving the threshold
 
 *What it is for: seeing that precision and recall are not properties of a model but of a model and a threshold.*
 
-The model outputs $\hat{p} = \sigma(z)$, and a decision needs a threshold $t$: call the part defective when $\hat{p} \ge t$, equivalently when $z \ge \mathrm{logit}(t)$ (chapter 3). Every table so far fixed $t$. Moving it changes all four counts:
+The model outputs $\hat{p} = \sigma(z)$, and a decision needs a threshold $t$: call the part defective when $\hat{p} \ge t$, equivalently when $z \ge \mathrm{logit}(t)$ (chapter 3). Every table so far fixed $t$. Moving it changes all four counts. (The F1 column is defined in the next section; until then read it as one number that is large only when precision and recall are both large.)
 
 <!-- worked: metrics.threshold_sweep -->
 The 1000 validation parts (106 defective). A part is called defective when sigmoid(z) >= t.
@@ -143,7 +143,9 @@ The 1000 validation parts (106 defective). A part is called defective when sigmo
 
 Read the table from top to bottom. As $t$ rises, fewer parts are called defective, so $\mathrm{TP}$ and $\mathrm{FP}$ both fall and recall falls: $0.8962$ at $t = 0.001$, $0.1226$ at $t = 0.999$. It can only fall, because raising the threshold removes decisions and never adds them. Precision moves the other way in the main, from $0.2617$ to $0.6842$, because the parts that survive a high threshold are the ones the model is surest of; but not monotonically (it would be monotone only if the model's scores were in perfect order), as the figure shows. That is the **precision-recall trade-off**: no threshold gives both a low miss rate and a low false-alarm rate, and moving along the table buys one with the other.
 
-![Three curves over the cut on the logit: recall falls from about 0.9 at the lowest cut to about 0.12 at the highest, precision rises from about 0.24 to about 0.77, and F1 stays between 0.4 and 0.55 in the middle, with its maximum near the cut at zero.](img/precision-recall-threshold.svg)
+The figure below sweeps the cut on the logit from $-8$ to $8$ in steps of $0.1$ on the same validation parts, a wider and finer grid than the seven rows of the table, so its end values differ from the table's.
+
+![Three curves over the cut on the logit z from -8 to 8: recall falls steadily from about 0.9 at the lowest cut to about 0.12 at the highest, precision rises unevenly from about 0.24 to about 0.76, and F1 peaks at about 0.54 near the cut at zero and falls to about 0.2 at the right end.](img/precision-recall-threshold.svg)
 
 The accuracy column rises as the threshold grows: $0.7210$ at $t = 0.001$, $0.9070$ at $t = 0.99$. A reader who trusted accuracy would raise the threshold to $0.99$ and so find only $29$ of the $106$ defects. The reason is the one of the problem section. The never-alarm rule has accuracy $1 - 106/1000 = 0.894$ on these validation parts, and every increase of the threshold moves the model toward that rule. At the default $t = 0.5$ the model's accuracy is $0.8920$, below the rule that never looks at the part. The model finds $59$ of $106$ defects, which the rule does not.
 
@@ -183,7 +185,7 @@ $$
 \frac{1}{F_1} = \frac{1}{2}\left(\frac{\mathrm{TP} + \mathrm{FP}}{\mathrm{TP}} + \frac{\mathrm{TP} + \mathrm{FN}}{\mathrm{TP}}\right) = \frac{2\,\mathrm{TP} + \mathrm{FP} + \mathrm{FN}}{2\,\mathrm{TP}}, \qquad F_1 = \frac{2\,\mathrm{TP}}{2\,\mathrm{TP} + \mathrm{FP} + \mathrm{FN}}.
 $$
 
-The last form is the one to compute: it needs only the counts and is defined whenever at least one positive exists or has been called. The paragraph under the table checks it on the validation parts at $t = 0.5$, with the counts of the threshold table: the two ratios and the count form give the same $F_1$ to six places.
+The last form is the one to compute: it needs only the counts and is defined whenever at least one positive exists or has been called. It is also the definition used for the rule that never alarms in the problem section: there $\mathrm{TP} = \mathrm{FP} = 0$ and $\mathrm{FN} = 1000$, so $F_1 = 0/1000 = 0$, although its precision is undefined and the ratio form $2PR/(P + R)$ is not available. (Only when no part is positive and none is called positive is $F_1$ itself undefined, $0/0$.) The paragraph under the table checks it on the validation parts at $t = 0.5$, with the counts of the threshold table: the two ratios and the count form give the same $F_1$ to six places.
 
 The form shows what $F_1$ ignores: $\mathrm{TN}$ does not appear. That is deliberate when good parts are plentiful and uninteresting, and the paragraph under the table makes it concrete: adding a million correctly passed good parts leaves precision, recall and $F_1$ unchanged and sends accuracy from $0.8920$ to $0.999892$. The other thing $F_1$ fixes is that it weights precision and recall equally; a factory where a miss costs ten times a false alarm needs a different weighting, which is the subject of the last section. In the threshold table, $F_1$ is largest at $t = 0.5$ ($0.5221$) and nearly as large at $t = 0.1$ ($0.5193$): a broad plateau, not a sharp peak, which is typical.
 
@@ -245,13 +247,13 @@ Two things follow at once. The $\mathrm{AUC}$ depends on the scores only through
 
 ### A third computation, by ranks
 
-Counting $n_+ n_-$ pairs is slow for a large dataset ($824364$ pairs on the test set below). A sort does it in $O(N \log N)$. Rank all $N$ scores from the lowest (rank $1$), giving tied scores the average of the ranks they occupy. Let $R_+$ be the sum of the ranks of the positives. The rank of a positive $i$ is $1$, plus the number of positives below it (counting ties as half), plus the number of negatives below it (counting ties as half). Summed over all the positives, the first term gives $n_+$, the second gives $n_+(n_+ - 1)/2$ (each pair of positives contributes $1$ in total: one is above the other, or they tie and each gets half), and the third is exactly the numerator of the pair count. Therefore
+Counting $n_+ n_-$ pairs is slow for a large dataset ($824364$ pairs on the test set below). A sort does it in $O(N \log N)$. Rank all $N$ scores from the lowest (rank $1$), giving tied scores the average of the ranks they occupy. Let $W_+$ be the sum of the ranks of the positives (the Wilcoxon rank sum). The rank of a positive $i$ is $1$, plus the number of positives below it (counting ties as half), plus the number of negatives below it (counting ties as half). Summed over all the positives, the first term gives $n_+$, the second gives $n_+(n_+ - 1)/2$ (each pair of positives contributes $1$ in total: one is above the other, or they tie and each gets half), and the third is exactly the numerator of the pair count. Therefore
 
 $$
-R_+ = \frac{n_+(n_+ + 1)}{2} + n_+ n_- \cdot \mathrm{AUC}, \qquad \mathrm{AUC} = \frac{R_+ - n_+(n_+ + 1)/2}{n_+ n_-}.
+W_+ = \frac{n_+(n_+ + 1)}{2} + n_+ n_- \cdot \mathrm{AUC}, \qquad \mathrm{AUC} = \frac{W_+ - n_+(n_+ + 1)/2}{n_+ n_-}.
 $$
 
-(In the eight-part example the positives have the ascending ranks $3.5$ (tied with a good part for ranks $3$ and $4$), $5$, $7$ and $8$, so $R_+ = 23.5$ and $\mathrm{AUC} = (23.5 - 10)/16 = 0.84375$, the block's value.) This is the Mann-Whitney $U$ statistic in disguise, and it is the form brain computes (the last section). In pseudocode, the trapezoid version, which handles ties by moving through every group of equal scores at once:
+(In the eight-part example the positives have the ascending ranks $3.5$ (tied with a good part for ranks $3$ and $4$), $5$, $7$ and $8$, so $W_+ = 23.5$ and $\mathrm{AUC} = (23.5 - 10)/16 = 0.84375$, the block's value.) This is the Mann-Whitney $U$ statistic in disguise, and it is the form brain computes (the last section). In pseudocode, the trapezoid version, which handles ties by moving through every group of equal scores at once:
 
 ```text
 function roc_auc(score: array<real>[N], y: array<int>[N]) -> real:
@@ -285,7 +287,7 @@ function roc_auc(score: array<real>[N], y: array<int>[N]) -> real:
 
 ### Checking the equivalence on real scores
 
-The three computations must agree to rounding error on the 3000 test parts, and they do, to eight places. To test the tie rule as well, the logits are also rounded to one decimal, which creates $1645$ tied (defective, good) pairs; the table also shows what the two wrong tie rules would give.
+The three computations must agree to rounding error on the 3000 test parts, and they do, to eight places. To test the tie rule as well, the logits are also rounded to one decimal (the `round(z, 1)` of the pseudocode, ties away from zero; no logit of this data set lies exactly halfway, so the rule does not decide any value), which creates $1645$ tied (defective, good) pairs; the table also shows what the two wrong tie rules would give.
 
 <!-- worked: metrics.auc_three_ways -->
 The 3000 test parts (306 defective, 2694 good, 824364 pairs). Ties counted as half in the first three columns; counted as 0 and as 1 in the last two.
@@ -304,14 +306,14 @@ Without ties all five columns are equal: $0.87778700$. With ties the trapezoid, 
 
 The left panel of the figure below is the ROC curve of the model on the test parts, with its area, $0.8778$, shaded. The ROC curve is the same whatever share of the parts are defective, because both of its axes are rates *given the label*. That is a strength when the base rate is unknown or will change. It is a weakness when the question is the one the factory asked: of the parts flagged, how many are real?
 
-The **precision-recall curve** plots precision against recall as the threshold moves (the right panel), the same sweep with different axes. Since precision combines $\mathrm{TPR}$, $\mathrm{FPR}$ and the base rate, it carries the base rate with it. To see it, keep the model fixed and change the share of defective parts by giving each good part a weight, as if the factory had more of them or fewer:
+The **precision-recall curve** plots precision against recall as the threshold moves (the right panel), the same sweep with different axes. Since precision combines $\mathrm{TPR}$, $\mathrm{FPR}$ and the base rate, it carries the base rate with it. To see it, keep the model fixed and change the share of defective parts by giving each good part a weight, as if the factory had more of them or fewer. (The third column of the table, the average precision, summarizes a whole precision-recall curve in one number; it is defined right after the table.)
 
-![Left: the ROC curve of the model on 3000 test parts, rising steeply from the origin and bending toward the top-left corner, with the area below it, 0.8778, shaded and a dashed diagonal for chance. Right: two precision-recall curves for the same model, one at the test set's own 10.2 percent of defective parts, falling from about 0.8 at low recall to about 0.1 at full recall, and one at 1 percent, far lower, close to its dashed no-skill level at 0.01.](img/roc-and-pr.svg)
+![Left: the ROC curve of the model on 3000 test parts, rising steeply from the origin and bending toward the top-left corner, with the area below it, 0.8778, shaded and a dashed diagonal for chance. Right: two precision-recall curves for the same model, one at the test set's own 10.2 percent of defective parts, starting near 1 at the smallest recall and falling to 0.102 at full recall, and one at 1 percent, far lower, ending at 0.01 at full recall; the dashed horizontal lines mark each curve's no-skill level.](img/roc-and-pr.svg)
 
 <!-- worked: metrics.pr_vs_prevalence -->
-The 3000 test parts. Good parts are re-weighted by w = (1 - s)/s x 306/2694 so that the defective parts make up a share s of the weighted total. The operating point is the first threshold at which recall reaches 0.8: logit -3.9946, recall 0.8007, false positive rate 0.1904.
+The 3000 test parts. Each good part is given the weight (1 - xi)/xi x 306/2694 (each defective part has weight 1) so that the defective parts make up a share xi (the base rate) of the weighted total. The operating point is the first threshold at which recall reaches 0.8: logit -3.9946, recall 0.8007, false positive rate 0.1904.
 
-| share of defective s | ROC AUC | average precision | precision at the operating point |
+| base rate xi | ROC AUC | average precision | precision at the operating point |
 |---|---:|---:|---:|
 | 0.5000 | 0.8778 | 0.8694 | 0.8079 |
 | 0.2000 | 0.8778 | 0.6613 | 0.5125 |
@@ -326,10 +328,10 @@ The ROC area does not move: $0.8778$ in every row. The precision at one fixed th
 The usual summary is the **average precision**, $\mathrm{AP}$: the step-wise area under the PR curve,
 
 $$
-\mathrm{AP} = \sum_k (r_k - r_{k-1})\,p_k,
+\mathrm{AP} = \sum_k (R_k - R_{k-1})\,P_k,
 $$
 
-where $r_k$ and $p_k$ are the recall and precision after the $k$-th distinct score, and $r_0 = 0$. Each step is weighted by the recall gained, and the precision at that point is used as it stands: unlike the ROC curve, precision does not move in a straight line between two thresholds, so the trapezoid of the ROC section would not be a faithful area here. The table shows $\mathrm{AP}$ following the base rate, from $0.8694$ at $50\%$ to $0.5024$ at the test set's own rate to $0.0569$ at $0.1\%$. The baseline of an uninformative model is $\pi$ itself (the dashed lines of the figure), so a PR curve is always read against its own base rate.
+where $R_k$ and $P_k$ are the recall and precision after the $k$-th distinct score (a group of tied scores counts as one score), and $R_0 = 0$. Each step is weighted by the recall gained, and the precision at that point is used as it stands: unlike the ROC curve, precision does not move in a straight line between two thresholds, so the trapezoid of the ROC section would not be a faithful area here. The table shows $\mathrm{AP}$ following the base rate, from $0.8694$ at $50\%$ to $0.5024$ at the test set's own rate to $0.0569$ at $0.1\%$. The baseline of an uninformative model is $\xi$ itself (the dashed lines of the figure), so a PR curve is always read against its own base rate.
 
 The two curves answer different questions. Use the ROC curve to compare models on their ability to rank, independent of the population; use the PR curve when the population is known, positives are rare and what matters is the quality of what is flagged. Reporting both costs nothing.
 
@@ -388,7 +390,7 @@ function ece(p: array<real>[N], y: array<int>[N], B: int) -> real:
     return total
 ```
 
-Calibration and discrimination are separate properties. The model of this chapter has a good ranking ($\mathrm{AUC} = 0.88$) and poor calibration. The reverse also happens: a model that always says the base rate, $\hat{p} = \pi$, is perfectly calibrated and ranks nothing. A product that only needs to rank parts for inspection needs the first; a product that multiplies the probability by a price needs the second. Both are reported.
+Calibration and discrimination are separate properties. The model of this chapter has a good ranking ($\mathrm{AUC} = 0.88$) and poor calibration. The reverse also happens: a model that always says the base rate, $\hat{p} = \xi$, is perfectly calibrated and ranks nothing. A product that only needs to rank parts for inspection needs the first; a product that multiplies the probability by a price needs the second. Both are reported.
 
 Brain's calibration metrics use a variant. For a classifier choosing among several options, `ece` there bins by the model's *confidence in the option it chose* and compares each bin with the share of those choices that were right (a related but not identical statistic for two options). The one defined here, on the probability of the positive class, keeps the direction of the error visible (above or below the diagonal), which the repair below needs.
 
@@ -455,7 +457,7 @@ The 1000 validation parts. The model is sigmoid(a z) with z the logit of the fit
 | 1.5 | 0.667 | 0.6681 |
 | 0.3027 (fitted) | 3.303 | 0.2589 |
 
-Slope at the fitted a: 1.01e-18. Temperature = 1/a = 3.3032.
+Slope at the fitted a: absolute value below 1e-12 (yes; the exact residue is rounding noise and depends on the summation order). Temperature = 1/a = 3.3032.
 
 On the test parts:
 
@@ -468,7 +470,7 @@ On the test parts:
 | ROC AUC | 0.877787 | 0.877787 |
 <!-- /worked -->
 
-The first table is the valley of $f$: the cross-entropy of the validation parts falls from $0.4664$ at $a = 1$ to $0.2589$ at the fitted $a = 0.3027$, a temperature of $3.3032$, and rises again on both sides. At the minimum the slope is zero to rounding, $10^{-18}$. The model's logits were about three times too large.
+The first table is the valley of $f$: the cross-entropy of the validation parts falls from $0.4664$ at $a = 1$ to $0.2589$ at the fitted $a = 0.3027$, a temperature of $3.3032$, and rises again on both sides. At the minimum the slope is zero to rounding (the block checks that its absolute value is below $10^{-12}$; the residue itself depends on the order of summation). The model's logits were about three times too large.
 
 The second table is what the repair does on the test parts. The cross-entropy falls from $0.4733$ to $0.2664$. The $\mathrm{ECE}$ falls less, from $0.0856$ to $0.0687$. Two numbers do not move at all: the accuracy at $t = 0.5$ ($0.8857$) and the $\mathrm{AUC}$ ($0.877787$). That is not luck. A positive $a$ keeps the sign of every logit and the order of every pair of logits, so it changes no decision at $t = 0.5$ and no ranking. Temperature scaling repairs the *confidence* and leaves the *discrimination* alone, which is why it is safe to do after the model is trained.
 
@@ -478,7 +480,7 @@ The second table is what the repair does on the test parts. The cross-entropy fa
 
 The $\mathrm{ECE}$ after scaling is still $0.0687$. The reliability diagram shows what is left:
 
-![Reliability diagram of the model on 3000 test parts. The dashed diagonal is perfect calibration. The raw model's curve starts above the diagonal at the lowest bin and falls far below it everywhere above 0.3. The curve after scaling by a single temperature lies nearer to the diagonal but still below it above 0.1. The curve after a scale and a shift lies close to the diagonal throughout.](img/reliability-diagram.svg)
+![Reliability diagram of the model on 3000 test parts. The dashed diagonal is perfect calibration. The raw model's curve starts above the diagonal at the lowest bin and falls far below it everywhere above 0.3. The curve after scaling by a single temperature lies nearer to the diagonal but still below it in every bin. The curve after a scale and a shift lies close to the diagonal in most bins, with the sparse bins between 0.7 and 0.9 below it.](img/reliability-diagram.svg)
 
 <!-- worked: metrics.reliability_scaled -->
 The 3000 test parts, a and b fitted on the validation parts.
@@ -496,10 +498,42 @@ The 3000 test parts, a and b fitted on the validation parts.
 | 0.8 to 0.9 | 60 | 0.8510 | 0.5500 | 22 | 0.8492 | 0.6364 |
 | 0.9 to 1.0 | 70 | 0.9557 | 0.7286 | 16 | 0.9342 | 0.9375 |
 
-Scale only: a = 0.3027, ECE = 0.0687, cross-entropy 0.2664. Scale and shift, sigmoid(a z + b) fitted on the validation parts by Newton's method from (1, 0): a = 0.2347, b = -0.9928, ECE = 0.0116, cross-entropy 0.2283. Mean predicted probability: scale only 0.1707, scale and shift 0.1081, observed 0.1020.
+Scale only: a = 0.3027, ECE = 0.0687, cross-entropy 0.2664. Scale and shift, sigmoid(a z + b) fitted on the validation parts by Newton's method with step halving (`fit_scale_shift` of the chapter: start (1, 0), at most 100 iterations, stop when |da| + |db| < 1e-12): a = 0.2347, b = -0.9928, ECE = 0.0116, cross-entropy 0.2283. Mean predicted probability: scale only 0.1707, scale and shift 0.1081, observed 0.1020.
 <!-- /worked -->
 
-After the scale alone the points are closer to the diagonal but still below it in every bin, because the probabilities are too high everywhere: the mean predicted probability is $0.1707$ against an observed share of $0.1020$. Shrinking the logits moves every probability toward one half, including those of the thousands of clearly good parts, whose probability rises from nearly $0$ to a few percent. One number cannot at once shrink the confidence and keep the overall rate. A second parameter, a shift $b$, can: fit $\sigma(a z + b)$ on the validation parts by Newton's method (the same loss, now in two variables, with a step halved whenever it fails to lower the loss). The fit gives $a = 0.2347$ and $b = -0.9928$; the mean predicted probability becomes $0.1081$, the $\mathrm{ECE}$ falls to $0.0116$, and the cross-entropy to $0.2283$. The curve of the figure lies near the diagonal.
+After the scale alone the points are closer to the diagonal but still below it in every bin, because the probabilities are too high everywhere: the mean predicted probability is $0.1707$ against an observed share of $0.1020$. Shrinking the logits moves every probability toward one half, including those of the thousands of clearly good parts, whose probability rises from nearly $0$ to a few percent. One number cannot at once shrink the confidence and keep the overall rate. A second parameter, a shift $b$, can: fit $\sigma(a z + b)$ on the validation parts. The loss is the same cross-entropy, now in two variables, $f(a, b) = \frac{1}{N}\sum_n \bigl[\mathrm{softplus}(a z_n + b) - y_n (a z_n + b)\bigr]$. Write $s_n = \sigma(a z_n + b)$. By the same algebra as before its gradient has the components $g_a = \frac{1}{N}\sum_n (s_n - y_n) z_n$ and $g_b = \frac{1}{N}\sum_n (s_n - y_n)$, and its Hessian has the entries $h_{aa} = \frac{1}{N}\sum_n s_n (1 - s_n) z_n^2$, $h_{ab} = \frac{1}{N}\sum_n s_n (1 - s_n) z_n$ and $h_{bb} = \frac{1}{N}\sum_n s_n (1 - s_n)$. Newton's method (Volume I, chapter 7, extended here to two variables) moves from $(a, b)$ by the step $(\Delta a, \Delta b)$ that solves the two equations $h_{aa}\Delta a + h_{ab}\Delta b = g_a$ and $h_{ab}\Delta a + h_{bb}\Delta b = g_b$, by Cramer's rule; it is safe to halve the step whenever the full step fails to lower the loss, and the loop below stops when the step is negligible:
+
+```text
+function cross_entropy(z: array<real>[N], y: array<int>[N], a: real, b: real) -> real:
+    return mean([softplus(a * z[n] + b) - y[n] * (a * z[n] + b) for n in 0 .. N])
+
+function fit_scale_shift(z: array<real>[N], y: array<int>[N]) -> (real, real):
+    require N > 0, "no validation parts"
+    a = 1.0
+    b = 0.0
+    for iteration in 0 .. 100:
+        s = [sigmoid(a * z[n] + b) for n in 0 .. N]
+        g_a = mean([(s[n] - y[n]) * z[n] for n in 0 .. N])
+        g_b = mean([s[n] - y[n] for n in 0 .. N])
+        h_aa = mean([s[n] * (1 - s[n]) * z[n] * z[n] for n in 0 .. N])
+        h_ab = mean([s[n] * (1 - s[n]) * z[n] for n in 0 .. N])
+        h_bb = mean([s[n] * (1 - s[n]) for n in 0 .. N])
+        det = h_aa * h_bb - h_ab * h_ab
+        require det > 0.0, "the Hessian is singular: the logits are all equal"
+        d_a = (h_bb * g_a - h_ab * g_b) / det
+        d_b = (h_aa * g_b - h_ab * g_a) / det
+        base = cross_entropy(z, y, a, b)
+        step = 1.0
+        while step > 0.000001 and cross_entropy(z, y, a - step * d_a, b - step * d_b) > base:
+            step = step / 2.0
+        a = a - step * d_a
+        b = b - step * d_b
+        if abs(step * d_a) + abs(step * d_b) < 0.000000000001:
+            break
+    return (a, b)
+```
+
+The Hessian is positive definite whenever the logits take at least two different values (its determinant is a variance-like quantity), so `det` is positive; the halving loop ends after at most 20 halvings, and a step that was halved down to $10^{-6}$ is taken anyway, as the loop is written. The fit gives $a = 0.2347$ and $b = -0.9928$; the mean predicted probability becomes $0.1081$, the $\mathrm{ECE}$ falls to $0.0116$, and the cross-entropy to $0.2283$. The curve of the figure lies near the diagonal in most bins.
 
 Fitting a shift as well as a scale costs one more parameter and still changes no ranking (a strictly increasing map of the logit again), but the shift can move the decisions at a fixed threshold, and it needs more data to estimate. Which to use is a question about how much held-out data there is: the single scale is the safest when data are scarce, and the pair when the base rate of the held-out set is trustworthy. Brain's survival crate makes exactly this choice, an intercept alone, both, or both only when the data show the slope differs from one (the last section).
 
@@ -508,7 +542,7 @@ Fitting a shift as well as a scale costs one more parameter and still changes no
 An $\mathrm{ECE}$ computed from a finite sample is never zero, even for perfect probabilities, because each bin's observed share is a sample mean (Volume I, chapter 12). The data of this chapter allow a test of that, since the hidden law gives each test part its true probability. Using those true probabilities as the predictions gives a perfectly calibrated "model":
 
 <!-- worked: metrics.ece_binning -->
-The 3000 test parts. 'Recalibrated' is sigmoid(a z + b) with a, b fitted on the validation parts (`metrics.reliability_scaled`). 'True law' uses the hidden probability sigmoid(-4.5 + 2.5 x1 + 1.8 x2) of each part, which is perfectly calibrated by construction; the last column uses only the first 300 test parts.
+The 3000 test parts. 'Recalibrated' is sigmoid(a z + b) with a, b fitted on the validation parts (`metrics.reliability_scaled`). 'True law' uses the hidden probability sigmoid(-4.5 + 2.5 x1 + 1.8 x2) of each part, which is perfectly calibrated by construction; the last column uses only the first 300 test parts (in the order drawn). Equal-width bins follow the `ece` pseudocode of the chapter. Equal-mass bins: sort the N parts by predicted probability ascending (parts with equal probability keep their original order), and let bin b = 0 .. B - 1 hold the sorted positions floor(b N / B) to floor((b + 1) N / B) - 1, so bin sizes differ by at most one; each bin is weighted by its own count, n_b / N. Four decimals printed.
 
 | binning rule | model, raw | model, recalibrated | true law, 3000 parts | true law, 300 parts |
 |---|---:|---:|---:|---:|
@@ -517,9 +551,28 @@ The 3000 test parts. 'Recalibrated' is sigmoid(a z + b) with a, b fitted on the 
 | 20 equal-width bins | 0.0858 | 0.0141 | 0.0084 | 0.0477 |
 | 10 equal-mass bins | 0.0817 | 0.0137 | 0.0082 | 0.0289 |
 | 30 equal-mass bins | 0.0839 | 0.0209 | 0.0132 | 0.0518 |
+| 7 equal-mass bins (7 does not divide 3000 or 300) | 0.0837 | 0.0125 | 0.0043 | 0.0140 |
 <!-- /worked -->
 
-The true law has $\mathrm{ECE} = 0.0070$ on $3000$ parts and $0.0324$ on $300$ parts with ten bins: the noise floor of the measurement, and it rises with the number of bins because each bin is estimated from fewer parts ($0.0212$ with $5$ bins and $0.0477$ with $20$). The recalibrated model's $0.0116$ is therefore within a hair of what a perfect model would score at this size, and the raw model's $0.0856$ is twelve times the floor. Two consequences: an $\mathrm{ECE}$ difference of a point or two on a few hundred examples is not evidence of anything, and the number of bins is part of the metric and has to be stated. (Equal-mass bins, which put the same number of parts in each, are an alternative that never leaves a bin nearly empty; the table gives it too.)
+The true law has $\mathrm{ECE} = 0.0070$ on $3000$ parts and $0.0324$ on $300$ parts with ten bins: the noise floor of the measurement, and it rises with the number of equal-width bins because each bin is estimated from fewer parts ($0.0212$ with $5$ bins and $0.0477$ with $20$). The recalibrated model's $0.0116$ is therefore within a hair of what a perfect model would score at this size, and the raw model's $0.0856$ is twelve times the floor. Two consequences: an $\mathrm{ECE}$ difference of a point or two on a few hundred examples is not evidence of anything, and the number of bins is part of the metric and has to be stated. Equal-mass bins, which put (almost) the same number of parts in each, are an alternative that never leaves a bin nearly empty, and the table gives them too. The rule is exact. Sort the $N$ parts by predicted probability ascending, parts with equal probability keeping their original order (the stable `argsort` of the pseudocode). Bin $b$, for $b = 0, \dots, B - 1$, holds the sorted positions $\lfloor bN/B \rfloor$ to $\lfloor (b + 1)N/B \rfloor - 1$. When $B$ divides $N$ every bin has $N/B$ parts; otherwise the sizes differ by at most one, and each bin is weighted in the sum by its own count, $n_b/N$. The last row of the table uses $B = 7$, which divides neither $3000$ nor $300$.
+
+```text
+function ece_equal_mass(p: array<real>[N], y: array<int>[N], B: int) -> real:
+    require B >= 1 and B <= N, "need at least one part per bin"
+    order = argsort(p)                          # ascending, ties keep the original order
+    total = 0.0
+    for b in 0 .. B:
+        first = (b * N) // B
+        last = ((b + 1) * N) // B               # one past the last position of bin b
+        count = last - first
+        sum_p = 0.0
+        sum_y = 0.0
+        for m in first .. last:
+            sum_p = sum_p + p[order[m]]
+            sum_y = sum_y + y[order[m]]
+        total = total + (count / N) * abs(sum_y / count - sum_p / count)
+    return total
+```
 
 ## Metrics for numbers
 
@@ -527,16 +580,16 @@ The true law has $\mathrm{ECE} = 0.0070$ on $3000$ parts and $0.0324$ on $300$ p
 
 For a quantity the labels are numbers $y$ and the predictions $\hat{y}$. The mean squared error of chapter 2 is the average of $(\hat{y} - y)^2$. Its square is the unit of the quantity squared, and a single large error dominates it. The **mean absolute error**, $\mathrm{MAE} = \frac{1}{N}\sum_n |\hat{y}_n - y_n|$, is in the quantity's own unit and weighs every error in proportion to its size. The choice follows the loss one cares about: the constant that minimizes the squared error is the mean (set $\frac{d}{dc}\sum_n (y_n - c)^2 = 0$), the constant that minimizes the absolute error is the median (the derivative of $\sum_n |y_n - c|$ is the number of labels below $c$ minus the number above it, which vanishes at the middle value).
 
-A third number gives the error a scale. The **coefficient of determination**, $R^2 = 1 - \mathrm{SSE}/\mathrm{SST}$, compares the squared errors, $\mathrm{SSE} = \sum_n (\hat{y}_n - y_n)^2$, with those of the baseline that always predicts the mean of the labels, $\mathrm{SST} = \sum_n (y_n - \bar{y})^2$. It is the regression counterpart of the majority-class baseline: it is $0$ for the baseline itself, $1$ for perfect predictions, and negative for a model worse than the baseline.
+A third number gives the error a scale. The **coefficient of determination**, $R^2 = 1 - \mathrm{SSE}/\mathrm{SST}$, compares the squared errors, $\mathrm{SSE} = \sum_n (\hat{y}_n - y_n)^2$, with those of the baseline that always predicts the mean of the labels $\bar{y} = \frac{1}{N}\sum_n y_n$, $\mathrm{SST} = \sum_n (y_n - \bar{y})^2$ (so $\mathrm{MSE} = \mathrm{SSE}/N$). It is the regression counterpart of the majority-class baseline: it is $0$ for the baseline itself, $1$ for perfect predictions, and negative for a model worse than the baseline.
 
 <!-- worked: metrics.regression_metrics -->
-Labels y = [2.0, 4.0, 6.0, 8.0, 10.0], mean 6.0, total squared deviation from the mean 40.0.
+Labels y = [2.0, 4.0, 6.0, 8.0, 10.0], mean 6.0, SST = sum of (y - mean)^2 = 40.0. MSE = SSE / 5, MAE = mean of |prediction - y|, R^2 = 1 - SSE/SST, with SSE = sum of (prediction - y)^2; no rounding before the last step, four decimals printed.
 
-| predictions | MSE | MAE | R^2 = 1 - SSE/SST |
-|---|---:|---:|---:|
-| small errors | 0.2500 | 0.5000 | 0.9688 |
-| one large error | 20.0000 | 2.0000 | -1.5000 |
-| always the mean | 8.0000 | 2.4000 | 0.0000 |
+| predictions | predicted values | MSE | MAE | R^2 |
+|---|---|---:|---:|---:|
+| small errors | [2.5, 3.5, 6.5, 7.5, 10.5] | 0.2500 | 0.5000 | 0.9688 |
+| one large error | [2.0, 4.0, 6.0, 8.0, 20.0] | 20.0000 | 2.0000 | -1.5000 |
+| always the mean | [6.0, 6.0, 6.0, 6.0, 6.0] | 8.0000 | 2.4000 | 0.0000 |
 <!-- /worked -->
 
 One error of size $10$ among five predictions multiplies the MSE by eighty ($0.25$ to $20$) and the MAE by four ($0.5$ to $2$), and sends $R^2$ to $-1.5$, below the baseline's $0$.
@@ -597,7 +650,7 @@ $$
 The default $t = 0.5$ is the right threshold only when the two costs are equal. With $c_{\mathrm{FP}} = 1$ and $c_{\mathrm{FN}} = 10$ it is $t^\star = 1/11 = 0.0909$. The derivation assumes the probability $p$ is *true*; a miscalibrated probability gives the wrong threshold, which is a practical reason for the second half of this chapter. The table puts it to the test on the screening data: the cost per part on the validation and test parts for several rules for choosing the cut on the logit.
 
 <!-- worked: metrics.cost_threshold -->
-Cost of a good part rejected (false positive) 1, of a defective part passed (false negative) 10. A part is flagged when its cut is met on the logit z. For a calibrated probability p, flagging pays when p x 10 > (1 - p) x 1, that is p > 1/(1 + 10) = 0.0909, logit -2.3026. The scaled probability is sigmoid(a z) with a = 0.3027, so its cut on z is -2.3026/0.3027; the scaled and shifted one is sigmoid(a z + b) with a = 0.2347, b = -0.9928 (`metrics.reliability_scaled`), so its cut is (-2.3026 - (-0.9928))/0.2347. A searched cut is the lowest of the cuts -15, -14.95, ..., 15 with the smallest cost on the parts named.
+Cost of a good part rejected (false positive) 1, of a defective part passed (false negative) 10. A part is flagged when its cut is met on the logit z. For a calibrated probability p, flagging pays when p x 10 > (1 - p) x 1, that is p > 1/(1 + 10) = 0.0909, logit -2.3026. The scaled probability is sigmoid(a z) with a = 0.3027, so its cut on z is -2.3026/0.3027; the scaled and shifted one is sigmoid(a z + b) with a = 0.2347, b = -0.9928 (`metrics.reliability_scaled`), so its cut is (-2.3026 - (-0.9928))/0.2347. A searched cut is the lowest of the cuts c_k = -15 + 0.05 k, k = 0 .. 600 (computed by that multiplication; a part is flagged when z >= c_k) with the smallest cost on the parts named. Costs are per part, four decimals printed.
 
 | rule | cut on z | cost per part, validation | cost per part, test | FP on test | FN on test |
 |---|---:|---:|---:|---:|---:|
@@ -621,7 +674,7 @@ Every number above was computed from a finite test set, so it carries a sampling
 
 <!-- worked: metrics.bootstrap_intervals -->
 Generator: the book's SplitMix64, seed 0x6a94e644937c3834 (7680016446780094516).
-The 3000 test parts (306 defective). The cut on z is chosen on the validation parts (the lowest of the cuts -15, -14.95, ..., 15 with the largest F1): z >= -1.15, which is held fixed. 1000 resamples; a resample is 3000 calls of rng.integer(3000), each the index of a test part (rows in the order drawn). Interval ends are the 2.5th and 97.5th percentiles of the sorted replicates by linear interpolation at position q (R - 1); the standard error is the standard deviation of the replicates (divisor R).
+The 3000 test parts (306 defective). The cut on z is chosen on the validation parts (the lowest of the cuts c_k = -15 + 0.05 k, k = 0 .. 600, computed by that multiplication, with the largest F1 on the validation parts, a part being flagged when z >= c_k; on equal F1 the lowest cut): z >= -1.15, which is held fixed. The estimate column is the metric on the original 3000 test parts in their given order. 1000 resamples drawn one after the other from this one generator; a resample is 3000 calls of rng.integer(3000), each the index of a test part (rows in the order drawn). Interval ends are the 2.5th and 97.5th percentiles of the sorted replicates by linear interpolation at position q x (1000 - 1), q = 0.025 and 0.975, in the ascending list of the 1000 replicates; the standard error is the standard deviation of the replicates (divisor 1000).
 
 | metric | estimate | standard error | 95% lower | 95% upper |
 |---|---:|---:|---:|---:|
@@ -629,7 +682,7 @@ The 3000 test parts (306 defective). The cut on z is chosen on the validation pa
 | accuracy | 0.8693 | 0.0063 | 0.8567 | 0.8813 |
 | F1 | 0.4909 | 0.0223 | 0.4488 | 0.5354 |
 
-Formula for the accuracy: sqrt(p (1 - p) / n) = 0.0062, interval 0.8573 to 0.8814.
+Formula for the accuracy, with p the estimate above and n = 3000: sqrt(p (1 - p) / n) = 0.0062, interval p -/+ 1.959964 x that = 0.8573 to 0.8814.
 <!-- /worked -->
 
 The $\mathrm{AUC}$ is $0.8778$ with a $95\%$ interval from $0.8582$ to $0.8968$; the accuracy $0.8693$ from $0.8567$ to $0.8813$, close to the formula's $0.8573$ to $0.8814$. The $F_1$ score, which depends on a few hundred positives, is the least certain: $0.4909$ with an interval of $0.4488$ to $0.5354$, a width of nearly nine points. Two models whose $F_1$ differ by two points on this test set are not distinguished; and for two models scored on the *same* test parts the paired comparison of Volume I, chapter 12, is far sharper than two separate intervals. These intervals describe the variation of the test sample for a fixed model; they do not include the variation from retraining (a different seed, a different training sample), which is the subject of the experiments chapter.
@@ -686,13 +739,13 @@ Answers are at the end of the chapter.
 5. **Find the error.** A team fits the temperature on the test set "so the reliability diagram looks right" and reports the test $\mathrm{ECE}$. What is wrong with the reported number, and which set should have been used for the fit?
 6. **Explain.** Model A has the lower perplexity and model B the higher exact match on the same questions. Using the table of the language section, say what each metric is averaging, and which model you would deploy to answer arithmetic questions.
 7. **Find the error.** "The model is $99.5\%$ right per token, so a $100$-token answer is right $99.5\%$ of the time." Compute what is expected under independence, and say what the assumption is.
-8. **Predict.** A missed defect costs $19$ times a false alarm. What threshold should a calibrated model use? Using the cost table, in which direction (stricter or looser) does the raw model's cut at the derived threshold err relative to the calibrated one, and what is the evidence?
+8. **Predict.** A missed defect costs $19$ times a false alarm. What threshold should a calibrated model use? The cost table of the chapter is for a ratio of $10$ (threshold $0.0909$), not $19$; use it only for the direction of the comparison: does the raw model's cut at the derived threshold err on the stricter or the looser side relative to the calibrated one, and what is the evidence?
 
 ## Exercises
 
-1. **[Calculate]** A detector's counts on $1000$ parts are $\mathrm{TP} = 30$, $\mathrm{FP} = 20$, $\mathrm{FN} = 10$, $\mathrm{TN} = 940$. Compute accuracy, precision, recall, false positive rate and $F_1$, and the accuracy of the majority-class rule. Verify the identity accuracy $= \pi\,\mathrm{TPR} + (1 - \pi)(1 - \mathrm{FPR})$.
+1. **[Calculate]** A detector's counts on $1000$ parts are $\mathrm{TP} = 30$, $\mathrm{FP} = 20$, $\mathrm{FN} = 10$, $\mathrm{TN} = 940$. Compute accuracy, precision, recall, false positive rate and $F_1$, and the accuracy of the majority-class rule. Verify the identity accuracy $= \xi\,\mathrm{TPR} + (1 - \xi)(1 - \mathrm{FPR})$.
 2. **[Calculate]** Show that $\min(P, R) \le F_1 \le (P + R)/2$ for $P, R > 0$, with equality in the second only when $P = R$, and that $F_1 \le 2\min(P, R)$. Compute $F_1$ for $(P, R) = (0.2, 0.8)$ and compare with the table.
-3. **[Calculate]** Six parts have scores and labels $0.9\,(+)$, $0.8\,(-)$, $0.7\,(+)$, $0.7\,(-)$, $0.4\,(+)$, $0.2\,(-)$. Build the ROC points, compute the trapezoid area, count the pairs with half credit for the tie, and compute $R_+$ and the rank-sum formula. Confirm that the three agree.
+3. **[Calculate]** Six parts have scores and labels $0.9\,(+)$, $0.8\,(-)$, $0.7\,(+)$, $0.7\,(-)$, $0.4\,(+)$, $0.2\,(-)$. Build the ROC points, compute the trapezoid area, count the pairs with half credit for the tie, and compute $W_+$ and the rank-sum formula. Confirm that the three agree.
 4. **[Calculate]** A model's logits on four validation parts are $-2, -1, 1, 2$ with labels $0, 0, 1, 1$. Show that the slope $f'(a)$ of the cross-entropy is negative for every $a > 0$ and that no finite scale minimizes the loss. Change the labels to $0, 1, 0, 1$: compute $f'(0)$, and decide whether a positive scale can help.
 5. **[Calculate]** For the cost ratio $c_{\mathrm{FN}} = 19\,c_{\mathrm{FP}}$, derive the threshold $t^\star$ on a calibrated probability and on the logit. A model is calibrated for a population with $2\%$ defective parts and is moved to a population with $10\%$: using the Bayes formula for the odds, say how the calibrated probability of a part must be adjusted, and how $t^\star$ moves.
 6. **[Implement]** Implement the confusion counts, precision, recall, $F_1$, the ROC points with the trapezoid area, the pair count with half credit for ties, and the rank sum, and reproduce `metrics.roc_by_hand` and `metrics.auc_three_ways` (the generator of `metrics.screen_data` is needed for the second).
@@ -741,7 +794,7 @@ The limits are in what a held-out test set can say. Every number here describes 
 5. The test set has been used to choose a parameter, so the $\mathrm{ECE}$ on it is optimistic: it measures the fit to that sample, noise included. The temperature should be fitted on the validation set and the $\mathrm{ECE}$ reported on the test set, which was never used to choose anything.
 6. Perplexity averages the logarithm of the probability of the correct token over all positions, so it rewards sharpness on most tokens and tolerates a single slip (B: $1.2768$ against A's $2.2222$). Exact match counts whole answers, so it loses an answer to any single wrong top choice (B: $0.8$ against A's $1.0$). To answer arithmetic questions, where an answer is right or wrong as a whole, model A, which gets every answer right; B's better perplexity is a better fit to the text on average, not a better answer rate.
 7. Under independence the answer is right with probability $0.995^{100} = 0.6058$, about $61\%$, not $99.5\%$. The assumption is that the tokens of an answer are right or wrong independently with the same probability. In practice errors are correlated (one wrong digit often follows from an earlier wrong one) and positions differ in difficulty, so the real value differs from $0.6058$, but the order of magnitude is the point: per-token accuracy overstates the accuracy of whole answers.
-8. The threshold is $t^\star = 1/(1 + 19) = 0.05$. In the table the raw model's cut at its derived threshold ($-2.303$, for $t^\star = 0.0909$) is stricter than the calibrated one ($-5.580$): it flags $581$ parts ($211$ defective, $370$ good) where the calibrated cut flags $937$, and it misses $95$ defective parts where the calibrated cut misses $42$. The raw model's tails are overconfident (parts it gives about $0.005$ are defective $3.9\%$ of the time), so a threshold on the raw probability cuts too high. The test cost is $0.4400$ against $0.3643$.
+8. The threshold is $t^\star = 1/(1 + 19) = 0.05$. In the table (which is for the ratio $10$, $t^\star = 0.0909$, so it shows the direction and not the numbers for $19$) the raw model's cut at its derived threshold ($-2.303$) is stricter than the calibrated one ($-5.580$): it flags $581$ parts ($211$ defective, $370$ good) where the calibrated cut flags $937$, and it misses $95$ defective parts where the calibrated cut misses $42$. The raw model's tails are overconfident (parts it gives about $0.005$ are defective $3.9\%$ of the time), so a threshold on the raw probability cuts too high. The test cost is $0.4400$ against $0.3643$.
 
 ## References
 

@@ -199,11 +199,11 @@ def dataset_head():
         cls.append((CLASS_NAMES[c], len(pts), _pt(CENTRES[c], 1), f"{SHAPES[c][0]}, {SHAPES[c][1]}, {SHAPES[c][2]:g} deg", _pt(m)))
     return (
         f"{_seed_line(DATA_NAME)} Three classes A, B, C. Each point is two draws, z1 = rng.normal() then z2 = rng.normal(); "
-        "with the class's standard deviations (s1, s2) and angle t, a = s1 z1 and b = s2 z2, "
-        "x1 = c1 + a cos t - b sin t and x2 = c2 + a sin t + b cos t, rounded to 2 decimals. "
+        "with the class's standard deviations (s1, s2) and angle (in degrees, converted to radians for cos and sin), a = s1 z1 and b = s2 z2, "
+        "x1 = c1 + a cos(angle) - b sin(angle) and x2 = c2 + a sin(angle) + b cos(angle), rounded to 2 decimals. "
         f"Rows are drawn in order, the class cycling A, B, C, A, ...: first {N_TRAIN} training rows, then {N_VAL} validation rows, then {N_TEST} test rows, "
         "from one generator without reseeding.\n\n"
-        + _table(["class", "training rows", "centre (c1, c2)", "s1, s2, t", "average of training rows"], cls, "lrlll")
+        + _table(["class", "training rows", "centre (c1, c2)", "s1, s2, angle", "average of training rows"], cls, "lrlll")
         + "\n\nThe first six training rows:\n\n" + _table(["n", "x1", "x2", "class"], rows, "lrrl")
     )
 
@@ -406,6 +406,7 @@ def kmeans_trace():
 INIT_NAME = "classical.kmeans_init"
 K_MEANS_K = 3
 RESTARTS = 100
+REACH_TOL = 0.005      # a run "reaches the lowest" when its J is below the lowest J of that k plus this
 
 
 def _train_points():
@@ -433,15 +434,17 @@ def kmeans_restarts():
             if kk != k:
                 continue
             js = sorted(r[0] for r in rs)
-            hits = sum(1 for j in js if j <= best + 1e-6)
+            hits = sum(1 for j in js if j < best + REACH_TOL)
             rounds_mean = sum(len(r[3]) for r in rs) / len(rs)
-            rows.append((k, name, f"{js[0]:.2f}", f"{js[len(js) // 2]:.2f}", f"{js[-1]:.2f}", f"{sum(js) / len(js):.2f}", f"{hits} of {RESTARTS}", f"{rounds_mean:.1f}"))
+            median = (js[len(js) // 2 - 1] + js[len(js) // 2]) / 2        # an even count: the average of the two middle values
+            rows.append((k, name, f"{js[0]:.2f}", f"{median:.2f}", f"{js[-1]:.2f}", f"{sum(js) / len(js):.2f}", f"{hits} of {RESTARTS}", f"{rounds_mean:.1f}"))
     return (f"{_seed_line(INIT_NAME)} Points: the 90 training rows without their labels. In order, from one generator: {RESTARTS} random starts and {RESTARTS} k-means++ starts for k = 3, then the same for k = 6. "
             "A random start shuffles the numbers 0 .. 89 with `shuffle` and takes the first k rows as centres. "
             "A k-means++ start draws the first centre as row `rng.integer(90)`, then each further centre with one `rng.uniform()`: "
-            "u = uniform x (sum of D), walk the rows in order subtracting each D(row) from u, and take the first row at which u <= 0 (D = squared distance to the nearest centre so far). "
-            "Lloyd's rounds follow until the assignment repeats; the rounds counted include the last, confirming one. J is the sum of squared distances to the assigned centre. "
-            "'Lowest' is the lowest J found by any of the 200 runs at that k.\n\n"
+            "target = uniform x (sum of D2), walk the rows in order subtracting each D2(row) from target, and take the first row at which target <= 0 (D2 = squared distance from the row to the nearest centre chosen so far). "
+            "Lloyd's rounds follow until the assignment repeats; the rounds counted include the last, confirming one, and 'mean rounds' is their average over the 100 runs of the row. J is the sum of squared distances to the assigned centre. "
+            "'Lowest' is the lowest J found by any of the 200 runs at that k (both starts together); a run 'reaches the lowest' when its J is less than 0.005 above that value. "
+            "'Median J' of the 100 runs of a row is the average of the 50th and 51st smallest values (the median of the book's pseudocode page). Mean J is the average of the 100 values.\n\n"
             + _table(["k", "start", "lowest J", "median J", "highest J", "mean J", "runs reaching the lowest", "mean rounds"], rows, "rlrrrrrr"))
 
 
@@ -482,7 +485,7 @@ def kmeans_choose_k():
         rows.append((k, f"{best:.2f}", f"{best / len(pts):.3f}", "" if prev is None else f"{100 * (prev - best) / prev:.1f}%"))
         prev = best
     return (f"{_seed_line(INIT_NAME + '.choose_k')} For each k = 1 .. 8 in turn, 10 k-means++ starts (each: `rng.integer(90)`, then k - 1 draws of `rng.uniform()`), the lowest final J is kept. "
-            "Points: the 90 training rows.\n\n"
+            "Points: the 90 training rows. Relative drop = (J(k - 1) - J(k)) / J(k - 1), with J the lowest of 10 starts at each k.\n\n"
             + _table(["k", "lowest J of 10 starts", "J / N", "relative drop from k - 1"], rows))
 
 
@@ -539,6 +542,9 @@ def pca_trace():
     g = [[_dot(a, b) for b in xc] for a in xc]
     gv, _ = _jacobi_eigen(g)
     out = [
+        "Four points (x1, x2); covariance with divisor N = 4; every eigenvector is signed so that its entry of largest magnitude is positive. "
+        "An eigenvalue that is zero up to rounding error (magnitude below 0.00005) is printed as 0.0000, whatever its sign.",
+        "",
         _table(["n", "x1", "x2", "x1 centred", "x2 centred", "score on direction 1", "reconstruction (rank 1)"],
                [(i + 1, f"{rows[i][0]:g}", f"{rows[i][1]:g}", f"{xc[i][0]:.2f}", f"{xc[i][1]:.2f}", f"{scores[i]:.4f}", _pt(recon[i], 4)) for i in range(n)], "rrrrrrl"),
         "",
@@ -590,9 +596,9 @@ def pca_cloud():
         ("covariance of the whitened data", f"[[{cw[0][0]:.4f}, {cw[0][1]:.4f}], [{cw[1][0]:.4f}, {cw[1][1]:.4f}]]"),
     ]
     return (f"{_seed_line(CLOUD_NAME)} {CLOUD_N} points; each is two draws a = {CLOUD_SD[0]} rng.normal(), b = {CLOUD_SD[1]} rng.normal(), "
-            f"then x1 = {CLOUD_MEAN[0]} + a cos t - b sin t, x2 = {CLOUD_MEAN[1]} + a sin t + b cos t with t = {CLOUD_ANGLE:g} degrees, rounded to 2 decimals. "
-            f"Covariance with divisor N. Average point {_pt(mu)}.\n\n" + _table(["quantity", "value"], rows, "ll")
-            + "\n\nWhitening: z = (u1 / sqrt(lambda1), u2 / sqrt(lambda2)), with u_j the dot product of the centred point with direction j.")
+            f"then x1 = {CLOUD_MEAN[0]} + a cos(angle) - b sin(angle), x2 = {CLOUD_MEAN[1]} + a sin(angle) + b cos(angle) with angle = {CLOUD_ANGLE:g} degrees, rounded to 2 decimals. "
+            f"Covariance with divisor N; eigenvectors signed so that the entry of largest magnitude is positive. Average point {_pt(mu)}.\n\n" + _table(["quantity", "value"], rows, "ll")
+            + "\n\nWhitened data: the point with score_1, score_2 becomes (score_1 / sqrt(lambda1), score_2 / sqrt(lambda2)), where score_j is the dot product of the centred point with direction j; its covariance has divisor N as above.")
 
 
 LATENT_NAME = "classical.pca_latent"
@@ -865,7 +871,7 @@ def forest_accuracy():
     for b in (1, 5, 25, 100):
         rows.append((b, _pct(_acc([_vote_class(_vote(bag[:b], x)) for x in vx], vy)), _pct(_acc([_vote_class(_vote(rf[:b], x)) for x in vx], vy))))
     return (f"{_seed_line(FOREST_NAME)} Draw order: 100 bagged trees, then 100 random-forest trees, from one generator. For each tree: a bootstrap sample of the 90 training rows (90 calls of `rng.integer(90)`, the rows taken in the order drawn); "
-            "then the tree is grown to purity (entropy). In a random-forest tree, each node that is about to be split first draws one `rng.integer(2)`, the only feature considered there; nodes are visited depth-first, the yes branch before the no branch. "
+            "then the tree is grown to purity (entropy). In a random-forest tree, each node that is not pure (a pure node is a leaf and draws nothing) first draws one `rng.integer(2)`, the only feature considered there, also when no question at the node gains anything; nodes are visited depth-first, the yes branch before the no branch. "
             "An ensemble of B trees uses the first B trees of its 100; the vote is the plurality of the trees, a tie going to the smaller class label.\n\n"
             + _table(["B trees", "bagging: validation accuracy", "random forest: validation accuracy"], rows)
             + f"\n\nOne tree grown on the full training set (no bootstrap): validation accuracy {_pct(base)}.")
@@ -971,13 +977,13 @@ def adaboost_rounds():
         rows.append(tuple(row))
     heads = ["x", "y"]
     for m, *_ in parts:
-        heads += [f"w before round {m}", f"h{m}(x)", f"w after round {m}"]
-    return ("Ten points with x = 0 .. 9 and labels y = +, +, +, -, -, -, +, +, +, -. Initial weights 1/10. A stump predicts s when x <= t and -s otherwise, for t at the half-integers 0.5 .. 8.5 and s = +1 or -1; "
-            "the best stump has the smallest weighted error (the lowest t, then s = +1, on a tie). alpha = 0.5 ln((1 - error)/error); the new weight is the old one times exp(-alpha y h(x)), divided by their sum Z. "
-            "The strong classifier is the sign of the sum of alpha h (sign(0) = +1).\n\n"
+        heads += [f"q before round {m}", f"h{m}(x)", f"q after round {m}"]
+    return ("Ten points with x = 0 .. 9 and labels y = +, +, +, -, -, -, +, +, +, -. Initial weights q = 1/10 each. A stump predicts s when x <= t and -s otherwise, for t at the half-integers 0.5 .. 8.5 and s = +1 or -1; "
+            "the best stump has the smallest weighted error (the lowest t, then s = +1, on a tie). Its vote weight is v = 0.5 ln((1 - err)/err); the new weight is the old one times exp(-v y h(x)), divided by the sum Z of these products. "
+            "The combined classifier is the sign of the sum of v h over the rounds so far (sign(0) = +1). Six rounds are run; the first three are shown in the weight table.\n\n"
             + _table(heads, rows, "r" * len(heads))
             + "\n\nThe rounds, and the number of training points the combined classifier gets wrong after each:\n\n"
-            + _table(["round", "stump", "weighted error", "alpha", "Z", "errors of the sum so far"], summary, "rlrrrr"))
+            + _table(["round", "stump", "weighted error", "v", "Z", "errors of the sum so far"], summary, "rlrrrr"))
 
 
 GB_X = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
@@ -1009,7 +1015,8 @@ def gradient_boosting_rounds():
         mse = sum((y - p) ** 2 for y, p in zip(ys, pred)) / len(ys)
         rows.append((m, f"x <= {t:g}", f"{lv:+.4f}", f"{rv:+.4f}", f"{sse:.4f}", f"{mse:.4f}"))
     return ("Eight points: x = 1 .. 8, y = " + ", ".join(f"{y:g}" for y in ys) + ". Squared loss, so the negative gradient is the residual y - F(x). "
-            f"F0 = mean of y. Each round fits a stump to the current residuals by least squares (leaf values are the mean residual of each side; the lowest threshold on a tie) and sets F = F + {eta} (stump), the shrinkage.\n\n"
+            f"F0 = mean of y. Each round fits a stump to the current residuals by least squares (thresholds at the half-integers 1.5 .. 7.5, leaf values are the mean residual of each side; the lowest threshold on a tie) and sets F = F + {eta} (stump), the shrinkage. "
+            "SSE of the stump = the sum over the eight points of (residual - leaf value)^2; MSE of F = the mean over the eight points of (y - F(x))^2.\n\n"
             + _table(["round", "stump on residuals", "left leaf", "right leaf", "SSE of the stump", "MSE of F after the round"], rows, "rlrrrr"))
 
 
@@ -1068,14 +1075,17 @@ def kernel_ridge_equivalence():
     k = [[kern(KR_X[i], KR_X[j]) + (KR_LAMBDA if i == j else 0.0) for j in range(n)] for i in range(n)]
     c = _solve(k, KR_Y)
     rows = []
+    worst = 0.0
     for t in KR_TEST:
         fp = _dot(w, psi(t))
         fd = sum(ci * kern(xi, t) for ci, xi in zip(c, KR_X))
-        rows.append((f"{t:g}", f"{fp:.10f}", f"{fd:.10f}", f"{abs(fp - fd):.1e}"))
+        rows.append((f"{t:g}", f"{fp:.10f}", f"{fd:.10f}"))
+        worst = max(worst, abs(fp - fd))
     return (f"Four points x = {', '.join(f'{x:g}' for x in KR_X)} with y = {', '.join(f'{y:g}' for y in KR_Y)}; lambda = {KR_LAMBDA:g}. "
             "Feature map psi(x) = (1, sqrt(2) x, x^2), so the kernel is (x x' + 1)^2.\n\n"
             f"Primal weights (3 numbers) w = {_vec(w, 6)}. Dual coefficients (4 numbers) c = {_vec(c, 6)}.\n\n"
-            + _table(["x", "primal: w.psi(x)", "dual: sum of c_n k(x_n, x)", "difference"], rows, "rrrr"))
+            + _table(["x", "primal: w.psi(x)", "dual: sum of c_n k(x_n, x)"], rows, "rrr")
+            + f"\n\nThe two columns agree to all ten printed decimals: {'yes' if worst < 1e-12 else 'NO'} (the largest absolute difference is below 1e-12; its own digits are rounding error that depends on the order of the elimination, so they are not printed).")
 
 
 RIDGE_LAMBDAS = (0.01, 0.1, 1.0)
@@ -1158,16 +1168,16 @@ def svm_margin_check():
                 break
     w, b = best
     sv = [(x, y) for x, y in zip(SVM_X, SVM_Y) if abs(y * (w * x + b) - 1.0) < 1e-9]
-    alpha = (w) / (sv[1][0] - sv[0][0]) if len(sv) == 2 else float("nan")   # w = alpha (x_+ - x_-)  when alpha_+ = alpha_- = alpha
-    dual = 2 * alpha - 0.5 * alpha * alpha * (sv[1][0] - sv[0][0]) ** 2
+    nu = (w) / (sv[1][0] - sv[0][0]) if len(sv) == 2 else float("nan")   # w = nu (x_+ - x_-)  when nu_+ = nu_- = nu
+    dual = 2 * nu - 0.5 * nu * nu * (sv[1][0] - sv[0][0]) ** 2
     rows = [(f"{x:g}", f"{y:+d}", f"{w * x + b:+.3f}", f"{y * (w * x + b):.3f}") for x, y in zip(SVM_X, SVM_Y)]
     return ("Points x = 0.5, 1, 2, 3 with labels -, -, +, + (the separable data of chapter 3). Brute-force search over w in [0, 4] and b in [-6, 0] on a grid of step 0.005, "
             "for the smallest w with y (w x + b) >= 1 for all four points:\n\n"
             f"w = {w:.3f}, b = {b:.3f}; boundary at x = {-b / w:.3f}; margin (distance from the boundary to the nearest point) 1/w = {1 / w:.3f}.\n\n"
             + _table(["x", "y", "w x + b", "y (w x + b)"], rows)
-            + f"\n\nThe points with y (w x + b) = 1 (support vectors): x = {', '.join(f'{x:g}' for x, _ in sv)}. "
-            f"With dual weights alpha = {alpha:.3f} on each support vector, w = sum of alpha y x = {sum(alpha * y * x for x, y in sv):.3f} and the dual objective "
-            f"sum alpha - (1/2) sum alpha alpha' y y' x x' = {dual:.3f}, equal to the primal (1/2) w^2 = {0.5 * w * w:.3f}.")
+            + f"\n\nThe points with y (w x + b) = 1 (the points that touch the margin): x = {', '.join(f'{x:g}' for x, _ in sv)}. "
+            f"With dual weights nu = {nu:.3f} on each of these points, w = sum of nu y x = {sum(nu * y * x for x, y in sv):.3f} and the dual objective "
+            f"sum nu - (1/2) sum nu nu' y y' x x' = {dual:.3f}, equal to the primal (1/2) w^2 = {0.5 * w * w:.3f}.")
 
 
 # =============================================================== naive Bayes

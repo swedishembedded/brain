@@ -3,7 +3,7 @@
 
 """Why an L1 penalty lands on a corner: a loss with elliptical contours meets a diamond and a circle.
 
-The loss is 1/2 (w - c)^T A (w - c), minimal at c = (1.2, 1.9). Left: the best point on the L1 ball |w1| + |w2| = r is
+The loss is 1/2 (w - m)^T A (w - m), minimal at m = (1.2, 1.9). Left: the best point on the L1 ball |w1| + |w2| = r is
 the lasso solution of the worked module (likelihood.penalty_corners), and it sits at the corner on the w2 axis, where
 w1 is exactly zero. Right: the circle with the same length ||w||_2 touches the loss contour through the ridge solution,
 a point where both weights are nonzero. The contour through each solution is drawn; ellipses are computed from the

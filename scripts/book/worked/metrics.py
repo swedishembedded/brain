@@ -379,7 +379,8 @@ def accuracy_under_imbalance():
     bayes = r_a * prev / (r_a * prev + fpr * (1 - prev))
     out.append("")
     out.append(f"Precision by Bayes' rule, recall x prevalence / (recall x prevalence + false alarm rate x (1 - prevalence)) "
-               f"= {bayes:.4f}.")
+               f"= {bayes:.4f}. F1 is computed from the counts, 2 TP / (2 TP + FP + FN), which is defined whenever there is a "
+               f"defective part or an alarm: for 'never alarm' it is 0 / {2 * 0 + 0 + pos} = 0 although its precision is undefined.")
     return "\n".join(out)
 
 
@@ -515,10 +516,10 @@ def pr_vs_prevalence():
         assert abs(prec - prec_w) < 1e-12
         label = f"{prev:.4f}" + (" (the test set)" if abs(prev - pos / len(y)) < 1e-12 else "")
         rows.append((label, f"{auc:.4f}", f"{ap:.4f}", f"{prec:.4f}"))
-    head = (f"The {len(y)} test parts. Good parts are re-weighted by w = (1 - s)/s x {pos}/{neg} so that the defective parts "
-            f"make up a share s of the weighted total. The operating point is the first threshold at which recall "
+    head = (f"The {len(y)} test parts. Each good part is given the weight (1 - xi)/xi x {pos}/{neg} (each defective part has weight 1) so that the defective parts "
+            f"make up a share xi (the base rate) of the weighted total. The operating point is the first threshold at which recall "
             f"reaches 0.8: logit {thr:.4f}, recall {tpr:.4f}, false positive rate {fpr:.4f}.\n\n")
-    return head + _table(["share of defective s", "ROC AUC", "average precision", "precision at the operating point"], rows)
+    return head + _table(["base rate xi", "ROC AUC", "average precision", "precision at the operating point"], rows)
 
 
 # -------------------------------------------------------------- calibration
@@ -554,7 +555,8 @@ def temperature_fit():
     t1 = _table(["scale a", "temperature 1/a", "validation cross-entropy"], rows)
     head = (f"The {len(yv)} validation parts. The model is sigmoid(a z) with z the logit of the fitted model of "
             "`metrics.screen_data`; a is found by bisection on the slope of the cross-entropy.\n\n")
-    tail = f"\n\nSlope at the fitted a: {slope:.2e}. Temperature = 1/a = {1 / a:.4f}."
+    tail = (f"\n\nSlope at the fitted a: absolute value below 1e-12 ({'yes' if abs(slope) < 1e-12 else 'NO'}; the exact residue is "
+            f"rounding noise and depends on the summation order). Temperature = 1/a = {1 / a:.4f}.")
     # what changes and what does not, on the test parts
     pr = [sigmoid(v) for v in zt]
     ps = [sigmoid(a * v) for v in zt]
@@ -582,7 +584,8 @@ def reliability_scaled():
                      c2, _fmt(m2) if c2 else "-", _fmt(f2) if c2 else "-"))
     t1 = _table(["bin of p", "parts (scale)", "mean p", "observed", "parts (scale+shift)", "mean p", "observed"], rows)
     tail = (f"\n\nScale only: a = {a:.4f}, ECE = {_ece(ps, yt):.4f}, cross-entropy {_nll(zt, yt, a):.4f}. "
-            f"Scale and shift, sigmoid(a z + b) fitted on the validation parts by Newton's method from (1, 0): "
+            f"Scale and shift, sigmoid(a z + b) fitted on the validation parts by Newton's method with step halving "
+            f"(`fit_scale_shift` of the chapter: start (1, 0), at most 100 iterations, stop when |da| + |db| < 1e-12): "
             f"a = {a2:.4f}, b = {b2:.4f}, ECE = {_ece(p2, yt):.4f}, cross-entropy {_nll(zt, yt, a2, b2):.4f}. "
             f"Mean predicted probability: scale only {sum(ps) / n:.4f}, scale and shift {sum(p2) / n:.4f}, "
             f"observed {sum(yt) / n:.4f}.")
@@ -602,21 +605,26 @@ def ece_binning():
              ("10 equal-width bins", lambda p, y: _ece(p, y, 10)),
              ("20 equal-width bins", lambda p, y: _ece(p, y, 20)),
              ("10 equal-mass bins", lambda p, y: _ece_equal_mass(p, y, 10)),
-             ("30 equal-mass bins", lambda p, y: _ece_equal_mass(p, y, 30)))
+             ("30 equal-mass bins", lambda p, y: _ece_equal_mass(p, y, 30)),
+             ("7 equal-mass bins (7 does not divide 3000 or 300)", lambda p, y: _ece_equal_mass(p, y, 7)))
     rows = []
     for name, fn in rules:
         rows.append((name, f"{fn(p_raw, yt):.4f}", f"{fn(p_fix, yt):.4f}", f"{fn(p_true, yt):.4f}",
                      f"{fn(p_true[:small], yt[:small]):.4f}"))
     head = (f"The {len(yt)} test parts. 'Recalibrated' is sigmoid(a z + b) with a, b fitted on the validation parts "
             f"(`metrics.reliability_scaled`). 'True law' uses the hidden probability sigmoid({LAW[0]} + {LAW[1]} x1 + {LAW[2]} x2) "
-            f"of each part, which is perfectly calibrated by construction; the last column uses only the first {small} test parts.\n\n")
+            f"of each part, which is perfectly calibrated by construction; the last column uses only the first {small} test parts "
+            "(in the order drawn). Equal-width bins follow the `ece` pseudocode of the chapter. Equal-mass bins: sort the N parts by "
+            "predicted probability ascending (parts with equal probability keep their original order), and let bin b = 0 .. B - 1 hold "
+            "the sorted positions floor(b N / B) to floor((b + 1) N / B) - 1, so bin sizes differ by at most one; each bin is "
+            "weighted by its own count, n_b / N. Four decimals printed.\n\n")
     return head + _table(["binning rule", "model, raw", "model, recalibrated", "true law, 3000 parts", f"true law, {small} parts"], rows)
 
 
 # ------------------------------------------------------ regression, language
 
 def regression_metrics():
-    """MSE, MAE and R^2 for two sets of predictions, one with a single large error."""
+    """MSE, MAE and R^2 for three prediction vectors, one with a single large error; the predictions are printed."""
     y = [2.0, 4.0, 6.0, 8.0, 10.0]
     sets = [("small errors", [2.5, 3.5, 6.5, 7.5, 10.5]),
             ("one large error", [2.0, 4.0, 6.0, 8.0, 20.0]),
@@ -625,12 +633,14 @@ def regression_metrics():
     sst = sum((v - mean) ** 2 for v in y)
     rows = []
     for name, pred in sets:
-        mse = sum((p - t) ** 2 for p, t in zip(pred, y)) / len(y)
-        mae = sum(abs(p - t) for p, t in zip(pred, y)) / len(y)
         sse = sum((p - t) ** 2 for p, t in zip(pred, y))
-        rows.append((name, f"{mse:.4f}", f"{mae:.4f}", f"{1 - sse / sst:.4f}"))
-    head = f"Labels y = {y}, mean {mean}, total squared deviation from the mean {sst}.\n\n"
-    return head + _table(["predictions", "MSE", "MAE", "R^2 = 1 - SSE/SST"], rows)
+        mae = sum(abs(p - t) for p, t in zip(pred, y)) / len(y)
+        rows.append((name, "[" + ", ".join(f"{p:.1f}" for p in pred) + "]",
+                     f"{sse / len(y):.4f}", f"{mae:.4f}", f"{1 - sse / sst:.4f}"))
+    head = (f"Labels y = [{', '.join(f'{v:.1f}' for v in y)}], mean {mean:.1f}, SST = sum of (y - mean)^2 = {sst:.1f}. "
+            "MSE = SSE / 5, MAE = mean of |prediction - y|, R^2 = 1 - SSE/SST, with SSE = sum of (prediction - y)^2; "
+            "no rounding before the last step, four decimals printed.\n\n")
+    return head + _table(["predictions", "predicted values", "MSE", "MAE", "R^2"], rows, "llrrr")
 
 
 def perplexity_vs_exact_match():
@@ -701,7 +711,8 @@ def cost_threshold():
             f"logit {zstar:+.4f}. The scaled probability is sigmoid(a z) with a = {a:.4f}, so its cut on z is "
             f"{zstar:+.4f}/{a:.4f}; the scaled and shifted one is sigmoid(a z + b) with a = {a2:.4f}, b = {b2:.4f} "
             f"(`metrics.reliability_scaled`), so its cut is ({zstar:+.4f} - ({b2:.4f}))/{a2:.4f}. A searched cut is the "
-            "lowest of the cuts -15, -14.95, ..., 15 with the smallest cost on the parts named.\n\n")
+            "lowest of the cuts c_k = -15 + 0.05 k, k = 0 .. 600 (computed by that multiplication; a part is flagged when z >= c_k) "
+            "with the smallest cost on the parts named. Costs are per part, four decimals printed.\n\n")
     return head + _table(["rule", "cut on z", "cost per part, validation", "cost per part, test", "FP on test", "FN on test"], rows)
 
 
@@ -740,13 +751,14 @@ def bootstrap_intervals():
     se = math.sqrt(acc * (1 - acc) / n)
     head = (_generator_line(BOOT_NAME) + "\n"
             f"The {n} test parts ({sum(yt)} defective). The cut on z is chosen on the validation parts (the lowest of the cuts "
-            f"-15, -14.95, ..., 15 with the largest F1): z >= {best:+.2f}, "
-            f"which is held fixed. {BOOT_RESAMPLES} resamples; a resample is {n} calls of rng.integer({n}), each the index of a "
+            f"c_k = -15 + 0.05 k, k = 0 .. 600, computed by that multiplication, with the largest F1 on the validation parts, a part "
+            f"being flagged when z >= c_k; on equal F1 the lowest cut): z >= {best:+.2f}, "
+            f"which is held fixed. The estimate column is the metric on the original {n} test parts in their given order. {BOOT_RESAMPLES} resamples drawn one after the other from this one generator; a resample is {n} calls of rng.integer({n}), each the index of a "
             f"test part (rows in the order drawn). Interval ends are the 2.5th and 97.5th percentiles of the sorted replicates by "
-            f"linear interpolation at position q (R - 1); the standard error is the standard deviation of the replicates "
-            f"(divisor R).\n\n")
-    tail_txt = (f"\n\nFormula for the accuracy: sqrt(p (1 - p) / n) = {se:.4f}, interval {acc - 1.959964 * se:.4f} to "
-                f"{acc + 1.959964 * se:.4f}.")
+            f"linear interpolation at position q x ({BOOT_RESAMPLES} - 1), q = 0.025 and 0.975, in the ascending list of the {BOOT_RESAMPLES} replicates; the standard error is the standard deviation of the replicates "
+            f"(divisor {BOOT_RESAMPLES}).\n\n")
+    tail_txt = (f"\n\nFormula for the accuracy, with p the estimate above and n = {n}: sqrt(p (1 - p) / n) = {se:.4f}, interval p -/+ 1.959964 x that = "
+                f"{acc - 1.959964 * se:.4f} to {acc + 1.959964 * se:.4f}.")
     return head + _table(["metric", "estimate", "standard error", "95% lower", "95% upper"], rows) + tail_txt
 
 
