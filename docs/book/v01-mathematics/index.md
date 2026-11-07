@@ -56,8 +56,8 @@ in the curriculum and appear here when they are written.
    higher-dimensional arrays are laid out in memory and indexed.
 6. [Eigenvalues, Rotations and Low-Rank Structure](06-decompositions.md): the hidden
    structure of a matrix, and how a large one is approximated by small ones.
-7. Derivatives: The Mathematics of Change: how fast a function's output moves
-   when its input moves a tiny bit.
+7. [Derivatives: The Mathematics of Change](07-derivatives.md): how fast a function's
+   output moves when its input moves a tiny bit.
 8. Gradients, Jacobians and Many Variables: which way to move millions of
    numbers at once to make a quantity smaller.
 9. Integrals and Differential Equations: adding up infinitely many small

@@ -1,0 +1,35 @@
+<!-- source-sha256: 5dd4e1e542459e8218d2cd14ffe31f0ebb38d5d2409b45ceb9838d117bd063f0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 380" width="560" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="380" fill="#ffffff"/>
+<line x1="196.29" y1="334" x2="196.29" y2="30" stroke="#edf2f7"/>
+<text x="196.29" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="369.14" y1="334" x2="369.14" y2="30" stroke="#edf2f7"/>
+<text x="369.14" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="542" y1="334" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="542" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">15</text>
+<line x1="58" y1="285.36" x2="542" y2="285.36" stroke="#edf2f7"/>
+<text x="52" y="289.36" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-10</text>
+<line x1="58" y1="224.56" x2="542" y2="224.56" stroke="#edf2f7"/>
+<text x="52" y="228.56" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-7.5</text>
+<line x1="58" y1="163.76" x2="542" y2="163.76" stroke="#edf2f7"/>
+<text x="52" y="167.76" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-5</text>
+<line x1="58" y1="102.96" x2="542" y2="102.96" stroke="#edf2f7"/>
+<text x="52" y="106.96" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-2.5</text>
+<line x1="58" y1="42.16" x2="542" y2="42.16" stroke="#edf2f7"/>
+<text x="52" y="46.16" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<rect x="58" y="30" width="484" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,62.88 92.57,87.52 127.14,111.88 161.71,136.2 196.29,160.52 230.86,184.84 265.43,208.85 300,241.1 334.57,204.29 369.14,183.47 403.71,151.27 438.29,123.98 472.86,123.42 507.43,91.52 542,52.1"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,99.16 92.57,147.8 127.14,196.44 161.71,245.08 196.29,291.01 230.86,280.17 265.43,291.01 300,241.1 334.57,241.1 369.14,192.27 403.71,163.32 438.29,131.59 472.86,123.42 507.43,91.52 542,60.98"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.2" stroke-dasharray="6 4" points="58,63.24 92.57,87.56 127.14,111.88 161.71,136.2 196.29,160.52 230.86,184.84 265.43,209.16 300,233.48 334.57,257.8 369.14,282.12 403.71,306.44 438.29,330.76 472.86,355.08 507.43,379.4 542,403.72"/><polyline fill="none" stroke="#c05621" stroke-width="1.2" stroke-dasharray="6 4" points="58,99.16 92.57,147.8 127.14,196.44 161.71,245.08 196.29,293.72 230.86,342.36 265.43,391 300,439.64 334.57,455.6 369.14,455.6 403.71,455.6 438.29,455.6 472.86,455.6 507.43,455.6 542,455.6"/></g>
+<text x="300" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">-log10 of the step h</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">log10 of the error</text>
+<text x="280" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Finite-difference error of e^x at x = 1</text>
+<line x1="372" y1="40" x2="392" y2="40" stroke="#2b6cb0" stroke-width="2"/>
+<text x="398" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">forward difference</text>
+<line x1="372" y1="58" x2="392" y2="58" stroke="#c05621" stroke-width="2"/>
+<text x="398" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">central difference</text>
+<line x1="372" y1="76" x2="392" y2="76" stroke="#2b6cb0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="398" y="80" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">e h / 2 (slope 1)</text>
+<line x1="372" y1="94" x2="392" y2="94" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="398" y="98" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">e h^2 / 6 (slope 2)</text>
+</svg>

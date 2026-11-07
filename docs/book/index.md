@@ -33,6 +33,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 4. [Matrices as Linear Maps](v01-mathematics/04-matrices.md): What does it mean to multiply a matrix by a vector, and why is that the central operation of machine learning?
 5. [Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md): How are vectors, matrices and higher-dimensional arrays actually laid out in memory and indexed?
 6. [Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md): What hidden structure does a matrix have, and how can a big matrix be approximated by small ones?
+7. [Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md): How do we measure how fast a function's output changes when its input moves a tiny bit?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 

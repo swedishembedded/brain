@@ -16,15 +16,25 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## C
 
+**chain rule**: the derivative of a composition is the derivative of the outer function, evaluated at the inner value, times the derivative of the inner function: $(f\circ g)'(x) = f'(g(x))\,g'(x)$. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
 **composition**: feeding the output of one function into another, $(g \circ f)(x) = g(f(x))$; it is associative but not commutative. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 **computational graph**: a record of a calculation as nodes (values) and edges showing which values were used to compute which. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
+**convexity**: the property that no chord joining two points of the curve lies below the curve, equivalent for twice-differentiable functions to a non-negative second derivative; every critical point of a convex function is a global minimum. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
 **cosine similarity**: the dot product of two vectors after dividing each by its norm, a number from $-1$ to $1$ that ignores positive scaling. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
+
+**critical point**: a point where the derivative is zero, so the tangent is horizontal; it may be a minimum, a maximum or neither. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 ## D
 
+**derivative**: the limit of the difference quotient $\frac{f(x+h) - f(x)}{h}$ as $h \to 0$; the slope of the tangent to the curve of $f$ at $x$, and the rate at which $f$ changes when $x$ changes. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
 **determinant**: the signed factor by which a square matrix scales area or volume ($ad - bc$ for a $2 \times 2$); zero exactly when the matrix crushes space and has no inverse. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
+
+**differentiation rules**: the short list (constants and multiples, sums, products, quotients, powers) from which the derivative of any formula built from simple pieces is computed without returning to the limit. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **dot product**: the number $\sum_i a_i b_i$ obtained from two vectors of equal length, equal to $\lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert\cos\theta$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
@@ -58,6 +68,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## L
 
+**limit**: the value a quantity approaches as its input gets close to a point without reaching it; $\lim_{h\to 0} g(h) = L$ means $g(h)$ can be made as close to $L$ as we like by taking $h$ small enough and nonzero. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
 **linear map**: a function of vectors that commutes with addition and scaling, and is determined by what it does to the unit vectors. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
 **logarithm**: the exponent to which a base must be raised to give a number; it is the inverse of the exponent and turns a product into a sum, $\log(uv) = \log u + \log v$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
@@ -77,6 +89,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **monotonic function**: a function that never reverses direction, always increasing or always decreasing, and so keeps the order of single values. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 ## N
+
+**Newton's method**: the iteration that replaces a function by its tangent line (or, for minimisation, by a quadratic with the same slope and curvature) and jumps to its zero (or bottom), $x \leftarrow x - f(x)/f'(x)$ or $x \leftarrow x - f'(x)/f''(x)$; its error is squared at each step near a simple root. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **norm**: the length of a vector; the L2 norm is $\sqrt{\mathbf{a}\cdot\mathbf{a}}$, and the L1 and max norms measure total and largest-entry size. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 

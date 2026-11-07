@@ -1,0 +1,29 @@
+<!-- source-sha256: bca381868cc7cf1abeb24fabac0eb43ff70a824bcfb48e36a62cfc1ffd002a5b -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 360" width="520" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="520" height="360" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-2</text>
+<line x1="166.29" y1="314" x2="166.29" y2="30" stroke="#edf2f7"/>
+<text x="166.29" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-1</text>
+<line x1="274.59" y1="314" x2="274.59" y2="30" stroke="#edf2f7"/>
+<text x="274.59" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="382.88" y1="314" x2="382.88" y2="30" stroke="#edf2f7"/>
+<text x="382.88" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="491.17" y1="314" x2="491.17" y2="30" stroke="#edf2f7"/>
+<text x="491.17" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="58" y1="219.33" x2="502" y2="219.33" stroke="#edf2f7"/>
+<text x="52" y="223.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="114.15" x2="502" y2="114.15" stroke="#edf2f7"/>
+<text x="52" y="118.15" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<rect x="58" y="30" width="444" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="444" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#4a5568" stroke-width="2.5" points="58,177.26 60.77,187.21 63.55,196.61 66.33,205.45 69.1,213.77 71.88,221.57 74.65,228.87 77.43,235.69 80.2,242.05 82.98,247.95 85.75,253.42 88.52,258.46 91.3,263.1 94.07,267.35 96.85,271.22 99.62,274.72 102.4,277.88 105.17,280.7 107.95,283.2 110.72,285.38 113.5,287.27 116.28,288.88 119.05,290.22 121.83,291.29 124.6,292.12 127.38,292.72 130.15,293.09 132.93,293.25 135.7,293.21 138.48,292.97 141.25,292.56 144.03,291.98 146.8,291.25 149.57,290.36 152.35,289.34 155.12,288.19 157.9,286.92 160.68,285.54 163.45,284.06 166.22,282.48 169,280.83 171.77,279.1 174.55,277.3 177.32,275.45 180.1,273.54 182.87,271.59 185.65,269.61 188.43,267.59 191.2,265.56 193.97,263.5 196.75,261.44 199.53,259.38 202.3,257.32 205.07,255.27 207.85,253.23 210.62,251.21 213.4,249.22 216.18,247.26 218.95,245.33 221.73,243.44 224.5,241.6 227.27,239.8 230.05,238.06 232.82,236.37 235.6,234.73 238.38,233.16 241.15,231.65 243.93,230.21 246.7,228.84 249.48,227.54 252.25,226.32 255.02,225.17 257.8,224.1 260.57,223.11 263.35,222.19 266.12,221.36 268.9,220.61 271.68,219.94 274.45,219.36 277.23,218.86 280,218.44 282.77,218.1 285.55,217.85 288.32,217.67 291.1,217.58 293.88,217.57 296.65,217.63 299.43,217.77 302.2,217.98 304.98,218.27 307.75,218.62 310.52,219.05 313.3,219.53 316.07,220.08 318.85,220.69 321.62,221.35 324.4,222.07 327.17,222.83 329.95,223.64 332.73,224.48 335.5,225.36 338.27,226.27 341.05,227.21 343.83,228.17 346.6,229.14 349.38,230.12 352.15,231.11 354.93,232.09 357.7,233.06 360.48,234.02 363.25,234.96 366.02,235.87 368.8,236.75 371.58,237.58 374.35,238.36 377.12,239.09 379.9,239.75 382.67,240.33 385.45,240.83 388.23,241.24 391,241.56 393.78,241.76 396.55,241.85 399.32,241.8 402.1,241.62 404.88,241.3 407.65,240.82 410.42,240.16 413.2,239.34 415.98,238.32 418.75,237.1 421.52,235.67 424.3,234.02 427.07,232.14 429.85,230.01 432.63,227.62 435.4,224.96 438.17,222.02 440.95,218.79 443.73,215.24 446.5,211.38 449.27,207.18 452.05,202.63 454.83,197.71 457.6,192.43 460.38,186.75 463.15,180.66 465.93,174.16 468.7,167.22 471.48,159.84 474.25,151.98 477.02,143.65 479.8,134.82 482.58,125.48 485.35,115.61 488.12,105.19 490.9,94.21 493.67,82.66 496.45,70.5 499.23,57.74 502,44.35"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="133.71,293.26 397.05,241.85"/><circle cx="133.71" cy="293.26" r="3.5" fill="#9b2c2c"/><circle cx="397.05" cy="241.85" r="3.5" fill="#9b2c2c"/><circle cx="265.38" cy="221.58" r="4" fill="#4a5568"/><circle cx="265.38" cy="267.55" r="4" fill="#9b2c2c"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="404.54,241.35 480.34,133.04"/><circle cx="404.54" cy="241.35" r="3.5" fill="#2b6cb0"/><circle cx="480.34" cy="133.04" r="3.5" fill="#2b6cb0"/></g>
+<text x="280" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">x</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">f(x)</text>
+<text x="260" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Not convex: f(x) = x^4 - 3x^2 + x has two valleys</text>
+<line x1="332" y1="40" x2="352" y2="40" stroke="#9b2c2c" stroke-width="2"/>
+<text x="358" y="44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chord between the valleys</text>
+<line x1="332" y1="58" x2="352" y2="58" stroke="#2b6cb0" stroke-width="2"/>
+<text x="358" y="62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">a chord on the right branch</text>
+</svg>
