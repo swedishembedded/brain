@@ -1264,6 +1264,17 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "sigmoid" => f(3 * n0(), 8 * n0()),
         // min(max(x, lo), hi): two compares per element. params [total, lo, hi].
         "clamp_range" => f(2 * n0(), 8 * n0()),
+        // dx = dy inside [lo, hi], else 0: two compares, read x and dy, write dx. params [total, lo, hi].
+        "clamp_range_bwd" => f(2 * n0(), 12 * n0()),
+        // out = a + sigmoid(lam) * (b - a): the sigmoid is 3 ops, then a subtract, a multiply and an add. params [total].
+        "value_lerp" => f(6 * n0(), 12 * n0()),
+        // da += (1-s) dy, db += s dy: sigmoid + 2 multiplies + 2 adds, reads dy, da, db and writes da, db. params [total].
+        "value_lerp_bwd" => f(8 * n0(), 20 * n0()),
+        // part[c] = s(1-s) sum_r dy (b - a): a subtract, a multiply and an add per element. params [rows, cols].
+        "value_lerp_dlam" => {
+            let total = p(0)? * p(1)?;
+            f(3 * total, 12 * total)
+        }
         // dx = dy * s * (1 + x*(1-s)) — the same sigmoid plus the product rule.
         "silu_bwd" => f(8 * n0(), 12 * n0()),
         // params [total, c, inner]: out[i] *= scale[chan(i)].

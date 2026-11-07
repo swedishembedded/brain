@@ -318,6 +318,8 @@ pub const CIOU: &str = include_str!("../wgsl/ciou.wgsl");
 pub const CIOU_GRAD: &str = include_str!("../wgsl/ciou_grad.wgsl");
 /// `wgsl/clamp_range.wgsl`
 pub const CLAMP_RANGE: &str = include_str!("../wgsl/clamp_range.wgsl");
+/// `wgsl/clamp_range_bwd.wgsl`
+pub const CLAMP_RANGE_BWD: &str = include_str!("../wgsl/clamp_range_bwd.wgsl");
 /// `wgsl/clip_coef.wgsl`
 pub const CLIP_COEF: &str = include_str!("../wgsl/clip_coef.wgsl");
 /// `wgsl/clip_coef_wg.wgsl`
@@ -1401,6 +1403,12 @@ pub const UNPACK_QKV: &str = include_str!("../wgsl/unpack_qkv.wgsl");
 pub const UPSAMPLE2: &str = include_str!("../wgsl/upsample2.wgsl");
 /// `wgsl/upsample2_dx.wgsl`
 pub const UPSAMPLE2_DX: &str = include_str!("../wgsl/upsample2_dx.wgsl");
+/// `wgsl/value_lerp.wgsl`
+pub const VALUE_LERP: &str = include_str!("../wgsl/value_lerp.wgsl");
+/// `wgsl/value_lerp_bwd.wgsl`
+pub const VALUE_LERP_BWD: &str = include_str!("../wgsl/value_lerp_bwd.wgsl");
+/// `wgsl/value_lerp_dlam.wgsl`
+pub const VALUE_LERP_DLAM: &str = include_str!("../wgsl/value_lerp_dlam.wgsl");
 /// `wgsl/vq_argmax_dot.wgsl`
 pub const VQ_ARGMAX_DOT: &str = include_str!("../wgsl/vq_argmax_dot.wgsl");
 /// `wgsl/vq_argmin.wgsl`
@@ -1555,6 +1563,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("ciou", CIOU),
     ("ciou_grad", CIOU_GRAD),
     ("clamp_range", CLAMP_RANGE),
+    ("clamp_range_bwd", CLAMP_RANGE_BWD),
     ("clip_coef", CLIP_COEF),
     ("clip_coef_wg", CLIP_COEF_WG),
     ("col2im", COL2IM),
@@ -2044,6 +2053,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("unpack_qkv", UNPACK_QKV),
     ("upsample2", UPSAMPLE2),
     ("upsample2_dx", UPSAMPLE2_DX),
+    ("value_lerp", VALUE_LERP),
+    ("value_lerp_bwd", VALUE_LERP_BWD),
+    ("value_lerp_dlam", VALUE_LERP_DLAM),
     ("vq_argmax_dot", VQ_ARGMAX_DOT),
     ("vq_argmin", VQ_ARGMIN),
     ("weight_decode", WEIGHT_DECODE),
