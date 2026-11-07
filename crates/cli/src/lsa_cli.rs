@@ -51,7 +51,11 @@ brain lsa prefill --indexer SPEC (--model REPO | --checkpoint PATH) [options]
            SPEC is random, pca or an indexer file
   prefill  --tokens N,N,.. (4096,8192,16384,32768) [--corpus DIR] [--dense-until N]
            [--sparse-only] [--profile] [--tree SPEC]
-           qwen3 only: --kv-cache int8|f32|fp8 --weights f32|int8 --yarn FACTOR
+           qwen3: --kv-cache int8|f32|fp8 --weights f32|int8 --yarn FACTOR
+           ricursive: --kv-cache f32|bf16|int8|fp8 (default f32) --weights SPEC (int8, fp8, bf16,
+           f32 or pattern=format; default: as the checkpoint stores them, so the NVFP4 release
+           stays NVFP4). On several cards the layers are staged over the fewest that hold the
+           deployment (distill and prefill; eval needs one card).
 
   --tree size=4,blocks=1024:4096,beam=2048:2048,page=4096,growth=1024[,start=N]
            reads through node bucket levels (qwen3).
@@ -228,15 +232,25 @@ struct RippleOpener {
     path: String,
     cfg: ricursive::RicursiveConfig,
     source_layers: Vec<usize>,
+    /// `--weights` and `--kv-cache`, checked against what Ripple declares (`ricursive::POLICY`).
+    policy: model::policy::ServePolicy,
 }
 
 impl RippleOpener {
     fn new(path: &str, args: &Args) -> Result<RippleOpener, String> {
-        for flag in ["kv-cache", "weights", "yarn", "tree"] {
+        for flag in ["yarn", "tree"] {
             if args.get(flag).is_some() {
-                return Err(format!("--{flag} applies to qwen3 only (ricursive reads an f32 cache, flat index)"));
+                return Err(format!("--{flag} applies to qwen3 only (ricursive reads a flat index over unscaled positions)"));
             }
         }
+        let mut policy = model::policy::ServePolicy::default();
+        if let Some(w) = args.get("weights") {
+            policy.set("--weight-format", w)?;
+        }
+        if let Some(kv) = args.get("kv-cache") {
+            policy.set("--kv-cache", kv)?;
+        }
+        ricursive::POLICY.check(&policy)?;
         let config = config_path(path)?;
         let full = ricursive::RicursiveConfig::from_file(&config)?;
         let (cfg, source_layers) = match args.get("layers") {
@@ -246,17 +260,30 @@ impl RippleOpener {
                 (full.truncated(&layers)?, layers)
             }
         };
-        Ok(RippleOpener { path: path.to_string(), cfg, source_layers })
+        Ok(RippleOpener { path: path.to_string(), cfg, source_layers, policy })
+    }
+
+    /// The engine for prompts of `max_tokens`, its cache at `kv`, staged over the cards the device selection offers.
+    fn engine(&self, max_tokens: u32, kv: model::kv_tier::KvTier) -> Result<ricursive::RicursiveEngine, String> {
+        let src = ricursive::open_checkpoint(&self.path, &self.cfg, &self.source_layers)?;
+        let block_size = BLOCK;
+        let mut serve = ricursive::ServeConfig { sparse_attention: true, kv_cache: kv, ..ricursive::ServeConfig::new(block_size, 2 * max_tokens.div_ceil(block_size) + 8, max_tokens, 1, 0, 64) };
+        serve.apply_policy(&model::policy::ServePolicy { kv_cache: None, ..self.policy.clone() })?;
+        let tiers = ricursive::resolve_tiers(&self.cfg, &src, serve.weights.as_ref());
+        let plan = ricursive::placement::auto_plan(&self.cfg, &serve, &tiers, 0, None)?;
+        println!("ricursive: {} layers over {} stage(s) [{}], weights {}, KV {}", self.cfg.num_hidden_layers, plan.n_stages(), plan.describe(), tiers.summary(), serve.kv_cache);
+        ricursive::RicursiveEngine::from_source_staged(self.cfg.clone(), Box::new(src), serve, None, &plan)
     }
 }
 
 impl Opener for RippleOpener {
     type Engine = ricursive::RicursiveEngine;
+    /// Distillation and evaluation read unquantized keys: an f32 cache.
     fn open(&self, max_tokens: u32) -> Result<Self::Engine, String> {
-        let src = ricursive::open_checkpoint(&self.path, &self.cfg, &self.source_layers)?;
-        let block_size = BLOCK;
-        let serve = ricursive::ServeConfig { sparse_attention: true, ..ricursive::ServeConfig::new(block_size, 2 * max_tokens.div_ceil(block_size) + 8, max_tokens, 1, 0, 64) };
-        ricursive::RicursiveEngine::from_source(self.cfg.clone(), Box::new(src), serve, None)
+        self.engine(max_tokens, model::kv_tier::KvTier::F32)
+    }
+    fn open_timed(&self, max_tokens: u32) -> Result<Self::Engine, String> {
+        self.engine(max_tokens, self.policy.kv_cache.unwrap_or(model::kv_tier::KvTier::F32))
     }
 }
 

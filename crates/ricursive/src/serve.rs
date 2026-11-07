@@ -349,6 +349,11 @@ impl RicursiveEngine {
         &self.stages[0]
     }
 
+    /// The stage that runs `layer`.
+    fn stage_of(&self, layer: usize) -> &Stage {
+        self.stages.iter().find(|s| s.range.contains(&layer)).expect("the stages tile the layers")
+    }
+
     fn last(&self) -> &Stage {
         self.stages.last().expect("an engine has a stage")
     }
@@ -621,9 +626,6 @@ impl RicursiveEngine {
     /// The queries (normed, unrotated: the global layers apply no RoPE) and keys of every global layer over a dense
     /// prefill of `prompt` ([`model::lsa::capture::AttentionCapture`]); `None` for the sliding layers.
     fn capture_global(&mut self, prompt: &[u32], positions: &[u32]) -> Result<Vec<Option<LayerCapture>>, String> {
-        if self.stages.len() > 1 {
-            return Err(format!("ricursive: attention capture reads one device's key pools, and this engine is split over {} stages", self.stages.len()));
-        }
         if self.serve.kv_cache != KvTier::F32 {
             return Err(format!("ricursive: attention capture reads the unquantized keys; open the engine with an f32 KV cache, not {}", self.serve.kv_cache));
         }
@@ -636,8 +638,8 @@ impl RicursiveEngine {
         let mut keys: Vec<Vec<f32>> = globals.iter().map(|_| Vec::with_capacity(prompt.len() * kv_dim)).collect();
         let result = self.run_chunks(prompt, |e, table, from, to, _| {
             let taken = e.capture_q.replace(Vec::new()).unwrap_or_default();
-            for (acc, buf) in queries.iter_mut().zip(&taken) {
-                let rows = e.stages[0].gpu().read(buf, (to - from) * q_dim);
+            for ((acc, buf), &l) in queries.iter_mut().zip(&taken).zip(&globals) {
+                let rows = e.stage_of(l).gpu().read(buf, (to - from) * q_dim);
                 // Only the requested positions are kept: a long text does not hold every query.
                 for &p in positions.iter().filter(|&&p| (from..to).contains(&(p as usize))) {
                     acc.extend_from_slice(&rows[(p as usize - from) * q_dim..][..q_dim]);
@@ -649,7 +651,7 @@ impl RicursiveEngine {
                     let (block, offset) = table.locate(p as u32, e.serve.block_size);
                     let row = (block * e.serve.block_size + offset) as usize * kv_dim;
                     let mut buf = vec![0f32; kv_dim];
-                    e.stages[0].gpu().read_into(e.stages[0].kv_of(l).k.data(), row as u64, &mut buf);
+                    e.stage_of(l).gpu().read_into(e.stage_of(l).kv_of(l).k.data(), row as u64, &mut buf);
                     acc.extend(buf);
                 }
             }

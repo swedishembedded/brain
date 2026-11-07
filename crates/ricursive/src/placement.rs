@@ -143,6 +143,32 @@ pub fn stream_plan(fp: &Footprint, cards: &[(usize, u64)]) -> Option<StreamPlan>
     StreamPlan::fit(&fp.bytes, &net_of_stage_overhead(fp, cards))
 }
 
+/// The stage plan for serving on the cards `device` (the `--device` grammar; `None`: the ambient selection) may
+/// schedule: the fewest of them that hold the deployment ([`stream_plan`]), each at what it has free now, or one
+/// stage on the ambient device when the selection has no card (the CPU backend). An error says how many bytes
+/// the deployment needs and what the cards offer, never a partial plan.
+pub fn auto_plan(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy, lsa_bytes: u64, device: Option<&str>) -> Result<StreamPlan, String> {
+    let cards = StreamPlan::cards(device, 0);
+    if cards.is_empty() {
+        return Ok(StreamPlan::single(cfg.num_hidden_layers));
+    }
+    let fp = footprint(cfg, serve, tiers, lsa_bytes);
+    stream_plan(&fp, &cards).ok_or_else(|| {
+        let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+        format!(
+            "ricursive: this deployment needs {:.1} GiB ({:.1} weights, {:.1} global KV, {:.1} rings, {:.1} index, {:.1} fixed per stage) and the {} card(s) offer {:.1} GiB usable; use a narrower weight or KV format, a shorter context, or more cards",
+            gib(fp.single_card_bytes()),
+            gib(fp.weights),
+            gib(fp.kv_global),
+            gib(fp.kv_rings),
+            gib(fp.lsa),
+            gib(fp.per_stage),
+            cards.len(),
+            gib(cards.iter().map(|c| c.1).sum())
+        )
+    })
+}
+
 /// The parameter-count cost model `model::shard::plan_balanced` cuts by for interchangeable cards.
 pub fn shard_cost(cfg: &RicursiveConfig, rows: usize) -> ShardCost {
     let per_layer: f64 = layer_linears(cfg).into_iter().map(|(_, n, k)| (n * k) as f64).sum();
@@ -293,4 +319,50 @@ mod tests {
         // The head stage is heavier by the lm_head, so it gets fewer layers.
         assert!(plan.stages()[1].end - plan.stages()[1].start <= plan.stages()[0].end - plan.stages()[0].start);
     }
+
+    /// The placements the GPU-phase runbook quotes: the published configuration on 96 GiB cards (GH200), the fewest
+    /// cards for each weight format, KV tier and context, with the latent-sparse-attention index charged where the
+    /// global layers read sparsely. Printed with `--nocapture`.
+    #[test]
+    fn placements_of_the_published_configuration_on_96_gib_cards() {
+        let cfg = real();
+        let cards: Vec<(usize, u64)> = (0..4).map(|i| (i, card_budget(96 * GIB))).collect();
+        eprintln!("usable per 96 GiB card: {:.1} GiB", cards[0].1 as f64 / GIB as f64);
+        let gib = |b: u64| b as f64 / GIB as f64;
+        let geometry = model::lsa::indexer::IndexGeometry { n_layers: 80, n_heads: 80, n_kv_heads: 8, head_dim: 128, rope_base: 0.0 };
+        let mut indexer = model::lsa::indexer::Indexer::random(model::lsa::LsaConfig::default(), geometry, 1).expect("indexer");
+        for (l, layer) in indexer.layers.iter_mut().enumerate() {
+            if cfg.layer_type(l) != LayerType::Full {
+                *layer = None;
+            }
+        }
+        let mut fewest = Vec::new();
+        for (weights, tiers) in [("bf16", TierPolicy::uniform(Dtype::BF16)), ("nvfp4", nvfp4_release_tiers(&cfg)), ("fp8", TierPolicy::uniform(Dtype::F8E4M3)), ("int8", TierPolicy::uniform(Dtype::I8))] {
+            for (kv, tier) in [("bf16", KvTier::BF16), ("int8", KvTier::INT8), ("fp8", KvTier::FP8)] {
+                for tokens in [131_072u32, 1 << 20] {
+                    let s = serve(tokens, tier, 1);
+                    let lsa = crate::lsa_device_bytes(&indexer, &s);
+                    let fp = footprint(&cfg, &s, &tiers, lsa);
+                    let n = (1..=4).find(|&n| place(&fp, &cards[..n]).is_some());
+                    eprintln!(
+                        "weights {weights:>5} kv {kv:>4} ctx {:>7}: weights {:>6.1} GiB  global KV {:>5.1}  rings {:>4.1}  index {:>4.1}  fixed/stage {:>4.1}  -> {}",
+                        tokens,
+                        gib(fp.weights),
+                        gib(fp.kv_global),
+                        gib(fp.kv_rings),
+                        gib(fp.lsa),
+                        gib(fp.per_stage),
+                        n.map_or("does not fit 4 cards".to_string(), |n| format!("{n} card(s): {}", describe(&fp, &place(&fp, &cards[..n]).unwrap())))
+                    );
+                    fewest.push((weights, kv, tokens, n));
+                }
+            }
+        }
+        let cards_for = |w: &str, kv: &str, t: u32| fewest.iter().find(|r| r.0 == w && r.1 == kv && r.2 == t).and_then(|r| r.3);
+        assert_eq!(cards_for("nvfp4", "int8", 131_072), Some(1));
+        assert_eq!(cards_for("bf16", "int8", 131_072), Some(2));
+        assert_eq!(cards_for("bf16", "bf16", 1 << 20), Some(3), "64 GiB of bf16 cache on top of 129 GB of weights");
+        assert!(cards_for("nvfp4", "int8", 1 << 20) <= Some(2));
+    }
 }
+

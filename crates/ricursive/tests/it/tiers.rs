@@ -414,3 +414,25 @@ fn latent_sparse_attention_refuses_a_split_engine_by_name() {
     let err = e.set_lsa(&indexer).unwrap_err();
     assert!(err.contains("2 stages"), "{err}");
 }
+
+/// Spec: the D-LSA capture and the scoring pass work across stages (each global layer's queries and keys are read
+/// from the stage that owns it), and a compact cache is refused by name because the capture reads unquantized keys.
+#[test]
+fn attention_capture_and_scoring_work_across_stages_and_refuse_a_compact_cache() {
+    use model::lsa::capture::AttentionCapture;
+    let Some(dir) = tiny_dir() else { return };
+    let cfg = tiny_config(&dir);
+    let ids = stream(3, 20, cfg.vocab_size as u32);
+    let positions: Vec<u32> = vec![3, 9, 15, 19];
+    let mut one = open_engine(&dir, serve_config(4, 0)).unwrap();
+    let plan = two_stages();
+    let mut two = RicursiveEngine::from_source_staged(cfg.clone(), Box::new(weights(&dir, &cfg)), serve_config(4, 0), Some("cpu"), &plan).expect("staged engine");
+    let (a, b) = (one.capture_attention(&ids, &positions).unwrap(), two.capture_attention(&ids, &positions).unwrap());
+    let (a, b) = (a[2].as_ref().unwrap(), b[2].as_ref().unwrap());
+    assert!(a.q == b.q && a.k == b.k, "the staged capture is the single-stage capture");
+    assert_eq!(one.position_logprobs(&ids, 4), two.position_logprobs(&ids, 4));
+
+    let mut int8 = open_engine(&dir, ServeConfig { kv_cache: KvTier::INT8, ..serve_config(4, 0) }).unwrap();
+    let err = int8.capture_attention(&ids, &positions).expect_err("refused");
+    assert!(err.contains("f32 KV cache") && err.contains("int8"), "{err}");
+}

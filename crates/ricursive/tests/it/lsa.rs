@@ -233,3 +233,39 @@ fn the_memory_charge_covers_projections_pages_and_scratch() {
         assert_eq!(e.lsa_stats().unwrap().device_bytes, small, "the charge equals what the attachment holds");
     }
 }
+
+/// Over a compact cache the sparse read decodes the packed rows as the dense read does: a budget that covers every key
+/// answers as the dense engine at the same KV tier, in prefill chunks and decode, with the index built from the
+/// dequantized keys. (int8 and fp8 pools carry per-row scales the sparse kernels read; bf16 is refused by name.)
+#[test]
+fn a_full_budget_over_a_packed_kv_cache_equals_the_dense_read_of_the_same_cache() {
+    let Some(dir) = tiny_dir() else { return };
+    if !lsa_runs_here() {
+        return;
+    }
+    let cfg = tiny_config(&dir);
+    let ids = stream(5, 26 + 14, cfg.vocab_size as u32);
+    let ix = indexer(&cfg, lsa_config(64, 256), 17);
+    for tier in [model::kv_tier::KvTier::INT8, model::kv_tier::KvTier::FP8] {
+        let mut dense = engine_with(&dir, ServeConfig { kv_cache: tier, ..serve_config(8, 0) });
+        let mut sparse = engine_with(&dir, ServeConfig { sparse_attention: true, kv_cache: tier, ..serve_config(8, 0) });
+        sparse.set_lsa(&ix).expect("set_lsa over a packed cache");
+        sparse.set_lsa_dense_until(0);
+        let (mut td, mut ts) = (BlockTable::new(), BlockTable::new());
+        let (hd, hs) = (prefill_in_slices(&mut dense, &mut td, &ids[..26], 5), prefill_in_slices(&mut sparse, &mut ts, &ids[..26], 5));
+        let mut worst = 0.0f32;
+        check_row(&format!("{tier}: prefill"), &sparse.logits(&hs), &dense.logits(&hd), &mut worst);
+        for (pos, &token) in ids.iter().enumerate().skip(26) {
+            let want = dense.decode_logits(&mut [&mut td], &[token]);
+            let got = sparse.decode_logits(&mut [&mut ts], &[token]);
+            check_row(&format!("{tier}: decode at {pos}"), &got[0], &want[0], &mut worst);
+        }
+        let stats = sparse.lsa_stats().expect("sparse attention is on");
+        assert_eq!(stats.reads.selected_keys, stats.reads.causal_keys, "{tier}: a budget past the context selects every causal key");
+        eprintln!("LSA over a {tier} cache: sparse vs dense worst scaled error {worst:.3e}");
+    }
+    let mut bf16 = engine_with(&dir, ServeConfig { kv_cache: model::kv_tier::KvTier::BF16, ..serve_config(8, 0) });
+    assert!(bf16.set_lsa(&ix).unwrap_err().contains("sparse_attention"), "an engine opened without the kernels refuses");
+    let refused = RicursiveEngine::from_source(cfg.clone(), Box::new(crate::serve::weights(&dir, &cfg)), ServeConfig { sparse_attention: true, kv_cache: model::kv_tier::KvTier::BF16, ..serve_config(8, 0) }, None);
+    assert!(refused.err().expect("refused").contains("f32, int8 or fp8"));
+}

@@ -17,7 +17,10 @@ clipped SwiGLU feed-forward.
 | Parity with the reference implementation (random weights, real layers) | [x] |
 | Paged serving engine under the generic scheduler (library) | [x] |
 | Serving over the CLI, HTTP API or D-Bus | [ ] |
-| Quantized weights | [ ] |
+| Weights held as the checkpoint stores them (bf16; the official ModelOpt NVFP4 release with the MLP in NVFP4) | [x] |
+| Weight formats `--weight-format` f32, bf16, f16, int8, fp8 | [x] |
+| KV cache `--kv-cache` f32, bf16, int8, fp8 (global pools and sliding rings) | [x] |
+| Layers split over several devices (pipeline stages) | [x] |
 | Training | [ ] |
 
 **Read that table before relying on this.** `RicursiveEngine` implements
@@ -25,11 +28,38 @@ clipped SwiGLU feed-forward.
 `model::serve::Scheduler` with continuous batching, chunked prefill and prefix
 reuse, and it passes the shared serving conformance suite. It is not in the
 model catalog: `brain serve` and the capability interface do not know it yet.
-Weights are resident f32, so it needs a machine that holds them; there is no
-quantization yet. Its global layers can read through latent sparse attention
-(`RicursiveEngine::set_lsa`, an indexer covering only global layers), which
-needs a device that runs workgroup-barrier kernels. The registry row is the model's name
-and its Hugging Face class.
+Its global layers can read through latent sparse attention
+(`RicursiveEngine::set_lsa`, an indexer covering only global layers, over an
+f32, int8 or fp8 cache on a single stage), which needs a device that runs
+workgroup-barrier kernels. The registry row is the model's name and its
+Hugging Face class.
+
+### Weights, KV cache and devices
+
+By default every linear weight is held as the checkpoint stores it: the bf16
+release stays bf16 on the device, and
+`ricursiveAI/Ripple-65B-Preview-NVFP4` is loaded as published, with no
+conversion step, its MLP in NVFP4 (E2M1 codes, an E4M3 scale per 16 weights,
+an f32 per-tensor scale) and its attention, embedding and `lm_head` in bf16.
+`--weight-format` picks another format (`f32`, `bf16`, `f16`, `int8`, `fp8`,
+or a list such as `bf16,mlp=fp8`); NVFP4 cannot be asked for, because nothing
+quantizes into it. A format the device cannot hold is refused naming the
+tensor and the format it would have used (int8 needs a packed-int8 dot, which
+the CPU backend does not have).
+
+The NVFP4 release is W4A4: it stores a static input scale per quantized
+module. Brain keeps activations in float (W4A16, at least as precise as the
+reference), so the scales are checked at open (one finite positive scalar per
+module, none missing) and not applied.
+
+`--kv-cache` stores K and V as `f32`, `bf16`, `int8` or `fp8` in both the
+global pools and the rings; each element is widened as the attention kernel
+loads it. The D-LSA capture reads unquantized keys and so needs `f32`.
+
+The layers can be cut into pipeline stages, one device each
+(`RicursiveEngine::from_source_staged`); `ricursive::placement` computes the
+byte-exact cost of each layer at the chosen formats and the fewest cards that
+hold the deployment. Latent sparse attention needs one stage.
 
 The sliding layers keep a fixed ring of recent keys per sequence and the
 global layers keep a growing paged cache, so the memory a sequence costs is a
