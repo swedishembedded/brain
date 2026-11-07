@@ -358,6 +358,21 @@ mod tests {
                 }
             }
         }
+        // The longest context one card holds (one sequence, latent sparse attention charged), by bisection.
+        for (weights, tiers) in [("nvfp4", nvfp4_release_tiers(&cfg)), ("fp8", TierPolicy::uniform(Dtype::F8E4M3))] {
+            for (kv, tier) in [("bf16", KvTier::BF16), ("int8", KvTier::INT8)] {
+                let fits = |tokens: u32| {
+                    let s = serve(tokens, tier, 1);
+                    place(&footprint(&cfg, &s, &tiers, crate::lsa_device_bytes(&indexer, &s)), &cards[..1]).is_some()
+                };
+                let (mut lo, mut hi) = (0u32, 4 << 20);
+                while hi - lo > 4096 {
+                    let mid = (lo + hi) / 2;
+                    if fits(mid) { lo = mid } else { hi = mid }
+                }
+                eprintln!("one card, weights {weights} kv {kv}: the longest context is about {lo} tokens");
+            }
+        }
         let cards_for = |w: &str, kv: &str, t: u32| fewest.iter().find(|r| r.0 == w && r.1 == kv && r.2 == t).and_then(|r| r.3);
         assert_eq!(cards_for("nvfp4", "int8", 131_072), Some(1));
         assert_eq!(cards_for("bf16", "int8", 131_072), Some(2));

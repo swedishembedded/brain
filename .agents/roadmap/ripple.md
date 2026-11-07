@@ -86,7 +86,11 @@ serve other work; CUDA parity and performance follow on the same gates.
        PCA/random-initialised, distilled and evaluated by `brain lsa`;
        Ripple's indexer covers its 16 global layers. Tooling and a tiny-scale
        gate done; the real long-context run is the GPU phase below.
-5. [ ] NVFP4 release loading (MLP W4A4, attention bf16), quantized KV.
+5. [x] Weight tiers (bf16 as stored, fp8, int8, the official NVFP4 release as
+       published), compact KV (bf16, int8, fp8) for the rings and the global
+       pools, byte-exact placement over cards, the engine in pipeline stages.
+       Done and measured on the CPU backend and the software Vulkan adapter;
+       no card has run it (step 7).
 6. [ ] Backward, gradcheck, LoRA; N-LSA after D-LSA.
 7. [ ] CUDA parity and the measured long-context numbers (both GH200s,
        when free).
@@ -177,8 +181,141 @@ Host cost of distilling a 65B global layer (one thread, Ripple's 80 heads over
 parallel over layers). Across 16 cores that is about 12 s. The capture itself
 no longer holds every query: it keeps the sampled positions (all positions of
 a 32k text would be 1.3 GB a layer, 21 GB for 16), the keys are 134 MB a
-layer. The remaining blocker for the real run is the engine, not the
-arithmetic: it holds f32 weights resident (about 260 GB for 80 layers).
+layer. The blocker the engine was (f32 weights, about 260 GB for 80 layers) is gone with
+step 5: the NVFP4 release is 52 GiB resident.
+
+Step 5, weight tiers, KV tiers, placement, stages. The engine holds each linear at
+the tier the checkpoint stores (`resolve_tiers`: bf16 stays bf16 and the NVFP4
+release keeps its MLP in NVFP4 and the rest in bf16) or at a `--weight-format`
+policy, through the shared `upload_from_source` and `Ops`; K and V at a
+`model::kv_tier::KvTier` through `KvKernels` (the paged triad over a per-row
+scaled pool); the layers in `Stage`s opened from a `model::shard::StreamPlan`.
+`ricursive::POLICY` is what the model declares (weights f32, bf16, f16, int8, fp8
+with per-leaf rules; KV f32, bf16, int8, fp8; sparse attention). A tier the
+device cannot hold is an error naming the tensor and the tier it would have used
+(the CPU JIT has no packed-int8 dot, so int8 is refused there and runs on the
+software Vulkan adapter).
+
+NVFP4 semantics. The release stores, per MLP linear: `weight` U8 `[n, k/2]` (E2M1
+codes, even element in the low nibble), `weight_scale` F8_E4M3 `[n, k/16]`,
+`weight_scale_2` F32 scalar and `input_scale` F32 scalar; attention, `embed_tokens`,
+`lm_head`, norms and `value_res_lambda` are bf16; there is no `hf_quant_config.json`
+(404), the quantization is declared in `config.json` (`quant_method: modelopt`,
+`quant_algo: NVFP4`, static 4-bit input activations, group 16, every `self_attn*`,
+`embed_tokens` and `lm_head` ignored). 1923 tensors, `total_size` 57,213,636,640 bytes
+(`placement::footprint` costs 57,216,944,320: 5.8e-5 off). Brain executes it
+float-read, `Weight::Micro` (`NVFP4`): the tile decode yields `E2M1 x scale_2 x E4M3`
+and multiplies the f32 activations (W4A16 on every backend; on CUDA the library GEMM
+reads bf16 activations by default, `LinearActivations::AUTO`). It does not quantize
+activations to FP4, so it is at least as precise as the W4A4 reference. The static
+`input_scale`s are read and checked at open (`import::activation_scales`: exactly one
+finite positive scalar each, present for every quantized weight or for none) and not
+applied. Backends: the CPU JIT and the software adapter run the tile decode and
+the dense GEMM; CUDA has the native NVFP4 kernels (`LinearActivations`), not
+validated here.
+
+Weight tiers, tiny model (3 layers, 15 rows: 10 prefill and 14 decode steps with window 4
+wrapped, logits against the f32 engine; `tests/it/tiers.rs`):
+
+| tier | engine vs f32 engine on the tier's own decode (scaled) | mean KL vs original f32 | top-1 vs original |
+|---|---|---|---|
+| bf16 | 0 (CPU), 1.2e-6 (software) | 9.7e-5 | 93.3% |
+| f16 | 0 | 1.2e-6 | 100% |
+| fp8 e4m3 (128 blocks) | 0 (CPU), 7.8e-7 (software) | 2.2e-2 | 73.3% |
+| int8 (software adapter only; W8A8) | 2.3e-2 (activations quantized too) | 1.7e-3 | 100% |
+| NVFP4 MLP (fixture encoder, random weights) | 6.1e-7 (CPU), 1.1e-6 (software) | 0.11 | 60% |
+
+The tiny model has random weights, which 4 and 8 bit formats do not preserve as they do
+trained ones; the tier numbers that mean something are the real-tensor ones below. "The
+tier's own decode" is the device read-back of the loaded weight (`Ops::read_host`); the
+codec's host `Weight::round_trip` differs from the loader's FP8 quantizer by one step on some
+elements (the loader rounds block scales to bf16), which is why the reference is the
+read-back.
+
+NVFP4 on real tensors (layers 0 and 4 of `ricursiveAI/Ripple-65B-Preview-NVFP4`
+fetched by range reads beside the bf16 partial, 3.4 GB; CPU backend;
+`tests/it/real_nvfp4.rs`; 115 tokens of an English and Rust paragraph tokenized greedily
+over the release vocabulary):
+
+| check | result |
+|---|---|
+| device decode vs an independent ModelOpt decode (E2M1 x E4M3 x `weight_scale_2`), 60 rows over six matrices | worst error 1.0e-7 of the row range |
+| NVFP4 vs the bf16 files they were quantized from: hidden stream relative L2 error | 4.2e-2 after layer 0, 4.2e-2 after layer 4 |
+| same, next-token distribution | mean KL 3.6e-3 (last position 8.3e-4), top-1 agreement 87.8% (101 of 115), worst scaled logits error 5.4e-2 |
+| static input scales against the activations the MLP saw (gate and up share a scale) | layer 0: observed amax 1.32 of calibrated 1.84 (72%); layer 4: 2.02 of 2.50 (81%): no clipping a W4A4 reference would apply on this text |
+| engine on the NVFP4 files vs the prefill model on the same files (9-token prefill, 4 decodes) | worst scaled error 4.1e-6 |
+| resident weights of the two layers | bf16 x11 1.58 GiB, NVFP4 x6 0.66 GiB (those six matrices in bf16 are 2.3 GiB) |
+
+A two-layer stack of an 80-layer model is not a language model: these are relative damage
+measures of the formats, not task metrics. The 80-layer NVFP4 versus bf16 comparison needs
+the whole release (57 GB) and a card, and is not measured.
+
+KV tiers, tiny model, same run, against the f32 cache (rings wrapped three times, global
+pool across 4-row blocks):
+
+| KV | worst scaled logits error | mean KL | top-1 | bytes of the pools (tiny) |
+|---|---|---|---|---|
+| bf16 | 4.5e-3 | 1.8e-5 | 100% | half of f32 |
+| int8 | 1.5e-2 | 1.4e-4 | 93.3% | 0.31 of f32 (1 byte + a 4-byte scale per 16 elements) |
+| fp8 e4m3 | 5.7e-2 | 2.4e-3 | 86.7% | same as int8 |
+
+Prefix reuse (prefix of 20 and 18 tokens resumed by a longer prompt) reproduces the cold
+logits of the same tier exactly (scaled error 0) for bf16, int8 and fp8: the ring snapshot and
+the shared blocks are copied as stored, scales included. Latent sparse attention at a budget
+past the context over an int8 or fp8 cache answers as the dense read of that cache:
+3.4e-7 and 4.2e-7 (software adapter). A bf16 cache with sparse attention, and sparse attention on
+a staged engine, are refused by name. The D-LSA capture needs the f32 cache (it reads
+unquantized keys) and works across stages.
+
+Stages. `RicursiveEngine::from_source_staged` opens one device handle per stage under the
+plan's placement scope, loads only the stage's layers, keeps block tables, ring slots and the
+prefix cache on the host (block `b` is block `b` on every stage) and carries the residual stream
+across a boundary with `Gpu::copy_to` (peer copy where the pair has a link, host-staged
+otherwise). Two stages reproduce the single stage exactly on the CPU backend (scaled error 0,
+including a prefix-reuse resume across the boundary and the D-LSA capture). What the CPU can
+and cannot do: `--device cpu0-7,cpu8-15` is one compute set (a core mask), not two devices, so
+the two-stage test opens two independent CPU `Gpu` handles, whose boundary copy goes through host
+memory ("device-to-device transfers on the cpu backend go through host memory"). A real peer copy,
+the `with_gpu` placement of a stage on a card and `StreamPlan::cards` (the free-memory probe) have
+not run: all physical GPUs are in use by other jobs. The one other serving engine I found that splits a sequence's decode
+over cards is `Qwen35GgufResident` (`qwen35/int8_gguf_resident.rs`), whose stage seam this engine follows; `model::shard::Shardable` is the training pipeline's trait (it
+needs `Model`, a backward) and is not implemented for Ripple: the adapter is `placement`
+(`LayerBytes`, `ShardCost`) until step 6.
+
+Placement, published configuration on 96 GiB cards (`capacity::headroom` leaves 83.8 GiB usable
+of 96; `placements_of_the_published_configuration_on_96_gib_cards` prints the whole table), one
+sequence, latent sparse attention charged (`lsa_device_bytes` of a default indexer), the dense
+paged triad capped at 8192 keys (`ServeConfig::dense_keys`), 512-row prefill chunks. Every
+row therefore assumes the global layers read sparsely; a dense read at 128k needs
+`dense_keys` 131072, whose score scratch is 2 x 4 x rows x 80 x 131072 bytes (5.4 GB at 64-row
+chunks, 43 GB at 512), and past that the dense triad is not an option. Fixed bytes per stage 2.9
+to 3.2 GiB (score scratch, activations, tile budget) are on top of the stage bytes:
+
+| weights | KV | context | cards | per card (stage bytes) |
+|---|---|---|---|---|
+| bf16 (119.7 GiB) | bf16 | 128k | 2 | 63.7 + 64.8 GiB |
+| bf16 | int8 | 128k | 2 | 61.6 + 62.8 GiB |
+| bf16 | int8 | 1M | 2 | 76.7 + 77.9 GiB (33.0 GiB of KV) |
+| bf16 | bf16 | 1M | 3 | 63.7 + 63.3 + 58.9 GiB (64.0 GiB of KV) |
+| NVFP4 release (52.3 GiB) | int8 | 128k | 1 | 57.0 GiB |
+| NVFP4 | bf16 | 128k | 1 | 61.1 GiB |
+| NVFP4 | int8 | 1M | 2 | 43.7 + 43.5 GiB |
+| NVFP4 | bf16 | 1M | 2 | 59.3 + 59.1 GiB |
+| fp8 (59.9 GiB) | int8 | 128k | 1 | 64.6 GiB |
+| int8 (67.3 GiB) | int8 | 128k | 1 | 72.1 GiB |
+
+**Staged engines cannot read sparsely yet** (open items), so the multi-card rows are placements of
+bytes, not configurations this engine serves at those contexts: a staged engine reads dense, which
+caps its context by the score scratch. One card holds the NVFP4 release with an int8 cache up to about 843k tokens (bf16 cache 442k;
+fp8 weights 614k and 319k). Rings cost 0.4 GiB (bf16) or 0.2 GiB (int8) a slot of the whole stack
+whatever the context. The weights cost matches the published `total_size` and the 65B parameter
+count (`placement` unit tests); the fixed per-stage bytes are an estimate (the activations of the
+widest forward), not a measurement, and the allocator overhead is `capacity::headroom`'s 14%.
+
+Not measured or not run: any card (CUDA parity of the tiers, the native NVFP4 kernels, peer copies,
+throughput of any tier or KV format, loading time), the 80-layer release end to end, int8 on the
+CPU backend (refused), the `brain lsa` staging path (`StreamPlan::cards` probes free card memory),
+and the host-RAM figure of the embedding gather (it reads one row per token from the mapped file).
 
 ### GPU phase runbook
 
@@ -190,12 +327,40 @@ brain lsa eval --arch ricursive --checkpoint <directory> --corpus <directory> \
     --indexer random,pca,ripple-lsa.safetensors --tokens 32768 --skip-docs 48 --held-docs 6
 ```
 
-Needs a placement that holds the model (quantized or layer-streamed weights in
-the engine, not yet there) and the host parallelism above for the teacher.
-Serve with the artifact through the engine's `set_lsa`; the catalog entry
-comes later.
+Needs the host parallelism above for the teacher. Serve with the artifact through the
+engine's `set_lsa`; the catalog entry comes later.
+
+Which tier and placement (all numbers above; the first run on a card checks each against the
+engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
+
+* **1 GH200 (96 GiB), D-LSA distillation and evaluation, serving up to ~0.8M tokens**: the NVFP4
+  release loaded as published (`--checkpoint <Ripple-65B-Preview-NVFP4 directory>`, no
+  `--weights`), `--device gpu0`. 52.3 GiB of weights. Distillation and the capture need an f32
+  cache (`brain lsa distill`: 128 KiB a token over the 16 global layers, 4 GiB at 32k tokens, fine). Serving
+  and `prefill` timing take `--kv-cache int8` (33 KiB a token: the card holds about 843k tokens
+  with sparse attention charged) or `bf16` (442k). `eval` and `set_lsa` need one stage.
+* **2 GH200, the bf16 release (129 GB)**: `--device gpu0,gpu1`, no `--weights`: the layers are staged
+  over the fewest cards that hold them (bf16 + int8 cache: 2 cards, 62 + 63 GiB at 128k). Dense
+  attention (`dense_keys` set to the context, 64-row chunks), scoring and the D-LSA capture work
+  across stages; latent sparse attention does not, so a 1M context on several cards waits for the
+  open item below and the one-card NVFP4 limit (843k tokens, int8 cache, sparse) is the longest
+  context served today. `--weights fp8` or `int8` from the bf16 release
+  quantizes at load (fp8 59.9 GiB, int8 67.3 GiB resident, 1 card to 128k).
+* First checks on a card, in order: the NVFP4 tile decode and the library bf16 GEMM against the CPU
+  numbers in this file (`real_nvfp4` with `--device gpu0`; set `BRAIN_REQUIRE_CAPABILITIES`), the int8
+  tier (`tiers` with `--device gpu0`), peer copy vs host-staged boundary on two cards, then throughput
+  per tier with `brain perf` (`kernels.md` section F) before any tuning.
 
 ## Open items for the later steps
+
+- Fused dense attention for group 10: `KvKernels::flash_decode` is specialised for head width 256 and
+  `(128, 1)`; Ripple (128, group 10) keeps the paged triad, whose score scratch is why
+  `ServeConfig::dense_keys` exists. Only a sparse engine can run long contexts today.
+- Latent sparse attention across stages (one binding per stage needs per-stage index pages in the block table): without it a multi-card engine reads its global layers dense and the long-context rows of the placement table (1M tokens on 2 or 3 cards) are not servable.
+- Activation quantization to FP4 (W4A4 as the release was calibrated) as an opt-in beside the float-read default
+  would need the static `input_scale`s applied; the checks and the coverage numbers above are the groundwork.
+- The embedding is gathered on the host a row at a time from the mapped file (no device copy); a bf16 device table
+  would save the host read at 1 GiB.
 
 - Step 1's `Layer::record` still materializes `[heads, t, t]` scores; the
   engine does not (its scratch is `rows x heads x keys`, rows being one
