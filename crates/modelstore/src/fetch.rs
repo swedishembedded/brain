@@ -39,37 +39,49 @@ pub fn stream_to_file(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = dest.with_extension(match dest.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{ext}.part"),
-        None => "part".to_string(),
-    });
-    let mut file = std::fs::File::create(&tmp)?;
-    let mut hasher = expected_sha256.is_some().then(Sha256::new);
-    let mut buf = [0u8; 64 * 1024];
-    let mut got: u64 = 0;
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
+    // Each download writes its own `.part` (two fetches of one file, two
+    // quantisations of one base, must not interleave into one), created
+    // exclusively, and removed on every way out but success.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = dest.with_extension(format!(
+        "{}part-{}-{}",
+        dest.extension().and_then(|e| e.to_str()).map(|e| format!("{e}.")).unwrap_or_default(),
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let written = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut hasher = expected_sha256.is_some().then(Sha256::new);
+        let mut buf = [0u8; 64 * 1024];
+        let mut got: u64 = 0;
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            got += n as u64;
+            // A server that sends more than it declared is not sending the file.
+            if total.is_some_and(|t| got > t) {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("the download runs past its declared {} bytes", total.unwrap_or(0))));
+            }
+            file.write_all(&buf[..n])?;
+            if let Some(h) = &mut hasher {
+                h.update(&buf[..n]);
+            }
+            progress(got, total);
         }
-        file.write_all(&buf[..n])?;
-        if let Some(h) = &mut hasher {
-            h.update(&buf[..n]);
+        file.sync_all()?;
+        if let (Some(expected), Some(h)) = (expected_sha256, hasher) {
+            let digest = hex_lower(&h.finalize());
+            if digest != expected {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("sha256 mismatch: expected {expected}, got {digest}")));
+            }
         }
-        got += n as u64;
-        progress(got, total);
-    }
-    file.sync_all()?;
-    drop(file);
-    if let (Some(expected), Some(h)) = (expected_sha256, hasher) {
-        let digest = hex_lower(&h.finalize());
-        if digest != expected {
-            std::fs::remove_file(&tmp).ok();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("sha256 mismatch: expected {expected}, got {digest}"),
-            ));
-        }
+        Ok(())
+    })();
+    if let Err(e) = written {
+        std::fs::remove_file(&tmp).ok();
+        return Err(e);
     }
     std::fs::rename(&tmp, dest)?;
     Ok(())
@@ -297,6 +309,23 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A download that fails leaves no `.part`, and one that sends more than
+    /// it declared is refused.
+    #[test]
+    fn a_failed_download_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("brain-fetch-part-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("w.safetensors");
+        let err = stream_to_file(&b"0123456789"[..], &dest, Some(4), None, &mut |_, _| {}).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let err = stream_to_file(&b"abc"[..], &dest, Some(3), Some("00"), &mut |_, _| {}).unwrap_err();
+        assert!(err.to_string().contains("sha256"), "{err}");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "no .part and no destination remain");
+        stream_to_file(&b"abc"[..], &dest, Some(3), None, &mut |_, _| {}).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"abc");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn streams_bytes_to_dest_atomically_via_rename() {

@@ -329,11 +329,14 @@ pub struct StoreSupplier {
     store: Store,
     hub: Box<dyn Hub>,
     inflight: Mutex<HashMap<String, FetchGate>>,
+    /// Held for the whole of one fetch: models are fetched one at a time, so
+    /// requests naming many repos cannot start that many downloads at once.
+    fetching: Mutex<()>,
 }
 
 impl StoreSupplier {
     pub fn new(store: Store, hub: Box<dyn Hub>) -> StoreSupplier {
-        StoreSupplier { store, hub, inflight: Mutex::new(HashMap::new()) }
+        StoreSupplier { store, hub, inflight: Mutex::new(HashMap::new()), fetching: Mutex::new(()) }
     }
 
     fn do_ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
@@ -456,7 +459,10 @@ impl ModelSupplier for StoreSupplier {
 
         // The leader: do the real work, then publish the result to every
         // follower waiting on the same slot.
-        let result = self.do_ensure(model, exec, progress);
+        let result = {
+            let _one_at_a_time = self.fetching.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.do_ensure(model, exec, progress)
+        };
         let slot = self.inflight.lock().unwrap().get(model).cloned();
         if let Some(slot) = slot {
             let (lock, cv) = &*slot;

@@ -343,6 +343,13 @@ fn resolve_redirect_location(base: &str, location: &str) -> Result<String, HubEr
 /// The host-allowlist check, pulled out as a pure function so it is testable
 /// without a live server or a mock HTTP stack.
 fn check_redirect_allowed(location: &str) -> Result<(), HubError> {
+    let url = parse_url(location)?;
+    // The hub token rides every hop: only https, and no credentials of the
+    // location's own, which a server could use to make a URL read as one host
+    // and connect to another.
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return Err(HubError::Network(format!("refused redirect to {location}: only plain https locations are followed")));
+    }
     let host = url_host(location)?;
     if !host_is_allowed(&host) {
         return Err(HubError::Network(format!("refused off-host redirect to {host}")));
@@ -350,28 +357,31 @@ fn check_redirect_allowed(location: &str) -> Result<(), HubError> {
     Ok(())
 }
 
-fn url_host(url: &str) -> Result<String, HubError> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| HubError::BadResponse(format!("redirect to a non-http(s) url: {url}")))?;
-    let host = rest.split(['/', ':']).next().unwrap_or("");
-    if host.is_empty() {
-        return Err(HubError::BadResponse(format!("redirect url has no host: {url}")));
+/// `url` parsed as an absolute http(s) URL.
+fn parse_url(url: &str) -> Result<url::Url, HubError> {
+    let parsed = url::Url::parse(url).map_err(|e| HubError::BadResponse(format!("redirect to an unparsable url {url}: {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(HubError::BadResponse(format!("redirect to a non-http(s) url: {url}")));
     }
-    Ok(host.to_string())
+    Ok(parsed)
 }
 
-/// The `scheme://host` prefix of an absolute `http(s)://` URL.
+/// The host a URL connects to, parsed as the HTTP client parses it: a
+/// `?`, `#`, `@` or `\\` cannot make a URL read as one host here and connect
+/// to another.
+fn url_host(url: &str) -> Result<String, HubError> {
+    let parsed = parse_url(url)?;
+    match parsed.host_str() {
+        Some(host) if !host.is_empty() => Ok(host.to_ascii_lowercase()),
+        _ => Err(HubError::BadResponse(format!("redirect url has no host: {url}"))),
+    }
+}
+
+/// The `scheme://host[:port]` prefix of an absolute `http(s)://` URL.
 fn url_origin(url: &str) -> Result<String, HubError> {
-    let scheme = if url.starts_with("https://") {
-        "https"
-    } else if url.starts_with("http://") {
-        "http"
-    } else {
-        return Err(HubError::BadResponse(format!("not an http(s) url: {url}")));
-    };
-    Ok(format!("{scheme}://{}", url_host(url)?))
+    let parsed = parse_url(url)?;
+    url_host(url)?;
+    Ok(parsed.origin().ascii_serialization())
 }
 
 /// An in-memory [`Hub`] for tests: no network, no filesystem beyond writing
@@ -561,6 +571,11 @@ mod tests {
         assert_eq!(url_host("http://huggingface.co:443/x").unwrap(), "huggingface.co");
         assert!(url_host("ftp://evil.example/x").is_err());
         assert!(url_host("https://").is_err());
+        // A host suffix in a query, a fragment or userinfo is not the host.
+        for trick in ["https://evil.example?x.hf.co/", "https://evil.example#.huggingface.co/", "https://huggingface.co@evil.example/", "https://evil.example\\@huggingface.co/"] {
+            assert!(check_redirect_allowed(trick).is_err(), "{trick}");
+        }
+        assert!(check_redirect_allowed("http://huggingface.co/x").is_err(), "the token never travels in plaintext");
     }
 
     #[test]
