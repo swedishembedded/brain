@@ -220,11 +220,11 @@ fn the_bf16_pool_variant_matches_the_oracle_on_rounded_kv() {
 /// reassociation: its tiles are 16 keys, the per-head kernel's 8.
 #[test]
 fn the_per_kv_head_kernel_matches_the_per_head_kernel() {
-    for (nh, nkv) in [(16u32, 8u32), (8, 2), (4, 4), (16, 2), (40, 8), (12, 4)] {
+    for (nh, nkv, hd) in [(16u32, 8u32, 64u32), (8, 2, 64), (4, 4, 64), (16, 2, 64), (40, 8, 64), (12, 4, 64), (80, 8, 128), (40, 8, 128)] {
         let gqa = gqa_kernel(nh / nkv).unwrap();
         let pipes: &'static [(&str, &str)] = Box::leak(vec![KERNEL, gqa].into_boxed_slice());
         let Some(g) = barrier_gpu(pipes) else { return };
-        let shape = SparseAttention { n_heads: nh, n_kv_heads: nkv, head_dim: 64, block_size: 8, max_bt: 32 };
+        let shape = SparseAttention { n_heads: nh, n_kv_heads: nkv, head_dim: hd, block_size: 8, max_bt: 32 };
         let lens = [200u32, 77];
         let mut rng = Rng::new(data::rng::random_seed());
         let cache = Cache::new(&mut rng, shape, &lens);
@@ -247,7 +247,7 @@ fn the_per_kv_head_kernel_matches_the_per_head_kernel() {
         }
         let selection = Selection { width, ids, lens: row_lens };
         let rows = SparseRows::pack(&selection, &tables, &live).unwrap();
-        let q: Vec<f32> = (0..rows.rows * nh * 64).map(|_| rng.next_gaussian() as f32).collect();
+        let q: Vec<f32> = (0..rows.rows * nh * hd).map(|_| rng.next_gaussian() as f32).collect();
         let (pk, pv) = cache.f32_pools();
         let per_head = cache.run(&g, 0, false, &q, &rows, (&pk, &pv));
         let per_kv_head = cache.run(&g, 1, true, &q, &rows, (&pk, &pv));
@@ -286,8 +286,7 @@ fn packed_pool(rng: &mut Rng, slots: usize, n_kv: usize, hd: usize, kv: PackedKv
 /// dequantised pool, int8 and fp8, on ragged rows of two sequences.
 #[test]
 fn packed_pools_read_what_the_f32_kernel_reads_dequantised() {
-    for kv in [PackedKv::Int8, PackedKv::Fp8] {
-        let (nh, nkv, hd) = (8u32, 4u32, 64u32);
+    for (kv, (nh, nkv, hd)) in [PackedKv::Int8, PackedKv::Fp8].into_iter().flat_map(|kv| [(8u32, 4u32, 64u32), (80, 8, 128)].map(move |g| (kv, g))) {
         let pipes: &'static [(&str, &str)] = Box::leak(vec![gqa_kernel(nh / nkv).unwrap(), gqa_kernel_kv(nh / nkv, kv).unwrap()].into_boxed_slice());
         let Some(g) = barrier_gpu(pipes) else { return };
         let shape = SparseAttention { n_heads: nh, n_kv_heads: nkv, head_dim: hd, block_size: 8, max_bt: 32 };
@@ -344,7 +343,7 @@ fn packed_pools_read_what_the_f32_kernel_reads_dequantised() {
 /// at the model geometries it is built for, int8 and fp8.
 #[test]
 fn the_whole_row_kernel_matches_over_the_dequantised_pool() {
-    for (nh, nkv, hd) in [(16u32, 8u32, 128u32), (32, 8, 128), (8, 2, 64)] {
+    for (nh, nkv, hd) in [(16u32, 8u32, 128u32), (32, 8, 128), (8, 2, 64), (40, 8, 128), (80, 8, 128), (64, 8, 128)] {
         for kv in [PackedKv::Int8, PackedKv::Fp8] {
             let pipes: &'static [(&str, &str)] = Box::leak(vec![gqa_kernel(nh / nkv).unwrap(), rows_kernel_kv(nh, nkv, hd, kv).unwrap()].into_boxed_slice());
             let Some(g) = barrier_gpu(pipes) else { return };
@@ -394,4 +393,75 @@ fn the_whole_row_kernel_matches_over_the_dequantised_pool() {
             assert!(w < 1e-4, "{nh}/{nkv}/{hd} {kv:?}: whole-row kernel vs per-KV-head maxabs {w}");
         }
     }
+}
+
+/// The per-KV-head f32 kernel at group 10 (Ripple's 80 heads over 8 KV heads of 128) and group 5 (40 over 8)
+/// against the scalar oracle `lsa::attend`, on LSA selections that leave keys unread.
+#[test]
+fn the_wide_group_kernels_match_the_scalar_oracle() {
+    for (nh, nkv, hd) in [(80u32, 8u32, 128u32), (40, 8, 128)] {
+        let gqa = gqa_kernel(nh / nkv).unwrap();
+        let pipes: &'static [(&str, &str)] = Box::leak(vec![gqa].into_boxed_slice());
+        let Some(g) = barrier_gpu(pipes) else { return };
+        let shape = SparseAttention { n_heads: nh, n_kv_heads: nkv, head_dim: hd, block_size: 8, max_bt: 32 };
+        let layout = HeadLayout { n_heads: nh as usize, n_kv_heads: nkv as usize, head_dim: hd as usize, rotary: RotaryLayout::None };
+        let cfg = LsaConfig { index_dim: layout.index_dim().unwrap(), pool_size: 2, bucket_size: 4, bucket_cap: 8, cluster_block: 32, top_p: 4, top_k: 12, sink: 2, window: 32, early: None };
+        let lens = [3 * 32 + 20u32, 2 * 32 + 3];
+        let mut rng = Rng::new(data::rng::random_seed());
+        let cache = Cache::new(&mut rng, shape, &lens);
+        let q_row = (nh * hd) as usize;
+        let (pk, pv) = cache.f32_pools();
+        let mut sparse_rows = 0usize;
+        for (seq, &len) in lens.iter().enumerate() {
+            let index = BucketIndex::build(cfg, &layout.index_keys(&cache.k[seq]).unwrap()).unwrap();
+            let positions: Vec<u32> = (0..len).step_by(7).chain([len - 1]).collect();
+            let q: Vec<f32> = (0..positions.len() * q_row).map(|_| rng.next_gaussian() as f32).collect();
+            let selection = select(&index, &layout.index_queries(&q).unwrap(), &positions).unwrap();
+            sparse_rows += positions.iter().enumerate().filter(|(r, &p)| (selection.lens[*r] as usize) < p as usize + 1).count();
+            let rows = SparseRows::pack(&selection, &vec![seq as u32; positions.len()], &vec![len; positions.len()]).unwrap();
+            let device = cache.run(&g, 0, true, &q, &rows, (&pk, &pv));
+            let host = cache.oracle(&q, &selection, &cache.k[seq], &cache.v[seq]);
+            let w = worst(&device, &host);
+            assert!(w < 1e-4, "{nh}/{nkv}/{hd} sequence {seq}: device vs host oracle maxabs {w}");
+        }
+        assert!(sparse_rows > 0, "the fixture must leave some keys unread");
+    }
+}
+
+/// Every kernel variant an engine can register is valid WGSL, and its workgroup memory fits the core-compute
+/// profile's 16 KiB. Runs on every backend: the cooperative kernels cannot execute on the CPU JIT, but they can be
+/// parsed and validated, which catches a bad template before a device ever compiles it.
+#[test]
+fn every_registered_sparse_variant_is_valid_wgsl_within_workgroup_memory() {
+    let mut variants: Vec<(&'static str, &'static str)> = Vec::new();
+    for group in [1u32, 2, 4, 5, 8, 10] {
+        variants.push(gqa_kernel(group).unwrap());
+        for kv in [PackedKv::Int8, PackedKv::Fp8] {
+            variants.push(gqa_kernel_kv(group, kv).unwrap());
+        }
+    }
+    for (nh, nkv, hd) in [(16u32, 8u32, 128u32), (32, 8, 128), (8, 2, 64), (40, 8, 128), (64, 8, 128), (80, 8, 128), (48, 8, 128), (24, 4, 96)] {
+        for kv in [PackedKv::Int8, PackedKv::Fp8] {
+            variants.push(rows_kernel_kv(nh, nkv, hd, kv).unwrap());
+        }
+    }
+    for (name, src) in variants {
+        let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty()).validate(&module).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let shared: u32 = module.global_variables.iter().filter(|(_, v)| v.space == naga::AddressSpace::WorkGroup).map(|(_, v)| module.types[v.ty].inner.size(module.to_ctx())).sum();
+        eprintln!("{name}: {shared} bytes of workgroup memory");
+        assert!(shared <= 16 * 1024, "{name}: {shared} bytes of workgroup memory");
+    }
+}
+
+/// The whole-row workgroup keeps the shapes already validated and widens it for head counts that do not divide 64.
+#[test]
+fn the_whole_row_workgroup_is_geometry_derived() {
+    assert_eq!(rows_geometry(16, 8, 128).unwrap(), (64, 8));
+    assert_eq!(rows_geometry(32, 8, 128).unwrap(), (64, 8));
+    assert_eq!(rows_geometry(8, 2, 64).unwrap(), (64, 8));
+    assert_eq!(rows_geometry(40, 8, 128).unwrap(), (80, 8));
+    assert_eq!(rows_geometry(80, 8, 128).unwrap(), (160, 4));
+    assert!(rows_geometry(300, 10, 128).is_err(), "no workgroup of at most 256 threads holds 300 heads");
+    assert!(rows_geometry(16, 8, 130).is_err() && rows_geometry(15, 8, 128).is_err());
 }

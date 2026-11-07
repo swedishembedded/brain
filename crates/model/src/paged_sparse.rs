@@ -68,15 +68,55 @@ pub enum Layout {
     PerRow,
 }
 
-/// The whole-row kernel over a packed pool, specialised for the model's
-/// geometry (`n_heads` must divide 64, `head_dim % 4 == 0`): each selected
-/// key is resolved and its full K/V row staged once per query row and read
-/// by every head - the prefill-shaped read. Bind the scales.
-pub fn rows_kernel_kv(n_heads: u32, n_kv_heads: u32, head_dim: u32, kv: PackedKv) -> Result<(&'static str, &'static str), String> {
-    if n_heads == 0 || n_kv_heads == 0 || !64u32.is_multiple_of(n_heads) || !n_heads.is_multiple_of(n_kv_heads) || head_dim == 0 || !head_dim.is_multiple_of(4) || !(head_dim / (64 / n_heads)).is_multiple_of(4) {
-        return Err(format!("sparse attention: no whole-row kernel for {n_heads} heads over {n_kv_heads} KV heads of {head_dim}"));
+/// Bytes of workgroup memory the whole-row kernel may use: the portable limit of the core-compute profile.
+const ROWS_WORKGROUP_MEMORY: u32 = 16 * 1024;
+
+/// The most threads a workgroup may have on every backend.
+const ROWS_MAX_WORKGROUP: u32 = 256;
+
+/// Widest channel slice a thread keeps in registers (query and accumulator).
+const ROWS_MAX_CHANNELS_PER_THREAD: u32 = 64;
+
+/// The whole-row kernel's workgroup shape for a geometry: `(threads, keys per tile)`.
+///
+/// A thread owns `head_dim / tph` channels of one head, so the workgroup is
+/// `n_heads * tph` threads: the smallest `tph` that makes it at least 64 threads
+/// (the kernel's tuned width) with at most [`ROWS_MAX_CHANNELS_PER_THREAD`]
+/// channels per thread, which keeps the original shapes (16 heads: 4 threads a
+/// head; 32: 2; 8 heads of 64: 8) and takes 40 heads as 80 threads and 80 as
+/// 160. The tile is 8 keys where its staging, partials and weights fit
+/// [`ROWS_WORKGROUP_MEMORY`], fewer otherwise (80 heads of 128 over 8 KV heads: 4).
+pub fn rows_geometry(n_heads: u32, n_kv_heads: u32, head_dim: u32) -> Result<(u32, u32), String> {
+    let no = |why: &str| Err(format!("sparse attention: no whole-row kernel for {n_heads} heads over {n_kv_heads} KV heads of {head_dim}: {why}"));
+    if n_heads == 0 || n_kv_heads == 0 || !n_heads.is_multiple_of(n_kv_heads) {
+        return no("the heads do not group");
     }
-    let int8 = kernels::template::interned("paged_sparse_flash_rows_i8", kernels::PAGED_SPARSE_FLASH_ROWS_I8, &[("HEADS", n_heads), ("KVH", n_kv_heads), ("HD", head_dim)])?;
+    if head_dim == 0 || head_dim > MAX_HEAD_DIM || !head_dim.is_multiple_of(4) {
+        return no("head_dim must be a multiple of 4 up to 128");
+    }
+    let tph = (1..=head_dim / 4).filter(|t| (head_dim / 4).is_multiple_of(*t)).find(|t| {
+        let wg = n_heads * t;
+        (64..=ROWS_MAX_WORKGROUP).contains(&wg) && head_dim / t <= ROWS_MAX_CHANNELS_PER_THREAD
+    });
+    let Some(tph) = tph else { return no("no workgroup of 64..=256 threads splits the heads' channels") };
+    let wg = n_heads * tph;
+    let kvw = n_kv_heads * head_dim / 4;
+    let bytes = |bc: u32| 4 * (bc * kvw + bc * n_kv_heads + bc * wg + n_heads * bc + 3 * n_heads + bc);
+    let Some(bc) = [8u32, 4, 2, 1].into_iter().find(|&bc| bytes(bc) <= ROWS_WORKGROUP_MEMORY) else { return no("its key tile does not fit in workgroup memory") };
+    Ok((wg, bc))
+}
+
+/// The whole-row kernel over a packed pool, specialised for the model's
+/// geometry ([`rows_geometry`] picks the workgroup): each selected key is
+/// resolved and its full K/V row staged once per query row and read by every
+/// head - the prefill-shaped read. Bind the scales.
+pub fn rows_kernel_kv(n_heads: u32, n_kv_heads: u32, head_dim: u32, kv: PackedKv) -> Result<(&'static str, &'static str), String> {
+    let (wg, bc) = rows_geometry(n_heads, n_kv_heads, head_dim)?;
+    let int8 = kernels::template::interned(
+        "paged_sparse_flash_rows_i8",
+        kernels::PAGED_SPARSE_FLASH_ROWS_I8,
+        &[("HEADS", n_heads), ("KVH", n_kv_heads), ("HD", head_dim), ("WG", wg), ("BC", bc), ("workgroup_size", wg)],
+    )?;
     match kv {
         PackedKv::Int8 => Ok(int8),
         PackedKv::Fp8 => kernels::template::fp8_decode_variant(int8.0, int8.1),

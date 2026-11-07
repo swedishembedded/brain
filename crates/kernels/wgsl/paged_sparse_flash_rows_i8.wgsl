@@ -2,15 +2,17 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  Sparse paged attention of a whole query row (every head) over its selected keys in an int8 KV pool
-// @how   64-thread workgroup per query row: each key's full packed K/V row staged once (coalesced) and read by every head, a thread owns a head's channel slice in registers
+// @how   workgroup per query row (a multiple of the head count, 64 or more threads): each key's full packed K/V row staged once (coalesced) and read by every head, a thread owns a head's channel slice in registers
 // @opt   4
 // @cpu   no
 // @gpu   yes
 // @npu   no
 // @quant int8
 // @dtype f32
-// @tpl   HEADS, KVH, HD -> the model's query heads, KV heads and head width
-//        (`HEADS` must divide 64); the int8 byte decode between the
+// @tpl   HEADS, KVH, HD -> the model's query heads, KV heads and head width;
+//        WG (with the `workgroup_size` attribute) -> the workgroup's threads,
+//        `HEADS * TPH`; BC -> keys per tile, which `paged_sparse::rows_geometry`
+//        sizes so the workgroup memory stays inside 16 KiB; the int8 byte decode between the
 //        kv8-decode markers -> FP8 E4M3 via
 //        `kernels::template::fp8_decode_variant`.
 //
@@ -43,7 +45,9 @@
 // `head_dim == HD`, `HD % 4 == 0`.
 //
 // Workgroup memory at 16 heads, 8 KV heads of 128: K/V tile 8 KiB + partials
-// 2 KiB + weights 512 B + scales 512 B ~= 11 KiB.
+// 2 KiB + weights 512 B + scales 512 B ~= 11 KiB. `WG = HEADS * TPH` threads, so
+// a head count that does not divide 64 (40, 80) takes a wider workgroup rather
+// than none: `TPH` threads share a head's channels (`HD / TPH` each).
 
 const BC: u32 = 8u;               // keys per tile
 const WG: u32 = 64u;

@@ -60,6 +60,8 @@ pollster.workspace = true
 # this is not a real cycle.
 [dev-dependencies]
 brain-testutil.workspace = true
+# Test-only: parses and validates every sparse-attention kernel variant, which the CPU JIT cannot execute.
+naga.workspace = true
 brain-gradcheck.workspace = true
 # Test-only: `crates/model/tests/it/causal_conv1d_step.rs` gates
 # `gdn::gdn_causal_conv1d_step` against `audio::conv::conv1d_fwd`'s

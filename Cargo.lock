@@ -2085,6 +2085,7 @@ dependencies = [
  "brain-paramstore",
  "brain-testutil",
  "half",
+ "naga",
  "pollster",
  "ring",
  "serde",
