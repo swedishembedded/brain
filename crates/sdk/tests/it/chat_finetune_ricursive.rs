@@ -19,9 +19,7 @@ use std::path::{Path, PathBuf};
 
 use brain::{ChatFineTune, ChatFullFineTune, FineTuneStatus, PreferenceFineTune};
 
-#[path = "../chat_fixture/common.rs"]
-mod common;
-use common::{cpu, TempDir};
+use crate::chat_fixture::{cpu, TempDir};
 
 const TEMPLATE: &str = "{% for message in messages %}<|im_start|>{{ message.role }}{{ message.content }}<|im_end|>{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant{% endif %}";
 
@@ -47,8 +45,15 @@ fn ripple_model_dir(tag: &str) -> TempDir {
     dir
 }
 
+/// A chat dataset of one-line question/answer pairs, the answer supervised and the question not.
 fn write_dataset(dir: &Path) -> PathBuf {
-    common::write_chat_dataset(dir, &[("cab", "bad"), ("fed", "deaf"), ("ace", "face"), ("bag", "gab")])
+    let path = dir.join("chat.jsonl");
+    let rows: Vec<String> = [("cab", "bad"), ("fed", "deaf"), ("ace", "face"), ("bag", "gab")]
+        .iter()
+        .map(|(u, a)| serde_json::json!({ "messages": [{"role": "user", "content": u, "train": false}, {"role": "assistant", "content": a, "train": true}], "tools": [] }).to_string())
+        .collect();
+    std::fs::write(&path, rows.join("\n")).unwrap();
+    path
 }
 
 /// Spec: a supervised LoRA fine-tune trains an adapter over the frozen base, exports it with its card, and the
