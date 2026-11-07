@@ -88,8 +88,8 @@ volumes:
       - id: multivariable-calculus
         title: "Gradients, Jacobians and Many Variables"
         question: "When a quantity depends on millions of numbers, which way should we move them all to make it smaller?"
-        introduces: [partial-derivative, gradient, directional-derivative, jacobian, hessian, taylor-expansion, multivariable-chain-rule]
-        requires: [derivative, chain-rule, vector, matrix, dot-product]
+        introduces: [partial-derivative, gradient, directional-derivative, jacobian, hessian, taylor-expansion, multivariable-chain-rule, condition-number]
+        requires: [derivative, chain-rule, vector, matrix, dot-product, eigenvalue]
         brain: []
       - id: integrals-and-odes
         title: "Integrals and Differential Equations"
@@ -130,8 +130,8 @@ volumes:
       - id: floating-point
         title: "Floating Point and Numerical Error"
         question: "Why does a computer get arithmetic slightly wrong, and when does slightly wrong become completely wrong?"
-        introduces: [floating-point-number, machine-epsilon, rounding-error, catastrophic-cancellation, overflow-and-underflow, log-sum-exp, compensated-summation, condition-number]
-        requires: [real-number, exponent, logarithm, derivative]
+        introduces: [floating-point-number, machine-epsilon, rounding-error, catastrophic-cancellation, overflow-and-underflow, log-sum-exp, compensated-summation]
+        requires: [real-number, exponent, logarithm, derivative, condition-number]
         brain: []
       - id: algorithms
         title: "Algorithms, Cost and Complexity"

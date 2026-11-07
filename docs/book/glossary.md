@@ -22,6 +22,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **computational graph**: a record of a calculation as nodes (values) and edges showing which values were used to compute which. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
+**condition number**: for a bowl-shaped function, the ratio of its largest to its smallest curvature; a large ratio means long, narrow contours and slow progress for a fixed step size. The floating-point chapter extends the idea to how strongly a computation amplifies small errors in its inputs. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
 **convexity**: the property that no chord joining two points of the curve lies below the curve, equivalent for twice-differentiable functions to a non-negative second derivative; every critical point of a convex function is a global minimum. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **cosine similarity**: the dot product of two vectors after dividing each by its norm, a number from $-1$ to $1$ that ignores positive scaling. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
@@ -35,6 +37,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **determinant**: the signed factor by which a square matrix scales area or volume ($ad - bc$ for a $2 \times 2$); zero exactly when the matrix crushes space and has no inverse. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
 **differentiation rules**: the short list (constants and multiples, sums, products, quotients, powers) from which the derivative of any formula built from simple pieces is computed without returning to the limit. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
+**directional derivative**: the rate of change of a function per unit distance in a chosen unit direction $\mathbf{u}$, equal to $\nabla L\cdot\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **dot product**: the number $\sum_i a_i b_i$ obtained from two vectors of equal length, equal to $\lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert\cos\theta$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
@@ -58,6 +62,14 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **function notation**: the writing $f(x)$ for the output of the rule $f$ at the input $x$, and $f(x; w, b)$ to separate inputs from parameters. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
+## G
+
+**gradient**: the vector of all the partial derivatives of a scalar function, the same shape as its inputs; it points in the direction of steepest ascent and its length is the steepest rate of change. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+## H
+
+**Hessian**: the symmetric matrix of second partial derivatives of a scalar function; $\mathbf{u}^\top\mathbf{H}\mathbf{u}$ is the curvature along the unit direction $\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
 ## I
 
 **identity matrix**: the square matrix with ones on the diagonal and zeros elsewhere, which leaves every vector unchanged. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
@@ -65,6 +77,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **integer**: a whole number, positive, negative or zero, with no fractional part; the exact numbers of counting and naming. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **inverse function**: the function $f^{-1}$ that undoes $f$, so $f^{-1}(f(x)) = x$; it exists when $f$ is one-to-one. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
+
+## J
+
+**Jacobian**: the matrix of shape outputs by inputs whose entry $(i, j)$ is $\partial f_i/\partial x_j$; it is the best linear approximation of a vector function near a point. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 ## L
 
@@ -88,6 +104,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **monotonic function**: a function that never reverses direction, always increasing or always decreasing, and so keeps the order of single values. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
+**multivariable chain rule**: the Jacobian of a composition of vector functions is the product of their Jacobians, the outer one evaluated at the inner function's output. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
 ## N
 
 **Newton's method**: the iteration that replaces a function by its tangent line (or, for minimisation, by a quadratic with the same slope and curvature) and jumps to its zero (or bottom), $x \leftarrow x - f(x)/f'(x)$ or $x \leftarrow x - f'(x)/f''(x)$; its error is squared at each step near a simple root. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
@@ -101,6 +119,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **orthogonality**: the property of two vectors having dot product 0, that is, being at right angles. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 ## P
+
+**partial derivative**: the derivative of a function of several variables with respect to one of them while all the others are held fixed, $\partial L/\partial w_j$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **piecewise function**: a function defined by different rules on different parts of its domain, such as the absolute value, ReLU and a schedule with a warmup. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
@@ -141,6 +161,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **summation notation**: the symbol $\sum_{i=a}^{b} x_i$ for the sum of the terms $x_i$ as the index $i$ runs from $a$ to $b$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 ## T
+
+**Taylor expansion**: the polynomial that matches a function's value and first derivatives at a point, such as $f(a) + f'(a)h + \tfrac{1}{2}f''(a)h^2$, whose error is of the order of the first term dropped. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **tensor**: an array of numbers with any number of axes (zero for a scalar, one for a vector, two for a matrix), described by its shape. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 

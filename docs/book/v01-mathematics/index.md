@@ -58,8 +58,8 @@ in the curriculum and appear here when they are written.
    structure of a matrix, and how a large one is approximated by small ones.
 7. [Derivatives: The Mathematics of Change](07-derivatives.md): how fast a function's
    output moves when its input moves a tiny bit.
-8. Gradients, Jacobians and Many Variables: which way to move millions of
-   numbers at once to make a quantity smaller.
+8. [Gradients, Jacobians and Many Variables](08-multivariable-calculus.md): which way to
+   move millions of numbers at once to make a quantity smaller.
 9. Integrals and Differential Equations: adding up infinitely many small
    pieces, and following a system that changes continuously.
 10. Probability: Reasoning Under Uncertainty: putting numbers on uncertainty
