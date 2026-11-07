@@ -116,6 +116,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **dataset**: a collection of $N$ examples, each a vector of features paired with a label, written as the pairs $(\mathbf{x}_n, y_n)$. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
+**dead-units**: ReLU units whose pre-activation is not positive on any input, so that their output and slope are zero, their incoming gradient is exactly zero and no gradient step can revive them. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
+
 **decision boundary**: the set of inputs where the model switches its decision, for a linear logit the line, plane or flat sheet $\mathbf{w}\cdot\mathbf{x} = 0$ (at threshold $1/2$), which separates the two predicted classes. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
 **decision tree**: a model that asks a sequence of yes-or-no questions, each a threshold on one feature chosen to make the answers as informative about the class as possible, and predicts the class held at the leaf reached. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
@@ -163,6 +165,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **exact match**: the share of test questions whose generated answer equals the single reference answer as a string, after a stated normalization; all or nothing, with no partial credit. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **expectation**: the probability-weighted average $\sum_x x\,p(x)$ (or $\int x f(x)\,dx$) of a random variable, the value its long-run average approaches; it is linear, $\mathbb{E}[X + Y] = \mathbb{E}[X] + \mathbb{E}[Y]$. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
+
+**exploding-gradient**: the same product with factors above one, so that the gradient grows geometrically toward the early layers and a step on them is enormous. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
 **exponent**: the count of repeated factors in $b^n$, extended to zero, negative and fractional counts by the rule $b^m b^n = b^{m+n}$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
@@ -290,6 +294,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **logit**: the logarithm of the odds of an event, $\log\frac{p}{1-p}$, a number on the whole real line that a weighted sum of features can model; the model's $z = \mathbf{w}\cdot\mathbf{x}$ is the logit of its predicted probability. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
+**loss curve**: the loss plotted against the training step or epoch; it can show the minibatch loss, the loss on the whole training set or on a validation set, each with a different noise level and cost, and it is read by its start, direction, slope and gap. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
+
 **loss function**: a rule that scores one prediction against its label with a non-negative number, zero for a perfect prediction; its average over the data is the quantity learning minimises. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
 **low-rank approximation**: replacing a matrix by one of small rank, best obtained by keeping the largest singular values; it stores $r(m + n)$ numbers instead of $mn$ and its error is the dropped singular values. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
@@ -358,6 +364,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **orthogonality**: the property of two vectors having dot product 0, that is, being at right angles. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
+**overfit-one-batch**: the test of training a network on one fixed small batch for a few hundred steps; the loss must fall to nearly zero, and if it does not the model, loss, data or update is broken. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
+
 **overfitting**: a model so flexible for its data that it fits the accidents of the training rows, so that its training error is low and its error on new rows is worse than that of a simpler model. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **overflow and underflow**: overflow is an exact result too large for the format, stored as infinity; underflow is a nonzero result too small, stored with fewer and fewer significant digits (subnormal numbers) and finally as zero. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
@@ -419,6 +427,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **reproducibility**: the property that running again from the same recorded inputs (seed, data, code, settings) gives the same results exactly, which requires the same draws in the same order and the same floating-point arithmetic. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **reshape-and-view**: reshaping keeps a tensor's line of numbers in row-major order and cuts it into a new shape; a view is a new shape, strides and offset over the same storage, so a reshape of a contiguous array needs no copy. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
+**residual-connection**: a layer that returns its input plus a correction, $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, so that its Jacobian is $\mathbf{I} + \mathbf{J}_f$ and the gradient has a path through it that passes no weights. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
 **reverse-mode differentiation**: computing derivatives by carrying a row vector from the single output back through the chain of Jacobians, so one sweep gives the gradient with respect to every input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
@@ -509,6 +519,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## V
 
 **validation set**: rows kept apart from fitting and used to choose between models (degree, penalty, learning rate, when to stop); the score of the chosen model on it is optimistic, because it was chosen for its score. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
+**vanishing-gradient**: the gradient reaching the early layers of a deep network is a tiny fraction of the one at the top, because it is a product of layer Jacobians whose factors are below one; those layers do not learn. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
 **variance**: the expected squared deviation from the mean, $\mathbb{E}[X^2] - \mathbb{E}[X]^2$, which scales by $a^2$ under multiplication by $a$ and adds over independent variables; its square root is the standard deviation. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 

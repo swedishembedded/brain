@@ -71,4 +71,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 9. [Initialization: Where Training Starts](v03-neural-networks/09-initialization.md): Why does the random starting point decide whether a deep network trains at all?
 10. [Normalization Layers](v03-neural-networks/10-normalization.md): How does rescaling activations inside a network make it train faster and more stably?
 11. [Regularization in Neural Networks](v03-neural-networks/11-regularization.md): How do we stop a network with millions of parameters from memorizing its training set?
+12. [Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md): When a loss curve looks wrong, how do we find out why?
 <!-- /contents -->

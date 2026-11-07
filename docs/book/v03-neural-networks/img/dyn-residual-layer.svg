@@ -1,0 +1,45 @@
+<!-- source-sha256: ab689bdddf26fb2357e58b13ee0dd9f2afc2578b456361c4b033287c6e625b3a -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380" width="900" height="380"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="900" height="380" fill="#ffffff"/>
+<rect x="10" y="10" width="880" height="130" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">plain layer:  a&#x27; = g(W a + b),   gradient of a:  W^T D da&#x27;</text>
+<ellipse cx="91" cy="85" rx="31" ry="28" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="91" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a</text>
+<rect x="152" y="57" width="100" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="202" y="81.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Linear</text>
+<text x="202" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W, b</text>
+<ellipse cx="313" cy="85" rx="31" ry="28" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="313" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">z</text>
+<rect x="374" y="57" width="100" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="424" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">g</text>
+<ellipse cx="535" cy="85" rx="31" ry="28" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="535" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a&#x27;</text>
+<line x1="125" y1="85" x2="149" y2="85" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="255" y1="85" x2="279" y2="85" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="347" y1="85" x2="371" y2="85" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="477" y1="85" x2="501" y2="85" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="10" y="160" width="880" height="210" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="182" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">residual layer:  a&#x27; = a + s g(W a + b),   gradient of a:  da&#x27; + s W^T D da&#x27;</text>
+<ellipse cx="91" cy="305" rx="31" ry="28" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="91" y="309.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a</text>
+<rect x="152" y="277" width="100" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="202" y="301.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Linear</text>
+<text x="202" y="317.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W, b</text>
+<ellipse cx="313" cy="305" rx="31" ry="28" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="313" y="309.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">z</text>
+<rect x="374" y="277" width="100" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="424" y="309.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">g</text>
+<rect x="504" y="277" width="100" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="554" y="309.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">times s</text>
+<ellipse cx="654" cy="305" rx="20" ry="28" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="654" y="309.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+</text>
+<ellipse cx="735" cy="305" rx="31" ry="28" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="735" y="309.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a&#x27;</text>
+<line x1="125" y1="305" x2="149" y2="305" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="255" y1="305" x2="279" y2="305" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="347" y1="305" x2="371" y2="305" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="477" y1="305" x2="501" y2="305" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="607" y1="305" x2="631" y2="305" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="677" y1="305" x2="701" y2="305" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M91,277 L91,232 Q91,222 101,222 L644,222 Q654,222 654,232 L654,274" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="372.5" y="212.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">identity path: no weights, no slope</text>
+</svg>

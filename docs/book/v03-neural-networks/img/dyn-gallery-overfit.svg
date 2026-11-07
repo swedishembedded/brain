@@ -1,0 +1,44 @@
+<!-- source-sha256: cf962115c133b0ee82525b6b16affcd3486c36456229e07ce8e928cd4cc1be15 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" width="640" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="360" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="152" y1="314" x2="152" y2="30" stroke="#edf2f7"/>
+<text x="152" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="246" y1="314" x2="246" y2="30" stroke="#edf2f7"/>
+<text x="246" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">200</text>
+<line x1="340" y1="314" x2="340" y2="30" stroke="#edf2f7"/>
+<text x="340" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">300</text>
+<line x1="434" y1="314" x2="434" y2="30" stroke="#edf2f7"/>
+<text x="434" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">400</text>
+<line x1="528" y1="314" x2="528" y2="30" stroke="#edf2f7"/>
+<text x="528" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">500</text>
+<line x1="622" y1="314" x2="622" y2="30" stroke="#edf2f7"/>
+<text x="622" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">600</text>
+<line x1="58" y1="314" x2="622" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="266.67" x2="622" y2="266.67" stroke="#edf2f7"/>
+<text x="52" y="270.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="219.33" x2="622" y2="219.33" stroke="#edf2f7"/>
+<text x="52" y="223.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="172" x2="622" y2="172" stroke="#edf2f7"/>
+<text x="52" y="176" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.5</text>
+<line x1="58" y1="124.67" x2="622" y2="124.67" stroke="#edf2f7"/>
+<text x="52" y="128.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="77.33" x2="622" y2="77.33" stroke="#edf2f7"/>
+<text x="52" y="81.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2.5</text>
+<line x1="58" y1="30" x2="622" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">3</text>
+<rect x="58" y="30" width="564" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="564" height="284"/></clipPath>
+<g clip-path="url(#plot)"><line x1="95.6" y1="314" x2="95.6" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,173.82 76.8,241.79 95.6,275.16 114.4,291.45 133.2,300.74 152,305.07 170.8,308.44 189.6,309.98 208.4,311.03 227.2,311.63 246,312.05 264.8,312.45 283.6,312.67 302.4,312.87 321.2,312.99 340,313.09 358.8,313.21 377.6,313.28 396.4,313.35 415.2,313.4 434,313.45 452.8,313.49 471.6,313.52 490.4,313.55 509.2,313.58 528,313.61 546.8,313.63 565.6,313.66 584.4,313.67 603.2,313.69 622,313.7"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="58,172.56 76.8,192.4 95.6,198.24 114.4,176.93 133.2,158.17 152,147.25 170.8,131.03 189.6,127.71 208.4,118.69 227.2,111.34 246,105.12 264.8,96.53 283.6,92.68 302.4,90.25 321.2,84.88 340,84.89 358.8,80.94 377.6,75.94 396.4,73.15 415.2,70.44 434,68.44 452.8,65.91 471.6,62.83 490.4,60.5 509.2,58.13 528,56.87 546.8,54.59 565.6,54.14 584.4,51.87 603.2,50.25 622,49.03"/></g>
+<text x="340" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">gradient step</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">loss</text>
+<text x="340" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Memorising 24 examples</text>
+<rect x="490.76" y="262" width="123.24" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="498.76" y1="277" x2="518.76" y2="277" stroke="#2b6cb0" stroke-width="2"/>
+<text x="524.76" y="281" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">training loss</text>
+<line x1="498.76" y1="294" x2="518.76" y2="294" stroke="#9b2c2c" stroke-width="2"/>
+<text x="524.76" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">validation loss</text>
+</svg>

@@ -158,6 +158,7 @@ row of `x: [T, D]`".
 | `silu(x)` | `x * sigmoid(x)` (Volume III, chapter 2) |
 | `erf(x)` | the error function $\frac{2}{\sqrt\pi}\int_0^x e^{-s^2}ds$, odd, with `erf(0) = 0` and limits $\pm 1$; the standard Gaussian cumulative distribution is $\Phi(z) = \frac12\bigl(1 + \mathrm{erf}(z/\sqrt2)\bigr)$. Use the library routine of your language (a reproduction agrees to the printed digits; its series is not needed) |
 | `atan2(y, x)` | the angle in radians, in $(-\pi, \pi]$, of the point with horizontal coordinate `x` and vertical coordinate `y` (the angle from the positive horizontal axis, anticlockwise); `atan2(0, 0)` is `0` |
+| `is_finite(x)` | true when `x` is neither `infinity`, `-infinity` nor not-a-number, false otherwise (so `is_finite(0.0 / 1.0)` is true and `is_finite(infinity - infinity)` is false); it is the test that a value can still be used in arithmetic (Volume III, chapter 12) |
 | `pi`, `infinity` | the constant $\pi$ and positive infinity (`-infinity` is its negative) |
 | `and`, `or`, `not` | logical operations on `bool`; `and` and `or` stop at the first operand that decides the result |
 | `x if c else y` | `x` when the condition `c` is true, otherwise `y`; only the chosen operand is evaluated |

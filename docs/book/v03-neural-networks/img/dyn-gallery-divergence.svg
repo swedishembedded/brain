@@ -1,0 +1,40 @@
+<!-- source-sha256: 78ef2ff09403f70faed3a1f4ef54a40a9effaea7f680afb866793d04a78ba5a7 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 360" width="620" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="360" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="148.67" y1="314" x2="148.67" y2="30" stroke="#edf2f7"/>
+<text x="148.67" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="239.33" y1="314" x2="239.33" y2="30" stroke="#edf2f7"/>
+<text x="239.33" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="330" y1="314" x2="330" y2="30" stroke="#edf2f7"/>
+<text x="330" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="420.67" y1="314" x2="420.67" y2="30" stroke="#edf2f7"/>
+<text x="420.67" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="511.33" y1="314" x2="511.33" y2="30" stroke="#edf2f7"/>
+<text x="511.33" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="602" y1="314" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="58" y1="314" x2="602" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="254.83" x2="602" y2="254.83" stroke="#edf2f7"/>
+<text x="52" y="258.83" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<line x1="58" y1="195.67" x2="602" y2="195.67" stroke="#edf2f7"/>
+<text x="52" y="199.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="136.5" x2="602" y2="136.5" stroke="#edf2f7"/>
+<text x="52" y="140.5" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">15</text>
+<line x1="58" y1="77.33" x2="602" y2="77.33" stroke="#edf2f7"/>
+<text x="52" y="81.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<rect x="58" y="30" width="544" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="284"/></clipPath>
+<g clip-path="url(#plot)"><line x1="58" y1="280.26" x2="602" y2="280.26" stroke="#a0aec0" stroke-dasharray="4 4"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,308.16 148.67,296.61 239.33,284.53 330,252.12 420.67,212.28 511.33,144.15 602,36.32"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" stroke-dasharray="6 4" points="58,313.6 148.67,302.37 239.33,293.55 330,264.28 420.67,222.52 511.33,155.03 602,50.7"/><text x="67.07" y="270.22" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">exp overflows above 709.78</text></g>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">gradient step</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">log10 of the largest |logit| in the batch</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">The diverging run (rate 10)</text>
+<rect x="66" y="38" width="123.13" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">largest |logit|</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#2b6cb0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">minibatch loss</text>
+</svg>
