@@ -215,8 +215,9 @@ pub enum FactSplit {
 /// How many held-out probes a document-learning cycle must have.
 ///
 /// Matches the measured SFT regime's own `--eval-per-cycle 48`, and puts
-/// [`crate::stats::sign_test`]'s discordant-pair floor (5 net wins for
-/// `p <= 0.05`) far out of the danger zone. Batching many facts into one
+/// [`crate::stats::sign_test`]'s discordant-pair floor (`p <= 0.05` needs at
+/// least 5 discordant pairs, all of them wins; 8 need 7) far out of the
+/// danger zone. Batching many facts into one
 /// cycle makes the sign test EASIER to satisfy, not harder.
 pub const MIN_HELD_OUT_PROBES: usize = 48;
 
