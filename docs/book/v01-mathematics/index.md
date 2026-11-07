@@ -66,8 +66,8 @@ in the curriculum and appear here when they are written.
     uncertainty and updating them on evidence.
 11. [The Distributions Machine Learning Uses](11-distributions.md): the few
     distributions that keep appearing, and why.
-12. Statistics: Learning Facts from Samples: how much a finite sample can tell
-    us, and how to know whether a difference is real.
+12. [Statistics: Learning Facts from Samples](12-statistics.md): how much a finite
+    sample can tell us, and how to know whether a difference is real.
 13. Information, Entropy and Surprise: how many bits it takes to describe what
     we expect to see, and what expecting the wrong thing costs.
 14. Complex Numbers, Frequencies and the Fourier Transform: writing any signal

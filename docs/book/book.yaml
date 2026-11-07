@@ -113,7 +113,7 @@ volumes:
         title: "Statistics: Learning Facts from Samples"
         question: "How much can a finite sample tell us, and how do we know whether a difference is real?"
         introduces: [estimator, sample-mean, standard-error, confidence-interval, hypothesis-test, paired-test, bootstrap, multiple-comparisons]
-        requires: [expectation, variance, central-limit-theorem, gaussian-distribution]
+        requires: [expectation, variance, covariance, bernoulli-distribution, central-limit-theorem, gaussian-distribution]
         brain: [stats]
       - id: information-theory
         title: "Information, Entropy and Surprise"

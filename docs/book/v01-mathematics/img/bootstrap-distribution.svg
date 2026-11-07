@@ -1,0 +1,25 @@
+<!-- source-sha256: f1e22d203397d7fd5c8aeca6282fefcc108e2d7ff05739fac969f2d099f13867 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 320" width="560" height="320">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="320" fill="#ffffff"/>
+<line x1="169.69" y1="274" x2="169.69" y2="30" stroke="#edf2f7"/>
+<text x="169.69" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="355.85" y1="274" x2="355.85" y2="30" stroke="#edf2f7"/>
+<text x="355.85" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.05</text>
+<line x1="542" y1="274" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="542" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.1</text>
+<line x1="58" y1="274" x2="542" y2="274" stroke="#edf2f7"/>
+<text x="52" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="211.41" x2="542" y2="211.41" stroke="#edf2f7"/>
+<text x="52" y="215.41" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="148.82" x2="542" y2="148.82" stroke="#edf2f7"/>
+<text x="52" y="152.82" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<line x1="58" y1="86.24" x2="542" y2="86.24" stroke="#edf2f7"/>
+<text x="52" y="90.24" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">30</text>
+<rect x="58" y="30" width="484" height="244" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="244"/></clipPath>
+<g clip-path="url(#plot)"><rect x="58" y="274" width="18.02" height="0" fill="#90cdf4"/><rect x="76.62" y="274" width="18.02" height="0" fill="#90cdf4"/><rect x="95.23" y="274" width="18.02" height="0" fill="#90cdf4"/><rect x="113.85" y="273.37" width="18.02" height="0.63" fill="#90cdf4"/><rect x="132.46" y="272.12" width="18.02" height="1.88" fill="#90cdf4"/><rect x="151.08" y="270.24" width="18.02" height="3.76" fill="#90cdf4"/><rect x="169.69" y="267.12" width="18.02" height="6.88" fill="#90cdf4"/><rect x="188.31" y="258.98" width="18.02" height="15.02" fill="#90cdf4"/><rect x="206.92" y="232.07" width="18.02" height="41.93" fill="#90cdf4"/><rect x="225.54" y="216.42" width="18.02" height="57.58" fill="#90cdf4"/><rect x="244.15" y="148.2" width="18.02" height="125.8" fill="#90cdf4"/><rect x="262.77" y="155.08" width="18.02" height="118.92" fill="#90cdf4"/><rect x="281.38" y="74.34" width="18.02" height="199.66" fill="#90cdf4"/><rect x="300" y="118.78" width="18.02" height="155.22" fill="#90cdf4"/><rect x="318.62" y="61.83" width="18.02" height="212.17" fill="#90cdf4"/><rect x="337.23" y="173.86" width="18.02" height="100.14" fill="#90cdf4"/><rect x="355.85" y="165.1" width="18.02" height="108.9" fill="#90cdf4"/><rect x="374.46" y="230.81" width="18.02" height="43.19" fill="#90cdf4"/><rect x="393.08" y="235.82" width="18.02" height="38.18" fill="#90cdf4"/><rect x="411.69" y="262.73" width="18.02" height="11.27" fill="#90cdf4"/><rect x="430.31" y="268.99" width="18.02" height="5.01" fill="#90cdf4"/><rect x="448.92" y="269.62" width="18.02" height="4.38" fill="#90cdf4"/><rect x="467.54" y="272.75" width="18.02" height="1.25" fill="#90cdf4"/><rect x="486.15" y="274" width="18.02" height="0" fill="#90cdf4"/><rect x="504.77" y="274" width="18.02" height="0" fill="#90cdf4"/><rect x="523.38" y="274" width="18.02" height="0" fill="#90cdf4"/><line x1="206.92" y1="274" x2="206.92" y2="30" stroke="#2f855a" stroke-dasharray="4 4"/><line x1="407.97" y1="274" x2="407.97" y2="30" stroke="#2f855a" stroke-dasharray="4 4"/><line x1="169.69" y1="274" x2="169.69" y2="30" stroke="#c53030" stroke-dasharray="4 4"/><line x1="304.52" y1="274" x2="304.52" y2="30" stroke="#2b6cb0"/><text x="206.92" y="42.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#2f855a" text-anchor="end">2.5%</text><text x="407.97" y="42.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#2f855a" text-anchor="start">97.5%</text><text x="169.69" y="139.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#c53030" text-anchor="end">no difference</text></g>
+<text x="300" y="310" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">gap B - A on a resample of the 500 questions</text>
+<text x="14" y="152" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 152)">density</text>
+<text x="280" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">2000 bootstrap resamples</text>
+</svg>

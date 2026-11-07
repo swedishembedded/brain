@@ -38,6 +38,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 9. [Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md): How do we add up infinitely many small pieces, and how do we follow a system that changes continuously?
 10. [Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md): How do we put numbers on uncertainty and update them when we see evidence?
 11. [The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md): Which few probability distributions keep appearing, and why?
+12. [Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md): How much can a finite sample tell us, and how do we know whether a difference is real?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 

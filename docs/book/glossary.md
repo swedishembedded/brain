@@ -16,6 +16,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Bernoulli distribution**: the distribution of a single yes/no outcome coded as $1$ or $0$, equal to $1$ with probability $p$; its mean is $p$ and its variance is $p(1-p)$. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
+**bootstrap**: a method that estimates the sampling distribution of a statistic by repeatedly drawing a sample of the same size with replacement from the sample itself and recomputing the statistic, giving a standard error or interval without a formula. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
+
 **broadcasting**: the rule that aligns two shapes from the right and treats an axis of size 1 as stretched to match the other, by giving it stride 0, so that arrays of different shapes combine without copying. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 ## C
@@ -33,6 +35,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **condition number**: for a bowl-shaped function, the ratio of its largest to its smallest curvature; a large ratio means long, narrow contours and slow progress for a fixed step size. The floating-point chapter extends the idea to how strongly a computation amplifies small errors in its inputs. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **conditional probability**: the probability of an event within the part of the experiment where another event occurred, $P(A \mid B) = P(A \cap B)/P(B)$, defined when $P(B) > 0$. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
+
+**confidence interval**: a range computed from a sample, $\bar{x} \pm 1.96\,\mathrm{SE}$ at level $95\%$, built by a recipe that contains the true value in about that share of repeated experiments. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **convexity**: the property that no chord joining two points of the curve lies below the curve, equivalent for twice-differentiable functions to a non-negative second derivative; every critical point of a convex function is a global minimum. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
@@ -59,6 +63,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **eigenvalue**: the number $\lambda$ by which a matrix stretches one of its eigenvectors, $\mathbf{A}\mathbf{v} = \lambda\mathbf{v}$; the roots of $\det(\mathbf{A} - \lambda\mathbf{I}) = 0$. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
 **eigenvector**: a nonzero vector that a matrix sends to a multiple of itself, so that the map only stretches (or flips) it. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
+
+**estimator**: a rule that turns a sample into a number meant to approximate a quantity of the underlying world; because the sample is random, the number is a random variable with its own distribution, judged by its bias and spread. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **Euler's method**: the rule $x_{i+1} = x_i + h\,f(t_i, x_i)$ that follows the slope of an ODE for a short step $h$ and repeats; with a gradient as the slope it is gradient descent. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
@@ -89,6 +95,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## H
 
 **Hessian**: the symmetric matrix of second partial derivatives of a scalar function; $\mathbf{u}^\top\mathbf{H}\mathbf{u}$ is the curvature along the unit direction $\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**hypothesis test**: a rule for deciding whether data are consistent with a claim that nothing is going on (the null hypothesis), by computing the probability, assuming the claim, of a test statistic at least as extreme as the one observed (the p-value) and comparing it with a threshold fixed in advance. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 ## I
 
@@ -132,6 +140,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **monotonic function**: a function that never reverses direction, always increasing or always decreasing, and so keeps the order of single values. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
+**multiple comparisons**: the problem that testing many hypotheses makes some significant by chance, so that the chance of at least one false positive grows with their number, controlled by tests at a smaller level such as the Bonferroni correction. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
+
 **multivariable chain rule**: the Jacobian of a composition of vector functions is the product of their Jacobians, the outer one evaluated at the inner function's output. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **multivariate Gaussian**: the distribution of a vector $\boldsymbol{\mu} + \mathbf{A}\mathbf{z}$ built from independent standard Gaussians $\mathbf{z}$, fixed by its mean vector and covariance matrix $\boldsymbol{\Sigma} = \mathbf{A}\mathbf{A}^\top$; its level curves are ellipses along the eigenvectors of $\boldsymbol{\Sigma}$. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
@@ -153,6 +163,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **orthogonality**: the property of two vectors having dot product 0, that is, being at right angles. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 ## P
+
+**paired test**: a comparison of two systems scored on the same examples through the per-example differences, whose standard error is smaller than an unpaired one when the systems' answers are correlated; the paired z-test and the exact sign test are two of them. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **partial derivative**: the derivative of a function of several variables with respect to one of them while all the others are held fixed, $\partial L/\partial w_j$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
@@ -184,6 +196,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## S
 
+**sample mean**: the average of the observations in a sample; it is an unbiased estimator of the true mean, and the accuracy, the mean loss and a minibatch gradient are all sample means. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
+
 **saved activations**: the values of the forward pass that are kept in memory because the backward pass reads them. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **scalar multiplication**: multiplying every entry of a vector by one number, which stretches, shrinks or flips the arrow. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
@@ -193,6 +207,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **shape**: the list of the sizes of a tensor's axes, outermost first; the number of elements is their product. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **singular value decomposition**: the factorisation $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$ of any matrix into a rotation, a stretch by non-negative singular values and a second rotation. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
+
+**standard error**: the standard deviation of an estimator over repeated samples, the typical size of its error; for the sample mean it is $\sigma/\sqrt{n}$, estimated by $s/\sqrt{n}$. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **stride**: the distance in memory, counted in elements, between two neighbours along one axis; a view is described by one stride per axis, and stride 0 repeats one number. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
