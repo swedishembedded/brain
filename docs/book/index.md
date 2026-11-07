@@ -37,6 +37,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 8. [Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md): When a quantity depends on millions of numbers, which way should we move them all to make it smaller?
 9. [Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md): How do we add up infinitely many small pieces, and how do we follow a system that changes continuously?
 10. [Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md): How do we put numbers on uncertainty and update them when we see evidence?
+11. [The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md): Which few probability distributions keep appearing, and why?
 
 ### [Volume III: Building Neural Networks from Nothing](v03-neural-networks/index.md)
 

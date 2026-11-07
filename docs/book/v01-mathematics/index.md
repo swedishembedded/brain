@@ -64,8 +64,8 @@ in the curriculum and appear here when they are written.
    many small pieces, and following a system that changes continuously.
 10. [Probability: Reasoning Under Uncertainty](10-probability.md): putting numbers on
     uncertainty and updating them on evidence.
-11. The Distributions Machine Learning Uses: the few distributions that keep
-    appearing, and why.
+11. [The Distributions Machine Learning Uses](11-distributions.md): the few
+    distributions that keep appearing, and why.
 12. Statistics: Learning Facts from Samples: how much a finite sample can tell
     us, and how to know whether a difference is real.
 13. Information, Entropy and Surprise: how many bits it takes to describe what

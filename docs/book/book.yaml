@@ -107,7 +107,7 @@ volumes:
         title: "The Distributions Machine Learning Uses"
         question: "Which few probability distributions keep appearing, and why?"
         introduces: [bernoulli-distribution, categorical-distribution, gaussian-distribution, multivariate-gaussian, law-of-large-numbers, central-limit-theorem, covariance]
-        requires: [probability-distribution, expectation, variance, exponential-function, vector, matrix]
+        requires: [probability-distribution, expectation, variance, independence, integral, exponential-function, vector, cosine-similarity, matrix, matrix-multiplication, eigenvector, eigenvalue]
         brain: []
       - id: statistics
         title: "Statistics: Learning Facts from Samples"
