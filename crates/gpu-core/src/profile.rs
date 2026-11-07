@@ -1020,7 +1020,7 @@ mod arithmetic_tests {
         for cc in ["library_gemm 8x8x8 F32.F32.F32 tA b1", "matmul_reg3", "matmul_gemv_reg#MREG=32", "native:matmul_f32_tiled", "native:conv2d_fwd_f32", "matmul_i8_gemv"] {
             assert_eq!(arithmetic_of(cc), Arithmetic::CudaCoreProduct, "{cc}");
         }
-        for attn in ["flash_attn_cross_relpos", "paged_flash_decode_gqa_hd256#GRP=1,HD=128,HD4=32", "attn_scores_cross_kt"] {
+        for attn in ["flash_attn_cross_relpos", "paged_flash_decode_gqa_hd256#GRP=1,HD=128,HD4=32,HDS=7", "attn_scores_cross_kt"] {
             assert_eq!(arithmetic_of(attn), Arithmetic::CudaCoreAttention, "{attn}");
         }
         for other in ["rmsnorm_rows", "native:softmax_rows_f32_k64", "bias_add", "native:cast_f32_bf16"] {

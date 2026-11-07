@@ -15,17 +15,20 @@
 //! tests need a device that runs them (the software Vulkan adapter, `BRAIN_DEVICE=software`; two device handles
 //! of it coexist) and skip by name on the CPU JIT.
 
-use data::rng::Lcg;
 use model::lsa::indexer::{IndexGeometry, Indexer};
 use model::lsa::LsaConfig;
 use model::paged::BlockTable;
 use model::serve::PagedDecoder;
-use model::shard::{Shard, ShardCost, StreamPlan};
-use ricursive::{manifest, open_safetensors, RicursiveConfig, RicursiveEngine, ServeConfig};
+use ricursive::{RicursiveConfig, RicursiveEngine, ServeConfig};
 
 use crate::serve::{prefill_in_slices, stream};
+use crate::synthetic::{synthetic, Shape};
 
 const LAYERS: [&str; 4] = ["sliding_attention", "full_attention", "sliding_attention", "full_attention"];
+
+fn model() -> crate::synthetic::Model {
+    synthetic(&LAYERS, Shape { heads: 4, kv_heads: 2, head_dim: 16 })
+}
 
 fn runs_here() -> bool {
     let runs = gpu_core::testgpu::dev(&[]).caps().workgroup_reductions;
@@ -33,63 +36,6 @@ fn runs_here() -> bool {
         brain_testutil::skip_unavailable("LSA: this backend does not run workgroup-barrier kernels (GPU-only)");
     }
     runs
-}
-
-struct Model {
-    cfg: RicursiveConfig,
-    file: tempfile::TempDir,
-}
-
-impl Model {
-    fn path(&self) -> String {
-        self.file.path().join("synthetic.safetensors").to_string_lossy().into_owned()
-    }
-
-    fn source(&self) -> Box<checkpoint::remap::RemapSource<'static>> {
-        let layers: Vec<usize> = (0..self.cfg.num_hidden_layers).collect();
-        Box::new(open_safetensors(&self.path(), &self.cfg, &layers).expect("open"))
-    }
-
-    fn engine(&self, serve: ServeConfig) -> RicursiveEngine {
-        RicursiveEngine::from_source(self.cfg.clone(), self.source(), serve, None).expect("engine")
-    }
-
-    fn staged(&self, serve: ServeConfig) -> RicursiveEngine {
-        let plan = StreamPlan::balanced(&ShardCost { n_layers: LAYERS.len(), per_layer: 1.0, embed: 0.0, head: 0.0, boundary_words: 0 }, &[Shard::ANY_GPU, Shard::ANY_GPU]);
-        assert_eq!(plan.n_stages(), 2);
-        RicursiveEngine::from_source_staged(self.cfg.clone(), self.source(), serve, None, &plan).expect("staged engine")
-    }
-}
-
-/// A model of the tiny shape with `LAYERS` and random weights of a scale that keeps the residual stream tame.
-fn synthetic() -> Model {
-    let types = serde_json::to_string(&LAYERS).unwrap();
-    let cfg = RicursiveConfig::from_json(&format!(
-        r#"{{"model_type":"ricursive","vocab_size":128,"hidden_size":64,"intermediate_size":96,"num_hidden_layers":{},"num_attention_heads":4,"num_key_value_heads":2,
-            "head_dim":16,"sliding_window":4,"use_valres":true,"use_gated_attention":true,"ffn_clamp_threshold":20.0,"embed_scale":8.0,"layer_types":{types}}}"#,
-        LAYERS.len()
-    ))
-    .unwrap();
-    let mut rng = Lcg::new(31);
-    let layers: Vec<usize> = (0..cfg.num_hidden_layers).collect();
-    let tensors: Vec<brain_testutil::hfquant::Raw> = manifest(&cfg, &layers)
-        .into_iter()
-        .map(|(name, shape)| {
-            let n: usize = shape.iter().product();
-            let data: Vec<f32> = if name.ends_with("norm.weight") || name.contains("layernorm") {
-                (0..n).map(|_| 1.0 + rng.scaled(0.1)).collect()
-            } else if name.ends_with("value_res_lambda") {
-                vec![0.0; n]
-            } else {
-                let fan_in = shape.last().copied().unwrap_or(1) as f32;
-                (0..n).map(|_| rng.signed() * 1.7 / fan_in.sqrt()).collect()
-            };
-            brain_testutil::hfquant::f32_raw(&name, &shape, &data)
-        })
-        .collect();
-    let file = tempfile::tempdir().unwrap();
-    brain_testutil::hfquant::write_safetensors(&file.path().join("synthetic.safetensors"), &tensors);
-    Model { cfg, file }
 }
 
 fn serve(prefix_slots: u32, sparse: bool) -> ServeConfig {
@@ -127,7 +73,7 @@ fn a_two_stage_sparse_engine_equals_the_single_stage_sparse_engine() {
     if !runs_here() {
         return;
     }
-    let m = synthetic();
+    let m = model();
     let ids = stream(5, 26 + 14, m.cfg.vocab_size as u32);
     let ix = indexer(&m.cfg, 2, 3);
     let mut one = m.engine(serve(0, true));
@@ -152,7 +98,7 @@ fn a_full_budget_across_stages_equals_the_dense_engine() {
     if !runs_here() {
         return;
     }
-    let m = synthetic();
+    let m = model();
     let ids = stream(5, 26 + 14, m.cfg.vocab_size as u32);
     let mut dense = m.engine(serve(0, false));
     let mut two = m.staged(serve(0, true));
@@ -174,7 +120,7 @@ fn prefix_reuse_across_stages_with_sparse_attention_on() {
     if !runs_here() {
         return;
     }
-    let m = synthetic();
+    let m = model();
     let ids = stream(11, 34, m.cfg.vocab_size as u32);
     let ix = indexer(&m.cfg, 2, 3);
     let run = |e: &mut RicursiveEngine| {

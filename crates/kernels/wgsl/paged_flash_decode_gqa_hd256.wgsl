@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Fused GQA decode attention at head_dim 256 (or 128 by specialisation): one workgroup per (sequence, kv head, key split) attends every query head of the group and writes a partial online-softmax state
+// @what  Fused GQA decode attention at head_dim 256 (or 128 by specialisation, any group): one workgroup per (sequence, kv head, key split) attends every query head of the group and writes a partial online-softmax state
 // @how   128-thread workgroup, 128-key tiles, a thread-per-key score pass over 16-byte row loads and a thread-per-channel-pair weighted sum
 // @opt   4
 // @cpu   no
@@ -90,10 +90,11 @@
 // bit-identical to the triad (a different reduction order); gated against exact
 // f64 attention at 2e-4 relative.
 
-const HD: u32 = 256u;      // head_dim: 256, or 128 (HD4 = 32) through `kernels::template::specialize`
+const HD: u32 = 256u;      // head_dim: 256, or 128 (HD4 = 32, HDS = 7) through `kernels::template::specialize`
 const HD4: u32 = 64u;      // 4-channel pieces per head row
+const HDS: u32 = 8u;       // log2(HD): a compact tier's row scale is `row >> HDS`
 const TILE: u32 = 128u;    // keys per tile, and threads per workgroup
-const GMAX: u32 = 8u;      // most query heads one kv head may serve
+const GMAX: u32 = 8u;      // capacity of the per-head arrays: GRP rounded up to 8 (specialised with GRP above 8)
 const GRP: u32 = 6u;       // query heads per kv head - specialised per model, see above
 const WG: u32 = 128u;
 const SP: u32 = 144u;      // row stride of `sp`: TILE plus 16 pad floats
@@ -131,13 +132,13 @@ fn k_scale(row: u32) -> f32 { return 1.0; }
 fn v_scale(row: u32) -> f32 { return 1.0; }
 // @kv-tier-end loads
 
-var<workgroup> qs:   array<vec4<f32>, 512>;  // GMAX*HD4, this group's queries
-var<workgroup> sp:   array<f32, 1152>;       // GMAX*SP, a tile's scores then probabilities
+var<workgroup> qs:   array<vec4<f32>, GMAX * HD4>;  // this group's queries
+var<workgroup> sp:   array<f32, GMAX * SP>;          // a tile's scores then probabilities
 var<workgroup> red:  array<f32, 128>;        // reduction scratch
 var<workgroup> rowb: array<u32, 128>;        // element index of each tile key's row in the pool
-var<workgroup> mrun: array<f32, 8>;          // running max per head
-var<workgroup> lrun: array<f32, 8>;          // running sum per head
-var<workgroup> corr: array<f32, 8>;          // this tile's rescale of the accumulators per head
+var<workgroup> mrun: array<f32, GMAX>;       // running max per head
+var<workgroup> lrun: array<f32, GMAX>;       // running sum per head
+var<workgroup> corr: array<f32, GMAX>;       // this tile's rescale of the accumulators per head
 
 @compute @workgroup_size(128)
 fn main(@builtin(workgroup_id) wgid: vec3<u32>,
@@ -175,19 +176,18 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let kt_end = min(kt0 + p.tiles_per_split, ntiles);
 
     // This thread's channel pair of every head's output.
-    var o: array<vec2<f32>, 8>;
+    var o: array<vec2<f32>, GMAX>;
     for (var g = 0u; g < GRP; g = g + 1u) { o[g] = vec2<f32>(0.0, 0.0); }
 
     let own = t < HD / 2u;  // this thread owns a channel pair of the output
-    let sg = t / 16u;       // softmax: this thread's head
-    let si = t % 16u;       // and its lane within that head's 16 threads
+    let si = t % 16u;       // softmax: this thread's lane within its head's 16 threads (head `t / 16` of each round of 8)
 
     for (var kt = kt0; kt < kt_end; kt = kt + 1u) {
         // ---- scores: key `t` of the tile, every head of the group.
         let j = kt * TILE + t;
         let live = j < tlen;
         var rb = 0u;
-        var sc: array<f32, 8>;
+        var sc: array<f32, GMAX>;
         for (var g = 0u; g < GRP; g = g + 1u) { sc[g] = 0.0; }
         if (live) {
             let physical = block_tables[b * p.max_bt + j / p.block_size];
@@ -223,46 +223,51 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         }
         workgroupBarrier();
 
-        // ---- softmax: head `sg`, keys `si + 16 m`. Max first.
-        var lmax = -3.4e38;
-        if (sg < GRP) {
-            for (var m = 0u; m < 8u; m = m + 1u) { lmax = max(lmax, sp[sg * SP + si + 16u * m]); }
-        }
-        red[t] = lmax;
-        workgroupBarrier();
-        for (var st = 8u; st > 0u; st = st >> 1u) {
-            if (si < st) { red[t] = max(red[t], red[t + st]); }
-            workgroupBarrier();
-        }
-        let tmax = red[sg * 16u];
-        // Every thread must have read its head's max before the sum below
-        // overwrites `red`.
-        workgroupBarrier();
-
-        let m_old = mrun[sg];
-        let m_new = max(m_old, tmax);
-        var lsum = 0.0;
-        if (sg < GRP) {
-            for (var m = 0u; m < 8u; m = m + 1u) {
-                let at = sg * SP + si + 16u * m;
-                let e = exp(sp[at] - m_new);
-                sp[at] = e;
-                lsum = lsum + e;
+        // ---- softmax, in rounds of 8 heads (128 threads, 16 a head): head `hb + t / 16`, keys `si + 16 m`. Max first.
+        for (var hb = 0u; hb < GRP; hb = hb + 8u) {
+            let sg = hb + t / 16u;
+            let live_head = sg < GRP;
+            var lmax = -3.4e38;
+            if (live_head) {
+                for (var m = 0u; m < 8u; m = m + 1u) { lmax = max(lmax, sp[sg * SP + si + 16u * m]); }
             }
-        }
-        red[t] = lsum;
-        workgroupBarrier();
-        for (var st = 8u; st > 0u; st = st >> 1u) {
-            if (si < st) { red[t] = red[t] + red[t + st]; }
+            red[t] = lmax;
+            workgroupBarrier();
+            for (var st = 8u; st > 0u; st = st >> 1u) {
+                if (si < st) { red[t] = max(red[t], red[t + st]); }
+                workgroupBarrier();
+            }
+            let tmax = red[(t / 16u) * 16u];
+            // Every thread must have read its head's max before the sum below
+            // overwrites `red`.
+            workgroupBarrier();
+
+            var m_old = -3.4e38;
+            if (live_head) { m_old = mrun[sg]; }
+            let m_new = max(m_old, tmax);
+            var lsum = 0.0;
+            if (live_head) {
+                for (var m = 0u; m < 8u; m = m + 1u) {
+                    let at = sg * SP + si + 16u * m;
+                    let e = exp(sp[at] - m_new);
+                    sp[at] = e;
+                    lsum = lsum + e;
+                }
+            }
+            red[t] = lsum;
+            workgroupBarrier();
+            for (var st = 8u; st > 0u; st = st >> 1u) {
+                if (si < st) { red[t] = red[t] + red[t + st]; }
+                workgroupBarrier();
+            }
+            if (si == 0u && live_head) {
+                let cr = exp(m_old - m_new);
+                corr[sg] = cr;
+                lrun[sg] = lrun[sg] * cr + red[(t / 16u) * 16u];
+                mrun[sg] = m_new;
+            }
             workgroupBarrier();
         }
-        if (si == 0u && sg < GRP) {
-            let cr = exp(m_old - m_new);
-            corr[sg] = cr;
-            lrun[sg] = lrun[sg] * cr + red[sg * 16u];
-            mrun[sg] = m_new;
-        }
-        workgroupBarrier();
 
         // ---- apply: channel pair `t`, every head, four keys at a time.
         for (var g = 0u; g < GRP; g = g + 1u) { o[g] = o[g] * corr[g]; }

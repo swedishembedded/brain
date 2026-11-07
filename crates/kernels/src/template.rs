@@ -551,8 +551,8 @@ fn v2(row: u32, i: u32) -> vec2<f32> {
     let sh = (e & 3u) * 8u;   // 0 or 16: an even pair never straddles a word
     return vec2<f32>(i8x(w, 24u - sh), i8x(w, 16u - sh));
 }
-fn k_scale(row: u32) -> f32 { return k_scales[row >> 8u]; }
-fn v_scale(row: u32) -> f32 { return v_scales[row >> 8u]; }
+fn k_scale(row: u32) -> f32 { return k_scales[row >> HDS]; }
+fn v_scale(row: u32) -> f32 { return v_scales[row >> HDS]; }
 ";
 
 /// The fp8 loads: the int8 block's byte addressing with an E4M3 decode of each byte.
@@ -574,8 +574,8 @@ fn v2(row: u32, i: u32) -> vec2<f32> {
     let sh = (e & 3u) * 8u;
     return vec2<f32>(f8x(w, sh), f8x(w, sh + 8u));
 }
-fn k_scale(row: u32) -> f32 { return k_scales[row >> 8u]; }
-fn v_scale(row: u32) -> f32 { return v_scales[row >> 8u]; }
+fn k_scale(row: u32) -> f32 { return k_scales[row >> HDS]; }
+fn v_scale(row: u32) -> f32 { return v_scales[row >> HDS]; }
 "
 );
 

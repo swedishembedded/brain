@@ -18,7 +18,7 @@
 use std::ops::Range;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
-use model::kv_tier::{KvAppend, KvKernels, KvLayer};
+use model::kv_tier::{FlashDecodeShape, KvAppend, KvKernels, KvLayer, PrefillShape};
 use model::lsa::binding::LsaBinding;
 use model::lsa::engine::LayerBuffers;
 use model::ops::{Ops, PagedDecodeShape, Weight};
@@ -65,6 +65,8 @@ pub(crate) struct HostIndex {
     ring_rows: Vec<u32>,
     ring_table: Vec<u32>,
     ring_lens: Vec<u32>,
+    /// Whether every row is a position of one sequence (a prefill chunk), as the fused prefill kernel requires.
+    one_sequence: bool,
 }
 
 impl HostIndex {
@@ -80,6 +82,7 @@ impl HostIndex {
             ring_rows: Vec::with_capacity(n),
             ring_table: vec![0u32; n * w as usize],
             ring_lens: Vec::with_capacity(n),
+            one_sequence: rows.iter().all(|r| r.ring == rows[0].ring),
         };
         for (i, row) in rows.iter().enumerate() {
             ix.positions.push(row.pos);
@@ -154,6 +157,8 @@ pub(crate) struct Stage {
     pub head: Option<StageHead>,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
+    /// Attention runs the fused paged flash kernels (no score slabs) rather than the triad.
+    pub(crate) fused: bool,
 }
 
 impl Stage {
@@ -173,11 +178,17 @@ impl Stage {
                 Ok(KvLayer::new(gpu, serve.kv_cache, rows, kv_dim, hd))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let kernels = KvKernels::resolve(gpu, serve.kv_cache)?;
+        let kernels = KvKernels::resolve_for(gpu, serve.kv_cache, &[crate::ops::flash_shape(cfg)])?;
+        let (hd32, group) = crate::ops::flash_shape(cfg);
+        let fused = serve.fused_attention && kernels.flash_decode_available(gpu, hd32, group);
+        if serve.fused_attention && !fused {
+            tracing::warn!(device = gpu.kind(), "ricursive: the fused paged attention kernels do not run on this device; attending through the score-slab triad");
+        }
         let max_rows = u64::from(serve.max_batch.max(serve.prefill_chunk));
         let max_keys = u64::from(g.dense_keys().max(cfg.sliding_window as u32));
-        let scratch = max_rows * cfg.num_attention_heads as u64 * max_keys;
-        Ok(Stage { scores: gpu.storage(scratch), probs: gpu.storage(scratch), ops, range, layers, kv, kernels, head })
+        // The fused kernels keep their partial states per call; only the triad needs the score slabs.
+        let scratch = if fused { 1 } else { max_rows * cfg.num_attention_heads as u64 * max_keys };
+        Ok(Stage { scores: gpu.storage(scratch), probs: gpu.storage(scratch), ops, range, layers, kv, kernels, head, fused })
     }
 
     pub(crate) fn gpu(&self) -> &Gpu {
@@ -188,13 +199,25 @@ impl Stage {
         &self.kv[layer - self.range.start]
     }
 
-    /// One layer's attention over the keys already appended to `layer`'s KV: scores, softmax, apply.
+    /// One layer's attention over the keys already appended to `layer`'s KV: the fused flash kernels where the device runs
+    /// them (the prefill kernel for the rows of one sequence reading a global layer, `chunk`; the split-key decode kernel
+    /// for everything else, a row per sequence), else scores, softmax, apply. `cap` bounds every row's key count.
     #[allow(clippy::too_many_arguments)]
-    fn attend(&self, g: &Geometry<'_>, s: &mut Vec<Step>, q: &DeviceBuffer, layer: &KvLayer, table: &DeviceBuffer, lens: &DeviceBuffer, rows: u32, block_size: u32, cap: u32, max_bt: u32) -> DeviceBuffer {
+    fn attend(&self, g: &Geometry<'_>, s: &mut Vec<Step>, q: &DeviceBuffer, layer: &KvLayer, table: &DeviceBuffer, lens: &DeviceBuffer, rows: u32, block_size: u32, cap: u32, max_bt: u32, chunk: bool) -> DeviceBuffer {
         let c = g.cfg;
         let gpu = self.gpu();
         let (heads, hd) = (c.num_attention_heads as u32, c.head_dim as u32);
         let ctx = gpu.storage(u64::from(rows) * u64::from(heads * hd));
+        if self.fused {
+            if chunk && rows > 1 {
+                let shape = PrefillShape { n: rows, n_heads: heads, n_kv_heads: c.num_key_value_heads as u32, head_dim: hd, block_size, max_bt, keys: cap };
+                s.extend(self.kernels.flash_prefill_hd256(gpu, q, &layer.k, &layer.v, table, lens, &ctx, shape));
+            } else {
+                let shape = FlashDecodeShape { batch: rows, n_heads: heads, n_kv_heads: c.num_key_value_heads as u32, head_dim: hd, block_size, max_bt, cap, pin_splits: false };
+                s.extend(self.kernels.flash_decode(gpu, q, &layer.k, &layer.v, table, lens, &ctx, shape));
+            }
+            return ctx;
+        }
         let shape = PagedDecodeShape { batch: rows, n_heads: heads, group: c.group() as u32, head_dim: hd, block_size, kv_stride: c.kv_dim() as u32, cap, max_bt, scale: 1.0 / (hd as f32).sqrt() };
         s.push(self.kernels.scores(gpu, q, &layer.k, table, lens, &self.scores, shape));
         s.push(gpu.step(K_SOFTMAX, &[&self.scores, lens, &self.probs], &[rows, heads, cap], rows * heads));
@@ -247,7 +270,7 @@ impl Stage {
                     }
                     self.append(g, &mut s, layer, &k, &v, &idx.ring_rows, &idx.ring_offsets, n, 1);
                     let window = c.sliding_window as u32;
-                    self.attend(g, &mut s, &q, layer, &idx.ring_table, &idx.ring_lens, n, 1, window, window)
+                    self.attend(g, &mut s, &q, layer, &idx.ring_table, &idx.ring_lens, n, 1, window, window, false)
                 }
                 LayerType::Full => {
                     let bs = g.serve.block_size;
@@ -261,10 +284,11 @@ impl Stage {
                             ctx
                         }
                         None => {
-                            if index.longest() > g.dense_keys() {
+                            if !self.fused && index.longest() > g.dense_keys() {
                                 return Err(format!("ricursive: a dense read of global layer {l} spans {} keys but the score scratch holds {} (ServeConfig::dense_keys); read it sparsely or raise the limit", index.longest(), g.dense_keys()));
                             }
-                            self.attend(g, &mut s, &q, layer, &idx.global_table, &idx.global_lens, n, bs, g.dense_keys(), g.max_blocks_per_seq)
+                            let cap = if self.fused { index.longest() } else { g.dense_keys() };
+                            self.attend(g, &mut s, &q, layer, &idx.global_table, &idx.global_lens, n, bs, cap, g.max_blocks_per_seq, index.one_sequence)
                         }
                     }
                 }

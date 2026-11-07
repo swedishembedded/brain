@@ -143,7 +143,7 @@ impl<'s> RicursiveModel<'s> {
         let t = ids.len();
         let embeddings = embed(self.src, cfg, ids)?;
 
-        let gpu = Gpu::open(self.device.as_deref(), &pipelines(&[]));
+        let gpu = Gpu::open(self.device.as_deref(), &pipelines(cfg, &[]));
         let rope = cfg.layer_types.contains(&LayerType::Sliding).then(|| DeviceRope::upload(&gpu, &half_split_table(cfg.head_dim, cfg.rope_theta, t)));
 
         let mut x = embeddings.clone();

@@ -96,7 +96,7 @@ fn open_engine(dir: &str, serve: ServeConfig) -> Result<RicursiveEngine, String>
 fn dequantized_checkpoint(dir: &str, tier: Dtype, into: &Path) -> String {
     let cfg = tiny_config(dir);
     let src = weights(dir, &cfg);
-    let ops = model::ops::Ops::new(gpu_core::Gpu::open(None, &ricursive::pipelines(&[]))).expect("ops");
+    let ops = model::ops::Ops::new(gpu_core::Gpu::open(None, &ricursive::pipelines(&cfg, &[]))).expect("ops");
     let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(64 << 20, 0));
     let linear: Vec<String> = ricursive::linear_names(&cfg);
     let tensors: Vec<Raw> = manifest(&cfg, &(0..cfg.num_hidden_layers).collect::<Vec<_>>())
@@ -375,7 +375,7 @@ fn a_two_stage_engine_reproduces_the_single_stage_logits() {
     let single = run(&mut open_engine(&dir, serve_config(4, 2)).unwrap(), &ids);
     let plan = two_stages();
     assert_eq!(plan.n_stages(), 2);
-    let staged_engine = |serve: ServeConfig| RicursiveEngine::from_source_staged(cfg.clone(), Box::new(weights(&dir, &cfg)), serve, Some("cpu"), &plan).expect("staged engine");
+    let staged_engine = |serve: ServeConfig| RicursiveEngine::from_source_staged(cfg.clone(), Box::new(weights(&dir, &cfg)), serve, None, &plan).expect("staged engine");
     let mut staged = staged_engine(serve_config(4, 2));
     assert_eq!(staged.stage_plan().n_stages(), 2);
     let got = run(&mut staged, &ids);
@@ -412,7 +412,7 @@ fn attention_capture_and_scoring_work_across_stages_and_refuse_a_compact_cache()
     let positions: Vec<u32> = vec![3, 9, 15, 19];
     let mut one = open_engine(&dir, serve_config(4, 0)).unwrap();
     let plan = two_stages();
-    let mut two = RicursiveEngine::from_source_staged(cfg.clone(), Box::new(weights(&dir, &cfg)), serve_config(4, 0), Some("cpu"), &plan).expect("staged engine");
+    let mut two = RicursiveEngine::from_source_staged(cfg.clone(), Box::new(weights(&dir, &cfg)), serve_config(4, 0), None, &plan).expect("staged engine");
     let (a, b) = (one.capture_attention(&ids, &positions).unwrap(), two.capture_attention(&ids, &positions).unwrap());
     let (a, b) = (a[2].as_ref().unwrap(), b[2].as_ref().unwrap());
     assert!(a.q == b.q && a.k == b.k, "the staged capture is the single-stage capture");

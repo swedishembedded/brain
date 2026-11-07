@@ -105,7 +105,8 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
 
     // The dense triad's two score slabs, sized by the keys a dense read may span.
     let keys = u64::from(serve.dense_keys.unwrap_or(serve.max_seq_len).max(cfg.sliding_window as u32));
-    let scores = 2 * 4 * rows * cfg.num_attention_heads as u64 * keys;
+    // Only the triad needs the score slabs; the fused kernels keep their partial states per call (a few MiB).
+    let scores = if serve.fused_attention { 0 } else { 2 * 4 * rows * cfg.num_attention_heads as u64 * keys };
     // The widest forward's live activations: gate, up and their product, the attention streams, the residuals.
     let activations = 4 * rows * (3 * cfg.intermediate_size as u64 + 5 * cfg.q_dim() as u64 + 4 * cfg.kv_dim() as u64 + 10 * cfg.hidden_size as u64);
     let decodes_tiles = tiers.dtypes().any(|t| matches!(t, Dtype::F8E4M3 | Dtype::F8E5M2 | Dtype::NF4 | Dtype::F4E2M1));
@@ -372,6 +373,26 @@ mod tests {
                     if fits(mid) { lo = mid } else { hi = mid }
                 }
                 eprintln!("one card, weights {weights} kv {kv}: the longest context is about {lo} tokens");
+            }
+        }
+        // The longest context the dense path serves (fused kernels, no index, no score scratch): only the cache bounds it.
+        for (weights, tiers) in [("nvfp4", nvfp4_release_tiers(&cfg)), ("bf16", TierPolicy::uniform(Dtype::BF16))] {
+            for (kv, tier) in [("bf16", KvTier::BF16), ("int8", KvTier::INT8)] {
+                for n_cards in [1usize, 2, 3] {
+                    let fits = |tokens: u32| {
+                        let s = ServeConfig { sparse_attention: false, dense_keys: None, fused_attention: true, ..serve(tokens, tier, 1) };
+                        place(&footprint(&cfg, &s, &tiers, LsaCharge::default()), &cards[..n_cards]).is_some_and(|p| p.len() <= n_cards)
+                    };
+                    if !fits(4096) {
+                        continue;
+                    }
+                    let (mut lo, mut hi) = (4096u32, 8 << 20);
+                    while hi - lo > 4096 {
+                        let mid = (lo + hi) / 2;
+                        if fits(mid) { lo = mid } else { hi = mid }
+                    }
+                    eprintln!("dense fused path, {n_cards} card(s), weights {weights} kv {kv}: the longest context is about {lo} tokens");
+                }
             }
         }
         let cards_for = |w: &str, kv: &str, t: u32| fewest.iter().find(|r| r.0 == w && r.1 == kv && r.2 == t).and_then(|r| r.3);

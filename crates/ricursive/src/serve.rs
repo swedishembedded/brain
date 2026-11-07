@@ -136,12 +136,16 @@ pub struct ServeConfig {
     /// million tokens is not a size anyone allocates; an engine that reads its global layers sparsely sets the
     /// crossover it densely reads below. A dense read past it is an error, never a truncation.
     pub dense_keys: Option<u32>,
+    /// Attend through the fused paged flash kernels (`model::kv_tier`) wherever the device runs them, which needs no
+    /// score scratch and so no cap on the context a dense read spans; `false` pins the three-kernel triad, the reference
+    /// (and what a device without workgroup barriers, the CPU JIT, always runs).
+    pub fused_attention: bool,
 }
 
 impl ServeConfig {
     /// A config with the given sizes, weights as stored and an f32 KV cache.
     pub fn new(block_size: u32, num_blocks: u32, max_seq_len: u32, max_batch: u32, prefix_slots: u32, prefill_chunk: u32) -> ServeConfig {
-        ServeConfig { block_size, num_blocks, max_seq_len, max_batch, prefix_slots, prefill_chunk, sparse_attention: false, weights: None, kv_cache: KvTier::F32, dense_keys: None }
+        ServeConfig { block_size, num_blocks, max_seq_len, max_batch, prefix_slots, prefill_chunk, sparse_attention: false, weights: None, kv_cache: KvTier::F32, dense_keys: None, fused_attention: true }
     }
 
     fn validate(&self, cfg: &RicursiveConfig) -> Result<(), String> {
@@ -299,7 +303,7 @@ impl RicursiveEngine {
                 extra = binding::kernel_pipelines(&[shape], &[], &packed, false);
             }
         }
-        let table = pipelines(&extra);
+        let table = pipelines(&cfg, &extra);
         let tiers = resolve_tiers(&cfg, src.as_ref(), serve.weights.as_ref());
         let ring_rows = ring_rows(&cfg, serve.prefill_chunk);
         let max_blocks_per_seq = serve.max_seq_len.div_ceil(serve.block_size);
@@ -346,6 +350,12 @@ impl RicursiveEngine {
         let lm_head = loader.linear("lm_head.weight", cfg.vocab_size, cfg.hidden_size)?;
         src.advise_drop("lm_head.weight");
         Ok(StageHead { norm, lm_head })
+    }
+
+    /// Whether attention runs the fused paged flash kernels on every stage (else the score-slab triad: a device without
+    /// workgroup barriers, or [`ServeConfig::fused_attention`] off).
+    pub fn fused_attention(&self) -> bool {
+        self.stages.iter().all(|s| s.fused)
     }
 
     pub fn config(&self) -> &RicursiveConfig {

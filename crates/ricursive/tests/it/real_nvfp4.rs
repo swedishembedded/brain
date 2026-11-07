@@ -131,8 +131,8 @@ fn reference_row(raw: &Raw, module: &str, r: usize) -> Vec<f32> {
         .collect()
 }
 
-fn ops() -> Ops {
-    Ops::new(gpu_core::Gpu::open(None, &ricursive::pipelines(&[]))).expect("ops")
+fn ops(cfg: &RicursiveConfig) -> Ops {
+    Ops::new(gpu_core::Gpu::open(None, &ricursive::pipelines(cfg, &[]))).expect("ops")
 }
 
 /// Spec: the device holds the MLP exactly as the ModelOpt format defines, checked row by row (the first, the last
@@ -142,7 +142,7 @@ fn the_real_nvfp4_tensors_decode_as_the_modelopt_format_defines() {
     let Some(f) = files() else { return };
     let raw = Raw::open(&brain_testutil::testdata(NVFP4));
     let src = open_safetensors(&f.nvfp4, &f.cfg, &SOURCE_LAYERS).expect("open the release");
-    let ops = ops();
+    let ops = ops(&f.cfg);
     let staging = BoundedWorkspace::new(MemoryBudget::new(64 << 20, 0));
     let mut worst = 0.0f32;
     for (canonical, file_layer) in [(0usize, 0usize), (1, 4)] {

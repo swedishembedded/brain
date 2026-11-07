@@ -14,6 +14,8 @@
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::ops::{Ops, Weight};
 
+use crate::config::RicursiveConfig;
+
 pub(crate) const K_RMSNORM: usize = 0;
 pub(crate) const K_ROPE2D: usize = 1;
 pub(crate) const K_GQA_SCORES_WIN: usize = 2;
@@ -28,6 +30,11 @@ pub(crate) const K_MIX: usize = 10;
 pub(crate) const K_ROPE_PAGED: usize = 11;
 pub(crate) const K_SOFTMAX: usize = 12;
 pub(crate) const K_COPY_WITHIN: usize = 13;
+
+/// The `(head_dim, group)` the fused decode attention is specialised for: the model's own.
+pub(crate) fn flash_shape(cfg: &RicursiveConfig) -> (u32, u32) {
+    (cfg.head_dim as u32, cfg.group() as u32)
+}
 
 /// The kernels Ripple's own graph dispatches by index, in the order of the `K_*` indices. The products, the
 /// KV append and the paged attention scores and apply are not here: they go through `model::ops::Ops` and
@@ -56,7 +63,7 @@ const OWN_KERNELS: [(&str, &str); 14] = [
 /// (every weight tier's products and tile decode: `model::ops::training_kernel_list`), then the KV tiers'
 /// kernels (`model::kv_tier::kernel_list`), then `extra` (the sparse-attention kernels). A name that two of
 /// them share is registered once.
-pub fn pipelines(extra: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static str)> {
+pub fn pipelines(cfg: &RicursiveConfig, extra: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static str)> {
     fn add(table: &mut Vec<(&'static str, &'static str)>, list: &[(&'static str, &'static str)]) {
         for &entry in list {
             if !table.iter().any(|(name, _)| *name == entry.0) {
@@ -66,10 +73,10 @@ pub fn pipelines(extra: &[(&'static str, &'static str)]) -> Vec<(&'static str, &
     }
     let mut table: Vec<(&'static str, &'static str)> = OWN_KERNELS.to_vec();
     add(&mut table, model::ops::training_kernel_list());
-    // The fused decode kernels are specialised for head shapes this model does not have (group 10); the paged triad
-    // and the append kernels of each tier are what it dispatches.
-    let tiers: Vec<_> = model::kv_tier::kernel_list(&table).into_iter().filter(|(name, _)| !name.starts_with("paged_flash_decode")).collect();
-    add(&mut table, &tiers);
+    // The fused decode attention is specialised for this model's own head shape (80 query heads over 8 kv heads of
+    // 128 is a group of 10), at every KV tier; the paged triad stays the CPU JIT's path and the reference.
+    let fused = model::kv_tier::kernel_list_for(&table, &[flash_shape(cfg)]);
+    add(&mut table, &fused);
     add(&mut table, extra);
     table
 }

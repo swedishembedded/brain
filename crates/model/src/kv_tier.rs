@@ -446,7 +446,9 @@ struct Names {
 const FLASH_COMBINE: &str = "paged_flash_decode_gqa_combine";
 
 /// The `(head_dim, GQA group)` pairs (group = query heads per kv head) the fused decode is
-/// specialised for - its loops over a group's heads are unrolled into
+/// specialised for on every device that registers [`kernel_list`]; a model with another shape registers its own
+/// through [`kernel_list_for`] and resolves it through [`KvKernels::resolve_for`] (a power-of-two head width of at
+/// most 256 and a group of up to 128 query heads) - its loops over a group's heads are unrolled into
 /// registers, so each pair is its own pipeline. Group 6 at head_dim 256 is Qwen3.8-27B
 /// (24 heads / 4 kv), group 8 the 35B-A3B sibling (16 / 2); head_dim 128 with group 1 is plain
 /// multi-head attention (DeepSeek-OCR's decoder: 10 heads of 128). Any other shape keeps the triad.
@@ -459,14 +461,31 @@ pub fn flash_decode_shape(head_dim: u32, group: u32) -> bool {
     FLASH_SHAPES.contains(&(head_dim, group))
 }
 
+/// Whether the fused decode kernel can be specialised for `head_dim` and `group`: a power-of-two head width from 16 to 256 (it
+/// reads a row in 16-byte pieces and keeps `head_dim / 2` threads of the workgroup busy on the weighted sum), and a group of
+/// 1 to 128 heads (the softmax runs 8 heads at a time on its 128 threads).
+pub fn check_flash_shape(head_dim: u32, group: u32) -> Result<(), String> {
+    if !head_dim.is_power_of_two() || !(16..=256).contains(&head_dim) {
+        return Err(format!("fused decode attention: head_dim {head_dim} is not a power of two from 16 to 256"));
+    }
+    if !(1..=128).contains(&group) {
+        return Err(format!("fused decode attention: a group of {group} query heads per kv head is outside 1..=128"));
+    }
+    Ok(())
+}
+
 /// The compile-time constants of the fused decode kernel for one shape: `GRP`, and for the
 /// non-native head width `HD` and its 4-channel piece count `HD4`.
 fn decode_params(head_dim: u32, group: u32) -> Vec<(&'static str, u32)> {
-    if head_dim == 256 {
-        vec![("GRP", group)]
-    } else {
-        vec![("GRP", group), ("HD", head_dim), ("HD4", head_dim / 4)]
+    let mut params = vec![("GRP", group)];
+    if head_dim != 256 {
+        params.extend([("HD", head_dim), ("HD4", head_dim / 4), ("HDS", head_dim.ilog2())]);
     }
+    // The per-head arrays hold 8 heads unless the group needs more.
+    if group > 8 {
+        params.push(("GMAX", group));
+    }
+    params
 }
 
 /// The pipeline name of the fused decode for `tier` at `head_dim` and GQA group `group`:
@@ -525,6 +544,13 @@ impl KvTier {
 /// for, across all tiers - what a model that offers the compact tiers adds to
 /// its own pipeline list. Names already in `existing` are not repeated.
 pub fn kernel_list(existing: &[(&str, &str)]) -> Vec<(&'static str, &'static str)> {
+    kernel_list_for(existing, &FLASH_SHAPES)
+}
+
+/// [`kernel_list`] with the fused decode of exactly the `(head_dim, group)` pairs in `shapes` (a model's own attention
+/// shape, such as Ripple's 128 / 10) at every KV tier, instead of the built-in [`FLASH_SHAPES`]. A shape that fails
+/// [`check_flash_shape`] gets no fused kernel; the caller checks first and keeps the triad by name.
+pub fn kernel_list_for(existing: &[(&str, &str)], shapes: &[(u32, u32)]) -> Vec<(&'static str, &'static str)> {
     use kernels::template::{dtype_variant, dtype_variant_store, fp8_kv_variant, int8_kv_variant, interned, kv_tier_variant, CompactKv};
     use gpu_core::select::Dtype;
 
@@ -538,15 +564,15 @@ pub fn kernel_list(existing: &[(&str, &str)]) -> Vec<(&'static str, &'static str
     let fp8_scores = fp8_kv_variant("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED, "pool_k", "k_scales", "p.head_dim").expect("pool_k is templatable");
     let fp8_apply = fp8_kv_variant("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED, "pool_v", "v_scales", "p.head_dim").expect("pool_v is templatable");
     let mut decode = Vec::new();
-    for (head_dim, group) in FLASH_SHAPES {
+    for &(head_dim, group) in shapes {
+        if check_flash_shape(head_dim, group).is_err() {
+            continue;
+        }
         let base = interned("paged_flash_decode_gqa_hd256", kernels::PAGED_FLASH_DECODE_GQA_HD256, &decode_params(head_dim, group)).expect("the decode kernel declares its constants");
         decode.push(base);
         decode.push(kv_tier_variant(base.0, base.1, CompactKv::Bf16).expect("the decode kernel marks its kv-tier blocks"));
-        // The int8 and fp8 row loaders read 256-channel rows; at head_dim 128 those tiers keep the triad.
-        if head_dim == 256 {
-            decode.push(kv_tier_variant(base.0, base.1, CompactKv::Int8).expect("the decode kernel marks its kv-tier blocks"));
-            decode.push(kv_tier_variant(base.0, base.1, CompactKv::Fp8).expect("the decode kernel marks its kv-tier blocks"));
-        }
+        decode.push(kv_tier_variant(base.0, base.1, CompactKv::Int8).expect("the decode kernel marks its kv-tier blocks"));
+        decode.push(kv_tier_variant(base.0, base.1, CompactKv::Fp8).expect("the decode kernel marks its kv-tier blocks"));
     }
     let all: Vec<(&'static str, &'static str)> = vec![
         (FLASH_COMBINE, kernels::PAGED_FLASH_DECODE_GQA_COMBINE),
@@ -766,6 +792,12 @@ impl KvKernels {
     /// Look `tier`'s kernels up on `gpu` by name. An error names the first
     /// missing kernel: the model did not register [`kernel_list`].
     pub fn resolve(gpu: &Gpu, tier: KvTier) -> Result<KvKernels, String> {
+        Self::resolve_for(gpu, tier, &[])
+    }
+
+    /// [`Self::resolve`], also looking up the fused decode of each `(head_dim, group)` in `shapes` (registered by
+    /// [`kernel_list_for`]).
+    pub fn resolve_for(gpu: &Gpu, tier: KvTier, shapes: &[(u32, u32)]) -> Result<KvKernels, String> {
         let names = tier.names();
         let find = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("KV tier {tier}: kernel '{name}' is not registered on this Gpu (add model::kv_tier::kernel_list to its pipelines)"));
         Ok(KvKernels {
@@ -775,7 +807,7 @@ impl KvKernels {
             apply: find(names.apply)?,
             prefill_hd256: find(names.prefill_hd256)?,
             native_prefill: true,
-            decode: FLASH_SHAPES.iter().filter_map(|&(hd, group)| gpu.kernel_index(&decode_name(tier, hd, group)).map(|i| (hd, group, i))).collect(),
+            decode: FLASH_SHAPES.iter().chain(shapes).filter_map(|&(hd, group)| gpu.kernel_index(&decode_name(tier, hd, group)).map(|i| (hd, group, i))).collect(),
             decode_combine: gpu.kernel_index(FLASH_COMBINE),
         })
     }

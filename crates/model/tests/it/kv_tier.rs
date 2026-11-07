@@ -29,7 +29,7 @@
 use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::paged_attention_fused;
-use model::kv_tier::{kernel_list, FlashDecodeShape, KvAppend, KvElement, KvKernels, KvPlane, KvTier, PrefillShape};
+use model::kv_tier::{kernel_list_for, FlashDecodeShape, KvAppend, KvElement, KvKernels, KvPlane, KvTier, PrefillShape};
 use model::ops::PagedDecodeShape;
 
 /// Real-device tests share one adapter; see `kv_bf16_roundtrip.rs`.
@@ -37,7 +37,8 @@ static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn kernels() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
-    LIST.get_or_init(|| kernel_list(&[]))
+    // The built-in fused shapes and Ripple's (80 query heads over 8 kv heads of 128: a group of 10).
+    LIST.get_or_init(|| kernel_list_for(&[], &[(256, 6), (256, 8), (256, 4), (128, 1), (128, 10), (64, 12)]))
 }
 
 struct Shape {
@@ -249,12 +250,7 @@ fn fused_prefill_over_compact_planes_equals_f32_over_their_decoded_values(g: &Gp
 /// not a multiple of the tile, blocks scattered through the pool, `n_heads / n_kv`
 /// query heads sharing each kv head.
 fn fused_decode_equals_exact_attention_over_the_decoded_planes(g: &Gpu, tier: KvTier, label: &str, n_heads: u32, n_kv: u32, head_dim: u32) {
-    // The 8-bit tiers' row loaders read 256-channel rows: at head_dim 128 they keep the triad (the kernel is not registered).
-    if head_dim == 128 && (tier == KvTier::INT8 || tier == KvTier::FP8) {
-        assert!(!KvKernels::resolve(g, tier).unwrap().flash_decode_available(g, head_dim, n_heads / n_kv), "{label} {tier}: no fused decode is registered at head_dim 128");
-        return;
-    }
-    let s = Shape { n_heads, n_kv, head_dim, block_size: 64, num_blocks: 80 };
+    let s = Shape { n_heads, n_kv, head_dim, block_size: 4, num_blocks: 1500 };
     let group = (s.n_heads / s.n_kv) as usize;
     let lens = [3000u32, 70, 1500, 1];
     let max_bt = (*lens.iter().max().unwrap()).div_ceil(s.block_size);
@@ -290,7 +286,7 @@ fn fused_decode_equals_exact_attention_over_the_decoded_planes(g: &Gpu, tier: Kv
     let q_h: Vec<f32> = random(0xC0FFEE, (batch * s.n_heads * s.head_dim) as usize).iter().map(|x| x * 0.5).collect();
     let (q, table, seq_lens) = (g.storage_init("q", &q_h), u32s(g, &table_h), u32s(g, &lens));
     let ctx = g.storage((batch * s.n_heads * s.head_dim) as u64);
-    let kernels = KvKernels::resolve(g, tier).unwrap();
+    let kernels = KvKernels::resolve_for(g, tier, &[(128, 10), (64, 12)]).unwrap();
     let shape = FlashDecodeShape { batch, n_heads: s.n_heads, n_kv_heads: s.n_kv, head_dim: s.head_dim, block_size: s.block_size, max_bt, cap: *lens.iter().max().unwrap(), pin_splits: false };
     assert!(kernels.flash_decode_available(g, s.head_dim, s.n_heads / s.n_kv), "{label} {tier}: the fused decode must be available for this shape");
     g.submit(&[], &kernels.flash_decode(g, &q, &kc, &vc, &table, &seq_lens, &ctx, shape));
@@ -524,8 +520,9 @@ fn fused_decode_reads_compact_planes_as_exact_attention_reads_their_decoded_valu
             return;
         }
         // Qwen3.8-27B's group of six, the 35B-A3B sibling's eight (both head_dim 256), and plain multi-head
-        // attention at head_dim 128 (DeepSeek-OCR's decoder: ten heads, one per kv head).
-        for (n_heads, n_kv, head_dim) in [(12, 2, 256), (16, 2, 256), (10, 10, 128)] {
+        // attention at head_dim 128 (DeepSeek-OCR's decoder: ten heads, one per kv head), Ripple's group of ten at head_dim 128 (twice
+        // the 8 heads the kernel's per-head arrays held before they were sized by the group), and a group of 12 at head_dim 64.
+        for (n_heads, n_kv, head_dim) in [(12, 2, 256), (16, 2, 256), (10, 10, 128), (20, 2, 128), (40, 4, 128), (24, 2, 64)] {
             fused_decode_equals_exact_attention_over_the_decoded_planes(g, tier, label, n_heads, n_kv, head_dim);
         }
     });
