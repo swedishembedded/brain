@@ -1154,7 +1154,7 @@ exponential, an addition, and a division. `crates/kernels/wgsl/gelu.wgsl` comput
 `0.5 * v * (1.0 + tanh(inner))` with `inner = k * (v + 0.044715 * v * v * v)`,
 whose inner part is a degree-3 polynomial from this chapter. A second kernel,
 `crates/kernels/wgsl/gelu_erf.wgsl`, computes the exact formula instead of the
-polynomial-inside-tanh approximation. Commit `c298c998e` (16 July 2026) added it
+polynomial-inside-tanh approximation. Commit `c76a78130` (16 July 2026) added it
 because a reference model used the exact version and the two differ by about
 $10^{-3}$, enough to break a parity check against the reference: two functions
 that are plotted as the same curve are not the same function, and the tests
@@ -1169,7 +1169,7 @@ affine step (batch-normalisation at inference time, collapsed to
 and `bias[c] = beta[c] - run_mean[c] * scale[c]`) and the chosen activation into one pass.
 The collapse of the normalisation into one scale and one bias is the
 composition-of-lines identity of this chapter, with $w_2 w_1$ and
-$w_2 b_1 + b_2$ computed once. Commit `aa139306a` (25 June 2026) made the change
+$w_2 b_1 + b_2$ computed once. Commit `b2d1b379e` (25 June 2026) made the change
 for an object-detection model, replacing three kernel launches and two
 intermediate buffers with one, and leaves the training path unchanged: the collapse is for the inference form
 of the normalisation, whose statistics are fixed.

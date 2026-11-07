@@ -1227,7 +1227,7 @@ additions for each output, so floating-point rounding is identical too.
 (Reordering the additions would be allowed in exact arithmetic and is not in
 floating point, which Chapter 15 explains.)
 
-**A story: the same product, a different schedule.** Commit `c54253ae6`
+**A story: the same product, a different schedule.** Commit `dc4fdeedc`
 (20 July 2026) added that row-blocked kernel. Its message explains the
 reason in the vocabulary of this chapter: the naive kernel streams the whole
 $[N, K]$ weight once for every output row, so for the large vision-transformer

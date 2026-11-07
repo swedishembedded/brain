@@ -49,7 +49,7 @@ CHAPTER_SECTIONS = ["The problem", "Before you begin", "Check your understanding
 PROJECT_SECTIONS = ["The goal", "Before you begin", "Milestones", "Acceptance tests", "Summary"]
 
 SVG_BUDGET = 120 * 1024
-COMMIT = re.compile(r"\bcommit `?([0-9a-f]{7,40})`?")
+COMMIT = re.compile(r"\bcommit `?([0-9a-f]{7,40})`?", re.I)
 KNOWLEDGE = re.compile(r"\bknowledge #(\d+[a-z]?)\b")
 CRATE_PATH = re.compile(r"`(crates/[A-Za-z0-9_./-]+)`")
 IMAGE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
@@ -112,8 +112,11 @@ def pages(book, errors):
 
 
 def commit_exists(sha, cache={}):
+    """A cited commit must be in HEAD's history, not merely somewhere in the
+    object store: a commit only on a side branch (or the pre-rebase twin of a
+    mainline commit) is absent from a fresh clone of the main branch."""
     if sha not in cache:
-        r = subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=ROOT,
+        r = subprocess.run(["git", "merge-base", "--is-ancestor", sha, "HEAD"], cwd=ROOT,
                            capture_output=True)
         cache[sha] = r.returncode == 0
     return cache[sha]
@@ -174,7 +177,7 @@ def content(page_list, errors, owner=None):
                 errors.append(f"{rel}:{n}: machine-specific absolute path")
             for sha in COMMIT.findall(line):
                 if not commit_exists(sha):
-                    errors.append(f"{rel}:{n}: commit {sha} is not in this repository")
+                    errors.append(f"{rel}:{n}: commit {sha} is not in the history of HEAD")
             for k in KNOWLEDGE.findall(line):
                 if k.lstrip("0") not in kids:
                     errors.append(f"{rel}:{n}: knowledge #{k} does not exist")

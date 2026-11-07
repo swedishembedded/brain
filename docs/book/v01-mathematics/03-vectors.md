@@ -1076,7 +1076,7 @@ library's SDK policy (0.0 on mismatched lengths) differs from the host
 helper's (panic), a choice each layer made for its own caller: a request path
 that must keep serving versus a test that must fail loudly.
 
-**Cosine inside attention.** Commit `7df678322` (16 July 2026) added
+**Cosine inside attention.** Commit `eccdb6ef5` (16 July 2026) added
 `crates/kernels/wgsl/l2norm_scale.wgsl`, a kernel that normalises each query
 and key vector to unit length over the head dimension and multiplies by a
 learned per-dimension scale before attention. The commit message calls it "the

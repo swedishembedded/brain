@@ -1020,7 +1020,7 @@ shared weight whose second use was dropped, which needs a per-entry check
 (knowledge #187).
 
 **Story: the autodiff crate that was never written.** The first workspace split
-(commit `b486191c8`, 24 June 2026) created an `autodiff` crate as a placeholder, with a doc
+(commit `d9bfa70d4`, 24 June 2026) created an `autodiff` crate as a placeholder, with a doc
 comment promising "shared SSA forward-cache / reverse-mode autodiff scaffolding
 reused by every model". Over the following weeks every model grew its own
 backward. On 1 September 2026, commit `6eee2197d` deleted the crate: it was an
