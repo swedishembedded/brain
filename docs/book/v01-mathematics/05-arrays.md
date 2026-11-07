@@ -90,8 +90,10 @@ A vector is a list of numbers with one index. A matrix is a table with two. The
 natural next step is a table with any number $R$ of indices, and the book needs
 it constantly, so it gets a name.
 
-A **tensor** is an array of numbers with $R \ge 0$ axes (also called its rank
-or number of dimensions). A scalar is a tensor with no axes, a vector has one, a
+A **tensor** is an array of numbers with $R \ge 0$ axes; $R$ is its **number
+of axes** (the book never calls it the rank of the tensor, because Chapter 4
+used rank for the number of independent columns of a matrix, a different
+thing). A scalar is a tensor with no axes, a vector has one, a
 matrix two. The word has a deeper meaning in physics and geometry, where it
 also says how the numbers change when the coordinates change. In machine
 learning it almost always means just this: a multi-axis array of numbers. The
@@ -291,7 +293,7 @@ Read that buffer as a column-major matrix of shape [3, 2] (column j is buf[3j:3j
 
 Row-major product Y = X W^T with X [2, 3] = [[1, 2, 3], [4, 5, 6]] and W [4, 3] = [[1, 0, 2], [0, 1, 1], [1, 1, 0], [2, 0, 1]]: Y flat = [7, 5, 3, 5, 16, 11, 9, 14].
 
-A column-major routine is asked for the [n, m] = [4, 2] product W X^T, given W's buffer and X's buffer unchanged, with m = 4, n = 2, k = 3, lda = ldb = k = 3, ldc = n = 4 and W marked transposed. Its output buffer is [7, 5, 3, 5, 16, 11, 9, 14].
+The column-major routine gemm of the text is asked for the [M, N] = [4, 2] product W X^T, given W's buffer and X's buffer unchanged: M = 4, N = 2, K = 3, A = W's buffer with trans_a = true and lda = K = 3, B = X's buffer with ldb = K = 3, and ldc = M = 4. Its output buffer is [7, 5, 3, 5, 16, 11, 9, 14].
 
 Equal to Y's row-major buffer: True. No operand was copied or transposed.
 <!-- /worked -->
@@ -302,9 +304,21 @@ the transpose of the other: the $(i, j)$ entry of the first and the $(j, i)$ ent
 second sit at the same offset, $i n + j$ in the first and $j + i n$ in the
 second. Memory cannot tell the two readings apart, only the convention can.
 
-The second paragraph of the block turns this into a tool. Suppose a library
-routine multiplies column-major matrices, as the linear-algebra libraries
-inherited from Fortran do, and we want a row-major product $\mathbf{Y} =
+The second paragraph of the block turns this into a tool. The routine in
+question is the standard **general matrix multiply**, written here
+`gemm(trans_a, M, N, K, A, lda, B, ldb, C, ldc)`. It computes the column-major
+$[M, N]$ matrix $\mathbf{C} = \mathrm{op}(\mathbf{A})\,\mathbf{B}$, where
+$\mathrm{op}$ is the identity, or the transpose when `trans_a` is true. Every
+buffer is column-major, and the **leading dimension** of a buffer (`lda`,
+`ldb`, `ldc`) is the distance in elements between the starts of consecutive
+columns of the stored matrix: element $(i, j)$ of a stored matrix sits at
+offset $i + j \cdot \mathrm{ld}$, and $\mathrm{ld}$ must be at least the
+number of rows stored (any extra rows are padding, or belong to a larger
+matrix of which this is a block). `A` is stored as an $[M, K]$ matrix when
+`trans_a` is false and as a $[K, M]$ matrix, read transposed, when it is true;
+`B` is stored $[K, N]$ and `C` is $[M, N]$ with leading dimension `ldc` $\ge M$.
+Suppose such a library routine, as the linear-algebra libraries inherited from
+Fortran provide, is all we have, and we want a row-major product $\mathbf{Y} =
 \mathbf{X}\mathbf{W}^\top$ with $\mathbf{X}$ of shape $[m, k]$ and
 $\mathbf{W}$ of shape $[n, k]$. Take the transpose of the whole equation. By the
 rule of Chapter 4, $(\mathbf{X}\mathbf{W}^\top)^\top = \mathbf{W}\mathbf{X}^\top$, so
@@ -313,7 +327,10 @@ Now read the buffers through the column-major convention. The buffer of
 $\mathbf{X}$, row-major of shape $[m, k]$, *is* a column-major matrix of shape
 $[k, m]$ with leading dimension $k$, that is $\mathbf{X}^\top$ exactly as
 needed. The buffer of $\mathbf{W}$ read the same way is $\mathbf{W}^\top$, which
-the routine is asked to transpose back with a flag. The routine writes a
+the routine is asked to transpose back with a flag. In the routine's letters: $M = n$, $N = m$, $K = k$; `A` is the buffer of
+$\mathbf{W}$ with `trans_a` true and `lda` $= k$ (the buffer, read column-major,
+is $[k, n]$); `B` is the buffer of $\mathbf{X}$ with `ldb` $= k$; and the
+output has `ldc` $= M = n$ (its stored matrix has $M = n$ rows). The routine writes a
 column-major $[n, m]$ matrix, $\mathbf{Y}^\top$, and a column-major $[n, m]$ matrix
 has the same memory as a row-major $[m, n]$ one: that is $\mathbf{Y}$. No operand was
 copied or transposed; the product was merely *stated* with the operands in the
@@ -405,7 +422,9 @@ which is a view with shape $[n, m]$ and strides $(s_1, s_0)$: **swap the two
 entries of the shape and the two entries of the strides**. Nothing else
 changes; no number moves. For the $[3, 4]$ example the strides $(4, 1)$ become
 $(1, 4)$. A trace of every element of that view, with the offset computed from
-(1) and the element of the original it must equal:
+(1) and the element of the original it must equal (the last line of the block
+says whether a view is **contiguous**, meaning its elements sit in storage in
+reading order with no gaps; the term is defined with its test below):
 
 <!-- worked: arrays.transpose_view -->
 A = [[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23]] [3, 4], strides (4, 1), storage [0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23].
@@ -453,7 +472,11 @@ $o_0 + (a + c\,i)\,s_0 + \dots = (o_0 + a\,s_0) + i\,(c\,s_0) + \dots$: the new
 starting offset is $o_0 + a s_0$, the stride is multiplied by the step, and the
 size is $\lceil (b - a)/c \rceil$. The other axes are untouched. Slicing several
 axes at once repeats the rule per axis. The book's pseudocode writes half-open
-ranges `a[i, 2:5]`; this is how they are executed.
+ranges `a[i, 2:5]`; this is how they are executed. A range keeps its axis, even
+when it selects one element, and an integer index drops it (see the
+pseudocode page), so a view that must keep the axis, as in the table below, is
+written with a range of length one: `A[1:2, :]` has shape $[1, 4]$, while
+`A[1, :]` has shape $[4]$.
 
 <!-- worked: arrays.slices_are_views -->
 Storage of A (row-major [3, 4]): [0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23].
@@ -465,13 +488,13 @@ Storage of A (row-major [3, 4]): [0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23].
 | A[1:3, :] | [2, 4] | (4, 1) | 4 | [10, 11, 12, 13, 20, 21, 22, 23] | yes |
 | A[::2, :] | [2, 4] | (8, 1) | 0 | [0, 1, 2, 3, 20, 21, 22, 23] | no |
 | A[:, ::2] | [3, 2] | (4, 2) | 0 | [0, 2, 10, 12, 20, 22] | no |
-| A[1, :] (a row) | [1, 4] | (4, 1) | 4 | [10, 11, 12, 13] | yes |
-| A[:, 2] (a column) | [3, 1] | (4, 1) | 2 | [2, 12, 22] | no |
+| A[1:2, :] (a row) | [1, 4] | (4, 1) | 4 | [10, 11, 12, 13] | yes |
+| A[:, 2:3] (a column) | [3, 1] | (4, 1) | 2 | [2, 12, 22] | no |
 | transpose(A) | [4, 3] | (1, 4) | 0 | [0, 10, 20, 1, 11, 21, 2, 12, 22, 3, 13, 23] | no |
 
 Writing through a view changes the original:
 
-after setting element 1 of the column view A[:, 2] to -1, A = [[0, 1, 2, 3], [10, 11, -1, 13], [20, 21, 22, 23]] (was [[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23]]).
+after setting element 1 of the column view A[:, 2:3] to -1, A = [[0, 1, 2, 3], [10, 11, -1, 13], [20, 21, 22, 23]] (was [[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23]]).
 <!-- /worked -->
 
 Each line is a different way to look at the storage of $A$, and none moved a
@@ -664,8 +687,12 @@ in storage. Merge axes $k$ and $k + 1$, sizes $d_k$ and $d_{k+1}$, strides $s_k$
 and $s_{k+1}$. A merged index $j = i_k d_{k+1} + i_{k+1}$ has to correspond to
 offset $j\,s_{k+1}$ (one stride, the inner one), so we need
 $i_k s_k + i_{k+1} s_{k+1} = (i_k d_{k+1} + i_{k+1})\,s_{k+1}$ for every pair. That
-holds for all pairs exactly when
-$$s_k = d_{k+1}\, s_{k+1}. \tag{2}$$
+holds for all pairs of indices exactly when
+$$s_k = d_{k+1}\, s_{k+1}, \tag{2}$$
+provided both axes have size at least 2. (An axis of size 1 only ever has
+index 0, so its stride is never used and the condition cannot fail for it: such
+an axis is dropped first, and the merged axis takes the stride of the other
+axis.)
 In a contiguous array this is the definition of the row-major strides, so
 merging neighbours is always free there. In a transposed or sliced array it
 usually fails, and the block shows the cases:
@@ -673,12 +700,13 @@ usually fails, and the block shows the cases:
 <!-- worked: arrays.merge_rule -->
 | array | shape | strides | axes merged | s_k vs d_(k+1) s_(k+1) | result |
 |---|---|---|---|---|---|
-| contiguous [2, 3, 4] | [2, 3, 4] | (12, 4, 1) | 0, 1 | 12 vs 3*4 = 12 | view |
-| contiguous [2, 3, 4] | [2, 3, 4] | (12, 4, 1) | 1, 2 | 4 vs 4*1 = 4 | view |
+| contiguous [2, 3, 4] | [2, 3, 4] | (12, 4, 1) | 0, 1 | 12 vs 3*4 = 12 | view, merged stride 4 |
+| contiguous [2, 3, 4] | [2, 3, 4] | (12, 4, 1) | 1, 2 | 4 vs 4*1 = 4 | view, merged stride 1 |
 | swapped axes [3, 2, 4] | [3, 2, 4] | (4, 12, 1) | 0, 1 | 4 vs 2*12 = 24 | copy |
 | swapped axes [3, 2, 4] | [3, 2, 4] | (4, 12, 1) | 1, 2 | 12 vs 4*1 = 4 | copy |
 | A[:, 0:2] of [3, 4] | [3, 2] | (4, 1) | 0, 1 | 4 vs 2*1 = 2 | copy |
 | A[::2, :] of [3, 4] | [2, 4] | (8, 1) | 0, 1 | 8 vs 4*1 = 4 | copy |
+| A[:, 2:3] of [3, 4] | [3, 1] | (4, 1) | 0, 1 | an axis has size 1: drop it | view, merged stride 4 |
 
 Every merge the rule allows reproduces the row-major reading exactly: True.
 <!-- /worked -->
@@ -687,7 +715,12 @@ Rule (2) says "the outer axis steps over exactly the whole inner axis". A block
 of columns, every second row, and the swapped axes all violate it, and for
 those the reshape is a copy. This is the full content of the guidance above:
 split anything, merge only what is adjacent in memory, and expect a copy when
-you ask for more.
+you ask for more. The last row of the block is the size-1 case: the axis of
+size 1 is dropped and the merged axis keeps the stride 4 of the other.
+
+The two rules combine into one algorithm for any reshape, given in the section
+on algorithms: it matches old axes to new axes by their running products, and
+takes a view when every group of old axes can be merged by rule (2).
 
 ## Broadcasting
 
@@ -871,7 +904,7 @@ Image batch with B = 2, C = 3, H = 2, W = 2; element value = its NCHW offset.
 
 NCHW: shape [2, 3, 2, 2], strides (12, 4, 2, 1). NHWC: shape [2, 2, 2, 3], strides (12, 6, 3, 1).
 
-The three channel values of the pixel at image 1, row 1, column 0:
+The NHWC array is the same picture stored channels-last: its element (b, h, w, c) is the NCHW element (b, c, h, w). The three channel values of the pixel at image 1, row 1, column 0:
 
 | channel | NCHW offset | NCHW value | NHWC offset | NHWC value |
 |---|---:|---:|---:|---:|
@@ -901,7 +934,8 @@ $[B T, D]$ view is $bT + t$, at offset $(bT + t) D$, the same cell as before.
 ### Images: channels first or channels last
 
 The first part of the block above is a batch of images in the two layouts in
-common use. In **NCHW** (the book's $[B, C, H, W]$; N for the number of examples) the three
+common use. In **NCHW** (the book's $[B, C, H, W]$; the N of the name counts the examples in the
+batch, which the rest of the book calls $B$) the three
 channels of a pixel are $H W$ cells apart, and each channel is a contiguous
 plane. In **NHWC** ($[B, H, W, C]$) the channels of a pixel are adjacent, and
 each pixel is a short contiguous vector. Which is better depends on the
@@ -939,7 +973,7 @@ function row_major_strides(shape: array<int>[R]) -> array<int>[R]:
     return strides
 
 function offset_of(v: View, index: array<int>[R]) -> int:
-    require len(index) == R, "index rank differs from array rank"
+    require len(index) == R, "index length differs from the number of axes"
     off = v.offset
     for k in 0 .. R:
         require 0 <= index[k] < v.shape[k], "index out of bounds"
@@ -949,14 +983,14 @@ function offset_of(v: View, index: array<int>[R]) -> int:
 function transpose_view(v: View, a: int, b: int) -> View:
     require 0 <= a < R and 0 <= b < R, "axis out of range"
     shape = copy(v.shape); strides = copy(v.strides)
-    swap shape[a] and shape[b]; swap strides[a] and strides[b]
+    swap shape[a], shape[b]; swap strides[a], strides[b]
     return View(v.storage, v.offset, shape, strides)      # no number moves
 
 function slice_view(v: View, start, stop, step: array<int>[R]) -> View:
     shape = zeros(int, [R]); strides = zeros(int, [R]); off = v.offset
     for k in 0 .. R:
         require step[k] >= 1 and 0 <= start[k] <= stop[k] <= v.shape[k], "bad slice"
-        shape[k]   = (stop[k] - start[k] + step[k] - 1) / step[k]    # integer division
+        shape[k]   = (stop[k] - start[k] + step[k] - 1) // step[k]   # integer division
         strides[k] = v.strides[k] * step[k]
         off        = off + start[k] * v.strides[k]
     return View(v.storage, off, shape, strides)
@@ -971,7 +1005,7 @@ function is_contiguous(v: View) -> bool:
 function materialize(v: View) -> View:        # copy into new contiguous storage
     out = zeros(real, [numel(v.shape)])
     n = 0
-    for index in all indices of v.shape in row-major order:
+    for index in indices(v.shape):            # every index tuple, in row-major order
         out[n] = v.storage[offset_of(v, index)]
         n = n + 1
     return View(out, 0, copy(v.shape), row_major_strides(v.shape))
@@ -981,6 +1015,40 @@ function reshape(v: View, new_shape: array<int>[Q]) -> View:
     if not is_contiguous(v):
         v = materialize(v)                    # a view is possible only in special cases
     return View(v.storage, v.offset, new_shape, row_major_strides(new_shape))
+
+function reshape_view(v: View, new_shape: array<int>[Q]) -> (ok: bool, w: View):
+    # A view with the new shape if the split and merge rules allow one, else ok = false.
+    require numel(new_shape) == numel(v.shape), "element counts differ"
+    require all dimensions of v.shape and new_shape are >= 1, "empty axes not handled"
+    R = len(v.shape)
+    old_d = [v.shape[k] for k in 0 .. R if v.shape[k] != 1]        # axes of size 1 are dropped:
+    old_s = [v.strides[k] for k in 0 .. R if v.shape[k] != 1]      # their stride is never used
+    new_strides = zeros(int, [Q])
+    k = 0                                     # next unused old axis
+    j = 0                                     # next unused new axis
+    while j < Q:
+        if new_shape[j] == 1:
+            new_strides[j] = 1                # never stepped along, any value will do
+            j = j + 1
+            continue
+        # a group: old axes k .. k2 and new axes j .. j2 whose sizes have the same product
+        k2 = k; prod_old = old_d[k]
+        j2 = j; prod_new = new_shape[j]
+        while prod_old != prod_new:
+            if prod_old < prod_new:
+                k2 = k2 + 1; prod_old = prod_old * old_d[k2]
+            else:
+                j2 = j2 + 1; prod_new = prod_new * new_shape[j2]
+        for a in k .. k2:                     # the old axes of the group must merge, by rule (2)
+            if old_s[a] != old_d[a + 1] * old_s[a + 1]:
+                return (false, v)
+        inner = old_s[k2]                     # the group is read with the innermost old stride ...
+        for b in j2 down to j:                # ... and the new axes split it, row-major
+            new_strides[b] = inner
+            inner = inner * new_shape[b]
+        k = k2 + 1
+        j = j2 + 1
+    return (true, View(v.storage, v.offset, new_shape, new_strides))
 
 function broadcast_shape(a: array<int>[P], b: array<int>[Q]) -> array<int>[max(P, Q)]:
     R = max(P, Q)
@@ -1010,8 +1078,15 @@ functions are `materialize` and, when it must, `reshape`; every other function
 returns in time independent of the number of elements. `reshape` is deliberately
 conservative: it copies whenever the input is not contiguous, even when
 rules (2) and the axis split would have allowed a view, which is safe and keeps
-the algorithm short. A real implementation takes the view whenever rule (2)
-or the split rule applies, as the earlier blocks showed.
+the algorithm short. `reshape_view` is the complete rule. Try it on a
+contiguous $[2, 3, 4]$ made into $[6, 4]$: the old sizes $2, 3, 4$ and the new
+sizes $6, 4$ group as $\{2, 3\} \to \{6\}$ and $\{4\} \to \{4\}$; the first group
+needs $s_0 = d_1 s_1$, that is $12 = 3 \cdot 4$, which holds, so the result is
+a view with strides $(4, 1)$. On the swapped-axes view of the merge block
+($[3, 2, 4]$, strides $(4, 12, 1)$) the same request groups $\{3, 2\} \to \{6\}$
+and fails on $4 = 2 \cdot 12$, so it reports `ok = false` and a caller copies
+with `materialize`. A real implementation calls `reshape_view` first and
+`reshape` only when it fails.
 
 ## Making it work
 
@@ -1150,7 +1225,9 @@ its documentation stating "Products over row-major data are stated by swapping t
 operands, so no operand is ever copied or transposed". The code that builds one,
 `crates/gpu-core/src/provider/library.rs`, has the derivation of this chapter
 as a comment: "Row-major `y = x W^T` is column-major `y^T[n, m] = W[k, n]^T x^T[k, m]`",
-with the fields `trans_a: true`, `m: n`, `n: m`, `lda: k`, `ldb: k`, `ldc: n`. The
+with the fields `trans_a: true`, `m: n`, `n: m`, `lda: k`, `ldb: k`, `ldc: n`
+(there `n` is the width of the row-major output, which is the number of rows $M$
+of the column-major one, so `ldc` is $M$ as above). The
 worked example `arrays.misread_and_swap` is this call on a small size. It
 arrived with the library path in commit `8ed1c8345` (16 October 2026), and its
 batched form carries strides between consecutive matrices of a batch
@@ -1288,20 +1365,28 @@ Answers are at the end of the chapter.
    `transpose_view`, `slice_view`, `is_contiguous` and `materialize` from the
    pseudocode in your language, with the `require` checks, and reproduce
    `arrays.layout_3x4`, `arrays.nd_offsets`, `arrays.transpose_view` and
-   `arrays.slices_are_views`, including the write-through example.
+   `arrays.slices_are_views` (take `A[1:2, :]` as a slice with start 1, stop 2),
+   including the write-through example.
 
 9. **[Implement]** Implement `reshape`, `broadcast_shape` and `broadcast_view`,
    and elementwise addition on broadcast views, and reproduce
    `arrays.reshape_vs_transpose`, `arrays.split_heads`, `arrays.broadcast_shapes`,
-   `arrays.broadcast_values` and `arrays.silent_outer_diff`. Then extend `reshape` to
-   return a view whenever the split rule or rule (2) allows, and reproduce
-   `arrays.split_axis_rule` and `arrays.merge_rule`; check the claim at the end of
-   the last block by brute force on random shapes and strides.
+   `arrays.broadcast_values` and `arrays.silent_outer_diff`. Then implement
+   `reshape_view`, make `reshape` try it first and copy only when it reports
+   failure, and reproduce `arrays.split_axis_rule` and `arrays.merge_rule`;
+   check the claim at the end of the last block by brute force on random
+   shapes (sizes 1 to 5) and random strides (0 to 12): whenever `reshape_view`
+   returns a view, its elements equal those of the copying `reshape`.
 
-10. **[Implement]** Implement the column-major product routine and the
-    swapped-operand call, and reproduce `arrays.misread_and_swap`. Then break it
-    two ways: forget the transpose flag, and swap only one operand. Report what
-    shapes, if any, make the mistake invisible to a shape check.
+10. **[Implement]** Implement the column-major product routine `gemm` of the
+    text and the swapped-operand call, and reproduce `arrays.misread_and_swap`.
+    Then break it two ways. First: forget the transpose flag (`trans_a = false`,
+    with `lda` raised to $M$ so that the routine's checks pass). Second: state
+    the product in the unswapped order, with $\mathbf{X}$'s buffer as the first
+    operand (transposed) and $\mathbf{W}$'s as the second, and read the output
+    buffer as the row-major $\mathbf{Y}$. A shape check here means: each
+    leading dimension is at least the number of rows stored, and each buffer is
+    long enough. Report for which shapes each mistake passes the shape check.
 
 11. **[Investigate]** Time a sum over every element of a large row-major
     matrix traversed by rows, and by columns (the same elements in the other order),

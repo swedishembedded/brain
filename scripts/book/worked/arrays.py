@@ -180,9 +180,10 @@ def add(a, b):
 def _table(headers, rows, align=None):
     align = align or ("l" + "r" * (len(headers) - 1))
     sep = ["---:" if a == "r" else "---" for a in align]
-    out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
+    cell = lambda c: str(c).replace("|", "\\|")  # a literal pipe inside a cell must not split the column
+    out = ["| " + " | ".join(cell(h) for h in headers) + " |", "|" + "|".join(sep) + "|"]
     for r in rows:
-        out.append("| " + " | ".join(str(c) for c in r) + " |")
+        out.append("| " + " | ".join(cell(c) for c in r) + " |")
     return "\n".join(out)
 
 
@@ -290,9 +291,9 @@ def misread_and_swap():
     got = _colmajor_gemm(n, m, k, W.data, k, X.data, k, trans_a=True)
     out += [f"Row-major product Y = X W^T with X {_sh(X.shape)} = {X.nested()} and W {_sh(W.shape)} = {W.nested()}: "
             f"Y flat = {want}.", "",
-            f"A column-major routine is asked for the [n, m] = [{n}, {m}] product W X^T, given W's buffer and X's buffer "
-            f"unchanged, with m = {n}, n = {m}, k = {k}, lda = ldb = k = {k}, ldc = n = {n} and W marked transposed. "
-            f"Its output buffer is {got}.", "",
+            f"The column-major routine gemm of the text is asked for the [M, N] = [{n}, {m}] product W X^T, given W's buffer "
+            f"and X's buffer unchanged: M = {n}, N = {m}, K = {k}, A = W's buffer with trans_a = true and lda = K = {k}, "
+            f"B = X's buffer with ldb = K = {k}, and ldc = M = {n}. Its output buffer is {got}.", "",
             f"Equal to Y's row-major buffer: {got == want}. No operand was copied or transposed."]
     return "\n".join(out)
 
@@ -320,7 +321,7 @@ def slices_are_views():
     A = _labelled_matrix(3, 4)
     cases = [("A", A), ("A[:, 1:3]", A.slice((0, 3, 1), (1, 3, 1))), ("A[1:3, :]", A.slice((1, 3, 1), (0, 4, 1))),
              ("A[::2, :]", A.slice((0, 3, 2), (0, 4, 1))), ("A[:, ::2]", A.slice((0, 3, 1), (0, 4, 2))),
-             ("A[1, :] (a row)", A.slice((1, 2, 1), (0, 4, 1))), ("A[:, 2] (a column)", A.slice((0, 3, 1), (2, 3, 1))),
+             ("A[1:2, :] (a row)", A.slice((1, 2, 1), (0, 4, 1))), ("A[:, 2:3] (a column)", A.slice((0, 3, 1), (2, 3, 1))),
              ("transpose(A)", A.permute((1, 0)))]
     rows = [(name, _sh(v.shape), _t(v.strides), v.offset, v.flat(), "yes" if v.is_contiguous() else "no")
             for name, v in cases]
@@ -330,7 +331,7 @@ def slices_are_views():
     col = A.slice((0, 3, 1), (2, 3, 1))
     before = A.nested()
     A.data[offset_of((1, 0), col.strides, col.offset)] = -1
-    out.append(f"after setting element 1 of the column view A[:, 2] to -1, A = {A.nested()} (was {before}).")
+    out.append(f"after setting element 1 of the column view A[:, 2:3] to -1, A = {A.nested()} (was {before}).")
     return "\n".join(out)
 
 
@@ -463,6 +464,7 @@ def image_layouts():
     view = nchw.permute((0, 2, 3, 1))
     out = [f"Image batch with B = {B}, C = {C}, H = {H}, W = {W}; element value = its NCHW offset.", "",
            f"NCHW: shape {_sh(nchw.shape)}, strides {_t(nchw.strides)}. NHWC: shape {_sh(nhwc.shape)}, strides {_t(nhwc.strides)}.", "",
+           "The NHWC array is the same picture stored channels-last: its element (b, h, w, c) is the NCHW element (b, c, h, w). "
            f"The three channel values of the pixel at image 1, row 1, column 0:", "",
            _table(["channel", "NCHW offset", "NCHW value", "NHWC offset", "NHWC value"], chans), "",
            f"In NCHW the three channels of one pixel are {nchw.strides[1]} apart; in NHWC they are adjacent.", "",
@@ -568,9 +570,15 @@ def broadcast_hw_kernel():
 
 
 def merge_rule():
-    """Two adjacent axes merge into one without a copy exactly when s_k == d_{k+1} * s_{k+1}."""
-    def can_merge(v, k):
-        return v.strides[k] == v.shape[k + 1] * v.strides[k + 1]
+    """Two adjacent axes of sizes >= 2 merge without a copy exactly when s_k == d_{k+1} * s_{k+1};
+    an axis of size 1 is dropped first, and the other axis keeps its stride."""
+    def merged_stride(v, k):
+        """The stride of the merged axis, or None when a copy is needed."""
+        if v.shape[k] == 1:
+            return v.strides[k + 1]
+        if v.shape[k + 1] == 1:
+            return v.strides[k]
+        return v.strides[k + 1] if v.strides[k] == v.shape[k + 1] * v.strides[k + 1] else None
 
     A = _labelled_matrix(3, 4)
     x = Arr(list(range(24)), (2, 3, 4))
@@ -578,19 +586,24 @@ def merge_rule():
     cases = [("contiguous [2, 3, 4]", x, 0), ("contiguous [2, 3, 4]", x, 1),
              ("swapped axes [3, 2, 4]", heads, 0), ("swapped axes [3, 2, 4]", heads, 1),
              ("A[:, 0:2] of [3, 4]", A.slice((0, 3, 1), (0, 2, 1)), 0),
-             ("A[::2, :] of [3, 4]", A.slice((0, 3, 2), (0, 4, 1)), 0)]
+             ("A[::2, :] of [3, 4]", A.slice((0, 3, 2), (0, 4, 1)), 0),
+             ("A[:, 2:3] of [3, 4]", A.slice((0, 3, 1), (2, 3, 1)), 0)]
     rows = []
     for name, v, k in cases:
-        ok = can_merge(v, k)
-        rows.append((name, _sh(v.shape), _t(v.strides), f"{k}, {k + 1}",
-                     f"{v.strides[k]} vs {v.shape[k + 1]}*{v.strides[k + 1]} = {v.shape[k + 1] * v.strides[k + 1]}",
-                     "view" if ok else "copy"))
+        ms = merged_stride(v, k)
+        if 1 in (v.shape[k], v.shape[k + 1]):
+            cmp = "an axis has size 1: drop it"
+        else:
+            cmp = f"{v.strides[k]} vs {v.shape[k + 1]}*{v.strides[k + 1]} = {v.shape[k + 1] * v.strides[k + 1]}"
+        rows.append((name, _sh(v.shape), _t(v.strides), f"{k}, {k + 1}", cmp,
+                     f"view, merged stride {ms}" if ms is not None else "copy"))
     # Check the rule against brute force: a merged view must reproduce the row-major reading.
     agree = True
     for name, v, k in cases:
         shape = v.shape[:k] + (v.shape[k] * v.shape[k + 1],) + v.shape[k + 2:]
-        if can_merge(v, k):
-            strides = v.strides[:k] + (v.strides[k + 1],) + v.strides[k + 2:]
+        ms = merged_stride(v, k)
+        if ms is not None:
+            strides = v.strides[:k] + (ms,) + v.strides[k + 2:]
             agree &= Arr(v.data, shape, strides, v.offset).flat() == v.flat()
     return _table(["array", "shape", "strides", "axes merged", "s_k vs d_(k+1) s_(k+1)", "result"], rows, "llllll") + \
         f"\n\nEvery merge the rule allows reproduces the row-major reading exactly: {agree}."

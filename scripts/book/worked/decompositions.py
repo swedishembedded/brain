@@ -23,15 +23,18 @@ by sending an email to info@swedishembedded.com.
 import math
 from fractions import Fraction
 
+import bookrng
+
 
 # ------------------------------------------------------------------ helpers
 
 def _table(headers, rows, align=None):
     align = align or ("l" + "r" * (len(headers) - 1))
     sep = ["---:" if a == "r" else "---" for a in align]
-    out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
+    cell = lambda c: str(c).replace("|", "\\|")  # a literal pipe inside a cell must not split the column
+    out = ["| " + " | ".join(cell(h) for h in headers) + " |", "|" + "|".join(sep) + "|"]
     for r in rows:
-        out.append("| " + " | ".join(str(c) for c in r) + " |")
+        out.append("| " + " | ".join(cell(c) for c in r) + " |")
     return "\n".join(out)
 
 
@@ -137,9 +140,10 @@ def _eigh(S, sweeps=60):
     n = len(S)
     A = [list(map(float, r)) for r in S]
     V = _eye(n)
+    scale = sum(x * x for row in A for x in row)  # squared Frobenius size: unchanged by rotations
     for _ in range(sweeps):
         off = sum(A[i][j] ** 2 for i in range(n) for j in range(n) if i != j)
-        if off < 1e-30:
+        if off <= 1e-30 * scale:
             break
         for p in range(n - 1):
             for q in range(p + 1, n):
@@ -234,17 +238,6 @@ def _spectral_norm(A, iters=500):
         x = [c / nrm for c in y]
         lam = _dot(x, _matvec(G, x))
     return math.sqrt(lam)
-
-
-class _Lcg:
-    """A tiny deterministic generator so competitor matrices are reproducible in any language."""
-
-    def __init__(self, seed):
-        self.state = seed
-
-    def uniform(self):
-        self.state = (1103515245 * self.state + 12345) % (2 ** 31)
-        return self.state / 2 ** 31 - 0.5
 
 
 def _gram_schmidt(cols):
@@ -837,7 +830,8 @@ def eckart_young_check():
     M = spectrum_matrix()
     m, n = len(M), len(M[0])
     U, s, V = _svd(M)
-    rng = _Lcg(2026)
+    name = "decompositions.eckart_young_check"
+    rng = bookrng.generator(name)  # one generator, never reseeded, shared by every r
     rows = []
     for r in (1, 2, 3, 4):
         opt = _fro(_sub(M, _truncate(U, s, V, r)))
@@ -846,16 +840,23 @@ def eckart_young_check():
         order = sorted(range(n), key=lambda j: -_norm(cols[j]))[:r]
         a = _fro(_sub(M, _project_columns(M, _gram_schmidt([cols[j] for j in order]))))
         # (b) truncated SVD of M plus noise of size 0.3
-        N = [[M[i][j] + 0.6 * rng.uniform() for j in range(n)] for i in range(m)]
+        N = [[M[i][j] + 0.6 * (rng.uniform() - 0.5) for j in range(n)] for i in range(m)]
         Un, sn, Vn = _svd(N)
         b = _fro(_sub(M, _truncate(Un, sn, Vn, r)))
         # (c) best of 2000 random r-dimensional column spaces
         best = 1e18
         for _ in range(2000):
-            basis = _gram_schmidt([[rng.uniform() for _ in range(m)] for _ in range(r)])
+            basis = _gram_schmidt([[rng.uniform() - 0.5 for _ in range(m)] for _ in range(r)])
             best = min(best, _fro(_sub(M, _project_columns(M, basis))))
         rows.append((r, _g(opt, 5), _g(a, 5), _g(b, 5), _g(best, 5)))
-    return ("Frobenius error |M - X|_F for rank-r matrices X built four ways (smaller is better).\n\n"
+    seed = bookrng.seed_of(name)
+    return (f"Frobenius error |M - X|_F for rank-r matrices X built four ways (smaller is better), printed to 5 significant digits.\n\n"
+            f"Column 2: orthonormalise (Gram-Schmidt, in order of decreasing column length) the r columns of M with the largest Euclidean norm, "
+            f"and project M onto their span in R^8. Columns 3 and 4 draw from ONE SplitMix64 generator with seed {seed} "
+            f"(0x{seed:016X}), seeded once and never reseeded, used for r = 1, 2, 3, 4 in turn. For each r: first the 48 noise values "
+            f"0.6 * (uniform() - 0.5), row by row (row 0 first), added to M for column 3; then 2000 random subspaces for column 4, each "
+            f"made of r vectors of 8 entries (uniform() - 0.5), drawn vector by vector and orthonormalised by Gram-Schmidt in the order drawn; "
+            f"M is projected on the span and the smallest error of the 2000 is kept.\n\n"
             + _table(["r", "truncated SVD of M", "project on the r longest columns", "truncated SVD of M + noise",
                       "best of 2000 random subspaces"], rows))
 

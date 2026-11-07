@@ -22,6 +22,8 @@ import math
 import struct
 from fractions import Fraction
 
+import bookrng
+
 
 # ------------------------------------------------------------------ helpers
 
@@ -29,9 +31,10 @@ def _table(headers, rows, align=None):
     """A markdown table; `align` is a string of 'l'/'r' per column (default: first l, rest r)."""
     align = align or ("l" + "r" * (len(headers) - 1))
     sep = ["---:" if a == "r" else "---" for a in align]
-    out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
+    cell = lambda c: str(c).replace("|", "\\|")  # a literal pipe inside a cell must not split the column
+    out = ["| " + " | ".join(cell(h) for h in headers) + " |", "|" + "|".join(sep) + "|"]
     for r in rows:
-        out.append("| " + " | ".join(str(c) for c in r) + " |")
+        out.append("| " + " | ".join(cell(c) for c in r) + " |")
     return "\n".join(out)
 
 
@@ -168,7 +171,8 @@ def add_and_scale():
     u = [0.9, 0.8, 0.1, 0.0]
     w = [0.8, 0.9, 0.2, 0.1]
     mid = scale(0.5, add(u, w))
-    return t + f"\n\nIn four dimensions the same rules hold entry by entry: the midpoint (cat + dog)/2 is {_v(mid)}."
+    return t + (f"\n\nIn four dimensions the same rules hold entry by entry: the midpoint of cat = {_v(u)} and "
+                f"dog = {_v(w)} (vectors that the section on cosine similarity uses again) is (cat + dog)/2 = {_v(mid)}.")
 
 
 def dot_products():
@@ -371,29 +375,29 @@ def cauchy_schwarz_check():
     return _table(["a", "b", "abs(a.b)", "norm(a) norm(b)", "cosine"], rows, align="llrrr")
 
 
-def _lcg_signs(n, state):
-    """n entries of +1/-1 from a 64-bit linear congruential generator (state in, state out)."""
-    out = []
-    for _ in range(n):
-        state = (state * 6364136223846793005 + 1442695040888963407) % (1 << 64)
-        out.append(1.0 if (state >> 40) & 1 else -1.0)
-    return out, state
+def _signs(rng, n):
+    """n entries of +1/-1: +1 when the next uniform draw is below 0.5."""
+    return [1.0 if rng.uniform() < 0.5 else -1.0 for _ in range(n)]
 
 
 def random_directions():
+    name = "vectors.random_directions"
+    rng = bookrng.generator(name)
     rows = []
-    state = 12345
     pairs = 300
     for n in (2, 8, 32, 128, 512, 2048):
         total, big = 0.0, 0.0
         for _ in range(pairs):
-            a, state = _lcg_signs(n, state)
-            b, state = _lcg_signs(n, state)
+            a = _signs(rng, n)
+            b = _signs(rng, n)
             c = abs(dot(a, b)) / n  # both have norm sqrt(n)
             total += c
             big = max(big, c)
         rows.append((n, _g(total / pairs, 3), _g(big, 3), _g(math.sqrt(2 / (math.pi * n)), 3)))
-    return _table(["n", "mean abs(cos)", "largest abs(cos)", "sqrt(2 / (pi n))"], rows)
+    head = (f"One generator, SplitMix64 with seed {bookrng.seed_of(name)} (0x{bookrng.seed_of(name):016X}), used for the whole table. "
+            f"For each n in the order below and each of {pairs} pairs: draw n uniforms for the first vector, then n for the second; "
+            "an entry is +1 when its uniform is below 0.5, otherwise -1.\n\n")
+    return head + _table(["n", "mean abs(cos)", "largest abs(cos)", "sqrt(2 / (pi n))"], rows)
 
 
 def summation_order():

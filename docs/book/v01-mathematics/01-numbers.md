@@ -247,8 +247,8 @@ either; the **intersection** $A \cap B$ holds what is in both; the
 <!-- worked: numbasics.set_operations -->
 | expression | value | note |
 |---|---|---|
-| A | {1, 2, 3, 4} | |A| = 4 |
-| B | {3, 4, 5} | |B| = 3 |
+| A | {1, 2, 3, 4} | \|A\| = 4 |
+| B | {3, 4, 5} | \|B\| = 3 |
 | union A U B | {1, 2, 3, 4, 5} | 5 elements |
 | intersection A n B | {3, 4} | 2 elements |
 | difference A \ B | {1, 2} | 2 elements |
@@ -256,7 +256,7 @@ either; the **intersection** $A \cap B$ holds what is in both; the
 | {3, 4} subset of B? | true |  |
 | {n in Z : n^2 < 20} | {-4, -3, -2, -1, 0, 1, 2, 3, 4} | 9 elements |
 | {1, 2, 2, 3, 2} | {1, 2, 3} | repeats collapse: 3 elements |
-| A x B (ordered pairs) | 12 pairs | |A| * |B| |
+| A x B (ordered pairs) | 12 pairs | \|A\| * \|B\| |
 <!-- /worked -->
 
 The last row introduces the **product** of two sets: $A \times B$ is the set
@@ -297,7 +297,9 @@ extension is not a free choice: we demand that the product rule keep holding.
 
 **Zero.** The rule says $b^0 \cdot b^n = b^{0+n} = b^n$. A number that leaves
 every $b^n$ unchanged when multiplied is $1$, so $b^0$ must equal $1$ (for
-$b \neq 0$).
+$b \neq 0$). The book also takes $0^0 = 1$, the empty product, because
+formulas such as $\sum_j c_j x^j$ must give $c_0$ at $x = 0$; a program's
+power function usually agrees.
 
 **Negative integers.** The rule says $b^{-n} \cdot b^{n} = b^{0} = 1$, so
 $b^{-n}$ must be the reciprocal: $b^{-n} = 1 / b^n$. Thus $2^{-3} = 1/8$.
@@ -548,7 +550,7 @@ and the integer part tells the order of magnitude. $\log_{10}$ is how we turn
 binary digits?" into one:
 
 <!-- worked: numbasics.digits_and_bits -->
-| quantity x | log_10 x | log_2 x | bits to number x things (ceil of log_2) |
+| quantity x | log_10 x | log_2 x | bits to number x things (log_2 x rounded up) |
 |---|---:|---:|---:|
 | a count of 1,000 | 3.0000 | 9.9658 | 10 |
 | a model with 7 x 10^9 parameters | 9.8451 | 32.7047 | 33 |
@@ -904,7 +906,12 @@ represent positive numbers only down to about $5 \times 10^{-324}$, and the
 **32-bit** format common in machine learning only down to about
 $1.4 \times 10^{-45}$; anything smaller is stored as $0$. This is
 **underflow**. Multiply $0.1$ by itself $n$ times in each format and compare
-with the sum of $n$ natural logarithms of $0.1$.
+with the sum of $n$ natural logarithms of $0.1$. The rule for the products:
+start from 1, round the factor $0.1$ to the format once, and after every
+multiplication round the result to that format before the next one (no
+wider intermediate format, which some processors use silently). Columns
+print four significant digits, so a reproduction agrees when it matches to
+those digits.
 
 <!-- worked: numbasics.underflow -->
 | n factors of 0.1 | true product | multiplied in 64 bits | multiplied in 32 bits | sum of n natural logs |
@@ -921,7 +928,11 @@ with the sum of $n$ natural logarithms of $0.1$.
 <!-- /worked -->
 
 In 32 bits the product vanishes at $n = 46$, after only 46 words, and in
-64 bits at $n = 324$. The sum of logs is an ordinary number all the way:
+64 bits at $n = 324$. (The entries $1.401 \times 10^{-45}$ and
+$9.881 \times 10^{-324}$ are the smallest numbers of their formats: below the
+ordinary range the formats keep going with fewer and fewer significant digits,
+down to a single bit, before they reach 0. These are **subnormal** numbers;
+Chapter 15 explains them.) The sum of logs is an ordinary number all the way:
 $-105.92$ and $-746.04$ at the points where the products disappear, and
 $-921.03$ for 400 factors. The picture plots the base-10 logarithm of each
 quantity.
@@ -1113,18 +1124,25 @@ Answers are at the end of the chapter.
 
 8. **[Implement]** Implement `log_likelihood` from the pseudocode and reproduce
    `numbasics.log_of_product` and `numbasics.stable_log_sum_demo`. Make your
-   function reject a chance of $0$ and of $1.5$ with an error, and say what it
-   returns for a chance of exactly $1$.
+   function reject a chance of $0$ and of $1.5$ with an error (in your
+   language's way of reporting one), and say what it returns for a chance of
+   exactly $1$. Compare to the digits printed.
 
 9. **[Implement]** Implement `mean_squared_error` and reproduce
    `numbasics.loss_dataset` and `numbasics.loss_as_function_of_w`. Then scan $w$
-   from 0 to 4 in steps of 0.01 and report the $w$ with the smallest loss;
-   compare it with the $w$ that sets the average error to zero.
+   from 0 to 4 in steps of 0.01 (with $b = 1$ held fixed) and report the $w$
+   with the smallest loss, which is $2.00$ with $L = 0.044$. Compare it with
+   the $w$ that sets the average error $\frac1N\sum_n (w x_n + b - y_n)$ to
+   zero, which is $w = (\bar y - b)/\bar x = 2.02$, where $\bar x$ and $\bar y$
+   are the averages of the $x_n$ and $y_n$. Why are the two different? (One
+   makes the squares small, the other makes the signed errors cancel.)
 
 10. **[Implement]** Starting from $x = 1$, run the averaging recipe
     $x \leftarrow \tfrac12 (x + 2/x)$ with exact fractions (or big integers)
     and reproduce `numbasics.sqrt2_approximations`. Count the digits of the
-    numerator at each step: by what factor do they grow?
+    numerator at each step (the first steps have 1, 1, 2, 3 and 6 digits):
+    by what factor do they grow from step 3 on, and why? A language with
+    only 64-bit integers can reach step 5.
 
 11. **[Investigate]** Reproduce `numbasics.e_limit` for $n = 10^k$ up to $k = 18$.
     At which $k$ does the computed value first move away from $e$ instead of

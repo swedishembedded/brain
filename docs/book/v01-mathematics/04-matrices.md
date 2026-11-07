@@ -521,7 +521,15 @@ A is [10, 100], B is [100, 5], C is [5, 50]:
 | (A B) C | A B -> [10, 5]: 5,000 | (AB) C -> [10, 50]: 2,500 | 7,500 |
 | A (B C) | B C -> [100, 50]: 25,000 | A (BC) -> [10, 50]: 50,000 | 75,000 |
 
-On integer matrices of shapes [3,4], [4,2], [2,5] the two orders produce the same [3, 5] result (first row (43, 74, -16, -8, -67)), as associativity promises.
+Integer matrices (entry (i, j), counting from 0, is (3i + 2j) mod 7 - 3 for P, (i + 4j) mod 5 - 2 for Q, (2i + j) mod 6 - 2 for R):
+
+P = [[-3, -1, 1, 3], [0, 2, -3, -1], [3, -2, 0, 2]] [3, 4]
+
+Q = [[-2, 2], [-1, -2], [0, -1], [1, 0]] [4, 2]
+
+R = [[-2, -1, 0, 1, 2], [0, 1, 2, 3, -2]] [2, 5]
+
+Both groupings, (P Q) R and P (Q R), give the same [3, 5] result [[-20, -15, -10, -5, 30], [6, 2, -2, -6, -4], [4, 12, 20, 28, -24]], as associativity promises.
 <!-- /worked -->
 
 The first order is hundreds of times more expensive than the second for the
@@ -726,7 +734,8 @@ one unknown there, and so on up: **back substitution**.
 Here are the steps on a system of three equations in three unknowns, each
 matrix the one after the stated operation. The notation $R2 \leftarrow R2 +
 \tfrac32 R1$ reads "replace row 2 by itself plus $\tfrac32$ times row 1" and
-rows are counted from 1 here.
+rows are counted from 1 here (columns, in the line that follows the steps,
+from 0, as in the pseudocode).
 
 <!-- worked: matrices.elimination_trace -->
 The system 2x + y - z = 8, -3x - y + 2z = -11, -2x + y + 2z = -3 as an augmented matrix [A | b]:
@@ -759,7 +768,7 @@ R2  [   0 1/2 1/2 |   1 ]
 R3  [   0   0  -1 |   1 ]
 ```
 
-Pivot columns [0, 1, 2]: three pivots, so the system has a unique solution. Back substitution from the last row up gives x = (2, 3, -1).
+Pivot columns (counted from 0) [0, 1, 2]: three pivots, so the system has a unique solution. Back substitution from the last row up gives x = (2, 3, -1).
 
 Check: A x = (8, -11, -3), equal to b = (8, -11, -3).
 <!-- /worked -->
@@ -773,7 +782,14 @@ difference).
 The cost of the method is a count we can make. Eliminating below the pivot in
 column $c$ touches about $(n - c)$ rows of about $(n - c)$ entries each, and
 summing the squares over the columns gives about $\tfrac13 n^3$ multiply-adds,
-plus $\tfrac12 n^2$ for back substitution.
+plus $\tfrac12 n^2$ for back substitution. The table counts exactly, with this
+rule: one multiply-add for every execution of the statement
+`M[i, j] = M[i, j] - f * M[r, j]` in `eliminate` below (on the augmented matrix
+of shape $[n, n+1]$, where `j` runs from the pivot column to the last column,
+so it includes the entry being cleared and the right-hand side), and one for
+every term `acc - M[i, j] * x[j]` in back substitution, $n(n-1)/2$ in all.
+Divisions (`f`, and the final `acc / M[i, i]`) are not counted. For $n = 3$ that
+is $8 + 3 = 11$ in elimination plus $3$ in back substitution, $14$.
 
 <!-- worked: matrices.elimination_cost -->
 | n | multiply-adds counted | n^3 / 3 | n^3 (one n x n product) |
@@ -826,7 +842,7 @@ R2  [  0 -3 -6 ]
 R3  [  0  0  0 ]
 ```
 
-Pivot columns [0, 1]: only 2 pivots, the last row is all zeros, rank = 2.
+Pivot columns (counted from 0) [0, 1]: only 2 pivots, the last row is all zeros, rank = 2.
 
 | product | value |
 |---|---:|
@@ -1060,19 +1076,25 @@ only `C[i, j]`), which is why a machine can run all $m n$ dot products at once
 and why the work is $m n k$. Elimination, the pivot search and the rank:
 
 ```text
-function eliminate(M: inout array<real>[m, n], ncols: int) -> array<int>:
+function eliminate(M: inout array<real>[m, n], ncols: int, partial: bool) -> array<int>:
     # Forward elimination on the first ncols columns; the remaining columns are
     # an augmented right-hand side and are carried along by every row operation.
     # Returns the pivot columns; their number is the rank of the leading block.
+    # The pivot of a column is its first nonzero entry at or below row r, or,
+    # when partial is true, the entry of largest absolute value there.
     require 0 <= ncols and ncols <= n
     pivots = []
     r = 0                                   # next row that wants a pivot
     for c in 0 .. ncols:
         if r == m: break
         p = r
-        while p < m and M[p, c] == 0: p = p + 1
-        if p == m: continue                 # no pivot in this column
-        swap rows r and p of M
+        if partial:
+            for i in r + 1 .. m:
+                if abs(M[i, c]) > abs(M[p, c]): p = i
+        else:
+            while p < m and M[p, c] == 0: p = p + 1
+        if p == m or M[p, c] == 0: continue # no pivot in this column
+        swap M[r, :], M[p, :]
         for i in r + 1 .. m:                # clear below the pivot
             f = M[i, c] / M[r, c]
             for j in c .. n:
@@ -1081,9 +1103,9 @@ function eliminate(M: inout array<real>[m, n], ncols: int) -> array<int>:
         r = r + 1
     return pivots
 
-function solve(A: array<real>[n, n], y: array<real>[n]) -> array<real>[n]:
+function solve(A: array<real>[n, n], y: array<real>[n], partial: bool) -> array<real>[n]:
     M = augment(copy(A), y)                 # [A | y], shape [n, n + 1]
-    pivots = eliminate(M, n)
+    pivots = eliminate(M, n, partial)
     require len(pivots) == n, "solve: matrix is singular"
     x = zeros(real, [n])
     for i in n-1 down to 0:                 # back substitution
@@ -1094,7 +1116,7 @@ function solve(A: array<real>[n, n], y: array<real>[n]) -> array<real>[n]:
     return x
 
 function rank(A: array<real>[m, n]) -> int:
-    return len(eliminate(copy(A), n))
+    return len(eliminate(copy(A), n, false))   # exact arithmetic: first nonzero pivot
 ```
 
 `solve` refuses a singular matrix instead of dividing by zero, and the pivot
@@ -1137,7 +1159,7 @@ largest in magnitude, and swap it up. The example is a system whose first
 pivot is $10^{-17}$:
 
 <!-- worked: matrices.pivot_choice -->
-| pivot rule | computed x | largest residual |Ax - b| |
+| pivot rule | computed x | largest residual (max over equations of abs(Ax - b)) |
 |---|---:|---:|
 | first | (0, 1) | 1.0e+00 |
 | partial | (1, 1) | 0.0e+00 |
@@ -1310,14 +1332,23 @@ Answers are at the end of the chapter.
 10. **[Implement]** Implement `eliminate`, `solve` and `rank` over exact
     fractions and reproduce `matrices.elimination_trace`,
     `matrices.singular_example`, `matrices.rank_survey` and
-    `matrices.elimination_cost`. Add a random test: for 50 random $4\times 4$
-    integer matrices with nonzero rank 4, check $\mathbf{A}\,\mathrm{solve}(
+    `matrices.elimination_cost` (count as the text's rule says; $n = 10$ and
+    $n = 100$ need only the loop structure, so run the counting on floating
+    numbers). Add a random test: for 50 random $4\times 4$ integer matrices
+    (entries uniform in $-6 \ldots 6$, from any generator, redrawn until the
+    rank is 4) and integer right-hand sides, check $\mathbf{A}\,\mathrm{solve}(
     \mathbf{A},\mathbf{y}) = \mathbf{y}$ exactly.
 
 11. **[Implement]** Reproduce `matrices.pivot_choice` in 64-bit floating point with
-    first-nonzero pivoting and with partial pivoting. Then vary the small pivot
+    first-nonzero pivoting and with partial pivoting (the `partial` argument
+    of `eliminate`; the largest residual is the largest over the two equations
+    of $\lvert (\mathbf{A}\mathbf{x} - \mathbf{b})_i \rvert$). Then vary the small pivot
     over $10^{-1}, 10^{-5}, 10^{-10}, 10^{-17}$ and report where the unpivoted
-    answer first stops matching the pivoted one to six digits.
+    answer first stops matching the pivoted one to six significant digits (each
+    component within a relative $5\times10^{-7}$). Expect $10^{-17}$; at
+    $10^{-10}$ the two still agree to six digits but the unpivoted $x_1$ is off
+    by about $8\times10^{-8}$, so a stricter criterion of eight digits would
+    already fail there.
 
 12. **[Investigate]** The projection of Chapter 3 onto the line through
     $\mathbf{u}$ is a linear map with the matrix $\mathbf{P} =

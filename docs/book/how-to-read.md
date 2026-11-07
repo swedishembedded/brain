@@ -117,6 +117,13 @@ When you implement an algorithm, reproduce the worked example first. If your
 numbers differ in more than the last digit or two, your implementation (or,
 occasionally, the book) is wrong, and finding out which is the exercise.
 
+A table agrees with yours when each value matches after rounding to the
+digits printed (a difference below half a unit in the last place printed),
+unless the text states a tolerance. A worked example that uses random numbers
+prints its seed and the order of its draws; the generator that produces them
+is built in Chapter 17, and the earlier chapters print the drawn values when
+they are few.
+
 References to brain look like `crates/gradcheck` (a directory in brain's
 source tree), commit `afbbae41d` (a change in its history, identified by the
 first characters of its hash) or knowledge #3 (a numbered engineering

@@ -171,7 +171,7 @@ real numbers to every entry separately.
 | 2a - 3b | (3, -4) |
 | 0 a | (0, 0) |
 
-In four dimensions the same rules hold entry by entry: the midpoint (cat + dog)/2 is (0.85, 0.85, 0.15, 0.05).
+In four dimensions the same rules hold entry by entry: the midpoint of cat = (0.9, 0.8, 0.1, 0) and dog = (0.8, 0.9, 0.2, 0.1) (vectors that the section on cosine similarity uses again) is (cat + dog)/2 = (0.85, 0.85, 0.15, 0.05).
 <!-- /worked -->
 
 **In the arrow picture.** Scaling by $c > 1$ stretches the arrow, by
@@ -204,8 +204,9 @@ $$
 
 The sum is over vectors, using the notation of Chapter 1 unchanged. The
 mean of $N$ data vectors is $\frac{1}{N}\sum_{n=1}^{N} \mathbf{x}_n$, a linear
-combination with every weight equal to $1/N$; the midpoint of the "cat" and
-"dog" vectors of the worked block is the combination with weights
+combination with every weight equal to $1/N$; the midpoint of the two
+four-dimensional vectors printed under the table above (they return in the
+section on cosine similarity) is the combination with weights
 $\tfrac12, \tfrac12$. A weight update in training, $\mathbf{w} - \eta
 \mathbf{g}$ (the weights minus a learning rate times a gradient), is the
 combination with weights $1$ and $-\eta$. Almost every step of training is a
@@ -415,6 +416,14 @@ is on the unit circle. Angles are measured in degrees (a full turn is
 360) or radians (a full turn is $2\pi$, so $180^\circ$ is $\pi$ radians);
 this chapter uses degrees and the worked block shows both.
 
+One more function is needed, to read an angle off a point. The function
+`atan2(y, x)` returns the angle $\theta$ in $(-180^\circ, 180^\circ]$ (in
+radians, $(-\pi, \pi]$) at which the unit circle meets the half-line from the
+origin through the point $(x, y)$, measured anticlockwise from $(1, 0)$. So
+`atan2(1, 1)` is $45^\circ$, `atan2(1, -1)` is $135^\circ$ and `atan2(-1, -1)`
+is $-135^\circ$: unlike the plain ratio $y/x$, it uses the signs of both
+coordinates to tell the quadrants apart.
+
 <!-- worked: vectors.unit_circle -->
 | angle (degrees) | angle (radians) | cos | sin | cos^2 + sin^2 |
 |---|---:|---:|---:|---:|
@@ -490,7 +499,10 @@ $$
 The two results describe the same number, so the terms that differ must agree:
 $-2\,\mathbf{a}\cdot\mathbf{b} = -2\lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert\cos\theta$, which is the boxed
 formula. The numerical check is a table in which the angle is computed
-independently, from the direction of each arrow, without any dot product.
+independently, from the direction of each arrow, without any dot product:
+the angle between $\mathbf{a}$ and $\mathbf{b}$ is
+`atan2(b[1], b[0]) - atan2(a[1], a[0])`, taken in absolute value and, when it
+exceeds $180^\circ$, replaced by $360^\circ$ minus itself.
 
 <!-- worked: vectors.law_of_cosines -->
 | a | b | angle by atan2 (deg) | norm(a-b)^2 | norm(a)^2 + norm(b)^2 - 2 norm(a) norm(b) cos | a.b | norm(a) norm(b) cos |
@@ -567,7 +579,8 @@ pattern. The "kitten" vector is exactly half of "cat".
 | truck | 0.23 | 0.333 | 0.23 | 0.987 | 1 |
 <!-- /worked -->
 
-Cat and kitten have cosine exactly 1, though one is half as long as the other;
+Cat and kitten have cosine 1 (exactly, in mathematics; a computer may print
+$0.9999999999999999$), though one is half as long as the other;
 cat and dog are close (0.987); cat and car are nearly orthogonal (0.123). The
 numbers are invented for the chapter and are not from a trained model, but the
 behaviour is what trained embeddings are used for.
@@ -850,6 +863,14 @@ function cosine_similarity(a: array<real>[n], b: array<real>[n]) -> real:
     require na > 0 and nb > 0, "cosine of a zero vector is undefined"
     return dot(a, b) / (na * nb)
 
+function unit(a: array<real>[n]) -> array<real>[n]:
+    nrm = norm(a)
+    require nrm > 0, "the zero vector has no direction"
+    u = zeros(real, [n])
+    for i in 0 .. n:
+        u[i] = a[i] / nrm
+    return u
+
 function project(v: array<real>[n], u: array<real>[n])
         -> (t: real, p: array<real>[n], r: array<real>[n]):
     require v.shape == u.shape, "projection of different dimensions"
@@ -877,7 +898,9 @@ mathematical dot product does not depend on the order in which the products
 are added, because addition of real numbers is associative. A computer's
 addition of rounded numbers is not (Chapter 15 derives why). In the example
 below, the products are exact in 32-bit arithmetic, and only the order of the
-additions changes:
+additions changes. Every sum is rounded to a 32-bit number before the next one,
+with no wider intermediate (some processors use one silently; a 32-bit
+reproduction must switch that off):
 
 <!-- worked: vectors.summation_order -->
 | x = (1e8, 1, -1e8, 1), y = (1, 1, 1, 1) | x . y |
@@ -896,23 +919,26 @@ accumulates a long sum in a wider format than its inputs, as the last section sh
 **Near-orthogonality is the default.** How large is the cosine between two
 unrelated vectors? In two dimensions it is often large: there are only so many
 directions. In many dimensions it is almost always near 0. The table draws pairs
-of vectors with entries $\pm 1$ from a fixed-seed pseudo-random generator
-(Chapter 17 explains how such generators work) and reports the average absolute
-cosine, the largest one seen among 300 pairs, and the value
+of vectors with entries $\pm 1$ from the book's generator (Chapter 17 builds
+it; the seed and the order of the draws are printed under the table) and
+reports the average absolute cosine, the largest one seen among 300 pairs, and
+the value
 $\sqrt{2/(\pi n)}$, which is what theory predicts for the average:
 
 <!-- worked: vectors.random_directions -->
+One generator, SplitMix64 with seed 760955756825205139 (0x0A8F753AA75AD993), used for the whole table. For each n in the order below and each of 300 pairs: draw n uniforms for the first vector, then n for the second; an entry is +1 when its uniform is below 0.5, otherwise -1.
+
 | n | mean abs(cos) | largest abs(cos) | sqrt(2 / (pi n)) |
 |---|---:|---:|---:|
-| 2 | 0.533 | 1 | 0.564 |
-| 8 | 0.284 | 1 | 0.282 |
-| 32 | 0.135 | 0.562 | 0.141 |
-| 128 | 0.074 | 0.281 | 0.0705 |
-| 512 | 0.0347 | 0.137 | 0.0353 |
-| 2048 | 0.0184 | 0.0713 | 0.0176 |
+| 2 | 0.497 | 1 | 0.564 |
+| 8 | 0.272 | 0.75 | 0.282 |
+| 32 | 0.145 | 0.5 | 0.141 |
+| 128 | 0.0666 | 0.25 | 0.0705 |
+| 512 | 0.0349 | 0.145 | 0.0353 |
+| 2048 | 0.0177 | 0.0664 | 0.0176 |
 <!-- /worked -->
 
-The average absolute cosine falls like $1/\sqrt{n}$: about 0.53 at $n = 2$,
+The average absolute cosine falls like $1/\sqrt{n}$: about 0.50 at $n = 2$,
 about 0.035 at $n = 512$ and below 0.02 at 2048. (The prediction column is a
 fact from probability, Chapter 10, taken here without proof; the measured
 column is the evidence.) So a cosine of 0.1 between two 2048-dimensional
@@ -946,6 +972,13 @@ output vectors. A re-implementation that forgets a constant factor (a
 dropped scale, a gain applied twice, a normalisation constant read wrongly)
 produces an output that is the reference multiplied by a number. By the
 cancellation shown above, its cosine with the reference is exactly 1.
+The reference is the six-entry vector
+$\mathbf{want} = (0.8, -1.2, 0.5, 2.0, -0.3, 1.1)$, and the candidates are
+built from it: the exact copy; the noisy copy, with
+$(0.001, -0.002, 0.001, 0, 0.002, -0.001)$ added to the entries; the copies
+multiplied by 1.05, 1.001 and 0.5; and the copy with entry 3 (counting from 0)
+changed from 2.0 to 1.0. The cosine is printed to nine decimals, the other
+columns to three significant digits.
 
 <!-- worked: vectors.scale_blindness -->
 | candidate vs reference | cosine | relative L2 | max abs difference |
@@ -1121,21 +1154,28 @@ Answers are at the end of the chapter.
 
 8. **[Implement]** Implement `project` and reproduce `vectors.projection` and
    `vectors.projection_four_dimensions`. Then write a test that draws 100 pairs
-   of vectors of dimension 8 from a generator and checks that the residual is
+   of vectors of dimension 8, entries uniform in $[-3, 3]$ from any generator,
+   and checks that the residual is
    orthogonal to $\mathbf{u}$ to within $10^{-9}$ every time, and that
    projecting the projection returns it unchanged.
 
 9. **[Implement]** Reproduce `vectors.scale_blindness`: implement cosine, relative
    L2 and max absolute difference. Add a candidate whose first entry is wrong
-   by 0.2 and one with noise of up to 0.01 times each entry's size, and state which
+   by 0.2 and one with noise of up to 0.01 times each entry's size (entry
+   $\times (1 + 0.01u)$, $u$ uniform in $[-1, 1]$), and state which
    of the three measurements flags each candidate, and at what ceiling you
    would gate on it.
 
 10. **[Implement]** Reproduce `vectors.summation_order` in 32-bit floating point.
-    Then draw two 1000-entry vectors and compute their dot product with a
-    32-bit accumulator left to right, with a 64-bit accumulator, and with
-    pairwise summation (split in halves, sum each, add). Compare the three
-    against the 64-bit result and report the error of each.
+    Then draw two 1000-entry vectors with entries uniform in $[-1, 1]$ rounded
+    to 32 bits, and compute their dot product with a 32-bit accumulator left to
+    right, with a 64-bit accumulator (adding the exact products of the 32-bit
+    entries), and with pairwise summation of the 32-bit products (a list of
+    length 1 is its own sum; otherwise split it into the first $\lfloor n/2
+    \rfloor$ entries and the rest, sum each, add). Compare the three against
+    the exact dot product of the stored entries (rational arithmetic or the
+    widest float your language has) and report the error of each. Expect the
+    64-bit accumulator to be far the best and left to right the worst.
 
 11. **[Investigate]** Reproduce `vectors.random_directions`, then replace the $\pm 1$
     entries with entries uniform in $[-1, 1]$. Does the average absolute cosine

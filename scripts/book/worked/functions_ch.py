@@ -29,9 +29,10 @@ def _table(headers, rows, align=None):
     """A markdown table; `align` is a string of 'l'/'r' per column (default: first l, rest r)."""
     align = align or ("l" + "r" * (len(headers) - 1))
     sep = ["---:" if a == "r" else "---" for a in align]
-    out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
+    cell = lambda c: str(c).replace("|", "\\|")  # a literal pipe inside a cell must not split the column
+    out = ["| " + " | ".join(cell(h) for h in headers) + " |", "|" + "|".join(sep) + "|"]
     for r in rows:
-        out.append("| " + " | ".join(str(c) for c in r) + " |")
+        out.append("| " + " | ".join(cell(c) for c in r) + " |")
     return "\n".join(out)
 
 
@@ -338,9 +339,11 @@ def bisection_inverse():
     def f(x):
         return x ** 3 + x
 
-    target, lo, hi = 10.0, 0.0, 3.0
+    target, lo, hi, tol = 10.0, 0.0, 3.0, 1e-3
     rows = []
-    for k in range(1, 13):
+    k = 0
+    while hi - lo > tol:
+        k += 1
         mid = (lo + hi) / 2
         fm = f(mid)
         rows.append((k, _g(lo, 6), _g(hi, 6), _g(mid, 6), _g(fm, 6), "too small, raise lo" if fm < target else "too big, lower hi"))
@@ -472,7 +475,8 @@ def schedule_table():
 def schedule_monotone_check():
     s = SCHEDULE
     rates = [schedule_rate(t, **s) for t in range(200)]
-    peak_step = max(range(len(rates)), key=lambda i: rates[i])
+    tol = 1e-12
+    peak_step = next(i for i in range(len(rates)) if rates[i] >= max(rates) - tol)
     up = all(rates[i] < rates[i + 1] for i in range(s["warmup"] - 1))
     down = all(rates[i] >= rates[i + 1] for i in range(s["warmup"] - 1, 199))
     jumps = max(abs(rates[i + 1] - rates[i]) for i in range(199))

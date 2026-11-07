@@ -30,9 +30,10 @@ def _table(headers, rows, align=None):
     """A markdown table; `align` is a string of 'l'/'r' per column (default: first l, rest r)."""
     align = align or ("l" + "r" * (len(headers) - 1))
     sep = ["---:" if a == "r" else "---" for a in align]
-    out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
+    cell = lambda c: str(c).replace("|", "\\|")  # a literal pipe inside a cell must not split the column
+    out = ["| " + " | ".join(cell(h) for h in headers) + " |", "|" + "|".join(sep) + "|"]
     for r in rows:
-        out.append("| " + " | ".join(str(c) for c in r) + " |")
+        out.append("| " + " | ".join(cell(c) for c in r) + " |")
     return "\n".join(out)
 
 
@@ -234,7 +235,7 @@ def digits_and_bits():
                     ("a vocabulary of 50,000 tokens", 50000.0), ("a vocabulary of 128,000 tokens", 128000.0),
                     ("one million", 1e6)):
         rows.append((name, f"{math.log10(v):.4f}", f"{math.log2(v):.4f}", math.ceil(math.log2(v)) if v >= 1 else "-"))
-    return _table(["quantity x", "log_10 x", "log_2 x", "bits to number x things (ceil of log_2)"], rows, "lrrr")
+    return _table(["quantity x", "log_10 x", "log_2 x", "bits to number x things (log_2 x rounded up)"], rows, "lrrr")
 
 
 # ------------------------------------------------------ function notation

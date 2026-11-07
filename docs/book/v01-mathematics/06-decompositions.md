@@ -241,7 +241,7 @@ information and is trivially invertible, yet its determinant is $0.1^n$.
 <!-- worked: decompositions.determinant_scale -->
 A = 0.1 I_n multiplies every vector by 0.1: invertible for every n. Its determinant is 0.1^n.
 
-| n | det computed as a float64 product | log |det| = n log 0.1 |
+| n | det computed as a float64 product | log \|det\| = n log 0.1 |
 |---|---:|---:|
 | 10 | 1.00e-10 | -23.03 |
 | 100 | 1.00e-100 | -230.3 |
@@ -495,7 +495,7 @@ and top eigenvector $(1, \sqrt2, 1)/2$. Started at $(1, 0, 0)$:
 <!-- worked: decompositions.power_iteration_trace -->
 A = [[2, 1, 0], [1, 2, 1], [0, 1, 2]], x_0 = (1, 0, 0). The true top eigenpair is lambda_1 = 2 + sqrt 2 = 3.41421, v_1 = (1, sqrt 2, 1)/2 = (0.5, 0.70711, 0.5); the other eigenvalues are 2 and 0.585786.
 
-| k | x_k | Rayleigh quotient x_k . A x_k | lambda_1 - Rayleigh | |x_k - v_1| |
+| k | x_k | Rayleigh quotient x_k . A x_k | lambda_1 - Rayleigh | \|x_k - v_1\| |
 |---:|---|---:|---:|---:|
 | 0 | (1, 0, 0) | 2 | 1.41e+00 | 1.00e+00 |
 | 1 | (0.89443, 0.44721, 0) | 2.8 | 6.14e-01 | 6.88e-01 |
@@ -521,12 +521,19 @@ observe this here and do not prove it.)
 The rate depends on the ratio, and a ratio can be changed. Adding $s\mathbf{I}$
 to $\mathbf{A}$ adds $s$ to every eigenvalue, since $(\mathbf{A} + s\mathbf{I})
 \mathbf{v} = (\lambda + s)\mathbf{v}$, and leaves the eigenvectors alone. Here
-are three shifts of the same matrix:
+are three shifts of the same matrix. The table's last two columns are defined
+as follows: the predicted number of steps is $\ln 10^{-8}/\ln(|\lambda_2|/|\lambda_1|)$
+(the steps for the error to fall from 1 to $10^{-8}$ at the predicted rate), and
+the measured ratio per step is $(e_{20}/e_{10})^{1/10}$ with
+$e_k = \|\mathbf{x}_k - \mathbf{v}_1\|$, the length of the difference to the
+unit top eigenvector whose first entry is positive. (The shift $s = 2$ has
+a predicted ratio $0.73880$ and a measured $0.73892$: the third eigenvalue
+still contributes a little at iteration 10.)
 
 <!-- worked: decompositions.power_iteration_rates -->
 A + s I for the tridiagonal matrix above, started at x_0 = (1, 0, 0).
 
-| shift s | eigenvalues of A + s I | |lambda_2| / |lambda_1| | measured error ratio per step | steps to reach error 1e-8 (predicted) |
+| shift s | eigenvalues of A + s I | \|lambda_2\| / \|lambda_1\| | measured error ratio per step | steps to reach error 1e-8 (predicted) |
 |---:|---|---:|---:|---:|
 | -1 | 2.414, 1, -0.4142 | 0.4142 | 0.4142 | 20.9 |
 | 0 | 3.414, 2, 0.5858 | 0.5858 | 0.5858 | 34.4 |
@@ -589,7 +596,8 @@ was $108.4^\circ$ there.
 Two further facts hold for every real symmetric matrix and are stated without
 proof here (the second needs the complex numbers of Chapter 14): its
 eigenvalues are real, and when an eigenvalue is repeated one can still choose
-orthogonal eigenvectors inside its eigenspace. The conclusion is the
+orthogonal eigenvectors inside its eigenspace (the set of all eigenvectors
+of that eigenvalue, with the zero vector). The conclusion is the
 **spectral theorem**: an $n \times n$ symmetric matrix has $n$ real
 eigenvalues and $n$ mutually orthogonal unit eigenvectors. Numerically, on a
 $3 \times 3$ example:
@@ -651,7 +659,7 @@ Q = (1/3) [[1, 2, 2], [2, 1, -2], [2, -2, 1]].
 | Q Q^T | [[1, 0, 0], [0, 1, 0], [0, 0, 1]] |
 | x | (3, 0, 4) |
 | Q x | (11/3, -2/3, 10/3) |
-| |x|^2 and |Q x|^2 | 25 and 25 |
+| \|x\|^2 and \|Q x\|^2 | 25 and 25 |
 | y | (1, 2, -1) |
 | x . y and (Q x) . (Q y) | -1 and -1 |
 | det Q | -1 |
@@ -729,7 +737,7 @@ $$
 <!-- worked: decompositions.rotation_matrix_table -->
 R(theta) = [[cos theta, -sin theta], [sin theta, cos theta]], applied to e1 = (1, 0) and p = (2, 1), |p| = 2.2361.
 
-| theta (degrees) | R(theta) | R e1 | R p | det R | |R p| |
+| theta (degrees) | R(theta) | R e1 | R p | det R | \|R p\| |
 |---:|---|---|---|---:|---:|
 | 0 | [[1, 0], [0, 1]] | (1, 0) | (2, 1) | 1 | 2.2361 |
 | 30 | [[0.866, -0.5], [0.5, 0.866]] | (0.866, 0.5) | (1.232, 1.866) | 1 | 2.2361 |
@@ -774,7 +782,7 @@ consequences of the geometry, not facts to memorise.
 | cos 45 | 0.707107 |
 | sin 20 cos 25 + cos 20 sin 25 | 0.707107 |
 | sin 45 | 0.707107 |
-| largest |R(20) R(25) - R(45)| entry | 1.11e-16 |
+| largest \|R(20) R(25) - R(45)\| entry | 1.11e-16 |
 | R(30)^T | [[0.86603, 0.5], [-0.5, 0.86603]] |
 | R(-30) | [[0.86603, 0.5], [-0.5, 0.86603]] |
 | R(30)^T R(30) | [[1, 0], [0, 1]] |
@@ -847,7 +855,12 @@ points that land on the axes are two perpendicular directions, $\mathbf{v}_1$
 and $\mathbf{v}_2$. So the map takes the orthogonal pair $\mathbf{v}_1,
 \mathbf{v}_2$ to an orthogonal pair of directions $\mathbf{u}_1, \mathbf{u}_2$,
 stretched by $\sigma_1$ and $\sigma_2$:
-$\mathbf{A}\mathbf{v}_i = \sigma_i\mathbf{u}_i$.
+$\mathbf{A}\mathbf{v}_i = \sigma_i\mathbf{u}_i$. (In this chapter $\sigma_i$,
+with an index, is always the $i$-th stretch factor, a singular value; it is
+unrelated to the sigmoid $\sigma(x)$, which has an argument, and to the
+standard deviation $\sigma$ of Volume I's later chapters. Likewise
+$\boldsymbol{\Sigma}$ here is the diagonal matrix of the $\sigma_i$, not a
+covariance matrix.)
 
 ![Four panels showing the unit circle pushed through the matrix with rows (3, 0) and (4, 5) in three steps. Panel 1: the unit circle with two perpendicular right singular vectors v1 and v2. Panel 2: after the rotation V transpose the circle is unchanged and v1, v2 lie on the coordinate axes. Panel 3: after the stretch Sigma the circle is an axis-aligned ellipse with semi-axes 6.71 and 2.24. Panel 4: after the rotation U the ellipse is tilted, with its axes sigma1 u1 and sigma2 u2 drawn. A black dot follows the point (1, 0) through all four panels.](img/svd-circle-ellipse.svg)
 
@@ -878,7 +891,8 @@ the columns of $\mathbf{U}$ the left singular vectors.
 
 How do we find $\mathbf{v}_i$ and $\sigma_i$? The trick is to turn $\mathbf{A}$
 into a symmetric matrix, for which we have the spectral theorem.
-Consider $\mathbf{A}^\top\mathbf{A}$, symmetric as shown above. Its quadratic
+Consider $\mathbf{A}^\top\mathbf{A}$, the **Gram matrix** of $\mathbf{A}$ (the
+table of dot products between its columns), which is symmetric as shown above. Its quadratic
 form is a squared length: $\mathbf{x}^\top\mathbf{A}^\top\mathbf{A}\mathbf{x} =
 (\mathbf{A}\mathbf{x})\cdot(\mathbf{A}\mathbf{x}) = \|\mathbf{A}\mathbf{x}\|^2
 \ge 0$. By the spectral theorem it has orthonormal eigenvectors
@@ -909,7 +923,7 @@ $\sigma_i > 0$), gives an orthonormal set, and $\mathbf{A}\mathbf{v}_i =
 A = [[3, 0], [4, 5]], A^T A = [[25, 20], [20, 25]].
 det(A^T A - lambda I) = (25 - lambda)^2 - 400 = lambda^2 - 50 lambda + 225 = 0, so lambda = (50 +- 40)/2 = 45 and 5.
 
-| i | lambda_i | sigma_i = sqrt lambda_i | v_i | A v_i | u_i = A v_i / sigma_i | |u_i| |
+| i | lambda_i | sigma_i = sqrt lambda_i | v_i | A v_i | u_i = A v_i / sigma_i | \|u_i\| |
 |---:|---:|---:|---|---|---|---:|
 | 1 | 45 | 6.7082 | (0.7071, 0.7071) | (2.121, 6.364) | (0.3162, 0.9487) | 1 |
 | 2 | 5 | 2.2361 | (0.7071, -0.7071) | (2.121, -0.7071) | (0.9487, -0.3162) | 1 |
@@ -952,7 +966,7 @@ direct meaning as stretch factors, which a scan over every whole degree
 confirms:
 
 <!-- worked: decompositions.stretch_scan -->
-|  | angle (degrees) | |A x| | singular value |
+|  | angle (degrees) | \|A x\| | singular value |
 |---|---:|---:|---:|
 | longest image | 45 | 6.7082 | 6.7082 |
 | shortest image | 135 | 2.2361 | 2.2361 |
@@ -1025,7 +1039,10 @@ $$
 
 a matrix of rank at most $r$. A **low-rank approximation** of $\mathbf{A}$ is
 a matrix of small rank $r$ that is close to $\mathbf{A}$. The pieces for our
-$2 \times 2$ example:
+$2 \times 2$ example. Besides the largest stretch (the spectral norm above), the
+block reports the **Frobenius norm** $\|\cdot\|_F$ of the error, the Euclidean
+norm of all the entries of a matrix read as one long vector; the next
+subsections come back to both.
 
 <!-- worked: decompositions.rank_one_pieces -->
 A = [[3, 0], [4, 5]] = sigma_1 u_1 v_1^T + sigma_2 u_2 v_2^T.
@@ -1064,7 +1081,7 @@ reveal exactly that:
 <!-- worked: decompositions.spectrum_table -->
 The 8 x 6 table M (three smooth patterns plus noise, defined in the text).
 
-| i | sigma_i | share of |M|_F^2 (%) | cumulative share (%) |
+| i | sigma_i | share of \|M\|_F^2 (%) | cumulative share (%) |
 |---|---:|---:|---:|
 | 1 | 20.79 | 76.16 | 76.157 |
 | 2 | 10.404 | 19.07 | 95.228 |
@@ -1092,9 +1109,13 @@ singular values (circles); the two are the same number.
 To measure the distance between two matrices we need a norm for matrices. The
 **Frobenius norm** is the Euclidean norm of Chapter 3 applied to the matrix read
 as one long vector (Chapter 5's flat view): $\|\mathbf{A}\|_F = \sqrt{\sum_{ij}
-A_{ij}^2}$. Multiplying by an orthogonal matrix does not change it: the columns
-of $\mathbf{Q}\mathbf{A}$ are the columns of $\mathbf{A}$ with their lengths
-preserved, and likewise for rows when multiplying on the right. Hence
+A_{ij}^2}$. Multiplying by an orthogonal matrix does not change it. For
+$\mathbf{Q}\mathbf{A}$: column $j$ of the product is $\mathbf{Q}\mathbf{a}_{:j}$,
+which has the same length as $\mathbf{a}_{:j}$ (an orthogonal matrix
+keeps lengths, shown above), and $\|\mathbf{A}\|_F^2$ is the sum of the squared column
+lengths. For $\mathbf{A}\mathbf{Q}$: $\|\mathbf{A}\mathbf{Q}\|_F =
+\|\mathbf{Q}^\top\mathbf{A}^\top\|_F = \|\mathbf{A}^\top\|_F =
+\|\mathbf{A}\|_F$, since transposing only reorders the entries. Hence
 $\|\mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top\|_F = \|\boldsymbol{\Sigma}\|_F
 = \sqrt{\sum_i\sigma_i^2}$: **the squared size of a matrix is the sum of its
 squared singular values**.
@@ -1113,7 +1134,7 @@ $$
 <!-- worked: decompositions.truncation_error -->
 M is 8 x 6: storing it takes m n = 48 numbers; a rank-r approximation as two factors takes r (m + n) = r * 14.
 
-| r | numbers stored r(m+n) | |M - M_r|_F | sqrt(sum of dropped sigma^2) | largest stretch of M - M_r | sigma_(r+1) |
+| r | numbers stored r(m+n) | \|M - M_r\|_F | sqrt(sum of dropped sigma^2) | largest stretch of M - M_r | sigma_(r+1) |
 |---|---:|---:|---:|---:|---:|
 | 0 | 0 | 23.823 | 23.823 | 20.79 | 20.79 |
 | 1 | 14 | 11.633 | 11.633 | 10.404 | 10.404 |
@@ -1139,7 +1160,11 @@ rank at most $r$. It crushes at least an $(n - r)$-dimensional set of directions
 to zero (this is the counting behind rank in Chapter 4: $r$ pivots leave $n - r$
 free columns). Directions $\mathbf{v}_1, \dots, \mathbf{v}_{r+1}$ span an
 $(r+1)$-dimensional set. Because $(n - r) + (r + 1) = n + 1 > n$, the two sets
-share a nonzero unit vector $\mathbf{x}$. For it $\mathbf{X}\mathbf{x} =
+share a nonzero unit vector $\mathbf{x}$. (Why: put a basis of each set as the
+columns of one $n \times (n + 1)$ matrix. Elimination (Chapter 4) has at most $n$
+pivots, so some column is free, which gives a combination of the basis
+vectors, not all coefficients zero, that adds up to zero; moved to two sides,
+a nonzero vector of the first set equals a vector of the second.) For it $\mathbf{X}\mathbf{x} =
 \mathbf{0}$, so $\|(\mathbf{A} - \mathbf{X})\mathbf{x}\| = \|\mathbf{A}
 \mathbf{x}\|$, and writing $\mathbf{x}$ in the $\mathbf{v}_i$ with only
 $i \le r + 1$ present, $\|\mathbf{A}\mathbf{x}\|^2 = \sum_{i \le r+1}
@@ -1150,26 +1175,32 @@ misses by exactly that.
 We can also test it. Here are four ways to build a rank-$r$ approximation of
 $\mathbf{M}$: the truncated SVD; the projection of $\mathbf{M}$ onto the
 span of its $r$ longest columns; the truncated SVD of $\mathbf{M}$ plus noise of
-amplitude $0.3$; and the best of $2000$ random $r$-dimensional column spaces
-onto which $\mathbf{M}$ is projected.
+amplitude $0.3$ (each entry gets $0.6(u - \tfrac12)$ for a uniform $u$ in $[0, 1)$);
+and the best of $2000$ random $r$-dimensional column spaces
+onto which $\mathbf{M}$ is projected. The projections are onto subspaces of
+$\mathbb{R}^8$, the space of the columns. The block states the generator and
+the exact order of its draws, so that the last two columns can be reproduced
+digit for digit.
 
 <!-- worked: decompositions.eckart_young_check -->
-Frobenius error |M - X|_F for rank-r matrices X built four ways (smaller is better).
+Frobenius error |M - X|_F for rank-r matrices X built four ways (smaller is better), printed to 5 significant digits.
+
+Column 2: orthonormalise (Gram-Schmidt, in order of decreasing column length) the r columns of M with the largest Euclidean norm, and project M onto their span in R^8. Columns 3 and 4 draw from ONE SplitMix64 generator with seed 8136057881202253862 (0x70E915894913E026), seeded once and never reseeded, used for r = 1, 2, 3, 4 in turn. For each r: first the 48 noise values 0.6 * (uniform() - 0.5), row by row (row 0 first), added to M for column 3; then 2000 random subspaces for column 4, each made of r vectors of 8 entries (uniform() - 0.5), drawn vector by vector and orthonormalised by Gram-Schmidt in the order drawn; M is projected on the span and the smallest error of the 2000 is kept.
 
 | r | truncated SVD of M | project on the r longest columns | truncated SVD of M + noise | best of 2000 random subspaces |
 |---|---:|---:|---:|---:|
-| 1 | 11.633 | 14.091 | 11.656 | 13.189 |
-| 2 | 5.2044 | 6.3407 | 5.2519 | 12.031 |
-| 3 | 0.078908 | 0.11595 | 0.90103 | 9.1194 |
-| 4 | 0.03994 | 0.055165 | 1.1214 | 5.2691 |
+| 1 | 11.633 | 14.091 | 11.642 | 13.564 |
+| 2 | 5.2044 | 6.3407 | 5.2857 | 11.83 |
+| 3 | 0.078908 | 0.11595 | 1.0555 | 7.8013 |
+| 4 | 0.03994 | 0.055165 | 1.1696 | 6.5225 |
 <!-- /worked -->
 
 In every row the first column is the smallest. The projection onto the longest
 columns stays within about a quarter of the optimum ($14.09$ against $11.63$ at
 $r = 1$), and the SVD of the noisy copy is nearly as good while only the two
-strongest patterns are needed ($5.25$ against $5.20$ at $r = 2$). At $r = 3$,
+strongest patterns are needed ($5.29$ against $5.20$ at $r = 2$). At $r = 3$,
 where the SVD finds the third pattern and the error drops to $0.079$, the
-column projection gives $0.116$ and the noisy copy $0.90$, an error made of the
+column projection gives $0.116$ and the noisy copy $1.06$, an error made of the
 noise it carries. The random subspaces are far worse, as expected: among all
 directions the good ones are rare, and the SVD finds them directly.
 
@@ -1255,19 +1286,23 @@ function jacobi_eigen(S: array<real>[n, n], sweeps: int)
     require close(S, transpose(S), 1e-12, 1e-12), "jacobi_eigen: not symmetric"
     A = copy(S)
     V = identity(n)
+    scale = 0.0                                 # squared size of S; rotations do not change it
+    for i in 0 .. n:
+        for j in 0 .. n:
+            scale = scale + A[i, j] * A[i, j]
     for sweep in 0 .. sweeps:
         off = 0.0
         for i in 0 .. n:
             for j in 0 .. n:
                 if i != j:
                     off = off + A[i, j] * A[i, j]
-        if off < 1e-30:
+        if off <= 1e-30 * scale:                # relative, so the test does not depend on the units of S
             break
         for p in 0 .. n - 1:
             for q in p + 1 .. n:
                 if A[p, q] != 0.0:
                     theta = (A[q, q] - A[p, p]) / (2.0 * A[p, q])
-                    t = sign(theta) / (abs(theta) + sqrt(theta * theta + 1.0))
+                    t = sign(theta) / (abs(theta) + sqrt(theta * theta + 1.0))   # sign(0) = +1
                     c = 1.0 / sqrt(t * t + 1.0)
                     s = t * c
                     J = identity(n)             # a rotation in the (p, q) plane
@@ -1285,7 +1320,12 @@ Each rotation $\mathbf{J}$ is chosen to make the entry $A_{pq}$ zero: with
 $t = s/c$ the condition is $t^2 + 2\theta t - 1 = 0$, and the code takes its
 smaller root. A rotation that zeroes one off-diagonal pair can disturb others, but
 every rotation reduces the total squared size of the off-diagonal entries, so
-sweeping over all pairs converges to a diagonal matrix. The product of the
+sweeping over all pairs converges to a diagonal matrix. The convention
+$\mathrm{sign}(0) = +1$ of the pseudocode page matters: when the two diagonal
+entries are equal, as in $\begin{pmatrix}25&20\\20&25\end{pmatrix}$ below,
+$\theta = 0$, the smaller root is $t = 1$ (a rotation by $45^\circ$), and a
+sign function returning $0$ there would give $t = 0$, the identity rotation,
+and a method that never makes progress. The product of the
 rotations is the orthogonal matrix of eigenvectors, and because each step is a
 rotation, rounding error is not amplified. Sort the values and columns in
 decreasing order to match the chapter.
@@ -1294,12 +1334,14 @@ decreasing order to match the chapter.
 function svd_via_gram(A: array<real>[m, n])
         -> (array<real>[m, n], array<real>[n], array<real>[n, n]):
     G = matmul(transpose(A), A)                 # [n, n], symmetric
-    (lam, V) = jacobi_eigen(G, 60)
-    sort lam descending and permute the columns of V the same way
+    (lam, Vj) = jacobi_eigen(G, 60)
+    order = argsort(lam, descending)            # indices from the largest eigenvalue down
+    V = zeros(real, [n, n])
     sigma = zeros(real, [n])
-    U = zeros(real, [m, n])
+    U = zeros(real, [m, n])                     # a column stays zero where sigma is 0
     for i in 0 .. n:
-        sigma[i] = sqrt(max(lam[i], 0.0))
+        V[:, i] = Vj[:, order[i]]               # the columns of Vj in the same order
+        sigma[i] = sqrt(max(lam[order[i]], 0.0))
         if sigma[i] > 0.0:
             U[:, i] = matvec(A, V[:, i]) / sigma[i]     # broadcast by the scalar
     return (U, sigma, V)
@@ -1311,6 +1353,8 @@ function svd_one_sided(A: array<real>[m, n], sweeps: int)
     require m >= n, "svd_one_sided: transpose A first when m < n"
     W = copy(A)
     V = identity(n)
+    sigma = zeros(real, [n])
+    U = zeros(real, [m, n])
     for sweep in 0 .. sweeps:
         rotated = false
         for i in 0 .. n - 1:
@@ -1321,25 +1365,43 @@ function svd_one_sided(A: array<real>[m, n], sweeps: int)
                 if abs(g) > 1e-15 * sqrt(a * b):
                     rotated = true
                     zeta = (b - a) / (2.0 * g)
-                    t = sign(zeta) / (abs(zeta) + sqrt(1.0 + zeta * zeta))
+                    t = sign(zeta) / (abs(zeta) + sqrt(1.0 + zeta * zeta))   # sign(0) = +1
                     c = 1.0 / sqrt(1.0 + t * t)
                     s = c * t
-                    rotate columns i and j of W and of V by (c, s):
-                        (x, y) = (col i, col j)
-                        col i = c * x - s * y
-                        col j = s * x + c * y
+                    for k in 0 .. m:            # rotate columns i and j of W by (c, s)
+                        x = W[k, i]
+                        y = W[k, j]
+                        W[k, i] = c * x - s * y
+                        W[k, j] = s * x + c * y
+                    for k in 0 .. n:            # and the same rotation of V
+                        x = V[k, i]
+                        y = V[k, j]
+                        V[k, i] = c * x - s * y
+                        V[k, j] = s * x + c * y
         if not rotated:
             break
-    sigma[j] = norm(W[:, j]) for every column j
-    sort descending; U[:, j] = W[:, j] / sigma[j] where sigma[j] > 0
-    return (U, sigma, V)
+    for j in 0 .. n:
+        sigma[j] = norm(W[:, j])                # the column lengths
+    order = argsort(sigma, descending)
+    Vs = zeros(real, [n, n])
+    ss = zeros(real, [n])
+    for j in 0 .. n:                            # reorder everything from the largest sigma down
+        Vs[:, j] = V[:, order[j]]
+        ss[j] = sigma[order[j]]
+        if ss[j] > 0.0:
+            U[:, j] = W[:, order[j]] / ss[j]
+    return (U, ss, Vs)
 ```
 
 `svd_one_sided` implements the idea behind $\mathbf{A}\mathbf{V} =
 \mathbf{U}\boldsymbol{\Sigma}$ directly: rotate pairs of columns of $\mathbf{A}$
 until all columns are mutually orthogonal; then the column lengths are the
 singular values and the rotations multiplied together are $\mathbf{V}$. It
-never forms $\mathbf{A}^\top\mathbf{A}$, which matters in the next section.
+never forms $\mathbf{A}^\top\mathbf{A}$, which matters in the next section. (Both SVD
+functions return $\mathbf{U}$ of shape $[m, n]$ with a zero column wherever
+$\sigma_i = 0$: neither the thin nor the full form, but enough to rebuild
+$\mathbf{A}$. The examples below call `svd_one_sided` with `sweeps = 60`; it needs
+2 on the matrix of the next section.)
 
 ## Making it work
 
@@ -1351,7 +1413,14 @@ $\mathbf{V}$ for the same matrix. A test must compare what is unique: the
 singular values, the reconstruction $\mathbf{U}\boldsymbol{\Sigma}
 \mathbf{V}^\top$, the products $\mathbf{u}_i\mathbf{v}_i^\top$ for separated
 $\sigma_i$, or the subspace spanned by the leading vectors. The same holds for
-eigenvectors, whose sign and (for repeated eigenvalues) basis are free.
+eigenvectors, whose sign and (for repeated eigenvalues) basis are free. The
+tables of this chapter print each eigenvector or singular vector with the sign
+that makes its first nonzero entry positive; a reproduction that gets the
+opposite sign has not made a mistake. Entries such as the "largest entry of
+$|\mathbf{Q}\,\mathrm{diag}(\lambda)\mathbf{Q}^\top - \mathbf{A}|$" of the
+symmetric example and of the rotation-composition example are round-off: their
+size (below $10^{-13}$) is what to compare, not their digits, which depend on
+the order of the additions.
 
 **Squaring the matrix squares the problem.** The recipe "eigenvalues of
 $\mathbf{A}^\top\mathbf{A}$" is exact and clear, and it is also the way to lose
@@ -1562,13 +1631,13 @@ Answers are at the end of the chapter.
 
 7. **[Calculate]** The matrix $\begin{pmatrix}1&2\\2&4\\3&6\end{pmatrix}$ has rank $1$. Write it as $\mathbf{u}\mathbf{v}^\top$, compute its single singular value, and state the number of parameters of the factored form against the original. For a $1000 \times 500$ matrix at rank $10$, compute the number of stored numbers and the ratio to $mn$.
 
-8. **[Implement]** Implement `power_iteration` and reproduce `decompositions.power_iteration_trace` and `decompositions.power_iteration_rates` (the three shifts, the start vector $(1, 0, 0)$, the measured per-step ratio taken between iterations $10$ and $20$). Plot $\log_{10}$ of the error and compare the slope with $\log_{10}(|\lambda_2|/|\lambda_1|)$.
+8. **[Implement]** Implement `power_iteration` and reproduce `decompositions.power_iteration_trace` and `decompositions.power_iteration_rates` (the three shifts, the start vector $(1, 0, 0)$, the measured per-step ratio taken between iterations $10$ and $20$). Plot $\log_{10}$ of the error (or, without a plotting library, print the slope between iterations 10 and 20) and compare the slope with $\log_{10}(|\lambda_2|/|\lambda_1|)$: for the three shifts it is $-0.3828$, $-0.2323$ and $-0.1314$.
 
-9. **[Implement]** Implement `jacobi_eigen` and `svd_via_gram`, and reproduce `decompositions.symmetric_orthogonal` and `decompositions.svd_by_hand`. Then implement `svd_one_sided` and reproduce `decompositions.lauchli_squaring`, including the failure of the Gram route.
+9. **[Implement]** Implement `jacobi_eigen` and `svd_via_gram`, and reproduce `decompositions.symmetric_orthogonal` and `decompositions.svd_by_hand`. Then implement `svd_one_sided` (with 60 sweeps) and reproduce `decompositions.lauchli_squaring`, including the failure of the Gram route. Both examples have equal diagonal entries (or equal squared column lengths), so they test the $\mathrm{sign}(0) = +1$ rule.
 
 10. **[Implement]** Implement $\mathbf{R}(\theta)$, the block rotation of pairs and the check that rotated dot products depend only on the offset. Reproduce `decompositions.rotation_matrix_table`, `decompositions.rotation_composition` and `decompositions.rotation_relative_position`.
 
-11. **[Implement]** Build the $8 \times 6$ table $\mathbf{M}$ of the text, and reproduce `decompositions.spectrum_table` and `decompositions.truncation_error` (the Frobenius error must equal the root of the dropped squares, and the largest stretch of the residual must equal $\sigma_{r+1}$). Then reproduce the first three columns of `decompositions.eckart_young_check`; for the fourth, draw your own $2000$ random subspaces and check that none beats the first column. A linear congruential generator for repeatability: $s \leftarrow (1103515245\,s + 12345) \bmod 2^{31}$, uniform $= s/2^{31} - \tfrac12$, seed $2026$ shared across all $r$; noise for column three is $0.6\times$ uniform per entry, row by row.
+11. **[Implement]** Build the $8 \times 6$ table $\mathbf{M}$ of the text, and reproduce `decompositions.spectrum_table` and `decompositions.truncation_error` (the Frobenius error must equal the root of the dropped squares, and the largest stretch of the residual must equal $\sigma_{r+1}$). Then reproduce the first two columns of `decompositions.eckart_young_check`. The last two use the generator that Chapter 17 builds, seeded and drawn in the order printed under the block; once you have that generator, reproduce them digit for digit, and until then check that the noisy-copy column is larger than the first and that no random subspace you draw yourself beats the first column.
 
 12. **[Investigate]** (a) Start power iteration exactly at a vector orthogonal to $\mathbf{v}_1$ (for the tridiagonal matrix, $(1, 0, -1)$) and watch the iterate for $100$ steps: what does it converge to, and what does round-off do? (b) Try a matrix whose two largest eigenvalues are $+3$ and $-3$. (c) Change the noise amplitude of the $8 \times 6$ table from $0.05$ to $0.5$ and to $2$ and find where the cliff in the spectrum disappears. At what noise level would you stop calling the table "rank 3"? Justify your choice from the spectrum.
 

@@ -176,7 +176,7 @@ cannot be matched by any line, and the choice of the "closest" one needs a
 definition of closest, which is the subject of Volume II. This section keeps
 the exact case, because it shows the counting that returns below: **a family
 with $k$ parameters can be made to pass through $k$ chosen points** (under a
-mild condition), and no more. To fit more points we need more parameters, which
+mild condition: below, that the chosen $x$ values are all different), and no more. To fit more points we need more parameters, which
 means richer families. The classical one is next.
 
 ## Polynomials
@@ -191,7 +191,8 @@ with real numbers $c_0, \dots, c_n$, the **coefficients**, and $c_n \ne 0$. A
 degree-1 polynomial is a line ($c_1 = w$, $c_0 = b$). Degree 2 is a
 **quadratic**, whose graph is a parabola: a bowl if $c_2 > 0$, an upside-down
 bowl if $c_2 < 0$. Degree 3 can bend twice, and in general a polynomial of
-degree $n$ has a graph with at most $n - 1$ bends. A polynomial has $n + 1$
+degree $n$ has a graph with at most $n - 1$ bends (a **bend** is a place
+where the graph turns from rising to falling or the reverse). A polynomial has $n + 1$
 parameters, so each extra degree buys one more dial.
 
 Figure 1 shows four members of the quadratic family $y = a x^2 + b x + c$,
@@ -299,17 +300,17 @@ algorithm shows the steps without surprises:
 ```text
 function fit_polynomial(xs: array<real>[m], ys: array<real>[m]) -> array<real>[m]:
     require m >= 1, "no points"
-    require all xs[i] are distinct, "two points at one x have no function through them"
+    require all xs[i] are distinct, "two points at one x have no function through them"   # exact comparison
     # row i of A is the powers of xs[i]: [1, x, x^2, ..., x^(m-1)]; the equations are A c = ys
     A = zeros(real, [m, m + 1])               # augmented matrix: last column is ys
     for i in 0 .. m:
         for j in 0 .. m:
-            A[i, j] = xs[i] ^ j
+            A[i, j] = xs[i] ^ j               # 0 ^ 0 = 1: the column of ones is exact at x = 0
         A[i, m] = ys[i]
     for col in 0 .. m:
         pivot = the row r >= col with the largest abs(A[r, col])
         swap rows col and pivot
-        require abs(A[col, col]) > 0, "singular system"
+        require abs(A[col, col]) > 0, "singular system"   # an exact zero only; see below
         divide row col by A[col, col]          # now A[col, col] = 1
         for r in 0 .. m:
             if r != col:
@@ -322,9 +323,20 @@ start of the chapter in action: two points with the same $x$ and different $y$
 cannot lie on any function. With distinct $x$ values the system always has
 exactly one solution, so **$n + 1$ points with distinct $x$ determine exactly
 one polynomial of degree at most $n$**. (The proof, for the curious: a nonzero
-polynomial of degree at most $n$ has at most $n$ zeros, so the difference of
+polynomial of degree at most $n$ has at most $n$ zeros, because if $r$ is a
+zero then $p(x) = (x - r)\,q(x)$ with $q$ of one degree less carrying the
+remaining zeros, and a nonzero constant has none. So the difference of
 two solutions, which would vanish at $n + 1$ points, must be the zero
 polynomial.)
+
+The two `require` tests compare exactly, on purpose: they catch points that
+are the same, and a pivot that is exactly zero. Points that are merely very
+close pass them, and the answer degrades without any error. For the points
+$(0, 1)$, $(1, 0)$ and $(1 + \delta, 3)$ the coefficients are $c_0 = 1$,
+$c_1 = -3/\delta$ and $c_2 = 3/\delta$ up to terms of order one: they grow
+like $1/\delta$, and once $\delta$ is near the round-off of the format the
+digits of the solution are gone. Distinct is necessary; well separated is
+what a program needs.
 
 ### More parameters is not more truth
 
@@ -602,7 +614,10 @@ output has exactly one input. We can find it by **bisection**: if $f$ is
 increasing and $f(\text{lo}) \le y \le f(\text{hi})$, the answer is between
 $\text{lo}$ and $\text{hi}$. Test the midpoint; if $f(\text{mid})$ is below
 the target the answer is to its right, otherwise to its left; either way the
-interval halves.
+interval halves. Here the target is $y = 10$ on $[0, 3]$, and the loop stops
+as soon as the interval is narrower than the tolerance $0.001$; since
+$3/2^{12} = 0.00073$ that is after exactly the twelve steps shown (values
+printed to six significant digits).
 
 <!-- worked: functions_ch.bisection_inverse -->
 | step | lo | hi | mid | f(mid) | decision |
@@ -1023,6 +1038,11 @@ monotonic behaviour and joins:
 | largest change between neighbouring steps | 0.01 |
 <!-- /worked -->
 
+(Floating-point differences of rates such as $0.1 - 0.09$ are not exactly
+$0.01$; the check compares with a tolerance of $10^{-12}$ where it tests an
+equality, and "first step at the peak" is the first step whose rate is within
+that tolerance of the maximum.)
+
 The schedule rises on its first piece and never rises again, and the largest
 change between neighbouring steps is the 0.01 of the warmup ramp, so no join
 introduces a jump. These checks are exactly the kind a test can make about any
@@ -1223,13 +1243,15 @@ Answers are at the end of the chapter.
 7. **[Implement]** Implement `horner` and `fit_polynomial` from the
    pseudocode, with exact rational arithmetic if your language has it, and
    reproduce `functions_ch.quadratic_fit` and `functions_ch.interpolation_overfit`.
-   Make `fit_polynomial` reject two equal $x$ values, and then give it three
-   *nearly* equal $x$ values and describe what the coefficients do.
+   Make `fit_polynomial` reject two equal $x$ values, and then give it the
+   points $(0, 1)$, $(1, 0)$, $(1 + \delta, 3)$ for $\delta = 10^{-3}, 10^{-9}$
+   and describe what the coefficients do and whether any error is raised.
 
 8. **[Implement]** Implement `invert_increasing` and reproduce
    `functions_ch.bisection_inverse`. Use it to compute $\log_{10} 7$ as the
-   inverse of $10^x$ on $[0, 1]$, to six digits, and count the steps against
-   the $\log_2$ formula of the text.
+   inverse of $10^x$ on $[0, 1]$ with absolute tolerance $10^{-6}$ (the
+   result is $0.845098$ to six digits), and count the steps against the
+   $\log_2$ formula of the text. The worked block uses `tol = 0.001`.
 
 9. **[Implement]** Implement `schedule_rate` and reproduce
    `functions_ch.schedule_table` and `functions_ch.schedule_monotone_check`. Add
@@ -1238,12 +1260,16 @@ Answers are at the end of the chapter.
 
 10. **[Implement]** Reproduce `functions_ch.monotone_argmax` and
     `functions_ch.monotone_mean_warning`. Then draw 1000 random score lists of
-    length 5 (uniform in $[-3, 3]$) and count how often $\arg\max s^2$ differs
-    from $\arg\max s$, and how often $\arg\max e^s$ does.
+    length 5 (uniform in $[-3, 3]$, from any generator; Chapter 17 builds the
+    book's) and count how often $\arg\max s^2$ differs from $\arg\max s$,
+    and how often $\arg\max e^s$ does. Expect 0 for $e^s$ and, for $s^2$,
+    about half the lists: it differs exactly when the entry of largest
+    magnitude is negative.
 
 11. **[Investigate]** Repeat the experiment of `functions_ch.runge` with the
     points chosen not equally spaced but bunched toward the ends, for example
-    $x_i = \operatorname{sign}(t_i)\sqrt{|t_i|}$ where the $t_i$ are equally
+    $x_i = \mathrm{sign}(t_i)\sqrt{|t_i|}$ (with $\mathrm{sign}(0) = +1$ as in the
+    pseudocode page; the value at $t_i = 0$ does not matter here) where the $t_i$ are equally
     spaced on $[-1, 1]$. How does the largest error behave as
     $n$ grows? What does that say about whether the polynomial family or the
     choice of points was the cause?

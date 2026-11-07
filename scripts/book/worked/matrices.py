@@ -29,9 +29,10 @@ F = Fraction
 def _table(headers, rows, align=None):
     align = align or ("l" + "r" * (len(headers) - 1))
     sep = ["---:" if a == "r" else "---" for a in align]
-    out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
+    cell = lambda c: str(c).replace("|", "\\|")  # a literal pipe inside a cell must not split the column
+    out = ["| " + " | ".join(cell(h) for h in headers) + " |", "|" + "|".join(sep) + "|"]
     for r in rows:
-        out.append("| " + " | ".join(str(c) for c in r) + " |")
+        out.append("| " + " | ".join(cell(c) for c in r) + " |")
     return "\n".join(out)
 
 
@@ -302,11 +303,15 @@ def association_costs():
     out += ["A is [10, 100], B is [100, 5], C is [5, 50]:", "",
             _table(["order", "first product", "second product", "total"], rows2, "llll"), ""]
     # the two orders give the same answer, checked exactly on small integer matrices
-    A, B, C = _lcg_matrix(3, 4, 1), _lcg_matrix(4, 2, 2), _lcg_matrix(2, 5, 3)
+    A = [[(3 * i + 2 * j) % 7 - 3 for j in range(4)] for i in range(3)]
+    B = [[(i + 4 * j) % 5 - 2 for j in range(2)] for i in range(4)]
+    C = [[(2 * i + j) % 6 - 2 for j in range(5)] for i in range(2)]
     left, right = _matmul(_matmul(A, B), C), _matmul(A, _matmul(B, C))
     assert left == right
-    out += [f"On integer matrices of shapes [3,4], [4,2], [2,5] the two orders produce the same [3, 5] result "
-            f"(first row {_vec(left[0])}), as associativity promises."]
+    out += ["Integer matrices (entry (i, j), counting from 0, is (3i + 2j) mod 7 - 3 for P, (i + 4j) mod 5 - 2 for Q, "
+            "(2i + j) mod 6 - 2 for R):", "",
+            f"P = {_mat(A)} [3, 4]", "", f"Q = {_mat(B)} [4, 2]", "", f"R = {_mat(C)} [2, 5]", "",
+            f"Both groupings, (P Q) R and P (Q R), give the same [3, 5] result {_mat(left)}, as associativity promises."]
     return "\n".join(out)
 
 
@@ -439,7 +444,7 @@ def elimination_trace():
     for label, mat in shown:
         out += [f"{label}", "```text", _rows_text(mat, labels=True, sep_col=3), "```", ""]
     x = _back_substitute(M, 3)
-    out += [f"Pivot columns {piv}: three pivots, so the system has a unique solution. "
+    out += [f"Pivot columns (counted from 0) {piv}: three pivots, so the system has a unique solution. "
             f"Back substitution from the last row up gives x = {_vec(x)}.", ""]
     check = _matvec(A, x)
     out += [f"Check: A x = {_vec(check)}, equal to b = {_vec(b)}."]
@@ -456,7 +461,7 @@ def singular_example():
     out = ["A = [[1, 2, 3], [4, 5, 6], [7, 8, 9]].", "", "start", "```text", _rows_text(start, labels=True), "```", ""]
     for label, mat in trace:
         out += [label, "```text", _rows_text(mat, labels=True), "```", ""]
-    out += [f"Pivot columns {piv}: only {len(piv)} pivots, the last row is all zeros, rank = {len(piv)}.", ""]
+    out += [f"Pivot columns (counted from 0) {piv}: only {len(piv)} pivots, the last row is all zeros, rank = {len(piv)}.", ""]
     v1, v2 = [1, 1, 1], [1, -2, 1]
     rows = [("A (1, 1, 1)", _vec(_matvec(A, v1))), ("A (1, -2, 1)", _vec(_matvec(A, v2)))]
     t = 2
@@ -580,7 +585,7 @@ def pivot_choice():
         x = _back_substitute(M, 2)
         res = [sum(a * xi for a, xi in zip(row, x)) - bi for row, bi in zip(A, b)]
         rows.append((mode, _vec(x), f"{max(abs(r) for r in res):.1e}"))
-    out.append(_table(["pivot rule", "computed x", "largest residual |Ax - b|"], rows, "lrr"))
+    out.append(_table(["pivot rule", "computed x", "largest residual (max over equations of abs(Ax - b))"], rows, "lrr"))
     out.append("")
     out.append("System: 1e-17 x1 + x2 = 1 and x1 + x2 = 2, in 64-bit floating point. The exact solution is "
                "x1 = 1/(1 - 1e-17), x2 = 1 - 1e-17 x1, both within 1e-16 of 1.")
