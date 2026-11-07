@@ -94,7 +94,7 @@ tmp_src=$(mktemp)
 tmp_cand=$(mktemp)
 tmp_txt=$(mktemp)
 tmp_ctx=$(mktemp)
-trap 'rm -f "$tmp_hits" "$tmp_hits.sorted" "$tmp_src" "$tmp_cand" "$tmp_txt" "$tmp_ctx"' EXIT
+trap 'rm -f "$tmp_hits" "$tmp_hits.sorted" "$tmp_src" "$tmp_cand" "$tmp_txt" "$tmp_ctx" "$tmp_ctx.book"' EXIT
 
 # A number that is not glued to a surrounding word: "0.19", "36", "1,024" -
 # but not the "32" of `u32s`, the "40" of `P40s`, or the "4" of `f16x4`.
@@ -256,7 +256,11 @@ grep -noiP "$PCTL_RE" "$tmp_txt" >> "$tmp_cand"
 # Which records carry measurement vocabulary. Done once with grep -E (rather
 # than inside the awk below) so SRC_CONTEXT_RE keeps `\b` and stays a plain
 # extension of CONTEXT_RE.
-grep -niE "$SRC_CONTEXT_RE" "$tmp_txt" | cut -d: -f1 > "$tmp_ctx"
+# scripts/book generates the textbook's prose and tables, so its records
+# take the book's performance-only vocabulary (see BOOK_CONTEXT_RE).
+awk -F: '$1 ~ /^scripts\/book\// { print NR }' "$tmp_src" > "$tmp_ctx.book"
+grep -niE "$SRC_CONTEXT_RE" "$tmp_txt" | cut -d: -f1 | grep -vxFf "$tmp_ctx.book" > "$tmp_ctx" || true
+grep -niE "$BOOK_CONTEXT_RE" "$tmp_txt" | cut -d: -f1 | grep -xFf "$tmp_ctx.book" >> "$tmp_ctx" || true
 
 # Context-gate every candidate against the narration window (same file, 4
 # source lines back, 2 forward) and report the survivors.
