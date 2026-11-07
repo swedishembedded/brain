@@ -29,7 +29,7 @@ pub(crate) mod ops;
 pub mod serve;
 
 pub use config::{LayerType, RicursiveConfig};
-pub use import::{manifest, open_safetensors, validate_layout};
+pub use import::{manifest, open_checkpoint, open_safetensors, validate_layout};
 pub use layer::{Layer, LayerBuffers, LayerOutput, KERNELS};
 pub use model::{embed, Forward, Head, HeadOutput, RicursiveModel};
 pub use serve::{global_kv_bytes_per_token, lsa_device_bytes, ring_bytes_per_slot, ring_rows, RicursiveEngine, ServeConfig};

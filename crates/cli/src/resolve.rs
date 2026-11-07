@@ -196,6 +196,9 @@ enum Resolved {
     Optimize { rest: Vec<String> },
     /// `brain prune <BASE> --dataset … --out …` -- structured pruning.
     Prune { rest: Vec<String> },
+    /// `brain lsa distill|eval|prefill …` -- latent sparse attention for any engine that captures its attention; the
+    /// architecture is read from the checkpoint, not a token.
+    Lsa { rest: Vec<String> },
     Unknown(String),
     Empty,
 }
@@ -250,6 +253,9 @@ fn resolve(argv: &[String]) -> Resolved {
     if first == "prune" {
         return Resolved::Prune { rest: argv[1..].to_vec() };
     }
+    if first == "lsa" {
+        return Resolved::Lsa { rest: argv[1..].to_vec() };
+    }
     Resolved::Unknown(first.clone())
 }
 
@@ -264,6 +270,7 @@ pub fn dispatch(argv: &[String], help: &str) {
         Resolved::QuantizeFile { rest } => quantize_cli::run_quantize(&rest),
         Resolved::Optimize { rest } => optimize_cli::run_optimize(&rest),
         Resolved::Prune { rest } => prune_cli::run_prune(&rest),
+        Resolved::Lsa { rest } => crate::lsa_cli::run_lsa(&rest),
         Resolved::Unknown(tok) => {
             eprintln!("brain: unknown command '{tok}'\n");
             print!("{help}");

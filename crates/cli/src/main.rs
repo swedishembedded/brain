@@ -30,6 +30,7 @@ mod gguf_cli;
 mod gpt_cli;
 mod image_io;
 mod lfm_cli;
+mod lsa_cli;
 mod ouro_cli;
 mod huginn_cli;
 mod load_line;
@@ -553,6 +554,15 @@ QUANTIZE (the export sibling: any checkpoint -> a quantized GGUF)
       GGUF. Needs no per-architecture code: a tensor is quantized if it is
       rank 2 with a block-aligned row, unless --keep names it. --plan prints
       the per-tensor decision and writes nothing.
+
+LSA (latent sparse attention for any model whose engine captures its attention)
+  brain lsa distill --corpus DIR --out FILE (--model REPO | --checkpoint PATH) [--tokens N] [--epochs N] [--top-k N] [--top-p N]
+  brain lsa eval    --corpus DIR --indexer random|pca|FILE[,..] (--model REPO | --checkpoint PATH)
+  brain lsa prefill --indexer random|FILE (--model REPO | --checkpoint PATH) [--tokens N,N,..]
+      Distil, evaluate and time a latent-sparse-attention indexer. The
+      architecture is read from the checkpoint's config.json (--arch names
+      it): qwen3 over every layer, ricursive over its global layers. brain lsa
+      --help lists every option.
 
 OPTIMIZE (the weight format of every linear, searched within a byte budget)
   brain optimize BASE --dataset FILE --out DIR [--budget FORMAT | --bits-per-weight B | --max-bytes N]

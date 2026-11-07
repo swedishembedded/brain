@@ -286,15 +286,7 @@ pub fn lsa_device_bytes(indexer: &model::lsa::indexer::Indexer, block_size: u32,
     model::lsa::binding::LsaBinding::device_bytes_for(indexer, kv, max_prefill.max(max_batch), num_blocks)
 }
 
-/// One layer's attention inputs from [`Engine::capture_attention`], rotated
-/// as attention read them.
-#[derive(Clone, Debug)]
-pub struct LayerCapture {
-    /// `[T, q_dim]` queries.
-    pub q: Vec<f32>,
-    /// `[T, kv_dim]` keys.
-    pub k: Vec<f32>,
-}
+pub use model::lsa::capture::LayerCapture;
 
 /// Output columns per thread of the int8 prefill tile: 4 gives a 128x64
 /// workgroup tile whose register block fits two workgroups per SM, faster
@@ -1799,12 +1791,13 @@ impl Engine {
         Ok(())
     }
 
-    /// The teacher material of latent sparse attention's distillation: a dense
+    /// The teacher material of latent sparse attention's distillation (the
+    /// [`model::lsa::capture::AttentionCapture`] contract): a dense
     /// prefill of `prompt` (not added to the prefix cache) that keeps, per
     /// layer, every position's rotated queries `[T, q_dim]` and keys
     /// `[T, kv_dim]` as attention read them. Sparse attention, if attached,
     /// is set aside for the pass: the teacher is the model's own attention.
-    pub fn capture_attention(&mut self, prompt: &[u32]) -> Result<Vec<LayerCapture>, String> {
+    fn capture_layers(&mut self, prompt: &[u32]) -> Result<Vec<LayerCapture>, String> {
         if self.kv_int8 {
             return Err("capturing attention needs an f32 KV cache".into());
         }
@@ -7462,5 +7455,33 @@ mod rollout_tests {
 
         let diverged = (0..20u64).any(|seed| run(0.05, seed) != run(1.0, seed));
         assert!(diverged, "top_p=0.05 vs top_p=1.0 never diverged across 20 seeds - top_p does not appear to be honoured");
+    }
+}
+
+impl model::lsa::capture::AttentionCapture for Engine {
+    fn index_geometry(&self) -> model::lsa::indexer::IndexGeometry {
+        let c = &self.cfg;
+        model::lsa::indexer::IndexGeometry { n_layers: c.n_layers as usize, n_heads: c.n_heads as usize, n_kv_heads: c.n_kv_heads as usize, head_dim: c.head_dim as usize, rope_base: c.rope_theta }
+    }
+    /// Every layer attends the whole context.
+    fn sparse_capable(&self) -> Vec<bool> {
+        vec![true; self.cfg.n_layers as usize]
+    }
+    fn max_capture_tokens(&self) -> usize {
+        self.max_seq_len()
+    }
+    fn capture_attention(&mut self, prompt: &[u32], positions: &[u32]) -> Result<Vec<Option<LayerCapture>>, String> {
+        let q_dim = self.cfg.q_dim() as usize;
+        Ok(self
+            .capture_layers(prompt)?
+            .into_iter()
+            .map(|LayerCapture { q, k }| Some(LayerCapture { q: positions.iter().flat_map(|&p| q[p as usize * q_dim..][..q_dim].to_vec()).collect(), k }))
+            .collect())
+    }
+    fn position_logprobs(&mut self, prompt: &[u32], from: usize) -> Vec<f32> {
+        Engine::position_logprobs(self, prompt, from)
+    }
+    fn set_lsa(&mut self, indexer: &model::lsa::indexer::Indexer) -> Result<(), String> {
+        Engine::set_lsa(self, indexer)
     }
 }

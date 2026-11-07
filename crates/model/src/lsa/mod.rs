@@ -43,6 +43,7 @@
 
 pub mod attend;
 pub mod binding;
+pub mod capture;
 pub mod config;
 pub mod device;
 pub mod distill;

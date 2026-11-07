@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 
 use checkpoint::mmap::MmapSafetensors;
+use checkpoint::weightio::WeightReader;
 use checkpoint::remap::{Fetch, RemapSource};
 
 use crate::config::RicursiveConfig;
@@ -121,6 +122,28 @@ pub fn open_safetensors(path: &str, cfg: &RicursiveConfig, source_layers: &[usiz
         .map(|((canonical, _), (in_file, _))| (canonical, Fetch::Whole(in_file)))
         .collect();
     Ok(RemapSource::owning(Box::new(file), plan))
+}
+
+/// [`open_safetensors`] for a checkpoint that is a single safetensors file or a Hugging Face directory (sharded,
+/// with `model.safetensors.index.json`): the same validation, the same canonical names.
+pub fn open_checkpoint(path: &str, cfg: &RicursiveConfig, source_layers: &[usize]) -> Result<RemapSource<'static>, String> {
+    if source_layers.len() != cfg.num_hidden_layers {
+        return Err(format!("ricursive import: {} source layers for a {}-layer config", source_layers.len(), cfg.num_hidden_layers));
+    }
+    let p = std::path::Path::new(path);
+    let reader = if p.is_dir() { WeightReader::open_hf_dir(p) } else { WeightReader::open(path) }.map_err(|e| format!("ricursive import: cannot open {path}: {e}"))?;
+    let present: Vec<String> = reader.names().map(str::to_string).collect();
+    validate_layout(
+        cfg,
+        source_layers,
+        &present,
+        |n| reader.shape(n).map(|s| s.iter().map(|d| *d as usize).collect()),
+        |n| reader.dtype(n).map(str::to_string),
+    )
+    .map_err(|e| format!("{e} ({path})"))?;
+    let identity: Vec<usize> = (0..cfg.num_hidden_layers).collect();
+    let plan: HashMap<String, Fetch> = manifest(cfg, &identity).into_iter().zip(manifest(cfg, source_layers)).map(|((canonical, _), (in_file, _))| (canonical, Fetch::Whole(in_file))).collect();
+    Ok(RemapSource::owning(Box::new(reader), plan))
 }
 
 #[cfg(test)]

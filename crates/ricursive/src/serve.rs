@@ -73,6 +73,7 @@
 use checkpoint::TensorSource;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::lsa::binding::{self, Attachment, HeadShape, LsaBinding};
+use model::lsa::capture::{AttentionCapture, LayerCapture};
 use model::lsa::engine::{KeyPools, KvGeometry, LayerBuffers, LsaStats};
 use model::lsa::indexer::{IndexGeometry, Indexer};
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
@@ -206,6 +207,8 @@ pub struct RicursiveEngine {
     lsa: Option<LsaBinding>,
     /// Every layer's key pool, as the index pages read them.
     key_pools: Vec<DeviceBuffer>,
+    /// While capturing attention: the queries of each global layer of the forward in flight.
+    capture_q: Option<Vec<DeviceBuffer>>,
 }
 
 impl RicursiveEngine {
@@ -260,6 +263,7 @@ impl RicursiveEngine {
             max_blocks_per_seq: serve.max_seq_len.div_ceil(serve.block_size),
             lsa: None,
             key_pools,
+            capture_q: None,
             cfg,
             serve,
             src,
@@ -324,6 +328,11 @@ impl RicursiveEngine {
     /// densely.
     pub fn lsa_stats(&self) -> Option<LsaStats> {
         self.lsa.as_ref().map(|a| a.stats(&self.gpu))
+    }
+
+    /// The prefill position up to which chunks read densely (0 without sparse attention).
+    pub fn lsa_dense_until(&self) -> u32 {
+        self.lsa.as_ref().map_or(0, |a| a.dense_until())
     }
 
     /// Override the prefill position up to which chunks read densely (0, the default: every chunk reads sparsely;
@@ -446,6 +455,11 @@ impl RicursiveEngine {
             };
             let v = ops::linear(gpu, &mut s, &v_in, &w.v, n, hidden, kv_dim);
             let q = ops::rmsnorm(gpu, &mut s, &q_pre, &w.q_norm, hd, n * heads, c.rms_norm_eps);
+            if c.layer_type(l) == LayerType::Full {
+                if let Some(taken) = self.capture_q.as_mut() {
+                    taken.push(q.clone());
+                }
+            }
             let k = ops::rmsnorm(gpu, &mut s, &k_pre, &w.k_norm, hd, n * kv_heads, c.rms_norm_eps);
 
             let ctx = match c.layer_type(l) {
@@ -589,6 +603,20 @@ impl RicursiveEngine {
     /// Prefill `prompt[from..to]` (at most one ring-slack chunk) into `table`; the last row's final-norm hidden state
     /// when `last`.
     fn prefill_slice(&mut self, table: &mut BlockTable, prompt: &[u32], from: usize, to: usize, last: bool) -> Option<Vec<f32>> {
+        let x = self.forward_slice(table, prompt, from, to);
+        last.then(|| {
+            // Only the prompt's last row is projected.
+            let hidden = self.cfg.hidden_size;
+            let all = self.gpu.read(&x, (to - from) * hidden);
+            let row = self.gpu.storage(hidden as u64);
+            self.gpu.write_f32(&row, &all[(to - from - 1) * hidden..]);
+            self.head(&row, 1).0
+        })
+    }
+
+    /// The layer stack over `prompt[from..to]` of `table` (a chunk of at most the ring slack), appending its K/V:
+    /// the residual stream after the last layer, `[to - from, hidden]`.
+    fn forward_slice(&mut self, table: &mut BlockTable, prompt: &[u32], from: usize, to: usize) -> DeviceBuffer {
         if let Some(lsa) = self.lsa.as_mut() {
             let pools = KeyPools { keys: &self.key_pools, scales: None };
             lsa.prepare_chunk(&self.gpu, table, from as u32, (to - from) as u32, pools).unwrap_or_else(|e| panic!("ricursive serve: latent sparse attention: {e}"));
@@ -597,15 +625,89 @@ impl RicursiveEngine {
         assert_eq!(start as usize, from, "ricursive serve: the table holds {start} rows but the prompt resumes at {from}");
         let (blocks, ring) = (table.blocks().to_vec(), Self::ring_slot(table));
         let rows: Vec<RowPlan<'_>> = (from..to).map(|p| RowPlan { token: prompt[p], pos: p as u32, ring, blocks: &blocks }).collect();
-        let x = self.forward_hidden(&rows).unwrap_or_else(|e| panic!("{e}"));
-        last.then(|| {
-            // Only the prompt's last row is projected.
-            let hidden = self.cfg.hidden_size;
-            let all = self.gpu.read(&x, rows.len() * hidden);
-            let row = self.gpu.storage(hidden as u64);
-            self.gpu.write_f32(&row, &all[(rows.len() - 1) * hidden..]);
-            self.head(&row, 1).0
-        })
+        self.forward_hidden(&rows).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Run `prompt` from an empty table in chunks, calling `each(table, chunk start, chunk end, residual stream)` after each;
+    /// the sequence is released afterwards. LSA, if attached, stays in effect.
+    fn run_chunks(&mut self, prompt: &[u32], mut each: impl FnMut(&mut Self, &BlockTable, usize, usize, &DeviceBuffer)) -> Result<(), String> {
+        if prompt.is_empty() || prompt.len() > self.serve.max_seq_len as usize {
+            return Err(format!("ricursive: a text of {} tokens: the engine holds 1..={}", prompt.len(), self.serve.max_seq_len));
+        }
+        if let Some(&bad) = prompt.iter().find(|&&t| t as usize >= self.cfg.vocab_size) {
+            return Err(format!("ricursive: token {bad} is outside the vocabulary ({})", self.cfg.vocab_size));
+        }
+        let slot = self.ring_free.pop().ok_or("ricursive: no free sequence slot for a scoring pass")?;
+        let mut table = BlockTable::new();
+        table.set_state_row(slot);
+        let mut at = 0usize;
+        while at < prompt.len() {
+            let limit = self.lsa.as_ref().map_or(usize::MAX, |a| a.chunk_limit(at as u32) as usize);
+            let to = prompt.len().min(at + (self.serve.prefill_chunk as usize).min(limit));
+            let x = self.forward_slice(&mut table, prompt, at, to);
+            each(self, &table, at, to, &x);
+            at = to;
+        }
+        self.release_table(&mut table);
+        Ok(())
+    }
+
+    /// The queries (normed, unrotated: the global layers apply no RoPE) and keys of every global layer over a dense
+    /// prefill of `prompt` ([`model::lsa::capture::AttentionCapture`]); `None` for the sliding layers.
+    fn capture_global(&mut self, prompt: &[u32], positions: &[u32]) -> Result<Vec<Option<LayerCapture>>, String> {
+        let c = self.cfg.clone();
+        let globals: Vec<usize> = (0..c.num_hidden_layers).filter(|&l| c.layer_type(l) == LayerType::Full).collect();
+        let (q_dim, kv_dim) = (c.q_dim(), c.kv_dim());
+        let mut queries: Vec<Vec<f32>> = globals.iter().map(|_| Vec::with_capacity(positions.len() * q_dim)).collect();
+        let lsa = self.lsa.take();
+        self.capture_q = Some(Vec::new());
+        let mut keys: Vec<Vec<f32>> = globals.iter().map(|_| Vec::with_capacity(prompt.len() * kv_dim)).collect();
+        let result = self.run_chunks(prompt, |e, table, from, to, _| {
+            let taken = e.capture_q.replace(Vec::new()).unwrap_or_default();
+            for (acc, buf) in queries.iter_mut().zip(&taken) {
+                let rows = e.gpu.read(buf, (to - from) * q_dim);
+                // Only the requested positions are kept: a long text does not hold every query.
+                for &p in positions.iter().filter(|&&p| (from..to).contains(&(p as usize))) {
+                    acc.extend_from_slice(&rows[(p as usize - from) * q_dim..][..q_dim]);
+                }
+            }
+            // This chunk's global K rows, from the blocks the table holds for `from..to`.
+            for (acc, &l) in keys.iter_mut().zip(&globals) {
+                for p in from..to {
+                    let (block, offset) = table.locate(p as u32, e.serve.block_size);
+                    let row = (block * e.serve.block_size + offset) as usize * kv_dim;
+                    let mut buf = vec![0f32; kv_dim];
+                    e.gpu.read_into(&e.pools[l].k, row as u64, &mut buf);
+                    acc.extend(buf);
+                }
+            }
+        });
+        self.capture_q = None;
+        self.lsa = lsa;
+        result?;
+        let mut out: Vec<Option<LayerCapture>> = vec![None; c.num_hidden_layers];
+        for ((&l, q), k) in globals.iter().zip(queries).zip(keys) {
+            out[l] = Some(LayerCapture { q, k });
+        }
+        Ok(out)
+    }
+
+    /// The log-probability the model gives each next token of `prompt` at `from..len - 1`.
+    fn score(&mut self, prompt: &[u32], from: usize) -> Result<Vec<f32>, String> {
+        let vocab = self.cfg.vocab_size;
+        let mut out = Vec::new();
+        self.run_chunks(prompt, |e, _, start, to, x| {
+            let (_, logits) = e.head(x, (to - start) as u32);
+            for (i, row) in logits.chunks(vocab).enumerate() {
+                let p = start + i;
+                if p >= from && p + 1 < prompt.len() {
+                    let m = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let log_total = m as f64 + row.iter().map(|&z| ((z - m) as f64).exp()).sum::<f64>().ln();
+                    out.push((row[prompt[p + 1] as usize] as f64 - log_total) as f32);
+                }
+            }
+        })?;
+        Ok(out)
     }
 
     /// One decode step: the logits of each `(table, input)` pair, `[vocab]` per sequence.
@@ -773,5 +875,27 @@ impl PagedDecoder for RicursiveEngine {
     }
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY.min(self.cfg.vocab_size)
+    }
+}
+
+impl AttentionCapture for RicursiveEngine {
+    fn index_geometry(&self) -> IndexGeometry {
+        Self::index_geometry(&self.cfg)
+    }
+    /// Only the global layers: a sliding layer already reads its window.
+    fn sparse_capable(&self) -> Vec<bool> {
+        self.cfg.layer_types.iter().map(|t| *t == LayerType::Full).collect()
+    }
+    fn max_capture_tokens(&self) -> usize {
+        self.serve.max_seq_len as usize
+    }
+    fn capture_attention(&mut self, prompt: &[u32], positions: &[u32]) -> Result<Vec<Option<LayerCapture>>, String> {
+        self.capture_global(prompt, positions)
+    }
+    fn position_logprobs(&mut self, prompt: &[u32], from: usize) -> Vec<f32> {
+        self.score(prompt, from).unwrap_or_else(|e| panic!("{e}"))
+    }
+    fn set_lsa(&mut self, indexer: &Indexer) -> Result<(), String> {
+        RicursiveEngine::set_lsa(self, indexer)
     }
 }

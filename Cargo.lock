@@ -1052,6 +1052,7 @@ dependencies = [
  "brain-qwen3vl",
  "brain-recon",
  "brain-residency",
+ "brain-ricursive",
  "brain-rl",
  "brain-rrdbnet",
  "brain-runtime",
@@ -2407,7 +2408,6 @@ dependencies = [
  "brain-kernels",
  "brain-memauth",
  "brain-model",
- "brain-modelref",
  "brain-modelstore",
  "brain-optim",
  "brain-paramstore",
@@ -2613,6 +2613,7 @@ name = "brain-ricursive"
 version = "5.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
@@ -2620,6 +2621,7 @@ dependencies = [
  "brain-testutil",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
 ]
 
