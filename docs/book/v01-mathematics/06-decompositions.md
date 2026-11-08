@@ -5,64 +5,55 @@
 
 *What hidden structure does a matrix have, and how can a big matrix be approximated by small ones?*
 
-## The problem
-
 A weight matrix in a language model has $4096$ rows and $4096$ columns:
 $16\,777\,216$ numbers, about sixty-four mebibytes in 32-bit floating point,
 for one layer of dozens. Chapter 4 taught us what such a table does: it is a
 linear map, it composes with other maps by multiplication, and it can be
-inverted only if its rank is full. That is a description of what the table
-*is*. It says nothing yet about what is *inside* it, and four practical
-questions depend on the answer.
+inverted only if its rank is full. That describes what the table *is*. It says
+nothing yet about what is *inside* it, and the practical questions that follow
+all depend on the answer.
 
-1. **How much does the map scale space, and when does it collapse it?** Chapter
-   4 found a single number, $ad - bc$, that gave the area of the image of a
-   unit square and vanished exactly when the map crushed the plane onto a
-   line. We want that number for matrices of any size, with its geometric
-   meaning, and we want to know whether it is the right thing to compute.
-2. **Are there directions that the map only stretches, never turns?** Take
-   $\mathbf{A} = \begin{pmatrix} 2 & 1 \\ 1 & 2 \end{pmatrix}$. It sends
-   $(1, 0)$ to $(2, 1)$, which points somewhere else. But it sends $(1, 1)$ to
-   $(3, 3)$, the same direction, three times as long. If a matrix has such
-   directions then applying it a hundred times, which is what depth in a
-   network and recurrence in a sequence model amount to, becomes easy to
-   predict: the stretched directions grow or shrink by a fixed factor each
-   time.
-3. **Can we move data around without distorting it?** Some maps keep every
-   length and every angle: they turn the space as a rigid object. They never
-   amplify a rounding error, and their inverse costs nothing. Which matrices
-   are these, how do we build them, and what do they do to a pair of
-   coordinates that we turn by an angle?
-4. **Does every matrix reduce to such simple pieces, and can a big one be
-   replaced by a small one?** If a table of $4096 \times 4096$ numbers were
-   built from only $8$ independent patterns, it could be stored with
-   $8 \times (4096 + 4096) = 65\,536$ numbers, two hundred and fifty-six times
-   fewer, and a fine-tuning method could train only those. Whether that is
-   true of a given matrix is something a matrix itself can tell us, through
-   numbers called singular values.
+Chapter 4 found a single number, $ad - bc$, that gave the area of the image of
+a unit square and vanished exactly when the map crushed the plane onto a line.
+We want that number for matrices of any size, with its geometric meaning, and
+we want to know whether it is the right thing to compute. Then there is the
+matter of direction. Take
+$\mathbf{A} = \begin{pmatrix} 2 & 1 \\ 1 & 2 \end{pmatrix}$. It sends
+$(1, 0)$ to $(2, 1)$, which points somewhere else. But it sends $(1, 1)$ to
+$(3, 3)$, the same direction, three times as long. If a matrix has such
+directions, applying it a hundred times, which is what depth in a network and
+recurrence in a sequence model amount to, becomes easy to predict: the
+stretched directions grow or shrink by a fixed factor each time.
 
-The chapter answers these in order. Each answer is one idea from the previous
-chapters used a little harder: the area number is the $ad - bc$ of Chapter 4,
-the stretched directions come from solving $\mathbf{A}\mathbf{x} = \lambda
+Some maps do not stretch anything. They keep every length and every angle and
+turn the space as a rigid object, so they never amplify a rounding error and
+their inverse costs nothing. Which matrices are these, how are they built, and
+what do they do to a pair of coordinates that we turn by an angle? And behind
+all of it sits the question that makes the chapter pay: does every matrix
+reduce to such simple pieces, and can a big one be replaced by a small one? If
+a table of $4096 \times 4096$ numbers were built from only $8$ independent
+patterns, it could be stored with $8 \times (4096 + 4096) = 65\,536$ numbers,
+two hundred and fifty-six times fewer, and a fine-tuning method could train
+only those. Whether that is true of a given matrix is something the matrix
+itself can tell us, through numbers called singular values.
+
+The answers come in that order, and each is one idea from the earlier chapters
+used a little harder. The area number is the $ad - bc$ of Chapter 4, the
+stretched directions come from solving $\mathbf{A}\mathbf{x} = \lambda
 \mathbf{x}$ with the elimination of Chapter 4, the rigid maps are the matrices
 whose columns are orthogonal unit vectors in the sense of Chapter 3, and the
-approximation is a sum of simple matrices whose size is measured with the
-norm of Chapter 3.
+approximation is a sum of simple matrices whose size is measured with the norm
+of Chapter 3. Complex numbers belong to Chapter 14, so wherever one would be
+needed the text says so and goes around it; derivatives wait for Chapter 7, and
+statistics for Volume II.
 
-You may use from earlier chapters: matrix multiplication, the transpose
-and its adjoint identity $(\mathbf{M}\mathbf{x})\cdot\mathbf{y} =
-\mathbf{x}\cdot(\mathbf{M}^\top\mathbf{y})$, the inverse and rank (all
-Chapter 4), norms, orthogonality and the unit circle with its cosine and sine
-(Chapter 3), the roots of a quadratic (Chapter 2), and the flat view of an
-array as one long list (Chapter 5). Not assumed: complex numbers (they are
-Chapter 14; this chapter notes where one would be needed and goes around it),
-derivatives (Chapter 7), and anything about statistics.
-
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The
-answers are at the end of the chapter. If one is hard, go back to the chapter
-named before reading on.
+Six ideas from earlier chapters carry the weight, and it helps to have them
+fresh: matrix multiplication and the transpose with its adjoint identity
+$(\mathbf{M}\mathbf{x})\cdot\mathbf{y} = \mathbf{x}\cdot(\mathbf{M}^\top\mathbf{y})$,
+the inverse and rank, norms and orthogonality, the unit circle, the roots of a
+quadratic, and the flat view of an array as one long list (Chapter 5). Answer
+these from memory; the answers are at the end, and a hard one sends you back to
+the chapter named.
 
 1. (Chapter 4, matrix multiplication and transpose.) For $\mathbf{A} =
    \begin{pmatrix}1&2\\0&1\end{pmatrix}$ and $\mathbf{B} =
@@ -1271,10 +1262,10 @@ most energy, and projecting onto them is the best rank-$r$ summary of the
 examples in the Eckart-Young sense. This is principal component analysis,
 met again in Volume II.
 
-## The algorithms
+## Jacobi eigenvalues and the SVD as pseudocode
 
-In the book's [pseudocode](../pseudocode.md). The first function is the one
-shown above. The next two compute eigenpairs of a symmetric matrix and the SVD;
+The procedures of this chapter, in the book's [pseudocode](../pseudocode.md).
+The first function is the one shown above. The next two compute eigenpairs of a symmetric matrix and the SVD;
 the textbook cost of either is on the order of $n^3$ for a square matrix, so
 they are for matrices up to a few thousand wide, not for the full weights of a
 large model.
@@ -1403,7 +1394,7 @@ $\sigma_i = 0$: neither the thin nor the full form, but enough to rebuild
 $\mathbf{A}$. The examples below call `svd_one_sided` with `sweeps = 60`; it needs
 2 on the matrix of the next section.)
 
-## Making it work
+## Comparing decompositions without fooling yourself
 
 **Never compare singular vectors elementwise.** The pair $(\mathbf{u}_i,
 \mathbf{v}_i)$ can be negated together without changing $\mathbf{u}_i\mathbf{v}_i^\top$,
@@ -1460,7 +1451,7 @@ direction with one matrix-vector product per step; finding the top $k$
 (repeat with the found directions removed, or iterate on $k$ vectors at once)
 costs far less than all $n$ for $k \ll n$. A full decomposition is cubic.
 
-## Where this appears in brain
+## Eigensolvers, rotations and adapters in brain
 
 brain uses a symmetric eigensolver, orthogonal rotations of activations, low-rank
 adapters and rotary position embeddings. Four places show them, and two stories
@@ -1699,7 +1690,7 @@ variable, and builds the derivative.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $\mathbf{A}\mathbf{B} = \begin{pmatrix}3&2\\1&1\end{pmatrix}$ and $(\mathbf{A}\mathbf{B})^\top = \begin{pmatrix}3&1\\2&1\end{pmatrix}$, which equals $\mathbf{B}^\top\mathbf{A}^\top$ (the order reverses).
 2. $4\cdot 6 - 7 \cdot 2 = 10 \ne 0$, so the inverse exists. A $2 \times 2$ matrix with $ad - bc = 0$ has no inverse: it crushes the plane onto a line (or a point).

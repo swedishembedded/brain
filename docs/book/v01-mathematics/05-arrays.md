@@ -5,70 +5,56 @@
 
 *How are vectors, matrices and higher-dimensional arrays actually laid out in memory and indexed?*
 
-## The problem
+Take twelve numbers, $0, 1, 2, \dots, 11$, stored one after another in memory,
+and tell a program to treat them as a matrix $A$ of 3 rows and 4 columns. What
+is $A_{12}$, the entry in row 1, column 2 (counting from 0)? If the rows were
+written out one after another, row 0 is $0, 1, 2, 3$ and row 1 is
+$4, 5, 6, 7$, so the answer is 6. If the columns were written out one after
+another, column 0 is $0, 1, 2$, column 1 is $3, 4, 5$, column 2 is $6, 7, 8$
+and the entry is the second number of that column, 7. Both readings are
+reasonable, they give different matrices from the same twelve numbers, and the
+numbers themselves do not say which was meant.
 
-A model reads a batch of 32 colour images, each 224 pixels high and 224 wide
-with three colour channels. As a mathematical object that batch is a table with
-four indices: which image, which channel, which row, which column. A matrix has
-two indices, and Chapter 4 gave those a great deal of structure. A batch of
-images has four, a batch of token sequences has three, and an engine has to
-store, slice, reorder and combine all of them.
+The ambiguity is small here and expensive at scale. A model reads a batch of 32
+colour images, each 224 pixels high and 224 wide with three colour channels. As
+a mathematical object that batch is a table with four indices: which image,
+which channel, which row, which column. A matrix has two indices, and Chapter 4
+gave those a great deal of structure. A batch of images has four, a batch of
+token sequences has three, and an engine has to store, slice, reorder and
+combine all of them, on a machine that has no tables at all. Memory is one long
+line of numbered cells, and a four-index table has to be flattened onto it.
 
-But a computer has no tables. Memory is one long line of numbered cells, and a
-four-index table has to be flattened onto it. Every operation that sounds
-harmless in the mathematical language then turns into a question about that line:
+Four ordinary-sounding operations then turn into questions about that line.
+A program that wants the element $(b, c, i, j)$ must turn four indices into one
+address, and must do it the same way in every kernel, or two pieces of code
+will disagree about which number is which. Chapter 4 defined the transpose as
+swapping rows and columns and remarked that a program rarely needs a copy;
+how can a matrix be read as its own transpose without moving a single number?
+A sequence of vectors of width 6 can be seen as two vectors of width 3 per
+position (two "heads"), and moving the head axis in front of the position axis
+is also a change of shape; the two give arrays of the same shape with different
+contents, and the program runs either way and produces a plausible wrong
+answer for one of them. And a layer adds a bias vector of length $D$ to every
+one of $T$ rows, which Chapter 4 wrote as "add $\mathbf{b}$ to every row" in
+words; there should be one precise rule for it, so that code can do it without
+making $T$ copies of the bias, and so that mistakes are caught and not
+silently turned into something else.
 
-1. **Where is the element with index $(b, c, i, j)$?** A program that wants one
-   number must turn four indices into one address, and must do it the same way
-   every time, in every kernel, or two pieces of code will disagree about which
-   number is which. Nothing in the numbers themselves says how it was done.
-2. **What does it cost to transpose?** Chapter 4 defined the transpose as
-   swapping rows and columns, and noted that a program rarely needs a copy. How
-   can a matrix be read as its own transpose without moving a single number?
-3. **What can be reshaped, and what cannot?** A sequence of vectors of width 6
-   can be seen as two vectors of width 3 per position (two "heads"). That is a
-   change of shape. Moving the head axis in front of the position axis is also
-   a change of shape. They give arrays of the same shape with different
-   contents, and the program runs either way and produces a plausible wrong
-   answer for one of them.
-4. **How do arrays of different shapes combine?** A layer adds a bias vector of
-   length $D$ to every one of $T$ rows. Chapter 4 wrote "add $\mathbf{b}$ to every
-   row" in words. There should be one precise rule for this, so that code can
-   do it without making $T$ copies of the bias, and so that mistakes are
-   caught and not silently turned into something else.
+One idea, the stride, and one habit, keeping the numbers in memory apart from
+the way they are read, answer all four. Chapter 3 gave us vectors and Chapter 4
+matrices; here both are generalised to arrays with any number of axes, their
+place in memory is pinned down exactly, and the operations that move, reorder
+and combine them are derived. Nothing about computer memory is assumed beyond
+what the text explains. How memory speed depends on the order of reading is
+only touched on here and is measured in Volume IV.
 
-This chapter answers all four with one idea, the stride, and one habit, the
-distinction between the numbers in memory and the way they are read. Chapter 3
-gave us vectors, Chapter 4 matrices. We now generalise both to arrays with any
-number of axes, say exactly how they live in memory, and derive the operations
-that move, reorder and combine them.
+Indices in this chapter start at **0**. Elsewhere in mathematics they start at
+1, but this chapter is about addresses, where the first element is at offset 0,
+and the [pseudocode conventions](../pseudocode.md) do the same.
 
-A small case shows what is at stake. The twelve numbers $0, 1, 2, \dots, 11$ sit
-in memory in that order, and a program is told to treat them as a matrix $A$ of
-3 rows and 4 columns. What is $A_{12}$, the entry in row 1, column 2 (counting
-from 0)? If the rows were written out one after another, row 0 is
-$0, 1, 2, 3$ and row 1 is $4, 5, 6, 7$, so the answer is 6. If the columns were
-written out one after another, column 0 is $0, 1, 2$, column 1 is $3, 4, 5$,
-column 2 is $6, 7, 8$ and the entry is the second number of that column, 7.
-Both readings are reasonable, they give different matrices from the same twelve
-numbers, and the numbers themselves do not say which one was meant. The rest of
-the chapter turns that small ambiguity into a complete theory.
-
-You may use from earlier chapters: vectors (Chapter 3), matrices, the transpose
-and matrix multiplication (Chapter 4), and sums and products (Chapter 1). Not
-assumed: anything about computer memory; it is explained here as far as the
-book needs it. How memory speed depends on the order of reading is only touched
-on here and is measured in Volume IV.
-
-One note on indices. Elsewhere in mathematics indices start at 1. This chapter
-is about addresses, where the first element is at offset 0, so, as in the
-[pseudocode conventions](../pseudocode.md), every index here starts at **0**.
-
-## Before you begin
-
-Five questions on ideas from earlier chapters, to answer from memory. The
-answers are at the end of the chapter. If one is hard, go back to the
-chapter named before reading on.
+The derivation leans on five ideas from earlier chapters, so it is worth
+bringing them back first. Answer them from memory; the answers are at the end,
+and if one is hard, the chapter named is the place to look.
 
 1. (Chapter 1, sums.) Write $\sum_{k=0}^{2} i_k s_k$ out in full and evaluate it for
    $(i_0, i_1, i_2) = (1, 2, 3)$ and $(s_0, s_1, s_2) = (12, 4, 1)$.
@@ -953,11 +939,11 @@ exchange of them is a permutation with the same cost and the same
 trap. Code that handles several models must say which layout every tensor
 has, in a name or a comment, because the shape alone, as the heads bug showed, does not.
 
-## The algorithms
+## Views, strides and reshapes as pseudocode
 
-Pseudocode for the operations above. A **view** is the record of equation (1).
-Where the conventions say a slice is a view, these are the functions that make
-it one.
+Everything so far reduces to one record and a handful of functions over it. The
+record is a **view**, equation (1) written as data, and where the conventions
+say a slice is a view these are the functions that make it one.
 
 ```text
 record View:
@@ -1090,43 +1076,42 @@ and fails on $4 = 2 \cdot 12$, so it reports `ok = false` and a caller copies
 with `materialize`. A real implementation calls `reshape_view` first and
 `reshape` only when it fails.
 
-## Making it work
+## Keeping layout bugs visible
 
-**Say which layout a tensor is in.** The shape of a tensor does not record
-whether its axes are $[B, C, H, W]$ or $[B, H, W, C]$, nor whether a buffer is
-row- or column-major. Name the layout where a tensor is created and at every
-boundary (a file, a kernel call, a library), and test a conversion by a round
-trip: permute and permute back must return the original bitwise.
+Nearly every mistake in this chapter preserves the shapes and damages the
+values, which makes layout bugs quiet ones, and most of the defence is a matter
+of habit.
 
-**A test must see the bug.** The reshape-for-transpose bug and the silent
-broadcast both preserve every shape. A test on shapes cannot find them; a test
-on *values* with distinguishable numbers (like $10t + c$ above, where each
-number names its position) finds them immediately. Use numbers that name their
-place whenever a test checks a layout.
+The first habit is to say which layout a tensor is in. The shape does not
+record whether its axes are $[B, C, H, W]$ or $[B, H, W, C]$, nor whether a
+buffer is row- or column-major, so name the layout where a tensor is created
+and at every boundary (a file, a kernel call, a library), and test a
+conversion by a round trip: permute and permute back must return the original
+bitwise.
 
-**Also use dimensions that expose what the real ones hide.** A test with square
-matrices accepts a transposed buffer. A test with every size a multiple of 64
-never notices an alignment assumption. Make the sizes distinct and awkward
-(2, 3, 5), which is the reason the chapter's examples use $[2, 3]$ and $[3, 4]$ and not
-$[4, 4]$.
+The second is to give tests numbers that name their place. The reshape-for-
+transpose bug and the silent broadcast both preserve every shape, so a test on
+shapes cannot find them; a test on values like $10t + c$ above, where each
+number names its position, finds them immediately. Sizes matter in the same
+way: a test with square matrices accepts a transposed buffer, and one with
+every size a multiple of 64 never notices an alignment assumption. Make the
+sizes distinct and awkward (2, 3, 5), which is why the chapter's examples use
+$[2, 3]$ and $[3, 4]$ and not $[4, 4]$.
 
-**Strides are in elements, offsets can be large.** A stride or an offset must
-be stored in an integer big enough for the largest array: with 32-bit
-integers an array of more than $2^{32}$ elements cannot be indexed, and the
-failure, a wrapped offset, is silent. Check the element count when the shape is
-created.
+Three smaller hazards belong with these. A stride or an offset must be stored
+in an integer big enough for the largest array: with 32-bit integers an array
+of more than $2^{32}$ elements cannot be indexed, and the failure, a wrapped
+offset, is silent, so check the element count when the shape is created.
+A write through a view changes everything that shares the storage, so where a
+function must not change its input it copies, where it may the conventions mark
+the argument `inout`, and a function that returns a view of its input extends
+the input's lifetime, since the view is valid only while the storage is. And
+some devices bind a slice of a buffer to a kernel only if the slice starts at a
+multiple of a fixed number of bytes; whether a row boundary satisfies that
+depends on the row width, which is arithmetic of exactly this chapter, and the
+last story below is about it.
 
-**Aliasing.** A write through a view changes everything that shares the storage.
-Where a function must not change its input, it copies; where it may, the
-conventions mark the argument `inout`. A function that returns a view of its
-input extends the input's lifetime: the view is only valid while the storage is.
-
-**A slice of a buffer can be illegal.** Some devices bind a slice of a buffer to
-a kernel only if the slice starts at a multiple of a fixed number of bytes.
-Whether a row boundary satisfies that depends on the row width, which is
-arithmetic of exactly this chapter, and the case study's story is about it.
-
-## Where this appears in brain
+## How brain's kernels compute offsets
 
 Every kernel in brain receives its tensors as flat buffers plus a small block of
 parameters, and computes the offset formula of this chapter by hand, one index
@@ -1434,9 +1419,8 @@ explicitly. The **batch dimension** is the first axis, where each example is a
 contiguous block, the first size never enters a stride, and a $[B, T, D]$ batch merges
 to $[B T, D]$ for free so that one matrix product serves all examples.
 
-What this chapter does not give is a reason why the numbers in a matrix should be
-what they are. Having fixed how matrices and tensors are stored and moved, the
-next chapter returns to the matrices themselves and asks what hidden structure one
+How a matrix is stored and moved is now settled, but not why its numbers are what
+they are. The next chapter returns to the matrices themselves and asks what hidden structure one
 has: the directions a map only stretches (eigenvectors), the rotations, and
 the way a large matrix is approximated by a sum of a few simple ones.
 
@@ -1452,7 +1436,7 @@ the way a large matrix is approximated by a sum of a few simple ones.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $\sum_{k=0}^{2} i_k s_k = i_0 s_0 + i_1 s_1 + i_2 s_2 = 1\cdot 12 + 2\cdot 4 + 3\cdot 1 = 23$.
 2. A function has an inverse when it is one-to-one (different inputs give

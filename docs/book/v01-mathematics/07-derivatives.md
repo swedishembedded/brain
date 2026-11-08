@@ -5,8 +5,6 @@
 
 *How do we measure how fast a function's output changes when its input moves a tiny bit?*
 
-## The problem
-
 You have a machine with one knob. The knob is a number $w$, the machine makes a
 prediction from it, and a score $L(w)$ says how wrong the prediction is: zero
 is perfect, larger is worse. Chapter 2 taught us to call $L$ a function and $w$
@@ -44,28 +42,26 @@ once: its sign says which way to turn (up, since it is negative and we want the
 score to fall) and its size says how much the score responds (a nudge of $0.01$
 moves it by about $0.08$). It is the **rate of change** of $L$ at $w = 0.5$.
 
-This chapter turns that observation into mathematics. Reading a rate off a table
-of nudges is slow (every number costs one run of the machine) and it is only
-approximate. A **derivative** is the exact value that the last column approaches,
-and the rules in this chapter compute it from a formula without any nudging.
-That matters for a reason that the rest of the book keeps returning to. A neural
-network has millions of knobs, and training turns every knob a little at every
-step, in the direction its own derivative recommends. Nudging each knob and
-re-reading the score would cost millions of runs per step. A formula for the
+Reading a rate off a table of nudges is slow, since every number costs one run
+of the machine, and it is only approximate. A **derivative** is the exact value
+that the last column approaches, and the rules of this chapter compute it from a
+formula with no nudging at all. The difference decides what training can afford.
+A neural network has millions of knobs, and each step turns every one of them a
+little, in the direction its own derivative recommends. Nudging each knob and
+re-reading the score would cost millions of runs per step; a formula for the
 derivative costs about one.
 
-We build the idea in the order a reader needs it: the slope of a line through two
-points of a curve, what happens when the two points merge, the rules for
-differentiating sums, products, quotients and compositions, the exponential and
-logarithm, what a slope of zero means, when that guarantees a single best answer,
-a method that uses the slope to find roots and minima very fast, and the error you
-make when you estimate a derivative numerically. You may use from earlier chapters: functions,
+To get there we follow the slope of a line through two points of a curve and ask
+what happens as the points merge. That gives rules for sums, products,
+quotients and compositions, then the exponential and the logarithm, then the
+meaning of a slope of zero and the cases where it guarantees a single best
+answer. Newton's method, which uses the slope to find roots and minima very
+quickly, comes next, and the chapter closes with the error one makes in
+estimating a derivative numerically. The tools needed are functions,
 composition and polynomials (Chapter 2), the exponential function and its
-inverse the logarithm (Chapters 1 and 2), and the number $e$ (Chapter 1).
-
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+inverse the logarithm (Chapters 1 and 2), and the number $e$ (Chapter 1), so
+here are six questions on them, to answer from memory. The answers are at the
+end of the chapter, and a hard one sends you back to the chapter named.
 
 1. (Chapter 2, composition.) With $f(x) = x^2$ and $g(x) = 3x + 1$, compute $(f \circ g)(2)$ and $(g \circ f)(2)$.
 2. (Chapter 2, polynomials.) Evaluate $p(x) = 2x^3 - 5x + 1$ at $x = 2$.
@@ -1098,28 +1094,32 @@ term properly; here the rule is that a finite-difference derivative has a best
 step, that it is not "as small as possible", and that its size is set by the
 number format.
 
-## Making it work
+## Trusting a derivative formula
 
-- **Check a derivative against a central difference.** Every formula in this
-  chapter was checked that way. Evaluate at a handful of points that are not
-  special (not $0$, not $1$), take $h$ near $u^{1/3}$ times a scale of
-  $|x|$ and compare with a relative tolerance. A mismatch means the formula (or the
-  code) is wrong; agreement means only that it is right *at those points*.
-- **Evaluate the outer derivative at the inner value.** In the chain rule the
-  first factor is $f'(g(x))$. The classic bug is $f'(x)$.
-- **Do not simplify a product of rates across links.** Keep each link's local
-  derivative: reusing the forward value ($s$ for the logistic slope) is what makes
-  derivatives cheap.
-- **Check the domain.** $\frac{d}{dx}\log x = 1/x$ holds for $x > 0$ only; the
-  quotient rule needs $g(x) \ne 0$; a derivative at a corner does not exist. A
-  program evaluates the formula blindly.
-- **Prefer central differences for checking, forward for cheapness.** A forward
-  difference costs one extra evaluation per direction and has first-order error;
-  a central difference costs two and has second-order error.
+A derivative formula is easy to get subtly wrong, so the working habits of this
+chapter are all ways of checking one.
 
-## Where this appears in brain
+The surest is to compare with a central difference. Every formula in this
+chapter was checked that way: evaluate at a handful of points that are not
+special (not $0$, not $1$), take $h$ near $u^{1/3}$ times a scale of $|x|$ and
+compare with a relative tolerance. A mismatch means the formula (or the code)
+is wrong; agreement means only that it is right *at those points*. A forward
+difference costs one extra evaluation per direction and has first-order error;
+a central difference costs two and has second-order error, so the first is the
+cheap choice and the second the one to check with.
 
-**Derivative formulas in backward kernels.** The rules of this chapter are what
+Three slips recur. In the chain rule the first factor is $f'(g(x))$, the outer
+derivative at the inner value, and the classic bug is $f'(x)$. A product of
+rates across links should not be simplified away: keep each link's local
+derivative, because reusing the forward value ($s$ for the logistic slope) is
+what makes derivatives cheap. And a formula has a domain that a program ignores:
+$\frac{d}{dx}\log x = 1/x$ holds for $x > 0$ only, the quotient rule needs
+$g(x) \ne 0$, and a derivative at a corner does not exist, yet the program
+evaluates the formula blindly.
+
+## Derivative formulas inside brain's backward kernels
+
+**The rules in the kernels.** The rules of this chapter are what
 each backward kernel in `crates/kernels/wgsl` implements, written out in its header
 comment. `crates/kernels/wgsl/tanh_act_bwd.wgsl` computes $dx = dy\,(1 - \tanh^2 x)$,
 the derivative $1 - \tanh^2$ that the central differences below confirm.
@@ -1289,7 +1289,7 @@ extends every idea here to that case.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $(f\circ g)(2) = f(g(2)) = f(7) = 49$ and $(g\circ f)(2) = g(f(2)) = g(4) = 13$. The order matters.
 2. $2 \cdot 8 - 5 \cdot 2 + 1 = 16 - 10 + 1 = 7$.
