@@ -443,7 +443,7 @@ volumes:
         title: "Positional Information"
         question: "Attention ignores order; how do we tell it where each token is?"
         introduces: [absolute-position-embedding, sinusoidal-encoding, rotary-position-embedding, relative-position, multi-axis-rope]
-        requires: [scaled-dot-product-attention, rotation-matrix, sinusoid, complex-number]
+        requires: [scaled-dot-product-attention, rotation-matrix, sinusoid, complex-number, eulers-formula, embedding-table, dot-product, arithmetic-intensity, bandwidth-bound, kernel-fusion]
         brain: []
       - id: transformer-block
         title: "The Transformer Block"

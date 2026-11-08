@@ -68,8 +68,8 @@ generation.
    sequence and write another, and why a fixed-size summary failed.
 7. [Self-Attention](07-self-attention.md): how every position in a sequence can look at every
    other position in parallel.
-8. Positional Information: how attention, which ignores order, is told where each
-   token is.
+8. [Positional Information](08-positions.md): how attention, which ignores order, is told
+   where each token is.
 9. The Transformer Block: how attention, a feed-forward network, residuals and
    normalization fit into one repeating unit.
 10. Training a GPT from Scratch: the full pipeline from raw text to a trained

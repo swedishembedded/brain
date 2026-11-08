@@ -10,6 +10,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **ablation**: removing or adding the components of a method one at a time (or in a grid) under the same protocol to see which of them produce the result; when components interact, the grid is the report and shares of the gain are not defined. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
+**absolute position embedding**: a table with one trained vector for each position, added to the token's embedding before the first layer, so that the same word at two places enters the network as two different vectors; it cannot name a position beyond its last row. *([Positional Information](v05-sequences/08-positions.md))*
+
 **accuracy**: the share of a classifier's decisions that are right, $(\mathrm{TP} + \mathrm{TN})/N$; equivalently the average of the per-class success rates weighted by the class shares, so a rare class barely affects it. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **activation function**: the fixed one-input function $g$ a neuron applies to its weighted sum to produce its output, for example the identity, the sigmoid or the step. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
@@ -454,6 +456,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **monotonic function**: a function that never reverses direction, always increasing or always decreasing, and so keeps the order of single values. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
+**multi-axis rotary embedding**: rotary embedding for tokens that have a position on several axes, such as the frame, row and column of an image patch, in which the channel pairs of a head are divided among the axes and each pair turns by the position on its own axis times its own rate. *([Positional Information](v05-sequences/08-positions.md))*
+
 **multi-head attention**: attention run $H$ times on slices of the width, each head with its own queries, keys and values, the outputs placed side by side and mixed by one output matrix, so that a position can ask several different questions of the same set at once. *([Self-Attention](v05-sequences/07-self-attention.md))*
 
 **multilayer perceptron**: a network of fully connected layers, each followed by an activation function (usually except the last), so that each layer reads all of the outputs of the one before it; the name is historical, since its units rarely use the step. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
@@ -584,6 +588,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **relative error**: the size of the difference between two numbers divided by the larger of their sizes, which is independent of scale but unbounded near zero. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
+**relative position**: the offset $j - i$ between a key and a query; a position scheme is relative when the score it produces depends on the two positions only through this offset, whether by rotation, by a learned bias per bucket of offsets or by a fixed slope. *([Positional Information](v05-sequences/08-positions.md))*
+
 **relu**: the rectified linear unit $\max(0, z)$, zero for negative inputs and the identity for positive ones, with slope $1$ where it is positive and $0$ elsewhere. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **reporting uncertainty**: stating with a result its intervals over seeds and over the test sample, the numbers of seeds and examples, what was tuned on which split, and how many variants were tried, so that a reader can judge how far to trust it. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
@@ -603,6 +609,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **ROC curve**: the curve of the true positive rate against the false positive rate as the decision threshold moves over every value; its area equals the probability that a random positive is scored above a random negative, counting ties as one half. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **roofline model**: the bound that the attainable rate of a computation on a machine is the smaller of the machine's peak arithmetic rate and its arithmetic intensity times its memory bandwidth, drawn as a slanted line that meets a flat one at the ridge point. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
+
+**rotary position embedding**: a scheme that cuts each query and key into pairs of channels and rotates the pair $m$ of position $i$ by the angle $i\,\omega_m$ after the projections, so that every attention score depends on the two positions only through their offset. *([Positional Information](v05-sequences/08-positions.md))*
 
 **rotation matrix**: an orthogonal matrix with determinant $+1$; in the plane $\begin{pmatrix}\cos\theta&-\sin\theta\\\sin\theta&\cos\theta\end{pmatrix}$, and rotations compose by adding their angles. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
@@ -649,6 +657,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **singular value decomposition**: the factorisation $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$ of any matrix into a rotation, a stretch by non-negative singular values and a second rotation. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
 **sinusoid**: a wave $A\cos(2\pi f t + \varphi)$ described by an amplitude $A$ (its largest value), a frequency $f$ (cycles per second) and a phase $\varphi$ (where in its cycle it stands at time zero); a cosine and a sine are the same sinusoid a quarter period apart. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
+
+**sinusoidal encoding**: a position vector made of sines and cosines at a geometric scale of rates, $\sin(i\omega_m)$ and $\cos(i\omega_m)$, which needs no training and has, for every offset, a fixed linear map from the vector at one position to the vector at another. *([Positional Information](v05-sequences/08-positions.md))*
 
 **softmax**: the function that turns a vector of real scores into a probability vector by exponentiating each score and dividing by the sum of the exponentials, so that the outputs are positive, add to one and keep the order of the scores. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
