@@ -260,6 +260,29 @@ impl DistillTopK {
     }
 }
 
+impl DistillTopK {
+    /// Literally K weighted-CE passes (see the module doc comment for the derivation), one
+    /// ordinary forward per k and, when `train`, one backward, letting `Model::backward`'s
+    /// accumulate-not-overwrite contract sum them. Returns the mean KL over the active
+    /// positions.
+    fn run_passes<M: Model>(&mut self, model: &M, packed: &PackedExample, train: bool) -> f32 {
+        let k_max = packed.teacher.iter().map(|t| t.ids.len()).max().unwrap_or(0);
+        let mut total = 0.0f32;
+        for k in 0..k_max {
+            let (targets, weights, _count) = pass_arrays(&packed.teacher, k);
+            model.set_batch(Batch::LmWeighted { tokens: &packed.tokens, targets: &targets, weights: &weights });
+            total += model.forward();
+            if train {
+                model.backward();
+                self.passes += 1;
+            }
+        }
+        let entropy: f32 = packed.teacher.iter().map(neg_entropy).sum();
+        let active = packed.teacher.iter().filter(|t| !t.ids.is_empty()).count().max(1) as f32;
+        (total + entropy) / active
+    }
+}
+
 impl<M: Model> Objective<M> for DistillTopK {
     fn regime(&self) -> &'static str {
         "distill_topk"
@@ -280,24 +303,21 @@ impl<M: Model> Objective<M> for DistillTopK {
             self.pending.push_back(pack_row(self.cfg.seq_len, &example.prompt, &example.completion, &example.teacher));
         }
         let packed = self.pending.pop_front().expect("just ensured pending is non-empty");
-
-        // Literally K weighted-CE passes (see the module doc comment for
-        // the derivation) - one ordinary forward + backward per k, letting
-        // `Model::backward`'s accumulate-not-overwrite contract sum them.
-        let k_max = packed.teacher.iter().map(|t| t.ids.len()).max().unwrap_or(0);
-        let mut total = 0.0f32;
-        for k in 0..k_max {
-            let (targets, weights, _count) = pass_arrays(&packed.teacher, k);
-            model.set_batch(Batch::LmWeighted { tokens: &packed.tokens, targets: &targets, weights: &weights });
-            total += model.forward();
-            model.backward();
-            self.passes += 1;
-        }
-
-        let entropy: f32 = packed.teacher.iter().map(neg_entropy).sum();
-        let active = packed.teacher.iter().filter(|t| !t.ids.is_empty()).count().max(1) as f32;
-        self.last_loss = (total + entropy) / active;
+        self.last_loss = self.run_passes(model, &packed, true);
         self.last_loss
+    }
+
+    /// The loss of the example the next training step takes, forward only; the example stays
+    /// queued, so probing moves no cursor.
+    fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
+        if self.pending.is_empty() {
+            let Some(example) = (self.source)(rng) else { return 0.0 };
+            self.pending.push_back(pack_row(self.cfg.seq_len, &example.prompt, &example.completion, &example.teacher));
+        }
+        let packed = self.pending.pop_front().expect("just ensured pending is non-empty");
+        let loss = self.run_passes(model, &packed, false);
+        self.pending.push_front(packed);
+        loss
     }
 
     /// An optimiser step with no teacher-scored position holds no gradient: applying it

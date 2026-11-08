@@ -129,6 +129,11 @@ path = "tests/empty_steps.rs"
 required-features = ["qwen3"]
 
 [[test]]
+name = "objective_cursor"
+path = "tests/objective_cursor.rs"
+required-features = ["qwen3"]
+
+[[test]]
 name = "distill_gradcheck"
 path = "tests/distill_gradcheck.rs"
 required-features = ["qwen3"]

@@ -30,7 +30,7 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [x] T015 P1 - crates/rl/src/objective/grpo.rs (attach_references) - incomplete references refuse; unsupported EOS positions distinguished
 - [ ] T016 P1 - crates/rl/src/objective/external.rs - explicit exact vs proxy behaviour logprobs with provenance
 - [ ] T017 P1 - crates/rl/src/objective/external.rs - missing rollout sidecars never select imitation semantics silently
-- [ ] T018 P1 - crates/model/src/train.rs (loss_probe) - pure probe; persistent objective cursor; resume equivalence test
+- [x] T018 P1 - crates/model/src/train.rs (loss_probe) - pure probe; persistent objective cursor; resume equivalence test (probe is pure for DPO and distillation; a resumed run still restarts a closure-fed stream or from_pairs/from_examples cursor at record 0, open)
 - [ ] T019 P1 - central ValidatedTrainingPlan - every numeric configuration refused at every entry point
 - [ ] T020 P1 - crates/rl/src/objective/distill.rs - duplicate/out-of-range ids, non-finite or unnormalised teacher probabilities (with T011)
 - [ ] T021 P1 - DPO reference checkpoint - reference digest in run identity

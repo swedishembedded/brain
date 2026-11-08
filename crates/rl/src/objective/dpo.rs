@@ -495,6 +495,23 @@ impl<M: Model> Objective<M> for Dpo {
         term.loss
     }
 
+    /// The loss of the pair the next training step takes, forward only. A stream's pair is
+    /// drawn into the queue (the order the steps consume is unchanged) and a dataset's is
+    /// drawn from the probe's own generator, so probing moves no cursor.
+    fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
+        match &mut self.source {
+            Source::Stream { next, ref_logprobs, pending } => {
+                if pending.is_empty() {
+                    let Some(pair) = next(rng) else { return 0.0 };
+                    let (chosen_ref, rejected_ref) = ref_logprobs(&pair);
+                    pending.push_back(pack_pair(&self.cfg, &pair, &chosen_ref, &rejected_ref));
+                }
+                weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, pending.front().expect("just ensured pending is non-empty")).0.loss
+            }
+            Source::Dataset { pairs, .. } => weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, rng.choice(pairs)).0.loss,
+        }
+    }
+
     /// An optimiser step with no trained pair holds no gradient: applying it would
     /// still decay the weights, advance the moments and the bias-correction step.
     fn step_verdict(&mut self) -> StepVerdict {
