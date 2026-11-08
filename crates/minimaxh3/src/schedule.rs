@@ -193,6 +193,18 @@ impl DualSchedule {
         DualSchedule { video: H3Scheduler::new(H3_VIDEO_SHIFT), audio: H3Scheduler::new(H3_AUDIO_SHIFT) }
     }
 
+    /// Both schedules for `steps` transformer forwards: the diffusers grid of
+    /// `steps + 1` points, its terminal `0.0` included. This is the one place
+    /// a request's step count becomes a grid size.
+    pub fn for_denoise_steps(steps: usize) -> Result<DualSchedule, String> {
+        if steps == 0 {
+            return Err("minimaxh3: steps must be at least 1 (one transformer forward per step)".into());
+        }
+        let mut sched = DualSchedule::new();
+        sched.set_timesteps(steps + 1);
+        Ok(sched)
+    }
+
     /// Build both schedules for the same requested step count - each applies
     /// its OWN shift internally, so the two end up with different sigma/
     /// timestep sequences despite requesting the same `num_inference_steps`.
@@ -248,6 +260,29 @@ mod tests {
     /// is checked against.
     fn shift_ref(shift: f64, sigma: f64) -> f64 {
         shift * sigma / (1.0 + (shift - 1.0) * sigma)
+    }
+
+    /// A request's `steps` counts transformer forwards, while the diffusers
+    /// scheduler counts sigma grid points; a few-step distilled adapter is
+    /// run with `steps + 1` grid points (the terminal `0.0` included), and
+    /// four steps are the shifted `[1, 0.75, 0.5, 0.25, 0]`.
+    #[test]
+    fn for_denoise_steps_runs_one_forward_per_step() {
+        for steps in [1, 4, 20] {
+            let sched = DualSchedule::for_denoise_steps(steps).unwrap();
+            assert_eq!(sched.num_steps(), steps, "{steps} steps must run {steps} forwards");
+            for (s, shift) in [(sched.video(), 12.0), (sched.audio(), 3.0)] {
+                let want: Vec<f64> = (0..=steps).map(|i| shift_ref(shift, 1.0 - i as f64 / steps as f64)).collect();
+                assert_eq!(s.sigmas().len(), want.len());
+                for (got, want) in s.sigmas().iter().zip(&want) {
+                    assert!((*got as f64 - want).abs() < 1e-6, "shift {shift}, {steps} steps: sigma {got} != {want}");
+                }
+            }
+        }
+        let four = DualSchedule::for_denoise_steps(4).unwrap();
+        let want = [1.0, 9.0 / 9.25, 6.0 / 6.5, 0.8, 0.0];
+        assert!(four.video().sigmas().iter().zip(want).all(|(g, w)| (*g as f64 - w).abs() < 1e-6), "{:?}", four.video().sigmas());
+        assert!(DualSchedule::for_denoise_steps(0).is_err(), "zero steps denoise nothing and are refused");
     }
 
     #[test]

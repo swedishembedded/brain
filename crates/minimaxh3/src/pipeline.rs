@@ -781,10 +781,9 @@ pub struct GenOpts {
     /// validation).
     pub canvas: Option<(u32, u32)>,
     pub num_frames: u32,
-    /// `linspace(1, 0, num_inference_steps)`'s own point count - drives
-    /// `num_inference_steps - 1` model evaluations (fewer if the shift's
-    /// dedup collapses any); see `crate::schedule`'s own doc.
-    pub num_inference_steps: usize,
+    /// Transformer forwards (Euler steps), at least 1; the schedule is the
+    /// diffusers grid of one more point ([`DualSchedule::for_denoise_steps`]).
+    pub denoise_steps: usize,
     pub seed: u64,
     pub device: Option<String>,
     /// How the DiT's linears quantize their activations against its int8
@@ -1033,8 +1032,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     };
     let resident = model.or(owned.as_ref());
     let streaming_ctx = resident.is_none().then(|| StreamingDit::open(dit_cfg, device));
-    let mut sched = DualSchedule::new();
-    sched.set_timesteps(opts.num_inference_steps);
+    let sched = DualSchedule::for_denoise_steps(opts.denoise_steps)?;
     let num_steps = sched.num_steps();
     let num_text_tokens = packed.text_indices.len();
 
@@ -1461,7 +1459,7 @@ pub(crate) mod tests {
     /// request-level business rule this pipeline enforces for a real
     /// caller too.
     pub(crate) fn tiny_gen_opts(seed: u64) -> GenOpts {
-        GenOpts { canvas: Some((32, 32)), num_frames: 124, num_inference_steps: 3, seed, device: Some("cpu".to_string()), act_levels: Default::default() }
+        GenOpts { canvas: Some((32, 32)), num_frames: 124, denoise_steps: 2, seed, device: Some("cpu".to_string()), act_levels: Default::default() }
     }
 
     /// The end-to-end gate: encode (pre-built) -> pack -> denoise

@@ -151,7 +151,7 @@ pub fn manifest() -> Manifest {
             .param(ParamSpec::new("height", ParamType::Int, "canvas height, px - see width").min(0.0).max(capability::bounds::SIDE_PX))
             // perf-number: frame-rate constant / memory ratio, not a measured timing
             .param(ParamSpec::new("num_frames", ParamType::Int, "video frames at 24fps before alignment; snapped up to the VAE's own chunk grid, and the aligned duration must land in MiniMax-H3's 5-15 second bound").min(0.0).max(capability::bounds::VIDEO_FRAMES).default(json!(default_frames)))
-            .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (shared by both the video and the audio schedule, one forward per step - no CFG, this model is guidance-distilled)").min(0.0).max(capability::bounds::DENOISE_STEPS).default(json!(20)))
+            .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (shared by both the video and the audio schedule, one forward per step - no CFG, this model is guidance-distilled)").min(1.0).max(capability::bounds::DENOISE_STEPS).default(json!(20)))
             .param(ParamSpec::new("seed", ParamType::Int, "initial-noise seed (omit for random; the outcome reports the one used)"))
             .param(ParamSpec::new("int8_activation_levels", ParamType::Int, "int8 levels the DiT's linears quantize their activations to against its int8 weights: 1 (the int8 tier's ordinary arithmetic), or 2 (also quantizes what the first level rounds away - closer to the fp32 model, at a second product per linear)").min(1.0).max(2.0).default(json!(1)))
             .param(ParamSpec::new("allow_community", ParamType::Bool, "confirm you are authorized to use the MiniMax-H3 weights under the MiniMax H3 Community License Agreement (territorial, revenue-cap and attribution terms apply); every request is refused without it").default(json!(false)))
@@ -274,7 +274,10 @@ fn decode_gen_params(inv: &capability::Invocation) -> Result<GenParams, String> 
     let opts = pipeline::GenOpts {
         canvas,
         num_frames,
-        num_inference_steps: inv.get_i64("steps").unwrap_or(20).max(1) as usize,
+        denoise_steps: match inv.get_i64("steps").unwrap_or(20) {
+            n if n >= 1 => n as usize,
+            n => return Err(format!("minimaxh3: steps must be at least 1 (one transformer forward per step), got {n}")),
+        },
         seed,
         // Not an invocation parameter: placement is the SERVER's decision,
         // not the caller's - `ltxv::caps::gen_params_from`'s own identical
@@ -1162,7 +1165,7 @@ mod tests {
         let inv = spec.validate(Invocation::new().set("prompt", json!("a cat"))).unwrap();
         let p = decode_gen_params(&inv).unwrap();
         assert_eq!(p.opts.num_frames, default_num_frames());
-        assert_eq!(p.opts.num_inference_steps, 20);
+        assert_eq!(p.opts.denoise_steps, 20);
         assert_eq!(p.opts.canvas, None);
         assert_eq!(p.opts.device, None, "placement is the server's decision, not an invocation param");
     }
@@ -1198,7 +1201,10 @@ mod tests {
         let m = vae_cfg.spatial_compression_ratio() * H3TransformerConfig::real().patch_size[2];
         let p = decode_gen_params(&base().set("width", json!(m)).set("height", json!(m)).set("steps", json!(2))).unwrap();
         assert_eq!(p.opts.canvas, Some((m, m)));
-        assert_eq!(p.opts.num_inference_steps, 2);
+        assert_eq!(p.opts.denoise_steps, 2);
+        // `steps` counts forwards; none at all is refused, not clamped.
+        let e = decode_gen_params(&base().set("steps", json!(0))).unwrap_err();
+        assert!(e.contains("steps"), "{e}");
     }
 
     #[test]
