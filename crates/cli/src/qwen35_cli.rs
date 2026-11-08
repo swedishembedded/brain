@@ -458,7 +458,8 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
         // of the cosine schedule, so the LR would never anneal at all.
         decay_iters: steps,
         min_lr: lr * 0.1,
-        warmup: a.u32_or("--warmup", d.warmup),
+        // The default warmup, unless the run is shorter than it: one longer than the run never reaches the peak rate.
+        warmup: a.u32_or("--warmup", d.warmup.min((steps / 2).max(1))),
         weight_decay: a.f32_or("--weight-decay", d.weight_decay),
         grad_clip: a.f32_or("--grad-clip", d.grad_clip),
         grad_accum: a.u32_or("--grad-accum", d.grad_accum),
@@ -691,6 +692,9 @@ mod finetune_cli_tests {
         assert_eq!(ft.opts.decay_iters, 50);
         assert_eq!(ft.opts.lr, 1e-3);
         assert!((ft.opts.min_lr - 1e-4).abs() < 1e-9, "min_lr {}", ft.opts.min_lr);
+        // The default warmup does not outlast a short run either: the shared plan refuses a warmup longer than the decay.
+        assert_eq!(ft.opts.warmup, 25);
+        ft.opts.validate().expect("the derived schedule is consistent");
     }
 
     /// `--mode lora` must be usable on its own: a caller who has not yet

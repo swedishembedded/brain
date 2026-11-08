@@ -769,6 +769,18 @@ fn rehearsal_pool<C: Curriculum>(curr: &C, cycle: usize) -> Vec<SftSource> {
     (0..cycle).map(SftSource::Cycle).chain((0..curr.rehearsal_len()).map(SftSource::Rehearsal)).collect()
 }
 
+/// The warmup a cycle of `steps` steps takes from the study's configured `warmup`. A warmup as long as the cycle
+/// (the study default is 100 steps) never reaches the peak rate before the decay is over, which the shared plan
+/// refuses; such a cycle warms up over a tenth of its steps instead, and says so.
+fn cycle_warmup(warmup: u32, steps: u32) -> u32 {
+    if warmup <= steps {
+        return warmup;
+    }
+    let shortened = (steps / 10).max(1);
+    eprintln!("study: the configured warmup of {warmup} steps is longer than a cycle of {steps}; warming up over {shortened}");
+    shortened
+}
+
 /// [`cycle_opts`] for [`Regime::Sft`]. Deliberately a SECOND function rather
 /// than a branch inside `cycle_opts`, so the GRPO path stays byte-identical to
 /// the one that produced the recorded trajectory.
@@ -779,7 +791,7 @@ fn sft_cycle_opts<C: Curriculum>(cfg: &StudyConfig, sft: &SftConfig, curr: &C, c
         block_size: block,
         lr: sft.lr,
         min_lr: sft.min_lr,
-        warmup: sft.warmup,
+        warmup: cycle_warmup(sft.warmup, cfg.steps_per_cycle),
         decay_iters: cfg.steps_per_cycle,
         weight_decay: 0.0,
         grad_clip: 1.0,
@@ -1326,6 +1338,14 @@ pub fn overlay_adapter<M: Model>(pretrained: &Path, study_cfg: &M::Config, seed:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cycle_never_warms_up_for_longer_than_it_runs() {
+        assert_eq!(cycle_warmup(100, 400), 100);
+        assert_eq!(cycle_warmup(100, 100), 100);
+        assert_eq!(cycle_warmup(100, 8), 1);
+        assert_eq!(cycle_warmup(100, 50), 5);
+    }
 
     /// An environment whose task ids a test picks by hand, so it can decide
     /// exactly which ids each half of a curriculum produces. `tasks` maps a

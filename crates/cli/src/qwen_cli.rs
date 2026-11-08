@@ -670,7 +670,8 @@ fn train(args: &[String], base: Option<&str>) {
         batch_size: batch,
         block_size: block,
         lr,
-        warmup: 50,
+        // 50 steps, unless the run is shorter than that: a warmup longer than the run never reaches the peak rate.
+        warmup: 50.min((steps / 2).max(1)),
         decay_iters: steps,
         min_lr: lr * 0.1,
         weight_decay: 0.1,
