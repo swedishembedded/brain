@@ -107,6 +107,14 @@ brain minimaxh3 ref2va --allow_community true \
   --vsa_sparsity 0.75 --steps 4 --out video=woman.mp4
 ```
 
+A served `ref2va` request, which cannot name files on the server, picks the
+same setup by `preset`: `base` (the release alone), `turbo-4step` (the
+adapter above) or `turbo-4step-vsa` (the adapter and the gates, at
+`vsa_sparsity` 0.75 unless one is asked). Each preset runs pinned files of
+`lightx2v/Minimax-h3-Turbo` and `barelymining/ComfyUI-MiniMax-H3-FastVideo`
+from the model store that holds the release; one the store lacks is
+refused naming the repo.
+
 Sparse attention needs a GPU (its attention pass is workgroup-cooperative).
 The gates are held at the DiT's tier beside each block (~1.9 GB at int8)
 and count toward the placement.

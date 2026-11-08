@@ -208,13 +208,15 @@ impl ResidentModel for MiniMaxH3Resident {
         // An unparseable level count keys as one level; the request itself is
         // refused once `gen_params_from` runs.
         let levels = if inv.get_i64("int8_activation_levels") == Some(2) { "/a2" } else { "" };
-        // An adapter's corrections are held beside the DiT; an unreadable one
-        // plans as none, and the request itself is refused when it runs.
-        let adapter = match inv.get_str("adapter").map(|path| minimaxh3::lora::planned_cost(&path)) {
+        // An adapter's corrections and the VSA gates are held beside the DiT,
+        // named outright or by a preset; a request that does not resolve plans
+        // as neither, and is refused itself when it runs.
+        let (adapter, gates) = minimaxh3::caps::requested_extras(inv, &self.paths).unwrap_or_default();
+        let adapter = match adapter.map(|path| minimaxh3::lora::planned_cost(&path)) {
             Some(Ok((bytes, rank))) => format!("/l{bytes}r{rank}"),
             _ => String::new(),
         };
-        let gates = if inv.get_str("vsa_gate").is_some_and(|p| !p.trim().is_empty()) { "/g" } else { "" };
+        let gates = if gates.is_some() { "/g" } else { "" };
         InstanceKey::new(&self.id, format!("{extent}@{RESIDENT_DTYPE}{levels}{adapter}{gates}"))
     }
 
@@ -317,7 +319,7 @@ impl Instance for MiniMaxH3Instance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         // Params (and the license gate they carry) before the weights read -
         // `wan::caps::WanAction::run`'s own ordering.
-        let mut req = minimaxh3::caps::request_from(action, inv)?;
+        let mut req = minimaxh3::caps::request_from(action, inv, &self.paths)?;
         req.params.opts.device = device_name(self.device);
         let dit = self.paths.dit_for(action)?.to_string();
         let vae = minimaxh3::caps::VaeWeights::load(&self.paths)?;

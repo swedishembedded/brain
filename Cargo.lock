@@ -2063,6 +2063,7 @@ dependencies = [
  "brain-kernels",
  "brain-memauth",
  "brain-model",
+ "brain-modelref",
  "brain-modelstore",
  "brain-qwen3vl",
  "brain-testutil",

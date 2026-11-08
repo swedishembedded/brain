@@ -29,6 +29,7 @@ brain-model.workspace = true
 # The model-store resolver: `spec.rs`'s `H3Spec` classifies/validates the
 # component directories through `inventory`/`resolve`, the same seam
 # `wan::spec`/`s3dit::spec`/`ltxv::spec` build on.
+brain-modelref.workspace = true
 brain-modelstore.workspace = true
 # `crate::video_vae`: dispatches the same shared catalogue kernels
 # (`conv3d`, the `gn_*` GroupNorm family, `pad2d_reflect`) ltxv/wan's 3D

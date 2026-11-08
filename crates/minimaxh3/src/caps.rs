@@ -156,7 +156,7 @@ pub fn manifest() -> Manifest {
             .param(ParamSpec::new("int8_activation_levels", ParamType::Int, "int8 levels the DiT's linears quantize their activations to against its int8 weights: 1 (the int8 tier's ordinary arithmetic), or 2 (also quantizes what the first level rounds away - closer to the fp32 model, at a second product per linear)").min(1.0).max(2.0).default(json!(1)))
             .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter for this action's DiT (a diffusers PEFT save, such as a few-step distillation); runs beside the quantized weights, never folded into them").host_resolved())
             .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier on top of the adapter's own alpha/rank; 1.0 = as trained. Only read when adapter is set.").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
-            .param(ParamSpec::new("vsa_sparsity", ParamType::Float, "video sparse attention: the share of the video's key tiles each video query drops (0.75 keeps a quarter), selected per head by tile-mean scores; text, references and audio always stay dense. 0 is dense attention").default(json!(0.0)).min(0.0).max(0.99).step(0.05))
+            .param(ParamSpec::new("vsa_sparsity", ParamType::Float, "video sparse attention: the share of the video's key tiles each video query drops (0.75 keeps a quarter), selected per head by tile-mean scores; text, references and audio always stay dense. Omitted: the preset's own, else 0 (dense attention)").min(0.0).max(0.99).step(0.05))
             .param(ParamSpec::new("vsa_gate", ParamType::Str, "server-side path to the trained to_gate_compress of every DiT block (a FastVideo VSA checkpoint or a gate-only extract): adds the coarse branch video sparse attention was distilled with").host_resolved())
             .param(ParamSpec::new("allow_community", ParamType::Bool, "confirm you are authorized to use the MiniMax-H3 weights under the MiniMax H3 Community License Agreement (territorial, revenue-cap and attribution terms apply); every request is refused without it").default(json!(false)))
             .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames in [0,1], meta {frames,w,h,c,fps}").required())
@@ -212,6 +212,7 @@ pub fn manifest() -> Manifest {
         .required()
         .host_resolved(),
     )
+    .param(ParamSpec::new("preset", ParamType::Enum(PRESETS.iter().map(|p| p.to_string()).collect()), "what the DiT runs with, from the model store beside the release: base (the release alone), turbo-4step (lightx2v's 4-step ref2v adapter: run it at steps 4) or turbo-4step-vsa (that adapter and FastVideo's trained sparse-attention gates, at vsa_sparsity 0.75 unless one is asked)").default(json!("base")))
     .video(contract.clone().references("references", ',', &[Media::Image, Media::Video, Media::Audio], pipeline::MAX_REFERENCES));
 
     Manifest::new(
@@ -223,6 +224,17 @@ pub fn manifest() -> Manifest {
 
 // ===================== shared param decoding =====================
 
+/// The names `ref2va`'s `preset` takes.
+pub const PRESETS: [&str; 3] = ["base", "turbo-4step", "turbo-4step-vsa"];
+/// `(vendor, repo, file)` of the adapter the turbo presets run with:
+/// lightx2v's 4-step distillation of `transformer_ref`.
+pub const PRESET_ADAPTER: (&str, &str, &str) = ("lightx2v", "Minimax-h3-Turbo", "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors");
+/// `(vendor, repo, file)` of the VSA gates `turbo-4step-vsa` runs with,
+/// extracted from FastVideo's FastH3 4-step VSA checkpoint.
+pub const PRESET_GATES: (&str, &str, &str) = ("barelymining", "ComfyUI-MiniMax-H3-FastVideo", "fasth3_vsa_gate.safetensors");
+/// The sparsity `turbo-4step-vsa` runs at unless a request asks another.
+pub const PRESET_VSA_SPARSITY: f32 = 0.75;
+
 /// One decoded `t2va`/`fl2va` request's numeric options - everything BOTH
 /// actions take. [`fl2va_keyframes_from`] decodes `fl2va`'s own extra
 /// `first_frame`/`last_frame` params separately, since only `fl2va` has them.
@@ -232,8 +244,59 @@ pub struct GenParams {
     /// The LoRA adapter the DiT runs with (`crate::lora`), `None` for the
     /// base model.
     pub adapter: Option<model::adapter::AdapterSpec>,
+    /// `lora_scale`: the strength of the adapter, explicit or the preset's.
+    adapter_scale: f32,
     /// The blocks' trained VSA gates (`crate::vsa`), `None` without them.
     pub vsa_gate: Option<String>,
+    /// The request's `preset`, resolved onto `adapter`/`vsa_gate` by
+    /// [`resolve_preset`]; `"base"` asks nothing.
+    pub preset: String,
+    /// Whether the request named its own `vsa_sparsity`.
+    sparsity_asked: bool,
+}
+
+/// The adapter and gate files a request runs its DiT with, its preset
+/// resolved as a run resolves it - what a residency plan prices before the
+/// request runs.
+pub fn requested_extras(inv: &capability::Invocation, paths: &Paths) -> Result<(Option<String>, Option<String>), String> {
+    let mut params = decode_gen_params(inv)?;
+    resolve_preset(&mut params, paths)?;
+    Ok((params.adapter.map(|a| a.path), params.vsa_gate))
+}
+
+/// Fill `params`' adapter, gates and sparsity from its preset: pinned files
+/// of model-store repos, found under the store that holds the release
+/// `paths` was resolved from. A preset beside a host-side adapter or gate is
+/// refused - which of them should run is ambiguous.
+pub fn resolve_preset(params: &mut GenParams, paths: &Paths) -> Result<(), String> {
+    let (adapter, gates) = match params.preset.as_str() {
+        "base" => return Ok(()),
+        "turbo-4step" => (true, false),
+        "turbo-4step-vsa" => (true, true),
+        other => return Err(format!("minimaxh3: unknown preset '{other}' ({})", PRESETS.join(", "))),
+    };
+    if params.adapter.is_some() || params.vsa_gate.is_some() {
+        return Err(format!("minimaxh3: preset '{}' names its own adapter and gates; drop the explicit adapter/vsa_gate or the preset", params.preset));
+    }
+    let release = std::path::Path::new(&paths.text_encoder).parent().filter(|r| crate::spec::is_h3_pipeline_root(r)).ok_or("minimaxh3: a preset is served from a model-store release")?;
+    let store = release.parent().and_then(std::path::Path::parent).ok_or("minimaxh3: the release is not inside a model store")?;
+    let file = |(vendor, repo, name): (&str, &str, &str)| {
+        let path = brain_modelstore::Store::new(store).repo_dir(&brain_modelref::ModelRef::new(vendor, repo, None)).join(name);
+        match path.is_file() {
+            true => path.to_str().map(str::to_string).ok_or_else(|| format!("minimaxh3: {} is not UTF-8", path.display())),
+            false => Err(format!("minimaxh3: preset '{}' runs {name} of {vendor}/{repo}, which the model store beside the release does not hold", params.preset)),
+        }
+    };
+    if adapter {
+        params.adapter = Some(model::adapter::AdapterSpec { path: file(PRESET_ADAPTER)?, scale: params.adapter_scale });
+    }
+    if gates {
+        params.vsa_gate = Some(file(PRESET_GATES)?);
+        if !params.sparsity_asked {
+            params.opts.vsa_sparsity = PRESET_VSA_SPARSITY;
+        }
+    }
+    Ok(())
 }
 
 /// Decode + validate the shared params from an invocation, and check the
@@ -304,15 +367,15 @@ fn decode_gen_params(inv: &capability::Invocation) -> Result<GenParams, String> 
             n => return Err(format!("gen_params_from: int8_activation_levels must be 1 or 2, got {n}")),
         },
     };
-    let adapter = match inv.get_str("adapter").filter(|p| !p.trim().is_empty()) {
-        None => None,
-        Some(path) => match inv.get_f64("lora_scale").unwrap_or(1.0) {
-            scale if scale.is_finite() && scale >= 0.0 => Some(model::adapter::AdapterSpec { path: path.to_string(), scale: scale as f32 }),
-            scale => return Err(format!("gen_params_from: lora_scale must be a non-negative number, got {scale}")),
-        },
+    let adapter_scale = match inv.get_f64("lora_scale").unwrap_or(1.0) {
+        scale if scale.is_finite() && scale >= 0.0 => scale as f32,
+        scale => return Err(format!("gen_params_from: lora_scale must be a non-negative number, got {scale}")),
     };
+    let adapter = inv.get_str("adapter").filter(|p| !p.trim().is_empty()).map(|path| model::adapter::AdapterSpec { path: path.to_string(), scale: adapter_scale });
     let vsa_gate = inv.get_str("vsa_gate").filter(|p| !p.trim().is_empty()).map(|p| p.to_string());
-    Ok(GenParams { opts, adapter, vsa_gate })
+    let preset = inv.get_str("preset").unwrap_or_else(|| "base".into()).to_string();
+    let sparsity_asked = inv.get_f64("vsa_sparsity").is_some();
+    Ok(GenParams { opts, adapter, adapter_scale, vsa_gate, preset, sparsity_asked })
 }
 
 /// One `fl2va` keyframe request: which end of the clip it anchors, and the
@@ -373,8 +436,9 @@ fn canvas_multiple() -> u32 {
 
 /// Decode `action`'s request from `inv` and load the media it names,
 /// before any weight is read: a request that cannot run is refused first.
-pub fn request_from(action: &str, inv: &capability::Invocation) -> Result<Request, String> {
+pub fn request_from(action: &str, inv: &capability::Invocation, paths: &Paths) -> Result<Request, String> {
     let mut params = gen_params_from(inv)?;
+    resolve_preset(&mut params, paths)?;
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
     let conditioning = match action {
         "t2va" => Conditioning::Prompt,
@@ -1021,7 +1085,7 @@ impl Action for MiniMaxH3Action {
         // The request and its media before any weight is read: a request
         // that could never run must not cost a checkpoint load to refuse -
         // `wan::caps::WanAction::run`'s own ordering.
-        let req = request_from(&self.name, inv)?;
+        let req = request_from(&self.name, inv, &self.paths)?;
         let cfg = H3TransformerConfig::real();
         let lora = req.params.adapter.as_ref().map(|a| crate::lora::runtime_adapter(a, &cfg)).transpose()?;
         let gates = req.params.vsa_gate.as_deref().map(|p| open_vsa_gates(p, &cfg)).transpose()?;
@@ -1190,6 +1254,49 @@ mod tests {
         assert!(paths.dit_for("ref2va").unwrap_err().contains("transformer_ref"));
         assert_eq!(paths.dit_for("t2va").unwrap(), paths.dit);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A served ref2va request picks a preset by name; each resolves to
+    /// pinned files of model-store repos beside the release it is served
+    /// from, never to a path the caller names. A preset the store lacks is
+    /// refused naming the repo to pull, and a preset beside a host-side
+    /// adapter or gate is ambiguous and refused.
+    #[test]
+    fn a_preset_resolves_to_pinned_store_files_beside_the_release() {
+        let store = std::env::temp_dir().join(format!("brain-minimaxh3-preset-{}", std::process::id()));
+        let release = store.join("MiniMaxAI/MiniMax-H3");
+        std::fs::create_dir_all(release.join("text_encoder")).unwrap();
+        std::fs::write(release.join("model_index.json"), r#"{"_class_name": "MiniMaxH3ModularPipeline"}"#).unwrap();
+        let paths = Paths::resolve(release.to_str().unwrap());
+        let decoded = |preset: &str, extra: &[(&str, serde_json::Value)]| {
+            let mut inv = Invocation::new().set("prompt", json!("x")).set("preset", json!(preset));
+            for (k, v) in extra {
+                inv = inv.set(k, v.clone());
+            }
+            let mut p = decode_gen_params(&inv)?;
+            resolve_preset(&mut p, &paths)?;
+            Ok::<GenParams, String>(p)
+        };
+
+        let base = decoded("base", &[]).expect("base needs nothing");
+        assert!(base.adapter.is_none() && base.vsa_gate.is_none() && base.opts.vsa_sparsity == 0.0);
+        let e = decoded("turbo-4step", &[]).expect_err("not in the store");
+        assert!(e.contains("lightx2v/Minimax-h3-Turbo"), "{e}");
+
+        for (vendor, repo, file) in [PRESET_ADAPTER, PRESET_GATES] {
+            let dir = store.join(vendor).join(repo);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(file), b"").unwrap();
+        }
+        let turbo = decoded("turbo-4step", &[]).expect("resolves");
+        assert!(turbo.adapter.as_ref().unwrap().path.ends_with(PRESET_ADAPTER.2) && turbo.vsa_gate.is_none());
+        let vsa = decoded("turbo-4step-vsa", &[]).expect("resolves");
+        assert!(vsa.vsa_gate.as_ref().unwrap().ends_with(PRESET_GATES.2));
+        assert_eq!(vsa.opts.vsa_sparsity, PRESET_VSA_SPARSITY, "the preset's own sparsity unless one is asked");
+        assert_eq!(decoded("turbo-4step-vsa", &[("vsa_sparsity", json!(0.5))]).unwrap().opts.vsa_sparsity, 0.5);
+        let e = decoded("turbo-4step", &[("adapter", json!("/elsewhere.safetensors"))]).expect_err("ambiguous");
+        assert!(e.contains("preset"), "{e}");
+        std::fs::remove_dir_all(&store).ok();
     }
 
     /// The manifest's own advertised defaults must survive `validate` ->

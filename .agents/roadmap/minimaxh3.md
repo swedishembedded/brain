@@ -935,6 +935,11 @@ MiniMax H3 Community License derivatives.
       arm, the gate import (resident and streamed) and the request params.
       Not measured at size yet: the flash pass walks every key tile's mask
       bit, and `vsa_select` ranks by a serial count over each region.
+- [x] `ref2va`'s served `preset` (`base`, `turbo-4step`, `turbo-4step-vsa`):
+      pinned store files beside the release, so `/v1/videos` selects the
+      adapter and gates it may not name as paths.
+- [ ] Presets for `t2va`/`fl2va`: their few-step adapter is lightx2v's
+      fl2v distillation of `transformer/`, not fetched or run here yet.
 - [ ] Real-weight runs: dense ref2va (20 steps), adapter at 4 steps, VSA
       at 4 steps; measured per step and per card.
 
