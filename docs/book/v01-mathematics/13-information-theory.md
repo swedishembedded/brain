@@ -5,8 +5,6 @@
 
 *How many bits does it take to describe what we expect to see, and what does it cost to expect the wrong thing?*
 
-## The problem
-
 A friend lays out eight cards face down, picks one in secret, and lets you ask
 yes/no questions until you can name it. The cards are equally likely. Each
 question can at best cut the remaining candidates in half, so the best strategy
@@ -40,8 +38,7 @@ twenty questions can narrow down almost anything. The count of questions is a
 measure of how much we did not know before the game: eight equally likely cards
 leave three yes/no choices of ignorance, a million leave twenty.
 
-This chapter turns that observation into a tool with three uses in machine
-learning. First, a number for the *uncertainty* of a distribution, so that "this
+That observation grows into a tool with three uses in machine learning. First, a number for the *uncertainty* of a distribution, so that "this
 next-word prediction is nearly certain" and "this one is a coin toss" are
 quantities and not feelings. Second, a number for the *cost of being wrong*: if
 the world follows one distribution and a model believes another, how many extra
@@ -50,18 +47,15 @@ yes/no questions per observation does the mistake cost? Third, a number for the
 entropy, cross-entropy with its close relative the divergence, and mutual
 information. The averages of surprise that training minimises and that
 evaluation reports (the loss of a classifier, the perplexity of a language
-model) are special cases, and this chapter explains where those numbers come
-from before later chapters use them.
-
-We start with one event and what it tells us, then average over a distribution,
-connect the average to the length of messages, and finally compare two
+model) are special cases, and later chapters will use them as if they had always
+been there. The route to them runs from one event to a whole distribution, from
+the distribution to the length of messages, and last to the comparison of two
 distributions.
 
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The
-answers are at the end of the chapter. If one is hard, go back to the chapter
-named before reading on.
+Surprise is a logarithm, an average of surprise is an expectation, and the table the
+average runs over is a categorical distribution, so six earlier ideas are in play
+before the first formula. Answer them from memory; the answers are at the end of the
+chapter, and the chapter named is the place to go back to.
 
 1. (Chapter 1, logarithm.) What are $\log_2 8$, $\log_2 \tfrac{1}{4}$ and $\log_2 1$? Write $\log(u v)$ in terms of $\log u$ and $\log v$.
 2. (Chapter 1, logarithm.) A product of $400$ factors, each $0.1$, underflows to zero on a computer. What is the sum of the base-10 logarithms, and why is the sum safe?
@@ -71,8 +65,6 @@ named before reading on.
 6. (Chapter 11, categorical distribution.) Three scores $(0, 0, 0)$ are turned into probabilities by exponentiating and dividing by the total. What distribution results, and what two conditions must any categorical distribution satisfy?
 
 ## Surprise: what one event tells us
-
-*What it is for: a number for how unexpected a single outcome is.*
 
 A fair coin lands heads: mildly interesting. A fair die shows a six: a bit
 more. An event with probability one in a million: remarkable. Before averaging
@@ -164,9 +156,8 @@ $\ln$ where it is nats, and every worked table names its unit.
 
 ## Entropy: expected surprise
 
-*What it is for: one number for the uncertainty of a whole distribution.*
-
-Back to the guessing game, now with unequal cards. Four items have probabilities
+Surprise belongs to one event, and a distribution needs one number for its whole
+uncertainty. Back to the guessing game, now with unequal cards. Four items have probabilities
 $\tfrac12, \tfrac14, \tfrac18, \tfrac18$. Halving the number of items is no
 longer the best question, because the first item alone has half of the
 probability. Ask "is it a?" first, then "is it b?", then "is it c?":
@@ -318,8 +309,6 @@ itself is unsure, before the next word is revealed.
 
 ## Entropy as the length of a message
 
-*What it is for: why the unit is bits, and what the formula guarantees.*
-
 So far "bits" is a unit of surprise. It is also, literally, the length of a
 message. Suppose a weather station reports each day as one of four symbols,
 *sun*, *cloud*, *rain*, *snow*, with probabilities $0.4, 0.3, 0.2, 0.1$, and
@@ -431,9 +420,7 @@ for long sequences of rolls.
 
 ## Cross-entropy: the price of expecting the wrong thing
 
-*What it is for: how many bits a model's beliefs cost on data it did not choose.*
-
-The weather code was designed for the distribution $p = (0.4, 0.3, 0.2, 0.1)$.
+A model's beliefs cost bits on data it did not choose, and the weather code lets us count them. That code was designed for the distribution $p = (0.4, 0.3, 0.2, 0.1)$.
 Suppose instead the designer believed some other distribution $q$ and built the
 code that gives symbol $k$ a word of ideal length $-\log_2 q_k$ (ignoring the
 whole-bit rounding, as above). The real weather still follows $p$. Each day, the
@@ -486,8 +473,6 @@ has infinite cost. A model that declares an event impossible and then sees it
 pays infinitely.
 
 ## KL divergence: the excess cost
-
-*What it is for: a distance-like measure of how far a belief is from the truth.*
 
 The extra bits per symbol, cross-entropy minus entropy, get their own name. The
 **KL divergence** (Kullback-Leibler divergence, also called relative entropy) of
@@ -660,9 +645,8 @@ digits).
 
 ## Cross-entropy on observed labels
 
-*What it is for: the number a classifier or language model reports.*
-
-In practice nobody has the true $p$. What exists is a list of observations: five
+The number a classifier or language model reports is a cross-entropy against
+observed data, not against a known distribution. In practice nobody has the true $p$. What exists is a list of observations: five
 emails with their true kinds, a million words of text with the word that actually
 came next. Chapter 10 showed how to treat a dataset as a distribution: give each
 observed example probability $1/N$. For one example with the observed label $y$,
@@ -723,8 +707,6 @@ underflow; they compute $\ln q_y$ directly from the model's raw scores, a
 technique the floating-point chapter (Chapter 15) develops.
 
 ## Perplexity: the effective number of choices
-
-*What it is for: a cross-entropy in units a human can picture.*
 
 A cross-entropy of $1.65$ nats means little to most readers. Exponentiating
 undoes the logarithm and returns a count. The **perplexity** of a model on data
@@ -818,9 +800,7 @@ nats per token.
 
 ## Mutual information: what one quantity says about another
 
-*What it is for: the dependence between two quantities, in bits.*
-
-Chapter 10 compared the joint table of two variables with the product of its
+The same machinery measures dependence between two quantities, in bits. Chapter 10 compared the joint table of two variables with the product of its
 marginals. For the spam filter, a flagged spam email has probability $0.18$ and
 independence would predict $0.22 \times 0.20 = 0.044$, a ratio of $4.09$.
 Independence means all ratios are $1$; how far they are from $1$ measures how much
@@ -910,15 +890,16 @@ covariance (Chapter 11), which can be zero for variables that depend on each
 other, is zero only for independence and detects any kind of dependence, not
 only a straight line.
 
-## Making it work
+## Units, zeros, direction and floors in practice
 
-**Keep the unit.** Every quantity in this chapter is in bits if the logarithm is
+The formulas of this chapter are short and the code that implements them goes wrong
+in five recurring ways, each silent. The first is the unit. Every quantity in this chapter is in bits if the logarithm is
 base 2 and in nats if it is natural. Mixing them is silent: a cross-entropy of
 $2.30$ nats equals $3.32$ bits (the bits-and-nats table above) and
 perplexity is the same either way. State the unit wherever a number is reported,
 and exponentiate with the matching base.
 
-**Zeros.** $0 \log 0 = 0$ is a convention that makes entropy continuous; in code
+The second is zeros. $0 \log 0 = 0$ is a convention that makes entropy continuous; in code
 it needs an explicit check, because $0 \times (-\infty)$ is NaN. A probability
 $q_k = 0$ where the data has $p_k > 0$ gives an infinite cross-entropy: the
 correct reaction is to find out why the model forbade a possible event, not to
@@ -926,27 +907,26 @@ hide it. Some code clamps probabilities to a tiny floor before taking logarithms
 which converts infinity into a large finite number; know that the clamp, and not
 the model, then decides the size of the loss on such an example.
 
-**Which direction.** $D_{\mathrm{KL}}(p \,\Vert\, q)$ and $D_{\mathrm{KL}}(q \,\Vert\, p)$ differ, and so
+The third is direction. $D_{\mathrm{KL}}(p \,\Vert\, q)$ and $D_{\mathrm{KL}}(q \,\Vert\, p)$ differ, and so
 do the behaviours they encourage. In a program, argument order is part of the
 meaning. A reported "KL" should come with the statement of which distribution is
 the data (or the reference) and which is the model.
 
-**Entropy is not the loss.** Cross-entropy on data of positive entropy has a
+The fourth is mistaking entropy for the loss. Cross-entropy on data of positive entropy has a
 floor at $H(p)$, not at $0$. A cross-entropy of $1.28$ nats on the weather data
 is as good as any model can do; reading it as "far from zero, so bad" is an
 error. The divergence is the excess over the floor, and it does reach $0$.
 
-**Estimated entropies.** All the tables here used exact probabilities. Entropy
+The fifth is forgetting that entropies are estimated. All the tables here used exact probabilities. Entropy
 computed from the frequencies of a finite sample is itself an estimate (Chapter
 12 shows how a finite sample carries uncertainty); an exercise below asks you to
 see how it behaves.
 
-## Where this appears in brain
+## Perplexity, cross-entropy kernels and divergences in brain
 
 This chapter is background for the losses and metrics of later volumes, and in
-brain its quantities appear in a few concrete places.
-
-**Perplexity is an exponentiated mean cross-entropy.** `gpt_val_perplexity` in
+brain its quantities appear in a few concrete places. Start with perplexity, which
+is an exponentiated mean cross-entropy. `gpt_val_perplexity` in
 `crates/eval/src/lib.rs` loads a checkpoint and a held-out token stream, draws
 random batches of windows, adds up the model's mean cross-entropy over each batch
 and returns the exponential of the average. It is the perplexity of this chapter,
@@ -955,7 +935,7 @@ uncertainty of Chapter 12), and it was introduced as a same-input comparison met
 in commit `8c26af5e0` (June 2026). Because the loss comes from natural-logarithm
 kernels, the exponential is `exp`, matching the nats.
 
-**The cross-entropy kernels compute $-\ln q_y$ without forming $q_y$.**
+The cross-entropy kernels compute $-\ln q_y$ without ever forming $q_y$.
 `crates/kernels/wgsl/ce_value.wgsl` writes, for each position, the log-sum-exp of
 the row of scores minus the score of the target; that is $-\ln q_y$ for the
 softmax distribution $q$ of the scores, the surprise of the observed label. The
@@ -963,7 +943,7 @@ host sums these and divides by the number of rows to get the mean cross-entropy.
 Its sibling `crates/kernels/wgsl/ce_grad.wgsl` writes the gradient with respect
 to the scores, $(q - \text{onehot}(y))/n$, which a later chapter derives.
 
-**KL divergence in distillation and in policy training.** The comment at the top
+KL divergence appears in distillation and in policy training. The comment at the top
 of `crates/rl/src/objective/distill.rs` derives that distilling a teacher
 distribution $q$ into a student $p$ by minimising $D_{\mathrm{KL}}(q \,\Vert\, p)$ has
 the same gradient as cross-entropy with the teacher as target, because
@@ -979,7 +959,7 @@ policy from a frozen reference from the log-probabilities of one sampled token a
 $e^u - u - 1$ with $u = \ln(\text{ref}) - \ln(\text{new})$, a quantity that, by
 the inequality $\ln x \le x - 1$ of this chapter, is never negative.
 
-**Knowing the floor.** Commit `07191ec88` (September 2026) changed the calibration
+The floor matters in calibration metrics. Commit `07191ec88` (September 2026) changed the calibration
 metrics of `crates/rlcd/src/metrics.rs` after they had been scored against the
 hard (argmax) label, which rewarded a model for moving toward certainty even when
 the data-generating process was uncertain. `soft_nll` scores against the oracle's
@@ -987,7 +967,7 @@ whole distribution and documents that its floor is the oracle's entropy, not zer
 `posterior_kl` is the same quantity minus that entropy and does floor at zero. The
 test `an_exact_oracle_scores_zero_on_every_soft_metric` checks both statements on
 an oracle model: KL is zero, and the soft cross-entropy equals the mean entropy.
-The lesson is the one of the previous section: when the data are uncertain, the
+The lesson is the fourth caution above: when the data are uncertain, the
 cross-entropy has a floor, and only the divergence says how far the model is from
 the best possible.
 
@@ -1065,7 +1045,7 @@ decides whether a loss of $-\ln$ of a tiny number can be computed at all
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $\log_2 8 = 3$, $\log_2 \tfrac14 = -2$, $\log_2 1 = 0$; $\log(uv) = \log u + \log v$.
 2. $400 \times (-1) = -400$. The product $10^{-400}$ is below the smallest number the machine can hold, but $-400$ is an ordinary number, so the sum of logarithms never leaves the representable range.

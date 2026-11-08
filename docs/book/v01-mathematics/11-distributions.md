@@ -5,8 +5,6 @@
 
 *Which few probability distributions keep appearing, and why?*
 
-## The problem
-
 Flip a fair coin $30$ times and count the heads. Do it $5000$ times, each run
 fresh, and tally how often each count occurred:
 
@@ -39,8 +37,8 @@ symmetrically, and are almost never below $8$ or above $22$: a smooth hump that
 did not exist in the flips themselves. Change the coin to a loaded one, or flip
 $300$ times instead of $30$, and the hump moves and narrows but keeps its shape.
 
-This chapter explains why a handful of distributions do most of the work in
-machine learning. A yes/no outcome, such as a classifier being right or wrong on
+A handful of distributions do most of the work in machine learning, and the hump
+above is the clue to why. A yes/no outcome, such as a classifier being right or wrong on
 one example, has the simplest distribution there is. A choice among a fixed list,
 such as the next word of a sentence, generalises it. A sum or an average of many
 small random effects, such as the thirty flips above, lands on the hump, and the
@@ -51,11 +49,9 @@ variance with the rules of the previous chapter, and then state and test the two
 facts that explain the hump: averages settle down, and what they settle into has
 a universal shape.
 
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The answers
-are at the end of the chapter. If one is hard, go back to the chapter named before
-reading on.
+The derivations lean on six ideas from earlier chapters, the oldest of them nine
+chapters back. Try them from memory before reading on; the answers are at the end of
+the chapter, and a stumble is a reason to reopen the chapter named.
 
 1. (Chapter 10, variance.) $\mathrm{Var}[X] = 4$ and $Y$ is independent of $X$ with $\mathrm{Var}[Y] = 5$. What are $\mathrm{Var}[2X + 1]$ and $\mathrm{Var}[X + Y]$?
 2. (Chapter 10, independence.) $X$ and $Y$ are independent with $\mathbb{E}[X] = 2$ and $\mathbb{E}[Y] = 3$. What is $\mathbb{E}[XY]$?
@@ -66,9 +62,7 @@ reading on.
 
 ## One yes/no: the Bernoulli distribution
 
-*What it is for: the building block of every count and every choice.*
-
-A classifier is run on one test example and is either right or wrong. Encode right
+Every count and every choice in this chapter is assembled from one smallest case. A classifier is run on one test example and is either right or wrong. Encode right
 as $1$ and wrong as $0$. The random variable $X$ takes the value $1$ with
 probability $p$ and $0$ with probability $1 - p$; that table is the **Bernoulli
 distribution** with parameter $p$. A training recipe that hides each token of a
@@ -104,7 +98,7 @@ $0.25$. A classifier that is right $90\%$ of the time has the same variance as o
 that is right only $10\%$ of the time: the uncertainty of the outcome is the same,
 only its direction differs.
 
-**Counting successes.** Run the classifier on $n$ independent examples and let $K$
+Counting successes needs no new machinery. Run the classifier on $n$ independent examples and let $K$
 be the number it gets right. Then $K = X_1 + \dots + X_n$, a sum of $n$
 independent Bernoulli variables, and Chapter 10's rules give the mean and
 variance without any new work: by linearity $\mathbb{E}[K] = np$, and since the
@@ -169,9 +163,7 @@ is the reason for the next two sections.
 
 ## One choice among several: the categorical distribution
 
-*What it is for: next words, classes, any outcome from a fixed list.*
-
-A language model has read "the cat sat on the" and must say what comes next. For
+A yes/no is too coarse for most of what a model decides. A language model has read "the cat sat on the" and must say what comes next. For
 a vocabulary of five words, its output is five scores, one per word, which the
 softmax of the notation page turns into probabilities: exponentiate each score and
 divide by the total, so that all five are positive and sum to $1$.
@@ -220,8 +212,8 @@ which returns to this table.
 
 ## The bell curve: the Gaussian distribution
 
-*What it is for: the shape that sums of many small effects take, and the default
-model of noise.*
+The hump of the opening, which sums of many small effects take, is also the default
+model of noise, and it deserves a formula of its own.
 
 ### Building the shape
 
@@ -399,9 +391,6 @@ Generator: the book's SplitMix64, seed 0xd99ff6d98e6f1575 (15681523841785337205)
 
 ## Moving together: covariance and correlation
 
-*What it is for: measuring how two quantities vary jointly, which a pair of
-variances cannot say.*
-
 Two raters score the same five answers on a scale of $1$ to $5$. Do they tend to
 agree? The average score and the spread of each rater say nothing about whether a
 high score from one comes with a high score from the other. The tool is the
@@ -446,7 +435,7 @@ variance. $\mathrm{Cov}[X, Y] = \mathrm{Cov}[Y, X]$. And $\mathrm{Cov}[aX, bY] =
 \mathrm{Cov}[X, Y]$, so the covariance carries the units of both variables and
 changes when either is rescaled.
 
-**Correlation.** To get a number that does not depend on units, divide by the
+Covariance carries the units of both variables, so to get a number free of them, divide by the
 two standard deviations: the **correlation** is $\rho = \mathrm{Cov}[X, Y] /
 (\sigma_X \sigma_Y)$. For the raters, $\rho = 1.6/(\sqrt 2 \sqrt 2) = 0.8$. It has a
 geometric meaning from Chapter 3. For a data set of $N$ pairs, put the centred
@@ -484,7 +473,7 @@ unrelated noise gives about zero; and the last row, where $y$ is completely
 determined by $x$ through $y = x^2$, also gives zero. Zero correlation means there is no
 straight-line trend, not that the variables have nothing to do with each other.
 
-**Uncorrelated is not independent.** Chapter 10 proved that independent variables
+Zero covariance is weaker than independence. Chapter 10 proved that independent variables
 satisfy $\mathbb{E}[XY] = \mathbb{E}[X]\mathbb{E}[Y]$, which says that their covariance is zero. The converse fails
 (Chapter 10 gave this example in one line), and the smallest counterexample shows why. Let $X$ be $-1$, $0$ or $1$ with
 probability $1/3$ each, and $Y = X^2$.
@@ -512,7 +501,7 @@ The negative and positive values of $X$ cancel in the product with $Y$, which is
 why the covariance cannot see the dependence. Independence is a statement about the
 whole joint table; covariance is one number extracted from it.
 
-**The covariance matrix.** With several variables, put every pairwise covariance
+With several variables, put every pairwise covariance
 in a table. For a random vector $\mathbf{x} = (X_1, \dots, X_D)$ with mean
 $\boldsymbol{\mu}$, the **covariance matrix** is the $D \times D$ matrix with entries
 $\Sigma_{ij} = \mathrm{Cov}[X_i, X_j]$, that is,
@@ -575,7 +564,7 @@ has variance $3.6$, the largest eigenvalue, because the raters agree, and
 follows: strongly correlated variables carry most of their spread in one
 direction, and the eigenvectors of the covariance matrix point along it.
 
-**Back to the categorical variable.** The indicator list of a categorical outcome has
+The categorical variable fits the same frame. The indicator list of a categorical outcome has
 $\mathbb{E}[e_j e_k] = 0$ for $j \ne k$, since the word drawn cannot be both $j$ and
 $k$, so $\mathrm{Cov}[e_j, e_k] = -p_jp_k$. Its covariance matrix is
 $\mathrm{diag}(\mathbf{p}) - \mathbf{p}\mathbf{p}^\top$:
@@ -598,8 +587,8 @@ which matters in the next section.
 
 ## Several dimensions: the multivariate Gaussian
 
-*What it is for: the model of noise and of data clouds when more than one number
-is measured at once.*
+Noise and data clouds rarely arrive one number at a time, so the bell needs a version for
+several measurements at once.
 
 ### From independent coordinates to a general covariance
 
@@ -823,9 +812,6 @@ section.
 
 ## Averages settle: the law of large numbers
 
-*What it is for: the reason that a sample average can stand in for an
-expectation.*
-
 Chapter 10 observed that the running average of repeated draws settles at the
 expectation, and measured its spread as $\sigma/\sqrt{n}$. We can now state it and
 say why. Let $X_1, X_2, \dots$ be independent draws from one distribution with mean
@@ -890,9 +876,6 @@ larger and jump (run 2 is at $-36$ for $n = 10{,}000$ and back at $0.24$ for $n 
 extreme draw can outweigh all the others combined, however many have been taken.
 
 ## The shape of the average: the central limit theorem
-
-*What it is for: the reason that sums and averages of many small effects look
-Gaussian whatever the effects are.*
 
 The law of large numbers says where the average goes. It does not say what the error
 looks like, but the opening coin counts suggested the answer: a Gaussian hump. To see how
@@ -961,12 +944,12 @@ the central limit theorem says that the total looks Gaussian, whatever the
 individual disturbances were. And it is why the statistics chapter can build error
 bars for any average with the table of areas computed above.
 
-## Why Gaussians appear in initialisation and noise
+## Starting weights and added noise: two later uses of the Gaussian
 
 Two uses in later volumes follow from what this chapter derived, and each is a
 computation the reader can already do.
 
-**Starting values of weights.** A layer computes $y = \sum_{i=1}^n w_ix_i$ from $n$
+Take the starting values of weights first. A layer computes $y = \sum_{i=1}^n w_ix_i$ from $n$
 inputs, with the weights $w_i$ drawn independently from $\mathcal{N}(0, \sigma_w^2)$
 before training. For a fixed input $\mathbf{x}$, $y$ is a Gaussian with mean $0$ and, by the
 variance of an independent sum and the scaling rule of Chapter 10,
@@ -998,16 +981,16 @@ of wide layers would multiply that growth at every layer; with $\sigma_w = 1/\sq
 $1$. The initialisation chapter of Volume III builds a full recipe on this one
 computation.
 
-**Noise in generative models.** The table of the noised coordinate above is the
+Added noise is the second use. The table of the noised coordinate above is the
 forward process of the diffusion models in Volume VIII: a clean value is mixed with
 Gaussian noise of known standard deviation. Because a Gaussian shifted and scaled
 stays Gaussian, the distribution of the noised value at any level is known in
 closed form, and the high-dimensional table above says that a noise tensor of $D$ entries
 has length almost exactly $\sqrt{D}$ however it is seeded.
 
-## Making it work
+## Keeping covariance matrices and densities well behaved
 
-**Covariance matrices must be symmetric and positive definite** to be used as
+A covariance matrix must be symmetric and positive definite to be used as
 $\boldsymbol{\Sigma}$. A matrix estimated from data is symmetric by construction but
 can be singular: the centred rows sum to the zero vector, so $\mathbf{C}$ has rank at
 most $N - 1$, and with fewer observations than variables the estimated
@@ -1015,20 +998,20 @@ $\boldsymbol{\Sigma}$ cannot be inverted. The `cholesky` pseudocode above checks
 positive definiteness and stops with a message rather than taking the square root of
 a negative number and returning garbage.
 
-**Work with the logarithm of a density.** The density of a Gaussian in $D = 1000$
+Density evaluation has its own trap. The density of a Gaussian in $D = 1000$
 dimensions is a product of a thousand factors, each less than $1$, which underflows
-(Chapter 15 explains why). The logarithm of the formula above is a plain sum,
+(Chapter 15 explains why), so the sensible quantity to compute is the logarithm. The logarithm of the formula above is a plain sum,
 $-\tfrac12\bigl[(\mathbf{x}-\boldsymbol{\mu})^\top\boldsymbol{\Sigma}^{-1}(\mathbf{x}-\boldsymbol{\mu})
 + \log\det\boldsymbol{\Sigma} + D\log 2\pi\bigr]$, and Volume II uses it
 as the log-likelihood of Gaussian data.
 
-**Do not invert to solve.** The quadratic form is computed from the Cholesky factor by
+Nor is there any reason to invert $\boldsymbol{\Sigma}$. The quadratic form is computed from the Cholesky factor by
 solving the triangular system $\mathbf{L}\mathbf{s} = \mathbf{x} - \boldsymbol{\mu}$, which gives
 $(\mathbf{x}-\boldsymbol{\mu})^\top\boldsymbol{\Sigma}^{-1}(\mathbf{x}-\boldsymbol{\mu}) =
 \lVert\mathbf{s}\rVert^2$, so the factor computed once for sampling also serves for
 evaluation.
 
-**Common mistakes.**
+Five mistakes recur, and none of them fails loudly:
 
 - *Reading zero correlation as independence.* The counterexample above is a
   deterministic relationship with covariance $0$. Only for jointly Gaussian
@@ -1045,9 +1028,9 @@ evaluation.
   standard Gaussian draws has standard deviation $1/\sqrt{n}$, so a test must allow several
   of those, as the next section shows.
 
-## Where this appears in brain
+## Gaussian noise, weights and test tolerances in brain
 
-**The noise that diffusion models start from.** The header of `crates/diffusion/src/lib.rs`
+Diffusion models start from noise. The header of `crates/diffusion/src/lib.rs`
 describes the flow-matching forward process as $x_\sigma = (1 - \sigma)\,x_0 + \sigma\,\epsilon$,
 the noised coordinate of this chapter, with $\epsilon$ standard Gaussian. In
 `crates/s3dit/src/pipeline.rs` the text-to-image path starts from `randn(n, seed)`, a vector of
@@ -1055,7 +1038,7 @@ independent standard Gaussians (a seeded round cloud in $n$ dimensions), and an
 image-to-image path re-noises an encoded latent with the same formula. How a uniform
 generator becomes a Gaussian one is the subject of Chapter 17.
 
-**Three Gaussian generators, deliberately.** `crates/model/src/hostmath.rs` has two
+Brain carries three Gaussian generators, deliberately. `crates/model/src/hostmath.rs` has two
 Gaussian generators, `randn` and `gaussian`, and `crates/data/src/rng.rs` has a third,
 `Rng::next_gaussian`. All three produce $\mathcal{N}(0, 1)$ draws. Commit `7ee9cb205`
 (July 2026) moved `randn` into the shared model crate and documented it as statistically
@@ -1068,7 +1051,7 @@ the same thing; as streams they are different, and a product that promises
 "the same seed gives the same picture" depends on the stream, which the distribution
 does not determine.
 
-**Initial weights.** The `init.rs` files of several crates draw weights as
+Initial weights are drawn the same way. The `init.rs` files of several crates draw weights as
 `std * rng.next_gaussian()`: `crates/yolov8/src/init.rs` draws convolution weights with
 `std = 0.1` and the normalisation scale as $1 + 0.1\,\mathcal{N}(0, 1)$, and
 `crates/sam1/src/init.rs`, `crates/supir/src/init.rs` and `crates/toyautoencoder/src/init.rs` follow the same shape. A comment in
@@ -1077,7 +1060,7 @@ weights made a deep stack too curved for the finite-difference gradient check. T
 the link this chapter's computation predicts between the spread of the initial weights
 and the size of what comes out of a layer.
 
-**A statistical test of a generator.** `normal_is_roughly_standard` in
+A generator is itself tested statistically. `normal_is_roughly_standard` in
 `crates/fcbench/src/rng.rs` draws $20{,}000$ values and asserts that the mean is within
 $0.05$ of $0$ and the variance within $0.1$ of $1$. The standard deviation of the mean of $20{,}000$ standard draws is
 $1/\sqrt{20000} = 0.0071$, so the first tolerance is about seven standard errors, and the
@@ -1088,7 +1071,7 @@ counted in standard errors: a test that passes by luck of one seed would eventua
 for some other, and the arithmetic of this chapter is what says how wide the tolerance
 must be for that never to happen.
 
-**Choosing a token.** The sampler `sample_from_topk_impl` in `crates/model/src/serve.rs`, which
+Choosing a token is a categorical draw. The sampler `sample_from_topk_impl` in `crates/model/src/serve.rs`, which
 Chapter 10 discussed, draws from a categorical distribution: the table of scores is the softmax
 of this chapter, and the draw walks the cumulative sum exactly as `_draw` does in the
 worked module.
@@ -1162,7 +1145,7 @@ is real. That is the next chapter, *Statistics: Learning Facts from Samples*.
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $\mathrm{Var}[2X + 1] = 4 \cdot 4 = 16$ (the $+1$ shifts but does not spread), and $\mathrm{Var}[X + Y] = 4 + 5 = 9$ since the variables are independent.
 2. $\mathbb{E}[XY] = \mathbb{E}[X]\mathbb{E}[Y] = 6$.

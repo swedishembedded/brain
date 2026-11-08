@@ -5,8 +5,6 @@
 
 *How much can a finite sample tell us, and how do we know whether a difference is real?*
 
-## The problem
-
 Two language models answer the same $500$ multiple-choice questions. Model A gets
 $352$ right, $70.4\%$. Model B gets $356$ right, $71.2\%$. B is ahead by four questions,
 eight tenths of a point. Is B the better model?
@@ -45,21 +43,20 @@ four questions we observed. The observed difference is the kind of thing chance 
 produces. It is not evidence that B is better, and it is not evidence that B is not
 better: it is a measurement too coarse to say.
 
-This chapter builds the tools for that situation, which is the daily situation of
-anyone who evaluates models. Every score on a finite test set is an **estimate** of a
-quantity we cannot observe, the accuracy the model would show on all questions of the
-kind. The chapter answers four questions in order. How good is one estimate, and how
-does its error shrink with the number of examples? How wide an interval around it can
-we trust? When two scores differ, how do we decide whether the difference is real, and
-how do we compare two models on the same questions without throwing information away?
-And what happens to all of this when we compare not two models but twenty? The same
-two models, with the same $500$ questions, return as the running example: first as the
-problem, then as the case that every tool is applied to.
+That situation is the daily one for anyone who evaluates models. Every score on a
+finite test set is an **estimate** of a quantity we cannot observe, the accuracy the
+model would show on all questions of the kind, and an estimate is only as useful as our
+knowledge of its error. So the chapter starts with one estimate and the way its error
+shrinks as examples are added, widens that into an interval we can trust, and turns the
+interval into a rule for deciding whether a gap between two scores is real. Two models
+asked the same questions carry more information than two separate totals, and the
+chapter spends it. Last comes the quiet trap of trying twenty things and reporting the
+best. The two models and their $500$ questions stay as the running example, first as
+the puzzle and then as the case every tool is applied to.
 
-## Before you begin
-
-Answer these from memory; the chapter that taught each idea is named so you can go
-back to it.
+The arguments below use six ideas from earlier chapters, one of them from the first.
+Answer them from memory; each names the chapter that taught it, to go back to if the
+answer will not come.
 
 1. (Chapter 10, probability.) Ten independent measurements each have variance $4$. What is the variance of their average?
 2. (Chapter 11, distributions.) $X$ and $Y$ each have variance $1$ and their covariance is $0.8$. What is $\mathrm{Var}[X - Y]$?
@@ -70,9 +67,7 @@ back to it.
 
 ## Estimating a quantity from a sample
 
-*What it is for: naming what a test score is, so that its error can be measured.*
-
-We ask about a model's **true accuracy** $p$: the probability that it answers a
+Before a test score's error can be measured, we have to say what the score is an estimate of. We ask about a model's **true accuracy** $p$: the probability that it answers a
 question drawn from the kind of questions we care about correctly. We cannot see $p$.
 We see a **sample**, here $n = 500$ questions, and on each the model is right ($1$) or
 wrong ($0$). The score $\hat{p} = 352/500 = 0.704$ is our best guess at $p$. The hat marks
@@ -105,10 +100,8 @@ zero spread and large bias. A sensible estimator has little of either.
 
 ### The sample mean
 
-*What it is for: the estimator behind every accuracy, loss and average in machine
-learning.*
-
-Given $n$ observations $x_1, \dots, x_n$ the **sample mean** is their average,
+The estimator behind every accuracy, loss and average in machine learning is the
+simplest one. Given $n$ observations $x_1, \dots, x_n$ the **sample mean** is their average,
 
 $$
 \bar{x} = \frac{1}{n}\sum_{i=1}^{n} x_i .
@@ -189,9 +182,6 @@ only because an accuracy over $25$ questions can take just $26$ values.
 
 ### Why the sample variance divides by $n - 1$
 
-*What it is for: estimating the spread of the data from the data, the missing piece of
-the standard error.*
-
 The standard error needs $\sigma$, and for a general quantity we do not know it. We
 estimate it from the sample. The obvious estimator is the average squared deviation from
 the sample mean, $\frac{1}{n}\sum(x_i - \bar{x})^2$. It turns out to be biased, and the
@@ -264,10 +254,8 @@ estimator of one quantity, not something that survives applying a function to it
 
 ### Putting the sample mean to work: standardising features
 
-*What it is for: the promise of Chapter 3, that features of different scales be rescaled
-before distances and dot products are taken.*
-
-Chapter 3 noticed that if one feature is measured in large numbers, it dominates every
+Chapter 3 promised a remedy for features of different scales, to be applied before
+distances and dot products are taken, and the sample mean and variance now supply it. Chapter 3 noticed that if one feature is measured in large numbers, it dominates every
 distance. Here are eight houses described by area in square metres and age in years:
 
 <!-- worked: statistics_ch.feature_scales -->
@@ -391,8 +379,6 @@ function standardise(X: array<real>[N, F], mean: array<real>[F], std: array<real
 ```
 
 ## Confidence intervals: how far off can the estimate be?
-
-*What it is for: turning a single estimate into a range that says how much to trust it.*
 
 A score without its uncertainty invites misreading. Start from the computed case. Each
 model's accuracy comes with its standard error, and the interval that extends $1.96$
@@ -531,9 +517,6 @@ eight thousand questions of the last section.
 
 ## Hypothesis tests: is the difference real?
 
-*What it is for: a rule for deciding, from data, whether an observed difference could
-plausibly be chance.*
-
 Now the problem's question. Is the four-question gap between A and B real? A
 **hypothesis test** answers a question of this kind by asking how surprising the data would
 be in a world where nothing is going on. It has four parts.
@@ -608,7 +591,7 @@ the table shows $98\%$ power at $8000$. The consequence for the problem: a non-s
 result on $500$ questions is not a finding that the models are equal. It says the test was
 too weak to tell.
 
-**A common misreading.** The p-value is not the probability that the null hypothesis is
+The p-value invites a common misreading. It is not the probability that the null hypothesis is
 true, nor that B is better. It is the probability of data like these if the null were
 true, which is a different conditional probability (Chapter 10's Bayes' rule is the bridge,
 and it needs the share of ideas that were really null to start with). To see how different,
@@ -633,9 +616,6 @@ alternative was before the test.
 
 ## Paired tests: the same questions, a better comparison
 
-*What it is for: comparing two models without wasting the fact that they were asked the
-same questions.*
-
 So far we treated the two scores as independent measurements, each with its own questions.
 But in a real evaluation both models see the same $500$, and we know much more than two
 totals: we know, question by question, who was right. Here is the full picture behind
@@ -655,7 +635,7 @@ problem, $352$ and $356$, are the margins of this table. The $456$ questions on 
 agree carry no information about which is better. All the information about the gap is in
 the $44$ on which they differ.
 
-**Why pairing shrinks the error.** The unpaired test treats $\bar{A}$ and $\bar{B}$ as
+Pairing shrinks the error for a reason that can be written down. The unpaired test treats $\bar{A}$ and $\bar{B}$ as
 independent and adds their variances. They are not independent: a hard question is hard for
 both models. Define the per-question difference $D_i = B_i - A_i$, which is $+1$, $0$ or
 $-1$. The gap is the sample mean $\bar{D}$, so the standard error of the gap is the
@@ -718,7 +698,7 @@ change, are strongly correlated, and for them ignoring the pairing throws away m
 the evidence. Comparing two models on the same examples through the per-example
 differences is a **paired test**.
 
-**Two paired tests.** The first is the one the unpaired test already was, with the paired
+Two paired tests follow. The first is the one the unpaired test already was, with the paired
 standard error: the statistic is $\bar{D}$ divided by $s_D/\sqrt{n}$, where $s_D$ is the
 sample standard deviation of the differences (the unbiased one, from the earlier section).
 It is the form of Student's test for paired data; with hundreds of questions the Gaussian
@@ -826,9 +806,6 @@ function sign_test(a: array<real>[n], b: array<real>[n]) -> (int, int, real, rea
 
 ## The bootstrap: an interval without a formula
 
-*What it is for: an interval for statistics whose standard error has no formula we know,
-and a check on the ones that do.*
-
 The standard error $\sigma/\sqrt{n}$ is a fact about the mean. Many quantities we report are
 not means: the median latency of a service, the ratio of two scores, a percentile, an
 F-score. Their sampling distributions have no formula in this book. The idea of the
@@ -885,7 +862,7 @@ function bootstrap_interval(x: array<real>[n], statistic: function(array<real>[n
         # linear interpolation between neighbours: position q * (len(v) - 1)
 ```
 
-**An accuracy gap.** The same machinery handles the paired comparison. Resample the $500$
+An accuracy gap goes through the same machinery as any paired comparison. Resample the $500$
 questions with replacement and recompute the gap $\bar{D}$ each time. The figure shows the
 second scenario:
 
@@ -912,7 +889,7 @@ do here). The interval is the more useful report, because it also says how large
 could be, here between one and six points, where a p-value alone says only that it is not
 zero.
 
-**When examples are not independent.** The bootstrap inherits the assumption of
+The bootstrap also inherits the assumption of
 everything in this chapter: the resampled units must be independent draws. Frames of a
 video are near-duplicates, and a model that is right on one frame of a clip is usually right
 on its neighbours. The right unit to resample is the clip, with all its frames. To see
@@ -944,9 +921,6 @@ statistics such as a median of few values need more, and ten thousand resamples 
 little at this size.
 
 ## Many comparisons: the best of twenty
-
-*What it is for: keeping the number of things we try from manufacturing the result we
-report.*
 
 Everything so far compared two models once. Machine learning practice rarely does. A
 researcher tries $20$ learning rates, or $20$ random seeds, or $20$ prompt variants, tests
@@ -995,7 +969,7 @@ best-looking configuration beat the baseline by $3.71$ points on average, when t
 of every one of them is zero. Selecting the maximum of noisy estimates is biased upward, and
 the estimate of the winner is not an estimate of what the winner will do on new data.
 
-**Bonferroni.** The simplest repair is to hold the whole family to the level $\alpha$ by
+The simplest repair, Bonferroni's, is to hold the whole family to the level $\alpha$ by
 testing each of the $m$ comparisons at $\alpha/m$. The **Bonferroni correction** needs no
 assumption about how the tests relate. Let $E_j$ be the event that test $j$ fires falsely.
 The probability that any fires is at most the sum of the individual probabilities, a
@@ -1010,7 +984,7 @@ In the experiment, a false positive anywhere in the family happened in $4.5\%$ o
 repeats, under the promised $5\%$. The price is power: a real gain must now clear a higher
 bar, and the bar grows with $m$.
 
-**Holm.** A step-down refinement keeps the same guarantee and loses less power. Sort the
+Holm's step-down refinement keeps the same guarantee and loses less power. Sort the
 $m$ p-values from smallest to largest; multiply the $r$-th smallest ($r = 1, 2, \dots$) by
 $m - r + 1$, force the results to be non-decreasing along the order, and compare each with
 $\alpha$. The smallest p-value is held to Bonferroni's standard, but the later ones are held to
@@ -1035,34 +1009,34 @@ and metric that could have been reported if it had looked good. A discipline tha
 this honest is to fix the family of comparisons and the decision rule before seeing the
 results; a family chosen afterwards can be made as small as you like.
 
-## Making it work
+## Habits that keep an error bar honest
 
-**Know the unit of independence.** Every standard error in this chapter assumes the
+These tools fail quietly, so a few habits are worth stating. Every standard error in this chapter assumes the
 examples are independent draws. Several questions about one document, frames of one clip,
 the same prompt in several phrasings, and cross-validation folds that share most of their
 training data are not independent, and the naive error bar is too small, as the clustered
 bootstrap showed. Resample or group by the dependent unit.
 
-**Separate two sources of noise.** The standard error of a paired comparison measures
+Two sources of noise are easily confused. The standard error of a paired comparison measures
 how much the result would change with a different draw of the test questions, for these
 two trained models. It says nothing about how much the result would change if a model were
 trained again from another random seed. That is a different quantity, estimated only by
 training several times, and a comparison of two single training runs has both.
 
-**Do not spend the test set on choices.** Each time the test set is used to choose a
+The test set must not be spent on choices. Each time the test set is used to choose a
 configuration it becomes one of the $m$ comparisons above. Choose on separate validation
 data and use the test set once (Volume II).
 
-**Report the interval, not only the p-value.** A p-value says "unlikely to be zero". The
+The interval belongs beside the p-value. A p-value says "unlikely to be zero". The
 interval says how large the difference could be, and a significant difference too small
 to matter should not change a decision. A decision rule is better with both: significant,
 and a gap of at least a stated size.
 
-**Small samples need care in two places.** With few examples use the t multipliers, and
+Small samples need care in two places. With few examples use the t multipliers, and
 remember the sign test's floor: with three comparisons the smallest attainable one-sided
 p-value is $1/8$.
 
-**Common mistakes.**
+Six mistakes recur:
 
 - *Reading "95% confidence" as "95% probability that the true value is in this interval".* The $95\%$ describes the recipe over repeated experiments, as the figure of a hundred intervals shows.
 - *Reading "not significant" as "no difference".* A test with $18\%$ power fails to see a real three-point gain four times in five.
@@ -1071,9 +1045,9 @@ p-value is $1/8$.
 - *Reporting the best of many and calling it the result.* Its significance level and its size are both inflated, by the count of things tried.
 - *Computing normalisation statistics on the test set.* The test set then helps fit the model it is meant to judge.
 
-## Where this appears in brain
+## Sign tests, thresholds and honest seeds in brain's gates
 
-**`crates/stats` is not a statistics library.** Despite its name, `crates/stats` is
+Despite its name, `crates/stats` is not a statistics library. It is
 brain's runtime statistics subsystem: a self-describing snapshot of a running engine
 (accelerators, loaded models, the executor, requests, connections) that a live
 monitor renders; its header in `crates/stats/src/lib.rs` says so, and the later chapter
@@ -1092,7 +1066,7 @@ section's lesson. The code arrived in the performance suite (commit `43b968c65`,
 and moved to `crates/stats` with commit `bca395aa1` (October 2026), which removed three
 upward crate dependencies.
 
-**The paired sign test behind the promote gate.** The real statistical estimation lives in
+The real statistical estimation lives in
 `crates/promote`. `crates/promote/src/stats.rs` holds `sign_test`, an exact one-sided
 paired binomial test over the discordant pairs, the algorithm of this chapter, with the
 binomial coefficient written as a running product. It was introduced as
@@ -1121,7 +1095,7 @@ in code. The sign-test floor appears directly: the document study requires at le
 the test can reach significance at all (the smallest case is five disagreements, all in the
 candidate's favour; see the floor table above).
 
-**A threshold derived from a standard error.** Commit `d6f7adc0f` (September 2026) fixed a
+A threshold can be derived from a standard error instead of chosen. Commit `d6f7adc0f` (September 2026) fixed a
 blind spot of the gate. Its pooled anchor mean was the only retention check, and a
 pooled mean over $k$ earlier blocks moves by only $d/k$ when one block falls by $d$:
 
@@ -1151,7 +1125,7 @@ and `ordinary_per_block_wobble_still_promotes_under_the_document_gate_config`, s
 shown both to fire and not to fire on noise. This is the chapter's central habit: a
 threshold is meaningful only in units of the noise of the quantity it guards.
 
-**Bootstrap, paired comparisons and a seed-noise rule.** `crates/survival/src/compare.rs`
+Bootstrap, paired comparison and a seed-noise rule come together elsewhere. `crates/survival/src/compare.rs`
 holds `corrected_resampled_t` and a cluster bootstrap. The first is the paired t-test across
 cross-validation folds with a variance correction (the module notes that folds share most of
 their training data, so their results are positively correlated and the naive standard
@@ -1166,10 +1140,10 @@ a sequence are near-duplicates, and whose module docstring states the three cond
 for a difference to count: its interval excludes zero, it exceeds twice the seed noise of a
 difference of two single trainings (measured apart, as the sample standard deviation over
 seeds), and its bootstrap p-value survives Holm's correction over the pre-registered family
-of comparisons. That is the "Making it work" advice, the sign-test and the corrections
+of comparisons. That is the advice on honest error bars above, the sign-test and the corrections
 of this chapter combined in one rule.
 
-**An honest three-seed result.** Knowledge #292 records a pre-registered ablation in
+An honest three-seed result shows the other side. Knowledge #292 records a pre-registered ablation in
 `crates/rl/tests/continual_study.rs` (`reduced_ablation_of_the_ratio_basis_and_dynamic_sampling`).
 Three seeds, two arms, final scores $0.135, 0.161, 0.250$ for arm A and $0.313, 0.276, 0.193$ for
 arm B. The registered rule was that B must beat A on every seed; it did not (it lost on
@@ -1194,7 +1168,7 @@ freedom runs from $-0.22$ to $0.38$, wide enough to contain every story. A sign 
 seeds could never go below $0.125$. A three-seed ablation can only say "not established", and
 the knowledge entry says so.
 
-**Where it is not used.** Not every comparison in brain carries a standard error. The
+Not every comparison in brain carries a standard error. The
 comparison grid of `crates/fcbench` (`Comparison` in `crates/fcbench/src/harness.rs`)
 averages each model's score over a number of windows and reports one value per model,
 scenario and metric, and its negative-control check flags a model that beats the naive
@@ -1285,7 +1259,7 @@ happens.
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. The variance of the average of $n$ independent values is $\sigma^2/n = 4/10 = 0.4$.
 2. $\mathrm{Var}[X - Y] = 1 + 1 - 2(0.8) = 0.4$. The positive covariance makes the difference less variable than the sum of variances.
