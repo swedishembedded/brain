@@ -46,7 +46,7 @@ use model::training::{self, Unsupported};
 use model::{Batch, Model, Objective, StepVerdict, IGNORE};
 
 pub use super::advantage::{group_advantages, group_advantages_with, AdvantageNorm};
-pub use super::grpo_stats::{CycleLog, GrpoStats, NonFiniteSteps, RowRefusal, MAX_CONSECUTIVE_NONFINITE};
+pub use super::grpo_stats::{BehaviourRefusal, CycleLog, GrpoStats, NonFiniteSteps, RowRefusal, MAX_CONSECUTIVE_NONFINITE};
 pub use super::grpo_term::{k3_kl, near_clip_boundary, token_term, token_term_banded, ClipBand, TokenTerm, MAX_LOG_RATIO};
 use super::pg_batch::{backward_weighted, with_adapters_disabled, PgBatch, PgSpec};
 use crate::env::{Environment, Task, Verifier};
@@ -129,9 +129,11 @@ pub struct GrpoConfig {
     pub kl_beta: f32,
     /// Packed row length (`t`): prompt length + completion, at least.
     pub seq_len: usize,
-    /// Sampling policy + stopping conditions for every rollout. Truncating
-    /// the sampler (top-k, top-p) makes the behaviour policy differ from the
-    /// trained one; such rows are flagged and counted
+    /// Sampling policy + stopping conditions for every rollout. A sampler that
+    /// truncates or reshapes the distribution (top-k, top-p, min-p, penalties, a
+    /// thinking budget) is refused on the trainer's ratio basis
+    /// ([`GrpoConfig::validate`]); the legacy [`RatioBasis::Sampler`] trains on the
+    /// sampler's own likelihood and counts such rows
     /// ([`GrpoStats::truncated_sampling_rows`]).
     pub rollout: RolloutParams,
     /// `group_size == 1` (RFT/STaR) only: how many completions to sample per
@@ -139,6 +141,43 @@ pub struct GrpoConfig {
     pub max_attempts: usize,
     /// See [`GrpoOptions`].
     pub options: GrpoOptions,
+}
+
+impl GrpoConfig {
+    /// Refuse a configuration whose importance ratio would not be taken against the
+    /// distribution the tokens were sampled from. On the trainer's basis the behaviour
+    /// likelihood is the tempered softmax, so any sampler that truncates or reshapes it
+    /// (top-k, top-p, min-p, repetition or presence/frequency penalties, DRY, no-repeat,
+    /// a thinking budget) would make `pi_new / pi_old` a ratio against a distribution that
+    /// never produced the samples. Exact truncated likelihoods are not implemented, so it is
+    /// refused rather than approximated.
+    pub fn validate(&self) -> Result<(), BehaviourRefusal> {
+        let sample = self.rollout.sample;
+        if sample.is_greedy() || self.options.ratio_basis != RatioBasis::Trainer {
+            return Ok(());
+        }
+        let mut shaped = Vec::new();
+        if sample.top_k > 0 {
+            shaped.push(format!("top_k {}", sample.top_k));
+        }
+        if sample.top_p > 0.0 && sample.top_p < 1.0 {
+            shaped.push(format!("top_p {}", sample.top_p));
+        }
+        if sample.min_p > 0.0 {
+            shaped.push(format!("min_p {}", sample.min_p));
+        }
+        if sample.has_processors() {
+            shaped.push("logit penalties or a no-repeat filter".to_string());
+        }
+        if sample.thinking.is_some() {
+            shaped.push("a thinking budget".to_string());
+        }
+        if shaped.is_empty() {
+            Ok(())
+        } else {
+            Err(BehaviourRefusal::ShapedSampling { what: shaped.join(", ") })
+        }
+    }
 }
 
 /// The frozen-reference logprob source the k3 KL term reads: `(task, sampled
@@ -204,9 +243,17 @@ pub struct Grpo<E: Environment, V: Verifier> {
 }
 
 impl<E: Environment, V: Verifier> Grpo<E, V> {
+    /// [`Self::try_new`], panicking on a configuration it refuses.
     pub fn new(env: E, verifier: V, cfg: GrpoConfig) -> Grpo<E, V> {
+        Grpo::try_new(env, verifier, cfg).unwrap_or_else(|why| panic!("Grpo: {why}"))
+    }
+
+    /// The objective for `cfg`, or why `cfg` would train against a likelihood that is not the
+    /// sampled one ([`GrpoConfig::validate`]).
+    pub fn try_new(env: E, verifier: V, cfg: GrpoConfig) -> Result<Grpo<E, V>, BehaviourRefusal> {
         assert!(cfg.group_size >= 1, "Grpo: group_size must be >= 1");
-        Grpo {
+        cfg.validate()?;
+        Ok(Grpo {
             env,
             verifier,
             cfg,
@@ -220,7 +267,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             version: 0,
             verdict: None,
             consecutive_nonfinite: 0,
-        }
+        })
     }
 
     /// Attach the frozen-reference logprob source the k3 KL term reads. Called

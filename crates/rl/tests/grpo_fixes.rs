@@ -26,7 +26,7 @@ mod grpo_common;
 
 use grpo_common::{always_variable, config, parity_reward, Env, Judge, T};
 use rl::env::{Environment, Verifier};
-use rl::objective::grpo::{CycleLog, Grpo, GrpoConfig, GrpoOptions, LossAgg, NonFiniteSteps, RatioBasis, RowRefusal};
+use rl::objective::grpo::{BehaviourRefusal, CycleLog, Grpo, GrpoConfig, GrpoOptions, LossAgg, NonFiniteSteps, RatioBasis, RowRefusal};
 
 const EOS: u32 = 7;
 
@@ -333,4 +333,32 @@ fn a_loss_probe_leaves_the_objective_untouched() {
     assert!(loss.is_finite());
     assert_eq!(*obj.stats(), Default::default());
     assert!(log.sampled().is_empty() && log.trained().is_empty());
+}
+
+/// T004: a sampler that truncates or reshapes the distribution draws from a likelihood the
+/// trainer does not score, so the trainer's ratio basis refuses it instead of approximating.
+#[test]
+fn a_sampler_that_reshapes_the_distribution_is_refused_on_the_trainers_basis() {
+    type Shape = fn(&mut model::serve::SampleParams);
+    let shaped: [(&str, Shape); 4] = [
+        ("top_k", |p| p.top_k = 40),
+        ("top_p", |p| p.top_p = 0.9),
+        ("min_p", |p| p.min_p = 0.05),
+        ("penalties", |p| p.repetition_penalty = 1.2),
+    ];
+    for (name, apply) in shaped {
+        let mut cfg = config(2, 1.0, GrpoOptions::default());
+        apply(&mut cfg.rollout.sample);
+        let (judge, _) = Judge::new(first_wins);
+        let refusal = Grpo::try_new(Env { variable: always_variable }, judge, cfg).err().unwrap_or_else(|| panic!("{name} sampling must be refused"));
+        assert!(matches!(refusal, BehaviourRefusal::ShapedSampling { .. }), "{name}: {refusal}");
+        // The legacy basis trains on the sampler's own likelihood, so it stays available for ablations.
+        let mut legacy = cfg;
+        legacy.options.ratio_basis = RatioBasis::Sampler;
+        let (judge, _) = Judge::new(first_wins);
+        assert!(Grpo::try_new(Env { variable: always_variable }, judge, legacy).is_ok(), "{name}");
+    }
+    // Plain temperature sampling is what the trainer scores.
+    let (judge, _) = Judge::new(first_wins);
+    assert!(Grpo::try_new(Env { variable: always_variable }, judge, config(2, 0.7, GrpoOptions::default())).is_ok());
 }

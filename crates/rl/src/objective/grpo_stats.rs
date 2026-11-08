@@ -12,7 +12,31 @@
 //! needs expertise in operating RL fine-tuning you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
+use std::fmt;
+
 pub use model::stepgate::{NonFiniteSteps, MAX_CONSECUTIVE_NONFINITE};
+
+/// Why a GRPO configuration cannot be trained on: the importance ratio's behaviour likelihood is not the one that
+/// produced the samples. Carried as the source of the
+/// `std::io::Error` that aborts the run, or returned by [`GrpoConfig::validate`](super::grpo::GrpoConfig::validate).
+#[derive(Clone, Debug, PartialEq)]
+pub enum BehaviourRefusal {
+    /// The sampler truncates or reshapes the distribution (top-k, top-p, min-p, penalties,
+    /// thinking budget), so the likelihood the trainer scores (the full tempered softmax) is not
+    /// the one the tokens were drawn from. Only [`RatioBasis::Sampler`](super::grpo::RatioBasis::Sampler)
+    /// trains on the sampler's own likelihood.
+    ShapedSampling { what: String },
+}
+
+impl fmt::Display for BehaviourRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BehaviourRefusal::ShapedSampling { what } => write!(f, "GRPO on the trainer's ratio basis cannot train samples drawn with {what}: the behaviour likelihood is not the tempered softmax the trainer scores"),
+        }
+    }
+}
+
+impl std::error::Error for BehaviourRefusal {}
 
 /// Why a queued row was not trained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
