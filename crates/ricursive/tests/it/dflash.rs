@@ -28,7 +28,7 @@ const DRAFT: &str = "golden/dflash2/tiny/draft";
 /// A tap row is the residual rounded to bf16; against the reference's f32 it can differ by half a bf16 step.
 const TAP_TOLERANCE: f32 = 5e-3;
 
-fn draft_dir() -> Option<String> {
+pub(crate) fn draft_dir() -> Option<String> {
     let dir = brain_testutil::testdata(DRAFT);
     if Path::new(&dir).join("model.safetensors").exists() {
         Some(dir)
@@ -44,7 +44,7 @@ fn sizing(draft: &str) -> DraftSizing {
     DraftSizing { cfg, weight_bytes }
 }
 
-fn drafted_engine(dir: &str, draft: &str, serve: ServeConfig) -> RicursiveEngine {
+pub(crate) fn drafted_engine(dir: &str, draft: &str, serve: ServeConfig) -> RicursiveEngine {
     let mut e = engine_with(dir, ServeConfig { drafter: Some(sizing(draft)), ..serve });
     e.set_drafter(Path::new(draft)).expect("set_drafter");
     e
@@ -58,7 +58,7 @@ fn reference_hidden(dir: &str, ids: &[u32]) -> Vec<Vec<f32>> {
 }
 
 /// The retained rows of every position of `table` equal the reference forward's hidden state at the tapped layers.
-fn assert_taps(e: &RicursiveEngine, dir: &str, table: &BlockTable, ids: &[u32], label: &str) {
+pub(crate) fn assert_taps(e: &RicursiveEngine, dir: &str, table: &BlockTable, ids: &[u32], label: &str) {
     let n = table.len() as usize;
     let hidden = tiny_config(dir).hidden_size;
     let layers = e.tap_layers().to_vec();

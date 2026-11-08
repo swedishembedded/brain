@@ -570,3 +570,28 @@ fn a_draft_model_is_charged_to_the_plan_and_never_changes_the_greedy_output() {
         std::fs::remove_dir_all(d).ok();
     }
 }
+
+/// Agent-style multi-turn traffic on Ripple: each turn resends the whole history plus a new message, with its own
+/// sampling parameters and seed. The resident's prefix cache serves the shared history from the filed prompt (blocks and
+/// ring snapshot) instead of recomputing it, and the answer is what a cold instance gives for the same prompt.
+#[test]
+fn a_resent_history_is_served_from_the_ripple_prefix_cache() {
+    let dir = pulled_dir("resent");
+    let resident = resident(&dir, &RicursiveServeConfig::default(), &[]).unwrap();
+    let key = InstanceKey::new(ID, "default");
+    let history = "system: you are an agent. tools: shell, read. user: list the files in the repository root.";
+    let turn1 = ask(history).set("max_new", serde_json::json!(6));
+    let turn2_prompt = format!("{history} assistant: ok. user: now count them and report.");
+    let turn2 = ask(&turn2_prompt).set("max_new", serde_json::json!(6)).set("temp", serde_json::json!(0.8)).set("seed", serde_json::json!(7));
+    gpu_core::devices::with_host_tier(|| {
+        let mut warm = resident.activate(&key, Device::Cpu).expect("activates");
+        text(warm.run("generate", &turn1, &mut |_| {}));
+        assert_eq!(metric(&*warm, "kv_prefix_hit_tokens"), 0, "nothing to reuse on the first turn");
+        let got = text(warm.run("generate", &turn2, &mut |_| {}));
+        let hit = metric(&*warm, "kv_prefix_hit_tokens");
+        assert!(hit >= history.len() as u64, "turn 2 reuses the history: {hit} tokens hit of {}", history.len());
+        let mut cold = resident.activate(&key, Device::Cpu).expect("activates");
+        assert_eq!(got, text(cold.run("generate", &turn2, &mut |_| {})), "a cache hit does not change the answer");
+    });
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -93,6 +93,8 @@
 //! sequences are. Latent sparse attention ([`RicursiveEngine::set_lsa`]) reads the global layers sparsely over
 //! an f32, int8 or fp8 cache, one binding per stage; there is no offload in this engine.
 
+use std::collections::HashMap;
+
 use checkpoint::TensorSource;
 use dflash2::{DraftHost, DraftRequest, Dflash2Drafter, TapRows};
 use gpu_core::{DeviceBuffer, Gpu};
@@ -118,6 +120,9 @@ use crate::ops::pipelines;
 use crate::train::TrainConfig;
 use crate::stage::{Geometry, HostIndex, RowPlan, Stage, StageHead};
 use crate::weights::{resolve_tiers, Loader, WeightReport};
+
+/// Hints held for prompts that have not started prefilling; the oldest is dropped past this.
+const MAX_PREFIX_HINTS: usize = 8;
 
 /// The shortest prompt worth a snapshot: copying a slot's rings for a handful
 /// of tokens costs more than prefilling them again.
@@ -355,6 +360,10 @@ pub struct RicursiveEngine {
     taps: Option<TapPool>,
     /// The DFlash2 draft model proposing for the scheduler ([`Self::set_drafter`]).
     drafter: Option<Dflash2Drafter>,
+    /// Where each prefilling sequence (by ring slot) files a branch point: the length of a prefix other prompts continue.
+    branches: HashMap<u32, usize>,
+    /// Prefixes a prompt not yet started is to file as branch points ([`PagedDecoder::hint_shared_prefix`]), by namespace.
+    hints: Vec<(KvNamespace, Vec<u32>)>,
     /// The `--device` the stages were opened on, for the draft model's own device.
     device: Option<String>,
 }
@@ -419,6 +428,8 @@ impl RicursiveEngine {
             capture_q: None,
             taps: None,
             drafter: None,
+            branches: HashMap::new(),
+            hints: Vec::new(),
             device: device.map(str::to_string),
             plan: plan.clone(),
             stages,
@@ -796,7 +807,10 @@ impl RicursiveEngine {
         if prompt.len() < MIN_CACHED_TOKENS {
             return None;
         }
-        let hit = self.cache.lookup(table.kv_namespace(), prompt)?;
+        let Some(hit) = self.cache.lookup(table.kv_namespace(), prompt) else {
+            self.plan_branch(table, prompt, 0);
+            return None;
+        };
         let bs = self.serve.block_size;
         let entry = self.cache.entry(hit);
         let rows = entry.tokens.len() as u32;
@@ -808,11 +822,34 @@ impl RicursiveEngine {
             self.copy_block_rows(from, to, rows % bs);
         }
         self.copy_ring(self.snapshot_slot(snap), slot);
-        (rows as usize == prompt.len()).then_some(hidden)
+        if rows as usize == prompt.len() {
+            return Some(hidden);
+        }
+        self.plan_branch(table, prompt, rows as usize);
+        None
     }
 
-    /// File the sequence of `table`, whose state is exactly `prompt`'s, as a prefix entry.
-    fn file_prefix(&mut self, table: &BlockTable, prompt: &[u32], hidden: &[f32]) {
+    /// Decide where the prefill of `prompt` into `table`, resumed at `resumed` tokens, files a branch point: where it
+    /// leaves a cached prompt it shares a prefix with, or where a hint says other prompts will branch, rounded down to a
+    /// whole KV block (the global blocks are then shared whole), when that is past what it resumed from.
+    fn plan_branch(&mut self, table: &BlockTable, prompt: &[u32], resumed: usize) {
+        let bs = self.serve.block_size as usize;
+        let ns = table.kv_namespace();
+        let hinted = {
+            let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.hints).into_iter().partition(|(n, t)| *n == ns && prompt.starts_with(t));
+            self.hints = rest;
+            mine.into_iter().map(|(_, t)| t.len())
+        };
+        let branch = self.cache.branch_point(ns, prompt, bs, MIN_CACHED_TOKENS).into_iter().chain(hinted).filter(|&b| b > resumed && b < prompt.len()).min();
+        if let (Some(b), Some(slot)) = (branch, table.state_row()) {
+            self.branches.insert(slot, b);
+        }
+    }
+
+    /// File the sequence of `table`, whose state is exactly `prompt`'s, as a prefix entry. `branch` marks a prefix other
+    /// prompts continue (taken mid-prefill, `prompt` being the prefix and `table` the sequence still prefilling): it is
+    /// kept while they extend it instead of being replaced by them.
+    fn file_prefix(&mut self, table: &BlockTable, prompt: &[u32], hidden: &[f32], branch: bool) {
         if prompt.len() < MIN_CACHED_TOKENS || !self.cache.enabled() {
             return;
         }
@@ -823,11 +860,13 @@ impl RicursiveEngine {
         let Some(row) = row else { return };
         self.copy_ring(Self::ring_slot(table), self.snapshot_slot(row));
         let mut shared = table.fork(&mut self.alloc);
+        shared.truncate(prompt.len() as u32, &mut self.alloc);
         for s in &mut self.lsa {
             // The snapshot holds the index pages of the blocks it holds (each stage's own), so they outlive the sequence with them.
             s.binding.retain_pages(table, &mut shared).unwrap_or_else(|e| panic!("ricursive: latent sparse attention: {e}"));
         }
-        let retired = self.cache.insert(Entry::new(prompt.to_vec(), shared, row, Resume { last_hidden: hidden.to_vec() }));
+        let entry = Entry::new(prompt.to_vec(), shared, row, Resume { last_hidden: hidden.to_vec() });
+        let retired = self.cache.insert(if branch { entry.branch() } else { entry });
         for mut gone in retired {
             self.drop_table(&mut gone);
         }
@@ -1113,6 +1152,7 @@ impl PagedDecoder for RicursiveEngine {
     }
     fn release_table(&mut self, t: &mut BlockTable) {
         if let Some(slot) = t.take_state_row() {
+            self.branches.remove(&slot);
             self.ring_free.push(slot);
         }
         self.drop_table(t);
@@ -1122,6 +1162,30 @@ impl PagedDecoder for RicursiveEngine {
             if let PrefillProgress::Done(hidden) = self.prefill_chunk(table, prompt, usize::MAX) {
                 return hidden;
             }
+        }
+    }
+    /// File `prompt[..at]`, rounded down to a whole KV block, as a branch point of the prefill into `table`: as soon as that
+    /// prefill passes it if it has started and not passed it, else when it starts (matched by the prompt's tokens, as the
+    /// table has no ring slot yet). The ring is snapshotted there and the global blocks (with their taps and index pages)
+    /// are shared whole.
+    fn hint_shared_prefix(&mut self, table: &mut BlockTable, prompt: &[u32], at: usize) -> bool {
+        let at = at.min(prompt.len()) / self.serve.block_size as usize * self.serve.block_size as usize;
+        if at < MIN_CACHED_TOKENS || !self.cache.enabled() {
+            return false;
+        }
+        let Some(slot) = table.state_row() else {
+            if self.hints.len() >= MAX_PREFIX_HINTS {
+                self.hints.remove(0);
+            }
+            self.hints.push((table.kv_namespace(), prompt[..at].to_vec()));
+            return true;
+        };
+        if (table.len() as usize) < at && at < prompt.len() {
+            let b = self.branches.entry(slot).or_insert(at);
+            *b = (*b).min(at);
+            true
+        } else {
+            false
         }
     }
     fn prefill_interleave_tokens(&self) -> Option<usize> {
@@ -1137,20 +1201,32 @@ impl PagedDecoder for RicursiveEngine {
         }
         let done = table.len() as usize;
         let end = done + budget.min(prompt.len() - done);
+        let slot = Self::ring_slot(table);
         let mut hidden = None;
         let mut at = done;
         while at < end {
             // A chunk stays inside one cluster block, so every query's closed blocks are indexed before it runs.
             let limit = self.lsa.first().map_or(usize::MAX, |a| a.binding.chunk_limit(at as u32) as usize);
-            let to = end.min(at.saturating_add(self.serve.prefill_chunk as usize).min(at.saturating_add(limit)));
-            hidden = self.prefill_slice(table, prompt, at, to, to == prompt.len());
+            let mut to = end.min(at.saturating_add(self.serve.prefill_chunk as usize).min(at.saturating_add(limit)));
+            // A slice ends at the branch point, where the ring and the blocks so far are filed as a prefix of their own.
+            let branch = self.branches.get(&slot).copied().filter(|&b| at < b && b < to);
+            if let Some(b) = branch {
+                to = b;
+            }
+            let at_branch = self.branches.get(&slot) == Some(&to);
+            hidden = self.prefill_slice(table, prompt, at, to, to == prompt.len() || at_branch);
+            if at_branch {
+                self.branches.remove(&slot);
+                let row = hidden.clone().expect("the slice before a branch point returns its last row");
+                self.file_prefix(table, &prompt[..to], &row, true);
+            }
             at = to;
         }
         if end < prompt.len() {
             return PrefillProgress::Partial { consumed: end - done };
         }
         let hidden = hidden.expect("the last slice of a prompt returns its hidden state");
-        self.file_prefix(table, prompt, &hidden);
+        self.file_prefix(table, prompt, &hidden, false);
         PrefillProgress::Done(hidden)
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
