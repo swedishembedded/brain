@@ -169,6 +169,9 @@ impl Gen<'_> {
     pub(super) fn load_place(&mut self, place: Place) -> Result<Eval, String> {
         match place {
             Place::Lvalue(lv, t) => Ok(Eval::Value(lv, t)),
+            // `atomicLoad`: a volatile read, so it is re-read every time and
+            // never served from a register.
+            Place::Atomic(lv, t) => Ok(Eval::Value(format!("(*(volatile {} *)&{lv})", t.c()), t)),
             Place::VecRef { base, n, ty } => Ok(Eval::Vector((0..n as usize).map(|c| super::vec_comp(&base, c)).collect(), ty)),
             Place::Struct { lv, ty } | Place::Array { lv, ty } => Ok(Eval::Agg(lv, ty)),
             Place::MemScalar { ptr, off, ty } => Ok(Eval::Value(format!("{}({ptr}, {off})", read_helper(ty)?), ty)),

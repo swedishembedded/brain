@@ -25,12 +25,19 @@
 //! workgroup id and workgroup count, loads from the uniform parameter block,
 //! local variables only ever assigned uniform values in uniform flow, and
 //! arithmetic over those. Anything else - the local or global invocation id,
-//! storage and workgroup memory (written per thread), call and atomic results -
-//! is non-uniform. The analysis is deliberately conservative: it may call a
+//! storage and workgroup memory (written per thread), atomic results - is
+//! non-uniform. The analysis is deliberately conservative: it may call a
 //! uniform thing non-uniform (the generator then refuses or guards it, as
 //! before) and never the reverse.
+//!
+//! A called function is analysed where it is called: its arguments are as
+//! uniform as the caller's values, its body runs under the call site's
+//! control flow, and a barrier it reaches under non-uniform flow (including
+//! after a `return` only some threads took) is one the caller reaches there.
+//! Its result is uniform when every `return` it reaches is, with a uniform
+//! value.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use naga::{
     AddressSpace, Binding, BuiltIn, Block, Expression, Function, Handle, LocalVariable, Module, Statement, StorageAccess,
@@ -44,23 +51,42 @@ pub struct Uniformity {
     /// Some barrier is reached under non-uniform control flow, so threads
     /// that skip it would leave the others waiting forever.
     pub has_barrier_in_non_uniform_flow: bool,
+    /// Every `return` is reached in uniform flow with a uniform value, so the
+    /// function's result is the same for every invocation.
+    pub returns_uniform: bool,
+}
+
+/// The uniformity of a function's arguments: an entry point's are its
+/// builtins, a called function's are the caller's values.
+#[derive(Clone, Copy)]
+enum Args<'a> {
+    Entry,
+    Call(&'a [bool]),
 }
 
 /// Analyse `func`, an entry point of `module`.
 pub fn analyse(module: &Module, func: &Function) -> Uniformity {
+    analyse_function(module, func, Args::Entry, true)
+}
+
+/// Analyse `func` called with `args`, its body entered in uniform flow when
+/// `in_uniform_flow`.
+fn analyse_function(module: &Module, func: &Function, args: Args, in_uniform_flow: bool) -> Uniformity {
+    let calls = call_sites(&func.body);
     let mut non_uniform_locals: HashSet<Handle<LocalVariable>> = HashSet::new();
     loop {
         let mut walk = Walk {
+            module,
             func,
-            uniform: expression_uniformity(module, func, &non_uniform_locals),
+            uniform: expression_uniformity(module, func, &non_uniform_locals, args, &calls),
             non_uniform_locals: &mut non_uniform_locals,
             changed: false,
             return_diverged: false,
             loop_diverged: false,
             saw_non_uniform_exit: false,
-            out: Uniformity { has_non_uniform_return: false, has_barrier_in_non_uniform_flow: false },
+            out: Uniformity { has_non_uniform_return: false, has_barrier_in_non_uniform_flow: false, returns_uniform: true },
         };
-        walk.block(&func.body, true, true);
+        walk.block(&func.body, in_uniform_flow, true);
         let (changed, out) = (walk.changed, walk.out);
         // A store into a local can make a value non-uniform that an earlier
         // expression already read as uniform; iterate to a fixed point. The
@@ -71,9 +97,46 @@ pub fn analyse(module: &Module, func: &Function) -> Uniformity {
     }
 }
 
+/// A function's calls that have a result: the result expression, the callee
+/// and its arguments.
+type CallSites = HashMap<Handle<Expression>, (Handle<Function>, Vec<Handle<Expression>>)>;
+
+/// Every call in `b` that has a result.
+fn call_sites(b: &Block) -> CallSites {
+    let mut out = HashMap::new();
+    fn walk(b: &Block, out: &mut CallSites) {
+        for s in b.iter() {
+            match s {
+                Statement::Call { function, arguments, result: Some(r) } => {
+                    out.insert(*r, (*function, arguments.clone()));
+                }
+                Statement::Block(inner) => walk(inner, out),
+                Statement::If { accept, reject, .. } => {
+                    walk(accept, out);
+                    walk(reject, out);
+                }
+                Statement::Switch { cases, .. } => cases.iter().for_each(|c| walk(&c.body, out)),
+                Statement::Loop { body, continuing, .. } => {
+                    walk(body, out);
+                    walk(continuing, out);
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(b, &mut out);
+    out
+}
+
 /// Whether each expression's value (or, for a pointer, its address) is the
 /// same for every invocation of a workgroup, in arena order.
-fn expression_uniformity(module: &Module, func: &Function, non_uniform_locals: &HashSet<Handle<LocalVariable>>) -> Vec<bool> {
+fn expression_uniformity(
+    module: &Module,
+    func: &Function,
+    non_uniform_locals: &HashSet<Handle<LocalVariable>>,
+    args: Args,
+    calls: &CallSites,
+) -> Vec<bool> {
     let mut uniform = vec![false; func.expressions.len()];
     for (h, e) in func.expressions.iter() {
         let u = |x: &Handle<Expression>| uniform[x.index()];
@@ -81,12 +144,18 @@ fn expression_uniformity(module: &Module, func: &Function, non_uniform_locals: &
             Expression::Literal(_) | Expression::Constant(_) | Expression::Override(_) | Expression::ZeroValue(_) => true,
             // Uniform by definition: the value is broadcast from one invocation.
             Expression::WorkGroupUniformLoadResult { .. } => true,
-            Expression::FunctionArgument(i) => {
-                matches!(
+            Expression::FunctionArgument(i) => match args {
+                Args::Entry => matches!(
                     func.arguments[*i as usize].binding,
                     Some(Binding::BuiltIn(BuiltIn::WorkGroupId | BuiltIn::NumWorkGroups))
-                )
-            }
+                ),
+                Args::Call(given) => given.get(*i as usize).copied().unwrap_or(false),
+            },
+            // The callee's arguments precede its result in the arena.
+            Expression::CallResult(_) => calls.get(&h).is_some_and(|(callee, arguments)| {
+                let given: Vec<bool> = arguments.iter().map(u).collect();
+                analyse_function(module, &module.functions[*callee], Args::Call(&given), true).returns_uniform
+            }),
             // A pointer's own address: a variable's is fixed, an indexed one is
             // as uniform as its base and index.
             Expression::GlobalVariable(_) | Expression::LocalVariable(_) => true,
@@ -105,8 +174,8 @@ fn expression_uniformity(module: &Module, func: &Function, non_uniform_locals: &
             }
             Expression::ArrayLength(p) => u(p),
             Expression::Load { pointer } => u(pointer) && root_is_uniform(module, func, *pointer, non_uniform_locals),
-            // Call and atomic results, images, derivatives, subgroup and ray
-            // query results: not provably uniform.
+            // Atomic results, images, derivatives, subgroup and ray query
+            // results: not provably uniform.
             _ => false,
         };
     }
@@ -149,6 +218,7 @@ fn local_root(func: &Function, mut pointer: Handle<Expression>) -> Option<Handle
 }
 
 struct Walk<'a> {
+    module: &'a Module,
     func: &'a Function,
     uniform: Vec<bool>,
     non_uniform_locals: &'a mut HashSet<Handle<LocalVariable>>,
@@ -192,10 +262,13 @@ impl Walk<'_> {
                 }
             }
             Statement::Loop { body, continuing, break_if } => self.loop_(body, continuing, *break_if, flow),
-            Statement::Return { .. } => {
+            Statement::Return { value } => {
                 if !flow && !tail {
                     self.out.has_non_uniform_return = true;
                     self.return_diverged = true;
+                }
+                if !flow || value.is_some_and(|v| !self.uniform[v.index()]) {
+                    self.out.returns_uniform = false;
                 }
             }
             Statement::Break | Statement::Continue => {
@@ -208,6 +281,22 @@ impl Walk<'_> {
             Statement::ControlBarrier(_) | Statement::WorkGroupUniformLoad { .. } => {
                 if !flow {
                     self.out.has_barrier_in_non_uniform_flow = true;
+                }
+            }
+            Statement::Call { function, arguments, .. } => {
+                let given: Vec<bool> = arguments.iter().map(|a| self.uniform[a.index()]).collect();
+                let callee = analyse_function(self.module, &self.module.functions[*function], Args::Call(&given), flow);
+                if callee.has_barrier_in_non_uniform_flow {
+                    self.out.has_barrier_in_non_uniform_flow = true;
+                }
+                // The callee may store through a pointer to one of this
+                // function's locals; what it stores is not followed.
+                for a in arguments {
+                    if let Some(v) = local_root(self.func, *a) {
+                        if self.non_uniform_locals.insert(v) {
+                            self.changed = true;
+                        }
+                    }
                 }
             }
             Statement::Store { pointer, value } => {
@@ -358,5 +447,26 @@ mod tests {
     fn a_thread_dependent_break_makes_the_loop_barrier_non_uniform() {
         let u = analyse_entry(&kernel("for (var i = 0u; i < p.n; i = i + 1u) { if (lid.x == i) { break; } workgroupBarrier(); }"));
         assert!(u.has_barrier_in_non_uniform_flow, "{u:?}");
+    }
+
+    /// A helper is analysed where it is called: one returning a broadcast
+    /// value may steer a branch that reaches a barrier, one returning a
+    /// per-thread value may not, and a helper's barrier after a return only
+    /// some threads took is reached under non-uniform flow.
+    #[test]
+    fn a_called_function_is_analysed_at_its_call_site() {
+        let src = |helper: &str, body: &str| {
+            format!(
+                "struct P {{ n: u32 }};\n@group(0) @binding(0) var<uniform> p: P;\nvar<workgroup> total: u32;\n{helper}\n@compute @workgroup_size(64)\nfn main(@builtin(local_invocation_id) lid: vec3<u32>) {{\n{body}\n}}\n"
+            )
+        };
+        let phase = "fn phase() { workgroupBarrier(); }";
+        let broadcast = format!("{phase}\nfn total_now() -> u32 {{ return workgroupUniformLoad(&total); }}");
+        assert!(!analyse_entry(&src(&broadcast, "if (total_now() > p.n) { phase(); }")).has_barrier_in_non_uniform_flow);
+        let per_thread = format!("{phase}\nfn mine(t: u32) -> u32 {{ return t; }}");
+        assert!(analyse_entry(&src(&per_thread, "if (mine(lid.x) > p.n) { phase(); }")).has_barrier_in_non_uniform_flow);
+        let early = "fn early(t: u32) { if (t == 0u) { return; } workgroupBarrier(); }";
+        assert!(analyse_entry(&src(early, "early(lid.x);")).has_barrier_in_non_uniform_flow);
+        assert!(!analyse_entry(&src(early, "early(p.n);")).has_barrier_in_non_uniform_flow);
     }
 }

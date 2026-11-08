@@ -143,7 +143,7 @@ pub fn generate(name: &str, wgsl: &str) -> Result<Kernel, String> {
     }
 
     let entry = entry_name(name);
-    let has_barrier = block_has_barrier(&func.body);
+    let has_barrier = block_has_barrier(&m, &func.body);
     // A kernel is "guarded" (every `return` becomes a flag that skips the rest
     // of the body, so threads that finished still arrive at later barriers)
     // only when some `return` is reached by part of the workgroup. A return the
@@ -159,7 +159,7 @@ pub fn generate(name: &str, wgsl: &str) -> Result<Kernel, String> {
     }
     let guarded = has_barrier && uniformity.has_non_uniform_return;
     if guarded {
-        check_barrier_structure(&func.body)?;
+        check_barrier_structure(&m, &func.body)?;
     }
 
     let mut g = Gen {
@@ -324,6 +324,12 @@ enum Place {
     /// An array whose elements are vectors, awaiting an index. `stride` is the
     /// element's size in 32-bit words, which WGSL rounds `vec3` up to four.
     VecArrayBase { ident: String, elem: Ty, n: u32, stride: u32, nel: String },
+    /// A storage array of `atomic<T>`, awaiting an index.
+    AtomicArrayBase(String, Ty, String),
+    /// One `atomic<T>` element: read and written only through CUDA's atomic
+    /// operations and volatile accesses, never as a plain lvalue the compiler
+    /// may cache in a register.
+    Atomic(String, Ty),
 }
 
 /// What a global variable became in the emitted source.
@@ -341,19 +347,24 @@ enum GlobalKind {
     /// A storage binding of structs, accessed through byte offsets like the
     /// uniform block. `stride` is an element's size in bytes.
     StorageMem { ident: String, elem: Handle<naga::Type>, stride: u32, nel: String },
+    /// A storage binding of `atomic<T>` scalars.
+    StorageAtomic { ident: String, elem: Ty, nel: String },
 }
 
 // ---------------------------------------------------------------------------
 // Structural checks (done before a single line is emitted)
 // ---------------------------------------------------------------------------
 
-fn block_has_barrier(b: &Block) -> bool {
+/// Whether running `b` reaches a barrier, counting one inside a called
+/// function as a barrier at the call (WGSL has no recursion, so this ends).
+fn block_has_barrier(m: &naga::Module, b: &Block) -> bool {
     b.iter().any(|s| match s {
         Statement::ControlBarrier(_) | Statement::WorkGroupUniformLoad { .. } => true,
-        Statement::Block(inner) => block_has_barrier(inner),
-        Statement::If { accept, reject, .. } => block_has_barrier(accept) || block_has_barrier(reject),
+        Statement::Call { function, .. } => block_has_barrier(m, &m.functions[*function].body),
+        Statement::Block(inner) => block_has_barrier(m, inner),
+        Statement::If { accept, reject, .. } => block_has_barrier(m, accept) || block_has_barrier(m, reject),
         Statement::Loop { body, continuing, .. } => {
-            block_has_barrier(body) || block_has_barrier(continuing)
+            block_has_barrier(m, body) || block_has_barrier(m, continuing)
         }
         _ => false,
     })
@@ -395,12 +406,12 @@ fn block_has_return(b: &Block) -> bool {
 /// * A `return` inside a loop: turning that return into "stop doing work" is
 ///   exactly what the guard does, but it also stops the loop from ever
 ///   exiting through it, so a loop whose only exit was the return would spin.
-fn check_barrier_structure(body: &Block) -> Result<(), String> {
+fn check_barrier_structure(m: &naga::Module, body: &Block) -> Result<(), String> {
     for s in body.iter() {
         match s {
             Statement::ControlBarrier(_) | Statement::WorkGroupUniformLoad { .. } => {}
             Statement::Loop { body, continuing, .. } => {
-                if block_has_barrier(body) || block_has_barrier(continuing) {
+                if block_has_barrier(m, body) || block_has_barrier(m, continuing) {
                     return Err("a barrier inside a loop is not supported by the generated tier; \
                                 the guarded-body transform cannot keep the deactivated threads \
                                 arriving at it"
@@ -414,17 +425,17 @@ fn check_barrier_structure(body: &Block) -> Result<(), String> {
                 }
             }
             Statement::If { accept, reject, .. } => {
-                if block_has_barrier(accept) || block_has_barrier(reject) {
+                if block_has_barrier(m, accept) || block_has_barrier(m, reject) {
                     return Err("a barrier under an `if` is not supported by the generated tier; \
                                 the threads the condition excludes would never arrive at it"
                         .into());
                 }
                 // A loop nested under an `if` still has to be checked for a
                 // `return` the guard transform would turn into an infinite one.
-                check_barrier_structure(accept)?;
-                check_barrier_structure(reject)?;
+                check_barrier_structure(m, accept)?;
+                check_barrier_structure(m, reject)?;
             }
-            Statement::Block(inner) => check_barrier_structure(inner)?,
+            Statement::Block(inner) => check_barrier_structure(m, inner)?,
             _ => {}
         }
     }
@@ -531,6 +542,13 @@ impl<'a> Gen<'a> {
                         self.cpp_type(elem)?;
                         bindings.push((b, ident.clone(), Ty::U32, stride / 4));
                         self.globals.insert(h, GlobalKind::StorageMem { ident, elem, stride, nel: format!("__nel{b}") });
+                        continue;
+                    }
+                    if let Some(elem) = atomic_array_elem(self.m, gv.ty) {
+                        let elem = elem?;
+                        let ident = format!("__b{b}");
+                        bindings.push((b, ident.clone(), elem, 1));
+                        self.globals.insert(h, GlobalKind::StorageAtomic { ident, elem, nel: format!("__nel{b}") });
                         continue;
                     }
                     let layout = array_layout(self.m, gv.ty)?;
@@ -776,6 +794,12 @@ impl<'a> Gen<'a> {
                             let helper = aggregate::write_helper(ty)?;
                             let _ = writeln!(out, "{pad}{helper}({ptr}, {off}, {v});");
                         }
+                        // `atomicStore`.
+                        Place::Atomic(lv, ty) => {
+                            let (v, vt) = self.value(*value, out)?;
+                            let v = coerce(&v, vt, ty)?;
+                            let _ = writeln!(out, "{pad}atomicExch(&{lv}, {v});");
+                        }
                         Place::Mem { ptr, off, ty } => {
                             let v = match &self.m.types[ty].inner {
                                 naga::TypeInner::Struct { .. } => {
@@ -818,6 +842,37 @@ impl<'a> Gen<'a> {
                 }
                 Statement::Call { function, arguments, result } => {
                     self.inline_call(*function, arguments, *result, out, inner)?;
+                }
+                Statement::Atomic { pointer, fun, value, result } => {
+                    let Place::Atomic(lv, ty) = self.place(*pointer, out, inner)? else {
+                        return Err("an atomic operation on something that is not an atomic".into());
+                    };
+                    let (v, vt) = self.value(*value, out)?;
+                    let v = coerce(&v, vt, ty)?;
+                    let call = match fun {
+                        naga::AtomicFunction::Add => format!("atomicAdd(&{lv}, {v})"),
+                        naga::AtomicFunction::Subtract => format!("atomicSub(&{lv}, {v})"),
+                        naga::AtomicFunction::And => format!("atomicAnd(&{lv}, {v})"),
+                        naga::AtomicFunction::InclusiveOr => format!("atomicOr(&{lv}, {v})"),
+                        naga::AtomicFunction::ExclusiveOr => format!("atomicXor(&{lv}, {v})"),
+                        naga::AtomicFunction::Min => format!("atomicMin(&{lv}, {v})"),
+                        naga::AtomicFunction::Max => format!("atomicMax(&{lv}, {v})"),
+                        naga::AtomicFunction::Exchange { compare: None } => format!("atomicExch(&{lv}, {v})"),
+                        // `atomicCompareExchangeWeak` returns a struct.
+                        naga::AtomicFunction::Exchange { compare: Some(_) } => return Err("atomicCompareExchangeWeak is unsupported".into()),
+                    };
+                    match result {
+                        Some(r) => {
+                            let name = format!("__e{}", self.n_tmp);
+                            self.n_tmp += 1;
+                            self.decls.push(format!("{} {name};", ty.c()));
+                            let _ = writeln!(out, "{pad}{name} = {call};");
+                            self.cache.insert(*r, Eval::Value(name, ty));
+                        }
+                        None => {
+                            let _ = writeln!(out, "{pad}{call};");
+                        }
+                    }
                 }
                 Statement::Return { .. } => {
                     if self.guarded {
@@ -1003,9 +1058,8 @@ impl<'a> Gen<'a> {
     /// C++ function would have to be handed one by one. The body is wrapped in
     /// a block, each `return` becomes "store the value, jump to the label after
     /// the block", and every local, temporary and label gets a name no other
-    /// call can reuse. A helper may not contain a barrier (it could be reached
-    /// by a subset of the workgroup, which the uniformity analysis does not
-    /// follow into).
+    /// call can reuse. A helper may reach barriers wherever the uniformity
+    /// analysis, which follows calls, found every thread arrives at them.
     fn inline_call(
         &mut self,
         function: Handle<naga::Function>,
@@ -1015,8 +1069,11 @@ impl<'a> Gen<'a> {
         depth: usize,
     ) -> Result<(), String> {
         let callee: &'a naga::Function = &self.m.functions[function];
-        if block_has_barrier(&callee.body) {
-            return Err("a barrier inside a called function is not supported by the generated tier".into());
+        // The uniformity analysis checked each barrier the callee reaches
+        // where it reaches it. The guard transform does not follow into an
+        // inlined body, so a guarded kernel still may not call one.
+        if self.guarded && block_has_barrier(self.m, &callee.body) {
+            return Err("a barrier inside a called function is not supported in a kernel whose `return`s are guard flags".into());
         }
         if self.frames.len() >= 16 {
             return Err("function calls nested more than 16 deep (recursion is not valid WGSL)".into());
@@ -1235,12 +1292,14 @@ impl<'a> Gen<'a> {
                 Some(GlobalKind::StorageMem { ident, elem, stride, nel }) => {
                     Ok(Eval::Place(Place::MemArray { ptr: ident, off: "0".to_string(), elem, stride, nel }))
                 }
+                Some(GlobalKind::StorageAtomic { ident, elem, nel }) => Ok(Eval::Place(Place::AtomicArrayBase(ident, elem, nel))),
                 None => Err("global variable in an unsupported address space".into()),
             },
             Expression::LocalVariable(l) => Ok(Eval::Place(self.locals[l].clone())),
             Expression::ArrayLength(array) => match self.eval(*array, out, depth)? {
                 Eval::Place(Place::Array { ty, .. }) => Ok(Eval::Value(format!("(unsigned int)({})", self.array_count(ty)?), Ty::U32)),
                 Eval::Place(Place::ArrayBase(_, _, nel))
+                | Eval::Place(Place::AtomicArrayBase(_, _, nel))
                 | Eval::Place(Place::VecArrayBase { nel, .. })
                 | Eval::Place(Place::MemArray { nel, .. }) => {
                     Ok(Eval::Value(format!("__brain_len32({nel})"), Ty::U32))
@@ -1288,6 +1347,9 @@ impl<'a> Gen<'a> {
                     // which is what a 64-bit device pointer needs.
                     Place::ArrayBase(base, elem, nel) => {
                         Ok(Eval::Place(Place::Lvalue(format!("{base}[{}]", clamped(&format!("(size_t)({idx})"), &nel)), elem)))
+                    }
+                    Place::AtomicArrayBase(base, elem, nel) => {
+                        Ok(Eval::Place(Place::Atomic(format!("{base}[{}]", clamped(&format!("(size_t)({idx})"), &nel)), elem)))
                     }
                     // An element of an array of vectors: its components are
                     // `stride` words apart, starting at element `idx`.
@@ -1367,6 +1429,9 @@ impl<'a> Gen<'a> {
                     Eval::Place(Place::ArrayBase(base, elem, nel)) => {
                         Ok(Eval::Place(Place::Lvalue(format!("{base}[{}]", clamped(&format!("(size_t)({index}u)"), &nel)), elem)))
                     }
+                    Eval::Place(Place::AtomicArrayBase(base, elem, nel)) => {
+                        Ok(Eval::Place(Place::Atomic(format!("{base}[{}]", clamped(&format!("(size_t)({index}u)"), &nel)), elem)))
+                    }
                     // Column `index` of a matrix value.
                     Eval::Matrix(m, t) => {
                         let c = *index as usize;
@@ -1375,7 +1440,7 @@ impl<'a> Gen<'a> {
                         }
                         Ok(Eval::Vector(m.elems[c * m.rows..(c + 1) * m.rows].to_vec(), t))
                     }
-                    Eval::Place(Place::Lvalue(..)) | Eval::Place(Place::MemScalar { .. }) | Eval::Value(..) => {
+                    Eval::Place(Place::Lvalue(..)) | Eval::Place(Place::Atomic(..)) | Eval::Place(Place::MemScalar { .. }) | Eval::Value(..) => {
                         Err("AccessIndex on a scalar".into())
                     }
                 }
@@ -1805,6 +1870,17 @@ fn coerce(v: &str, from: Ty, want: Ty) -> Result<String, String> {
 // naga type helpers
 // ---------------------------------------------------------------------------
 
+/// The scalar of a storage array of `atomic<T>`, or `None` for any other type.
+/// CUDA's atomics are on 32-bit words, `atomic<u32>` and `atomic<i32>`.
+fn atomic_array_elem(m: &naga::Module, ty: Handle<naga::Type>) -> Option<Result<Ty, String>> {
+    let TypeInner::Array { base, .. } = &m.types[ty].inner else { return None };
+    let TypeInner::Atomic(s) = &m.types[*base].inner else { return None };
+    Some(Ty::from_scalar(*s).and_then(|t| match t {
+        Ty::U32 | Ty::I32 => Ok(t),
+        other => Err(format!("atomic<{other:?}> is unsupported (32-bit integer atomics only)")),
+    }))
+}
+
 fn scalar_ty_of(m: &naga::Module, ty: Handle<naga::Type>) -> Result<Ty, String> {
     match &m.types[ty].inner {
         TypeInner::Scalar(s) => Ty::from_scalar(*s),
@@ -2167,6 +2243,72 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
         let e = generate("half", SRC).expect_err("f16 must be refused");
         assert!(e.contains("f16"), "{e}");
+    }
+
+    /// A helper of barrier-separated phases, called where the whole
+    /// workgroup is: inlined with its barriers. Called under a per-thread
+    /// branch, or with a barrier under its own branch, it is refused, since
+    /// some threads would never arrive.
+    #[test]
+    fn a_helper_with_top_level_barriers_inlines_only_where_every_thread_calls_it() {
+        let kernel = |call_site: &str, helper_body: &str| {
+            format!(
+                r#"
+struct Params {{ n: u32 }};
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read_write> o: array<u32>;
+var<workgroup> part: array<u32, 64>;
+fn scan(lt: u32) {{
+{helper_body}
+}}
+@compute @workgroup_size(64)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {{
+    let lt = lid.x;
+    part[lt] = lt;
+{call_site}
+    o[wid.x * 64u + lt] = part[lt];
+}}
+"#
+            )
+        };
+        let phases = "    workgroupBarrier();\n    if (lt == 0u) { part[0] = part[0] + 1u; }\n    workgroupBarrier();";
+        let k = generate("helper_barrier", &kernel("    scan(lt);", phases)).unwrap_or_else(|e| panic!("{e}"));
+        let written_out = generate("helper_barrier", &kernel(phases, "")).unwrap_or_else(|e| panic!("{e}"));
+        let barriers = |src: &str| src.matches("__syncthreads()").count();
+        assert_eq!(barriers(&k.source), barriers(&written_out.source), "the helper's barriers, as if written in main:\n{}", k.source);
+        let e = generate("helper_barrier", &kernel("    if (lt < 32u) { scan(lt); }", phases)).expect_err("a per-thread call site must be refused");
+        assert!(e.contains("non-uniform"), "{e}");
+        let nested = "    if (lt == 0u) { workgroupBarrier(); }";
+        let e = generate("helper_barrier", &kernel("    scan(lt);", nested)).expect_err("a barrier under the helper's own branch must be refused");
+        assert!(e.contains("branch"), "{e}");
+    }
+
+    /// A storage `atomic<u32>` is touched only atomically: read-modify-write
+    /// operations become CUDA's, keeping the old value where the kernel uses
+    /// it; `atomicStore` is an exchange and `atomicLoad` a volatile read, so
+    /// neither can be served from or held in a register.
+    #[test]
+    fn storage_atomics_translate_to_cuda_atomics() {
+        const SRC: &str = r#"
+struct Params { n: u32 };
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read_write> c: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> o: array<u32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= p.n) { return; }
+    let old = atomicAdd(&c[0], 1u);
+    atomicMax(&c[1], gid.x);
+    atomicStore(&c[2], 7u);
+    o[gid.x] = old + atomicLoad(&c[3]);
+}
+"#;
+        let k = generate("atomics", SRC).unwrap_or_else(|e| panic!("{e}"));
+        let src = &k.source;
+        assert!(src.contains("= atomicAdd(&__b1["), "the old value is kept:\n{src}");
+        assert!(src.contains("atomicMax(&__b1["), "{src}");
+        assert!(src.contains("atomicExch(&__b1["), "atomicStore is an atomic write:\n{src}");
+        assert!(src.contains("(*(volatile unsigned int *)&__b1["), "atomicLoad is a volatile read:\n{src}");
     }
 
     /// WGSL confines every array access to the array. The emitted source must

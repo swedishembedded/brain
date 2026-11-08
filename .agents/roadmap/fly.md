@@ -323,10 +323,11 @@ it was found:
 * WGSL/WebGPU core has **no `atomic<f32>`** at all, so the fp32 `atomicAdd` one
   would naively reach for is genuinely unavailable portably.
 * The real blocker is verifiable in-repo and is stronger than either:
-  **`crates/wgsl-cpu` has no atomic lowering whatsoever**, and neither does
-  `crates/wgsl-cuda`. An atomic kernel is wgpu/Vulkan-only, which forfeits the
-  CPU backend - the `make test/parity` oracle, and the thing that catches the
-  silent-zero-gradient class this repo's own headline warning is about.
+  **`crates/wgsl-cpu` has no atomic lowering whatsoever** (`crates/wgsl-cuda`
+  lowers storage `atomic<u32>`/`atomic<i32>` to CUDA's atomics). An atomic
+  kernel forfeits the CPU backend - the `make test/parity` oracle, and the
+  thing that catches the silent-zero-gradient class this repo's own headline
+  warning is about.
 
 If the event-driven path later proves worth it, the amendment arrives as a
 **measured** proposal, not an argument from first principles: add
