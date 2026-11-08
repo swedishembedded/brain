@@ -99,6 +99,15 @@ pub trait Rollout {
 /// adapters into its base) is its own business.
 pub trait SyncRollout: Rollout {
     fn sync(&mut self, trained: &HashMap<String, Vec<f32>>) -> Result<(), String>;
+
+    /// The sampling distribution this engine actually draws from, when it can say: what
+    /// [`Completion::logprobs`] is the log-likelihood under. An objective whose importance
+    /// ratio assumes a distribution compares it against this and refuses a mismatch instead
+    /// of training on a likelihood that is not the one sampled from. `None` (the default):
+    /// the engine does not declare it, so the request in [`RolloutParams`] is taken on trust.
+    fn sampling(&self) -> Option<SampleParams> {
+        None
+    }
 }
 
 /// Build the sorted-descending `(token id, logit)` candidate list

@@ -362,3 +362,78 @@ fn a_sampler_that_reshapes_the_distribution_is_refused_on_the_trainers_basis() {
     let (judge, _) = Judge::new(first_wins);
     assert!(Grpo::try_new(Env { variable: always_variable }, judge, config(2, 0.7, GrpoOptions::default())).is_ok());
 }
+
+/// An engine that reports the policy it was synced with, so a test can tell whose samples are whose.
+struct Declaring {
+    inner: Scripted,
+    sampling: Option<model::serve::SampleParams>,
+}
+
+impl Rollout for Declaring {
+    fn sample_n(&mut self, prompt: &[u32], n: usize, params: &RolloutParams, rng: &mut Rng) -> Vec<Completion> {
+        self.inner.sample_n(prompt, n, params, rng)
+    }
+}
+
+impl SyncRollout for Declaring {
+    fn sync(&mut self, trained: &std::collections::HashMap<String, Vec<f32>>) -> Result<(), String> {
+        self.inner.sync(trained)
+    }
+    fn sampling(&self) -> Option<model::serve::SampleParams> {
+        self.sampling
+    }
+}
+
+/// T003: an engine that is not re-synced every group samples from a policy the trainer has
+/// since left. Scoring its samples with the current trainer would put the ratio against the
+/// wrong behaviour policy, so the step after the trainer moved aborts with a typed reason.
+#[test]
+fn samples_from_an_engine_the_trainer_has_left_behind_are_refused() {
+    let s = seed();
+    let (mut m, _, _) = lora_model(s);
+    let (judge, _) = Judge::new(first_wins);
+    let group = vec![completion(&[4, 4]), completion(&[5, 5])];
+    // The engine is synced every second group: group 0 at step 0, group 1 is drawn after one update.
+    let mut obj = Grpo::new(Env { variable: always_variable }, judge, config(2, 1.0, GrpoOptions::default())).with_rollout(Box::new(Scripted { group }), 2);
+    obj.prepare(&mut m).unwrap();
+    let mut rng = Rng::new(s);
+    obj.micro_steps(&m, &mut rng, 2);
+    assert!(matches!(verdict(&mut obj), StepVerdict::Apply), "the first step trains on the synced engine's samples");
+    obj.micro_steps(&m, &mut rng, 2);
+    let StepVerdict::Abort(e) = verdict(&mut obj) else { panic!("the engine is one update behind: the step must abort") };
+    let refusal = e.get_ref().and_then(|source| source.downcast_ref::<BehaviourRefusal>()).expect("a typed error");
+    assert_eq!(*refusal, BehaviourRefusal::StaleEngine { engine_version: 0, trainer_version: 1 });
+}
+
+/// An engine synced every group always holds the current policy, however many updates pass.
+#[test]
+fn an_engine_synced_every_group_is_never_stale() {
+    let s = seed();
+    let (mut m, _, _) = lora_model(s);
+    let (judge, _) = Judge::new(first_wins);
+    let group = vec![completion(&[4, 4]), completion(&[5, 5])];
+    let mut obj = scripted(Env { variable: always_variable }, judge, config(2, 1.0, GrpoOptions::default()), group);
+    obj.prepare(&mut m).unwrap();
+    let mut rng = Rng::new(s);
+    for step in 1..=3 {
+        obj.micro_steps(&m, &mut rng, 2);
+        assert!(matches!(verdict(&mut obj), StepVerdict::Apply), "step {step}");
+    }
+}
+
+/// An engine that declares a sampling distribution other than the one the ratio assumes is refused.
+#[test]
+fn an_engine_declaring_another_sampling_distribution_is_refused() {
+    let s = seed();
+    let (mut m, _, _) = lora_model(s);
+    let (judge, _) = Judge::new(first_wins);
+    let cfg = config(2, 1.0, GrpoOptions::default());
+    let declared = model::serve::SampleParams { top_p: 0.9, ..cfg.rollout.sample };
+    let group = vec![completion(&[4, 4]), completion(&[5, 5])];
+    let engine = Declaring { inner: Scripted { group }, sampling: Some(declared) };
+    let mut obj = Grpo::new(Env { variable: always_variable }, judge, cfg).with_rollout(Box::new(engine), 1);
+    obj.prepare(&mut m).unwrap();
+    obj.micro_steps(&m, &mut Rng::new(s), 2);
+    let StepVerdict::Abort(e) = verdict(&mut obj) else { panic!("a declared top_p 0.9 against an assumed plain sampler must abort") };
+    assert!(matches!(e.get_ref().and_then(|source| source.downcast_ref::<BehaviourRefusal>()), Some(BehaviourRefusal::SamplingMismatch { .. })));
+}

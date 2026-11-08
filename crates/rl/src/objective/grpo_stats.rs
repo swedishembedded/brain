@@ -16,8 +16,8 @@ use std::fmt;
 
 pub use model::stepgate::{NonFiniteSteps, MAX_CONSECUTIVE_NONFINITE};
 
-/// Why a GRPO configuration cannot be trained on: the importance ratio's behaviour likelihood is not the one that
-/// produced the samples. Carried as the source of the
+/// Why a rollout cannot be trained on: the importance ratio's behaviour policy is not the one that
+/// produced the samples, or cannot be reconstructed. Carried as the source of the
 /// `std::io::Error` that aborts the run, or returned by [`GrpoConfig::validate`](super::grpo::GrpoConfig::validate).
 #[derive(Clone, Debug, PartialEq)]
 pub enum BehaviourRefusal {
@@ -26,12 +26,24 @@ pub enum BehaviourRefusal {
     /// the one the tokens were drawn from. Only [`RatioBasis::Sampler`](super::grpo::RatioBasis::Sampler)
     /// trains on the sampler's own likelihood.
     ShapedSampling { what: String },
+    /// The rollout engine holds the policy of optimiser step `engine_version` while the trainer is at
+    /// `trainer_version`: its samples were drawn from a policy the trainer no longer has, and
+    /// scoring them with the current trainer would put the ratio against the wrong behaviour policy.
+    /// Sync the engine every group (`sync_every` 1) or train on the sampler's likelihood.
+    StaleEngine { engine_version: u64, trainer_version: u64 },
+    /// The engine declares it samples from `declared`, but the objective's ratio assumes `expected`.
+    SamplingMismatch { declared: String, expected: String },
 }
 
 impl fmt::Display for BehaviourRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BehaviourRefusal::ShapedSampling { what } => write!(f, "GRPO on the trainer's ratio basis cannot train samples drawn with {what}: the behaviour likelihood is not the tempered softmax the trainer scores"),
+            BehaviourRefusal::StaleEngine { engine_version, trainer_version } => write!(
+                f,
+                "the rollout engine holds the policy of step {engine_version} but the trainer is at step {trainer_version}: the behaviour policy of its samples cannot be reconstructed; sync the engine every group (sync_every 1)"
+            ),
+            BehaviourRefusal::SamplingMismatch { declared, expected } => write!(f, "the rollout engine samples from {declared}, but the objective's ratio assumes {expected}"),
         }
     }
 }

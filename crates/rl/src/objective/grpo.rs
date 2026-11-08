@@ -206,6 +206,8 @@ struct External {
     rollout: Box<dyn model::rollout::SyncRollout>,
     sync_every: usize,
     groups: usize,
+    /// The optimiser step whose policy the engine last received.
+    synced_version: Option<u64>,
 }
 
 /// One drawn group, before it is queued.
@@ -240,6 +242,8 @@ pub struct Grpo<E: Environment, V: Verifier> {
     version: u64,
     verdict: Option<StepVerdict>,
     consecutive_nonfinite: u32,
+    /// Why the next step must abort instead of training what was sampled.
+    refusal: Option<BehaviourRefusal>,
 }
 
 impl<E: Environment, V: Verifier> Grpo<E, V> {
@@ -267,6 +271,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             version: 0,
             verdict: None,
             consecutive_nonfinite: 0,
+            refusal: None,
         })
     }
 
@@ -289,7 +294,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     /// packed: a different device or kernel never enters the probability ratio.
     pub fn with_rollout(mut self, rollout: Box<dyn model::rollout::SyncRollout>, sync_every: usize) -> Grpo<E, V> {
         assert!(sync_every >= 1, "Grpo: sync_every must be >= 1");
-        self.external = Some(External { rollout, sync_every, groups: 0 });
+        self.external = Some(External { rollout, sync_every, groups: 0, synced_version: None });
         self
     }
 
@@ -493,8 +498,23 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
                     let names = model.optimized_params().unwrap_or_else(|| model.param_names());
                     let trained: std::collections::HashMap<String, Vec<f32>> = names.into_iter().map(|n| (n.clone(), model.read_weight(&n))).collect();
                     ext.rollout.sync(&trained).unwrap_or_else(|e| panic!("Grpo: syncing the rollout failed: {e}"));
+                    ext.synced_version = Some(self.version);
                 }
                 ext.groups += 1;
+                // The trainer scores the behaviour likelihood itself on this basis, which is only the
+                // sampled policy's while the engine holds the policy of the current step.
+                let stale = ext.synced_version.filter(|&v| v != self.version);
+                let declared = ext.rollout.sampling().filter(|declared| *declared != self.cfg.rollout.sample);
+                let refusal = match (stale, declared) {
+                    (Some(engine_version), _) if self.cfg.options.ratio_basis == RatioBasis::Trainer => Some(BehaviourRefusal::StaleEngine { engine_version, trainer_version: self.version }),
+                    (_, Some(declared)) => Some(BehaviourRefusal::SamplingMismatch { declared: format!("{declared:?}"), expected: format!("{:?}", self.cfg.rollout.sample) }),
+                    _ => None,
+                };
+                if let Some(refusal) = refusal {
+                    self.refusal = Some(refusal);
+                    self.external = external;
+                    return;
+                }
                 self.draw_group(model, &task, &mut *ext.rollout, false, rng)
             }
             None => self.draw_group(model, &task, &mut ModelRollout::new(model), true, rng),
@@ -544,6 +564,10 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     /// Train `rows` as one optimiser step of `k` slots; leaves the verdict.
     fn train_rows<M: Model>(&mut self, model: &M, rows: Vec<PackedRow>, k: usize) -> f32 {
         self.stats.record_step(rows.len(), k);
+        if let Some(refusal) = self.refusal.take() {
+            self.verdict = Some(StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, refusal)));
+            return 0.0;
+        }
         if rows.is_empty() {
             self.consecutive_nonfinite = 0;
             self.verdict = Some(StepVerdict::Skip("no row with a non-zero advantage after resampling".into()));

@@ -733,7 +733,7 @@ pub enum AdapterAvailability {
 /// [`Scheduler`] only takes the (slower, no on-device window) top-K sampling
 /// path when at least one ACTIVE sequence in the current iteration wants real
 /// sampling.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SampleParams {
     /// `<= 0.0` is greedy (argmax), matching `qwen3::sample::sample_logits`.
     pub temp: f32,
