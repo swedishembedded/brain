@@ -286,14 +286,14 @@ def _blocked_phases(q, r, bk, counters):
                 gr, gk = inv.wy * big + row, c * bk + kk
                 v = 0.0
                 if gr < m and gk < k:
-                    v = inv.load("A", gr * k + gk)
+                    v = inv.load("A", gr * k + gk, site=("A", e))
                     counters["global"] += 1
                 inv.shared_store(idx, v)
                 kk2, col = divmod(idx, big)                 # element (kk2, col) of the B chunk
                 gk2, gc = c * bk + kk2, inv.wx * big + col
                 v = 0.0
                 if gk2 < k and gc < n:
-                    v = inv.load("B", gk2 * n + gc)
+                    v = inv.load("B", gk2 * n + gc, site=("B", e))
                     counters["global"] += 1
                 inv.shared_store(big * bk + idx, v)
         return phase
@@ -317,7 +317,7 @@ def _blocked_phases(q, r, bk, counters):
                     for j in range(r):
                         gr, gc = inv.wy * big + ty * r + i, inv.wx * big + tx * r + j
                         if gr < m and gc < n:
-                            inv.store("C", gr * n + gc, acc[i][j])
+                            inv.store("C", gr * n + gc, acc[i][j], site=("C", i, j))
         return phase
 
     def build(k_total):
@@ -389,7 +389,17 @@ def tiled_trace():
     return ("Integer matrices A[i, k] = (7 i + 3 k) mod 11 - 5 and B[k, j] = (5 k + 2 j) mod 13 - 6 (as in `matmul_fast.naive_small`), run on "
             "the kernel simulator of Chapter 5 (32-lane subgroups, 32-byte blocks). Loads are counted by the kernel as it executes them; "
             "an invocation that falls outside the matrices loads nothing. Formula: naive 2 m n k; tiled k (m ceil(n / T) + n ceil(m / T)). "
-            "'Load blocks' are the simulator's 32-byte transactions for loads.\n\n"
+            "'Load blocks' are the simulator's 32-byte transactions for loads, counted as follows. A memory instruction is one "
+            "load statement of the kernel at one step of its loops: for the naive kernel the load of A and the load of B at one k; "
+            "for the tiled kernel the load of A and the load of B at one step e of the cooperative loop in one k-chunk of one "
+            "workgroup. The invocations of a subgroup (32 consecutive invocations of a workgroup; a workgroup of 16 is one "
+            "partial subgroup) that reach an instruction issue it together, and one that has returned or whose element lies "
+            "outside the matrix does not issue it, so a skipped load never moves the later loads of that invocation into "
+            "another instruction. An instruction costs one transaction per distinct 32-byte block (8 consecutive words, "
+            "aligned to a multiple of 8 words) that its addresses touch. A, B and C sit in one flat memory of 4-byte words, in "
+            "that order, each buffer starting at the first multiple of 8 words at or after the end of the previous one: for "
+            "[6, 7] by [7, 10], A is words 0 to 41, B words 48 to 117 and C words 120 to 179 (for [16, 16] by [16, 16] "
+            "all three are multiples of 8 anyway).\n\n"
             + _table(["product", "kernel", "global loads, counted", "global loads, formula", "load blocks", "equals direct"],
                      rows, "llrrrl"))
 
@@ -714,7 +724,8 @@ def fragment_product():
             ("FLOPs of the product 2 n^3 = fragment multiply-adds x FLOPs each", _n(flops)),
             (f"subgroup instructions of vector fused multiply-adds ({sg} lanes) for the same product", _n(side ** 3 // sg)),
             ("accumulator registers per lane, m_f n_f / 32", fm * fn // sg),
-            ("numbers loaded from A and B", _n(cnt["numbers"])),
+            (f"numbers loaded from A and B = fragment multiply-adds x (m_f k_f + k_f n_f) = {cnt['mads']} x ({fm * fk} + {fk * fn})",
+             _n(cnt["numbers"])),
             ("largest |D - exact product of the fp16 inputs| (accumulation only)", f"{float(max(err_acc)):.3e}"),
             ("largest |D - exact product of the original fp32 inputs| (inputs rounded to fp16)", f"{float(max(err_in)):.3e}"),
             ("largest |sequential fp32 loop - exact product of the fp32 inputs|", f"{float(max(err_f32)):.3e}")]
@@ -817,7 +828,17 @@ def summation_orders():
         one.append((v, f"{x:.9g}", _bits(x), f"{(x - base[0]) / _ulp(base[0]):+.0f}"))
     return (f"C = A B with A [{side}, {k}] and B [{k}, {side}], entries `2 uniform() - 1` rounded to float32. {_seed_note(SUM_NAME)} Draw order: the {side * k} entries "
             f"of A row by row, then the {k * side} entries of B row by row. Every product and every sum is a correctly rounded float32 operation (no fused "
-            "multiply-add) unless the row says otherwise; the rows are defined in the text. 'Differ' counts the outputs whose float32 value differs from the "
+            "multiply-add) unless the row says otherwise. With p = 0 .. 1023 the index of the sum and fl(.) a rounding to float32, "
+            "the seven orders are: sequential, acc = fl(acc + fl(a_p b_p)) for p ascending from acc = 0; tiled with the "
+            "accumulator carried, the same additions in the same order written as 64 tiles of 16 consecutive p (p ascending inside a tile, "
+            "one accumulator for the whole sum); fused multiply-add, acc = fl(acc + a_p b_p) with the product exact (one rounding "
+            "per term); split-k with 4 slices, the four slices of 256 consecutive p are each summed sequentially from 0 "
+            "(rounded products) and the four slice sums are then added sequentially, slice 0 first, from acc = 0; tile sums "
+            "added to the total, each of the 64 tiles of 16 consecutive p is summed sequentially from 0 and the tile sums are "
+            "then added sequentially to acc, tile 0 first; 8 vector lanes, lane j = fl(lane j + fl(a_p b_p)) for the p with p mod 8 = j "
+            "in ascending order, then s_j = fl(lane j + lane j + 4) for j = 0 .. 3 and the result fl(fl(s_0 + s_1) + fl(s_2 + s_3)); "
+            "fragments with fp16 inputs, a and b first rounded to fp16, then for each tile of 16 consecutive p the 16 products "
+            "are formed exactly, added exactly to acc, and the sum is rounded once to float32. 'Differ' counts the outputs whose float32 value differs from the "
             "sequential order. Error is |result - exact sum of the float32 inputs|, with the exact sum computed in rational arithmetic, divided by u S, where "
             "u = 2^-24 and S = the sum of |A[i, p] B[p, j]| (Volume I's bound for a sum of K terms is (K - 1) u S = 1,023 u S).\n\n"
             + _table(["order of the sum", "differ from sequential", "largest error / (u S)", "mean error / (u S)"], rows)

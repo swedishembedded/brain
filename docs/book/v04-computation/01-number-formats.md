@@ -265,7 +265,7 @@ $\varepsilon = 2^{-n_m}$ (the gap between 1 and the next number, $2^{1-p}$ of Vo
 $p \log_{10} 2$, and the **decades** of range, $\log_{10}$ of the largest over the smallest positive number.
 
 <!-- worked: number_formats.float_formats -->
-Everything below is computed from the bit split n_e / n_m by the decoding rule of the chapter (bias = 2^(n_e-1) - 1, eps = 2^-n_m, digits = (n_m + 1) log10 2, decades = log10(max / smallest subnormal)). Decoding was checked against the machine's own binary16 for all 65536 codes, and encoding against its binary32 and binary16 on 2000 random values.
+Everything below is computed from the bit split n_e / n_m by the decoding rule of the chapter (bias = 2^(n_e-1) - 1, eps = 2^-n_m, digits = (n_m + 1) log10 2, decades = log10(max / smallest subnormal)). fp32, fp16, bf16 and E5M2 use the IEEE-style rule (the all-ones exponent field is infinity and NaN); E4M3 sets the decoder's finite_only flag: its all-ones exponent field 1111 is an ordinary exponent, only the pattern with fraction 111 as well is NaN, and there is no infinity, so its largest finite number is (1 + 6/8) * 2^8 = 448 (the IEEE-style rule would stop at (1 + 7/8) * 2^7 = 240). Decoding was checked against the machine's own binary16 for all 65536 codes, and encoding against its binary32 and binary16 on 2000 random values.
 
 | format | bits | exponent / fraction bits | bias | largest finite | smallest normal | smallest subnormal | eps = 2^-n_m | decimal digits | decades of range |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -333,28 +333,29 @@ in a wider format before the update. The cost is that $S$ must be large enough t
 gradients out of the subnormal range and small enough not to overflow the large ones, and the right $S$ changes during training.
 
 <!-- worked: number_formats.loss_scaling -->
-10000 stand-in gradient magnitudes g_i = 10^(-12 + 10 u_i), u_i = uniform() drawn in order i = 0, 1, ... from the generator seeded 13609293853419212352 (seed_of 'number_formats.loss_scaling'); the scaled values S g_i are rounded to the format once, ties to even. 'zero' is the share stored as 0, 'subnormal' the share stored with fewer than the full significand bits, 'inf' the share that overflows, 'kept' the share stored as a nonzero finite number; 'mean rel. error' is the mean of |stored - S g| / (S g) over the kept values.
+10000 stand-in gradient magnitudes g_i = 10^(-12 + 10 u_i), u_i = uniform() drawn in order i = 0, 1, ... from the generator seeded 13609293853419212352 (seed_of 'number_formats.loss_scaling'); the scaled values S g_i are rounded to the format once, ties to even. 'zero' is the share stored as 0, 'subnormal' the share stored with fewer than the full significand bits, 'inf' the share that overflows, 'kept' the share stored as a nonzero finite number; 'mean rel. error' is the mean of |stored - S g| / (S g) over the kept values. Shares are printed with two decimals (each is a count out of 10000, so two decimals are exact).
 
 | format | scale S | zero | subnormal | inf | kept | mean rel. error of kept |
 |---|---:|---:|---:|---:|---:|---:|
-| fp16 | 1 | 44.3% | 33.1% | 0.0% | 55.7% | 0.0424 |
-| fp16 | 2^8 | 20.2% | 32.5% | 0.0% | 79.8% | 0.0303 |
-| fp16 | 2^12 | 8.3% | 33.0% | 0.0% | 91.7% | 0.0256 |
-| fp16 | 2^16 | 0.0% | 29.1% | 0.0% | 100.0% | 0.00997 |
-| fp16 | 2^20 | 0.0% | 17.2% | 0.0% | 100.0% | 7.22e-04 |
-| fp16 | 2^24 | 0.0% | 5.5% | 4.2% | 95.8% | 1.92e-04 |
-| bf16 | 1 | 0.0% | 0.0% | 0.0% | 100.0% | 0.00141 |
+| fp16 | 1 | 44.26% | 33.07% | 0.00% | 55.74% | 0.0424 |
+| fp16 | 2^8 | 20.15% | 32.47% | 0.00% | 79.85% | 0.0303 |
+| fp16 | 2^12 | 8.32% | 32.95% | 0.00% | 91.68% | 0.0256 |
+| fp16 | 2^16 | 0.00% | 29.13% | 0.00% | 100.00% | 0.00997 |
+| fp16 | 2^20 | 0.00% | 17.17% | 0.00% | 100.00% | 7.22e-04 |
+| fp16 | 2^24 | 0.00% | 5.53% | 4.20% | 95.80% | 1.92e-04 |
+| bf16 | 1 | 0.00% | 0.00% | 0.00% | 100.00% | 0.00141 |
 <!-- /worked -->
 
 Without scaling, almost half of the stand-in gradients are stored as zero in fp16, and another third are
 subnormal, kept with fewer significant bits (the "kept" column counts them, and their error is why the mean
 error is large). Raising $S$ rescues them: at $2^{16}$ nothing is lost to zero, and at $2^{24}$ the largest
-gradients start to overflow to infinity (4.2%). There is a window of workable scales, and a training
+gradients start to overflow to infinity (4.20%). There is a window of workable scales, and a training
 run has to stay inside it. With bf16 the whole distribution is stored as it is, with no scale: the range is
 that of fp32, so there is no window to stay in. The price is precision: a mean error of 0.0014, about twice fp16's 0.0007 at $S = 2^{20}$, where nothing is lost. That is why bf16 training keeps its sums in 32 bits (see the sections below).
 This is the reason bf16 is the usual training format for large models and fp16 survives where the
 numbers are known to stay inside its range, as in serving. The mechanics of mixed-precision training (which tensors use which format, how
-the scale is adjusted, what master weights are) are the subject of Volume XIII, "Mixed-Precision Training".
+the scale is adjusted) belong to the later volume on training large models (Volume XIII). Nothing here depends on it: all
+that is needed is that a master copy is a 32-bit copy of the weights to which the updates are added, with the narrow copy rebuilt from it for the arithmetic.
 
 ## Eight bits: E4M3 and E5M2
 
@@ -485,7 +486,7 @@ group scale of $0.00708661$. The stored integer is a **code** $q$ and the number
 $\Delta q$, where $\Delta$ is a scale shared by a group of values. An **integer-quantized format** is a
 storage format of this kind: small integer codes, such as 8-bit or 4-bit two's complement numbers, plus the scale (and sometimes an offset, the zero point, below)
 needed to read them as numbers. How to choose scales well, group sizes, and how to find the numbers worth
-protecting is the subject of Volume IV, "Quantization: Fewer Bits per Weight"; this section
+protecting is the subject of Chapter 12 of this volume, on quantization; this section
 describes the format plainly so that the byte counts and kernels of the chapters between can be read.
 
 The simplest choice of scale maps the largest magnitude of the group to the largest code, $\Delta = \max_i |x_i| / q_{\max}$, with
@@ -607,6 +608,8 @@ relations the formats were designed with: bf16 is the top half of fp32, and E5M2
 | bf16 code c decodes like the fp32 pattern c << 16 | 65536 | 0 |
 | E5M2 code c decodes like the fp16 pattern c << 8 | 256 | 0 |
 | the finite positive codes of each format increase with their values | 4 | 0 |
+| encode(decode(c)) = c for every finite code, negative zero excepted | 129266 | 0 |
+| the negative-zero code decodes to 0 and 0 encodes as the positive-zero code (sign of zero is dropped) | 4 | 0 |
 <!-- /worked -->
 
 The last row says that the finite positive codes are ordered like their values, so two positive numbers can be compared as integers. (For negative numbers the order reverses, and NaN has no place in it.)
@@ -728,12 +731,12 @@ The weight is w = 1. The update u is added in exact arithmetic and the sum is ro
 
 An update of 0.001 leaves a bf16 weight at 1 exactly: the learning rate times the gradient can be too small for the format, for every step of
 training, and the weight never moves. (The row for 0.0005 in fp16 is the opposite oddity: the update rounds up to a full gap, nearly double its size.) Training in a narrow
-format therefore keeps the weights, or a master copy of them, in 32 bits, or rounds stochastically; Volume XIII explains both.
+format therefore keeps the weights, or a master copy of them, in 32 bits, or rounds stochastically (rounds up with a probability equal to the fraction of a gap that the update covers, so that the average update survives); the later volume on training large models works both out.
 
 ## Bytes and bandwidth
 
 The reason to put up with all of the above is the number of bytes, so we count them. A weight stored in $b$ bytes costs $b$ bytes of memory and, each time it is used, $b$ bytes of traffic. Generating one token with a dense model at batch size 1 reads each
-weight once and does 2 FLOPs with it (a multiply and an add), so the work per token is $2P$ FLOPs and $Pb$ bytes: $2/b$ FLOPs per byte. The scales of the
+weight once and does 2 FLOPs with it (a multiply and an add), so the work per token is $2P$ FLOPs and $Pb$ bytes: $2/b$ FLOPs per byte (the FLOPs per byte of a computation is its arithmetic divided by the bytes it moves; Chapter 3 builds the roofline on it). The scales of the
 block and group formats are charged in full.
 
 <!-- worked: number_formats.memory_per_format -->
@@ -750,7 +753,7 @@ A dense model of P = 7,000,000,000 parameters. Producing one token at batch size
 
 For $7 \times 10^9$ parameters the weights alone go from 28 GB in fp32 to 14 GB in a 16-bit format, to about 7 GB in 8 bits and 4.4 GB in 4 bits with a scale
 for every 32 values. The scales are not free: they turn "4 bits" into 5, and "8 bits" into 9. Because one token needs one pass over the
-weights, the bytes per token are the table's second column, and the arithmetic per byte rises as the bytes fall: the FLOPs per byte rise as $2/b$, from 0.5 for fp32 to 3.2 for the 4-bit format, and a device limited by its memory (Volume IV, Chapter 3 gives the test) gains exactly as the bytes fall. How a number of seconds follows depends on the device's bandwidth, and is for that chapter and for the profiling chapter.
+weights, the bytes per token are the table's second column, and the arithmetic per byte rises as the bytes fall: the FLOPs per byte rise as $2/b$, from 0.5 for fp32 to 3.2 for the 4-bit format, and a device limited by its memory (Chapter 3 of this volume gives the test) gains exactly as the bytes fall. How a number of seconds follows depends on the device's bandwidth, and is for that chapter and for the profiling chapter.
 
 Training stores more than the weights. Volume III, Chapter 7 counted 16 bytes per parameter for AdamW in 32 bits:
 
@@ -768,7 +771,7 @@ Bytes of training memory per parameter for AdamW (two moment slots, each in the 
 
 The second row is the surprise of mixed precision: with a 32-bit master copy and 32-bit moments, a bf16 model needs *as many* parameter bytes as the 32-bit one, 16 per
 parameter. The saving of that configuration is in the activations and the bandwidth of the matrix products, not in the parameter memory. Only narrower moments, or dropping the master copy,
-reduce the bill, and each of those costs precision somewhere else; the trade is worked out in Volume XIII, "Where Training Memory Goes".
+reduce the bill, and each of those costs precision somewhere else; the later volume on training large models works the trade out.
 
 ## Rules that keep narrow formats safe
 
@@ -857,7 +860,7 @@ because a format that moves fewer bytes only helps if the machine is waiting for
 3. **[Calculate]** A hypothetical IEEE-style format has 3 exponent bits and 4 fraction bits. Give its bias, largest finite number, smallest normal number, smallest subnormal number, $\varepsilon$ and decades of range, as in the format table.
 4. **[Calculate]** Convert the fp32 patterns `0x3F808000`, `0x3F818000` and `0x3F808001` to bf16 with round to nearest even by the integer rule, and by truncation. Which of the three distinguishes the two rules?
 5. **[Calculate]** A model has $13 \times 10^9$ parameters. Give its weight memory in decimal GB in bf16, in E4M3 with one 32-bit scale per 128 by 128 block, and in 4-bit codes with one 16-bit scale per group of 64.
-6. **[Implement]** Implement `decode_float` and `encode_float` from this chapter in your language and reproduce `number_formats.float_formats` and `number_formats.special_codes`. Check that `encode_float(decode_float(c)) == c` for every finite code of the four small formats (the exhaustive test of `number_formats.format_relations`).
+6. **[Implement]** Implement `decode_float` and `encode_float` from this chapter in your language and reproduce `number_formats.float_formats` and `number_formats.special_codes`. Check that `encode_float(decode_float(c)) == c` for every finite code of the four small formats except the negative-zero code of each, which decodes to 0 and so encodes as the positive-zero code (the exhaustive test of `number_formats.format_relations`).
 7. **[Implement]** Implement two's complement negation, addition with wrap and sign extension and reproduce `number_formats.twos_complement`, `number_formats.twos_complement_arithmetic` and `number_formats.unsigned_wrap`.
 8. **[Implement]** Implement the SplitMix64 stream of Volume I, Chapter 17, the bf16 shortcut and truncation, and reproduce `number_formats.bf16_rounding_bias` (the seed and draw order are printed with it). Then reproduce `number_formats.accumulator_stall` and `number_formats.update_absorbed`.
 9. **[Implement]** Implement symmetric and zero-point quantization, the per-block E4M3 scale and the int4 packing, and reproduce `number_formats.int8_group_scale`, `number_formats.int8_zero_point`, `number_formats.fp8_block_scale` and `number_formats.int4_pack`.

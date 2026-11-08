@@ -185,7 +185,7 @@ workgroup that are past the end of the data read and write memory beyond the buf
 workgroup size 4, with each mistake in turn. The memory is one flat list in which the buffers sit one after another:
 
 <!-- worked: compute_kernels.grid_failures -->
-The kernel of the previous block, y = 2 x + 1 with workgroup size 4, launched with a wrong grid or without its guard. y starts at 1000 (a value the kernel never writes); the neighbour buffer z has 4 words 500, 501, 502, 503; memory words between buffers hold -777. 'clamped' is the language's robust-access rule: an index past the end is replaced by the last valid one. Last two columns: words of z changed, padding words changed.
+The kernel of the previous block, y = 2 x + 1 with workgroup size 4, launched with a wrong grid or without its guard. y starts at 1000 (a value the kernel never writes); the neighbour buffer z has 4 words 500, 501, 502, 503; memory words between buffers hold -777. Input x_i = i - 3 for i = 0 .. N - 1. Memory is one flat list of 4-byte words in which the buffers are placed one after another in the order x, y, z, a tail buffer of 8 zero words that keeps an unguarded write inside memory; each buffer starts at the first word that is a multiple of 8 (32 bytes) at or after the end of the previous one, except 'z packed behind y', where z starts at the word right after y's last word. For N = 10 that puts x at words 0 to 9, y at 16 to 25 and z at 26 to 29 (packed) or 32 to 35 (aligned), so y[10] and y[11] fall on z[0], z[1] when packed and on padding words when aligned. The workgroups run one after another; 'clamped' is the language's robust-access rule: an index past the end is replaced by the last valid one. Last two columns: words of z changed, padding words changed.
 
 | launch | N | workgroups | invocations | y correct | y never written | z changed | padding changed |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -262,16 +262,16 @@ $(i, j)$ at storage cell $o + i s_0 + j s_1$. A kernel that materializes a view 
 is stored contiguously, so invocation $g$ owns output element $(i, j)$ with $i = \lfloor g / d_1 \rfloor$ and $j = g \bmod d_1$:
 
 ```text
-kernel gather_view(x: array<f32>[S], y: inout array<f32>[d0 * d1], d0: int, d1: int, s0: int, s1: int, o: int) workgroup n_wg:
+kernel gather_view(x: array<f32>[S], y: inout array<f32>[d0 * d1], S: int, d0: int, d1: int, s0: int, s1: int, o: int) workgroup n_wg:
     if g >= d0 * d1: return
     i = g // d1
     j = g mod d1
     y[g] = x[o + i * s0 + j * s1]
 
-launch gather_view(x, y, d0, d1, s0, s1, o) over ceil(d0 * d1 / n_wg) workgroups
+launch gather_view(x, y, len(x), d0, d1, s0, s1, o) over ceil(d0 * d1 / n_wg) workgroups
 ```
 
-The shape, strides and offset are uniform parameters, five integers, and one kernel serves every view. The case of Volume I,
+The shape, strides and offset are uniform parameters, five integers, and one kernel serves every view; $S$ is the length of the flat storage $x$ (it bounds the reads and is not used otherwise). The case of Volume I,
 Chapter 5, the storage $[0, 10, \ldots, 60]$ viewed with shape $[2, 3]$, strides $(1, 2)$ and offset 1, run through the simulator:
 
 <!-- worked: compute_kernels.view_gather -->
@@ -333,7 +333,7 @@ transposed tile. With $T = 16$ a workgroup has 256 invocations, the portable lim
 launch is two-dimensional, $n_x = \lceil n / T \rceil$ workgroups across and $n_y = \lceil m / T \rceil$ down):
 
 ```text
-kernel transpose_tiled(x: array<f32>[m, n], y: inout array<f32>[n, m], T: int) workgroup T * T:
+kernel transpose_tiled(x: array<f32>[m, n], y: inout array<f32>[n, m], m: int, n: int, T: int) workgroup T * T:
     shared tile: array<f32>[T * T]
     ly = l // T
     lx = l mod T
@@ -347,7 +347,7 @@ kernel transpose_tiled(x: array<f32>[m, n], y: inout array<f32>[n, m], T: int) w
     if r_out < n and c_out < m:
         y[r_out, c_out] = tile[lx * T + ly]
 
-launch transpose_tiled(x, y, T) over ceil(n / T) by ceil(m / T) workgroups
+launch transpose_tiled(x, y, m, n, T) over ceil(n / T) by ceil(m / T) workgroups
 ```
 
 Before the barrier, lane $l$ reads the element in row $w_y T + \lfloor l / T \rfloor$ and column $w_x T + (l \bmod T)$: consecutive lanes read consecutive
@@ -418,7 +418,7 @@ skips it, the others wait for ones that never arrive. Some compilers refuse such
 computes something. The natural way to write the guard breaks the rule, and it is wrong in a way that only edge tiles reveal:
 
 <!-- worked: compute_kernels.barrier_rule -->
-The tiled transpose of the previous block (tile 4 x 4, 16 invocations per workgroup) with the guard written two ways, on a matrix whose sides are not multiples of the tile and on one whose sides are. A workgroup 'faults' when only some of its invocations reach the barrier; its result is then undefined. The last column lists the faulting workgroups (x, y) and how many invocations arrived.
+The tiled transpose of the previous block (tile 4 x 4, 16 invocations per workgroup) with the guard written two ways, on a matrix whose sides are not multiples of the tile and on one whose sides are. A workgroup 'faults' when only some of its invocations reach the barrier; its result is then undefined. The last column lists the faulting workgroups (x, y) and how many invocations arrived. x[i, j] = 10 i + j; the shared tile of each workgroup starts as 99 in every slot; the workgroups run in ascending order and the result of a faulting workgroup is not used (the table reports it as undefined).
 
 | x | guard | workgroups | faulting | y equals direct | arrived at the barrier |
 |---|---|---:|---:|---|---|
@@ -436,7 +436,7 @@ takes it. The rule for writing: put the guard around the memory accesses, never 
 And the barrier itself cannot be dropped, which Chapter 4 showed for a stencil and the simulator shows here for the tile:
 
 <!-- worked: compute_kernels.missing_barrier -->
-The same [6, 10] transpose with and without the barrier. Inside each phase the invocations of a workgroup run in the order 0, 1, ..., 15 (ascending) or 15, ..., 0 (descending); both orders are legal on a device. Entries of y that differ from the direct transpose:
+The same [6, 10] transpose with and without the barrier. Inside each phase the invocations of a workgroup run in the order 0, 1, ..., 15 (ascending) or 15, ..., 0 (descending); both orders are legal on a device. x[i, j] = 10 i + j, tile 4 x 4, one shared tile per workgroup that starts as 99 in every slot, y starts as 1000 everywhere, and the workgroups run one after another. In the one-phase kernel each invocation in turn does its load into the shared tile and then, at once, its store from the shared tile, before the next invocation starts. Entries of y that differ from the direct transpose:
 
 | kernel | ascending order | descending order |
 |---|---:|---:|
@@ -514,7 +514,7 @@ Flat blocks of 4-byte scalars have alignment 4, so the struct is 4 x (number of 
 <!-- /worked -->
 
 A block of 4-byte scalars needs no holes: its size is $4 \times$ the number of fields, and only the final rounding to 16 bytes remains. The zero words after the fields are the buffer's padding. They
-make a second silent failure possible: if a host passes fewer words than the kernel's block has fields, the missing fields read zero, not an error (knowledge #171, in the brain section at the end). A scale or a tolerance that
+make a second silent failure possible: if a host passes fewer words than the kernel's block has fields, the missing fields read zero, not an error (the brain section at the end tells an instance, knowledge #171). A scale or a tolerance that
 is silently 0 is as hard to find as the misread `origin`. The same applies to arrays: an `array<vec3<f32>>` has a stride of 16 bytes, not 12, so a kernel that wants three floats per element reads a flat
 `array<f32>` and computes `3 * i + c` itself.
 

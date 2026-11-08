@@ -260,6 +260,10 @@ def float_formats():
                      _num(p["min_sub"], 3), _num(p["eps"], 3), f"{p['digits']:.2f}", f"{p['decades']:.1f}"])
     return ("Everything below is computed from the bit split n_e / n_m by the decoding rule of the chapter (bias = 2^(n_e-1) - 1, "
             "eps = 2^-n_m, digits = (n_m + 1) log10 2, decades = log10(max / smallest subnormal)). "
+            "fp32, fp16, bf16 and E5M2 use the IEEE-style rule (the all-ones exponent field is infinity and NaN); E4M3 sets the "
+            "decoder's finite_only flag: its all-ones exponent field 1111 is an ordinary exponent, only the pattern with "
+            "fraction 111 as well is NaN, and there is no infinity, so its largest finite number is (1 + 6/8) * 2^8 = 448 "
+            "(the IEEE-style rule would stop at (1 + 7/8) * 2^7 = 240). "
             "Decoding was checked against the machine's own binary16 for all 65536 codes, and encoding against its binary32 and binary16 on 2000 random values.\n\n"
             + _table(["format", "bits", "exponent / fraction bits", "bias", "largest finite", "smallest normal",
                       "smallest subnormal", "eps = 2^-n_m", "decimal digits", "decades of range"], rows))
@@ -440,14 +444,15 @@ def loss_scaling():
     for f, scales in [("fp16", [1, 2 ** 8, 2 ** 12, 2 ** 16, 2 ** 20, 2 ** 24]), ("bf16", [1])]:
         for S in scales:
             z, s, o, e = stats([S * g for g in gs], f)
-            rows.append([f, f"2^{int(math.log2(S))}" if S > 1 else "1", f"{100 * z:.1f}%", f"{100 * s:.1f}%", f"{100 * o:.1f}%",
-                         f"{100 * (1 - z - o):.1f}%", _num(e, 3)])
+            rows.append([f, f"2^{int(math.log2(S))}" if S > 1 else "1", f"{100 * z:.2f}%", f"{100 * s:.2f}%", f"{100 * o:.2f}%",
+                         f"{100 * (1 - z - o):.2f}%", _num(e, 3)])
     seed = bookrng.seed_of("number_formats.loss_scaling")
     head = (f"{LOSS_SCALE_DRAWS} stand-in gradient magnitudes g_i = 10^(-12 + 10 u_i), u_i = uniform() drawn in order i = 0, 1, ... "
             f"from the generator seeded {seed} (seed_of 'number_formats.loss_scaling'); the scaled values S g_i are rounded to the "
             "format once, ties to even. 'zero' is the share stored as 0, 'subnormal' the share stored with fewer than the full "
             "significand bits, 'inf' the share that overflows, 'kept' the share stored as a nonzero finite number; "
-            "'mean rel. error' is the mean of |stored - S g| / (S g) over the kept values.\n\n")
+            "'mean rel. error' is the mean of |stored - S g| / (S g) over the kept values. Shares are printed with two decimals "
+            "(each is a count out of 10000, so two decimals are exact).\n\n")
     return head + _table(["format", "scale S", "zero", "subnormal", "inf", "kept", "mean rel. error of kept"], rows)
 
 
@@ -631,6 +636,26 @@ def format_relations():
         tot += 1
         ok += all(vals[i][0] < vals[i + 1][0] and vals[i][1] < vals[i + 1][1] for i in range(len(vals) - 1))
     rows.append(["the finite positive codes of each format increase with their values", tot, tot - ok])
+    # encode(decode(c)) == c for every finite code; the one exception is the negative-zero code of each format,
+    # because a real number has no sign of zero: it decodes to 0 and encodes as the positive-zero code
+    n_codes = 0
+    bad = 0
+    neg_zero = 0
+    neg_zero_bad = 0
+    for f in SMALL:
+        for c in range(1 << width(f)):
+            v = decode(c, f)
+            if v != v or math.isinf(v):
+                continue
+            if v == 0 and c != 0:
+                neg_zero += 1
+                neg_zero_bad += encode(0.0, f) != 0
+            else:
+                n_codes += 1
+                bad += encode(v, f) != c
+    rows.append(["encode(decode(c)) = c for every finite code, negative zero excepted", n_codes, bad])
+    rows.append(["the negative-zero code decodes to 0 and 0 encodes as the positive-zero code (sign of zero is dropped)",
+                 neg_zero, neg_zero_bad])
     return _table(["relation", "cases checked", "violations"], rows)
 
 

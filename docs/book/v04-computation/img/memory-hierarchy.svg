@@ -1,4 +1,4 @@
-<!-- source-sha256: 3e2f28292658955cb3a8a87659716f277d3c7ecbd64b650ac14018b585135510 -->
+<!-- source-sha256: e76e4a8a487af84f104f8106f433fe753daa945f43a01f33f967c0001119064c -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 444" width="780" height="444"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="444" fill="#ffffff"/>
 <rect x="20" y="12" width="740" height="420" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="34" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">One core&#x27;s memory, nearest the arithmetic at the top (typical values)</text>
@@ -9,7 +9,7 @@
 <rect x="50" y="76" width="200" height="44" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="150" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">registers</text>
 <rect x="265" y="76" width="130" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
-<text x="330" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 KiB</text>
+<text x="330" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">640 B</text>
 <rect x="435" y="76" width="130" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="500" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 cycle</text>
 <rect x="600" y="76" width="130" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>

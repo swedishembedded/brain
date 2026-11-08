@@ -203,7 +203,7 @@ def hierarchy_cost_model():
 # (name, typical capacity in bytes, "who shares it", typical latency in cycles, note); typical orders of
 # magnitude of a recent desktop or server core, chosen for round arithmetic, not measured on any machine.
 HIERARCHY = (
-    ("registers", 1024, "one core", 1, "named in the instruction"),
+    ("registers", 640, "one core", 1, "named in the instruction"),
     ("L1 data cache", 32 * 1024, "one core", 4, "split from the instruction cache"),
     ("L2 cache", 1024 * 1024, "one core", 14, "unified"),
     ("L3 cache", 32 * 1024 * 1024, "all cores", 45, "shared"),
@@ -224,8 +224,8 @@ def hierarchy_table():
         lines = "-" if name == "registers" else _n(cap // LINE)
         rows.append((name, _size(cap), lines, who, lat, f"{lat / HIERARCHY[1][3]:.2f}"))
     return ("TYPICAL orders of magnitude for one core of a recent server or desktop chip, rounded for arithmetic; "
-            "they vary by chip and are not measurements of any machine. The register row counts the vector "
-            "registers (16 of 32 bytes, plus the scalar ones) as about 1 KiB.\n\n"
+            "they vary by chip and are not measurements of any machine. The register row counts "
+            "16 vector registers of 32 bytes (512 bytes) and 16 scalar registers of 8 bytes (128 bytes): 640 bytes.\n\n"
             + _table(["level", "typical capacity", "lines of 64 bytes", "shared by", "typical latency, cycles",
                       "relative to L1"], rows, "lrrlrr"))
 
@@ -255,44 +255,82 @@ def _schedule(ops, latency, issue):
     return last
 
 
-def _sum_graph(n, lanes):
-    """The additions of summing n numbers into `lanes` accumulators, then adding the lanes in a tree.
+def _sum_program(n, lanes):
+    """The additions of summing n numbers into `lanes` totals, then adding the totals in layers, in program order.
 
-    Lane l adds elements l, l + lanes, l + 2 lanes, ... one after another (n // lanes - 1 or so additions in
-    sequence; the first element needs no addition). The lane totals are then combined pairwise, layer by
-    layer. Returns (ops, longest chain of additions). Operands are assumed to be in registers already.
+    Element i belongs to total i mod `lanes`. The first addition of a total adds its first two elements and each
+    later one adds the next element of the total to the running value, so a total with m elements is a chain of
+    m - 1 additions; a total with one element needs none. The totals are then combined in layers: adjacent pairs
+    (0 with 1, 2 with 3, ...) are added, an odd one out moves to the next layer unchanged, and the next layer pairs
+    the results the same way, until one value is left. Program order is every addition of total 0, then of total 1,
+    and so on, then the layers from the first to the last, left to right. Each addition is a pair of operands,
+    ("x", i) for input element i or ("o", k) for the result of addition k.
     """
-    ops, tail = [], []
+    prog, layer = [], []
     for lane in range(lanes):
-        prev = None
-        for _ in range(lane + lanes, n, lanes):
-            ops.append([] if prev is None else [prev])
-            prev = len(ops) - 1
-        tail.append(prev)
-    layer = tail
+        prev = ("x", lane)
+        for i in range(lane + lanes, n, lanes):
+            prog.append((prev, ("x", i)))
+            prev = ("o", len(prog) - 1)
+        layer.append(prev)
     while len(layer) > 1:
         nxt = []
         for a, b in zip(layer[::2], layer[1::2]):
-            ops.append([d for d in (a, b) if d is not None])
-            nxt.append(len(ops) - 1)
+            prog.append((a, b))
+            nxt.append(("o", len(prog) - 1))
         if len(layer) % 2:
             nxt.append(layer[-1])
         layer = nxt
+    return prog
+
+
+def _sum_graph(n, lanes):
+    """The dependencies of `_sum_program`: ops[k] = indices of the additions whose results addition k needs.
+
+    Returns (ops, longest chain of additions). Operands are assumed to be in registers already.
+    """
+    ops = [[v for kind, v in pair if kind == "o"] for pair in _sum_program(n, lanes)]
     depth = [0] * len(ops)
     for i, deps in enumerate(ops):
         depth[i] = 1 + max((depth[d] for d in deps), default=0)
     return ops, max(depth, default=0)
 
 
+def _label(operand):
+    return f"{operand[0]}{operand[1]}"
+
+
+def _program_text(n, lanes):
+    return "; ".join(f"o{k} = {_label(a)} + {_label(b)}" for k, (a, b) in enumerate(_sum_program(n, lanes)))
+
+
+# What a reader needs to reproduce the schedule from the page; shared by both tables.
+_SCHEDULE_RULE = (
+    "Program: element i belongs to total i mod L; the first addition of a total adds its first two elements, each later "
+    "one adds the next element of that total to its running value, so a total of m elements is a chain of m - 1 "
+    "additions; then the L totals are combined in layers, adding adjacent pairs (total 0 with 1, 2 with 3, ...) and then "
+    "adjacent pairs of those results, until one value is left. Program order is all the additions of total 0, then of "
+    "total 1, and so on, then the layers from first to last, left to right. Schedule: cycles are numbered 0, 1, 2, ...; "
+    "in each cycle the not yet issued additions are scanned in program order and the first two whose operands are "
+    "available at the start of that cycle are issued (an addition that is not ready does not block the ones after "
+    "it); an addition issued in cycle c delivers its result at the start of cycle c + 4. The modelled cycles are the "
+    "cycle at which the last result is available; the dependent chain counts additions along the longest path."
+)
+
+
 def dependency_small():
     n, lat, iss = 8, 4, 2
     rows = []
+    progs = []
     for lanes in (1, 2, 4, 8):
         ops, chain = _sum_graph(n, lanes)
         rows.append((lanes, len(ops), chain, _schedule(ops, lat, iss)))
+        progs.append((lanes, _program_text(n, lanes)))
+    listing = "\n".join(f"- L = {lanes}: {text}" for lanes, text in progs)
     return (f"Summing n = {n} numbers into L accumulators, then adding the L totals as a tree. Model: an addition "
             f"takes {lat} cycles from issue to result, the core can start {iss} additions per cycle, operands are "
-            "already in registers. Additions are issued in program order, as soon as their inputs are ready.\n\n"
+            f"already in registers. {_SCHEDULE_RULE} Here x0 ... x7 are the inputs and o0, o1, ... are the results of "
+            "the additions in program order; the programs are:\n\n" + listing + "\n\n"
             + _table(["L", "additions", "longest chain of dependent additions", "modelled cycles to the sum"], rows))
 
 
@@ -303,10 +341,11 @@ def dependency_chain():
         ops, chain = _sum_graph(n, lanes)
         cyc = _schedule(ops, lat, iss)
         ideal = math.ceil(len(ops) / iss)
-        rows.append((lanes, len(ops), chain, cyc, ideal, f"{ideal / cyc:.2f}"))
+        rows.append((lanes, len(ops), chain, cyc, ideal, f"{ideal / cyc:.3f}"))
     return (f"The same model with n = {n}: an addition takes {lat} cycles from issue to result, the core starts "
             f"{iss} additions per cycle, so {lat * iss} independent additions are needed to keep it busy. A MODEL "
-            "of a core, not a measurement of one.\n\n"
+            f"of a core, not a measurement of one. {_SCHEDULE_RULE} The issue-limited cycles are the number of "
+            "additions divided by 2, rounded up; the last column is that divided by the modelled cycles.\n\n"
             + _table(["L", "additions", "longest dependent chain", "modelled cycles", "issue-limited cycles",
                       "fraction of the issue rate"], rows))
 
@@ -352,12 +391,14 @@ def hsum_trace():
     rows += [(f"lanes j and j + 4: s[{j}]", f"{s4[j]:.9g}") for j in range(4)]
     rows += [("s[0] + s[1]", f"{s2[0]:.9g}"), ("s[2] + s[3]", f"{s2[1]:.9g}"), ("horizontal sum", f"{s1:.9g}"),
              ("after the 4 tail elements (16 .. 19), one at a time", f"{total:.9g}"),
-             ("left to right, one accumulator", f"{ref:.9g}"), ("exact value of the stored numbers", f"{float(exact):.9g}")]
+             ("left to right, one accumulator", f"{ref:.9g}"),
+             ("exact sum of the exact products of the stored x and y", f"{float(exact):.9g}")]
     return (f"{_seed_note(name)} n = {n}. Draw order: the 20 values of x, each `2 * uniform() - 1` rounded to f32, "
             "then the 20 values of y the same way. Every product and every sum is rounded to f32 (no fused "
             "multiply-add). Lane j of the 8 accumulators adds the products j, j + 8 (elements 0..15 only). The "
             "horizontal sum is s[j] = lane j + lane j + 4, then (s[0] + s[1]) + (s[2] + s[3]); the last four "
-            "products are then added to it one at a time.\n\n" + _table(["step", "value"], rows))
+            "products are then added to it one at a time. The last row is the exact (unrounded) products of the stored f32 "
+            "inputs summed in exact arithmetic, then shown to 9 digits.\n\n" + _table(["step", "value"], rows))
 
 
 def _hsum(acc):
@@ -379,6 +420,7 @@ def simd_sum_order():
     y = [_f32(2.0 * rng.uniform() - 1.0) for _ in range(n)]
     prods = [_f32(a * b) for a, b in zip(x, y)]
     exact = sum(Fraction(a) * Fraction(b) for a, b in zip(x, y))
+    exact_rounded_products = sum(Fraction(p) for p in prods)
 
     def lanes_sum(w):
         acc = [0.0] * w
@@ -397,9 +439,12 @@ def simd_sum_order():
             "then the 4096 of y. The products are rounded to f32 and then added in f32, one addition at a time. With "
             "w lanes, lane j adds the products j, j + w, j + 2w, ... in order, and the lanes are then combined by "
             "the horizontal sum (while more than 4 lanes remain, lane j + h is added to lane j for h = half "
-            "the lanes; then (a0 + a1) + (a2 + a3)); w = 1 is the plain left-to-right sum. The exact value "
-            f"of the sum of the stored products is {float(exact):.9g}.\n\n"
-            + _table(["lanes w", "f32 sum", "relative error against the exact sum"], rows)
+            "the lanes; then (a0 + a1) + (a2 + a3)); w = 1 is the plain left-to-right sum. The reference is the exact "
+            "sum, in exact arithmetic, of the exact (unrounded) products of the stored f32 inputs: "
+            f"{float(exact):.9g}. (The exact sum of the f32-rounded products is {float(exact_rounded_products):.9g}; "
+            "the two differ by the rounding of the products, which no order of additions can remove.) The error column "
+            "is |f32 sum - reference| / |reference|.\n\n"
+            + _table(["lanes w", "f32 sum", "relative error against the reference"], rows)
             + f"\n\n{len(results)} distinct results from 5 orders.")
 
 
@@ -546,8 +591,8 @@ def dispatch_grain():
             rows.append((threads, _n(total), _n(chunk), _n(tasks) if chunk < total else "0 (runs on the caller)"))
     return (f"The splitting rule: a loop of N invocations on T threads is cut into chunks of "
             f"max(ceil(N / 8T), {floor}) invocations (about 8 chunks per thread, but never fewer than {_n(floor)} "
-            "per chunk); one chunk or fewer means no tasks at all. (The rounding of a chunk up to a whole workgroup, for kernels that "
-            "have one, is left out.)\n\n"
+            "per chunk); one chunk or fewer means no tasks at all. An invocation is one run of the loop body for one index. "
+            "The tasks column is ceil(N / chunk size) when that is more than one, and 0 otherwise.\n\n"
             + _table(["threads T", "invocations N", "chunk size", "tasks"], rows))
 
 

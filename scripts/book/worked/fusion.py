@@ -352,10 +352,12 @@ def redundant_partials():
             f"n_wg = N / (256 n_el) workgroups. Three dispatches: partial sums (reads 4 N, writes 4 n_wg), the total by one workgroup (reads 4 n_wg, "
             f"writes 4), the division (reads 4 N + 4, writes 4 N). Two dispatches: partial sums, then a division in which every workgroup first adds "
             f"all n_wg partials itself (n_wg workgroups each reading 4 n_wg bytes). Cost in millions of bytes inside one recorded submission: bytes plus "
-            f"{_n(L_DSP)} per dispatch (the common submission cost {_n(L_SUB)} cancels). The extra reads of the two-dispatch design, "
+            f"{_n(L_DSP)} per dispatch. The cost of the submission itself, {_n(L_SUB)} bytes, is the same for both designs and is left out of the "
+            f"'cost' columns (add {L_SUB / 1e6:.1f} to every cost to include it; it changes no comparison). The extra reads of the two-dispatch design, "
             f"4 n_wg^2 bytes, equal the dispatch they save when n_wg = sqrt({_n(L_DSP)} / 4) = {math.sqrt(L_DSP / 4):.1f}; "
             f"if the dispatches were submitted alone ({_n(L_LONE)} each) it would be n_wg = {math.sqrt(L_LONE / 4):.1f}.\n\n"
-            + _table(["n_el", "n_wg", "dispatches", "bytes", "cost (M)", "dispatches", "bytes", "cost (M)", "cheaper"],
+            + _table(["n_el", "n_wg", "dispatches", "bytes", "cost without submission (M)", "dispatches", "bytes",
+                       "cost without submission (M)", "cheaper"],
                      rows, "rrrrrrrrl"))
 
 

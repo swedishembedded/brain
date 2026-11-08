@@ -562,8 +562,12 @@ def launch_shape_bits():
             f"x[(k n_wg + w) size + t], k = 0 .. n_el - 1, left to right, and a sequential-addressing tree adds the workgroup; "
             f"pass 2 is one workgroup of 64 invocations, invocation t adding partials t, t + 64, ... left to right (missing ones "
             f"count as 0), then the same tree. The three 'one cell' rows model an unordered accumulate: the updates arrive in the "
-            f"order of a shuffle of 0 .. n - 1 (the book's Fisher-Yates), three shuffles drawn one after another from the "
-            f"generator of the name `{oname}` (seed {bookrng.seed_of(oname):#018x}). 'Same on rerun' repeats the whole computation.\n\n"
+            f"order of a shuffle of 0 .. n - 1 (the book's Fisher-Yates), each shuffle starting from a fresh array 0, 1, ..., n - 1 (not "
+            f"from the result of the previous one), three shuffles drawn one after another from the "
+            f"generator of the name `{oname}` (seed {bookrng.seed_of(oname):#018x}); the cell starts at 0 and the updates are "
+            f"acc = fl(acc + x[i]) for i in the order of the shuffle. 'Left fold' is acc = fl(acc + x[i]) for i = 0 .. n - 1; "
+            f"'tree of adjacent pairs' adds x[0] + x[1], x[2] + x[3], ... and then adjacent pairs of the results, layer by layer, "
+            f"until one value is left. 'Same on rerun' repeats the whole computation.\n\n"
             + _table(["order", "result", "bits", "ulps from exact", "same on rerun"], rows, "lrrrr"))
 
 
@@ -777,9 +781,13 @@ def block_scan_dispatches():
             f"serially in place and writes the block's total; the totals are scanned the same way, recursively, until they fit one "
             f"block; then one dispatch per level above the first adds the scanned totals back. 'Levels' lists the number of words "
             f"scanned at each level. Dispatches = levels block scans + (levels - 1) add-backs. 'Chain' = the longest chain of "
-            f"dependent additions (each block scan adds up to {SCAN_BLOCK - 1} times in sequence, each add-back once). Words are "
-            f"counted once per dispatch (block scan: read n_j, write n_j + totals; add-back: read n_j + totals, write n_j); the "
-            f"minimum for a scan is 2n (read every word, write every word).\n\n"
+            f"dependent additions: the block scan of a level with n_j words adds min({SCAN_BLOCK}, n_j) - 1 times in sequence "
+            f"(a full block of {SCAN_BLOCK} words takes {SCAN_BLOCK - 1}, the last level may be shorter), each add-back once, "
+            f"and the levels follow one another, so chain = the sum over the levels of min({SCAN_BLOCK}, n_j) - 1, plus "
+            f"levels - 1. Words are counted once per dispatch: a block scan of a level with n_j words and n_b = ceil(n_j / "
+            f"{SCAN_BLOCK}) blocks reads n_j words and writes n_j scanned words and one total per block, n_b words (the "
+            f"single block of the last level writes its total too, one word that nobody reads); an add-back reads the n_j "
+            f"words and the n_b scanned totals and writes n_j words. The minimum for a scan is 2n (read every word, write every word).\n\n"
             + _table(["n", "levels (words scanned)", "dispatches", "invocations in the first dispatch", "chain",
                       "words moved", "ratio to the minimum 2n"], rows, "lllrrrr"))
 
@@ -906,7 +914,11 @@ def radix_trace():
             + "\n\nThe pairs key:position after each pass:\n\n"
             + _table(["moment", "pairs"], [(a, " ".join(b)) for a, b in stage], "ll")
             + f"\n\nThe keys of the last pass are sorted: {_yes(final['keys'] == sorted(keys))}; equal keys keep their input order "
-              f"(positions equal the stable order): {_yes(stable)}. Words moved by the simulated dispatches: {counts['load']} loads + "
+              f"(positions equal the stable order): {_yes(stable)}. Words moved by the simulated dispatches, per pass: the histogram "
+              f"dispatch loads the {n} keys and stores the {h_words} histogram words; the scan dispatch (the histogram fits one block "
+              f"of the block scan of the previous section) loads the {h_words} words and stores the {h_words} scanned words and the "
+              f"block's total, {h_words + 1}; the scatter dispatch loads the {n} keys, the {n} values and the {h_words} offsets and "
+              f"stores the {n} keys and the {n} values. In all, {counts['load']} loads + "
               f"{counts['store']} stores = {got}; the formula 5n + 2 N_hist + S(N_hist) per pass with n = {n}, N_hist = {h_words} histogram words and "
               f"S(N_hist) = {_scan_words(h_words)} words of the scan gives {formula}: {_yes(got == formula)}.")
 

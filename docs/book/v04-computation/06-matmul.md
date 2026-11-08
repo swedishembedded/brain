@@ -218,7 +218,7 @@ Run it. The simulator of Chapter 5 executes the body of every invocation of ever
 ragged sides, so that tiles at the edges are partial:
 
 <!-- worked: matmul_fast.tiled_trace -->
-Integer matrices A[i, k] = (7 i + 3 k) mod 11 - 5 and B[k, j] = (5 k + 2 j) mod 13 - 6 (as in `matmul_fast.naive_small`), run on the kernel simulator of Chapter 5 (32-lane subgroups, 32-byte blocks). Loads are counted by the kernel as it executes them; an invocation that falls outside the matrices loads nothing. Formula: naive 2 m n k; tiled k (m ceil(n / T) + n ceil(m / T)). 'Load blocks' are the simulator's 32-byte transactions for loads.
+Integer matrices A[i, k] = (7 i + 3 k) mod 11 - 5 and B[k, j] = (5 k + 2 j) mod 13 - 6 (as in `matmul_fast.naive_small`), run on the kernel simulator of Chapter 5 (32-lane subgroups, 32-byte blocks). Loads are counted by the kernel as it executes them; an invocation that falls outside the matrices loads nothing. Formula: naive 2 m n k; tiled k (m ceil(n / T) + n ceil(m / T)). 'Load blocks' are the simulator's 32-byte transactions for loads, counted as follows. A memory instruction is one load statement of the kernel at one step of its loops: for the naive kernel the load of A and the load of B at one k; for the tiled kernel the load of A and the load of B at one step e of the cooperative loop in one k-chunk of one workgroup. The invocations of a subgroup (32 consecutive invocations of a workgroup; a workgroup of 16 is one partial subgroup) that reach an instruction issue it together, and one that has returned or whose element lies outside the matrix does not issue it, so a skipped load never moves the later loads of that invocation into another instruction. An instruction costs one transaction per distinct 32-byte block (8 consecutive words, aligned to a multiple of 8 words) that its addresses touch. A, B and C sit in one flat memory of 4-byte words, in that order, each buffer starting at the first multiple of 8 words at or after the end of the previous one: for [6, 7] by [7, 10], A is words 0 to 41, B words 48 to 117 and C words 120 to 179 (for [16, 16] by [16, 16] all three are multiples of 8 anyway).
 
 | product | kernel | global loads, counted | global loads, formula | load blocks | equals direct |
 |---|---|---:|---:|---:|---|
@@ -226,7 +226,7 @@ Integer matrices A[i, k] = (7 i + 3 k) mod 11 - 5 and B[k, j] = (5 k + 2 j) mod 
 | [16, 16] by [16, 16] | tiled, T = 4 (16 invocations) | 2,048 | 2,048 | 512 | yes |
 | [16, 16] by [16, 16] | tiled, T = 8 (64 invocations) | 1,024 | 1,024 | 128 | yes |
 | [6, 7] by [7, 10] | naive, 16 invocations per workgroup | 840 | 840 | 114 | yes |
-| [6, 7] by [7, 10] | tiled, T = 4 (16 invocations) | 266 | 266 | 94 | yes |
+| [6, 7] by [7, 10] | tiled, T = 4 (16 invocations) | 266 | 266 | 84 | yes |
 <!-- /worked -->
 
 The naive kernel loads $2mnk = 8{,}192$ numbers for the $16 \times 16$ product, the tiled kernel with $T = 4$ loads 2,048 and with $T = 8$ loads 1,024: the count is divided by $T$. The formula behind the column is exact for any shape. A number
@@ -467,7 +467,7 @@ A and B are [32, 32] with entries `2 uniform() - 1` rounded to float32 and then 
 | FLOPs of the product 2 n^3 = fragment multiply-adds x FLOPs each | 65,536 |
 | subgroup instructions of vector fused multiply-adds (32 lanes) for the same product | 1,024 |
 | accumulator registers per lane, m_f n_f / 32 | 8 |
-| numbers loaded from A and B | 4,096 |
+| numbers loaded from A and B = fragment multiply-adds x (m_f k_f + k_f n_f) = 8 x (256 + 256) | 4,096 |
 | largest |D - exact product of the fp16 inputs| (accumulation only) | 2.701e-07 |
 | largest |D - exact product of the original fp32 inputs| (inputs rounded to fp16) | 1.726e-03 |
 | largest |sequential fp32 loop - exact product of the fp32 inputs| | 2.190e-06 |
@@ -543,7 +543,7 @@ holds them, never the order in which one output sums its terms. What does change
 time, in an order the hardware chooses, with inputs rounded to a narrower format. The next table adds the same 1024 products of 16 seeded outputs in seven ways:
 
 <!-- worked: matmul_fast.summation_orders -->
-C = A B with A [4, 1024] and B [1024, 4], entries `2 uniform() - 1` rounded to float32. Generator: the book's SplitMix64, seed 0xf5470b48859cbe35 (the seed of the name `matmul_fast.summation_orders`). Draw order: the 4096 entries of A row by row, then the 4096 entries of B row by row. Every product and every sum is a correctly rounded float32 operation (no fused multiply-add) unless the row says otherwise; the rows are defined in the text. 'Differ' counts the outputs whose float32 value differs from the sequential order. Error is |result - exact sum of the float32 inputs|, with the exact sum computed in rational arithmetic, divided by u S, where u = 2^-24 and S = the sum of |A[i, p] B[p, j]| (Volume I's bound for a sum of K terms is (K - 1) u S = 1,023 u S).
+C = A B with A [4, 1024] and B [1024, 4], entries `2 uniform() - 1` rounded to float32. Generator: the book's SplitMix64, seed 0xf5470b48859cbe35 (the seed of the name `matmul_fast.summation_orders`). Draw order: the 4096 entries of A row by row, then the 4096 entries of B row by row. Every product and every sum is a correctly rounded float32 operation (no fused multiply-add) unless the row says otherwise. With p = 0 .. 1023 the index of the sum and fl(.) a rounding to float32, the seven orders are: sequential, acc = fl(acc + fl(a_p b_p)) for p ascending from acc = 0; tiled with the accumulator carried, the same additions in the same order written as 64 tiles of 16 consecutive p (p ascending inside a tile, one accumulator for the whole sum); fused multiply-add, acc = fl(acc + a_p b_p) with the product exact (one rounding per term); split-k with 4 slices, the four slices of 256 consecutive p are each summed sequentially from 0 (rounded products) and the four slice sums are then added sequentially, slice 0 first, from acc = 0; tile sums added to the total, each of the 64 tiles of 16 consecutive p is summed sequentially from 0 and the tile sums are then added sequentially to acc, tile 0 first; 8 vector lanes, lane j = fl(lane j + fl(a_p b_p)) for the p with p mod 8 = j in ascending order, then s_j = fl(lane j + lane j + 4) for j = 0 .. 3 and the result fl(fl(s_0 + s_1) + fl(s_2 + s_3)); fragments with fp16 inputs, a and b first rounded to fp16, then for each tile of 16 consecutive p the 16 products are formed exactly, added exactly to acc, and the sum is rounded once to float32. 'Differ' counts the outputs whose float32 value differs from the sequential order. Error is |result - exact sum of the float32 inputs|, with the exact sum computed in rational arithmetic, divided by u S, where u = 2^-24 and S = the sum of |A[i, p] B[p, j]| (Volume I's bound for a sum of K terms is (K - 1) u S = 1,023 u S).
 
 | order of the sum | differ from sequential | largest error / (u S) | mean error / (u S) |
 |---|---:|---:|---:|
@@ -573,7 +573,7 @@ split-K schedule and the vector lanes land 2, 3 and 3 units in the last place fr
 tile sums added to the total $0.192\,uS$. Volume I's bound for a sum of $K$ terms is $(K-1)\,uS = 1023\,uS$; every error in the table is below $1\,uS$, a thousand times under the bound, since the individual roundings are of both signs. The last row is of another size: with fp16 inputs the largest error is $374\,uS$, the error of the inputs, not of the sum.
 
 Three consequences follow. A test of a tuned kernel against a reference needs a tolerance sized by $uS$ (or by the unit roundoff of the *input* format when the inputs are narrowed), unless the kernel is meant to keep the order, in which case an exact comparison is a stronger test and brain makes it (the last section). A comparison with a tolerance
-should not be tightened to the zero that happened to come out, since the next legitimate reordering would then look like a regression (knowledge #119 says this). And the order of additions is itself a property worth recording: a kernel that is reproducible from run to run needs a fixed order, which split-K and a tree
+should not be tightened to the zero that happened to come out: that zero is a property of today's order of additions, and the next legitimate reordering changes the last bits, so a test demanding zero would then report a regression where there is none (knowledge #119 records the same lesson). And the order of additions is itself a property worth recording: a kernel that is reproducible from run to run needs a fixed order, which split-K and a tree
 reduction can have, as long as the slices are folded in a fixed sequence, and which an unordered accumulate (an atomic add) cannot give.
 
 ## The matmul ladder in brain's kernels

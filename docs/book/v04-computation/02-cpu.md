@@ -129,7 +129,12 @@ longest chain, and schedules the additions on the model core (each cycle, start 
 inputs are ready, in program order), for $L$ running totals combined at the end by a tree:
 
 <!-- worked: cpu.dependency_small -->
-Summing n = 8 numbers into L accumulators, then adding the L totals as a tree. Model: an addition takes 4 cycles from issue to result, the core can start 2 additions per cycle, operands are already in registers. Additions are issued in program order, as soon as their inputs are ready.
+Summing n = 8 numbers into L accumulators, then adding the L totals as a tree. Model: an addition takes 4 cycles from issue to result, the core can start 2 additions per cycle, operands are already in registers. Program: element i belongs to total i mod L; the first addition of a total adds its first two elements, each later one adds the next element of that total to its running value, so a total of m elements is a chain of m - 1 additions; then the L totals are combined in layers, adding adjacent pairs (total 0 with 1, 2 with 3, ...) and then adjacent pairs of those results, until one value is left. Program order is all the additions of total 0, then of total 1, and so on, then the layers from first to last, left to right. Schedule: cycles are numbered 0, 1, 2, ...; in each cycle the not yet issued additions are scanned in program order and the first two whose operands are available at the start of that cycle are issued (an addition that is not ready does not block the ones after it); an addition issued in cycle c delivers its result at the start of cycle c + 4. The modelled cycles are the cycle at which the last result is available; the dependent chain counts additions along the longest path. Here x0 ... x7 are the inputs and o0, o1, ... are the results of the additions in program order; the programs are:
+
+- L = 1: o0 = x0 + x1; o1 = o0 + x2; o2 = o1 + x3; o3 = o2 + x4; o4 = o3 + x5; o5 = o4 + x6; o6 = o5 + x7
+- L = 2: o0 = x0 + x2; o1 = o0 + x4; o2 = o1 + x6; o3 = x1 + x3; o4 = o3 + x5; o5 = o4 + x7; o6 = o2 + o5
+- L = 4: o0 = x0 + x4; o1 = x1 + x5; o2 = x2 + x6; o3 = x3 + x7; o4 = o0 + o1; o5 = o2 + o3; o6 = o4 + o5
+- L = 8: o0 = x0 + x1; o1 = x2 + x3; o2 = x4 + x5; o3 = x6 + x7; o4 = o0 + o1; o5 = o2 + o3; o6 = o4 + o5
 
 | L | additions | longest chain of dependent additions | modelled cycles to the sum |
 |---|---:|---:|---:|
@@ -147,16 +152,16 @@ combinations of a reduction into a tree cuts the longest dependent chain from $n
 For a long sum the effect is larger, and it saturates:
 
 <!-- worked: cpu.dependency_chain -->
-The same model with n = 1024: an addition takes 4 cycles from issue to result, the core starts 2 additions per cycle, so 8 independent additions are needed to keep it busy. A MODEL of a core, not a measurement of one.
+The same model with n = 1024: an addition takes 4 cycles from issue to result, the core starts 2 additions per cycle, so 8 independent additions are needed to keep it busy. A MODEL of a core, not a measurement of one. Program: element i belongs to total i mod L; the first addition of a total adds its first two elements, each later one adds the next element of that total to its running value, so a total of m elements is a chain of m - 1 additions; then the L totals are combined in layers, adding adjacent pairs (total 0 with 1, 2 with 3, ...) and then adjacent pairs of those results, until one value is left. Program order is all the additions of total 0, then of total 1, and so on, then the layers from first to last, left to right. Schedule: cycles are numbered 0, 1, 2, ...; in each cycle the not yet issued additions are scanned in program order and the first two whose operands are available at the start of that cycle are issued (an addition that is not ready does not block the ones after it); an addition issued in cycle c delivers its result at the start of cycle c + 4. The modelled cycles are the cycle at which the last result is available; the dependent chain counts additions along the longest path. The issue-limited cycles are the number of additions divided by 2, rounded up; the last column is that divided by the modelled cycles.
 
 | L | additions | longest dependent chain | modelled cycles | issue-limited cycles | fraction of the issue rate |
 |---|---:|---:|---:|---:|---:|
-| 1 | 1023 | 1023 | 4092 | 512 | 0.13 |
-| 2 | 1023 | 512 | 2048 | 512 | 0.25 |
-| 4 | 1023 | 257 | 1029 | 512 | 0.50 |
-| 8 | 1023 | 130 | 523 | 512 | 0.98 |
-| 16 | 1023 | 67 | 523 | 512 | 0.98 |
-| 32 | 1023 | 36 | 523 | 512 | 0.98 |
+| 1 | 1023 | 1023 | 4092 | 512 | 0.125 |
+| 2 | 1023 | 512 | 2048 | 512 | 0.250 |
+| 4 | 1023 | 257 | 1029 | 512 | 0.498 |
+| 8 | 1023 | 130 | 523 | 512 | 0.979 |
+| 16 | 1023 | 67 | 523 | 512 | 0.979 |
+| 32 | 1023 | 36 | 523 | 512 | 0.979 |
 <!-- /worked -->
 
 With one total the core completes an addition every 4 cycles, about one eighth of its modelled issue rate. With
@@ -184,17 +189,17 @@ and decreasing speed between the arithmetic and main memory. The stack is the **
 keeps copies of the lines most recently used from the level below it, so that a number needed again soon is
 found near the core. The figure below shows one core's view of it.
 
-![A column of five boxes from registers at the top to DRAM at the bottom, each with a typical capacity, a typical latency in cycles and who shares it: registers 1 KiB, 1 cycle, one core; L1 data cache 32 KiB, 4 cycles, one core; L2 cache 1 MiB, 14 cycles, one core; L3 cache 32 MiB, 45 cycles, all cores; DRAM 16 GiB, 250 cycles, all cores. Arrows between the boxes carry 64-byte lines.](img/memory-hierarchy.svg)
+![A column of five boxes from registers at the top to DRAM at the bottom, each with a typical capacity, a typical latency in cycles and who shares it: registers 640 B, 1 cycle, one core; L1 data cache 32 KiB, 4 cycles, one core; L2 cache 1 MiB, 14 cycles, one core; L3 cache 32 MiB, 45 cycles, all cores; DRAM 16 GiB, 250 cycles, all cores. Arrows between the boxes carry 64-byte lines.](img/memory-hierarchy.svg)
 
 The same numbers as a table, with the capacity expressed in lines and the latency relative to the first level
 of cache:
 
 <!-- worked: cpu.hierarchy_table -->
-TYPICAL orders of magnitude for one core of a recent server or desktop chip, rounded for arithmetic; they vary by chip and are not measurements of any machine. The register row counts the vector registers (16 of 32 bytes, plus the scalar ones) as about 1 KiB.
+TYPICAL orders of magnitude for one core of a recent server or desktop chip, rounded for arithmetic; they vary by chip and are not measurements of any machine. The register row counts 16 vector registers of 32 bytes (512 bytes) and 16 scalar registers of 8 bytes (128 bytes): 640 bytes.
 
 | level | typical capacity | lines of 64 bytes | shared by | typical latency, cycles | relative to L1 |
 |---|---:|---:|---|---:|---:|
-| registers | 1 KiB | - | one core | 1 | 0.25 |
+| registers | 640 B | - | one core | 1 | 0.25 |
 | L1 data cache | 32 KiB | 512 | one core | 4 | 1.00 |
 | L2 cache | 1 MiB | 16,384 | one core | 14 | 3.50 |
 | L3 cache | 32 MiB | 524,288 | all cores | 45 | 11.25 |
@@ -207,7 +212,7 @@ differs in every entry; what is stable across chips is the shape: each cache lev
 larger than the one above and three to four times slower, with main memory a larger step in both.
 
 The unit that moves between levels is the cache line. The 64 bytes is a property of the hardware that has
-been the same on most chips for years, and the book assumes it throughout (`LINE = 64` in the worked module).
+been the same on most chips for years, and the book assumes it throughout: every cache in the worked tables has 64-byte lines.
 Two habits of programs make this design pay.
 
 **Spatial locality** is the habit of using numbers near one another in memory soon after one another. A
@@ -472,7 +477,7 @@ Written as an algorithm, with $n_{\mathrm{lane}}$ lanes, the vectorized dot prod
 
 ```text
 function dot_lanes(x: array<f32>[n], y: array<f32>[n], w: int) -> f32:
-    require w >= 1 and (w == 1 or w == 2 or w == 4 or w == 8 or w == 16)
+    require w == 1 or w == 2 or w == 4 or w == 8 or w == 16 or w == 32
     acc = zeros(f32, [w])                       # one running total per lane
     blocks = n // w
     for b in 0 .. blocks:                       # one vector instruction per b
@@ -492,7 +497,13 @@ function dot_lanes(x: array<f32>[n], y: array<f32>[n], w: int) -> f32:
 ```
 
 The inner `for j` loop is a single instruction on a real core, not a loop; the algorithm shows the lanes
-explicitly because the order of the additions is the whole story of the next paragraphs. Lane $j$ adds the
+explicitly because the order of the additions is the whole story of the next paragraphs. The line
+`acc[j] + x[..] * y[..]` rounds the product and then the sum, as the pseudocode's operations do, and that is how the
+worked sums of this section compute it. The instruction count above is for a core that fuses the two into one
+multiply-add with a single rounding; without fusion each step is four instructions (two loads, a multiplication, an
+addition) and the counts become $4n/n_{\mathrm{lane}}$ plus the same reduction. The grouping of the additions, which
+is what this section studies, is identical either way, though the last digits are not. The condition allows $w = 32$, which stands for two 16-lane registers
+used as one group of accumulators, so that the worked examples can show a width beyond one register. Lane $j$ adds the
 products $j, j + w, j + 2w, \dots$ in order. The fold at the end is the one the 256-bit kernels of brain's
 `hsum256` use: add the high 128 bits to the low (lanes $j$ and $j + 4$), then two pair additions. The tail
 handles the $n \bmod w$ elements that do not fill a vector.
@@ -531,7 +542,7 @@ a different, usually slightly better, answer. Here it is concretely, on 20 produ
 above (no fused multiply-add, to keep the arithmetic to one rounding per operation):
 
 <!-- worked: cpu.hsum_trace -->
-Generator: the book's SplitMix64, seed 0x123899b4aebbbb06 (the seed of the name `cpu.hsum_trace`). n = 20. Draw order: the 20 values of x, each `2 * uniform() - 1` rounded to f32, then the 20 values of y the same way. Every product and every sum is rounded to f32 (no fused multiply-add). Lane j of the 8 accumulators adds the products j, j + 8 (elements 0..15 only). The horizontal sum is s[j] = lane j + lane j + 4, then (s[0] + s[1]) + (s[2] + s[3]); the last four products are then added to it one at a time.
+Generator: the book's SplitMix64, seed 0x123899b4aebbbb06 (the seed of the name `cpu.hsum_trace`). n = 20. Draw order: the 20 values of x, each `2 * uniform() - 1` rounded to f32, then the 20 values of y the same way. Every product and every sum is rounded to f32 (no fused multiply-add). Lane j of the 8 accumulators adds the products j, j + 8 (elements 0..15 only). The horizontal sum is s[j] = lane j + lane j + 4, then (s[0] + s[1]) + (s[2] + s[3]); the last four products are then added to it one at a time. The last row is the exact (unrounded) products of the stored f32 inputs summed in exact arithmetic, then shown to 9 digits.
 
 | step | value |
 |---|---:|
@@ -552,17 +563,17 @@ Generator: the book's SplitMix64, seed 0x123899b4aebbbb06 (the seed of the name 
 | horizontal sum | 0.0984741449 |
 | after the 4 tail elements (16 .. 19), one at a time | 0.641020656 |
 | left to right, one accumulator | 0.641020656 |
-| exact value of the stored numbers | 0.641020649 |
+| exact sum of the exact products of the stored x and y | 0.641020649 |
 <!-- /worked -->
 
 The vector sum and the one-accumulator sum happen to agree to all 9 printed digits on this small example (both
-differ from the exact value in the ninth digit), which is luck: eight chains of two or three products are too
+differ from the exact sum in the ninth digit), which is luck: eight chains of two or three products are too
 short to lose much. On 4096 products the orders separate:
 
 <!-- worked: cpu.simd_sum_order -->
-Generator: the book's SplitMix64, seed 0x02074311ab966a02 (the seed of the name `cpu.simd_sum_order`). n = 4096. Draw order: the 4096 values of x, each `2 * uniform() - 1` rounded to f32, then the 4096 of y. The products are rounded to f32 and then added in f32, one addition at a time. With w lanes, lane j adds the products j, j + w, j + 2w, ... in order, and the lanes are then combined by the horizontal sum (while more than 4 lanes remain, lane j + h is added to lane j for h = half the lanes; then (a0 + a1) + (a2 + a3)); w = 1 is the plain left-to-right sum. The exact value of the sum of the stored products is 7.77823008.
+Generator: the book's SplitMix64, seed 0x02074311ab966a02 (the seed of the name `cpu.simd_sum_order`). n = 4096. Draw order: the 4096 values of x, each `2 * uniform() - 1` rounded to f32, then the 4096 of y. The products are rounded to f32 and then added in f32, one addition at a time. With w lanes, lane j adds the products j, j + w, j + 2w, ... in order, and the lanes are then combined by the horizontal sum (while more than 4 lanes remain, lane j + h is added to lane j for h = half the lanes; then (a0 + a1) + (a2 + a3)); w = 1 is the plain left-to-right sum. The reference is the exact sum, in exact arithmetic, of the exact (unrounded) products of the stored f32 inputs: 7.77823008. (The exact sum of the f32-rounded products is 7.77822936; the two differ by the rounding of the products, which no order of additions can remove.) The error column is |f32 sum - reference| / |reference|.
 
-| lanes w | f32 sum | relative error against the exact sum |
+| lanes w | f32 sum | relative error against the reference |
 |---|---:|---:|
 | 1 | 7.77820683 | 2.99e-06 |
 | 4 | 7.77820969 | 2.62e-06 |
@@ -574,7 +585,7 @@ Generator: the book's SplitMix64, seed 0x02074311ab966a02 (the seed of the name 
 <!-- /worked -->
 
 Five lane counts give five different results. All are within the error bound of Chapter 15, and the sums
-with more lanes are closer to the exact value in this run, because each chain accumulates fewer terms and a short
+with more lanes are closer to the reference in this run, because each chain accumulates fewer terms and a short
 sum rounds less (Chapter 16's pairwise argument again), though that is a property of the run and not a guarantee.
 What is certain is that a vectorized kernel and a scalar kernel are different computations. Two consequences
 follow. A compiler that is asked to keep IEEE semantics will not vectorize a floating-point reduction by itself,
@@ -658,12 +669,12 @@ of them, and each one costs the runtime something to hand out and the worker som
 microseconds on typical hardware, enough to be more than a small iteration's whole work).
 
 The last point is what the **grain** of a parallel loop is about: the smallest piece of work worth giving a
-worker. brain's CPU backend fixes one for its generated kernels: it cuts a loop of $N$ invocations into
+worker. brain's CPU backend fixes one for its generated kernels: it cuts a loop of $N$ invocations (one invocation is one run of the loop body for one index) into
 about 8 chunks per thread, but never into chunks of fewer than 16,384 invocations, and a loop that fits in one
 chunk runs on the calling thread with no tasks at all.
 
 <!-- worked: cpu.dispatch_grain -->
-The splitting rule: a loop of N invocations on T threads is cut into chunks of max(ceil(N / 8T), 16384) invocations (about 8 chunks per thread, but never fewer than 16,384 per chunk); one chunk or fewer means no tasks at all. (The rounding of a chunk up to a whole workgroup, for kernels that have one, is left out.)
+The splitting rule: a loop of N invocations on T threads is cut into chunks of max(ceil(N / 8T), 16384) invocations (about 8 chunks per thread, but never fewer than 16,384 per chunk); one chunk or fewer means no tasks at all. An invocation is one run of the loop body for one index. The tasks column is ceil(N / chunk size) when that is more than one, and 0 otherwise.
 
 | threads T | invocations N | chunk size | tasks |
 |---|---:|---:|---:|
@@ -723,9 +734,9 @@ Splitting a loop among workers speeds up the part that is split and nothing else
 and the cost of starting and joining the workers set a ceiling. This is Amdahl's argument, and Chapter 11 of
 this volume, on measuring performance, derives it and shows how to find the serial part of a real program with
 a profile. The practical form is a question: what fraction of the work runs inside a parallel loop, and what
-does a worker cost to start? Knowledge entry #430 records an instance in a different part of the repository, a
-sampled profile in which most of the CPU samples were the worker pool spinning at a low average core use, which
-meant that the work was sitting in a serial step and not in the loops that were parallel.
+does a worker cost to start? A sampled profile of a program of this kind can show most of its CPU samples in the worker pool spinning while the
+average core use stays low; that pattern means the work is sitting in a serial step and not in the loops that are
+parallel, because idle workers spin while one thread works.
 
 ## Counting the work
 
@@ -942,8 +953,9 @@ Chapter 3 defines them and combines them into the roofline.
 7. **[Implement]** Reproduce `cpu.tiled_transpose`: the tile-by-tile visit order, the two matrices at the stated
    addresses, the 8 KiB cache, and the three columns (fully associative, 8-way, 8-way with the row pitch 272).
 8. **[Implement]** Reproduce `cpu.dependency_chain`: build the dependency graph of the $L$-total sum with a final
-   pairwise tree, schedule it with latency 4 and 2 issues per cycle in program order, and print the longest chain and
-   the cycle at which the last result is ready.
+   pairwise tree, schedule it with latency 4 and 2 issues per cycle by the scheduling rule printed with
+   `cpu.dependency_small` (which also lists the additions of the small cases to check your program against), and print
+   the longest chain and the cycle at which the last result is ready.
 9. **[Implement]** Reproduce `cpu.simd_sum_order` and `cpu.hsum_trace` from the generator seeds printed beside them,
    rounding every product and every sum to f32. Make the horizontal sum a function of the lane count.
 10. **[Investigate]** In the model of the tiling table, find the smallest row padding (in elements) for which the 8-way

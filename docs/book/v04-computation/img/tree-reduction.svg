@@ -1,4 +1,4 @@
-<!-- source-sha256: ce779e14b493c86654e36bdd026b89ed01c1c4d4d3dac96450586dfa2b3814a7 -->
+<!-- source-sha256: ff60ea79e92ccec9c106661675fc58fe8ff6b581c9939af099e8c7310eea24c9 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 864 662" width="864" height="662"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="864" height="662" fill="#ffffff"/>
 <rect x="14" y="14" width="836" height="316" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="28" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Kernels A and B: neighbours first, invocation l adds the value of l + s</text>

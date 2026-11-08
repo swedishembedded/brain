@@ -249,7 +249,7 @@ by moving fewer bytes, and the next two sections look at two ways: a different f
 
 ## Decoding a token reads the model
 
-The operation that dominates language-model generation is the matrix-vector product, so the roofline tells how fast generation can be, which is the question the chapter opened with. A decoder-only language model (Volume V builds one) generates one token by passing one new vector through every layer. A layer is a matrix product with the weights, and for one token it is a
+The operation that dominates language-model generation is the matrix-vector product, so the roofline tells how fast generation can be, which is the question the chapter opened with. A decoder-only language model (a later volume builds one; here it is only a stack of layers, each a matrix product with weights) generates one token by passing one new vector through every layer. A layer is a matrix product with the weights, and for one token it is a
 matrix-vector product, so the whole model does $2P$ operations for $P$ weights and reads all $P$ weights once; if a weight occupies $b$ bytes, a token moves $Pb$ bytes and has intensity $2P/(Pb) = 2/b$ (activations and the memory of earlier tokens are small by comparison, and ignored here; an exercise adds them).
 For a model of $P = 7 \times 10^9$ weights in the four storage formats of Chapter 1:
 
@@ -347,7 +347,7 @@ operations divided by peak, which is the same for both because the arithmetic is
 
 So a format with fewer bytes per weight is a speedup for bandwidth-bound work, in proportion to the bytes it removes, and no speedup for compute-bound work. It lowers the batch at which the ridge is reached (from 50 to 16 for fp16 against 4-bit on the GPU), which is also a gain: the machine reaches its peak with a smaller batch, so a single user waits less for it. Quantization also reduces the memory a model occupies, which is a different benefit that the roofline does not measure: 14 GB against 4.4 GB is whether the model fits at all.
 
-A different arithmetic helps compute-bound work. Many machines have faster units for 8-bit integer dot products or for small matrices (Chapter 4 describes them), a second and higher flat part with its own $F_{\mathrm{pk}}$, and a computation can use them only if its operands are in the matching format. That is a faster roof and a different ridge, not fewer bytes, and Chapter 12 treats the formats that can use it.
+A different arithmetic helps compute-bound work. Many machines have faster units for 8-bit integer dot products or for small matrices (Chapter 6 describes them), a second and higher flat part with its own $F_{\mathrm{pk}}$, and a computation can use them only if its operands are in the matching format. That is a faster roof and a different ridge, not fewer bytes, and Chapter 12 treats the formats that can use it.
 
 ## Training operations on the roofline
 
@@ -541,7 +541,7 @@ A number from `crates/perf` is therefore a dated observation of one setup, and t
 5. Explain from the counts of operations and bytes why the intensity of the vector addition is the same for every length and that of the matrix product is not.
 6. A benchmark reports that a kernel achieved a bandwidth above the machine's measured main-memory bandwidth. List two explanations, and say which one the measured cache bandwidth in brain's `Roofs` is there for.
 7. With the tiling table in mind: a tile of 64 and a tile of 256 both give a compute-bound product on the CPU. Why would one still prefer the second on the GPU?
-8. In the table of small problems the vector addition of 16,384 elements reaches a fraction of 0.0467 of its roofline. Give the explanation and the remedy.
+8. In the table of small problems the vector addition of 16,384 elements reaches a fraction of 0.0468 of its roofline. Give the explanation and the remedy.
 
 ## Summary
 

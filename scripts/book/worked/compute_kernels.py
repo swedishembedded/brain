@@ -138,18 +138,18 @@ class Invocation:
             raise Fault(f"access to word {a} of {len(self._mem.words)}")
         return a
 
-    def load(self, name, i):
+    def load(self, name, i, site=None):
         buf = self._bufs[name]
         a = self._address(buf, i)
-        self._log.append(("load", name, a))
+        self._log.append(("load", name, a, site))
         return self._mem.words[a]
 
-    def store(self, name, i, value):
+    def store(self, name, i, value, site=None):
         buf = self._bufs[name]
         if buf.access != "read_write":
             raise Fault(f"store to read-only buffer {name}")
         a = self._address(buf, i)
-        self._log.append(("store", name, a))
+        self._log.append(("store", name, a, site))
         self._mem.words[a] = float(value)
 
     def shared_load(self, i):
@@ -163,21 +163,20 @@ class Invocation:
 
 
 def _count_transactions(logs, wg_size):
-    """Transactions of one phase of one workgroup. The j-th access of the
-    invocations of a subgroup is one memory instruction (invocations that
-    returned or skipped it do not issue it); it costs one transaction per
-    distinct 32-byte block its addresses touch."""
+    """Transactions of one phase of one workgroup. A memory instruction is a place in the kernel's code, and the
+    invocations of a subgroup that reach it issue it together (an invocation that returned or skipped it does not);
+    it costs one transaction per distinct 32-byte block its addresses touch, counted per buffer. An access names its
+    place with `site` (any hashable value, such as the loop step); an access without a site is the j-th access the
+    invocation makes in the phase, which is the same place for every invocation as long as none skips an access."""
     counts = {"load": 0, "store": 0}
     for s in range(_ceil_div(wg_size, SUBGROUP)):
-        lanes = logs[s * SUBGROUP:(s + 1) * SUBGROUP]
-        for j in range(max((len(x) for x in lanes), default=0)):
-            blocks = {}
-            for lane in lanes:
-                if j < len(lane):
-                    kind, name, a = lane[j]
-                    blocks.setdefault((kind, name), set()).add(a * F32 // SECTOR)
-            for (kind, _), s_ in blocks.items():
-                counts[kind] += len(s_)
+        blocks = {}
+        for lane in logs[s * SUBGROUP:(s + 1) * SUBGROUP]:
+            for j, (kind, name, a, site) in enumerate(lane):
+                place = site if site is not None else ("access", j)
+                blocks.setdefault((place, kind, name), set()).add(a * F32 // SECTOR)
+        for (_, kind, _), s_ in blocks.items():
+            counts[kind] += len(s_)
     return counts
 
 
@@ -379,7 +378,13 @@ def grid_failures():
                      pad_changed if align else "-"))
     return (f"The kernel of the previous block, y = 2 x + 1 with workgroup size {wg}, launched with a wrong grid or "
             f"without its guard. y starts at {_v(UNWRITTEN)} (a value the kernel never writes); the neighbour buffer z has 4 words "
-            f"500, 501, 502, 503; memory words between buffers hold {_v(PAD)}. 'clamped' is the language's robust-access "
+            f"500, 501, 502, 503; memory words between buffers hold {_v(PAD)}. Input x_i = i - 3 for i = 0 .. N - 1. Memory is one "
+            "flat list of 4-byte words in which the buffers are placed one after another in the order x, y, z, a tail buffer "
+            "of 8 zero words that keeps an unguarded write inside memory; each buffer starts at the first word that is a "
+            "multiple of 8 (32 bytes) at or after the end of the previous one, except 'z packed behind y', where z starts "
+            "at the word right after y's last word. For N = 10 that puts x at words 0 to 9, y at 16 to 25 and z at 26 to 29 "
+            "(packed) or 32 to 35 (aligned), so y[10] and y[11] fall on z[0], z[1] when packed and on padding words when "
+            "aligned. The workgroups run one after another; 'clamped' is the language's robust-access "
             f"rule: an index past the end is replaced by the last valid one. Last two columns: words of z changed, "
             f"padding words changed.\n\n"
             + _table(["launch", "N", "workgroups", "invocations", "y correct", "y never written",
@@ -552,7 +557,9 @@ def barrier_rule():
     return ("The tiled transpose of the previous block (tile 4 x 4, 16 invocations per workgroup) with the guard written "
             "two ways, on a matrix whose sides are not multiples of the tile and on one whose sides are. A workgroup "
             "'faults' when only some of its invocations reach the barrier; its result is then undefined. The last column "
-            "lists the faulting workgroups (x, y) and how many invocations arrived.\n\n"
+            "lists the faulting workgroups (x, y) and how many invocations arrived. x[i, j] = 10 i + j; the shared tile of each "
+            "workgroup starts as 99 in every slot; the workgroups run in ascending order and the result of a faulting "
+            "workgroup is not used (the table reports it as undefined).\n\n"
             + _table(["x", "guard", "workgroups", "faulting", "y equals direct", "arrived at the barrier"], rows,
                      align="llrrll"))
 
@@ -569,7 +576,11 @@ def missing_barrier():
         rows.append((label, f"{counts[0]} of {m * n}", f"{counts[1]} of {m * n}"))
     return (f"The same [{m}, {n}] transpose with and without the barrier. Inside each phase the invocations of a workgroup "
             f"run in the order 0, 1, ..., {t * t - 1} (ascending) or {t * t - 1}, ..., 0 (descending); both orders are legal "
-            f"on a device. Entries of y that differ from the direct transpose:\n\n"
+            f"on a device. x[i, j] = 10 i + j, tile {t} x {t}, one shared tile per workgroup that starts as {_v(SHARED_FILL)} in "
+            f"every slot, y starts as {_v(UNWRITTEN)} everywhere, and the workgroups run one after another. In the "
+            "one-phase kernel each invocation in turn does its load into the shared tile and then, at once, its store "
+            "from the shared tile, before the next invocation starts. Entries of y that differ from the direct "
+            "transpose:\n\n"
             + _table(["kernel", "ascending order", "descending order"], rows))
 
 

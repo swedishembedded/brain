@@ -12,7 +12,7 @@ chapters doing it: one core of the CPU, the whole 10-core CPU, and the GPU of th
 section builds.
 
 <!-- worked: gpu.vector_add -->
-c = a + b with n = 2^24 = 16,777,216 fp32 numbers. Work: 16,777,216 additions and 201,326,592 bytes (12 per element, 192 MiB). A round is every lane doing one addition; rounds = ceil(n / lanes). Arithmetic time = rounds / clock; memory time = bytes / bandwidth with the whole machine's bandwidth (80 and 800, in GB/s). Both are model outputs in milliseconds.
+c = a + b with n = 2^24 = 16,777,216 fp32 numbers. Work: 16,777,216 additions and 201,326,592 bytes (12 per element, 192 MiB). A round is every lane doing one addition; rounds = ceil(n / lanes). Arithmetic time = rounds / clock, with the CPU clock 2.5 GHz and the GPU clock 2 GHz; memory time = bytes / bandwidth with the whole machine's bandwidth (80 for the CPU and 800 for the GPU, in GB/s). The CPU has 16 lanes per core (two vector units of 8 f32 lanes) and 10 cores; the GPU has 10,240 lanes. Both times are model outputs in milliseconds.
 
 | machine | lanes | rounds | arithmetic (ms) | memory (ms) |
 |---|---:|---:|---:|---:|

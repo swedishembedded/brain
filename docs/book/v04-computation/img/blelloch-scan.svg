@@ -1,4 +1,4 @@
-<!-- source-sha256: 4f0f2f6d0cf47983cbd86e427269b0f953f044785a12294e75ce17ca7622d2d2 -->
+<!-- source-sha256: cae83d1a8eb5a9e7169b1adba1d33e76c0bde9bd23ca32edabca440024d39a8c -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 596" width="860" height="596"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="860" height="596" fill="#ffffff"/>
 <rect x="14" y="12" width="832" height="572" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="28" y="34" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Blelloch scan of eight numbers: 7 additions up, 7 down</text>
