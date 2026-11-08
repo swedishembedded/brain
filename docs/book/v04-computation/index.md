@@ -51,7 +51,7 @@ more than one kind of device.
    ten times faster when the data is arranged differently.
 3. [Memory Bandwidth, Compute and the Roofline](03-roofline.md): whether a computation is limited
    by arithmetic or by moving data, and how to tell.
-4. The GPU: Thousands of Small Workers: how a GPU organizes its thousands of
+4. [The GPU: Thousands of Small Workers](04-gpu.md): how a GPU organizes its thousands of
    threads, and what that demands of our algorithms.
 5. Writing Compute Kernels: how to express one parallel computation so a GPU
    can run it.

@@ -230,6 +230,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **global gradient norm**: the Euclidean norm of the gradient of every parameter of the model, all tensors taken together as one vector, the number a clip compares with its threshold. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
 
+**GPU architecture**: the organization of a graphics processor used for computing: many compute units, each with lanes, a large register file, a small on-chip memory and a scheduler, over a memory of high bandwidth and high latency, built for throughput and not for the speed of one thread. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
+
 **gradient**: the vector of all the partial derivatives of a scalar function, the same shape as its inputs; it points in the direction of steepest ascent and its length is the steepest rate of change. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **gradient accumulation**: adding each contribution to a value's gradient into one persistent buffer, never assigning, with the buffer zeroed once per optimiser step; it sums the uses of a shared weight and the pieces of a batch split into micro-batches. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
@@ -352,6 +354,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **memory bandwidth**: the number of bytes per second that main memory can deliver to the processor when the program asks for them in the best possible way (long sequential reads), a property of the machine and not of the program. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
 
+**memory coalescing**: the merging of the loads or stores of the lanes of a subgroup into few memory transactions when they touch adjacent addresses, so that all the bytes of each block moved are used. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
+
 **memory complexity**: the amount of memory, counted in cells and measured at the peak, that an algorithm needs as a function of its input size; it can be traded against time by storing a result instead of recomputing it, or the reverse. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
 **metric selection**: choosing the number that scores a model from the decision its output feeds and the costs of its mistakes, checking it on a trivial and a perfect predictor, and reporting it with an uncertainty. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
@@ -389,6 +393,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **numerical integration**: approximating an integral by a weighted sum of function values, such as rectangles, trapezoids or Simpson's rule, whose error falls as a fixed power of the panel width. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
 ## O
+
+**occupancy**: the fraction of a compute unit's resident-invocation slots that a kernel fills, limited by the registers per invocation, the shared memory per workgroup, the workgroup size and the cap on resident workgroups. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
 **one-hot-encoding**: writing a class index as a vector with a one in the position of that class and zeros elsewhere, the probability vector that puts all its weight on that class. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
@@ -498,6 +504,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **shape**: the list of the sizes of a tensor's axes, outermost first; the number of elements is their product. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
+**shared memory**: the small, fast, on-chip memory of a compute unit that all invocations of one workgroup can read and write and no other workgroup can see, a cache whose contents the programmer chooses. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
+
 **shuffling**: rearranging a list into an order chosen uniformly among all $n!$ orders, correctly done by swapping each position from the end with a uniformly chosen position at or before it (Fisher-Yates). *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **sigmoid**: the function $\sigma(z) = 1/(1 + e^{-z})$ that maps any real number to $(0, 1)$ and is the inverse of the logit; its slope is $\sigma(1 - \sigma)$, at most $1/4$. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
@@ -505,6 +513,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **silu**: the sigmoid linear unit $z\,\sigma(z)$ (also called swish), the input times the logistic sigmoid of the input, smooth, with a slope that overshoots $1$ before settling to it. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **SIMD**: single instruction, multiple data: an instruction that applies the same operation to all the lanes of a wide register at once, for example eight f32 additions in one 256-bit instruction. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
+
+**SIMT execution**: single instruction, multiple threads: the hardware issues each instruction once for a fixed group of threads, each applying it to its own registers, so a program is written for one thread and the group's lanes are filled by the hardware. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
 **singular value decomposition**: the factorisation $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$ of any matrix into a rotation, a stretch by non-negative singular values and a second rotation. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
@@ -523,6 +533,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **stochastic gradient descent**: gradient descent that steps along the gradient of a small random batch of examples instead of the whole training set, $\theta \leftarrow \theta - \eta\,\mathbf{g}_t$, an unbiased but noisy estimate of the full step. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **stride**: the distance in memory, counted in elements, between two neighbours along one axis; a view is described by one stride per axis, and stride 0 repeats one number. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
+**subgroup**: the group of consecutive invocations of a workgroup, 32 in this book's model, that the hardware executes with one instruction at a time. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
 **summation notation**: the symbol $\sum_{i=a}^{b} x_i$ for the sum of the terms $x_i$ as the index $i$ runs from $a$ to $b$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
@@ -579,6 +591,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## W
 
 **weight decay**: shrinking every weight toward zero by the fraction $\eta\lambda$ at each step, as a regularizer of a neural network; the L2 penalty of Volume II, applied directly to the weights in the decoupled form of chapter 7. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
+
+**workgroup**: a set of invocations of one dispatch that run together on one compute unit, share an on-chip memory and can wait for each other at a barrier, while different workgroups are independent. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
 ## X
 

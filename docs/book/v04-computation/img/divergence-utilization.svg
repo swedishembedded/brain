@@ -1,0 +1,40 @@
+<!-- source-sha256: 1f19a88bf366bbda4fe406fccb1f959a654af295d5a968aed339dbf033028e0c -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 360" width="600" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="360" fill="#ffffff"/>
+<line x1="76.07" y1="314" x2="76.07" y2="30" stroke="#edf2f7"/>
+<text x="76.07" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-3</text>
+<line x1="166.41" y1="314" x2="166.41" y2="30" stroke="#edf2f7"/>
+<text x="166.41" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-2.5</text>
+<line x1="256.76" y1="314" x2="256.76" y2="30" stroke="#edf2f7"/>
+<text x="256.76" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-2</text>
+<line x1="347.1" y1="314" x2="347.1" y2="30" stroke="#edf2f7"/>
+<text x="347.1" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-1.5</text>
+<line x1="437.45" y1="314" x2="437.45" y2="30" stroke="#edf2f7"/>
+<text x="437.45" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-1</text>
+<line x1="527.79" y1="314" x2="527.79" y2="30" stroke="#edf2f7"/>
+<text x="527.79" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-0.5</text>
+<line x1="58" y1="314" x2="582" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="261.41" x2="582" y2="261.41" stroke="#edf2f7"/>
+<text x="52" y="265.41" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<line x1="58" y1="208.81" x2="582" y2="208.81" stroke="#edf2f7"/>
+<text x="52" y="212.81" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">40</text>
+<line x1="58" y1="156.22" x2="582" y2="156.22" stroke="#edf2f7"/>
+<text x="52" y="160.22" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">60</text>
+<line x1="58" y1="103.63" x2="582" y2="103.63" stroke="#edf2f7"/>
+<text x="52" y="107.63" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">80</text>
+<line x1="58" y1="51.04" x2="582" y2="51.04" stroke="#edf2f7"/>
+<text x="52" y="55.04" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100</text>
+<rect x="58" y="30" width="524" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="76.07,62.22 85.1,63.5 94.14,64.91 103.17,66.46 112.21,68.18 121.24,70.06 130.28,72.13 139.31,74.39 148.34,76.86 157.38,79.54 166.41,82.45 175.45,85.59 184.48,88.96 193.52,92.58 202.55,96.44 211.59,100.54 220.62,104.87 229.66,109.41 238.69,114.15 247.72,119.07 256.76,124.13 265.79,129.31 274.83,134.58 283.86,139.88 292.9,145.18 301.93,150.44 310.97,155.6 320,160.62 329.03,165.45 338.07,170.06 347.1,174.4 356.14,178.43 365.17,182.11 374.21,185.43 383.24,188.36 392.28,190.88 401.31,192.97 410.34,194.64 419.38,195.89 428.41,196.73 437.45,197.17 446.48,197.26 455.52,197 464.55,196.45 473.59,195.64 482.62,194.58 491.66,193.32 500.69,191.85 509.72,190.17 518.76,188.28 527.79,186.15 536.83,183.77 545.86,181.09 554.9,178.08 563.93,174.71"/><circle cx="76.07" cy="51.04" r="3.5" fill="#c05621"/><circle cx="162.28" cy="72.34" r="3.5" fill="#c05621"/><circle cx="256.76" cy="105.73" r="3.5" fill="#c05621"/><circle cx="342.97" cy="149.39" r="3.5" fill="#c05621"/><circle cx="383.06" cy="190.93" r="3.5" fill="#c05621"/><circle cx="437.45" cy="197.77" r="3.5" fill="#c05621"/><circle cx="509.35" cy="190.67" r="3.5" fill="#c05621"/><circle cx="563.74" cy="173.84" r="3.5" fill="#c05621"/></g>
+<text x="320" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log10 of p, the chance a lane takes path A</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">lane utilization (%)</text>
+<text x="320" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Branch divergence in a subgroup of 32</text>
+<rect x="389.6" y="38" width="184.4" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="397.6" y1="53" x2="417.6" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="423.6" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">expected value</text>
+<circle cx="407.6" cy="70" r="3.5" fill="#c05621"/>
+<text x="423.6" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">seeded run, 32 subgroups</text>
+</svg>
