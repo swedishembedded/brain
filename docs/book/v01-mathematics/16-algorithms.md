@@ -5,8 +5,6 @@
 
 *How do we predict how long a computation will take and how much memory it needs before we run it?*
 
-## The problem
-
 A training set is a long list of token ids, and before it is used someone has to check it. One check is easy to state: *does this list of ids contain a repeat?* A repeated id inside a short window can mean a corrupted sample, a duplicated line in a document, or a degenerate generation. The question has a perfectly clear answer, and there is more than one way to compute it.
 
 Here is a list of twelve ids. Three programs answer the question: one compares every id with every later one, one sorts the list and compares neighbours, one remembers each id in a hash table as it goes. All three find a repeated id; the table counts the elementary steps each took.
@@ -47,9 +45,7 @@ Nothing about the machine decided that; it is a property of the three *procedure
 
 This is the tool for a question every later volume asks: will it fit, and will it finish? A matrix product, a Fourier transform and a sort are all procedures with a cost, and Chapters 4 and 14 already counted two of them informally. Here the counting becomes a method, and we use it to study the building blocks that every machine learning system is made of: reductions, prefix sums, sorting and hashing.
 
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter.
+Counting cost leans on six ideas from earlier chapters, and it helps to have them to hand before the counting starts. Answer from memory; the answers are at the end of the chapter, and the chapter in brackets is where to look if one is hard.
 
 1. (Chapter 1, summation notation.) Write $\sum_{i=0}^{n-1} i$ in closed form. Evaluate it for $n = 5$ by adding and by the formula.
 2. (Chapter 1, logarithms.) How many times can you halve $1024$ before you reach $1$? How does that number relate to $\log_2 1024$? What is $\log_2 10^6$, roughly?
@@ -70,7 +66,7 @@ An **algorithm** is a finite list of definite steps that turns any input of a st
 
 A recipe that says "stir until it looks right" is not an algorithm; a loop with a stopping rule is. The book's pseudocode (see [Pseudocode Conventions](../pseudocode.md)) is a notation for writing algorithms down without committing to a machine.
 
-**Correctness by an invariant.** How do we know that an algorithm does what its postcondition says, for every input and not just the ones we tried? The standard argument is an **invariant**: a statement about the state of the algorithm that is true before the loop starts, stays true after every pass, and implies the postcondition when the loop ends. It is induction (Chapter 1) on the number of passes.
+How do we know that an algorithm does what its postcondition says, for every input and not just the ones we tried? The standard argument is an **invariant**: a statement about the state of the algorithm that is true before the loop starts, stays true after every pass, and implies the postcondition when the loop ends. It is induction (Chapter 1) on the number of passes.
 
 Take the simplest reduction, the maximum of a list `x` of length $n \ge 1$.
 
@@ -102,9 +98,9 @@ Every algorithm in this chapter has such an invariant, and we will state it for 
 
 ## Counting operations
 
-**Why count.** Time on a real machine depends on the machine, the language, what else is running and the state of its caches. A count of elementary operations depends on none of these, and it predicts how the time *grows* with the size of the input, which is the part we need before running anything. We fix a **cost model**: a list of the operations we count and agree to treat each as one unit. For the duplicate checkers the unit is an element comparison (plus a hash evaluation for the hash set). For numerical code it is usually a multiply-add, as in Chapter 4.
+Time on a real machine depends on the machine, the language, what else is running and the state of its caches. A count of elementary operations depends on none of these, and it predicts how the time *grows* with the size of the input, which is the part we need before running anything. We fix a **cost model**: a list of the operations we count and agree to treat each as one unit. For the duplicate checkers the unit is an element comparison (plus a hash evaluation for the hash set). For numerical code it is usually a multiply-add, as in Chapter 4.
 
-**A count is a function of the input size.** For an input of size $n$ the algorithm performs $T(n)$ steps in the worst case, the largest over all inputs of that size. Counting is a summation (Chapter 1), and the all-pairs method shows it. The outer index $i$ runs over $0, \dots, n-1$ and the inner index $j$ over $i + 1, \dots, n - 1$, one comparison for each pair:
+For an input of size $n$ the algorithm performs $T(n)$ steps in the worst case, the largest over all inputs of that size. Counting is a summation (Chapter 1), and the all-pairs method shows it. The outer index $i$ runs over $0, \dots, n-1$ and the inner index $j$ over $i + 1, \dots, n - 1$, one comparison for each pair:
 
 $$
 T_{\text{pairs}}(n) = \sum_{i=0}^{n-1} (n - 1 - i) = (n-1) + (n-2) + \dots + 1 + 0 = \frac{n(n-1)}{2}.
@@ -112,7 +108,7 @@ $$
 
 The last step is the closed form you recalled in Before you begin: the sum of the first $n - 1$ whole numbers. For $n = 4096$ it is $4096 \cdot 4095 / 2 = 8{,}386{,}560$, exactly the entry of the growth table. The instrumented program counted every comparison, and the formula agrees with it.
 
-**The dominant term.** Real counts have several parts. A dense layer with $n$ inputs and $n$ outputs, $\mathbf{y} = \max(0, \mathbf{W}\mathbf{x} + \mathbf{b})$ with $\mathbf{W}$ of shape $[n, n]$, performs $n^2$ multiply-adds for the matrix-vector product (Chapter 4), $n$ additions for the bias and $n$ evaluations of the maximum: in total $n^2 + 2n$. The table counts these inside the loops and divides:
+Real counts have several parts. A dense layer with $n$ inputs and $n$ outputs, $\mathbf{y} = \max(0, \mathbf{W}\mathbf{x} + \mathbf{b})$ with $\mathbf{W}$ of shape $[n, n]$, performs $n^2$ multiply-adds for the matrix-vector product (Chapter 4), $n$ additions for the bias and $n$ evaluations of the maximum: in total $n^2 + 2n$. The table counts these inside the loops and divides:
 
 <!-- worked: algorithms.dominant_term -->
 One dense layer with n inputs and n outputs, operations counted inside the loops.
@@ -132,7 +128,7 @@ By $n = 1024$ the $n^2$ term is $99.8$ percent of the total and the rest does no
 
 Look at the counts again. The all-pairs count is $\tfrac12 n^2 - \tfrac12 n$. The sorted-neighbours count is, on random lists, about $n \log_2 n$ minus a multiple of $n$. The hash count is about $2.2\,n$. We say that the three are of order $n^2$, $n \log n$ and $n$. Here is the definition that makes "of order" precise.
 
-**Definition.** For functions $T, f : \mathbb{N} \to \mathbb{R}_{\ge 0}$:
+Precisely, for functions $T, f : \mathbb{N} \to \mathbb{R}_{\ge 0}$:
 
 - $T(n) = O(f(n))$ if there are constants $c > 0$ and $n_0$ such that $T(n) \le c\, f(n)$ for all $n \ge n_0$. ($f$ is an upper bound up to a constant.)
 - $T(n) = \Omega(f(n))$ if there are constants $c > 0$ and $n_0$ such that $T(n) \ge c\, f(n)$ for all $n \ge n_0$. (A lower bound up to a constant.)
@@ -140,7 +136,7 @@ Look at the counts again. The all-pairs count is $\tfrac12 n^2 - \tfrac12 n$. Th
 
 The equals sign is a historical habit; read "$T$ is in the family $O(f)$". The constants $c$ and $n_0$ are called *witnesses*, and a claim is proved by exhibiting them. For the all-pairs count, $T(n) = \tfrac{n(n-1)}{2} \le \tfrac12 n^2$ for every $n \ge 1$, so $c = \tfrac12$, $n_0 = 1$ prove $T = O(n^2)$. For the lower side, $\tfrac{n(n-1)}{2} \ge \tfrac{1}{4} n^2$ once $n \ge 2$, because $n - 1 \ge n/2$ there; so $c_1 = \tfrac14$, $n_0 = 2$ prove $T = \Omega(n^2)$ and hence $T = \Theta(n^2)$.
 
-**Checking a claim on the tables.** The definition says the ratio $T(n)/f(n)$ stays between two positive constants. That is a statement we can read off the counted data: divide each count by the candidate growth rate and look at the column.
+The definition says the ratio $T(n)/f(n)$ stays between two positive constants. That is a statement we can read off the counted data: divide each count by the candidate growth rate and look at the column.
 
 <!-- worked: algorithms.asymptotic_ratios -->
 Each count divided by the candidate growth rate. A column that stays between two positive constants shows that the candidate fits.
@@ -174,7 +170,7 @@ The first column approaches $0.5$ from below, and its smallest entry (at $n = 16
 
 The count over $n$ grows without bound, so $n$ is too slow a rate for the pairs; the count over $n^3$ shrinks toward zero, so $n^3$ is too fast. Only the right rate gives a flat column. The same holds for the sorting counts against $n$ (growing) and $n^2$ (shrinking).
 
-**Four facts used constantly.**
+Four facts about the notation get used constantly.
 
 1. *Constants and lower-order terms vanish.* $3n^2 + 5n + 7 = \Theta(n^2)$: for $n \ge 1$ the whole is at most $15 n^2$ and at least $3 n^2$.
 2. *Logarithm bases do not matter.* $\log_2 n = \log_{10} n / \log_{10} 2$ differs from $\log_{10} n$ by a constant factor, so $O(\log n)$ needs no base.
@@ -246,7 +242,7 @@ The three duplicate checkers differ in memory as sharply as in time. Comparing a
 
 So the slowest method is the leanest. That is the first example of a **time-memory tradeoff**, a choice that recurs through the whole book: spend memory to remember a result so that it need not be computed again, or spend time to recompute it so that it need not be kept. The hash method buys speed with memory. A larger example, and the most important one for training neural networks, runs the other way.
 
-**Store or recompute.** Think of a chain of $L$ layers, each computing a new array from the previous one: $a_i = f_i(a_{i-1})$ for $i = 1, \dots, L$, starting from an input $a_0$. Volume III will show that training must walk the chain *backwards*, and that the backward step of layer $i$ needs the value $a_{i-1}$ which the forward pass produced. The plain way keeps every $a_i$ from the forward pass until the backward pass needs it: the peak memory is $L$ arrays and the cost is $L$ layer evaluations. The other extreme keeps only the input and recomputes whatever the backward step needs from scratch: almost no memory and about $L^2/2$ evaluations.
+Think of a chain of $L$ layers, each computing a new array from the previous one: $a_i = f_i(a_{i-1})$ for $i = 1, \dots, L$, starting from an input $a_0$. Volume III will show that training must walk the chain *backwards*, and that the backward step of layer $i$ needs the value $a_{i-1}$ which the forward pass produced. The plain way keeps every $a_i$ from the forward pass until the backward pass needs it: the peak memory is $L$ arrays and the cost is $L$ layer evaluations. The other extreme keeps only the input and recomputes whatever the backward step needs from scratch: almost no memory and about $L^2/2$ evaluations.
 
 In between there is a dial, the stride $s$: keep every $s$-th array during the forward pass, and when the backward pass enters a segment of $s$ layers, recompute that segment's arrays from its checkpoint, use them, and drop them. We can simulate this and count. The simulation stores sets of array indices, records the peak size and counts every layer evaluation, forward and recomputed:
 
@@ -273,7 +269,7 @@ With every array kept ($s = 1$) the peak is $64$ arrays at $64$ evaluations. At 
 
 The most common algorithm in machine learning is also the simplest: take a long list and combine it into one number. A sum, a maximum, the position of a maximum, a product of probabilities. Each of them has the same shape, and the shape is worth naming.
 
-**Folding.** Given a list $x_0, \dots, x_{n-1}$ and a binary operation $\oplus$ (a rule that combines two values of the list's type into one), the *left fold* is
+Given a list $x_0, \dots, x_{n-1}$ and a binary operation $\oplus$ (a rule that combines two values of the list's type into one), the *left fold* is
 
 $$
 \big(\cdots\big((x_0 \oplus x_1) \oplus x_2\big) \oplus \cdots \big) \oplus x_{n-1}.
@@ -290,7 +286,7 @@ function argmax_combine(a: (real, int), b: (real, int)) -> (real, int):
 
 This is the algorithm behind greedy decoding in Volume V: the next token is the index of the largest logit.
 
-**Why associativity matters.** A left fold fixes one order of evaluation, strictly sequential: every step waits for the one before it, $n - 1$ steps deep. But the answer of a fold does not have to be computed that way, *if* the operation is **associative**: $(a \oplus b) \oplus c = a \oplus (b \oplus c)$ for all values (Chapter 4 met this for matrices). With associativity the parentheses can be placed anywhere. In particular they can group neighbours in pairs, then pairs of pairs, in layers: a *tree*. A tree of $n$ leaves has $\lceil \log_2 n \rceil$ layers, and all the combinations inside one layer are independent of one another:
+A left fold fixes one order of evaluation, strictly sequential: every step waits for the one before it, $n - 1$ steps deep. But the answer of a fold does not have to be computed that way, *if* the operation is **associative**: $(a \oplus b) \oplus c = a \oplus (b \oplus c)$ for all values (Chapter 4 met this for matrices). With associativity the parentheses can be placed anywhere. In particular they can group neighbours in pairs, then pairs of pairs, in layers: a *tree*. A tree of $n$ leaves has $\lceil \log_2 n \rceil$ layers, and all the combinations inside one layer are independent of one another:
 
 <!-- worked: algorithms.tree_depth -->
 | n | left-to-right steps in sequence | tree layers | additions in the tree |
@@ -304,7 +300,7 @@ This is the algorithm behind greedy decoding in Volume V: the next token is the 
 
 The total number of combinations is the same, $n - 1$, but the longest chain of *dependent* combinations falls from $n - 1$ to $\lceil \log_2 n \rceil$: from a million steps in sequence to twenty. This is the idea behind the parallel reductions of Volume IV, where many processors each take a part of every layer; we only record here that it works if and only if the operation allows the regrouping. The sum, the maximum and the argmax pair operation above are all associative on exact values, so they give the same result however they are grouped. Subtraction is not associative, and regrouping it changes the answer. The table at the end of this section shows both.
 
-**The floating-point catch.** Floating-point addition is *not* associative (Chapter 15: $(0.1 + 0.2) + 0.3 \ne 0.1 + (0.2 + 0.3)$). Each addition rounds, and different groupings round different intermediate sums. So the tree reduction of a floating-point sum is a different computation from the left fold: not wrong, but different, and the two give different 32-bit answers. The table sums 4096 signed 32-bit numbers of mixed magnitude in four orders; the "exact" value is the sum of the stored numbers computed in exact rational arithmetic.
+Floating-point addition is *not* associative (Chapter 15: $(0.1 + 0.2) + 0.3 \ne 0.1 + (0.2 + 0.3)$). Each addition rounds, and different groupings round different intermediate sums. So the tree reduction of a floating-point sum is a different computation from the left fold: not wrong, but different, and the two give different 32-bit answers. The table sums 4096 signed 32-bit numbers of mixed magnitude in four orders; the "exact" value is the sum of the stored numbers computed in exact rational arithmetic.
 
 <!-- worked: algorithms.reduction_orders -->
 Sum of 4096 signed 32-bit numbers of mixed magnitude (exact value of the stored numbers: 18471.4975). Generator: the book's SplitMix64, seed 0xbb9d131a4996afad (the seed of the name `algorithms.reduction_orders`). Each number draws a = `uniform()` then k = `integer(7)` and is f32((2a - 1) * 10^(k - 3)); the 1024 integers that follow, from the same generator, are `integer(2001)` - 1000. The orders: left to right; the tree of the chapter (adjacent pairs layer by layer, an odd last element carried up); L interleaved lanes, meaning lane j (0 <= j < L) adds the elements j, j + L, j + 2L, ... left to right and the L lane totals are then added left to right. Every addition is rounded to 32 bits. The relative error is against the exact rational sum.
@@ -379,7 +375,7 @@ Concatenated, the last column is [0, 2, 9, 10, 18, 20, 28, 29, 37, 39, 47, 51, 5
 
 The three phases give exactly the exclusive scan of the whole array. Phase two is itself a scan, on a list $1/4$ as long, so the scheme applies recursively until the list of totals fits in one block.
 
-**Use 1: sampling a token.** Chapter 10's sampler laid the probabilities end to end on $[0, 1)$ and walked along them until the drawn number $u$ was passed. The walk is a prefix sum in disguise. Compute the inclusive scan of the probabilities, the *cumulative distribution* $F_i = p_0 + \dots + p_i$, once; a draw is then the first index $i$ with $F_i > u$. Because $F$ is non-decreasing it can be searched by halving the range each time: a binary search takes at most $\lceil \log_2 K \rceil$ steps, $K$ the number of tokens, instead of up to $K$ (the table counts the steps of the exact rule it states). The scan costs $\Theta(K)$ once and each further draw from the same distribution costs $\Theta(\log K)$.
+The first use is sampling a token. Chapter 10's sampler laid the probabilities end to end on $[0, 1)$ and walked along them until the drawn number $u$ was passed. The walk is a prefix sum in disguise. Compute the inclusive scan of the probabilities, the *cumulative distribution* $F_i = p_0 + \dots + p_i$, once; a draw is then the first index $i$ with $F_i > u$. Because $F$ is non-decreasing it can be searched by halving the range each time: a binary search takes at most $\lceil \log_2 K \rceil$ steps, $K$ the number of tokens, instead of up to $K$ (the table counts the steps of the exact rule it states). The scan costs $\Theta(K)$ once and each further draw from the same distribution costs $\Theta(\log K)$.
 
 <!-- worked: algorithms.scan_cdf -->
 | token | probability | cumulative (inclusive scan) |
@@ -415,7 +411,7 @@ Binary search for the first index i with F_i > u. The search interval [lo, hi] s
 
 The frequencies of the $20{,}000$ draws match the probabilities to about the sampling error (a standard deviation of about $0.003$ for a probability of $0.25$). When the draws come from a distribution of tens of thousands of tokens, the saving of a logarithm is real; it is also why top-p sampling in Volume V, which needs the cumulative sum of the sorted probabilities, is a scan.
 
-**Use 2: packing variable-length sequences.** A batch of sequences of different lengths is wasteful to store as a rectangle padded to the longest sequence. Pack them end to end instead, in one array, and keep for each sequence its *offset*, where it starts. The offset of sequence $s$ is the sum of the lengths of the sequences before it: an exclusive scan of the lengths. The last inclusive sum is the total size of the buffer.
+The second use is packing variable-length sequences. A batch of sequences of different lengths is wasteful to store as a rectangle padded to the longest sequence. Pack them end to end instead, in one array, and keep for each sequence its *offset*, where it starts. The offset of sequence $s$ is the sum of the lengths of the sequences before it: an exclusive scan of the lengths. The last inclusive sum is the total size of the buffer.
 
 <!-- worked: algorithms.scan_offsets -->
 | sequence | length | offset (exclusive scan) | end |
@@ -436,7 +432,7 @@ Each sequence can now be written to its slot independently, without waiting for 
 
 **Sorting** is the algorithm that rearranges a list into non-decreasing order, so that $x_0 \le x_1 \le \dots \le x_{n-1}$, with the output a permutation of the input. A sorted list can be searched by halving (the binary search above), the neighbours of a value are adjacent to it, and equal values are next to each other. The duplicate detector used the last property: after sorting, a repeat can only be a neighbour. Sorting is also how the $k$ largest logits are found, how the nucleus of a distribution is selected, and how items are grouped by key.
 
-**Merge sort.** A divide-and-conquer algorithm. To sort a list: if it has one element it is sorted; otherwise cut it in two halves, sort each, and *merge* the two sorted halves into one sorted list.
+Merge sort is a divide-and-conquer algorithm. To sort a list: if it has one element it is sorted; otherwise cut it in two halves, sort each, and *merge* the two sorted halves into one sorted list.
 
 ```text
 function merge_sort(x: array<int>[N]) -> array<int>[N]:
@@ -492,7 +488,7 @@ $$
 
 and for $n = 2^k$ unrolling the recursion level by level gives $W(n) = n \log_2 n - n + 1$: level $j$ has $2^j$ merges of lists of size $n / 2^{j+1}$ each costing $n / 2^j - 1$ comparisons, and summing $n - 2^j$ over $j = 0, \dots, k-1$ gives $kn - (2^k - 1)$. For $n = 8$ this is $8 \cdot 3 - 8 + 1 = 17$, and the table above shows $17$ comparisons for this particular list. Merge sort is thus $\Theta(n \log n)$ in the worst case, and, since the merge needs somewhere to put its output, $\Theta(n)$ in memory.
 
-**A lower bound: no comparison sort can do better.** Is $n \log n$ merge sort's weakness, or a limit for the whole task? For algorithms that learn about the order only by comparing two elements at a time, it is a limit, and the argument is short enough to give. Consider sorting three distinct numbers. There are $3! = 6$ possible orderings of the input, and the algorithm must output a different rearrangement for each. Every comparison has two outcomes, so after $d$ comparisons the algorithm can distinguish at most $2^d$ cases: it is a binary *decision tree* of depth $d$ whose leaves are the possible answers. To tell six orderings apart the tree needs at least six leaves, so $2^d \ge 6$ and $d \ge 3$. Merge sort on all six inputs:
+Is $n \log n$ merge sort's weakness, or a limit for the whole task? For algorithms that learn about the order only by comparing two elements at a time, it is a limit, and the argument is short enough to give. Consider sorting three distinct numbers. There are $3! = 6$ possible orderings of the input, and the algorithm must output a different rearrangement for each. Every comparison has two outcomes, so after $d$ comparisons the algorithm can distinguish at most $2^d$ cases: it is a binary *decision tree* of depth $d$ whose leaves are the possible answers. To tell six orderings apart the tree needs at least six leaves, so $2^d \ge 6$ and $d \ge 3$. Merge sort on all six inputs:
 
 <!-- worked: algorithms.decision_tree3 -->
 | input order | comparisons used by merge sort |
@@ -533,7 +529,7 @@ Mean of 20 random permutations per row. The lower bound is the smallest number o
 
 The mean count of merge sort lies between the bound and its worst case, as the argument says it must. Insertion sort is the same task at a different shape: $\Theta(n^2)$ comparisons on average, fine for sixteen elements and useless for a thousand.
 
-**Beating the bound by not comparing.** The lower bound holds only for algorithms whose sole information about the order is a comparison. When the keys are integers of bounded size, other information is available: the *value* of a key can be used as an address. **Counting sort** sorts keys in $0, \dots, b - 1$ in three steps: count how many keys have each value, take the exclusive scan of the counts (this gives the position where each value's block begins), then place each key at its position and increment it. The scan appears again, now as the offsets of the output. Here is one pass on pairs of a key and a tag, to show that the placement is stable: equal keys keep their input order.
+The lower bound holds only for algorithms whose sole information about the order is a comparison. When the keys are integers of bounded size, other information is available: the *value* of a key can be used as an address. **Counting sort** sorts keys in $0, \dots, b - 1$ in three steps: count how many keys have each value, take the exclusive scan of the counts (this gives the position where each value's block begins), then place each key at its position and increment it. The scan appears again, now as the offsets of the output. Here is one pass on pairs of a key and a tag, to show that the placement is stable: equal keys keep their input order.
 
 <!-- worked: algorithms.radix_stability -->
 Input [(2, 'a'), (1, 'b'), (2, 'c'), (1, 'd'), (0, 'e'), (2, 'f')]; output of one counting pass: [(0, 'e'), (1, 'b'), (1, 'd'), (2, 'a'), (2, 'c'), (2, 'f')].
@@ -567,7 +563,7 @@ At $n = 1024$ the fixed cost of four 256-entry tables makes radix sort no cheape
 
 The third duplicate checker did not compare ids with each other at all. It computed from each id an *address* and looked there. **Hashing** is the technique of turning a value, by a fixed rule, into a number of fixed size that is used as an address or fingerprint of the value. The rule is a **hash function** $h$. We will see it in two roles that need different properties: as the address in a table (this section) and as the identity of a file (the next).
 
-**A hash table.** Choose $m$ buckets, numbered $0, \dots, m - 1$, each holding a short list (a *chain*). To store a key $x$, append it to bucket $h(x)$. To look a key up, search only bucket $h(x)$. For $m = 2^b$ and a 32-bit key, one workable function is multiplicative: multiply by a fixed odd constant, keep the low 32 bits, and take the top $b$ of them,
+A hash table puts that address to work. Choose $m$ buckets, numbered $0, \dots, m - 1$, each holding a short list (a *chain*). To store a key $x$, append it to bucket $h(x)$. To look a key up, search only bucket $h(x)$. For $m = 2^b$ and a 32-bit key, one workable function is multiplicative: multiply by a fixed odd constant, keep the low 32 bits, and take the top $b$ of them,
 
 $$
 h(x) = \big( (x \cdot A) \bmod 2^{32} \big) \gg (32 - b), \qquad A = 2654435761,
@@ -575,9 +571,9 @@ $$
 
 where $\gg$ shifts right and $A$ is about $2^{32}$ divided by the golden ratio (a choice due to Knuth, which spreads nearby keys apart). The duplicate checker is then: for each id, look it up; if present, report; else insert. The invariant is that the table contains exactly the ids seen so far.
 
-**Collisions.** Two different keys with the same $h$ share a bucket: a **collision**. They cannot be avoided: with more keys than buckets the pigeonhole principle forces some, and even with fewer, random-looking placement produces them (among $n$ keys thrown into $m$ buckets the expected number of colliding pairs is $\binom n2 / m$, since each of the $\binom n2$ pairs has probability $1/m$ of landing together). A lookup therefore costs one evaluation of $h$ plus a scan of the chain.
+Two different keys with the same $h$ share a bucket: a **collision**. They cannot be avoided: with more keys than buckets the pigeonhole principle forces some, and even with fewer, random-looking placement produces them (among $n$ keys thrown into $m$ buckets the expected number of colliding pairs is $\binom n2 / m$, since each of the $\binom n2$ pairs has probability $1/m$ of landing together). A lookup therefore costs one evaluation of $h$ plus a scan of the chain.
 
-**Expected cost.** Let $\alpha = n/m$ be the **load**, the average chain length. If $h$ spreads keys evenly, a lookup of a key *not* in the table scans a whole chain, whose expected length is $\alpha$ comparisons. A lookup of a key that *is* present scans the chain up to that key: the key itself (one comparison) plus on average half of the other $\alpha$ keys that share its bucket, so about $1 + \alpha/2$. Both are independent of $n$ when $\alpha$ is held constant by keeping $m$ proportional to $n$. This is why hashing is called **expected $O(1)$** per operation: the expectation is over the keys, and the worst case is still $O(n)$, a single chain holding everything. We measure both predictions on a table of $1024$ buckets as the number of keys grows:
+Let $\alpha = n/m$ be the **load**, the average chain length. If $h$ spreads keys evenly, a lookup of a key *not* in the table scans a whole chain, whose expected length is $\alpha$ comparisons. A lookup of a key that *is* present scans the chain up to that key: the key itself (one comparison) plus on average half of the other $\alpha$ keys that share its bucket, so about $1 + \alpha/2$. Both are independent of $n$ when $\alpha$ is held constant by keeping $m$ proportional to $n$. This is why hashing is called **expected $O(1)$** per operation: the expectation is over the keys, and the worst case is still $O(n)$, a single chain holding everything. We measure both predictions on a table of $1024$ buckets as the number of keys grows:
 
 <!-- worked: algorithms.hash_loads -->
 A table of 1,024 buckets with chaining and the multiplicative hash of the chapter (b = 10); n random 24-bit keys. Generator: the book's SplitMix64, seed 0xd3bd911f079cb32a (the seed of the name `algorithms.hash_loads`). Keys are `integer(2^24)` draws in order with repeats discarded: the stored keys of a row are the first n of them, and the 2,000 absent keys are the 4,097th to 6,096th distinct keys (the draws that repeat an earlier key are skipped and not numbered), the same for every row. Comparisons are counted for looking up every stored key (found) or every absent key (absent), one per chain entry visited up to and including the match; the chain is in insertion order. The prediction columns are 1 + alpha/2 and alpha.
@@ -593,7 +589,7 @@ A table of 1,024 buckets with chaining and the multiplicative hash of the chapte
 
 The measured comparisons agree with the predictions $\alpha$ and $1 + \alpha/2$ within the sampling variation of one random draw, and the longest chain grows only slowly (twelve at load $4$). Hence the third column of the first growth table: the hash set did about $2.2$ steps per id, whatever $n$ was: two hash evaluations (one for the lookup and one for the insertion) and a fraction of a comparison.
 
-**What a bad hash function does.** The expectation assumed that $h$ spreads the keys. A function that does not turns the table into a list. Take $256$ token ids that are all multiples of $64$, in $64$ buckets, and hash by the remainder $x \bmod 64$, which looks natural:
+The expectation assumed that $h$ spreads the keys. A function that does not turns the table into a list. Take $256$ token ids that are all multiples of $64$, in $64$ buckets, and hash by the remainder $x \bmod 64$, which looks natural:
 
 <!-- worked: algorithms.hash_bad_function -->
 256 token ids, the multiples of 64 from 64 to 16384 (ids 64 k for k = 1 .. 256), in a table of 64 buckets (load 4.0). Each id is inserted in this order, then every id is looked up once; x mod 64 is the bucket of the first row, the multiplicative hash of the chapter with b = 6 the second; comparisons are counted as in the table of loads above.
@@ -606,7 +602,7 @@ The measured comparisons agree with the predictions $\alpha$ and $1 + \alpha/2$ 
 
 Every key lands in bucket $0$. The chain has length $256$ and a lookup compares with half of it on average; the multiplicative function, on the same keys and the same table, uses all $64$ buckets, longest chain $6$. The function must mix the bits of its key so that structure in the data, such as a common factor, does not carry over to the addresses. The cost of the hash table is therefore a joint property of the data and the function, which is also why it is a *design* choice, not an automatic one.
 
-**Content hashing.** There is a second role for hash functions, for which the property wanted is stronger. A **fingerprint** (or digest) of a file is a short, fixed-size number computed from all of its bytes, in such a way that a change to any byte, however small, changes the fingerprint, in a way that looks unrelated to the change, and no one can in practice find two different files with the same fingerprint. SHA-256 is a function of this kind; it maps any sequence of bytes to $256$ bits, written as $64$ hexadecimal digits. We use it as a black box with these properties and do not derive it. Flipping the lowest bit of one byte of a message, or changing one character, changes about half of the $256$ output bits:
+There is a second role for hash functions, for which the property wanted is stronger. A **fingerprint** (or digest) of a file is a short, fixed-size number computed from all of its bytes, in such a way that a change to any byte, however small, changes the fingerprint, in a way that looks unrelated to the change, and no one can in practice find two different files with the same fingerprint. SHA-256 is a function of this kind; it maps any sequence of bytes to $256$ bits, written as $64$ hexadecimal digits. We use it as a black box with these properties and do not derive it. Flipping the lowest bit of one byte of a message, or changing one character, changes about half of the $256$ output bits:
 
 <!-- worked: algorithms.fingerprints -->
 The original message is the 26 ASCII bytes `token ids: 1 2 3 4 5 6 7 8`; the second message flips the lowest bit of its first byte; the third replaces the last character `8` by `9`. SHA-256 is the standard function, used as a black box.
@@ -636,15 +632,18 @@ A hash table's function and a fingerprint differ in what they promise. The table
 
 Look back at the three duplicate checkers with the vocabulary of the chapter. All pairs: $\Theta(n^2)$ time, $O(1)$ memory, works for any type that can be tested for equality. Sort and compare: $\Theta(n \log n)$ time, $\Theta(n)$ memory, needs an order. Hash set: expected $\Theta(n)$ time, $\Theta(n)$ memory, needs a good hash function and gives up the worst-case guarantee. There is no best method independent of the situation: the order or the hash may not exist, memory may be the constraint, and the sizes decide whether the quadratic method is even considered. What the analysis gives is the ability to see this before writing the program.
 
-**Common mistakes.**
+Five slips recur when these tools are applied. $O(n^2)$ is an upper bound, not a
+prediction for a given input, so say worst or average and say which input. The
+crossover between a $\Theta(n)$ and a $\Theta(n \log n)$ method may lie far above
+the sizes in use, so compare exponents at small $n$ with care and measure at the
+real $n$ as well. Counting only the cheap operation can misjudge a method, since
+comparisons and memory accesses cost very different amounts on real hardware,
+so state what is counted. Reordering a floating-point reduction and expecting
+the same bits is a mistake, because it is a different computation. And hashing
+is $O(1)$ only in expectation under a spreading hash, so the bound needs a good
+function.
 
-- *Reading $O$ as "the time".* $O(n^2)$ is an upper bound, not a prediction for a given input. Say worst or average, and say which input.
-- *Comparing algorithms by exponent at small $n$.* The crossover between a $\Theta(n)$ and a $\Theta(n \log n)$ method may be far above the sizes in use; measure at the real $n$ as well.
-- *Counting the wrong operation.* Comparisons and memory accesses cost very different amounts on real hardware, and a cost model that counts only the cheap one can misjudge. State what is counted.
-- *Reordering a floating-point reduction and expecting the same bits.* It is a different computation.
-- *Assuming hashing is $O(1)$ without a good function.* The bound is an expectation under a spreading hash.
-
-## Where this appears in brain
+## A quadratic tokenizer, top-k selection, scans and checkpoint digests in the engine
 
 **A quadratic hiding in a tokenizer.** Byte-pair encoding turns text into token ids by repeatedly merging the adjacent pair of symbols with the lowest *rank* in a table; Volume V derives it. The table is a hash table from a pair of symbols to its rank, `ranks: HashMap<(String, String), u32>` in `crates/data/src/bpe.rs`. The textbook loop rescans every adjacent pair after each merge, and that is the same count as the "all pairs" method: for a piece of $n$ symbols that merge one at a time, $n(n-1)/2$ rank lookups. Commit `c13603044` (October 2026) records the consequence. A prompt with no whitespace, such as random text, base64 or a minified file, reaches the tokenizer as one piece, and the quadratic loop held a serving thread for seconds while the GPU sat idle; the commit message describes how it was found, serving a large model to a load generator that sent random prompts. The fix keeps the symbols in a linked list and the candidate pairs in a min-heap ordered by rank then position, so each merge updates only the two pairs it touches; the doc comment of `bpe_merge` states the cost as $O(n \log n)$ instead of $O(n^2)$ and says that the result is the textbook loop's. The test beside it pins the new code to the textbook loop on small alphabets and requires a $100{,}000$-symbol piece to finish. The worked module has both versions as independent implementations and counts their rank lookups on a merge table that forces one merge at a time:
 
@@ -725,7 +724,7 @@ The next chapter asks a question that this chapter assumed away: where do the ra
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $\sum_{i=0}^{n-1} i = n(n-1)/2$. For $n = 5$: $0 + 1 + 2 + 3 + 4 = 10$ and $5 \cdot 4 / 2 = 10$.
 2. Ten times: $1024 \to 512 \to \dots \to 1$ is ten halvings, and $\log_2 1024 = 10$: the logarithm counts halvings. $\log_2 10^6 \approx 19.9$, since $10^6 \approx 2^{20}$.

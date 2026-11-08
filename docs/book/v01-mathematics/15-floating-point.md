@@ -5,8 +5,6 @@
 
 *Why does a computer get arithmetic slightly wrong, and when does slightly wrong become completely wrong?*
 
-## The problem
-
 Ask any programming language for $0.1 + 0.2$ and compare the answer with
 $0.3$:
 
@@ -72,11 +70,9 @@ at $n = 10^{16}$. Chapter 7 found that a finite-difference derivative has a best
 step. This chapter explains all three, and finishes the techniques that
 those chapters postponed: log-sum-exp and compensated summation.
 
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The
-answers are at the end of the chapter. If one is hard, go back to the chapter
-named before reading on.
+Six ideas from earlier chapters carry the argument, and it helps to have them in
+hand before the rounding starts. Answer from memory; the answers are at the end
+of the chapter, and if one is hard, the chapter in brackets is where to go back.
 
 1. (Chapter 1, real numbers.) How many real numbers lie between $0.1$ and $0.2$? A computer stores a number in a fixed number of bits: what does that imply about which real numbers it can hold?
 2. (Chapter 1, exponents and scientific notation.) Write $0.00032$ and $5400$ in scientific notation. What is $2^{-3}$, and what is $2^{10}$?
@@ -1174,30 +1170,33 @@ of a language model are rarely that large, but the same trap appears in other
 guises (for example when scores are multiplied by a temperature or a scale
 before the exponential).
 
-## Making it work
+## Habits that keep rounding error small
 
-- **Compare with a tolerance, derived from the problem.** Never test floating-point
-  results for equality. A tolerance is a few times $\kappa\,u$ for a stable
-  computation, or $(n-1)u$ times the sum of absolute values for a naive sum.
-- **Know your digits.** Seven digits in 32 bits, sixteen in 64. Count the digits a
-  step will lose: $\log_{10}$ of the ratio of the largest quantity formed to the
-  final result is a lower bound on the digits gone.
-- **Subtract late and only exact things.** Rewrite so that nearly equal quantities
-  are never subtracted when they are rounded results: `expm1`, `log1p`, the
-  two-pass variance, the stable quadratic.
-- **Sum with care.** Use a wider accumulator, pairwise summation, or compensated
-  summation for any long reduction in 32 bits or less; check that no optimisation
-  level removes the compensation.
-- **Work in log space and shift by the maximum.** Products of probabilities become sums of
-  logs; sums of probabilities become log-sum-exp; never exponentiate an unshifted
-  score.
-- **Make the finite-difference step depend on the format.** About
-  $(3u)^{1/3}$ times a scale for central differences.
-- **Keep clamps out of formulas.** A floor like `max(p, 1e-12)` protects a division
-  or a logarithm but changes the function. The story in the next section shows what it
-  costs.
+The chapter's results compress into a handful of habits, each the answer to one
+of the failures above.
 
-## Where this appears in brain
+Never test floating-point results for equality. Compare with a tolerance derived
+from the computation: a few times $\kappa\,u$ for a stable one, or $(n-1)u$ times
+the sum of absolute values for a naive sum. Know how many digits you have, seven
+in 32 bits and sixteen in 64, and count the ones a step will lose: $\log_{10}$ of
+the ratio of the largest quantity formed to the final result is a lower bound on
+the digits gone.
+
+Subtract late, and only exact things. Rewrite so that nearly equal quantities
+are never subtracted once they are rounded results (`expm1`, `log1p`, the
+two-pass variance, the stable quadratic). Sum with care: use a wider
+accumulator, pairwise summation or compensated summation for any long reduction
+in 32 bits or less, and check that no optimisation level removes the
+compensation.
+
+Work in log space and shift by the maximum. Products of probabilities become sums
+of logs, sums of probabilities become log-sum-exp, and an unshifted score is
+never exponentiated. Let the finite-difference step depend on the format, about
+$(3u)^{1/3}$ times a scale for central differences. And keep clamps out of
+formulas: a floor like `max(p, 1e-12)` protects a division or a logarithm but
+changes the function, and the story in the next section shows what that costs.
+
+## Accumulators, shifted exponentials and deleted gradients in the engine
 
 **Accumulating in 64 bits.** `crates/model/src/hostmath.rs` holds the shared
 `cosine` and `l2_normalize`, which accumulate the dot product and the squared norms
@@ -1407,7 +1406,7 @@ worth their complexity.
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. Infinitely many: between any two different reals there is another (their average). A computer has only finitely many bit patterns, so it can hold only a finite set of reals; every other number has to be replaced by a stored neighbour.
 2. $0.00032 = 3.2 \times 10^{-4}$ and $5400 = 5.4 \times 10^{3}$. $2^{-3} = \tfrac18$ and $2^{10} = 1024$.

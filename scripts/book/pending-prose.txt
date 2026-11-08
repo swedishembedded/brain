@@ -1,8 +1,5 @@
 # Chapters still to be rewritten as prose (scripts/book/check.py, recycled()).
 # Remove a line in the same change that rewrites its chapter; the list only shrinks.
-docs/book/v01-mathematics/14-fourier.md
-docs/book/v01-mathematics/15-floating-point.md
-docs/book/v01-mathematics/16-algorithms.md
 docs/book/v01-mathematics/17-randomness.md
 docs/book/v01-mathematics/18-project-numerical-library.md
 docs/book/v02-learning/01-learning-problem.md

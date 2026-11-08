@@ -5,8 +5,6 @@
 
 *How can any signal be written as a sum of waves, and why does that make convolution cheap?*
 
-## The problem
-
 A sensor reports how far a machine's casing moves, sixteen times a second. One
 second of its output is sixteen numbers:
 
@@ -78,11 +76,10 @@ fast Fourier transform. Third, the reason the same machinery makes
 convolution (a sliding weighted sum, the operation inside every filter and
 later inside convolutional layers) cheap: the convolution theorem.
 
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The
-answers are at the end of the chapter. If one is hard, go back to the chapter
-named before reading on.
+The route there leans on six ideas from earlier chapters, and it is cheaper to
+bring them back now than to stumble on them later. Answer from memory; the
+answers are at the end of the chapter, and if one is hard, the chapter named in
+brackets is where to go back to.
 
 1. (Chapter 1, summation notation.) Evaluate $\sum_{n=0}^{3} 2^n$. How many terms does $\sum_{n=0}^{N-1}$ have?
 2. (Chapter 2, exponential function and the cosine schedule.) The decay piece of the cosine learning-rate schedule is $\tfrac12(1 + \cos \pi u)$ for $u$ from $0$ to $1$. What are its values at $u = 0$, $\tfrac12$ and $1$?
@@ -93,10 +90,10 @@ named before reading on.
 
 ## Complex numbers: points in the plane that multiply
 
-*What it is for: one object that carries a cosine and a sine at once, and that a rotation can act on.*
-
-We already know how to add points of the plane: add them coordinate by
-coordinate, as vectors (Chapter 3). The new ingredient is a multiplication of
+The pair of correlations has to travel as one object that carries a cosine and
+a sine at once, and a rotation has to be able to act on it. Points of the plane
+can be that object once they can be multiplied. We already know how to add them:
+coordinate by coordinate, as vectors (Chapter 3). The new ingredient is a multiplication of
 two points that gives a point, designed to do what Chapter 6 showed rotations
 do. Write a point as a pair $(a, b)$ and ask for a product with this property:
 multiplying $(a, b)$ by the point $(\cos t, \sin t)$ on the unit circle must
@@ -242,9 +239,8 @@ this chapter needs both.
 
 ## Euler's formula: the exponential of a turn
 
-*What it is for: a compact name for "a point on the unit circle at angle $t$" that obeys the laws of exponents.*
-
-Give the point of the unit circle at angle $t$ a name: $E(t) = \cos t + i \sin t$.
+Rotations will be everywhere from here on, so the point on the unit circle at
+angle $t$ deserves a compact name that obeys the laws of exponents. Give it one: $E(t) = \cos t + i \sin t$.
 By the polar rule above, two of them multiply by adding angles:
 
 $$
@@ -416,9 +412,8 @@ $\omega^3\omega^6 = \omega^9 = \omega^1$: exponents add, and reduce modulo $8$.
 
 ## Sinusoids: amplitude, frequency and phase
 
-*What it is for: naming the three numbers that describe a wave, so that "which frequencies, how strong" has units.*
-
-A **sinusoid** is a function of time of the form
+To say which frequencies a signal contains and how strong each is, we need
+names, with units, for the numbers that describe a single wave. A **sinusoid** is a function of time of the form
 
 $$
 x(t) = A\cos(2\pi f t + \varphi),
@@ -441,7 +436,7 @@ sinusoids too: $\sin\theta = \cos(\theta - \pi/2)$.)
 | 1 | 0.5 | 3.142 | 2 | -1 | 1 |
 <!-- /worked -->
 
-The problem's opening exposed the difficulty: the cosine and the sine are the
+The opening of the chapter exposed the difficulty: the cosine and the sine are the
 same shape shifted by a quarter period, and a test with one of them misses the
 other. Both are handled at once by writing a general sinusoid as a combination
 of the two. By the angle-addition formula,
@@ -476,7 +471,7 @@ $$
 
 (the last equality follows from $a = A\cos\varphi$, $b = -A\sin\varphi$) carries
 both the amplitude, as its modulus, and the phase, as its angle. It is the
-point $(a, -b)$ of the plane. This is the pair of the problem section, stored
+point $(a, -b)$ of the plane. This is the pair of the opening, stored
 as one number, and the table shows the same cases: for $(a, b) = (0, 1.5)$, which
 is $1.5\sin\theta$, the complex amplitude is $-1.5i$, modulus $1.5$ and angle
 $-90^\circ$.
@@ -538,11 +533,13 @@ range is $0 \le k \le N/2$.
 
 ## The discrete Fourier transform
 
-*What it is for: the pair of correlations of the signal with the cosine and sine at every frequency, computed at once and stored as complex numbers.*
+The pair of correlations of the signal with the cosine and the sine can be
+computed at every frequency at once and stored as complex numbers. That is the
+transform, and the rest of this section builds it.
 
 ### From a pair of correlations to one complex number
 
-At each frequency $k$ the problem section computed two dot products, with the
+At each frequency $k$ the opening of the chapter computed two dot products, with the
 cosine and the sine at that frequency. Call them $C_k = \sum_n x[n]\cos(2\pi k n/N)$
 and $S_k = \sum_n x[n]\sin(2\pi k n/N)$. Store the pair as the complex number
 $C_k - i S_k$. By Euler's formula, with the sum over the $N$ samples,
@@ -568,7 +565,7 @@ has no component at that frequency, they point everywhere and cancel. (The
 minus sign in $\omega$ is a convention: with it, a component $e^{+2\pi i k n/N}$ of
 the signal produces $X[k] = N$ at exactly $k$, as the orthogonality below shows.)
 
-The problem's table gave $C_2 = 24$, $S_2 = 0$, so $X[2] = 24$, and $C_5 = 0$,
+The opening's table of correlations gave $C_2 = 24$, $S_2 = 0$, so $X[2] = 24$, and $C_5 = 0$,
 $S_5 = 12$, so $X[5] = -12i$. The next paragraph shows how to turn these numbers
 into amplitudes and phases.
 
@@ -590,7 +587,7 @@ A = \frac{2\,|X[k]|}{N},\quad \varphi = \text{the angle of } X[k].
 $$
 
 The modulus of $X[k]$ is the amplitude (times $N/2$) and its angle is the
-phase. In the problem, $X[2] = 24$ gives $A = 2 \cdot 24/16 = 3$ and phase $0$: the
+phase. In the opening example, $X[2] = 24$ gives $A = 2 \cdot 24/16 = 3$ and phase $0$: the
 hum is $3\cos(2\pi \cdot 2n/16)$. And $X[5] = -12i$ gives $A = 1.5$ and phase
 $-90^\circ$: the tone is $1.5\cos(2\pi \cdot 5n/16 - \pi/2) = 1.5\sin(2\pi \cdot 5n/16)$.
 The signal was built as exactly these, with an offset of $0.5$ (which appears as
@@ -897,7 +894,8 @@ a machine learning engine uses exactly this basis.
 
 ## The fast Fourier transform
 
-*What it is for: bringing the cost of the transform from $N^2$ to about $N\log_2 N$, which is what makes it usable on long signals.*
+The transform is only usable on long signals if its cost comes down from $N^2$
+to about $N\log_2 N$, and the idea that does it is a change of grouping.
 
 ### Splitting into even and odd samples
 
@@ -1110,7 +1108,9 @@ section.
 
 ## Convolution and the convolution theorem
 
-*What it is for: the sliding weighted sum behind every filter, and the reason it can be computed in the frequency domain with a pointwise product.*
+The sliding weighted sum behind every filter can be computed in the frequency
+domain with a pointwise product, and that is the reason the transform matters
+for models that filter.
 
 ### The sliding weighted sum
 
@@ -1324,9 +1324,10 @@ rewritten as a convolution (a rearrangement known as the chirp-z or Bluestein
 method) and then done with power-of-two FFTs, so convolution and the transform
 can each compute the other.
 
-## Making it work
+## Conventions, lengths and rounding in a working transform
 
-*What it is for: the choices that decide whether a transform is correct and fast in practice.*
+A transform that is right on paper is correct and fast in practice only if a few
+choices are made on purpose.
 
 **Normalisation is a convention, and it must be stated.** The forward transform
 as defined here has no scale factor and the inverse carries $1/N$. Another
@@ -1353,7 +1354,7 @@ the tables here do, and state a tolerance that grows with the length.
 apart, and a frequency between bins smears across all of them. Lengthening the
 window sharpens the resolution; shaping it softens the leakage.
 
-## Where this appears in brain
+## Rotary embeddings, a Fourier basis and audio front ends in the engine
 
 This chapter's ideas appear in three places in the engine, from the smallest to the
 most structural.
@@ -1539,7 +1540,7 @@ calling "rounding", why it is small here, and when it is not.
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $1 + 2 + 4 + 8 = 15$. The sum $\sum_{n=0}^{N-1}$ has $N$ terms.
 2. At $u = 0$: $\tfrac12(1 + 1) = 1$. At $u = \tfrac12$: $\tfrac12(1 + 0) = \tfrac12$. At $u = 1$: $\tfrac12(1 - 1) = 0$. The schedule falls from its peak to the floor.
