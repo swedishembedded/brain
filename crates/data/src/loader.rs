@@ -81,17 +81,6 @@ pub struct ExampleTooLong {
     pub index: usize,
     pub tokens: usize,
     pub block_size: usize,
-    /// The buffers the rejected call took ownership of, handed back so a
-    /// caller that has another way to train on this data does not have to
-    /// re-read or re-encode it.
-    returned: (Vec<u32>, Vec<bool>),
-}
-
-impl ExampleTooLong {
-    /// The `(data, mask)` passed to the rejected [`TokenDataset::new_examples`].
-    pub fn returned(self) -> (Vec<u32>, Vec<bool>) {
-        self.returned
-    }
 }
 
 impl std::fmt::Display for ExampleTooLong {
@@ -169,7 +158,6 @@ impl TokenDataset {
                 index,
                 tokens: b - a,
                 block_size: cfg.block_size,
-                returned: (data, mask),
             });
         }
         Ok(TokenDataset {
@@ -697,11 +685,9 @@ mod tests {
     fn an_example_longer_than_the_row_is_refused() {
         let (data, mask) = three_examples();
         let cfg = BatchConfig { batch_size: 2, block_size: 3, ..Default::default() };
-        let err = TokenDataset::new_examples(data.clone(), mask, &STARTS, PAD, &cfg).map(|_| ()).expect_err("must refuse");
+        let err = TokenDataset::new_examples(data, mask, &STARTS, PAD, &cfg).map(|_| ()).expect_err("must refuse");
         assert_eq!((err.index, err.tokens, err.block_size), (0, 4, 3));
         assert!(err.to_string().contains("--block"), "the message must say how to fix it: {err}");
-        // The caller gets its buffers back rather than having to re-encode.
-        assert_eq!(err.returned().0, data);
     }
 
     /// A stream written with each example closed by a separator indexes to
