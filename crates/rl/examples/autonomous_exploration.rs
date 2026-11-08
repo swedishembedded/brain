@@ -201,7 +201,7 @@ fn train_round(base: &Path, out: &Path, env: PositionCopyEnv, args: &Args, round
         max_attempts: 1,
         options: Default::default(),
     };
-    let objective = Grpo::new(env, PositionCopyVerifier, grpo).with_log(log.clone());
+    let objective = Grpo::try_new(env, PositionCopyVerifier, grpo).expect("a valid GRPO configuration").with_log(log.clone());
     let opts = FitOpts {
         steps: args.steps,
         batch_size: 1,

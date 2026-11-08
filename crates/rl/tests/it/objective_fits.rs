@@ -144,7 +144,7 @@ fn grpo_trains_only_adapters<M: Model>(b: &Build<M>) {
     let student = (b.make)(1, SEED);
     let before = snapshot(&student);
     let (judge, seen) = Judge::new(parity_reward);
-    let grpo = Grpo::new(Env { variable: grpo_common::always_variable }, judge, config(4, 1.0, GrpoOptions::default()));
+    let grpo = Grpo::try_new(Env { variable: grpo_common::always_variable }, judge, config(4, 1.0, GrpoOptions::default())).expect("a valid GRPO configuration");
 
     let opts = FitOpts { grad_accum: 4, ..fit_opts(2) };
     let mut fit = GrpoFit::new(grpo, &opts, FitControl::default());
@@ -196,7 +196,7 @@ fn grpo_raises_a_verifiable_reward<M: Model>(b: &Build<M>) {
     let student = (b.make)(1, SEED);
     let before = mean_even_share(&student, 96, SEED);
     let (judge, _) = Judge::new(even_share);
-    let grpo = Grpo::new(Env { variable: grpo_common::always_variable }, judge, config(8, 1.0, GrpoOptions::default()));
+    let grpo = Grpo::try_new(Env { variable: grpo_common::always_variable }, judge, config(8, 1.0, GrpoOptions::default())).expect("a valid GRPO configuration");
     let opts = FitOpts { grad_accum: 2, ..fit_opts(40) };
     let mut fit = GrpoFit::new(grpo, &opts, FitControl::default());
     let (report, trained) = fit.fit(student).unwrap_or_else(|e| panic!("{what}: {e}"));

@@ -78,7 +78,7 @@ fn grpo_group_size_two_runs_end_to_end_through_fit_with() {
         max_attempts: 1,
         options: Default::default(),
     };
-    let obj = Grpo::new(env, FracMatchVerifier, grpo_cfg);
+    let obj = Grpo::try_new(env, FracMatchVerifier, grpo_cfg).expect("a valid GRPO configuration");
 
     let opts = model::FitOpts {
         steps: 2,
@@ -129,7 +129,7 @@ fn grpo_group_size_one_is_the_rft_star_path_and_runs_end_to_end() {
         max_attempts: 4,
         options: Default::default(),
     };
-    let obj = Grpo::new(env, FracMatchVerifier, grpo_cfg);
+    let obj = Grpo::try_new(env, FracMatchVerifier, grpo_cfg).expect("a valid GRPO configuration");
 
     let opts = model::FitOpts {
         steps: 2,
@@ -201,7 +201,7 @@ fn an_external_rollout_is_synced_on_schedule_and_its_logprobs_are_recomputed() {
         options: GrpoOptions { advantage: AdvantageNorm::ZScore, ..GrpoOptions::default() },
     };
     let env = FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4, 5, 6] };
-    let mut obj = Grpo::new(env, FracMatchVerifier, grpo_cfg).with_rollout(Box::new(RecordingRollout { syncs: syncs.clone() }), 2);
+    let mut obj = Grpo::try_new(env, FracMatchVerifier, grpo_cfg).expect("a valid GRPO configuration").with_rollout(Box::new(RecordingRollout { syncs: syncs.clone() }), 2);
     use model::Objective;
     obj.prepare(&mut model).unwrap();
     let mut rng = data::rng::Rng::new(data::rng::random_seed());

@@ -81,7 +81,7 @@ fn verdict<E: Environment, V: Verifier>(obj: &mut Grpo<E, V>) -> StepVerdict {
 }
 
 fn scripted<E: Environment, V: Verifier>(env: E, judge: V, cfg: GrpoConfig, group: Vec<Completion>) -> Grpo<E, V> {
-    Grpo::new(env, judge, cfg).with_rollout(Box::new(Scripted { group }), 1)
+    Grpo::try_new(env, judge, cfg).expect("a valid GRPO configuration").with_rollout(Box::new(Scripted { group }), 1)
 }
 
 /// R1: whatever the sampling temperature, the first update of a fresh row sees
@@ -105,7 +105,7 @@ fn the_legacy_ratio_basis_starts_off_policy_at_a_non_unit_temperature() {
     let (mut m, _, _) = lora_model(s);
     let (judge, _) = Judge::new(parity_reward);
     let options = GrpoOptions { ratio_basis: RatioBasis::Sampler, ..GrpoOptions::default() };
-    let mut obj = Grpo::new(Env { variable: always_variable }, judge, config(4, 1.5, options));
+    let mut obj = Grpo::try_new(Env { variable: always_variable }, judge, config(4, 1.5, options)).expect("a valid GRPO configuration");
     obj.prepare(&mut m).unwrap();
     obj.micro_steps(&m, &mut Rng::new(s), 4);
     let st = obj.stats();
@@ -132,7 +132,7 @@ fn a_run_without_signal_leaves_the_weights_alone() {
     let before: Vec<Vec<f32>> = m.param_names().iter().map(|n| m.read_weight(n)).collect();
     let (judge, _) = Judge::new(parity_reward);
     let log = CycleLog::new();
-    let obj = Grpo::new(Env { variable: |_| false }, judge, config(2, 1.0, GrpoOptions::default())).with_log(log.clone());
+    let obj = Grpo::try_new(Env { variable: |_| false }, judge, config(2, 1.0, GrpoOptions::default())).expect("a valid GRPO configuration").with_log(log.clone());
     let opts = model::FitOpts { steps: 3, grad_accum: 2, lr: 1e-2, min_lr: 1e-3, weight_decay: 0.5, eval_interval: 0, seed: s, ..model::FitOpts::default() };
     let (_, m) = model::fit_controlled(m, obj, &opts, None, Default::default()).expect("fit");
     let after: Vec<Vec<f32>> = m.param_names().iter().map(|n| m.read_weight(n)).collect();
@@ -328,7 +328,7 @@ fn a_loss_probe_leaves_the_objective_untouched() {
     let (mut m, _, _) = lora_model(s);
     let (judge, _) = Judge::new(parity_reward);
     let log = CycleLog::new();
-    let mut obj = Grpo::new(Env { variable: always_variable }, judge, config(4, 1.0, GrpoOptions::default())).with_log(log.clone());
+    let mut obj = Grpo::try_new(Env { variable: always_variable }, judge, config(4, 1.0, GrpoOptions::default())).expect("a valid GRPO configuration").with_log(log.clone());
     obj.prepare(&mut m).unwrap();
     let loss = obj.loss_probe(&m, &mut Rng::new(s));
     assert!(loss.is_finite());
@@ -395,7 +395,7 @@ fn samples_from_an_engine_the_trainer_has_left_behind_are_refused() {
     let (judge, _) = Judge::new(first_wins);
     let group = vec![completion(&[4, 4]), completion(&[5, 5])];
     // The engine is synced every second group: group 0 at step 0, group 1 is drawn after one update.
-    let mut obj = Grpo::new(Env { variable: always_variable }, judge, config(2, 1.0, GrpoOptions::default())).with_rollout(Box::new(Scripted { group }), 2);
+    let mut obj = Grpo::try_new(Env { variable: always_variable }, judge, config(2, 1.0, GrpoOptions::default())).expect("a valid GRPO configuration").with_rollout(Box::new(Scripted { group }), 2);
     obj.prepare(&mut m).unwrap();
     let mut rng = Rng::new(s);
     obj.micro_steps(&m, &mut rng, 2);
@@ -416,7 +416,7 @@ fn a_step_the_update_gate_skipped_leaves_the_engine_current() {
     let (mut m, _, _) = lora_model(s);
     let (judge, _) = Judge::new(first_wins);
     let group = vec![completion(&[4, 4]), completion(&[5, 5])];
-    let mut obj = Grpo::new(Env { variable: always_variable }, judge, config(2, 1.0, GrpoOptions::default())).with_rollout(Box::new(Scripted { group }), 2);
+    let mut obj = Grpo::try_new(Env { variable: always_variable }, judge, config(2, 1.0, GrpoOptions::default())).expect("a valid GRPO configuration").with_rollout(Box::new(Scripted { group }), 2);
     obj.prepare(&mut m).unwrap();
     let mut rng = Rng::new(s);
     obj.micro_steps(&m, &mut rng, 2);
@@ -453,7 +453,7 @@ fn an_engine_declaring_another_sampling_distribution_is_refused() {
     let declared = model::serve::SampleParams { top_p: 0.9, ..cfg.rollout.sample };
     let group = vec![completion(&[4, 4]), completion(&[5, 5])];
     let engine = Declaring { inner: Scripted { group }, sampling: Some(declared) };
-    let mut obj = Grpo::new(Env { variable: always_variable }, judge, cfg).with_rollout(Box::new(engine), 1);
+    let mut obj = Grpo::try_new(Env { variable: always_variable }, judge, cfg).expect("a valid GRPO configuration").with_rollout(Box::new(engine), 1);
     obj.prepare(&mut m).unwrap();
     obj.micro_steps(&m, &mut Rng::new(s), 2);
     let StepVerdict::Abort(e) = verdict(&mut obj) else { panic!("a declared top_p 0.9 against an assumed plain sampler must abort") };
@@ -511,4 +511,7 @@ fn numeric_settings_no_run_can_honour_are_refused() {
         let refusal = Grpo::try_new(Env { variable: always_variable }, judge, cfg).err().unwrap_or_else(|| panic!("{field} must be refused"));
         assert!(matches!(refusal, BehaviourRefusal::InvalidNumeric { field: f, .. } if f == field), "{field}: {refusal}");
     }
+    let (judge, _) = Judge::new(first_wins);
+    let refusal = Grpo::try_new(Env { variable: always_variable }, judge, GrpoConfig { group_size: 0, ..base }).err().expect("an empty group is refused, not a panic");
+    assert_eq!(refusal, BehaviourRefusal::InvalidCount { field: "group_size", got: 0, least: 1 });
 }

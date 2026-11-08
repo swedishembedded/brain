@@ -55,7 +55,7 @@ fn assert_empty_steps_change_nothing<O: Objective<Qwen>>(rows: u32, obj: O) {
 
 #[test]
 fn dpo_steps_without_a_pair_change_no_weights_moments_or_step_count() {
-    let obj = Dpo::new(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, |_: u64| None::<DpoPair>, |_| (Vec::new(), Vec::new()));
+    let obj = Dpo::try_new(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, |_: u64| None::<DpoPair>, |_| (Vec::new(), Vec::new())).expect("a valid DPO configuration");
     assert_empty_steps_change_nothing(2, obj);
 }
 
@@ -67,7 +67,7 @@ fn distill_steps_without_an_example_change_no_weights_moments_or_step_count() {
 
 #[test]
 fn a_mixture_whose_drawn_arms_have_nothing_to_learn_changes_nothing() {
-    let dpo = Dpo::new(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, |_: u64| None::<DpoPair>, |_| (Vec::new(), Vec::new()));
+    let dpo = Dpo::try_new(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, |_: u64| None::<DpoPair>, |_| (Vec::new(), Vec::new())).expect("a valid DPO configuration");
     let obj = rl::objective::mixture::Mixture::<Qwen>::new(vec![(1.0, Box::new(dpo))]);
     assert_empty_steps_change_nothing(2, obj);
 }
@@ -87,7 +87,7 @@ fn assert_malformed_record_aborts_before_any_update<O: Objective<Qwen>>(rows: u3
 #[test]
 fn a_dpo_pair_longer_than_the_row_stops_the_run() {
     let pair = DpoPair { prompt: vec![1, 2, 3], chosen: vec![4; SEQ_LEN], rejected: vec![5, 6] };
-    let obj = Dpo::new(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, move |_: u64| Some(pair.clone()), |p: &DpoPair| (vec![-1.0; p.chosen.len()], vec![-1.0; p.rejected.len()]));
+    let obj = Dpo::try_new(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, move |_: u64| Some(pair.clone()), |p: &DpoPair| (vec![-1.0; p.chosen.len()], vec![-1.0; p.rejected.len()])).expect("a valid DPO configuration");
     assert_malformed_record_aborts_before_any_update(2, obj, "do not fit");
 }
 

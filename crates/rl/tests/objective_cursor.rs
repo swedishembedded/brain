@@ -58,7 +58,7 @@ fn examples() -> Vec<DistillExample> {
 
 #[test]
 fn probing_a_dpo_run_does_not_advance_its_pair_cursor() {
-    let make = || Dpo::from_pairs(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, pairs(), |p: &DpoPair| (vec![-1.0; p.chosen.len()], vec![-1.0; p.rejected.len()]));
+    let make = || Dpo::try_from_pairs(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, pairs(), |p: &DpoPair| (vec![-1.0; p.chosen.len()], vec![-1.0; p.rejected.len()])).expect("a valid DPO configuration");
     assert!(first_step_gradients(2, make(), 0) == first_step_gradients(2, make(), 5), "five probes moved the first trained pair");
 }
 
@@ -110,7 +110,7 @@ fn assert_resume_continues_the_stream<O: Objective<Qwen>>(name: &str, rows: u32,
 
 #[test]
 fn a_resumed_dpo_run_continues_its_pair_stream() {
-    assert_resume_continues_the_stream("dpo", 2, || Dpo::from_pairs(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, pairs(), |p: &DpoPair| (vec![-1.0; p.chosen.len()], vec![-1.0; p.rejected.len()])));
+    assert_resume_continues_the_stream("dpo", 2, || Dpo::try_from_pairs(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, pairs(), |p: &DpoPair| (vec![-1.0; p.chosen.len()], vec![-1.0; p.rejected.len()])).expect("a valid DPO configuration"));
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn a_resumed_dpo_run_over_an_indexed_source_continues_it() {
     let source = pairs();
     assert_resume_continues_the_stream("dpo-indexed", 2, || {
         let source = source.clone();
-        Dpo::new(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, move |n: u64| Some(source[(n * 2 % 3) as usize].clone()), |p: &DpoPair| (vec![-1.0; p.chosen.len()], vec![-1.0; p.rejected.len()]))
+        Dpo::try_new(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, move |n: u64| Some(source[(n * 2 % 3) as usize].clone()), |p: &DpoPair| (vec![-1.0; p.chosen.len()], vec![-1.0; p.rejected.len()])).expect("a valid DPO configuration")
     });
 }
 

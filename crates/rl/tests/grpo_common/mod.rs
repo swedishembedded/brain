@@ -90,7 +90,7 @@ pub fn always_variable(_: u64) -> bool {
 /// sampler's reported probability is the trainer's, at sampling temperature `temp`.
 pub fn assert_trained_distribution_is_sampled<M: Model>(m: &mut M, temp: f32, seed: u64) {
     let (judge, _) = Judge::new(parity_reward);
-    let mut obj = Grpo::new(Env { variable: always_variable }, judge, config(4, temp, GrpoOptions::default()));
+    let mut obj = Grpo::try_new(Env { variable: always_variable }, judge, config(4, temp, GrpoOptions::default())).expect("a valid GRPO configuration");
     Objective::<M>::prepare(&mut obj, m).unwrap();
     obj.micro_steps(m, &mut Rng::new(seed), 4);
     let st = obj.stats();
@@ -104,7 +104,7 @@ pub fn assert_trained_distribution_is_sampled<M: Model>(m: &mut M, temp: f32, se
 /// is never allowed on zero rows.
 pub fn assert_no_step_on_an_empty_batch<M: Model>(m: &mut M, seed: u64) {
     let (judge, _) = Judge::new(parity_reward);
-    let mut obj = Grpo::new(Env { variable: |seed| seed % 10 >= 8 }, judge, config(4, 1.0, GrpoOptions::default()));
+    let mut obj = Grpo::try_new(Env { variable: |seed| seed % 10 >= 8 }, judge, config(4, 1.0, GrpoOptions::default())).expect("a valid GRPO configuration");
     Objective::<M>::prepare(&mut obj, m).unwrap();
     let mut rng = Rng::new(seed);
     let k = 4;

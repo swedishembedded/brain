@@ -84,7 +84,7 @@ fn dpo_training_raises_chosen_logprob_and_lowers_rejected_logprob() {
 
     let pair = DpoPair { prompt: prompt.clone(), chosen: chosen.clone(), rejected: rejected.clone() };
     let dpo_cfg = DpoConfig { beta: 0.5, seq_len, nll_weight: 0.0 };
-    let mut obj = Dpo::from_pairs(dpo_cfg, vec![pair], move |_pair: &DpoPair| (ref_chosen.clone(), ref_rejected.clone()));
+    let mut obj = Dpo::try_from_pairs(dpo_cfg, vec![pair], move |_pair: &DpoPair| (ref_chosen.clone(), ref_rejected.clone())).expect("a valid DPO configuration");
 
     obj.prepare(&mut model).unwrap();
     let mut rng = Rng::new(random_seed());

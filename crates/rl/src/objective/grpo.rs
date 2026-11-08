@@ -153,6 +153,9 @@ impl GrpoConfig {
     /// refused rather than approximated.
     pub fn validate(&self) -> Result<(), BehaviourRefusal> {
         let sample = self.rollout.sample;
+        if self.group_size < 1 {
+            return Err(BehaviourRefusal::InvalidCount { field: "group_size", got: self.group_size, least: 1 });
+        }
         for (field, value, allows_zero) in [("kl_beta", self.kl_beta, true), ("clip_eps", self.clip_eps, false), ("clip_eps_high", self.options.clip_eps_high, false), ("temp", sample.temp, true)] {
             if !(value.is_finite() && (value > 0.0 || (allows_zero && value == 0.0))) {
                 return Err(BehaviourRefusal::InvalidNumeric { field, value });
@@ -254,15 +257,9 @@ pub struct Grpo<E: Environment, V: Verifier> {
 }
 
 impl<E: Environment, V: Verifier> Grpo<E, V> {
-    /// [`Self::try_new`], panicking on a configuration it refuses.
-    pub fn new(env: E, verifier: V, cfg: GrpoConfig) -> Grpo<E, V> {
-        Grpo::try_new(env, verifier, cfg).unwrap_or_else(|why| panic!("Grpo: {why}"))
-    }
-
     /// The objective for `cfg`, or why `cfg` would train against a likelihood that is not the
     /// sampled one ([`GrpoConfig::validate`]).
     pub fn try_new(env: E, verifier: V, cfg: GrpoConfig) -> Result<Grpo<E, V>, BehaviourRefusal> {
-        assert!(cfg.group_size >= 1, "Grpo: group_size must be >= 1");
         cfg.validate()?;
         Ok(Grpo {
             env,

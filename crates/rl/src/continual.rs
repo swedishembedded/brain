@@ -1012,7 +1012,7 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
         // cannot be `'static`.
         let objective: Box<dyn model::Objective<M> + '_> = match &cfg.regime {
             Regime::Grpo => {
-                Box::new(Grpo::new(ReplayEnv::new(curr, k, cfg.replay_frac), curr.verifier(), grpo_cfg(cfg, block as usize, completion_len)).with_log(log.clone()))
+                Box::new(Grpo::try_new(ReplayEnv::new(curr, k, cfg.replay_frac), curr.verifier(), grpo_cfg(cfg, block as usize, completion_len))?.with_log(log.clone()))
             }
             Regime::Sft(sft) => Box::new(sft_objective::<M, C>(curr, sft, k, &cycle_dir, &opts, ARM1_SALT)?),
         };
@@ -1097,7 +1097,7 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
             let fresh_dir = cycle_dir.join("fresh");
             let fresh_obj: Box<dyn model::Objective<M> + '_> = match &cfg.regime {
                 Regime::Grpo => Box::new(
-                    Grpo::new(ReplayEnv::new(curr, k, cfg.replay_frac), curr.verifier(), grpo_cfg(cfg, block as usize, completion_len)).with_log(fresh_log.clone()),
+                    Grpo::try_new(ReplayEnv::new(curr, k, cfg.replay_frac), curr.verifier(), grpo_cfg(cfg, block as usize, completion_len))?.with_log(fresh_log.clone()),
                 ),
                 Regime::Sft(sft) => {
                     std::fs::create_dir_all(&fresh_dir)?;
@@ -1244,7 +1244,7 @@ pub fn joint_oracle<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &S
     // rule is present at once, which is the capacity question Arm 3 exists for.
     let sft_dir = cfg.work_dir.join("oracle-sft");
     let objective: Box<dyn model::Objective<M> + '_> = match &cfg.regime {
-        Regime::Grpo => Box::new(Grpo::new(PooledEnv { curr, cycles: cfg.cycles }, curr.verifier(), grpo_cfg(cfg, block as usize, completion_len)).with_log(log.clone())),
+        Regime::Grpo => Box::new(Grpo::try_new(PooledEnv { curr, cycles: cfg.cycles }, curr.verifier(), grpo_cfg(cfg, block as usize, completion_len))?.with_log(log.clone())),
         Regime::Sft(sft) => {
             let sources: Vec<SftSource> = (0..cfg.cycles).map(SftSource::Cycle).collect();
             curr.write_sft_dataset(&sources, sft.seqs, opts.seed ^ ORACLE_SALT, &sft_dir)?;

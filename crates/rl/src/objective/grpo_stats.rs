@@ -37,6 +37,8 @@ pub enum BehaviourRefusal {
     IncompleteReference { expected: usize, got: usize },
     /// A numeric setting no run can honour (`field` is `kl_beta`, `clip_eps`, `clip_eps_high` or `temp`).
     InvalidNumeric { field: &'static str, value: f32 },
+    /// A count no run can honour: `field` (`group_size`) is `got`, below the `least` it can be.
+    InvalidCount { field: &'static str, got: usize, least: usize },
     /// The engine declares it samples from `declared`, but the objective's ratio assumes `expected`.
     SamplingMismatch { declared: String, expected: String },
 }
@@ -51,12 +53,19 @@ impl fmt::Display for BehaviourRefusal {
             ),
             BehaviourRefusal::IncompleteReference { expected, got } => write!(f, "the reference log-probability source returned {got} values for a completion of {expected} tokens; an incomplete reference would silently change the KL term"),
             BehaviourRefusal::InvalidNumeric { field, value } => write!(f, "{field} must be finite and {}, got {value}", if *field == "kl_beta" || *field == "temp" { "not negative" } else { "positive" }),
+            BehaviourRefusal::InvalidCount { field, got, least } => write!(f, "{field} must be at least {least}, got {got}"),
             BehaviourRefusal::SamplingMismatch { declared, expected } => write!(f, "the rollout engine samples from {declared}, but the objective's ratio assumes {expected}"),
         }
     }
 }
 
 impl std::error::Error for BehaviourRefusal {}
+
+impl From<BehaviourRefusal> for std::io::Error {
+    fn from(refusal: BehaviourRefusal) -> Self {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, refusal)
+    }
+}
 
 /// Why a queued row was not trained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

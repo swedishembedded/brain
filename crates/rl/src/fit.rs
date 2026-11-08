@@ -79,7 +79,7 @@ impl ModelFit for DpoFit<'_, '_> {
         for set in &mut self.score_sets {
             set.iter_mut().for_each(|pair| pair.score_reference(&model));
         }
-        let (report, model) = fit_controlled(model, Dpo::from_dataset(self.dpo, pairs), self.opts, None, control)?;
+        let (report, model) = fit_controlled(model, Dpo::try_from_dataset(self.dpo, pairs)?, self.opts, None, control)?;
         if !report.interrupted {
             self.margins = self.score_sets.iter().map(|set| set.iter().map(|pair| pair.margin(&model)).collect()).collect();
         }

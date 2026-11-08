@@ -59,7 +59,7 @@
 //! one row (`b == 1`) at a time, DPO cannot: it structurally needs both
 //! rows in the same forward. [`Dpo`] therefore takes its verifier-derived
 //! pairs from an externally supplied source (a plain closure, or
-//! [`Dpo::from_pairs`]'s fixed/cycling dataset) rather than owning a live
+//! [`Dpo::try_from_pairs`]'s fixed/cycling dataset) rather than owning a live
 //! [`model::rollout::Rollout`] against its own training model - the
 //! sampling and verification (whoever performs it: a `b == 1` snapshot of
 //! the same architecture, or an offline collection pass) happen upstream of
@@ -70,7 +70,7 @@
 //!
 //! ## A fixed preference dataset, referenced against the starting model
 //!
-//! [`Dpo::from_dataset`] trains on a fixed set of [`PackedPair`]s (rendered
+//! [`Dpo::try_from_dataset`] trains on a fixed set of [`PackedPair`]s (rendered
 //! conversations with a per-token supervision mask, see
 //! [`PackedPair::from_masked`]) and takes its frozen reference to be the model
 //! the run STARTS from: [`Objective::prepare`] scores every pair once on the
@@ -151,6 +151,35 @@ impl DpoConfig {
             return Err(format!("seq_len {} leaves no position that predicts a token", self.seq_len));
         }
         Ok(())
+    }
+}
+
+/// Why a [`Dpo`] cannot be built: the configuration no run can honour, or the dataset it was handed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DpoConfigError {
+    /// [`DpoConfig::validate`] refused the configuration, saying why.
+    Invalid(String),
+    /// A pair source built from a dataset was given no pair.
+    NoPairs,
+    /// Pair `index` of a packed dataset is `got` positions wide, not the configuration's `expected`.
+    PairWidth { index: usize, got: usize, expected: usize },
+}
+
+impl std::fmt::Display for DpoConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DpoConfigError::Invalid(why) => write!(f, "Dpo: {why}"),
+            DpoConfigError::NoPairs => write!(f, "Dpo: a dataset needs at least one pair"),
+            DpoConfigError::PairWidth { index, got, expected } => write!(f, "Dpo: pair {index} is packed at seq_len {got}, the configuration says {expected}"),
+        }
+    }
+}
+
+impl std::error::Error for DpoConfigError {}
+
+impl From<DpoConfigError> for std::io::Error {
+    fn from(error: DpoConfigError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
     }
 }
 
@@ -440,36 +469,42 @@ impl Dpo {
     /// continues the stream exactly. `ref_logprobs` computes the frozen reference's per-token
     /// logprobs for a pair's chosen/rejected completions, called once per pair and cached - see
     /// this struct's own field doc comments.
-    pub fn new<S, R>(cfg: DpoConfig, source: S, ref_logprobs: R) -> Dpo
+    pub fn try_new<S, R>(cfg: DpoConfig, source: S, ref_logprobs: R) -> Result<Dpo, DpoConfigError>
     where
         S: FnMut(u64) -> Option<DpoPair> + 'static,
         R: Fn(&DpoPair) -> (Vec<f32>, Vec<f32>) + 'static,
     {
-        cfg.validate().unwrap_or_else(|why| panic!("Dpo: {why}"));
-        Dpo { cfg, source: Source::Stream { next: IndexedStream::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0, refusal: None }
+        cfg.validate().map_err(DpoConfigError::Invalid)?;
+        Ok(Dpo { cfg, source: Source::Stream { next: IndexedStream::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0, refusal: None })
     }
 
     /// A fixed preference dataset (see the module doc): each micro-step
     /// trains one pair drawn uniformly from `pairs` with the training loop's
     /// batch generator, and the frozen reference is the model this objective
     /// is prepared on. Every pair must be packed at `cfg.seq_len`.
-    pub fn from_dataset(cfg: DpoConfig, pairs: Vec<PackedPair>) -> Dpo {
-        cfg.validate().unwrap_or_else(|why| panic!("Dpo: {why}"));
-        assert!(!pairs.is_empty(), "Dpo::from_dataset: need at least one pair");
-        assert!(pairs.iter().all(|p| p.seq_len() == cfg.seq_len), "Dpo::from_dataset: every pair must be packed at seq_len {}", cfg.seq_len);
-        Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0, trained: 0, refusal: None }
+    pub fn try_from_dataset(cfg: DpoConfig, pairs: Vec<PackedPair>) -> Result<Dpo, DpoConfigError> {
+        cfg.validate().map_err(DpoConfigError::Invalid)?;
+        if pairs.is_empty() {
+            return Err(DpoConfigError::NoPairs);
+        }
+        if let Some((index, pair)) = pairs.iter().enumerate().find(|(_, p)| p.seq_len() != cfg.seq_len) {
+            return Err(DpoConfigError::PairWidth { index, got: pair.seq_len(), expected: cfg.seq_len });
+        }
+        Ok(Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0, trained: 0, refusal: None })
     }
 
-    /// Convenience over [`Self::new`]: a fixed, cycling dataset of
+    /// Convenience over [`Self::try_new`]: a fixed, cycling dataset of
     /// already-verifier-derived pairs - the common case for a small
     /// synthetic pair set or a pre-collected offline preference dataset,
     /// rather than a live pairing source.
-    pub fn from_pairs<R>(cfg: DpoConfig, pairs: Vec<DpoPair>, ref_logprobs: R) -> Dpo
+    pub fn try_from_pairs<R>(cfg: DpoConfig, pairs: Vec<DpoPair>, ref_logprobs: R) -> Result<Dpo, DpoConfigError>
     where
         R: Fn(&DpoPair) -> (Vec<f32>, Vec<f32>) + 'static,
     {
-        assert!(!pairs.is_empty(), "Dpo::from_pairs: need at least one pair");
-        Dpo::new(cfg, stream::cycle(pairs), ref_logprobs)
+        if pairs.is_empty() {
+            return Err(DpoConfigError::NoPairs);
+        }
+        Dpo::try_new(cfg, stream::cycle(pairs), ref_logprobs)
     }
 }
 
@@ -720,5 +755,17 @@ mod tests {
         ] {
             assert!(cfg.validate().expect_err(field).contains(field));
         }
+    }
+
+    #[test]
+    fn the_constructors_return_a_typed_error_instead_of_panicking() {
+        let ok = DpoConfig { beta: 0.1, seq_len: 8, nll_weight: 0.0 };
+        let source = |_: u64| None::<DpoPair>;
+        let reference = |_: &DpoPair| (Vec::new(), Vec::new());
+        assert!(matches!(Dpo::try_new(DpoConfig { beta: 0.0, ..ok }, source, reference), Err(DpoConfigError::Invalid(why)) if why.contains("beta")));
+        assert_eq!(Dpo::try_from_dataset(ok, Vec::new()).err(), Some(DpoConfigError::NoPairs));
+        assert_eq!(Dpo::try_from_pairs(ok, Vec::new(), reference).err(), Some(DpoConfigError::NoPairs));
+        let narrow = PackedPair::from_masked(4, (&[1, 2, 3], &[false, true, true]), (&[1, 2, 4], &[false, true, true])).unwrap();
+        assert_eq!(Dpo::try_from_dataset(ok, vec![narrow]).err(), Some(DpoConfigError::PairWidth { index: 0, got: 4, expected: 8 }));
     }
 }

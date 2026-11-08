@@ -42,7 +42,7 @@ fn an_improve_cycle_runs_on_qwen35() {
     let held_out = env.tasks(900_000);
     let log = CycleLog::new();
     let (judge, _) = Judge::new(parity_reward);
-    let objective = Grpo::new(env, judge, config(2, 1.0, GrpoOptions::default())).with_log(log.clone());
+    let objective = Grpo::try_new(env, judge, config(2, 1.0, GrpoOptions::default())).expect("a valid GRPO configuration").with_log(log.clone());
     let opts = FitOpts { steps: 6, grad_accum: 2, lr: 5e-3, min_lr: 5e-4, decay_iters: 6, grad_clip: 1.0, seed, ..FitOpts::default() };
     let targets = qwen35::config::lora_targets();
     let (eval_judge, _) = Judge::new(parity_reward);
