@@ -139,6 +139,11 @@ path = "tests/distill_gradcheck.rs"
 required-features = ["qwen3"]
 
 [[test]]
+name = "distill_normalisation"
+path = "tests/distill_normalisation.rs"
+required-features = ["qwen3"]
+
+[[test]]
 name = "distill_full_kl"
 path = "tests/distill_full_kl.rs"
 required-features = ["qwen3"]

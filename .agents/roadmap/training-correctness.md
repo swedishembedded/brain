@@ -21,7 +21,7 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [x] T006 P0 - crates/rl/src/objective/dpo.rs (empty step) - empty step changes no weights, moments or step count
 - [x] T007 P0 - crates/rl/src/objective/distill.rs (empty step) - same as T006 for distillation
 - [x] T008 P0 - crates/model/src/train.rs (fit_controlled) - transactional update gate in the shared loop; strict mode; NaN injection test (shared gate landed as `model::stepgate`; `FitOpts::strict_updates` is not yet exposed as a CLI flag; GRPO and external policy gradient keep their own verdict counters)
-- [ ] T009 P1 - crates/rl/src/objective/distill.rs - one normalisation convention; dense-softmax mean-KL oracle, unequal lengths
+- [x] T009 P1 - crates/rl/src/objective/distill.rs - one normalisation convention; dense-softmax mean-KL oracle, unequal lengths
 - [x] T010 P1 - crates/rl/src/objective/dpo.rs (pack_row) - streaming DPO refuses truncation
 - [x] T011 P1 - crates/rl/src/objective/distill.rs (pack_row, TopK::from_logits) - refuse truncation and zero-information batches; validated teacher distribution
 - [x] T012 P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers Adam beta1/beta2/eps; resume refuses a change

@@ -37,26 +37,34 @@
 //! any per-row scalar before backward reads it. So realizing `d(KL)/dz =
 //! p − q_K` needs no new kernel at all: run `K` ordinary
 //! [`model::Batch::LmWeighted`] passes over the SAME tokens, pass `k` using
-//! target `v_k` and weight `w_k = q_k·count` (the same "multiply by the
-//! model's own `/count` weighted-CE divisor to cancel it exactly"
-//! `rl::objective::dpo::pair_term`'s `w = β·σ(−u)·count` already uses), and
-//! let [`model::Model::backward`]'s documented ACCUMULATE-not-overwrite
-//! contract sum the `K` passes' gradients: `Σ_k (q_k·count)·(p −
-//! e_{v_k})/count = Σ_k q_k·(p − e_{v_k}) = p − q_K`. Unlike DPO's and
+//! target `v_k` and weight `w_k = q_k·count_k / active` (`count_k` is the
+//! model's own `/count` weighted-CE divisor for that pass, cancelled exactly
+//! the way `rl::objective::dpo::pair_term`'s `w = β·σ(−u)·count` does, and
+//! `active` the number of teacher-scored positions, which makes the loss a
+//! mean), and let [`model::Model::backward`]'s documented
+//! ACCUMULATE-not-overwrite contract sum the `K` passes' gradients: `Σ_k
+//! (q_k/active)·(p − e_{v_k}) = (p − q_K)/active` per position. Unlike DPO's and
 //! GRPO's weight formulas, this one needs no readback of the model's own
 //! current predictions at all (`w_k` is pure teacher data) - simpler than
 //! either, not just a third instance of the same trick.
 //!
-//! The realized scalar loss composes the same way: with that weight, one
-//! pass's [`model::Model::forward`] returns `Σ_v(active) q_k·CE_k = Σ
-//! q_k·(−ln p_{v_k})`; summing all `K` passes gives `Σ_k q_k·(−ln p_{v_k}) =
-//! KL(q_K‖p) + H(q_K)` (`H` the teacher's own entropy, a constant that does
-//! not depend on the student's parameters). [`neg_entropy`] computes `−H(q_K)
-//! = Σ_k q_k·ln(q_k)` directly from the teacher's own (data-only) `TopK`, so
-//! adding it to the summed pass losses reports the actual `KL(q_K‖p)`
-//! rather than the teacher-entropy-shifted cross-entropy - this constant
-//! addition changes nothing about the gradient (entropy is a fixed offset
-//! w.r.t. the student's parameters), only what the reported metric means.
+//! ## One normalisation convention
+//!
+//! An example's loss is the MEAN over its `active` teacher-scored positions of
+//! `KL(q_K‖p)`, and the gradient written is the gradient of exactly that mean.
+//! The examples of an optimiser step are averaged by the shared loop
+//! (`grad_accum`), so an example counts once whatever its length. (An earlier
+//! revision reported the mean but wrote `active` times its gradient.)
+//!
+//! The realized scalar loss composes the same way: with that weight, summing
+//! the `K` passes' [`model::Model::forward`] returns `(1/active)·Σ_t Σ_k
+//! q_k·(−ln p_{v_k}) = mean KL(q_K‖p) + mean H(q_K)` (`H` the teacher's own
+//! entropy, a constant that does not depend on the student's parameters).
+//! [`neg_entropy`] computes `−H(q_K) = Σ_k q_k·ln(q_k)` directly from the
+//! teacher's own (data-only) `TopK`, and [`mean_kl`] adds its mean to the
+//! summed pass losses to report the actual mean `KL(q_K‖p)` rather than the
+//! teacher-entropy-shifted cross-entropy - this constant addition changes
+//! nothing about the gradient, only what the reported metric means.
 //!
 //! ## Why `K = vocab` is not a different approximation
 //!
@@ -157,13 +165,13 @@ pub struct DistillConfig {
     pub seq_len: usize,
 }
 
-/// Pass `k`'s weight for one position, scaled by `count` to cancel the
-/// model's own `/count` weighted-CE division exactly (see the module doc
-/// comment's derivation) - `prob` is pure teacher data, no current-policy
-/// readback needed (unlike `rl::objective::dpo::pair_term`/
+/// Pass `k`'s weight for one position, scaled by `count` (the model's own `/count` weighted-CE
+/// divisor of that pass, cancelled exactly - see the module doc comment's derivation) and divided
+/// by `active`, the number of teacher-scored positions, so the loss is their mean. `prob` is pure
+/// teacher data, no current-policy readback needed (unlike `rl::objective::dpo::pair_term`/
 /// `rl::objective::grpo::token_term`, both of which DO need it).
-pub fn topk_weight(prob: f32, count: f32) -> f32 {
-    prob * count
+pub fn topk_weight(prob: f32, count: f32, active: f32) -> f32 {
+    prob * count / active
 }
 
 /// `Σ_k q_k·ln(q_k)` (`0` contributes `0`, matching the standard `0·ln 0 :=
@@ -174,6 +182,18 @@ pub fn topk_weight(prob: f32, count: f32) -> f32 {
 /// (data-only) distribution, never on the student.
 pub fn neg_entropy(topk: &TopK) -> f32 {
     topk.probs.iter().map(|&q| if q > 0.0 { q * q.ln() } else { 0.0 }).sum()
+}
+
+/// The positions of `teacher` that carry a distribution (at least one), the divisor of the mean (never zero).
+fn active_positions(teacher: &[TopK]) -> f32 {
+    teacher.iter().filter(|t| !t.ids.is_empty()).count().max(1) as f32
+}
+
+/// The mean `KL(q_K‖p)` over the teacher-scored positions of one example, from the sum of its `K`
+/// passes' forward losses (`pass_losses`, already divided by the active positions through the
+/// weights): the passes give the mean cross-entropy, the teacher's own mean entropy completes it.
+pub fn mean_kl(pass_losses: f32, teacher: &[TopK]) -> f32 {
+    pass_losses + teacher.iter().map(neg_entropy).sum::<f32>() / active_positions(teacher)
 }
 
 /// Build pass `k`'s [`model::Batch::LmWeighted`] `targets`/`weights` arrays
@@ -190,12 +210,13 @@ pub fn neg_entropy(topk: &TopK) -> f32 {
 /// independently cancels its own divisor.
 pub fn pass_arrays(teacher: &[TopK], k: usize) -> (Vec<u32>, Vec<f32>, f32) {
     let count = teacher.iter().filter(|t| k < t.ids.len()).count().max(1) as f32;
+    let active = active_positions(teacher);
     let mut targets = vec![IGNORE; teacher.len()];
     let mut weights = vec![0.0f32; teacher.len()];
     for (i, t) in teacher.iter().enumerate() {
         if let (Some(&id), Some(&p)) = (t.ids.get(k), t.probs.get(k)) {
             targets[i] = id;
-            weights[i] = topk_weight(p, count);
+            weights[i] = topk_weight(p, count, active);
         }
     }
     (targets, weights, count)
@@ -319,9 +340,7 @@ impl DistillTopK {
                 self.passes += 1;
             }
         }
-        let entropy: f32 = packed.teacher.iter().map(neg_entropy).sum();
-        let active = packed.teacher.iter().filter(|t| !t.ids.is_empty()).count().max(1) as f32;
-        (total + entropy) / active
+        mean_kl(total, &packed.teacher)
     }
 }
 
@@ -426,14 +445,14 @@ mod tests {
         let (t0, w0, c0) = pass_arrays(&teacher, 0);
         assert_eq!(t0, vec![5, 9, IGNORE]);
         assert_eq!(c0, 2.0, "positions 0 and 1 are active at k=0");
-        assert!((w0[0] - 0.6 * 2.0).abs() < 1e-6, "{w0:?}");
-        assert!((w0[1] - 1.0 * 2.0).abs() < 1e-6, "{w0:?}");
+        assert!((w0[0] - 0.6 * 2.0 / 2.0).abs() < 1e-6, "{w0:?}");
+        assert!((w0[1] - 1.0 * 2.0 / 2.0).abs() < 1e-6, "{w0:?}");
         assert_eq!(w0[2], 0.0);
 
         let (t1, w1, c1) = pass_arrays(&teacher, 1);
         assert_eq!(t1, vec![7, IGNORE, IGNORE]);
         assert_eq!(c1, 1.0, "only position 0 has a k=1 entry");
-        assert!((w1[0] - 0.4 * 1.0).abs() < 1e-6, "{w1:?}");
+        assert!((w1[0] - 0.4 * 1.0 / 2.0).abs() < 1e-6, "{w1:?}");
     }
 
     #[test]

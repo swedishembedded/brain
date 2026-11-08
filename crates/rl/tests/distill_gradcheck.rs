@@ -10,10 +10,10 @@
 //! ONE pass's own term - never the accumulated `KL(q_K‖p)` scalar the
 //! accumulated K-pass `backward()` calls actually differentiate. This
 //! harness's `loss()` instead recomputes the real accumulated
-//! `Σ_k q_k·CE_k + Σ_k q_k·ln(q_k)` (`= KL(q_K‖p)`, see
+//! mean over the teacher-scored positions of `Σ_k q_k·CE_k + Σ_k q_k·ln(q_k)` (`= KL(q_K‖p)`, see
 //! `rl::objective::distill`'s own module doc comment for the derivation) on
 //! the host, replaying the exact same `rl::objective::distill::
-//! pass_arrays`/`neg_entropy` calls `DistillTopK::micro_step` calls - so
+//! pass_arrays`/`mean_kl` calls `DistillTopK::micro_step` calls - so
 //! finite differences test the real objective a training run would
 //! differentiate, not a stand-in for it.
 //!
@@ -25,7 +25,7 @@ use std::cell::Cell;
 
 use gradcheck::{directional_check, CheckModel};
 use qwen3::{Qwen, QwenConfig};
-use rl::objective::distill::{neg_entropy, pass_arrays, TopK};
+use rl::objective::distill::{mean_kl, pass_arrays, TopK};
 
 const SEQ_LEN: usize = 6;
 const N: usize = SEQ_LEN;
@@ -100,8 +100,7 @@ impl CheckModel for DistillHarness {
             total += self.m.forward();
         }
         self.fwd_done.set(true);
-        let entropy: f32 = self.teacher.iter().map(neg_entropy).sum();
-        total + entropy
+        mean_kl(total, &self.teacher)
     }
 
     fn zero_grads(&self) {

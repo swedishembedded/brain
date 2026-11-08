@@ -19,7 +19,7 @@
 
 use data::rng::{random_seed, Rng};
 use qwen3::{Qwen, QwenConfig};
-use rl::objective::distill::{neg_entropy, pass_arrays, TopK};
+use rl::objective::distill::{mean_kl, pass_arrays, TopK};
 
 const SEQ_LEN: usize = 5;
 
@@ -63,7 +63,7 @@ fn distill_topk_at_k_equals_vocab_reproduces_exact_kl() {
     }
 
     // Reference: the textbook definition, computed WITHOUT going through
-    // `pass_arrays`/`neg_entropy` at all.
+    // `pass_arrays`/`mean_kl` at all.
     let mut reference = 0.0f32;
     for (i, p_row) in host_p.iter().enumerate() {
         for (v, &p) in p_row.iter().enumerate() {
@@ -84,8 +84,7 @@ fn distill_topk_at_k_equals_vocab_reproduces_exact_kl() {
         m.write_weights(&weights);
         total += m.forward();
     }
-    let entropy: f32 = teacher.iter().map(neg_entropy).sum();
-    let realized = (total + entropy) / SEQ_LEN as f32;
+    let realized = mean_kl(total, &teacher);
 
     assert!((realized - reference).abs() < 1e-2, "K=vocab realized KL {realized} != reference KL {reference}");
 }
