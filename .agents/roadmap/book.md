@@ -41,8 +41,15 @@ reproduced its worked examples from the text alone in another language.
       passed 169 of 181 items (11 after a guess, 1 failure); after fixes the
       recheck passed all 297 items. Nine wording nits it noted (none
       blocking reproduction) are open below.
-- [ ] Volume III, Building Neural Networks from Nothing: chapters 1 to 4
-      written.
+- [x] Volume III, Building Neural Networks from Nothing: all 13 chapters
+      and the project written. Verified by two independent C
+      re-implementations (`scratchpad/reader/v03`,
+      `scratchpad/reader/v03-recheck`): the recheck passed 224 of 246 items
+      (8 after a guess, 14 failures, mostly chaotic cells printed with more
+      digits than survive a 1e-12 nudge). All were fixed in the following
+      commit with a shared five-run stable-digits rule and exact captions;
+      a third pass has not been run.
+- [ ] Volume IV, Computation and Hardware: chapters 1 to 4 written.
 
 ## Open
 
