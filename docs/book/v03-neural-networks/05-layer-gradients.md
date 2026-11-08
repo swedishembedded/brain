@@ -5,17 +5,11 @@
 
 *What is the backward pass of a matrix multiply, a sum, a broadcast and an elementwise function, written out exactly?*
 
-## The problem
+A bias $\mathbf{b} = (0.5, -0.5, 0, 1)$ is added to each of three rows of an activation. The loss sends back a gradient for every entry of the result, and in column 1 the three rows hold $-1$, $2$ and $1$. What is the gradient of $b_1$? Chapter 4's fan-out rule answers it: $b_1$ was used three times, once per row, each use passes its gradient straight through (the derivative of an addition is $1$), and the contributions add: $-1 + 2 + 1 = 2$. A one-line rule hides in that sentence, *a value that was copied forward gets the sum of the gradients of its copies*, and the rest of this chapter shows that every layer's backward pass is one such statement about *who read what*.
 
-The previous chapter derived the backward pass of one small network, two linear layers around a $\tanh$, and then stated a design: every operation in an engine supplies a rule that takes the gradient arriving from above and returns the gradients going down. That is a contract, not a rule. A real network is built from many more operations than the ones we differentiated: matrix products with a leading batch axis, sums and means, maximums, softmax, additions of a small array to a large one, reshapes, slices, lookups by index, and weights that are used twice. Each of them needs its backward written exactly, once, so that nobody ever has to derive it again under pressure.
+One case is not a catalogue. The previous chapter derived the backward pass of only one small network, two linear layers around a $\tanh$, and then stated a design: every operation in an engine supplies a rule that takes the gradient arriving from above and returns the gradients going down. That is a contract, not a rule. A real network is built from many more operations than the ones we differentiated: matrix products with a leading batch axis, sums and means, maximums, softmax, additions of a small array to a large one, reshapes, slices, lookups by index, and weights that are used twice. Each of them needs its backward written exactly, once, so that nobody ever has to derive it again under pressure. We derive them all with one method, check every one numerically, count what each costs, and end with the rule that keeps them from silently going wrong: gradients **accumulate**.
 
-Start with the smallest case. A bias $\mathbf{b} = (0.5, -0.5, 0, 1)$ is added to each of three rows of an activation. The loss sends back a gradient for every entry of the result, and in column 1 the three rows hold $-1$, $2$ and $1$. What is the gradient of $b_1$? Chapter 4's fan-out rule answers it: $b_1$ was used three times, once per row, each use passes its gradient straight through (the derivative of an addition is $1$), and the contributions add: $-1 + 2 + 1 = 2$. A one-line rule hides in that sentence, *a value that was copied forward gets the sum of the gradients of its copies*, and this chapter shows that every layer's backward pass is one such statement about *who read what*. We derive them all with one method, check every one numerically, count what each costs, and end with the rule that keeps them from silently going wrong: gradients **accumulate**.
-
-You may use from earlier chapters: the backward pass, the vector-Jacobian product and the fan-out rule (Chapter 4), the softmax Jacobian (Chapter 3), matrix products and transposes (Volume I, Chapter 4), broadcasting (Volume I, Chapter 5) and the multivariable chain rule (Volume I, Chapter 8).
-
-## Before you begin
-
-Five questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+The derivations lean on the backward pass, the vector-Jacobian product and the fan-out rule (Chapter 4), the softmax Jacobian (Chapter 3), matrix products and transposes (Volume I, Chapter 4), broadcasting (Volume I, Chapter 5) and the multivariable chain rule (Volume I, Chapter 8). Five questions bring them back before they are needed. Answer them from memory; the answers are at the end of the chapter, and a hard one sends you to the chapter named.
 
 1. ("Gradients, Jacobians and Many Variables", Volume I, Chapter 8, the chain rule.) A quantity $z$ depends on $x$ through three intermediate quantities $y_1(x), y_2(x), y_3(x)$. Write $\frac{dz}{dx}$ in terms of partial derivatives.
 2. ("Backpropagation Derived from Scratch", Chapter 4 of this volume.) For $a_i = \tanh(z_i)$ the backward pass computes $dz_i = da_i\,(1 - a_i^2)$ without building a Jacobian. What shape does the Jacobian have, and why can the product be done with $n$ multiplications instead of $n^2$?
@@ -635,7 +629,9 @@ A stack of identical layers, where the first layer needs no dX because the data 
 
 **The backward pass of a matrix multiply costs about twice its forward pass** in arithmetic: $4BDO$ against $2BDO$ when the layer needs both $d\mathbf{X}$ and $d\mathbf{W}$. The first layer of a network needs no $d\mathbf{X}$, because the data are not a parameter and nothing below them needs a gradient; that layer's backward costs the same as its forward. A stack of $L$ identical layers therefore costs $(2L - 1)/L$ forwards in its backward, which tends to $2$ as depth grows; the table shows $1.9688$ at $32$ layers. A training step is a forward plus a backward, about three forwards of arithmetic, the figure Chapter 4 used. Everything else in the table is cheap by comparison: the bias add and the bias gradient are $BO$ operations each, against $2BDO$, a fraction $1/(2D)$ of one product. They are limited by moving data and not by arithmetic, which is why engines spend effort on them (the next section has an example).
 
-## Making it work
+## Five ways a correct rule goes wrong in code
+
+Every rule above is short, and a short rule can still be implemented wrongly without any error being raised. Five habits catch most of the damage.
 
 **Check the shape of every gradient.** The gradient of an array has that array's shape. A $d\mathbf{W}$ of the wrong shape is a transposed product; one that has the right shape only because $B = O$ is the bug that distinct test sizes exist to expose.
 
@@ -647,7 +643,7 @@ A stack of identical layers, where the first layer needs no dX because the data 
 
 **Test rules away from kinks.** ReLU at $0$, a tied maximum, and the absolute value at $0$ have no derivative; a central difference there reports the average of the one-sided slopes, which no rule reproduces. Pick test inputs at a distance from them larger than the finite-difference step.
 
-## Where this appears in brain
+## The rules as kernels, and the bugs that broke them
 
 brain's backward passes are written by hand as one kernel per rule (Chapter 4 explained why), so the rules of this chapter are visible as files in `crates/kernels/wgsl/`.
 
@@ -685,6 +681,18 @@ Answers are at the end of the chapter.
 6. **Predict.** $L = w x_1 + w x_2$ with $x_1 = 2$, $x_2 = 3$. What is $\frac{dL}{dw}$, and what would a backward pass that assigns instead of adding return?
 7. **Explain.** A batch of $10$ examples is split into micro-batches of $4$, $3$ and $3$ and each micro-batch computes the gradient of its own mean loss. A colleague multiplies the sum of the three gradients by $1/3$. Is that the gradient of the mean over $10$? What weights are correct, and how does the "divide by the total count" design avoid the question?
 
+## Summary
+
+One formula, $dx_i = \sum_j dy_j\,\partial y_j/\partial x_i$, with one reading rule (every forward read becomes a backward add) generates the backward pass of every layer. The **backward pass of a linear layer** is $d\mathbf{X} = d\mathbf{Y}\mathbf{W}$, $d\mathbf{W} = d\mathbf{Y}^\top\mathbf{X}$ and $d\mathbf{b} = \sum_b d\mathbf{Y}$, which the shapes rebuild if forgotten. The **backward pass of a matrix multiply** is $d\mathbf{A} = d\mathbf{C}\mathbf{B}^\top$ and $d\mathbf{B} = \mathbf{A}^\top d\mathbf{C}$, per item for a batch, with a sum over the batch for a shared operand. The **backward pass of an elementwise function** is $dx = dy\,f'(x)$, and which of input, output or a mask must be saved depends on the function (GELU needs its input). The **backward pass of a reduction** copies the gradient to everything the reduction collapsed (sum), divides by the count (mean), routes it to the argmax with a stated tie rule (max), or applies the one-dot-product VJP of the softmax. The **backward pass of a broadcast** is the sum over every stretched axis, the mirror of the reduction rule, so copies forward are sums backward and sums forward are copies backward. Moving data (reshape, transpose, slice, gather) is index bookkeeping: gradients return to their sources, unread positions get zero, repeated reads add. **Gradient accumulation** is the principle behind all of them: contributions are added into a gradient buffer, never assigned, the buffer is zeroed once per step, and the sum of micro-batch gradients equals the whole batch's when each piece carries its share of the total count. Every rule has a central-difference check, and the backward of a matrix product costs two products of the forward's size, so a training step is about three forwards of arithmetic. In brain, the rules are one kernel each, the accumulate-or-assign choice of each kernel is stated in its header, and three of the knowledge entries are these rules broken: an uncleared buffer, half a buffer assigned and half accumulated, and a scale that only an optimiser's insensitivity hid.
+
+We have taken each rule on trust from its derivation plus a quick numerical comparison. The next chapter, "Proving Gradients Correct", makes that comparison a proper instrument: how to choose the step, how rounding error limits it, how to judge a relative error, why a check must avoid kinks and square sizes, and how brain gates every model on it.
+
+## References
+
+- Rumelhart, D. E., Hinton, G. E. and Williams, R. J., *Learning representations by back-propagating errors*, 1986.
+- Griewank, A. and Walther, A., *Evaluating Derivatives: Principles and Techniques of Algorithmic Differentiation*, second edition, 2008.
+- Baydin, A. G., Pearlmutter, B. A., Radul, A. A. and Siskind, J. M., *Automatic differentiation in machine learning: a survey*, 2018.
+
 ## Exercises
 
 1. **[Calculate]** A linear layer has $\mathbf{X} = \begin{pmatrix}1 & 2 & 0\\ 0 & 1 & 3\end{pmatrix}$ ($B = 2$, $D = 3$), $\mathbf{W} = (1, -1, 2)$ ($O = 1$), $\mathbf{b} = (0.5)$ and the gradient $d\mathbf{Y} = (2, -1)^\top$ arrives. Compute $d\mathbf{X}$, $d\mathbf{W}$ and $d\mathbf{b}$ and check the three shapes.
@@ -711,12 +719,6 @@ Answers are at the end of the chapter.
 
 12. **[Investigate]** Run the central difference on $\max(\mathbf{x})$ and on ReLU at points $x = \delta$ for $\delta = 10^{-1}, 10^{-3}, 10^{-5}, 10^{-7}, 0$ with step $10^{-6}$. At which $\delta$ does the central difference stop agreeing with the rule? Explain it with the one-sided slopes, and say what a test of a network containing ReLUs should do about it.
 
-## Summary
-
-One formula, $dx_i = \sum_j dy_j\,\partial y_j/\partial x_i$, with one reading rule (every forward read becomes a backward add) generates the backward pass of every layer. The **backward pass of a linear layer** is $d\mathbf{X} = d\mathbf{Y}\mathbf{W}$, $d\mathbf{W} = d\mathbf{Y}^\top\mathbf{X}$ and $d\mathbf{b} = \sum_b d\mathbf{Y}$, which the shapes rebuild if forgotten. The **backward pass of a matrix multiply** is $d\mathbf{A} = d\mathbf{C}\mathbf{B}^\top$ and $d\mathbf{B} = \mathbf{A}^\top d\mathbf{C}$, per item for a batch, with a sum over the batch for a shared operand. The **backward pass of an elementwise function** is $dx = dy\,f'(x)$, and which of input, output or a mask must be saved depends on the function (GELU needs its input). The **backward pass of a reduction** copies the gradient to everything the reduction collapsed (sum), divides by the count (mean), routes it to the argmax with a stated tie rule (max), or applies the one-dot-product VJP of the softmax. The **backward pass of a broadcast** is the sum over every stretched axis, the mirror of the reduction rule, so copies forward are sums backward and sums forward are copies backward. Moving data (reshape, transpose, slice, gather) is index bookkeeping: gradients return to their sources, unread positions get zero, repeated reads add. **Gradient accumulation** is the principle behind all of them: contributions are added into a gradient buffer, never assigned, the buffer is zeroed once per step, and the sum of micro-batch gradients equals the whole batch's when each piece carries its share of the total count. Every rule has a central-difference check, and the backward of a matrix product costs two products of the forward's size, so a training step is about three forwards of arithmetic. In brain, the rules are one kernel each, the accumulate-or-assign choice of each kernel is stated in its header, and three of the knowledge entries are these rules broken: an uncleared buffer, half a buffer assigned and half accumulated, and a scale that only an optimiser's insensitivity hid.
-
-We have taken each rule on trust from its derivation plus a quick numerical comparison. The next chapter, "Proving Gradients Correct", makes that comparison a proper instrument: how to choose the step, how rounding error limits it, how to judge a relative error, why a check must avoid kinks and square sizes, and how brain gates every model on it.
-
 ## Key terms
 
 - **backward pass of a linear layer**: the three rules $d\mathbf{X} = d\mathbf{Y}\mathbf{W}$, $d\mathbf{W} = d\mathbf{Y}^\top\mathbf{X}$ and $d\mathbf{b} = \sum_b d\mathbf{Y}$ for $\mathbf{Y} = \mathbf{X}\mathbf{W}^\top + \mathbf{b}$, each gradient having the shape of the array it belongs to. <!-- concept: linear-layer-backward -->
@@ -728,7 +730,7 @@ We have taken each rule on trust from its derivation plus a quick numerical comp
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $\frac{dz}{dx} = \sum_{k=1}^{3}\frac{\partial z}{\partial y_k}\frac{dy_k}{dx}$, one product per path from $x$ to $z$, added.
 2. The Jacobian is $n \times n$ and diagonal, because $a_i$ depends only on $z_i$. The product of a row vector with a diagonal matrix scales entry $i$ by the diagonal entry $i$: $n$ multiplications.
@@ -745,9 +747,3 @@ We have taken each rule on trust from its derivation plus a quick numerical comp
 5. GELU is not monotonic, so one output can come from two inputs with different derivatives. The output $-0.1$ comes from $x = -1.5017$ (derivative $-0.127$) and $x = -0.2489$ (derivative $+0.305$); a backward computed from the output alone cannot tell them apart. GELU saves its input.
 6. $\frac{dL}{dw} = x_1 + x_2 = 5$, from two contributions $2$ and $3$. A backward that assigns would return $3$ or $2$ depending on which use it visits last, losing the other.
 7. No. The mean over $10$ is $\frac{4}{10}\nabla L_1 + \frac{3}{10}\nabla L_2 + \frac{3}{10}\nabla L_3$; the sum times $1/3$ weights each piece by $0.333$ and so gives the first piece too little weight and the other two too much. The correct weights are $B_j/B$. If each micro-batch instead computes the gradient of the sum of its examples' losses divided by the total count $10$, a plain sum of the three is exact for any split.
-
-## References
-
-- Rumelhart, D. E., Hinton, G. E. and Williams, R. J., *Learning representations by back-propagating errors*, 1986.
-- Griewank, A. and Walther, A., *Evaluating Derivatives: Principles and Techniques of Algorithmic Differentiation*, second edition, 2008.
-- Baydin, A. G., Pearlmutter, B. A., Radul, A. A. and Siskind, J. M., *Automatic differentiation in machine learning: a survey*, 2018.

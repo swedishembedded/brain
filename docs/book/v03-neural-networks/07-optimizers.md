@@ -5,9 +5,7 @@
 
 *Once we have a gradient, what is the smartest way to use it?*
 
-## The problem
-
-Chapter 4 gave us the gradient of a loss with respect to every parameter of a network at the cost of about one extra pass, and Chapter 6 gave us a way to prove that gradient correct. Volume II gave us the only thing we have done with a gradient so far: step against it, $\theta \leftarrow \theta - \eta\,\nabla\mathcal{L}(\theta)$. That rule has three weaknesses, and each one gets worse as the model grows.
+Chapter 4 made the gradient of a loss with respect to every parameter cost about one extra pass, and Chapter 6 gave a way to prove it correct. Volume II showed what to do with it: step against it, $\theta \leftarrow \theta - \eta\,\nabla\mathcal{L}(\theta)$. That rule has three weaknesses, and each one gets worse as the model grows. The first is the bill.
 
 **The gradient is expensive.** The loss $\mathcal{L}$ is a mean over all $N$ training examples, so its exact gradient is a sum over all of them. Take a linear model with $d = 1000$ weights and a training set of $N = 1\,000\,000$ examples. One example costs about $4d$ floating-point operations (FLOPs) to push through the model and back (2d for the prediction, 2d for the gradient entries), so one exact gradient costs $4dN$ FLOPs, and then we move the weights once. How many moves can we afford, and how much does each cost?
 
@@ -28,13 +26,9 @@ The middle of the table is the observation to hold on to. Whatever the batch siz
 
 **Penalties interact with the cure.** Volume II turned an L2 penalty into a decay of the weights. We will see that once a step is divided by a running gradient size, the penalty is divided too, and its meaning changes from parameter to parameter. The repair (AdamW, defined below) is a one-line move of the decay out of the gradient.
 
-Last, every cure costs memory: momentum remembers one number per parameter, Adam two. For a model with billions of parameters that is the difference between fitting on a device and not, so this chapter counts the bytes of each rule, and ends with a rule (Lion) that keeps one number and still works.
+Every cure also costs memory: momentum remembers one number per parameter, Adam two. For a model with billions of parameters that is the difference between fitting on a device and not, so this chapter counts the bytes of each rule, and ends with a rule (Lion) that keeps one number and still works.
 
-You may use from earlier chapters: gradient descent, the learning rate, the stability bound and the condition number (Volumes I and II), expectation and variance (Volume I), the L2 penalty (Volume II), and the backward pass and its accumulation over micro-batches (Chapters 4 and 5 of this volume).
-
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter.
+The chapter leans on gradient descent, the learning rate, the stability bound and the condition number (Volumes I and II), expectation and variance (Volume I), the L2 penalty (Volume II), and the backward pass and its accumulation over micro-batches (Chapters 4 and 5 of this volume). Six questions bring those back before they are needed. Answer them from memory; the answers are at the end of the chapter, and a hard one sends you to the chapter named.
 
 1. ("Linear Regression and the First Descent", the stability limit.) Gradient descent on a quadratic loss whose Hessian has largest eigenvalue $\lambda_{\max}$ uses a fixed learning rate $\eta$. What is the largest $\eta$ for which the error shrinks along every eigendirection?
 2. ("Gradients, Jacobians and Many Variables", conditioning.) A bowl has curvatures $9$ and $1$. What is its condition number, and by what factor does the error shrink per step at the best fixed learning rate?
@@ -45,7 +39,7 @@ Six questions on ideas from earlier chapters, to answer from memory. The answers
 
 ## Stochastic gradient descent
 
-*What it is for: to move the weights many times per pass over the data, on gradients that are cheap and right on average.*
+The first weakness has the simplest cure: move the weights many times per pass over the data, using gradients that are cheap and right on average, rather than once on an exact one.
 
 ### The minibatch
 
@@ -170,7 +164,7 @@ Nothing in the loop depends on the update rule except the last two lines. Every 
 
 ## Momentum
 
-*What it is for: to turn a gradient that points back and forth across a valley, and steadily along it, into a step that mostly goes along it.*
+On the elongated bowl the gradient points back and forth across the valley and steadily along it, and the step should mostly go along it. A running average of the gradients gives such a step.
 
 ### Averaging cancels the zigzag
 
@@ -291,8 +285,6 @@ function sgd_momentum_step(theta: inout array<real>[P], g: array<real>[P],
 
 ## RMSProp
 
-*What it is for: to give every parameter a step of its own natural size, whatever scale its gradient has.*
-
 Momentum treats all coordinates alike: one $\eta$ for all. But the coordinates of a network can differ enormously in the size of their gradients: a weight feeding a unit that is almost always active, a bias, an embedding row that is rarely used. With a single $\eta$, the one with a large gradient limits the step for everybody (the stability bound of Volume II), and the ones with small gradients crawl. A cure is to normalise each coordinate by its own typical gradient size. **RMSProp** keeps, for every coordinate, an exponential moving average of the squared gradient, $\mathbf{v}_t$, whose square root is the root mean square (RMS) of the recent gradients, and divides the step by it:
 
 $$
@@ -316,7 +308,7 @@ The first is on its first step. $\mathbf{v}_0 = \mathbf{0}$, so after one step $
 
 ## Adam
 
-*What it is for: to combine the momentum average and the RMS normalisation, with the start-up bias removed.*
+Momentum cures the zigzag, RMSProp cures the unequal scales, and RMSProp carries a start-up flaw. Adam combines the two averages and removes that flaw.
 
 **Adam** keeps both averages. In the average form of the section "Two ways to write the same average", the first moment of the gradient (the mean) and the second moment (the mean square) are
 
@@ -470,7 +462,7 @@ Read it by columns. Gradient descent and momentum, whose steps are multiples of 
 
 ## Decay: coupled and decoupled
 
-*What it is for: to shrink the weights each step without the shrinkage being rescaled by the gradient.*
+Weight decay should shrink every weight by a fixed fraction each step. The shrinkage must therefore not pass through whatever rescaling the optimizer applies to the gradient, and the question is how to write the decay so that it does not.
 
 ### The L2 penalty under SGD
 
@@ -553,7 +545,7 @@ RMSProp is the same loop without `m`, `mhat` and `bc` (and with $\hat v$ replace
 
 ## Lion
 
-*What it is for: an update that keeps one state array instead of two, and bounds every step.*
+Adam pays for its two averages with two extra arrays. Lion shows that one is enough, and that every step can be bounded as well.
 
 **Lion** (the name abbreviates "evolved sign momentum": the rule was found by a search over programs) throws away the magnitude of the update. It forms an interpolation of the momentum and the new gradient, takes only its sign, and steps by $\eta$ in that direction:
 
@@ -604,7 +596,7 @@ SGD's and momentum's steps scale with the gradient (the rows for $a = 100$ are e
 
 ## Optimizer state: bytes and FLOPs
 
-*What it is for: to count what each rule costs, so that a rule can be chosen by what a device can hold and move.*
+A rule can only be chosen sensibly by what a device can hold and move, so this section counts the cost of each.
 
 Every rule above keeps arrays beside the parameters: SGD none, momentum and Lion one ($\mathbf{m}$), RMSProp one ($\mathbf{v}$), Adam and AdamW two ($\mathbf{m}$ and $\mathbf{v}$), each as large as the parameter array itself. Training also keeps the parameters and their gradients. In 32-bit floats that is 4 bytes for each array element. The table gives the memory per parameter, the FLOPs of one update (counted by the rule in the block's header) and the bytes that one update moves (read the weight, the gradient and the state, write the weight and the state).
 
@@ -656,9 +648,9 @@ An int8 AdamW update moves $16.25$ bytes against 28, $58\%$ of the traffic, for 
 
 ## All the rules on one small network
 
-*What it is for: to see the rules race on a problem with minibatch noise, with the learning rate of each tuned fairly.*
+The comparisons so far used exact gradients. Minibatch noise changes the race, and each rule deserves a learning rate tuned for it, so the rules now compete on one small network.
 
-The problem: 200 points $(x_1, x_2)$ uniform in $[-1, 1]^2$ labelled 1 when $x_1x_2 > 0$ and 0 otherwise (the quadrant XOR of Chapter 1), and the network of Chapter 2, $2 \to 8 \to 1$ with a tanh hidden layer and a sigmoid output, trained on the mean binary cross-entropy of Chapter 3 with the backward pass of Chapter 4. Every rule takes 300 steps of batch size 20 (30 epochs), from the same starting weights, with the same batches. A rule is only as good as its learning rate, so each gets a grid, $\eta \in \{0.0003, 0.001, 0.003, \dots, 10\}$ (a factor of about 3.16 apart), and its score is the mean loss over the last checkpoints.
+The task is 200 points $(x_1, x_2)$ uniform in $[-1, 1]^2$ labelled 1 when $x_1x_2 > 0$ and 0 otherwise (the quadrant XOR of Chapter 1), and the network of Chapter 2, $2 \to 8 \to 1$ with a tanh hidden layer and a sigmoid output, trained on the mean binary cross-entropy of Chapter 3 with the backward pass of Chapter 4. Every rule takes 300 steps of batch size 20 (30 epochs), from the same starting weights, with the same batches. A rule is only as good as its learning rate, so each gets a grid, $\eta \in \{0.0003, 0.001, 0.003, \dots, 10\}$ (a factor of about 3.16 apart), and its score is the mean loss over the last checkpoints.
 
 <!-- worked: optimizers.mlp_sweep -->
 Data and starting weights from one generator (seed 0xc234bb64614333c5): for i = 0 .. 199, two calls of uniform() give x1 = 2 u - 1 and x2 = 2 u - 1, and the label is 1 when x1 x2 > 0 and 0 otherwise; then 16 calls of normal() times 0.5 for W1 (row-major, 8 x 2), then 8 calls times 0.5 for W2; biases start at 0. Network: 2 -> 8 tanh -> 1 sigmoid, mean binary cross-entropy. The loss at the starting weights is 0.7471. Every rule runs 300 steps of batch size 20, with batches from a second generator (seed 0xd4925ce94a6807e9): shuffle the list 0 .. 199, cut it into consecutive batches of 20, reshuffle when the epoch ends; the same batches for every rule and learning rate. Entries: the mean loss over all 200 examples, averaged over the six checkpoints at steps 250, 260, ..., 300 (the loss after k updates is the loss at step k); the best entry of each row is in bold. Rule details: momentum is the sum form m = 0.9 m + g, theta = theta - eta m; RMSProp uses beta2 = 0.9 and eps = 1e-8; Adam uses 0.9, 0.999, 1e-8; AdamW adds decoupled decay 0.05; Lion uses beta1 = 0.9, beta2 = 0.99, the three-way sign (0 at 0) and decay 0. Rounding noise grows into any difference in a run whose learning rate is too large. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation. 'diverged' means the gradient stopped being finite.
@@ -705,7 +697,7 @@ Each rule at its best learning rate from the sweep above; mean loss over all 200
 
 What the evidence says, and does not say. Adam is fastest in the first 20 steps (its loss is $0.2795$ at step 20 where SGD's is $0.5291$): per-coordinate scaling pays off at once, when gradients are large and different. Over the full 300 steps the order of the means of five orders is Lion, Adam, RMSProp, momentum, SGD, AdamW at decay $0.05$; the means $0.049$, $0.101$, $0.104$, $0.116$ and $0.131$ are separated by less than the ranges of the five orders (Adam's runs span $0.084$ to $0.127$), so only Lion's lead of a factor 2 stands out. SGD's curve spikes (near steps 120 and 200 in the figure) because it is run at the largest rate that suits it, where a single unlucky batch moves the weights far. AdamW is last because decay at $\lambda = 0.05$ with $\eta = 0.1$ removes $0.5\%$ of every weight per step on a problem where nothing overfits: the penalty has no job here. One tiny problem, one data set, one grid with 3.16 between neighbours: this is the shape of such a comparison, not a ranking of optimizers for your problem. A different problem would reorder them.
 
-## Where this appears in brain
+## The optimizers in brain, and three stories about them
 
 **The reference.** `crates/optim/src/rule.rs` defines `Rule`, an enum with one variant per rule of this chapter: `AdamW { adam, wd }`, `Lion { beta1, beta2, wd }`, `SgdMomentum { momentum, wd, nesterov }` and an Adafactor variant that keeps a factored second moment and no element-wise state (beyond this book's rules). The module's own header says what the file is: "the CPU reference definition every fused device kernel (WGSL, CUDA) is gated against", element-wise update rules over decoded 32-bit state, where `Rule::slots` says how many state arrays a rule needs (two for AdamW, one for Lion and momentum, none for Adafactor), the number of this chapter's table. Reading `Rule::update` next to this chapter's pseudocode shows three choices that are easy to miss. `SgdMomentum` adds `wd * w` to the gradient before the momentum step: coupled decay, "as torch", the L2 penalty of Volume II. `AdamW` and `Lion` shrink the weight directly, by `lr * wd * w` and as `lr * (u + wd * w)`: decoupled decay. And Lion's three-way sign returns 0 at 0 (the book's `sign` returns $+1$ there). The unit tests `lion_and_sgd_follow_their_definitions` and `adamw_rule_is_the_adam_update` pin these: Lion's first step from $w = 1$ with gradient $0.5$ and $\eta = 0.1$ lands at $0.9$ and leaves a momentum of $0.005 = (1-\beta_2)\cdot 0.5$.
 
@@ -736,6 +728,29 @@ Answers are at the end of the chapter.
 7. **Predict.** A model has $4 \times 10^9$ parameters. How many gigabytes of training memory (value, gradient and state, 32 bits each, decimal GB) does it need with SGD, with Lion and with AdamW? With AdamW's moments in blockwise int8, how many?
 8. **Explain.** Lion has half of Adam's state and has no $\epsilon_{\mathrm{den}}$. Name two things in its update that explain each, and one reason its best learning rate is smaller than Adam's.
 
+## Summary
+
+A step of gradient descent is expensive because the gradient is a sum over all examples, and one pass over the data costs the same $4dN$ FLOPs whatever the batch size: the batch size only decides how often the weights move. **Stochastic gradient descent** moves them after every **minibatch**. The minibatch gradient is unbiased, $\mathbb{E}[\mathbf{g}] = \nabla\mathcal{L}$, and its variance is $\sigma_g^2/B$, so its noise falls as $1/\sqrt{B}$ against a cost proportional to $B$: halving the noise costs four times the work (the measured variance times $B$ over $\sigma_g^2$ is within $0.05$ of 1 at all five batch sizes). With a fixed learning rate SGD settles into a noise floor of mean square size $\eta s^2/(\lambda(2 - \eta\lambda))$, proportional to $\eta/B$, which is why the step must fall during training.
+
+**Momentum** keeps a weighted sum of past gradients: steady directions get an effective step $\eta/(1-\beta)$, alternating ones are reduced to $1/(1+\beta)$, and on a quadratic with tuned $\eta$ and $\beta$ every direction shrinks by $\sqrt{\beta}$ per step, so that the work to reduce the error falls from proportional to $\kappa$ to proportional to $\sqrt{\kappa}$ (3454 steps against 109 at $\kappa = 1000$). **RMSProp** divides each coordinate's step by the root of a running mean of its squared gradient, so every coordinate moves by about $\eta$ whatever its scale; it cures badly scaled coordinates and not a rotation, and it hovers at a distance of the order of $\eta$ from the minimum.
+
+**Adam** combines both averages and removes their start-up bias by **bias correction**: the average of a stationary signal after $t$ steps is $1 - \beta^t$ of its true size, so dividing by that gives an unbiased value and a first step of exactly $\eta$ instead of $3.16\,\eta$ or more. Adam's step is bounded by about $\eta$ and nearly independent of the gradient's scale, which has the price that a scale bug is invisible at $\epsilon_{\mathrm{den}} = 10^{-8}$.
+
+Put an L2 penalty into Adam's gradient and the penalty is divided by the gradient scale, so it differs by orders of magnitude between parameters and stops depending on $\lambda$; **decoupled weight decay** takes the shrinkage out of the gradient, and **AdamW** is Adam with it, in the same product $\eta\lambda$ as SGD.
+
+**Lion** takes the sign of an interpolated momentum, moves every weight by exactly $\eta$ and keeps one state array instead of two. Every rule is limited by bytes: 4 + 4 bytes for value and gradient plus 0, 4, 4, 8 and 4 for SGD, momentum, RMSProp, AdamW and Lion, and an update moves 12 to 28 bytes for 2 to 16 FLOPs. Narrower state moves fewer bytes.
+
+Limits: a learning rate is part of each rule, the tuned rates on the small network differ by a factor 100, and the ranking of rules on one tiny problem is not a ranking for a different one. A constant learning rate leaves every rule with a noise floor, and in its first steps Adam's corrected second moment is an average of only a few squared gradients, an unbiased but noisy estimate. The next chapter, Learning-Rate Schedules and Gradient Clipping, changes the learning rate during the run (warm-up for the early steps, decay for the floor), and limits the size of a gradient that explodes.
+
+## References
+
+- Polyak, B. T., "Some methods of speeding up the convergence of iteration methods", 1964.
+- Nesterov, Y., "A method for solving the convex programming problem with convergence rate $O(1/k^2)$", 1983.
+- Tieleman, T. and Hinton, G., "Lecture 6.5, RMSProp: Divide the gradient by a running average of its recent magnitude", COURSERA: Neural Networks for Machine Learning, 2012.
+- Kingma, D. P. and Ba, J., "Adam: A Method for Stochastic Optimization", 2015.
+- Loshchilov, I. and Hutter, F., "Decoupled Weight Decay Regularization", 2019.
+- Chen, X. et al., "Symbolic Discovery of Optimization Algorithms" (Lion), 2023.
+
 ## Exercises
 
 1. **[Calculate]** For $N = 50\,000$ examples and $d = 200$ weights with the cost rule of the first table, compute the FLOPs of one step and the number of updates per epoch for $B = 1, 50, 500$ and $N$. In which row does the exact gradient make one update per epoch?
@@ -751,20 +766,6 @@ Answers are at the end of the chapter.
 11. **[Investigate]** Using your implementation of the previous exercise, shrink $\eta$ of Adam on the rotated bowl by a factor of 10 at step 100 and compare the distance at step 200 with the constant-$\eta$ value. What does this say about the noise floor of a normalised step, and what rule would you add?
 12. **[Investigate]** Reproduce `optimizers.decay_trajectories` and `optimizers.decay_strength`. Then run the trajectory with $\lambda = 0.01$ and $\lambda = 1.0$ for Adam with the penalty in the gradient and for AdamW. For which values of $\lambda$ does Adam's trajectory change and for which does it not? State what that says about tuning $\lambda$ with a coupled penalty.
 
-## Summary
-
-A step of gradient descent is expensive because the gradient is a sum over all examples, and one pass over the data costs the same $4dN$ FLOPs whatever the batch size: the batch size only decides how often the weights move. **Stochastic gradient descent** moves them after every **minibatch**. The minibatch gradient is unbiased, $\mathbb{E}[\mathbf{g}] = \nabla\mathcal{L}$, and its variance is $\sigma_g^2/B$, so its noise falls as $1/\sqrt{B}$ against a cost proportional to $B$: halving the noise costs four times the work (the measured variance times $B$ over $\sigma_g^2$ is within $0.05$ of 1 at all five batch sizes). With a fixed learning rate SGD settles into a noise floor of mean square size $\eta s^2/(\lambda(2 - \eta\lambda))$, proportional to $\eta/B$, which is why the step must fall during training.
-
-**Momentum** keeps a weighted sum of past gradients: steady directions get an effective step $\eta/(1-\beta)$, alternating ones are reduced to $1/(1+\beta)$, and on a quadratic with tuned $\eta$ and $\beta$ every direction shrinks by $\sqrt{\beta}$ per step, so that the work to reduce the error falls from proportional to $\kappa$ to proportional to $\sqrt{\kappa}$ (3454 steps against 109 at $\kappa = 1000$). **RMSProp** divides each coordinate's step by the root of a running mean of its squared gradient, so every coordinate moves by about $\eta$ whatever its scale; it cures badly scaled coordinates and not a rotation, and it hovers at a distance of the order of $\eta$ from the minimum.
-
-**Adam** combines both averages and removes their start-up bias by **bias correction**: the average of a stationary signal after $t$ steps is $1 - \beta^t$ of its true size, so dividing by that gives an unbiased value and a first step of exactly $\eta$ instead of $3.16\,\eta$ or more. Adam's step is bounded by about $\eta$ and nearly independent of the gradient's scale, which has the price that a scale bug is invisible at $\epsilon_{\mathrm{den}} = 10^{-8}$.
-
-Put an L2 penalty into Adam's gradient and the penalty is divided by the gradient scale, so it differs by orders of magnitude between parameters and stops depending on $\lambda$; **decoupled weight decay** takes the shrinkage out of the gradient, and **AdamW** is Adam with it, in the same product $\eta\lambda$ as SGD.
-
-**Lion** takes the sign of an interpolated momentum, moves every weight by exactly $\eta$ and keeps one state array instead of two. Every rule is limited by bytes: 4 + 4 bytes for value and gradient plus 0, 4, 4, 8 and 4 for SGD, momentum, RMSProp, AdamW and Lion, and an update moves 12 to 28 bytes for 2 to 16 FLOPs. Narrower state moves fewer bytes.
-
-Limits: a learning rate is part of each rule, the tuned rates on the small network differ by a factor 100, and the ranking of rules on one tiny problem is not a ranking for a different one. A constant learning rate leaves every rule with a noise floor, and in its first steps Adam's corrected second moment is an average of only a few squared gradients, an unbiased but noisy estimate. The next chapter, Learning-Rate Schedules and Gradient Clipping, changes the learning rate during the run (warm-up for the early steps, decay for the floor), and limits the size of a gradient that explodes.
-
 ## Key terms
 
 - **stochastic gradient descent**: gradient descent that steps along the gradient of a small random batch of examples instead of the whole training set, $\theta \leftarrow \theta - \eta\,\mathbf{g}_t$, an unbiased but noisy estimate of the full step. <!-- concept: stochastic-gradient-descent -->
@@ -779,7 +780,7 @@ Limits: a learning rate is part of each rule, the tuned rates on the small netwo
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $\eta < 2/\lambda_{\max}$: along the steepest eigendirection the error is multiplied by $1 - \eta\lambda_{\max}$ per step, which has size below 1 exactly when $0 < \eta\lambda_{\max} < 2$.
 2. $\kappa = 9/1 = 9$; at the best rate the error shrinks by $(\kappa - 1)/(\kappa + 1) = 8/10 = 0.8$ per step (the table of momentum against condition number gives the same $0.8000$ for $\kappa = 9$).
@@ -810,12 +811,3 @@ Limits: a learning rate is part of each rule, the tuned rates on the small netwo
 6. Step 1: $m = 0.04$, $v = 0.00016$, $\hat m = 0.4$, $\hat v = 0.16$, decay $\eta\lambda w = 0.01\cdot 0.1\cdot 2 = 0.002$, step $0.01\cdot 0.4/0.4 = 0.01$, new weight $2 - 0.002 - 0.01 = 1.988$. Step 2: $m = 0.9\cdot 0.04 - 0.1\cdot 0.4 = -0.004$, $v = 0.999\cdot 0.00016 + 0.001\cdot 0.16 = 0.00031984$, $\hat m = -0.004/0.19 = -0.0210526$, $\hat v = 0.00031984/0.001999 = 0.16000$, step $0.01\cdot(-0.0210526)/0.4 = -0.000526$ (a step of $0.0526\,\eta$ backwards), decay $0.001988$, new weight $1.988 - 0.001988 + 0.000526 = 1.986538$.
 
 The [Implement] and [Investigate] exercises have no printed answers: the worked blocks they name are the reference values.
-
-## References
-
-- Polyak, B. T., "Some methods of speeding up the convergence of iteration methods", 1964.
-- Nesterov, Y., "A method for solving the convex programming problem with convergence rate $O(1/k^2)$", 1983.
-- Tieleman, T. and Hinton, G., "Lecture 6.5, RMSProp: Divide the gradient by a running average of its recent magnitude", COURSERA: Neural Networks for Machine Learning, 2012.
-- Kingma, D. P. and Ba, J., "Adam: A Method for Stochastic Optimization", 2015.
-- Loshchilov, I. and Hutter, F., "Decoupled Weight Decay Regularization", 2019.
-- Chen, X. et al., "Symbolic Discovery of Optimization Algorithms" (Lion), 2023.

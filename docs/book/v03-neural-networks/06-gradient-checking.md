@@ -5,8 +5,6 @@
 
 *How do we know a backward pass is right without trusting the person who wrote it?*
 
-## The problem
-
 You have written the backward pass of a network, by hand, from the rules of the last two chapters. It runs, it returns arrays of the right shapes, and the loss goes down when you train with it. Is it right?
 
 Train a small network with five different backward passes and look. The task is a regression a small network can fit: 24 examples with 5 inputs, 7 hidden units, 2 outputs, targets produced by a random three-unit teacher network. One backward pass is correct. The other four each contain one realistic mistake: the factor 2 of the squared error dropped from $d\mathbf{Y}$, the mean taken over the batch only instead of over the batch and the outputs, the batch sum of the first-layer weight gradient missing the last example, and the factor $1 - A^2$ of the tanh forgotten. Plain gradient descent, 2000 steps:
@@ -41,11 +39,7 @@ So a loss curve is not an instrument for the correctness of a backward pass, and
 
 Chapter 4 already contains the idea: go back to the definition of the derivative. Nudge one parameter up and down by a small step $h$, run the forward pass twice, and divide the difference of the two losses by $2h$. That previewed check was used to confirm every rule of the last two chapters. This chapter makes it a precise instrument. How wrong is the estimate, and how do we choose $h$? What numbers do we compare, and with what tolerance? What does a check cost, and how do we afford it for a million parameters? Which inputs should we test on? Where does the instrument go blind? The answers decide whether a green check means anything.
 
-You may use from earlier chapters: the backward pass and its cost (Chapters 4 and 5), the derivative and the central difference (Volume I, Chapter 7), the multivariable chain rule, the directional derivative and the Taylor expansion (Volume I, Chapter 8), and rounding error, unit round-off and cancellation (Volume I, Chapter 15).
-
-## Before you begin
-
-Five questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+The instrument is built from the backward pass and its cost (Chapters 4 and 5), the derivative and the central difference (Volume I, Chapter 7), the multivariable chain rule, the directional derivative and the Taylor expansion (Volume I, Chapter 8), and rounding error, unit round-off and cancellation (Volume I, Chapter 15). Five questions bring those back before they are used. Answer them from memory; the answers are at the end of the chapter, and a hard one sends you to the chapter named.
 
 1. ("Derivatives: The Mathematics of Change", Volume I, Chapter 7.) Write the central difference estimate of $f'(x)$ with step $h$. How does its error shrink as $h$ shrinks?
 2. ("Gradients, Jacobians and Many Variables", Volume I, Chapter 8, Taylor expansion.) Write the Taylor expansion of $f(x + h)$ about $x$ up to the term in $h^3$.
@@ -68,7 +62,7 @@ $$
 \frac{\partial L}{\partial \theta_i} \approx \frac{L(\boldsymbol\theta + h\,\mathbf{e}_i) - L(\boldsymbol\theta - h\,\mathbf{e}_i)}{2h}.
 $$
 
-**How wrong is it?** Expand the function around $x$ (Volume I, Chapter 8):
+How wrong is the estimate? Expand the function around $x$ (Volume I, Chapter 8):
 
 $$
 f(x \pm h) = f(x) \pm f'(x)\,h + \tfrac12 f''(x)\,h^2 \pm \tfrac16 f'''(x)\,h^3 + \tfrac1{24} f''''(x)\,h^4 \pm \dots
@@ -294,7 +288,7 @@ The function returns the failing entries, not a verdict, so that a failure says 
 
 **A scalar loss for any layer.** The loss is the end of the chain. To check a single layer whose output is an array $\mathbf{Y} = f(\mathbf{X}, \mathbf{W})$, use a *fixed random linear functional* of its output as the loss: $L = \sum_{ij} G_{ij}\,Y_{ij}$ with $\mathbf{G}$ drawn once and kept. Its gradient with respect to $\mathbf{Y}$ is $\mathbf{G}$ itself, so the backward pass is called with $d\mathbf{Y} = \mathbf{G}$, and the check tests the layer's whole vector-Jacobian product in one stroke. This is what Chapter 5 did for every rule; it needs no head and no target.
 
-**What it costs.** Two forward passes per checked entry, $2P$ for all of them. In the work units of Chapter 4 (a multiply-add is two operations; matrix products only):
+A check is paid for in forward passes: two per checked entry, $2P$ for all of them. In the work units of Chapter 4 (a multiply-add is two operations; matrix products only):
 
 <!-- worked: gradient_checking.check_cost -->
 Work counts multiplications and additions of the matrix products only (a multiply-add is two operations), as in Chapter 4: forward = 2 B D H + 2 B H O; backward = 2 O B H + 2 B O H + 2 H B D. The directional check uses 4 tensors, 4 directions each, 2 forward passes per direction.
@@ -349,7 +343,7 @@ The "best of $n_{\mathrm{dirs}}$" selection exists for a reason. A random direct
 
 **Why it is stable, and what step it wants.** The directional estimate has a larger numerator than a single-entry one: the loss moves by about $h\,|\nabla L\cdot\mathbf{v}|$, and $\nabla L\cdot\mathbf{v}$ is a sum of $N$ terms, typically of size $\lVert\nabla L\rVert$ rather than one entry's. The round-off floor $\mathrm{rnd}_L / h$ is the same, so the signal-to-noise ratio is better, and a directional check tolerates a smaller $h$ than a per-entry one. But the step is longer than it looks: a direction of $N$ entries of size $\pm1$ has Euclidean length $\sqrt{N}$, so the weights move by $h\sqrt{N}$ in total. A tensor with 864 entries and $h = 5 \times 10^{-3}$ moves by $0.147$ in weight space, which may be well outside the region where the loss is locally smooth, and the truncation error grows with it. The step of a directional check must therefore *shrink as the tensor grows*, and be measured (the section on brain shows such a measurement).
 
-**What it cannot see.** A directional check compares one number. Suppose the backward pass is *partly* wrong, say it drops a share of the gradient: the true gradient is $\mathbf{g}$, the computed one is $\tilde{\mathbf{g}} = \mathbf{g} - \mathbf{m}$, and $\mathbf{m}$ is the missing part. The check measures $\tilde{\mathbf g}\cdot\mathbf v$ against $\mathbf g\cdot\mathbf v$, so the error it sees is $\mathbf{m}\cdot\mathbf{v}$, a *projection* of the missing part. For a random $\pm1$ direction that projection is a random number of typical size $\lVert\mathbf m\rVert$ with a sign that varies from direction to direction, and it can be small even when $\lVert\mathbf m\rVert$ is large: the contraction of $N$ numbers into one lets them cancel. A wholly wrong gradient fails in every direction. A partly wrong one fails in *most* directions but passes in some, and the best-of-$n_{\mathrm{dirs}}$ rule *selects the direction where the error is smallest*, which is the worst selection against exactly this bug.
+A directional check also has a blind spot, because it compares one number. Suppose the backward pass is *partly* wrong, say it drops a share of the gradient: the true gradient is $\mathbf{g}$, the computed one is $\tilde{\mathbf{g}} = \mathbf{g} - \mathbf{m}$, and $\mathbf{m}$ is the missing part. The check measures $\tilde{\mathbf g}\cdot\mathbf v$ against $\mathbf g\cdot\mathbf v$, so the error it sees is $\mathbf{m}\cdot\mathbf{v}$, a *projection* of the missing part. For a random $\pm1$ direction that projection is a random number of typical size $\lVert\mathbf m\rVert$ with a sign that varies from direction to direction, and it can be small even when $\lVert\mathbf m\rVert$ is large: the contraction of $N$ numbers into one lets them cancel. A wholly wrong gradient fails in every direction. A partly wrong one fails in *most* directions but passes in some, and the best-of-$n_{\mathrm{dirs}}$ rule *selects the direction where the error is smallest*, which is the worst selection against exactly this bug.
 
 Volume I, Chapter 8 built a toy of this effect on a linear model and showed best-of-4 accepting a gradient with about 0.31 of its size missing in 579 of 1000 problems. The same effect on this chapter's network, with the bug of the opening table that drops the last example of 3 from the first-layer batch sum (the missing part has a relative size 0.525 here), with the loose gate of a 32-bit check:
 
@@ -490,9 +484,9 @@ The difference never exceeds $8.68 \times 10^{-4}$, which is below the absolute 
 
 **One point, one backend.** The check holds at one set of weights and one batch. A bug that depends on a branch the batch did not exercise (a mask that is all ones, a sequence with no padding, a path taken only for long inputs) is not tested. And a kernel may be right on the device the test ran on and wrong on another: a reduction written for a device with cooperative workgroups can come back all zeros on a device without them, with no error. A check that ran on one backend certifies that backend. In brain every gradient check is run on every backend (knowledge #5); later volumes, on computation, return to why backends diverge.
 
-## Making it work
+## Building a check, step by step
 
-A short checklist, in the order a check is built.
+Seven steps, in the order a check is built, put the chapter to work.
 
 1. Build the smallest model that exercises every layer type, with distinct sizes, in a format you can switch (64-bit for the first run).
 2. Choose the loss: the model's own, or a fixed random linear functional of its output for a layer under test. Fix the batch and any randomness.
@@ -502,7 +496,7 @@ A short checklist, in the order a check is built.
 6. Run the structural tests (no all-zero gradient where a gradient is due; every parameter covered) and pin by other means whatever the gate cannot see.
 7. Run it on every backend you ship.
 
-## Where this appears in brain
+## The gradient check in brain, and three stories from it
 
 `crates/gradcheck` is brain's gradient check, and `crates/gradcheck/src/lib.rs` its core. It was introduced as a replacement for an external framework used as an oracle (commit `afbbae41d`, 24 June 2026, whose message calls it a "directional finite-difference check" and reports the first language model's backward validated on all 29 of its tensors).
 
@@ -519,7 +513,7 @@ A short checklist, in the order a check is built.
 
 This is the valley of the figure above, measured on a real model: truncation dominates above $2 \times 10^{-3}$, round-off below $2 \times 10^{-4}$, and the floor is at $10^{-3}$ to $5 \times 10^{-4}$. (These numbers are the doc comment's record, gated by the test `t5_eps_plateau` only loosely; they were not re-measured for this book.) The module's per-entry check uses a step of $10^{-2}$, twenty times larger, for the reason of the section on directional checks: one entry has no $\sqrt{N}$ amplification, so the loss difference is $h\,|\partial L/\partial w_i|$ and 32-bit round-off bites sooner. The harness's `loss` accumulates its host-side dot product in 64 bits for the reason of the accumulator table (commit `4171bccb0`, 4 August 2026).
 
-**Three stories.**
+Three episodes from the repository show the limits of the instrument.
 
 *The check that cannot see a third missing.* The same commit, `4171bccb0`, added the per-entry check. A weight shared across T5's blocks, the relative-position bias, has its gradient contributions summed over blocks; deleting that sum left a third of the gradient missing, and the best-of-4 directional check reported a relative error of $6.2 \times 10^{-4}$ for it at one seed and $5.3 \times 10^{-2}$ at another, both inside the gate. The per-entry check over the tensor's 24 entries fails when the sum is deleted. This is the effect measured above; Volume I, Chapter 8 told the story in the context of its own toy. Knowledge #187 found the same blindness on a second model, in which the shared weights were two convolutions of a vision tower whose second use is added scaled by a learned coefficient; at the coefficient 0.7 the directional check caught the missing use for one of the two tensors and passed the other, and at the checkpoint's own coefficient of about $5.6 \times 10^{-3}$ the second use is below the resolution of any check (`crates/gradcheck/src/sam_hd.rs`).
 
@@ -539,6 +533,19 @@ Answers are at the end of the chapter.
 6. **Explain.** A directional check on a large weight matrix passes. Why does this not prove that the gradient of a weight used at two places in the network includes both uses, and what test would?
 7. **Explain.** Name two kinds of backward-pass error that a passing check with the 32-bit gate cannot detect, and for each say what detects it.
 8. **Predict.** Use the last table of the section on step size (the counts of entries within each gate over all 21 parameters): which of $h = 10^{-5}$ and $h = 5 \times 10^{-3}$ do you expect to pass the strict gate $(10^{-6}, 10^{-4})$ on more entries, and why does the loose gate hide the difference?
+
+## Summary
+
+A backward pass that is slightly wrong still trains: a dropped factor of 2 is a learning rate, a missing example is noise, and a cosine of 1 sees neither. The instrument that needs no trust in the code under test is the definition of the derivative. A **finite difference** estimates a derivative from function values; the forward difference has error proportional to $h$ and the **central difference** error proportional to $h^2$, as Taylor's expansion shows and the loss of a small network confirms (ratios of 10 and 100 per decade). The error has a second source: the loss is computed with rounding, and dividing the difference of two nearby losses by $2h$ magnifies it, so the total error has a valley with its bottom at $h^\ast = (3\,\mathrm{rnd}_L / M_3)^{1/3}$, a step about 800 times larger in 32 bits than in 64 and an accuracy of only about two thirds of the format's digits. A long loss should be accumulated in the wider format, and the stored perturbed weights, not $2h$, set the true step. Comparing two numbers needs both a floor and a slope: the **relative error** blows up at small gradients, the absolute error has no scale, and the gate $|\mathrm{ana} - \mathrm{num}| \le \mathrm{atol} + \mathrm{rtol}\max(|\mathrm{ana}|, |\mathrm{num}|)$ has a floor at the noise and a slope above the truncation; cosine sees direction only and L2 averages entries away. A **gradient check** does this for every entry, at a cost of $2P$ forward passes (about 400,000 backward passes for a 200,000-parameter classifier), so it runs on a small model; one pair of passes per random direction checks a whole tensor and misses a partly missing gradient, which is why folded, shared and small tensors need the per-entry check. **Test-dimension choice** decides what a check can see: with a size of 1 or two equal sizes whole bug classes compute the same function as the correct code, so sizes are distinct, above 1, and uncorrelated with the architecture's rules. Kinks, ties and discrete decisions make a correct backward pass fail the check; tests keep a margin larger than the perturbation, smooth the function, or freeze the decision. A passing check proves the derivative of the forward that was run, at one batch and one set of weights, to the gate's tolerance, on the backend that ran it: not the objective, not what the tolerance forgives, not dead or uncovered gradients, not another backend.
+
+In brain, `crates/gradcheck` implements this: a trait with seven methods, the gate as `Check::within`, directional and per-entry checks with a step measured per model, structural tests for dead gradients, and a policy of running every check on every backend, shaped by the failures of its history.
+
+Limits: a check tells whether a backward pass is the derivative of a forward pass, not whether training will succeed. For that we need to choose how to use the gradient, which is the subject of the next chapter, Optimizers: From SGD to AdamW.
+
+## References
+
+- Higham, N. J., *Accuracy and Stability of Numerical Algorithms*, second edition, 2002.
+- Griewank, A. and Walther, A., *Evaluating Derivatives: Principles and Techniques of Algorithmic Differentiation*, second edition, 2008.
 
 ## Exercises
 
@@ -564,14 +571,6 @@ Answers are at the end of the chapter.
 
 11. **[Investigate]** Reproduce `gradient_checking.accumulator_noise` for $N = 16, 256, 4096, 65536$ and plot the error of the 32-bit accumulator against $N$. Does it grow like $N$, like $\sqrt{N}$, or neither? Explain with the error bound of summation from Volume I, Chapter 15.
 
-## Summary
-
-A backward pass that is slightly wrong still trains: a dropped factor of 2 is a learning rate, a missing example is noise, and a cosine of 1 sees neither. The instrument that needs no trust in the code under test is the definition of the derivative. A **finite difference** estimates a derivative from function values; the forward difference has error proportional to $h$ and the **central difference** error proportional to $h^2$, as Taylor's expansion shows and the loss of a small network confirms (ratios of 10 and 100 per decade). The error has a second source: the loss is computed with rounding, and dividing the difference of two nearby losses by $2h$ magnifies it, so the total error has a valley with its bottom at $h^\ast = (3\,\mathrm{rnd}_L / M_3)^{1/3}$, a step about 800 times larger in 32 bits than in 64 and an accuracy of only about two thirds of the format's digits. A long loss should be accumulated in the wider format, and the stored perturbed weights, not $2h$, set the true step. Comparing two numbers needs both a floor and a slope: the **relative error** blows up at small gradients, the absolute error has no scale, and the gate $|\mathrm{ana} - \mathrm{num}| \le \mathrm{atol} + \mathrm{rtol}\max(|\mathrm{ana}|, |\mathrm{num}|)$ has a floor at the noise and a slope above the truncation; cosine sees direction only and L2 averages entries away. A **gradient check** does this for every entry, at a cost of $2P$ forward passes (about 400,000 backward passes for a 200,000-parameter classifier), so it runs on a small model; one pair of passes per random direction checks a whole tensor and misses a partly missing gradient, which is why folded, shared and small tensors need the per-entry check. **Test-dimension choice** decides what a check can see: with a size of 1 or two equal sizes whole bug classes compute the same function as the correct code, so sizes are distinct, above 1, and uncorrelated with the architecture's rules. Kinks, ties and discrete decisions make a correct backward pass fail the check; tests keep a margin larger than the perturbation, smooth the function, or freeze the decision. A passing check proves the derivative of the forward that was run, at one batch and one set of weights, to the gate's tolerance, on the backend that ran it: not the objective, not what the tolerance forgives, not dead or uncovered gradients, not another backend.
-
-In brain, `crates/gradcheck` implements this: a trait with seven methods, the gate as `Check::within`, directional and per-entry checks with a step measured per model, structural tests for dead gradients, and a policy of running every check on every backend, shaped by the failures of its history.
-
-Limits: a check tells whether a backward pass is the derivative of a forward pass, not whether training will succeed. For that we need to choose how to use the gradient, which is the subject of the next chapter, Optimizers: From SGD to AdamW.
-
 ## Key terms
 
 - **finite difference**: an estimate of a derivative built from values of the function at nearby points, such as the forward difference $(f(x+h) - f(x))/h$. <!-- concept: finite-difference -->
@@ -582,7 +581,7 @@ Limits: a check tells whether a backward pass is the derivative of a forward pas
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $D_0(h) = (f(x + h) - f(x - h))/(2h)$; its error is $\frac16 f'''(x)h^2 + \dots$, proportional to $h^2$, so a tenth of the step gives a hundredth of the error.
 2. $f(x + h) = f + f' h + \frac12 f'' h^2 + \frac16 f''' h^3 + \dots$
@@ -600,8 +599,3 @@ Limits: a check tells whether a backward pass is the derivative of a forward pas
 6. A directional check compares one number per direction, a projection of the gradient, and a missing share can project to nearly nothing; keeping the best of several directions selects such a projection. A per-entry check of that tensor, at a setting where the second use contributes visibly, would catch it.
 7. (a) A wrong objective: the derivative of the wrong forward is correct, so the check passes; a reference value or golden output detects it. (b) A gradient wrong by less than $\mathrm{atol}$, or exactly zero where the true derivative is below it: a tighter gate where the arithmetic allows, a test that the gradient is nonzero, or a separate test pinning the two functions apart. (Also acceptable: an error on a backend or a branch the test did not run.)
 8. $h = 5 \times 10^{-3}$: at $h = 10^{-5}$ the table reports 0 of 21 entries within the strict gate (the quantisation and round-off errors are largest there) and 18 of 21 at $5 \times 10^{-3}$. The loose gate passes 20 and 21 because its absolute floor $4 \times 10^{-3}$ is larger than the noise at either step.
-
-## References
-
-- Higham, N. J., *Accuracy and Stability of Numerical Algorithms*, second edition, 2002.
-- Griewank, A. and Walther, A., *Evaluating Derivatives: Principles and Techniques of Algorithmic Differentiation*, second edition, 2008.
