@@ -260,12 +260,40 @@ pub enum Anchor {
     Last,
 }
 
+/// One contiguous run of packed rows, as the layout builds it: what a
+/// sparse attention tiles by, never straddling two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Segment {
+    /// Rows every query attends densely: the text, a keyframe or image
+    /// reference, a soundtrack, the target audio.
+    Dense { rows: u32 },
+    /// A video's rows over its `(frames, height, width)` token grid, frame-
+    /// major then row-major: a reference video, or the target video (last).
+    Video { grid: [u32; 3] },
+}
+
+impl Segment {
+    pub fn rows(&self) -> u32 {
+        match *self {
+            Segment::Dense { rows } => rows,
+            Segment::Video { grid } => grid.iter().product(),
+        }
+    }
+}
+
+/// The non-empty dense run of `rows` rows.
+fn dense(rows: u32) -> Option<Segment> {
+    (rows > 0).then_some(Segment::Dense { rows })
+}
+
 /// [`build_packed_sequence`]'s output: the `[text | keyframe conditions |
 /// target audio | target video]` layout's `(t,h,w)` rotary grid, modality
 /// tags, and the three row-index arrays every later stage addresses rows
 /// through.
 #[derive(Clone, Debug)]
 pub struct PackedSequence {
+    /// Every row's segment, in packed order; their rows sum to the sequence.
+    pub segments: Vec<Segment>,
     /// `[seq_len, 3]` row-major `(t, h, w)`.
     pub position_ids: Vec<f32>,
     pub token_tags: Vec<u32>,
@@ -333,7 +361,9 @@ pub fn build_packed_sequence(text_token_tags: &[u32], num_latent_frames: u32, la
 
     let video_indices: Vec<u32> = (condition_start..audio_start).chain(video_start..sequence_length).collect();
     let audio_indices: Vec<u32> = (audio_start..video_start).collect();
-    finish_packed_sequence(position_ids, text_token_tags, video_indices, audio_indices, num_condition_rows as usize, 0)
+    let grid = [num_latent_frames, latent_height / patch_h, latent_width / patch_w];
+    let segments = dense(num_text_tokens).into_iter().chain(keyframe_anchors.iter().filter_map(|_| dense(rows_per_frame))).chain(dense(num_audio_rows)).chain([Segment::Video { grid }]).collect();
+    finish_packed_sequence(segments, position_ids, text_token_tags, video_indices, audio_indices, num_condition_rows as usize, 0)
 }
 
 /// `_fill_audio_positions`: one channel-major audio block of `num_latents`
@@ -373,7 +403,9 @@ fn fill_video_positions(position_ids: &mut [f64], start: u32, num_latent_frames:
 
 /// The modality tags of a finished layout plus its narrowing to the f32 grid
 /// the transformer's rope reads (`position_ids.to(torch.float32)`).
-fn finish_packed_sequence(position_ids: Vec<f64>, text_token_tags: &[u32], video_indices: Vec<u32>, audio_indices: Vec<u32>, num_condition_video_rows: usize, num_condition_audio_rows: usize) -> PackedSequence {
+#[allow(clippy::too_many_arguments)]
+fn finish_packed_sequence(segments: Vec<Segment>, position_ids: Vec<f64>, text_token_tags: &[u32], video_indices: Vec<u32>, audio_indices: Vec<u32>, num_condition_video_rows: usize, num_condition_audio_rows: usize) -> PackedSequence {
+    debug_assert_eq!(segments.iter().map(Segment::rows).sum::<u32>() as usize, position_ids.len() / 3, "the segments cover the sequence");
     let text_indices: Vec<u32> = (0..text_token_tags.len() as u32).collect();
     let mut token_tags = vec![0u32; position_ids.len() / 3];
     token_tags[..text_token_tags.len()].copy_from_slice(text_token_tags);
@@ -384,6 +416,7 @@ fn finish_packed_sequence(position_ids: Vec<f64>, text_token_tags: &[u32], video
         token_tags[row as usize] = TAG_VIDEO;
     }
     PackedSequence {
+        segments,
         position_ids: position_ids.iter().map(|&v| v as f32).collect(),
         token_tags,
         video_indices,
@@ -464,6 +497,7 @@ pub fn build_ref2va_packed_sequence(text_token_tags: &[u32], references: &[Refer
     }
 
     let (mut video_indices, mut audio_indices) = (Vec::new(), Vec::new());
+    let mut segments: Vec<Segment> = dense(num_text_tokens).into_iter().collect();
     let mut cursor = num_text_tokens;
     let mut rotary_time = num_text_tokens as f64;
     for reference in references {
@@ -472,12 +506,14 @@ pub fn build_ref2va_packed_sequence(text_token_tags: &[u32], references: &[Refer
                 let (frame_grid, _) = frame_position_grid(latent_height, latent_width, patch_h, patch_w);
                 fill_video_positions(&mut position_ids, cursor, 1, rotary_time, &frame_grid);
                 video_indices.extend(cursor..cursor + frame_grid.len() as u32);
+                segments.extend(dense(frame_grid.len() as u32));
                 cursor += frame_grid.len() as u32;
                 rotary_time += 1.0;
             }
             ReferenceGeometry::Audio { latents } => {
                 fill_audio_positions(&mut position_ids, cursor, latents, rotary_time, &target_width_grid, audio_channels);
                 audio_indices.extend(cursor..cursor + latents * audio_channels);
+                segments.extend(dense(latents * audio_channels));
                 cursor += latents * audio_channels;
                 rotary_time += latents as f64;
             }
@@ -485,10 +521,12 @@ pub fn build_ref2va_packed_sequence(text_token_tags: &[u32], references: &[Refer
                 let (frame_grid, width_grid) = frame_position_grid(latent_height, latent_width, patch_h, patch_w);
                 fill_audio_positions(&mut position_ids, cursor, soundtrack_latents, rotary_time, &width_grid, audio_channels);
                 audio_indices.extend(cursor..cursor + soundtrack_latents * audio_channels);
+                segments.extend(dense(soundtrack_latents * audio_channels));
                 cursor += soundtrack_latents * audio_channels;
                 fill_video_positions(&mut position_ids, cursor, latent_frames, rotary_time, &frame_grid);
                 let video_rows = latent_frames * frame_grid.len() as u32;
                 video_indices.extend(cursor..cursor + video_rows);
+                segments.push(Segment::Video { grid: [latent_frames, latent_height / patch_h, latent_width / patch_w] });
                 cursor += video_rows;
                 let video_span: f64 = (0..latent_frames as usize).map(|i| ROPE_FRAME_RESCALE * ROPE_FRAMES_PER_LATENT[i % ROPE_FRAMES_PER_LATENT.len()]).fold(0.0, |acc, v| acc + v);
                 rotary_time += (soundtrack_latents as f64).max(video_span);
@@ -502,7 +540,9 @@ pub fn build_ref2va_packed_sequence(text_token_tags: &[u32], references: &[Refer
     fill_video_positions(&mut position_ids, video_start, num_latent_frames, rotary_time, &target_frame_grid);
     video_indices.extend(video_start..sequence_length);
     audio_indices.extend(audio_start..video_start);
-    finish_packed_sequence(position_ids, text_token_tags, video_indices, audio_indices, num_reference_video_rows as usize, num_reference_audio_rows as usize)
+    segments.extend(dense(num_target_audio_rows));
+    segments.push(Segment::Video { grid: [num_latent_frames, latent_height / patch_h, latent_width / patch_w] });
+    finish_packed_sequence(segments, position_ids, text_token_tags, video_indices, audio_indices, num_reference_video_rows as usize, num_reference_audio_rows as usize)
 }
 
 // ============================================================================
@@ -1255,6 +1295,44 @@ pub(crate) mod tests {
         assert_eq!(rows.len(), n);
         let back = unpatchify_video(&rows, c, t, h, w, patch);
         assert_eq!(back, latents);
+    }
+
+    /// Every layout names its rows as the segments a sparse attention tiles
+    /// by, in packed order: each dense run on its own (the text, each
+    /// keyframe or image reference, each soundtrack, the target audio) and
+    /// each video as its token grid, the target video last.
+    #[test]
+    fn every_layout_names_its_segments_in_packed_order() {
+        let total = |p: &PackedSequence| p.segments.iter().map(Segment::rows).sum::<u32>() as usize;
+        let t2va = build_packed_sequence(&[TAG_TEXT; 3], 4, 4, 6, 5, [1, 2, 2], 2, &[]);
+        assert_eq!(t2va.segments, vec![Segment::Dense { rows: 3 }, Segment::Dense { rows: 10 }, Segment::Video { grid: [4, 2, 3] }]);
+        assert_eq!(total(&t2va), t2va.token_tags.len());
+
+        let fl2va = build_packed_sequence(&[TAG_TEXT; 2], 4, 4, 6, 3, [1, 2, 2], 2, &[Anchor::First, Anchor::Last]);
+        assert_eq!(fl2va.segments, vec![Segment::Dense { rows: 2 }, Segment::Dense { rows: 6 }, Segment::Dense { rows: 6 }, Segment::Dense { rows: 6 }, Segment::Video { grid: [4, 2, 3] }]);
+        assert_eq!(total(&fl2va), fl2va.token_tags.len());
+
+        let references = [
+            ReferenceGeometry::Image { latent_height: 4, latent_width: 6 },
+            ReferenceGeometry::Video { latent_frames: 2, latent_height: 4, latent_width: 4, soundtrack_latents: 3 },
+            ReferenceGeometry::Video { latent_frames: 3, latent_height: 2, latent_width: 2, soundtrack_latents: 0 },
+            ReferenceGeometry::Audio { latents: 2 },
+        ];
+        let ref2va = build_ref2va_packed_sequence(&[TAG_TEXT; 5], &references, 4, 4, 6, 4, [1, 2, 2], 2);
+        assert_eq!(
+            ref2va.segments,
+            vec![
+                Segment::Dense { rows: 5 },
+                Segment::Dense { rows: 6 },
+                Segment::Dense { rows: 6 },
+                Segment::Video { grid: [2, 2, 2] },
+                Segment::Video { grid: [3, 1, 1] },
+                Segment::Dense { rows: 4 },
+                Segment::Dense { rows: 8 },
+                Segment::Video { grid: [4, 2, 3] },
+            ]
+        );
+        assert_eq!(total(&ref2va), ref2va.token_tags.len());
     }
 
     #[test]
