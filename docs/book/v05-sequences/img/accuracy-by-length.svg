@@ -1,0 +1,40 @@
+<!-- source-sha256: 5c552f0bd233c27a1154864091c0ae6e9b27c85d2b3feae52a43a7bd175757f0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 380" width="640" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="380" fill="#ffffff"/>
+<line x1="128.5" y1="334" x2="128.5" y2="30" stroke="#edf2f7"/>
+<text x="128.5" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="222.5" y1="334" x2="222.5" y2="30" stroke="#edf2f7"/>
+<text x="222.5" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="316.5" y1="334" x2="316.5" y2="30" stroke="#edf2f7"/>
+<text x="316.5" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="410.5" y1="334" x2="410.5" y2="30" stroke="#edf2f7"/>
+<text x="410.5" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">8</text>
+<line x1="504.5" y1="334" x2="504.5" y2="30" stroke="#edf2f7"/>
+<text x="504.5" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="598.5" y1="334" x2="598.5" y2="30" stroke="#edf2f7"/>
+<text x="598.5" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">12</text>
+<line x1="58" y1="328.26" x2="622" y2="328.26" stroke="#edf2f7"/>
+<text x="52" y="332.26" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="270.91" x2="622" y2="270.91" stroke="#edf2f7"/>
+<text x="52" y="274.91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="213.55" x2="622" y2="213.55" stroke="#edf2f7"/>
+<text x="52" y="217.55" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="156.19" x2="622" y2="156.19" stroke="#edf2f7"/>
+<text x="52" y="160.19" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="98.83" x2="622" y2="98.83" stroke="#edf2f7"/>
+<text x="52" y="102.83" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="41.47" x2="622" y2="41.47" stroke="#edf2f7"/>
+<text x="52" y="45.47" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="564" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="564" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="81.5,41.47 128.5,41.47 175.5,41.47 222.5,51.03 269.5,70.15 316.5,108.39 363.5,160.97 410.5,239.84 457.5,266.13 504.5,301.97 551.5,318.7 598.5,328.26"/><circle cx="81.5" cy="41.47" r="3" fill="#c05621"/><circle cx="128.5" cy="41.47" r="3" fill="#c05621"/><circle cx="175.5" cy="41.47" r="3" fill="#c05621"/><circle cx="222.5" cy="51.03" r="3" fill="#c05621"/><circle cx="269.5" cy="70.15" r="3" fill="#c05621"/><circle cx="316.5" cy="108.39" r="3" fill="#c05621"/><circle cx="363.5" cy="160.97" r="3" fill="#c05621"/><circle cx="410.5" cy="239.84" r="3" fill="#c05621"/><circle cx="457.5" cy="266.13" r="3" fill="#c05621"/><circle cx="504.5" cy="301.97" r="3" fill="#c05621"/><circle cx="551.5" cy="318.7" r="3" fill="#c05621"/><circle cx="598.5" cy="328.26" r="3" fill="#c05621"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="81.5,41.47 128.5,41.47 175.5,41.47 222.5,41.47 269.5,41.47 316.5,41.47 363.5,41.47 410.5,41.47 457.5,41.47 504.5,41.47 551.5,60.59 598.5,189.65"/><circle cx="81.5" cy="41.47" r="3" fill="#9b2c2c"/><circle cx="128.5" cy="41.47" r="3" fill="#9b2c2c"/><circle cx="175.5" cy="41.47" r="3" fill="#9b2c2c"/><circle cx="222.5" cy="41.47" r="3" fill="#9b2c2c"/><circle cx="269.5" cy="41.47" r="3" fill="#9b2c2c"/><circle cx="316.5" cy="41.47" r="3" fill="#9b2c2c"/><circle cx="363.5" cy="41.47" r="3" fill="#9b2c2c"/><circle cx="410.5" cy="41.47" r="3" fill="#9b2c2c"/><circle cx="457.5" cy="41.47" r="3" fill="#9b2c2c"/><circle cx="504.5" cy="41.47" r="3" fill="#9b2c2c"/><circle cx="551.5" cy="60.59" r="3" fill="#9b2c2c"/><circle cx="598.5" cy="189.65" r="3" fill="#9b2c2c"/><line x1="528" y1="334" x2="528" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><text x="537.4" y="305.32" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">not trained on</text></g>
+<text x="340" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">digits in the input, T</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">exact-match accuracy</text>
+<text x="340" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">One vector against attention</text>
+<rect x="66" y="282" width="107.62" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="297" x2="94" y2="297" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="301" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">no attention</text>
+<line x1="74" y1="314" x2="94" y2="314" stroke="#9b2c2c" stroke-width="2"/>
+<text x="100" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">attention</text>
+</svg>

@@ -431,7 +431,7 @@ volumes:
         title: "Encoder-Decoder Models and the Birth of Attention"
         question: "How can a model read one sequence and write another, and why did a fixed-size summary fail?"
         introduces: [encoder-decoder, context-vector, additive-attention, cross-attention]
-        requires: [recurrent-neural-network, softmax, embedding-table, teacher-forcing]
+        requires: [recurrent-neural-network, softmax, embedding-table, teacher-forcing, gru, dot-product, tanh-activation, softmax-cross-entropy, adam, gradient-clipping, gradient-check]
         brain: [toyseq2seq]
       - id: self-attention
         title: "Self-Attention"

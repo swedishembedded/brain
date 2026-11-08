@@ -64,7 +64,7 @@ generation.
    language.
 5. [Recurrent Networks](05-recurrent-networks.md): how a network carries memory from one step of a
    sequence to the next, and why that memory fades.
-6. Encoder-Decoder Models and the Birth of Attention: how a model can read one
+6. [Encoder-Decoder Models and the Birth of Attention](06-seq2seq.md): how a model can read one
    sequence and write another, and why a fixed-size summary failed.
 7. Self-Attention: how every position in a sequence can look at every other
    position in parallel.

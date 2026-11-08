@@ -18,6 +18,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **AdamW**: Adam with decoupled weight decay: $\theta \leftarrow \theta - \eta\lambda\theta - \eta\hat{\mathbf{m}}/(\sqrt{\hat{\mathbf{v}}} + \epsilon_{\mathrm{den}})$. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
+**additive attention**: attention whose score for a decoder state and an encoder state is computed by a small network that adds a projection of each before a tanh and takes a weighted sum of the result, so that the decoder can build a different weighted average of the encoder states at every step. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
+
 **affine quantization**: the map from a real number to an $n_b$-bit integer code and back, $q = \mathrm{clamp}(\mathrm{round}(w/\Delta) + q_0, 0, 2^{n_b} - 1)$ and $w' = \Delta(q - q_0)$, a multiplication and an offset applied to a group of weights. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
 **ahead-of-time compilation**: compiling kernels for a list of known device architectures before the program ships and loading the results at run time with a key that identifies their inputs, so that a machine without a compiler can run them, at the price of storage and of devices outside the list. *([One Program, Many Devices](v04-computation/09-backends.md))*
@@ -136,6 +138,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **confidence interval**: a range computed from a sample, $\bar{x} \pm 1.96\,\mathrm{SE}$ at level $95\%$, built by a recipe that contains the true value in about that share of repeated experiments. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
+**context vector**: the vector that carries what an encoder has read to the decoder; in the first design a single vector, the encoder's last state, and in attention a vector of its own at every output step, a weighted average of the encoder states. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
+
 **controlled experiment**: a comparison in which the two arms differ only in the thing the claim is about, with the data, recipe, seeds, compute, tuning effort and metric held the same, so that a difference can be attributed to that thing. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
 **convergence**: the approach of the iterates to the minimiser and of the loss to its minimum; for a quadratic loss it is geometric, with a speed set by the learning rate and the condition number. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
@@ -155,6 +159,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **CPU core**: one unit of a processor that fetches, decodes and executes instructions in a pipeline, with its own registers and first-level caches, sharing the rest of the memory system with the other cores of the chip. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 
 **critical point**: a point where the derivative is zero, so the tangent is horizontal; it may be a minimum, a maximum or neither. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
+**cross-attention**: attention in which the questions come from one sequence, such as the decoder's states, and the things looked up come from another, such as the encoder's states; the general form of which additive attention is the first example. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
 
 **cross-backend parity**: the property that every backend gives results for the same inputs that agree to a stated criterion, bit for bit where the kernel fixes every rounding and order, and otherwise within a tolerance derived from the error bound of the operation. *([One Program, Many Devices](v04-computation/09-backends.md))*
 
@@ -215,6 +221,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **embedding gradient**: the gradient of the loss with respect to the table: each row is the sum of the gradient rows of the positions that looked it up, so a token used twice receives two contributions added and a token not used receives exactly zero. *([Embeddings](v05-sequences/03-embeddings.md))*
 
 **embedding table**: the array of shape $[V, D]$ with one row for each token of the vocabulary; looking up a token id returns its row, which is the vector the model computes with, and the rows are learned parameters. *([Embeddings](v05-sequences/03-embeddings.md))*
+
+**encoder-decoder**: a model made of two networks trained together, an encoder that reads an input sequence into states and a decoder that writes an output sequence from them, so that the output may have a different length from the input. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
 
 **end-to-end-training-loop**: the whole path from data to saved model in one function: shuffle, batch, forward, loss, backward, clip, optimizer step at the scheduled rate, log, evaluate on the validation set, keep the best checkpoint. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 

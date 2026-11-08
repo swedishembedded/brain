@@ -1,0 +1,73 @@
+<!-- source-sha256: eecba20a6f03cfbe89e4a03ca51b9e357647370d1076ced1af0cb3ef22cb3bbc -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 400" width="1000" height="400"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="400" fill="#ffffff"/>
+<rect x="10" y="10" width="360" height="340" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Encoder: reads the input</text>
+<rect x="570" y="10" width="420" height="340" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="584" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Decoder: writes the output</text>
+<rect x="43" y="165" width="84" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="85" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">GRU 1</text>
+<rect x="153" y="165" width="84" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">GRU 2</text>
+<rect x="263" y="165" width="84" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="305" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">GRU 3</text>
+<rect x="585" y="165" width="80" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="625" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">GRU 1</text>
+<rect x="685" y="165" width="80" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="725" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">GRU 2</text>
+<rect x="785" y="165" width="80" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="825" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">GRU 3</text>
+<rect x="885" y="165" width="80" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="925" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">GRU 4</text>
+<ellipse cx="470" cy="190" rx="62" ry="38" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">context vector</text>
+<text x="470" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">c = h3</text>
+<text x="470" y="210.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">H numbers</text>
+<rect x="48" y="283" width="74" height="34" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="85" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x1 = 2</text>
+<line x1="85" y1="280" x2="85" y2="218" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="158" y="283" width="74" height="34" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x2 = 3</text>
+<line x1="195" y1="280" x2="195" y2="218" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="268" y="283" width="74" height="34" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="305" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x3 = 1</text>
+<line x1="305" y1="280" x2="305" y2="218" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="130" y1="190" x2="150" y2="190" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="140" y="181.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">h1</text>
+<line x1="240" y1="190" x2="260" y2="190" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="250" y="181.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">h2</text>
+<line x1="350" y1="190" x2="405" y2="190" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="377.5" y="181.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">h3</text>
+<line x1="535" y1="190" x2="582" y2="190" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="558.5" y="181.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">s0 = c</text>
+<line x1="668" y1="190" x2="682" y2="190" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="675" y="181.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">s1</text>
+<line x1="768" y1="190" x2="782" y2="190" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="775" y="181.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">s2</text>
+<line x1="868" y1="190" x2="882" y2="190" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="875" y="181.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">s3</text>
+<rect x="588" y="283" width="74" height="34" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="625" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">in &lt;s&gt;</text>
+<line x1="625" y1="280" x2="625" y2="218" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="625" cy="90" rx="37" ry="18" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="625" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<line x1="625" y1="162" x2="625" y2="111" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="688" y="283" width="74" height="34" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="725" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">in 1</text>
+<line x1="725" y1="280" x2="725" y2="218" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="725" cy="90" rx="37" ry="18" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="725" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3</text>
+<line x1="725" y1="162" x2="725" y2="111" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="788" y="283" width="74" height="34" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="825" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">in 3</text>
+<line x1="825" y1="280" x2="825" y2="218" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="825" cy="90" rx="37" ry="18" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="825" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2</text>
+<line x1="825" y1="162" x2="825" y2="111" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="888" y="283" width="74" height="34" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="925" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">in 2</text>
+<line x1="925" y1="280" x2="925" y2="218" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="925" cy="90" rx="37" ry="18" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="925" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">&lt;end&gt;</text>
+<line x1="925" y1="162" x2="925" y2="111" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="500" y="380.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the decoder sees the input only through c; in training each input token is the target shifted right, when generating it is the model&#x27;s own previous output</text>
+</svg>
