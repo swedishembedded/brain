@@ -5,8 +5,6 @@
 
 *How does an engine run near the roofline on hardware nobody tuned it for?*
 
-## The problem
-
 A matrix product $C = A B$, with $A$ of shape $m \times k$ and $B$ of shape $k \times n$, can be run by three of the kernels of [Chapter 6](06-matmul.md): the naive one (one output per invocation, a serial loop over $k$), the tiled one (a $32 \times 32$ tile of outputs per workgroup, each invocation holding a $4 \times 4$ block) and the register-blocked one (a $128 \times 128$ tile, an $8 \times 8$ block per invocation). They compute the same function. The engine has to pick one for every product it runs, on a GPU that nobody has measured it on, and the shapes change from one request to the next: $m$ is 1 for one token and 512 for a prefill.
 
 [Chapter 3](03-roofline.md) gives a way to rank them without running anything: count the bytes each kernel requests and the FLOPs of the product, and take the cost the roofline model assigns. The register-blocked kernel reuses every loaded number the most, so it requests the fewest bytes, and the model ranks it first at every shape. Here is that ranking next to a seeded model of a real device (the formulas are in the section after the next; the numbers are of the model GPU of Chapters 3 and 4, the one whose silicon reaches 36,000 (GFLOP/s) and 664 (GB/s)). Each entry is the cost of the problem's floor, every operand moved once and $2mnk$ FLOPs, divided by the cost of the kernel, so 1 would be the roofline itself:
@@ -25,7 +23,7 @@ Generator: the book's SplitMix64, seed 0xbc12f335dfcc1d23 (the seed of the name 
 | 512 x 100 x 4096 | reg | 0.676 | tiled | 0.157 | 0.077 | 0.508 |
 <!-- /worked -->
 
-At $m = 1$ the model picks the register-blocked kernel and predicts 0.993 of the roofline. On the device it reaches 0.313, and the tiled kernel, which the model ranked second, reaches 0.833: choosing as the model says gives up 62.5 percent of what was available. At $m = 512$ the model is right. At $512 \times 100 \times 4096$, a product with only 100 output columns, it is wrong again and the choice loses 50.8 percent. This is not a defect of the roofline model of Chapter 3. The model is a bound: it says no kernel can cost less than its own bytes and FLOPs. It does not say how far above its bound each kernel lies, and that distance differs from kernel to kernel and from shape to shape, so a ranking of bounds is not a ranking of costs. Knowledge #15 met the same fact on one card: a selection rule that sent short matrices to the naive kernel was the bottleneck of a whole forward pass, and the right threshold was found by a sweep, not by arithmetic.
+At $m = 1$ the model picks the register-blocked kernel and predicts 0.993 of the roofline. On the device it reaches 0.313, and the tiled kernel, which the model ranked second, reaches 0.833: choosing as the model says gives up 62.5 percent of what was available. At $m = 512$ the model is right. At $512 \times 100 \times 4096$, a product with only 100 output columns, it is wrong again and the choice loses 50.8 percent. The roofline model of Chapter 3 is working as designed here. It is a bound: it says no kernel can cost less than its own bytes and FLOPs. It does not say how far above its bound each kernel lies, and that distance differs from kernel to kernel and from shape to shape, so a ranking of bounds is not a ranking of costs. Knowledge #15 met the same fact on one card: a selection rule that sent short matrices to the naive kernel was the bottleneck of a whole forward pass, and the right threshold was found by a sweep, not by arithmetic.
 
 The sentence "run them and look" is the right answer, and it has five ways of going wrong, each of which becomes one stage of the engine's answer:
 
@@ -41,9 +39,7 @@ The kernels are the candidates the stages work on. The figure shows the stages, 
 
 All the numbers of this chapter come from one seeded model, `scripts/book/worked/kernel_selection.py`, and nothing in it times a real machine. Costs are in the equivalent bytes of [Chapter 8](08-fusion.md): the roofline time multiplied by the bandwidth, so that a cost carries no seconds and holds for any machine with the same ridge point.
 
-## Before you begin
-
-Answer from memory; the answers are at the end of the chapter.
+The stages ahead lean on six earlier ideas, from the roofline to the standard error. Bring them back from memory; the answers are at the end of the chapter.
 
 1. (Volume IV, Chapter 3, the roofline.) A computation does $2 \times 10^9$ FLOP on 100 MB. On a device with $F_{\mathrm{pk}} = 40{,}000$ GFLOP/s and $\mathrm{BW} = 800$ GB/s, what is its intensity, on which side of the ridge point is it, and what is its cost $B_{\mathrm{eq}}$ in equivalent bytes (Chapter 8)?
 2. (Volume IV, Chapter 6, the tile.) A $128 \times 128$ output tile is used for a product with $m = 1$ row. What share of the tile's outputs is real?
@@ -54,11 +50,9 @@ Answer from memory; the answers are at the end of the chapter.
 
 ## Implementation candidates: an implementation and its conditions
 
-*What this is for: a selector chooses among things. We say what one of those things is, so that every later stage can be stated about it.*
+A selector chooses among things, and every later stage is a statement about one of them, so we begin by saying what one is. An **implementation candidate** is one implementation of an operation together with the conditions under which it is valid: the capabilities a device must declare for it to run, the shapes it serves, and the contract of its result (the formats it reads and the tolerance its output is held to). The operation is the same for all candidates of a slot; the conditions are what differ.
 
-An **implementation candidate** is one implementation of an operation together with the conditions under which it is valid: the capabilities a device must declare for it to run, the shapes it serves, and the contract of its result (the formats it reads and the tolerance its output is held to). The operation is the same for all candidates of a slot; the conditions are what differ.
-
-The three candidates of the problem, with the counts that Chapter 6 taught. The issue efficiency is the fused multiply-adds of one step of $k$ over all the instructions of that step, so a kernel that spends its instructions on loads has a low one:
+The three candidates of the opening, with the counts that Chapter 6 taught. The issue efficiency is the fused multiply-adds of one step of $k$ over all the instructions of that step, so a kernel that spends its instructions on loads has a low one:
 
 <!-- worked: kernel_selection.candidate_table -->
 Three implementations of C = A B. 'Tile' is the block of outputs one workgroup owns (the naive kernel owns one output per invocation). 'Loads in flight' is the independent 4-byte loads an invocation has outstanding before it must wait: 2 for the naive kernel (the two operands of one step of k), and the staging loads of a step for the tiled kernels (a 32 x 8 slab of A and an 8 x 32 slab of B over 64 invocations is 8; a 128 x 8 and an 8 x 128 over 256 is 8). The issue efficiency e = r s / (r s + r + s + 2) counts the fused multiply-adds of one step of k against the reads of the slabs and 2 instructions of loop overhead; the naive kernel does 1 multiply-add against 2 loads from memory and the same overhead, 1 / 5.
@@ -92,7 +86,7 @@ A candidate for a different contract, a matrix product of fp16 operands on a mat
 
 ## What the model sees and what it does not
 
-*What this is for: the roofline model remains useful, as an order, as a bound and as the unit in which results are stated. We write down exactly what it counts and what the device does beyond that, so that its failure in the problem has a cause.*
+The roofline model remains useful as an order, as a bound and as the unit in which results are stated, so it is worth writing down exactly what it counts and what the device does beyond that. Then its failure in the opening table has a cause.
 
 For a candidate $c$ with an output tile of $T_m \times T_n$ and a shape $(m, n, k)$, the tile grid is $t_m = \lceil m / T_m \rceil$ by $t_n = \lceil n / T_n \rceil$. Each tile reads its slab of $A$ and of $B$ once, so the bytes requested are
 
@@ -186,7 +180,7 @@ None of this makes the model useless. It gives the order of the list (right on 8
 
 ## Capability declaration: what may run
 
-*What this is for: before anything is timed, the candidates that cannot run on the device must be removed, because a candidate that is wrong on a device is not a slow candidate and speed cannot tell the two apart.*
+Before anything is timed, the candidates that cannot run on the device must be removed, because a candidate that is wrong on a device is not a slow candidate and speed cannot tell the two apart.
 
 A **capability declaration** is the statement of what a device can execute (the record of [Chapter 9](09-backends.md), queried from the device and absent when unknown) together with the statement of what each candidate needs of it. A candidate is **admissible** on a device when every need is declared. The CPU unit and the GPU unit of Chapter 3, with different ridge points (10 and 50 in the specification), differ here as they do in speed: the CPU unit's compiler runs a workgroup as loops and cannot execute a barrier kernel correctly, and it has no matrix unit.
 
@@ -242,7 +236,7 @@ function admissible(c: Candidate, caps: Caps, m: int, n: int, k: int) -> bool:
 
 ## The measured roofline: the device's own denominator
 
-*What this is for: every result of the later stages is a fraction of the roofline, and a fraction of the wrong roofline is a number about nobody. We measure the device's two rates with two kernels whose work we can count.*
+Every result of the later stages is a fraction of the roofline, and a fraction of the wrong roofline is a number about nobody. So the device's two rates are measured, with two kernels whose work we can count.
 
 The specification of the model GPU says 40,000 (GFLOP/s) and 800 (GB/s). A particular unit of it reaches less, as every real device does, and a kernel graded against the specification looks worse than it is by the same factor every time, so that rows of a profile that should be ranked against each other are all shifted and a kernel at its device's limit still looks unfinished. The two rates cannot be read from the device: no compute interface reports what the silicon achieves. They are measured, each with a kernel that does nothing else.
 
@@ -286,7 +280,7 @@ The work the probes executed, all attempts together:
 
 The GPU unit's measured rates, 34,469 (GFLOP/s) and 646 (GB/s), are 86.2 and 80.8 percent of the specification and give a ridge of 53.3, not 50: a different device has a different roofline even when it carries the same name, and the ridge point decides which kernels are bandwidth-bound. Both are a little below the unit's true rates (36,000 and 664), by 4.3 and 2.6 percent. That is how every measurement of a rate of work behaves: a run never beats the floor of the device, so the best of a few runs is above it, and the measured roofline is a slightly low roofline. A fraction slightly above 1 is therefore within the noise of the roof; one far above 1 is a defect of the measurement. The whole calibration of the GPU unit executed 166.9 (GFLOP) and moved 2.4 (GB), once, and is saved with the device's identity.
 
-The **measured roofline** is the pair of rates $(F_{\mathrm{ms}}, \mathrm{BW}_{\mathrm{ms}})$ found by two such probes on the device itself. Results are then stated against it. The same best-of-8 runs of the problem's table, graded four ways:
+The **measured roofline** is the pair of rates $(F_{\mathrm{ms}}, \mathrm{BW}_{\mathrm{ms}})$ found by two such probes on the device itself. Results are then stated against it. The same best-of-8 runs of the opening table, graded four ways:
 
 <!-- worked: kernel_selection.fraction_of_roofs -->
 The same best-of-8 runs as `kernel_selection.ranking_table` (no new draws), graded against four rooflines: the unit's true rates (36,000 and 664: the fractions of the ranking table), the specification (40,000 and 800), the calibration of `kernel_selection.calibration` on this unit (34,469 and 646), and a calibration whose compute probe ran on an idle device and measured 14,244 (its bandwidth is the calibrated one). The bound of a row is max(2 m n k / F, 4 (m k + k n + m n) / BW). The cold probe is `kernel_selection.calibration.GPU.cold` (seed 0x1fca8e5bcdf55823): the compute probe of the calibration, with the device's true compute rate multiplied by 0.4.
@@ -304,7 +298,7 @@ A fraction measured against the device's own roofline is dimensionless and has n
 
 ## Reference-gated selection: fast and right
 
-*What this is for: a candidate that is faster because it computes less must never win. We build the check that is run on the device before anything is timed.*
+A candidate that is faster because it computes less must never win, which calls for a check that runs on the device before anything is timed.
 
 Here is a candidate that nobody wrote on purpose. The register-blocked kernel needs a guard so that a partial tile at the end of $m$ does not read or write outside the matrix. Remove the guard (an easy edit, and it makes the inner loop shorter) and the kernel becomes correct only when $m$ is a whole number of 128-row tiles: it computes the rows of the whole tiles and leaves the others at their initial value. Call it `reg-notail`. Three shapes of the bucket 129 to 256, with the device fractions of the three candidates, each the minimum of 8 seeded runs:
 
@@ -384,7 +378,7 @@ The gate costs one launch of the candidate at each gate shape and a host-side re
 
 ## Measuring honestly enough: repeats, a robust statistic, noise
 
-*What this is for: the stage that decides must not decide by luck. We model what makes a measurement noisy, compare four ways of reading a few runs, and add a rule for ignoring differences that are inside the noise.*
+The stage that decides must not decide by luck. To see how luck enters, we model what makes a measurement noisy, compare four ways of reading a few runs, and add a rule for ignoring differences that are inside the noise.
 
 The model device returns, for each launch, its noise-free cost times a factor drawn from three uniforms $u_0, u_1, u_2$:
 
@@ -428,7 +422,7 @@ Two conventions bound the work. First, the measurement is a **race**: the incumb
 
 ## The selection cache: keeping the answer where it holds
 
-*What this is for: measuring is device work. We say what the answer is keyed by, so that it is reused where it is true and discarded where it may not be, and we count the work of the cache against what it saves.*
+Measuring is device work, so the answer is worth keeping, but only where it is still true. What the answer is keyed by decides where it is reused and where it is discarded, and the work of the cache can be counted against what it saves.
 
 A **selection cache** maps a key to the candidate chosen for it, and it is kept between runs. Its key has four parts, and each is a way the stored answer can stop being true:
 
@@ -534,7 +528,7 @@ function select_kernel(m: int, n: int, k: int, catalogue: list<Candidate>, refer
 
 Here `digest(catalogue)` is the FNV-1a of the concatenated sources as above (so a different source set gives a different key), `bucket_text(b, n, k)` is the text `M<=b,N=n,K=k`, `order_by_predicted_cost` sorts the candidates by $B_{\mathrm{pred}}$ (ties keep the order of the catalogue), `gate_at(c, m, n, k)` builds seeded inputs of that shape, runs the candidate on the device and calls `gate`, and `race` is the measurement of the previous section, which returns the winning candidate.
 
-## Where this appears in brain
+## Selection in brain: the selector, the roofs and the tuning tables
 
 **The seam: `crates/backend-api/src/select.rs`.** The module header names what it replaced: every call site wrote its own regime test (`if m <= 32 && gpu.kind() != "cpu"`), which scattered the policy, made it untestable without a device and keyed it on a backend's name rather than on what the device can do. An `Op` and an `OpShape` (m, n, k and a data type) name the operation and the shape; a `KernelVariant` (`Reference`, `WorkgroupPerOutput`, `SplitReduction`, `PackedInt8`, `RegisterTiled`, `FusedFlash`) names the implementation family, and the call site maps a family to its own pipeline index, with `Reference` as the fallback every model ships. `candidates` returns the variants that can execute for an op, a shape and a device, static best guess first: a match enumerates the regimes (the order is "measured regime boundaries", no capability checks), and a single uniform filter at the end keeps what the device's capabilities permit and returns `Reference` if nothing is left, so that the list is never empty. The default policy is the head of that list by construction (`DefaultSelector`), "so the default choice and the tuner's probe set can never drift apart", and a test pins it (`candidates_head_is_the_default_policy`). The matrix-product arm is the problem of this chapter in code: for fp32 and the storage types it enumerates the decode kernel, the register-tiled kernel from `GEMM_TILE_MIN_ROWS` = 8 rows and `GEMM_TILE_MIN_COLS` = 128 columns, and the reference, thresholds the comment says were swept at $k = 2048$, $n = 2560$ (knowledge #15 and commit 6cfc15861 are that sweep).
 
@@ -573,6 +567,18 @@ A cache entry that merely records the absence of an answer is a wrong answer wit
 7. The challenger's estimate is 1.5 percent below the incumbent's, and its standard error of the difference is 1 percent. Which does the rule of this chapter choose, and what would a plain minimum choose?
 8. Why is the bucket ladder geometric, and what goes wrong with a representative taken from the middle of a bucket instead of its largest member?
 
+## Summary
+
+The roofline model of Chapter 3 ranks implementations by their own bytes and FLOPs, and the ranking is wrong exactly where a kernel is far above its bound: on the model GPU unit it is wrong on 8 of 16 shapes, by up to 62.5 percent of what was available, because the model sees neither the idle lanes of a tile, nor the invocations that exist, nor the instruction mix, nor the start of the launch. It remains a lower bound, an order for the candidates and the source of the floor in which results are stated. The choice itself is made on the device, by a pipeline of stages each of which prevents one failure. An **implementation candidate** states its conditions, and a **capability declaration** against the device's record removes what cannot run before any cost is computed, as a correctness gate and never a preference. The **measured roofline** of two probes whose work is counted (166.9 (GFLOP) and 2.4 (GB) for the GPU unit) gives the denominator of every fraction, and a fraction above 1 beyond the noise signals a bad roof. **Reference-gated selection** admits a candidate only after its output on the device matches the reference within a tolerance derived from its arithmetic, at the edges of the bucket as well as at its representative, because the fastest candidate is often the one that does less. A robust statistic, a rule that declines differences inside the noise and a race that drops hopeless challengers early make the stage that times candidates stable. The **selection cache**, keyed by device, driver, source digest and shape bucket, keeps the answer where it holds, and a geometric ladder of buckets repaid its measurement after 2.26 runs of the workload at a cost of 2.82 percent over the best possible choice.
+
+What the chapter leaves open is how to know that a timing is a timing of the kernel: a clock stopped before the device finished, a run that includes a compile, a mean that hides a spike. Selection is only as good as its measurements, and the next chapter is about producing numbers that do not lie.
+
+## References
+
+- R. Clint Whaley and Jack Dongarra, "Automatically Tuned Linear Algebra Software", 1998.
+- Matteo Frigo and Steven G. Johnson, "The Design and Implementation of FFTW3", 2005.
+- Samuel Williams, Andrew Waterman and David Patterson, "Roofline: An Insightful Visual Performance Model for Multicore Architectures", 2009.
+
 ## Exercises
 
 1. **[Calculate]** For $m = 77$, $n = 2560$, $k = 2048$, find $N_{\mathrm{byte}}$, $N_{\mathrm{flop}}^{\mathrm{pad}}$, $o_{\mathrm{cmp}}$, $o_{\mathrm{mem}}$, $B_{\mathrm{pred}}$ and $B_{\mathrm{dev}}$ of the tiled kernel from the formulas and the parameters of `kernel_selection.candidate_table` and `kernel_selection.cost_model_example`, and check them against the table.
@@ -588,12 +594,6 @@ A cache entry that merely records the absence of an answer is a wrong answer wit
 11. **[Investigate]** With the noise of the chapter, bound the probability that a good candidate is dropped by the cap: a launch exceeds twice the floor only if the spike $s$ satisfies $1.04(1 + s) > 2$. Compute the bound for one launch and for four, and then run the pipeline's race 10,000 times with a seeded generator and report how often the dropped candidate was the true best.
 12. **[Investigate]** On a machine you have, time two implementations of a kernel of your own over a range of one size parameter, with the procedure of this chapter (a warm-up, 20 launches, batch minima, a 2 SE rule). Report the crossing, its spread over three repetitions and whether a fixed threshold of the form $m \ge c$ would have been right.
 
-## Summary
-
-The roofline model of Chapter 3 ranks implementations by their own bytes and FLOPs, and the ranking is wrong exactly where a kernel is far above its bound: on the model GPU unit it is wrong on 8 of 16 shapes, by up to 62.5 percent of what was available, because the model sees neither the idle lanes of a tile, nor the invocations that exist, nor the instruction mix, nor the start of the launch. It remains a lower bound, an order for the candidates and the source of the floor in which results are stated. The choice itself is made on the device, by a pipeline of stages each of which prevents one failure. An **implementation candidate** states its conditions, and a **capability declaration** against the device's record removes what cannot run before any cost is computed, as a correctness gate and never a preference. The **measured roofline** of two probes whose work is counted (166.9 (GFLOP) and 2.4 (GB) for the GPU unit) gives the denominator of every fraction, and a fraction above 1 beyond the noise signals a bad roof. **Reference-gated selection** admits a candidate only after its output on the device matches the reference within a tolerance derived from its arithmetic, at the edges of the bucket as well as at its representative, because the fastest candidate is often the one that does less. A robust statistic, a rule that declines differences inside the noise and a race that drops hopeless challengers early make the stage that times candidates stable. The **selection cache**, keyed by device, driver, source digest and shape bucket, keeps the answer where it holds, and a geometric ladder of buckets repaid its measurement after 2.26 runs of the workload at a cost of 2.82 percent over the best possible choice.
-
-What the chapter leaves open is how to know that a timing is a timing of the kernel: a clock stopped before the device finished, a run that includes a compile, a mean that hides a spike. Selection is only as good as its measurements, and the next chapter is about producing numbers that do not lie.
-
 ## Key terms
 
 - **implementation candidate**: one implementation of an operation together with the conditions under which it is valid (the capabilities it needs, the shapes it serves, the contract of its result), one of several that a selector chooses among. <!-- concept: implementation-candidate -->
@@ -604,7 +604,7 @@ What the chapter leaves open is how to know that a timing is a timing of the ker
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. Intensity $2 \times 10^9 / 10^8 = 20$ FLOP per byte, below the ridge point of 50, so bandwidth-bound. $B_{\mathrm{eq}} = \max(10^8,\ 2 \times 10^9 / 50) = 100{,}000{,}000$ bytes.
 2. One row of 128: $1/128 = 0.8$ percent.
@@ -623,9 +623,3 @@ What the chapter leaves open is how to know that a timing is a timing of the ker
 6. The driver (or runtime) version. A new compiler can generate different code for the same source, so the winner can change. Adding it costs a re-measurement after each update (a few runs of work, once), which is cheap against running a stale choice for the life of the install; the cost grows only if the driver string changes spuriously.
 7. The rule keeps the incumbent: the gap, 1.5 percent, is below twice its standard error, 2 percent. A plain minimum would choose the challenger, which at a 1 percent true difference it does in 99.5 percent of the trials of the simulation and at identical candidates in about half of them.
 8. The effects that decide the winner (tile counts, padding, fill of the lanes) depend on the ratio of $m$ to the tile, so a bucket that doubles at each step keeps the same relative width. A middle member is smaller than most of the bucket; its winner may be the tiled kernel while the bucket's larger shapes need the register-blocked one, and the gate and the measurement then describe shapes the bucket does not mostly contain.
-
-## References
-
-- R. Clint Whaley and Jack Dongarra, "Automatically Tuned Linear Algebra Software", 1998.
-- Matteo Frigo and Steven G. Johnson, "The Design and Implementation of FFTW3", 2005.
-- Samuel Williams, Andrew Waterman and David Patterson, "Roofline: An Insightful Visual Performance Model for Multicore Architectures", 2009.

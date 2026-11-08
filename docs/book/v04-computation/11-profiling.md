@@ -5,11 +5,9 @@
 
 *Why do most performance numbers lie, and how do we produce ones that do not?*
 
-## The problem
-
 A colleague reports that their kernel adds two arrays of $2^{26}$ floats in 5.4 microseconds. Count the work before believing anything ([Chapter 3](03-roofline.md)). The addition $c = a + b$ moves 12 bytes per element, 805,306,368 bytes in all. At 646 (GB/s), the measured bandwidth of the model GPU unit of [Chapter 10](10-kernel-selection.md), the bytes alone need 1,246.6 microseconds to arrive. The report is faster than the memory can possibly deliver the data, by a factor of more than 200. Nothing is wrong with the colleague's arithmetic or with their kernel. Their clock was stopped at the wrong moment.
 
-Here is what three clocks read on the model device of this chapter, a seeded model and not a measurement of any machine. All three time the same program, a dispatch of one kernel, but they stop at different moments: when the call returns, after the host has waited for the device, and from the device's own timestamps. The table prints every parameter of the model (the section after the next explains each), the seed and the order in which the random numbers are drawn.
+Here is what three clocks read on the model device of this chapter, a seeded model and not a measurement of any machine. All three time the same program, a dispatch of one kernel, but they stop at different moments: when the call returns, after the host has waited for the device, and from the device's own timestamps. The table prints every parameter of the model (the next section explains each), the seed and the order in which the random numbers are drawn.
 
 <!-- worked: profiling.enqueue_lie -->
 The model of this chapter, all parameters labelled and none a measurement. Device: the model GPU unit of Chapter 10, true rates 36,000 (GFLOP/s) and 664 (GB/s), graded against its measured roofline 34,469 (GFLOP/s) and 646 (GB/s). A dispatch submitted alone costs the host t_sub + t_dsp = 4 + 1 = 5 microseconds of enqueue, times (1 + 0.20 u); the wait costs 40 microseconds after the device has finished, times (1 + 0.25 u); the device runs for t_dsp = 1 microsecond plus the roofline time of the kernel at its hidden efficiency (0.85 for the additions c = a + b, 0.55 for the matrix product), times the noise factor of Chapter 10, (1 + 0.04 u0) (1 - 0.25 ln(1 - u2) if u1 < 0.2, else 1), with ln the natural logarithm. Bytes and FLOPs: the addition of N floats does N FLOPs and moves 12 N bytes, the product C[m, n] = A[m, k] B[k, n] in fp32 does 2 m n k FLOPs and moves 4 (m k + k n + m n) bytes.
@@ -41,9 +39,7 @@ This chapter is about asking the question first. The rest of the book states spe
 4. When explaining a time, divide it among the kernels, and then check the division against the whole.
 5. Decide what to optimize by what the whole pass would gain.
 
-## Before you begin
-
-Answer from memory; the answers are at the end of the chapter.
+Those habits lean on six ideas from earlier chapters, from the dispatch to seeded randomness. Bring them back from memory; the answers are at the end of the chapter.
 
 1. (Volume IV, Chapter 5, the dispatch.) A host program calls `dispatch` for a kernel and reads the host clock the moment the call returns. What has the clock measured?
 2. (Volume IV, Chapter 3, the achieved fraction.) A computation moves 100 MB and does far fewer FLOPs than the machine could do in that time. The machine has $\mathrm{BW} = 800$ (GB/s) and the run takes 200 microseconds. What fraction of the roofline is that?
@@ -54,13 +50,13 @@ Answer from memory; the answers are at the end of the chapter.
 
 ## Where the clock stops: device-synchronized timing
 
-*What this is for: a time is only the time of a kernel if the clock starts and stops around the kernel's work. We separate the host's time from the device's, and find out what it costs to make the host wait.*
+A time is only the time of a kernel if the clock starts and stops around the kernel's work, so the first job is to separate the host's time from the device's and to find out what it costs to make the host wait.
 
 A GPU program has two processors that run at different times. The host runs the program: it prepares a dispatch, hands it to the device and goes on to the next line. The device runs the dispatch later, on its own. The host is free again after $t_{\mathrm{enq}}$, the time it takes to hand over one dispatch, which is the sum of the submission and the start of one dispatch from [Chapter 8](08-fusion.md), $t_{\mathrm{enq}} = t_{\mathrm{sub}} + t_{\mathrm{dsp}} = 4 + 1 = 5$ microseconds in the model. The device then runs for $t_{\mathrm{dev}}$. The figure puts both on one time axis for the addition of $2^{20}$ floats, with the widths to scale.
 
 ![Two timelines, each with a host lane and a device lane. Top: the host enqueues for 5 microseconds and the clock stops there, while the device kernel (23.3 microseconds) has only just started. Bottom: the host enqueues, is blocked until the device finishes, then spends 40 microseconds noticing, and the clock stops after 68.3 microseconds; the device's own stamps read 23.3.](img/sync-timeline.svg)
 
-A clock on the host can stop at two moments. Stopped when the call returns, it reads $t_{\mathrm{enq}}$, the cost of the host's own bookkeeping, which does not depend on the kernel at all (the first rows of the table of the problem: 5.21, 5.37 and 5.49 microseconds for three kernels whose device times differ by a factor of 60). Stopped after the host has *waited* for the device, it reads
+A clock on the host can stop at two moments. Stopped when the call returns, it reads $t_{\mathrm{enq}}$, the cost of the host's own bookkeeping, which does not depend on the kernel at all (the first rows of the opening table: 5.21, 5.37 and 5.49 microseconds for three kernels whose device times differ by a factor of 60). Stopped after the host has *waited* for the device, it reads
 
 $$
 t_{\mathrm{sync}} = t_{\mathrm{enq}} + t_{\mathrm{dev}} + t_{\mathrm{wait}},
@@ -130,7 +126,7 @@ Two cautions complete the picture. A device stamp is still a measurement and can
 
 ## Warm-up runs
 
-*What this is for: the first runs of a program are not the runs a user will see. We model the transient, show what it does to a mean, and give a rule that finds where it ends.*
+The first runs of a program are not the runs a user will see. To say how far they mislead, we model the transient, show what it does to a mean, and give a rule that finds where it ends.
 
 The first call of a kernel does work no later call does. Pipelines are built (compiled and specialised for this device), memory is allocated and touched for the first time, caches are cold, and the device's clock has not yet risen to the frequency it will hold ([Chapter 10](10-kernel-selection.md) found the cost of that last one: a roofline probe that ran on an idle device measured a ceiling 0.4 times the real one, and every fraction built on it was wrong). The runs that pay for these things are the **warm-up runs** of a measurement: the leading runs of a series whose cost is dominated by a start-up transient and is not the cost of the steady state.
 
@@ -234,7 +230,7 @@ The bias falls as $1/n$ and the noise of the mean falls as $1/\sqrt{n}$, so a tr
 
 ## Many runs, one summary, one comparison
 
-*What this is for: a single run is a draw from a distribution. We choose what to report about the draws, use the standard error of Volume I to say how well we know it, and derive how many runs a given resolution costs.*
+A single run is a draw from a distribution, so we must choose what to report about the draws, say how well we know it with the standard error of Volume I, and derive how many runs a given resolution costs.
 
 With the warm-up gone, the remaining runs scatter because of noise that only lengthens them. The noise of Chapter 10 has an analytic mean and standard deviation, and the seeded sample agrees with them:
 
@@ -318,7 +314,7 @@ The best of $k$ approaches the floor (1.0002 at $k = 300$) while the typical run
 
 ## The per-kernel profile
 
-*What this is for: a pass is made of many dispatches, and "make it faster" needs to know which ones to look at. We build the table that divides the time among them and attaches the work, so that each row is a fraction of the roofline.*
+A pass is made of many dispatches, and "make it faster" needs to know which ones to look at. The table that divides the time among them and attaches the work to each makes every row a fraction of the roofline.
 
 Consider one layer of a transformer for 512 tokens, as a model of the kind of pass brain runs: ten dispatches in dependency order, four of them matrix products. For each dispatch the profile needs three things: the counted work (FLOPs and bytes by the rules of [Chapter 3](03-roofline.md)), its device time as the stamps read it, and the roofline time of the same work on the measured roofline. A **per-kernel profile** is the table of those for every dispatch or kernel kind of a pass: its counted FLOPs and bytes, its device time and its share of the pass, and the achieved fraction of the measured roofline, graded against the roof of its own class (bandwidth or compute). In the model pass, with the hidden efficiencies printed in the table's header, the replays' minima are:
 
@@ -365,7 +361,7 @@ The same ten times grouped by kernel kind, as brain's profiler groups them. The 
 
 The two ways to rank the rows disagree, and the disagreement is the point of the profile. Ranked by *fraction*, `attention` is the worst kernel of the pass (0.311). Ranked by *share*, it is second among the kinds, at 0.070 of the time, and the matrix products are 0.871 of the stamps' sum. A kernel that is far from its roofline and takes little time is not where the time is. The next sections turn that sentence into arithmetic.
 
-Two rules keep the table honest, and brain's profiler enforces both. A kind with no count of its work (no FLOP or byte formula) reports no fraction at all, not zero: dividing a partial count by a whole time reports a low rate that is false. And a fraction above 1 beyond noise is printed as an error and not as a percentage, for the reason that the problem of this chapter showed.
+Two rules keep the table honest, and brain's profiler enforces both. A kind with no count of its work (no FLOP or byte formula) reports no fraction at all, not zero: dividing a partial count by a whole time reports a low rate that is false. And a fraction above 1 beyond noise is printed as an error and not as a percentage, for the reason that the opening of this chapter showed.
 
 ### The trap: the rows do not add up to the pass
 
@@ -387,7 +383,7 @@ So the sum of per-kernel times can be larger or smaller than the pass, and it is
 
 ## The whole pass
 
-*What this is for: the number a user feels is the time from asking to having the result. We measure that number and judge a change by it, and show a change that improves a row and worsens the pass.*
+The number a user feels is the time from asking to having the result. We measure that number and judge a change by it, and then show a change that improves a row and worsens the pass.
 
 A **whole-pass measurement** is the time of the unit of work a user asks for (a layer, a forward pass, a generated image, a request), taken from the moment the request starts to the moment its result is available to the program, with every dispatch, every wait, every host-side step and every copy that the real use performs inside the bracket, and nothing else. It is measured with a synchronized clock around the entire unit, repeated and summarized as the previous sections describe. Per-kernel profiles come after it and explain it.
 
@@ -412,7 +408,7 @@ The pass is also where the host's work lives. If a pass includes sampling on the
 
 ## Amdahl's law
 
-*What this is for: a profile says where the time is. Amdahl's law says how much a pass can gain from improving one part, and so which row is worth attention.*
+A profile says where the time is, and does not say how much a pass can gain from improving one part, and so which row deserves attention. Amdahl's law does.
 
 Suppose a pass takes time $t_{\mathrm{pass}}$ and a part of it takes the share $p$ of that time (a number in $[0, 1]$, not a probability). We make that part $g$ times as fast, so its time falls from $p\,t_{\mathrm{pass}}$ to $p\,t_{\mathrm{pass}}/g$, and nothing else changes. The new pass takes
 
@@ -467,9 +463,7 @@ A word on what the law does not claim. Its derivation assumes the improved part 
 
 ## Other ways to lie
 
-*What this is for: five more ways a time goes wrong, each with a small seeded example, and the check that catches it or the check that cannot.*
-
-The model of the problem makes the lies cheap to demonstrate. Each row is a way of reading a time; the last column says whether the roofline test of [Chapter 3](03-roofline.md), "a fraction above 1.05 is a defect of the measurement", catches it.
+Five more ways for a time to go wrong are cheap to demonstrate on the model of the opening, each with a small seeded example and the check that catches it, or the observation that no check can. Each row is a way of reading a time; the last column says whether the roofline test of [Chapter 3](03-roofline.md), "a fraction above 1.05 is a defect of the measurement", catches it.
 
 <!-- worked: profiling.lies_catalogue -->
 A catalogue of the ways to read a wrong time, on the model of `profiling.enqueue_lie`. The kernel is the addition c = a + b on 2^26 floats (67,108,864 FLOPs, 805,306,368 bytes, hidden efficiency 0.85), except where the row says otherwise; each row is the median of 11 runs (the best of 100 in the last row). 'Removed' means the kernel body is gone, so the dispatch costs only t_dsp = 1 microsecond on the device; 'cached' costs 3 microseconds on the host (times (1 + 0.20 u)) and no dispatch; 'not yet warmed up' multiplies the work time by 1 / 0.4; the roof probed cold is the arithmetic roof times 0.4. The fraction is the roofline time of the row's own work over the time read; 'caught' means the fraction is above 1.05, the threshold at which brain's profiler prints an error instead of a percentage (Chapter 3). Generator: the book's SplitMix64, seed 0x46cde49cc64a4c0e (the seed of the name `profiling.lies`). Draw order: rows in the order of the table; a row of runs draws five uniforms per run (enqueue jitter, wait jitter, u0, u1, u2); the cached row draws one uniform per run; the best-of-100 row draws three per run (u0, u1, u2).
@@ -500,7 +494,7 @@ Four rows of the eight are caught by the roof test: the timer that never waited,
 
 ## Reporting speed as work
 
-*What this is for: the chapter's conclusion. It says what to write down, so that a number about speed means the same thing next year on other hardware.*
+The chapter's conclusion is what to write down, so that a number about speed means the same thing next year on other hardware.
 
 A time is a fact about a run: this program, this input, this device, this driver, this clock state, this day. It tells nothing about a different setup, and it ages with every change of driver and every update of the code around it. The hardware-independent statement of speed is the *work* the computation requires, which does not change with the machine, and the *fraction* of what the device can do that the run achieved, which has the machine divided out:
 
@@ -510,11 +504,11 @@ A time is a fact about a run: this program, this input, this device, this driver
 - the way the time was taken: which clock (device stamps or a bracket), the warm-up and how it was found, the statistic and $n$, and the standard error;
 - the setup, with a date, in case anyone needs the time itself.
 
-For the matrix product of the problem that reads: "$5.37 \times 10^9$ FLOPs and 30.4 million bytes; 0.555 of the roofline (34,469 (GFLOP/s), 646 (GB/s), measured on this unit), by device stamps, median of 11 runs after warm-up; model GPU unit of the book, November 2026." The 280.85 microseconds belong in that report only as the dated observation they are. A claim of the form "twice as fast" is a claim about two fractions or about two amounts of work, and a claim of the form "5.4 microseconds" with no work beside it cannot be checked at all, which is how the problem opened.
+For the matrix product of the opening table that reads: "$5.37 \times 10^9$ FLOPs and 30.4 million bytes; 0.555 of the roofline (34,469 (GFLOP/s), 646 (GB/s), measured on this unit), by device stamps, median of 11 runs after warm-up; model GPU unit of the book, November 2026." The 280.85 microseconds belong in that report only as the dated observation they are. A claim of the form "twice as fast" is a claim about two fractions or about two amounts of work, and a claim of the form "5.4 microseconds" with no work beside it cannot be checked at all, which is how this chapter opened.
 
 The same discipline has a name in brain's repository, and it is mechanical: a gate that fails any bare number beside a performance unit in documentation or in source commentary, unless a reviewer has signed it off with a stated reason. The next section describes what it enforces.
 
-### Making it work
+### Nine habits in one list
 
 - **Count first.** Write $N_{\mathrm{flop}}$ and $N_{\mathrm{byte}}$ and the roofline time before timing, and distrust a result above it. A fraction above 1 is the first thing to check, never a result.
 - **Bracket every timed region with a wait, or use the device's stamps.** State which.
@@ -526,7 +520,7 @@ The same discipline has a name in brain's repository, and it is mechanical: a ga
 - **Time what the user runs:** the sizes, the data, the caches and the clock state of the real use.
 - **Report work and fraction; write times as dated observations.**
 
-## Where this appears in brain
+## Profilers, the performance suite and the number gate in brain
 
 brain's performance code is in three places with three jobs. `crates/gpu-core/src/profile.rs` times kernels and passes on the device. `crates/perf` measures what a served engine delivers over time and compares runs. `crates/trace` records what a run did, as events. The first is this chapter's profile, the second its statistics and its refusal to compare what cannot be compared, the third a tool for finding where a run went when a table of times is not enough.
 
@@ -561,7 +555,7 @@ In August 2026, with the timing fixed, one kernel still reported the impossible 
 
 ## Check your understanding
 
-1. A student times 100 dispatches of one kernel in a loop, with the clock before the loop and after it, divides by 100, and reports 3.1 microseconds per dispatch for a kernel that moves 805 MB. Find the error, say which of the three timers of the problem it resembles, and say what to check first.
+1. A student times 100 dispatches of one kernel in a loop, with the clock before the loop and after it, divides by 100, and reports 3.1 microseconds per dispatch for a kernel that moves 805 MB. Find the error, say which of the three timers of the opening it resembles, and say what to check first.
 2. A kernel's device time is 4.5 microseconds. Using the model of this chapter, about what will a bracket with two waits read, and by what factor will it overstate the kernel? What would you do to measure a program of many such kernels?
 3. A warm-up of $\tau = 5$ runs is handled by discarding only run 0, the compile, and averaging the remaining 199. What bias remains, and why is "discard the first run" a poor rule?
 4. A profile's per-kernel device times sum to 4 milliseconds while the whole pass measured with a bracket is 3 milliseconds. Another pass has per-kernel times that sum to 2 milliseconds against a bracket of 3. Give the most likely cause of each, and say what to look at next.
@@ -569,6 +563,19 @@ In August 2026, with the timing fixed, one kernel still reported the impossible 
 6. Find the error: "I ran both variants 10 times. B's mean is 4 percent below A's, so B is faster." The relative standard deviation of one run is 0.14.
 7. A report says "the new kernel reaches 3.2 times the device's measured bandwidth." List, in order, the three things you check before believing or refuting it.
 8. Find the error: "A part takes 90 percent of the time, so making it 100 times as fast makes the whole 10 times as fast."
+
+## Summary
+
+A time is a number with a question attached, and most timings that lie answer a different question from the one asked. The clock must stop only after the device has finished, by waiting for it or by reading the device's own stamps; a clock stopped at the call's return reads the host's hand-over cost, a fraction of the roofline above 1 is the sign, and a bracket that waits adds a floor ($t_{\mathrm{enq}} + t_{\mathrm{wait}}$, about 45 microseconds in the model, 45.6 times a small kernel's own time) that stamps between the dispatches of one submission do not pay. The first runs belong to a transient, and a rule that asks for $k$ consecutive runs within a tolerance of the floor ends the warm-up (at run 20 on the seeded series): averaged in, it biases a mean like $23.09/n$, by 11.9 percent at $n = 200$. Repetition gives the standard error $s/\sqrt{n}$, a comparison is the difference over its standard error with $n = 8\,\mathrm{cv}^2/\delta^2$ runs for a gap $\delta$ (1,644 runs for 1 percent on the noise of Chapter 10) and four times as many for confidence, and the best of many runs is a number the device reaches rarely (7.1 percent flattering on this model). A per-kernel profile divides a pass by dispatch with counted FLOPs and bytes and a fraction of the measured roofline, and its sum is never the pass (it can be 44 microseconds short, or 356 over); the whole pass, bracketed around everything the user waits for, is the number a change is judged by, and a kernel 14.9 percent faster by its stamps made the pass 2.44 percent slower. Amdahl's law, $A = 1/((1 - p) + p/g)$, bounds the gain of a part by its share, with ceiling $1/(1 - p)$, and the roofline bounds the part's own factor by $1/\mathrm{frac}$: on the model layer "twice as fast products" gives 1.75 but the device allows 1.4213. The conclusion for the book and for the repository is one rule. State speed as the counted work and the achieved fraction of the device's measured roofline, with the way the time was taken, and keep every time as a dated observation of a stated setup.
+
+Measurement tells what is. The next chapter changes what the weights are: [Quantization](12-quantization.md) (the next chapter of this volume) stores a model in four bits per weight, so that the bytes of the roofline fall, and judges the result by the error it introduces and by the speed measured in the fashion of this chapter.
+
+## References
+
+- Gene M. Amdahl, "Validity of the single processor approach to achieving large scale computing capabilities", 1967.
+- Torsten Hoefler and Roberto Belli, "Scientific benchmarking of parallel computing systems: twelve ways to tell the masses when reporting performance results", 2015.
+- Todd Mytkowicz, Amer Diwan, Matthias Hauswirth and Peter F. Sweeney, "Producing wrong data without doing anything obviously wrong!", 2009.
+- Samuel Williams, Andrew Waterman and David Patterson, "Roofline: An Insightful Visual Performance Model for Multicore Architectures", 2009.
 
 ## Exercises
 
@@ -585,12 +592,6 @@ In August 2026, with the timing fixed, one kernel still reported the impossible 
 11. **[Investigate]** Read `print_top` in `crates/gpu-core/src/profile.rs` and list each guard that prevents one of the lies of this chapter (a rate above the roof, a rate over an incomplete count, a roof not measured for the kind, host-bracketed times that inflate small kernels). For each, say what the printed table would hide without it.
 12. **[Investigate]** Run `scripts/gates/check-no-perf-numbers.sh` on a page of your own that quotes a time, a rate and a speedup, then add the reviewed marker to one of them. State, for each of the three, whether the number should have been a counted quantity (work, a fraction) instead of a time.
 
-## Summary
-
-A time is a number with a question attached, and most timings that lie answer a different question from the one asked. The clock must stop only after the device has finished, by waiting for it or by reading the device's own stamps; a clock stopped at the call's return reads the host's hand-over cost, a fraction of the roofline above 1 is the sign, and a bracket that waits adds a floor ($t_{\mathrm{enq}} + t_{\mathrm{wait}}$, about 45 microseconds in the model, 45.6 times a small kernel's own time) that stamps between the dispatches of one submission do not pay. The first runs belong to a transient, and a rule that asks for $k$ consecutive runs within a tolerance of the floor ends the warm-up (at run 20 on the seeded series): averaged in, it biases a mean like $23.09/n$, by 11.9 percent at $n = 200$. Repetition gives the standard error $s/\sqrt{n}$, a comparison is the difference over its standard error with $n = 8\,\mathrm{cv}^2/\delta^2$ runs for a gap $\delta$ (1,644 runs for 1 percent on the noise of Chapter 10) and four times as many for confidence, and the best of many runs is a number the device reaches rarely (7.1 percent flattering on this model). A per-kernel profile divides a pass by dispatch with counted FLOPs and bytes and a fraction of the measured roofline, and its sum is never the pass (it can be 44 microseconds short, or 356 over); the whole pass, bracketed around everything the user waits for, is the number a change is judged by, and a kernel 14.9 percent faster by its stamps made the pass 2.44 percent slower. Amdahl's law, $A = 1/((1 - p) + p/g)$, bounds the gain of a part by its share, with ceiling $1/(1 - p)$, and the roofline bounds the part's own factor by $1/\mathrm{frac}$: on the model layer "twice as fast products" gives 1.75 but the device allows 1.4213. The conclusion for the book and for the repository is one rule. State speed as the counted work and the achieved fraction of the device's measured roofline, with the way the time was taken, and keep every time as a dated observation of a stated setup.
-
-Measurement tells what is. The next chapter changes what the weights are: [Quantization](12-quantization.md) (the next chapter of this volume) stores a model in four bits per weight, so that the bytes of the roofline fall, and judges the result by the error it introduces and by the speed measured in the fashion of this chapter.
-
 ## Key terms
 
 - **device-synchronized timing**: timing in which the clock stops only after the device has finished the work being timed, either by the host waiting for it or by reading timestamps the device wrote itself; a clock stopped when the call returns reads the host's cost of handing over the work. <!-- concept: device-synchronized-timing -->
@@ -601,7 +602,7 @@ Measurement tells what is. The next chapter changes what the weights are: [Quant
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. The host's cost of handing the dispatch over (building the request and queueing it), $t_{\mathrm{enq}}$. The call returns without waiting, so the kernel has barely started; the reading is nearly independent of the kernel.
 2. $t_{\mathrm{bound}} = 100 \times 10^6 / (800 \times 10^9) = 125$ microseconds, so the fraction is $125/200 = 0.625$.
@@ -620,10 +621,3 @@ Measurement tells what is. The next chapter changes what the weights are: [Quant
 6. $\mathrm{SE}_\Delta \approx 0.14\sqrt{2/10}\,\bar t = 0.063\,\bar t$, so a gap of 0.04 is 0.64 standard errors: far inside the noise and the order of the two means carries no information. About $8 \times 0.14^2/0.04^2 \approx 98$ runs of each variant would put it at two standard errors.
 7. First the timer: a clock stopped at the call's return or without a wait before it reads the host's cost, so a fraction above 1 almost always means "the device had not finished". Then the work: whether the byte count is the bytes the device actually had to move (a cache can serve a small working set above the main-memory bandwidth) and whether the result was used so that nothing was removed. Then the roof: whether the measured bandwidth was itself measured on a warmed-up device with a probe that streams past the caches.
 8. Amdahl's law gives $A(0.9, 100) = 1/(0.1 + 0.009) = 9.17$, not 10: 10 is the ceiling at infinite speedup and is never reached, and the roofline of the part will stop $g$ well short of 100 for most kernels.
-
-## References
-
-- Gene M. Amdahl, "Validity of the single processor approach to achieving large scale computing capabilities", 1967.
-- Torsten Hoefler and Roberto Belli, "Scientific benchmarking of parallel computing systems: twelve ways to tell the masses when reporting performance results", 2015.
-- Todd Mytkowicz, Amer Diwan, Matthias Hauswirth and Peter F. Sweeney, "Producing wrong data without doing anything obviously wrong!", 2009.
-- Samuel Williams, Andrew Waterman and David Patterson, "Roofline: An Insightful Visual Performance Model for Multicore Architectures", 2009.

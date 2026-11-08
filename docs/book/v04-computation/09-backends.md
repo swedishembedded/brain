@@ -5,8 +5,6 @@
 
 *How can one set of kernels run on CPUs, Vulkan GPUs and CUDA GPUs with the same results?*
 
-## The problem
-
 Take the kernel of Chapter 5, $y_g = 2 x_g + 1$ over ten numbers, written once as a WGSL text. Three machines are to run it: a GPU that is driven through Vulkan, a GPU that is driven through CUDA, and the cores of a CPU. They do not accept the same program. The Vulkan driver takes a binary intermediate form of the kernel and compiles it for its own chip. The CUDA toolchain takes C++ text with its own names for the indices (`blockIdx`, `threadIdx`) and compiles that. A CPU has no launch at all: it needs loops. So the one text has to be turned into three different programs, and the three programs must put the same ten numbers in $y$.
 
 Here is the source, the CUDA text a translator produces from it, the loop nest that a CPU compiler produces from it, a line-by-line map between them and the result of running each form on the book's models of the three devices. The uniform block is the list of 32-bit words that travels to every device ($n$, then the bit patterns of the two floats), and the invocations of the first model run in a seeded shuffled order because the kernel may not depend on the order:
@@ -84,9 +82,7 @@ Read the map before the listings. The line `if (g >= p.n) { return; }` stays a g
 
 Three programs from one text raise four questions, and the chapter takes them in order. What does the code above the devices see, so that it never has to know which one it runs on (the **backend abstraction**)? What must a translation preserve, and where do translations break (**shader translation**)? When is the translation compiled to machine code, at the moment the program starts or before it ships (**JIT** and **ahead-of-time compilation**)? And what does it mean that the three devices give "the same results", given that floating-point arithmetic is not associative and a fused multiply-add rounds once where two operations round twice (**cross-backend parity**)?
 
-## Before you begin
-
-Answer from memory; the answers are at the end of the chapter.
+The comparisons ahead lean on six earlier ideas, some of which the first example already uses. Bring them back from memory; the answers are at the end of the chapter.
 
 1. (Volume IV, Chapter 5, the guard.) A kernel is launched over $N = 10$ elements with workgroups of 4 invocations. How many invocations run, and what does the guard `if g >= N: return` do for them?
 2. (Volume IV, Chapter 5, the barrier rule.) When is a `return` before a `barrier` legal, and what happens to the others when it is not?
@@ -97,9 +93,7 @@ Answer from memory; the answers are at the end of the chapter.
 
 ## One interface, one kernel set
 
-*What this is for: the code that builds a model must not change when the device does. We say which operations a device must offer, what a program may ask a device about itself, and why the kernels are written once.*
-
-A **backend** is a program that provides the host operations of Chapter 5 for one kind of device. The code above it, the model, uses nothing else. The set of operations and the meaning the model may rely on is the **backend abstraction**. In the pseudocode of the book (`docs/book/pseudocode.md`) the contract is this list of signatures:
+The code that builds a model must not change when the device does, so the first thing to settle is what a device has to offer and what a program may ask it about itself. A **backend** is a program that provides the host operations of Chapter 5 for one kind of device. The code above it, the model, uses nothing else. The set of operations and the meaning the model may rely on is the **backend abstraction**. In the pseudocode of the book (`docs/book/pseudocode.md`) the contract is this list of signatures:
 
 ```text
 interface Backend:
@@ -138,7 +132,7 @@ The number of comparisons does not shrink: two devices must still agree on every
 
 ## Shader translation: what must survive
 
-*What this is for: a translator is a compiler from one kernel language to another, and a compiler is correct when the program it produces does what the source says. We list what a kernel language says, because most of it is not in the syntax.*
+A translator is a compiler from one kernel language to another, and a compiler is correct when the program it produces does what the source says. What a kernel language says is mostly not in its syntax, so we begin by listing it.
 
 **Shader translation** is rewriting a kernel from the language it is written in into the form a device accepts, in such a way that the translated program computes what the source program computes for every input on which the source says what that is. The last clause is the hard one. A kernel language is a contract with its programmers, and the contract contains promises that are never written into a kernel because the kernel relies on them. A translator is correct only if it keeps the promises that a target does not make by itself:
 
@@ -195,9 +189,9 @@ Notice what the table says about where bugs live. The promises are the ones the 
 
 ## The CPU: a workgroup becomes loops
 
-*What this is for: a CPU has no thousands of lanes and no launch. We derive the loop nest from the kernel, add the barrier, and find the three things the loops must do by hand.*
+A CPU has no thousands of lanes and no launch, so the translator's job there is to derive a loop nest from the kernel, add the barrier, and find the three things the loops must do by hand.
 
-The listing of the first section already holds the whole idea for a kernel without a barrier: the workgroups are an outer loop, the invocations of a workgroup an inner loop, and the body is the body. Since workgroups may run in any order, the outer loop is the one a CPU shares out among its cores, each core taking a range of workgroups, and nothing synchronizes them.
+The listing of the opening already holds the whole idea for a kernel without a barrier: the workgroups are an outer loop, the invocations of a workgroup an inner loop, and the body is the body. Since workgroups may run in any order, the outer loop is the one a CPU shares out among its cores, each core taking a range of workgroups, and nothing synchronizes them.
 
 A barrier changes this. Chapter 5 defined it as a rendezvous: every invocation of the workgroup has finished the statements before it before any invocation starts the statements after it. A CPU core runs one invocation at a time, so the rendezvous is built by splitting the body at the barrier into two phases and giving each phase its own loop over the invocations. Loop 1 runs the code before the barrier for $l = 0, 1, 2, 3$; when it ends, every invocation has finished it, which is the barrier; loop 2 then runs the code after. This is exactly what the simulator of Chapter 5 did when it ran "a phase for every invocation of a workgroup before it started the next"; the simulator was the transformation, and a CPU compiler emits it as machine code instead of running it as a program. The figure shows one workgroup of the kernel below, as the GPU runs it and as the CPU compiles it:
 
@@ -263,7 +257,7 @@ The loops also fix a limit, which the interface reports through `capabilities().
 
 ## Reaching a GPU: text, IR and a driver
 
-*What this is for: on a GPU the translation is done by someone else's compiler. We follow the path of the source to see what the engine controls.*
+On a GPU the last steps of the translation are done by someone else's compiler, so the useful question is how much of the path the engine still controls. We follow the source along it.
 
 On a Vulkan-style device the first stages of the path are shared. A **front end** parses the WGSL, checks it (types, address spaces, rules of control flow) and produces one internal form. A **back end** writes that form in the language the platform wants: SPIR-V words for Vulkan, other languages for other platforms. The GPU driver then compiles those words for the chip, at the moment the program asks for a pipeline. On a CUDA device the same internal form is written as C++ text by the translator of the previous sections, and NVRTC, a compiler that ships with the CUDA toolkit, turns the text into machine code (a *cubin*) for the architecture of the device, again at run time. On a CPU the internal form goes to a code generator and then to the machine code of the cores, in memory, at start. The figure shows the three paths with their stages:
 
@@ -274,7 +268,7 @@ Two facts about this path matter for the rest of the chapter. First, every stage
 
 ## Compiling at start and compiling before
 
-*What this is for: translating and compiling cost work, and the work is paid somewhere. We separate the two designs, count what each pays and when, and say what a cache must be keyed on.*
+Translating and compiling cost work, and the work is paid somewhere: the two designs below differ in where, and a cache decides how often.
 
 **JIT compilation** (just-in-time) compiles a kernel from its source at the moment a program needs it, on the machine that will run it. Its strength is that it compiles for whatever is actually present: the architecture the device reports, the compiler version installed, the flags in force. Its price is that the work of the compiler is paid on that machine, at start, and that the machine must carry the compiler. **Ahead-of-time compilation** (AOT) compiles for a list of known architectures before the program is shipped and stores the results with a key that identifies exactly what they were built from. At start a program only loads: it needs the driver and no compiler. Its price is size (one image per kernel per architecture) and coverage (a device that is not in the list has no image).
 
@@ -351,7 +345,7 @@ The two lanes cover different devices. The older lane serves every capability fr
 
 ## Same results: what "same" can mean
 
-*What this is for: three devices that compute the same function in float32 do not, in general, return the same bits. We say what a test may demand, show the three reasons the bits differ, and derive the tolerance from the arithmetic instead of choosing one.*
+Three devices that compute the same function in float32 do not, in general, return the same bits, so a test has to say what it demands, and the tolerance has to come from the arithmetic and not from a guess.
 
 **Cross-backend parity** is the property that every backend computes, for the same inputs, results that agree to a stated criterion. There are three criteria, in order of strength.
 
@@ -475,7 +469,7 @@ Three modelled arithmetic profiles on the same seeded inputs. Generator: the boo
 
 The pattern of the cells is the lesson. The transpose and the four-slot sum are bit-identical on every profile, because the first has no arithmetic and the second only additions in a fixed order: for such kernels bit-identity is the right criterion, and a tolerance would only hide a defect. The kernels that have a multiply followed by an add differ on a large fraction of their outputs under contraction (1,560 of 4,096 for $a x + b$, 35 of 64 dot products) by at most $2\,u S$ (1.99 and 0.63 in the table), which the bound for two roundings predicts; the largest differences measured in float32 steps (72 and 192) look alarming and are not, because the results nearly cancel and the step of a small number is small, which is why the units of a tolerance are $u S$ and not ulps. And the $\exp$ kernel differs in most of its outputs, by at most about $8u$ over $|x| < 8$.
 
-## Where this appears in brain
+## The backend seam, the two compilers and the parity tests in brain's crates
 
 **The seam.** `crates/backend-api/src/lib.rs` holds the contract. Its `Backend` trait is the interface of this chapter: allocate (`storage`, `buffer`, `storage_init`, `uniform_dynamic`), upload (`write`, `write_at`), record a dispatch (`step`, `step_sliced`, `step_buf`; a kernel is named by its index in the list given at construction), run it (`submit`), `read` (which blocks), `poll_wait`, and `caps`, with a `kind()` name (`"wgpu"`, `"cpu"`, `"vulkan"`, `"cuda"`) for diagnostics. Handles are opaque: `DeviceBuffer` and `Step` wrap `Arc<dyn Any>` and each backend downcasts its own. A backend registers a factory by name (`register_backend`, `create_backend`), which is what makes a new backend a crate that depends on `backend-api` and nothing else. Commit 7c8c97045 (July 2026) introduced the seam, moving the wgpu, CPU and Vulkan backends into crates of their own behind a facade, with the existing public API unchanged. It introduced a second contract for whole-graph accelerators too, which the crate's header now records as deleted: it was never object-safe, had one implementation and one call site, and could not express named multi-tensor input, so an interface with one user was not worth keeping. The record `DeviceCaps` carries what a selector needs (`max_workgroup_size`, `workgroup_mem_bytes`, `subgroup_size` as an `Option`, `workgroup_reductions`, and `peak_gflops` and `peak_bandwidth_gbs`, which are filled by measurement and stay `None` until something measures them). Its documentation states the rule of this chapter: an unknown capability is never assumed present, and `workgroup_reductions` is "a correctness gate, not a tuning preference". Knowledge #105 records that the selection policy reads `DeviceCaps` and never a backend name; its lesson is the other half of the abstraction, that two kernels a capability chooses between are interchangeable only if they read the same parameters, and a kernel-by-kernel comparison cannot see a model that registered the wrong pair.
 
@@ -502,6 +496,17 @@ The compiler's story of locals is the cautionary tale. Commit 9b9c9c003 (August 
 7. Why may an AOT key leave out the compiler version while a JIT key may not, and why must both contain the flags?
 8. Find the error: "Our tolerance is $k_{\mathrm{rd}} u S/(1 - k_{\mathrm{rd}} u)$ for the left fold, $n = 4{,}096$, so a test at that tolerance proves a backend that folds is correct."
 
+## Summary
+
+One kernel source reaches three kinds of device as three different programs: SPIR-V compiled by a driver, CUDA C++ compiled by NVRTC (or loaded as a cubin built beforehand), and a loop nest in machine code, and the model above them sees only a narrow **backend abstraction**: capabilities, compile, buffers, upload, dispatch, read-back, release, with opaque handles, an ordered queue, a read that waits, and capabilities in which an unknown value forbids the feature. Keeping one kernel set turns $K D$ files into $K + D$ artifacts without removing any comparison. **Shader translation** is correct when it keeps the promises that a target does not make by itself: clamped indices, wrapping integers, a chosen shift rule, rounding to nearest with no contraction, barriers that every invocation reaches, a return that is permanent, zeroed workgroup memory and the WGSL byte layout. On a CPU a workgroup becomes two loops split at the barrier (the simulator of Chapter 5 is this transformation), and the loops must clear the shared array per workgroup, carry a return across the split in a mask and promote locals that cross the barrier. **JIT compilation** pays the compiler on the machine at start (120,000,000 steps for a whole catalogue of the model against 14,400,000 for the 12 kernels a run uses) under a key that covers every input that can change the code; **ahead-of-time compilation** pays it before shipping, runs where no compiler is present, and trades 2,100,000 to 3,900,000 bytes and a coverage that depends on the architectures built.
+
+**Cross-backend parity** means bit-identity where the kernel fixes every rounding and order, and otherwise a tolerance derived from the number of roundings $k_{\mathrm{rd}}$ and the size of the terms $S$, never chosen from what passes: a fixed $10^{-6}$ flagged correct devices on 24 of 40 seeded vectors, a loose $10^{-3} S$ missed a dropped term on every vector at 4,096 terms, and the derived tolerance of the tree did neither. The bits differ for three reasons, contraction, order and library functions, and the parity matrix shows which kernels escape them. All of this assumes the devices compute the same function; what it leaves open is which of several correct kernels to run on a device nobody tuned for, since they all agree and differ only in work. That is the question of the next chapter.
+
+## References
+
+- Nicholas J. Higham, "The accuracy of floating point summation", 1993.
+- Nicholas J. Higham, "Accuracy and Stability of Numerical Algorithms", 2002.
+
 ## Exercises
 
 1. **[Calculate]** A program registers $N_{\mathrm{ker}} = 250$ kernels and dispatches $N_{\mathrm{used}} = 20$; $s_{\mathrm{src}} = 3{,}000$ bytes, $s_{\mathrm{img}} = 8{,}000$ bytes, a portable form of 4,000 bytes, $c_{\mathrm{cmp}} = 400$ steps per byte. Find the compiler steps of the eager start with an empty cache and of the lazy start with an empty cache, the bytes read by the lazy warm start and by the AOT start, and the disk size of an AOT directory with 6 architectures and one with 3.
@@ -517,12 +522,6 @@ The compiler's story of locals is the cautionary tale. Commit 9b9c9c003 (August 
 11. **[Investigate]** Compile a kernel with $a b + c$ on your toolchain at its default flags and at the flags that forbid contraction, and read the generated instructions. Report whether your default contracts, and run the seeded triples of `backends.fma_example` on your device to find the first triple on which the results differ.
 12. **[Investigate]** Run a kernel of your own on two backends you have (two devices, or a device and a CPU path), derive the tolerance from its error bound as in this chapter, report the largest difference in units of $u S$ and whether it is within the tolerance, and then remove one mechanism (the guard, a clamp) and show that your test fails.
 
-## Summary
-
-One kernel source reaches three kinds of device as three different programs: SPIR-V compiled by a driver, CUDA C++ compiled by NVRTC (or loaded as a cubin built beforehand), and a loop nest in machine code, and the model above them sees only a narrow **backend abstraction**: capabilities, compile, buffers, upload, dispatch, read-back, release, with opaque handles, an ordered queue, a read that waits, and capabilities in which an unknown value forbids the feature. Keeping one kernel set turns $K D$ files into $K + D$ artifacts without removing any comparison. **Shader translation** is correct when it keeps the promises that a target does not make by itself: clamped indices, wrapping integers, a chosen shift rule, rounding to nearest with no contraction, barriers that every invocation reaches, a return that is permanent, zeroed workgroup memory and the WGSL byte layout. On a CPU a workgroup becomes two loops split at the barrier (the simulator of Chapter 5 is this transformation), and the loops must clear the shared array per workgroup, carry a return across the split in a mask and promote locals that cross the barrier. **JIT compilation** pays the compiler on the machine at start (120,000,000 steps for a whole catalogue of the model against 14,400,000 for the 12 kernels a run uses) under a key that covers every input that can change the code; **ahead-of-time compilation** pays it before shipping, runs where no compiler is present, and trades 2,100,000 to 3,900,000 bytes and a coverage that depends on the architectures built.
-
-**Cross-backend parity** means bit-identity where the kernel fixes every rounding and order, and otherwise a tolerance derived from the number of roundings $k_{\mathrm{rd}}$ and the size of the terms $S$, never chosen from what passes: a fixed $10^{-6}$ flagged correct devices on 24 of 40 seeded vectors, a loose $10^{-3} S$ missed a dropped term on every vector at 4,096 terms, and the derived tolerance of the tree did neither. The bits differ for three reasons, contraction, order and library functions, and the parity matrix shows which kernels escape them. All of this assumes the devices compute the same function; what it leaves open is which of several correct kernels to run on a device nobody tuned for, since they all agree and differ only in work. That is the question of the next chapter.
-
 ## Key terms
 
 - **backend abstraction**: the narrow set of operations (capabilities, compile, create a buffer, upload, dispatch, read back, release) that every device-specific backend provides with the same meaning, so that the code that builds a model never names the device that runs it. <!-- concept: backend-abstraction -->
@@ -533,7 +532,7 @@ One kernel source reaches three kinds of device as three different programs: SPI
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $3 \cdot 4 = 12$ invocations. The two with $g = 10$ and $11$ have no element; the guard makes them return before they read or write.
 2. When every invocation of the workgroup takes it, so none is left to arrive. If some return and others reach the barrier, the others wait for invocations that never come and the result is undefined.
@@ -552,8 +551,3 @@ One kernel source reaches three kinds of device as three different programs: SPI
 6. Not unless the order is the same: launch shapes change the order of the additions (Chapter 7's three shapes gave +2, +3 and -3 steps), so the bits differ. To demand bit-identity the shape must be fixed by the data size alone (as brain's gradient-norm kernel does), or the test must use the tolerance of the program.
 7. An AOT image is loaded where no compiler exists, so the version cannot be asked for and is recorded beside the image; a JIT key is formed where the compiler is, and a different compiler can emit different code. Both need the flags because `--fmad=false` against `--fmad=true` changes the rounding and so the numbers.
 8. A test at that tolerance only proves that no result is wrong by more than the bound. At $n = 4{,}096$ the bound is 4,100 $u S$, about 0.25, as large as a dropped term, and the table shows 22 of 40 defective results passing. The test shows the arithmetic is within the worst case, not that it is correct; fixing the order allows the tighter bound.
-
-## References
-
-- Nicholas J. Higham, "The accuracy of floating point summation", 1993.
-- Nicholas J. Higham, "Accuracy and Stability of Numerical Algorithms", 2002.
