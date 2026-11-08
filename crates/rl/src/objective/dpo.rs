@@ -85,7 +85,7 @@ use std::collections::VecDeque;
 
 use data::rng::Rng;
 use model::rollout::Completion;
-use model::{Batch, Model, Objective, IGNORE};
+use model::{Batch, Model, Objective, StepVerdict, IGNORE};
 use model::training::Unsupported;
 
 /// One verifier-derived preference pair for a single prompt: `chosen` is a
@@ -390,6 +390,8 @@ pub struct Dpo {
     cfg: DpoConfig,
     source: Source,
     last_margin: f32,
+    /// Pairs trained since the last [`Objective::step_verdict`]: a step with none changes nothing.
+    trained: u32,
 }
 
 /// Where a [`Dpo`]'s pairs and their reference come from.
@@ -412,7 +414,7 @@ impl Dpo {
         S: FnMut(&mut Rng) -> Option<DpoPair> + 'static,
         R: Fn(&DpoPair) -> (Vec<f32>, Vec<f32>) + 'static,
     {
-        Dpo { cfg, source: Source::Stream { next: Box::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0 }
+        Dpo { cfg, source: Source::Stream { next: Box::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0 }
     }
 
     /// A fixed preference dataset (see the module doc): each micro-step
@@ -422,7 +424,7 @@ impl Dpo {
     pub fn from_dataset(cfg: DpoConfig, pairs: Vec<PackedPair>) -> Dpo {
         assert!(!pairs.is_empty(), "Dpo::from_dataset: need at least one pair");
         assert!(pairs.iter().all(|p| p.seq_len() == cfg.seq_len), "Dpo::from_dataset: every pair must be packed at seq_len {}", cfg.seq_len);
-        Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0 }
+        Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0, trained: 0 }
     }
 
     /// Convenience over [`Self::new`]: a fixed, cycling dataset of
@@ -487,9 +489,19 @@ impl<M: Model> Objective<M> for Dpo {
             }
         };
         self.last_margin = margin;
+        self.trained += 1;
         // One ordinary backward, weighted by the pair's term.
         model.backward();
         term.loss
+    }
+
+    /// An optimiser step with no trained pair holds no gradient: applying it would
+    /// still decay the weights, advance the moments and the bias-correction step.
+    fn step_verdict(&mut self) -> StepVerdict {
+        match std::mem::take(&mut self.trained) {
+            0 => StepVerdict::Skip("no preference pair this step".into()),
+            _ => StepVerdict::Apply,
+        }
     }
 
     fn metrics(&self) -> Vec<(&'static str, f32)> {

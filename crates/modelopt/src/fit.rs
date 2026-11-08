@@ -22,7 +22,7 @@ fn lm(owned: &[(Vec<u32>, Vec<u32>)]) -> Vec<Batch<'_>> {
 
 /// A report for a visit that trained nothing.
 fn no_steps(loss: f64) -> FitReport {
-    FitReport { initial_loss: loss as f32, final_loss: None, steps_completed: 0, resumed_at: None, interrupted: false, evaluations: Vec::new(), kept_best: None, stopped_early: false }
+    FitReport { initial_loss: loss as f32, final_loss: None, steps_completed: 0, resumed_at: None, interrupted: false, evaluations: Vec::new(), kept_best: None, stopped_early: false, applied_steps: 0 }
 }
 
 /// [`search_weights`] over the model a trainer builds, on the prepared

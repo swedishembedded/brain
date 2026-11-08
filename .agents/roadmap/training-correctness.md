@@ -18,8 +18,8 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [ ] T003 P0 - crates/rl/src/objective/grpo.rs (RatioBasis::Trainer) - stale rollouts: behaviour policy identity; two-policy ratio test
 - [ ] T004 P0 - crates/rl/src/objective/grpo.rs (top-k/top-p old_lp) - exact truncated likelihood or refuse; truncated-sampling test
 - [ ] T005 P0 - crates/rl/src/objective/grpo_term.rs (capped log-ratio / k3) - forward and backward agree; FP64 reference + finite differences
-- [ ] T006 P0 - crates/rl/src/objective/dpo.rs (empty step) - empty step changes no weights, moments or step count
-- [ ] T007 P0 - crates/rl/src/objective/distill.rs (empty step) - same as T006 for distillation
+- [x] T006 P0 - crates/rl/src/objective/dpo.rs (empty step) - empty step changes no weights, moments or step count
+- [x] T007 P0 - crates/rl/src/objective/distill.rs (empty step) - same as T006 for distillation
 - [ ] T008 P0 - crates/model/src/train.rs (fit_controlled) - transactional update gate in the shared loop; strict mode; NaN injection test
 - [ ] T009 P1 - crates/rl/src/objective/distill.rs - one normalisation convention; dense-softmax mean-KL oracle, unequal lengths
 - [ ] T010 P1 - crates/rl/src/objective/dpo.rs (pack_row) - streaming DPO refuses truncation

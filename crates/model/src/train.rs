@@ -1386,6 +1386,10 @@ pub struct FitReport {
     /// True when the held-out loss had not improved for
     /// [`FitOpts::patience`] evaluations and the run stopped there.
     pub stopped_early: bool,
+    /// Optimiser steps that were applied in the whole run, resumed ones included. A step the
+    /// objective skipped (nothing to learn from, non-finite values) is a completed step but not
+    /// an applied one: it changed no weights and no moments.
+    pub applied_steps: u32,
 }
 
 /// The format tag of an exact-resume state file.
@@ -2046,7 +2050,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         );
     }
     let kept_best = kept_best.then(|| selection.best_step.map(|step| KeptBest { step, eval_loss: selection.watch.best() })).flatten();
-    let report = FitReport { initial_loss: initial, final_loss: last_train, steps_completed: completed, resumed_at, interrupted, evaluations: selection.evaluations, kept_best, stopped_early };
+    let report = FitReport { initial_loss: initial, final_loss: last_train, steps_completed: completed, resumed_at, interrupted, evaluations: selection.evaluations, kept_best, stopped_early, applied_steps: applied };
     Ok((report, model))
 }
 

@@ -155,7 +155,7 @@ impl ModelFit for TeacherFit<'_> {
         if self.examples.is_empty() {
             return Err(std::io::Error::other("the prepared dataset has no supervised record to distill"));
         }
-        let report = FitReport { initial_loss: 0.0, final_loss: None, steps_completed: 0, resumed_at: None, interrupted: false, evaluations: Vec::new(), kept_best: None, stopped_early: false };
+        let report = FitReport { initial_loss: 0.0, final_loss: None, steps_completed: 0, resumed_at: None, interrupted: false, evaluations: Vec::new(), kept_best: None, stopped_early: false, applied_steps: 0 };
         Ok((report, model))
     }
 }

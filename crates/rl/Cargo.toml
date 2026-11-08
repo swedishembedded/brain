@@ -124,6 +124,11 @@ path = "tests/dpo_objective.rs"
 required-features = ["qwen3"]
 
 [[test]]
+name = "empty_steps"
+path = "tests/empty_steps.rs"
+required-features = ["qwen3"]
+
+[[test]]
 name = "distill_gradcheck"
 path = "tests/distill_gradcheck.rs"
 required-features = ["qwen3"]

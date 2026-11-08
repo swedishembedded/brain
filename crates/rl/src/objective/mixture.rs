@@ -26,7 +26,7 @@
 
 use data::loader::{BatchConfig, TokenDataset};
 use data::rng::Rng;
-use model::{Batch, Model, Objective, IGNORE};
+use model::{Batch, Model, Objective, StepVerdict, IGNORE};
 use model::training::Unsupported;
 
 /// i32 targets from the loader (`-1` = ignore) reinterpreted as the model's
@@ -126,6 +126,8 @@ pub fn draw_arm(weights: &[f32], rng: &mut Rng) -> usize {
 pub struct Mixture<M: Model> {
     weights: Vec<f32>,
     arms: Vec<Box<dyn Objective<M>>>,
+    /// Whether each arm took a micro-step since the last [`Objective::step_verdict`].
+    drawn: Vec<bool>,
 }
 
 impl<M: Model> Mixture<M> {
@@ -136,7 +138,8 @@ impl<M: Model> Mixture<M> {
         assert!(!arms.is_empty(), "Mixture needs at least one arm");
         let (weights, arms): (Vec<f32>, Vec<Box<dyn Objective<M>>>) = arms.into_iter().unzip();
         assert!(weights.iter().all(|&w| w > 0.0), "Mixture arm probabilities must be > 0");
-        Mixture { weights, arms }
+        let drawn = vec![false; arms.len()];
+        Mixture { weights, arms, drawn }
     }
 }
 
@@ -154,7 +157,30 @@ impl<M: Model> Objective<M> for Mixture<M> {
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
         let idx = draw_arm(&self.weights, rng);
+        self.drawn[idx] = true;
         self.arms[idx].micro_step(model, rng)
+    }
+
+    /// The step may be taken when any arm that ran this step asks for it; it is aborted when
+    /// any of them does, and skipped (with every reason) when none applies.
+    fn step_verdict(&mut self) -> StepVerdict {
+        let mut apply = false;
+        let mut reasons = Vec::new();
+        for (arm, drawn) in self.arms.iter_mut().zip(self.drawn.iter_mut()) {
+            if !std::mem::take(drawn) {
+                continue;
+            }
+            match arm.step_verdict() {
+                StepVerdict::Apply => apply = true,
+                StepVerdict::Skip(why) => reasons.push(why),
+                abort @ StepVerdict::Abort(_) => return abort,
+            }
+        }
+        if apply {
+            StepVerdict::Apply
+        } else {
+            StepVerdict::Skip(reasons.join("; "))
+        }
     }
 
     fn eval(&mut self, model: &M, rng: &mut Rng, batches: u32) -> Option<f32> {

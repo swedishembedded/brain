@@ -71,7 +71,7 @@
 use std::collections::VecDeque;
 
 use data::rng::Rng;
-use model::{Batch, Model, Objective, IGNORE};
+use model::{Batch, Model, Objective, StepVerdict, IGNORE};
 use model::training::Unsupported;
 
 /// One position's top-K teacher distribution: `ids[k]`/`probs[k]` pairs,
@@ -231,6 +231,8 @@ pub struct DistillTopK {
     source: ExampleSource,
     pending: VecDeque<PackedExample>,
     last_loss: f32,
+    /// Teacher-scored passes run since the last [`Objective::step_verdict`]: a step with none changes nothing.
+    passes: u32,
 }
 
 impl DistillTopK {
@@ -240,7 +242,7 @@ impl DistillTopK {
     where
         S: FnMut(&mut Rng) -> Option<DistillExample> + 'static,
     {
-        DistillTopK { cfg, source: Box::new(source), pending: VecDeque::new(), last_loss: 0.0 }
+        DistillTopK { cfg, source: Box::new(source), pending: VecDeque::new(), last_loss: 0.0, passes: 0 }
     }
 
     /// Convenience over [`Self::new`]: a fixed, cycling dataset of
@@ -289,12 +291,22 @@ impl<M: Model> Objective<M> for DistillTopK {
             model.set_batch(Batch::LmWeighted { tokens: &packed.tokens, targets: &targets, weights: &weights });
             total += model.forward();
             model.backward();
+            self.passes += 1;
         }
 
         let entropy: f32 = packed.teacher.iter().map(neg_entropy).sum();
         let active = packed.teacher.iter().filter(|t| !t.ids.is_empty()).count().max(1) as f32;
         self.last_loss = (total + entropy) / active;
         self.last_loss
+    }
+
+    /// An optimiser step with no teacher-scored position holds no gradient: applying it
+    /// would still decay the weights, advance the moments and the bias-correction step.
+    fn step_verdict(&mut self) -> StepVerdict {
+        match std::mem::take(&mut self.passes) {
+            0 => StepVerdict::Skip("no teacher-scored position this step".into()),
+            _ => StepVerdict::Apply,
+        }
     }
 
     fn metrics(&self) -> Vec<(&'static str, f32)> {

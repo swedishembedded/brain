@@ -57,7 +57,7 @@ impl ModelFit for ManifestCovers {
         for (name, _) in model.prunable_dims().iter().flat_map(|d| &d.slices) {
             assert!(searched.contains(&name.as_str()), "{name} is prunable but not in the search's manifest");
         }
-        let report = FitReport { initial_loss: 0.0, final_loss: None, steps_completed: 0, resumed_at: None, interrupted: false, evaluations: Vec::new(), kept_best: None, stopped_early: false };
+        let report = FitReport { initial_loss: 0.0, final_loss: None, steps_completed: 0, resumed_at: None, interrupted: false, evaluations: Vec::new(), kept_best: None, stopped_early: false, applied_steps: 0 };
         Ok((report, model))
     }
 }
@@ -82,7 +82,7 @@ impl ModelFit for HeldOut<'_> {
             count += n;
         }
         self.loss = Some(sum / count);
-        let report = FitReport { initial_loss: 0.0, final_loss: None, steps_completed: 0, resumed_at: None, interrupted: false, evaluations: Vec::new(), kept_best: None, stopped_early: false };
+        let report = FitReport { initial_loss: 0.0, final_loss: None, steps_completed: 0, resumed_at: None, interrupted: false, evaluations: Vec::new(), kept_best: None, stopped_early: false, applied_steps: 0 };
         Ok((report, model))
     }
 }
