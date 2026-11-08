@@ -12,7 +12,7 @@ use residency::{Device, Executor, Policy};
 use serde_json::{json, Value};
 use trainjob::{ArtifactStore, Digest, TrainConfig};
 
-use crate::fixture::{qwen35_model_dir, TempDir};
+use crate::fixture::{qwen35_model_dir, qwen3_model_dir_of, TempDir};
 
 /// (prompt, answer, advantage): two actions of well-rewarded rollouts and two of badly rewarded ones.
 const ROLLOUTS: [(&str, &str, f64); 4] = [("cab", "bad", 1.0), ("fed", "dad", 1.0), ("ace", "cab", -1.0), ("bag", "egg", -1.0)];
@@ -33,11 +33,20 @@ pub fn rig(tag: &str, memory: u64, store: bool) -> Rig {
 
 /// [`rig`] on a host whose largest card holds `card` bytes (when it has one), serving `extra` beside the training workload.
 pub fn rig_with(tag: &str, memory: u64, store: bool, card: Option<u64>, extra: Vec<Arc<dyn residency::ResidentModel>>) -> Rig {
+    rig_over(tag, memory, store, card, extra, qwen35_model_dir(&format!("{tag}-base")))
+}
+
+/// [`rig`] holding a toy `qwen3` base as `local/toy`.
+pub fn rig_qwen3(tag: &str, memory: u64) -> Rig {
+    rig_over(tag, memory, true, None, Vec::new(), qwen3_model_dir_of(&format!("{tag}-base"), qwen3::QwenConfig::tiny()))
+}
+
+/// A server whose store holds `made` (a model directory) as `local/toy`.
+fn rig_over(tag: &str, memory: u64, store: bool, card: Option<u64>, extra: Vec<Arc<dyn residency::ResidentModel>>, made: TempDir) -> Rig {
     let dir = TempDir::new(tag);
     let models = dir.join("models");
     let base = models.join("local").join("toy");
     std::fs::create_dir_all(&base).unwrap();
-    let made = qwen35_model_dir(&format!("{tag}-base"));
     std::fs::rename(made.join("model.safetensors"), base.join("model.brain.safetensors")).unwrap();
     for file in ["tokenizer.json", "tokenizer_config.json"] {
         std::fs::rename(made.join(file), base.join(file)).unwrap();

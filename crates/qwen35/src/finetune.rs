@@ -433,6 +433,7 @@ pub struct Qwen35Trainer;
 
 impl model::finetune::ChatTrainer for Qwen35Trainer {
     type Trained = Qwen35;
+    const POLICY_GRADIENT: bool = true;
     const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35", bases: crate::base_source::LORA_BASES };
     /// What the GGUF resident's engine holds per leaf (`serve::Engine::from_source_tier`).
     const SERVED_WEIGHTS: &'static [Dtype] = &[Dtype::F32, Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::Q4, Dtype::NF4];

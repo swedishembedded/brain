@@ -24,6 +24,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+brain-qwen3.workspace = true
 brain-qwen35.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true

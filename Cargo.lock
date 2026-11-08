@@ -3136,6 +3136,7 @@ dependencies = [
  "brain-dbus",
  "brain-modelref",
  "brain-modelstore",
+ "brain-qwen3",
  "brain-qwen35",
  "brain-residency",
  "brain-testutil",

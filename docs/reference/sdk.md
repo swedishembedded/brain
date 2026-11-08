@@ -463,7 +463,7 @@ copy is held while training, and the first step's margin is exactly zero
 
 ### Policy-gradient fine-tuning on collected rollouts
 
-`ChatFineTune::policy_gradient(config)` (the `study` feature, `qwen35` bases) trains the LoRA adapter with the clipped
+`ChatFineTune::policy_gradient(config)` (the `study` feature; every architecture whose trainer declares `ChatTrainer::POLICY_GRADIENT`: `qwen3`, `qwen35`, `ricursive`) trains the LoRA adapter with the clipped
 policy-gradient objective of GRPO/PPO on rollouts an orchestrator collected outside brain, instead of imitating every
 record. Each model call of an agent is one chat record whose trained assistant turn is the action; the orchestrator
 scores the rollout with an independent verifier, computes the group-relative advantage and writes it on every record of

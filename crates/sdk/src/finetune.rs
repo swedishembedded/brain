@@ -353,18 +353,45 @@ impl ChatFamily {
         held_out: &[&Path],
         modules_to_save: &[String],
     ) -> std::io::Result<(model::FitReport, TrainedLora, PolicyGradientStats, Vec<model::ScoredSet>)> {
+        if let ChatFamily::Ripple(dtype) = self {
+            let (report, trained, scored, stats) = self.train_chat(*dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, Some(config), modules_to_save)?;
+            return Ok((report, trained, stats.unwrap_or_default(), scored));
+        }
+        // The objective is written over `model::Model`: a family only builds its LoRA model and hands it to the visitor.
+        let mut fit = rl::fit::PolicyGradientFit::new(prepared_dir, config, opts, control);
+        let (report, trained) = self.visit_lora(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &mut fit)?;
+        Ok((report, trained, fit.into_stats().unwrap_or_default(), Vec::new()))
+    }
+
+    /// Build the family's LoRA model exactly as its supervised run does and hand it to `fit`.
+    #[allow(clippy::too_many_arguments)]
+    fn visit_lora(
+        &self,
+        open: &Path,
+        prepared_dir: &Path,
+        opts: &model::FitOpts,
+        rank: u32,
+        alpha: f32,
+        tuning: model::adapter::device::AdapterTuning,
+        continue_from: Option<&Path>,
+        fit: &mut impl model::finetune::ModelFit,
+    ) -> std::io::Result<(model::FitReport, TrainedLora)> {
         match self {
-            ChatFamily::Qwen3(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "policy-gradient training on rollouts is not wired for qwen3 bases")),
+            ChatFamily::Qwen3(tier) => {
+                let start = match continue_from {
+                    Some(path) => qwen3::finetune::LoraStart::Continue(path.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "adapter path is not UTF-8"))?),
+                    None => qwen3::finetune::LoraStart::Fresh,
+                };
+                let weights = open.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "checkpoint path is not UTF-8"))?;
+                let (report, trained) = qwen3::finetune::finetune_lora_visited(weights, opts, rank, alpha, tuning, &start, *tier, fit)?;
+                Ok((report, TrainedLora::Qwen3(trained)))
+            }
             ChatFamily::Qwen35(dtype) => {
                 let run = qwen35::finetune::StreamedRun::uniform(*dtype, qwen35_recompute(*dtype, opts.precision.activations)?, qwen35::finetune::LongSeqOverrides::default());
-                let mut fit = rl::fit::PolicyGradientFit::new(prepared_dir, config, opts, control);
-                let (report, trained) = qwen35::finetune::finetune_lora_visited(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &run, &mut fit)?;
-                Ok((report, TrainedLora::Qwen35(Box::new(trained)), fit.into_stats().unwrap_or_default(), Vec::new()))
+                let (report, trained) = qwen35::finetune::finetune_lora_visited(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &run, fit)?;
+                Ok((report, TrainedLora::Qwen35(Box::new(trained))))
             }
-            ChatFamily::Ripple(dtype) => {
-                let (report, trained, scored, stats) = self.train_chat(*dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, Some(config), modules_to_save)?;
-                Ok((report, trained, stats.unwrap_or_default(), scored))
-            }
+            ChatFamily::Ripple(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive runs through its generic ChatTrainer entry")),
         }
     }
 
@@ -988,8 +1015,8 @@ impl ChatFineTune {
         let refuse = |why: String| Err(Error::Backend(format!("ChatFineTune: policy_gradient: {why}")));
         config.validate().or_else(refuse)?;
         let generic = crate::study::arch(arch_id).ok().and_then(|a| a.chat).is_some_and(|chat| chat.policy_gradient);
-        if arch_id != "qwen35" && !generic {
-            return refuse(format!("training on rollouts is wired for qwen35 bases and for architectures whose trainer declares it, not {arch_id}"));
+        if !generic {
+            return refuse(format!("{arch_id}'s trainer does not declare ChatTrainer::POLICY_GRADIENT (its trainable model must implement model::training::TokenObjectives: weighted per-token loss, per-token log-probabilities, a logit scale)"));
         }
         if self.eval_every > 0 || self.patience > 0 || self.keep_best {
             return refuse("a run has no monitoring loss to select on; leave eval_every, patience and keep_best unset (its statistics are on the outcome)".to_string());

@@ -20,6 +20,7 @@ mod chat_trainer_bases;
 mod document_study;
 mod external_policy_gradient;
 mod external_policy_gradient_gradcheck;
+mod external_policy_gradient_gradcheck_qwen3;
 mod lazy_scoring;
 mod self_distill;
 #[cfg(feature = "qwen3")]

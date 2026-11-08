@@ -73,6 +73,23 @@ pub fn qwen35_model_dir(tag: &str) -> TempDir {
     dir
 }
 
+/// The model directory of a `qwen3` checkpoint of shape `shape` at the real vocabulary size, in `model.safetensors` form.
+pub fn qwen3_model_dir_of(tag: &str, shape: qwen3::QwenConfig) -> TempDir {
+    let dir = TempDir::new(tag);
+    let cfg = qwen3::QwenConfig { vocab: 151_936, block_size: 128, max_position_embeddings: 128, ..shape };
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+        .param_list()
+        .into_iter()
+        .map(|(name, numel)| {
+            let data: Vec<f32> = (0..numel).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect();
+            (name, vec![numel as u64], data)
+        })
+        .collect();
+    checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &cfg.to_json(), None).unwrap();
+    write_tokenizer(&dir);
+    dir
+}
+
 /// A chat dataset of one-line question/answer pairs, one record per line, the
 /// answer supervised and the question not.
 pub fn write_chat_dataset(dir: &Path, pairs: &[(&str, &str)]) -> PathBuf {

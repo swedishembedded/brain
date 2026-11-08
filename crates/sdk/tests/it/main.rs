@@ -15,6 +15,7 @@ mod common;
 mod audio_clip;
 mod chat_finetune;
 mod chat_finetune_policy_gradient;
+mod chat_finetune_policy_gradient_archs;
 mod chat_finetune_qwen35;
 mod chat_finetune_qwen35moe;
 mod chat_finetune_ricursive;

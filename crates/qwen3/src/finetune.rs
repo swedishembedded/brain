@@ -776,6 +776,24 @@ pub fn finetune_lora_tuned(
     lora_trained(cfg, &init, opts, base_dtype, &mut fit)
 }
 
+/// [`finetune_lora_tuned`] with the objective in the caller's hands: the LoRA model is built exactly as a
+/// supervised run builds it and handed to `fit` (any objective written over [`model::Model`], such as the
+/// clipped policy gradient on rollouts) instead of the supervised loop. Returns the trained model.
+#[allow(clippy::too_many_arguments)]
+pub fn finetune_lora_visited(
+    base: &str,
+    opts: &FitOpts,
+    rank: u32,
+    alpha: f32,
+    tuning: AdapterTuning,
+    start: &LoraStart<'_>,
+    base_dtype: Dtype,
+    fit: &mut impl model::finetune::ModelFit,
+) -> std::io::Result<(model::FitReport, Trained)> {
+    let (cfg, init) = lora_start_tuned(base, rank, alpha, tuning, opts.seed, start)?;
+    lora_trained(cfg, &init, opts, base_dtype, fit)
+}
+
 /// The LoRA model of `cfg` over `init` at `dt`, laid out over the cards
 /// ([`build_trainer`]) and handed to `fit` as the concrete type that layout
 /// gave. A LoRA build never offloads its moments.
@@ -808,6 +826,7 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
     type Trained = Trained;
     const SCORES_EXPORTED_PAIRS: bool = true;
     const NATIVE_SPARSE: bool = true;
+    const POLICY_GRADIENT: bool = true;
     const LORA_BASES: model::policy::TrainBases = TRAIN_BASES;
     /// `serve::Engine::check_tiers`' serving tiers less f16 and q4, which no qwen3 base is trained over.
     const SERVED_WEIGHTS: &'static [Dtype] = &[Dtype::F32, Dtype::BF16, Dtype::I8, Dtype::NF4];

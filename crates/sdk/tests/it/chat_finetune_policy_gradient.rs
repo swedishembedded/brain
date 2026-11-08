@@ -157,8 +157,6 @@ fn records_and_settings_a_policy_gradient_run_cannot_honour_are_refused_before_t
     assert!(why.contains("eval_every"), "{why}");
     let why = refused(policy_gradient(&model, &dataset, &out, Default::default()).held_out(&plain));
     assert!(why.contains("held-out"), "{why}");
-    let why = refused(policy_gradient(&model, &dataset, &out, Default::default()).arch("qwen3"));
-    assert!(why.contains("qwen35"), "{why}");
 
     // A sampler's log-probabilities that do not number the answer's tokens name the record and both counts.
     let bad = write_lines(&model.join("bad.jsonl"), &[record("cab", "bad", Some(1.0), None), record("fed", "dad", Some(-1.0), Some(vec![-1.0; 3]))]);

@@ -8,10 +8,25 @@ use capability::CancelToken;
 use residency::Job;
 use serde_json::{json, Value};
 
-use crate::support::{assert_reservation_returned, data_digest, invocation, plain, rig, rollouts, run, work_is_clean, Frames, BASE};
+use crate::support::{assert_reservation_returned, data_digest, invocation, plain, rig, rig_qwen3, rollouts, run, work_is_clean, Frames, BASE};
 
 fn hex64(v: &Value) -> bool {
     v.as_str().is_some_and(|s| trainjob::Digest::parse(s).is_ok())
+}
+
+/// A plain `qwen3` base is served the same job: the objective belongs to the shared fine-tune path, not to one family.
+#[test]
+fn a_policy_gradient_job_trains_a_qwen3_base() {
+    let rig = rig_qwen3("run-pg-qwen3", 16 << 30);
+    let train = data_digest(&rig, &rollouts());
+    let params = json!({
+        "base": BASE, "arch": "qwen3", "objective": "policy_gradient", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128,
+        "data": json!({"train": {"digest": train.hex()}}).to_string(),
+    });
+    let outcome = run(&rig, params, &[], &Frames::default()).expect("the run");
+    assert_eq!(outcome.outputs["status"], "completed");
+    assert_eq!(outcome.outputs["policy_gradient"]["steps_taken"], 2);
+    assert_eq!(outcome.outputs["policy_gradient"]["sequences_with_advantage"], 4);
 }
 
 #[test]
