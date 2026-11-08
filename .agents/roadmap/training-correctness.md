@@ -22,8 +22,8 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [x] T007 P0 - crates/rl/src/objective/distill.rs (empty step) - same as T006 for distillation
 - [x] T008 P0 - crates/model/src/train.rs (fit_controlled) - transactional update gate in the shared loop; strict mode; NaN injection test (shared gate landed as `model::stepgate`; `FitOpts::strict_updates` is not yet exposed as a CLI flag; GRPO and external policy gradient keep their own verdict counters)
 - [ ] T009 P1 - crates/rl/src/objective/distill.rs - one normalisation convention; dense-softmax mean-KL oracle, unequal lengths
-- [ ] T010 P1 - crates/rl/src/objective/dpo.rs (pack_row) - streaming DPO refuses truncation
-- [ ] T011 P1 - crates/rl/src/objective/distill.rs (pack_row, TopK::from_logits) - refuse truncation and zero-information batches; validated teacher distribution
+- [x] T010 P1 - crates/rl/src/objective/dpo.rs (pack_row) - streaming DPO refuses truncation
+- [x] T011 P1 - crates/rl/src/objective/distill.rs (pack_row, TopK::from_logits) - refuse truncation and zero-information batches; validated teacher distribution
 - [x] T012 P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers Adam beta1/beta2/eps; resume refuses a change
 - [x] T013 (adam, gemm precision, native sparse attention; the rest of the resolved configuration is not yet persisted) P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers GEMM compute precision and the whole resolved run configuration
 - [ ] T014 P1 - crates/model/src/train.rs (build_or_resume) - separate exact resume, weight warm start, adapter continuation (names and lineage)
@@ -32,7 +32,7 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [ ] T017 P1 - crates/rl/src/objective/external.rs - missing rollout sidecars never select imitation semantics silently
 - [x] T018 P1 - crates/model/src/train.rs (loss_probe) - pure probe; persistent objective cursor; resume equivalence test (probe is pure for DPO and distillation; a resumed run still restarts a closure-fed stream or from_pairs/from_examples cursor at record 0, open)
 - [ ] T019 P1 - central ValidatedTrainingPlan - every numeric configuration refused at every entry point
-- [ ] T020 P1 - crates/rl/src/objective/distill.rs - duplicate/out-of-range ids, non-finite or unnormalised teacher probabilities (with T011)
+- [x] T020 (ids, probabilities, normalisation, zero-information, k=0; vocabulary range and discarded tail mass are not checked yet) P1 - crates/rl/src/objective/distill.rs - duplicate/out-of-range ids, non-finite or unnormalised teacher probabilities (with T011)
 - [ ] T021 P1 - DPO reference checkpoint - reference digest in run identity
 - [ ] T022 P1 - structured datasets - strict schema mode
 - [ ] T023 P1 - per architecture - expected-vs-actual trainable tensor audit (full FT / LoRA target coverage)

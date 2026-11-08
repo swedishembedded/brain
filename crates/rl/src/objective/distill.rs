@@ -95,7 +95,13 @@ impl TopK {
     /// over the whole row (so the probabilities are the teacher's) and then
     /// renormalized over the kept entries. Ties keep the lower id. `k` is
     /// clamped to the row width.
+    ///
+    /// # Panics
+    /// If `k` is zero or `logits` is empty or holds a non-finite value: such a distribution
+    /// carries no information and would train nothing.
     pub fn from_logits(logits: &[f32], k: usize) -> TopK {
+        assert!(k >= 1 && !logits.is_empty(), "TopK::from_logits: need k >= 1 and a non-empty row (k {k}, {} logits)", logits.len());
+        assert!(logits.iter().all(|l| l.is_finite()), "TopK::from_logits: the teacher's logits must be finite");
         let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         let mut order: Vec<u32> = (0..logits.len() as u32).collect();
         order.sort_by(|&a, &b| logits[b as usize].total_cmp(&logits[a as usize]).then(a.cmp(&b)));
@@ -103,6 +109,29 @@ impl TopK {
         let kept: Vec<f32> = order.iter().map(|&i| (logits[i as usize] - max).exp()).collect();
         let sum: f32 = kept.iter().sum();
         TopK { probs: kept.iter().map(|p| p / sum).collect(), ids: order }
+    }
+}
+
+impl TopK {
+    /// Whether this is a usable teacher distribution: as many probabilities as ids, no id twice,
+    /// every probability finite and non-negative, and (unless empty, which marks a position
+    /// without teacher signal) summing to one - the keystone identity needs `sum_k q_k = 1`.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.ids.len() != self.probs.len() {
+            return Err(format!("{} ids but {} probabilities", self.ids.len(), self.probs.len()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if let Some(id) = self.ids.iter().find(|&&id| !seen.insert(id)) {
+            return Err(format!("token id {id} listed twice"));
+        }
+        if self.probs.iter().any(|p| !p.is_finite() || *p < 0.0) {
+            return Err("a probability is negative or not finite".to_string());
+        }
+        let sum: f32 = self.probs.iter().sum();
+        if !self.ids.is_empty() && (sum - 1.0).abs() > 1e-3 {
+            return Err(format!("probabilities sum to {sum}, not 1 (renormalise over the kept ids)"));
+        }
+        Ok(())
     }
 }
 
@@ -184,31 +213,36 @@ struct PackedExample {
 /// `seq_len`-wide row, at the same "targets[t] predicts position t+1"
 /// alignment `rl::objective::grpo::pack_row`/`rl::objective::dpo::pack_row`
 /// both use: position `prompt.len() - 1 + i` predicts `completion[i]`, so
-/// `teacher[i]`'s distribution is placed at that same position. A
-/// completion that overruns `seq_len` is silently truncated at the tail,
-/// same as its siblings.
-fn pack_row(seq_len: usize, prompt: &[u32], completion: &[u32], teacher: &[TopK]) -> PackedExample {
-    assert_eq!(completion.len(), teacher.len(), "pack_row: one TopK per completion token");
+/// `teacher[i]`'s distribution is placed at that same position. An example that
+/// does not fit the row, has no prompt, carries a malformed teacher
+/// distribution, or has no teacher signal at all is refused, never truncated or
+/// skipped.
+fn pack_row(seq_len: usize, prompt: &[u32], completion: &[u32], teacher: &[TopK]) -> Result<PackedExample, String> {
+    if completion.len() != teacher.len() {
+        return Err(format!("{} completion tokens but {} teacher distributions", completion.len(), teacher.len()));
+    }
+    if prompt.is_empty() {
+        return Err("the example has no prompt".to_string());
+    }
+    if prompt.len() + completion.len() > seq_len {
+        return Err(format!("{} prompt + {} completion tokens do not fit a row of {seq_len}", prompt.len(), completion.len()));
+    }
+    for (i, t) in teacher.iter().enumerate() {
+        t.validate().map_err(|why| format!("teacher distribution of completion token {i}: {why}"))?;
+    }
+    if teacher.iter().all(|t| t.ids.is_empty()) {
+        return Err("no completion position carries a teacher distribution".to_string());
+    }
     let mut tokens = vec![0u32; seq_len];
     let mut packed_teacher = vec![TopK::default(); seq_len];
     let plen = prompt.len();
-    if plen == 0 {
-        // Not a real scenario (every task prompt is non-empty) - guards the
-        // `tok_idx - 1` underflow below rather than relying on callers.
-        return PackedExample { tokens, teacher: packed_teacher };
-    }
-    for (i, &t) in prompt.iter().chain(completion.iter()).take(seq_len).enumerate() {
+    for (i, &t) in prompt.iter().chain(completion.iter()).enumerate() {
         tokens[i] = t;
     }
     for (i, t) in teacher.iter().enumerate() {
-        let tok_idx = plen + i;
-        if tok_idx >= seq_len {
-            break;
-        }
-        let t_pos = tok_idx - 1;
-        packed_teacher[t_pos] = t.clone();
+        packed_teacher[plen + i - 1] = t.clone();
     }
-    PackedExample { tokens, teacher: packed_teacher }
+    Ok(PackedExample { tokens, teacher: packed_teacher })
 }
 
 /// Where [`DistillTopK`] draws its next teacher-scored example from - a
@@ -233,16 +267,35 @@ pub struct DistillTopK {
     last_loss: f32,
     /// Teacher-scored passes run since the last [`Objective::step_verdict`]: a step with none changes nothing.
     passes: u32,
+    /// An example the source supplied that cannot be packed faithfully; aborts the run at the step's verdict.
+    refusal: Option<String>,
 }
 
 impl DistillTopK {
+    /// Make sure an example is queued, drawing and packing one from the source when none is.
+    /// `false`: nothing to train (the source had none, or the one it supplied was refused and
+    /// the refusal recorded for the step's verdict).
+    fn enqueue(&mut self, rng: &mut Rng) -> bool {
+        if self.pending.is_empty() {
+            let Some(example) = (self.source)(rng) else { return false };
+            match pack_row(self.cfg.seq_len, &example.prompt, &example.completion, &example.teacher) {
+                Ok(packed) => self.pending.push_back(packed),
+                Err(why) => {
+                    self.refusal = Some(why);
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// `source` supplies the next teacher-scored example (or `None` for a
     /// no-signal round) - see this struct's own field doc comment.
     pub fn new<S>(cfg: DistillConfig, source: S) -> DistillTopK
     where
         S: FnMut(&mut Rng) -> Option<DistillExample> + 'static,
     {
-        DistillTopK { cfg, source: Box::new(source), pending: VecDeque::new(), last_loss: 0.0, passes: 0 }
+        DistillTopK { cfg, source: Box::new(source), pending: VecDeque::new(), last_loss: 0.0, passes: 0, refusal: None }
     }
 
     /// Convenience over [`Self::new`]: a fixed, cycling dataset of
@@ -294,13 +347,9 @@ impl<M: Model> Objective<M> for DistillTopK {
     }
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
-        if self.pending.is_empty() {
-            let Some(example) = (self.source)(rng) else {
-                // No example available this round - a legitimate no-op
-                // micro-step, matching GRPO's/DPO's own convention.
-                return 0.0;
-            };
-            self.pending.push_back(pack_row(self.cfg.seq_len, &example.prompt, &example.completion, &example.teacher));
+        // No example this round is a legitimate no-op micro-step, matching GRPO's/DPO's own convention.
+        if !self.enqueue(rng) {
+            return 0.0;
         }
         let packed = self.pending.pop_front().expect("just ensured pending is non-empty");
         self.last_loss = self.run_passes(model, &packed, true);
@@ -310,9 +359,8 @@ impl<M: Model> Objective<M> for DistillTopK {
     /// The loss of the example the next training step takes, forward only; the example stays
     /// queued, so probing moves no cursor.
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
-        if self.pending.is_empty() {
-            let Some(example) = (self.source)(rng) else { return 0.0 };
-            self.pending.push_back(pack_row(self.cfg.seq_len, &example.prompt, &example.completion, &example.teacher));
+        if !self.enqueue(rng) {
+            return 0.0;
         }
         let packed = self.pending.pop_front().expect("just ensured pending is non-empty");
         let loss = self.run_passes(model, &packed, false);
@@ -323,6 +371,9 @@ impl<M: Model> Objective<M> for DistillTopK {
     /// An optimiser step with no teacher-scored position holds no gradient: applying it
     /// would still decay the weights, advance the moments and the bias-correction step.
     fn step_verdict(&mut self) -> StepVerdict {
+        if let Some(why) = self.refusal.take() {
+            return StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("distillation example refused: {why}")));
+        }
         match std::mem::take(&mut self.passes) {
             0 => StepVerdict::Skip("no teacher-scored position this step".into()),
             _ => StepVerdict::Apply,
@@ -418,7 +469,7 @@ mod tests {
         let completion = [4u32, 5];
         let teacher = vec![TopK { ids: vec![4, 9], probs: vec![0.9, 0.1] }, TopK { ids: vec![5], probs: vec![1.0] }];
 
-        let packed = pack_row(seq_len, &prompt, &completion, &teacher);
+        let packed = pack_row(seq_len, &prompt, &completion, &teacher).expect("fits");
 
         assert_eq!(packed.tokens, vec![1, 2, 3, 4, 5, 0]);
         // Position 2 (prompt.len()-1) predicts completion[0]=4, position 3
@@ -431,21 +482,39 @@ mod tests {
     }
 
     #[test]
-    fn pack_row_truncates_a_completion_that_overruns_seq_len() {
-        let seq_len = 4;
-        let prompt = [1u32, 2];
-        let completion = [3u32, 4, 5, 6];
+    fn pack_row_refuses_a_completion_that_overruns_seq_len_instead_of_truncating_it() {
         let teacher: Vec<TopK> = (0..4).map(|i| TopK { ids: vec![10 + i as u32], probs: vec![1.0] }).collect();
+        let Err(err) = pack_row(4, &[1, 2], &[3, 4, 5, 6], &teacher) else { panic!("2 + 4 tokens do not fit a row of 4") };
+        assert!(err.contains("do not fit"), "{err}");
+        assert!(pack_row(6, &[1, 2], &[3, 4, 5, 6], &teacher).is_ok(), "exactly full is allowed");
+    }
 
-        let packed = pack_row(seq_len, &prompt, &completion, &teacher);
+    #[test]
+    fn pack_row_refuses_a_zero_information_example() {
+        let none = vec![TopK::default(); 2];
+        assert!(pack_row(8, &[1, 2], &[3, 4], &none).is_err());
+        assert!(pack_row(8, &[], &[3, 4], &[TopK { ids: vec![1], probs: vec![1.0] }, TopK { ids: vec![1], probs: vec![1.0] }]).is_err(), "no prompt");
+    }
 
-        // Only position 1 (predicts completion[0]=3) and position 2
-        // (predicts completion[1]=4) fit in seq_len=4; completion[2..] is
-        // dropped, not scored.
-        assert_eq!(packed.tokens, vec![1, 2, 3, 4]);
-        assert_eq!(packed.teacher[1].ids, vec![10]);
-        assert_eq!(packed.teacher[2].ids, vec![11]);
-        assert!(packed.teacher[0].ids.is_empty());
-        assert!(packed.teacher[3].ids.is_empty());
+    #[test]
+    fn a_teacher_distribution_must_be_a_distribution() {
+        let ok = TopK { ids: vec![1, 2], probs: vec![0.25, 0.75] };
+        assert!(ok.validate().is_ok());
+        let bad = [
+            TopK { ids: vec![1, 1], probs: vec![0.5, 0.5] },
+            TopK { ids: vec![1, 2], probs: vec![0.5] },
+            TopK { ids: vec![1, 2], probs: vec![f32::NAN, 1.0] },
+            TopK { ids: vec![1, 2], probs: vec![-0.5, 1.5] },
+            TopK { ids: vec![1, 2], probs: vec![0.2, 0.2] },
+        ];
+        for t in bad {
+            assert!(t.validate().is_err(), "{t:?}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "need k >= 1")]
+    fn top_k_of_zero_is_refused() {
+        let _ = TopK::from_logits(&[0.1, 0.2], 0);
     }
 }

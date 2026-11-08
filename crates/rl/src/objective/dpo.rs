@@ -212,28 +212,33 @@ pub fn row_sum(new_lp: &[f32], ref_lp: &[f32], targets: &[u32], row: usize, seq_
 /// Pack one row (`prompt` followed by `completion`) into row `row` of a
 /// `2 * seq_len`-wide batch, at the same "targets[t] predicts position
 /// t+1" alignment [`crate::objective::grpo::pack_row`] uses: position
-/// `prompt.len() - 1 + i` predicts `completion[i]`. A completion that
-/// overruns `seq_len` is silently truncated at the tail.
-fn pack_row(tokens: &mut [u32], targets: &mut [u32], ref_lp: &mut [f32], row: usize, seq_len: usize, prompt: &[u32], completion: &[u32], ref_logprobs: &[f32]) {
+/// `prompt.len() - 1 + i` predicts `completion[i]`. A row that does not fit,
+/// has no prompt, or whose reference has another length than its completion is
+/// refused, never truncated or skipped: a cut-off answer is a different
+/// preference than the one the pair states.
+#[allow(clippy::too_many_arguments)]
+fn pack_row(tokens: &mut [u32], targets: &mut [u32], ref_lp: &mut [f32], row: usize, seq_len: usize, prompt: &[u32], completion: &[u32], ref_logprobs: &[f32]) -> Result<(), String> {
+    let name = if row == 0 { "chosen" } else { "rejected" };
+    if prompt.is_empty() {
+        return Err(format!("{name}: the pair has no prompt"));
+    }
+    if prompt.len() + completion.len() > seq_len {
+        return Err(format!("{name}: {} prompt + {} completion tokens do not fit a row of {seq_len}", prompt.len(), completion.len()));
+    }
+    if ref_logprobs.len() != completion.len() {
+        return Err(format!("{name}: {} reference log-probabilities for {} completion tokens", ref_logprobs.len(), completion.len()));
+    }
     let base = row * seq_len;
     let plen = prompt.len();
-    if plen == 0 {
-        // Not a real scenario (every task prompt is non-empty) - guards the
-        // `tok_idx - 1` underflow below rather than relying on callers.
-        return;
-    }
-    for (i, &t) in prompt.iter().chain(completion.iter()).take(seq_len).enumerate() {
+    for (i, &t) in prompt.iter().chain(completion.iter()).enumerate() {
         tokens[base + i] = t;
     }
     for i in 0..completion.len() {
-        let tok_idx = plen + i;
-        if tok_idx >= seq_len {
-            break;
-        }
-        let t_pos = tok_idx - 1;
+        let t_pos = plen + i - 1;
         targets[base + t_pos] = completion[i];
         ref_lp[base + t_pos] = ref_logprobs[i];
     }
+    Ok(())
 }
 
 /// One preference pair packed as the two rows of a `b = 2` batch (row 0
@@ -324,14 +329,26 @@ impl PackedPair {
     }
 }
 
-fn pack_pair(cfg: &DpoConfig, pair: &DpoPair, chosen_ref: &[f32], rejected_ref: &[f32]) -> PackedPair {
+fn pack_pair(cfg: &DpoConfig, pair: &DpoPair, chosen_ref: &[f32], rejected_ref: &[f32]) -> Result<PackedPair, String> {
     let seq_len = cfg.seq_len;
     let mut tokens = vec![0u32; 2 * seq_len];
     let mut targets = vec![IGNORE; 2 * seq_len];
     let mut ref_lp = vec![0f32; 2 * seq_len];
-    pack_row(&mut tokens, &mut targets, &mut ref_lp, 0, seq_len, &pair.prompt, &pair.chosen, chosen_ref);
-    pack_row(&mut tokens, &mut targets, &mut ref_lp, 1, seq_len, &pair.prompt, &pair.rejected, rejected_ref);
-    PackedPair { tokens, targets, ref_lp }
+    pack_row(&mut tokens, &mut targets, &mut ref_lp, 0, seq_len, &pair.prompt, &pair.chosen, chosen_ref)?;
+    pack_row(&mut tokens, &mut targets, &mut ref_lp, 1, seq_len, &pair.prompt, &pair.rejected, rejected_ref)?;
+    Ok(PackedPair { tokens, targets, ref_lp })
+}
+
+/// Make sure `pending` holds a packed pair, drawing and packing one from the source when it is
+/// empty. `Ok(false)`: the source had none this round. `Err`: the pair it supplied does not fit
+/// the row or its reference is the wrong length.
+fn enqueue(cfg: &DpoConfig, next: &mut PairSource, ref_logprobs: &RefLogprobFn, pending: &mut VecDeque<PackedPair>, rng: &mut Rng) -> Result<bool, String> {
+    if pending.is_empty() {
+        let Some(pair) = next(rng) else { return Ok(false) };
+        let (chosen_ref, rejected_ref) = ref_logprobs(&pair);
+        pending.push_back(pack_pair(cfg, &pair, &chosen_ref, &rejected_ref)?);
+    }
+    Ok(true)
 }
 
 /// One pair's DPO forward: the current policy's log-probabilities of both
@@ -392,6 +409,8 @@ pub struct Dpo {
     last_margin: f32,
     /// Pairs trained since the last [`Objective::step_verdict`]: a step with none changes nothing.
     trained: u32,
+    /// A pair the source supplied that cannot be packed faithfully; aborts the run at the step's verdict.
+    refusal: Option<String>,
 }
 
 /// Where a [`Dpo`]'s pairs and their reference come from.
@@ -414,7 +433,7 @@ impl Dpo {
         S: FnMut(&mut Rng) -> Option<DpoPair> + 'static,
         R: Fn(&DpoPair) -> (Vec<f32>, Vec<f32>) + 'static,
     {
-        Dpo { cfg, source: Source::Stream { next: Box::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0 }
+        Dpo { cfg, source: Source::Stream { next: Box::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0, refusal: None }
     }
 
     /// A fixed preference dataset (see the module doc): each micro-step
@@ -424,7 +443,7 @@ impl Dpo {
     pub fn from_dataset(cfg: DpoConfig, pairs: Vec<PackedPair>) -> Dpo {
         assert!(!pairs.is_empty(), "Dpo::from_dataset: need at least one pair");
         assert!(pairs.iter().all(|p| p.seq_len() == cfg.seq_len), "Dpo::from_dataset: every pair must be packed at seq_len {}", cfg.seq_len);
-        Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0, trained: 0 }
+        Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0, trained: 0, refusal: None }
     }
 
     /// Convenience over [`Self::new`]: a fixed, cycling dataset of
@@ -470,15 +489,16 @@ impl<M: Model> Objective<M> for Dpo {
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
         let (term, margin) = match &mut self.source {
             Source::Stream { next, ref_logprobs, pending } => {
-                if pending.is_empty() {
-                    let Some(pair) = next(rng) else {
-                        // No pair available this round - a legitimate no-op
-                        // micro-step, matching GRPO's own "every completion
-                        // this round was dropped" convention.
+                // No pair available this round is a legitimate no-op micro-step, matching GRPO's own
+                // "every completion this round was dropped" convention; a pair that cannot be packed
+                // faithfully is not.
+                match enqueue(&self.cfg, next, ref_logprobs, pending, rng) {
+                    Ok(true) => {}
+                    Ok(false) => return 0.0,
+                    Err(why) => {
+                        self.refusal = Some(why);
                         return 0.0;
-                    };
-                    let (chosen_ref, rejected_ref) = ref_logprobs(&pair);
-                    pending.push_back(pack_pair(&self.cfg, &pair, &chosen_ref, &rejected_ref));
+                    }
                 }
                 let packed = pending.pop_front().expect("just ensured pending is non-empty");
                 weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, &packed)
@@ -501,10 +521,13 @@ impl<M: Model> Objective<M> for Dpo {
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         match &mut self.source {
             Source::Stream { next, ref_logprobs, pending } => {
-                if pending.is_empty() {
-                    let Some(pair) = next(rng) else { return 0.0 };
-                    let (chosen_ref, rejected_ref) = ref_logprobs(&pair);
-                    pending.push_back(pack_pair(&self.cfg, &pair, &chosen_ref, &rejected_ref));
+                match enqueue(&self.cfg, next, ref_logprobs, pending, rng) {
+                    Ok(true) => {}
+                    Ok(false) => return 0.0,
+                    Err(why) => {
+                        self.refusal = Some(why);
+                        return 0.0;
+                    }
                 }
                 weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, pending.front().expect("just ensured pending is non-empty")).0.loss
             }
@@ -515,6 +538,9 @@ impl<M: Model> Objective<M> for Dpo {
     /// An optimiser step with no trained pair holds no gradient: applying it would
     /// still decay the weights, advance the moments and the bias-correction step.
     fn step_verdict(&mut self) -> StepVerdict {
+        if let Some(why) = self.refusal.take() {
+            return StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("DPO pair refused: {why}")));
+        }
         match std::mem::take(&mut self.trained) {
             0 => StepVerdict::Skip("no preference pair this step".into()),
             _ => StepVerdict::Apply,
@@ -643,5 +669,17 @@ mod tests {
         assert_eq!(count, 3);
         assert!((sum_new - 18.0).abs() < 1e-6); // 5.0 + 6.0 + 7.0
         assert!((sum_ref - 1.8).abs() < 1e-6); // 0.5 + 0.6 + 0.7
+    }
+
+    #[test]
+    fn a_pair_that_overruns_the_row_is_refused_not_truncated() {
+        let cfg = DpoConfig { beta: 0.1, seq_len: 5, nll_weight: 0.0 };
+        let fits = DpoPair { prompt: vec![1, 2], chosen: vec![3, 4, 5], rejected: vec![6, 7, 8] };
+        assert!(pack_pair(&cfg, &fits, &[0.0; 3], &[0.0; 3]).is_ok(), "exactly full is allowed");
+        let long = DpoPair { prompt: vec![1, 2], chosen: vec![3, 4, 5, 6], rejected: vec![6] };
+        assert!(pack_pair(&cfg, &long, &[0.0; 4], &[0.0]).expect_err("refused").contains("chosen"));
+        assert!(pack_pair(&cfg, &fits, &[0.0; 2], &[0.0; 3]).is_err(), "a short reference is refused");
+        let no_prompt = DpoPair { prompt: vec![], ..fits };
+        assert!(pack_pair(&cfg, &no_prompt, &[0.0; 3], &[0.0; 3]).is_err());
     }
 }
