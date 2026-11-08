@@ -196,6 +196,8 @@ def _labels(path, rel, errors, where):
             continue
         text = next(g for g in m.groups() if g)
         label = text.strip().lower()
+        if re.match(r"(figure|table) \d", label):
+            continue  # a numbered caption, not a section label
         if label in TEMPLATE_LABELS:
             errors.append(f"{rel}: '{text.strip()}' is a template slot, not a subject: "
                           "say it in the prose or name what the section is about")
