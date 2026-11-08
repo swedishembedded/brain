@@ -20,7 +20,7 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [x] T005 P0 - crates/rl/src/objective/grpo_term.rs (capped log-ratio / k3) - forward and backward agree; FP64 reference + finite differences
 - [x] T006 P0 - crates/rl/src/objective/dpo.rs (empty step) - empty step changes no weights, moments or step count
 - [x] T007 P0 - crates/rl/src/objective/distill.rs (empty step) - same as T006 for distillation
-- [x] T008 P0 - crates/model/src/train.rs (fit_controlled) - transactional update gate in the shared loop; strict mode; NaN injection test (shared gate landed as `model::stepgate`; `FitOpts::strict_updates` is not yet exposed as a CLI flag; GRPO and external policy gradient keep their own verdict counters)
+- [x] T008 P0 - crates/model/src/train.rs (fit_controlled) - transactional update gate in the shared loop; strict mode; NaN injection test (shared gate landed as `model::stepgate`; `FitOpts::strict_updates` is exposed on the CLI, the SDK and the served job; GRPO and external policy gradient report their verdicts to the shared applied-update count)
 - [x] T009 P1 - crates/rl/src/objective/distill.rs - one normalisation convention; dense-softmax mean-KL oracle, unequal lengths
 - [x] T010 P1 - crates/rl/src/objective/dpo.rs (pack_row) - streaming DPO refuses truncation
 - [x] T011 P1 - crates/rl/src/objective/distill.rs (pack_row, TopK::from_logits) - refuse truncation and zero-information batches; validated teacher distribution
@@ -30,7 +30,7 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [x] T015 P1 - crates/rl/src/objective/grpo.rs (attach_references) - incomplete references refuse; unsupported EOS positions distinguished
 - [x] T016 (recorded behaviour log-probs are the default exact mode; the sampler policy identity is not stored per record) P1 - crates/rl/src/objective/external.rs - explicit exact vs proxy behaviour logprobs with provenance
 - [x] T017 P1 - crates/rl/src/objective/external.rs - missing rollout sidecars never select imitation semantics silently
-- [x] T018 P1 - crates/model/src/train.rs (loss_probe) - pure probe; persistent objective cursor; resume equivalence test (probe is pure for DPO and distillation; a resumed run still restarts a closure-fed stream or from_pairs/from_examples cursor at record 0, open)
+- [x] T018 P1 - crates/model/src/train.rs (loss_probe) - pure probe; persistent objective cursor; resume equivalence test (probe is pure for DPO and distillation; a resumed run continues the objectives' own pair, example and closure-fed streams, tested for dataset lengths not divisible by the step size)
 - [x] T019 (model::training_plan::ValidatedTrainingPlan built by the ChatFineTune, ChatFullFineTune and PreferenceFineTune builders, hence the CLI and the served job; per-architecture CLIs that build FitOpts directly are checked by the shared loop only) P1 - central ValidatedTrainingPlan: options, schedules, DPO beta (ablation flag), GRPO and policy-gradient numerics, distill row length; token ids, rewards and advantages checked by the objectives before a step
 - [x] T020 (ids, probabilities, normalisation, zero-information, k=0; vocabulary range and discarded tail mass are not checked yet) P1 - crates/rl/src/objective/distill.rs - duplicate/out-of-range ids, non-finite or unnormalised teacher probabilities (with T011)
 - [x] T021 P1 - DPO reference checkpoint - reference (base digest, continued-adapter digest, base format) in the run identity
