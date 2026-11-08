@@ -404,8 +404,8 @@ fn convert_wan(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
 /// `MiniMaxAI/MiniMax-H3` repo ships as role directories - the SAME role
 /// names and rel paths `minimaxh3::spec::H3Spec` and
 /// `minimaxh3::caps::Paths::from_assembly` read, not a second spelling.
-/// (`transformer_ref/` - `ref2va`'s second DiT - is deliberately absent, per
-/// `H3Recipe::SKIP_BY_DEFAULT`.)
+/// `transformer_ref/` - `ref2va`'s second DiT - is no role of its own: it is
+/// found beside the text encoder in the release root.
 fn convert_h3(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     convert_files(
         store,

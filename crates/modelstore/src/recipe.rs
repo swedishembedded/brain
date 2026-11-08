@@ -636,17 +636,10 @@ impl H3Recipe {
     /// [`Specificity::RepoPinned`] claim - see this type's doc.
     const VENDOR: &'static str = "MiniMaxAI";
     const REPO: &'static str = "MiniMax-H3";
-    /// Role subdirectory names at the repo root.
+    /// Role subdirectory names at the repo root, every one fetched:
+    /// `transformer_ref/` is `ref2va`'s own separately-trained DiT.
     const ROLE_DIRS: &'static [&'static str] =
         &["transformer/", "transformer_ref/", "text_encoder/", "vae/", "audio_vae/", "tokenizer/", "processor/", "scheduler/", "audio_scheduler/"];
-    /// `transformer_ref/` is `ref2va`'s own separately-trained transformer
-    /// instance - a second, equally large copy of the DiT. `t2va`/`fl2va`
-    /// (the only tasks this port implements today) share plain
-    /// `transformer/`, so this recipe does not fetch `transformer_ref/` by
-    /// default; a future `ref2va` port fetches it by hand (or this recipe
-    /// grows a role toggle then) rather than every `brain pull` paying for
-    /// weights nothing yet reads.
-    const SKIP_BY_DEFAULT: &'static [&'static str] = &["transformer_ref/"];
 }
 
 impl ArtifactRecipe for H3Recipe {
@@ -667,9 +660,7 @@ impl ArtifactRecipe for H3Recipe {
     fn artifacts(&self, _reference: &ModelRef, listing: &[String], _hub: &dyn Hub) -> Result<Vec<Artifact>, Box<PlanError>> {
         let mut artifacts = vec![artifact("model_index.json", "model_index.json")];
         for f in listing {
-            let under_a_role_dir = Self::ROLE_DIRS.iter().any(|d| f.starts_with(d));
-            let skipped = Self::SKIP_BY_DEFAULT.iter().any(|d| f.starts_with(d));
-            if under_a_role_dir && !skipped {
+            if Self::ROLE_DIRS.iter().any(|d| f.starts_with(d)) {
                 artifacts.push(artifact(f.clone(), f.clone()));
             }
         }
@@ -1196,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn h3_recipe_downloads_every_file_under_a_role_dir_except_transformer_ref() {
+    fn h3_recipe_downloads_every_file_under_a_role_dir_including_transformer_ref() {
         let listing = h3_root_listing();
         let hub = crate::hub::FakeHub::new();
         let r = ModelRef::new("MiniMaxAI", "MiniMax-H3", None);
@@ -1205,14 +1196,12 @@ mod tests {
 
         for f in listing.iter().filter(|f| f.as_str() != "model_index.json") {
             let under_a_role_dir = H3Recipe::ROLE_DIRS.iter().any(|d| f.starts_with(d));
-            let skipped = H3Recipe::SKIP_BY_DEFAULT.iter().any(|d| f.starts_with(d));
-            assert_eq!(dest.contains(&f.as_str()), under_a_role_dir && !skipped, "{f} inclusion disagrees with role-dir membership minus the default skip list");
+            assert_eq!(dest.contains(&f.as_str()), under_a_role_dir, "{f} inclusion disagrees with role-dir membership");
         }
         assert!(dest.contains(&"model_index.json"));
-        // transformer_ref/ is real content in the listing (ref2va's own DiT
-        // copy) but deliberately not fetched by default - see
-        // SKIP_BY_DEFAULT's own doc comment.
-        assert!(!dest.iter().any(|d| d.starts_with("transformer_ref/")), "transformer_ref/ must not be fetched until ref2va is implemented");
+        // ref2va denoises with transformer_ref/, so a pull that left it out
+        // would leave a checkout that refuses one of the release's tasks.
+        assert!(dest.contains(&"transformer_ref/config.json"), "transformer_ref/ is ref2va's DiT and is fetched with the release");
     }
 
     #[test]
