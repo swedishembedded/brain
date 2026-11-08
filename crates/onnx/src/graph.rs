@@ -5,10 +5,10 @@
 //! [`crate::onnx`]. Brain's exporters build against these types; [`Graph::to_proto`]
 //! bridges to the wire representation for serialization.
 //!
-//! The split is deliberate: keeping a clean owned model (rather than poking the
-//! generated `*Proto` structs directly) is what would let a future ONNX *import*
-//! frontend reuse the same vocabulary via a `from_proto` (not implemented now —
-//! only the export/serialize direction exists today).
+//! The split is deliberate: exporters build a clean owned model rather than
+//! poking the generated `*Proto` structs directly. The import direction
+//! ([`crate::read`], [`crate::walk`]) reads the wire types as they are; there
+//! is no `from_proto` into this model.
 
 use crate::onnx as p;
 
@@ -35,8 +35,8 @@ impl Elem {
     }
 }
 
-/// A typed, shaped graph input/output (`ValueInfoProto`). A `None` dim is a
-/// dynamic dimension; brain always exports static shapes so dims are concrete.
+/// A typed, shaped graph input/output (`ValueInfoProto`). Every dim is
+/// concrete: brain exports static shapes only.
 #[derive(Clone, Debug)]
 pub struct ValueInfo {
     pub name: String,
