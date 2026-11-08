@@ -12,28 +12,7 @@
 //! needs expertise in operating RL fine-tuning you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
-use std::fmt;
-
-/// Consecutive optimiser steps with a non-finite loss or gradient after which
-/// the run is aborted instead of skipping again.
-pub const MAX_CONSECUTIVE_NONFINITE: u32 = 3;
-
-/// The run was aborted because the loss or gradient was non-finite on
-/// [`MAX_CONSECUTIVE_NONFINITE`] optimiser steps in a row. Carried as the
-/// source of the `std::io::Error` the training loop returns, so a caller can
-/// `downcast_ref` it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NonFiniteSteps {
-    pub consecutive: u32,
-}
-
-impl fmt::Display for NonFiniteSteps {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "the loss or gradient was not finite on {} optimiser steps in a row; the weights were left as they were", self.consecutive)
-    }
-}
-
-impl std::error::Error for NonFiniteSteps {}
+pub use model::stepgate::{NonFiniteSteps, MAX_CONSECUTIVE_NONFINITE};
 
 /// Why a queued row was not trained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

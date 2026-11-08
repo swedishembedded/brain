@@ -105,6 +105,7 @@ pub mod saved;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shard;
 pub mod streamed;
+pub mod stepgate;
 pub mod tape;
 pub mod train;
 pub mod trainprec;
@@ -517,6 +518,14 @@ pub trait Model {
     fn read_weight(&self, name: &str) -> Vec<f32>;
     fn write_weight(&self, name: &str, data: &[f32]);
     fn read_grad(&self, name: &str) -> Vec<f32>;
+
+    /// Whether every accumulated gradient of the optimised parameters is finite; `None` when this
+    /// model does not expose them. Reads the gradients back to the host, so a caller that asks every
+    /// step bounds the size of the set first ([`stepgate::MAX_SCANNED_GRAD_FLOATS`]).
+    fn gradients_finite(&self) -> Option<bool> {
+        let names = self.optimized_params()?;
+        Some(names.iter().all(|n| self.read_grad(n).iter().all(|g| g.is_finite())))
+    }
 
     /// Replace `name`'s gradient, as a data-parallel reduction needs to. The
     /// default refuses; a model that cannot expose its gradients cannot be

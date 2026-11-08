@@ -119,6 +119,10 @@ pub struct FitOpts {
     pub stages: u32,
     /// Train the global-attention layers with native sparse attention ([`NativeSparse`]); `None`: dense attention.
     pub native_sparse: Option<NativeSparse>,
+    /// Abort on the first non-finite loss or gradient instead of skipping the step and aborting after
+    /// [`crate::stepgate::MAX_CONSECUTIVE_NONFINITE`] in a row. Does not change what a healthy run computes,
+    /// so it is not part of a run's identity.
+    pub strict_updates: bool,
 }
 
 impl Default for FitOpts {
@@ -151,6 +155,7 @@ impl Default for FitOpts {
             precision: crate::TrainPrecision::default(),
             stages: 0,
             native_sparse: None,
+            strict_updates: false,
         }
     }
 }
@@ -1817,6 +1822,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         gpu_core::profile::stage_time("fit: initial loss probe (5 forwards)", probe_clock);
         total / 5.0
     };
+    let mut gate = crate::stepgate::UpdateGate::new(opts.strict_updates);
     let mut last_train: Option<f32> = None;
     let mut completed = first_step;
     let mut interrupted = false;
@@ -1845,11 +1851,18 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 // average grads over accumulation steps
                 let scale = 1.0 / opts.grad_accum.max(1) as f32;
                 let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
-                applied += 1;
                 if let Some(sync) = &grad_sync {
                     crate::distributed::reduce_grads(&model, sync.collective, sync.rank).map_err(std::io::Error::other)?;
                 }
-                model.adamw_step(applied, lr, opts.weight_decay, opts.adam, clip, scale);
+                // Moments, the applied-step count and the weights change only once the step passed the gate.
+                match gate.admit(&model, step_loss)? {
+                    Some(why) => eprintln!("step {:>6}: no optimiser step taken: {why}", step + 1),
+                    None => {
+                        applied += 1;
+                        model.adamw_step(applied, lr, opts.weight_decay, opts.adam, clip, scale);
+                        gate.verify_committed(model.last_grad_norm(), step + 1)?;
+                    }
+                }
             }
             StepVerdict::Skip(why) => eprintln!("step {:>6}: no optimiser step taken: {why}", step + 1),
             StepVerdict::Abort(e) => return Err(e),
@@ -2370,6 +2383,9 @@ mod tests {
         drawn: std::rc::Rc<std::cell::RefCell<Vec<u32>>>,
         /// The split and examples named by each batch that named its examples, in order.
         named: std::rc::Rc<std::cell::RefCell<Vec<NamedBatch>>>,
+        /// What `read_grad` reports for its one weight, and the norm the last update measured.
+        grad: std::rc::Rc<std::cell::Cell<f32>>,
+        norm: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     }
 
     /// A batch that named its examples: the split and the example in each row.
@@ -2401,7 +2417,7 @@ mod tests {
     impl Model for Recorder {
         type Config = RecorderCfg;
         fn new(_cfg: RecorderCfg, _b: u32, _t: u32, _init: &HashMap<String, Vec<f32>>) -> Self {
-            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default(), denominators: Default::default(), drawn: Default::default(), named: Default::default(), lrs: Default::default(), indices: Default::default() }
+            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default(), denominators: Default::default(), drawn: Default::default(), named: Default::default(), lrs: Default::default(), indices: Default::default(), grad: Default::default(), norm: Default::default() }
         }
         fn init_weights(_cfg: &RecorderCfg, _seed: u64) -> HashMap<String, Vec<f32>> {
             HashMap::new()
@@ -2464,7 +2480,10 @@ mod tests {
             *self.w.borrow_mut() = data.to_vec();
         }
         fn read_grad(&self, _name: &str) -> Vec<f32> {
-            vec![0.0]
+            vec![self.grad.get()]
+        }
+        fn last_grad_norm(&self) -> Option<f32> {
+            self.norm.get()
         }
         fn write_grad(&self, _name: &str, _data: &[f32]) -> Result<(), String> {
             Ok(())
@@ -2581,6 +2600,75 @@ mod tests {
         let (report, _) = fit_controlled(model, Verdicts(script.into()), &opts, None, FitControl::default()).expect("fit");
         assert_eq!(lrs.borrow().len(), 2, "two of the four steps were applied");
         assert_eq!(report.steps_completed, 4, "a skipped step still advances the schedule");
+    }
+
+    /// An objective whose micro-steps report a scripted `(loss, gradient)`.
+    struct Scripted(std::collections::VecDeque<(f32, f32)>);
+    impl Objective<Recorder> for Scripted {
+        fn regime(&self) -> &'static str {
+            "scripted"
+        }
+        fn micro_step(&mut self, m: &Recorder, _r: &mut Rng) -> f32 {
+            let (loss, grad) = self.0.pop_front().unwrap_or((0.0, 0.0));
+            m.grad.set(grad);
+            loss
+        }
+        /// The script belongs to the training steps, not to the initial estimate.
+        fn loss_probe(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            0.0
+        }
+    }
+
+    fn scripted_run(script: &[(f32, f32)], strict: bool) -> (std::io::Result<FitReport>, Vec<u32>) {
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        let indices = std::rc::Rc::clone(&model.indices);
+        let opts = FitOpts { steps: script.len() as u32, eval_interval: 0, strict_updates: strict, ..Default::default() };
+        let report = fit_controlled(model, Scripted(script.iter().copied().collect()), &opts, None, FitControl::default()).map(|(r, _)| r);
+        let applied = indices.borrow().clone();
+        (report, applied)
+    }
+
+    /// A non-finite loss or gradient never reaches the optimiser, whatever the objective: the
+    /// step is skipped, the applied-step index does not advance, and the run goes on.
+    #[test]
+    fn a_non_finite_loss_or_gradient_is_never_applied() {
+        for bad in [(f32::NAN, 0.0), (f32::INFINITY, 0.0), (1.0, f32::NAN), (1.0, f32::NEG_INFINITY)] {
+            let (report, applied) = scripted_run(&[(1.0, 0.5), bad, (1.0, 0.5)], false);
+            let report = report.expect("one bad step does not stop the run");
+            assert_eq!(applied, vec![1, 2], "{bad:?}: the bad step must not reach AdamW or advance its index");
+            assert_eq!((report.steps_completed, report.applied_steps), (3, 2), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn consecutive_non_finite_steps_abort_the_run_with_a_typed_error() {
+        let nan = (f32::NAN, 0.0);
+        let (result, applied) = scripted_run(&[(1.0, 0.0), nan, nan, nan, (1.0, 0.0)], false);
+        let error = result.expect_err("three in a row abort");
+        assert_eq!(error.get_ref().and_then(|e| e.downcast_ref::<crate::stepgate::NonFiniteSteps>()), Some(&crate::stepgate::NonFiniteSteps { consecutive: 3 }));
+        assert_eq!(applied, vec![1]);
+        // A good step in between resets the count.
+        let (result, applied) = scripted_run(&[nan, nan, (1.0, 0.0), nan, nan, (1.0, 0.0)], false);
+        result.expect("the count restarts after an applied step");
+        assert_eq!(applied, vec![1, 2]);
+    }
+
+    #[test]
+    fn strict_mode_aborts_on_the_first_non_finite_step() {
+        let (result, applied) = scripted_run(&[(1.0, 0.0), (1.0, f32::NAN), (1.0, 0.0)], true);
+        assert!(result.is_err());
+        assert_eq!(applied, vec![1], "the failing step is not applied");
+    }
+
+    /// A model whose gradients cannot be scanned before the update is checked after it: a
+    /// non-finite clip norm means the update already happened, so the run stops.
+    #[test]
+    fn a_non_finite_gradient_norm_after_an_update_stops_the_run() {
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        model.norm.set(Some(f32::INFINITY));
+        let opts = FitOpts { steps: 2, eval_interval: 0, ..Default::default() };
+        let error = fit_controlled(model, Scripted(Default::default()), &opts, None, FitControl::default()).err().expect("stops");
+        assert!(error.to_string().contains("gradient norm"), "{error}");
     }
 
     /// AdamW's bias correction depends on how many updates the moments have

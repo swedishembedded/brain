@@ -517,7 +517,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             loss += l;
             finite &= ok;
         }
-        finite &= gradients_are_finite(model);
+        finite &= model.gradients_finite().unwrap_or(true);
         self.verdict = Some(self.rule(finite));
         self.log.set_stats(&self.stats);
         loss
@@ -586,13 +586,6 @@ fn trainer_logprobs<M: Model>(model: &M, row: &PackedRow) -> Vec<f32> {
 /// The rows' per-position log-probabilities with every LoRA adapter disabled, or `None` for a model without adapters.
 fn adapter_off_logprobs<M: Model>(model: &M, rows: &[PackedRow]) -> Option<Vec<Vec<f32>>> {
     with_adapters_disabled(model, || rows.iter().map(|r| trainer_logprobs(model, r)).collect())
-}
-
-/// Whether the accumulated gradients of the trained tensors are finite. A model
-/// that does not expose its trained set is not inspected (its loss already was).
-fn gradients_are_finite<M: Model>(model: &M) -> bool {
-    let Some(names) = model.optimized_params() else { return true };
-    names.iter().all(|n| model.read_grad(n).iter().all(|g| g.is_finite()))
 }
 
 impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
