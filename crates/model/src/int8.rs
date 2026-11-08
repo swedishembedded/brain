@@ -22,7 +22,7 @@
 //! 17408 in the models this tier serves. That is a measured defect in this
 //! repo, not a theoretical one - whole-channel INT8 on the Qwen3 KV-cache
 //! decode graph measured cosine 0.994 / max_abs 11.2 against fp32's 1.000000
-//! / 0.0002 (`AGENTS.md`, "Weight-only quantization must be block/group-wise";
+//! / 0.0002 (knowledge #65 records it;
 //! the NPU-side quantizer `npu::topo::linear_quant` has used `QUANT_GROUP =
 //! 32` for the same reason since that measurement).
 //!
@@ -614,7 +614,7 @@ mod tests {
     /// The whole point of the group-wise layout, stated as a measurement.
     ///
     /// One row of otherwise-small weights with a single large outlier is the
-    /// exact failure mode `AGENTS.md` records for whole-channel scales: the
+    /// exact failure mode knowledge #65 records for whole-channel scales: the
     /// outlier sets `max|row|`, so every small weight in that ROW quantizes
     /// against a step ~300x too coarse and most of them collapse to code 0.
     /// Group-wise, the damage is CONFINED to the outlier's own 32-element

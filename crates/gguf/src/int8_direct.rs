@@ -4,7 +4,7 @@
 //! A Q8_0 GGUF tensor straight into brain's own packed-int8 layout: a byte
 //! repack, not a dequantize-then-requantize, now that `model::int8::GROUP`
 //! (32) matches Q8_0's own block size exactly. `crates/flux2` proved this
-//! bit-exact against the fp32 round trip first (`tests/gguf_direct_int8.rs`);
+//! bit-exact against the fp32 round trip first (`crates/flux2/tests/it/gguf_direct_int8.rs`);
 //! this module is that proof's implementation, lifted here so a second
 //! GGUF-sourced model does not re-derive it - the underlying arithmetic fact
 //! (`deq_q8_0` needs at most 18 significand bits against fp32's 24, so
