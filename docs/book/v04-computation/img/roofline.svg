@@ -1,0 +1,40 @@
+<!-- source-sha256: 6ed905f62e960148f12df977cf32cfce7b5519ff39730f3531a027e19c3ca83d -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 400" width="620" height="400">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="400" fill="#ffffff"/>
+<line x1="58" y1="354" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-2</text>
+<line x1="158.74" y1="354" x2="158.74" y2="30" stroke="#edf2f7"/>
+<text x="158.74" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-1</text>
+<line x1="259.48" y1="354" x2="259.48" y2="30" stroke="#edf2f7"/>
+<text x="259.48" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="360.22" y1="354" x2="360.22" y2="30" stroke="#edf2f7"/>
+<text x="360.22" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="460.96" y1="354" x2="460.96" y2="30" stroke="#edf2f7"/>
+<text x="460.96" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="561.7" y1="354" x2="561.7" y2="30" stroke="#edf2f7"/>
+<text x="561.7" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="58" y1="317.18" x2="602" y2="317.18" stroke="#edf2f7"/>
+<text x="52" y="321.18" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="243.55" x2="602" y2="243.55" stroke="#edf2f7"/>
+<text x="52" y="247.55" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="169.91" x2="602" y2="169.91" stroke="#edf2f7"/>
+<text x="52" y="173.91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">3</text>
+<line x1="58" y1="96.27" x2="602" y2="96.27" stroke="#edf2f7"/>
+<text x="52" y="100.27" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<rect x="58" y="30" width="544" height="324" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="324"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,324.32 430.64,51.94 602,51.94"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,397.95 360.22,177.05 602,177.05"/><circle cx="150.76" cy="256.51" r="3.5" fill="#2f855a"/><circle cx="229.13" cy="199.23" r="3.5" fill="#2f855a"/><circle cx="289.72" cy="154.94" r="3.5" fill="#2f855a"/><circle cx="545" cy="51.94" r="3.5" fill="#2f855a"/><text x="157.82" y="272.71" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">vector add</text><text x="236.19" y="215.43" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">GEMV fp32</text><text x="296.77" y="171.14" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">GEMV int8</text><text x="537.95" y="74.03" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">GEMM 4096</text><circle cx="259.48" cy="177.05" r="3.5" fill="#9b2c2c"/><circle cx="350.46" cy="110.54" r="3.5" fill="#9b2c2c"/><circle cx="441.44" cy="51.94" r="3.5" fill="#9b2c2c"/><circle cx="532.42" cy="51.94" r="3.5" fill="#9b2c2c"/><text x="252.43" y="163.79" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">B=1</text><text x="343.41" y="97.29" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">B=8</text><text x="434.39" y="38.68" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">B=64</text><text x="525.36" y="38.68" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">B=512</text><line x1="430.64" y1="354" x2="430.64" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="360.22" y1="354" x2="360.22" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/></g>
+<text x="330" y="390" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log10 of arithmetic intensity (FLOP per byte)</text>
+<text x="14" y="192" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 192)">log10 of attainable GFLOP/s</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">The roofline of two illustrative machines</text>
+<rect x="66" y="38" width="242.48" height="78" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">GPU roof (40,000 GFLOP/s, 800 GB/s)</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">CPU roof (800 GFLOP/s, 80 GB/s)</text>
+<circle cx="84" cy="87" r="3.5" fill="#2f855a"/>
+<text x="100" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">operations on the GPU roof</text>
+<circle cx="84" cy="104" r="3.5" fill="#9b2c2c"/>
+<text x="100" y="108" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">fp16 decode, batch 1, 8, 64, 512</text>
+</svg>

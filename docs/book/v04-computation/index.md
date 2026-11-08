@@ -49,7 +49,7 @@ more than one kind of device.
    needs, and what we lose with each bit we remove.
 2. [The CPU: Cores, Caches and Vectors](02-cpu.md): why the same arithmetic runs
    ten times faster when the data is arranged differently.
-3. Memory Bandwidth, Compute and the Roofline: whether a computation is limited
+3. [Memory Bandwidth, Compute and the Roofline](03-roofline.md): whether a computation is limited
    by arithmetic or by moving data, and how to tell.
 4. The GPU: Thousands of Small Workers: how a GPU organizes its thousands of
    threads, and what that demands of our algorithms.

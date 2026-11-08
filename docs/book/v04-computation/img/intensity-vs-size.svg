@@ -1,0 +1,42 @@
+<!-- source-sha256: d2a5c50f21b2f63b46748348d6742f612f25d4f57a0587930dd37b7b825dabdc -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 380" width="600" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="380" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="189" y1="334" x2="189" y2="30" stroke="#edf2f7"/>
+<text x="189" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="320" y1="334" x2="320" y2="30" stroke="#edf2f7"/>
+<text x="320" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="451" y1="334" x2="451" y2="30" stroke="#edf2f7"/>
+<text x="451" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="582" y1="334" x2="582" y2="30" stroke="#edf2f7"/>
+<text x="582" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="58" y1="312.29" x2="582" y2="312.29" stroke="#edf2f7"/>
+<text x="52" y="316.29" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-1</text>
+<line x1="58" y1="258" x2="582" y2="258" stroke="#edf2f7"/>
+<text x="52" y="262" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="203.71" x2="582" y2="203.71" stroke="#edf2f7"/>
+<text x="52" y="207.71" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="149.43" x2="582" y2="149.43" stroke="#edf2f7"/>
+<text x="52" y="153.43" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="95.14" x2="582" y2="95.14" stroke="#edf2f7"/>
+<text x="52" y="99.14" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">3</text>
+<line x1="58" y1="40.86" x2="582" y2="40.86" stroke="#edf2f7"/>
+<text x="52" y="44.86" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<rect x="58" y="30" width="524" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,245.96 90.75,232.1 123.5,218.53 156.25,205.34 189,191.67 221.75,178.08 254.5,164.55 287.25,150.97 320,137.39 352.75,123.82 385.5,110.24 418.25,96.67 451,83.1 483.75,69.53 516.5,55.96 549.25,42.39 582,28.81"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,278.64 90.75,276.83 123.5,275.77 156.25,275.17 189,274.81 221.75,274.61 254.5,274.49 287.25,274.43 320,274.39 352.75,274.37 385.5,274.36 418.25,274.35 451,274.35 483.75,274.34 516.5,274.34 549.25,274.34 582,274.34"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,255.52 90.75,250.33 123.5,246.92 156.25,244.81 189,243.47 221.75,242.69 254.5,242.25 287.25,241.99 320,241.85 352.75,241.76 385.5,241.72 418.25,241.69 451,241.68 483.75,241.67 516.5,241.66 549.25,241.66 582,241.66"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="58,316.58 90.75,316.58 123.5,316.58 156.25,316.58 189,316.58 221.75,316.58 254.5,316.58 287.25,316.58 320,316.58 352.75,316.58 385.5,316.58 418.25,316.58 451,316.58 483.75,316.58 516.5,316.58 549.25,316.58 582,316.58"/><line x1="58" y1="203.71" x2="582" y2="203.71" stroke="#c05621" stroke-dasharray="4 4"/><line x1="58" y1="165.77" x2="582" y2="165.77" stroke="#2b6cb0" stroke-dasharray="4 4"/><text x="578.07" y="197.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">CPU ridge 10</text><text x="578.07" y="159.26" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">GPU ridge 50</text></g>
+<text x="320" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log10 of the matrix side n</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">log10 of intensity (FLOP per byte)</text>
+<text x="320" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Intensity against matrix size</text>
+<rect x="66" y="38" width="199.91" height="78" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">matrix product C = A B (n / 6)</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">matrix-vector, fp32 weights</text>
+<line x1="74" y1="87" x2="94" y2="87" stroke="#2f855a" stroke-width="2"/>
+<text x="100" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">matrix-vector, int8 weights</text>
+<line x1="74" y1="104" x2="94" y2="104" stroke="#9b2c2c" stroke-width="2"/>
+<text x="100" y="108" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">vector addition (1/12)</text>
+</svg>

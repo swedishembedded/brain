@@ -1,0 +1,34 @@
+<!-- source-sha256: 43f108d026acb99d6c1f2b6e823f11c86e7510516f2c0c782e65767fb8e3efde -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 360" width="600" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="360" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="171.91" y1="314" x2="171.91" y2="30" stroke="#edf2f7"/>
+<text x="171.91" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="285.83" y1="314" x2="285.83" y2="30" stroke="#edf2f7"/>
+<text x="285.83" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="399.74" y1="314" x2="399.74" y2="30" stroke="#edf2f7"/>
+<text x="399.74" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="513.65" y1="314" x2="513.65" y2="30" stroke="#edf2f7"/>
+<text x="513.65" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="58" y1="314" x2="582" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="230.47" x2="582" y2="230.47" stroke="#edf2f7"/>
+<text x="52" y="234.47" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="146.94" x2="582" y2="146.94" stroke="#edf2f7"/>
+<text x="52" y="150.94" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<line x1="58" y1="63.41" x2="582" y2="63.41" stroke="#edf2f7"/>
+<text x="52" y="67.41" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">30</text>
+<rect x="58" y="30" width="524" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="1.2" stroke-dasharray="6 4" points="58,314 513.65,80.12"/><circle cx="513.65" cy="80.12" r="4.5" fill="#2b6cb0"/><circle cx="285.83" cy="197.06" r="4.5" fill="#2b6cb0"/><circle cx="186.15" cy="248.22" r="4.5" fill="#2b6cb0"/><circle cx="129.2" cy="277.46" r="4.5" fill="#2b6cb0"/><text x="547.83" y="146.94" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">fp32: 28.00 GB</text><text x="302.91" y="212.09" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">fp16: 14.00 GB</text><text x="203.24" y="263.26" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">int8 + scales: 7.88 GB</text><text x="146.28" y="292.49" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">int4 + scales: 4.38 GB</text></g>
+<text x="320" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">bytes per weight</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">GB read per token (7 billion weights)</text>
+<text x="320" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Bytes per token against weight format</text>
+<rect x="66" y="38" width="207.39" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#2b6cb0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">bytes = 7e9 x bytes per weight</text>
+<circle cx="84" cy="70" r="3.5" fill="#2b6cb0"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">stored formats</text>
+</svg>

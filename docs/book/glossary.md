@@ -20,6 +20,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **algorithm**: a finite list of definite steps that turns any input of a stated kind into an output of a stated kind, whose correctness can be argued with an invariant that holds before and after every pass of its loops. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
+**arithmetic intensity**: the number of floating-point operations a computation performs per byte it must move between main memory and the arithmetic, a property of the algorithm and the sizes and formats and not of the machine. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
+
 **artificial neuron**: a function of an input vector that forms a weighted sum of its entries plus a bias and passes the total through an activation function, $y = g(\mathbf{w}\cdot\mathbf{x} + b)$; the weights and the bias are what is learned. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
 
 **asymptotic complexity**: the growth rate of an algorithm's cost as the size of its input grows, stated with $O$, $\Omega$ and $\Theta$ so that constants and lower-order terms are dropped and only the shape (such as $n$, $n \log n$ or $n^2$) remains. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
@@ -39,6 +41,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **backward pass of a reduction**: the rule that sends the gradient of a sum, mean or maximum back to the entries that were collapsed: copied for a sum, divided by the count for a mean, routed to the argmax for a maximum. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
 
 **backward pass of an elementwise function**: multiplying the incoming gradient entry by entry with the derivative of the function at the input, $dx = dy\,f'(x)$, which needs the input, the output or a mask saved from the forward. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
+
+**bandwidth-bound**: limited by the bytes it moves: the arithmetic intensity is below the machine's ridge point, so the attainable rate is intensity times bandwidth and only moving fewer bytes makes it faster. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
 
 **baseline**: a method run under the same protocol as the new one, trivial (no features), simple (an earlier chapter's method fitted properly) or the previous best, whose result the new one must beat to count as progress. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
@@ -91,6 +95,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **composition**: feeding the output of one function into another, $(g \circ f)(x) = g(f(x))$; it is associative but not commutative. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 **computational graph**: a record of a calculation as nodes (values) and edges showing which values were used to compute which. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
+
+**compute-bound**: limited by arithmetic: the arithmetic intensity is at or above the machine's ridge point, so the attainable rate is the peak arithmetic rate and only fewer or cheaper operations, or a faster unit, make it faster. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
 
 **condition number**: for a bowl-shaped function, the ratio of its largest to its smallest curvature; a large ratio means long, narrow contours and slow progress for a fixed step size. The floating-point chapter extends the idea to how strongly a computation amplifies small errors in its inputs. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
@@ -344,6 +350,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **mean squared error**: the average over the examples of the squared difference between prediction and label, $\frac{1}{N}\sum_n (\hat{y}_n - y_n)^2$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
+**memory bandwidth**: the number of bytes per second that main memory can deliver to the processor when the program asks for them in the best possible way (long sequential reads), a property of the machine and not of the program. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
+
 **memory complexity**: the amount of memory, counted in cells and measured at the peak, that an algorithm needs as a function of its input size; it can be traded against time by storing a result instead of recomputing it, or the reverse. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
 **metric selection**: choosing the number that scores a model from the decision its output feeds and the costs of its mistakes, checking it on a trivial and a perfect predictor, and reporting it with an uncertainty. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
@@ -465,6 +473,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **RMSProp**: an update that divides each coordinate's gradient by the root of a running average of its own squared gradient, so every coordinate takes a step of about the learning rate whatever its scale. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **ROC curve**: the curve of the true positive rate against the false positive rate as the decision threshold moves over every value; its area equals the probability that a random positive is scored above a random negative, counting ties as one half. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
+
+**roofline model**: the bound that the attainable rate of a computation on a machine is the smaller of the machine's peak arithmetic rate and its arithmetic intensity times its memory bandwidth, drawn as a slanted line that meets a flat one at the ridge point. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
 
 **rotation matrix**: an orthogonal matrix with determinant $+1$; in the plane $\begin{pmatrix}\cos\theta&-\sin\theta\\\sin\theta&\cos\theta\end{pmatrix}$, and rotations compose by adding their angles. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
