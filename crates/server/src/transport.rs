@@ -11,13 +11,17 @@
 //! processes of the serving user; the network surface is the authenticated
 //! HTTP API.
 
-use crate::{pump_connection, Session};
-use std::io::{self, BufReader};
-#[cfg(unix)]
-use std::os::unix::{fs::PermissionsExt, net::UnixListener};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::Session;
+use std::io;
 use std::sync::Arc;
-use std::thread;
+#[cfg(unix)]
+use {
+    crate::pump_connection,
+    std::io::BufReader,
+    std::os::unix::{fs::PermissionsExt, net::UnixListener},
+    std::sync::atomic::{AtomicUsize, Ordering},
+    std::thread,
+};
 
 /// A factory building one fresh [`Session`] per connection. `Send + Sync` so it
 /// can be shared across accept threads; its *return* stays on the connection
@@ -100,6 +104,7 @@ trait CloneStream: io::Read + io::Write + Send + 'static {
     fn dup(&self) -> io::Result<Box<dyn io::Write + Send>>;
 }
 
+#[cfg(unix)]
 impl CloneStream for std::os::unix::net::UnixStream {
     fn dup(&self) -> io::Result<Box<dyn io::Write + Send>> {
         Ok(Box::new(self.try_clone()?))
