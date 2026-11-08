@@ -1,8 +1,5 @@
 # Chapters still to be rewritten as prose (scripts/book/check.py, recycled()).
 # Remove a line in the same change that rewrites its chapter; the list only shrinks.
-docs/book/v02-learning/08-experiments.md
-docs/book/v02-learning/09-project-first-predictor.md
-docs/book/v03-neural-networks/01-perceptron.md
 docs/book/v03-neural-networks/02-mlp.md
 docs/book/v03-neural-networks/03-softmax.md
 docs/book/v03-neural-networks/04-backpropagation.md

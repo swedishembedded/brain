@@ -5,25 +5,13 @@
 
 *What is an artificial neuron, and what can a single one never learn?*
 
-## The problem
-
 A pump in a plant is watched by three sensors: how hard it vibrates, how much its housing has warmed above normal, and how much its flow has fallen short. Each reading is scaled to the range $0$ to $1$. A maintenance engineer looks at the three numbers and decides: raise the alarm, or leave it. No single reading decides. A pump that vibrates a lot but is cool and flowing well is probably fine; a pump that is a little worse on all three is not. The engineer is, in effect, taking a vote in which the sensors have different numbers of votes, and calling the alarm when the total is large enough.
 
 That sentence is already a program. Give each sensor a **weight** that says how many votes it casts per unit of reading, add the weighted readings, and compare the total with a threshold. The previous volume used this program twice without naming it: the logit of [logistic regression](../v02-learning/03-logistic-regression.md) is a weighted sum of features, and the sign of that sum is the decision. This chapter gives the program a name, the **artificial neuron**, shows how its weights can be found from labelled examples by a rule of two lines (the perceptron rule of 1958, defined below), proves that the rule stops whenever it can, and then asks the question that drove the field for a generation: what can one such unit *not* do? The answer fits in four points on a square, and it is the reason the rest of this volume exists.
 
-The chapter has five steps.
+The chapter moves in five steps. It first computes the pump decision by hand for four readings, to see what each part of the formula contributes. It then generalises: the same weighted sum, with the hard threshold replaced by other choices, is linear regression, logistic regression or the perceptron. The weights are learned next, by the perceptron rule traced update by update on six points, with the geometry of one update; then comes the question of whether the rule stops, answered by the convergence theorem, its proof in six lines and a numerical check of the bound. Last is what one neuron cannot do: linear separability, the XOR problem with a proof, and the two ways out, a better set of features or more neurons.
 
-1. **One neuron, by hand.** We compute the pump decision for four readings and see what each part of the formula contributes.
-2. **The general neuron and its activation function.** The same weighted sum, with the hard threshold replaced by other choices, is linear regression, logistic regression, or the perceptron.
-3. **Learning the weights.** The perceptron rule, traced update by update on six points, with the geometry of one update.
-4. **Does it stop?** The convergence theorem, its proof in six lines, and a numerical check of the bound.
-5. **What one neuron cannot do.** Linear separability, the XOR problem with a proof, and the two ways out: a better set of features, or more neurons.
-
-You may use from earlier chapters: the dot product and the length of a vector (Volume I, chapter 3); the sigmoid and the decision boundary of a linear logit (Volume II, chapter 3). Where the text borrows from the margin of a support vector machine or the feature maps of kernel methods (Volume II, chapter 7), it restates what it needs.
-
-## Before you begin
-
-Five questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+The chapter uses the dot product and the length of a vector (Volume I, chapter 3), and the sigmoid and the decision boundary of a linear logit (Volume II, chapter 3). Where it borrows from the margin of a support vector machine or the feature maps of kernel methods (Volume II, chapter 7), it restates what it needs. Five questions bring those ideas back; answer them from memory, because the answers are at the end of the chapter, and a hard one sends you to the chapter it names.
 
 1. (Volume I, chapter 3, "Vectors: Lists of Numbers with Geometry", the dot product.) For $\mathbf{w} = (0.5, -1, 2)$ and $\mathbf{x} = (4, 1, 0.5)$, what is $\mathbf{w}\cdot\mathbf{x}$?
 2. (Volume II, chapter 3, "Classification and Logistic Regression", the decision boundary.) A model scores a point by $z = -3 + x_1 + 2x_2$ and predicts the positive class when $z \ge 0$. Which side of the boundary is the point $(2, 1)$ on, and what is the equation of the boundary?
@@ -555,15 +543,21 @@ Notice three things, because each is the subject of a chapter that follows.
 
 First, the weights above were found by thinking, not by learning. Nothing here is a procedure that would find them from the four labelled points. Second, the learning rule of this chapter cannot be used for the hidden neurons: the perceptron rule updates a neuron when *its own output* is wrong, and nobody tells the hidden neuron $h_1$ what its output should have been; only the final answer has a label. Third, and more fundamentally, the step activation has slope zero almost everywhere, so a gradient method has no information about how a small change in the hidden weights would change the final error: the answer changes only when a weighted sum crosses zero, and a small change almost never makes it. The way out is to give the hidden neurons activations that vary smoothly and to compute how the final error depends on every weight through all the layers. The next chapter builds the layered network with such activations and shows why the composition can represent far more than one neuron (stacking layers with an identity activation would add nothing, since a product of matrices is one matrix); the third introduces the output of a network that chooses among many classes; and the fourth derives the backward pass that delivers the gradient for every weight. The perceptron stands at the start of that line: a weighted vote, a threshold, and a rule that works exactly as long as one vote is enough.
 
-## Where this appears in brain
+## The neuron in brain's kernels
 
 The neuron $y = g(\mathbf{W}\mathbf{x} + \mathbf{b})$ is not a model in brain; it is the *shape* of nearly every kernel launch in it. The three stages of the formula, the weighted sums, the bias and the activation, are kept visible as three kinds of kernel.
 
-**The weighted sums are one matrix multiply.** `crates/kernels/wgsl/matmul.wgsl` computes `out = x @ W^T` for `x` of shape $[M, K]$ and `W` of shape $[N, K]$, and its header says in one line what this chapter spent a section on: `W[n, k]` is weight row $n$, which is output feature $n$. Row $n$ of `W` is neuron $n$; one invocation computes one output element, the dot product of one input row with one neuron's weights, so one launch evaluates every neuron on every example, the $\mathbf{Z} = \mathbf{X}\mathbf{W}^\top$ of the layer section. The header calls it the generic matrix multiply for every linear stage: the attention projections, the router, the expert feed-forward weights and the output head.
+### The weighted sums are one matrix multiply
 
-**The bias and the activation are separate steps.** `crates/kernels/wgsl/bias_add.wgsl` adds `bias[n]` to every row in place (`out[m,n] += bias[n]`, the "added to every row" of the layer section), and the activation is an elementwise kernel of its own, for example `crates/kernels/wgsl/sigmoid.wgsl`, `crates/kernels/wgsl/silu.wgsl` and `crates/kernels/wgsl/tanh_act.wgsl`, each the formula $y = g(z)$ with one thread per element. Where the extra trips through memory matter, the stages are fused: `crates/kernels/wgsl/conv_act.wgsl`, cited in Volume I for its fusion, computes a convolution, a per-channel scale and shift, and a selectable activation (identity, rectified linear, silu, sigmoid) in one pass, with a convolution playing the role of the dot product.
+`crates/kernels/wgsl/matmul.wgsl` computes `out = x @ W^T` for `x` of shape $[M, K]$ and `W` of shape $[N, K]$, and its header says in one line what this chapter spent a section on: `W[n, k]` is weight row $n$, which is output feature $n$. Row $n$ of `W` is neuron $n$; one invocation computes one output element, the dot product of one input row with one neuron's weights, so one launch evaluates every neuron on every example, the $\mathbf{Z} = \mathbf{X}\mathbf{W}^\top$ of the layer section. The header calls it the generic matrix multiply for every linear stage: the attention projections, the router, the expert feed-forward weights and the output head.
 
-**A decision head is one neuron.** The head of the decision model in `crates/decide/src/head.rs` ends in exactly the unit of this chapter with the identity as activation. Its module comment writes the last stage as `score_i = out_i . w + b`, and the code builds it from the two kernels above: a matrix multiply against `head.score.weight` of shape $[1, H]$ and a `bias_add` of `head.score.bias` of shape $[1]$, giving one raw score per option. No squashing is applied on the device: the scores of one question's options are normalised together by a softmax on the host, because the number of options is chosen per request. The commit that added the head, `commit fcabe836a` (17 September 2026), says the same in prose: the scorer is a dot product against a learned vector, and the softmax is deliberately not on the device. It is the lesson of the table of activations in a real design: the activation is whatever the output must be, and a score that will be compared across a variable set of options needs no activation of its own.
+### The bias and the activation are separate steps
+
+`crates/kernels/wgsl/bias_add.wgsl` adds `bias[n]` to every row in place (`out[m,n] += bias[n]`, the "added to every row" of the layer section), and the activation is an elementwise kernel of its own, for example `crates/kernels/wgsl/sigmoid.wgsl`, `crates/kernels/wgsl/silu.wgsl` and `crates/kernels/wgsl/tanh_act.wgsl`, each the formula $y = g(z)$ with one thread per element. Where the extra trips through memory matter, the stages are fused: `crates/kernels/wgsl/conv_act.wgsl`, cited in Volume I for its fusion, computes a convolution, a per-channel scale and shift, and a selectable activation (identity, rectified linear, silu, sigmoid) in one pass, with a convolution playing the role of the dot product.
+
+### A decision head is one neuron
+
+The head of the decision model in `crates/decide/src/head.rs` ends in exactly the unit of this chapter with the identity as activation. Its module comment writes the last stage as `score_i = out_i . w + b`, and the code builds it from the two kernels above: a matrix multiply against `head.score.weight` of shape $[1, H]$ and a `bias_add` of `head.score.bias` of shape $[1]$, giving one raw score per option. No squashing is applied on the device: the scores of one question's options are normalised together by a softmax on the host, because the number of options is chosen per request. The commit that added the head, `commit fcabe836a` (17 September 2026), says the same in prose: the scorer is a dot product against a learned vector, and the softmax is deliberately not on the device. It is the lesson of the table of activations in a real design: the activation is whatever the output must be, and a score that will be compared across a variable set of options needs no activation of its own.
 
 ## Check your understanding
 
@@ -576,6 +570,20 @@ Answers are at the end of the chapter.
 5. Predict what the perceptron rule does on XOR after the first pass, and say which property of the four labelled points makes it so.
 6. A student proposes to learn the two hidden neurons of the hand-built XOR network by gradient descent on the squared error of the output, keeping the step activation. What will the gradient with respect to the hidden weights be, and why does that stop the plan?
 7. On separable data, the perceptron stops with finite weights and logistic regression does not. Explain the difference from the form of their update rules.
+
+## Summary
+
+A neuron computes a weighted vote of its inputs, adds a bias and passes the total through an activation function: $y = g(\mathbf{w}\cdot\mathbf{x} + b)$. With the identity it is linear regression, with the sigmoid logistic regression, with the step the perceptron. The perceptron rule sets the weights from labelled examples by adding each misclassified example, signed by its label, to the weights; an update raises the score of the example by $\lVert\mathbf{x}\rVert^2 + 1$ and does not look at the others. When the data are linearly separable with margin $\gamma$ and the largest augmented input has length $R$, the rule makes at most $(R/\gamma)^2$ updates whatever the order, a bound that the six-point example and the gap sweep both respected and that was far from tight. The rule is the stochastic gradient descent of a hinge loss at zero and the hard-output cousin of logistic regression; it finds some separator, not the widest. A single neuron can compute only linearly separable functions: AND and OR are, XOR is not, by four inequalities that cannot all hold, and on XOR the perceptron cycles forever. Two repairs exist, a better set of features chosen by hand, or a second layer of neurons whose hidden units choose the features, and the second is hand-built in this chapter without any way to train it.
+
+That is the problem the next chapters solve. The step activation gives a gradient nothing to follow, and a hidden neuron has no label of its own. The next chapter therefore builds the multilayer network with smooth activations and shows what stacking can represent, and the fourth chapter derives the backward pass that tells every weight in every layer how to change.
+
+## References
+
+- Warren S. McCulloch and Walter Pitts, "A logical calculus of the ideas immanent in nervous activity", 1943.
+- Frank Rosenblatt, "The perceptron: a probabilistic model for information storage and organization in the brain", 1958.
+- Albert B. J. Novikoff, "On convergence proofs on perceptrons", 1962.
+- Marvin Minsky and Seymour Papert, "Perceptrons: An Introduction to Computational Geometry", 1969.
+- David E. Rumelhart, Geoffrey E. Hinton and Ronald J. Williams, "Learning representations by back-propagating errors", 1986.
 
 ## Exercises
 
@@ -590,12 +598,6 @@ Answers are at the end of the chapter.
 9. **[Implement]** Reproduce `perceptron.boolean_functions`: enumerate every $(w_1, w_2, b)$ on the stated grid, compute the four outputs of each neuron, and count the neurons that compute each of the sixteen functions. Report how many functions are reached.
 10. **[Investigate]** Take the $20$ points of `perceptron.gap_scaling` with $g = 0.5$ and flip the label of the point of index $0$ (the first one drawn), which makes the data non-separable; flipping the points of index $3$, $4$, $5$, $8$, $14$ or $19$ would leave them separable, so check separability after the flip. Run the perceptron rule for $200$ passes and record the number of mistakes per pass and the classification accuracy after each pass. Does the rule settle? Modify it to remember the weights with the highest accuracy seen so far, and say what that buys and what it does not.
 
-## Summary
-
-A neuron computes a weighted vote of its inputs, adds a bias and passes the total through an activation function: $y = g(\mathbf{w}\cdot\mathbf{x} + b)$. With the identity it is linear regression, with the sigmoid logistic regression, with the step the perceptron. The perceptron rule sets the weights from labelled examples by adding each misclassified example, signed by its label, to the weights; an update raises the score of the example by $\lVert\mathbf{x}\rVert^2 + 1$ and does not look at the others. When the data are linearly separable with margin $\gamma$ and the largest augmented input has length $R$, the rule makes at most $(R/\gamma)^2$ updates whatever the order, a bound that the six-point example and the gap sweep both respected and that was far from tight. The rule is the stochastic gradient descent of a hinge loss at zero and the hard-output cousin of logistic regression; it finds some separator, not the widest. A single neuron can compute only linearly separable functions: AND and OR are, XOR is not, by four inequalities that cannot all hold, and on XOR the perceptron cycles forever. Two repairs exist, a better set of features chosen by hand, or a second layer of neurons whose hidden units choose the features, and the second is hand-built in this chapter without any way to train it.
-
-That is the problem the next chapters solve. The step activation gives a gradient nothing to follow, and a hidden neuron has no label of its own. The next chapter therefore builds the multilayer network with smooth activations and shows what stacking can represent, and the fourth chapter derives the backward pass that tells every weight in every layer how to change.
-
 ## Key terms
 
 - **artificial neuron**: a function of an input vector that forms a weighted sum of its entries plus a bias and passes the total through an activation function, $y = g(\mathbf{w}\cdot\mathbf{x} + b)$; the weights and the bias are what is learned. <!-- concept: artificial-neuron -->
@@ -606,7 +608,7 @@ That is the problem the next chapters solve. The step activation gives a gradien
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $0.5\cdot 4 + (-1)\cdot 1 + 2\cdot 0.5 = 2 - 1 + 1 = 2$.
 2. At $(2, 1)$, $z = -3 + 2 + 2 = 1 \ge 0$, so it is on the positive side. The boundary is $z = 0$, the line $x_1 + 2x_2 = 3$.
@@ -614,7 +616,7 @@ That is the problem the next chapters solve. The step activation gives a gradien
 4. The one with the widest empty strip (the margin) between the classes. In the four-point example of that chapter it was the boundary $x = 1.5$ with a margin of $0.5$.
 5. The weights keep growing (their norm roughly like the logarithm of the number of steps) and the loss approaches zero without reaching it. Any correct classifier can be made more confident by scaling its weights up, which lowers the loss, so there is no finite minimiser.
 
-**Check your understanding**
+**Check your understanding.**
 
 1. The update lowers the score of the negative example $P4$ by exactly $\lVert\mathbf{x}\rVert^2 + 1 = 2$, from $+3$ to $+1$. That is the right direction, but the size of the step is fixed and was not enough to cross zero. The rule is not broken: other updates (4, at $P6$) changed the weights further, and $P4$ was still a mistake in the second pass, where update 5 finally took its score to $-2$. A mistake is not repaired in one step, only pushed in the right direction.
 2. The bound depends on the margin $\gamma$ and the size $R$ of the data, not on the number of points, and the number of updates depends on the order of the examples. For the six points the bound was $74.82$ and over $200$ orders the count went up to $9$. Five was the count for one order, as low as any of the $200$ orders gave; on other data with a smaller margin it can be far larger.
@@ -623,11 +625,3 @@ That is the problem the next chapters solve. The step activation gives a gradien
 5. Every visit in the first pass is a mistake, and the weights at the end of the pass are back at $\mathbf{w} = (0, 0)$, $b = 0$, so the same pass repeats forever. The reason is that the four updates $y_n\tilde{\mathbf{x}}_n$ sum to the zero vector: $(0,0,-1) + (0,1,1) + (1,0,1) + (-1,-1,-1) = (0,0,0)$.
 6. The gradient is zero: the step activation has slope zero everywhere except at the jump, and a small change in a hidden weight moves the weighted sum across zero for almost no input, so the output and the error do not change. Gradient descent then sees a flat loss and does not move any hidden weight.
 7. The perceptron adds an example only when it is a mistake, so once every example is correct, every update is zero and the weights stay put. The logistic update multiplies the input by $t - \sigma(z)$, which is never exactly zero for a finite score; a correctly classified example still pulls the weights toward larger magnitudes, so on separable data they grow without limit.
-
-## References
-
-- Warren S. McCulloch and Walter Pitts, "A logical calculus of the ideas immanent in nervous activity", 1943.
-- Frank Rosenblatt, "The perceptron: a probabilistic model for information storage and organization in the brain", 1958.
-- Albert B. J. Novikoff, "On convergence proofs on perceptrons", 1962.
-- Marvin Minsky and Seymour Papert, "Perceptrons: An Introduction to Computational Geometry", 1969.
-- David E. Rumelhart, Geoffrey E. Hinton and Ronald J. Williams, "Learning representations by back-propagating errors", 1986.
