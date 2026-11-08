@@ -100,7 +100,7 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
             let mut by_layer = bank.device_bytes_by_layer(&train, cfg.num_hidden_layers);
             let mut head = 0;
             for site in train.saved_sites() {
-                let bytes = (u64::from(bank.slots) + 1) * site.numel as u64 * 4;
+                let bytes = model::adapter::saved_bank::SavedBank::bytes_of(std::slice::from_ref(&site), bank.slots);
                 match site.layer {
                     Some(l) => by_layer[l] += bytes,
                     None => head += bytes,

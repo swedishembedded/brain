@@ -422,7 +422,9 @@ fn the_adapter_bank_is_charged_in_the_placement() {
     let plain = resident(&dir, &RicursiveServeConfig::default(), &[]).unwrap().estimate(&key).vram;
     let with = banked(&dir).estimate(&key).vram;
     let bank = model::adapter::bank::AdapterBankConfig::new(2, 4, &["q_proj", "k_proj", "v_proj", "o_proj", "g_proj", "gate_proj", "up_proj", "down_proj"]);
-    let wanted = bank.device_bytes(&ricursive::TrainConfig::new(config(), 1), 256);
+    let train = ricursive::TrainConfig::new(config(), 1);
+    // The factors, and the per-slot tables of the norm gains and value gates an adapter may carry in full.
+    let wanted = bank.device_bytes(&train, 256) + model::adapter::saved_bank::SavedBank::bytes_of(&train.saved_sites(), 2);
     assert_eq!(with - plain, wanted, "the placement charges the bank's bytes");
     std::fs::remove_dir_all(&dir).ok();
 }
