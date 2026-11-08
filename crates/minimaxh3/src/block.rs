@@ -91,8 +91,15 @@ const K_FLASH_ATTN_BIDIR_REG2: usize = 16;
 /// `out += t·Bᵀ`: the accumulate half of an adapter's correction beside a
 /// linear ([`Linear`]).
 const K_LORA_DELTA: usize = 17;
+/// Video sparse attention (`crate::vsa`).
+pub(crate) const K_VSA_TILE_MEAN: usize = 18;
+pub(crate) const K_VSA_TILE_SCORES: usize = 19;
+pub(crate) const K_VSA_SELECT: usize = 20;
+pub(crate) const K_FLASH_ATTN_VSA: usize = 21;
+pub(crate) const K_VSA_COARSE: usize = 22;
+pub(crate) const K_VSA_GATE_ADD: usize = 23;
 
-pub const KERNELS: [(&str, &str); 18] = [
+pub const KERNELS: [(&str, &str); 24] = [
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("rope2d_partial", kernels::ROPE2D_PARTIAL),
@@ -111,6 +118,12 @@ pub const KERNELS: [(&str, &str); 18] = [
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
     ("lora_delta", kernels::LORA_DELTA),
+    ("vsa_tile_mean", kernels::VSA_TILE_MEAN),
+    ("vsa_tile_scores", kernels::VSA_TILE_SCORES),
+    ("vsa_select", kernels::VSA_SELECT),
+    ("flash_attn_vsa", kernels::FLASH_ATTN_VSA),
+    ("vsa_coarse", kernels::VSA_COARSE),
+    ("vsa_gate_add", kernels::VSA_GATE_ADD),
 ];
 
 /// This crate's rung set for [`model::block::flash_bidir_variant`] - all four
@@ -537,6 +550,9 @@ pub struct BlockWeights {
     pub fc1_value: Linear,
     pub fc1_gate: Linear,
     pub fc2: Linear,
+    /// The trained VSA gate (`attn.to_gate_compress`), when the DiT runs
+    /// sparse attention with one (`crate::vsa`).
+    pub gate: Option<Linear>,
 }
 
 /// One `MiniMaxH3TokenRefinerBlock`'s weights - the same attention/FFN
@@ -606,6 +622,15 @@ pub fn load_host(tensors: &dyn checkpoint::TensorSource, name: &str) -> Vec<f32>
     out.unwrap()
 }
 
+/// What a DiT build reads besides its checkpoint: an adapter's corrections
+/// and the trained VSA gate of every block.
+#[derive(Clone, Copy, Default)]
+pub struct DitExtras<'a> {
+    pub adapter: Option<&'a RuntimeLora>,
+    /// Every block's `to_gate_compress` ([`crate::vsa::gate_name`]).
+    pub gates: Option<&'a dyn checkpoint::TensorSource>,
+}
+
 /// One `[n, k]` linear at `tier`, read in bounded chunks
 /// (`model::ops::Weight::upload_from`); the device's own capability has the
 /// last word on the tier (`Dtype::promote`). `adapter`'s correction for it,
@@ -660,11 +685,16 @@ pub fn load_attn(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str
 /// its linears at `tier`, nothing else. A caller processing blocks one at a
 /// time drops the returned value (freeing its device buffers) before loading
 /// the next index. `adapter`'s corrections for the block are attached.
-pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig, tier: Dtype, adapter: Option<&RuntimeLora>) -> BlockWeights {
+pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig, tier: Dtype, extras: DitExtras) -> BlockWeights {
     let p = format!("transformer_blocks.{index}");
     let (hidden, inner, ffn) = (cfg.hidden_size, cfg.inner_dim(), cfg.ffn_dim);
+    let adapter = extras.adapter;
     let attn = load_attn(tensors, ctx, &format!("{p}.attn"), (hidden, inner), tier, adapter);
     let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, (hidden, ffn), tier, adapter);
+    let gate = extras.gates.map(|g| {
+        let name = crate::vsa::gate_name(g, index).unwrap_or_else(|| panic!("minimaxh3 model: no VSA gate for block {index}"));
+        load_linear(g, ctx, &name, (inner, hidden), tier, None)
+    });
     BlockWeights {
         wq: attn.wq,
         wk: attn.wk,
@@ -677,6 +707,7 @@ pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usiz
         fc1_value,
         fc1_gate,
         fc2: load_linear(tensors, ctx, &format!("{p}.ff.net.2.weight"), (hidden, ffn), tier, adapter),
+        gate,
     }
 }
 
@@ -703,7 +734,12 @@ fn slot(l: &Linear) -> &DeviceBuffer {
 }
 
 /// [`load_block_streaming`]'s in-place rewrite of one block's device tensors.
-fn write_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, p: &str, hidden: u32, ffn: u32, s: &BlockWeights) {
+fn write_block(tensors: &dyn checkpoint::TensorSource, gates: Option<&dyn checkpoint::TensorSource>, ctx: &Ctx, (index, hidden, ffn): (usize, u32, u32), s: &BlockWeights) {
+    let p = &format!("transformer_blocks.{index}");
+    if let (Some(g), Some(slot_w)) = (gates, &s.gate) {
+        let name = crate::vsa::gate_name(g, index).unwrap_or_else(|| panic!("minimaxh3 model: no VSA gate for block {index}"));
+        write_dev(g, ctx, &name, slot(slot_w));
+    }
     for (leaf, w) in [("attn.to_q", &s.wq), ("attn.to_k", &s.wk), ("attn.to_v", &s.wv), ("attn.to_out.0", &s.wo), ("ff.net.2", &s.fc2)] {
         write_dev(tensors, ctx, &format!("{p}.{leaf}.weight"), slot(w));
     }
@@ -742,12 +778,11 @@ fn write_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, p: &str, hidde
 /// that to 11 allocations for the whole generation. Not used by
 /// [`load_block`]'s resident callers, which need every block's buffers
 /// alive at once.
-pub fn load_block_streaming(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig) -> BlockWeights {
-    let p = format!("transformer_blocks.{index}");
+pub fn load_block_streaming(tensors: &dyn checkpoint::TensorSource, gates: Option<&dyn checkpoint::TensorSource>, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig) -> BlockWeights {
     let mut slots = ctx.block_slots.borrow_mut();
     match slots.as_ref() {
-        None => *slots = Some(load_block(tensors, ctx, index, cfg, Dtype::F32, None)),
-        Some(s) => write_block(tensors, ctx, &p, cfg.hidden_size, cfg.ffn_dim, s),
+        None => *slots = Some(load_block(tensors, ctx, index, cfg, Dtype::F32, DitExtras { adapter: None, gates })),
+        Some(s) => write_block(tensors, gates, ctx, (index, cfg.hidden_size, cfg.ffn_dim), s),
     }
     let s = slots.as_ref().expect("filled above");
     BlockWeights {
@@ -762,6 +797,7 @@ pub fn load_block_streaming(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, i
         fc1_value: s.fc1_value.clone(),
         fc1_gate: s.fc1_gate.clone(),
         fc2: s.fc2.clone(),
+        gate: s.gate.clone(),
     }
 }
 
@@ -854,6 +890,9 @@ pub struct BlockInputs<'a> {
     /// half then reuses the attention half's dropped intermediates
     /// ([`gpu_core::ScratchScope::rewind`]) instead of adding to them.
     pub scope: Option<&'a gpu_core::ScratchScope<'a>>,
+    /// The request's sparse attention on this block's device, `None` for
+    /// dense attention.
+    pub vsa: Option<&'a crate::vsa::DevicePlan>,
 }
 
 /// `MiniMaxH3TransformerBlock.forward`: RoPE'd, AdaLN-Zero modulated
@@ -865,7 +904,7 @@ pub struct BlockInputs<'a> {
 /// only the block's final output, so a bug localizes to whichever half of
 /// the block introduced it.
 pub fn block_forward(cx: &Ctx, w: &BlockWeights, inp: &BlockInputs, cfg: &H3TransformerConfig) -> (DeviceBuffer, DeviceBuffer) {
-    let BlockInputs { x, adaln_indices, cos, sin, modulation, seq_len, levels, scope } = *inp;
+    let BlockInputs { x, adaln_indices, cos, sin, modulation, seq_len, levels, scope, vsa } = *inp;
     let (hidden, heads, hd, ffn) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim, cfg.ffn_dim);
     let half = 3 * cfg.rope_freq_dim;
 
@@ -879,13 +918,32 @@ pub fn block_forward(cx: &Ctx, w: &BlockWeights, inp: &BlockInputs, cfg: &H3Tran
     let (attn_out, h1) = {
         let n1 = rmsnorm(cx, x, &w.norm1, seq_len, hidden, cfg.norm_eps);
         let mod1 = modulate(cx, &n1, adaln_indices, &scale_msa, &shift_msa, seq_len, hidden);
-        let [q, k, v] = linears(cx, levels, &mod1, [&w.wq, &w.wk, &w.wv], seq_len);
+        let (q, k, v, gate) = match (&w.gate, vsa) {
+            (Some(g), Some(_)) => {
+                let [q, k, v, gate] = linears(cx, levels, &mod1, [&w.wq, &w.wk, &w.wv, g], seq_len);
+                (q, k, v, Some(gate))
+            }
+            _ => {
+                let [q, k, v] = linears(cx, levels, &mod1, [&w.wq, &w.wk, &w.wv], seq_len);
+                (q, k, v, None)
+            }
+        };
         let qn = rmsnorm(cx, &q, &w.norm_q, seq_len * heads, hd, cfg.qk_norm_eps);
         let kn = rmsnorm(cx, &k, &w.norm_k, seq_len * heads, hd, cfg.qk_norm_eps);
         rope_partial(cx, &qn, cos, sin, seq_len, heads, hd, half);
         rope_partial(cx, &kn, cos, sin, seq_len, heads, hd, half);
-        let mode = cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd));
-        let attn = attention(&cx.gpu, &DIT_ATTN, mode, &qn, &kn, &v, seq_len, heads, hd);
+        let attn = match vsa {
+            Some(plan) => {
+                let inner = heads * hd;
+                let qkv = cx.gpu.storage((seq_len * 3 * inner) as u64);
+                cx.gpu.submit(&[], &[cx.gpu.step(K_PACK_QKV, &[&qn, &kn, &v, &qkv], &[seq_len, inner], seq_len * 3 * inner)]);
+                crate::vsa::attention(&cx.gpu, plan, &qkv, gate.as_ref(), heads, hd)
+            }
+            None => {
+                let mode = cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd));
+                attention(&cx.gpu, &DIT_ATTN, mode, &qn, &kn, &v, seq_len, heads, hd)
+            }
+        };
         let attn_out = linear(cx, levels, &attn, &w.wo, None, seq_len);
         let h1 = gated_residual(cx, x, adaln_indices, &gate_msa, &attn_out, seq_len, hidden);
         (attn_out, h1)

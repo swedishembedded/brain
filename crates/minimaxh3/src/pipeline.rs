@@ -797,6 +797,8 @@ pub struct H3Checkpoint<'a> {
     /// The adapter corrections the DiT runs with (`crate::lora`), `None` for
     /// the base model.
     pub dit_lora: Option<&'a model::lora::RuntimeLora>,
+    /// Every block's trained VSA gate (`crate::vsa`), `None` without them.
+    pub dit_gates: Option<&'a dyn checkpoint::TensorSource>,
     pub dit_cfg: H3TransformerConfig,
     pub video_vae_tensors: &'a Tensors,
     pub video_vae_cfg: VideoVaeConfig,
@@ -827,6 +829,9 @@ pub struct GenOpts {
     /// Transformer forwards (Euler steps), at least 1; the schedule is the
     /// diffusers grid of one more point ([`DualSchedule::for_denoise_steps`]).
     pub denoise_steps: usize,
+    /// The share of video key tiles video sparse attention drops
+    /// (`crate::vsa`); `0.0` with no gates is dense attention.
+    pub vsa_sparsity: f32,
     pub seed: u64,
     pub device: Option<String>,
     /// How the DiT's linears quantize their activations against its int8
@@ -1065,7 +1070,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     let seq_len = (packed.position_ids.len() / 3) as u32;
     let owned = match model {
         Some(_) => None,
-        None => match H3Transformer::load(ckpt.dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels), ckpt.dit_lora) {
+        None => match H3Transformer::load(ckpt.dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels), crate::block::DitExtras { adapter: ckpt.dit_lora, gates: ckpt.dit_gates }) {
             Ok(m) => Some(m),
             Err(reason) => {
                 tracing::info!(%reason, "minimaxh3 DiT streamed one block at a time");
@@ -1075,6 +1080,8 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     };
     let resident = model.or(owned.as_ref());
     let streaming_ctx = resident.is_none().then(|| StreamingDit::open(dit_cfg, device));
+    // A gated DiT runs the sparse attention the gates were trained with.
+    let gated = resident.map_or(ckpt.dit_gates.is_some(), H3Transformer::has_gates);
     // A streamed DiT is fp32, where an adapter folds exactly as each block is
     // read.
     let folded = ckpt.dit_lora.filter(|_| resident.is_none()).map(|lora| lora.folded(ckpt.dit_tensors));
@@ -1125,10 +1132,11 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
             audio_indices: &packed.audio_indices,
             text_indices: &packed.text_indices,
             act_levels: opts.act_levels,
+            vsa: (opts.vsa_sparsity > 0.0 || gated).then_some(crate::vsa::Spec { segments: &packed.segments, sparsity: opts.vsa_sparsity, reference_sparsity: opts.vsa_sparsity }),
         };
         let out = match resident {
             Some(m) => m.forward(&inp),
-            None => H3Transformer::forward_streaming(streamed_tensors, dit_cfg, streaming_ctx.as_ref().expect("streamed whenever nothing is resident"), &inp),
+            None => H3Transformer::forward_streaming(streamed_tensors, ckpt.dit_gates, dit_cfg, streaming_ctx.as_ref().expect("streamed whenever nothing is resident"), &inp),
         };
         if let Some(missed) = folded.is_some().then(|| ckpt.dit_lora.map(model::lora::RuntimeLora::unapplied)).flatten().filter(|m| !m.is_empty()) {
             return Err(format!("generate: the adapter targets {} rectangles no DiT linear read: {}", missed.len(), missed.join(", ")));
@@ -1527,6 +1535,7 @@ pub(crate) mod tests {
         H3Checkpoint {
             dit_tensors,
             dit_lora: None,
+            dit_gates: None,
             dit_cfg: tiny_dit_cfg(),
             video_vae_tensors,
             video_vae_cfg: video_vae_cfg.clone(),
@@ -1551,7 +1560,7 @@ pub(crate) mod tests {
     /// request-level business rule this pipeline enforces for a real
     /// caller too.
     pub(crate) fn tiny_gen_opts(seed: u64) -> GenOpts {
-        GenOpts { canvas: Some((32, 32)), num_frames: 124, denoise_steps: 2, seed, device: Some("cpu".to_string()), act_levels: Default::default() }
+        GenOpts { canvas: Some((32, 32)), num_frames: 124, denoise_steps: 2, vsa_sparsity: 0.0, seed, device: Some("cpu".to_string()), act_levels: Default::default() }
     }
 
     /// The end-to-end gate: encode (pre-built) -> pack -> denoise

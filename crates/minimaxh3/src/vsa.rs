@@ -33,6 +33,8 @@
 //! you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
+use gpu_core::{DeviceBuffer, Gpu};
+
 use crate::pipeline::Segment;
 
 /// `(t, h, w)` rows of one video tile.
@@ -210,6 +212,119 @@ pub fn attention_host(geometry: &TileGeometry, (q, k, v): (&[f32], &[f32], &[f32
     out
 }
 
+/// What a forward runs VSA with: its layout's segments and the sparsity of
+/// the target video and of every reference video.
+#[derive(Clone, Copy, Debug)]
+pub struct Spec<'a> {
+    pub segments: &'a [Segment],
+    pub sparsity: f32,
+    pub reference_sparsity: f32,
+}
+
+/// The tensor name block `index`'s gate goes by in `gates`: a FastVideo
+/// transformer's own (`transformer_blocks.{i}.attn.to_gate_compress.weight`)
+/// or a gate-only extract's (`blocks.{i}.attn.to_gate_compress.weight`).
+pub fn gate_name(gates: &dyn checkpoint::TensorSource, index: usize) -> Option<String> {
+    [format!("transformer_blocks.{index}.attn.to_gate_compress.weight"), format!("blocks.{index}.attn.to_gate_compress.weight")].into_iter().find(|n| gates.numel(n).is_some())
+}
+
+/// Every block's gate is in `gates` at `[inner, hidden]`: checked before a
+/// weight is read, so a gate file for another model is refused up front.
+pub fn check_gates(gates: &dyn checkpoint::TensorSource, cfg: &crate::config::H3TransformerConfig) -> Result<(), String> {
+    let want = (cfg.inner_dim() * cfg.hidden_size) as usize;
+    for i in 0..cfg.num_layers as usize {
+        let name = gate_name(gates, i).ok_or_else(|| format!("minimaxh3 vsa: the gates hold no to_gate_compress for block {i}"))?;
+        match gates.numel(&name) {
+            Some(n) if n == want => {}
+            n => return Err(format!("minimaxh3 vsa: {name} holds {n:?} values, this DiT's gate is [{}, {}]", cfg.inner_dim(), cfg.hidden_size)),
+        }
+    }
+    Ok(())
+}
+
+/// Peak transient bytes VSA adds to a forward over `rows` packed rows of
+/// `segments`: the gate projection, the q/k/v tile means, the scores and the
+/// mask, and the coarse branch.
+pub fn workspace_bytes(cfg: &crate::config::H3TransformerConfig, rows: u32, gated: bool) -> u64 {
+    let (heads, d) = (cfg.num_attention_heads as u64, cfg.attention_head_dim as u64);
+    let tiles = rows.div_ceil(TILE_ROWS) as u64 + 64;
+    let gate = if gated { rows as u64 * heads * d } else { 0 };
+    (gate + 4 * heads * tiles * d + 2 * heads * tiles * tiles) * 4
+}
+
+/// A tile geometry and its selection on one device: uploaded once per
+/// request and read by every block's attention at every step.
+pub struct DevicePlan {
+    pub geometry: TileGeometry,
+    slots: DeviceBuffer,
+    live: DeviceBuffer,
+    tile_of_row: DeviceBuffer,
+    /// `(start, end, keep)` per video region.
+    spans: DeviceBuffer,
+    rows: u32,
+}
+
+impl DevicePlan {
+    /// `sparsity` applies to the target video (the last region),
+    /// `reference_sparsity` to every reference video.
+    pub fn new(gpu: &Gpu, geometry: TileGeometry, (sparsity, reference_sparsity): (f32, f32)) -> DevicePlan {
+        let upload = |data: &[u32]| {
+            let b = gpu.storage(data.len().max(1) as u64);
+            gpu.write(&b, data);
+            b
+        };
+        let rows = geometry.live.iter().sum::<u32>();
+        let mut tile_of_row = vec![0u32; rows as usize];
+        for (t, &live) in geometry.live.iter().enumerate() {
+            for &r in &geometry.slots[t * TILE_ROWS as usize..][..live as usize] {
+                tile_of_row[r as usize] = t as u32;
+            }
+        }
+        let last = geometry.video_spans.len().saturating_sub(1);
+        let spans: Vec<u32> = geometry.video_spans.iter().enumerate().flat_map(|(i, &(start, end))| [start, end, keep(if i == last { sparsity } else { reference_sparsity }, end - start)]).collect();
+        DevicePlan { slots: upload(&geometry.slots), live: upload(&geometry.live), tile_of_row: upload(&tile_of_row), spans: upload(&spans), rows, geometry }
+    }
+}
+
+/// [`attention_host`] on the device: `qkv` is the `[rows, 3 * heads *
+/// head_dim]` slab `pack_qkv` builds, `gate` the block's `[rows, heads *
+/// head_dim]` gate projection. Returns `[rows, heads * head_dim]`, packed
+/// order. GPU only: the flash pass needs workgroup reductions.
+pub(crate) fn attention(gpu: &Gpu, plan: &DevicePlan, qkv: &DeviceBuffer, gate: Option<&DeviceBuffer>, heads: u32, head_dim: u32) -> DeviceBuffer {
+    use crate::block::{K_FLASH_ATTN_VSA, K_VSA_COARSE, K_VSA_GATE_ADD, K_VSA_SELECT, K_VSA_TILE_MEAN, K_VSA_TILE_SCORES};
+    assert!(head_dim <= 128, "minimaxh3 vsa: head_dim {head_dim} > 128");
+    let (n, inner) = (plan.geometry.tiles(), heads * head_dim);
+    let stride = 3 * inner;
+    let means = |off: u32| {
+        let m = gpu.storage((heads * n * head_dim) as u64);
+        (gpu.step(K_VSA_TILE_MEAN, &[&m, qkv, &plan.slots, &plan.live], &[n, heads, head_dim, stride, off, TILE_ROWS], heads * n * head_dim), m)
+    };
+    let (q_step, qm) = means(0);
+    let (k_step, km) = means(inner);
+    let scores = gpu.storage((heads * n * n) as u64);
+    let mask = gpu.storage((heads * n * n) as u64);
+    let out = gpu.storage((plan.rows * inner) as u64);
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let mut steps = vec![
+        q_step,
+        k_step,
+        gpu.step(K_VSA_TILE_SCORES, &[&scores, &qm, &km], &[n, heads, head_dim, scale.to_bits()], heads * n * n),
+        gpu.step(K_VSA_SELECT, &[&mask, &scores, &plan.spans], &[n, heads, plan.geometry.prefix_tiles, plan.geometry.video_spans.len() as u32], heads * n * n),
+        gpu.dispatch(K_FLASH_ATTN_VSA, &[qkv, &out, &plan.slots, &plan.live, &mask], &[n, heads, head_dim, stride, 0, inner, 2 * inner, inner], gpu_core::Dispatch::Workgroups(heads * n)),
+    ];
+    if let Some(gate) = gate {
+        let (v_step, vm) = means(2 * inner);
+        let coarse = gpu.storage((heads * n * head_dim) as u64);
+        steps.push(v_step);
+        steps.push(gpu.step(K_VSA_COARSE, &[&coarse, &scores, &vm], &[n, heads, head_dim], heads * n * head_dim));
+        steps.push(gpu.step(K_VSA_GATE_ADD, &[&out, &coarse, gate, &plan.tile_of_row], &[plan.rows, n, heads, head_dim], plan.rows * inner));
+        gpu.submit(&[], &steps);
+    } else {
+        gpu.submit(&[], &steps);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +466,36 @@ mod tests {
         assert_eq!(keep(0.9, 5), 1);
         assert_eq!(keep(0.0, 7), 7);
         assert_eq!(keep(1.0, 7), 1);
+    }
+
+    /// The device attention computes the host reference's: with and without
+    /// a gate, over dense prefix tiles, two video regions with partial edge
+    /// tiles, and the full head width.
+    #[test]
+    fn the_device_attention_computes_the_host_reference() {
+        let cx = crate::block::Ctx::new(None);
+        if !model::block::flash_gate(&cx.gpu.caps(), true) {
+            brain_testutil::skip("vsa: the flash pass needs workgroup reductions, which this device lacks");
+            return;
+        }
+        let segments = [Segment::Dense { rows: 70 }, Segment::Video { grid: [3, 5, 6] }, Segment::Dense { rows: 9 }, Segment::Video { grid: [9, 4, 7] }];
+        let rows = segments.iter().map(Segment::rows).sum::<u32>() as usize;
+        for head_dim in [32usize, 128] {
+            let heads = 3usize;
+            let inner = heads * head_dim;
+            let (q, k, v) = qkv(rows, inner, 31 + head_dim as u64);
+            let gate: Vec<f32> = data::rng::Lcg::new(77).vec_scaled(rows * inner, 0.5);
+            let slab: Vec<f32> = (0..rows).flat_map(|r| q[r * inner..][..inner].iter().chain(&k[r * inner..][..inner]).chain(&v[r * inner..][..inner]).copied().collect::<Vec<_>>()).collect();
+            let slab_dev = cx.upload(&slab);
+            let gate_dev = cx.upload(&gate);
+            let sparsities = (0.6, 0.5);
+            let plan = DevicePlan::new(&cx.gpu, TileGeometry::new(&segments), sparsities);
+            for g in [None, Some(&gate)] {
+                let want = attention_host(&plan.geometry, (&q, &k, &v), g.map(|g| g.as_slice()), (heads, head_dim), sparsities);
+                let got = cx.gpu.read(&attention(&cx.gpu, &plan, &slab_dev, g.map(|_| &gate_dev), heads as u32, head_dim as u32), rows * inner);
+                let worst = close(&got, &want);
+                assert!(worst < 1e-4, "head_dim {head_dim}, gate {}: worst {worst}", g.is_some());
+            }
+        }
     }
 }

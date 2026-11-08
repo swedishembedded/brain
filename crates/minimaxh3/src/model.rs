@@ -44,7 +44,7 @@ use model::StreamPlan;
 use vae::blocks::Tensors;
 
 use crate::adaln::{AdalnCache, AdalnPlan};
-use crate::block::{self, BlockWeights, Ctx, Linear, RefinerBlockWeights};
+use crate::block::{self, BlockWeights, Ctx, DitExtras, Linear, RefinerBlockWeights};
 use model::lora::RuntimeLora;
 use crate::config::H3TransformerConfig;
 use crate::dit_shard::StreamingDit;
@@ -80,6 +80,9 @@ pub struct PackedInputs<'a> {
     /// How this forward's linears quantize their activations against
     /// quantized weights - the request's choice, see [`block::ActLevels`].
     pub act_levels: block::ActLevels,
+    /// Video sparse attention over this layout (`crate::vsa`), `None` for
+    /// dense attention.
+    pub vsa: Option<crate::vsa::Spec<'a>>,
 }
 
 /// `MiniMaxH3TransformerOutput`, minus the batch axis.
@@ -241,6 +244,7 @@ trait StageWeights {
 /// [`StageWeights`] read off the checkpoint at fp32 as the forward goes.
 struct Streamed<'a> {
     tensors: &'a dyn checkpoint::TensorSource,
+    gates: Option<&'a dyn checkpoint::TensorSource>,
     cfg: &'a H3TransformerConfig,
     dit: &'a StreamingDit,
 }
@@ -260,7 +264,7 @@ impl StageWeights for Streamed<'_> {
         Cow::Owned(EmbedWeights::load(self.tensors, cx, self.cfg, Dtype::F32, None))
     }
     fn block(&self, i: usize, cx: &Ctx) -> Cow<'_, BlockWeights> {
-        Cow::Owned(block::load_block_streaming(self.tensors, cx, i, self.cfg))
+        Cow::Owned(block::load_block_streaming(self.tensors, self.gates, cx, i, self.cfg))
     }
     fn head(&self, cx: &Ctx) -> Cow<'_, HeadWeights> {
         Cow::Owned(HeadWeights::load(self.tensors, cx, self.cfg))
@@ -349,15 +353,17 @@ pub fn forward_workspace_bytes(cfg: &H3TransformerConfig, rows: u32, levels: blo
 
 /// The resident model's per-card cost at `tier`: the block stack, the embed
 /// stage's projections and refiner, and the head stage's output projections,
-/// each with the corrections `adapter` attaches to it.
-pub fn resident_cost(cfg: &H3TransformerConfig, tier: Dtype, adapter: Option<&RuntimeLora>) -> LayerBytes {
+/// each with the corrections and VSA gates `extras` attach to it.
+pub fn resident_cost(cfg: &H3TransformerConfig, tier: Dtype, extras: DitExtras) -> LayerBytes {
+    let adapter = extras.adapter;
+    let gate = if extras.gates.is_some() { Weight::bytes_for(tier, cfg.inner_dim() as usize, cfg.hidden_size as usize) } else { 0 };
     let hidden = cfg.hidden_size as usize;
     let fp32 = |n: usize, k: usize| Weight::bytes_for(Dtype::F32, n, k) + n as u64 * 4;
     let corrections = |prefix: String| adapter.map_or(0, |a| crate::lora::correction_bytes(a, &prefix));
     let refiners: u64 = (0..cfg.num_refiner_layers).map(|j| block_bytes(cfg, tier) + corrections(format!("token_refiner.refiner_blocks.{j}."))).sum();
     let embed = fp32(hidden, cfg.video_patch_dim() as usize) + fp32(hidden, cfg.audio_in_channels as usize) + fp32(hidden, cfg.text_dim as usize) + refiners;
     let head = fp32(cfg.video_patch_dim() as usize, hidden) + fp32(cfg.audio_in_channels as usize, hidden) + hidden as u64 * 4;
-    let per_layer = (0..cfg.num_layers).map(|i| block_bytes(cfg, tier) + corrections(format!("transformer_blocks.{i}."))).collect();
+    let per_layer = (0..cfg.num_layers).map(|i| block_bytes(cfg, tier) + gate + corrections(format!("transformer_blocks.{i}."))).collect();
     LayerBytes { per_layer, embed, head }
 }
 
@@ -368,20 +374,25 @@ impl H3Transformer {
     /// of them does, or when the cards cannot run `tier` - the caller streams
     /// instead ([`Self::forward_streaming`]).
     ///
-    /// `adapter`'s corrections are attached beside the linears they target
-    /// and counted in the placement; one the build leaves unclaimed is
-    /// refused, never dropped.
-    pub fn load(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, device: Option<&str>, tier: Dtype, (rows, levels): (u32, block::ActLevels), adapter: Option<&RuntimeLora>) -> Result<H3Transformer, String> {
-        let workspace = forward_workspace_bytes(&cfg, rows, levels) + adapter.map_or(0, |a| crate::lora::workspace_bytes(a, rows));
+    /// `extras`' adapter corrections are attached beside the linears they
+    /// target, one the build leaves unclaimed refused, never dropped; its
+    /// VSA gates are held at `tier` beside each block. Both count in the
+    /// placement.
+    pub fn load(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, device: Option<&str>, tier: Dtype, (rows, levels): (u32, block::ActLevels), extras: DitExtras) -> Result<H3Transformer, String> {
+        let workspace = forward_workspace_bytes(&cfg, rows, levels) + extras.adapter.map_or(0, |a| crate::lora::workspace_bytes(a, rows)) + if extras.gates.is_some() { crate::vsa::workspace_bytes(&cfg, rows, true) } else { 0 };
         let cards = StreamPlan::cards(device, workspace);
-        let cost = resident_cost(&cfg, tier, adapter);
+        let cost = resident_cost(&cfg, tier, extras);
         let plan = StreamPlan::fit(&cost, &cards).ok_or_else(|| format!("minimaxh3: the DiT at {tier:?} is {} bytes, which no combination of the schedulable cards holds with {rows}-row workspace free (usable bytes {cards:?})", cost.total()))?;
-        H3Transformer::load_on(tensors, cfg, plan, device, tier, adapter)
+        H3Transformer::load_on(tensors, cfg, plan, device, tier, extras)
     }
 
     /// [`Self::load`] over the caller's own plan - what a test pinning the
     /// placement (one stage on the CPU, a forced split) uses.
-    pub fn load_on(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, plan: StreamPlan, device: Option<&str>, tier: Dtype, adapter: Option<&RuntimeLora>) -> Result<H3Transformer, String> {
+    pub fn load_on(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, plan: StreamPlan, device: Option<&str>, tier: Dtype, extras: DitExtras) -> Result<H3Transformer, String> {
+        if let Some(gates) = extras.gates {
+            crate::vsa::check_gates(gates, &cfg)?;
+        }
+        let adapter = extras.adapter;
         tracing::info!(plan = %plan.describe(), ?tier, "minimaxh3 resident DiT placement");
         let mut stages = Vec::with_capacity(plan.n_stages());
         let mut blocks = Vec::with_capacity(cfg.num_layers as usize);
@@ -390,7 +401,7 @@ impl H3Transformer {
         for (s, shard) in plan.stages().iter().enumerate() {
             let cx = plan.open_stage(s, || Ctx::new(device))?;
             for i in shard.start..shard.end {
-                let w = block::load_block(tensors, &cx, i, &cfg, tier, adapter);
+                let w = block::load_block(tensors, &cx, i, &cfg, tier, extras);
                 if w.wq.w.dtype() != tier {
                     return Err(format!("minimaxh3: {tier:?} weights landed as {:?} on stage {s} - this card cannot run the requested tier", w.wq.w.dtype()));
                 }
@@ -414,6 +425,11 @@ impl H3Transformer {
 
     pub fn config(&self) -> &H3TransformerConfig {
         &self.cfg
+    }
+
+    /// Whether every block holds its trained VSA gate.
+    pub fn has_gates(&self) -> bool {
+        self.blocks.iter().all(|b| b.gate.is_some())
     }
 
     /// Cache the AdaLN modulation for every timestep in `values` from
@@ -454,13 +470,16 @@ impl H3Transformer {
     /// 16-step generation OOM'd a 24GB P40 when this instead opened a fresh
     /// device per step: wgpu gives no guarantee the previous one's resources
     /// are reclaimed before the next opens.
-    pub fn forward_streaming(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, dit: &StreamingDit, inp: &PackedInputs) -> H3Output {
-        forward_core(cfg, dit.plan(), &|s| dit.stage(s), &Streamed { tensors, cfg, dit }, inp, false).0
+    ///
+    /// `gates` are the blocks' VSA gates, read beside each block, `None`
+    /// without them.
+    pub fn forward_streaming(tensors: &dyn checkpoint::TensorSource, gates: Option<&dyn checkpoint::TensorSource>, cfg: &H3TransformerConfig, dit: &StreamingDit, inp: &PackedInputs) -> H3Output {
+        forward_core(cfg, dit.plan(), &|s| dit.stage(s), &Streamed { tensors, gates, cfg, dit }, inp, false).0
     }
 
     /// [`Self::forward_streaming`] with [`Self::forward_with_taps`]'s taps.
     pub fn forward_streaming_with_taps(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, dit: &StreamingDit, inp: &PackedInputs) -> (H3Output, H3Taps) {
-        forward_core(cfg, dit.plan(), &|s| dit.stage(s), &Streamed { tensors, cfg, dit }, inp, true)
+        forward_core(cfg, dit.plan(), &|s| dit.stage(s), &Streamed { tensors, gates: None, cfg, dit }, inp, true)
     }
 }
 
@@ -561,7 +580,12 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
             cx.upload(&carry.take().expect("forward: a non-embed stage needs the previous stage's residual"))
         };
 
-        // 3. This stage's own slice of the block stack.
+        // 3. This stage's own slice of the block stack, on the request's
+        // sparse attention when it asks for it - tiled once per stage.
+        let vsa_plan = inp.vsa.filter(|_| shard.start < shard.end).map(|v| {
+            assert!(model::block::flash_gate(&cx.gpu.caps(), cfg.attention_head_dim <= 128), "minimaxh3 forward: video sparse attention needs a device with workgroup reductions");
+            crate::vsa::DevicePlan::new(&cx.gpu, crate::vsa::TileGeometry::new(v.segments), (v.sparsity, v.reference_sparsity))
+        });
         if taps && shard.owns(0) {
             tap_block0_input = cx.gpu.read(&h, (seq_len * hidden) as usize);
         }
@@ -575,7 +599,7 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
             let out = {
                 let arena = cx.gpu.scratch_scope_in(BLOCK_ARENA);
                 let rows = modulation.block_rows(i, inp.timestep).unwrap_or_else(|e| panic!("minimaxh3 forward: {e}"));
-                let (out, attn_out) = block::block_forward(cx, &w, &block::BlockInputs { x: &h, adaln_indices: adaln_idx_dev, cos, sin, modulation: &rows, seq_len, levels: inp.act_levels, scope: Some(&arena) }, cfg);
+                let (out, attn_out) = block::block_forward(cx, &w, &block::BlockInputs { x: &h, adaln_indices: adaln_idx_dev, cos, sin, modulation: &rows, seq_len, levels: inp.act_levels, scope: Some(&arena), vsa: vsa_plan.as_ref() }, cfg);
                 if taps && i == 0 {
                     tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
                     tap_block0_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
@@ -797,6 +821,7 @@ mod tests {
                 audio_indices: &self.audio_indices,
                 text_indices: &self.text_indices,
                 act_levels,
+                vsa: None,
             }
         }
     }
@@ -911,7 +936,7 @@ mod tests {
         let dit = crate::dit_shard::StreamingDit::open(&cfg, Some("cpu"));
         let cosine = |blocks: std::ops::Range<usize>| {
             let rounded = Int8RoundedWeights { inner: &reader, cfg, blocks: blocks.clone(), kinds: &[], group: model::int8::GROUP };
-            let out = H3Transformer::forward_streaming(&rounded, &cfg, &dit, &golden.inputs(block::ActLevels::One));
+            let out = H3Transformer::forward_streaming(&rounded, None, &cfg, &dit, &golden.inputs(block::ActLevels::One));
             let c = brain_testutil::parity::compare(&out.video, &want_video).0;
             eprintln!("blocks {blocks:?} rounded: output_video cosine {c:.6}");
             c
@@ -951,7 +976,7 @@ mod tests {
         ];
         for (label, kinds, group) in cases {
             let rounded = Int8RoundedWeights { inner: &reader, cfg, blocks: 0..cfg.num_layers as usize, kinds, group };
-            let out = H3Transformer::forward_streaming(&rounded, &cfg, &dit, &golden.inputs(block::ActLevels::One));
+            let out = H3Transformer::forward_streaming(&rounded, None, &cfg, &dit, &golden.inputs(block::ActLevels::One));
             let (v, a) = (brain_testutil::parity::compare(&out.video, &want_video).0, brain_testutil::parity::compare(&out.audio, &want_audio).0);
             eprintln!("{label}: output_video cosine {v:.6}, output_audio cosine {a:.6}");
         }
@@ -1009,10 +1034,11 @@ mod tests {
                 audio_indices: &packed.audio_indices,
                 text_indices: &packed.text_indices,
                 act_levels: block::ActLevels::One,
+                vsa: None,
             };
             let t = std::time::Instant::now();
-            let exact = H3Transformer::forward_streaming(&reader, &cfg, &dit, &inp);
-            let int8 = H3Transformer::forward_streaming(&rounded, &cfg, &dit, &inp);
+            let exact = H3Transformer::forward_streaming(&reader, None, &cfg, &dit, &inp);
+            let int8 = H3Transformer::forward_streaming(&rounded, None, &cfg, &dit, &inp);
             let (v, a) = (brain_testutil::parity::compare(&int8.video, &exact.video), brain_testutil::parity::compare(&int8.audio, &exact.audio));
             eprintln!("step {step} (video t {vt:.3}, audio t {at:.3}): video (cosine, max_abs) {v:?}, audio {a:?}; {:.0}s", t.elapsed().as_secs_f32());
             assert!(v.0 > 0.9995 && a.0 > 0.9995, "step {step}: the int8 tier's weights move a real forward: video cosine {:.6}, audio {:.6}", v.0, a.0);
@@ -1039,10 +1065,10 @@ mod tests {
         // placement do: the model alone sits within a GiB of one P40's
         // allocatable memory, too close to share it with this measurement.
         let rows = (golden.position_ids.len() / 3) as u32;
-        let cost = resident_cost(&cfg, Dtype::I8, None);
+        let cost = resident_cost(&cfg, Dtype::I8, DitExtras::default());
         let cards: Vec<(usize, u64)> = StreamPlan::cards(None, forward_workspace_bytes(&cfg, rows, block::ActLevels::Two)).into_iter().map(|(i, b)| (i, b.min(cost.total() * 3 / 5))).collect();
         let plan = StreamPlan::fit(&cost, &cards).expect("two cards hold the int8 model");
-        let m = H3Transformer::load_on(&reader, cfg, plan, None, Dtype::I8, None).expect("the int8 model on two cards");
+        let m = H3Transformer::load_on(&reader, cfg, plan, None, Dtype::I8, DitExtras::default()).expect("the int8 model on two cards");
         let _plan = m.prepare(&reader, &golden.timestep).expect("prepare");
         eprintln!("int8 model loaded in {:.0}s", t0.elapsed().as_secs_f32());
         let err = |got: &[f32], want: &[f32]| (brain_testutil::parity::compare(got, want), brain_testutil::parity::rel_l2(got, want));
@@ -1225,7 +1251,7 @@ mod tests {
     fn tiny_config_forward_is_finite_and_the_right_shape() {
         let cfg = H3TransformerConfig::tiny();
         let tensors = rand_tensors(&cfg, 3);
-        let model = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, None).expect("a resident tiny model");
+        let model = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, DitExtras::default()).expect("a resident tiny model");
         let cfg = model.config();
 
         let num_video = 4u32;
@@ -1277,6 +1303,7 @@ mod tests {
             audio_indices: &audio_indices,
             text_indices: &text_indices,
             act_levels: block::ActLevels::One,
+            vsa: None,
         };
 
         let _plan = model.prepare(&tensors, &timestep).expect("prepare");
@@ -1359,6 +1386,7 @@ mod tests {
                 audio_indices: &self.audio_indices,
                 text_indices: &self.text_indices,
                 act_levels: block::ActLevels::One,
+                vsa: None,
             }
         }
     }
@@ -1372,7 +1400,7 @@ mod tests {
 
         let cfg = H3TransformerConfig::tiny();
         let src = Counting::new(rand_tensors(&cfg, 23));
-        let model = H3Transformer::load_on(&src, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, None).expect("a resident tiny model");
+        let model = H3Transformer::load_on(&src, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, DitExtras::default()).expect("a resident tiny model");
         assert!(src.take_matching("adaln_proj").is_empty(), "loading the resident model must not read adaln_proj");
         let packed = Packed::random(&cfg);
         let inp = packed.inputs();
@@ -1384,7 +1412,7 @@ mod tests {
         src.take_matching("");
         for _ in 0..2 {
             let resident = model.forward(&inp);
-            let streamed = H3Transformer::forward_streaming(&src, &cfg, &dit, &inp);
+            let streamed = H3Transformer::forward_streaming(&src, None, &cfg, &dit, &inp);
             assert!(src.take_matching("adaln_proj").is_empty(), "a prepared step must not re-read adaln_proj");
             assert_eq!(resident.video, streamed.video, "resident and streaming forwards must agree");
             assert_eq!(resident.audio, streamed.audio);
@@ -1411,7 +1439,7 @@ mod tests {
             pair.add_delta(1.0, &mut folded.get_mut(&pair.base_key).expect("every target is a checkpoint tensor").1);
         }
         let packed = Packed::random(&cfg);
-        let streamed = |src: &dyn checkpoint::TensorSource| H3Transformer::forward_streaming(src, &cfg, &StreamingDit::open_single(&cfg, Some("cpu")), &packed.inputs());
+        let streamed = |src: &dyn checkpoint::TensorSource| H3Transformer::forward_streaming(src, None, &cfg, &StreamingDit::open_single(&cfg, Some("cpu")), &packed.inputs());
         let want = streamed(&folded);
         let base = streamed(&tensors);
         assert!(want.video.iter().zip(&base.video).any(|(a, b)| (a - b).abs() > 1e-3), "the adapter must change the forward for the comparison to mean anything");
@@ -1427,9 +1455,67 @@ mod tests {
         assert!(lora.unapplied().is_empty(), "the streamed forward read every corrected tensor");
 
         let lora = crate::lora::runtime_adapter(&model::adapter::AdapterSpec::new(&path), &cfg).expect("maps");
-        let resident = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, Some(&lora)).expect("a resident adapted model");
+        let resident = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, DitExtras { adapter: Some(&lora), gates: None }).expect("a resident adapted model");
         let _plan = resident.prepare(&tensors, packed.inputs().timestep).expect("prepare");
         close(&resident.forward(&packed.inputs()), "resident with each correction beside its linear");
+    }
+
+    /// Video sparse attention over a real layout: at zero sparsity without
+    /// gates it is the dense forward; with every block's gate and a sparsity,
+    /// the resident and the streamed forward compute the same, and something
+    /// else than dense attention.
+    #[test]
+    fn video_sparse_attention_runs_resident_and_streamed_alike() {
+        use crate::dit_shard::StreamingDit;
+
+        let cfg = H3TransformerConfig::tiny();
+        if !model::block::flash_gate(&Ctx::new(None).gpu.caps(), cfg.attention_head_dim <= 128) {
+            brain_testutil::skip("vsa: needs a device with workgroup reductions");
+            return;
+        }
+        let tensors = rand_tensors(&cfg, data::rng::random_seed());
+        let [_, ph, pw] = cfg.patch_size;
+        let layout = crate::pipeline::build_packed_sequence(&[TAG_TEXT; 3], 8, 4 * ph, 4 * pw, 3, cfg.patch_size, crate::pipeline::AUDIO_CHANNELS, &[]);
+        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
+        let (video, audio, text) = (rng.vec_scaled(layout.video_indices.len() * cfg.video_patch_dim() as usize, 0.3), rng.vec_scaled(layout.audio_indices.len() * cfg.audio_in_channels as usize, 0.3), rng.vec_scaled(3 * cfg.text_dim as usize, 0.3));
+        let ts_idx = vec![0u32; layout.token_tags.len()];
+        let inputs = |sparsity: Option<f32>| PackedInputs {
+            hidden_states: &video,
+            audio_hidden_states: &audio,
+            encoder_hidden_states: &text,
+            timestep: &[0.5],
+            timestep_indices: &ts_idx,
+            token_tags: &layout.token_tags,
+            position_ids: &layout.position_ids,
+            video_indices: &layout.video_indices,
+            audio_indices: &layout.audio_indices,
+            text_indices: &layout.text_indices,
+            act_levels: block::ActLevels::One,
+            vsa: sparsity.map(|sparsity| crate::vsa::Spec { segments: &layout.segments, sparsity, reference_sparsity: sparsity }),
+        };
+        let close = |a: &H3Output, b: &H3Output, what: &str| {
+            let worst = a.video.iter().chain(&a.audio).zip(b.video.iter().chain(&b.audio)).map(|(x, y)| (x - y).abs() / (1.0 + y.abs())).fold(0.0f32, f32::max);
+            assert!(worst < 1e-3, "{what}: worst relative difference {worst}");
+        };
+        let single = StreamPlan::single(cfg.num_layers as usize);
+
+        let plain = H3Transformer::load_on(&tensors, cfg, single.clone(), None, Dtype::F32, DitExtras::default()).expect("a resident tiny model");
+        let _p = plain.prepare(&tensors, &[0.5]).expect("prepare");
+        let dense = plain.forward(&inputs(None));
+        close(&plain.forward(&inputs(Some(0.0))), &dense, "every tile kept, no gate");
+        drop(plain);
+
+        let (inner, hidden) = (cfg.inner_dim() as usize, cfg.hidden_size as usize);
+        let gates: Tensors = (0..cfg.num_layers).map(|i| (format!("blocks.{i}.attn.to_gate_compress.weight"), (vec![inner, hidden], rng.vec_scaled(inner * hidden, 0.2)))).collect();
+        let gated = H3Transformer::load_on(&tensors, cfg, single, None, Dtype::F32, DitExtras { adapter: None, gates: Some(&gates) }).expect("a resident gated model");
+        assert!(gated.has_gates());
+        let _p = gated.prepare(&tensors, &[0.5]).expect("prepare");
+        let resident = gated.forward(&inputs(Some(0.5)));
+        let dit = StreamingDit::open_single(&cfg, None);
+        let _s = dit.prepare(&tensors, &cfg, &[0.5]).expect("prepare");
+        let streamed = H3Transformer::forward_streaming(&tensors, Some(&gates), &cfg, &dit, &inputs(Some(0.5)));
+        close(&resident, &streamed, "resident and streamed with gates");
+        assert!(resident.video.iter().zip(&dense.video).any(|(a, b)| (a - b).abs() > 1e-3), "the gated sparse forward must differ from dense attention");
     }
 
     #[test]
@@ -1439,8 +1525,8 @@ mod tests {
         let cfg = H3TransformerConfig::tiny();
         let tensors = rand_tensors(&cfg, data::rng::random_seed());
         let packed = Packed::random(&cfg);
-        let streamed = H3Transformer::forward_streaming(&tensors, &cfg, &StreamingDit::open_single(&cfg, Some("cpu")), &packed.inputs());
-        let resident = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, None).expect("a resident tiny model");
+        let streamed = H3Transformer::forward_streaming(&tensors, None, &cfg, &StreamingDit::open_single(&cfg, Some("cpu")), &packed.inputs());
+        let resident = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, DitExtras::default()).expect("a resident tiny model");
         let _plan = resident.prepare(&tensors, packed.inputs().timestep).expect("prepare");
         let out = resident.forward(&packed.inputs());
         assert_eq!(out.video, streamed.video);
@@ -1462,7 +1548,7 @@ mod tests {
         let packed = Packed::random(&cfg);
         let plan = || StreamPlan::single(cfg.num_layers as usize);
         let run = |tier: Dtype, act_levels: block::ActLevels| {
-            let m = H3Transformer::load_on(&tensors, cfg, plan(), None, tier, None).expect("a resident tiny model");
+            let m = H3Transformer::load_on(&tensors, cfg, plan(), None, tier, DitExtras::default()).expect("a resident tiny model");
             let _plan = m.prepare(&tensors, packed.inputs().timestep).expect("prepare");
             m.forward(&PackedInputs { act_levels, ..packed.inputs() })
         };
@@ -1509,14 +1595,14 @@ mod tests {
 
         let one = StreamingDit::open_single(&cfg, Some("cpu"));
         assert_eq!(one.plan().n_stages(), 1);
-        let single = H3Transformer::forward_streaming(&tensors, &cfg, &one, &inp);
+        let single = H3Transformer::forward_streaming(&tensors, None, &cfg, &one, &inp);
 
         let split_plan = StreamPlan::balanced(&shard_cost(&cfg), &[Shard::ANY_GPU, Shard::ANY_GPU]);
         assert_eq!(split_plan.n_stages(), 2, "the tiny config's two blocks must give two stages");
         assert!(split_plan.stages()[0].embed && !split_plan.stages()[0].head, "stage 0 owns the input projections only");
         assert!(split_plan.stages()[1].head && !split_plan.stages()[1].embed, "the last stage owns the output heads only");
         let two = StreamingDit::open_with_plan(split_plan, Some("cpu"));
-        let split = H3Transformer::forward_streaming(&tensors, &cfg, &two, &inp);
+        let split = H3Transformer::forward_streaming(&tensors, None, &cfg, &two, &inp);
 
         assert_eq!(split.video, single.video, "a split plan must compute bit-identical video output");
         assert_eq!(split.audio, single.audio, "a split plan must compute bit-identical audio output");
@@ -1579,7 +1665,7 @@ mod tests {
             }
         }
 
-        let model = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, None).expect("a resident tiny model");
+        let model = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, DitExtras::default()).expect("a resident tiny model");
 
         let inp = PackedInputs {
             hidden_states: get("input_hidden_states"),
@@ -1593,6 +1679,7 @@ mod tests {
             audio_indices: &get_u32("input_audio_indices"),
             text_indices: &get_u32("input_text_indices"),
             act_levels: block::ActLevels::One,
+            vsa: None,
         };
 
         let _plan = model.prepare(&tensors, inp.timestep).expect("prepare");

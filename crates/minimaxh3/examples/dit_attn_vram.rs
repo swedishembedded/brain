@@ -91,6 +91,7 @@ fn main() {
         fc1_value: lin(ffn, hidden),
         fc1_gate: lin(ffn, hidden),
         fc2: lin(hidden, ffn),
+        gate: None,
     };
     let x = cx.upload(&fill((seq * hidden) as usize));
     // One distinct timestep, every row at its first modality's row: the
@@ -108,7 +109,7 @@ fn main() {
         // The arena the model's own forward replays its blocks in.
         let out = {
             let arena = cx.gpu.scratch_scope_in("minimaxh3 block");
-            block_forward(&cx, &w, &BlockInputs { x: &x, adaln_indices: &adaln_idx, cos: &cos, sin: &sin, modulation: &[&modulation], seq_len: seq, levels: ActLevels::One, scope: Some(&arena) }, &cfg).0
+            block_forward(&cx, &w, &BlockInputs { x: &x, adaln_indices: &adaln_idx, cos: &cos, sin: &sin, modulation: &[&modulation], seq_len: seq, levels: ActLevels::One, scope: Some(&arena), vsa: None }, &cfg).0
         };
         let probe = cx.gpu.read(&out, 1);
         assert!(probe[0].is_finite(), "non-finite block output");

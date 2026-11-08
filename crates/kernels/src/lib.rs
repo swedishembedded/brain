@@ -490,6 +490,8 @@ pub const FLASH_ATTN_CAUSAL_GQA_BWD_DQ: &str = include_str!("../wgsl/flash_attn_
 pub const FLASH_ATTN_CROSS_REG2: &str = include_str!("../wgsl/flash_attn_cross_reg2.wgsl");
 /// `wgsl/flash_attn_cross_relpos.wgsl`
 pub const FLASH_ATTN_CROSS_RELPOS: &str = include_str!("../wgsl/flash_attn_cross_relpos.wgsl");
+/// `wgsl/flash_attn_vsa.wgsl`
+pub const FLASH_ATTN_VSA: &str = include_str!("../wgsl/flash_attn_vsa.wgsl");
 /// `wgsl/focal_dice_grad.wgsl`
 pub const FOCAL_DICE_GRAD: &str = include_str!("../wgsl/focal_dice_grad.wgsl");
 /// `wgsl/focal_dice_stats.wgsl`
@@ -1413,6 +1415,16 @@ pub const VALUE_LERP_DLAM: &str = include_str!("../wgsl/value_lerp_dlam.wgsl");
 pub const VQ_ARGMAX_DOT: &str = include_str!("../wgsl/vq_argmax_dot.wgsl");
 /// `wgsl/vq_argmin.wgsl`
 pub const VQ_ARGMIN: &str = include_str!("../wgsl/vq_argmin.wgsl");
+/// `wgsl/vsa_coarse.wgsl`
+pub const VSA_COARSE: &str = include_str!("../wgsl/vsa_coarse.wgsl");
+/// `wgsl/vsa_gate_add.wgsl`
+pub const VSA_GATE_ADD: &str = include_str!("../wgsl/vsa_gate_add.wgsl");
+/// `wgsl/vsa_select.wgsl`
+pub const VSA_SELECT: &str = include_str!("../wgsl/vsa_select.wgsl");
+/// `wgsl/vsa_tile_mean.wgsl`
+pub const VSA_TILE_MEAN: &str = include_str!("../wgsl/vsa_tile_mean.wgsl");
+/// `wgsl/vsa_tile_scores.wgsl`
+pub const VSA_TILE_SCORES: &str = include_str!("../wgsl/vsa_tile_scores.wgsl");
 /// `wgsl/weight_decode.wgsl`
 pub const WEIGHT_DECODE: &str = include_str!("../wgsl/weight_decode.wgsl");
 /// `wgsl/weighted_gap.wgsl`
@@ -1649,6 +1661,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("flash_attn_causal_gqa_bwd_dq", FLASH_ATTN_CAUSAL_GQA_BWD_DQ),
     ("flash_attn_cross_reg2", FLASH_ATTN_CROSS_REG2),
     ("flash_attn_cross_relpos", FLASH_ATTN_CROSS_RELPOS),
+    ("flash_attn_vsa", FLASH_ATTN_VSA),
     ("focal_dice_grad", FOCAL_DICE_GRAD),
     ("focal_dice_stats", FOCAL_DICE_STATS),
     ("gate_row", GATE_ROW),
@@ -2058,6 +2071,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("value_lerp_dlam", VALUE_LERP_DLAM),
     ("vq_argmax_dot", VQ_ARGMAX_DOT),
     ("vq_argmin", VQ_ARGMIN),
+    ("vsa_coarse", VSA_COARSE),
+    ("vsa_gate_add", VSA_GATE_ADD),
+    ("vsa_select", VSA_SELECT),
+    ("vsa_tile_mean", VSA_TILE_MEAN),
+    ("vsa_tile_scores", VSA_TILE_SCORES),
     ("weight_decode", WEIGHT_DECODE),
     ("weighted_gap", WEIGHTED_GAP),
     ("weighted_gap_dm", WEIGHTED_GAP_DM),

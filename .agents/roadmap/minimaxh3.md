@@ -927,10 +927,14 @@ MiniMax H3 Community License derivatives.
 - [x] Segment boundaries recorded by the layout builders
       (`pipeline::Segment`), the tile geometry and the host reference
       attention (`crate::vsa`).
-- [ ] Device VSA: tile means, scores, the per-region top-k, the block-
-      sparse flash attention over the selected tiles and the gated coarse
-      branch, each a WGSL kernel gated against `vsa::attention_host`, then
-      the block's attention arm and the gate import.
+- [x] Device VSA: `vsa_tile_mean`, `vsa_tile_scores`, `vsa_select` (the
+      per-region top-k as a rank mask), `flash_attn_vsa` (reg's lane-split
+      flash attention over the kept tiles, rows gathered through the slot
+      map) and `vsa_coarse`/`vsa_gate_add`, gated against
+      `vsa::attention_host` on CUDA, Vulkan and wgpu; the block's attention
+      arm, the gate import (resident and streamed) and the request params.
+      Not measured at size yet: the flash pass walks every key tile's mask
+      bit, and `vsa_select` ranks by a serial count over each region.
 - [ ] Real-weight runs: dense ref2va (20 steps), adapter at 4 steps, VSA
       at 4 steps; measured per step and per card.
 

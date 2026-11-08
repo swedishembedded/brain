@@ -77,7 +77,7 @@ in each key and its alpha in the header, such as a few-step distillation; run
 it with the step count it was distilled for:
 
 ```
-brain minimaxh3 ref2va --allow-community \
+brain minimaxh3 ref2va --allow_community true \
   --prompt "the woman from <Picture 1> turns to the camera and laughs" \
   --references woman.png --width 768 --height 448 --num_frames 121 \
   --adapter lightx2v/Minimax-h3-Turbo/minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors \
@@ -89,6 +89,27 @@ read. A resident int8 DiT evaluates each correction beside its linear on the
 fp32 input, never folded into the int8 weights; a streamed fp32 DiT folds it
 exactly as each block is read. The corrections are held on the cards with the
 blocks they belong to and count toward the placement.
+
+`--vsa_sparsity` turns on video sparse attention (FastVideo's VSA for this
+packed sequence): the video is cut into 4x4x4 tiles of 64 rows, every video
+query keeps the best `1 - sparsity` of each video's key tiles by tile-mean
+score, and the text, references and audio always stay dense. `--vsa_gate`
+names the trained `to_gate_compress` of every block - a FastVideo VSA
+checkpoint or a gate-only extract - which adds the coarse branch the
+sparse attention was distilled with:
+
+```
+brain minimaxh3 ref2va --allow_community true \
+  --prompt "the woman from <Picture 1> turns to the camera and laughs" \
+  --references woman.png --width 768 --height 448 --num_frames 121 \
+  --adapter lightx2v/Minimax-h3-Turbo/minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors \
+  --vsa_gate barelymining/ComfyUI-MiniMax-H3-FastVideo/fasth3_vsa_gate.safetensors \
+  --vsa_sparsity 0.75 --steps 4 --out video=woman.mp4
+```
+
+Sparse attention needs a GPU (its attention pass is workgroup-cooperative).
+The gates are held at the DiT's tier beside each block (~1.9 GB at int8)
+and count toward the placement.
 
 * **The text encoder is placed per prompt.** The first 50 layers of the
   Qwen3-VL language tower (~27 GB at int8) are spread over as many of the
