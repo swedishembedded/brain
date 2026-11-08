@@ -1,0 +1,73 @@
+<!-- source-sha256: 2e1df10dec9db1d8ed4d5e5d5b94fe94d75686f71f99accc3be69e9cc421f9fe -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 358" width="860" height="358"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="860" height="358" fill="#ffffff"/>
+<rect x="20" y="14" width="820" height="156" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Request m = 200 on the GPU unit</text>
+<rect x="32" y="49" width="112" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="88" y="80.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Candidates</text>
+<rect x="203" y="49" width="112" height="54" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="259" y="72.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Capability</text>
+<text x="259" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">filter</text>
+<rect x="374" y="49" width="112" height="54" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="430" y="72.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Reference</text>
+<text x="430" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gate</text>
+<rect x="545" y="49" width="112" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="601" y="72.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Measure</text>
+<text x="601" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(a race)</text>
+<rect x="716" y="49" width="112" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="772" y="72.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Selection</text>
+<text x="772" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cache</text>
+<line x1="147" y1="76" x2="200" y2="76" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="173.5" y="67.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="318" y1="76" x2="371" y2="76" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="344.5" y="67.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="489" y1="76" x2="542" y2="76" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="515.5" y="67.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="660" y1="76" x2="713" y2="76" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="686.5" y="67.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">reg</text>
+<text x="88" y="132.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">reg, tiled, naive,</text>
+<text x="88" y="148.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">reg-notail</text>
+<text x="259" y="140.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">4 of 4 pass</text>
+<text x="430" y="124.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">6 gate launches</text>
+<text x="430" y="140.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">1 refused: reg-notail</text>
+<text x="430" y="156.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">wrong at m = 129</text>
+<text x="601" y="132.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">28 launches</text>
+<text x="601" y="148.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">dropped: tiled, naive</text>
+<text x="772" y="124.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">stores reg</text>
+<text x="772" y="140.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">key: device | driver |</text>
+<text x="772" y="156.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">digest | bucket 256</text>
+<rect x="20" y="188" width="820" height="156" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="210" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">The same request on the CPU unit</text>
+<rect x="32" y="223" width="112" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="88" y="254.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Candidates</text>
+<rect x="203" y="223" width="112" height="54" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="259" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Capability</text>
+<text x="259" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">filter</text>
+<rect x="374" y="223" width="112" height="54" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="430" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Reference</text>
+<text x="430" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gate</text>
+<rect x="545" y="223" width="112" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="601" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Measure</text>
+<text x="601" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(a race)</text>
+<rect x="716" y="223" width="112" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="772" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Selection</text>
+<text x="772" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cache</text>
+<line x1="147" y1="250" x2="200" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="173.5" y="241.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="318" y1="250" x2="371" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="344.5" y="241.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="489" y1="250" x2="542" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="515.5" y="241.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="660" y1="250" x2="713" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="686.5" y="241.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">naive</text>
+<text x="88" y="306.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">reg, tiled, naive,</text>
+<text x="88" y="322.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">reg-notail</text>
+<text x="259" y="298.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">1 of 4 pass</text>
+<text x="259" y="314.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">3 refused: no</text>
+<text x="259" y="330.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">workgroup barriers</text>
+<text x="430" y="306.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">one candidate left:</text>
+<text x="430" y="322.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">nothing to check</text>
+<text x="601" y="306.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">one candidate left:</text>
+<text x="601" y="322.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">nothing to time</text>
+<text x="772" y="306.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">stores naive</text>
+<text x="772" y="322.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">under the CPU key</text>
+</svg>

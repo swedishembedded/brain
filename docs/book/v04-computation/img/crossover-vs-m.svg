@@ -1,0 +1,40 @@
+<!-- source-sha256: fddde844ee0bdcca36a9045fe857f8a9e767bb446b563a70aee7f446e4c34e99 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 360" width="620" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="360" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="155.14" y1="314" x2="155.14" y2="30" stroke="#edf2f7"/>
+<text x="155.14" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.5</text>
+<line x1="252.29" y1="314" x2="252.29" y2="30" stroke="#edf2f7"/>
+<text x="252.29" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="349.43" y1="314" x2="349.43" y2="30" stroke="#edf2f7"/>
+<text x="349.43" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1.5</text>
+<line x1="446.57" y1="314" x2="446.57" y2="30" stroke="#edf2f7"/>
+<text x="446.57" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="543.71" y1="314" x2="543.71" y2="30" stroke="#edf2f7"/>
+<text x="543.71" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2.5</text>
+<line x1="58" y1="314" x2="602" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-0.75</text>
+<line x1="58" y1="259.38" x2="602" y2="259.38" stroke="#edf2f7"/>
+<text x="52" y="263.38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-0.5</text>
+<line x1="58" y1="204.77" x2="602" y2="204.77" stroke="#edf2f7"/>
+<text x="52" y="208.77" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-0.25</text>
+<line x1="58" y1="150.15" x2="602" y2="150.15" stroke="#edf2f7"/>
+<text x="52" y="154.15" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="95.54" x2="602" y2="95.54" stroke="#edf2f7"/>
+<text x="52" y="99.54" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.25</text>
+<line x1="58" y1="40.92" x2="602" y2="40.92" stroke="#edf2f7"/>
+<text x="52" y="44.92" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<rect x="58" y="30" width="544" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="284"/></clipPath>
+<g clip-path="url(#plot)"><line x1="58" y1="150.15" x2="602" y2="150.15" stroke="#718096" stroke-dasharray="4 4"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" stroke-dasharray="6 4" points="58,152.33 116.49,154.43 150.7,156.45 174.97,158.39 209.18,162.08 233.46,165.52 267.67,171.76 291.94,177.28 326.16,186.65 350.43,194.31 384.64,237.83 408.91,241.99 443.13,265.29 467.4,279.5 468.06,253.16 501.61,265.29 525.89,279.5 560.1,279.5 584.37,279.5"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,57.72 116.49,59.11 150.7,61.34 174.97,64.83 209.18,67.78 233.46,73.02 267.67,80.72 291.94,88.47 326.16,102.24 350.43,113.13 384.64,162.45 408.91,174.9 443.13,213.64 467.4,240.03 468.06,249.5 501.61,262.32 525.89,277.29 560.1,277.9 584.37,277.64"/><circle cx="58" cy="57.72" r="3.5" fill="#2b6cb0"/><circle cx="116.49" cy="59.11" r="3.5" fill="#2b6cb0"/><circle cx="150.7" cy="61.34" r="3.5" fill="#2b6cb0"/><circle cx="174.97" cy="64.83" r="3.5" fill="#2b6cb0"/><circle cx="209.18" cy="67.78" r="3.5" fill="#2b6cb0"/><circle cx="233.46" cy="73.02" r="3.5" fill="#2b6cb0"/><circle cx="267.67" cy="80.72" r="3.5" fill="#2b6cb0"/><circle cx="291.94" cy="88.47" r="3.5" fill="#2b6cb0"/><circle cx="326.16" cy="102.24" r="3.5" fill="#2b6cb0"/><circle cx="350.43" cy="113.13" r="3.5" fill="#2b6cb0"/><circle cx="384.64" cy="162.45" r="3.5" fill="#2b6cb0"/><circle cx="408.91" cy="174.9" r="3.5" fill="#2b6cb0"/><circle cx="443.13" cy="213.64" r="3.5" fill="#2b6cb0"/><circle cx="467.4" cy="240.03" r="3.5" fill="#2b6cb0"/><circle cx="468.06" cy="249.5" r="3.5" fill="#2b6cb0"/><circle cx="501.61" cy="262.32" r="3.5" fill="#2b6cb0"/><circle cx="525.89" cy="277.29" r="3.5" fill="#2b6cb0"/><circle cx="560.1" cy="277.9" r="3.5" fill="#2b6cb0"/><circle cx="584.37" cy="277.64" r="3.5" fill="#2b6cb0"/><line x1="353.03" y1="314" x2="353.03" y2="30" stroke="#c05621" stroke-dasharray="4 4"/><text x="362.74" y="47.48" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">crossover at m = 33</text><text x="592.29" y="134.86" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">reg is dearer above this line</text><text x="592.29" y="172" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">reg is cheaper below it</text></g>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log10 of the rows m (n = 2560, k = 2048)</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">log10 of cost(reg) / cost(tiled)</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">The crossover the model cannot see</text>
+<rect x="66" y="262" width="189.13" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="277" x2="94" y2="277" stroke="#2f855a" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="281" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">roofline model</text>
+<line x1="74" y1="294" x2="94" y2="294" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">device (minimum of 8 runs)</text>
+</svg>

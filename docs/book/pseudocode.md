@@ -433,6 +433,10 @@ the language, and are defined where they are taught.
   row-major) and `gamma` before `beta`. Checkpoints, optimizer state and the
   gradient checks all use this order.
 
+## Routines defined in Volume IV
+
+- **Exact dot product.** `exact_dot(x, y)` of Volume IV, chapter 10 ("Reference-gated selection") returns the exact value of $\sum_i x_i y_i$ for two vectors of equal length whose entries are floating-point numbers, as a rational number or as a value rounded once to a format wider than the one under test. It is the reference that a candidate's rounded result is compared with, and it is never computed in the format being tested. Two vectors of different lengths are an error (`require`); two empty vectors give 0.
+
 ## Randomness
 
 Random numbers come from an explicit generator `rng` of type `Generator`,

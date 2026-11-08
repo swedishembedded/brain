@@ -86,4 +86,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 7. [Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md): How do thousands of threads add up one array, and why is the obvious way slow?
 8. [Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md): Why is the cheapest computation the one whose intermediate result never touches memory?
 9. [One Program, Many Devices](v04-computation/09-backends.md): How can one set of kernels run on CPUs, Vulkan GPUs and CUDA GPUs with the same results?
+10. [Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md): How does an engine run near the roofline on hardware nobody tuned it for?
 <!-- /contents -->

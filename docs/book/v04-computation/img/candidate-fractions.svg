@@ -1,0 +1,46 @@
+<!-- source-sha256: 7c5b903392e19fdb27279a670dd2085bd66b7b75de004fe93ca24fa7099a6b05 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="155.14" y1="334" x2="155.14" y2="30" stroke="#edf2f7"/>
+<text x="155.14" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.5</text>
+<line x1="252.29" y1="334" x2="252.29" y2="30" stroke="#edf2f7"/>
+<text x="252.29" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="349.43" y1="334" x2="349.43" y2="30" stroke="#edf2f7"/>
+<text x="349.43" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1.5</text>
+<line x1="446.57" y1="334" x2="446.57" y2="30" stroke="#edf2f7"/>
+<text x="446.57" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="543.71" y1="334" x2="543.71" y2="30" stroke="#edf2f7"/>
+<text x="543.71" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2.5</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="276.1" x2="602" y2="276.1" stroke="#edf2f7"/>
+<text x="52" y="280.1" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="218.19" x2="602" y2="218.19" stroke="#edf2f7"/>
+<text x="52" y="222.19" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="160.29" x2="602" y2="160.29" stroke="#edf2f7"/>
+<text x="52" y="164.29" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="102.38" x2="602" y2="102.38" stroke="#edf2f7"/>
+<text x="52" y="106.38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="44.48" x2="602" y2="44.48" stroke="#edf2f7"/>
+<text x="52" y="48.48" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,243.09 116.49,243.19 150.7,243.3 174.97,242.76 209.18,243.48 233.46,242.65 267.67,242.89 291.94,242.32 326.16,241.23 350.43,241.6 384.64,240.84 408.91,239.98 443.13,235.4 467.4,226.88 468.06,228.81 501.61,198.56 525.89,174.45 560.1,172.76 584.37,173.35"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" stroke-dasharray="6 4" points="58,46.61 116.49,48.7 150.7,50.77 174.97,52.8 209.18,56.76 233.46,60.6 267.67,67.93 291.94,74.83 326.16,87.48 350.43,98.81 384.64,118.23 408.91,134.29 443.13,159.28 467.4,168.29 468.06,221.83 501.61,191.35 525.89,168.29 560.1,168.29 584.37,168.29"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,93.14 116.49,96.92 150.7,102.72 174.97,109.75 209.18,118.32 233.46,128.03 267.67,144.59 291.94,158.37 326.16,180.28 350.43,197.5 384.64,252.17 408.91,261.56 443.13,283.5 467.4,292.46 468.06,297.08 501.61,292.48 525.89,292.22 560.1,292.05 584.37,292.09"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="58,53.14 116.49,61.28 150.7,68.95 174.97,76.19 209.18,89.51 233.46,101.48 267.67,122.12 291.94,139.28 326.16,166.19 350.43,186.32 384.64,248.36 408.91,258.14 443.13,282.08 467.4,291.61 468.06,296.13 501.61,291.61 525.89,291.61 560.1,291.61 584.37,291.61"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,311.99 116.49,312.26 150.7,312.1 174.97,311.88 209.18,311.94 233.46,316.22 267.67,322.02 291.94,324.9 326.16,327.87 350.43,329.36 384.64,330.9 408.91,331.62 443.13,332.39 467.4,332.68 468.06,332.67 501.61,332.68 525.89,332.67 560.1,332.68 584.37,332.67"/></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log10 of the rows m (n = 2560, k = 2048)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">fraction of the roofline floor</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Predicted and device fractions of the three candidates</text>
+<rect x="418.18" y="38" width="175.82" height="95" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="426.18" y1="53" x2="446.18" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="452.18" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">register-blocked, device</text>
+<line x1="426.18" y1="70" x2="446.18" y2="70" stroke="#2b6cb0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="452.18" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">register-blocked, model</text>
+<line x1="426.18" y1="87" x2="446.18" y2="87" stroke="#c05621" stroke-width="2"/>
+<text x="452.18" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">tiled, device</text>
+<line x1="426.18" y1="104" x2="446.18" y2="104" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="452.18" y="108" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">tiled, model</text>
+<line x1="426.18" y1="121" x2="446.18" y2="121" stroke="#2f855a" stroke-width="2"/>
+<text x="452.18" y="125" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">naive, device</text>
+</svg>

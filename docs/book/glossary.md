@@ -82,6 +82,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **calibration**: the property that a model's probabilities match frequencies, so that among the examples given probability $p$ about a share $p$ are positive; measured with a reliability diagram and the expected calibration error. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
+**capability declaration**: the statement of what a device can execute correctly, queried from the device and absent when unknown, matched against what each candidate needs, so that a candidate that cannot run is removed before any cost is considered. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
+
 **catastrophic cancellation**: the loss of leading digits when two nearly equal numbers that carry rounding errors are subtracted; the subtraction is exact but promotes the earlier errors to the leading digits of a much smaller result, losing about $\log_{10}$ of the ratio of the operands to the result. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **categorical distribution**: a table of $K$ non-negative probabilities summing to $1$, one per outcome of a choice among $K$ possibilities such as the next word; the case $K = 2$ is the Bernoulli distribution. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
@@ -276,6 +278,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **identity matrix**: the square matrix with ones on the diagonal and zeros elsewhere, which leaves every vector unchanged. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
+**implementation candidate**: one implementation of an operation together with the conditions under which it is valid (the capabilities it needs, the shapes it serves, the contract of its result), one of several that a selector chooses among. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
+
 **independence**: the property that $P(A \cap B) = P(A)P(B)$, so that knowing one event tells nothing about the other; it is not the same as being unable to occur together. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 **information content**: the surprise of an event, $-\log_2 p$ bits (or $-\ln p$ nats) for an event of probability $p$, the only measure for which certain events carry zero, rarer events carry more and independent events add. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
@@ -373,6 +377,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **maximum likelihood estimation**: choosing the parameter under which the observed data were most probable, equivalently the one that minimises the negative log-likelihood. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
 **mean squared error**: the average over the examples of the squared difference between prediction and label, $\frac{1}{N}\sum_n (\hat{y}_n - y_n)^2$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
+
+**measured roofline**: the peak arithmetic rate and the memory bandwidth of the device itself, found by two probes that do nothing but arithmetic and nothing but streaming and whose work is counted, in whose terms every result is stated as a fraction. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
 **memory bandwidth**: the number of bytes per second that main memory can deliver to the processor when the program asks for them in the best possible way (long sequential reads), a property of the machine and not of the program. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
 
@@ -488,6 +494,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **reduction algorithm**: an algorithm that combines the elements of an array into one value by repeated use of a binary operation, as a sum, a maximum or an argmax does; it takes $n - 1$ applications, and if the operation is associative they can be regrouped into a tree of depth $\lceil \log_2 n \rceil$. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
+**reference-gated selection**: choosing among candidates only those whose output on the actual device matches a reference within a tolerance derived from their arithmetic, checked at the edges of the shapes they will serve, before any of them is timed. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
+
 **register blocking**: giving each invocation of a kernel a small square block of outputs held in its registers, so that each operand it reads is used once per row or column of the block, which enlarges the output tile beyond the number of invocations and cuts the reads of shared memory per multiply-add. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 
 **reinforcement learning (overview)**: learning by an agent that acts in an environment and receives rewards, without being told the right action; full treatment in Volume XII. *([The Learning Problem](v02-learning/01-learning-problem.md))*
@@ -533,6 +541,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **scalar multiplication**: multiplying every entry of a vector by one number, which stretches, shrinks or flips the arrow. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **seed**: the number from which a generator's starting state is computed; the same seed gives the same stream, and a seed used by a run must be recorded for the run to be repeated. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
+
+**selection cache**: the stored map from a key of device identity, driver version, source digest and shape bucket to the candidate chosen, kept between runs so that a measurement is paid once and discarded when any part of the key changes. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
 **set**: a collection of distinct elements, written with braces and combined by union, intersection and difference. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
