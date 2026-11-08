@@ -14,6 +14,8 @@
 //!   trainable parameters (rank-2 LoRA factors for an adapter model);
 //! * C4 zero-initialised LoRA `B` leaves the logits bit-identical to the base;
 //! * C6 save, reload, identical log-probabilities;
+//! * C10 the trained tensors are the declared ones: the built model holds the architecture's declared tensors, a full
+//!   fine-tune trains all of them, and an adapter model trains only well-formed pairs on declared tensors;
 //! * C9 every declared frozen-base tier gives gradients within its stated
 //!   tolerance of the f32 base;
 //! * C8 a chunked LM-head cross-entropy, plain and weighted (the loss every
@@ -162,6 +164,7 @@ pub(crate) fn trained_rank<M: Model>(subject: &Subject<M>) -> Option<u32> {
 /// the caller reports it.
 pub fn run<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), String> {
     check_declaration(subject, seed)?;
+    crate::conformance_trainable::trainable_set_matches_declaration(subject, seed)?;
     if subject.declares.token_objectives {
         logprobs_follow_logit_scale(subject, seed)?;
         crate::conformance_grad::unit_weights_reproduce_plain_training(subject, seed)?;

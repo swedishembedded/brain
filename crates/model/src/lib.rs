@@ -40,6 +40,7 @@ pub mod conformance;
 pub mod conformance_adapter;
 pub mod conformance_grad;
 pub mod conformance_head;
+pub mod conformance_trainable;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod finetune;
 pub mod flow;

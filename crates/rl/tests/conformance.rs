@@ -309,3 +309,14 @@ fn a_false_declaration_fails_the_suite() {
     let err = model::conformance::run(&subject, 41).expect_err("a model that offers the capability but declares it absent must fail");
     assert!(err.contains("declares token_objectives=false"), "{err}");
 }
+
+/// C10 fails a model whose adapter sites are not what it declares: a config that ignores the rank gives a model
+/// that trains its base tensors where an adapter model must train adapter tensors only.
+#[test]
+fn an_adapter_model_that_trains_base_tensors_fails_the_trainable_audit() {
+    let mut subject = qwen3_subject();
+    subject.config = |_| qwen3::QwenConfig::tiny_i8();
+    // seed: fixed so a failure reproduces
+    let err = model::conformance_trainable::trainable_set_matches_declaration(&subject, 41).expect_err("the adapter model trains base tensors");
+    assert!(err.contains("qwen3") && err.contains("not an adapter tensor"), "{err}");
+}
