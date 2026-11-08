@@ -203,6 +203,21 @@ pub fn footprint_demands(cfg: &QwenConfig, shard: &Shard, dt: Dtype, b: u32, t: 
     vec![Demand::fixed(Category::Weights, "weights", weight_bytes(cfg, shard, dt, train)), Demand::fixed(Category::Kv, "kv cache", kv_cache_bytes(cfg, t, train)), Demand::fixed(Category::Activations, "activations and scratch", activations)]
 }
 
+/// An inference build that encodes up to `t` rows, priced the way a
+/// layer-range placement prices it: `(per_layer, per_stage)`. `per_layer` is
+/// one layer's weights at `dt` and the residual boundary it adds; `per_stage`
+/// is what every stage holds once, whatever its layer count - the activation
+/// scratch its layers share, its first residual boundary and the KV cache.
+/// The same terms [`footprint_demands`] sums for one shard.
+pub fn encode_stage_split(cfg: &QwenConfig, dt: Dtype, t: u32) -> (u64, u64) {
+    let one_layer = Shard { start: 0, end: 1, embed: false, head: false, gpu_index: Shard::ANY_GPU };
+    let n = crate::model::activation_rows(1, t, false);
+    let boundary = n * cfg.d_model as u64 * 4;
+    let per_layer = weight_bytes(cfg, &one_layer, dt, false) + boundary;
+    let per_stage = activation_scratch_bytes(cfg, n, t, 1, false) + boundary + kv_cache_bytes(cfg, t, false);
+    (per_layer, per_stage)
+}
+
 /// The parameter count from which a decoder is served with int8 linears
 /// unless its caller says otherwise: a 6-8B decoder is 24-32 GB of fp32
 /// weights, more than a 24 GB card holds.

@@ -47,16 +47,14 @@ pub struct TextTower {
     mrope_section: [u32; 3],
 }
 
-/// Device bytes each of the first `depth` layers holds in a batched encode
-/// of `rows` tokens at linear tier `dt` - the packed linears, the fp32 norms
-/// and the per-layer activations - with the fp32 embedding on the first
-/// stage and no head.
-pub fn tower_cost(cfg: &QwenConfig, depth: usize, dt: Dtype, rows: u32) -> LayerBytes {
-    let (t, d, ff) = (rows as u64, cfg.d_model as u64, cfg.d_ff as u64);
-    let (q, kv) = (cfg.q_dim() as u64, cfg.kv_dim() as u64);
-    let norms = (2 * d + 2 * cfg.head_dim as u64) * 4;
-    let activations = (t * (4 * d + q + 2 * kv + 3 * ff) + cfg.n_heads as u64 * t * t) * 4;
-    LayerBytes { per_layer: vec![crate::footprint::decoder_layer_linear_bytes(cfg, dt) + norms + activations; depth], embed: crate::footprint::embed_bytes(cfg), head: 0 }
+/// What the first `depth` layers cost a placement in a batched encode of
+/// `rows` tokens at linear tier `dt`: each layer's weights and residual
+/// boundary, with the fp32 embedding on the first stage and no head, and the
+/// bytes every card holding a stage reserves once - the activations its
+/// layers share and its KV cache ([`qwen3::footprint::encode_stage_split`]).
+pub fn tower_cost(cfg: &QwenConfig, depth: usize, dt: Dtype, rows: u32) -> (LayerBytes, u64) {
+    let (per_layer, per_stage) = qwen3::footprint::encode_stage_split(cfg, dt, rows);
+    (LayerBytes { per_layer: vec![per_layer; depth], embed: crate::footprint::embed_bytes(cfg), head: 0 }, per_stage)
 }
 
 impl TextTower {
@@ -68,13 +66,13 @@ impl TextTower {
         assert!(depth <= cfg.n_layers as usize, "text tower: depth {depth} past the checkpoint's {} layers", cfg.n_layers);
         let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(dir)).map_err(|e| format!("qwen3vl text tower: open {dir}: {e}"))?;
         let source = crate::import::decoder_source(&reader);
-        let cards = model::shard::StreamPlan::cards(None, 0);
-        let shards: Vec<Shard> = if cards.is_empty() {
+        let (cost, reserve) = tower_cost(&cfg, depth, dt, rows);
+        let shards: Vec<Shard> = if model::shard::StreamPlan::cards(None, 0).is_empty() {
             vec![Shard { start: 0, end: depth, embed: true, head: false, gpu_index: Shard::ANY_GPU }]
         } else {
-            let cost = tower_cost(&cfg, depth, dt, rows);
+            let cards = model::shard::StreamPlan::cards(None, reserve);
             let placed = model::shard::plan_fewest_devices(&cost, &cards).ok_or_else(|| {
-                format!("qwen3vl text tower: {depth} layers at {dt:?} need {} bytes, which fit no combination of the schedulable cards {cards:?} (usable bytes)", cost.total())
+                format!("qwen3vl text tower: {depth} layers at {dt:?} need {} bytes, which fit no combination of the schedulable cards {cards:?} (usable bytes once each holds its {reserve}-byte share of the {rows}-token encode)", cost.total())
             })?;
             placed.into_iter().map(|p| Shard { head: false, ..p.shard }).collect()
         };
@@ -153,6 +151,24 @@ impl TextTower {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A long prompt (a reference image's vision tokens) prices each layer at
+    /// its weights and the residual boundary it adds; the activations the
+    /// layers share - one copy per card, no `T x T` slab on the flash path -
+    /// are reserved once per card, never once per layer.
+    #[test]
+    fn a_long_prompt_reserves_the_shared_activations_once_per_card() {
+        let cfg = QwenConfig::tiny();
+        let rows = 4096;
+        let (layers, reserve) = tower_cost(&cfg, cfg.n_layers as usize, Dtype::F32, rows);
+        let (per_layer, per_stage) = qwen3::footprint::encode_stage_split(&cfg, Dtype::F32, rows);
+        assert!(layers.per_layer.iter().all(|&b| b == per_layer), "every layer at its weights and boundary");
+        assert_eq!(reserve, per_stage);
+        let scores = cfg.n_heads as u64 * rows as u64 * rows as u64 * 4;
+        assert!(per_layer < scores && per_stage < scores, "no T x T slab: {per_layer} / {per_stage} against {scores}");
+        let d = cfg.d_model as u64 * rows as u64 * 4;
+        assert!(per_layer >= d, "a layer holds at least its residual boundary");
+    }
 
     /// Cut anywhere, the tower encodes what it encodes whole - which also
     /// means every stage, not only the first, rotates by the prompt's own
