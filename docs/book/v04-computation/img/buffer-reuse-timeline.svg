@@ -1,4 +1,4 @@
-<!-- source-sha256: 5b217a4b65eae67dbd0818bcbfee8643e9f3938aa1752668fa604f041cbab5db -->
+<!-- source-sha256: f3b25606ead296d9c3998dfb3c7da11655928db92d9cc9903e2b3cea80090b01 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 392" width="880" height="392"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="880" height="392" fill="#ffffff"/>
 <rect x="20" y="12" width="840" height="368" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="34" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Tensor lifetimes and the bytes they share</text>

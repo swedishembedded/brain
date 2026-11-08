@@ -853,7 +853,9 @@ def epilogue_bytes():
     return (f"The epilogue of Chapter 8, bias then GELU (the nine operations of Chapter 8 in the order listed there, every one rounded to float32, the constants sqrt(2 / pi) and 0.044715 rounded to float32, tanh the library tanh of the float32 argument rounded to float32) on the output of the tiled kernel (T = 4), "
             f"m = {m}, n = {n}, k = {k}. {_seed('epilogue')}. Draw order: the {m * k} entries of A, the {k * n} entries of B (each `2 uniform() - 1` rounded to float32), then the {n} "
             f"bias entries `0.5 normal()` rounded to float32. 'Words' is every single-word load and store the executor counted, over all dispatches; bytes are 4 times that; "
-            f"'blocks' are 32-byte transactions. Digest: SHA-256 over binary32 little-endian bytes of the result, first 16 hex digits.\n\n"
+            f"'blocks' are 32-byte transactions. The two separate kernels are elementwise, one element per invocation, workgroups of 16 and ceil(m n / 16) workgroups, the guard `g >= m n` returns: "
+            f"bias_add stores u[g] = f32(z[g] + bias[g mod n]) and gelu stores the GELU of u[g]; the matmul is the tiled kernel's own launch. Every buffer starts on a 32-byte boundary, so the order of allocation does not change a count. "
+            f"Digest: SHA-256 over binary32 little-endian bytes of the result, first 16 hex digits.\n\n"
             + _table(["design", "dispatches", "words through memory", "bytes", "transaction blocks", "digest of the result"], rows, "lrrrrl")
             + f"\n\nWords saved: {saved} = 4 m n = {4 * m * n}: the intermediate z and the intermediate u are each stored once and loaded once. The results are bit-identical: "
             f"{_yes(out_un == out_fu)}; both equal the direct evaluation of the formula: {_yes(out_fu == want)}.")
@@ -1014,7 +1016,11 @@ def quantized_matmul():
             "'output SQNR' and 'relative error' compare the kernel's C with the float64 product of the original weights (the error to expect from quantizing); "
             "'worst ratio' compares the kernel's C with the float64 product of the decoded weights scale x code (the float32 arithmetic alone) over a tolerance "
             "(gamma(k_rd, 2^-24) + gamma(k, 2^-53)) S with S = sum |a w'|, k_rd = G + k / G for the factored form (the group's chain, the scale's product, the additions across groups) "
-            "and k + 1 for dequantizing first (the product with the rounded weight scale x code adds one rounding to the chain of k). Digest: binary32 little-endian bytes of C, first 16 hex digits.\n\n"
+            "and k + 1 = 129 for dequantizing first (a safe bound that ignores the grouping: the product with the rounded weight scale x code adds one rounding to a chain of k; "
+            "the longest chain the kernel really has is the decode rounding, G additions in a group and k / G additions across groups, 1 + G + k / G = 37 roundings, so this bound is loose by a factor of about 3.5 and the ratios of its rows are small for that reason). "
+            "The dequantize-first kernel is the loop of the factored one with two lines changed: in the group loop `inner = inner + A[i * K + grp * G + t] * (scale * Q[j * K + grp * G + t])` (the product scale x code is rounded to float32 first, the activation times it is a second rounding) "
+            "and, after the group loop, `total = total + inner` with no multiplication by the scale (it is already inside the products); `inner` is reset to 0 for every group, `total` starts at 0, and each sum is a left fold from t = 0 and grp = 0 in float32 (device A: no contraction). "
+            "Digest: binary32 little-endian bytes of C, first 16 hex digits.\n\n"
             + _table(["weights", "form", "bits per weight", "bytes per weight", "weight SQNR (dB)", "output SQNR (dB)", "relative error (%)", "k_rd",
                       "worst ratio", "outside", "digest"], rows, "llrrrrrrrrl")
             + "\n\nWhat the factored kernel reads (executor words) and the stored size of the weights:\n\n"
@@ -1206,7 +1212,23 @@ def selection_report():
             _, gap_se = _faster(res[best]["steady"], res[alone]["steady"])
             gap = f"{alone} by {gap_se:.1f}"
         notes.append((f"{m} x {n} x {k}", _n(fl), _n(by), f"{bound:.2f}", alone, gap, best, f"{margin:.1f}"))
-    return ("The GPU unit of Chapter 10 with its measured roofline, 34,469 (GFLOP/s) and 646 (GB/s) (`profiling.F_MS`, `profiling.BW_MS`), and the model clock of Chapters 10 and 11: a run of a "
+    dev = GPU_UNIT
+    ridge = dev["flops"] / dev["bw"]
+    prm = []
+    for nm in ("naive", "tiled", "reg"):
+        c = ks.CANDIDATES[nm]
+        prm.append((nm, f"{c['bm']} x {c['bn']}", c["n_wg"], f"{c['rb'][0]} x {c['rb'][1]}", c["ell"], f"{ks._efficiency(c):.4f}"))
+    params = (f"The cost model is that of Chapter 10 with the unit's TRUE rates, not the measured ones: peak {dev['flops']:,.0f} (GFLOP/s), bandwidth {dev['bw']:.0f} (GB/s), so the ridge is "
+              f"{ridge:.4f} FLOP per byte; {dev['lanes']:,} lanes; memory latency {dev['lat_ns']:.0f} ns, so n_need = {ks._loads_needed(dev):,.0f} loads in flight; one dispatch alone costs "
+              f"L = {dev['launch_us']:g} microseconds x {dev['bw']:.0f} (GB/s) = {ks._launch_bytes(dev):,.0f} bytes. Candidates of the model (tile T_m x T_n, invocations per workgroup, register block, loads in flight n_fl, issue efficiency e):\n\n"
+              + _table(["candidate", "tile", "invocations per workgroup", "register block", "n_fl", "e"], prm, "lrrrrr")
+              + f"\n\nFor a shape (m, n, k): t_m = ceil(m / T_m), t_n = ceil(n / T_n); N_byte = 4 (m k t_n + k n t_m + m n); executed FLOPs 2 (t_m T_m)(t_n T_n) k for tiled and reg, 2 m n k for naive; "
+              "invocations t_m t_n n_wg for tiled and reg, and for naive m n rounded UP to a multiple of 64 (T_m = T_n = 1); o_cmp = min(1, invocations / lanes); o_mem = min(1, invocations x n_fl / n_need); "
+              "cost in equivalent bytes B_dev = L + max(executed FLOPs / (ridge e o_cmp), N_byte / o_mem). The time of a launch in microseconds is this cost divided by the TRUE bandwidth, "
+              f"B_dev / ({dev['bw']:.0f} x 1000) (bytes per microsecond), times 0.95 for reg-nok. The fraction of the roofline uses the MEASURED roofline: the roofline time of the problem is "
+              "max(2 m n k / 34,469 (GFLOP/s), 4 (m k + k n + m n) / 646 (GB/s)), divided by the median.\n\n")
+    return ("The GPU unit of Chapter 10 with its measured roofline, 34,469 (GFLOP/s) and 646 (GB/s) (`profiling.F_MS`, `profiling.BW_MS`), and the model clock of Chapters 10 and 11. " + params
+            + "A run of a "
             "candidate is its noise-free cost (the cost in equivalent bytes of Chapter 10 over the bandwidth of the unit, times 0.95 for reg-nok, which the model grants for the "
             "checks it dropped) multiplied by the noise factor (1 + 0.04 u0)(1 - 0.25 ln(1 - u2) if u1 < 0.2, else 1) and by the warm-up transient 1 + 0.8 exp(-i / 5), plus 20 "
             "noise-free costs on run 0. Everything below is the output of this model, not a measurement of a machine. Protocol: "

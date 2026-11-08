@@ -48,7 +48,7 @@ def _n(v):
 
 
 def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (the seed of the name `{name}`)."
+    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`, defined on the pseudocode page)."
 
 
 def _median(v):
@@ -384,13 +384,14 @@ def repetitions_needed():
         rows.append(tuple(row))
     lines = [
         f"Two variants, A with floor 1 and B with floor 1 - gap, each timed n times with the noise of Chapter 10 (relative standard "
-        f"deviation cv = {c:.4f}, the table above). The runs needed so that the gap equals twice the standard error of the "
+        f"deviation cv = {c:.6f}, printed as {c:.4f} in the table above). The runs needed so that the gap equals twice the standard error of the "
         "difference, 2 cv sqrt(2 / n) = gap, are n = 8 cv^2 / gap^2 (rounded up), and four times as many when the gap is to equal "
         f"four standard errors. The last two columns are the share of {SIM_TRIALS} trials in which the mean of A exceeded the mean "
         "of B by more than 2 sqrt(s_A^2 / n + s_B^2 / n), with s the sample standard deviation (divisor n - 1). "
         f"{_seed_line(name)} Draw order: for each gap in the order of the table, for n = n_2 and then n = 4 n_2, for each trial, "
         "A's n factors and then B's n factors, three uniforms each; B's run is (1 - gap) times its factor. The 0.005 row is "
-        "not simulated.",
+        "not simulated. Each n_2 is the ceiling of its own formula, and n for four standard errors is 4 n_2 of the same row; the n_2 of the 0.005 row (6,573) is computed from the formula directly, "
+        "so it is not 4 times the n_2 of the 0.01 row (4 x 1,644 = 6,576, because 1,644 was itself rounded up).",
         "",
         _table(["gap", "n (gap = 2 SE)", "n (gap = 4 SE)", "flagged at n_2", "flagged at 4 n_2"], rows),
     ]
@@ -609,7 +610,8 @@ def whole_pass_change():
     n2 = math.ceil(8.0 * c_pass ** 2 / (diff / ma) ** 2)
     lines = [
         "Changing the output projection (`matmul_out`) of the layer of `profiling.kernel_profile`. Variant B runs the product "
-        f"in {SPLIT_SPEEDUP} of the time of A (by its device stamp: {k_b:,.2f} against {k_a:,.2f} microseconds, noise-free) but "
+        f"with the start of the dispatch unchanged (t_dsp = {L_DSP:g} microsecond) and the rest of its time, the work at the hidden efficiency, multiplied by {SPLIT_SPEEDUP} "
+        f"(by its device stamp: {L_DSP:g} + {SPLIT_SPEEDUP} x ({k_a:,.2f} - {L_DSP:g}) = {k_b:,.2f} against {k_a:,.2f} microseconds, noise-free) but "
         f"needs {EXTRA_DISPATCHES} more dispatches of t_dsp + {EXTRA_WORK_US:g} = {L_DSP + EXTRA_WORK_US:g} microseconds each and "
         f"{EXTRA_SYNCS} points where the host must wait for a result, each costing a submission (4) and a wait "
         "(40 microseconds, times (1 + 0.25 u)). A pass is timed with a wait at its end: the sum over its dispatches of the "

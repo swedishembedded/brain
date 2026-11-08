@@ -79,7 +79,7 @@ The oracle is a left fold in float64. The product of two float32 numbers has at 
 
 Every other milestone ends in a comparison with this function. A kernel that reads its operands through strides (milestone 2) is tested on views of the same storage, and the oracle reads the views in the same way, so a stride that is wrong in a kernel and right in the oracle cannot go unseen.
 
-To check it, reproduce the four views of one storage, then a product through a transposed view:
+In the table below `flat(t)` is the list of the elements of a view in the row-major order of its shape: for a view of shape $[m, n]$ the elements at $(0, 0), (0, 1), \ldots, (0, n - 1), (1, 0), \ldots, (m - 1, n - 1)$, each read through `at`. To check the views, reproduce the four views of one storage, then a product through a transposed view:
 
 <!-- worked: project_tensor_engine.tensor_views -->
 Storage = [0, 1, ..., 11] (twelve float32 words), A = shape [3, 4] with the row-major strides (4, 1) and offset 0. A transpose is the same storage with the shape and the strides exchanged; a row slice moves the offset and keeps the strides. Element (i, j) of a view is storage[offset + i s0 + j s1]; the table reads the element at the index shown.
@@ -155,7 +155,28 @@ function launch(mem: inout Memory, phases: list<function>, n_grp: int, wg: int, 
     return blocks                                    # (load transactions, store transactions)
 ```
 
-Three rules of this executor are the rules of Chapters 5 and 9, and each has a mistake that produces a plausible answer. A returned invocation stays returned in every later phase (the `alive` mask). The shared array is created afresh for every workgroup. A barrier that only some invocations reach is an error, not a result. The `transactions` function is the counting rule of Chapter 5: the invocations of a workgroup are cut into subgroups of 32 consecutive local indices; the $j$-th entry of the log of each invocation of a subgroup is one memory instruction (an invocation that returned has no entry, and one that skipped an access has its later entries moved up); the loads of one such instruction cost one transaction for each distinct 32-byte block that their addresses touch, and so do its stores, counted apart. Buffers are placed by the allocator of Chapter 5: each starts at a multiple of 8 words (32 bytes), words between buffers hold $-777$, and a buffer is filled with 1000 until it is uploaded or written.
+Three rules of this executor are the rules of Chapters 5 and 9, and each has a mistake that produces a plausible answer. A returned invocation stays returned in every later phase (the `alive` mask). The shared array is created afresh for every workgroup. A barrier that only some invocations reach is an error, not a result. The `transactions` function is the counting rule of Chapter 5: the invocations of a workgroup are cut into subgroups of 32 consecutive local indices; the $j$-th entry of the log of each invocation of a subgroup is one memory instruction (an invocation that returned has no entry, and one that skipped an access has its later entries moved up); the loads of one such instruction cost one transaction for each distinct 32-byte block that their addresses touch, and so do its stores, counted apart. As a function of the log:
+
+```text
+function transactions(log: list<list<(kind, address)>>, wg: int) -> (int, int):
+    # log[l] is the list of the accesses of invocation l in this phase, in order; kind is load or store; address is a word index
+    loads = 0
+    stores = 0
+    for s in 0 .. ceil(wg / 32):                          # subgroups of 32 consecutive local indices
+        top = min(32 * s + 32, wg)
+        for j in 0 .. max(len(log[l]) for l in 32 * s .. top):          # the j-th memory instruction
+            for kind in (load, store):
+                seen = empty list                          # the 32-byte blocks this instruction touches
+                for l in 32 * s .. top:
+                    if len(log[l]) > j and log[l][j].kind == kind:
+                        b = (log[l][j].address * 4) // 32
+                        if b not in seen: append b to seen
+                if kind == load: loads = loads + len(seen)
+                else: stores = stores + len(seen)
+    return (loads, stores)
+```
+
+Buffers are placed by the allocator of Chapter 5: the memory is one array of words that starts at word 0, the first buffer starts at word 0, every buffer starts at the next multiple of 8 words (32 bytes) after the end of the previous one, the words between buffers hold $-777$, and a buffer is filled with 1000 until it is uploaded or written. The memory only grows: a released buffer's words stay where they are and a later buffer is placed after the last one. A kernel that reads a word outside every buffer reads whatever is there (padding, a neighbour, a released buffer); a read past the end of the whole memory is an error in the executor, and no test of this chapter performs one.
 
 Beside the transactions, your executor must report the **words** each kernel touched, per buffer: the number of single-word loads and stores. Count them in the memory, not in the kernel (a kernel that counts its own loads can forget one, or count one it did not issue); a load that lands outside every buffer of the kernel is counted under that name.
 
@@ -308,7 +329,7 @@ The two-pass sum of device A moves 1011 words (4,044 bytes) through memory for 1
 Both devices stay within their tolerance, by a wide margin, and the two global sums differ in the last bit of the float32 total. Neither is wrong; the tolerance is what lets the engine say so. The fused epilogue:
 
 <!-- worked: project_tensor_engine.epilogue_bytes -->
-The epilogue of Chapter 8, bias then GELU (the nine operations of Chapter 8 in the order listed there, every one rounded to float32, the constants sqrt(2 / pi) and 0.044715 rounded to float32, tanh the library tanh of the float32 argument rounded to float32) on the output of the tiled kernel (T = 4), m = 13, n = 10, k = 9. seed 0x62a92e2264a1c883 (7109264212033128579). Draw order: the 117 entries of A, the 90 entries of B (each `2 uniform() - 1` rounded to float32), then the 10 bias entries `0.5 normal()` rounded to float32. 'Words' is every single-word load and store the executor counted, over all dispatches; bytes are 4 times that; 'blocks' are 32-byte transactions. Digest: SHA-256 over binary32 little-endian bytes of the result, first 16 hex digits.
+The epilogue of Chapter 8, bias then GELU (the nine operations of Chapter 8 in the order listed there, every one rounded to float32, the constants sqrt(2 / pi) and 0.044715 rounded to float32, tanh the library tanh of the float32 argument rounded to float32) on the output of the tiled kernel (T = 4), m = 13, n = 10, k = 9. seed 0x62a92e2264a1c883 (7109264212033128579). Draw order: the 117 entries of A, the 90 entries of B (each `2 uniform() - 1` rounded to float32), then the 10 bias entries `0.5 normal()` rounded to float32. 'Words' is every single-word load and store the executor counted, over all dispatches; bytes are 4 times that; 'blocks' are 32-byte transactions. The two separate kernels are elementwise, one element per invocation, workgroups of 16 and ceil(m n / 16) workgroups, the guard `g >= m n` returns: bias_add stores u[g] = f32(z[g] + bias[g mod n]) and gelu stores the GELU of u[g]; the matmul is the tiled kernel's own launch. Every buffer starts on a 32-byte boundary, so the order of allocation does not change a count. Digest: SHA-256 over binary32 little-endian bytes of the result, first 16 hex digits.
 
 | design | dispatches | words through memory | bytes | transaction blocks | digest of the result |
 |---|---:|---:|---:|---:|---|
@@ -464,14 +485,33 @@ kernel matmul_q(A: array<f32>[M, K], Q: array<int>[N * K], S: array<f32>[N * (K 
     C[g] = total
 ```
 
-A second kernel decodes each weight first (`inner = inner + A[...] * (scale * Q[...])`) and is the comparison. The simulator keeps one code in a word; the stored size of the matrix is computed from the format, $n_b + 32/G$ bits per weight, because that is what a device that packs the codes reads.
+A second kernel decodes each weight first and is the comparison. It keeps the group loop and the reset of `inner` for every group, multiplies the code by the scale inside the loop and adds the group's result to the total without a further multiplication:
+
+```text
+kernel matmul_q_dequant_first(A: array<f32>[M, K], Q: array<int>[N * K], S: array<f32>[N * (K / G)], C: inout array<f32>[M, N],
+                              M: int, N: int, K: int, G: int) workgroup n_wg:
+    if g >= M * N: return
+    i = g // N
+    j = g mod N
+    total = 0.0
+    for grp in 0 .. K // G:
+        scale = S[j * (K // G) + grp]
+        inner = 0.0
+        for t in 0 .. G:
+            w = scale * Q[j * K + grp * G + t]                 # the decoded weight, rounded to f32
+            inner = inner + A[i * K + grp * G + t] * w
+        total = total + inner                                  # the scale is already inside the products
+    C[g] = total
+```
+
+The two kernels differ only in where the scale is applied. The simulator keeps one code in a word; the stored size of the matrix is computed from the format, $n_b + 32/G$ bits per weight, because that is what a device that packs the codes reads.
 
 This is the kernel that a model with quantized weights runs on every layer. It also shows the tolerance of milestone 5 on a kernel whose longest chain is not the length of the dot product, and separates the two errors the quantized product has: the error of the weights, which is the point of the format and is large, and the error of the arithmetic, which must be small.
 
 The check is a product $[6, 128] \times [128, 24]$, with Gaussian weights and activations, both widths, both forms. Each row reports the quantization error (the kernel against the float64 product of the *original* weights, the number to expect) and the arithmetic error (the kernel against the float64 product of the *decoded* weights, which must stay under its derived tolerance):
 
 <!-- worked: project_tensor_engine.quantized_matmul -->
-The product C = A W, A of shape [6, 128] (activations), W of shape [128, 24] (weights), W quantized along k in groups of G = 32 for each column (symmetric codes -qmax .. qmax, qmax = 2^(bits - 1) - 1, scale = amax / qmax stored as float32, code = clamp(round_even(w / scale), -qmax, qmax)). seed 0x546969a482b88101 (6082508927029248257). Draw order: the 3072 weights `0.05 normal()` rounded to float32, row-major over [k, n], then the 768 activations `normal()` rounded to float32, row-major. Device A. 'Bits per weight' counts the 32-bit scale of every group: bits + 32 / G. 'Weight SQNR' is 10 log10 (mean w^2 / MSE of the decoded weights); 'output SQNR' and 'relative error' compare the kernel's C with the float64 product of the original weights (the error to expect from quantizing); 'worst ratio' compares the kernel's C with the float64 product of the decoded weights scale x code (the float32 arithmetic alone) over a tolerance (gamma(k_rd, 2^-24) + gamma(k, 2^-53)) S with S = sum |a w'|, k_rd = G + k / G for the factored form (the group's chain, the scale's product, the additions across groups) and k + 1 for dequantizing first (the product with the rounded weight scale x code adds one rounding to the chain of k). Digest: binary32 little-endian bytes of C, first 16 hex digits.
+The product C = A W, A of shape [6, 128] (activations), W of shape [128, 24] (weights), W quantized along k in groups of G = 32 for each column (symmetric codes -qmax .. qmax, qmax = 2^(bits - 1) - 1, scale = amax / qmax stored as float32, code = clamp(round_even(w / scale), -qmax, qmax)). seed 0x546969a482b88101 (6082508927029248257). Draw order: the 3072 weights `0.05 normal()` rounded to float32, row-major over [k, n], then the 768 activations `normal()` rounded to float32, row-major. Device A. 'Bits per weight' counts the 32-bit scale of every group: bits + 32 / G. 'Weight SQNR' is 10 log10 (mean w^2 / MSE of the decoded weights); 'output SQNR' and 'relative error' compare the kernel's C with the float64 product of the original weights (the error to expect from quantizing); 'worst ratio' compares the kernel's C with the float64 product of the decoded weights scale x code (the float32 arithmetic alone) over a tolerance (gamma(k_rd, 2^-24) + gamma(k, 2^-53)) S with S = sum |a w'|, k_rd = G + k / G for the factored form (the group's chain, the scale's product, the additions across groups) and k + 1 = 129 for dequantizing first (a safe bound that ignores the grouping: the product with the rounded weight scale x code adds one rounding to a chain of k; the longest chain the kernel really has is the decode rounding, G additions in a group and k / G additions across groups, 1 + G + k / G = 37 roundings, so this bound is loose by a factor of about 3.5 and the ratios of its rows are small for that reason). The dequantize-first kernel is the loop of the factored one with two lines changed: in the group loop `inner = inner + A[i * K + grp * G + t] * (scale * Q[j * K + grp * G + t])` (the product scale x code is rounded to float32 first, the activation times it is a second rounding) and, after the group loop, `total = total + inner` with no multiplication by the scale (it is already inside the products); `inner` is reset to 0 for every group, `total` starts at 0, and each sum is a left fold from t = 0 and grp = 0 in float32 (device A: no contraction). Digest: binary32 little-endian bytes of C, first 16 hex digits.
 
 | weights | form | bits per weight | bytes per weight | weight SQNR (dB) | output SQNR (dB) | relative error (%) | k_rd | worst ratio | outside | digest |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
@@ -488,7 +528,7 @@ What the factored kernel reads (executor words) and the stored size of the weigh
 | int4 | 18,432 | 18,432 | 576 | 144 | 12,288 | 1,920 |
 <!-- /worked -->
 
-The weight SQNR and the output SQNR agree to within a few tenths of a decibel, which is the prediction of Chapter 12 for white inputs: 20.15 dB of the weights at 4 bits becomes 20.22 dB at the output, a relative error of 9.7 percent, and 8 bits gives 45 dB and 0.56 percent. The two forms have the same quantization error, since they compute the same decoded weights; they differ in the last bits, within the tolerance each one's chain gives it (36 roundings for the factored form, 129 for decoding first). The stored size is the gain: 5 bits per weight is 1,920 bytes where float32 needs 12,288, the saving of 6.4 times in the bytes that a bandwidth-bound product reads.
+The weight SQNR and the output SQNR agree to within a few tenths of a decibel, which is the prediction of Chapter 12 for white inputs: 20.15 dB of the weights at 4 bits becomes 20.22 dB at the output, a relative error of 9.7 percent, and 8 bits gives 45 dB and 0.56 percent. The two forms have the same quantization error, since they compute the same decoded weights; they differ in the last bits, within the tolerance each one's chain gives it (36 roundings for the factored form; 129 for decoding first is a safe bound that ignores the grouping, the real longest chain of that kernel being 1 + 32 + 4 = 37 roundings). The stored size is the gain: 5 bits per weight is 1,920 bytes where float32 needs 12,288, the saving of 6.4 times in the bytes that a bandwidth-bound product reads.
 
 Taking the scale from the float64 maximum and then using the unrounded value in the decoder is a trap: the codes must be computed with the stored (float32) scale, or the decoded weights are not the weights the kernel uses. Quantizing along $n$ instead of along $k$ lets a group straddle outputs, and the factored form no longer applies. Rounding $w / \mathrm{scale}$ half away from zero differs from the rule, round to nearest even, on exact ties, which a coarse scale produces. And comparing the kernel with the original weights and calling a 9.7 percent error a bug, or with the decoded weights and calling a 45 dB error a feature, mixes up two comparisons that answer different questions.
 
@@ -572,7 +612,17 @@ function choose(live: list<Candidate>, gate: function(Candidate) -> bool, steady
 The report also measures the gate's refusals (an engine would not; the table does, to show what measurement alone would have chosen), so the draws of `reg-nok` are in the stream. On the CPU unit of Chapter 10 the filter leaves one candidate and the engine returns it unmeasured.
 
 <!-- worked: project_tensor_engine.selection_report -->
-The GPU unit of Chapter 10 with its measured roofline, 34,469 (GFLOP/s) and 646 (GB/s) (`profiling.F_MS`, `profiling.BW_MS`), and the model clock of Chapters 10 and 11: a run of a candidate is its noise-free cost (the cost in equivalent bytes of Chapter 10 over the bandwidth of the unit, times 0.95 for reg-nok, which the model grants for the checks it dropped) multiplied by the noise factor (1 + 0.04 u0)(1 - 0.25 ln(1 - u2) if u1 < 0.2, else 1) and by the warm-up transient 1 + 0.8 exp(-i / 5), plus 20 noise-free costs on run 0. Everything below is the output of this model, not a measurement of a machine. Protocol: 300 dispatches per candidate timed by the device's own stamps; the warm-up ends at the first run that starts 5 consecutive runs each within 5 percent of the minimum of runs 150 to 299, and those runs are discarded; the rest (at least 264 = 4 x 66, the runs for a 5 percent gap at four standard errors, Chapter 11) give the mean, its standard error s / sqrt(n) and the median; the winner is the admitted candidate with the lowest mean. seed 0x0711b23c5c9e3d12 (509384205191232786). Draw order: requests in the order of the table, candidates in catalogue order (those the unit can run), runs 0 .. 299, three uniforms each (u0, u1, u2). 'FLOPs executed' and 'bytes requested' are the counts of Chapter 10 for the candidate's tile (padded tiles included). Times are in microseconds of the model clock; the fraction is the roofline time of the problem on the measured roofline over the median (a fraction near 1 is the roofline).
+The GPU unit of Chapter 10 with its measured roofline, 34,469 (GFLOP/s) and 646 (GB/s) (`profiling.F_MS`, `profiling.BW_MS`), and the model clock of Chapters 10 and 11. The cost model is that of Chapter 10 with the unit's TRUE rates, not the measured ones: peak 36,000 (GFLOP/s), bandwidth 664 (GB/s), so the ridge is 54.2169 FLOP per byte; 10,240 lanes; memory latency 200 ns, so n_need = 33,200 loads in flight; one dispatch alone costs L = 5 microseconds x 664 (GB/s) = 3,320,000 bytes. Candidates of the model (tile T_m x T_n, invocations per workgroup, register block, loads in flight n_fl, issue efficiency e):
+
+| candidate | tile | invocations per workgroup | register block | n_fl | e |
+|---|---:|---:|---:|---:|---:|
+| naive | 1 x 1 | 64 | 1 x 1 | 2 | 0.2000 |
+| tiled | 32 x 32 | 64 | 4 x 4 | 8 | 0.6154 |
+| reg | 128 x 128 | 256 | 8 x 8 | 8 | 0.7805 |
+
+For a shape (m, n, k): t_m = ceil(m / T_m), t_n = ceil(n / T_n); N_byte = 4 (m k t_n + k n t_m + m n); executed FLOPs 2 (t_m T_m)(t_n T_n) k for tiled and reg, 2 m n k for naive; invocations t_m t_n n_wg for tiled and reg, and for naive m n rounded UP to a multiple of 64 (T_m = T_n = 1); o_cmp = min(1, invocations / lanes); o_mem = min(1, invocations x n_fl / n_need); cost in equivalent bytes B_dev = L + max(executed FLOPs / (ridge e o_cmp), N_byte / o_mem). The time of a launch in microseconds is this cost divided by the TRUE bandwidth, B_dev / (664 x 1000) (bytes per microsecond), times 0.95 for reg-nok. The fraction of the roofline uses the MEASURED roofline: the roofline time of the problem is max(2 m n k / 34,469 (GFLOP/s), 4 (m k + k n + m n) / 646 (GB/s)), divided by the median.
+
+A run of a candidate is its noise-free cost (the cost in equivalent bytes of Chapter 10 over the bandwidth of the unit, times 0.95 for reg-nok, which the model grants for the checks it dropped) multiplied by the noise factor (1 + 0.04 u0)(1 - 0.25 ln(1 - u2) if u1 < 0.2, else 1) and by the warm-up transient 1 + 0.8 exp(-i / 5), plus 20 noise-free costs on run 0. Everything below is the output of this model, not a measurement of a machine. Protocol: 300 dispatches per candidate timed by the device's own stamps; the warm-up ends at the first run that starts 5 consecutive runs each within 5 percent of the minimum of runs 150 to 299, and those runs are discarded; the rest (at least 264 = 4 x 66, the runs for a 5 percent gap at four standard errors, Chapter 11) give the mean, its standard error s / sqrt(n) and the median; the winner is the admitted candidate with the lowest mean. seed 0x0711b23c5c9e3d12 (509384205191232786). Draw order: requests in the order of the table, candidates in catalogue order (those the unit can run), runs 0 .. 299, three uniforms each (u0, u1, u2). 'FLOPs executed' and 'bytes requested' are the counts of Chapter 10 for the candidate's tile (padded tiles included). Times are in microseconds of the model clock; the fraction is the roofline time of the problem on the measured roofline over the median (a fraction near 1 is the roofline).
 
 | m x n x k | candidate | FLOPs executed | bytes requested | warm-up ends at run | steady runs | mean | standard error | median | fraction of roofline | status |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|

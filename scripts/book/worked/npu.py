@@ -56,7 +56,7 @@ def _table(headers, rows, align=None):
 
 
 def _seed_line(name):
-    return f"seed {bookrng.seed_of(name)} (seed_of '{name}')"
+    return f"seed {bookrng.seed_of(name)} (seed_of '{name}', defined on the pseudocode page)"
 
 
 def _v(values, nd=2):
@@ -522,7 +522,7 @@ def exactness():
     ]
     return (f"The network quantized from the 32-input calibration set run on {N_TEST} test inputs, x_i = round(normal(), 3) drawn in order, "
             f"{_seed_line('npu.test')}. 'Compiled form' is the integer program of the chapter (raw codes, folded bias, fixed-point requantizer); "
-            f"'direct reference' subtracts the zero point before each product and rounds the requantization as an exact rational.\n\n"
+            f"'direct reference' subtracts the zero point before each product and rounds the requantization as an exact rational: with the same integer multiplier and shift as the compiled form, round half to even of (multiplier x accumulator) / 2^shift (so the equality in the table tests the folding of the zero points into the bias and the integer arithmetic, not the approximation of M by a 15-bit multiplier). 'Ideal requantizer': the same with the real factor M in place of the multiplier and the shift, rounded half to even.\n\n"
             + _table(["quantity", "value"], rows, "lr"))
 
 
@@ -573,7 +573,7 @@ def clipping_curve():
 def clipping():
     rows = [[f"{100 * t:.2f}%", f"{100 * c:.2f}%", f"{med:.4f}", f"{p99:.4f}", f"{sq:.2f}"] for t, c, med, p99, sq in clipping_curve()]
     return ("A calibration range that ignores the tails of the recorded values. Inputs are 'spiky': for each, six normal() draws then one uniform(), "
-            "and when the uniform is below 0.02 all six values are multiplied by 6 (rounded to 3 decimals). The calibration set is 512 such inputs, "
+            "and when the uniform is below 0.02 all six values are multiplied by 6; each value is then rounded once to 3 decimals, x_i = round(k z_i, 3) with k = 6 or 1 (it is the product that is rounded, not z_i beforehand). The calibration set is 512 such inputs, "
             f"{_seed_line('npu.spiky_calibration')}; the test set 1000, {_seed_line('npu.spiky_test')}. Each activation range is [percentile(v, tail), percentile(v, 1 - tail)] "
             "of the values recorded for the tensor (the percentile of the book's pseudocode page; tail 0 is the minimum and maximum). "
             "'relative error' of an input is the norm of (decoded - float) over the norm of the float output; 'median' and '99th percentile' are over the 1000 test inputs; "
@@ -726,7 +726,7 @@ def tiling():
         rows.append([f"{ih} x {iw} x {c} -> {oc}, k{k} s{s}", f"{atoms:,}", "yes" if atoms <= INPUT_ATOMS else "no", len(bs),
                      f"{read_rows / ih:.3f}", f"{wbytes:,}"])
     return ("Height tiling of eight convolutions against an input buffer of 6144 atoms of 16 bytes (the capacity stated by the source of `crates/rknpu`, "
-            "98,304 bytes). A layer is written h x w x c -> oc, kernel k, stride s; padding is 1 for 3 x 3 kernels except the stem, whose padding is [0, 0, 1, 1] (top, left, bottom, right). "
+            "98,304 bytes). A layer is written h x w x c -> oc, kernel k, stride s; padding is 1 for 3 x 3 kernels except the stem, and 0 for the 1 x 1 kernels, whose padding is [0, 0, 1, 1] (top, left, bottom, right). "
             "'atoms' is h w ceil(c / 16); 'rows read' is the input rows summed over the bands divided by h (1.000 = no row is read twice); "
             "'weight bytes' is oc ceil(c / 16) 16 k^2.\n\n"
             + _table(["layer", "input atoms", "fits", "bands", "rows read", "weight bytes"], rows))

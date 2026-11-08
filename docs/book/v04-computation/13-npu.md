@@ -10,7 +10,7 @@ A small camera board has to find objects in every frame. Its general-purpose pro
 Everything the earlier chapters did one kernel at a time (Chapters 5 to 9) must now be settled before the first image arrives. This chapter takes the smallest network that shows every step and carries it from a float model to a list of command words. The network has two layers: a linear layer of 6 inputs and 4 outputs, a rectifier, and a linear layer of 4 inputs and 3 outputs. Its weights come from the book's generator:
 
 <!-- worked: npu.network_weights -->
-The weights of the network, seed 15132813171768601218 (seed_of 'npu.network'). Draw order: normal() for W1[0][0], W1[0][1], ... W1[3][5] (row-major, 24 draws), then b1[0..3], then W2[0][0] ... W2[2][3] (12 draws), then b2[0..2]; weights are round(0.6 z, 2), biases round(0.2 z, 2). The printed values are the inputs of everything below.
+The weights of the network, seed 15132813171768601218 (seed_of 'npu.network', defined on the pseudocode page). Draw order: normal() for W1[0][0], W1[0][1], ... W1[3][5] (row-major, 24 draws), then b1[0..3], then W2[0][0] ... W2[2][3] (12 draws), then b2[0..2]; weights are round(0.6 z, 2), biases round(0.2 z, 2). The printed values are the inputs of everything below.
 
 Layer 1, W1 of shape [4, 6] and b1 of shape [4]:
 
@@ -33,7 +33,7 @@ Layer 2, W2 of shape [3, 4] and b2 of shape [3]:
 Run one input through it in floating point, as Volume III taught. These are the numbers the integer program at the end of the chapter must come close to:
 
 <!-- worked: npu.float_forward -->
-One input, x_i = round(normal(), 3) for i = 0 .. 5 from the generator, seed 6064223036259098784 (seed_of 'npu.example'). The float forward pass of the network above (binary64, dot products summed from index 0, bias added last).
+One input, x_i = round(normal(), 3) for i = 0 .. 5 from the generator, seed 6064223036259098784 (seed_of 'npu.example', defined on the pseudocode page). The float forward pass of the network above (binary64, dot products summed from index 0, bias added last).
 
 | step | value |
 |---|---|
@@ -168,7 +168,7 @@ Chapter 12 quantized the weights and left the activations in floating point, bec
 The inputs used to measure the ranges are the **calibration set**: a small sample of inputs, representative of what the device will see, run through the float graph with every tensor recorded. Take 32 inputs of the kind used throughout this chapter and record the four tensors of the exported graph for each:
 
 <!-- worked: npu.calibration_ranges -->
-A calibration set of 32 inputs, each x_i = round(normal(), 3) for i = 0 .. 5, drawn in order from the generator, seed 12490842275477104722 (seed_of 'npu.calibration'). Each float tensor is recorded for every input; 'values' counts all numbers recorded for the tensor.
+A calibration set of 32 inputs, each x_i = round(normal(), 3) for i = 0 .. 5, drawn in order from the generator, seed 12490842275477104722 (seed_of 'npu.calibration', defined on the pseudocode page). Each float tensor is recorded for every input; 'values' counts all numbers recorded for the tensor.
 
 | tensor | shape | values | min | max |
 |---|---|---:|---:|---:|
@@ -343,7 +343,7 @@ The two accumulator rows agree: the raw-code form with the folded bias and the f
 One input proves little. The integer program must be right on every input, and "right" has two meanings that are best kept apart. The first is that the compiled integer program computes what the *specification* says, bit for bit. The specification is the direct form: subtract the zero point before the products, and round the requantization as an exact rational. The compiled form folds the bias and uses a shift. They must agree on every output code, with no tolerance, because both are exact integer arithmetic. The second is that the integer network is close to the *float* network, which is a statement about error and has a tolerance. We test both on 256 test inputs:
 
 <!-- worked: npu.exactness -->
-The network quantized from the 32-input calibration set run on 256 test inputs, x_i = round(normal(), 3) drawn in order, seed 4800775136902161489 (seed_of 'npu.test'). 'Compiled form' is the integer program of the chapter (raw codes, folded bias, fixed-point requantizer); 'direct reference' subtracts the zero point before each product and rounds the requantization as an exact rational.
+The network quantized from the 32-input calibration set run on 256 test inputs, x_i = round(normal(), 3) drawn in order, seed 4800775136902161489 (seed_of 'npu.test', defined on the pseudocode page). 'Compiled form' is the integer program of the chapter (raw codes, folded bias, fixed-point requantizer); 'direct reference' subtracts the zero point before each product and rounds the requantization as an exact rational: with the same integer multiplier and shift as the compiled form, round half to even of (multiplier x accumulator) / 2^shift (so the equality in the table tests the folding of the zero points into the bias and the integer arithmetic, not the approximation of M by a 15-bit multiplier). 'Ideal requantizer': the same with the real factor M in place of the multiplier and the shift, rounded half to even.
 
 | quantity | value |
 |---|---:|
@@ -361,7 +361,7 @@ The network quantized from the 32-input calibration set run on 256 test inputs, 
 | values clamped when quantized (inputs, a1, y) | 0.75% |
 <!-- /worked -->
 
-The compiled form equals the direct reference on all 256 inputs, which verifies the folding of the bias and the rounded shift. None of the 768 output codes differs from an ideal requantizer that multiplies by the real $M$; with other numbers a code can differ by one unit, and the requirement is only that this be rare and never larger. The accumulators stay below 34,000 in magnitude, more than 60,000 times below the 32-bit limit.
+The compiled form equals the direct reference on all 256 inputs, which verifies the folding of the zero points into the bias and the integer arithmetic (both forms use the same 15-bit multiplier and shift; the comparison with the ideal requantizer that multiplies by the real $M$ is the next sentence). None of the 768 output codes differs from an ideal requantizer that multiplies by the real $M$; with other numbers a code can differ by one unit, and the requirement is only that this be rare and never larger. The accumulators stay below 34,000 in magnitude, more than 60,000 times below the 32-bit limit.
 
 The SQNR of 20.65 dB is the answer to "how close to float", and it is the measure of Chapter 12 applied to the whole network's output. Look at where the error comes from. The 235 inputs for which no value was clamped have a largest error of 0.0457, about 1.2 steps of $y$ (a step is $\Delta_y = 0.0371$; half a step, the rounding bound of one output, is 0.0186; the hidden activations' own rounding adds to it). The other 21 inputs, in which at least one of the 0.75% of quantized values was clamped, produce the largest error of all, 1.87. A test input larger than anything in the calibration set sent a hidden activation beyond the calibrated range of $a$, the code 127 could not represent it, and the error passed through the second layer. This is the error that a calibration set causes, and it is the subject of the next section.
 
@@ -372,7 +372,7 @@ A calibration range is a prediction about the future: the device will see values
 Two tests show the effect. First, the size of the calibration set: the first $n$ inputs of one stream, for $n$ from 1 to 128. Second, whether it is representative: a stream whose inputs are a quarter of the size of the deployed ones (a camera at night used to calibrate a daylight deployment).
 
 <!-- worked: npu.calibration_size -->
-Output SQNR (dB, against the float network) on the 256 test inputs of the previous block, as a function of the size of the calibration set. 'representative' sets are the first n inputs of the calibration stream (128 inputs, seed 12490842275477104722 (seed_of 'npu.calibration')); 'narrow' sets are the first n inputs of a stream of x_i = round(0.25 normal(), 3), seed 11496424872099761511 (seed_of 'npu.calibration_narrow') (an input a quarter of the size of the deployed ones). 'clamped' is the share of the quantized values (inputs, hidden activations, outputs) that fell outside the calibrated range and were clamped.
+Output SQNR (dB, against the float network) on the 256 test inputs of the previous block, as a function of the size of the calibration set. 'representative' sets are the first n inputs of the calibration stream (128 inputs, seed 12490842275477104722 (seed_of 'npu.calibration', defined on the pseudocode page)); 'narrow' sets are the first n inputs of a stream of x_i = round(0.25 normal(), 3), seed 11496424872099761511 (seed_of 'npu.calibration_narrow', defined on the pseudocode page) (an input a quarter of the size of the deployed ones). 'clamped' is the share of the quantized values (inputs, hidden activations, outputs) that fell outside the calibrated range and were clamped.
 
 | calibration inputs | SQNR representative | clamped | SQNR narrow | clamped |
 |---|---:|---:|---:|---:|
@@ -397,7 +397,7 @@ The second pair of columns is the failure to be representative. The calibration 
 If a few extreme values set the range, they cost every ordinary value resolution (the argument of Chapter 12 about outliers, now on activations). A calibration that ignores the extreme tails sets a narrower range, with finer steps for the bulk, and clamps the rare large value. Whether that pays depends on whom the error is measured for. The test below uses inputs in which 2 in 100 are six times larger than the rest (a bright flash in a dark scene), and it measures the error per input, as a fraction of the size of that input's output, so that the typical input and the rare large input are seen separately.
 
 <!-- worked: npu.clipping -->
-A calibration range that ignores the tails of the recorded values. Inputs are 'spiky': for each, six normal() draws then one uniform(), and when the uniform is below 0.02 all six values are multiplied by 6 (rounded to 3 decimals). The calibration set is 512 such inputs, seed 11795650988708937134 (seed_of 'npu.spiky_calibration'); the test set 1000, seed 6408658945436704731 (seed_of 'npu.spiky_test'). Each activation range is [percentile(v, tail), percentile(v, 1 - tail)] of the values recorded for the tensor (the percentile of the book's pseudocode page; tail 0 is the minimum and maximum). 'relative error' of an input is the norm of (decoded - float) over the norm of the float output; 'median' and '99th percentile' are over the 1000 test inputs; SQNR is over all their outputs.
+A calibration range that ignores the tails of the recorded values. Inputs are 'spiky': for each, six normal() draws then one uniform(), and when the uniform is below 0.02 all six values are multiplied by 6; each value is then rounded once to 3 decimals, x_i = round(k z_i, 3) with k = 6 or 1 (it is the product that is rounded, not z_i beforehand). The calibration set is 512 such inputs, seed 11795650988708937134 (seed_of 'npu.spiky_calibration', defined on the pseudocode page); the test set 1000, seed 6408658945436704731 (seed_of 'npu.spiky_test', defined on the pseudocode page). Each activation range is [percentile(v, tail), percentile(v, 1 - tail)] of the values recorded for the tensor (the percentile of the book's pseudocode page; tail 0 is the minimum and maximum). 'relative error' of an input is the norm of (decoded - float) over the norm of the float output; 'median' and '99th percentile' are over the 1000 test inputs; SQNR is over all their outputs.
 
 | tail clipped per end | values clamped | median relative error | 99th percentile of it | SQNR dB |
 |---|---:|---:|---:|---:|
@@ -516,7 +516,7 @@ function bands(ih: int, iw: int, c: int, k: int, stride: int, pad: array<int>[4]
 Applied to eight layer shapes (the first is a small smoke test; the others are shapes of a 320 x 320 detector):
 
 <!-- worked: npu.tiling -->
-Height tiling of eight convolutions against an input buffer of 6144 atoms of 16 bytes (the capacity stated by the source of `crates/rknpu`, 98,304 bytes). A layer is written h x w x c -> oc, kernel k, stride s; padding is 1 for 3 x 3 kernels except the stem, whose padding is [0, 0, 1, 1] (top, left, bottom, right). 'atoms' is h w ceil(c / 16); 'rows read' is the input rows summed over the bands divided by h (1.000 = no row is read twice); 'weight bytes' is oc ceil(c / 16) 16 k^2.
+Height tiling of eight convolutions against an input buffer of 6144 atoms of 16 bytes (the capacity stated by the source of `crates/rknpu`, 98,304 bytes). A layer is written h x w x c -> oc, kernel k, stride s; padding is 1 for 3 x 3 kernels except the stem, and 0 for the 1 x 1 kernels, whose padding is [0, 0, 1, 1] (top, left, bottom, right). 'atoms' is h w ceil(c / 16); 'rows read' is the input rows summed over the bands divided by h (1.000 = no row is read twice); 'weight bytes' is oc ceil(c / 16) 16 k^2.
 
 | layer | input atoms | fits | bands | rows read | weight bytes |
 |---|---:|---:|---:|---:|---:|
@@ -684,7 +684,7 @@ The chapter has taken one device from a graph to a program. The next chapter, th
 5. **[Calculate]** Count, for the four-op chain of the fusion table, the bytes written to memory if only the rectifier is fused into the bias add (a three-op chain) and compare with the table's rows.
 6. **[Calculate]** Four tensors $t_0 \ldots t_3$ have sizes 4, 2, 3 and 2 (in units of 64 bytes) and lifetimes $[1,1]$, $[1,3]$, $[3,4]$ and $[2,4]$. Find the floor (the largest total alive at one op), run `plan_memory` by hand and give the size of the plan. Then find an arrangement that reaches the floor, and say which choice of the greedy rule prevented it.
 7. **[Implement]** Implement `affine_params`, `quantize_weights`, `fixed_point`, `round_shift` and the integer layer, and reproduce `npu.network_weights`, `npu.float_forward`, `npu.calibration_ranges`, `npu.activation_params`, `npu.weight_codes`, `npu.fixed_point_table` and `npu.one_input`. Then implement the direct reference and reproduce `npu.exactness`: 256 of 256 inputs equal, with no tolerance.
-8. **[Implement]** Implement `calibrate` with a `tail`, and reproduce `npu.calibration_size` and `npu.clipping`. Report the tail at which the median relative error is smallest and whether it moves with the seed of the calibration stream (derive three other seeds by the book's `derive_seed`).
+8. **[Implement]** Implement `calibrate` with a `tail`, and reproduce `npu.calibration_size` and `npu.clipping`. Report the tail at which the median relative error is smallest and whether it moves with the seed of the calibration stream (use three other seeds of your choice, for example `derive_seed(s, "a")`, `derive_seed(s, "b")` and `derive_seed(s, "c")` for a run seed `s` you pick, not `seed_of`, which names the book's printed examples).
 9. **[Implement]** Implement the two-stage requantizer, and reproduce `npu.two_stage`. Then reduce the Q14 fraction to 8 bits and report how many of the 768 output codes change.
 10. **[Implement]** Implement `bands` and `plan_memory` and reproduce `npu.tiling`, `npu.tiling_detail` and `npu.memory_plan`. Add the rule that a band is limited to 8 input rows and report the new band counts of the first four layers.
 11. **[Investigate]** The weights of the chapter's network are symmetric per output channel. Replace them by one scale for each whole layer, and measure the SQNR of `npu.exactness` again. Then multiply one weight of $W_1[2]$ by 10 and compare per-channel and per-layer scales. Which result does the argument of Chapter 12 predict?

@@ -52,7 +52,7 @@ def _n(v):
 
 
 def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (the seed of the name `{name}`)."
+    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`, defined on the pseudocode page)."
 
 
 def _f32(x):
@@ -275,8 +275,17 @@ def model_vs_device():
         "36,000 / 664 = 54.22 FLOP per byte. Three candidates, C[m, n] = A[m, k] B[k, n] in fp32. 'Predicted' is "
         "the roofline model of Chapter 3: the cost of the candidate is max(its bytes, 2 m n k / ridge), and the "
         "fraction is the cost of the problem's own floor (every operand once) divided by it. 'Device' is the model "
-        "device of this chapter (formulas below): the minimum of 8 seeded runs, as a fraction of the same floor. "
-        "'Lost' is 1 minus (device fraction of the model's pick over device fraction of the device's pick).\n\n"
+        "device of this chapter: the minimum of 8 seeded runs, as a fraction of the same floor. "
+        "'Lost' is 1 minus (device fraction of the model's pick over device fraction of the device's pick). "
+        "The model device (its formulas are derived in the section 'What the model sees and what it does not'; the table needs only these parameters): "
+        "10,240 lanes, memory latency 200 ns, so n_need = 664 x 200 / 4 = 33,200 loads in flight keep the memory busy, one dispatch alone costs "
+        "L = 5 microseconds x 664 (GB/s) = 3,320,000 bytes. Candidate (tile T_m x T_n, invocations per workgroup, register block r x s, loads in flight per invocation, issue efficiency): "
+        "naive (1 x 1, 64, 1 x 1, 2, 1/5), tiled (32 x 32, 64, 4 x 4, 8, 16/(16 + 4 + 4 + 2) = 0.6154), reg (128 x 128, 256, 8 x 8, 8, 64/(64 + 8 + 8 + 2) = 0.7805). "
+        "Bytes requested N_byte = 4 (m k t_n + k n t_m + m n) with t_m = ceil(m / T_m), t_n = ceil(n / T_n) (for naive T_m = T_n = 1); "
+        "executed FLOPs 2 (t_m T_m)(t_n T_n) k for the tiled kernels and 2 m n k for naive; invocations t_m t_n n_wg for the tiled kernels and m n rounded up to a multiple of 64 for naive; "
+        "o_cmp = min(1, invocations / 10,240), o_mem = min(1, invocations x loads in flight / 33,200); "
+        "device cost B_dev = L + max(executed FLOPs / (ridge x e x o_cmp), N_byte / o_mem) with ridge 54.2169 = 36,000 / 664; floor B_fl = max(4 (m k + k n + m n), 2 m n k / ridge). "
+        "A run costs B_dev x (1 + 0.04 u0) x (1 - 0.25 ln(1 - u2) if u1 < 0.2, else 1), three uniforms u0, u1, u2 per run in that order.\n\n"
         + _ranking_text(rows) + "\n\n"
         + _table(["m x n x k", "model's pick", "its predicted fraction", "device's pick", "its device fraction",
                   "device fraction of the model's pick", "lost"], body, "lrrrrrr")
@@ -394,7 +403,7 @@ def capability_filter():
         "The device side is the record of Chapter 9 (queried, an unknown capability is absent): the CPU unit "
         "declares no workgroup barriers (its compiler runs a workgroup as loops and cannot execute a barrier "
         "kernel correctly, Chapter 9) and no matrix unit; the GPU unit declares barriers, 16 KiB of workgroup "
-        "memory, workgroups of up to 256 and a (f16, f16, f32) matrix unit.\n\n"
+        "memory, workgroups of up to 256 and a (f16, f16, f32) matrix unit (the tensor core of Chapter 6, which multiplies 16 x 16 x 16 fragments with f32 accumulation; its kernel also uses subgroups, the groups of lanes that execute together, Chapter 4).\n\n"
         + _table(["candidate", "needs", "valid for", "CPU unit", "GPU unit"], rows, "lllll")
         + "\n\nThe filter is a correctness gate, not a preference. What the roofline model alone would pick on the CPU "
         "unit (ridge 10.67), for m = 512, n = 2560, k = 2048, if the filter did not exist:\n\n"
@@ -831,7 +840,14 @@ def bucket_tradeoff():
         "preference order). Measurement draws: `kernel_selection.buckets.<scheme>`, candidates in the model's "
         "preference order, 20 launches of 3 uniforms each. Costs are in billions (10^9) of equivalent bytes on the model GPU unit. 'Excess' is the work of "
         f"serving the {WORKLOAD_REQUESTS} requests with the buckets' choices minus the work with the best candidate for each "
-        f"exact m ({r['ideal'] / 1e9:.2f}).\n\n"
+        f"exact m ({r['ideal'] / 1e9:.2f}); the work of serving one request is the noise-free device cost B_dev of the chosen candidate at the request's own m, and the best candidate "
+        "for an m is the one of least noise-free device cost (naive, tiled or reg; a measurement may pick another, and that is what the excess counts). 'Measurement work' is the sum of the costs of the launches of the races, "
+        "each launch charged its noisy cost, a capped launch its cap. "
+        "Measurement seeds, one generator per scheme and one race per bucket in the order of first request: "
+        + "; ".join(f"{label}: {bookrng.seed_of(f'kernel_selection.buckets.{label}'):#018x}" for label, _ in SCHEMES)
+        + ". The race is the one of the text and of `kernel_selection.pipeline_trace`: the first candidate of the model's preference order (by predicted cost at the bucket's representative) is the incumbent and gets 20 launches in 5 batches of 4; "
+        "each other candidate gets up to 20 launches, each capped at twice the incumbent's mean of batch minima, and displaces the best so far when its mean of batch minima is lower by more than 2 sqrt(SE_best^2 + SE_c^2) (SE = sd / sqrt(5), sd with divisor 4); "
+        "a candidate whose first batch of 4 is entirely capped is dropped.\n\n"
         + _table(["scheme", "buckets measured", "measurement work", "excess over the best, %", "excess work"], rows, "lrrrr")
         + f"\n\nAlways using reg (the model's pick) costs an excess of {static_excess / 1e9:.2f}, "
         f"{100 * static_excess / r['ideal']:.2f} percent."
@@ -933,7 +949,13 @@ def pipeline_trace():
         "checks each candidate except the reference on the bucket's two extreme shapes, 256 and 129, with the sampled "
         "positions of `kernel_selection.gate_table` (n = 1024 here), and charges the device one launch at each; the "
         "measurement is the race of the text (20 launches for the incumbent, challengers capped at twice the best "
-        "estimate and dropped when their first batch of 4 is all abandoned). A request with one candidate left "
+        "estimate and dropped when their first batch of 4 is all abandoned). A launch is abandoned when its noisy cost reaches the cap of 2 x (the mean of batch minima of the best candidate so far, fixed when the challenger starts) "
+        "and is charged the cap; every other launch is charged its noisy cost. The incumbent's 20 launches are 5 batches of 4 uncapped launches; a challenger that is not dropped runs all 5 batches. "
+        "A candidate displaces the best when its mean of batch minima is lower by more than 2 sqrt(SE_best^2 + SE_c^2), SE = sd / sqrt(5) with sd taken with divisor 4. "
+        "A gate launch is not noisy: it is charged the candidate's noise-free device cost at the gated shape and draws nothing from the generator for its cost. "
+        "A gate shape's inputs are drawn as in `kernel_selection.gate_table`, afresh for each candidate and each shape; the gate stops at the first shape a candidate fails (the second is then neither drawn nor run, "
+        "but both launches are counted and charged), reg and tiled are checked with the left-fold arithmetic of reg (k_rd = k = 2048), reg-notail with reg's arithmetic and the guard removed. "
+        "The work of a miss is the gate launches plus the race. A request with one candidate left "
         "after the filter is not gated or measured. The key is `device|driver|digest of reg's source|bucket,n,k`. "
         + _seed_line("kernel_selection.pipeline") + " Draw order: for each miss, the gate's entries for each "
         "candidate that passed the filter and is not the reference (shape 256 then 129; the sampled rows of A, then the "

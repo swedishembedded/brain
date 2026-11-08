@@ -115,7 +115,9 @@ digits printed (a difference below half a unit in the last place printed),
 unless the text states a tolerance. A worked example that uses random numbers
 prints its seed and the order of its draws; the generator that produces them
 is built in Chapter 17, and the earlier chapters print the drawn values when
-they are few.
+they are few. The seed printed beside an example's name is `seed_of(name)` of the
+pseudocode page: the first 8 bytes of the SHA-256 digest of the name, read
+big-endian.
 
 References to brain look like `crates/gradcheck` (a directory in brain's
 source tree), commit `afbbae41d` (a change in its history, identified by the

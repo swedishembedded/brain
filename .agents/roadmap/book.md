@@ -49,8 +49,12 @@ reproduced its worked examples from the text alone in another language.
       digits than survive a 1e-12 nudge). All were fixed in the following
       commit with a shared five-run stable-digits rule and exact captions;
       a third pass has not been run.
-- [ ] Volume IV, Computation and Hardware: all 13 chapters and the project
-      written; the independent reader pass has not been run.
+- [x] Volume IV, Computation and Hardware: all 13 chapters and the project
+      written. Verified by an independent C re-implementation from the text
+      alone (`scratchpad/reader/v04`): 1124 of 1170 items passed, 32 after a
+      guess and 14 failed (unstated literals, seeds and orders, stale prose
+      numbers, and one simulator bug in the ragged tiled-matmul count). All
+      were fixed in the following commits; a recheck has not been run.
 
 ## Open
 

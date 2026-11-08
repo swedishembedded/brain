@@ -59,7 +59,7 @@ def _g(v, d=4):
 
 
 def _seed_line(name):
-    return f"seed {bookrng.seed_of(name)} (seed_of '{name}')"
+    return f"seed {bookrng.seed_of(name)} (seed_of '{name}', defined on the pseudocode page)"
 
 
 # ---------------------------------------------------------------- number helpers
@@ -399,9 +399,10 @@ def factored_dot():
             ("dequantize first: sum x_j Delta (q_j - q0)", f"{direct:.8f}"),
             ("factored: Delta (sum x_j q_j - q0 sum x_j)", f"{fact:.8f}"),
             ("sum x_j q_j", f"{sxq:.6f}"), ("sum x_j (shared by every row of W)", f"{sx:.6f}"),
-            ("difference of the two quantized forms", f"{abs(direct - fact):.2e}")]
+            ("difference of the two quantized forms", "below 1e-15" if abs(direct - fact) < 1e-15 else f"{abs(direct - fact):.2e}")]
     head = (f"One group of 32 weights w_j = round(0.05 z, 4) then 32 activations x_j = round(normal(), 4), all normal() in draw order from the generator, {_seed_line(name)}. "
-            f"4-bit affine codes: Delta = {delta:.6f}, q0 = {q0}.\n\n")
+            f"4-bit affine codes: Delta = {delta:.6f}, q0 = {q0}. Every sum is in binary64 (double precision), added from j = 0 to 31 in order; each form is then rounded to the digits shown. "
+            "The difference of the two quantized forms is a few units of the last place of a double (an implementation that adds in another order, or fuses a multiply-add, gets 0 or about 2.2e-16): the table prints only that it is below 1e-15.\n\n")
     return head + _table(["form", "value"], rows, align="lr")
 
 
@@ -411,6 +412,7 @@ def block_formats():
         ("fp16", 1, [("value", 2)]),
         ("Q8_0", 32, [("d (f16)", 2), ("32 int8 codes", 32)]),
         ("Q4_0", 32, [("d (f16)", 2), ("32 nibbles", 16)]),
+        ("Q5_0", 32, [("d (f16)", 2), ("32 fifth bits", 4), ("32 low nibbles", 16)]),
         ("Q4_K", 256, [("d (f16)", 2), ("dmin (f16)", 2), ("8 sc + 8 m, 6 bits each", 12), ("256 nibbles", 128)]),
         ("Q5_K", 256, [("d (f16)", 2), ("dmin (f16)", 2), ("8 sc + 8 m, 6 bits each", 12), ("256 fifth bits", 32), ("256 low nibbles", 128)]),
         ("Q6_K", 256, [("256 low nibbles", 128), ("256 high 2-bit pairs", 64), ("16 sc (int8)", 16), ("d (f16)", 2)]),
@@ -599,7 +601,7 @@ def format_comparison():
     w, _ = heavy_weights(name)
     rows = [(l, f"{b:.4f}", f"{s:.2f}", f"{m:.3e}", f"{x:.5f}") for l, b, s, m, x in _fmt_points(w)]
     head = (f"The {HEAVY_N} heavy-tailed weights of the outlier example ({_seed_line(name)}, outliers included; max |w| = {max(abs(x) for x in w):.4f}) "
-            "stored in each format. 'Q4_0': d = (signed element of largest magnitude) / -8 in f16, w' = d (code - 8). 'recipe': eight sub-blocks of 32 with a 6-bit step and 6-bit "
+            "stored in each format. 'Q4_0': per group of 32, d = (signed element of largest magnitude) / -8 rounded to f16 (nearest, ties to even), code = clamp(round_even(w / d) + 8, 0, 15) (round_even: nearest, ties to even), w' = d (code - 8); a group of zeros decodes to zeros. 'recipe': eight sub-blocks of 32 with a 6-bit step and 6-bit "
             "floor each, an f16 d and dmin per 256 weights, as derived in the chapter (n-bit codes, 128 bits of scales per 256 weights). "
             "Bits per weight count every stored scale.\n\n")
     return head + _table(["format", "bits per weight", "SQNR dB", "MSE", "largest |error|"], rows)
@@ -642,7 +644,7 @@ def histogram_summary():
     return (f"4096 weights 0.02 normal() in draw order from the generator, {_seed_line(name)}; max |w| = {max(abs(x) for x in w):.5f}. "
             f"Symmetric levels: Delta = max|w| / 7 = {delta:.6f}, 15 levels from {sym[0]:+.4f} to {sym[-1]:+.4f}. "
             f"Affine levels: Delta = {da:.6f}, q0 = {q0}, 16 levels from {aff[0]:+.4f} to {aff[-1]:+.4f}. "
-            f"Weights within one step of zero: {100 * sum(1 for x in w if abs(x) < delta / 2) / len(w):.1f}% decode to 0 under the symmetric levels.")
+            f"Weights within half a step of zero: {100 * sum(1 for x in w if abs(x) < delta / 2) / len(w):.1f}% decode to 0 under the symmetric levels.")
 
 
 # ---------------------------------------------------------------- the effect on a layer's output
@@ -672,7 +674,7 @@ def layer_output():
     head = (f"A linear layer y = W x with W of shape [{n_out}, {k}], W_ij = 0.05 normal() drawn in row-major order, then {n_in} inputs x with entries normal() "
             f"drawn in order, one input after another, from the generator, {_seed_line(name)}. W is stored in n-bit symmetric codes with one f16 scale per 32 weights along each row "
             "(bits per weight = n + 0.5). 'weight SQNR' is over the weights, 'output SQNR' over all "
-            f"{n_out * n_in} output values; 'relative output error' is the RMS error over the RMS output; cosine between the exact and the quantized outputs.\n\n")
+            f"{n_out * n_in} output values; 'relative output error' is the RMS error over the RMS output; cosine between the exact and the quantized outputs, both taken over the flattened vector of all {n_out * n_in} outputs (input after input, output unit within it); weight and output SQNR use the mean of the squared exact values as the signal power.\n\n")
     return head + _table(["n bits", "bits per weight", "weight SQNR dB", "output SQNR dB", "difference", "cosine", "relative output error"], rows)
 
 
@@ -761,7 +763,7 @@ def _error(t, nb, kap):
 def rel_table():
     kap = _rels()
     rows = [(nb, f"{nb + SCALE_BITS / GROUP:.1f}", f"{kap[nb]:.4e}", f"{10 * math.log10(1 / kap[nb]):.2f}") for nb in TIER_BITS]
-    head = ("The error of one weight at each tier: n-bit symmetric codes, f16 scale per 32 (bits per weight n + 0.5), measured as MSE over variance on 65536 standard normals "
+    head = ("The error of one weight at each tier: n-bit symmetric codes, f16 scale per 32 (bits per weight n + 0.5), measured as MSE over variance, the variance being the mean of w^2 (the weights have mean about 0, and it is not centred), on 65536 standard normals "
             f"normal() drawn in order from the generator, {_seed_line('quantization.rel')}. This relative MSE is the rel_n of the search below.\n\n")
     return head + _table(["n bits", "bits per weight", "rel_n", "SQNR dB"], rows)
 
@@ -772,6 +774,7 @@ def search_inputs():
     head = ("Twelve tensors, i = 0 .. 11, each drawn in order from the generator, "
             f"{_seed_line('quantization.tensors')}: size N_i = 4096 (1 + integer(4)), sigma_i = 0.02 * 2^(0.5 normal()), sensitivity sens_i = 10^(2 uniform()); "
             "the draws of one tensor are made in the order integer, normal, uniform, and sigma_i and sens_i are rounded to 3 significant digits before use (the table prints them rounded). "
+            "normal() is the book's Box-Muller with the held partner: tensor 0's normal() draws two uniforms and holds the sine partner, tensor 1's normal() returns the held value without drawing, tensor 2's draws two uniforms again, and so on (the held value carries across tensors). "
             "The estimated loss increase of tensor i stored at n bits is E_in = (1/2) sens_i N_i sigma_i^2 rel_n, its bytes N_i (n + 0.5) / 8.\n\n")
     return head + _table(["i", "N_i", "sigma_i", "sensitivity sens_i"], rows)
 
@@ -852,8 +855,23 @@ def greedy_vs_exhaustive():
             "Budget = bits per weight (mean over the six, scales included) x total weights / 8 bytes. 'plan' lists the bits of tensors 0 .. 5. "
             "Greedy: start every tensor at 2 bits, then repeatedly take the upgrade that removes the most estimated error per extra byte among those that still fit. "
             "Exhaustive: the plan of least total estimated error among all that fit. 'ratio' = greedy error / exhaustive error.\n\n")
+    # a finer sweep of the same instance: 0.05 bit steps from 2.50 to 8.50 bits per weight (121 budgets)
+    fine = []
+    for i in range(50, 171):
+        bpw = i / 20
+        budget = bpw * total_w / 8
+        err = greedy(ts, tiers, budget, kap)[2]
+        err_x = exhaustive(ts, tiers, budget, kap)[0]
+        fine.append((bpw, err / err_x))
+    worse = [(b, r) for b, r in fine if r > 1 + 1e-9]
+    worst_b, worst_r = max(worse, key=lambda t: (t[1], -t[0]))
+    top = [b for b, r in worse if abs(r - worst_r) < 1e-9]
+    tail = (f"\n\nThe nine budgets are a sample. The same instance on a finer sweep, every budget from 2.50 to 8.50 bits per weight in steps of 0.05 ({len(fine)} budgets): "
+            f"greedy equals the exhaustive optimum at {len(fine) - len(worse)} of them and is worse at {len(worse)}, by at most a factor {worst_r:.4f} "
+            f"(budgets {top[0]:.2f} to {top[-1]:.2f}); at 6.00 bits per weight the factor is "
+            f"{next(r for b, r in fine if abs(b - 6.0) < 1e-9):.4f}.")
     return head + _table(["budget bits/weight", "budget bytes", "greedy plan", "greedy bytes", "greedy error", "exhaustive plan", "exhaustive bytes", "exhaustive error", "ratio"], rows,
-                         align="rrlrrlrrr")
+                         align="rrlrrlrrr") + tail
 
 
 def greedy_plan():

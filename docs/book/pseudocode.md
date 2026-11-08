@@ -449,6 +449,9 @@ the language, and are defined where they are taught.
 
 - **Exact dot product.** `exact_dot(x, y)` of Volume IV, chapter 10 ("Reference-gated selection") returns the exact value of $\sum_i x_i y_i$ for two vectors of equal length whose entries are floating-point numbers, as a rational number or as a value rounded once to a format wider than the one under test. It is the reference that a candidate's rounded result is compared with, and it is never computed in the format being tested. Two vectors of different lengths are an error (`require`); two empty vectors give 0.
 
+- **Memory transactions and flattened views.** `transactions(log, wg)` of Volume IV, chapter 14 (milestone 2) counts the 32-byte memory transactions of one phase of a workgroup from the per-invocation access logs, by the rule of Volume IV, chapter 5 (subgroups of 32, the j-th access of each member is one instruction, one transaction per distinct 32-byte block, loads and stores apart); `flat(t)` of the same chapter (milestone 1) is the list of the elements of a tensor view in the row-major order of its shape.
+- **Selection helpers.** `digest`, `bucket_text`, `order_by_predicted_cost`, `gate_at` and `race` of Volume IV, chapter 10 are defined there, in pseudocode, before `select_kernel` uses them.
+
 ## Randomness
 
 Random numbers come from an explicit generator `rng` of type `Generator`,
@@ -466,6 +469,7 @@ Gaussian value (initially empty). The calls are:
 | `Generator(s)` | a new generator whose state is the `u64` `s` before its first draw (a seed `s` below $2^{64}$; there is no held Gaussian value yet) |
 | `rng.state` | the current `u64` state of the generator. `Generator(rng.state)` continues the stream exactly where `rng` stands, provided no Gaussian value is held (`uniform`, `integer` and `shuffle` never hold one; after an odd number of `normal` calls the held value is also state and must be saved with it). Volume III, Chapter 14 stores it in a checkpoint |
 | `derive_seed(run_seed, name)` | the seed of the stream called `name` under a run seed: `h = mix(run_seed)`, then `h = mix(h xor b)` for each byte `b` of the UTF-8 name in order, and `h` is the result in `0 .. 2^64 - 1`, where `mix` is the three scrambling lines of the SplitMix64 step without the state advance (Volume I, chapter 17, which gives the code and printed values). `Generator(derive_seed(s, "init"))` is the stream "init" of run seed `s` |
+| `seed_of(name)` | the seed of the worked example called `name` (a text such as `kernel_selection.ranking`): the first 8 bytes of the SHA-256 digest of the UTF-8 bytes of `name`, read as one big-endian `u64`. Every worked example that draws random numbers prints this seed beside its name; `Generator(seed_of(name))` is its generator. It is a rule for naming the book's own examples and is not `derive_seed`, which mixes a run seed with a stream name (Volume I, chapter 17) |
 
 Two runs with generators created from the same seed produce the same numbers.
 `os_entropy()` returns a `u64` taken from the operating system, the only

@@ -1,4 +1,4 @@
-<!-- source-sha256: ec21aeeedd7e14c83dd7a9b1cc82adb5c00b4956dbca8076a09e6c6d40c9f693 -->
+<!-- source-sha256: e056903ce14d462a13eddc98a76f9f7629b234e02dafb9d62b4ced70c6c0aa42 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 452" width="800" height="452"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="452" fill="#ffffff"/>
 <rect x="20" y="14" width="760" height="204" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Clock stopped when the call returns</text>

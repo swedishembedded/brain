@@ -65,7 +65,7 @@ def _n(v):
 
 
 def _seed_note(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (the seed of the name `{name}`)."
+    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`, defined on the pseudocode page)."
 
 
 def _yes(flag):
@@ -488,10 +488,12 @@ def cache_key():
             ("same key", _yes(_plain_key(pair_a) == _plain_key(pair_b)), _yes(_length_prefixed_key(pair_a) == _length_prefixed_key(pair_b)))]
     return (f"The key of one compiled kernel is the SHA-256 digest (first 12 hexadecimal digits shown) of its inputs, each written as an 8-byte little-endian length and then its UTF-8 bytes, in the "
             f"order: source text ({len(src.encode('utf-8'))} bytes, the CUDA text of `backends.three_paths`), entry name, device architecture, compiler version, flags, specialization macros, "
-            f"launch ABI. Base inputs: entry `brain_scale_shift`, `sm_61`, `nvrtc 12.9`, `--fmad=false`, no macros, `abi1`.\n\n"
+            f"launch ABI. Base inputs: entry `brain_scale_shift`, `sm_61`, `nvrtc 12.9`, `--fmad=false`, no macros (the field is present and empty: it is hashed as the length 0), `abi1`. "
+            f"Each row replaces one field: the comment row appends the line `// shift 1.5` and a newline to the source text; the entry row is `brain_other`; the macro row is `-DTILE=16`; the ABI row is `abi2`; the others are as named.\n\n"
             + _table(["inputs", "key", "same key as the base"], rows, "llr") + "\n\n"
             f"An ahead-of-time image is looked up by a key without the compiler version (no compiler is present where it is loaded; the builder's version is recorded beside the image): the fields "
-            f"source, entry, architecture, flags and ABI give the key {_length_prefixed_key(aot_fields)[:12]}.\n\n"
+            f"source, entry, architecture, flags and ABI, in this order (five fields, each length-prefixed as above), give the key {_length_prefixed_key(aot_fields)[:12]}. Their values: the same source text, "
+            f"`brain_scale_shift`, `sm_61`, the flag string `--gpu-architecture=sm_61 --fmad=false` (the architecture option is part of the flags of an AOT build) and `abi1`.\n\n"
             "Why each field is length-prefixed: without the prefix two different splits of the same characters hash alike.\n\n"
             + _table(["inputs", "digest without lengths", "digest with lengths"], coll, "lrr"))
 
@@ -849,8 +851,10 @@ def parity_matrix():
         ("exp(x), x in [-8, 8), 4096 values", cell(ref5, ref5), "not applicable", cell(ref5, fast5, scale5)),
     ]
     return (f"Three modelled arithmetic profiles on the same seeded inputs. {_seed_note('backends.parity_matrix')} Draws in order: 4096 x for y = a x + b (`2 uniform() - 1` rounded to float32; a = 1.7 and "
-            f"b = -0.3 rounded to float32); 4096 slot values; 4096 pa then 4096 pb for the dot products; 4096 x for exp (`16 uniform() - 8`, rounded to float32). "
+            f"b = -0.3 rounded to float32); 4096 slot values (`2 uniform() - 1` rounded to float32; output i is (s[4i] + s[4i+1]) + (s[4i+2] + s[4i+3]), each addition rounded); "
+            f"4096 pa then 4096 pb (the same distribution) for the dot products (output i uses pa[64i .. 64i+63] and pb[64i .. 64i+63], with the tree of `backends.dot_parity`: each product rounded, then adjacent pairs added); "
+            f"4096 x for exp (`16 uniform() - 8`, rounded to float32). The transpose draws nothing: its input is the [6, 10] matrix with entry 10 i + j in row i, column j. "
             "Profile P0 (the reference, and what a CPU loop nest and a translator that forbids contraction compute): every operation rounds to float32 in the order the kernel states, exp is the "
-            "double-precision library value rounded to float32. Profile P1 (a device that contracts a product followed by an add into a fused multiply-add where the kernel has one). Profile P2 (a device "
+            "double-precision library value rounded to float32. Profile P1 (a device that contracts a product followed by an add into a fused multiply-add where the kernel has one: for y = a x + b the fma(a, x, b); in the dot-product tree only the first level, where leaf j = fma(pa[2j+1], pb[2j+1], f32(pa[2j] pb[2j])) fuses the odd element's product into the add of the even product, and the remaining levels add as in P0). Profile P2 (a device "
             "whose exp goes through a base-2 instruction, as in `backends.exp_parity`). Each cell compares a profile with P0 on bit patterns; where values differ it also prints the largest difference in units of u S, with S = |a x| + |b| for y = a x + b, the sum of the absolute values of the 64 products for a dot product and |exp(x)| for exp.\n\n"
             + _table(["kernel", "P0 (reference)", "P1: contracts", "P2: fast exp"], rows, "llll"))
