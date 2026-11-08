@@ -16,6 +16,7 @@ mod staged_lsa;
 mod synthetic;
 mod branch;
 mod dflash;
+mod full_release;
 mod fused;
 mod taps;
 mod tiers;

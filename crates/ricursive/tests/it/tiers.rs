@@ -34,7 +34,7 @@ use crate::serve::{prefill_in_slices, serve_config, shared_weights, stream, tiny
 use crate::taps::scaled_error;
 
 /// `(label, logits row)` of a scripted run: a prefill row then one row per decode step.
-type Trace = Vec<Vec<f32>>;
+pub(crate) type Trace = Vec<Vec<f32>>;
 
 const PROMPT: usize = 10;
 const DECODES: usize = 14;
@@ -68,7 +68,7 @@ fn argmax(z: &[f32]) -> usize {
 }
 
 /// `(mean KL(reference || got), share of rows with the same top-1 token)` over the trace.
-fn quality(reference: &Trace, got: &Trace) -> (f64, f64) {
+pub(crate) fn quality(reference: &Trace, got: &Trace) -> (f64, f64) {
     assert_eq!(reference.len(), got.len());
     let mut kl = 0.0;
     let mut same = 0usize;

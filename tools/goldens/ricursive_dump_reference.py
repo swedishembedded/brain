@@ -45,6 +45,18 @@ boundary a Rust replay needs. Two modes, each writing its own directory with a
          4096 evenly strided entries (the full gradients are 10 GB). Writes
            <out>/real_grads/ricursive_real_grads.safetensors
 
+  full   the WHOLE released model (80 layers, 130 GB in bf16), run layer by layer: the embedding, then for each
+         layer the official `RicursiveDecoderLayer` is built, loaded from the sharded checkpoint directory, applied
+         to the residual stream and dropped, then the final norm and `lm_head`. Only one layer's weights (1.5 GB
+         in bf16) are ever resident beside the stream, so a single card or a CPU reproduces the official forward
+         without holding the model; the arithmetic is `RicursiveModel.forward`'s, layer for layer. Writes
+           <out>/full/ricursive_full.safetensors  `input_ids`, `logits` (the last `--logits-rows` rows),
+                                                  `hidden.<k>` (the stream entering layer k; the last `--tap-rows`
+                                                  rows) for the layers of `--taps`, and `final_hidden`
+  full-check  the streaming path against the whole-model path on a seeded tiny model written as a sharded
+         checkpoint: the streamed logits and taps equal `run()`'s, each tensor is read exactly once and one layer
+         is ever resident. Needs no checkpoint; this is the gate for `full` at tiny scale.
+
 Taps (all float32; token ids are cast exactly): `input_ids`, `hidden.0` (the
 scaled embeddings), `hidden.{k+1}` (decoder layer k's raw output),
 `attn_out.{k}` (layer k's `o_proj` output, before `post_attention_layernorm`),
@@ -55,6 +67,9 @@ is registered as a package. Run with `python -I`; nothing is read from the
 current directory.
 
 Usage:
+  python -I ricursive_dump_reference.py full --modeling-dir DIR --out DIR --checkpoint-dir RELEASE \\
+      --tokenizer tokenizer.json --prompt-file text.txt --max-tokens 4096 --device cuda:0 --dtype bfloat16
+  python -I ricursive_dump_reference.py full-check --modeling-dir DIR --out DIR
   python -I ricursive_dump_reference.py tiny --modeling-dir DIR --out DIR
   python -I ricursive_dump_reference.py real --modeling-dir DIR --out DIR \\
       --checkpoint layers-0-4.safetensors --config config.json \\
@@ -67,6 +82,7 @@ import importlib
 import json
 import os
 import secrets
+import struct
 import sys
 import types
 
@@ -449,6 +465,304 @@ def real(args, cfg_mod, mdl_mod):
     finish(out, manifest, identity, args, checkpoint="ricursiveAI/Ripple-65B-Preview", files=[args.checkpoint])
 
 
+class StreamedCheckpoint:
+    """Tensors of a Hugging Face safetensors directory (sharded with `model.safetensors.index.json`, or one
+    `model.safetensors`) read one at a time, never the whole model. Counts the reads of each tensor."""
+
+    def __init__(self, root):
+        self.root = root
+        index = os.path.join(root, "model.safetensors.index.json")
+        if os.path.exists(index):
+            with open(index) as f:
+                self.shard_of = json.load(f)["weight_map"]
+        else:
+            single = "model.safetensors"
+            with safe_open(os.path.join(root, single), "pt") as f:
+                self.shard_of = {name: single for name in f.keys()}
+        self.handles = {}
+        self.reads = {}
+
+    def get(self, name):
+        shard = self.shard_of[name]
+        if shard not in self.handles:
+            self.handles[shard] = safe_open(os.path.join(self.root, shard), "pt")
+        self.reads[name] = self.reads.get(name, 0) + 1
+        return self.handles[shard].get_tensor(name)
+
+    def names_under(self, prefix):
+        return sorted(n for n in self.shard_of if n.startswith(prefix))
+
+
+class HttpCheckpoint:
+    """[`StreamedCheckpoint`]'s interface over a Hugging Face repository read by HTTP range requests: each tensor
+    is fetched into memory when asked for and never written to disk, so the 130 GB bf16 release is run on a drive
+    that cannot hold it (the bytes cross the network once per tensor). `base` is the `.../resolve/main/` URL.
+    Public repositories need no token; `HF_TOKEN`, when set, is sent."""
+
+    DTYPES = {"BF16": torch.bfloat16, "F32": torch.float32, "F16": torch.float16, "U8": torch.uint8, "I8": torch.int8}
+
+    def __init__(self, base):
+        self.base = base if base.endswith("/") else base + "/"
+        self.shard_of = json.loads(self._range("model.safetensors.index.json", None))["weight_map"]
+        self.headers = {}
+        self.reads = {}
+
+    def _range(self, name, span):
+        import urllib.request
+
+        request = urllib.request.Request(self.base + name)
+        token = os.environ.get("HF_TOKEN")
+        if token:
+            request.add_header("Authorization", f"Bearer {token}")
+        if span is not None:
+            request.add_header("Range", f"bytes={span[0]}-{span[1] - 1}")
+        with urllib.request.urlopen(request, timeout=600) as reply:
+            data = reply.read()
+        if span is not None and len(data) != span[1] - span[0]:
+            raise SystemExit(f"{name} bytes {span}: the server answered {len(data)} bytes (no range support?)")
+        return data
+
+    def _header(self, shard):
+        if shard not in self.headers:
+            (n,) = struct.unpack("<Q", self._range(shard, (0, 8)))
+            self.headers[shard] = (json.loads(self._range(shard, (8, 8 + n))), 8 + n)
+        return self.headers[shard]
+
+    def get(self, name):
+        shard = self.shard_of[name]
+        header, start = self._header(shard)
+        entry = header[name]
+        a, b = entry["data_offsets"]
+        self.reads[name] = self.reads.get(name, 0) + 1
+        data = bytearray(self._range(shard, (start + a, start + b)))
+        return torch.frombuffer(data, dtype=self.DTYPES[entry["dtype"]]).reshape(entry["shape"])
+
+    def names_under(self, prefix):
+        return sorted(n for n in self.shard_of if n.startswith(prefix))
+
+
+def open_checkpoint(location):
+    """A directory path, or an `http(s)://` base URL (a Hugging Face `.../resolve/main/`)."""
+    return HttpCheckpoint(location) if location.startswith(("http://", "https://")) else StreamedCheckpoint(location)
+
+
+def streamed_forward(ckpt, cfg, mdl_mod, ids, device, dtype, tap_layers, tap_rows, logits_rows):
+    """`RicursiveModel.forward` followed by the head, with one decoder layer resident at a time.
+
+    Returns the tensors to dump and the statistics (`max_resident_layers`, `bytes_loaded`) that show nothing larger
+    than a layer was held. The order of operations is the model's: scaled embeddings seed both the stream and the
+    value residual, every layer sees `attention_mask=None` (the SDPA causal path), then the final norm, `lm_head`.
+    """
+    t = ids.shape[1]
+    stats = {"max_resident_layers": 0, "bytes_loaded": 0}
+    out = {"input_ids": ids[0].to(torch.float32).cpu()}
+
+    def load(module, state):
+        stats["bytes_loaded"] += sum(v.numel() * v.element_size() for v in state.values())
+        module.load_state_dict({k: v.to(device=device, dtype=dtype) for k, v in state.items()}, strict=True, assign=True)
+        return module
+
+    with torch.inference_mode():
+        table = ckpt.get("model.embed_tokens.weight")
+        stats["bytes_loaded"] += table.numel() * table.element_size()
+        stream = torch.nn.functional.embedding(ids.to(device), table.to(device=device, dtype=dtype))
+        del table
+        if getattr(cfg, "embed_scale", None) is not None:
+            stream = stream * cfg.embed_scale
+        value_residual = stream if cfg.use_valres else None
+        position_ids = torch.arange(t, device=device).unsqueeze(0)
+        for k in range(cfg.num_hidden_layers):
+            if k in tap_layers:
+                out[f"hidden.{k}"] = stream[0, -tap_rows:].float().cpu()
+            prefix = f"model.layers.{k}."
+            with torch.device("meta"):
+                layer = mdl_mod.RicursiveDecoderLayer(cfg, k)
+            state = {n[len(prefix):]: ckpt.get(n) for n in ckpt.names_under(prefix)}
+            load(layer, state)
+            del state
+            stats["max_resident_layers"] = max(stats["max_resident_layers"], 1)
+            stream = layer(
+                stream, attention_mask=None, position_ids=position_ids, past_key_value=None, output_attentions=False,
+                use_cache=False, cache_position=position_ids[0], value_residual=value_residual,
+            )[0]
+            del layer
+            if device != "cpu" and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print(f"  layer {k + 1}/{cfg.num_hidden_layers}", flush=True)
+        if cfg.num_hidden_layers in tap_layers:
+            out[f"hidden.{cfg.num_hidden_layers}"] = stream[0, -tap_rows:].float().cpu()
+        with torch.device("meta"):
+            norm = mdl_mod.RicursiveRMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
+        load(norm, {"weight": ckpt.get("model.norm.weight")})
+        final = norm(stream)
+        out["final_hidden"] = final[0, -tap_rows:].float().cpu()
+        head = ckpt.get("lm_head.weight").to(device=device, dtype=dtype)
+        stats["bytes_loaded"] += head.numel() * head.element_size()
+        out["logits"] = torch.nn.functional.linear(final[0, -logits_rows:], head).float().cpu()
+    return out, stats
+
+
+def parse_taps(text, n_layers):
+    """`every`, `none`, or a comma list of layer indices in 0..=n_layers (`n_layers` is the stream entering the norm)."""
+    if text == "every":
+        return set(range(n_layers + 1))
+    if text == "none":
+        return set()
+    taps = {int(v) for v in text.split(",")}
+    bad = sorted(v for v in taps if not 0 <= v <= n_layers)
+    if bad:
+        raise SystemExit(f"--taps {bad}: layers run 0 to {n_layers}")
+    return taps
+
+
+def full(args, cfg_mod, mdl_mod):
+    if not args.checkpoint_dir:
+        raise SystemExit("full needs --checkpoint-dir")
+    if bool(args.prompt_file) == bool(args.ids_file):
+        raise SystemExit("full needs exactly one of --prompt-file and --ids-file")
+    if args.prompt_file and not args.tokenizer:
+        raise SystemExit("--prompt-file needs --tokenizer")
+    ckpt = open_checkpoint(args.checkpoint_dir)
+    if isinstance(ckpt, HttpCheckpoint):
+        raw = json.loads(ckpt._range("config.json", None))
+    else:
+        with open(os.path.join(args.checkpoint_dir, "config.json")) as f:
+            raw = json.load(f)
+    cfg = cfg_mod.RicursiveConfig.from_dict(raw)
+    if args.ids_file:
+        with open(args.ids_file) as f:
+            token_ids = json.load(f)
+    else:
+        from tokenizers import Tokenizer
+
+        with open(args.prompt_file, encoding="utf-8") as f:
+            token_ids = Tokenizer.from_file(args.tokenizer).encode(f.read()).ids
+    token_ids = token_ids[: args.max_tokens]
+    ids = torch.tensor([token_ids])
+    print(f"prompt: {ids.shape[1]} tokens; {cfg.num_hidden_layers} layers streamed on {args.device} in {args.dtype}", flush=True)
+    dtype = {"bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
+    tap_layers = parse_taps(args.taps, cfg.num_hidden_layers)
+    tensors, stats = streamed_forward(ckpt, cfg, mdl_mod, ids, args.device, dtype, tap_layers, args.tap_rows, args.logits_rows)
+    missing = sorted(n for n in ckpt.shard_of if n not in ckpt.reads)
+    if missing:
+        raise SystemExit(f"the checkpoint holds tensors the reference never read (a layer count mismatch?): {missing[:3]}")
+    print(f"streamed {stats['bytes_loaded'] / 2**30:.1f} GiB through one resident layer", flush=True)
+
+    out = os.path.join(args.out, "full")
+    os.makedirs(out, exist_ok=True)
+    manifest = {"ricursive_full.safetensors": save(os.path.join(out, "ricursive_full.safetensors"), tensors)}
+    manifest["stream"] = dict(
+        dtype=args.dtype, device=args.device, tokens=ids.shape[1], logits_rows=min(args.logits_rows, ids.shape[1]),
+        tap_rows=min(args.tap_rows, ids.shape[1]), taps=sorted(tap_layers), **stats,
+    )
+    identity = dict(
+        vocab_size=cfg.vocab_size, hidden_size=cfg.hidden_size, intermediate_size=cfg.intermediate_size,
+        num_hidden_layers=cfg.num_hidden_layers, num_attention_heads=cfg.num_attention_heads,
+        num_key_value_heads=cfg.num_key_value_heads, head_dim=cfg.head_dim, sliding_window=cfg.sliding_window,
+    )
+    local = [os.path.join(args.checkpoint_dir, shard) for shard in sorted(set(ckpt.shard_of.values()))[:1]] if isinstance(ckpt, StreamedCheckpoint) else []
+    finish(out, manifest, identity, args, checkpoint=args.checkpoint_dir, files=local)
+
+
+def full_check(args, cfg_mod, mdl_mod):
+    """`streamed_forward` over a sharded tiny checkpoint equals the whole-model forward, reading each tensor once."""
+    import tempfile
+
+    cfg, model = tiny_model(args, cfg_mod, mdl_mod)
+    ids = torch.randint(0, TINY["vocab_size"], (1, TINY_PROMPT_LEN))
+    whole, _taps, _logits = run(model, ids)
+    state = model.state_dict()
+    with tempfile.TemporaryDirectory(dir=args.out if os.path.isdir(args.out) else None) as root:
+        weight_map = {}
+        for shard, prefix in enumerate(["model.layers.0.", "model.layers.1.", "model.layers.2.", ""]):
+            names = [n for n in state if (n.startswith(prefix) if prefix else not n.startswith("model.layers."))]
+            file = f"model-{shard:05d}.safetensors"
+            save_file({n: state[n].detach().clone().contiguous() for n in names}, os.path.join(root, file))
+            weight_map.update({n: file for n in names})
+        with open(os.path.join(root, "model.safetensors.index.json"), "w") as f:
+            json.dump({"metadata": {}, "weight_map": weight_map}, f)
+        ckpt = StreamedCheckpoint(root)
+        tap_layers = parse_taps("every", cfg.num_hidden_layers)
+        got, stats = streamed_forward(ckpt, cfg, mdl_mod, ids, "cpu", torch.float32, tap_layers, TINY_PROMPT_LEN, TINY_PROMPT_LEN)
+        # Reading the logits of the last 5 rows only keeps the same rows as the whole run's last 5.
+        last5, _ = streamed_forward(StreamedCheckpoint(root), cfg, mdl_mod, ids, "cpu", torch.float32, set(), 5, 5)
+        worst = 0.0
+        for k in range(cfg.num_hidden_layers):
+            want = whole[f"hidden.{k}"]
+            worst = max(worst, (got[f"hidden.{k}"] - want).abs().max().item() / want.abs().max().item())
+        for name in ("final_hidden", "logits"):
+            want = whole[name]
+            worst = max(worst, (got[name] - want).abs().max().item() / want.abs().max().item())
+        tail = (last5["logits"] - whole["logits"][-5:]).abs().max().item() / whole["logits"].abs().max().item()
+        reads = sorted(set(ckpt.reads.values()))
+        print(f"full-check: worst scaled error {worst:.3e}, last-5-rows logits {tail:.3e}, reads per tensor {reads}, "
+              f"resident layers {stats['max_resident_layers']}, {len(ckpt.reads)} of {len(ckpt.shard_of)} tensors read", flush=True)
+        assert worst <= 1e-6 and tail <= 1e-6, "the layer-streamed forward differs from the whole-model forward"
+        assert reads == [1], f"every tensor is read exactly once, got {reads}"
+        assert stats["max_resident_layers"] == 1
+        assert len(ckpt.reads) == len(ckpt.shard_of), "a tensor of the checkpoint was never read"
+        # The check can fail: a stream that skips the embedding scale is far from the whole-model forward.
+        cfg.embed_scale = None
+        wrong, _ = streamed_forward(StreamedCheckpoint(root), cfg, mdl_mod, ids, "cpu", torch.float32, set(), 1, TINY_PROMPT_LEN)
+        effect = (wrong["logits"] - whole["logits"]).abs().max().item() / whole["logits"].abs().max().item()
+        print(f"full-check: without the embedding scale the logits move by {effect:.3e}", flush=True)
+        assert effect > 1e-3, "the streamed forward does not depend on the embedding scale: the check is blind"
+
+        # The same checkpoint over HTTP range requests (a local server with range support): the same stream, nothing on disk.
+        cfg.embed_scale = TINY["embed_scale"]
+        import functools
+        import http.server
+        import threading
+
+        class Ranged(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                span = self.headers.get("Range")
+                path = self.translate_path(self.path)
+                data = open(path, "rb").read()
+                if span:
+                    a, b = (int(v) for v in span.removeprefix("bytes=").split("-"))
+                    data = data[a : b + 1]
+                    self.send_response(206)
+                else:
+                    self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Ranged, directory=root))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            remote = HttpCheckpoint(f"http://127.0.0.1:{server.server_port}/")
+            over_http, _ = streamed_forward(remote, cfg, mdl_mod, ids, "cpu", torch.float32, set(), 4, TINY_PROMPT_LEN)
+        finally:
+            server.shutdown()
+        gap = (over_http["logits"] - got["logits"]).abs().max().item() / got["logits"].abs().max().item()
+        print(f"full-check: over HTTP range requests the logits differ from the directory's by {gap:.3e}; {len(remote.reads)} tensors fetched", flush=True)
+        assert gap == 0.0 and sorted(set(remote.reads.values())) == [1]
+
+        # The command path itself: the same directory (with its config) through `full`, then the dump read back.
+        with open(os.path.join(root, "config.json"), "w") as f:
+            json.dump(cfg.to_dict(), f)
+        with open(os.path.join(root, "ids.json"), "w") as f:
+            json.dump(ids[0].tolist(), f)
+        dump = argparse.Namespace(**{**vars(args), "checkpoint_dir": root, "ids_file": os.path.join(root, "ids.json"), "prompt_file": None,
+                                     "max_tokens": 4096, "device": "cpu", "dtype": "float32", "taps": "0,3", "tap_rows": 4, "logits_rows": 6, "out": os.path.join(root, "out")})
+        full(dump, cfg_mod, mdl_mod)
+        from safetensors.torch import load_file
+
+        written = load_file(os.path.join(root, "out", "full", "ricursive_full.safetensors"))
+        assert sorted(written) == ["final_hidden", "hidden.0", "hidden.3", "input_ids", "logits"], sorted(written)
+        assert written["logits"].shape == (6, TINY["vocab_size"]) and written["hidden.3"].shape == (4, TINY["hidden_size"])
+        assert (written["logits"] - whole["logits"][-6:]).abs().max().item() <= 1e-6 * whole["logits"].abs().max().item()
+        with open(os.path.join(root, "out", "full", "manifest.json")) as f:
+            stream = json.load(f)["stream"]
+        assert stream["tokens"] == TINY_PROMPT_LEN and stream["max_resident_layers"] == 1, stream
+        print("full-check: the `full` command wrote its dump and manifest as specified", flush=True)
+
+
 def finish(out, manifest, identity, args, checkpoint, files):
     ident = {k: v for k, v in identity.items() if isinstance(v, int) and not isinstance(v, bool)}
     manifest["source"] = source_block(identity=ident, checkpoint=checkpoint, files=files, hash_files=False)
@@ -466,12 +780,21 @@ def finish(out, manifest, identity, args, checkpoint, files):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["tiny", "real", "grads", "real-grads", "real-lora"])
+    ap.add_argument("mode", choices=["tiny", "real", "grads", "real-grads", "real-lora", "full", "full-check"])
     ap.add_argument("--modeling-dir", required=True, help="directory holding modeling_ricursive.py and configuration_ricursive.py")
     ap.add_argument("--out", required=True)
     ap.add_argument("--checkpoint", help="real: the partial safetensors holding embed, norm, lm_head and layers 0 and 4")
     ap.add_argument("--config", help="real: the released config.json")
     ap.add_argument("--tokenizer", help="real: the released tokenizer.json")
+    ap.add_argument("--checkpoint-dir", help="full: the released checkpoint directory (config.json, model.safetensors.index.json and its shards), or the URL of a repository'\''s files (https://huggingface.co/<repo>/resolve/main/), read by range requests without touching the disk")
+    ap.add_argument("--prompt-file", help="full: a UTF-8 text file, tokenized with --tokenizer")
+    ap.add_argument("--ids-file", help="full: a JSON list of token ids (instead of --prompt-file)")
+    ap.add_argument("--max-tokens", type=int, default=4096, help="full: keep the first N prompt tokens (default 4096)")
+    ap.add_argument("--device", default="cpu", help="full: where the layers run (cpu, cuda:0)")
+    ap.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16", help="full: the reference's compute dtype (bfloat16: the release as served; float32: weights promoted)")
+    ap.add_argument("--taps", default="every", help="full: layers whose input stream is dumped: every, none, or a comma list (80 is the stream entering the final norm)")
+    ap.add_argument("--tap-rows", type=int, default=16, help="full: the last N positions of each tapped stream (default 16)")
+    ap.add_argument("--logits-rows", type=int, default=64, help="full: the last N positions of the logits (default 64; 100352 floats a row)")
     ap.add_argument("--seed", type=int, default=None, help="tiny: weight and prompt seed (default: random, printed and recorded in the manifest)")
     args = ap.parse_args()
     if args.seed is None:
@@ -480,7 +803,7 @@ def main():
     cfg_mod, mdl_mod = load_reference(os.path.abspath(args.modeling_dir))
     if args.mode in ("real", "real-grads", "real-lora") and not (args.checkpoint and args.config and args.tokenizer):
         ap.error("the real modes need --checkpoint, --config and --tokenizer")
-    {"tiny": tiny, "real": real, "grads": grads, "real-grads": real_grads, "real-lora": real_lora}[args.mode](args, cfg_mod, mdl_mod)
+    {"tiny": tiny, "real": real, "grads": grads, "real-grads": real_grads, "real-lora": real_lora, "full": full, "full-check": full_check}[args.mode](args, cfg_mod, mdl_mod)
 
 
 if __name__ == "__main__":
