@@ -50,6 +50,17 @@ fn effective(raw: &[f32], v: usize, d: usize, tier: Dtype) -> Vec<f32> {
     }
 }
 
+/// What a packed head holds, read back through the device's tile decode (the contract of `model::ops::tiled`: the
+/// decoded values equal the host decode), as f32 `[v, d]`.
+fn decoded(ops: &Ops, w: &Weight) -> Vec<f32> {
+    let g = ops.gpu();
+    let out = g.storage(w.n() as u64 * w.k() as u64);
+    let mut steps = Vec::new();
+    ops.decode_tile(&mut steps, w, 0, w.n(), &out);
+    g.submit(&[], &steps);
+    g.read(&out, w.n() as usize * w.k() as usize)
+}
+
 struct Reference {
     nll: Vec<f64>,
     d_hidden: Vec<f64>,
@@ -119,6 +130,7 @@ fn build(ops: &Ops, p: &Problem, w: &Weight, rows: u32, windows: bool) -> HeadCe
     let row_words = match w.dtype() {
         Dtype::F32 => p.d,
         Dtype::BF16 => p.d / 2,
+        Dtype::F8E4M3 | Dtype::I8 => p.d / 4,
         _ => p.d / 8,
     } as u64;
     let cfg = HeadCeConfig { rows_per_chunk: rows, tile_budget_words: windows.then_some(row_words * 250) };
@@ -136,16 +148,22 @@ fn run(ops: &Ops, hc: &HeadCe, p: &Problem, weights: Option<&[f32]>, logit_scale
     (loss, g.read(&d_hidden, p.n * p.d))
 }
 
-const TIERS: [Dtype; 3] = [Dtype::F32, Dtype::BF16, Dtype::NF4];
+const TIERS: [Dtype; 5] = [Dtype::F32, Dtype::BF16, Dtype::NF4, Dtype::F8E4M3, Dtype::I8];
+
+/// The tiers of [`TIERS`] this backend holds as such (the int8 tier needs a packed-int8 product the CPU backend
+/// lacks, and `Weight::upload` then widens it).
+fn held_tiers(ops: &Ops) -> Vec<Dtype> {
+    TIERS.into_iter().filter(|t| matches!(t, Dtype::F8E4M3) || t.promote(&ops.caps().numeric) == *t).collect()
+}
 
 #[test]
 fn chunked_loss_logprobs_and_hidden_gradient_match_the_host_reference() {
     let ops = ops();
     // n = 150 and v = 1000 divide by neither the 64-row chunk nor the 250-row windows.
     let p = problem(150, 96, 1000);
-    for tier in TIERS {
+    for tier in held_tiers(&ops) {
         let w = head(&ops, &p, tier);
-        let eff = effective(&p.raw, p.v, p.d, tier);
+        let eff = if matches!(tier, Dtype::F8E4M3 | Dtype::I8) { decoded(&ops, &w) } else { effective(&p.raw, p.v, p.d, tier) };
         let want = reference(&p.hidden, &eff, p.n, p.d, p.v, &p.labels, None, 1.0, 1.0 / 140.0);
         for windows in [false, true] {
             let hc = build(&ops, &p, &w, 64, windows);
@@ -164,7 +182,7 @@ fn chunked_loss_logprobs_and_hidden_gradient_match_the_host_reference() {
 fn chunking_and_windowing_change_nothing() {
     let ops = ops();
     let p = problem(150, 96, 1000);
-    for tier in TIERS {
+    for tier in held_tiers(&ops) {
         let w = head(&ops, &p, tier);
         let whole = build(&ops, &p, &w, 192, false);
         let (l0, g0) = run(&ops, &whole, &p, None, 1.0, 0.01);
@@ -203,7 +221,7 @@ fn hidden_gradient_agrees_with_finite_differences_of_the_loss() {
     let ops = ops();
     let g = ops.gpu();
     let p = problem(9, 96, 130);
-    for tier in TIERS {
+    for tier in held_tiers(&ops) {
         let w = head(&ops, &p, tier);
         let hc = build(&ops, &p, &w, 64, false);
         let count = p.labels.iter().filter(|&&l| l != IGNORE).count() as f32;

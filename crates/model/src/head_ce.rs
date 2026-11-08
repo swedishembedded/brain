@@ -25,8 +25,9 @@
 //!   ("vocab tiles"); each window's logit columns come from one GEMM into a
 //!   dense scratch and are copied to their place in the chunk's logits.
 //!
-//! The head is any float-read [`Weight`] tier - F32, BF16 or NF4 - so a frozen
-//! head need not be the 5 GB fp32 table. Peak extra memory is the scratch of
+//! The head is any [`Weight`] tier the products read as f32 rows - F32 and BF16 natively, every packed tier
+//! (NF4, FP8, int8, NVFP4) through the tile decode of [`Ops::matmul_rows`] - so a frozen head need not be the 5 GB
+//! fp32 table. Peak extra memory is the scratch of
 //! [`HeadCe::scratch_words`]: `O(rows_per_chunk * V)`, independent of the
 //! token count.
 //!
@@ -216,13 +217,17 @@ pub struct ArgmaxOut<'a> {
 /// Elements of a `[V, d]` weight per 4-byte word of its densest binding, and the
 /// element count a window start must be a multiple of for every binding the tier
 /// slices to stay on a 256-byte offset (64 words; NF4's scale plane has one
-/// word per 32 elements).
+/// word per 32 elements). A packed tier is multiplied by decoding a row window to a dense tile
+/// ([`Ops::matmul_rows`]); the decode takes the window as a row range, so its alignment is the granule of the
+/// densest plane only, kept as 64 words for every tier so a window is a legal binding offset wherever a device
+/// slices the planes.
 fn tier_layout(head: &Weight) -> (u64, u64) {
     match head {
         Weight::F32 { .. } => (1, 64),
         Weight::BF16 { .. } => (2, 128),
-        Weight::NF4 { .. } => (8, 2048),
-        other => panic!("HeadCe: a {:?} head is not a float-read tier (F32, BF16, NF4)", other.dtype()),
+        Weight::NF4 { .. } | Weight::Micro { .. } => (8, 2048),
+        Weight::FP8 { .. } | Weight::I8 { .. } => (4, 2048),
+        other => panic!("HeadCe: a {:?} head is not a tier the chunked loss reads (F32, BF16, NF4, FP8, int8, NVFP4)", other.dtype()),
     }
 }
 
@@ -271,8 +276,8 @@ impl HeadCe {
         if (head.n(), head.k()) != (vocab, d_model) {
             return Err(format!("HeadCe: the head is [{}, {}], expected [{vocab}, {d_model}]", head.n(), head.k()));
         }
-        if matches!(head, Weight::NF4 { .. }) && !d_model.is_multiple_of(32) {
-            return Err(format!("HeadCe: d_model {d_model} must be a multiple of the NF4 quantisation group (32)"));
+        if matches!(head, Weight::NF4 { .. } | Weight::I8 { .. } | Weight::Micro { .. }) && !d_model.is_multiple_of(32) {
+            return Err(format!("HeadCe: d_model {d_model} must be a multiple of the quantisation group (32) of a {:?} head", head.dtype()));
         }
         if cfg.rows_per_chunk == 0 {
             return Err("HeadCe: rows_per_chunk must be positive".into());

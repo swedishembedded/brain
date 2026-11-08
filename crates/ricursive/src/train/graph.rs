@@ -238,14 +238,6 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
         return Err(format!("ricursive training: the materialised attention of {attn_elems} scores per layer exceeds the 32-bit index space; shorten the row"));
     }
 
-    // The chunked head reads its table through an f32-activation product: of the packed tiers, f32, bf16 and NF4. A
-    // packed tier it cannot read (FP8, int8, NVFP4) holds the head at bf16 instead, a wider tier than asked for.
-    let mut opts = opts.clone();
-    if train && shard.head && !matches!(opts.tiers.want("lm_head.weight"), gpu_core::select::Dtype::F32 | gpu_core::select::Dtype::BF16 | gpu_core::select::Dtype::NF4) {
-        tracing::info!("ricursive training: the head is held at bf16, the chunked loss reads no other packed tier");
-        opts.tiers = opts.tiers.with(&["lm_head.weight"], gpu_core::select::Dtype::BF16);
-    }
-    let opts = &opts;
     let gpu = Gpu::new(super::pipelines());
     let mut ops = Ops::new(gpu.share()).map_err(|e| format!("ricursive training: {e}"))?;
     ops.set_gemm_precision(opts.gemm);

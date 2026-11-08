@@ -513,6 +513,7 @@ each layer is rebuilt in the backward.
 | N-LSA on the global layer, full budget vs dense (`train_nlsa`, software adapter, 2 x 64 tokens) | loss 3.759443 both, worst gradient difference 3.2e-7 of the largest; window-only 3.771009 |
 | N-LSA, sparse budget (window 8, sinks 2, top_k 16, top_p 8) | 40 AdamW steps: loss 3.7757 -> 0.0004 |
 | SDK `ChatFineTune` (LoRA), `ChatFullFineTune`, `PreferenceFineTune` on a tiny Ripple | loss falls in each; the DPO margin starts at ln 2; an adapter file holds adapter tensors only; a variant this model does not train and a held-out set it does not score are refused by name |
+| training head at every packed tier (`model::head_ce`: F32, BF16, NF4, FP8, int8 through the tile decode of `Ops::matmul_rows`; NVFP4 shares the path) vs the f32 reference over the decoded table, whole and in vocabulary windows | loss within 1e-4, hidden gradient within 1e-4, chunking and windowing change nothing (1e-5); a Ripple adapter over an FP8 base holds `lm_head` at FP8 (loss 4.2025094 both, worst gradient error 1.8e-6), no longer widened to bf16 |
 | training head: loss and gradient a chunk of 64 rows at a time vs the batch whole (2 x 64 rows) | loss identical (3.887103), worst gradient error 1.8e-7; the parity, gradcheck and real-layer gates above run through it |
 | two stages through the SDK trainer (`stages(2)`; the generic layout planner `model::plan_stage_layout`) vs one, LoRA and full fine-tune, CPU | losses before and after equal within 1e-5 and 1e-4 relative, every adapter factor within 1e-4; `brain ricursive finetune --stages 2` prints the layout and trains the one-stage loss |
 | adapter bank, one batch of a base row and the rows of two adapters over one resident base (`train_bank`), one stage and two | every row equals that row decoded alone (0.0) and the training model's forward with that adapter (worst 4.3e-7); the adapters change the answer (scaled difference 1.0); loading and unloading while serving (eviction among 3 adapters in 2 slots, draining, purging) |
@@ -671,8 +672,7 @@ engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
   NVFP4), and a full fine-tune needs a float base (f32 weights, AdamW on the device); layer-streamed and
   resident bf16/fp8 full fine-tuning (`Model::set_resident`) are not wired, so the 65B cannot be fully
   fine-tuned yet (a pipeline of float stages writes a full checkpoint, `Shardable::save_stages`).
-  `PolicyGradient` fine-tuning and held-out scoring before and after are wired for Qwen families only. The chunked
-  head holds an FP8, int8 or NVFP4-stored `lm_head` at bf16 (it reads f32, bf16 and NF4 tables).
+  `PolicyGradient` fine-tuning and held-out scoring before and after are wired for Qwen families only.
 - Training: on the CPU backend `matmul_dx` with a very large contraction (the head's, vocabulary 152k) is a
   naive strided loop, 25 s a step for a toy model, so toy tests use a 32-token vocabulary; a GPU does not
   have the problem.

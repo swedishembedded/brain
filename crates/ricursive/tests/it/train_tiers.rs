@@ -70,9 +70,7 @@ fn worst_relative(got: &[(String, Vec<f32>)], want: &[(String, Vec<f32>)]) -> (f
 fn decoded(cfg: &TrainConfig, weights: &HashMap<String, Vec<f32>>, tier: Dtype) -> HashMap<String, Vec<f32>> {
     let mut out = weights.clone();
     for (name, n, k) in ricursive::weights::all_linears_of(&cfg.model) {
-        // The chunked loss reads the head at f32, bf16 or NF4; a tier it cannot read holds the head at bf16.
-        let held = if name == "lm_head.weight" && !matches!(tier, Dtype::F32 | Dtype::BF16 | Dtype::NF4) { Dtype::BF16 } else { tier };
-        out.insert(name.clone(), Weight::round_trip(&weights[&name], n, k, held));
+        out.insert(name.clone(), Weight::round_trip(&weights[&name], n, k, tier));
     }
     out
 }
@@ -97,6 +95,8 @@ fn an_adapter_over_a_packed_base_trains_like_one_over_its_decoded_values() {
             }
             Err(e) => panic!("{tier:?}: {e}"),
         };
+        // The chunked head reads every packed tier, so the head is held at the tier asked for, not widened.
+        assert_eq!(packed.weight_tier("lm_head.weight"), Some(tier), "{tier:?}: the head stays at its tier");
         let reference = Ripple::build(cfg.clone(), ROWS, SEQ, &decoded(&cfg, &weights, tier), &TrainOpts::default(), true).unwrap();
         randomize_adapters(&packed, 9);
         randomize_adapters(&reference, 9);
