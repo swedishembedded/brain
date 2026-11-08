@@ -40,6 +40,10 @@ brain finetune BASE --dataset FILE --out DIR [options]
   --lsa-window N --lsa-sink N --lsa-top-k N --lsa-top-p N --lsa-cluster-block N
                      the selection's budget (defaults: the paper's D-LSA configuration).
   --lsa-window-only  with --native-sparse: window and sinks only, no long-range keys (the baseline).
+  --held-out FILE    chat JSONL scored on the model in the training process before the first step and after the last
+                     (the loss is printed); for architectures whose trainer scores it (Ripple, qwen35).
+  --policy-gradient  train the clipped policy gradient on rollout records (`advantage` on each record) instead of the
+                     supervised loss, for an adapter; --ratio-clip X and --kl-beta X set its clip band and KL weight.
   --activations P    what the backward keeps of the forward: keep|recompute|bf16|fp8.
   --no-thinking      render records without the reasoning block.
 
@@ -74,6 +78,10 @@ struct Args {
     base_format: Option<String>,
     activations: Option<model::saved::SavedPolicy>,
     no_thinking: bool,
+    held_out: Option<String>,
+    policy_gradient: bool,
+    clip_eps: Option<f32>,
+    kl_beta: Option<f32>,
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -114,6 +122,10 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--base-format" => a.base_format = Some(need(&mut i, &flag)?),
             "--activations" => a.activations = Some(crate::args::parse_activations(&need(&mut i, &flag)?).map_err(|e| format!("brain finetune: {e}"))?),
             "--no-thinking" => a.no_thinking = true,
+            "--held-out" => a.held_out = Some(need(&mut i, &flag)?),
+            "--policy-gradient" => a.policy_gradient = true,
+            "--ratio-clip" => a.clip_eps = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--kl-beta" => a.kl_beta = Some(number(&need(&mut i, &flag)?, &flag)?),
             "-h" | "--help" => return Err(String::new()),
             other if other.starts_with('-') => return Err(format!("brain finetune: unknown option '{other}'")),
             other if a.base.is_empty() => a.base = other.to_string(),
@@ -132,9 +144,16 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             }
         }
     }
+    if !a.policy_gradient {
+        for (flag, given) in [("--ratio-clip", a.clip_eps.is_some()), ("--kl-beta", a.kl_beta.is_some())] {
+            if given {
+                return Err(format!("brain finetune: {flag} shapes the policy gradient; give --policy-gradient"));
+            }
+        }
+    }
     if a.lora.is_none() {
         // Each of these shapes an adapter; a full fine-tune that was given one would silently ignore it.
-        for (flag, given) in [("--alpha", a.alpha.is_some()), ("--continue", a.continue_from.is_some()), ("--adapter-id", a.adapter_id.is_some()), ("--base-format", a.base_format.is_some())] {
+        for (flag, given) in [("--alpha", a.alpha.is_some()), ("--continue", a.continue_from.is_some()), ("--adapter-id", a.adapter_id.is_some()), ("--base-format", a.base_format.is_some()), ("--held-out", a.held_out.is_some()), ("--policy-gradient", a.policy_gradient)] {
             if given {
                 return Err(format!("brain finetune: {flag} applies to an adapter; give --lora RANK"));
             }
@@ -195,6 +214,13 @@ fn lora(a: &Args, rank: u32) -> brain::ChatFineTune {
     }
     if let Some(v) = a.activations {
         t = t.activations(v);
+    }
+    if let Some(v) = &a.held_out {
+        t = t.held_out(v);
+    }
+    if a.policy_gradient {
+        let d = brain::PolicyGradientConfig::default();
+        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), ..d });
     }
     t
 }
@@ -281,6 +307,13 @@ pub fn run_finetune(argv: &[String]) -> ! {
         Some(rank) => match lora(&args, rank).run_with(&brain::CancelToken::default(), |p| eprintln!("step {}: loss {:.4}", p.step, p.loss)) {
             Ok(o) => {
                 println!("status: {:?}, {} steps, {}", o.status, o.steps_completed, losses(o.initial_loss, o.final_loss));
+                if let (Some(base), Some(tuned)) = (&o.base_score, &o.tuned_score) {
+                    let show = |v: Option<f32>| v.map_or("-".to_string(), |v| format!("{v:.4}"));
+                    println!("held-out: {} records, {} positions, {}", base.records, base.positions, format!("loss {} -> {}", show(base.loss), show(tuned.loss)));
+                }
+                if let Some(pg) = &o.policy_gradient {
+                    println!("policy gradient: {} steps, mean loss {:?}, mean clip fraction {:?}, mean kl {:?}", pg.stats.steps.len(), pg.stats.mean_loss(), pg.stats.mean_clip_fraction(), pg.stats.mean_kl());
+                }
                 if let Some(p) = &o.adapter {
                     println!("adapter: {}", p.display());
                 }
@@ -329,6 +362,18 @@ mod tests {
     }
 
     #[test]
+    fn the_policy_gradient_settings_need_the_policy_gradient_and_an_adapter() {
+        let err = parse(&argv("base --lora 4 --ratio-clip 0.1")).unwrap_err();
+        assert!(err.contains("--policy-gradient"), "{err}");
+        let err = parse(&argv("base --policy-gradient")).unwrap_err();
+        assert!(err.contains("--lora"), "{err}");
+        let err = parse(&argv("base --held-out h.jsonl")).unwrap_err();
+        assert!(err.contains("--lora"), "{err}");
+        let a = parse(&argv("base --lora 4 --policy-gradient --kl-beta 0.1 --held-out h.jsonl")).unwrap();
+        assert!(a.policy_gradient && a.kl_beta == Some(0.1) && a.held_out.as_deref() == Some("h.jsonl"));
+    }
+
+    #[test]
     fn a_number_that_does_not_parse_is_an_error_naming_the_flag() {
         let err = parse(&argv("base --steps many")).unwrap_err();
         assert!(err.contains("--steps") && err.contains("many"), "{err}");
@@ -336,7 +381,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--held-out", "--policy-gradient", "--ratio-clip", "--kl-beta"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }

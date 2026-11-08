@@ -22,6 +22,8 @@ use gpu_core::select::Dtype;
 use grpo_common::{config, parity_reward, Env, Judge, PROMPT, T};
 use model::adapter::device::is_adapter_param;
 use model::finetune::ModelFit;
+use data::rng::Rng;
+use model::rollout::{ModelRollout, Rollout};
 use model::{FitControl, FitOpts, FitReport, Model, ModelConfig};
 use rl::fit::{DistillFit, DpoFit, GrpoFit};
 use rl::objective::distill::{DistillConfig, DistillExample, TopK};
@@ -65,6 +67,10 @@ fn qwen3_builds() -> Vec<Build<qwen3::Qwen>> {
 
 fn qwen35_builds() -> Vec<Build<qwen35::model::Qwen35>> {
     builds("qwen35", &[Dtype::BF16, Dtype::NF4, Dtype::F8E4M3], arch_builds::qwen35)
+}
+
+fn ricursive_builds() -> Vec<Build<ricursive::Ripple>> {
+    builds("ricursive", &[Dtype::BF16, Dtype::NF4, Dtype::F8E4M3], arch_builds::ricursive)
 }
 
 fn fit_opts(steps: u32) -> FitOpts {
@@ -173,25 +179,58 @@ fn dpo_widens_its_margin<M: Model>(b: &Build<M>) {
     assert_only_adapters_trained(&what, &before, &snapshot(&trained));
 }
 
+/// The mean verifiable reward of `n` completions of the policy's own samples: the share of tokens that are even.
+fn mean_even_share<M: Model>(m: &M, n: usize, seed: u64) -> f32 {
+    let rollout = config(1, 1.0, GrpoOptions::default()).rollout;
+    let completions = ModelRollout::new(m).sample_n(&PROMPT, n, &rollout, &mut Rng::new(seed));
+    completions.iter().map(|c| even_share(&c.tokens, true)).sum::<f32>() / n as f32
+}
+
+fn even_share(completion: &[u32], _variable: bool) -> f32 {
+    completion.iter().filter(|t| *t % 2 == 0).count() as f32 / completion.len().max(1) as f32
+}
+
+/// GRPO against a verifiable reward raises it: the policy's own samples score higher after the run than before.
+fn grpo_raises_a_verifiable_reward<M: Model>(b: &Build<M>) {
+    let what = format!("{} {:?} grpo reward", b.arch, b.encoding);
+    let student = (b.make)(1, SEED);
+    let before = mean_even_share(&student, 96, SEED);
+    let (judge, _) = Judge::new(even_share);
+    let grpo = Grpo::new(Env { variable: grpo_common::always_variable }, judge, config(8, 1.0, GrpoOptions::default()));
+    let opts = FitOpts { grad_accum: 2, ..fit_opts(40) };
+    let mut fit = GrpoFit::new(grpo, &opts, FitControl::default());
+    let (report, trained) = fit.fit(student).unwrap_or_else(|e| panic!("{what}: {e}"));
+    finite(&what, &report);
+    let after = mean_even_share(&trained, 96, SEED);
+    eprintln!("{what}: mean reward {before:.3} -> {after:.3}");
+    assert!(after > before + 0.1, "{what}: the policy's reward went {before} -> {after}");
+}
+
 /// `check` on every encoding of every registered architecture.
-fn on_every_build(check3: fn(&Build<qwen3::Qwen>), check35: fn(&Build<qwen35::model::Qwen35>)) {
+fn on_every_build(check3: fn(&Build<qwen3::Qwen>), check35: fn(&Build<qwen35::model::Qwen35>), check_ripple: fn(&Build<ricursive::Ripple>)) {
     qwen3_builds().iter().for_each(check3);
     qwen35_builds().iter().for_each(check35);
+    ricursive_builds().iter().for_each(check_ripple);
 }
 
 #[test]
 fn distillation_trains_the_adapters_over_every_base_encoding() {
-    on_every_build(distillation_lowers_its_kl, distillation_lowers_its_kl);
+    on_every_build(distillation_lowers_its_kl, distillation_lowers_its_kl, distillation_lowers_its_kl);
 }
 
 #[test]
 fn grpo_trains_the_adapters_over_every_base_encoding() {
-    on_every_build(grpo_trains_only_adapters, grpo_trains_only_adapters);
+    on_every_build(grpo_trains_only_adapters, grpo_trains_only_adapters, grpo_trains_only_adapters);
+}
+
+#[test]
+fn grpo_raises_a_verifiable_reward_on_ripple() {
+    ricursive_builds().iter().for_each(grpo_raises_a_verifiable_reward);
 }
 
 #[test]
 fn dpo_trains_the_adapters_over_every_base_encoding() {
-    on_every_build(dpo_widens_its_margin, dpo_widens_its_margin);
+    on_every_build(dpo_widens_its_margin, dpo_widens_its_margin, dpo_widens_its_margin);
 }
 
 #[test]

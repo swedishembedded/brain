@@ -180,6 +180,13 @@ trained on this checkpoint (its card records the base) and fit the model, and is
 (`--adapter-id`, a reference of the form `vendor/repo:owner:name:tag`). All adapters and the base share one copy of the
 weights; the adapters' slots on each device are part of the memory plan. A variant of the adapter Ripple does not train (rank-stabilised, LoRA+, frozen A) is refused by name.
 
+`--held-out FILE` scores a chat JSONL set on the model in the training process before the first step and after the
+last (the loss is printed). `--policy-gradient` (with `--ratio-clip` and `--kl-beta`) trains the clipped policy gradient on
+rollout records, each carrying the `advantage` of its rollout, instead of the supervised loss: the actions of
+well-rewarded rollouts become likelier and those of badly rewarded ones less likely. The log-probabilities the
+objective reads are the serving engine's for the same tokens, so a policy trained on the trainer's forward is the one
+the engine samples from.
+
 Every operation has a backward, checked against finite differences and against PyTorch autograd of the
 released `modeling_ricursive.py` on random weights and on the real layers 0 and 4. The value residual reads the
 embedding in every layer, so a pipeline stage holds the embedding table and recomputes it from the tokens. With

@@ -158,15 +158,16 @@ enum ChatFamily {
 enum TrainedLora {
     Qwen3(qwen3::finetune::Trained),
     Qwen35(Box<qwen35::model::Qwen35>),
-    Ripple(Box<ricursive::finetune::RippleRun>),
+    /// A family trained through the generic `model::finetune::ChatTrainer` entry: it writes its own adapter.
+    Chat(crate::chat_trainer::SaveAdapter),
 }
 
 impl TrainedLora {
-    fn save(&self, path: &str, card_id: &str, base_id: &str, dataset_id: Option<&str>, provenance: checkpoint::st::TrainingProvenance) -> std::io::Result<()> {
+    fn save(self, path: &str, card_id: &str, base_id: &str, dataset_id: Option<&str>, provenance: checkpoint::st::TrainingProvenance) -> std::io::Result<()> {
         match self {
             TrainedLora::Qwen3(t) => t.save_adapter_with_lineage(path, card_id, base_id, dataset_id, Some(provenance)),
-            TrainedLora::Qwen35(m) => qwen35::lora::save_adapter_with_lineage(path, m, card_id, base_id, dataset_id, Some(provenance)),
-            TrainedLora::Ripple(m) => m.save_adapter(path, card_id, base_id, dataset_id, Some(provenance)),
+            TrainedLora::Qwen35(m) => qwen35::lora::save_adapter_with_lineage(path, &m, card_id, base_id, dataset_id, Some(provenance)),
+            TrainedLora::Chat(save) => save(Path::new(path), &model::finetune::AdapterLineage { card_id, base_id, dataset_id, provenance: Some(provenance) }),
         }
     }
 }
@@ -279,6 +280,15 @@ impl ChatFamily {
         }
     }
 
+    /// Whether the family scores held-out sets on the model the trainer holds (qwen35 and the generic trainers that
+    /// declare it) rather than in a second process over the exported adapter.
+    fn scores_in_process(&self) -> bool {
+        match self {
+            ChatFamily::Qwen3(_) => false,
+            ChatFamily::Qwen35(_) | ChatFamily::Ripple(_) => true,
+        }
+    }
+
     /// The tier held-out scoring runs at; `None` where the family cannot score.
     fn scoring_tier(&self) -> Option<qwen3::Dtype> {
         match self {
@@ -316,15 +326,8 @@ impl ChatFamily {
                 Ok((report, TrainedLora::Qwen35(Box::new(trained)), scored))
             }
             ChatFamily::Ripple(dtype) => {
-                if tuning != model::adapter::device::AdapterTuning::default() {
-                    return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive trains the plain LoRA adapter; a rank-stabilised, LoRA+ or frozen-A variant is not wired for it"));
-                }
-                use model::finetune::ChatTrainer;
-                let tiers = model::ops::TierPolicy::uniform(*dtype);
-                let request = model::finetune::LoraRequest { rank, alpha, continue_from, base: &tiers };
-                let mut fit = model::finetune::CausalLmFit { dir: prepared_dir, opts, out: None, control: Some(control) };
-                let (report, trained) = ricursive::finetune::RippleTrainer::train_lora(open, &request, opts, &mut fit)?;
-                Ok((report, TrainedLora::Ripple(Box::new(trained)), Vec::new()))
+                let (report, trained, scored, _) = self.train_chat(*dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, None)?;
+                Ok((report, trained, scored))
             }
         }
     }
@@ -344,16 +347,48 @@ impl ChatFamily {
         continue_from: Option<&Path>,
         control: model::FitControl<'_>,
         config: PolicyGradientConfig,
-    ) -> std::io::Result<(model::FitReport, TrainedLora, PolicyGradientStats)> {
+        held_out: &[&Path],
+    ) -> std::io::Result<(model::FitReport, TrainedLora, PolicyGradientStats, Vec<model::ScoredSet>)> {
         match self {
-            ChatFamily::Qwen3(_) | ChatFamily::Ripple(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "policy-gradient training on rollouts is wired for qwen35 bases only")),
+            ChatFamily::Qwen3(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "policy-gradient training on rollouts is not wired for qwen3 bases")),
             ChatFamily::Qwen35(dtype) => {
                 let run = qwen35::finetune::StreamedRun::uniform(*dtype, qwen35_recompute(*dtype, opts.precision.activations)?, qwen35::finetune::LongSeqOverrides::default());
                 let mut fit = rl::fit::PolicyGradientFit::new(prepared_dir, config, opts, control);
                 let (report, trained) = qwen35::finetune::finetune_lora_visited(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &run, &mut fit)?;
-                Ok((report, TrainedLora::Qwen35(Box::new(trained)), fit.into_stats().unwrap_or_default()))
+                Ok((report, TrainedLora::Qwen35(Box::new(trained)), fit.into_stats().unwrap_or_default(), Vec::new()))
+            }
+            ChatFamily::Ripple(dtype) => {
+                let (report, trained, scored, stats) = self.train_chat(*dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, Some(config))?;
+                Ok((report, trained, stats.unwrap_or_default(), scored))
             }
         }
+    }
+
+    /// A LoRA run through the family's generic `ChatTrainer` entry ([`crate::chat_trainer::ChatEntry::lora`]):
+    /// supervised or, with `policy_gradient`, on rollouts, scoring `held_out` on the resident model around it.
+    #[allow(clippy::too_many_arguments)]
+    fn train_chat(
+        &self,
+        dtype: qwen3::Dtype,
+        open: &Path,
+        prepared_dir: &Path,
+        opts: &model::FitOpts,
+        rank: u32,
+        alpha: f32,
+        tuning: model::adapter::device::AdapterTuning,
+        continue_from: Option<&Path>,
+        control: model::FitControl<'_>,
+        held_out: &[&Path],
+        policy_gradient: Option<PolicyGradientConfig>,
+    ) -> std::io::Result<(model::FitReport, TrainedLora, Vec<model::ScoredSet>, Option<PolicyGradientStats>)> {
+        if tuning != model::adapter::device::AdapterTuning::default() {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive trains the plain LoRA adapter; a rank-stabilised, LoRA+ or frozen-A variant is not wired for it"));
+        }
+        let entry = crate::study::arch("ricursive").map_err(std::io::Error::other)?.chat.ok_or_else(|| std::io::Error::other("ricursive has no chat trainer"))?;
+        let tiers = model::ops::TierPolicy::uniform(dtype);
+        let job = crate::chat_trainer::LoraJob { base: open, lora: model::finetune::LoraRequest { rank, alpha, continue_from, base: &tiers }, opts, dir: prepared_dir, policy_gradient, held_out };
+        let run = (entry.lora)(job, control)?;
+        Ok((run.report, TrainedLora::Chat(run.save), run.scored, run.policy_gradient))
     }
 }
 
@@ -937,13 +972,14 @@ impl ChatFineTune {
         let Some(config) = &self.policy_gradient else { return Ok(()) };
         let refuse = |why: String| Err(Error::Backend(format!("ChatFineTune: policy_gradient: {why}")));
         config.validate().or_else(refuse)?;
-        if arch_id != "qwen35" {
-            return refuse(format!("training on rollouts is wired for qwen35 bases, not {arch_id}"));
+        let generic = crate::study::arch(arch_id).ok().and_then(|a| a.chat).is_some_and(|chat| chat.policy_gradient);
+        if arch_id != "qwen35" && !generic {
+            return refuse(format!("training on rollouts is wired for qwen35 bases and for architectures whose trainer declares it, not {arch_id}"));
         }
         if self.eval_every > 0 || self.patience > 0 || self.keep_best {
             return refuse("a run has no monitoring loss to select on; leave eval_every, patience and keep_best unset (its statistics are on the outcome)".to_string());
         }
-        if self.held_out.is_some() || self.held_out_text.is_some() {
+        if arch_id == "qwen35" && (self.held_out.is_some() || self.held_out_text.is_some()) {
             return refuse("held-out sets are scored by the supervised pass; score the exported adapter with score_tokens_qwen35 instead".to_string());
         }
         Ok(())
@@ -1021,9 +1057,6 @@ impl ChatFineTune {
         let held_out = self.held_out.as_deref().map(|path| asked.read(path)).transpose()?;
         let held_out_text = self.held_out_text.as_deref().map(|path| asked.read(path)).transpose()?;
         let monitor = self.monitor.as_deref().map(|path| asked.read(path)).transpose()?;
-        if matches!(family, ChatFamily::Ripple(_)) && (held_out.is_some() || held_out_text.is_some()) {
-            return Err(Error::Backend("ChatFineTune: ricursive evaluates its monitoring set during the run; scoring a separate held-out set before and after is not wired for it".to_string()));
-        }
         refuse_images_in(held_out.as_deref(), "held-out")?;
         refuse_images_in(held_out_text.as_deref(), "held-out text")?;
         let carries = |records: Option<&[ChatSample]>| records.is_some_and(|r| r.iter().any(|s| s.rollout.is_some()));
@@ -1051,11 +1084,12 @@ impl ChatFineTune {
         let vocab = family.vocab(&open)?;
         let prepared_dir = out_dir.join(PREPARED_DIR);
         let prepared = data::chat::prepare_chat_samples(&training, val, &tok, &tmpl, render, vocab, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
-        // The held-out sets of a family that scores them in the training process (qwen35) are prepared
-        // like the monitoring split, and the training row has to hold their longest example too.
+        // The held-out sets of a family that scores them in the training process (qwen35, and every family whose
+        // trainer declares `SCORES_HELD_OUT`) are prepared like the monitoring split, and the training row has to
+        // hold their longest example too.
         let mut longest = prepared.longest_example;
         let mut held_out_dirs: Vec<PathBuf> = Vec::new();
-        if matches!(family, ChatFamily::Qwen35(_)) {
+        if family.scores_in_process() {
             for (name, records) in [("prepared-held-out", held_out.as_deref()), ("prepared-held-out-text", held_out_text.as_deref())] {
                 if let Some(records) = records {
                     let dir = out_dir.join(name);
@@ -1154,8 +1188,8 @@ impl ChatFineTune {
         let held_out_refs: Vec<&Path> = held_out_dirs.iter().map(PathBuf::as_path).collect();
         let (report, trained, scored, policy_gradient) = match self.policy_gradient {
             Some(config) => {
-                let (report, trained, stats) = family.train_policy_gradient(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, config).map_err(|e| Error::Backend(format!("training: {e}")))?;
-                (report, trained, Vec::new(), Some(PolicyGradientOutcome { config, stats }))
+                let (report, trained, stats, scored) = family.train_policy_gradient(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, config, &held_out_refs).map_err(|e| Error::Backend(format!("training: {e}")))?;
+                (report, trained, scored, Some(PolicyGradientOutcome { config, stats }))
             }
             None => {
                 let (report, trained, scored) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, &held_out_refs).map_err(|e| Error::Backend(format!("training: {e}")))?;
@@ -1249,7 +1283,6 @@ impl ChatFineTune {
         let dataset_id = digest(dataset)?;
         trained.save(utf8(&adapter_path)?, &adapter_id, &base_id, Some(&dataset_id), provenance)
             .map_err(|e| Error::Backend(format!("{}: saving the adapter: {e}", adapter_path.display())))?;
-        drop(trained);
         outcome.adapter_digest = Some(digest(&adapter_path)?);
         let adapter_str = utf8(&adapter_path)?;
         outcome.tuned_score = match scored_held_out {

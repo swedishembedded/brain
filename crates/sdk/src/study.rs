@@ -217,7 +217,7 @@ impl ArchEntry {
 
     /// This row with the generic full-parameter and preference fine-tuners
     /// running on the model family's `ChatTrainer`.
-    pub(crate) const fn with_chat_trainer<T: model::finetune::ChatTrainer>(mut self) -> ArchEntry {
+    pub(crate) const fn with_chat_trainer<T: model::finetune::ChatTrainer + 'static>(mut self) -> ArchEntry where T::Trained: 'static {
         self.chat_fine_tune = true;
         self.chat = Some(ChatEntry::of::<T>());
         self

@@ -35,3 +35,12 @@ pub fn qwen35(rows: u32, seq: u32, seed: u64, encoding: Dtype) -> (qwen35::model
     let held = m.linear_dtype("blocks.0.mlp.gate.weight").expect("a dense mlp linear");
     (m, held)
 }
+
+pub fn ricursive(rows: u32, seq: u32, seed: u64, encoding: Dtype) -> (ricursive::Ripple, Dtype) {
+    let cfg = ricursive::TrainConfig { block_size: seq, ..ricursive::TrainConfig::tiny() }.with_lora(model::adapter::device::LoraCfg::new(RANK, RANK as f32, ricursive::train::default_targets()));
+    let init = cfg.tiny_weights(seed);
+    let opts = ricursive::TrainOpts { tiers: TierPolicy::uniform(encoding), ..Default::default() };
+    let m = ricursive::Ripple::build(cfg, rows, seq, &init, &opts, true).unwrap_or_else(|e| panic!("ricursive {encoding:?}: {e}"));
+    let held = m.weight_tier("model.layers.0.mlp.gate_proj.weight").expect("a feed-forward linear");
+    (m, held)
+}

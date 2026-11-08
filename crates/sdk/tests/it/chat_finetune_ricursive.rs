@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use brain::{ChatFineTune, ChatFullFineTune, FineTuneStatus, PreferenceFineTune};
+use brain::{ChatFineTune, ChatFullFineTune, FineTuneStatus, PolicyGradientConfig, PreferenceFineTune};
 
 use crate::chat_fixture::{cpu, TempDir};
 
@@ -251,4 +251,93 @@ fn native_sparse_attention_is_refused_where_it_cannot_run() {
     }
     let err = ChatFullFineTune::from_pretrained("none").arch("qwen35").dataset("d.jsonl").out_dir(std::env::temp_dir()).native_sparse_attention(lsa(1024, 16), true).run().expect_err("qwen35 does not declare it");
     assert!(err.to_string().contains("native sparse attention"), "{err}");
+}
+
+/// (prompt, answer, advantage): two actions of well-rewarded rollouts and two of badly rewarded ones.
+const ROLLOUTS: [(&str, &str, f64); 4] = [("cab", "bad", 1.0), ("fed", "dad", 1.0), ("ace", "cab", -1.0), ("bag", "egg", -1.0)];
+
+fn chat_record(prompt: &str, answer: &str, advantage: Option<f64>) -> String {
+    let mut record = serde_json::json!({"messages": [{"role": "user", "content": prompt, "train": false}, {"role": "assistant", "content": answer, "train": true}], "tools": []});
+    if let Some(a) = advantage {
+        record["advantage"] = serde_json::json!(a);
+    }
+    record.to_string()
+}
+
+fn write_records(path: PathBuf, rows: &[(&str, &str, Option<f64>)]) -> PathBuf {
+    let lines: Vec<String> = rows.iter().map(|(p, a, adv)| chat_record(p, a, *adv)).collect();
+    std::fs::write(&path, lines.join("\n")).unwrap();
+    path
+}
+
+/// Spec: a held-out set is scored on the model in the training process before the first step and after the last,
+/// through the generic trainer: the tuned loss on records like the training ones is lower than the base's.
+#[test]
+fn a_ricursive_run_scores_held_out_records_before_and_after() {
+    let model = ripple_model_dir("ripple-held-out");
+    let held_out = write_records(model.join("held.jsonl"), &[("cab", "bad", None), ("fed", "deaf", None)]);
+    let outcome = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+        .arch("ricursive")
+        .dataset(write_dataset(&model))
+        .held_out(&held_out)
+        .out_dir(model.join("run"))
+        .rank(2)
+        .steps(8)
+        .lr(5e-2)
+        .seed(7) // seed: runs compared with each other need the same stream
+        .device(cpu())
+        .run()
+        .expect("the LoRA fine-tune runs");
+    let (base, tuned) = (outcome.base_score.expect("the base is scored"), outcome.tuned_score.expect("the tuned model is scored"));
+    eprintln!("held-out loss {:?} -> {:?} over {} positions", base.loss, tuned.loss, base.positions);
+    assert_eq!((base.records, tuned.records), (2, 2));
+    assert!(base.positions > 0 && base.positions == tuned.positions);
+    assert!(tuned.loss.unwrap() < base.loss.unwrap(), "{base:?} -> {tuned:?}");
+}
+
+/// Spec: rollouts that carry an advantage train a Ripple adapter that makes the actions of well-rewarded rollouts
+/// likelier and those of badly rewarded ones less likely, measured on held-out copies of both sets; the run reports
+/// the objective's statistics and records its regime on the adapter's card.
+#[test]
+fn a_ricursive_policy_gradient_run_raises_rewarded_actions_and_lowers_penalised_ones() {
+    let model = ripple_model_dir("ripple-pg");
+    let rollouts = write_records(model.join("rollouts.jsonl"), &ROLLOUTS.map(|(p, a, adv)| (p, a, Some(adv))));
+    let rewarded = write_records(model.join("rewarded.jsonl"), &[(ROLLOUTS[0].0, ROLLOUTS[0].1, None), (ROLLOUTS[1].0, ROLLOUTS[1].1, None)]);
+    let penalised = write_records(model.join("penalised.jsonl"), &[(ROLLOUTS[2].0, ROLLOUTS[2].1, None), (ROLLOUTS[3].0, ROLLOUTS[3].1, None)]);
+    let outcome = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+        .arch("ricursive")
+        .dataset(&rollouts)
+        .held_out(&rewarded)
+        .held_out_text(&penalised)
+        .out_dir(model.join("run"))
+        .rank(2)
+        .steps(10)
+        .lr(2e-2)
+        .grad_accum(4)
+        .seed(7) // seed: runs compared with each other need the same stream
+        .device(cpu())
+        .policy_gradient(PolicyGradientConfig::default())
+        .run()
+        .expect("the policy-gradient run");
+    assert_eq!(outcome.status, FineTuneStatus::Completed);
+    let loss = |s: Option<brain::HeldOutScore>| s.expect("scored").loss.expect("a loss");
+    let (good, bad) = ((loss(outcome.base_score), loss(outcome.tuned_score)), (loss(outcome.base_text_score), loss(outcome.tuned_text_score)));
+    eprintln!("rewarded actions' loss {:.4} -> {:.4}, penalised actions' loss {:.4} -> {:.4}", good.0, good.1, bad.0, bad.1);
+    assert!(good.1 < good.0 - 1e-3, "rewarded actions got no likelier: {good:?}");
+    assert!(bad.1 > bad.0 + 1e-3, "penalised actions got no less likely: {bad:?}");
+
+    let pg = outcome.policy_gradient.as_ref().expect("a policy-gradient run reports its statistics");
+    assert_eq!((pg.stats.steps.len(), pg.stats.sequences_with_advantage, pg.stats.sequences_imitation), (10, 4, 0));
+    assert!((pg.stats.steps[0].ratio_mean - 1.0).abs() < 1e-4, "the first step is on-policy: {:?}", pg.stats.steps[0]);
+    let card = checkpoint::st::read_card(outcome.adapter.unwrap().to_str().unwrap()).unwrap().expect("a card");
+    assert_eq!(card.family, "ricursive");
+    assert_eq!(card.training.expect("the card records its run").regime, "policy_gradient_lora");
+}
+
+/// Spec: an architecture whose trainer declares neither refuses a policy gradient by name, before a device is claimed.
+#[test]
+fn a_policy_gradient_is_refused_by_an_architecture_that_does_not_declare_it() {
+    let model = ripple_model_dir("ripple-pg-refused");
+    let err = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).arch("qwen3").dataset(write_dataset(&model)).out_dir(model.join("run")).policy_gradient(PolicyGradientConfig::default()).device(cpu()).run().expect_err("refused");
+    assert!(err.to_string().contains("qwen3") && err.to_string().contains("policy_gradient"), "{err}");
 }

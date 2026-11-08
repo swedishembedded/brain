@@ -142,6 +142,8 @@ impl ChatTrainer for RippleTrainer {
 
     const PIPELINED: bool = true;
     const NATIVE_SPARSE: bool = true;
+    const POLICY_GRADIENT: bool = true;
+    const SCORES_HELD_OUT: bool = true;
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> PathBuf {
         if weights.file_name().is_some_and(|n| n == "config.json") {

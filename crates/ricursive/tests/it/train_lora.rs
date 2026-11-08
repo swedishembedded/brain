@@ -185,6 +185,61 @@ fn a_trained_adapter_served_by_the_engine_gives_the_training_models_logits() {
     assert_eq!(serve_last(&mut engine, model::paged::BASE_KV_NAMESPACE), base_logits, "a base sequence beside the loaded adapter answers the base, bit for bit");
 }
 
+/// Spec: the log-probabilities the trainer scores tokens with (what a policy-gradient objective's ratio and KL read)
+/// are the serving engine's for the same tokens, at the same sampling temperature, under a trained adapter: RL on the
+/// trainer's forward optimises the policy the engine samples from.
+#[test]
+fn the_trainers_token_logprobs_are_the_serving_engines_under_a_trained_adapter() {
+    let model = synthetic(&["sliding_attention", "sliding_attention", "full_attention"], Shape { heads: 4, kv_heads: 2, head_dim: 16 });
+    let layers: Vec<usize> = (0..model.cfg.num_hidden_layers).collect();
+    let vocab = model.cfg.vocab_size;
+    let tokens = stream(9, 12, vocab as u32);
+    let targets: Vec<u32> = tokens[1..].iter().copied().chain([ricursive::train::IGNORE]).collect();
+
+    let base = open_safetensors(&model.path(), &model.cfg, &layers).unwrap();
+    let cfg = TrainConfig::new(model.cfg.clone(), 12).with_lora(LoraCfg::new(2, 8.0, default_targets()));
+    let init = AdapterInit::fresh(&cfg, &base, 11);
+    let trainer = Ripple::build(cfg, 1, 12, &init, &TrainOpts::default(), true).unwrap();
+    trainer.set_batch(Batch::Lm { tokens: &tokens, targets: &targets });
+    for step in 1..=8 {
+        trainer.zero_grads();
+        trainer.forward();
+        trainer.backward();
+        trainer.adamw_step(step, 3e-2, 0.0, Adam::default(), None, 1.0);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("adapter.safetensors");
+    trainer.save_adapter(file.to_str().unwrap(), "test/adapter", "test/base", None, None).unwrap();
+
+    let mut engine = model.engine(serve_config(4, 0));
+    engine.enable_adapters(AdapterBankConfig::new(1, 2, &LORA_LEAVES)).unwrap();
+    let id = engine.load_adapter(VerifiedAdapter { label: "test/adapter".into(), digest: "sha256:test".into(), adapter: adapter::read_adapter(file.to_str().unwrap()).unwrap() }).unwrap();
+    assert_eq!(engine.adapter_availability(id), model::serve::AdapterAvailability::Resident);
+    engine.pin_adapter(id);
+    // The adapter was fitted to `targets`, so those are all near probability one; the comparison scores other tokens,
+    // the ones a sampler draws and a policy gradient pushes down.
+    let probed: Vec<u32> = targets.iter().map(|&t| if t == ricursive::train::IGNORE { t } else { (t + 5) % vocab as u32 }).collect();
+    // The engine's log-probability of the probed token after the first `n`, at a sampler temperature of 0.7.
+    let temperature = 0.7f32;
+    let served: Vec<f32> = (1..tokens.len())
+        .map(|n| {
+            let mut table = BlockTable::with_namespace(id.kv_namespace());
+            let hidden = prefill_in_slices(&mut engine, &mut table, &tokens[..n], 5);
+            let logits: Vec<f64> = engine.logits(&hidden).iter().map(|&z| f64::from(z / temperature)).collect();
+            engine.release_table(&mut table);
+            let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let log_sum = max + logits.iter().map(|z| (z - max).exp()).sum::<f64>().ln();
+            (logits[probed[n - 1] as usize] - log_sum) as f32
+        })
+        .collect();
+    let trained = model::logprobs::token_logprobs_scaled(&trainer, &tokens, &probed, 1.0 / temperature).expect("the trainer scores tokens");
+    let trained = &trained[..served.len()];
+    let worst = served.iter().zip(trained).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+    eprintln!("trainer vs served token log-probabilities over {} positions: worst difference {worst:.3e}", served.len());
+    assert!(served.iter().any(|lp| *lp < -0.5), "the log-probabilities are not all near zero, so the comparison means something");
+    assert!(worst <= 1e-4, "the trainer's log-probabilities are the engine's: {worst:.3e}");
+}
+
 /// Spec: a refused adapter says why and changes nothing: the wrong rank of a site, an unknown site.
 #[test]
 fn an_adapter_that_does_not_fit_the_model_is_refused_by_name() {

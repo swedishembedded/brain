@@ -524,6 +524,9 @@ each layer is rebuilt in the backward.
 | `tests/e2e/ripple.bats`: two adapters (one pinned, one in the store) and the base answer chat requests from one `brain serve`; the instance is built once; an adapter promoted into a `--watch-adapters` directory is listed and answers while the server runs | pass |
 | `TextGenerationPipeline::builder(dir).adapter(file)` over a Ripple | the adapter answers what the training forward does; `attach_adapter` switches to another and `detach_adapter` returns to the base bit for bit, no reload |
 | native sparse attention as a trainer option (`--native-sparse`, `native_sparse_attention`) at a full budget vs dense, software adapter, Ripple and Qwen3 | Ripple LoRA losses (3.9267719, 2.2625196) dense vs (3.9267719, 2.2625198) sparse; Qwen3 equal within 1e-3; refused by name on the CPU backend ("workgroup-barrier") and by architectures that do not declare it |
+| policy gradient on a tiny Ripple (`ChatFineTune::policy_gradient`, rollouts with an `advantage`), the rewarded actions and the penalised ones scored as held-out sets before and after on the resident model (`ScoredFit`, CPU backend) | rewarded actions' loss 3.8021 -> 3.4217, penalised 3.8529 -> 4.1263; first-step ratio 1 +- 1e-4; adapter card regime `policy_gradient_lora`; SFT held-out loss 3.8228 -> 0.8712 |
+| GRPO against a verifiable reward (share of even tokens) on a tiny Ripple over a bf16, NF4 and FP8 base (`rl` `objective_fits`, software adapter, 40 steps, 96 samples each side) | mean reward 0.534 -> 0.844, 0.539 -> 0.802, 0.557 -> 0.839; only the adapters move |
+| the trainer's token log-probabilities vs the serving engine's, the engine under a trained adapter in its bank, sampler temperature 0.7, 11 positions of tokens the adapter was not fitted to (`train_lora`) | worst difference 1.9e-6 |
 | `brain ricursive finetune` / `brain finetune --arch ricursive` end to end (`tests/e2e/ripple.bats`, `--device cpu`) | a LoRA run on the scripted model lowers the loss and writes the adapter, a second run continues it at its own rank and a different rank is refused; a full run writes a checkpoint |
 
 How a stage is cut: with the value residual every stage holds the embedding table and recomputes `x0` from the
@@ -672,7 +675,6 @@ engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
   NVFP4), and a full fine-tune needs a float base (f32 weights, AdamW on the device); layer-streamed and
   resident bf16/fp8 full fine-tuning (`Model::set_resident`) are not wired, so the 65B cannot be fully
   fine-tuned yet (a pipeline of float stages writes a full checkpoint, `Shardable::save_stages`).
-  `PolicyGradient` fine-tuning and held-out scoring before and after are wired for Qwen families only.
 - Training: on the CPU backend `matmul_dx` with a very large contraction (the head's, vocabulary 152k) is a
   naive strided loop, 25 s a step for a toy model, so toy tests use a 32-token vocabulary; a GPU does not
   have the problem.

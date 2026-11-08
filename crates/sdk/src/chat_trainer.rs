@@ -25,10 +25,11 @@ use model::ops::TierPolicy;
 use modelopt::{Budget, MeasureFit, Progress, PruneFit, PruneReport, PruneWidth, Report, SearchFit, Timing};
 use rl::fit::{DistillFit, TeacherFit};
 use rl::objective::distill::{DistillConfig, DistillExample};
-use model::finetune::{AdapterLineage, ChatTrainer, LoraRequest, OptimizerState, PreferenceMargins};
+use model::finetune::{AdapterLineage, CausalLmFit, ChatTrainer, LoraRequest, ModelFit, OptimizerState, PreferenceMargins, ScoredFit};
 use model::{FitControl, FitOpts, FitReport};
-use rl::fit::DpoFit;
+use rl::fit::{DpoFit, PolicyGradientFit};
 use rl::objective::dpo::{DpoConfig, PackedPair};
+use rl::objective::external::{PolicyGradientConfig, PolicyGradientStats};
 
 /// One preference fine-tune of a LoRA adapter, as the generic trainer takes it.
 pub(crate) struct PreferenceJob<'a> {
@@ -50,6 +51,33 @@ pub(crate) struct PreferenceJob<'a> {
 /// [`PreferenceJob::score_sets`] entry.
 pub(crate) type ResidentMargins = Vec<Vec<f64>>;
 
+/// One supervised or policy-gradient LoRA run on a prepared dataset, with optional held-out scoring around it.
+pub(crate) struct LoraJob<'a> {
+    pub base: &'a Path,
+    pub lora: LoraRequest<'a>,
+    pub opts: &'a FitOpts,
+    /// The prepared dataset ([`data::chat::prepare_chat_samples`]).
+    pub dir: &'a Path,
+    /// Train the clipped policy-gradient objective on rollout records instead of the supervised loss.
+    pub policy_gradient: Option<PolicyGradientConfig>,
+    /// Prepared held-out sets scored on the resident model before the first step and after the last.
+    pub held_out: &'a [&'a Path],
+}
+
+/// Writes the adapter a run trained (consuming it), once the caller knows the lineage to record.
+pub(crate) type SaveAdapter = Box<dyn FnOnce(&Path, &AdapterLineage<'_>) -> std::io::Result<()>>;
+
+/// What [`LoraJob`] produced.
+pub(crate) struct LoraOutcome {
+    pub report: FitReport,
+    /// One score per held-out set, in the order given.
+    pub scored: Vec<model::ScoredSet>,
+    /// What the policy-gradient objective measured; `None` for a supervised run.
+    pub policy_gradient: Option<PolicyGradientStats>,
+    pub save: SaveAdapter,
+}
+
+type LoraFn = for<'j, 'c> fn(LoraJob<'j>, FitControl<'c>) -> std::io::Result<LoraOutcome>;
 type FullFn = for<'c> fn(&Path, &Path, &FitOpts, &Path, OptimizerState, FitControl<'c>) -> std::io::Result<FitReport>;
 type PreferenceFn = for<'j, 'c> fn(PreferenceJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, ResidentMargins)>;
 type MarginsFn = fn(&Path, Option<&Path>, &Path, &[(EncodedTurn, EncodedTurn)], u32) -> Option<PreferenceMargins>;
@@ -111,6 +139,10 @@ pub(crate) struct ChatEntry {
     pub lora_bases: model::policy::TrainBases,
     /// The family scores the exported adapter ([`Self::margins`]) rather than the resident model.
     pub scores_exported_pairs: bool,
+    /// The family runs the policy-gradient objective ([`ChatTrainer::POLICY_GRADIENT`]).
+    pub policy_gradient: bool,
+    /// A supervised or policy-gradient LoRA run, with held-out scoring around it.
+    pub lora: LoraFn,
     /// The weight formats the family's serving engine holds per linear.
     pub served_weights: &'static [Dtype],
     /// The family's trainer cuts its model into the stage count a run asks for (`FitOpts::stages`).
@@ -133,7 +165,7 @@ pub(crate) struct ChatEntry {
 }
 
 impl ChatEntry {
-    pub(crate) const fn of<T: ChatTrainer>() -> ChatEntry {
+    pub(crate) const fn of<T: ChatTrainer + 'static>() -> ChatEntry where T::Trained: 'static {
         ChatEntry {
             checkpoint_path: T::checkpoint_path,
             vocab: T::vocab,
@@ -143,6 +175,8 @@ impl ChatEntry {
             margins: T::preference_margins,
             lora_bases: T::LORA_BASES,
             scores_exported_pairs: T::SCORES_EXPORTED_PAIRS,
+            policy_gradient: T::POLICY_GRADIENT,
+            lora: lora::<T>,
             served_weights: T::SERVED_WEIGHTS,
             pipelined: T::PIPELINED,
             native_sparse: T::NATIVE_SPARSE,
@@ -158,6 +192,39 @@ impl ChatEntry {
 
 fn full<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, out: &Path, state: OptimizerState, control: FitControl<'_>) -> std::io::Result<FitReport> {
     model::finetune::fit_full::<T>(base, dir, opts, out, state, control)
+}
+
+/// The supervised loss or the clipped policy gradient over the family's LoRA build, scored on `job.held_out` around
+/// it. A request the family does not declare ([`ChatTrainer::POLICY_GRADIENT`], [`ChatTrainer::SCORES_HELD_OUT`]) is
+/// refused by name before the base is opened.
+fn lora<T: ChatTrainer + 'static>(job: LoraJob<'_>, control: FitControl<'_>) -> std::io::Result<LoraOutcome> {
+    let unsupported = |what: &str| std::io::Error::new(std::io::ErrorKind::Unsupported, format!("{}: {what} is not wired for this architecture's trainer", T::LORA_BASES.model));
+    if job.policy_gradient.is_some() && !T::POLICY_GRADIENT {
+        return Err(unsupported("policy-gradient training on rollouts"));
+    }
+    if !job.held_out.is_empty() && !T::SCORES_HELD_OUT {
+        return Err(unsupported("scoring held-out sets before and after the run"));
+    }
+    let continuing = job.lora.continue_from.is_some();
+    fn run<T: ChatTrainer + 'static, F: ModelFit>(job: &LoraJob<'_>, inner: &mut F, continuing: bool) -> std::io::Result<(FitReport, Vec<model::ScoredSet>, SaveAdapter)> {
+        let mut scored = ScoredFit::new(inner, job.held_out, job.opts, continuing);
+        let (report, trained) = T::train_lora(job.base, &job.lora, job.opts, &mut scored)?;
+        let sets = scored.into_scored();
+        let save: SaveAdapter = Box::new(move |path, lineage| T::save_adapter(&trained, path, lineage));
+        Ok((report, sets, save))
+    }
+    match job.policy_gradient {
+        Some(config) => {
+            let mut fit = PolicyGradientFit::new(job.dir, config, job.opts, control);
+            let (report, scored, save) = run::<T, _>(&job, &mut fit, continuing)?;
+            Ok(LoraOutcome { report, scored, policy_gradient: Some(fit.into_stats().unwrap_or_default()), save })
+        }
+        None => {
+            let mut fit = CausalLmFit { dir: job.dir, opts: job.opts, out: None, control: Some(control) };
+            let (report, scored, save) = run::<T, _>(&job, &mut fit, continuing)?;
+            Ok(LoraOutcome { report, scored, policy_gradient: None, save })
+        }
+    }
 }
 
 fn preference<T: ChatTrainer>(job: PreferenceJob<'_>, control: FitControl<'_>) -> std::io::Result<(FitReport, ResidentMargins)> {

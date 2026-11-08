@@ -83,6 +83,42 @@ impl ModelFit for CausalLmFit<'_, '_> {
     }
 }
 
+/// Held-out scoring around any run: each prepared set in `held_out` is scored on the model the trainer builds before
+/// the first step (the base's loss, unless the run `continuing` an adapter, whose starting point is not the base) and
+/// on the model the run returns, over the supervised positions training itself supervises
+/// ([`crate::score_base`], [`crate::score_tuned`]). It scores on the resident model because a second copy of a large
+/// base does not fit beside it.
+pub struct ScoredFit<'a, F> {
+    inner: &'a mut F,
+    held_out: &'a [&'a Path],
+    opts: &'a FitOpts,
+    continuing: bool,
+    scored: Vec<crate::ScoredSet>,
+}
+
+impl<'a, F: ModelFit> ScoredFit<'a, F> {
+    /// Score `held_out` around the run `inner` performs.
+    pub fn new(inner: &'a mut F, held_out: &'a [&'a Path], opts: &'a FitOpts, continuing: bool) -> ScoredFit<'a, F> {
+        ScoredFit { inner, held_out, opts, continuing, scored: Vec::new() }
+    }
+
+    /// One score per held-out set, in the order given (the tuned loss is `None` for an interrupted run).
+    pub fn into_scored(self) -> Vec<crate::ScoredSet> {
+        self.scored
+    }
+}
+
+impl<F: ModelFit> ModelFit for ScoredFit<'_, F> {
+    fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(FitReport, M)> {
+        self.scored = crate::score_base(&model, self.held_out, self.opts, self.continuing)?;
+        let (report, model) = self.inner.fit(model)?;
+        if !report.interrupted {
+            crate::score_tuned(&model, self.held_out, self.opts, &mut self.scored)?;
+        }
+        Ok((report, model))
+    }
+}
+
 /// A full-parameter fine-tune of the checkpoint at `base` on the prepared
 /// dataset in `dir`, written to `out`: every weight trains in fp32 with the
 /// moments where `state` says and in the format `opts.precision` names. Always a fresh start from `base`; a run stopped
@@ -206,6 +242,16 @@ pub trait ChatTrainer {
     /// Whether [`Self::train_lora`] and [`Self::train_full`] cut the model into the stage count
     /// [`FitOpts::stages`] asks for. A family that lays itself out (or never does) refuses a request above zero.
     const PIPELINED: bool = false;
+
+    /// Whether [`Self::train_lora`] runs the clipped policy-gradient objective of
+    /// `rl::fit::PolicyGradientFit` on rollout records (the objective is written over [`crate::Model`], so a family
+    /// whose trainable model carries [`crate::training::TokenObjectives`] declares it). A request for it is refused by name
+    /// before the base is read where this is false.
+    const POLICY_GRADIENT: bool = false;
+
+    /// Whether the held-out record sets of a run are scored on the resident model before the first step and after the
+    /// last ([`ScoredFit`]). A request for it is refused by name where this is false.
+    const SCORES_HELD_OUT: bool = false;
 
     /// Whether this family's model takes native sparse attention training ([`crate::Model::enable_native_sparse_attention`]).
     /// A request for it is refused by name before the base is read where this is false.
