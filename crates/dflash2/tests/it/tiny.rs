@@ -13,7 +13,8 @@
 //! Fixture: `python3 tools/goldens/dflash2_reference_forward.py tiny --out testdata/golden/dflash2/tiny`; without it
 //! the tests skip by name.
 
-use dflash2::{BlockJob, Dflash2, Dflash2Config, HfDraft};
+use dflash2::{BlockJob, Dflash2, Dflash2Config, DraftCache, HfDraft};
+use model::kv_tier::KvTier;
 
 use crate::common::{gather, logits, scaled_error, Golden};
 
@@ -38,33 +39,44 @@ fn fixture() -> Option<Fixture> {
 }
 
 fn load(fx: &Fixture, slots: u32, cap: u32) -> Dflash2 {
+    load_with(fx, slots, cap, DraftCache::dense(slots, cap))
+}
+
+fn load_with(fx: &Fixture, slots: u32, cap: u32, cache: DraftCache) -> Dflash2 {
     let gpu = gpu_core::Gpu::open(None, &dflash2::pipelines(&fx.cfg));
     let src = HfDraft::open(std::path::Path::new(&format!("{}/draft", fx.dir))).unwrap();
-    Dflash2::load(gpu, fx.cfg.clone(), Box::new(src), slots, cap).unwrap()
+    Dflash2::load_with(gpu, fx.cfg.clone(), Box::new(src), slots, cap, cache).unwrap()
 }
 
 /// Compare a round's per-layer hidden states, its post-norm rows and the selector's path with the reference's.
 fn check_round(fx: &Fixture, m: &Dflash2, prefix: &str, hidden_rows: &[f32], trace: &[Vec<f32>], job: usize, jobs: usize) {
+    check_round_at(fx, m, prefix, hidden_rows, trace, job, jobs, TOLERANCE, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_round_at(fx: &Fixture, m: &Dflash2, prefix: &str, hidden_rows: &[f32], trace: &[Vec<f32>], job: usize, jobs: usize, tolerance: f32, exact_path: bool) {
     let d = fx.cfg.d_model as usize;
     let block = fx.cfg.block_size as usize;
     let per_job = block * d;
     for (l, layer) in trace.iter().enumerate() {
         let got = &layer[job * per_job..(job + 1) * per_job];
         let err = scaled_error(&format!("{prefix}layer {l}"), got, fx.gold.get(&format!("{prefix}layer.{l}")));
-        assert!(err <= TOLERANCE, "{prefix}layer {l}: scaled error {err:.3e}");
+        assert!(err <= tolerance, "{prefix}layer {l}: scaled error {err:.3e}");
     }
     let _ = jobs;
     let mask_rows = &hidden_rows[d..];
     let normed = m.normed(mask_rows);
     let err = scaled_error(&format!("{prefix}post-norm hidden"), &normed, fx.gold.get(&format!("{prefix}hidden")));
-    assert!(err <= TOLERANCE, "{prefix}post-norm hidden: scaled error {err:.3e}");
+    assert!(err <= tolerance, "{prefix}post-norm hidden: scaled error {err:.3e}");
     let head = fx.gold.get("head");
     let lg = logits(&normed, head, d);
     let err = scaled_error(&format!("{prefix}logits"), &lg, fx.gold.get(&format!("{prefix}logits")));
-    assert!(err <= TOLERANCE, "{prefix}logits: scaled error {err:.3e}");
+    assert!(err <= tolerance, "{prefix}logits: scaled error {err:.3e}");
     let anchor = fx.gold.ids(&format!("{prefix}ids"))[0];
     let path = m.select(mask_rows, &lg, anchor).unwrap();
-    assert_eq!(path, fx.gold.ids(&format!("{prefix}path")), "{prefix}selector path");
+    if exact_path {
+        assert_eq!(path, fx.gold.ids(&format!("{prefix}path")), "{prefix}selector path");
+    }
 }
 
 fn noise(fx: &Fixture, prefix: &str) -> Vec<f32> {
@@ -136,5 +148,50 @@ fn the_memory_plan_charges_the_weight_bytes_the_load_reports() {
     let planned = src.device_weight_bytes(&fx.cfg);
     let m = load(&fx, 1, 20);
     assert_eq!(planned, m.weight_bytes());
-    assert_eq!(fx.cfg.cache_bytes(3, 32), (0..fx.cfg.n_layers).map(|l| 2 * 3 * u64::from(fx.cfg.cache_rows(l, 32)) * u64::from(fx.cfg.kv_dim()) * 4).sum::<u64>());
+    // Sliding layers keep a ring per slot, the full layer a pool of 3 x 32 positions in blocks of 16.
+    let rows = |l: usize| if fx.cfg.layers[l].kind == dflash2::LayerKind::Sliding { 3 * u64::from(fx.cfg.cache_rows(l, 32)) } else { 96 };
+    assert_eq!(DraftCache::dense(3, 32).bytes(&fx.cfg, 3, 32), (0..fx.cfg.n_layers).map(|l| 2 * rows(l) * u64::from(fx.cfg.kv_dim()) * 4).sum::<u64>());
+}
+
+/// The caches held at a compact tier and paged in small blocks: two sequences interleaved, fed in pieces, one extended after
+/// a denoise, against the reference within the tier's tolerance (f32 exactly). The full layer's blocks are shared by the
+/// slots and handed back when one ends.
+#[test]
+fn compact_and_paged_caches_follow_the_reference_within_the_tiers_tolerance() {
+    let Some(fx) = fixture() else { return };
+    let wide = fx.cfg.tap_width();
+    // (tier, scaled tolerance on every layer, post-norm row and logit)
+    for (tier, tolerance) in [(KvTier::F32, TOLERANCE), (KvTier::BF16, 3e-2), (KvTier::INT8, 1.5e-1), (KvTier::FP8, 3e-1)] {
+        // Slot 0 holds 14 positions and a block of five (5 blocks of 4), slot 2 holds 17 and the block (6): 11 of 12.
+        let cache = DraftCache { tier, block_size: 4, pool_positions: 48 };
+        let m = load_with(&fx, 3, 32, cache);
+        m.append_context(0, fx.gold.get("a.taps"), 0).unwrap();
+        for (from, to) in [(0usize, 7usize), (7, 17)] {
+            m.append_context(2, &fx.gold.get("b.taps")[from * wide..to * wide], from as u32).unwrap();
+        }
+        let (na, nb) = (noise(&fx, "a."), noise(&fx, "b."));
+        let mut trace = Vec::new();
+        let out = m.denoise_traced(&[BlockJob { slot: 0, pos: 14, noise: &na }, BlockJob { slot: 2, pos: 17, noise: &nb }], Some(&mut trace)).unwrap();
+        eprintln!("tier {tier}:");
+        check_round_at(&fx, &m, "a.", &out[0], &trace, 0, 2, tolerance, tier == KvTier::F32);
+        check_round_at(&fx, &m, "b.", &out[1], &trace, 1, 2, tolerance, tier == KvTier::F32);
+        assert_eq!(m.pool_use(), (11, 12), "{tier}: the slots hold 5 and 6 blocks of the pool");
+        m.release_slot(0);
+        assert_eq!(m.pool_use(), (6, 12), "{tier}: a finished sequence's blocks are back at once");
+    }
+}
+
+/// A pool with no block left refuses the sequence that needs one, by name, and gives the others theirs back to try again.
+#[test]
+fn a_full_pool_refuses_the_sequence_that_needs_another_block_and_recovers_when_one_ends() {
+    let Some(fx) = fixture() else { return };
+    let cache = DraftCache { tier: KvTier::F32, block_size: 4, pool_positions: 24 };
+    let m = load_with(&fx, 2, 32, cache);
+    m.append_context(0, fx.gold.get("a.taps"), 0).unwrap();
+    m.reserve(0, 19).unwrap();
+    assert_eq!(m.pool_use(), (5, 6));
+    let err = m.append_context(1, fx.gold.get("b.taps"), 0).unwrap_err();
+    assert!(err.contains("cache pool of 24 positions is full"), "{err}");
+    m.release_slot(0);
+    m.append_context(1, fx.gold.get("b.taps"), 0).unwrap();
 }

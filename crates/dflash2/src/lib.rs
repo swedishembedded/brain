@@ -32,5 +32,5 @@ pub mod source;
 
 pub use config::{Dflash2Config, LayerKind, LayerSpec};
 pub use drafter::{DraftHost, DraftRequest, Dflash2Drafter, TapRows};
-pub use model::{pipelines, BlockJob, Dflash2};
+pub use model::{pipelines, BlockJob, Dflash2, DraftCache};
 pub use source::{DraftSource, GgufDraft, HfDraft, Leaf, Tensor};

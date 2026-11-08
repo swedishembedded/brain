@@ -126,7 +126,7 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
     let head_weight = Weight::bytes_for(tiers.want("lm_head.weight"), cfg.vocab_size, cfg.hidden_size);
     weights += head_weight;
     // A draft model rides the last stage's device beside the head.
-    let draft = serve.drafter.as_ref().map_or(0, |d| d.device_bytes(serve.max_batch, serve.max_seq_len));
+    let draft = serve.drafter.as_ref().map_or(0, |d| d.device_bytes(serve));
     let taps_host = serve.drafter.as_ref().map_or(0, |d| d.tap_bytes(cfg.hidden_size, serve.num_blocks, serve.block_size));
     let head = head_weight + draft + bank_head + 4 * cfg.hidden_size as u64 + 4 * rows * cfg.vocab_size as u64;
 
@@ -383,7 +383,7 @@ mod tests {
             let with = ServeConfig { drafter: Some(draft.clone()), ..plain.clone() };
             let (a, b) = (footprint(&cfg, &plain, &tiers, LsaCharge::default()), footprint(&cfg, &with, &tiers, LsaCharge::default()));
             assert_eq!((a.draft, a.taps_host), (0, 0));
-            assert_eq!(b.draft, draft.device_bytes(sequences, tokens));
+            assert_eq!(b.draft, draft.device_bytes(&with));
             assert_eq!(b.taps_host, 5 * 5120 * 2 * u64::from(with.num_blocks) * u64::from(with.block_size), "bf16 rows of five 5120-wide taps for every pooled position");
             assert_eq!(b.single_card_bytes(), a.single_card_bytes() + b.draft, "the draft is on the last stage; nothing else moves");
             assert_eq!(b.bytes.head, a.bytes.head + b.draft);
@@ -391,7 +391,7 @@ mod tests {
                 "nvfp4 target + draft, kv int8, ctx {tokens:>6} x {sequences} sequence(s): draft {:.2} GiB on the card (weights {:.2}, caches {:.2}), taps {:.1} GiB on the host",
                 gib(b.draft),
                 gib(draft.weight_bytes),
-                gib(draft.cfg.cache_bytes(sequences, tokens)),
+                gib(with.draft_cache().bytes(&draft.cfg, sequences, tokens)),
                 gib(b.taps_host)
             );
         }

@@ -118,7 +118,7 @@ fixed ring plus a per-token share of the global layers
 (`ricursive::ring_bytes_per_slot`, `ricursive::global_kv_bytes_per_token`).
 `ricursive::placement::footprint` states every term from the same functions
 the engine allocates with, and the resident registers exactly that with the
-scheduler. A cached prompt is reused at the length it was filed at.
+scheduler. A cached prompt is reused at the length it was filed at, and at the point where a later prompt left it: a prefill that leaves a cached prompt (or that the scheduler hints) files a prefix of its own there, rounded down to a KV block, so prompts that share a system prompt or document and then diverge reuse it. A re-sent conversation resumes from its previous prompt; the reply is prefilled again.
 
 Attention runs the fused paged flash kernels (no score slab, so no cap on the
 context a dense read spans, at every KV tier) on a device with workgroup
@@ -156,10 +156,11 @@ The engine retains the residual at the five layers for every position it consume
 bf16 on the host: 50 KiB a position, in blocks shared with the KV so prefix reuse and rollback need nothing more), and
 `PagedDecoder::draft` runs the draft for every sequence of the step in one forward: each sequence has a cache slot
 keyed by its request that is fed the taps of the positions it has not seen. The memory plan charges the draft's
-weights (7.42 GiB), its caches (a ring of window plus one block for each sliding layer, every position for the full
-one, per live sequence: 1.13 GiB at 128k tokens for one sequence) and one block of activations per sequence to the
+weights (7.42 GiB), its K/V caches (held at the `--kv-cache` tier; a ring of window plus one block for each sliding layer per live
+sequence, and the full layer paged in one pool as wide as the target's own block pool, handed back when a request
+ends: 0.29 GiB at 128k tokens with an int8 cache) and one block of activations per sequence to the
 last stage's card, and the taps to the host: on one 96 GiB card with the NVFP4 release and an int8 cache the longest
-dense context falls from about 962k to about 581k tokens with the draft attached.
+dense context falls from about 962k to about 684k tokens with the draft attached.
 
 ## Training it
 

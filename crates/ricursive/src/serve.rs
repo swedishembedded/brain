@@ -183,13 +183,14 @@ pub struct DraftSizing {
 }
 
 impl DraftSizing {
-    /// Device bytes of the draft beside the target: its weights, the K/V caches of `slots` sequences of up to
-    /// `max_seq_len` positions, and the activations of one block per sequence.
-    pub fn device_bytes(&self, slots: u32, max_seq_len: u32) -> u64 {
+    /// Device bytes of the draft beside the target: its weights, its K/V caches held as `serve` holds the target's
+    /// ([`ServeConfig::draft_cache`]: the same tier, a pool of the target's own positions for the full layers, a ring per
+    /// live sequence for the sliding ones) and one block of activations per live sequence.
+    pub fn device_bytes(&self, serve: &ServeConfig) -> u64 {
         let c = &self.cfg;
-        let rows = u64::from(slots) * u64::from(c.block_size);
+        let rows = u64::from(serve.max_batch) * u64::from(c.block_size);
         let activations = 4 * rows * (3 * u64::from(c.d_ff) + 5 * u64::from(c.q_dim()) + 4 * u64::from(c.kv_dim()) + 10 * u64::from(c.d_model) + u64::from(c.dyn_width()));
-        self.weight_bytes + c.cache_bytes(slots, max_seq_len) + activations
+        self.weight_bytes + serve.draft_cache().bytes(c, serve.max_batch, serve.max_seq_len) + activations
     }
 
     /// Host bytes of the target's retained hidden states for a block pool of `num_blocks` x `block_size` positions.
@@ -202,6 +203,15 @@ impl ServeConfig {
     /// A config with the given sizes, weights as stored and an f32 KV cache.
     pub fn new(block_size: u32, num_blocks: u32, max_seq_len: u32, max_batch: u32, prefix_slots: u32, prefill_chunk: u32) -> ServeConfig {
         ServeConfig { block_size, num_blocks, max_seq_len, max_batch, prefix_slots, prefill_chunk, sparse_attention: false, weights: None, kv_cache: KvTier::F32, dense_keys: None, fused_attention: true, adapter_bank: None, drafter: None }
+    }
+
+    /// How the draft model's K/V caches are held: at the target's KV tier, the full layers in a pool as wide as the
+    /// target's own block pool (every position a live sequence holds is a position the target holds too), the sliding
+    /// layers in a ring per live sequence.
+    pub fn draft_cache(&self) -> dflash2::DraftCache {
+        let pool = u64::from(self.num_blocks) * u64::from(self.block_size);
+        let live = u64::from(self.max_batch) * u64::from(self.max_seq_len);
+        dflash2::DraftCache { tier: self.kv_cache, block_size: self.block_size, pool_positions: pool.min(live).min(u64::from(u32::MAX)) as u32 }
     }
 
     fn validate(&self, cfg: &RicursiveConfig) -> Result<(), String> {
@@ -1153,6 +1163,10 @@ impl PagedDecoder for RicursiveEngine {
     fn release_table(&mut self, t: &mut BlockTable) {
         if let Some(slot) = t.take_state_row() {
             self.branches.remove(&slot);
+            // The draft's cache slot is keyed by the ring slot: a finished request gives its blocks back now.
+            if let Some(d) = self.drafter.as_mut() {
+                d.forget(u64::from(slot));
+            }
             self.ring_free.push(slot);
         }
         self.drop_table(t);
@@ -1301,7 +1315,7 @@ impl PagedDecoder for RicursiveEngine {
     }
     fn draft(&mut self, queries: &[DraftQuery], ks: &[usize]) -> Vec<Vec<u32>> {
         let Some(mut drafter) = self.drafter.take() else { return vec![Vec::new(); queries.len()] };
-        let requests: Vec<DraftRequest<'_>> = queries.iter().zip(ks).map(|(q, &want)| DraftRequest { id: q.id, context: q.context, table: q.table, want }).collect();
+        let requests: Vec<DraftRequest<'_>> = queries.iter().zip(ks).map(|(q, &want)| DraftRequest { id: u64::from(Self::ring_slot(q.table)), context: q.context, table: q.table, want }).collect();
         let proposals = drafter.propose(&*self, &*self, &requests);
         self.drafter = Some(drafter);
         proposals
@@ -1361,9 +1375,10 @@ impl RicursiveEngine {
         let last = self.stages.len() - 1;
         let device = self.device.clone();
         let (slots, cap) = (self.serve.max_batch, self.serve.max_seq_len);
+        let cache = self.serve.draft_cache();
         let model = self.plan.open_stage(last, || {
             let gpu = Gpu::open(device.as_deref(), &dflash2::pipelines(&cfg));
-            dflash2::Dflash2::load(gpu, cfg.clone(), Box::new(source), slots, cap)
+            dflash2::Dflash2::load_with(gpu, cfg.clone(), Box::new(source), slots, cap, cache)
         })??;
         tracing::info!(draft = %dir.display(), weights_gib = model.weight_bytes() as f64 / (1u64 << 30) as f64, slots, cap, layers = ?cfg.target_layers, "ricursive: draft model loaded");
         self.enable_taps(&cfg.target_layers)?;
@@ -1374,6 +1389,12 @@ impl RicursiveEngine {
     /// Refuse, by name, a draft built for another target.
     pub fn check_drafter(&self, cfg: &dflash2::Dflash2Config) -> Result<(), String> {
         check_draft_fits(&self.cfg, cfg)
+    }
+
+    /// Blocks of the draft model's shared cache pool in use and in all; `None` without a draft model. A finished request's
+    /// blocks are back as it is released.
+    pub fn draft_pool(&self) -> Option<(u32, u32)> {
+        self.drafter.as_ref().map(|d| d.model().pool_use())
     }
 
     /// What the draft model has cost so far; `None` without one.

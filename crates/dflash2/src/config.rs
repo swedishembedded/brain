@@ -272,11 +272,6 @@ impl Dflash2Config {
         };
         rows.min(u64::from(u32::MAX)) as u32
     }
-
-    /// Bytes of device memory the K/V caches of `slots` sequences of up to `cap` positions cost at f32.
-    pub fn cache_bytes(&self, slots: u32, cap: u32) -> u64 {
-        (0..self.n_layers).map(|l| 2 * u64::from(slots) * u64::from(self.cache_rows(l, cap)) * u64::from(self.kv_dim()) * 4).sum()
-    }
 }
 
 /// `no_rope_layers` as one RoPE flag per layer. The key is spelt two ways: a list of 0/1 flags with one entry per

@@ -139,7 +139,12 @@ pub fn run_lsa(argv: &[String]) -> ! {
             print!("{USAGE}");
             return Ok(());
         }
-        let set = gpu_core::select_compute(args.get("device").unwrap_or("gpu"), args.get("backend"))?;
+        // `--device` and `--backend` are global flags the CLI resolved and published before this command was parsed, so
+        // they never reach `args`: the published selection is the user's, and `gpu` is only the default when none was given.
+        let set = match (args.get("device"), gpu_core::published_compute_set()) {
+            (None, Some(published)) if args.get("backend").is_none() => published.clone(),
+            (device, _) => gpu_core::select_compute(device.unwrap_or("gpu"), args.get("backend"))?,
+        };
         set.apply()?;
         gpu_core::publish_compute_set(set);
         let path = checkpoint(&args)?;

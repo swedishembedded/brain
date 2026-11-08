@@ -313,3 +313,34 @@ fn sampled_decoding_runs_through_rejection_sampling_with_the_draft_model() {
     assert!(stats.verify_steps > 0 && stats.proposed > 0, "sampled requests were verified against the draft's proposals: {stats:?}");
     assert_eq!(run().0, first, "the same seeds give the same sampled text");
 }
+
+/// The draft's caches follow the target's KV tier and are paged: with a bf16 or int8 cache (draft planes in the same tier)
+/// speculation still equals plain greedy at that tier, and when the sequences finish the draft's pool is whole again,
+/// at once, not when another request wants the slot.
+#[test]
+fn compact_draft_caches_stay_lossless_and_a_finished_request_gives_its_blocks_back() {
+    use model::kv_tier::KvTier;
+    let (Some(dir), Some(draft)) = (tiny_dir(), draft_dir()) else { return };
+    let vocab = tiny_config(&dir).vocab_size as u32;
+    let prompts: Vec<Vec<u32>> = [(1u32, 9usize), (2, 15), (3, 30), (4, 6)].iter().map(|&(seed, n)| stream(seed, n, vocab)).collect();
+    for tier in [KvTier::BF16, KvTier::INT8] {
+        let serve = ServeConfig { kv_cache: tier, ..serve_config(8, 2) };
+        let want = plain_outputs(&dir, &serve, &prompts, 40);
+        let mut sched = Scheduler::new(drafted_engine(&dir, &draft, serve), 4);
+        let ids: Vec<u64> = prompts.iter().map(|p| sched.submit(greedy(p, 40))).collect();
+        let mut peak = 0;
+        let mut done = std::collections::HashMap::new();
+        while sched.pending() {
+            for (id, toks) in sched.step() {
+                done.insert(id, toks);
+            }
+            peak = peak.max(sched.decoder_mut().draft_pool().expect("a draft").0);
+        }
+        for (i, (id, plain)) in ids.iter().zip(&want).enumerate() {
+            assert_eq!(&done[id], plain, "{tier}: prompt {i}");
+        }
+        let (used, all) = sched.decoder_mut().draft_pool().unwrap();
+        assert!(peak > 0 && used == 0, "{tier}: the pool held {peak} of {all} blocks while sequences ran and {used} after they ended");
+        eprintln!("draft cache at {tier}: peak {peak} of {all} pool blocks, {:?}", sched.spec_stats());
+    }
+}

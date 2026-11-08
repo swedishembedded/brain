@@ -48,9 +48,8 @@ brain serve --openai --device gpu0 --kv-cache int8 --speculative dflash
 `--speculative dflash` reads the draft pulled beside the target (the target's repo
 without a quantization suffix, plus `-DFlash2`); `--draft-model DIR` names another
 directory or pulled `<vendor>/<repo>` and implies the mode. The memory plan charges the
-draft's weights (7.4 GiB at bf16), its K/V caches (a ring of `window + block` rows for
-each sliding layer and every position for a full one, per live sequence) and its
-activations to the last stage's card, and the retained hidden states (5 x 5120 bf16
+draft's weights (7.4 GiB at bf16), its K/V caches and its
+activations to the last stage's card (the caches at the target's `--kv-cache` tier, the full layers paged in one pool as wide as the target's block pool, handed back when a request ends), and the retained hidden states (5 x 5120 bf16
 values a position) to the host, so the default context shrinks to leave room. A draft
 built for another target (width, vocabulary, the layers it reads, the mask token) is
 refused by name.

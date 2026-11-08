@@ -27,6 +27,8 @@
 //! every position. Rows of the denoising block itself are written into the same cache at their absolute positions
 //! (the reference's "crop the draft cache back to `start`" is the next round overwriting them).
 
+use std::sync::Mutex;
+
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::kv_tier::{FlashDecodeShape, KvAppend, KvKernels, KvLayer, KvTier};
 use model::ops::{Act, Ops, PagedDecodeShape, Weight};
@@ -116,6 +118,49 @@ pub struct BlockJob<'a> {
     pub noise: &'a [f32],
 }
 
+/// How the draft's K/V caches are held.
+#[derive(Clone, Copy, Debug)]
+pub struct DraftCache {
+    /// The storage tier of the K and V planes.
+    pub tier: KvTier,
+    /// Rows per block of the full layers' shared pool.
+    pub block_size: u32,
+    /// Positions the full layers' pool holds across all slots; a sequence that would outgrow what is free is refused
+    /// by name (the draft proposes nothing for it) and the memory plan charges exactly this.
+    pub pool_positions: u32,
+}
+
+impl DraftCache {
+    /// The dense layout: f32, and a pool that holds every slot at `cap` positions (what a slot per sequence costs).
+    pub fn dense(slots: u32, cap: u32) -> DraftCache {
+        DraftCache { tier: KvTier::F32, block_size: 16, pool_positions: slots.saturating_mul(cap) }
+    }
+
+    fn pool_blocks(&self) -> u32 {
+        self.pool_positions.div_ceil(self.block_size.max(1))
+    }
+
+    /// Device bytes of the K and V planes of all layers of `cfg` for `slots` sequences of up to `cap` positions.
+    pub fn bytes(&self, cfg: &Dflash2Config, slots: u32, cap: u32) -> u64 {
+        let (kv, hd) = (u64::from(cfg.kv_dim()), u64::from(cfg.head_dim));
+        (0..cfg.n_layers)
+            .map(|l| {
+                let rows = match cfg.layers[l].kind {
+                    LayerKind::Sliding => u64::from(slots) * u64::from(cfg.cache_rows(l, cap)),
+                    LayerKind::Full => u64::from(self.pool_blocks()) * u64::from(self.block_size),
+                };
+                2 * self.tier.plane_bytes(rows, kv, hd)
+            })
+            .sum()
+    }
+}
+
+/// The blocks of the full layers' pool: free ones, and the ones each slot holds in position order.
+struct Pool {
+    free: Vec<u32>,
+    tables: Vec<Vec<u32>>,
+}
+
 /// The per-layer hidden states of a denoising pass, for gating a port layer by layer.
 pub type LayerTrace = Vec<Vec<f32>>;
 
@@ -133,6 +178,8 @@ pub struct Dflash2 {
     hidden_norm: DeviceBuffer,
     layers: Vec<Layer>,
     caches: Vec<KvLayer>,
+    cache: DraftCache,
+    pool: Mutex<Pool>,
     slots: u32,
     cap: u32,
     weight_bytes: u64,
@@ -142,7 +189,15 @@ impl Dflash2 {
     /// Load the draft from `src` onto `gpu` (whose pipelines include [`pipelines`] or [`kernels_beyond`]), with K/V
     /// caches for `slots` sequences of up to `cap` positions each.
     pub fn load(gpu: Gpu, cfg: Dflash2Config, src: Box<dyn DraftSource>, slots: u32, cap: u32) -> Result<Dflash2, String> {
+        Self::load_with(gpu, cfg, src, slots, cap, DraftCache::dense(slots, cap))
+    }
+
+    /// [`Self::load`] with the caches held as `cache` says.
+    pub fn load_with(gpu: Gpu, cfg: Dflash2Config, src: Box<dyn DraftSource>, slots: u32, cap: u32, cache: DraftCache) -> Result<Dflash2, String> {
         cfg.validate()?;
+        if cache.block_size == 0 || cache.pool_positions == 0 {
+            return Err(format!("{MODEL}: the draft's cache pool needs a block size and positions (got {} and {})", cache.block_size, cache.pool_positions));
+        }
         if slots == 0 || cap == 0 {
             return Err(format!("{MODEL}: a draft needs at least one cache slot and one position (slots {slots}, cap {cap})"));
         }
@@ -150,7 +205,7 @@ impl Dflash2 {
         let kid = |n: &str| gpu.kernel_index(n).ok_or_else(|| format!("{MODEL}: kernel {n:?} is not registered on this device - build its pipelines with dflash2::pipelines or kernels_beyond"));
         let k = Kids { rmsnorm: kid("rmsnorm")?, add2: kid("add2")?, silu_mul: kid("silu_mul")?, rope2d: kid("rope2d")?, dyn_conv: kid("dyn_group_conv1d")?, softmax: kid("decode_softmax_batched")? };
         let shape = head_shape(&cfg);
-        let kv = KvKernels::resolve_for(&gpu, KvTier::F32, &[shape])?;
+        let kv = KvKernels::resolve_for(&gpu, cache.tier, &[shape])?;
         let fused = kv.flash_decode_available(&gpu, shape.0, shape.1);
 
         let (d, ff) = (cfg.d_model as usize, cfg.d_ff as usize);
@@ -200,18 +255,57 @@ impl Dflash2 {
         let limit = gpu.max_storage_binding_bytes();
         let caches = (0..cfg.n_layers)
             .map(|l| {
-                let rows = u64::from(slots) * u64::from(cfg.cache_rows(l, cap));
-                if !KvTier::fits_addressing(rows, u64::from(cfg.kv_dim())) || rows * u64::from(cfg.kv_dim()) * 4 > limit {
+                let rows = match cfg.layers[l].kind {
+                    LayerKind::Sliding => u64::from(slots) * u64::from(cfg.cache_rows(l, cap)),
+                    LayerKind::Full => u64::from(cache.pool_blocks()) * u64::from(cache.block_size),
+                };
+                let plane = cache.tier.plane_bytes(rows, u64::from(cfg.kv_dim()), u64::from(cfg.head_dim));
+                if !KvTier::fits_addressing(rows, u64::from(cfg.kv_dim())) || plane > limit {
                     return Err(format!(
-                        "{MODEL}: layer {l}'s cache of {slots} slots x {} rows x {} elements exceeds what this device binds ({limit} bytes); serve a shorter context or fewer sequences",
-                        cfg.cache_rows(l, cap),
+                        "{MODEL}: layer {l}'s {} cache of {rows} rows x {} elements exceeds what this device binds ({limit} bytes); serve a shorter context or fewer sequences, or a narrower cache tier",
+                        cache.tier,
                         cfg.kv_dim()
                     ));
                 }
-                Ok(KvLayer::new(&gpu, KvTier::F32, rows, u64::from(cfg.kv_dim()), u64::from(cfg.head_dim)))
+                Ok(KvLayer::new(&gpu, cache.tier, rows, u64::from(cfg.kv_dim()), u64::from(cfg.head_dim)))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        Ok(Dflash2 { gpu, ops, k, kv, fused, cfg, src, selector, fc, hidden_norm, layers, caches, slots, cap, weight_bytes })
+        let pool = Mutex::new(Pool { free: (0..cache.pool_blocks()).rev().collect(), tables: vec![Vec::new(); slots as usize] });
+        Ok(Dflash2 { gpu, ops, k, kv, fused, cfg, src, selector, fc, hidden_norm, layers, caches, cache, pool, slots, cap, weight_bytes })
+    }
+
+    /// Give a finished or evicted sequence's blocks of the shared pool back at once. Its ring rows are overwritten by the
+    /// slot's next sequence, which feeds them before reading.
+    pub fn release_slot(&self, slot: u32) {
+        let mut pool = self.pool.lock().expect("the draft pool lock is never held across a panic");
+        let held = std::mem::take(&mut pool.tables[slot as usize]);
+        pool.free.extend(held.into_iter().rev());
+    }
+
+    /// Blocks of the shared pool in use and in all.
+    pub fn pool_use(&self) -> (u32, u32) {
+        let pool = self.pool.lock().expect("the draft pool lock is never held across a panic");
+        (self.cache.pool_blocks() - pool.free.len() as u32, self.cache.pool_blocks())
+    }
+
+    /// Make `slot` hold the blocks for positions `0 .. upto` of the full layers (a no-op without a full layer); an error
+    /// names a pool with no block left.
+    pub fn reserve(&self, slot: u32, upto: u32) -> Result<(), String> {
+        if self.cfg.layers.iter().all(|l| l.kind != LayerKind::Full) {
+            return Ok(());
+        }
+        let need = upto.div_ceil(self.cache.block_size) as usize;
+        let mut pool = self.pool.lock().expect("the draft pool lock is never held across a panic");
+        while pool.tables[slot as usize].len() < need {
+            let Some(block) = pool.free.pop() else {
+                return Err(format!(
+                    "{MODEL}: the draft's cache pool of {} positions is full (a sequence at position {upto} needs another block); serve fewer or shorter sequences, or hold the pool wider",
+                    self.cache.pool_positions
+                ));
+            };
+            pool.tables[slot as usize].push(block);
+        }
+        Ok(())
     }
 
     /// Resident bytes of the weights.
@@ -303,10 +397,20 @@ impl Dflash2 {
         s.push(model::block::rope2d_fwd(&self.gpu, self.k.rope2d, buf, cos, sin, rows, heads, self.cfg.head_dim, heads * self.cfg.head_dim));
     }
 
-    /// The physical row of absolute position `pos` of `slot` in layer `layer`'s cache.
-    fn cache_row(&self, layer: usize, slot: u32, pos: u32) -> u32 {
-        let rows = self.cfg.cache_rows(layer, self.cap);
-        slot * rows + pos % rows
+    /// The physical rows of absolute positions `positions` of `slot` in layer `layer`'s cache (a full layer's through the
+    /// slot's blocks, which [`Self::reserve`] has made).
+    fn cache_rows_of(&self, layer: usize, slot: u32, positions: impl Iterator<Item = u32>) -> Vec<u32> {
+        match self.cfg.layers[layer].kind {
+            LayerKind::Sliding => {
+                let rows = self.cfg.cache_rows(layer, self.cap);
+                positions.map(|p| slot * rows + p % rows).collect()
+            }
+            LayerKind::Full => {
+                let pool = self.pool.lock().expect("the draft pool lock is never held across a panic");
+                let (table, bs) = (&pool.tables[slot as usize], self.cache.block_size);
+                positions.map(|p| table[(p / bs) as usize] * bs + p % bs).collect()
+            }
+        }
     }
 
     /// Write `k` and `v` (`[n, kv_dim]`) into the cache planes of `layer` at the given physical rows.
@@ -375,6 +479,9 @@ impl Dflash2 {
             return Err(format!("{MODEL}: context reaches position {end_total} but a cache slot holds {}", self.cap));
         }
         let (nkv, hd) = (self.cfg.n_kv_heads, self.cfg.head_dim);
+        if self.cfg.layers.iter().any(|l| l.kind == LayerKind::Full) {
+            self.reserve(slot, end_total)?;
+        }
         for off in (0..total).step_by(CTX_CHUNK as usize) {
             let m = CTX_CHUNK.min(total - off);
             let base = pos_start + off;
@@ -404,7 +511,7 @@ impl Dflash2 {
                     let (cos, sin) = self.rope_tables(&positions);
                     self.rope(&mut s, &kn, &cos, &sin, cnt, nkv);
                 }
-                let phys: Vec<u32> = (from..chunk_end).map(|p| self.cache_row(l, slot, p)).collect();
+                let phys = self.cache_rows_of(l, slot, from..chunk_end);
                 self.write_rows(&mut s, l, &kn, &vb, &phys);
             }
             self.gpu.submit(&[], &s);
@@ -448,6 +555,11 @@ impl Dflash2 {
         if jobs.iter().enumerate().any(|(i, a)| jobs[..i].iter().any(|b| b.slot == a.slot)) {
             return Err(format!("{MODEL}: two blocks of one batch share a cache slot"));
         }
+        if c.layers.iter().any(|l| l.kind == LayerKind::Full) {
+            for j in jobs {
+                self.reserve(j.slot, j.pos + n)?;
+            }
+        }
         let rows = jobs.len() as u32 * n;
         let (nh, nkv, hd, ff) = (c.n_heads, c.n_kv_heads, c.head_dim, c.d_ff);
         let (hq, hkv) = (c.q_dim(), c.kv_dim());
@@ -480,16 +592,26 @@ impl Dflash2 {
                 let mut t = vec![0u32; rows as usize * stride];
                 for (r, &(lo, hi)) in sliding_ranges.iter().enumerate() {
                     let slot = jobs[r / n as usize].slot;
-                    for (k, p) in (lo..=hi).enumerate() {
-                        t[r * stride + k] = self.cache_row(l, slot, p);
-                    }
+                    t[r * stride..r * stride + (hi - lo + 1) as usize].copy_from_slice(&self.cache_rows_of(l, slot, lo..=hi));
                 }
                 t
             }
             None => vec![0],
         };
         let sliding_lens: Vec<u32> = sliding_ranges.iter().map(|&(lo, hi)| hi - lo + 1).collect();
-        let full_table: Vec<u32> = (0..rows).map(|r| jobs[(r / n) as usize].slot).collect();
+        // A full layer lists the blocks of its slot's pool, in position order.
+        let bs = self.cache.block_size;
+        let max_bt = cap_full.div_ceil(bs).max(1);
+        let full_table: Vec<u32> = {
+            let pool = self.pool.lock().expect("the draft pool lock is never held across a panic");
+            let mut t = vec![0u32; rows as usize * max_bt as usize];
+            for r in 0..rows as usize {
+                let table = &pool.tables[jobs[r / n as usize].slot as usize];
+                let used = (full_ranges[r].1 / bs + 1) as usize;
+                t[r * max_bt as usize..r * max_bt as usize + used.min(table.len())].copy_from_slice(&table[..used.min(table.len())]);
+            }
+            t
+        };
         let full_lens: Vec<u32> = full_ranges.iter().map(|&(lo, hi)| hi - lo + 1).collect();
         let (sliding_table, sliding_lens) = (self.upload(&sliding_table), self.upload(&sliding_lens));
         let (full_table, full_lens) = (self.upload(&full_table), self.upload(&full_lens));
@@ -519,11 +641,11 @@ impl Dflash2 {
             }
             // The block's own rows join the cache at their absolute positions, right after the context rows. The next
             // `append_context` overwrites whichever of them the target actually committed with the real thing.
-            let phys: Vec<u32> = jobs.iter().flat_map(|j| (j.pos..j.pos + n).map(move |p| (j.slot, p))).map(|(slot, p)| self.cache_row(l, slot, p)).collect();
+            let phys: Vec<u32> = jobs.iter().flat_map(|j| self.cache_rows_of(l, j.slot, j.pos..j.pos + n)).collect();
             self.write_rows(&mut s, l, &kn, &vp, &phys);
             let attn = match spec.kind {
                 LayerKind::Sliding => self.attend(&mut s, l, &qn, &sliding_table, &sliding_lens, rows, 1, cap_sliding, cap_sliding),
-                LayerKind::Full => self.attend(&mut s, l, &qn, &full_table, &full_lens, rows, c.cache_rows(l, self.cap), 1, cap_full),
+                LayerKind::Full => self.attend(&mut s, l, &qn, &full_table, &full_lens, rows, bs, max_bt, cap_full),
             };
             let proj = self.matmul(&mut s, &attn, 0, rows, &lb.wo);
             let post = self.dyn_conv(&mut s, &proj, &dyn1, &lb.attn_conv_base, rows, n, 1);

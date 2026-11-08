@@ -147,7 +147,13 @@ teardown_file() {
   spec=$(chat "$port" "$body")
   [ "$(jq -c '.choices[0] | [.finish_reason, .message.reasoning_content, .message.tool_calls[0].function]' <<<"$plain")" = "$(jq -c '.choices[0] | [.finish_reason, .message.reasoning_content, .message.tool_calls[0].function]' <<<"$spec")" ]
   jq -e '.usage.completion_tokens == 7' <<<"$spec"
-  grep -E "spec_rounds=[1-9][0-9]* spec_accept_rate=[0-9.]+ spec_tokens_per_round=[0-9.]+ spec_verify_steps=[1-9]" "$SCRATCH/serve-$port.log"
+  # The request line is logged just after the reply is sent.
+  for _ in $(seq 1 20); do
+    grep -qE "spec_rounds=[1-9][0-9]* spec_accept_rate=[0-9.]+ spec_tokens_per_round=[0-9.]+ spec_verify_steps=[1-9]" "$SCRATCH/serve-$port.log" && return 0
+    sleep 0.5
+  done
+  grep "request done" "$SCRATCH/serve-$port.log" >&3
+  false
 }
 
 @test "a draft model that is not there is refused by name and the model is not served" {
@@ -182,6 +188,7 @@ teardown_file() {
   ) || skip "the software adapter server with a draft model did not become ready"
   chat $((PORT + 7)) "$body" >"$SCRATCH/sparse-spec.json"
   [ "$(jq -c '.choices[0] | [.finish_reason, .message.reasoning_content, .message.tool_calls[0].function]' "$SCRATCH/sparse.json")" = "$(jq -c '.choices[0] | [.finish_reason, .message.reasoning_content, .message.tool_calls[0].function]' "$SCRATCH/sparse-spec.json")" ]
+  for _ in $(seq 1 20); do grep -qE "spec_rounds=[1-9][0-9]* spec_accept_rate=" "$SCRATCH/serve-$((PORT + 7)).log" && break; sleep 0.5; done
   grep -E "spec_rounds=[1-9][0-9]* spec_accept_rate=" "$SCRATCH/serve-$((PORT + 7)).log"
   # An indexer that cannot be read is refused at startup, naming the flag, and the model is not listed.
   start_server "$SCRATCH/scripted" $((PORT + 2)) --device cpu --sparse-attention "$SCRATCH/corpus/a.txt" || skip "the refusing server did not become ready"

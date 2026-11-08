@@ -111,8 +111,14 @@ serve other work; CUDA parity and performance follow on the same gates.
        block per sequence, one batched forward over the blocks of several sequences, safetensors or GGUF), the
        engine contract for hidden-state taps (`PagedDecoder::enable_taps`/`read_taps`, a `TapPool` addressed by the
        KV block tables), `RicursiveEngine::set_drafter`, `--speculative dflash` and `--draft-model`, the draft and
-       the taps charged in the placement, and speculation beside `--sparse-attention`. Measured below on the CPU
+       the taps charged in the placement, speculation beside `--sparse-attention`, and the draft's K/V caches held
+       paged and at the target's KV tier (f32, bf16, int8, fp8) with a finished request's blocks given back at once. Measured below on the CPU
        backend and the software adapter; no card has run it (step 8).
+6c. [x] Prefix reuse at branch points: a prefill that leaves a cached prompt, or that the scheduler hints
+       (`PagedDecoder::hint_shared_prefix`), files the ring snapshot and the shared blocks (with their taps and index
+       pages) at the divergence, rounded down to a KV block, as an entry later prompts extend instead of replacing;
+       bounded by the snapshot slots the plan already charges. Measured below; the reply of a finished turn is not
+       cached (the scheduler gives a decoder no tokens at release).
 7. [x] Backward for every Ripple op, gradchecked and compared with PyTorch autograd; the `Model` and `Shardable`
        faces through the generic trainer, pipeline and objectives; LoRA/QLoRA through `model::adapter` served by
        the engine; full fine-tuning; N-LSA on the global layers; `brain finetune` and the SDK fine-tuners. Measured
@@ -463,12 +469,31 @@ the two head norms, the three MLP linears and the two convolution sublayers.
 | a draft model that is not there, or built for another target | refused by name; the model is not served |
 
 Memory the plan charges (`placement::tests::the_draft_model_is_charged...`, NVFP4 target, int8 KV, one sequence): the
-draft is 7.42 GiB of weights plus its caches (1.13 GiB at 128k tokens, 2.13 GiB at 256k; four sequences at 256k: 8.5
-GiB) on the last stage's card, and the target's retained hidden states are 50 KiB a pooled position on the host (6.2 GiB
-at 128k, 12.5 GiB at 256k). On one 96 GiB card the longest dense context falls from about 962k tokens to about 581k with
-the draft attached.
+draft is 7.42 GiB of weights plus its K/V caches on the last stage's card, held at the target's KV tier with the full
+layer paged in one pool as wide as the target's own block pool and a ring of window plus one block per live sequence for
+each sliding layer: 0.29 GiB at 128k tokens, 0.55 GiB at 256k, 2.19 GiB for four sequences at 256k (they were f32 and a
+full-length slot each: 1.13, 2.13 and 8.50 GiB). The target's retained hidden states are 50 KiB a pooled position on the
+host (6.2 GiB at 128k, 12.5 GiB at 256k). On one 96 GiB card the longest dense context falls from about 962k tokens to
+about 684k with the draft attached (581k before the caches were compact).
 
-Shared-code defects found and fixed on the way: speculation was off beside latent sparse attention (a verify that
+| gate (compact draft cache) | result |
+|---|---|
+| tiny draft, two sequences interleaved, blocks of 4 rows in a pool of 12, context fed in pieces, against the reference | worst scaled error over every layer, post-norm row and logit: f32 2.0e-6, bf16 1.1e-2, int8 3.0e-2, fp8 1.2e-1 (the tiers' own rounding; the f32 selector path is identical, the compact tiers' bounds are 3e-2, 1.5e-1 and 3e-1) |
+| speculation at a bf16 and an int8 KV cache (draft planes in the same tier), four sequences, 40 tokens | equal to plain greedy at that tier; the pool peaked at 27 of 144 blocks, and 0 were in use once the sequences ended |
+| a pool with no block left | the sequence that needs one is refused by name (the draft proposes nothing for it, a warning in the log) and the others are untouched; a finished request's blocks make room |
+
+Prefix reuse at branch points (tiny model: window 4, blocks of 4 rows, `branch.rs`):
+
+| gate | result |
+|---|---|
+| three prompts sharing 24 tokens (six windows, six blocks) then diverging, prefill chunks of 8 and of 5 | the second leaves the first at the block-aligned divergence and files it; the third resumes there (24 tokens reused, 0 for the first two); all three prefills and 8 decode steps equal the full-recompute logits |
+| a hint before any prompt diverged (`hint_shared_prefix`) | files the prefix when the first prompt starts; the second prompt reuses 24 tokens; a prefix shorter than a cacheable prompt is declined |
+| a conversation re-sent for three turns (prompt, 6 greedy reply tokens, 5 new tokens) | each turn resumes from the previous prompt as filed and equals cold; the reply is prefilled again (the scheduler does not hand a decoder the generated tokens at release, so the generic cache cannot file them) |
+| six prompts in pairs sharing a document through two snapshot slots | never more than two entries; reclaiming gives every block back |
+| with the DFlash2 taps; with latent sparse attention (software adapter) | the taps of shared and copied blocks equal the forward's; the resumed prompt's logits equal a cold sparse run |
+| the shared conformance suite; the catalog's re-sent history through the resident (ported from the Qwen3 test) | pass |
+
+Shared-code defects found and fixed on the way: `brain lsa --device cpu` ignored the flag (the global `--device` never reached the command, which defaulted to `gpu`: it ran on a card); speculation was off beside latent sparse attention (a verify that
 crossed a cluster block of the index read a state a plain decode builds later: now the scheduler bounds each verify,
 `spec_rows_limit`, and the verify prepares the index as a chunk); the dynamic-convolution kernel could not run
 several blocks in one dispatch; `brain pull` refused the draft ("unsupported architecture") and the model scan
@@ -664,8 +689,8 @@ brain serve --openai --device gpu0 --kv-cache int8 --sparse-attention ripple-lsa
 brain serve --openai --device gpu0 --kv-cache int8 --speculative ngram
 
 # 1 GH200, NVFP4 target + the DFlash2 drafter + int8 KV (the draft is found beside the target; the startup log prints
-# "default draft model ..." and the placement with the draft's 7.4 GiB and caches charged to the card, the taps to
-# the host; add --sparse-attention ripple-lsa.safetensors to read the global layers sparsely beside it)
+# "default draft model ..." and the placement with the draft's 7.4 GiB and its compact caches charged to the card, the
+# taps to the host; the draft's caches follow --kv-cache; add --sparse-attention ripple-lsa.safetensors to read the global layers sparsely beside it)
 brain pull ricursiveAI/Ripple-65B-Preview-DFlash2
 brain serve --openai --device gpu0 --kv-cache int8 --speculative dflash --verbose 2
 
@@ -710,16 +735,17 @@ engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
 
 ## Open items for the later steps
 
-- DFlash2, step 6b. The draft's K/V caches are f32, one slot per live sequence, a full layer holding every position
-  (2.1 GiB a sequence at 256k): a cache slot above the device's binding limit is refused by name at load, so very long
-  contexts need a paged or compact (bf16/int8) draft cache; the dense fallback attention (no workgroup barriers) allocates
-  score slabs of `rows x heads x keys` for the full layer. The taps are bf16 on the host (50 KiB a position, 13 GiB at
-  256k) and cross to the draft through a host copy per round. The drafter reads one slot per request id; a finished
-  request's slot is reclaimed only when another needs it. The shared engine contract is implemented by Ripple only:
-  Qwen3.8 (`qwen35::dflash2`) still drives the draft single-stream, behind its own tap path, and Qwen3's engine does
-  not retain taps. Sampled decoding takes the scheduler's rejection sampling (`verify_proposals`); with the draft it ran
-  (seeded, repeatable, verify steps taken) but its distribution was not measured against plain sampling.
-
+- DFlash2, step 6b. The taps are bf16 on the host (50 KiB a position, 13 GiB at 256k) and cross to the draft through a
+  host copy per round; the pool holds the target's own number of positions, so a server sized for many cached
+  prefixes pays the draft cache for positions only live sequences use. The shared tap contract is implemented by
+  Ripple only: Qwen3.8 (`qwen35::dflash2`) still drives the draft single-stream behind its own tap path, and Qwen3's
+  engine retains no taps. Sampled decoding takes the scheduler's rejection sampling; with the draft it ran (seeded,
+  repeatable, verify steps taken) but its distribution was not measured against plain sampling. The fused decode
+  attention at the compact tiers was not run on a card.
+- Prefix branch points, step 6c. A finished turn's reply is not cached (needs the generated tokens at release in the
+  `PagedDecoder` contract); a branch is found where a new prompt leaves a cached one or where the scheduler hints, at
+  block granularity, and uses the existing snapshot slots (256 MiB a slot at 65B, charged), so a deployment with few
+  slots keeps the newest few prefixes only.
 - Adapter serving, step 7c. The bank is allocated per stage with `slots` x `rank_cap` x (in + out) f32 per targeted
   linear (`--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`; Ripple's default is all eight linears, 4 slots of
   rank 16): 3.75 GiB at 65B for four rank-16 slots on every linear (48 MiB a layer, computed from the released config; 1.9 GiB for two slots, 15 GiB for four at rank 64), charged to the stage that holds each layer; to be measured on a card.

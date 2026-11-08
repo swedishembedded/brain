@@ -117,7 +117,14 @@ impl Dflash2Drafter {
 
     /// Forget a sequence (finished or cancelled), freeing its slot.
     pub fn forget(&mut self, id: u64) {
-        self.seqs.remove(&id);
+        if let Some(seq) = self.seqs.remove(&id) {
+            self.model.release_slot(seq.slot);
+        }
+    }
+
+    /// Sequences that hold a cache slot now.
+    pub fn live(&self) -> usize {
+        self.seqs.len()
     }
 
     /// The cache slot for `id`, evicting the least recently drafted sequence that is not in this round when none is
@@ -131,7 +138,9 @@ impl Dflash2Drafter {
             Some(free) => free,
             None => {
                 let victim = self.seqs.iter().filter(|(k, _)| !in_round.contains(k)).min_by_key(|(_, s)| s.last_round).map(|(k, _)| *k)?;
-                self.seqs.remove(&victim)?.slot
+                let slot = self.seqs.remove(&victim)?.slot;
+                self.model.release_slot(slot);
+                slot
             }
         };
         self.seqs.insert(id, Seq { slot, fed: 0, last_round: self.round });
@@ -183,11 +192,26 @@ impl Dflash2Drafter {
             if seq.fed > ctx_len {
                 seq.fed = 0;
             }
-            if ctx_len > seq.fed {
-                let rows = taps.tap_rows(r.table, seq.fed, ctx_len - seq.fed)?;
-                self.model.append_context(slot, &rows, seq.fed)?;
-                self.stats.fed_rows += u64::from(ctx_len - seq.fed);
-                seq.fed = ctx_len;
+            let from = seq.fed;
+            let fed = (|| -> Result<(), String> {
+                if ctx_len > from {
+                    let rows = taps.tap_rows(r.table, from, ctx_len - from)?;
+                    self.model.append_context(slot, &rows, from)?;
+                }
+                // The denoising block writes one block of rows past the context.
+                self.model.reserve(slot, ctx_len + cfg.block_size)
+            })();
+            match fed {
+                Ok(()) => {
+                    self.stats.fed_rows += u64::from(ctx_len - from);
+                    self.seqs.get_mut(&r.id).expect("registered above").fed = ctx_len;
+                }
+                Err(e) => {
+                    // What it holds is incomplete: it starts over (and gives its blocks back) when it is next asked.
+                    tracing::warn!(id = r.id, "dflash2: not drafting for a sequence this round: {e}");
+                    self.forget(r.id);
+                    continue;
+                }
             }
             self.stats.feed_s += t0.elapsed().as_secs_f64();
             let mut ids = Vec::with_capacity(block);
