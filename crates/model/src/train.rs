@@ -1493,7 +1493,7 @@ fn off_device_dir(path: &Path) -> std::path::PathBuf {
 /// atomically: a crash mid-write leaves the previous state, never half of
 /// this one. A run selecting on held-out loss saves its selection with it:
 /// the watch, the curve and the best parameters so far.
-fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, applied: u32, rng: &Rng, opts: &FitOpts, identity: &serde_json::Value, selection: Option<&Selection>) -> std::io::Result<()> {
+fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, applied: u32, rng: &Rng, opts: &FitOpts, identity: &serde_json::Value, selection: Option<&Selection>, cursor: Option<serde_json::Value>) -> std::io::Result<()> {
     let names = model.optimized_params().ok_or_else(|| std::io::Error::other("exact resume: this model does not expose its optimizer state"))?;
     let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::with_capacity(names.len() * 4);
     for name in &names {
@@ -1519,6 +1519,8 @@ fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, applied: u32, r
         "opts": schedule_fingerprint(opts),
         "identity": identity,
         "selection": selection.map(Selection::to_json),
+        // The objective's own position in a data stream it walks itself (absent: it keeps none).
+        "objective_cursor": cursor,
     });
     // The off-device generation first: the resume file below names `applied`, so a crash between the two leaves
     // the previous resume file and a generation it does not use, never a file naming a state that is missing.
@@ -1548,10 +1550,22 @@ pub fn saved_seed(path: &Path) -> std::io::Result<Option<u64>> {
     st.config().get("opts").and_then(|o| o.get("seed")).and_then(|s| s.as_u64()).map(Some).ok_or_else(|| invalid("no training seed in the saved options"))
 }
 
-/// Restore the state [`save_train_state`] wrote into `model`, returning the
-/// completed step count, the AdamW applied-step count, the batch generator to continue with, and the
-/// selection the run had made so far when it was selecting.
-fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: &serde_json::Value) -> std::io::Result<(u32, u32, Rng, Option<Selection>)> {
+/// What a saved training state holds besides the weights and moments [`load_train_state`] put back.
+struct SavedState {
+    /// Completed steps.
+    step: u32,
+    /// AdamW's applied-update count.
+    applied: u32,
+    /// The batch generator to continue with.
+    rng: Rng,
+    /// The selection the run had made so far, when it was selecting.
+    selection: Option<Selection>,
+    /// The objective's own stream position ([`Objective::cursor`]), when it had one.
+    cursor: Option<serde_json::Value>,
+}
+
+/// Restore the state [`save_train_state`] wrote into `model` and describe the rest of it.
+fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: &serde_json::Value) -> std::io::Result<SavedState> {
     let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {why}", path.display()));
     let path_str = path.to_str().ok_or_else(|| invalid("not a UTF-8 path".to_string()))?;
     let st = checkpoint::st::load_safetensors(path_str)?;
@@ -1603,7 +1617,11 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
         (serde_json::Value::Null, true) => return Err(invalid("saved by a run that did not select on held-out loss".to_string())),
         (saved, _) => Some(Selection::from_json(opts, saved, &st.tensors).ok_or_else(|| invalid("its selection record cannot be read".to_string()))?),
     };
-    Ok((step, applied, rng, selection))
+    let cursor = match &header["objective_cursor"] {
+        serde_json::Value::Null => None,
+        saved => Some(saved.clone()),
+    };
+    Ok(SavedState { step, applied, rng, selection, cursor })
 }
 
 /// [`fit_with`], with the caller in the loop: a per-step report that can
@@ -1848,13 +1866,25 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 verify_resume(identity, path, sync.collective.world_size())?;
             }
         }
-        let (step, saved_applied, saved_rng, saved) = load_train_state(&model, state, opts, &control.identity)?;
+        let saved = load_train_state(&model, state, opts, &control.identity)?;
+        let step = saved.step;
         eprintln!("resuming at step {step} from {}", state.display());
+        // The objective's stream position comes back before `begin`, which positions the loop's own shuffle.
+        match (saved.cursor.as_ref(), obj.cursor().is_some()) {
+            (Some(cursor), _) => obj.restore_cursor(cursor).map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", state.display())))?,
+            (None, true) if step > 0 => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{}: saved without the objective's stream position; resuming would restart its data at record 0 instead of continuing the run", state.display()),
+                ))
+            }
+            (None, _) => {}
+        }
         first_step = step;
-        applied = saved_applied;
-        rng = saved_rng;
+        applied = saved.applied;
+        rng = saved.rng;
         resumed_at = Some(step);
-        if let Some(saved) = saved {
+        if let Some(saved) = saved.selection {
             selection = saved;
         }
         if let Some(spill) = control.state.map(spill_path).filter(|spill| selection.spilled && !spill.exists()) {
@@ -2067,7 +2097,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         if let Some(state) = control.state {
             let periodic = control.state_every > 0 && completed.is_multiple_of(control.state_every);
             if !keep_going || periodic {
-                save_train_state(&model, state, completed, applied, &rng, opts, &control.identity, selection.selecting().then_some(&selection))?;
+                save_train_state(&model, state, completed, applied, &rng, opts, &control.identity, selection.selecting().then_some(&selection), obj.cursor())?;
             }
         }
         if !keep_going {
@@ -3077,6 +3107,59 @@ mod tests {
         let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None, grad_sync: None };
         fit_controlled(model, Verdicts(Default::default()), &opts, None, control).expect("fit");
         assert_eq!(*indices.borrow(), vec![2, 3]);
+    }
+
+    /// An objective that walks a stream of its own: its position is saved with the exact-resume state and
+    /// put back before the first resumed step.
+    struct Walker {
+        position: u64,
+        restored: std::rc::Rc<std::cell::Cell<Option<u64>>>,
+    }
+    impl Objective<Recorder> for Walker {
+        fn regime(&self) -> &'static str {
+            "walker"
+        }
+        fn micro_step(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            self.position += 1;
+            0.0
+        }
+        fn loss_probe(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            0.0
+        }
+        fn cursor(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!(self.position))
+        }
+        fn restore_cursor(&mut self, cursor: &serde_json::Value) -> std::io::Result<()> {
+            self.position = cursor.as_u64().expect("a position");
+            self.restored.set(Some(self.position));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_resume_puts_back_the_objectives_stream_position() {
+        let dir = tmp("objective-cursor");
+        let state = dir.join("train.state");
+        let identity = serde_json::json!({"run": 1});
+        let opts = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
+        let restored = std::rc::Rc::new(std::cell::Cell::new(None));
+        let mut stop_at_two = |s: &StepReport| s.step < 2;
+        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+        fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Walker { position: 0, restored: restored.clone() }, &opts, None, control).expect("fit");
+        assert_eq!(restored.get(), None, "a fresh run restores nothing");
+
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+        fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Walker { position: 0, restored: restored.clone() }, &opts, None, control).expect("fit");
+        assert_eq!(restored.get(), Some(2));
+
+        // A state saved by an objective with no position cannot continue one that has a position.
+        let plain_state = dir.join("plain.state");
+        let mut stop_at_two = |s: &StepReport| s.step < 2;
+        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&plain_state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+        fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &opts, None, control).expect("fit");
+        let control = FitControl { on_step: None, state: Some(&plain_state), state_every: 0, identity, snapshots: None, grad_sync: None };
+        let err = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Walker { position: 0, restored }, &opts, None, control).err().expect("refused");
+        assert!(err.to_string().contains("stream position"), "{err}");
     }
 
     /// A saved state is only the same run when every number its arithmetic depends on is the same:

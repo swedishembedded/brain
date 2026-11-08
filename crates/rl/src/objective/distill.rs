@@ -71,6 +71,7 @@
 use std::collections::VecDeque;
 
 use data::rng::Rng;
+use super::stream::{self, IndexedStream};
 use model::{Batch, Model, Objective, StepVerdict, IGNORE};
 use model::training::Unsupported;
 
@@ -245,14 +246,6 @@ fn pack_row(seq_len: usize, prompt: &[u32], completion: &[u32], teacher: &[TopK]
     Ok(PackedExample { tokens, teacher: packed_teacher })
 }
 
-/// Where [`DistillTopK`] draws its next teacher-scored example from - a
-/// plain closure, the same "sampling/scoring happens upstream" shape
-/// `rl::objective::dpo::Dpo`'s `PairSource` uses (here: whatever produced
-/// the teacher's top-K token distributions, e.g. an offline teacher-model
-/// pass, is a caller concern, not this file's). `None` means "nothing
-/// available this round" - a legitimate no-op micro-step.
-type ExampleSource = Box<dyn FnMut(&mut Rng) -> Option<DistillExample>>;
-
 /// Top-K distillation training objective: packs each teacher-scored
 /// [`DistillExample`] into one row and runs `K` weighted-CE forward/backward
 /// passes per micro-step (`K` = that row's own largest per-position teacher
@@ -262,7 +255,7 @@ type ExampleSource = Box<dyn FnMut(&mut Rng) -> Option<DistillExample>>;
 /// - today `qwen3::Qwen` and `gpt2::Gpt`.
 pub struct DistillTopK {
     cfg: DistillConfig,
-    source: ExampleSource,
+    source: IndexedStream<DistillExample>,
     pending: VecDeque<PackedExample>,
     last_loss: f32,
     /// Teacher-scored passes run since the last [`Objective::step_verdict`]: a step with none changes nothing.
@@ -275,9 +268,9 @@ impl DistillTopK {
     /// Make sure an example is queued, drawing and packing one from the source when none is.
     /// `false`: nothing to train (the source had none, or the one it supplied was refused and
     /// the refusal recorded for the step's verdict).
-    fn enqueue(&mut self, rng: &mut Rng) -> bool {
+    fn enqueue(&mut self) -> bool {
         if self.pending.is_empty() {
-            let Some(example) = (self.source)(rng) else { return false };
+            let Some(example) = self.source.draw() else { return false };
             match pack_row(self.cfg.seq_len, &example.prompt, &example.completion, &example.teacher) {
                 Ok(packed) => self.pending.push_back(packed),
                 Err(why) => {
@@ -289,13 +282,14 @@ impl DistillTopK {
         true
     }
 
-    /// `source` supplies the next teacher-scored example (or `None` for a
-    /// no-signal round) - see this struct's own field doc comment.
+    /// `source` supplies the example at the index it is given (or `None` for a no-signal round): a
+    /// function of the index alone, so a resumed run - which asks for the index it stopped at again -
+    /// continues the stream exactly.
     pub fn new<S>(cfg: DistillConfig, source: S) -> DistillTopK
     where
-        S: FnMut(&mut Rng) -> Option<DistillExample> + 'static,
+        S: FnMut(u64) -> Option<DistillExample> + 'static,
     {
-        DistillTopK { cfg, source: Box::new(source), pending: VecDeque::new(), last_loss: 0.0, passes: 0, refusal: None }
+        DistillTopK { cfg, source: IndexedStream::new(source), pending: VecDeque::new(), last_loss: 0.0, passes: 0, refusal: None }
     }
 
     /// Convenience over [`Self::new`]: a fixed, cycling dataset of
@@ -304,12 +298,7 @@ impl DistillTopK {
     /// dump, rather than a live scoring source.
     pub fn from_examples(cfg: DistillConfig, examples: Vec<DistillExample>) -> DistillTopK {
         assert!(!examples.is_empty(), "DistillTopK::from_examples: need at least one example");
-        let mut idx = 0usize;
-        DistillTopK::new(cfg, move |_: &mut Rng| {
-            let e = examples[idx].clone();
-            idx = (idx + 1) % examples.len();
-            Some(e)
-        })
+        DistillTopK::new(cfg, stream::cycle(examples))
     }
 }
 
@@ -346,9 +335,9 @@ impl<M: Model> Objective<M> for DistillTopK {
         Ok(())
     }
 
-    fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
+    fn micro_step(&mut self, model: &M, _rng: &mut Rng) -> f32 {
         // No example this round is a legitimate no-op micro-step, matching GRPO's/DPO's own convention.
-        if !self.enqueue(rng) {
+        if !self.enqueue() {
             return 0.0;
         }
         let packed = self.pending.pop_front().expect("just ensured pending is non-empty");
@@ -358,14 +347,24 @@ impl<M: Model> Objective<M> for DistillTopK {
 
     /// The loss of the example the next training step takes, forward only; the example stays
     /// queued, so probing moves no cursor.
-    fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
-        if !self.enqueue(rng) {
+    fn loss_probe(&mut self, model: &M, _rng: &mut Rng) -> f32 {
+        if !self.enqueue() {
             return 0.0;
         }
         let packed = self.pending.pop_front().expect("just ensured pending is non-empty");
         let loss = self.run_passes(model, &packed, false);
         self.pending.push_front(packed);
         loss
+    }
+
+    /// The examples trained so far: where a resumed run continues the stream.
+    fn cursor(&self) -> Option<serde_json::Value> {
+        Some(self.source.position(self.pending.len()))
+    }
+
+    fn restore_cursor(&mut self, cursor: &serde_json::Value) -> Result<(), std::io::Error> {
+        self.pending.clear();
+        self.source.seek(cursor)
     }
 
     /// An optimiser step with no teacher-scored position holds no gradient: applying it

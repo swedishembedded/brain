@@ -84,6 +84,7 @@
 use std::collections::VecDeque;
 
 use data::rng::Rng;
+use super::stream::{self, IndexedStream};
 use model::rollout::Completion;
 use model::{Batch, Model, Objective, StepVerdict, IGNORE};
 use model::training::Unsupported;
@@ -360,9 +361,9 @@ fn pack_pair(cfg: &DpoConfig, pair: &DpoPair, chosen_ref: &[f32], rejected_ref: 
 /// Make sure `pending` holds a packed pair, drawing and packing one from the source when it is
 /// empty. `Ok(false)`: the source had none this round. `Err`: the pair it supplied does not fit
 /// the row or its reference is the wrong length.
-fn enqueue(cfg: &DpoConfig, next: &mut PairSource, ref_logprobs: &RefLogprobFn, pending: &mut VecDeque<PackedPair>, rng: &mut Rng) -> Result<bool, String> {
+fn enqueue(cfg: &DpoConfig, next: &mut IndexedStream<DpoPair>, ref_logprobs: &RefLogprobFn, pending: &mut VecDeque<PackedPair>) -> Result<bool, String> {
     if pending.is_empty() {
-        let Some(pair) = next(rng) else { return Ok(false) };
+        let Some(pair) = next.draw() else { return Ok(false) };
         let (chosen_ref, rejected_ref) = ref_logprobs(&pair);
         pending.push_back(pack_pair(cfg, &pair, &chosen_ref, &rejected_ref)?);
     }
@@ -402,14 +403,6 @@ pub fn weigh_pair<M: Model>(beta: f32, nll_weight: f32, model: &M, packed: &Pack
     (term, margin)
 }
 
-/// Where [`Dpo`] draws its next verifier-derived pair from - a plain
-/// closure so the pairing mechanism (live rollout + [`pairs_from_group`],
-/// or a fixed offline dataset via [`Dpo::from_pairs`]) stays a caller
-/// concern, not this file's (see the module doc comment on why DPO cannot
-/// own its own live rollout the way GRPO does). `None` means "nothing
-/// available this round" - a legitimate no-op micro-step.
-type PairSource = Box<dyn FnMut(&mut Rng) -> Option<DpoPair>>;
-
 /// The frozen-reference logprob source: per-token `log pi_ref(token)` for
 /// the chosen and rejected completions of one pair, called ONCE per pair
 /// (when it is queued) and cached in the resulting [`PackedPair`] - never
@@ -435,24 +428,25 @@ pub struct Dpo {
 enum Source {
     /// Pairs drawn from a caller's source, each scored by the caller's
     /// reference function when it is queued.
-    Stream { next: PairSource, ref_logprobs: RefLogprobFn, pending: VecDeque<PackedPair> },
+    Stream { next: IndexedStream<DpoPair>, ref_logprobs: RefLogprobFn, pending: VecDeque<PackedPair> },
     /// A fixed dataset, scored once against the starting model by
     /// [`Objective::prepare`] (`referenced` once it has been).
     Dataset { pairs: Vec<PackedPair>, referenced: bool },
 }
 
 impl Dpo {
-    /// `source` supplies the next verifier-derived pair (or `None` for a
-    /// no-signal round); `ref_logprobs` computes the frozen reference's
-    /// per-token logprobs for a pair's chosen/rejected completions, called
-    /// once per pair and cached - see this struct's own field doc comments.
+    /// `source` supplies the pair at the index it is given (or `None` for a no-signal round): a
+    /// function of the index alone, so a resumed run - which asks for the index it stopped at again -
+    /// continues the stream exactly. `ref_logprobs` computes the frozen reference's per-token
+    /// logprobs for a pair's chosen/rejected completions, called once per pair and cached - see
+    /// this struct's own field doc comments.
     pub fn new<S, R>(cfg: DpoConfig, source: S, ref_logprobs: R) -> Dpo
     where
-        S: FnMut(&mut Rng) -> Option<DpoPair> + 'static,
+        S: FnMut(u64) -> Option<DpoPair> + 'static,
         R: Fn(&DpoPair) -> (Vec<f32>, Vec<f32>) + 'static,
     {
         cfg.validate().unwrap_or_else(|why| panic!("Dpo: {why}"));
-        Dpo { cfg, source: Source::Stream { next: Box::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0, refusal: None }
+        Dpo { cfg, source: Source::Stream { next: IndexedStream::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0, refusal: None }
     }
 
     /// A fixed preference dataset (see the module doc): each micro-step
@@ -475,16 +469,7 @@ impl Dpo {
         R: Fn(&DpoPair) -> (Vec<f32>, Vec<f32>) + 'static,
     {
         assert!(!pairs.is_empty(), "Dpo::from_pairs: need at least one pair");
-        let mut idx = 0usize;
-        Dpo::new(
-            cfg,
-            move |_: &mut Rng| {
-                let p = pairs[idx].clone();
-                idx = (idx + 1) % pairs.len();
-                Some(p)
-            },
-            ref_logprobs,
-        )
+        Dpo::new(cfg, stream::cycle(pairs), ref_logprobs)
     }
 }
 
@@ -512,7 +497,7 @@ impl<M: Model> Objective<M> for Dpo {
                 // No pair available this round is a legitimate no-op micro-step, matching GRPO's own
                 // "every completion this round was dropped" convention; a pair that cannot be packed
                 // faithfully is not.
-                match enqueue(&self.cfg, next, ref_logprobs, pending, rng) {
+                match enqueue(&self.cfg, next, ref_logprobs, pending) {
                     Ok(true) => {}
                     Ok(false) => return 0.0,
                     Err(why) => {
@@ -541,7 +526,7 @@ impl<M: Model> Objective<M> for Dpo {
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         match &mut self.source {
             Source::Stream { next, ref_logprobs, pending } => {
-                match enqueue(&self.cfg, next, ref_logprobs, pending, rng) {
+                match enqueue(&self.cfg, next, ref_logprobs, pending) {
                     Ok(true) => {}
                     Ok(false) => return 0.0,
                     Err(why) => {
@@ -552,6 +537,25 @@ impl<M: Model> Objective<M> for Dpo {
                 weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, pending.front().expect("just ensured pending is non-empty")).0.loss
             }
             Source::Dataset { pairs, .. } => weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, rng.choice(pairs)).0.loss,
+        }
+    }
+
+    /// A stream source's position: the pairs trained so far. A dataset objective keeps none (its order is the
+    /// loop's batch generator).
+    fn cursor(&self) -> Option<serde_json::Value> {
+        match &self.source {
+            Source::Stream { next, pending, .. } => Some(next.position(pending.len())),
+            Source::Dataset { .. } => None,
+        }
+    }
+
+    fn restore_cursor(&mut self, cursor: &serde_json::Value) -> Result<(), std::io::Error> {
+        match &mut self.source {
+            Source::Stream { next, pending, .. } => {
+                pending.clear();
+                next.seek(cursor)
+            }
+            Source::Dataset { .. } => Err(std::io::Error::other("a dataset objective draws through the loop's batch generator and keeps no stream position")),
         }
     }
 

@@ -125,6 +125,22 @@ pub trait Objective<M: Model> {
     /// and not from its own verdicts. Default: not interested.
     fn updates_applied(&mut self, _applied: u32) {}
 
+    /// Where this objective is in a data stream it walks on its own - the position of a cycling
+    /// dataset, the index of the next record a source is asked for - as a value
+    /// [`Self::restore_cursor`] puts back. The shared loop saves it with the exact-resume state, so a
+    /// resumed run continues the stream an uninterrupted one would have followed. `None` (the default)
+    /// says the objective keeps no position of its own: its order is a function of the loop's batch
+    /// generator and [`Self::begin`].
+    fn cursor(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Put back a position [`Self::cursor`] returned. Called after [`Self::prepare`] and before
+    /// [`Self::begin`] when a run resumes; an objective that cannot honour the value refuses.
+    fn restore_cursor(&mut self, _cursor: &serde_json::Value) -> Result<(), std::io::Error> {
+        Err(std::io::Error::other("this training objective keeps no stream position to restore"))
+    }
+
     /// A loss on a training batch without differentiating it: what the
     /// estimate of the loss a run starts from is made of. Defaults to
     /// [`Self::micro_step`] (which differentiates, into gradients the first
@@ -224,6 +240,12 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for Box<O> {
     fn updates_applied(&mut self, applied: u32) {
         (**self).updates_applied(applied)
     }
+    fn cursor(&self) -> Option<serde_json::Value> {
+        (**self).cursor()
+    }
+    fn restore_cursor(&mut self, cursor: &serde_json::Value) -> Result<(), std::io::Error> {
+        (**self).restore_cursor(cursor)
+    }
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         (**self).loss_probe(model, rng)
     }
@@ -270,6 +292,12 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for &mut O {
     }
     fn updates_applied(&mut self, applied: u32) {
         (**self).updates_applied(applied)
+    }
+    fn cursor(&self) -> Option<serde_json::Value> {
+        (**self).cursor()
+    }
+    fn restore_cursor(&mut self, cursor: &serde_json::Value) -> Result<(), std::io::Error> {
+        (**self).restore_cursor(cursor)
     }
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         (**self).loss_probe(model, rng)

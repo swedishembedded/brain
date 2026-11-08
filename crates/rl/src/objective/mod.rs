@@ -15,3 +15,4 @@ pub mod grpo_term;
 pub mod mixture;
 pub mod pg_batch;
 pub mod score_cache;
+pub(crate) mod stream;

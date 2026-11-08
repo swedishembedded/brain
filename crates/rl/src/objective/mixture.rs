@@ -189,6 +189,22 @@ impl<M: Model> Objective<M> for Mixture<M> {
         }
     }
 
+    /// Every arm's own stream position, in arm order (`null` for an arm that keeps none); `None` when no arm does.
+    fn cursor(&self) -> Option<serde_json::Value> {
+        let cursors: Vec<_> = self.arms.iter().map(|arm| arm.cursor()).collect();
+        cursors.iter().any(Option::is_some).then(|| serde_json::json!(cursors))
+    }
+
+    fn restore_cursor(&mut self, cursor: &serde_json::Value) -> Result<(), std::io::Error> {
+        let saved = cursor.as_array().filter(|saved| saved.len() == self.arms.len()).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "the saved stream positions do not match this mixture's arms"))?;
+        for (arm, saved) in self.arms.iter_mut().zip(saved) {
+            if !saved.is_null() {
+                arm.restore_cursor(saved)?;
+            }
+        }
+        Ok(())
+    }
+
     fn eval(&mut self, model: &M, rng: &mut Rng, batches: u32) -> Option<f32> {
         self.arms.first_mut()?.eval(model, rng, batches)
     }

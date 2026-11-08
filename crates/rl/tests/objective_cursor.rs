@@ -13,6 +13,7 @@
 //! probes before it, for every objective that walks a fixed dataset.
 
 use data::rng::Rng;
+use model::train::{fit_controlled, FitControl, FitOpts, StepReport};
 use model::{Model, Objective};
 use qwen3::{LoraCfg, Qwen, QwenConfig};
 use rl::objective::distill::{DistillConfig, DistillExample, DistillTopK, TopK};
@@ -50,7 +51,7 @@ fn examples() -> Vec<DistillExample> {
         .map(|i| DistillExample {
             prompt: vec![1, 2],
             completion: vec![3 + i, 4],
-            teacher: vec![TopK { ids: vec![3 + i, 5], probs: vec![0.7, 0.3] }, TopK { ids: vec![4, 6], probs: vec![0.6, 0.4] }],
+            teacher: vec![TopK { ids: vec![3 + i, 20], probs: vec![0.7, 0.3] }, TopK { ids: vec![4, 6], probs: vec![0.6, 0.4] }],
         })
         .collect()
 }
@@ -65,4 +66,63 @@ fn probing_a_dpo_run_does_not_advance_its_pair_cursor() {
 fn probing_a_distillation_run_does_not_advance_its_example_cursor() {
     let make = || DistillTopK::from_examples(DistillConfig { seq_len: SEQ_LEN }, examples());
     assert!(first_step_gradients(1, make(), 0) == first_step_gradients(1, make(), 5), "five probes moved the first trained example");
+}
+
+/// Every trained tensor and its AdamW moments, bit for bit.
+fn trained_state(m: &Qwen) -> Vec<(String, Vec<u32>, Vec<u32>)> {
+    m.optimized_params()
+        .expect("a LoRA model exposes its optimised set")
+        .into_iter()
+        .map(|n| {
+            let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<u32>>();
+            let moments = m.read_moments(&n).map(|(a, b)| a.into_iter().chain(b).map(f32::to_bits).collect()).unwrap_or_default();
+            (n.clone(), bits(m.read_weight(&n)), moments)
+        })
+        .collect()
+}
+
+const STEPS: u32 = 7;
+const STOP_AFTER: u32 = 4;
+
+/// Train `STEPS` steps straight, and again as `STOP_AFTER` steps, a stop, and a resume into a fresh model and
+/// a fresh objective. Three records against five probes and four steps: any restart of the cursor, or any
+/// probe that moved it, lands the resumed run on another record.
+fn assert_resume_continues_the_stream<O: Objective<Qwen>>(name: &str, rows: u32, make: impl Fn() -> O) {
+    let opts = FitOpts { steps: STEPS, batch_size: rows, block_size: SEQ_LEN as u32, lr: 1e-2, min_lr: 1e-2, weight_decay: 0.1, eval_interval: 0, ..Default::default() };
+    let (straight_report, straight) = fit_controlled(lora_model(rows), make(), &opts, None, FitControl::default()).expect("the uninterrupted run");
+
+    let dir = std::env::temp_dir().join(format!("objective-cursor-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = dir.join("train.state");
+    let identity = serde_json::json!({ "run": name });
+    let mut stop = |s: &StepReport| s.step < STOP_AFTER;
+    let control = FitControl { on_step: Some(&mut stop), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+    let (first, _) = fit_controlled(lora_model(rows), make(), &opts, None, control).expect("the interrupted run");
+    assert!(first.interrupted);
+    let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None, grad_sync: None };
+    let (resumed_report, resumed) = fit_controlled(lora_model(rows), make(), &opts, None, control).expect("the resumed run");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(resumed_report.resumed_at, Some(STOP_AFTER));
+    assert!(trained_state(&straight) == trained_state(&resumed), "{name}: weights and moments after a stop and resume differ from the uninterrupted run");
+    assert_eq!(resumed_report.final_loss.map(f32::to_bits), straight_report.final_loss.map(f32::to_bits), "{name}: final loss");
+}
+
+#[test]
+fn a_resumed_dpo_run_continues_its_pair_stream() {
+    assert_resume_continues_the_stream("dpo", 2, || Dpo::from_pairs(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, pairs(), |p: &DpoPair| (vec![-1.0; p.chosen.len()], vec![-1.0; p.rejected.len()])));
+}
+
+#[test]
+fn a_resumed_dpo_run_over_an_indexed_source_continues_it() {
+    let source = pairs();
+    assert_resume_continues_the_stream("dpo-indexed", 2, || {
+        let source = source.clone();
+        Dpo::new(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0 }, move |n: u64| Some(source[(n * 2 % 3) as usize].clone()), |p: &DpoPair| (vec![-1.0; p.chosen.len()], vec![-1.0; p.rejected.len()]))
+    });
+}
+
+#[test]
+fn a_resumed_distillation_run_continues_its_example_stream() {
+    assert_resume_continues_the_stream("distill", 1, || DistillTopK::from_examples(DistillConfig { seq_len: SEQ_LEN }, examples()));
 }
