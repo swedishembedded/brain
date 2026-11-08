@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use brain::{ChatFineTune, FineTuneStatus, PolicyGradientConfig};
+use brain::{BehaviourSource, ChatFineTune, FineTuneStatus, PolicyGradientConfig};
 
 use crate::chat_fixture::{chat_model_dir, cpu, qwen35_model_dir, TempDir};
 
@@ -66,7 +66,7 @@ fn policy_gradient(arch: &str, model: &Path, dataset: &Path, out: &Path) -> Chat
         // seed: runs that are compared with each other need the same stream.
         .seed(7)
         .device(cpu())
-        .policy_gradient(PolicyGradientConfig::default())
+        .policy_gradient(PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() })
 }
 
 /// The mean log-probability of the actions of `ROLLOUTS` under `adapter` (per answer token for qwen3, summed for
@@ -120,7 +120,7 @@ fn self_distillation_records_train_through_the_same_run_on_every_architecture() 
             })
             .collect();
         let dataset = write_lines(&model.join("self-distill.jsonl"), &lines);
-        let config = PolicyGradientConfig { teacher: brain::ReferencePolicy::StartOfRun, ..Default::default() };
+        let config = PolicyGradientConfig { teacher: brain::ReferencePolicy::StartOfRun, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
         let outcome = policy_gradient(arch, &model, &dataset, &model.join("run")).policy_gradient(config).run().unwrap_or_else(|e| panic!("{arch}: {e}"));
         let pg = outcome.policy_gradient.expect("statistics");
         assert_eq!(pg.stats.sequences_with_teacher, 4, "{arch}");

@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use brain::{ChatFineTune, ChatFullFineTune, FineTuneStatus, PolicyGradientConfig, PreferenceFineTune};
+use brain::{BehaviourSource, ChatFineTune, ChatFullFineTune, FineTuneStatus, PolicyGradientConfig, PreferenceFineTune};
 
 use crate::chat_fixture::{cpu, TempDir};
 
@@ -316,7 +316,7 @@ fn a_ricursive_policy_gradient_run_raises_rewarded_actions_and_lowers_penalised_
         .grad_accum(4)
         .seed(7) // seed: runs compared with each other need the same stream
         .device(cpu())
-        .policy_gradient(PolicyGradientConfig::default())
+        .policy_gradient(PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() })
         .run()
         .expect("the policy-gradient run");
     assert_eq!(outcome.status, FineTuneStatus::Completed);
@@ -338,7 +338,7 @@ fn a_ricursive_policy_gradient_run_raises_rewarded_actions_and_lowers_penalised_
 #[test]
 fn a_policy_gradient_is_refused_by_an_architecture_that_does_not_declare_it() {
     let model = ripple_model_dir("ripple-pg-refused");
-    let err = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).arch("qwen3").dataset(write_dataset(&model)).out_dir(model.join("run")).policy_gradient(PolicyGradientConfig::default()).device(cpu()).run().expect_err("refused");
+    let err = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).arch("qwen3").dataset(write_dataset(&model)).out_dir(model.join("run")).policy_gradient(PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).device(cpu()).run().expect_err("refused");
     assert!(err.to_string().contains("qwen3") && err.to_string().contains("policy_gradient"), "{err}");
 }
 

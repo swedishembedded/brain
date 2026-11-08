@@ -19,7 +19,7 @@ use model::training;
 use model::{Batch, FitOpts, Model, Objective, StepVerdict};
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
-use rl::objective::external::{ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
+use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
 
 const T: usize = 8;
 const ANSWER_FROM: usize = 3;
@@ -105,7 +105,7 @@ fn teacher_logprobs(m: &Qwen35, e: usize, policy: impl Fn(&Qwen35, &[u32], usize
 }
 
 fn config() -> PolicyGradientConfig {
-    PolicyGradientConfig { kl_beta: 0.02, log_kl: true, clip_eps: 0.5, ..Default::default() }
+    PolicyGradientConfig { kl_beta: 0.02, log_kl: true, clip_eps: 0.5, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }
 }
 
 fn opts() -> FitOpts {
@@ -118,6 +118,8 @@ fn started(examples: usize, teacher: bool, cfg: PolicyGradientConfig, m: &mut Qw
     write_dataset(dir.path(), examples, teacher);
     let mut obj = ExternalPolicyGradient::open(dir.path(), &opts(), cfg).unwrap();
     Objective::<Qwen35>::prepare(&mut obj, m).unwrap();
+    // As the loop does before its first step: a resumed run has applied one update per draw so far.
+    Objective::<Qwen35>::updates_applied(&mut obj, draws_done as u32);
     Objective::<Qwen35>::begin(&mut obj, 17, draws_done);
     (obj, dir)
 }
@@ -127,6 +129,9 @@ fn step(obj: &mut ExternalPolicyGradient, m: &Qwen35) {
     let _ = Objective::<Qwen35>::micro_steps(obj, m, &mut Rng::new(1), 1);
     m.poll_wait();
     assert!(matches!(Objective::<Qwen35>::step_verdict(obj), StepVerdict::Apply));
+    // As the loop does once the update is applied.
+    let applied = obj.stats().steps.len() as u32;
+    Objective::<Qwen35>::updates_applied(obj, applied);
 }
 
 fn drawn(obj: &ExternalPolicyGradient, examples: usize) -> Vec<usize> {

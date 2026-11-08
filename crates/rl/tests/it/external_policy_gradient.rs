@@ -18,7 +18,7 @@ use model::training;
 use model::{fit_controlled, Batch, FitControl, FitOpts, Model, Objective, StepVerdict};
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
-use rl::objective::external::{ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
+use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
 use rl::objective::grpo::LossAgg;
 use rl::objective::grpo_term::k3_kl;
 
@@ -108,7 +108,7 @@ fn one_step(obj: &mut ExternalPolicyGradient, m: &Qwen35) -> f32 {
 }
 
 fn no_kl() -> PolicyGradientConfig {
-    PolicyGradientConfig { kl_beta: 0.0, log_kl: false, ..Default::default() }
+    PolicyGradientConfig { kl_beta: 0.0, log_kl: false, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn a_positive_advantage_raises_and_a_negative_one_lowers_the_probability_of_the_
     let dir = tempfile::tempdir().unwrap();
     write_dataset(dir.path(), &[Row { ..Row::new(&good.ids, 3, Some(1.0)) }, Row::new(&bad.ids, 3, Some(-1.0))]);
     let run = opts(6, 2, 2e-2);
-    let mut obj = ExternalPolicyGradient::open(dir.path(), &run, PolicyGradientConfig::default()).unwrap();
+    let mut obj = ExternalPolicyGradient::open(dir.path(), &run, PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).unwrap();
     let (report, m) = fit_controlled(m, &mut obj, &run, None, FitControl::default()).unwrap();
     assert!(!report.interrupted);
 
@@ -181,7 +181,7 @@ fn the_kl_term_is_the_k3_estimator_against_the_reference_it_names() {
     assert!(want > 1e-4, "the fixture's adapter must move the policy off the base: {want}");
 
     let beta = 0.5;
-    let cfg = PolicyGradientConfig { kl_beta: beta, reference: ReferencePolicy::Base, ..Default::default() };
+    let cfg = PolicyGradientConfig { kl_beta: beta, reference: ReferencePolicy::Base, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
     let (mut obj, _dir) = started(std::slice::from_ref(&row), cfg, &mut m);
     let loss = one_step(&mut obj, &m);
     let step = &obj.stats().steps[0];
@@ -193,7 +193,7 @@ fn the_kl_term_is_the_k3_estimator_against_the_reference_it_names() {
     assert!(grad_l1(&m) > 0.0, "the KL term pulls the policy toward the base");
 
     // Against the policy the run started from, the first step has no KL at all.
-    let cfg = PolicyGradientConfig { kl_beta: beta, reference: ReferencePolicy::StartOfRun, ..Default::default() };
+    let cfg = PolicyGradientConfig { kl_beta: beta, reference: ReferencePolicy::StartOfRun, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
     let (mut obj, _dir) = started(std::slice::from_ref(&row), cfg, &mut m);
     one_step(&mut obj, &m);
     assert!(obj.stats().steps[0].kl.unwrap().abs() < 1e-6);
@@ -217,7 +217,7 @@ fn without_recorded_behaviour_the_first_step_is_the_on_policy_estimator() {
     // The gradient is that of A * (-mean log-prob): the supervised fine-tune's gradient scaled by A.
     let policy_grad = m.param_names().iter().map(|n| m.read_grad(n)).collect::<Vec<_>>();
     m.zero_grads();
-    let plain = Row::new(&row.ids, 3, None);
+    let plain = Row::new(&row.ids, 3, Some(1.0));
     let (mut sft, _dir2) = started(std::slice::from_ref(&plain), no_kl(), &mut m);
     one_step(&mut sft, &m);
     let sft_grad = m.param_names().iter().map(|n| m.read_grad(n)).collect::<Vec<_>>();
@@ -233,16 +233,17 @@ fn without_recorded_behaviour_the_first_step_is_the_on_policy_estimator() {
     assert!(worst <= 1e-4 * scale.max(1e-6), "worst {worst} of scale {scale}");
 }
 
+/// A dataset mixing imitation records with rollouts trains the imitation ones as the supervised fine-tune does.
 #[test]
 fn a_record_without_an_advantage_trains_as_the_supervised_fine_tune_does() {
     let mut m = lora_model(data::rng::random_seed());
-    let row = Row::new(&[1, 2, 3, 4, 5, 6], 3, None);
+    let imitation = Row::new(&[1, 2, 3, 4, 5, 6], 3, None);
     let plain_loss = {
         let (tokens, targets) = {
             let mut tokens = vec![0u32; T];
-            tokens[..6].copy_from_slice(&row.ids);
+            tokens[..6].copy_from_slice(&imitation.ids);
             let mut targets = vec![model::IGNORE; T];
-            (2..5).for_each(|t| targets[t] = row.ids[t + 1]);
+            (2..5).for_each(|t| targets[t] = imitation.ids[t + 1]);
             (tokens, targets)
         };
         Model::set_batch(&m, Batch::Lm { tokens: &tokens, targets: &targets });
@@ -254,16 +255,24 @@ fn a_record_without_an_advantage_trains_as_the_supervised_fine_tune_does() {
     };
     let sft_grad: Vec<Vec<f32>> = m.param_names().iter().map(|n| m.read_grad(n)).collect();
 
-    let (mut obj, _dir) = started(std::slice::from_ref(&row), PolicyGradientConfig::default(), &mut m);
-    assert_eq!((obj.stats().sequences_imitation, obj.stats().sequences_with_advantage), (1, 0));
-    let loss = one_step(&mut obj, &m);
+    // A second record with a zero advantage and no KL term contributes nothing, so the step is the imitation record's.
+    let rows = [imitation, Row::new(&[2, 3, 4, 5, 6, 7], 3, Some(0.0))];
+    let dir = tempfile::tempdir().unwrap();
+    write_dataset(dir.path(), &rows);
+    let mut obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 2, 1e-2), no_kl()).unwrap();
+    Objective::<Qwen35>::prepare(&mut obj, &mut m).unwrap();
+    Objective::<Qwen35>::begin(&mut obj, 17, 0);
+    assert_eq!((obj.stats().sequences_imitation, obj.stats().sequences_with_advantage), (1, 1));
+    m.zero_grads();
+    let loss = Objective::<Qwen35>::micro_steps(&mut obj, &m, &mut Rng::new(1), 2);
+    m.poll_wait();
+    assert!(matches!(Objective::<Qwen35>::step_verdict(&mut obj), StepVerdict::Apply));
     assert!((loss - plain_loss).abs() < 1e-5 * plain_loss.abs().max(1.0), "loss {loss} against the supervised {plain_loss}");
     for (name, want) in m.param_names().iter().zip(&sft_grad) {
         let got = m.read_grad(name);
         let scale = want.iter().fold(0.0f32, |a, w| a.max(w.abs())).max(1e-6);
         assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1e-5 * scale), "{name}");
     }
-    assert!(obj.stats().steps[0].kl.is_none(), "an imitation token has no reference to diverge from");
 }
 
 #[test]
@@ -271,14 +280,14 @@ fn a_mistaken_configuration_is_refused_before_anything_trains() {
     let dir = tempfile::tempdir().unwrap();
     write_dataset(dir.path(), &[Row::new(&[1, 2, 3, 4], 2, Some(1.0))]);
     let run = opts(1, 1, 1e-2);
-    for bad in [PolicyGradientConfig { clip_eps: 0.0, ..Default::default() }, PolicyGradientConfig { clip_eps: 1.5, ..Default::default() }, PolicyGradientConfig { kl_beta: -0.1, ..Default::default() }, PolicyGradientConfig { temperature: 0.0, ..Default::default() }] {
+    for bad in [PolicyGradientConfig { clip_eps: 0.0, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }, PolicyGradientConfig { clip_eps: 1.5, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }, PolicyGradientConfig { kl_beta: -0.1, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }, PolicyGradientConfig { temperature: 0.0, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }] {
         let err = ExternalPolicyGradient::open(dir.path(), &run, bad).err().expect("refused");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
     }
     let wide = FitOpts { batch_size: 2, ..run.clone() };
-    let err = ExternalPolicyGradient::open(dir.path(), &wide, PolicyGradientConfig::default()).err().expect("a sequence mean needs one sequence per batch");
+    let err = ExternalPolicyGradient::open(dir.path(), &wide, PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).err().expect("a sequence mean needs one sequence per batch");
     assert!(err.to_string().contains("TokenSum"), "{err}");
-    assert!(ExternalPolicyGradient::open(dir.path(), &wide, PolicyGradientConfig { loss_agg: LossAgg::TokenSum, ..Default::default() }).is_ok());
+    assert!(ExternalPolicyGradient::open(dir.path(), &wide, PolicyGradientConfig { loss_agg: LossAgg::TokenSum, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).is_ok());
 }
 
 #[test]
@@ -296,7 +305,7 @@ fn a_supervised_trainer_refuses_a_dataset_that_carries_advantages() {
 fn every_step_reports_finite_statistics_and_the_step_log_line_carries_them() {
     let mut m = lora_model(data::rng::random_seed());
     let rows = [Row::new(&[1, 2, 3, 4, 5, 6], 3, Some(1.0)), Row::new(&[2, 3, 4, 5, 6, 7], 3, Some(-1.0))];
-    let cfg = PolicyGradientConfig { reference: ReferencePolicy::StartOfRun, loss_agg: LossAgg::TokenSum, ..Default::default() };
+    let cfg = PolicyGradientConfig { reference: ReferencePolicy::StartOfRun, loss_agg: LossAgg::TokenSum, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
     let (mut obj, _dir) = started(&rows, cfg, &mut m);
     assert_eq!(Objective::<Qwen35>::step_log(&obj), None, "nothing to say before the first step");
     for _ in 0..3 {
@@ -311,4 +320,52 @@ fn every_step_reports_finite_statistics_and_the_step_log_line_carries_them() {
         assert!(line.contains(&format!("ratio {:.3}", step.ratio_mean)), "{line}");
     }
     assert!(obj.stats().steps[0].kl.unwrap().abs() < 1e-6, "the first step sits on its own reference");
+}
+
+fn recorded(ids: &[u32], answer_from: usize, advantage: f32) -> Row {
+    Row { behavior: Some(vec![-1.0; ids.len() - answer_from]), ..Row::new(ids, answer_from, Some(advantage)) }
+}
+
+/// T016: the ratio is taken against the sampler's recorded log-probabilities, or - only when asked for - against the
+/// start of the run, and the result says which.
+#[test]
+fn the_behaviour_policy_is_the_recorded_one_unless_the_start_of_run_proxy_is_asked_for() {
+    let unrecorded = [Row::new(&[1, 2, 3, 4, 5, 6], 3, Some(1.0)), Row::new(&[2, 3, 4, 5, 6, 7], 3, Some(-1.0))];
+    let dir = tempfile::tempdir().unwrap();
+    write_dataset(dir.path(), &unrecorded);
+    let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig::default()).err().expect("no recorded behaviour, no explicit proxy");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("start_of_run_proxy") && err.to_string().contains("6 of the 6"), "{err}");
+    let proxy = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).unwrap();
+    assert_eq!((proxy.stats().behaviour, proxy.stats().tokens_recorded_behavior, proxy.stats().tokens_start_of_run_behavior), (BehaviourSource::StartOfRunProxy, 0, 6));
+
+    let exact = [recorded(&[1, 2, 3, 4, 5, 6], 3, 1.0), recorded(&[2, 3, 4, 5, 6, 7], 3, -1.0)];
+    write_dataset(dir.path(), &exact);
+    let obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig::default()).unwrap();
+    assert_eq!((obj.stats().behaviour, obj.stats().tokens_recorded_behavior, obj.stats().tokens_start_of_run_behavior), (BehaviourSource::Recorded, 6, 0));
+
+    // One record short of exact is not exact: the proxy has to be asked for by name.
+    write_dataset(dir.path(), &[recorded(&[1, 2, 3, 4, 5, 6], 3, 1.0), Row::new(&[2, 3, 4, 5, 6, 7], 3, Some(-1.0))]);
+    let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig::default()).err().expect("a partly recorded dataset");
+    assert!(err.to_string().contains("3 of the 6"), "{err}");
+}
+
+/// T017: a rollout dataset that lost its advantage sidecar is refused, not trained as imitation.
+#[test]
+fn a_rollout_dataset_missing_its_sidecars_is_refused_not_trained_as_imitation() {
+    let dir = tempfile::tempdir().unwrap();
+    write_dataset(dir.path(), &[recorded(&[1, 2, 3, 4, 5, 6], 3, 1.0)]);
+    std::fs::remove_file(dir.path().join("train.adv.bin")).unwrap();
+    let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig::default()).err().expect("behaviour log-probabilities without advantages");
+    assert!(err.to_string().contains("train.blp.bin") && err.to_string().contains("imitation"), "{err}");
+
+    write_dataset(dir.path(), &[Row::new(&[1, 2, 3, 4, 5, 6], 3, Some(1.0))]);
+    std::fs::remove_file(dir.path().join("train.adv.bin")).unwrap();
+    let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).err().expect("no sidecar at all");
+    assert!(err.to_string().contains("imitation") && err.to_string().contains("supervised objective"), "{err}");
+
+    // Every record without an advantage is the same case, however the files came to be.
+    write_dataset(dir.path(), &[Row::new(&[1, 2, 3, 4, 5, 6], 3, None)]);
+    let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig::default()).err().expect("an all-imitation dataset");
+    assert!(err.to_string().contains("imitation"), "{err}");
 }

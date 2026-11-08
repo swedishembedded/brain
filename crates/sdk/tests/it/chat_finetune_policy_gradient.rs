@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use brain::{ChatFineTune, FineTuneStatus, PolicyGradientConfig, ReferencePolicy};
+use brain::{BehaviourSource, ChatFineTune, FineTuneStatus, PolicyGradientConfig, ReferencePolicy};
 
 use crate::chat_fixture::common::{cpu, qwen35_model_dir};
 
@@ -79,7 +79,7 @@ fn rollouts_train_an_adapter_that_raises_rewarded_actions_and_lowers_penalised_o
     let (dataset, plain) = (rollouts(&model), plain(&model));
     let (good_before, bad_before) = action_logprobs(&model, &plain, None);
 
-    let outcome = policy_gradient(&model, &dataset, &model.join("run"), PolicyGradientConfig::default()).run().expect("the policy-gradient run");
+    let outcome = policy_gradient(&model, &dataset, &model.join("run"), PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).run().expect("the policy-gradient run");
     assert_eq!(outcome.status, FineTuneStatus::Completed);
     let adapter = outcome.adapter.clone().expect("an adapter");
     let (good_after, bad_after) = action_logprobs(&model, &plain, Some(&adapter));
@@ -108,7 +108,7 @@ fn recorded_behaviour_log_probs_are_the_behaviour_policy_and_the_rest_is_the_sta
     // Two actions come with the sampler's log-probabilities (four tokens: the answer and its end-of-turn marker).
     let lines: Vec<String> = ROLLOUTS.iter().enumerate().map(|(i, (p, a, adv))| record(p, a, Some(*adv), (i < 2).then(|| vec![-3.0; 4]))).collect();
     let dataset = write_lines(&model.join("rollouts.jsonl"), &lines);
-    let outcome = policy_gradient(&model, &dataset, &model.join("run"), PolicyGradientConfig::default()).run().expect("the run");
+    let outcome = policy_gradient(&model, &dataset, &model.join("run"), PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).run().expect("the run");
     let pg = outcome.policy_gradient.expect("statistics");
     assert_eq!((pg.stats.tokens_recorded_behavior, pg.stats.tokens_start_of_run_behavior), (8, 8));
     // A recorded log-probability of -3 against a policy near uniform makes the ratios large: some tokens are clipped.
@@ -119,15 +119,15 @@ fn recorded_behaviour_log_probs_are_the_behaviour_policy_and_the_rest_is_the_sta
 fn a_run_continues_an_adapter_and_its_reference_is_the_base_or_that_adapter() {
     let model = qwen35_model_dir("pg-continue");
     let dataset = rollouts(&model);
-    let first = policy_gradient(&model, &dataset, &model.join("first"), PolicyGradientConfig::default()).run().expect("the first run");
+    let first = policy_gradient(&model, &dataset, &model.join("first"), PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).run().expect("the first run");
     let parent = first.adapter.expect("the first adapter");
 
-    let from_base = policy_gradient(&model, &dataset, &model.join("second"), PolicyGradientConfig { reference: ReferencePolicy::Base, ..Default::default() }).continue_from(&parent).run().expect("continuing against the base");
+    let from_base = policy_gradient(&model, &dataset, &model.join("second"), PolicyGradientConfig { reference: ReferencePolicy::Base, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).continue_from(&parent).run().expect("continuing against the base");
     assert!(from_base.trained_from.is_some(), "the parent is recorded");
     let kl_to_base = from_base.policy_gradient.unwrap().stats.steps[0].kl.expect("a measured KL");
     assert!(kl_to_base > 1e-6, "the continued adapter has left the base: {kl_to_base}");
 
-    let from_start = policy_gradient(&model, &dataset, &model.join("third"), PolicyGradientConfig { reference: ReferencePolicy::StartOfRun, ..Default::default() }).continue_from(&parent).run().expect("continuing against its own start");
+    let from_start = policy_gradient(&model, &dataset, &model.join("third"), PolicyGradientConfig { reference: ReferencePolicy::StartOfRun, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).continue_from(&parent).run().expect("continuing against its own start");
     let kl_to_start = from_start.policy_gradient.unwrap().stats.steps[0].kl.expect("a measured KL");
     assert!(kl_to_start.abs() < 1e-6, "the first step sits on the policy it started from: {kl_to_start}");
 }
@@ -149,7 +149,7 @@ fn records_and_settings_a_policy_gradient_run_cannot_honour_are_refused_before_t
     let why = refused(policy_gradient(&model, &plain, &out, Default::default()));
     assert!(why.contains("no record") && why.contains("advantage"), "{why}");
 
-    let why = refused(policy_gradient(&model, &dataset, &out, PolicyGradientConfig { clip_eps: 1.5, ..Default::default() }));
+    let why = refused(policy_gradient(&model, &dataset, &out, PolicyGradientConfig { clip_eps: 1.5, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }));
     assert!(why.contains("clip_eps"), "{why}");
     let why = refused(policy_gradient(&model, &dataset, &out, Default::default()).eval_every(2));
     assert!(why.contains("eval_every"), "{why}");
@@ -177,7 +177,7 @@ fn records_with_a_teacher_context_train_on_the_teachers_per_token_advantage() {
         })
         .collect();
     let dataset = write_lines(&model.join("self-distill.jsonl"), &lines);
-    let config = PolicyGradientConfig { teacher: ReferencePolicy::StartOfRun, advantage_bound: Some(2.0), sequence_advantage_cap: Some(3.0), ..Default::default() };
+    let config = PolicyGradientConfig { teacher: ReferencePolicy::StartOfRun, advantage_bound: Some(2.0), sequence_advantage_cap: Some(3.0), behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
     let outcome = policy_gradient(&model, &dataset, &model.join("run"), config).run().expect("the self-distillation run");
     assert_eq!(outcome.status, FineTuneStatus::Completed);
     let pg = outcome.policy_gradient.expect("statistics");
@@ -193,7 +193,7 @@ fn every_step_reports_what_the_objective_measured_while_the_run_is_still_going()
     let model = qwen35_model_dir("pg-progress");
     let dataset = rollouts(&model);
     let mut frames: Vec<brain::FineTuneProgress> = Vec::new();
-    let outcome = policy_gradient(&model, &dataset, &model.join("run"), PolicyGradientConfig::default())
+    let outcome = policy_gradient(&model, &dataset, &model.join("run"), PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() })
         .run_with(&brain::CancelToken::default(), |p| frames.push(p.clone()))
         .expect("the run");
     let stats = outcome.policy_gradient.expect("statistics").stats;

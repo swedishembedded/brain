@@ -14,19 +14,35 @@ fn hex64(v: &Value) -> bool {
     v.as_str().is_some_and(|s| trainjob::Digest::parse(s).is_ok())
 }
 
+/// The caller chooses the behaviour policy: rollouts that recorded none are not silently trained against the start of
+/// the run.
+#[test]
+fn a_policy_gradient_job_over_unrecorded_rollouts_must_ask_for_the_proxy() {
+    let rig = rig_qwen3("run-pg-behaviour", 16 << 30);
+    let train = data_digest(&rig, &rollouts());
+    let params = json!({
+        "base": BASE, "arch": "qwen3", "objective": "policy_gradient", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128,
+        "data": json!({"train": {"digest": train.hex()}}).to_string(),
+    });
+    let outcome = run(&rig, params, &[], &Frames::default());
+    let why = format!("{:?}", outcome.expect_err("no recorded behaviour and no proxy asked for"));
+    assert!(why.contains("start_of_run_proxy"), "{why}");
+}
+
 /// A plain `qwen3` base is served the same job: the objective belongs to the shared fine-tune path, not to one family.
 #[test]
 fn a_policy_gradient_job_trains_a_qwen3_base() {
     let rig = rig_qwen3("run-pg-qwen3", 16 << 30);
     let train = data_digest(&rig, &rollouts());
     let params = json!({
-        "base": BASE, "arch": "qwen3", "objective": "policy_gradient", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128,
+        "base": BASE, "arch": "qwen3", "objective": "policy_gradient", "behaviour": "start_of_run_proxy", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128,
         "data": json!({"train": {"digest": train.hex()}}).to_string(),
     });
     let outcome = run(&rig, params, &[], &Frames::default()).expect("the run");
     assert_eq!(outcome.outputs["status"], "completed");
     assert_eq!(outcome.outputs["policy_gradient"]["steps_taken"], 2);
     assert_eq!(outcome.outputs["policy_gradient"]["sequences_with_advantage"], 4);
+    assert_eq!(outcome.outputs["policy_gradient"]["behaviour"], "start_of_run_proxy", "the proxy was asked for and the result says so");
 }
 
 #[test]
@@ -34,7 +50,7 @@ fn a_policy_gradient_job_streams_each_step_and_hands_back_the_adapter_by_digest_
     let rig = rig("run-pg", 16 << 30, true);
     let train = data_digest(&rig, &rollouts());
     let params = json!({
-        "base": BASE, "arch": "qwen35", "objective": "policy_gradient", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128,
+        "base": BASE, "arch": "qwen35", "objective": "policy_gradient", "behaviour": "start_of_run_proxy", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128,
         "data": json!({"train": {"digest": train.hex()}}).to_string(), "return_adapter": true,
     });
     let frames = Frames::default();
@@ -121,7 +137,7 @@ fn a_supervised_job_without_a_store_takes_its_datasets_as_blobs_scores_base_and_
 fn cancelling_a_run_stops_it_at_a_step_boundary_and_frees_everything() {
     let rig = rig("run-cancel", 16 << 30, true);
     let train = data_digest(&rig, &rollouts());
-    let params = json!({"base": BASE, "arch": "qwen35", "objective": "policy_gradient", "steps": 1000, "grad_accum": 1, "rank": 2, "seed": 7, "max_block": 128, "data": json!({"train": {"digest": train.hex()}}).to_string()});
+    let params = json!({"base": BASE, "arch": "qwen35", "objective": "policy_gradient", "behaviour": "start_of_run_proxy", "steps": 1000, "grad_accum": 1, "rank": 2, "seed": 7, "max_block": 128, "data": json!({"train": {"digest": train.hex()}}).to_string()});
     let mut inv = invocation(params, &[]).unwrap();
     inv.cancel = CancelToken::armed();
     let token = inv.cancel.clone();

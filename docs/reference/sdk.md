@@ -494,7 +494,7 @@ raises it.
   a supervised one); they train through the same vision path.
 
 ```rust
-use brain::{ChatFineTune, LossAgg, PolicyGradientConfig, ReferencePolicy};
+use brain::{BehaviourSource, ChatFineTune, LossAgg, PolicyGradientConfig, ReferencePolicy};
 
 let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
     .arch("qwen35")
@@ -508,6 +508,7 @@ let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
         clip_eps: 0.2,                         // ratio clipped to [0.8, 1.2]
         kl_beta: 0.02,                         // k3 KL to the reference; 0 for none
         reference: ReferencePolicy::Base,      // the base, or StartOfRun: the adapter this run began from
+        behaviour: BehaviourSource::Recorded,  // the sampler's recorded log-probs (exact), or StartOfRunProxy
         loss_agg: LossAgg::SeqMean,            // per-sequence token mean (GRPO), or TokenSum
         temperature: 1.0,                      // the temperature the collector sampled with
         log_kl: true,                          // report the KL even when kl_beta is 0
@@ -542,12 +543,18 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   number of tokens than the student, is refused by example. Each step reports the mean, the largest magnitude and the
   clipped fraction of the token advantages next to the KL and ratio. This is the sampled-token estimator (one teacher
   log-probability per sampled token), not the full-distribution reverse KL.
-- **Behaviour policy.** The recorded `behavior_logprobs` where there are some. Where there are none the importance ratio
-  is taken against the adapter the run **started from** (a fresh adapter: the base), measured by one forward pass over
-  each record the first time a step draws it, under a frozen copy of the start adapter (the adapters switched off for a
-  fresh adapter), never under the adapter as it has since been trained: the first optimiser step is the plain on-policy estimator `-A * log p` (ratio 1),
-  and the clip bounds how far later steps and epochs move a token from where the run began. It is a proxy for the true
-  behaviour policy and exact when the rollouts were sampled from the adapter being continued.
+- **Behaviour policy** (`PolicyGradientConfig::behaviour`). `BehaviourSource::Recorded` (the default, the exact mode): the
+  recorded `behavior_logprobs`, required on every supervised token of every record with an advantage; a dataset missing
+  any is refused before the run, naming how many tokens lack one. `BehaviourSource::StartOfRunProxy`, asked for by name:
+  where none was recorded the importance ratio is taken against the adapter the run **started from** (a fresh adapter:
+  the base), measured by one forward pass over each record the first time a step draws it, under a frozen copy of the
+  start adapter (the adapters switched off for a fresh adapter), never under the adapter as it has since been trained:
+  the first optimiser step is the plain on-policy estimator `-A * log p` (ratio 1), and the clip bounds how far later
+  steps and epochs move a token from where the run began. It is a proxy for the true behaviour policy and exact only when
+  the rollouts were sampled from the adapter being continued. The mode used is part of the run's identity and is
+  reported (`behaviour`, `tokens_recorded_behavior`, `tokens_start_of_run_behavior`) in the outcome, the training
+  record and the adapter card. A dataset with no advantage sidecar, or sidecars without it, is refused rather than
+  trained as imitation.
 - **Reference policy.** `Base` (the adapter disabled) or `StartOfRun` (the adapter being continued); the same for a
   fresh adapter. Measured by a forward pass over each record the first time a step draws it (a second pass when a
   continued adapter is compared with the base).

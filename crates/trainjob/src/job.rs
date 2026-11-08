@@ -222,6 +222,9 @@ fn policy_gradient_config(params: &crate::request::Params) -> Result<brain::Poli
     if let Some(v) = &params.reference {
         config.reference = reference(v)?;
     }
+    if let Some(v) = &params.behaviour {
+        config.behaviour = v.parse().map_err(|e| format!("train: {e}"))?;
+    }
     if let Some(v) = params.loss_agg.as_deref() {
         config.loss_agg = match v {
             "seq-mean" => brain::LossAgg::SeqMean,

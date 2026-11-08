@@ -50,6 +50,9 @@ brain finetune BASE --dataset FILE --out DIR [options]
                      (the loss is printed); for architectures whose trainer scores it (Ripple, qwen35).
   --policy-gradient  train the clipped policy gradient on rollout records (`advantage` on each record) instead of the
                      supervised loss, for an adapter; --ratio-clip X and --kl-beta X set its clip band and KL weight.
+  --behaviour B      with --policy-gradient: where the behaviour log-probabilities of the ratio come from.
+                     recorded (default): the sampler's own, on every supervised token of every record; start_of_run_proxy:
+                     where none was recorded, the start-of-run policy's (exact only if the rollouts were sampled from it).
   --activations P    what the backward keeps of the forward: keep|recompute|bf16|fp8.
   --train-precision SPEC
                      a full fine-tune's storage: `state=f32|bf16|int8[:B]|log8[:B]` for the optimizer state,
@@ -97,6 +100,7 @@ struct Args {
     policy_gradient: bool,
     clip_eps: Option<f32>,
     kl_beta: Option<f32>,
+    behaviour: Option<brain::BehaviourSource>,
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -147,6 +151,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--policy-gradient" => a.policy_gradient = true,
             "--ratio-clip" => a.clip_eps = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--kl-beta" => a.kl_beta = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--behaviour" => a.behaviour = Some(need(&mut i, &flag)?.parse().map_err(|e| format!("brain finetune: {flag}: {e}"))?),
             "-h" | "--help" => return Err(String::new()),
             other if other.starts_with('-') => return Err(format!("brain finetune: unknown option '{other}'")),
             other if a.base.is_empty() => a.base = other.to_string(),
@@ -166,7 +171,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         }
     }
     if !a.policy_gradient {
-        for (flag, given) in [("--ratio-clip", a.clip_eps.is_some()), ("--kl-beta", a.kl_beta.is_some())] {
+        for (flag, given) in [("--ratio-clip", a.clip_eps.is_some()), ("--kl-beta", a.kl_beta.is_some()), ("--behaviour", a.behaviour.is_some())] {
             if given {
                 return Err(format!("brain finetune: {flag} shapes the policy gradient; give --policy-gradient"));
             }
@@ -251,7 +256,7 @@ fn lora(a: &Args, rank: u32) -> brain::ChatFineTune {
     }
     if a.policy_gradient {
         let d = brain::PolicyGradientConfig::default();
-        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), ..d });
+        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), behaviour: a.behaviour.unwrap_or(d.behaviour), ..d });
     }
     t
 }
@@ -433,7 +438,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta", "--behaviour"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }

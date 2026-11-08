@@ -104,6 +104,40 @@ impl std::str::FromStr for ReferencePolicy {
     }
 }
 
+/// Where the behaviour log-probability `old` of a token comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BehaviourSource {
+    /// The sampler's own, recorded with the rollout. Every supervised token of every record that trains on the
+    /// policy gradient must have one; the ratio is then the true importance ratio against the policy that sampled.
+    #[default]
+    Recorded,
+    /// Where none was recorded, the log-probability under the policy the run started from. Exact only when the
+    /// rollouts were sampled from that policy; otherwise a proxy, and the result says so.
+    StartOfRunProxy,
+}
+
+impl BehaviourSource {
+    /// The name the CLI, the served action and the adapter's provenance use.
+    pub fn name(self) -> &'static str {
+        match self {
+            BehaviourSource::Recorded => "recorded",
+            BehaviourSource::StartOfRunProxy => "start_of_run_proxy",
+        }
+    }
+}
+
+impl std::str::FromStr for BehaviourSource {
+    type Err = String;
+    fn from_str(s: &str) -> Result<BehaviourSource, String> {
+        match s {
+            "recorded" => Ok(BehaviourSource::Recorded),
+            "start_of_run_proxy" => Ok(BehaviourSource::StartOfRunProxy),
+            other => Err(format!("unknown behaviour source {other:?}; expected \"recorded\" or \"start_of_run_proxy\"")),
+        }
+    }
+}
+
 /// The knobs of [`ExternalPolicyGradient`]. [`Default`] is the recommended configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PolicyGradientConfig {
@@ -112,6 +146,9 @@ pub struct PolicyGradientConfig {
     /// Coefficient of the k3 KL to the reference policy; `0.0` puts no KL term in the loss.
     pub kl_beta: f32,
     pub reference: ReferencePolicy,
+    /// Where the behaviour log-probabilities come from: the sampler's recorded ones ([`BehaviourSource::Recorded`],
+    /// the default, exact) or, where none were recorded, the start-of-run policy's (an explicit, recorded proxy).
+    pub behaviour: BehaviourSource,
     /// How token terms are normalised ([`LossAgg::SeqMean`], as GRPO publishes it, by default).
     pub loss_agg: LossAgg,
     /// The temperature the collector sampled with; the policy trained is `softmax(logits / temperature)`.
@@ -131,7 +168,7 @@ pub struct PolicyGradientConfig {
 
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
-        PolicyGradientConfig { clip_eps: 0.2, kl_beta: 0.02, reference: ReferencePolicy::Base, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None }
+        PolicyGradientConfig { clip_eps: 0.2, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None }
     }
 }
 
@@ -196,6 +233,9 @@ pub struct PolicyGradientStep {
 /// Everything a run measured, per optimiser step, and how it began.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct PolicyGradientStats {
+    /// Where the behaviour log-probabilities of the run came from (see [`BehaviourSource`]); with
+    /// `tokens_start_of_run_behavior` it says how much of the run's ratio is a proxy.
+    pub behaviour: BehaviourSource,
     pub steps: Vec<PolicyGradientStep>,
     /// Optimiser steps not taken because a loss or gradient was not finite.
     pub steps_skipped_nonfinite: usize,
@@ -388,11 +428,16 @@ impl ExternalPolicyGradient {
         }
         let ends: Vec<usize> = (0..starts.len()).map(|i| starts.get(i + 1).copied().unwrap_or(tokens.len())).collect();
         let mask = binio::read_mask_bin(&dir.join("train.mask.bin"))?;
-        let recorded = data::chat_rollout::read(dir, "train", starts.len(), tokens.len())?;
-        let (advantage, behavior) = match recorded {
-            Some(r) => (r.advantage, r.behavior),
-            None => (vec![f32::NAN; starts.len()], vec![f32::NAN; tokens.len()]),
+        // The sidecars are the dataset's declaration that it holds rollouts. Without the advantages every record would
+        // be trained as an imitation example, which is a different objective than the one asked for.
+        let Some(recorded) = data::chat_rollout::read(dir, "train", starts.len(), tokens.len())? else {
+            let stray = ["train.blp.bin", "train.tch.u32.bin", "train.tch.mask.bin", "train.tch.ex.bin"].into_iter().find(|name| dir.join(name).exists());
+            return Err(invalid(match stray {
+                Some(name) => format!("{}: {name} is there but train.adv.bin is not; a rollout dataset missing its advantage sidecar would train every record as imitation. Prepare the dataset again from its records", dir.display()),
+                None => format!("{}: the training split carries no rollout advantages, so a policy gradient would train every record as imitation; use the supervised objective, or prepare the dataset from records with an \"advantage\"", dir.display()),
+            }));
         };
+        let (advantage, behavior) = (recorded.advantage, recorded.behavior);
         let teacher = data::chat_rollout::read_teacher(dir, "train", starts.len())?;
         if let Some(teacher) = &teacher {
             check_teacher(teacher, &starts, &ends, &mask, batch_cfg.block_size).map_err(invalid)?;
@@ -415,6 +460,18 @@ impl ExternalPolicyGradient {
                 }
             }
         }
+        if stats.sequences_with_advantage == 0 {
+            return Err(invalid(format!("{}: no training record carries an advantage, so a policy gradient would train every record as imitation; use the supervised objective", dir.display())));
+        }
+        if cfg.behaviour == BehaviourSource::Recorded && stats.tokens_start_of_run_behavior > 0 {
+            return Err(invalid(format!(
+                "{}: {} of the {} supervised tokens of the records with an advantage have no recorded behaviour log-probability, so the ratio would not be taken against the policy that sampled them. Record them with the rollouts, or ask for the start-of-run proxy (behaviour \"start_of_run_proxy\"), which is exact only when the rollouts were sampled from the adapter this run starts from",
+                dir.display(),
+                stats.tokens_start_of_run_behavior,
+                stats.tokens_start_of_run_behavior + stats.tokens_recorded_behavior
+            )));
+        }
+        stats.behaviour = cfg.behaviour;
         let tag_examples = ["train", "val"].iter().any(|split| dir.join(format!("{split}.img.bin")).exists());
         let rows = Rows { starts, ends, advantage, behavior, teacher };
         let cache = ScoreCache::create(dir, rows.starts.len())?;

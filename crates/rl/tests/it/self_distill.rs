@@ -19,7 +19,7 @@ use model::training;
 use model::{fit_controlled, Batch, FitControl, FitOpts, Model};
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
-use rl::objective::external::{ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
+use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
 use rl::objective::pg_batch::with_adapters_disabled;
 
 const T: usize = 12;
@@ -59,11 +59,11 @@ fn lora_model(seed: u64) -> Qwen35 {
 }
 
 fn opts(steps: u32, lr: f32) -> FitOpts {
-    FitOpts { steps, batch_size: 1, block_size: T as u32, lr, grad_accum: 1, seed: 17, ..Default::default() }
+    FitOpts { steps, batch_size: 1, block_size: T as u32, lr, grad_accum: 1, seed: 17, min_lr: 0.0, ..Default::default() }
 }
 
 fn config() -> PolicyGradientConfig {
-    PolicyGradientConfig { kl_beta: 0.0, log_kl: false, clip_eps: 0.5, ..Default::default() }
+    PolicyGradientConfig { kl_beta: 0.0, log_kl: false, clip_eps: 0.5, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }
 }
 
 /// The model's log-probability of each supervised token of `ids` (answer from [`ANSWER_FROM`]).

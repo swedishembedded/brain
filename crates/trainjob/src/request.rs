@@ -70,6 +70,7 @@ pub fn action_spec() -> ActionSpec {
         .param(optional_f("clip_eps", "policy gradient: half-width of the clip band of the importance ratio", 0.0, 1.0))
         .param(optional_f("kl_beta", "policy gradient: coefficient of the KL term to the reference policy", 0.0, 1000.0))
         .param(ParamSpec::new("reference", ParamType::Enum(vec!["base".into(), "start".into()]), "policy gradient: the policy the KL term is taken against"))
+        .param(ParamSpec::new("behaviour", ParamType::Enum(vec!["recorded".into(), "start_of_run_proxy".into()]), "policy gradient: where the behaviour log-probabilities of the importance ratio come from: `recorded` (default) the sampler's own, required on every supervised token; `start_of_run_proxy` the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it"))
         .param(ParamSpec::new("loss_agg", ParamType::Enum(vec!["seq-mean".into(), "token-sum".into()]), "policy gradient: how the token terms are normalised"))
         .param(optional_f("temperature", "policy gradient: the temperature the rollouts were sampled at", 0.0, 100.0))
         .param(ParamSpec::new("teacher", ParamType::Enum(vec!["base".into(), "start".into()]), "policy gradient with teacher contexts: the frozen policy that scores the student's tokens in the privileged context"))
@@ -253,6 +254,7 @@ pub struct Params {
     pub clip_eps: Option<f32>,
     pub kl_beta: Option<f32>,
     pub reference: Option<String>,
+    pub behaviour: Option<String>,
     pub loss_agg: Option<String>,
     pub temperature: Option<f32>,
     pub teacher: Option<String>,
@@ -279,6 +281,7 @@ impl Request {
             (params.clip_eps.is_some(), "clip_eps"),
             (params.kl_beta.is_some(), "kl_beta"),
             (params.reference.is_some(), "reference"),
+            (params.behaviour.is_some(), "behaviour"),
             (params.loss_agg.is_some(), "loss_agg"),
             (params.temperature.is_some(), "temperature"),
             (params.teacher.is_some(), "teacher"),

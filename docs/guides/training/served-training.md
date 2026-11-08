@@ -67,7 +67,8 @@ No dataset or adapter travels through the API as a message body.
 | `eval_every`, `patience`, `replay_share`, `keep_evaluations` | monitoring and early stopping |
 | `adapter_id` | the id on the adapter's card |
 | `return_adapter` | also return the adapter as an output blob (D-Bus) |
-| `clip_eps`, `kl_beta`, `reference`, `loss_agg`, `temperature`, `teacher`, `advantage_bound`, `sequence_advantage_cap` | the policy-gradient objective's settings (only with `objective: policy_gradient`) |
+| `clip_eps`, `kl_beta`, `reference`, `behaviour`, `loss_agg`, `temperature`, `teacher`, `advantage_bound`, `sequence_advantage_cap` | the policy-gradient objective's settings (only with `objective: policy_gradient`) |
+| `behaviour` | where the importance ratio's behaviour log-probabilities come from. `recorded` (default): the sampler's own `behavior_logprobs`, on every supervised token of every record with an advantage; a dataset missing any is refused. `start_of_run_proxy`: the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it; the training record states which was used |
 | `arch` | the base's architecture, only for a checkpoint directory with no `config.json` |
 
 `data` is `{"train": SRC, "held_out"?: SRC, "held_out_text"?: SRC, "monitor"?:

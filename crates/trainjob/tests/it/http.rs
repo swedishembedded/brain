@@ -48,7 +48,7 @@ async fn a_training_job_over_http_is_created_followed_and_collected_by_digest() 
     let rig = rig("http-job", 16 << 30, true);
     let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI).with_training(true));
     let train = data_digest(&rig, &rollouts());
-    let params = json!({"base": BASE, "arch": "qwen35", "objective": "policy_gradient", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128, "data": json!({"train": {"digest": train.hex()}}).to_string()});
+    let params = json!({"base": BASE, "arch": "qwen35", "objective": "policy_gradient", "behaviour": "start_of_run_proxy", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128, "data": json!({"train": {"digest": train.hex()}}).to_string()});
 
     let (status, created) = call(&app, Method::POST, "/v1/jobs", Some(KEY), Some(job_body(params))).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&created));

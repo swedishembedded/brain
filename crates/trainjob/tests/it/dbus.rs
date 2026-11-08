@@ -74,7 +74,7 @@ fn a_job_over_the_bus_takes_its_dataset_as_a_descriptor_streams_its_steps_return
         assert_eq!(train["actions"][0]["name"], "train");
 
         // ---- a run whose dataset is a file descriptor ----
-        let params = json!({"base": BASE, "arch": "qwen35", "objective": "policy_gradient", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128, "return_adapter": true, "data": json!({"train": {"blob": "dataset"}}).to_string()});
+        let params = json!({"base": BASE, "arch": "qwen35", "objective": "policy_gradient", "behaviour": "start_of_run_proxy", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128, "return_adapter": true, "data": json!({"train": {"blob": "dataset"}}).to_string()});
         let mut fds: HashMap<String, ZOwnedFd> = HashMap::new();
         fds.insert("dataset".into(), memfd(&rollouts()));
         let (job, stream): (u64, ZOwnedFd) = proxy.call("Subscribe", &(trainjob::MODEL, trainjob::ACTION, params.to_string(), fds, r#"{"dataset":{"media":"bytes"}}"#)).await.unwrap();

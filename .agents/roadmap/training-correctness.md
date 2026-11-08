@@ -28,8 +28,8 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [x] T013 (adam, gemm precision, native sparse attention; the rest of the resolved configuration is not yet persisted) P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers GEMM compute precision and the whole resolved run configuration
 - [x] T014 (the warm start is announced and returned as StartKind; it is not written into the checkpoint header, which is each model's own save) P1 - crates/model/src/train.rs (build_or_warm_start) - separate exact resume, weight warm start, adapter continuation (names and lineage)
 - [x] T015 P1 - crates/rl/src/objective/grpo.rs (attach_references) - incomplete references refuse; unsupported EOS positions distinguished
-- [ ] T016 P1 - crates/rl/src/objective/external.rs - explicit exact vs proxy behaviour logprobs with provenance
-- [ ] T017 P1 - crates/rl/src/objective/external.rs - missing rollout sidecars never select imitation semantics silently
+- [x] T016 (recorded behaviour log-probs are the default exact mode; the sampler policy identity is not stored per record) P1 - crates/rl/src/objective/external.rs - explicit exact vs proxy behaviour logprobs with provenance
+- [x] T017 P1 - crates/rl/src/objective/external.rs - missing rollout sidecars never select imitation semantics silently
 - [x] T018 P1 - crates/model/src/train.rs (loss_probe) - pure probe; persistent objective cursor; resume equivalence test (probe is pure for DPO and distillation; a resumed run still restarts a closure-fed stream or from_pairs/from_examples cursor at record 0, open)
 - [ ] T019 P1 - central ValidatedTrainingPlan - every numeric configuration refused at every entry point (started: FitOpts::validate in the shared loop, DpoConfig, GRPO numerics; open: distill K/seq_len, rewards/advantages, token ids vs vocab, every SDK builder as a single ValidatedTrainingPlan)
 - [x] T020 (ids, probabilities, normalisation, zero-information, k=0; vocabulary range and discarded tail mass are not checked yet) P1 - crates/rl/src/objective/distill.rs - duplicate/out-of-range ids, non-finite or unnormalised teacher probabilities (with T011)
