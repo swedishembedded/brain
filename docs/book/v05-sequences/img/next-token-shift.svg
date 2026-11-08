@@ -1,0 +1,80 @@
+<!-- source-sha256: 59af16f76137a9ba53f94862e611ad6a531d6baa2502d468e1495854854bcfc6 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 424" width="780" height="424"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="780" height="424" fill="#ffffff"/>
+<rect x="10" y="14" width="760" height="190" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Correct: the target is the next token</text>
+<text x="88" y="88.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">input x_t</text>
+<text x="88" y="104.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">(what the model reads)</text>
+<text x="88" y="160.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">target y_t</text>
+<text x="88" y="176.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">(what it must predict)</text>
+<text x="250" y="64.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">t = 0</text>
+<rect x="208" y="76" width="84" height="32" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="250" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">&lt;s&gt;</text>
+<rect x="208" y="148" width="84" height="32" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="250" y="168.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<line x1="250" y1="111" x2="250" y2="145" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="350" y="64.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">t = 1</text>
+<rect x="308" y="76" width="84" height="32" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="350" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<rect x="308" y="148" width="84" height="32" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="350" y="168.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cat</text>
+<line x1="350" y1="111" x2="350" y2="145" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="450" y="64.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">t = 2</text>
+<rect x="408" y="76" width="84" height="32" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="450" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cat</text>
+<rect x="408" y="148" width="84" height="32" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="450" y="168.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sees</text>
+<line x1="450" y1="111" x2="450" y2="145" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="550" y="64.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">t = 3</text>
+<rect x="508" y="76" width="84" height="32" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="550" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sees</text>
+<rect x="508" y="148" width="84" height="32" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="550" y="168.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fish</text>
+<line x1="550" y1="111" x2="550" y2="145" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="650" y="64.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">t = 4</text>
+<rect x="608" y="76" width="84" height="32" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fish</text>
+<rect x="608" y="148" width="84" height="32" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="168.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">.</text>
+<line x1="650" y1="111" x2="650" y2="145" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="10" y="220" width="760" height="190" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="242" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Bug: no shift, the answer is in the input</text>
+<text x="88" y="294.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">input x_t</text>
+<text x="88" y="310.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">(what the model reads)</text>
+<text x="88" y="366.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">target y_t</text>
+<text x="88" y="382.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">(what it must predict)</text>
+<text x="250" y="270.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">t = 0</text>
+<rect x="208" y="282" width="84" height="32" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="250" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<rect x="208" y="354" width="84" height="32" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="250" y="374.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<line x1="250" y1="317" x2="250" y2="351" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<text x="259" y="338.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="start">copy</text>
+<text x="350" y="270.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">t = 1</text>
+<rect x="308" y="282" width="84" height="32" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="350" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cat</text>
+<rect x="308" y="354" width="84" height="32" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="350" y="374.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cat</text>
+<line x1="350" y1="317" x2="350" y2="351" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<text x="359" y="338.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="start">copy</text>
+<text x="450" y="270.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">t = 2</text>
+<rect x="408" y="282" width="84" height="32" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="450" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sees</text>
+<rect x="408" y="354" width="84" height="32" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="450" y="374.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sees</text>
+<line x1="450" y1="317" x2="450" y2="351" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<text x="459" y="338.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="start">copy</text>
+<text x="550" y="270.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">t = 3</text>
+<rect x="508" y="282" width="84" height="32" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="550" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fish</text>
+<rect x="508" y="354" width="84" height="32" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="550" y="374.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fish</text>
+<line x1="550" y1="317" x2="550" y2="351" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<text x="559" y="338.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="start">copy</text>
+<text x="650" y="270.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">t = 4</text>
+<rect x="608" y="282" width="84" height="32" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">.</text>
+<rect x="608" y="354" width="84" height="32" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="374.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">.</text>
+<line x1="650" y1="317" x2="650" y2="351" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<text x="659" y="338.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="start">copy</text>
+</svg>

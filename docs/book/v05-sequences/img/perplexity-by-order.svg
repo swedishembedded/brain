@@ -1,0 +1,34 @@
+<!-- source-sha256: 23c9b041a8869c79a4c617a87564cae7516d7719e1bd69b97611c38f01293d05 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 340" width="600" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="340" fill="#ffffff"/>
+<line x1="123.5" y1="294" x2="123.5" y2="30" stroke="#edf2f7"/>
+<text x="123.5" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="254.5" y1="294" x2="254.5" y2="30" stroke="#edf2f7"/>
+<text x="254.5" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="385.5" y1="294" x2="385.5" y2="30" stroke="#edf2f7"/>
+<text x="385.5" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="516.5" y1="294" x2="516.5" y2="30" stroke="#edf2f7"/>
+<text x="516.5" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="58" y1="294" x2="582" y2="294" stroke="#edf2f7"/>
+<text x="52" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="235.33" x2="582" y2="235.33" stroke="#edf2f7"/>
+<text x="52" y="239.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">3</text>
+<line x1="58" y1="176.67" x2="582" y2="176.67" stroke="#edf2f7"/>
+<text x="52" y="180.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="118" x2="582" y2="118" stroke="#edf2f7"/>
+<text x="52" y="122" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<line x1="58" y1="59.33" x2="582" y2="59.33" stroke="#edf2f7"/>
+<text x="52" y="63.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<rect x="58" y="30" width="524" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="123.5,211.79 254.5,144.18 385.5,96.06 516.5,61.94"/><circle cx="123.5" cy="211.79" r="3.5" fill="#2b6cb0"/><circle cx="254.5" cy="144.18" r="3.5" fill="#2b6cb0"/><circle cx="385.5" cy="96.06" r="3.5" fill="#2b6cb0"/><circle cx="516.5" cy="61.94" r="3.5" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="123.5,197.36 254.5,186.44 385.5,186.42 516.5,177.62"/><circle cx="123.5" cy="197.36" r="3.5" fill="#c05621"/><circle cx="254.5" cy="186.44" r="3.5" fill="#c05621"/><circle cx="385.5" cy="186.42" r="3.5" fill="#c05621"/><circle cx="516.5" cy="177.62" r="3.5" fill="#c05621"/><line x1="58" y1="224.33" x2="582" y2="224.33" stroke="#2f855a" stroke-dasharray="4 4"/><line x1="58" y1="270.59" x2="582" y2="270.59" stroke="#718096" stroke-dasharray="4 4"/><text x="575.45" y="219.64" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#2f855a" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">network, window of 4 tokens</text><text x="575.45" y="265.9" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">floor of the process</text></g>
+<text x="320" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">order n of the counting model (context of n - 1 tokens)</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">test perplexity</text>
+<text x="320" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">More context stops helping when the counts run out</text>
+<rect x="66" y="38" width="183.19" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">add-alpha smoothing</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">interpolation with back-off</text>
+</svg>

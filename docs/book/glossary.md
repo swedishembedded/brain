@@ -34,6 +34,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **autoencoder**: a network trained to output its own input after passing it through a bottleneck layer much narrower than the input, so that it must learn a short code from which the input can be rebuilt. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
+**autoregressive factorization**: writing the probability of a sequence as the product, over its positions, of the probability of each token given all the tokens before it, an identity that holds for every distribution over sequences. *([Language Modeling](v05-sequences/04-language-modeling.md))*
+
 ## B
 
 **backend abstraction**: the narrow set of operations (capabilities, compile, create a buffer, upload, dispatch, read back, release) that every device-specific backend provides with the same meaning, so that the code that builds a model never names the device that runs it. *([One Program, Many Devices](v04-computation/09-backends.md))*
@@ -97,6 +99,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **catastrophic cancellation**: the loss of leading digits when two nearly equal numbers that carry rounding errors are subtracted; the subtraction is exact but promotes the earlier errors to the leading digits of a much smaller result, losing about $\log_{10}$ of the ratio of the operands to the result. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **categorical distribution**: a table of $K$ non-negative probabilities summing to $1$, one per outcome of a choice among $K$ possibilities such as the next word; the case $K = 2$ is the Bernoulli distribution. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
+
+**causal language model**: a model whose output at each position depends only on the tokens up to that position and gives the distribution of the next one, so that its probabilities multiply into a valid probability of a sequence; in the data it means that the targets are the inputs shifted by one place. *([Language Modeling](v05-sequences/04-language-modeling.md))*
 
 **central difference**: the finite difference $(f(x+h) - f(x-h))/(2h)$, whose error is proportional to $h^2$ because the first error term cancels by symmetry. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
@@ -442,6 +446,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## N
 
+**n-gram model**: a language model that estimates the probability of the next token from the last $n - 1$ tokens only, by counting how often each token followed that context in a training text. *([Language Modeling](v05-sequences/04-language-modeling.md))*
+
 **naive Bayes**: a classifier that applies Bayes' rule with the assumption that the features are independent given the class, so that the class probabilities come from simple counts or per-feature distributions. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
 **naive matmul**: the matrix product computed as its definition reads, one output at a time as a dot product of a row and a column, loading both from memory for every output and keeping nothing between outputs; its intensity is about a quarter of an operation per byte at any size. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
@@ -449,6 +455,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **negative log-likelihood**: minus the natural logarithm of the likelihood, a sum over independent examples of the surprise at each observed label; the loss that maximum likelihood minimises. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
 **Newton's method**: the iteration that replaces a function by its tangent line (or, for minimisation, by a quadratic with the same slope and curvature) and jumps to its zero (or bottom), $x \leftarrow x - f(x)/f'(x)$ or $x \leftarrow x - f'(x)/f''(x)$; its error is squared at each step near a simple root. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
+**next-token prediction**: the training task of giving high probability to each token of a text given the tokens before it, with the mean cross-entropy over all positions as the loss, so that the text supplies its own labels. *([Language Modeling](v05-sequences/04-language-modeling.md))*
 
 **norm**: the length of a vector; the L2 norm is $\sqrt{\mathbf{a}\cdot\mathbf{a}}$, and the L1 and max norms measure total and largest-entry size. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
@@ -645,6 +653,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **tanh-activation**: the hyperbolic tangent used as a neuron's activation, a smooth step from $-1$ to $1$ equal to $2\sigma(2z) - 1$ with slope $1 - \tanh^2(z)$, centred on zero and saturating for large $|z|$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **Taylor expansion**: the polynomial that matches a function's value and first derivatives at a point, such as $f(a) + f'(a)h + \tfrac{1}{2}f''(a)h^2$, whose error is of the order of the first term dropped. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**teacher forcing**: training a sequence model at every position with the true earlier tokens as its context, instead of its own earlier predictions, so that a sequence of $T$ tokens gives $T$ independent training examples in one pass. *([Language Modeling](v05-sequences/04-language-modeling.md))*
 
 **tensor**: an array of numbers with any number of axes (zero for a scalar, one for a vector, two for a matrix), described by its shape. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 

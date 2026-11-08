@@ -419,7 +419,7 @@ volumes:
         title: "Language Modeling"
         question: "How can predicting the next token teach a model about language?"
         introduces: [autoregressive-factorization, n-gram-model, next-token-prediction, teacher-forcing, causal-language-model]
-        requires: [conditional-probability, softmax-cross-entropy, perplexity, token]
+        requires: [conditional-probability, softmax-cross-entropy, perplexity, token, embedding-table, multilayer-perceptron, gradient-descent, early-stopping, validation-set, test-set, data-leakage]
         brain: []
       - id: recurrent-networks
         title: "Recurrent Networks"

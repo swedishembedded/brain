@@ -60,7 +60,7 @@ generation.
    and why the choice matters so much.
 3. [Embeddings](03-embeddings.md): how a token id becomes numbers a model can compute with, and how
    those numbers come to mean something.
-4. Language Modeling: how predicting the next token can teach a model about
+4. [Language Modeling](04-language-modeling.md): how predicting the next token can teach a model about
    language.
 5. Recurrent Networks: how a network carries memory from one step of a sequence to
    the next, and why that memory fades.
