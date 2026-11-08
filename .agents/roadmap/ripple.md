@@ -437,7 +437,7 @@ left the host budget at zero so nothing could be placed.
 ### Step 6b: the DFlash2 drafter (CPU backend and the software Vulkan adapter, 2026-11-08)
 
 The drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`, fetched with `brain pull` to
-`~/project/shared/models-qhf/ripple-65b-preview-dflash2/`: `config.json` and an 8,075,513,104-byte `model.safetensors`)
+`~/project/shared/containers/brain-models/ricursiveAI/Ripple-65B-Preview-DFlash2/` (the default model store): `config.json` and an 8,075,513,104-byte `model.safetensors`)
 has 81 tensors of 4,037,752,064 parameters, all bf16. Against the Qwen3.8-27B drafter this repository first ported
 (`qwen35::dflash2`), what differs:
 

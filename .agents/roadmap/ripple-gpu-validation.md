@@ -15,8 +15,8 @@ file only says what to run on a card and what to expect. Nothing below has run o
 unrun, and a step is ticked only with the date, the commit and the number recorded under it.
 
 Conventions in every command: `$T` is a cargo target directory on the project drive
-(`CARGO_TARGET_DIR=$T`, `CARGO_INCREMENTAL=0`, at most 25 GB), `$R=~/project/shared/models-qhf` the data
-root (`--brain-data-dir $R`, models in `$R/models`; the home drive has 11 GB free), `$B=$T/release/brain`.
+(`CARGO_TARGET_DIR=$T`, `CARGO_INCREMENTAL=0`, at most 25 GB), `$R=~/project/shared/containers/brain-models` brain's
+default model store (`~/.local/share/brain/models` links to it, so no `--brain-data-dir` is passed; the home drive has 11 GB free), `$B=$T/release/brain`.
 Temporary files go under `~/tmp` (mode 700), never `/tmp`. Server ports are 8798 and up, never 8788 to 8791.
 Test-harness variables (`DEVICE`, `BACKEND`, `REQUIRE`, `RIPPLE_*`, `BRAIN_DEVICE`, `BRAIN_BACKEND`) are
 not read by `brain serve`/`brain finetune`: those take flags.
@@ -71,17 +71,17 @@ The cards belong to other jobs while the node is shared. This session hides them
 
 | artifact | size | where | verdict |
 |---|---|---|---|
-| NVFP4 release `ricursiveAI/Ripple-65B-Preview-NVFP4` | 57,213,636,640 bytes in safetensors (1923 tensors) | `$R/models/ricursiveAI/Ripple-65B-Preview-NVFP4` | fits once about 60 GB and a few hundred inodes are free |
-| bf16 release `ricursiveAI/Ripple-65B-Preview` | 129,565,378,720 bytes (16 shards, 1203 tensors) | `$R/models/ricursiveAI/Ripple-65B-Preview` | does **not** fit beside the NVFP4 release (130 + 57 GB against a 500 GB quota that is full); needs 135 GB freed. It is only needed for bf16 weights on 2 cards (step 9) and the bf16 rows of step 6 |
-| DFlash2 drafter | 8,075,513,104 bytes | already at `~/project/shared/models-qhf/ripple-65b-preview-dflash2` | present; pass it with `--draft-model` (a directory), no pull needed |
-| real layers 0 and 4 (bf16, NVFP4) | 5.2 GB, 3.4 GB | `testdata/ricursive/ripple-65b-partial` -> `$R/ripple-65b-partial` | present; the real-weight tests read them |
+| NVFP4 release `ricursiveAI/Ripple-65B-Preview-NVFP4` | 57,213,636,640 bytes in safetensors (1923 tensors) | `$R/ricursiveAI/Ripple-65B-Preview-NVFP4` | fits once about 60 GB and a few hundred inodes are free |
+| bf16 release `ricursiveAI/Ripple-65B-Preview` | 129,565,378,720 bytes (16 shards, 1203 tensors) | `$R/ricursiveAI/Ripple-65B-Preview` | does **not** fit beside the NVFP4 release (130 + 57 GB against a 500 GB quota that is full); needs 135 GB freed. It is only needed for bf16 weights on 2 cards (step 9) and the bf16 rows of step 6 |
+| DFlash2 drafter | 8,075,513,104 bytes | already at `$R/ricursiveAI/Ripple-65B-Preview-DFlash2` (beside the target, where `--speculative dflash` finds it) | present; pass it with `--draft-model` (a directory), no pull needed |
+| real layers 0 and 4 (bf16, NVFP4) | 5.2 GB, 3.4 GB | `testdata/ricursive/ripple-65b-partial` -> `$R/testdata/ricursive/ripple-65b-partial` (outside the store's vendor/repo level, so a scan does not list it) | present; the real-weight tests read them |
 
 - [ ] Free space: `du -sh` the largest directories of the drive and remove superseded runs and caches first; the
       headroom wanted is NVFP4 57 GB + a build target (up to 25 GB) + 10 GB of dumps = about 100 GB, and 135 GB more for the bf16 release.
-- [ ] `$B pull ricursiveAI/Ripple-65B-Preview-NVFP4 --brain-data-dir $R` (resumable per file). `testdata/ricursive/ripple-65b-nvfp4` is a link to its directory.
+- [ ] `$B pull ricursiveAI/Ripple-65B-Preview-NVFP4` (resumable per file). `testdata/ricursive/ripple-65b-nvfp4` is a link to its directory.
       Expect 1923 tensors, `total_size` 57,213,636,640, and the startup log's `static activation scales validated`.
 - [ ] The bf16 reference needs **no disk** (step 6): the dumper reads the bf16 release by HTTP range request, one tensor at a time. Pull the bf16
-      release (`$B pull ricursiveAI/Ripple-65B-Preview --brain-data-dir $R`) only when 135 GB are free and step 9 or the bf16 rows are wanted;
+      release (`$B pull ricursiveAI/Ripple-65B-Preview`) only when 135 GB are free and step 9 or the bf16 rows are wanted;
       the alternative to freeing space is per-layer goldens of the layers in question with `~/resources/tools/hf_fetch_tensors.py REPO OUT 'model\.layers\.(0|4)\..*|...'`
       (the way layers 0 and 4 were fetched).
 
@@ -148,7 +148,7 @@ for aarch64 (`sbsa`) makes it minutes on a card. The checkpoint is read over HTT
       (`--device cpu` where no CUDA torch exists; add a second dump with `--dtype float32 --out testdata/golden/ricursive-f32` when a parity number is wanted.)
       Expect: `streamed 120.7 GiB through one resident layer`, `golden/ricursive/full/ricursive_full.safetensors` with `logits` [256, 100352] and `hidden.0 .. hidden.80`
       (the last 16 rows each), and a manifest whose `source.identity` matches `config.json`. The `source` check of the Rust side refuses a dump of another model.
-- [ ] Link the engine's inputs: `ln -s $R/models/ricursiveAI/Ripple-65B-Preview-NVFP4 testdata/ricursive/ripple-65b-nvfp4`, and (disk permitting)
+- [ ] Link the engine's inputs: `ln -s $R/ricursiveAI/Ripple-65B-Preview-NVFP4 testdata/ricursive/ripple-65b-nvfp4`, and (disk permitting)
       `.../Ripple-65B-Preview testdata/ricursive/ripple-65b-bf16`.
 - [ ] The dense matrix, KL and top-1 against the bf16 reference at bf16/int8/fp8 KV, with the load-to-ready time of each engine:
       `BRAIN_DEVICE=gpu0 BRAIN_BACKEND=cuda BRAIN_REQUIRE_FIXTURES=1 make test/one P=brain-ricursive T=it ARGS="full_release --nocapture --test-threads=1"` (NVFP4 on one card; the bf16 release needs `BRAIN_DEVICE=gpu0,gpu1`).
@@ -167,7 +167,7 @@ for aarch64 (`sbsa`) makes it minutes on a card. The checkpoint is read over HTT
 ## Step 7: placement against the card
 
 - [ ] Serve the NVFP4 release on one card and compare the startup placement line with `nvidia-smi` after the first request:
-      `$B serve --brain-data-dir $R --openai 8798 --api-keys-out ~/tmp/keys.json --ready-file ~/tmp/ready --device gpu0 --kv-cache int8 --verbose 2`.
+      `$B serve --openai 8798 --api-keys-out ~/tmp/keys.json --ready-file ~/tmp/ready --device gpu0 --kv-cache int8 --verbose 2`.
       The plan says 52.3 GiB of weights on the device (the embedding is gathered on the host), 57.0 GiB at int8 KV and 128k context, and about 921k
       tokens of int8 context on one card with the index charged. Expect `nvidia-smi` within the allocator's 14% (`capacity::headroom`) of the plan; the fixed per-stage
       bytes (0.5 to 1.0 GiB) are an estimate to be replaced by the measurement.
@@ -180,7 +180,7 @@ The roofline for decode is bytes over the measured read bandwidth, never a table
 microbenchmark (`kernels.md` F.2), bytes from the placement (weights 52.3 GiB per token at batch 1, plus the KV a token reads).
 
 - [ ] Plain decode, batch 1, 8, 64, at 8192 context, kernels profiled:
-      `flock ~/project/shared/containers/gpu.lock $B perf run longctx --target ricursive:$R/models/ricursiveAI/Ripple-65B-Preview-NVFP4:kvint8 --device gpu0 --context 8192 --ladder 1,8,64 --steps 16 --kernels --out ~/tmp/ripple-longctx.json`.
+      `flock ~/project/shared/containers/gpu.lock $B perf run longctx --target ricursive:$R/ricursiveAI/Ripple-65B-Preview-NVFP4:kvint8 --device gpu0 --context 8192 --ladder 1,8,64 --steps 16 --kernels --out ~/tmp/ripple-longctx.json`.
       Expect a table with the plan's `needed_bytes` beside each fit and a per-kernel-kind profile. Record tokens/s per batch and the fraction of the bandwidth
       bound; a fraction under the gap-list threshold of the roofline probe is a kernel item (a new candidate, never a hand-tuned path). Batch 64 at 8k context needs 64 sequences
       of KV: if the sweep ends early the boundary is the finding.
@@ -195,7 +195,7 @@ microbenchmark (`kernels.md` F.2), bytes from the placement (weights 52.3 GiB pe
 - [ ] First, on a tiny and real draft against the reference on the card: `BRAIN_DEVICE=gpu0 BRAIN_BACKEND=cuda make test/one P=brain-dflash2 T=it ARGS="--nocapture --test-threads=1"`,
       then the `real` forward with `testdata/dflash2/ripple-65b-preview-dflash2` and the golden of `tools/goldens/dflash2_reference_forward.py real`. Expect the CPU numbers:
       layers 0 to 4 scaled error 3.2e-6 .. 2.5e-5, head logits 2.7e-5, the selector's 15-token path identical.
-- [ ] Equal replies: the same request twice, plain and `$B serve ... --speculative dflash --draft-model ~/project/shared/models-qhf/ripple-65b-preview-dflash2 --verbose 2`; greedy replies byte-equal.
+- [ ] Equal replies: the same request twice, plain and `$B serve ... --speculative dflash --draft-model $R/ricursiveAI/Ripple-65B-Preview-DFlash2 --verbose 2`; greedy replies byte-equal.
       A difference is an engine bug (verify/rollback), not a convention.
 - [ ] Acceptance. `spec_accept_rate` and `spec_tokens_per_round` in the `request done` lines, over 30 prompts (chat, code, tool call), against plain decode at batch 1 and 4. Reference point: a random draft
       accepts 0 of 19 proposals; prompt lookup (`--speculative ngram`) is the floor to beat.
@@ -210,7 +210,7 @@ microbenchmark (`kernels.md` F.2), bytes from the placement (weights 52.3 GiB pe
 
 Needs the bf16 release on disk (step 1: 135 GB).
 
-- [ ] `$B serve --brain-data-dir $R --openai 8798 --device gpu0,gpu1 [--kv-cache int8]`: the placement line expects stages of 63.6 + 64.8 GiB (bf16 KV, 128k) or 76.6 + 77.8 GiB (int8, 1M);
+- [ ] `$B serve --openai 8798 --device gpu0,gpu1 [--kv-cache int8]`: the placement line expects stages of 63.6 + 64.8 GiB (bf16 KV, 128k) or 76.6 + 77.8 GiB (int8, 1M);
       the peer copy against the host-staged boundary (the log names which path the pair used), bit-equal logits to one stage on the CPU backend, to be re-checked: step 6's staged row.
 - [ ] `perf run longctx --target ricursive:...Ripple-65B-Preview:kvint8 --device gpu0,gpu1 --context 8192 --ladder 1,8,64`; expect lower tokens/s than step 8 per the roofline (bytes 2.2x), no pipeline overlap at batch 1.
 - [ ] Prefill at 32k, 128k, 512k and 1M, dense and with the index: `$B perf run longctx --target ricursive:... --device gpu0 --context 8192 --ladder 1 --prefill 32768,131072,524288,1048576`. The dense engine holds at most 962k tokens on one card (NVFP4, int8 KV);
@@ -238,7 +238,7 @@ All of these ran on the CPU backend and the software adapter at tiny scale and o
 - [ ] The card gates first, each against the CPU number in `ripple.md`: `make test/one P=brain-ricursive T=it ARGS="train_resident train_saved train_lora train_pipeline train_tiers::a_chunked_head --nocapture --test-threads=1"` under `BRAIN_DEVICE=gpu0 BRAIN_BACKEND=cuda`,
       then `BRAIN_DEVICE=gpu0,gpu1` (already part of step 3). `train_real_lora` with the partial checkpoint linked: expect loss 13.992954 and gradients to 4.3e-5 (CPU: 47 s forward and backward).
 - [ ] LoRA over the NVFP4 release on 1 GH200 (52 GiB of weights, adapter state and one row of activations small beside it), tokens/s and the roofline fraction from `--kernel-profile`:
-      `$B finetune ricursiveAI/Ripple-65B-Preview-NVFP4 --brain-data-dir $R --arch ricursive --dataset chat.jsonl --out ~/tmp/run-lora --lora 16 --alpha 32 --base-format nvfp4 --activations recompute --steps 20 --lr 1e-4 --max-block 4096 --device gpu0`
+      `$B finetune ricursiveAI/Ripple-65B-Preview-NVFP4 --arch ricursive --dataset chat.jsonl --out ~/tmp/run-lora --lora 16 --alpha 32 --base-format nvfp4 --activations recompute --steps 20 --lr 1e-4 --max-block 4096 --device gpu0`
       Expect the loss to fall on a small dataset (CPU tiny: 4.1951 -> 0.0551 in 6 steps); record tokens/s (`kernels.md` F). QLoRA over nf4/fp8 from the bf16 release: `--base-format nf4|fp8` on two cards (`--device gpu0,gpu1`, layout printed).
 - [ ] The adapter served beside its base: `$B serve ... --adapter ~/tmp/run-lora/adapter.safetensors`; a trained adapter's logits equal the training forward's to 2.3e-7 (CPU) and the bank's memory (3.75 GiB for four rank-16 slots) against `nvidia-smi`.
 - [ ] RL: `--policy-gradient --held-out heldout.jsonl` (rollout records with `advantage`) and a verifiable-reward GRPO loop through the SDK trainer (`rl objective_fits`): expect reward up from the first step, the first-step ratio 1 +- 1e-4 (CPU: 0.534 -> 0.844 on a tiny model).
