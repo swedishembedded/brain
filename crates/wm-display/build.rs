@@ -9,9 +9,8 @@
 //! `rustc-link-lib=SDL2` names the library but says nothing about WHERE it
 //! lives. That is fine where SDL2 sits in the linker's default search path (a
 //! distro's `/usr/lib`, or a Windows SDK), but a macOS Homebrew install lands
-//! in a prefix the linker does not search on its own - the first in the list
-//! below, which only `brew --prefix sdl2` knows - so `-lSDL2` alone fails with
-//! a bare `ld: library 'SDL2' not found` even after a correct `brew install sdl2`.
+//! in a prefix the linker does not search on its own (one only
+//! `brew --prefix sdl2` knows), so `-lSDL2` alone fails with a bare `ld: library 'SDL2' not found` even after a correct `brew install sdl2`.
 //! Emit the matching `rustc-link-search` so the two travel together.
 //!
 //! The lib dir is discovered by ASKING the tools that own the fact rather than
@@ -23,19 +22,35 @@
 //! Discovery is best-effort and NEVER fails the build: when nothing turns up
 //! we still emit `-lSDL2` and let the linker report the same error, plus a
 //! macOS note naming what to install.
+//!
+//! The probe result is cached by Cargo, so the script must rerun when the
+//! machine's SDL2 situation changes. A script that only watched `build.rs`
+//! would keep its stale "not found" output after `brew install sdl2` and the
+//! very same link error would survive the fix the warning recommends. We
+//! therefore watch the variables that steer discovery (a changed `PATH` or
+//! `PKG_CONFIG_PATH` reruns it) and, for the install-after-failed-build case
+//! that no variable signals, say so in the warning: `cargo clean -p`.
+//!
+//! The OS test uses the HOST (`std::env::consts::OS`), not the target:
+//! reading `CARGO_CFG_TARGET_OS` would add an environment read this crate
+//! deliberately avoids (`make check/env-reads`). Both `brew` and the window are
+//! host-side concerns here, and a cross build supplies its own `-L`.
 
 use std::path::Path;
 use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=PATH");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
 
     if let Some(dir) = sdl2_libdir() {
         println!("cargo:rustc-link-search=native={dir}");
     } else if std::env::consts::OS == "macos" {
         println!(
             "cargo:warning=brain-wm-display: could not locate an SDL2 install. If the link \
-             fails with `library 'SDL2' not found`, run `brew install sdl2`; if SDL2 lives \
+             fails with `library 'SDL2' not found`, run `brew install sdl2` and then \
+             `cargo clean -p brain-wm-display` so this probe reruns; if SDL2 lives \
              somewhere unusual, add its lib dir with `RUSTFLAGS=\"-L<dir>\"`."
         );
     }
