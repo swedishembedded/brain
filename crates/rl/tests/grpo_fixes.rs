@@ -181,34 +181,48 @@ fn a_truncated_completion_is_rewarded_on_the_trained_span() {
 }
 
 /// R6: a sampled stop token is a training target, and the policy learns to stop.
+///
+/// The two completions share the prefix `[4, 5]` and differ only at the position after it: one stops (and is
+/// rewarded), the other goes on with a 5. Their advantages are opposite, so every shared position cancels and what
+/// is left is the contrast at that one position, whose logit gradient is `0.5 * (e_5 - e_stop)`. A small step down
+/// the loss gradient therefore raises `log P(stop) - log P(5)` after the prefix for ANY initial weights: the change
+/// to first order is `eta * g^T K g` with `K = J J^T` positive semi-definite. (The earlier form asserted that
+/// `log P(stop)` alone rises after twelve Adam steps against an unrelated second completion, which depends on
+/// how the random weights couple the two rows and failed on about a third of the seeds.)
 #[test]
 fn the_policy_learns_to_stop() {
     let s = seed();
     let (mut m, _, _) = lora_model(s);
-    let (judge, _) = Judge::new(first_wins);
+    let (judge, _) = Judge::new(|completion, _| (completion.len() == 2) as u32 as f32);
     let mut cfg = config(2, 1.0, GrpoOptions::default());
     cfg.rollout.eos = Some(EOS);
-    // Stopping after [4, 5] earns the reward; running on to [5, 5, 5] does not.
-    let group = vec![stopped(&[4, 5]), completion(&[5, 5, 5])];
+    let group = vec![stopped(&[4, 5]), completion(&[4, 5, 5])];
     let mut obj = scripted(Env { variable: always_variable }, judge, cfg, group);
     obj.prepare(&mut m).unwrap();
-    let stop_lp = |m: &Qwen| {
+    // log P(stop | prompt, 4, 5) - log P(5 | prompt, 4, 5)
+    let stop_over_continue = |m: &Qwen| {
         let tokens = [1u32, 2, 3, 4, 5];
-        let targets = [IGNORE, IGNORE, IGNORE, IGNORE, EOS];
-        *model::logprobs::token_logprobs(m, &tokens, &targets).expect("logits").last().unwrap()
+        let at = |target: u32| *model::logprobs::token_logprobs(m, &tokens, &[IGNORE, IGNORE, IGNORE, IGNORE, target]).expect("logits").last().unwrap();
+        at(EOS) - at(5)
     };
-    let before = stop_lp(&m);
-    let mut rng = Rng::new(s);
-    for step in 1..=12 {
-        m.zero_grads();
-        obj.micro_steps(&m, &mut rng, 2);
-        assert!(matches!(verdict(&mut obj), StepVerdict::Apply));
-        m.adamw_step(step, 3e-2, 0.0, Default::default(), Some(1.0), 0.5);
-        m.poll_wait();
+    let before = stop_over_continue(&m);
+    m.zero_grads();
+    obj.micro_steps(&m, &mut Rng::new(s), 2);
+    assert!(matches!(verdict(&mut obj), StepVerdict::Apply));
+    assert_eq!(obj.stats().eos_targets, 1, "the stop token of the rewarded completion is a target");
+    // One small step down the gradient, so the first-order argument above is the whole story.
+    let names = m.optimized_params().expect("a LoRA model exposes its optimised set");
+    let grads: Vec<Vec<f32>> = names.iter().map(|n| m.read_grad(n)).collect();
+    let largest = grads.iter().flatten().fold(0.0f32, |a, g| a.max(g.abs()));
+    assert!(largest > 0.0, "the step has a gradient");
+    let eta = 1e-3 / largest;
+    for (name, grad) in names.iter().zip(&grads) {
+        let weights: Vec<f32> = m.read_weight(name).iter().zip(grad).map(|(w, g)| w - eta * g).collect();
+        m.write_weight(name, &weights);
     }
-    assert_eq!(obj.stats().eos_targets, 12, "one stop-token target per step");
-    let after = stop_lp(&m);
-    assert!(after > before + 0.05, "log P(stop | prompt, 4, 5) did not rise: {before} -> {after}");
+    m.poll_wait();
+    let after = stop_over_continue(&m);
+    assert!(after > before, "log P(stop) - log P(5) after the prefix did not rise: {before} -> {after}");
 }
 
 /// R7: a non-finite log-probability never reaches the weights: the step is
