@@ -14,7 +14,8 @@
 //   out[n] = 0                                  if target[n] == IGNORE
 //          = logsumexp(logits[n]) - logit[tgt]  otherwise
 // Host sums out[] and divides by the count of non-ignored rows (mean CE,
-// matching F.cross_entropy(..., ignore_index=-100)).
+// the same mean as F.cross_entropy with ignore_index; the sentinel here is
+// IGNORE, not -100).
 
 struct Params {
     n_rows: u32,

@@ -13,7 +13,8 @@
 // Attention scores (materialised, for training):
 //   scores[b,h,i,j] = (q[b,i,h,:] . k[b,j,h,:]) / sqrt(head_dim)   for j <= i
 //                   = -3.4e38 (near the f32 minimum)   for j >  i  (causal)
-// q,k read from the fused qkv buffer (post-RoPE). One invocation per (b,h,i,j).
+// q,k read from the fused qkv buffer (after RoPE, in models that use it).
+// One invocation per (b,h,i,j).
 // scores layout: ((b*H + h)*T + i)*T + j.
 
 struct Params {

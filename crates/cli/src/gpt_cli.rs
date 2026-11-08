@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain gpt …` — train / evaluate / sample the dense GPT baseline. Uses the
+//! `brain gpt2 ...`: train, evaluate and sample the dense GPT baseline. Uses the
 //! shared `args` grammar; `infer` is the canonical verb for `gen`.
 //!
-//!   brain gpt train <data_dir> [--out F --steps N --batch B --block T --lr X
+//!   brain gpt2 train <data_dir> [--out F --steps N --batch B --block T --lr X
 //!                               --layers L --d-model D --heads H --mask = --align
 //!                               --job-plan FILE --job-rank N --job-secret FILE
 //!                               --profile-collectives FILE]
-//!   brain gpt infer --weights F [--data <dir>] [--prompt "..." --max-new N
+//!   brain gpt2 infer --weights F [--data <dir>] [--prompt "..." --max-new N
 //!                               --temp X --top-k K]
-//!   brain gpt eval  --weights F --data <dir> [--batches N --samples M]
+//!   brain gpt2 eval  --weights F --data <dir> [--batches N --samples M]
 
 use std::path::{Path, PathBuf};
 
