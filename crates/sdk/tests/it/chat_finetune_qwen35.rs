@@ -19,9 +19,7 @@ use std::path::{Path, PathBuf};
 
 use brain::{ChatFineTune, ChatFullFineTune, FineTuneStatus, PreferenceFineTune};
 
-#[path = "../chat_fixture/common.rs"]
-mod common;
-use common::{cpu, qwen35_model_dir as qwen35_chat_model_dir};
+use crate::chat_fixture::common::{cpu, qwen35_model_dir as qwen35_chat_model_dir};
 
 fn write_dataset(dir: &Path) -> PathBuf {
     let path = dir.join("train.jsonl");

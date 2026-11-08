@@ -20,9 +20,7 @@ use std::path::{Path, PathBuf};
 
 use brain::{ChatFullFineTune, FineTuneStatus, PreferenceFineTune};
 
-#[path = "../chat_fixture/common.rs"]
-mod common;
-use common::{cpu, write_tokenizer, TempDir};
+use crate::chat_fixture::common::{cpu, write_tokenizer, TempDir};
 
 /// A `Qwen35Config::tiny` mixture-of-experts checkpoint at the real vocabulary size.
 fn qwen35moe_model_dir(tag: &str) -> TempDir {

@@ -24,9 +24,7 @@ use std::path::{Path, PathBuf};
 
 use brain::emit_held_out_records;
 
-#[path = "../chat_fixture/common.rs"]
-mod common;
-use common::qwen35_model_dir;
+use crate::chat_fixture::common::qwen35_model_dir;
 
 /// A chat dataset whose records name a group and carry an experience, which is
 /// what makes them examinable: `groups` groups of `per_group` records each.

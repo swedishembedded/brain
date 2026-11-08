@@ -27,9 +27,7 @@ use std::path::{Path, PathBuf};
 use brain::{score_tokens_qwen35, ChatFineTune};
 use model::adapter::device::AdapterTuning;
 
-#[path = "../chat_fixture/common.rs"]
-mod common;
-use common::{cpu, qwen35_model_dir, write_chat_dataset};
+use crate::chat_fixture::common::{cpu, qwen35_model_dir, write_chat_dataset};
 
 /// The records both sides score: two question/answer pairs, the answer
 /// supervised.

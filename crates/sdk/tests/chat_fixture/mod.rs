@@ -4,7 +4,7 @@
 //! The synthetic Qwen3 chat model directory of the fine-tuning test binaries;
 //! the shared parts are in `common`.
 
-mod common;
+pub mod common;
 pub use common::{cpu, qwen35_model_dir, TempDir};
 
 /// The model directory: `model.safetensors`, `tokenizer.json`,

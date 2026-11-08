@@ -16,9 +16,7 @@ use std::path::{Path, PathBuf};
 
 use brain::{ChatFineTune, FineTuneStatus, PolicyGradientConfig, ReferencePolicy};
 
-#[path = "../chat_fixture/common.rs"]
-mod common;
-use common::{cpu, qwen35_model_dir};
+use crate::chat_fixture::common::{cpu, qwen35_model_dir};
 
 /// (prompt, answer, advantage): two actions of well-rewarded rollouts and two of badly rewarded ones.
 const ROLLOUTS: [(&str, &str, f64); 4] = [("cab", "bad", 1.0), ("fed", "dad", 1.0), ("ace", "cab", -1.0), ("bag", "egg", -1.0)];
