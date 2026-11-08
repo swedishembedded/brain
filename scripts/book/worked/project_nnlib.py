@@ -970,7 +970,7 @@ def initialization_statistics():
         var = {"he": 2.0 / n_in, "xavier": 2.0 / (n_in + n_out), "fan_in": 1.0 / n_in}[scheme]
         rows.append([scheme, shape, ", ".join(f"{v:+.6f}" for v in W[:3]), f"{math.sqrt(var):.6f}", f"{sd:.6f}", f"{max(abs(v) for v in W):.4f}"])
     return ("A weight matrix with n_out = 128 and n_in = 96 (12288 entries, row-major), drawn from a fresh generator per row named "
-            "project_nnlib.init.<scheme>.<shape> (the seed of a stream is the first 8 bytes, read as a big-endian unsigned integer, of the SHA-256 digest of its name; the seeds are printed below, so no derivation is needed; the draw is the one call of the chapter-9 rule per entry, "
+            "init.<scheme>.<shape> exactly, with nothing before it, e.g. the string init.he.normal (the seed of a stream is the first 8 bytes, read as a big-endian unsigned integer, of the SHA-256 digest of its name; the seeds are printed below, so no derivation is needed; the draw is the one call of the chapter-9 rule per entry, "
             "the truncated shape redrawing normal() until |z| <= 2). 'target sd' is sqrt(2/n_in), sqrt(2/(n_in+n_out)) or sqrt(1/n_in). 'sd of the 12288' is the population standard deviation with divisor n = 12288 after subtracting the mean of the entries (not the divisor n - 1 of the book's sd).\n\n"
             + _table(["scheme", "shape", "first three weights", "target sd", "sd of the 12288 (divisor n)", "largest |w|"], rows, "llrrrr")
             + "\n\nSeeds: " + "; ".join(f"init.{s}.{h} {_seed('init.' + s + '.' + h)}" for s, h in
@@ -1245,6 +1245,7 @@ def debug_diagnostics():
         e2 = evaluate(m, SoftmaxCrossEntropy(), Xv, yv, "eval")[0]
         return abs(a - b), abs(e1 - e2)
 
+    d_tr_bad, d_ev_bad = two_calls(bad)
     d_tr, d_ev = two_calls(good)
     counts, pv, pacc = prior_scores(y, yv)
     rows = [
@@ -1256,12 +1257,12 @@ def debug_diagnostics():
         ["overfit one batch: final loss", f"{of_bad[1]:.2e}", f"{of_good[1]:.2e}", "both pass: memorising needs no signal"],
         ["epoch-1 rate and rate at epoch 5 (peak 0.003, floor 3e-05)", f"{bad.log[0]['lr']:.3e}, {bad.log[4]['lr']:.3e}", f"{good.log[0]['lr']:.3e}, {good.log[4]['lr']:.3e}", "shipped: the floor by epoch 5"],
         ["rate of the last step of epoch 40", f"{bad.log[-1]['lr']:.3e}", f"{good.log[-1]['lr']:.3e}", "both at the floor 3e-05 to three digits; the shipped one got there 600 steps early"],
-        ["two evaluations of one model, train mode: loss difference", f"{d_tr:.4f}", "-", "different answers for one input"],
-        ["two evaluations of one model, eval mode: loss difference", f"{d_ev:.1e}", "-", "eval mode: identical, as it must be"],
+        ["two evaluations of one model, train mode: loss difference", f"{d_tr_bad:.4f}", f"{d_tr:.4f}", "different answers for one input"],
+        ["two evaluations of one model, eval mode: loss difference", f"{d_ev_bad:.1e}", f"{d_ev:.1e}", "eval mode: identical, as it must be"],
     ]
     return ("Checklist measurements of the shipped configuration against the healthy one (stage 3 of the previous table). Validation labels are never "
-            "shifted. The linear baseline and the overfit-one-batch test have the settings of the milestone-6 table, trained on the shifted labels (training label i replaced by the label of row i + 1, the last by the first) in the shipped column. The determinism probe evaluates the final weights of the healthy run (the second column, stage 3) twice on the 256 validation rows, in train mode from "
-            f"Generator {_seed('determinism_probe')} (draws continue between the two calls) and then in eval mode.\n\n"
+            "shifted. The linear baseline and the overfit-one-batch test have the settings of the milestone-6 table, trained on the shifted labels (training label i replaced by the label of row i + 1, the last by the first) in the shipped column. The determinism probe evaluates the final weights of the run of its own column (shipped: stage 0, healthy: stage 3) twice on the 256 validation rows, in train mode with a fresh generator "
+            f"{_seed('determinism_probe')} per column (the draws continue between the two calls) and then twice in eval mode.\n\n"
             + _table(["measurement", "shipped", "healthy", "reading"], rows, "lrrl"))
 
 

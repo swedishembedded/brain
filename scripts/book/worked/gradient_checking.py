@@ -472,7 +472,9 @@ def accumulator_noise():
         num = (loss(r32(w0 + h), acc64) - loss(r32(w0 - h), acc64)) / (2 * h)
         rows.append([label, f"{num:.6f}", _sci(abs(num - exact), 2)])
     head = (f"L(w) = (1/N) sum_k (a_k w + b_k)^2 with N = {n}, w = {w0:.10f}, h = 5e-3. Seed {bookrng.seed_of(name)}; draws in order: a_0 ... a_{n - 1}, then b_0 ... b_{n - 1}, each normal() rounded to 32 bits. "
-            f"Every product, sum and square inside a term is rounded to 32 bits; only the final sum over k differs. The exact derivative is 2/N sum a_k (a_k w + b_k) = {exact:.6f}.\n\n")
+            f"w is 0.3 rounded to 32 bits, and the two evaluation points w + h and w - h are each rounded to 32 bits before use, so the quotient (L(w + h) - L(w - h)) / (2 h) is taken in 64 bits on 32-bit losses. "
+            "Every product a_k w, sum with b_k and square inside a term is rounded to 32 bits; only the sum over k differs: the 32-bit accumulator adds the 4096 terms in order k = 0, 1, ... starting from 0, rounding every partial sum to 32 bits, and rounds the division by N to 32 bits; "
+            f"the 64-bit accumulator sums the (still 32-bit) terms exactly and divides by N in 64 bits. The exact derivative is 2/N sum a_k (a_k w + b_k) = {exact:.6f}.\n\n")
     return head + _table(["sum over k", "central difference", "absolute error"], rows)
 
 
@@ -655,7 +657,7 @@ def bug_catalogue():
             f"Seed {bookrng.seed_of(name)}; draws in order: X (row-major), T (row-major), W1 (row-major), b1, W2 (row-major), b2, each normal(), the last four multiplied by 0.5. "
             "Per-entry check: central difference with h = 1e-5 on every parameter. "
             f"Directional check: per tensor 4 directions of +-1 entries (seed {bookrng.seed_of(dname)}; for W1, b1, W2, b2 in turn, four directions each, an entry is +1 when integer(2) is 1 and -1 otherwise), step eps = 1e-4, the best of the four kept by relative error. "
-            "The 16 directions are drawn once, before the rows, and reused unchanged for every row (a row rejected by the shape check consumes no draws). "
+            "The 16 directions are drawn once, before any row is evaluated, and every row that is evaluated uses these same 16; a row rejected by the shape check is not evaluated, so it uses none. "
             f"Both use the gate |a - n| <= {F64_ATOL:g} + {F64_RTOL:g} max(|a|, |n|). The cosine and relative L2 error compare the 58 analytic values with the correct backward pass's.\n\n")
     return head + _table(["bug injected in the backward pass", "cosine with correct gradient", "relative L2 error", "per-entry check: entries failing", "directional check, best of 4"], rows,
                          "lrrrl")

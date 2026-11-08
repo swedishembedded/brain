@@ -323,6 +323,22 @@ it does not redefine it.
   derivative `g` and second derivative `gprime`. One iteration is one such
   update; a chapter states the starting value and the stopping rule.
 
+## Routines defined in Volume III
+
+Two conventions of Volume III are used in pseudocode without being operations of
+the language, and are defined where they are taught.
+
+- **Vector-Jacobian product.** `vjp(f, x, u)` of Volume III, chapter 4
+  ("Vector-Jacobian products: never build the Jacobian") returns the row
+  vector `u J_f(x)` for the operation `f` at the input `x` and an arriving
+  gradient `u` with the shape of the output of `f`, without building `J_f`. It
+  is what each operation's backward rule computes.
+- **Flat parameter vector.** Volume III, chapter 14 (milestone 2, the checks
+  of whole models) fixes the order of a model's parameters as one vector: the
+  leaf layers in depth-first order, within a layer `W` before `b` (each
+  row-major) and `gamma` before `beta`. Checkpoints, optimizer state and the
+  gradient checks all use this order.
+
 ## Randomness
 
 Random numbers come from an explicit generator `rng` of type `Generator`,

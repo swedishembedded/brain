@@ -366,8 +366,9 @@ the function whose derivative we want ($L$ as a function of $\theta$), so for
 a network with $P$ parameters forward mode costs on the order of $P$ forward
 passes. Reverse mode costs about one forward pass plus one backward pass, and
 the backward pass for a network built from matrix products turns out to cost
-about twice the forward pass (the table below). So the whole gradient
-costs a small constant number of forward passes, independent of $P$.
+between one and two forward passes (the ratio column of the table below, and
+the count after it). So the whole gradient costs a small constant number of
+forward passes, independent of $P$.
 
 This is the central fact of the chapter, and it is a fact about shapes:
 **the cost of reverse mode scales with the number of outputs (one loss), and
@@ -408,8 +409,14 @@ The backward-to-forward ratio is small because of how a linear layer
 differentiates (derived in the next section): the forward does one matrix
 product, and the backward does two, one for the gradient of the weights and one
 for the gradient of the input. A layer that needs both costs exactly twice its
-forward; the first layer of a network needs no gradient of its input, which
-is why the table's ratios are below two. The "forward mode" column is a lower bound that charges one forward pass per
+forward; the first layer of a network needs no gradient of its input, so it
+costs once its forward. For a network of two layers with forward costs $F_1$
+and $F_2$ the backward costs $F_1 + 2F_2$, and the ratio
+$(F_1 + 2F_2)/(F_1 + F_2)$ lies between $1$ (when the first layer dominates)
+and $2$ (when the second does). That is why the table's ratios are above one
+and below two: the digit classifier, whose first layer does almost all the
+work, is close to one, and the last row, whose two layers cost the same
+($F_1 = F_2$), is exactly $3/2$. The "forward mode" column is a lower bound that charges one forward pass per
 parameter and nothing for the extra work of carrying derivatives. The 134
 million parameters of the last row are modest by present standards.
 

@@ -534,7 +534,7 @@ Both networks control the tank. They are stable, settle in $21$ to $43$ steps (t
 The previous table also shows something the training log did not. During the run, the one-step error on validation samples (every input an expert state) and the closed-loop behaviour were measured after every epoch:
 
 <!-- worked: first_models.ctrl_open_vs_closed -->
-The explore-trained network at the end of epoch n. 'one-step error' is the RMS error of the command on the validation samples (teacher forcing: every input is an expert state). 'action error, own states' is the same difference measured at the states the network itself visits in the 180-step closed loop. The expert's own closed loop has tracking error 0.11869 and steady error 0.00849.
+The explore-trained network at the end of epoch n. 'one-step error' is the RMS error of the network's raw output (before any clamp to [-1, 1]; the square root of the validation loss) against the expert's command on the validation samples (teacher forcing: every input is an expert state). 'action error, own states' is the RMS difference between the command the loop applies (the network's output clamped to [-1, 1]) and the expert's command at the same state, measured at the states the network itself visits in the 180-step closed loop. The expert's own closed loop has tracking error 0.11869 and steady error 0.00849.
 
 | epoch | one-step error | action error, own states | tracking error | steady error | largest deviation from PID |
 |---|---:|---:|---:|---:|---:|
@@ -634,6 +634,8 @@ The gradient check of the autoencoder costs $2.4\%$ of its run, and the overfit 
 Every source of randomness of both builds is a named stream of the book's generator: the data, the initial weights, the order of the batches, the noise of the denoising run. The loop has no other. To check that this is enough, run each training twice from the start in the same process and compare every parameter bit for bit.
 
 <!-- worked: first_models.determinism -->
+The hashed bytes: the parameters after the last epoch (the final weights, not the best-validation checkpoint), layer by layer from the first layer to the last; within a layer the weight matrix W of shape [n_out, n_in] in row-major order (row j holds the weights of output unit j), then the bias vector b of n_out entries; every number as an IEEE 754 binary64 value in 8 bytes, least significant byte first (little-endian), with no header, separator or padding (499 numbers, 3992 bytes for the autoencoder; 353 numbers, 2824 bytes for the controller). The digest is SHA-256 of that byte string, written as lowercase hexadecimal and cut to its first 16 digits.
+
 | model | run 1: SHA-256 of the final parameters (first 16 hex) | run 2 | largest parameter difference | all logged losses equal |
 |---|---:|---:|---:|---:|
 | autoencoder | dbc7fcad7354ac5b | dbc7fcad7354ac5b | 0.0e+00 | True |

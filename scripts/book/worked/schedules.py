@@ -29,6 +29,7 @@ import struct
 
 import bookrng
 import optimizers as opt
+import stable
 
 # ------------------------------------------------------------------ formatting
 
@@ -171,16 +172,16 @@ class Run:
 
     def __init__(self):
         self.losses, self.norms, self.clipped, self.update_rms = {}, [], [], []
-        self._args, self._twin = None, None
+        self._args, self._twins = None, None
 
     @property
-    def twin(self):
-        """The same run with one starting weight changed by NUDGE: a quantity that differs between the two is chaotic,
-        and its digits cannot be reproduced by another implementation."""
-        if self._twin is None:
+    def twins(self):
+        """The same run with the first starting weight changed by each of `stable.NUDGES`: a quantity that differs
+        between the runs is chaotic, and its digits cannot be reproduced by another implementation."""
+        if self._twins is None:
             schedule, stream, steps, clip, outlier, dense, every = self._args
-            self._twin = train(schedule, stream, steps, clip, outlier, dense, every, nudge=NUDGE)
-        return self._twin
+            self._twins = [train(schedule, stream, steps, clip, outlier, dense, every, nudge=d) for d in stable.NUDGES]
+        return self._twins
 
 
 def train(schedule, stream="schedules.batches", steps=RUN_STEPS, clip=None, outlier=None, dense=60, every=10, nudge=0.0):
@@ -224,43 +225,21 @@ def train(schedule, stream="schedules.batches", steps=RUN_STEPS, clip=None, outl
     return run
 
 
-NUDGE = 1e-12        # change of one starting weight used to test whether a quantity is chaotic
-STABLE_TOL = 1e-3    # relative change under the nudge above which a quantity is printed as 'unstable'
-
-
 def cell(f, runs, digits=4):
-    """The mean over `runs` of the quantity f(run), to `digits` decimals, or 'unstable' when the nudged twins of the
-    runs give a mean that differs in the third significant digit."""
+    """The mean over `runs` of the quantity f(run), to `digits` decimals, with only the digits that survive in the same
+    mean over every set of nudged twins of the runs (see `stable.text`)."""
     v = sum(f(r) for r in runs) / len(runs)
-    w = sum(f(r.twin) for r in runs) / len(runs)
-    return _stable_text(v, w, digits)
-
-
-def _stable_text(v, w, digits):
-    """v to `digits` decimals when the nudged value w agrees to the third significant digit; otherwise 'about x' with
-    two significant digits when v and w differ by at most 2%, one significant digit when they round alike, and
-    'unstable' when they do not even agree to that."""
-    if abs(v - w) <= STABLE_TOL * max(abs(v), 1e-12):
-        return _fx(v, digits)
-    if abs(v - w) <= 0.02 * max(abs(v), 1e-12):
-        return f"about {(v + w) / 2:.2g}"
-    if f"{v:.1g}" == f"{w:.1g}":
-        return f"about {v:.1g}"
-    return "unstable"
+    ws = [sum(f(r.twins[k]) for r in runs) / len(runs) for k in range(len(stable.NUDGES))]
+    return stable.text(v, ws, lambda x: _fx(x, digits))
 
 
 def span_cell(f, runs, digits=4):
-    """'lowest to highest' of f over the runs, as for `cell`, or 'unstable' when any of the runs is."""
-    vs = [f(r) for r in runs]
-    ws = [f(r.twin) for r in runs]
-    parts = [_stable_text(a, b, digits) for a, b in zip(vs, ws)]
-    if any(t == "unstable" for t in parts):
+    """'lowest to highest' of f over the runs, each end written with `cell`'s rule, or 'unstable' when any run is."""
+    parts = [cell(f, [r], digits) for r in runs]
+    if "unstable" in parts:
         return "unstable"
-    if all(not t.startswith("about") for t in parts):
-        return f"{_fx(min(vs), digits)} to {_fx(max(vs), digits)}"
-    lo = min(zip(vs, ws))[0]
-    hi = max(zip(vs, ws))[0]
-    return f"about {lo:.2g} to {hi:.2g}"
+    vs = [f(r) for r in runs]
+    return f"{parts[vs.index(min(vs))]} to {parts[vs.index(max(vs))]}"
 
 
 def worst(run, lo, hi):
@@ -278,8 +257,7 @@ ORDERS = ["schedules.batches"] + [f"schedules.batches.{k}" for k in range(1, 5)]
 
 
 def _unstable_note():
-    return ("An entry that changes in its third significant digit when one starting weight is changed by 1e-12 belongs to a chaotic run (rounding noise grows into any difference) "
-            "and is printed with only the leading digits that survive the change ('about 0.089'), or as 'unstable' when not even one does: its other digits cannot be reproduced in another implementation.")
+    return "Rounding noise grows into any difference in a chaotic run. " + stable.RULE
 
 
 def _setup_text():

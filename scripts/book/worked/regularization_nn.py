@@ -31,6 +31,7 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import lru_cache
 
 import bookrng
+import stable
 
 # ---------------------------------------------------------------- the task and the recipe
 
@@ -275,41 +276,47 @@ def _fmt(v, d=3):
     return f"{v + 0.0:.{d}f}"
 
 
-NUDGE = 1e-12   # the first hidden weight of every network changed by this amount: a printed number that moves under it is chaotic
-
-
 def _twins(n=N_TRAIN, wd=0.0, coupled=False, drop=0.0, aug=("none", 0.0), keep=False):
-    """The same runs as `_runs` with the first hidden weight nudged, to test which printed digits are reproducible."""
-    return _run_many([_spec(s, n, wd, coupled, drop, aug, keep) + (NUDGE,) for s in SEEDS])
+    """The same runs as `_runs` once for each of `stable.NUDGES` (the first hidden weight changed by that amount): a list of
+    run lists, to test which printed digits are reproducible."""
+    return [_run_many([_spec(s, n, wd, coupled, drop, aug, keep) + (d,) for s in SEEDS]) for d in stable.NUDGES]
 
 
-def _fmtm(v, w, d=3):
-    """v to d decimals if the nudged value w agrees with it to within half a unit of the last digit; otherwise 'about'
-    v to the fewest decimals on which the two agree ('unstable' when they differ even in the integer part)."""
-    if abs(v - w) <= 0.5 * 10 ** (-d):
-        return f"{v + 0.0:.{d}f}"
-    for k in range(d - 1, -1, -1):
-        if f"{v + 0.0:.{k}f}" == f"{w + 0.0:.{k}f}":
-            return f"about {v + 0.0:.{k}f}"
-    return "unstable"
+def _fmtm(v, ws, d=3):
+    """v to d decimals if the nudged values ws give the same d decimals; otherwise only the digits that survive (see `stable.text`)."""
+    return stable.text(v, ws, lambda x: f"{x + 0.0:.{d}f}")
 
 
 def _m(f, a, b, d=3):
-    """Mean over the seeds of f(run), printed with `_fmtm` against the same mean over the nudged runs."""
-    return _fmtm(_mean([f(x) for x in a]), _mean([f(x) for x in b]), d)
+    """Mean over the seeds of f(run), printed with `_fmtm` against the same mean over each set of nudged runs b."""
+    return _fmtm(_mean([f(x) for x in a]), [_mean([f(x) for x in g]) for g in b], d)
 
 
-def _signed(v, w, d=3):
+def _best_step(a, b):
+    """The mean step of the lowest validation loss over the runs a, with the digits that survive in the nudged runs b."""
+    return stable.text(_mean([x["best_step"] for x in a]), [_mean([x["best_step"] for x in g]) for g in b], lambda x: f"{x:.0f}")
+
+
+def _col(key, group):
+    """The value `key` of every run of a group (or of every group of a list of groups)."""
+    return [_col(key, g) if isinstance(g, list) else g[key] for g in group]
+
+
+def _signed(v, ws, d=3):
     """_fmtm with an explicit sign."""
-    t = _fmtm(v, w, d)
-    return t if t == "unstable" else (t.replace("about ", "about +") if t.startswith("about") and not t.startswith("about -") else (("+" + t) if not t.startswith(("-", "about")) else t))
+    t = _fmtm(v, ws, d)
+    if t == "unstable" or t.startswith(("-", "about -")):
+        return t
+    return t.replace("about ", "about +") if t.startswith("about") else "+" + t
 
 
-def _paired_text(a, b, at, bt, d=3):
-    """('+0.012 (SE 0.004)', '+3.1', '7 of 8') of the paired comparison a - b, each printed against the nudged runs at, bt."""
+def _paired_text(a, b, ats, bts, d=3):
+    """('+0.012 (SE 0.004)', '+3.1', '7 of 8') of the paired comparison a - b; ats and bts are the same per-seed values in each nudged run."""
     m, se, t, wins = _paired(a, b)
-    m2, se2, t2, wins2 = _paired(at, bt)
-    return (f"{_signed(m, m2, d)} (SE {_fmtm(se, se2, d)})", _signed(t, t2, 1), f"{wins} of 8" if wins == wins2 else "unstable")
+    others = [_paired(x, y) for x, y in zip(ats, bts)]
+    ws = {o[3] for o in others} | {wins}
+    return (f"{_signed(m, [o[0] for o in others], d)} (SE {_fmtm(se, [o[1] for o in others], d)})", _signed(t, [o[2] for o in others], 1),
+            f"{wins} of 8" if len(ws) == 1 else "unstable")
 
 
 def _paired(a, b):
@@ -358,26 +365,25 @@ def memorisation():
     r = _runs(keep=False)
     h = r[0]["history"]
     marks = (10, 50, 100, 200, 400, 600, 1000, 1500, 2000, 3000)
-    rt = _run_many([_spec(0) + (NUDGE,)])[0]["history"]
+    rts = [_run_many([_spec(0) + (d,)])[0]["history"] for d in stable.NUDGES]
     rows = []
-    for (t, tr, va, nm), (_, tr2, va2, nm2) in zip(h, rt):
+    for i, (t, tr, va, nm) in enumerate(h):
         if t in marks:
-            rows.append((t, _fmtm(tr, tr2, 4), _fmtm(va, va2, 4), _fmtm(nm, nm2, 1)))
+            rows.append((t, _fmtm(tr, [rt[i][1] for rt in rts], 4), _fmtm(va, [rt[i][2] for rt in rts], 4), _fmtm(nm, [rt[i][3] for rt in rts], 1)))
     out = [
         f"Seed 0, no regularization (AdamW with weight decay 0). Training loss is the mean squared error on the {N_TRAIN} training points in eval mode; "
         f"validation is the mean squared error on the {N_VAL} validation points; the noise floor is {NOISE_SD ** 2:.2f}; the norm of the parameters is the Euclidean norm of the {PARAMS} parameters "
-        "(w, b, v and c together). The late rows come from a chaotic run: a change of 1e-12 in one initial weight changes the printed digits there, so an entry is printed in full only if it survives that change "
-        "and as 'about x' (the digits that survive) otherwise; the same rule applies to every number of this chapter's tables that comes from training.",
+        "(w, b, v and c together). The late rows come from a chaotic run, so " + stable.RULE[0].lower() + stable.RULE[1:] + " The same rule applies to every number of this chapter's tables that comes from training.",
         "",
         _table(["step", "training loss", "validation loss", "norm of the parameters"], rows),
         "",
     ]
-    bs = [x["best_step"] for x in r]
     rtw = _twins()
+    step_of = lambda agg: stable.text(agg([x["best_step"] for x in r]), [agg([x["best_step"] for x in g]) for g in rtw], lambda x: f"{x:.0f}")   # noqa: E731
     out.append(
-        f"Over the 8 seeds: the validation loss is lowest at step {_mean(bs):.0f} on average (range {min(bs)} to {max(bs)}), where it is "
+        f"Over the 8 seeds: the validation loss is lowest at step {step_of(_mean)} on average (range {step_of(min)} to {step_of(max)}), where it is "
         f"{_m(lambda x: x['best_val'], r, rtw)}; at step {STEPS} it is {_m(lambda x: x['final_val'], r, rtw)} on average "
-        f"(range {_fmtm(min(x['final_val'] for x in r), min(x['final_val'] for x in rtw))} to {_fmtm(max(x['final_val'] for x in r), max(x['final_val'] for x in rtw))}), while the training loss is "
+        f"(range {_fmtm(min(x['final_val'] for x in r), [min(x['final_val'] for x in g) for g in rtw])} to {_fmtm(max(x['final_val'] for x in r), [max(x['final_val'] for x in g) for g in rtw])}), while the training loss is "
         f"{_m(lambda x: x['final_train'], r, rtw, 4)}."
     )
     i_stop, i_best = _stop_point(h, 10)
@@ -618,18 +624,18 @@ def train_vs_eval():
     p = 0.3
     x = 0.75
     pair = []
-    for spec in (_spec(0, drop=p), _spec(0, drop=p) + (NUDGE,)):
+    for spec in (_spec(0, drop=p), *[_spec(0, drop=p) + (d,) for d in stable.NUDGES]):
         theta = _run_many([spec])[0]["theta"]
         ev = _predict(theta, [x])[0]
         g = bookrng.generator("regularization_nn.predict")
         five = [_stochastic(theta, x, p, g) for _ in range(5)]
         many = [_stochastic(theta, x, p, g) for _ in range(2000)]
         pair.append((five, ev, _mean(many), _sd(many)))
-    (five, ev, mm, sd), (five2, ev2, mm2, sd2) = pair
-    rows = [(f"train mode, mask {i + 1}", _fmtm(s, s2, 4)) for i, (s, s2) in enumerate(zip(five, five2))]
-    rows.append(("eval mode (no mask, no scaling)", _fmtm(ev, ev2, 4)))
-    rows.append(("mean of 2000 further train-mode outputs", _fmtm(mm, mm2, 4)))
-    rows.append(("standard deviation of those 2000", _fmtm(sd, sd2, 4)))
+    (five, ev, mm, sd), rest = pair[0], pair[1:]
+    rows = [(f"train mode, mask {i + 1}", _fmtm(s, [o[0][i] for o in rest], 4)) for i, s in enumerate(five)]
+    rows.append(("eval mode (no mask, no scaling)", _fmtm(ev, [o[1] for o in rest], 4)))
+    rows.append(("mean of 2000 further train-mode outputs", _fmtm(mm, [o[2] for o in rest], 4)))
+    rows.append(("standard deviation of those 2000", _fmtm(sd, [o[3] for o in rest], 4)))
     rows.append(("true value sin(2 pi x)", _fmt(_truth(x), 4)))
     return "\n".join([
         f"The network of seed 0 trained with dropout p = {p} on its hidden layer (3000 steps, otherwise the recipe of the chapter), evaluated at x = {x}. "
@@ -645,7 +651,7 @@ def dropout_sweep():
         r, rt = _runs(drop=p), _twins(drop=p)
         rows.append((f"{p:g}", _m(lambda x: x["final_norm"], r, rt, 1), _m(lambda x: x["final_train"], r, rt, 4),
                      _m(lambda x: x["final_val"], r, rt, 3), _m(lambda x: x["best_val"], r, rt, 3),
-                     f"{_mean([x['best_step'] for x in r]):.0f}"))
+                     _best_step(r, rt)))
     return "\n".join([
         "Dropout on the 64 hidden units, p as listed, the recipe of the chapter, means over the 8 seeds. Training loss is eval mode on the 16 training points; "
         "'best validation' is the lowest validation loss met during the run (checked every 10 steps), 'at step' the step where it was met.",
@@ -661,7 +667,7 @@ def dropout_by_size():
         d, dt = _runs(n=n, drop=0.3), _twins(n=n, drop=0.3)
         ta = [x["final_test"] for x in a]
         td = [x["final_test"] for x in d]
-        diff, tt, wins = _paired_text(td, ta, [x["final_test"] for x in dt], [x["final_test"] for x in at])
+        diff, tt, wins = _paired_text(td, ta, _col("final_test", dt), _col("final_test", at))
         rows.append((n, f"{PARAMS / n:.1f}", _m(lambda x: x["final_train"], a, at, 3), _m(lambda x: x["final_test"], a, at, 3), _m(lambda x: x["final_test"], d, dt, 3), diff, tt, wins))
     return "\n".join([
         "The same network and recipe with N training examples (N = 16 is the chapter's task; for the others the training points are the first N pairs of a stream "
@@ -753,13 +759,13 @@ def augmentation_table():
     g = bookrng.generator("regularization_nn.drift")
     base, baset = _runs(), _twins()
     tb = [x["final_test"] for x in base]
-    tbt = [x["final_test"] for x in baset]
+    tbt = _col("final_test", baset)
     rows = []
     for name, aug in AUGMENTATIONS:
         r, rt = _runs(aug=aug), _twins(aug=aug)
         drift = 0.0 if aug[0] == "none" else _drift(aug[0], aug[1], g)
         t_ = [x["final_test"] for x in r]
-        diff, tt, _ = _paired_text(t_, tb, [x["final_test"] for x in rt], tbt)
+        diff, tt, _ = _paired_text(t_, tb, _col("final_test", rt), tbt)
         rows.append((name, _fmt(drift, 3), _m(lambda x: x["final_train"], r, rt, 4), _m(lambda x: x["final_val"], r, rt, 3),
                      _m(lambda x: x["final_test"], r, rt, 3), "-" if aug[0] == "none" else diff.split(" (")[0], "-" if aug[0] == "none" else tt))
     return "\n".join([
@@ -804,7 +810,7 @@ def patience_rules():
         oracle = _m(lambda x: x["best_test"], runs, twins)
         for pat in PATIENCES:
             res = []
-            for group in (runs, twins):
+            for group in (runs, *twins):
                 stops, restored, at_stop, bests = [], [], [], []
                 for x in group:
                     i_stop, i_best = _stop_point(x["history"], pat)
@@ -813,9 +819,9 @@ def patience_rules():
                     restored.append(_mse(x["snapshots"][i_best], tx, ty))
                     at_stop.append(_mse(x["snapshots"][i_stop], tx, ty))
                 res.append((_mean(stops), _mean(bests), _mean(restored), _mean(at_stop)))
-            (st, be, re_, ats), (st2, be2, re2, ats2) = res
-            step = lambda a, b: f"{a:.0f}" if round(a) == round(b) else f"about {a:.0f}"   # noqa: E731
-            out_rows.append((label, pat, step(st, st2), step(be, be2), _fmtm(re_, re2, 3), _fmtm(ats, ats2, 3), full_test, oracle))
+            col = lambda i: (res[0][i], [r[i] for r in res[1:]])   # noqa: E731
+            step = lambda i: stable.text(*col(i), lambda x: f"{x:.0f}")   # noqa: E731
+            out_rows.append((label, pat, step(0), step(1), _fmtm(*col(2), 3), _fmtm(*col(3), 3), full_test, oracle))
     return "\n".join([
         f"The recorded validation losses (one every {EVAL_EVERY} steps) of the 8 runs of each setting, replayed with a patience rule: keep the lowest validation loss so far "
         "(only a strictly lower value counts as an improvement) and stop at the first evaluation at which `patience` evaluations in a row have not improved on it. "
@@ -997,19 +1003,19 @@ def method_comparison():
     none, none_t = data[0][2], twin_data[0][1]
     tn = [x["final_test"] for x in none]
     te = [x["best_test"] for x in none]
-    tnt = [x["final_test"] for x in none_t]
-    tet = [x["best_test"] for x in none_t]
+    tnt = _col("final_test", none_t)
+    tet = _col("best_test", none_t)
     rows_a, rows_b = [], []
     for (name, setting, r), (_, rt) in zip(data, twin_data):
         t_final = [x["final_test"] for x in r]
         t_es = [x["best_test"] for x in r]
-        d1, tt1, w1 = _paired_text(t_final, tn, [x["final_test"] for x in rt], tnt)
+        d1, tt1, w1 = _paired_text(t_final, tn, _col("final_test", rt), tnt)
         rows_a.append((name, setting, _m(lambda x: x["final_val"], r, rt), _m(lambda x: x["final_test"], r, rt),
-                       _fmtm(_sd(t_final), _sd([x["final_test"] for x in rt]), 3),
+                       _fmtm(_sd(t_final), [_sd(g) for g in _col("final_test", rt)], 3),
                        "-" if name == "none" else d1, "-" if name == "none" else tt1,
                        "-" if name == "none" else w1, _m(lambda x: x["final_norm"], r, rt, 1)))
-        d2, tt2, w2 = _paired_text(t_es, te, [x["best_test"] for x in rt], tet)
-        rows_b.append((name, _m(lambda x: x["best_val"], r, rt), f"{_mean([x['best_step'] for x in r]):.0f}", _m(lambda x: x["best_test"], r, rt),
+        d2, tt2, w2 = _paired_text(t_es, te, _col("best_test", rt), tet)
+        rows_b.append((name, _m(lambda x: x["best_val"], r, rt), _best_step(r, rt), _m(lambda x: x["best_test"], r, rt),
                        "-" if name == "none" else d2, "-" if name == "none" else tt2,
                        "-" if name == "none" else w2))
     return "\n".join([

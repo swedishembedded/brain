@@ -28,6 +28,7 @@ services by sending an email to info@swedishembedded.com.
 import math
 
 import bookrng
+import stable
 
 # ------------------------------------------------------------------ formatting
 
@@ -786,14 +787,10 @@ def mlp_sweep_results():
     return _SWEEP
 
 
-NUDGE = 1e-12   # a relative change of 1e-12 of one starting weight: the test of whether a run is reproducible in another implementation
-
-
-def mlp_unstable(make, lr, v):
-    """True when the score of a run changes in its third significant digit under a nudge of 1e-12 of one starting
-    weight, i.e. the run is chaotic and no other implementation can reproduce its digits."""
-    w = tail_loss(mlp_train(make, lr, nudge=NUDGE))
-    return v is not None and (w is None or abs(w - v) > 1e-3 * max(abs(v), 1e-12))
+def mlp_cell(make, lr, v):
+    """The score v of a run with only the digits that survive when one starting weight is changed by each of
+    `stable.NUDGES` (see `stable.text`): a run that is chaotic cannot be reproduced digit for digit in another implementation."""
+    return stable.text(v, [tail_loss(mlp_train(make, lr, nudge=d)) for d in stable.NUDGES], lambda x: _fx(x, 4))
 
 
 def mlp_best_lr(name):
@@ -813,7 +810,7 @@ def mlp_sweep():
         make = dict(MLP_RULES)[name]
         for lr, c in zip(LR_GRID, res[name]):
             v = tail_loss(c)
-            cell = "diverged" if v is None else ("unstable" if mlp_unstable(make, lr, v) else _fx(v, 4))
+            cell = "diverged" if v is None else mlp_cell(make, lr, v)
             cells.append(f"**{cell}**" if lr == best else cell)
         rows.append([name] + cells)
     head = (f"Data and starting weights from one generator (seed 0x{bookrng.seed_of('optimizers.mlp'):016x}): for i = 0 .. {MLP_N - 1}, "
@@ -825,7 +822,7 @@ def mlp_sweep():
             "reshuffle when the epoch ends; the same batches for every rule and learning rate. "
             "Entries: the mean loss over all 200 examples, averaged over the six checkpoints at steps 250, 260, ..., 300 (the loss after k updates is the loss at step k); the best entry of each row is in bold. "
             "Rule details: momentum is the sum form m = 0.9 m + g, theta = theta - eta m; RMSProp uses beta2 = 0.9 and eps = 1e-8; Adam uses 0.9, 0.999, 1e-8; AdamW adds decoupled decay 0.05; Lion uses beta1 = 0.9, beta2 = 0.99, the three-way sign (0 at 0) and decay 0. "
-            "Rounding noise grows into any difference in a run whose learning rate is too large, so a run that changes in its third significant digit when one starting weight is changed by 1e-12 is printed as 'unstable' (its digits cannot be reproduced in another implementation; its loss is of the order of the neighbouring entries or larger); "
+            "Rounding noise grows into any difference in a run whose learning rate is too large. " + stable.RULE + " "
             "'diverged' means the gradient stopped being finite.\n\n")
     return head + _table(["rule"] + [f"eta = {lr:g}" for lr in LR_GRID], rows)
 

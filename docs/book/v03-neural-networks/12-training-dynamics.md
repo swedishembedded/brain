@@ -31,12 +31,12 @@ The **gallery network** reads an input of 8 numbers and has two hidden layers of
 The inputs, the teacher and the validation labels of the main task are fixed by the two generator seeds above. The teacher's score of class $k$ is $2\,(\mathbf{u}_k\cdot\mathbf{x}) + (\mathbf{v}_k\cdot\mathbf{x})^2$, with $\mathbf{u}_k$ and $\mathbf{v}_k$ the vectors drawn in the stated order; the label is the index of the largest score, the first on a tie. Here is what the seven runs did.
 
 <!-- worked: training_dynamics.gallery_table -->
-A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' with the digits that survive, or as 'unstable'; the diverging run, whose loss reaches 1e22, is chaotic after its first steps and can only be reproduced to those digits. 'Log10 slope per 100 steps' is the least-squares slope of log10 of the training loss against the step over the evaluations at steps 100, 120, ..., 400, times 100.
+A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation. The diverging run, whose loss reaches 1e22, is chaotic after its first steps and can only be reproduced to those digits. 'Log10 slope per 100 steps' is the least-squares slope of log10 of the training loss against the step over the evaluations at steps 100, 120, ..., 400 (the overfitting run, which is trained for 600 steps, over steps 100, 120, ..., 600), times 100.
 
 | run | what differs from the healthy run | step 0 | step 20 | step 100 | step 200 | step 400 | largest step loss | log10 slope per 100 steps | val acc |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
 | healthy | nothing: He start, rate 0.1, batch 32 | 1.260 | 0.953 | 0.642 | 0.362 | 0.144 | 1.251 | -0.225 | 0.860 |
-| diverging | rate 10 instead of 0.1 | 1.260 | 2.811 | about 2.2 | about 4 | about 2 | 1.78e+22 | unstable | 0.393 |
+| diverging | rate 10 instead of 0.1 | 1.260 | 2.811 | about 2 | unstable | unstable | 1.78e+22 | unstable | unstable |
 | plateau | every weight 0.02 times its He scale | 1.099 | 1.085 | 1.080 | 1.080 | 1.079 | 1.213 | -7.74e-05 | 0.393 |
 | too slow | rate 0.003 instead of 0.1 | 1.260 | 1.196 | 1.080 | 1.029 | 0.975 | 1.471 | -0.014 | 0.510 |
 | noisy | batch 2 instead of 32 | 1.260 | 1.289 | 0.847 | 0.686 | 0.506 | 4.025 | -0.063 | 0.762 |
@@ -128,7 +128,7 @@ At the 19 steps $t = 20, 40, \dots, 380$ the raw minibatch loss differs from the
 A loss that falls by the same factor at every step, $L_t = L_0\,r^t$ with $r < 1$, has $\log_{10}L_t = \log_{10}L_0 + t\log_{10}r$: a straight line on a logarithmic axis with slope $\log_{10}r$. The slope is the rate, and it can be read at any height of the curve; on a linear axis everything near the bottom is squeezed into the same few pixels. Reading a curve on a log scale therefore asks one question, what the slope is, and the answer converts directly into a prediction.
 
 <!-- worked: training_dynamics.log_scale_table -->
-Slope: least-squares slope of log10 of the full-set training loss against the step, per 100 steps, over the evaluations at step >= 100 (at step >= 40 for the overfitting run). Steps per decade: 100 divided by minus the slope, the steps the loss needs to fall by a factor of 10 if the slope persisted.
+Slope: least-squares slope of log10 of the full-set training loss against the step, per 100 steps, over the evaluations at step >= 100 (at step >= 40 for the overfitting run); the evaluations are those of the gallery table, every 20 steps up to step 400 (up to step 600 for the overfitting run). Steps per decade: 100 divided by minus the slope, the steps the loss needs to fall by a factor of 10 if the slope persisted.
 
 | run | slope per 100 steps | steps per decade |
 |---|---:|---:|
@@ -172,7 +172,7 @@ Each failure below is handled the same way: say what the curve shows, name the h
 The curve starts at $1.08$ and the next steps print $9.6$, $53$, $1.6\times10^4$. A rising loss at a single step could be an unlucky batch (the noise section above), so the first measurement is whether it keeps rising, and how the gradient behaves.
 
 <!-- worked: training_dynamics.divergence_table -->
-A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable' (as in the gallery table).
+A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation. (as in the gallery table).
 
 | step t | minibatch loss | global gradient norm | norm / previous norm | largest |logit| |
 |---|---:|---:|---:|---:|
@@ -189,7 +189,7 @@ A number that changes in its third significant digit when the first weight of th
 The loss rises by a factor of about 9 at step 1 and keeps rising; the global gradient norm rises with it, by a factor of $8.5$, $4.3$, $37$, $605$ from one step to the next. A gradient that grows at every step is not noise. The hypothesis that fits is a step that is too long. Chapter 4 derived what a too-long step does for one weight: the error is multiplied at every step by $1 - 2\eta x^2$, and when $\lvert 1 - 2\eta x^2\rvert > 1$ it grows geometrically. For a network, take any direction in which the loss has a curvature $\lambda$ (the second derivative along it, Volume I): along that direction a gradient step multiplies the error by $1 - \eta\lambda$, and the descent is unstable along it once $\eta > 2/\lambda$. The loss of a network is not a quadratic, and the bigger weights then make the activations and the gradients bigger still, which is why the table shows the norm growing by more each step. The size of the first step is the measurement that exposes it:
 
 <!-- worked: training_dynamics.update_ratio_table -->
-The update ratio of a step is (rate * gradient norm) / (norm of all weights before the step), the relative size of the step, with the gradient norm before any clipping. The median is the book's median of the 100 ratios of steps 0 to 99 (the mean of the 50th and 51st smallest). A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable'.
+The update ratio of a step is (rate * gradient norm) / (norm of all weights before the step), the relative size of the step, with the gradient norm before any clipping. The median is the book's median of the 100 ratios of steps 0 to 99 (the mean of the 50th and 51st smallest). A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | run | rate | ratio at step 0 | step 1 | step 2 | median over steps 0 to 99 |
 |---|---:|---:|---:|---:|---:|
@@ -203,7 +203,7 @@ The **update ratio** of a step, $r_{\mathrm{upd}} = \eta\,\lVert\mathbf{g}\rVert
 The remedy that the hypothesis predicts is a smaller rate, and a rate sweep checks it, at the cost of ten short runs:
 
 <!-- worked: training_dynamics.lr_sweep_table -->
-Each row is a fresh run of the healthy configuration with only the rate changed, 100 steps, the same start and the same batches. Largest step loss: the largest minibatch loss of the run divided by the loss at step 0. A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable'.
+Each row is a fresh run of the healthy configuration with only the rate changed, 100 steps, the same start and the same batches. Largest step loss: the largest minibatch loss of the run divided by the loss at step 0. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | rate | largest step loss / step-0 loss | full-set training loss after 100 steps | training accuracy |
 |---|---:|---:|---:|
@@ -216,7 +216,7 @@ Each row is a fresh run of the healthy configuration with only the rate changed,
 | 2 | 2.638 | 0.844 | 0.621 |
 | 3 | 2.241 | 0.846 | 0.611 |
 | 5 | 8.426 | 1.317 | 0.426 |
-| 10 | 1.65e+22 | about 2.2 | 0.426 |
+| 10 | 1.65e+22 | about 2 | 0.426 |
 <!-- /worked -->
 
 Rates up to $1$ train. At $2$ and $3$ the loss spikes to more than twice its starting value and recovers, at $5$ it reaches $8.4$ times and does not recover, and at $10$ the largest step loss is $1.65\times10^{22}$ times the first. The best rate of the sweep, $0.3$, is three times the healthy run's $0.1$: the healthy run was safe but not fast. (The threshold $2/\lambda_{\max}$ is a first guess about where the cliff is; the sweep measures where it is. We do not compute $\lambda_{\max}$ here.)
@@ -224,11 +224,11 @@ Rates up to $1$ train. At $2$ and $3$ the loss spikes to more than twice its sta
 A different fix is to cap the step instead of the rate. The clip of chapter 8 multiplies the gradient by $\min(1, \tau_{\mathrm{clip}}/\lVert\mathbf{g}\rVert)$:
 
 <!-- worked: training_dynamics.clip_table -->
-A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable'.
+A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | rate | clip threshold (global norm) | steps clipped of 100 | largest step loss | full-set training loss after 100 steps |
 |---|---:|---:|---:|---:|
-| 10 | none | 0 | 1.78e+22 | about 2.2 |
+| 10 | none | 0 | 1.78e+22 | about 2 |
 | 10 | 1 | 14 | 38.148 | 3.029 |
 | 10 | 0.1 | 100 | 1.273 | 0.408 |
 | 10 | 0.01 | 100 | 1.255 | 0.577 |
@@ -329,7 +329,7 @@ The bound is an upper bound, so it proves vanishing and cannot prove the opposit
 The deep stack of this section has an input layer ($8\to16$), 24 hidden matrices of $16\times16$ and a read-out ($16\to3$). It is plain (each layer $\mathbf{a} = g(\mathbf{W}\mathbf{a}+\mathbf{b})$) at its start, with weights $\text{gain}\cdot c/\sqrt{n_{\mathrm{in}}}\cdot$`normal()`, where $c = 1$ for sigmoid and tanh and $\sqrt2$ for ReLU, so gain 1 is He for ReLU and the variance-preserving scale of chapter 9 for tanh; the read-out is the exception, $\mathrm{normal}()/\sqrt{16}$ with no gain and no $c$. First the product itself. For 16 inputs, each with a random unit vector at the top, the table gives the geometric mean of the norm after passing back through $k$ layers, the typical-gain prediction (with $\mathbb{E}[g'^2]$ measured from the same layers) and the norm bound.
 
 <!-- worked: training_dynamics.jacobian_table -->
-Plain stack of 24 layers of width 16 (start of training). Generator: the book's SplitMix64, seed 0x70a0199053f0467b (8115514636195874427); draws in the order: input layer (16 x 8), the 24 hidden matrices, read-out (rows one after the other, biases 0). Weights of the input layer and of the hidden matrices = gain * c / sqrt(fan_in) * normal() with c = 1 for sigmoid and tanh (fan_in 8 for the input layer, 16 for the hidden matrices); the read-out is normal() / sqrt(16), without gain. The spectral norm of a matrix (for the norm bound) is its largest singular value, found by 60 power iterations on W^T W from a start vector of 16 normal() draws of the generator `training_dynamics.spectral` (seed 0x20287cd37f8599fc), restarted for each matrix, each iteration normalising the vector. Slopes use the activation's derivative at the pre-activation (sigmoid s(1 - s), tanh 1 - a^2). 16 pairs (first 16 training inputs, unit vector at the output of the last hidden layer from normal() draws normalised, stream 0xb546f4b44d8a777c). Entries are geometric means over the pairs of the norm of the gradient after passing back through k layers, started from a vector of norm 1.
+Plain stack of 24 layers of width 16 (start of training). Generator: the book's SplitMix64, seed 0x70a0199053f0467b (8115514636195874427); draws in the order: input layer (16 x 8), the 24 hidden matrices, read-out (rows one after the other, biases 0). Weights of the input layer and of the hidden matrices = gain * c / sqrt(fan_in) * normal() with c = 1 for sigmoid and tanh (fan_in 8 for the input layer, 16 for the hidden matrices); the read-out is normal() / sqrt(16), without gain. The spectral norm of a matrix (for the norm bound) is its largest singular value, found by 60 power iterations on W^T W from a start vector of 16 normal() draws of the generator `training_dynamics.spectral` (seed 0x20287cd37f8599fc), restarted for each matrix, each iteration normalising the vector. Slopes use the activation's derivative at the pre-activation (sigmoid s(1 - s), tanh 1 - a^2). 16 pairs (first 16 training inputs, unit vector at the output of the last hidden layer from normal() draws normalised, stream 0xb546f4b44d8a777c). Entries are geometric means over the pairs of the norm of the gradient after passing back through k layers, started from a vector of norm 1. The prediction for a pair and a depth k is (n sigma^2 s2)^(k/2) with n = 16, sigma^2 = gain^2 / 16 and s2 the mean of g'(z)^2 over all the units of the last k hidden layers (one pooled mean over the 16 k units, for that example); the table gives the geometric mean of that prediction over the pairs.
 
 | configuration | quantity | k = 1 | k = 2 | k = 4 | k = 8 | k = 16 | k = 24 |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -352,7 +352,7 @@ Each row group is one configuration. The sigmoid stack at gain 1 reaches $3.9\ti
 Now the quantity a training loop can actually log, the gradient norm of each weight matrix. The weight gradient of a layer is $d\mathbf{W}_\ell = \sum_n d\mathbf{z}_{\ell,n}\,\mathbf{a}_{\ell-1,n}^\top$, so its norm carries the backward signal $d\mathbf{z}_\ell$ and the forward activation $\mathbf{a}_{\ell-1}$ at that layer.
 
 <!-- worked: training_dynamics.stack_gradient_table -->
-Gradient of the loss (mean over the batch of the cross-entropy) on the first 32 training examples at the start; 'dW norm' is the Euclidean (Frobenius) norm of the gradient of the 16 x 16 weight matrix, the whole batch summed in the gradient and the bias gradient not included. Weights: input layer and hidden matrices gain * c / sqrt(fan_in) * normal() with c = sqrt(2) for ReLU and 1 for sigmoid and tanh (the gain is 1 for the ReLU rows), the read-out normal() / sqrt(16) without gain, biases 0. Matrix 1 is the one nearest the input layer and matrix 24 the one nearest the read-out. Same normal() draws for every row (Generator: the book's SplitMix64, seed 0x70a0199053f0467b (8115514636195874427)), only the scales differ; the residual stack adds s = sqrt(1 / 48) times the layer's output to its input. Last column: the norm of the gradient arriving at the output of hidden layer 1 divided by the one arriving at the output of hidden layer 24, which is the product of the 23 layers' Jacobians seen from above.
+Gradient of the loss (mean over the batch of the cross-entropy) on the first 32 training examples at the start; 'dW norm' is the Euclidean (Frobenius) norm of the gradient of the 16 x 16 weight matrix of the mean loss (the sum over the 32 examples of the outer products, each example's gradient at the logits carrying the factor 1 / 32 of the mean), the bias gradient not included. Weights: input layer and hidden matrices gain * c / sqrt(fan_in) * normal() with c = sqrt(2) for ReLU and 1 for sigmoid and tanh (the gain is 1 for the ReLU rows), the read-out normal() / sqrt(16) without gain, biases 0. Matrix 1 is the one nearest the input layer and matrix 24 the one nearest the read-out. Same normal() draws for every row (Generator: the book's SplitMix64, seed 0x70a0199053f0467b (8115514636195874427)), only the scales differ; the residual stack adds s = sqrt(1 / 48) times the layer's output to its input. Last column: the Frobenius norm of the whole [32, 16] matrix of gradients arriving at the output of hidden layer 1 (all 32 rows together, not their mean) divided by the same norm at the output of hidden layer 24, which is the product of the 23 layers' Jacobians seen from above.
 
 | stack | loss | dW norm, matrix 1 | matrix 6 | matrix 12 | matrix 18 | matrix 24 | matrix 1 / matrix 24 | gradient at layer 1 / at layer 24 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -473,7 +473,7 @@ function residual_backward(dout: array<real>[B, n], a: array<real>[B, n], z: arr
 A residual layer adds to its input at every layer, so the size of the stream grows with depth unless each branch is small, which is the problem chapter 9 gave a rule for. If each branch has second moment $\omega$ times its input's, $L$ layers multiply the stream's second moment by $(1+\omega)^L$, and the same arithmetic applies to the gradient. Chapter 9's rule is $\omega = 1/(2L)$, so that the product stays near $\sqrt{e} = 1.65$. In the stack here $s = \sqrt\omega$. The table varies $\omega$ on a residual tanh stack of 24 layers:
 
 <!-- worked: training_dynamics.residual_scale_table -->
-Residual tanh stack, 24 layers, gain 1 start, branch s = sqrt(omega). Predicted growth (1 + omega)^24 of the second moment of the stream (chapter 9, upper bound for a branch that preserves the second moment); measured growth: mean square of the stream after layer 24 over its mean square after the input layer. Backward growth: norm of the gradient arriving at hidden layer 1's output over the one at layer 24's output.
+Residual tanh stack, 24 layers, gain 1 start (weights as in the previous tables), branch s = sqrt(omega), evaluated on the first 32 training examples. Predicted growth (1 + omega)^24 of the second moment of the stream (chapter 9, upper bound for a branch that preserves the second moment); measured growth: the ratio of two means, the mean of the squares of all 32 x 16 entries of the stream after layer 24 over the mean of the squares of all entries after the input layer. Backward growth: the Frobenius norm of the whole [32, 16] matrix of gradients arriving at hidden layer 1's output (all rows of the batch, each carrying the 1 / 32 of the mean loss) over the same norm at layer 24's output; the loss is the mean cross-entropy of those examples.
 
 | omega | predicted growth (1 + omega)^24 | measured forward growth | backward growth | loss at step 0 |
 |---|---:|---:|---:|---:|
@@ -489,7 +489,7 @@ At $\omega = 1$ the stream's mean square grows by a factor of $52$ and the gradi
 The test is training. The four runs share the data and the batch stream of the gallery, a rate of $0.1$, 300 steps, and in each pair the same 24 matrices:
 
 <!-- worked: training_dynamics.deep_training_table -->
-24-matrix stacks of width 16, rate 0.1, batch 32, 300 steps, the gallery data and batch stream; the plain and the residual stack of a pair have the same 24 matrices. Full-set training loss after t updates.
+24-matrix stacks of width 16, rate 0.1, batch 32, 300 steps, the gallery data and batch stream; the plain and the residual stack of a pair have the same 24 matrices (the weights of the previous tables: Generator: the book's SplitMix64, seed 0x70a0199053f0467b (8115514636195874427)), and the residual stack adds s = sqrt(1 / 48) = 0.1443 times each layer's output to its input. All parameters train: the input layer (8 -> 16), the 24 matrices and the read-out (16 -> 3), with their biases. Full-set training loss after t updates.
 
 | stack | step 0 | step 50 | step 100 | step 200 | step 300 | train acc | val acc |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -532,12 +532,12 @@ function dead_fraction(Z: list<array<real>[N, n]>) -> real
 The count is relative to the probe: a unit that is off on all 256 probe inputs and on for a rare input is counted. It costs $B\cdot U$ comparisons, $0.83\%$ of a step of the gallery network, from activations the forward pass has already produced. Here are five runs of the gallery network, counted on 256 fixed training inputs.
 
 <!-- worked: training_dynamics.dead_units_table -->
-Fraction of the 64 hidden units that are not positive on any of the first 256 training inputs, after t updates; the same start, data and batches as the gallery, 200 steps. The leaky ReLU is x for x > 0 and 0.1 x otherwise. Last column: full-set training loss after 200 updates (the healthy run reaches 0.362 at step 200).
+Fraction of the 64 hidden units (32 in each of the two hidden layers) that are not positive on any of the first 256 training inputs, after t updates; the same start, data and batches as the gallery, 200 steps. The leaky ReLU is x for x > 0 and 0.1 x otherwise. Last column: full-set training loss after 200 updates (the healthy run reaches 0.362 at step 200). A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | run | t = 0 | t = 10 | t = 20 | t = 50 | t = 100 | t = 200 | loss at t = 200 |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | ReLU, rate 0.1 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.016 | 0.362 |
-| ReLU, rate 2 | 0.000 | 0.094 | 0.141 | 0.188 | 0.219 | 0.234 | 0.553 |
+| ReLU, rate 2 | 0.000 | 0.094 | 0.141 | 0.188 | 0.219 | about 0.2 | unstable |
 | leaky ReLU, rate 2 | 0.000 | 0.062 | 0.031 | 0.000 | 0.016 | 0.016 | 0.246 |
 | ReLU, rate 0.1, hidden biases start at -2 | 0.422 | 0.422 | 0.422 | 0.422 | 0.422 | 0.422 | 1.078 |
 | ReLU, rate 0.1, weights 0.02 times He (the plateau start) | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.016 | 1.080 |
@@ -547,28 +547,28 @@ Fraction of the 64 hidden units that are not positive on any of the first 256 tr
 
 Three causes show up, each with its own signature.
 
-**A step that is too big.** At rate $0.1$ the dead fraction is $0.000$ until step 100 and $0.016$ (one unit in 64) at step 200. At rate 2, the fraction is $0.094$ after 10 steps and reaches $0.234$ at step 200: at the first steps the big updates push biases and weights so that some units are negative on everything. The healthy rate's loss at step 200 is $0.362$ and the rate-2 run's is $0.553$, so the dead units cost something real.
+**A step that is too big.** At rate $0.1$ the dead fraction is $0.000$ until step 100 and $0.016$ (one unit in 64) at step 200. At rate 2, the fraction is $0.094$ after 10 steps and reaches about $0.2$ at step 200 (the table prints only the digits that survive a nudge of $10^{-12}$): at the first steps the big updates push biases and weights so that some units are negative on everything. The healthy rate's loss at step 200 is $0.362$; the rate-2 run's is chaotic by then and the table prints it as unstable.
 
 **A bad start.** With every hidden bias started at $-2$ (at the healthy rate $0.1$) the fraction at step 0 is $0.422$ and at step 200 it is the same, $0.422$: the units that were dead at the start have no gradient to ever move them, and the loss sits at $1.078$, the label entropy. This is the same curve as the plateau of the gallery (the last row of the table is the plateau start itself, at $1.080$), from a different fault, and the dead fraction separates them: $0.422$ here against $0.000$ for the small-weight start, whose units are all alive and whose gradients are merely tiny. It is the situation that chapter 2 set up by putting a bias of $-12$ on one unit.
 
 **Bias drift.** The two mechanisms above both work through the bias, which shifts $z$ for every input at once. The table of the gradient of a dead unit makes the effect visible:
 
 <!-- worked: training_dynamics.dead_gradient_table -->
-Gradient of the loss on the 256 probe examples, rate-2 ReLU run after 200 updates (loss 0.547). Every bias started at 0.
+Gradient of the loss on the 256 probe examples, rate-2 ReLU run after 200 updates (loss unstable). Every bias started at 0. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | layer | dead units | alive units | largest |dW| entry in a dead unit's row | largest |db| of a dead unit | median row norm of an alive unit | mean bias of dead units | mean bias of alive units |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| hidden layer 1 | 0 | 32 | 0.0e+00 | 0.0e+00 | 1.70e-02 | - | -1.039 |
-| hidden layer 2 | 15 | 17 | 0.0e+00 | 0.0e+00 | 6.57e-03 | -0.424 | -0.233 |
+| hidden layer 1 | 0 | 32 | 0.0e+00 | 0.0e+00 | unstable | - | about -1 |
+| hidden layer 2 | unstable | about 20 | 0.0e+00 | 0.0e+00 | unstable | unstable | about -0.2 |
 <!-- /worked -->
 
-The incoming weights and the bias of every dead unit have a gradient of exactly $0.0$ (not tiny: zero), while an alive unit's row has a gradient norm of order $10^{-2}$. At the first hidden layer no unit is dead, but their biases have drifted from $0$ to a mean of $-1.039$ at rate 2, pushed negative together; at the second hidden layer, 15 of 32 units are dead and their mean bias is $-0.424$ against $-0.233$ for the alive ones. A unit can also come back: layer 2's inputs come from layer 1, which keeps changing, and a layer-2 unit can leave the dead set when its inputs shift (the figure's curve for the rate-2 run goes down as well as up). A first-layer unit has no such help, since its input is the data.
+The incoming weights and the bias of every dead unit have a gradient of exactly $0.0$ (not tiny: zero), while an alive unit's row has a gradient norm of order $10^{-2}$. At the first hidden layer no unit is dead, but their biases have drifted from $0$ to a mean of about $-1$ at rate 2, pushed negative together; at the second hidden layer about 20 of 32 units are alive (the count of dead units and their mean bias are chaotic and the table prints them as unstable), and the alive ones have a mean bias of about $-0.2$. A unit can also come back: layer 2's inputs come from layer 1, which keeps changing, and a layer-2 unit can leave the dead set when its inputs shift (the figure's curve for the rate-2 run goes down as well as up). A first-layer unit has no such help, since its input is the data.
 
 ### Remedies
 
 The leaky ReLU, $x$ for $x > 0$ and $\alpha_{\mathrm{leak}}\,x$ otherwise (here $\alpha_{\mathrm{leak}} = 0.1$), never has a zero slope. A unit that is negative on every input still passes a gradient $\alpha_{\mathrm{leak}}\,da$, so its weights keep moving and it can recover.
 
-At rate 2 the leaky network has a dead fraction near $0.016$ at step 200 (it counts a unit as inactive when it is not positive anywhere, even though its gradient is not zero) against $0.234$ for the ReLU, and its loss at step 200 is $0.246$ against $0.553$. The leaky network costs nothing extra in arithmetic: the same multiply by a constant on the negative side. Other remedies attack the causes: a smaller rate and a warmup (chapter 8) against the big step, a start whose biases are zero or a normalization before the activation (chapter 10) against the start and the drift, and the smooth activations of chapter 2, whose slope is small but nonzero for moderately negative inputs, against all three.
+At rate 2 the leaky network has a dead fraction near $0.016$ at step 200 (it counts a unit as inactive when it is not positive anywhere, even though its gradient is not zero) against about $0.2$ for the ReLU, and its loss at step 200 is $0.246$ (the ReLU run's is unstable in the table). The leaky network costs nothing extra in arithmetic: the same multiply by a constant on the negative side. Other remedies attack the causes: a smaller rate and a warmup (chapter 8) against the big step, a start whose biases are zero or a normalization before the activation (chapter 10) against the start and the drift, and the smooth activations of chapter 2, whose slope is small but nonzero for moderately negative inputs, against all three.
 
 ## The overfit-one-batch test
 
@@ -617,7 +617,7 @@ The two checks catch different defects. A **correct** network passes both, and p
 The two tests together cover the table. Neither is enough alone: the overfit test is the one that sees the loop, the loss and the data, and the gradient check is the one that sees a wrong gradient that the remaining parameters can compensate for. A permanent label misalignment, which memorization cannot see, is caught by a model that has to generalize:
 
 <!-- worked: training_dynamics.misalignment_table -->
-Shuffle: Fisher-Yates of the 512 training labels with the stream 0xe8a3b8aba5821884 (validation labels untouched). Overfit one batch: the first 8 examples, 300 steps at rate 0.1. Baseline: the linear softmax model of the checklist table, 400 steps, trained on all 512 (possibly shuffled) labels and scored against the true validation labels.
+Shuffle: Fisher-Yates of the 512 training labels with the stream 0xe8a3b8aba5821884 (validation labels untouched). Overfit one batch: the first 8 examples, 300 steps at rate 0.1. Baseline: the linear softmax model of the checklist table, trained on all 512 (possibly shuffled) labels and scored against the true validation labels. The linear baseline is the softmax model 8 -> 3 (weights sqrt(1 / 8) * normal() from the gallery's start generator `training_dynamics.init`, 24 draws row by row, biases 0) trained by plain gradient descent at rate 0.1, minibatches of 32 indices from the gallery's batch stream (seed 0x28e8e3949e5963e6), 400 steps, no clipping.
 
 | training labels | overfit one batch: loss | overfit one batch: accuracy | linear baseline: training accuracy | linear baseline: validation accuracy |
 |---|---:|---:|---:|---:|
@@ -632,7 +632,7 @@ Memorizing a fixed batch works with the labels shuffled once ($0.0026$, accuracy
 The tools of this chapter cost different amounts, and the order in which to use them follows the cost. The table counts each in FLOPs for the gallery network, with a training step counted as in the monitoring table below, and as a share of one 400-step run.
 
 <!-- worked: training_dynamics.checklist_table -->
-Network [8, 32, 32, 3]. Cost in FLOPs (counted as in the previous table) and as a share of the 400-step run. The monitoring row is spread over the run, the others are paid before or beside it.
+Network [8, 32, 32, 3]. Cost in FLOPs (counted as in the previous table) and as a share of the 400-step run. The monitoring row is spread over the run, the others are paid before or beside it. The linear baseline is the softmax model 8 -> 3 (weights sqrt(1 / 8) * normal() from the gallery's start generator `training_dynamics.init`, 24 draws row by row, biases 0) trained by plain gradient descent at rate 0.1, minibatches of 32 indices from the gallery's batch stream (seed 0x28e8e3949e5963e6), 400 steps, no clipping.
 
 | check | what it costs | FLOPs | % of the run | what it tells |
 |---|---|---:|---:|---|
@@ -669,7 +669,7 @@ Network [8, 32, 32, 3], P = 1443 parameters, batch B = 32. One training step cos
 
 | monitor | operations | FLOPs per step | % of a training step |
 |---|---|---:|---:|
-| global gradient norm (and each layer's share of it) | P multiplies and P - 1 adds | 2,886 | 1.16 |
+| global gradient norm (and each layer's share of it) | P multiplies and P adds (the sum starts from 0, so every product has its add) | 2,886 | 1.16 |
 | update ratio | the norm of the weights: P multiplies and adds (the update norm is the rate times the gradient norm) | 2,886 | 1.16 |
 | activation rms of each hidden layer | B * U squares and adds, U = 64 hidden units | 4,096 | 1.65 |
 | fraction of dead units on the minibatch | B * U comparisons | 2,048 | 0.83 |

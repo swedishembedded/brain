@@ -32,6 +32,7 @@ from functools import lru_cache
 
 import bookrng
 import initialization as ini
+import stable
 
 EPS = 1e-5            # the epsilon inside the square root, in every example unless stated
 KINDS = ("batch", "layer", "rms")
@@ -751,12 +752,13 @@ def epsilon_effect():
 
 # ------------------------------------------------------------------ training table
 
-def _stable_cell(v, w):
-    """A loss in the table's precision when a change of 1e-12 in one starting weight leaves its third significant digit unchanged
-    (a loss that has overflowed counts as 'not finite'), otherwise only the leading digits that survive, or 'unstable'."""
-    v = v if v is not None and math.isfinite(v) and v < 1e30 else None
-    w = w if w is not None and math.isfinite(w) and w < 1e30 else None
-    return ini._stable_loss(v, w).replace("not finite", "not finite")
+def _stable_cell(losses, twins, s):
+    """The loss after s steps with only the digits that survive in the nudged runs `twins` (a loss that has overflowed or
+    exceeded 1e30, or that does not exist because the run stopped earlier, counts as 'not finite')."""
+    def at(run):
+        v = run[s] if s < len(run) else None
+        return v if v is not None and math.isfinite(v) and v < 1e30 else None
+    return stable.text(at(losses), [at(t) for t in twins], ini._loss)
 
 
 def stack_training():
@@ -764,16 +766,14 @@ def stack_training():
     for lr in STACK_RATES:
         for kind in ("none", "batch", "layer", "rms"):
             losses = stack_run(kind, lr)[0]
-            twin = stack_run(kind, lr, nudge=ini.NUDGE)[0]
-            cells = []
-            for s in (0, 10, 30, 100):
-                cells.append(_stable_cell(losses[s] if s < len(losses) else None, twin[s] if s < len(twin) else None))
+            twins = [stack_run(kind, lr, nudge=d)[0] for d in stable.NUDGES]
+            cells = [_stable_cell(losses, twins, s) for s in (0, 10, 30, 100)]
             rows.append((lr, KIND_LABEL[kind]) + tuple(cells))
     return (_stack_setup(", 100 steps") + " A normalization (gamma = 1 and, for batch and layer norm, beta = 0 at the start, trained with the same rate, "
             f"epsilon = {EPS:g}) sits between each of the ten linear layers and its ReLU; batch norm takes its statistics "
             "over the 32 examples, layer norm and RMS norm over the 64 units of an example. "
-            "\"not finite\" means the loss overflowed or exceeded 1e30 before that step. A loss that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 "
-            "is printed with the leading digits that survive ('about 0.45') or as 'unstable'. RMS norm has only the vector gamma (no shift beta); batch norm and layer norm have gamma and beta, trained with the same rate; "
+            "\"not finite\" means the loss overflowed or exceeded 1e30 before that step. " + stable.RULE + " "
+            "RMS norm has only the vector gamma (no shift beta); batch norm and layer norm have gamma and beta, trained with the same rate; "
             "the weights, biases and gamma and beta are all updated by plain gradient descent.\n\n" +
             _table(["rate", "layers", "step 0", "step 10", "step 30", "step 100"], rows, "rlrrrr"))
 

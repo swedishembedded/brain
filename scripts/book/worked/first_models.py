@@ -975,8 +975,8 @@ def ctrl_open_vs_closed():
         if r["epoch"] in shown:
             rows.append([str(r["epoch"]), _fx(r["open_rms"], 4), _fx(r["closed_rms"], 4), _fx(r["closed_mse"], 5), _fx(r["ss"], 4), _fx(r["dev"], 3)])
     pid_rows = rollout(pid_controller())
-    head = (f"The explore-trained network at the end of epoch n. 'one-step error' is the RMS error of the command on the validation samples (teacher forcing: every input is an expert state). "
-            f"'action error, own states' is the same difference measured at the states the network itself visits in the 180-step closed loop. The expert's own closed loop has tracking error {_fx(tracking_mse(pid_rows), 5)} and steady error {_fx(steady_error(pid_rows), 5)}.\n\n")
+    head = (f"The explore-trained network at the end of epoch n. 'one-step error' is the RMS error of the network's raw output (before any clamp to [-1, 1]; the square root of the validation loss) against the expert's command on the validation samples (teacher forcing: every input is an expert state). "
+            f"'action error, own states' is the RMS difference between the command the loop applies (the network's output clamped to [-1, 1]) and the expert's command at the same state, measured at the states the network itself visits in the 180-step closed loop. The expert's own closed loop has tracking error {_fx(tracking_mse(pid_rows), 5)} and steady error {_fx(steady_error(pid_rows), 5)}.\n\n")
     return head + _table(["epoch", "one-step error", "action error, own states", "tracking error", "steady error", "largest deviation from PID"], rows)
 
 
@@ -1028,7 +1028,12 @@ def determinism():
         same_log = all(p["train"] == q["train"] and p["val"] == q["val"] for p, q in zip(x["log"], y["log"]))
         diff = max(abs(p - q) for p, q in zip(x["theta"], y["theta"]))
         rows.append([name, digest(x["theta"])[:16], digest(y["theta"])[:16], _sci(diff, 1), str(same_log)])
-    return _table(["model", "run 1: SHA-256 of the final parameters (first 16 hex)", "run 2", "largest parameter difference", "all logged losses equal"], rows)
+    head = ("The hashed bytes: the parameters after the last epoch (the final weights, not the best-validation checkpoint), layer by layer from the first layer to the last; "
+            "within a layer the weight matrix W of shape [n_out, n_in] in row-major order (row j holds the weights of output unit j), then the bias vector b of n_out entries; "
+            "every number as an IEEE 754 binary64 value in 8 bytes, least significant byte first (little-endian), with no header, separator or padding "
+            f"({n_params(AE_SPEC)} numbers, {8 * n_params(AE_SPEC)} bytes for the autoencoder; {n_params(CTRL_SPEC)} numbers, {8 * n_params(CTRL_SPEC)} bytes for the controller). "
+            "The digest is SHA-256 of that byte string, written as lowercase hexadecimal and cut to its first 16 digits.\n\n")
+    return head + _table(["model", "run 1: SHA-256 of the final parameters (first 16 hex)", "run 2", "largest parameter difference", "all logged losses equal"], rows)
 
 
 def work_counts():

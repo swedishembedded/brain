@@ -30,6 +30,7 @@ from functools import lru_cache
 from operator import mul
 
 import bookrng
+import stable as stab
 
 # ------------------------------------------------------------------ constants
 
@@ -611,44 +612,39 @@ def gallery_setup():
     return _table(["item", "value"], rows, "ll")
 
 
-NUDGE = 1e-12      # change of the first weight used to test which printed digits another implementation can reproduce
+def gallery_twins(key):
+    """The runs of the gallery again with the first weight changed by each of `stab.NUDGES`."""
+    return [gallery_run(key, d) for d in stab.NUDGES]
 
 
-def _numm(v, w, d=4):
-    """_num(v, d) when the nudged value w agrees to the third significant digit; otherwise 'about x' with the digits on which the two
-    agree (two significant digits if they differ by at most 2%, else one), or 'unstable'. Non-finite values are printed by name."""
-    if not (is_finite(v) and is_finite(w)):
+def _numm(v, ws, d=4):
+    """_num(v, d) with only the digits that survive in the nudged values ws (see `stable.text`); non-finite values are printed by name."""
+    if not (is_finite(v) and all(is_finite(w) for w in ws)):
         return _num(v, d)
-    if abs(v - w) <= 1e-3 * max(abs(v), 1e-300):
-        return _num(v, d)
-    if abs(v - w) <= 0.02 * max(abs(v), 1e-300):
-        return f"about {(v + w) / 2:.2g}"
-    if f"{v:.1g}" == f"{w:.1g}":
-        return f"about {v:.1g}"
-    return "unstable"
+    return stab.text(v, ws, lambda x: _num(x, d))
 
 
 def gallery_table():
     entries = [(k, lab, chg) for k, lab, chg, _ in GALLERY]
     runs = {k: gallery_run(k) for k, *_ in entries}
-    twins = {k: gallery_run(k, NUDGE) for k, *_ in entries}
+    twins = {k: gallery_twins(k) for k, *_ in entries}
     entries.append(("overfit", "overfitting", "24 training examples, 25% wrong labels"))
     runs["overfit"] = overfit_run()
-    twins["overfit"] = overfit_run(NUDGE)
+    twins["overfit"] = [overfit_run(d) for d in stab.NUDGES]
     rows = []
     for key, lab, chg in entries:
-        r, q = runs[key], twins[key]
+        r, qs = runs[key], twins[key]
         ev = {t: l for t, l, *_ in r["evals"]}
-        ew = {t: l for t, l, *_ in q["evals"]}
-        cells = [_numm(ev[m], ew[m], 3) for m in (0, 20, 100, 200, 400)]
-        rows.append((lab, chg, *cells, _numm(max(r["step_loss"]), max(q["step_loss"]), 3), _numm(log_slope(r["evals"]), log_slope(q["evals"]), 3),
-                     _numm(r["evals"][-1][4], q["evals"][-1][4], 3)))
+        ews = [{t: l for t, l, *_ in q["evals"]} for q in qs]
+        cells = [_numm(ev[m], [ew[m] for ew in ews], 3) for m in (0, 20, 100, 200, 400)]
+        rows.append((lab, chg, *cells, _numm(max(r["step_loss"]), [max(q["step_loss"]) for q in qs], 3),
+                     _numm(log_slope(r["evals"]), [log_slope(q["evals"]) for q in qs], 3),
+                     _numm(r["evals"][-1][4], [q["evals"][-1][4] for q in qs], 3)))
     nan = nan_run()
     rows.append(("NaN", "the diverging run with the textbook softmax", _num(nan["evals"][0][1], 3), "NaN", "NaN", "NaN", "NaN",
                  "NaN", "NaN", "-"))
-    note = ("A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' with the digits that survive, or as 'unstable'; "
-            "the diverging run, whose loss reaches 1e22, is chaotic after its first steps and can only be reproduced to those digits. "
-            "'Log10 slope per 100 steps' is the least-squares slope of log10 of the training loss against the step over the evaluations at steps 100, 120, ..., 400, times 100.\n\n")
+    note = (stab.RULE + " The diverging run, whose loss reaches 1e22, is chaotic after its first steps and can only be reproduced to those digits. "
+            "'Log10 slope per 100 steps' is the least-squares slope of log10 of the training loss against the step over the evaluations at steps 100, 120, ..., 400 (the overfitting run, which is trained for 600 steps, over steps 100, 120, ..., 600), times 100.\n\n")
     return note + _table(["run", "what differs from the healthy run", "step 0", "step 20", "step 100", "step 200", "step 400",
                    "largest step loss", "log10 slope per 100 steps", "val acc"], rows, "llrrrrrrrr")
 
@@ -711,28 +707,23 @@ def noise_by_batch_table():
 
 # ====================================================== causes, one run at a time
 
-def _scim(v, w, d=2):
-    """Scientific notation of v with d decimals if the nudged value w agrees to the third significant digit, else 'about' / 'unstable' (see _numm)."""
-    if not (is_finite(v) and is_finite(w)):
+def _scim(v, ws, d=2):
+    """Scientific notation of v with d decimals and only the digits that survive in the nudged values ws (see `_numm`)."""
+    if not (is_finite(v) and all(is_finite(w) for w in ws)):
         return _sci(v, d)
-    if abs(v - w) <= 1e-3 * max(abs(v), 1e-300):
-        return _sci(v, d)
-    if abs(v - w) <= 0.02 * max(abs(v), 1e-300):
-        return f"about {(v + w) / 2:.2g}"
-    if f"{v:.1g}" == f"{w:.1g}":
-        return f"about {v:.1g}"
-    return "unstable"
+    return stab.text(v, ws, lambda x: _sci(x, d))
 
 
 def divergence_table():
     r = gallery_run("diverging")
-    q = gallery_run("diverging", NUDGE)
-    n, m = r["grad_norm"], q["grad_norm"]
+    qs = gallery_twins("diverging")
+    n, ms = r["grad_norm"], [q["grad_norm"] for q in qs]
     rows = []
     for t in range(0, 8):
-        ratio = "" if t == 0 else _numm(n[t] / n[t - 1], m[t] / m[t - 1], 2)
-        rows.append((t, _numm(r["step_loss"][t], q["step_loss"][t], 3), _numm(n[t], m[t], 3), ratio, _numm(r["max_logit"][t], q["max_logit"][t], 3)))
-    return ("A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable' (as in the gallery table).\n\n" + _table(["step t", "minibatch loss", "global gradient norm", "norm / previous norm", "largest |logit|"], rows))
+        ratio = "" if t == 0 else _numm(n[t] / n[t - 1], [m[t] / m[t - 1] for m in ms], 2)
+        rows.append((t, _numm(r["step_loss"][t], [q["step_loss"][t] for q in qs], 3), _numm(n[t], [m[t] for m in ms], 3), ratio,
+                     _numm(r["max_logit"][t], [q["max_logit"][t] for q in qs], 3)))
+    return (stab.RULE + " (as in the gallery table).\n\n" + _table(["step t", "minibatch loss", "global gradient norm", "norm / previous norm", "largest |logit|"], rows))
 
 
 SWEEP_RATES = (0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 2.0, 3.0, 5.0, 10.0)
@@ -744,21 +735,23 @@ def sweep_runs():
     out = []
     for eta in SWEEP_RATES:
         layers = init_mlp([IN_DIM, HIDDEN, HIDDEN, CLASSES])
-        twin = init_mlp([IN_DIM, HIDDEN, HIDDEN, CLASSES])
-        twin[0]["P"]["W"][0][0] += NUDGE
-        out.append((eta, train(layers, data, eta=eta, steps=100, eval_every=100), train(twin, data, eta=eta, steps=100, eval_every=100)))
+        twins = []
+        for d in stab.NUDGES:
+            twin = init_mlp([IN_DIM, HIDDEN, HIDDEN, CLASSES])
+            twin[0]["P"]["W"][0][0] += d
+            twins.append(train(twin, data, eta=eta, steps=100, eval_every=100))
+        out.append((eta, train(layers, data, eta=eta, steps=100, eval_every=100), twins))
     return out
 
 
 def lr_sweep_table():
     rows = []
-    for eta, r, q in sweep_runs():
-        l0, q0 = r["step_loss"][0], q["step_loss"][0]
-        rows.append((f"{eta:g}", _numm(max(r["step_loss"]) / l0, max(q["step_loss"]) / q0, 3), _numm(r["evals"][-1][1], q["evals"][-1][1], 3),
-                     _numm(r["evals"][-1][3], q["evals"][-1][3], 3)))
+    for eta, r, qs in sweep_runs():
+        l0 = r["step_loss"][0]
+        rows.append((f"{eta:g}", _numm(max(r["step_loss"]) / l0, [max(q["step_loss"]) / q["step_loss"][0] for q in qs], 3),
+                     _numm(r["evals"][-1][1], [q["evals"][-1][1] for q in qs], 3), _numm(r["evals"][-1][3], [q["evals"][-1][3] for q in qs], 3)))
     return ("Each row is a fresh run of the healthy configuration with only the rate changed, 100 steps, the same start and the "
-            "same batches. Largest step loss: the largest minibatch loss of the run divided by the loss at step 0. A number that changes in its third significant digit when the first weight "
-            "of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable'.\n\n"
+            "same batches. Largest step loss: the largest minibatch loss of the run divided by the loss at step 0. " + stab.RULE + "\n\n"
             + _table(["rate", "largest step loss / step-0 loss", "full-set training loss after 100 steps", "training accuracy"], rows))
 
 
@@ -767,15 +760,17 @@ def clip_table():
     rows = []
     for eta, clip in ((10.0, None), (10.0, 1.0), (10.0, 0.1), (10.0, 0.01), (0.1, None), (0.1, 0.1)):
         layers = init_mlp([IN_DIM, HIDDEN, HIDDEN, CLASSES])
-        twin = init_mlp([IN_DIM, HIDDEN, HIDDEN, CLASSES])
-        twin[0]["P"]["W"][0][0] += NUDGE
         r = train(layers, data, eta=eta, clip=clip, steps=100, eval_every=100)
-        q = train(twin, data, eta=eta, clip=clip, steps=100, eval_every=100)
-        clipped = sum(1 for g in r["grad_norm"] if clip is not None and g > clip)
-        clipped_q = sum(1 for g in q["grad_norm"] if clip is not None and g > clip)
-        rows.append((f"{eta:g}", "none" if clip is None else f"{clip:g}", f"{clipped}" if clipped == clipped_q else f"about {clipped}",
-                     _numm(max(r["step_loss"]), max(q["step_loss"]), 3), _numm(r["evals"][-1][1], q["evals"][-1][1], 3)))
-    return ("A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable'.\n\n" + _table(["rate", "clip threshold (global norm)", "steps clipped of 100", "largest step loss", "full-set training loss after 100 steps"], rows))
+        qs = []
+        for d in stab.NUDGES:
+            twin = init_mlp([IN_DIM, HIDDEN, HIDDEN, CLASSES])
+            twin[0]["P"]["W"][0][0] += d
+            qs.append(train(twin, data, eta=eta, clip=clip, steps=100, eval_every=100))
+        count = lambda run: sum(1 for g in run["grad_norm"] if clip is not None and g > clip)   # noqa: E731
+        clipped = stab.text(count(r), [count(q) for q in qs], str)
+        rows.append((f"{eta:g}", "none" if clip is None else f"{clip:g}", clipped,
+                     _numm(max(r["step_loss"]), [max(q["step_loss"]) for q in qs], 3), _numm(r["evals"][-1][1], [q["evals"][-1][1] for q in qs], 3)))
+    return (stab.RULE + "\n\n" + _table(["rate", "clip threshold (global norm)", "steps clipped of 100", "largest step loss", "full-set training loss after 100 steps"], rows))
 
 
 def plateau_table():
@@ -798,16 +793,16 @@ def plateau_table():
 def update_ratio_table():
     rows = []
     for key in ("healthy", "slow", "diverging"):
-        r, q = gallery_run(key), gallery_run(key, NUDGE)
+        r, qs = gallery_run(key), gallery_twins(key)
         meds = []
-        for run in (r, q):
+        for run in (r, *qs):
             srt = sorted(run["update_ratio"][:100])
             meds.append(0.5 * (srt[49] + srt[50]))      # the book's median of 100 values: the mean of the two middle ones
-        ur, uq = r["update_ratio"], q["update_ratio"]
-        rows.append((key, {"healthy": "0.1", "slow": "0.003", "diverging": "10"}[key], _scim(ur[0], uq[0]), _scim(ur[1], uq[1]), _scim(ur[2], uq[2]),
-                     _scim(meds[0], meds[1])))
+        ur = r["update_ratio"]
+        rows.append((key, {"healthy": "0.1", "slow": "0.003", "diverging": "10"}[key],
+                     *[_scim(ur[i], [q["update_ratio"][i] for q in qs]) for i in range(3)], _scim(meds[0], meds[1:])))
     return ("The update ratio of a step is (rate * gradient norm) / (norm of all weights before the step), the relative size of "
-            "the step, with the gradient norm before any clipping. The median is the book's median of the 100 ratios of steps 0 to 99 (the mean of the 50th and 51st smallest). A number that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed as 'about x' or 'unstable'.\n\n"
+            "the step, with the gradient norm before any clipping. The median is the book's median of the 100 ratios of steps 0 to 99 (the mean of the 50th and 51st smallest). " + stab.RULE + "\n\n"
             + _table(["run", "rate", "ratio at step 0", "step 1", "step 2", "median over steps 0 to 99"], rows))
 
 
@@ -983,7 +978,9 @@ def jacobian_table():
             f"(seed {bookrng.seed_of(SPECTRAL_NAME):#018x}), restarted for each matrix, each iteration normalising the vector. "
             f"Slopes use the activation's derivative at the pre-activation (sigmoid s(1 - s), tanh 1 - a^2). {JAC_PAIRS} pairs (first {JAC_PAIRS} training inputs, unit vector at the output of the last hidden layer "
             f"from normal() draws normalised, stream {bookrng.seed_of(JAC_NAME):#018x}). Entries are geometric means over the pairs of the norm "
-            f"of the gradient after passing back through k layers, started from a vector of norm 1.")
+            f"of the gradient after passing back through k layers, started from a vector of norm 1. The prediction for a pair and a depth k is (n sigma^2 s2)^(k/2) with n = {STACK_WIDTH}, "
+            f"sigma^2 = gain^2 / {STACK_WIDTH} and s2 the mean of g'(z)^2 over all the units of the last k hidden layers (one pooled mean over the {STACK_WIDTH} k units, for that example); "
+            "the table gives the geometric mean of that prediction over the pairs.")
     return note + "\n\n" + _table(["configuration", "quantity"] + [f"k = {k}" for k in JAC_DEPTHS], rows, "llrrrrrr")
 
 
@@ -1019,11 +1016,11 @@ def stack_gradient_table():
         loss, norms, a1, a24 = stack_norms(kind, act, gain)
         rows.append((label, _num(loss, 3), *[_sci(norms[i], 1) for i in (0, 5, 11, 17, 23)], _sci(norms[0] / norms[-1], 1), _sci(a1 / a24, 1)))
     note = (f"Gradient of the loss (mean over the batch of the cross-entropy) on the first {STACK_BATCH} training examples at the start; 'dW norm' is the Euclidean (Frobenius) norm of the gradient of the "
-            f"{STACK_WIDTH} x {STACK_WIDTH} weight matrix, the whole batch summed in the gradient and the bias gradient not included. Weights: input layer and hidden matrices gain * c / sqrt(fan_in) * normal() "
+            f"{STACK_WIDTH} x {STACK_WIDTH} weight matrix of the mean loss (the sum over the {STACK_BATCH} examples of the outer products, each example's gradient at the logits carrying the factor 1 / {STACK_BATCH} of the mean), the bias gradient not included. Weights: input layer and hidden matrices gain * c / sqrt(fan_in) * normal() "
             f"with c = sqrt(2) for ReLU and 1 for sigmoid and tanh (the gain is 1 for the ReLU rows), the read-out normal() / sqrt({STACK_WIDTH}) without gain, biases 0. Matrix 1 is the one nearest the input layer and "
             f"matrix 24 the one nearest the read-out. Same normal() draws for every row ({_gen_note(STACK_NAME)}), only the scales differ; the "
-            f"residual stack adds s = sqrt(1 / 48) times the layer's output to its input. Last column: the norm of the gradient arriving at "
-            f"the output of hidden layer 1 divided by the one arriving at the output of hidden layer 24, which is the product of the 23 layers' Jacobians "
+            f"residual stack adds s = sqrt(1 / 48) times the layer's output to its input. Last column: the Frobenius norm of the whole [{STACK_BATCH}, {STACK_WIDTH}] matrix of gradients arriving at "
+            f"the output of hidden layer 1 (all {STACK_BATCH} rows together, not their mean) divided by the same norm at the output of hidden layer 24, which is the product of the 23 layers' Jacobians "
             f"seen from above.")
     return note + "\n\n" + _table(["stack", "loss", "dW norm, matrix 1", "matrix 6", "matrix 12", "matrix 18", "matrix 24", "matrix 1 / matrix 24",
                                   "gradient at layer 1 / at layer 24"], rows)
@@ -1118,10 +1115,10 @@ def residual_scale_table():
         loss, d = ce_stable(out, yt[:STACK_BATCH])
         _, arrive = backward(layers, caches, d)
         rows.append((label, _num((1 + om) ** n, 4), _num(q24 / q0, 4), _num(arrive[1] / arrive[n], 4), _num(loss, 3)))
-    return ("Residual tanh stack, 24 layers, gain 1 start, branch s = sqrt(omega). Predicted growth (1 + omega)^24 of the second moment of "
-            "the stream (chapter 9, upper bound for a branch that preserves the second moment); measured growth: mean square of the "
-            "stream after layer 24 over its mean square after the input layer. Backward growth: norm of the gradient arriving at hidden layer 1's "
-            "output over the one at layer 24's output.\n\n"
+    return (f"Residual tanh stack, 24 layers, gain 1 start (weights as in the previous tables), branch s = sqrt(omega), evaluated on the first {STACK_BATCH} training examples. Predicted growth (1 + omega)^24 of the second moment of "
+            f"the stream (chapter 9, upper bound for a branch that preserves the second moment); measured growth: the ratio of two means, the mean of the squares of all {STACK_BATCH} x {STACK_WIDTH} entries of the "
+            "stream after layer 24 over the mean of the squares of all entries after the input layer. Backward growth: the Frobenius norm of the whole [32, 16] matrix of gradients arriving at hidden layer 1's "
+            "output (all rows of the batch, each carrying the 1 / 32 of the mean loss) over the same norm at layer 24's output; the loss is the mean cross-entropy of those examples.\n\n"
             + _table(["omega", "predicted growth (1 + omega)^24", "measured forward growth", "backward growth", "loss at step 0"], rows))
 
 
@@ -1149,7 +1146,8 @@ def deep_training_table():
         ev = {t: l for t, l, *_ in r["evals"]}
         rows.append((label, *[_num(ev[t], 3) for t in (0, 50, 100, 200, 300)], _num(r["evals"][-1][3], 3), _num(r["evals"][-1][4], 3)))
     return (f"24-matrix stacks of width {STACK_WIDTH}, rate {ETA}, batch {BATCH}, 300 steps, the gallery data and batch stream; the plain and the "
-            f"residual stack of a pair have the same 24 matrices. Full-set training loss after t updates.\n\n"
+            f"residual stack of a pair have the same 24 matrices (the weights of the previous tables: {_gen_note(STACK_NAME)}), and the residual stack adds s = sqrt(1 / 48) = {math.sqrt(1 / 48):.4f} times each layer's output to its input. "
+            "All parameters train: the input layer (8 -> 16), the 24 matrices and the read-out (16 -> 3), with their biases. Full-set training loss after t updates.\n\n"
             + _table(["stack", "step 0", "step 50", "step 100", "step 200", "step 300", "train acc", "val acc"], rows))
 
 
@@ -1167,12 +1165,14 @@ DEAD_RUNS = (
 
 
 @lru_cache(maxsize=None)
-def dead_runs():
+def dead_runs(nudge=0.0):
+    """The runs of DEAD_RUNS (`nudge` is added to the first weight of the first layer: the test of which digits are reproducible)."""
     data = gallery_data()
     probe = data[0][:PROBE]
     out = {}
     for label, act, eta, bias, scale in DEAD_RUNS:
         layers = init_mlp([IN_DIM, HIDDEN, HIDDEN, CLASSES], act=act, bias=bias, scale=scale)
+        layers[0]["P"]["W"][0][0] += nudge
         out[label] = train(layers, data, eta=eta, steps=DEAD_STEPS, eval_every=10, probe=probe)
     return out
 
@@ -1180,38 +1180,54 @@ def dead_runs():
 def dead_units_table():
     rows = []
     marks = (0, 10, 20, 50, 100, 200)
+    twins = [dead_runs(d) for d in stab.NUDGES]
     for label, r in dead_runs().items():
         fr = dict(r["dead"])
-        rows.append((label, *[_num(fr[m], 3) for m in marks], _num(r["evals"][-1][1], 3)))
-    return (f"Fraction of the 64 hidden units that are not positive on any of the first {PROBE} training inputs, after t updates; the same start, data and "
+        frs = [dict(t[label]["dead"]) for t in twins]
+        rows.append((label, *[_numm(fr[m], [f[m] for f in frs], 3) for m in marks],
+                     _numm(r["evals"][-1][1], [t[label]["evals"][-1][1] for t in twins], 3)))
+    return (f"Fraction of the {2 * HIDDEN} hidden units ({HIDDEN} in each of the two hidden layers) that are not positive on any of the first {PROBE} training inputs, after t updates; the same start, data and "
             f"batches as the gallery, {DEAD_STEPS} steps. The leaky ReLU is x for x > 0 and {LEAK} x otherwise. Last column: full-set training loss after 200 "
-            f"updates (the healthy run reaches {_num(gallery_run('healthy')['evals'][10][1], 3)} at step 200).\n\n"
+            f"updates (the healthy run reaches {_num(gallery_run('healthy')['evals'][10][1], 3)} at step 200). " + stab.RULE + "\n\n"
             + _table(["run"] + [f"t = {m}" for m in marks] + ["loss at t = 200"], rows))
 
 
-def dead_gradient_table():
-    """For the rate-2 ReLU run after 200 updates: the gradient of the probe batch with respect to the incoming weights of
-    dead and of alive units, and their biases."""
-    r = dead_runs()["ReLU, rate 2"]
-    layers = r["layers"]
+def _dead_gradient_stats(nudge):
+    """For the rate-2 ReLU run after 200 updates: the loss on the probe batch and, for each of the two hidden layers, the numbers of
+    dead and alive units, the largest |dW| entry and |db| of a dead unit, the median row norm of an alive unit and the mean bias of the dead
+    and of the alive units (None for an empty group)."""
+    layers = dead_runs(nudge)["ReLU, rate 2"]["layers"]
     Xt, yt, _, _ = gallery_data()
     X, y = Xt[:PROBE], yt[:PROBE]
     logits, caches = forward(layers, X)
     loss, d = ce_stable(logits, y)
     backward(layers, caches, d)
-    rows = []
+    out = []
     for li in (0, 1):
         L = layers[li]
         A, Z, Out = caches[li]
         dead = [j for j, col in enumerate(zip(*Z)) if all(z <= 0.0 for z in col)]
         alive = [j for j in range(HIDDEN) if j not in dead]
-        gmax_dead = max((max(abs(x) for x in L["G"]["W"][j]) for j in dead), default=0.0)
+        gmax_dead = max((max(abs(x) for x in L["G"]["W"][j])) for j in dead) if dead else 0.0
         bmax_dead = max((abs(L["G"]["b"][j]) for j in dead), default=0.0)
         norms = sorted(math.sqrt(sum(x * x for x in L["G"]["W"][j])) for j in alive)
-        mb = lambda idx: _num(sum(L["P"]["b"][j] for j in idx) / len(idx), 3) if idx else "-"   # noqa: E731
-        rows.append((f"hidden layer {li + 1}", len(dead), len(alive), _sci(gmax_dead, 1), _sci(bmax_dead, 1), _sci(norms[len(norms) // 2], 2),
-                     mb(dead), mb(alive)))
-    return (f"Gradient of the loss on the {PROBE} probe examples, rate-2 ReLU run after {DEAD_STEPS} updates (loss {_num(loss, 3)}). Every bias started at 0.\n\n"
+        mb = lambda idx: sum(L["P"]["b"][j] for j in idx) / len(idx) if idx else None   # noqa: E731
+        out.append((len(dead), len(alive), gmax_dead, bmax_dead, norms[len(norms) // 2], mb(dead), mb(alive)))
+    return loss, out
+
+
+def dead_gradient_table():
+    """For the rate-2 ReLU run after 200 updates: the gradient of the probe batch with respect to the incoming weights of
+    dead and of alive units, and their biases."""
+    loss, base = _dead_gradient_stats(0.0)
+    others = [_dead_gradient_stats(d) for d in stab.NUDGES]
+    rows = []
+    for li in (0, 1):
+        col = lambda i: (base[li][i], [o[1][li][i] for o in others])   # noqa: E731
+        bias = lambda i: "-" if base[li][i] is None else (_numm(*col(i), 3) if all(o[1][li][i] is not None for o in others) else "unstable")   # noqa: E731
+        rows.append((f"hidden layer {li + 1}", stab.text(*col(0), str), stab.text(*col(1), str), _scim(*col(2), 1), _scim(*col(3), 1),
+                     _scim(*col(4)), bias(5), bias(6)))
+    return (f"Gradient of the loss on the {PROBE} probe examples, rate-2 ReLU run after {DEAD_STEPS} updates (loss {_numm(loss, [o[0] for o in others], 3)}). Every bias started at 0. " + stab.RULE + "\n\n"
             + _table(["layer", "dead units", "alive units", "largest |dW| entry in a dead unit's row", "largest |db| of a dead unit",
                       "median row norm of an alive unit", "mean bias of dead units", "mean bias of alive units"], rows))
 
@@ -1328,7 +1344,7 @@ def monitoring_cost_table():
     U = 2 * HIDDEN
     step = step_flops(dims, BATCH)
     items = [
-        ("global gradient norm (and each layer's share of it)", "P multiplies and P - 1 adds", 2 * P),
+        ("global gradient norm (and each layer's share of it)", "P multiplies and P adds (the sum starts from 0, so every product has its add)", 2 * P),
         ("update ratio", "the norm of the weights: P multiplies and adds (the update norm is the rate times the gradient norm)", 2 * P),
         ("activation rms of each hidden layer", f"B * U squares and adds, U = {U} hidden units", 2 * BATCH * U),
         ("fraction of dead units on the minibatch", "B * U comparisons", BATCH * U),
@@ -1348,6 +1364,13 @@ def monitoring_cost_table():
 def baseline_run():
     """A linear softmax model (8 -> 3) on the gallery data: the cheapest model that is not the prior."""
     return train(init_mlp([IN_DIM, CLASSES]), gallery_data(), eta=ETA, steps=STEPS)
+
+
+def _baseline_text():
+    """How the linear softmax baseline of the checklist and of the misalignment table is trained."""
+    return (f"The linear baseline is the softmax model {IN_DIM} -> {CLASSES} (weights sqrt(1 / {IN_DIM}) * normal() from the gallery's start generator `{INIT_NAME}`, "
+            f"{IN_DIM * CLASSES} draws row by row, biases 0) trained by plain gradient descent at rate {ETA}, minibatches of {BATCH} indices from the gallery's batch stream "
+            f"(seed {bookrng.seed_of(BATCH_NAME):#018x}), {STEPS} steps, no clipping.")
 
 
 def checklist_table():
@@ -1378,7 +1401,7 @@ def checklist_table():
     ]
     rows = [(a, b, f"{c:,}", _num(100.0 * c / full, 2), n) for a, b, c, n in items]
     return (f"Network {dims}. Cost in FLOPs (counted as in the previous table) and as a share of the {STEPS}-step run. The monitoring row is spread over "
-            f"the run, the others are paid before or beside it.\n\n"
+            f"the run, the others are paid before or beside it. {_baseline_text()}\n\n"
             + _table(["check", "what it costs", "FLOPs", "% of the run", "what it tells"], rows, "llrrl"))
 
 
@@ -1398,7 +1421,7 @@ def misalignment_table():
         rows.append((label, _num(r["evals"][-1][1], 4), _num(r["evals"][-1][3], 3), _num(base["evals"][-1][3], 3), _num(base["evals"][-1][4], 3)))
     return (f"Shuffle: Fisher-Yates of the {N_TRAIN} training labels with the stream {bookrng.seed_of('training_dynamics.misalignment'):#018x} "
             f"(validation labels untouched). Overfit one batch: the first {OVERFIT_N} examples, {OVERFIT_STEPS} steps at rate {OVERFIT_ETA}. Baseline: the "
-            f"linear softmax model of the checklist table, {STEPS} steps, trained on all {N_TRAIN} (possibly shuffled) labels and scored against the true validation labels.\n\n"
+            f"linear softmax model of the checklist table, trained on all {N_TRAIN} (possibly shuffled) labels and scored against the true validation labels. {_baseline_text()}\n\n"
             + _table(["training labels", "overfit one batch: loss", "overfit one batch: accuracy", "linear baseline: training accuracy",
                       "linear baseline: validation accuracy"], rows))
 
@@ -1413,7 +1436,7 @@ def log_scale_table():
     sl = log_slope(overfit_run()["evals"], start=40)
     rows.append(("overfitting (training loss, steps 40 to 600)", _num(sl, 3), _num(100.0 / -sl, 0)))
     return ("Slope: least-squares slope of log10 of the full-set training loss against the step, per 100 steps, over the evaluations at step >= 100 "
-            "(at step >= 40 for the overfitting run). Steps per decade: 100 divided by minus the slope, the steps the loss needs to fall by a factor of 10 "
+            "(at step >= 40 for the overfitting run); the evaluations are those of the gallery table, every 20 steps up to step 400 (up to step 600 for the overfitting run). Steps per decade: 100 divided by minus the slope, the steps the loss needs to fall by a factor of 10 "
             "if the slope persisted.\n\n" + _table(["run", "slope per 100 steps", "steps per decade"], rows))
 
 

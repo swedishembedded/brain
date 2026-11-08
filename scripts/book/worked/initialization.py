@@ -28,6 +28,7 @@ from functools import lru_cache
 from operator import mul
 
 import bookrng
+import stable
 
 INPUT_DIM = 64      # width of the input x
 WIDTH = 64          # units per hidden layer
@@ -82,21 +83,11 @@ def _loss(v):
     return f"{v:.4f}" if 1e-3 <= v < 1e3 else _sci(v)
 
 
-NUDGE = 1e-12       # change of the first weight used to test whether a run is chaotic
-
-
-def _stable_loss(v, w):
-    """The loss v (a number, or None for 'not finite') to the book's precision when the nudged run w agrees to the third
-    significant digit; otherwise 'about x' with two or one significant digits on which they agree, or 'unstable'."""
-    if v is None or w is None:
-        return "not finite" if (v is None and w is None) else "unstable"
-    if abs(v - w) <= 1e-3 * max(abs(v), 1e-300):
-        return _loss(v)
-    if abs(v - w) <= 0.02 * max(abs(v), 1e-300):
-        return f"about {(v + w) / 2:.2g}"
-    if f"{v:.1g}" == f"{w:.1g}":
-        return f"about {v:.1g}"
-    return "unstable"
+def _stable_loss(run, twins, s):
+    """The loss after s steps of `run` with only the digits that survive in the nudged runs `twins` (a run that left
+    the finite range earlier has no entry at s: 'not finite' if it does so in every run, else 'unstable')."""
+    at = lambda r: r[s] if s < len(r) else None   # noqa: E731
+    return stable.text(at(run), [at(t) for t in twins], _loss)
 
 
 def _is_bad(v):
@@ -681,14 +672,13 @@ def training_table(act):
     e_t2, var_t = _target_stats()
     rows = []
     for scheme in SCHEMES:
-        run, twin = train_run(act, scheme), train_run(act, scheme, nudge=NUDGE)
-        cells = [_stable_loss(run[s] if s < len(run) else None, twin[s] if s < len(twin) else None) for s in TRAIN_RECORD]
+        run, twins = train_run(act, scheme), [train_run(act, scheme, nudge=d) for d in stable.NUDGES]
+        cells = [_stable_loss(run, twins, s) for s in TRAIN_RECORD]
         rows.append((_scheme_label(scheme), *cells))
     return (f"Setup: the deep stack with {act} units, {N_TRAIN} training examples (full batch), mean squared error, "
             f"plain gradient descent with rate {TRAIN_LR:g}, {TRAIN_STEPS} steps, biases start at 0. The target is "
             f"t = 1 + sin(a . x) with mean of t^2 = {e_t2:.4f}; predicting the mean of the targets gives the loss "
-            f"{var_t:.4f}. {stack_note() if act == "tanh" else "Weights and data exactly as in the tanh table above (same generators, seeds, draw order and scales)."} A loss that changes in its third significant digit when the first weight of the first layer is changed by 1e-12 is printed with the leading digits that survive "
-            "('about 11'), or 'unstable' when not even one does: a run with large weights is chaotic, so only those digits can be reproduced in another implementation.\n\n"
+            f"{var_t:.4f}. {stack_note() if act == "tanh" else "Weights and data exactly as in the tanh table above (same generators, seeds, draw order and scales)."} " + stable.RULE + "\n\n"
             + _table(["start"] + [f"step {s}" for s in TRAIN_RECORD], rows))
 
 
