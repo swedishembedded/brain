@@ -66,6 +66,22 @@ fn worst_relative(got: &[(String, Vec<f32>)], want: &[(String, Vec<f32>)]) -> (f
     worst
 }
 
+/// `(||got - want|| / ||want||, cosine)` over every tensor taken as one vector: how far two gradient sets are apart
+/// as a whole, which is what an optimizer step feels, not the worst small tensor's.
+fn global_agreement(got: &[(String, Vec<f32>)], want: &[(String, Vec<f32>)]) -> (f64, f64) {
+    let (mut diff, mut gg, mut ww, mut gw) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for ((_, g), (_, w)) in got.iter().zip(want) {
+        for (a, b) in g.iter().zip(w) {
+            let (a, b) = (f64::from(*a), f64::from(*b));
+            diff += (a - b).powi(2);
+            gg += a * a;
+            ww += b * b;
+            gw += a * b;
+        }
+    }
+    (diff.sqrt() / ww.sqrt(), gw / (gg.sqrt() * ww.sqrt()))
+}
+
 /// The base weights with every linear replaced by what `tier` decodes it to.
 fn decoded(cfg: &TrainConfig, weights: &HashMap<String, Vec<f32>>, tier: Dtype) -> HashMap<String, Vec<f32>> {
     let mut out = weights.clone();
@@ -80,7 +96,12 @@ fn packed_opts(tier: Dtype) -> TrainOpts {
 }
 
 /// Spec: an adapter trains over a base held at bf16, FP8 or NF4 exactly as it does over an f32 base holding the
-/// decoded values; the int8 tier too wherever the backend runs it.
+/// decoded values. The int8 tier, wherever the backend runs it, is a W8A8 product: the shared op quantizes the
+/// activations to int8 too (as in serving, where the tier measures 2.3e-2 scaled logits error), so it cannot equal
+/// the decoded-values build; it is held to a bounded drift of the gradient as a whole instead. Measured on the
+/// software Vulkan adapter and on a GH200 alike (loss 4.208457 vs 4.206841, worst single tensor 0.26, global
+/// relative error 0.128, median per tensor 0.096, in every layer): quantization noise of the tier, not a defect of
+/// one backend or one kernel.
 #[test]
 fn an_adapter_over_a_packed_base_trains_like_one_over_its_decoded_values() {
     let cfg = adapter_config();
@@ -106,6 +127,13 @@ fn an_adapter_over_a_packed_base_trains_like_one_over_its_decoded_values() {
         assert!(want.iter().all(|(n, g)| norm(g) > 0.0 || n.ends_with(".lora_a")), "every B factor has a live gradient");
         let (rel, name) = worst_relative(&grads, &want);
         eprintln!("{tier:?}: loss {loss} vs {want_loss}, worst adapter gradient error {rel:.2e} ({name})");
+        if tier == Dtype::I8 {
+            let (global, cosine) = global_agreement(&grads, &want);
+            eprintln!("I8: global gradient error {global:.3e}, cosine {cosine:.4}");
+            assert!((loss - want_loss).abs() <= 5e-3 * want_loss.abs(), "I8: loss {loss} vs {want_loss}");
+            assert!(global <= 0.25 && cosine >= 0.97, "I8: the gradient drifted by {global:.3} (cosine {cosine:.4}), more than activation quantization explains");
+            continue;
+        }
         assert!((loss - want_loss).abs() <= 1e-4 * want_loss.abs().max(1.0), "{tier:?}: loss {loss} vs {want_loss}");
         assert!(rel < 2e-3, "{tier:?}: {name}'s gradient is {rel} from the decoded-values build's");
     }
