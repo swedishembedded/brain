@@ -5,9 +5,7 @@
 
 *How do we know a model has learned the pattern rather than memorized the examples?*
 
-## The problem
-
-The workshop of chapter 1 has run more sensors through the reference thermometer and now holds twenty measured rows. The table below lists them. Nobody knows what degree of polynomial relates a sensor's voltage to the temperature, so the workshop does the natural thing and tries them all: a constant, a line, a parabola, a cubic, and so on up to degree nine. Each is fitted to the twenty rows by least squares (chapter 2), and each is scored by how far its predictions are from the labels it was fitted to.
+Fit ten models to the same twenty rows and the one that scores best on those rows is the one to trust least. The workshop of chapter 1 has run more sensors through the reference thermometer and now holds twenty measured rows, listed below. Nobody knows what degree of polynomial relates a sensor's voltage to the temperature, so the workshop does the natural thing and tries them all: a constant, a line, a parabola, a cubic, and so on up to degree nine. Each is fitted to the twenty rows by least squares (chapter 2), and each is scored by how far its predictions are from the labels it was fitted to.
 
 <!-- worked: generalization.sensor_source -->
 The source: voltage v uniform on [0.4, 2.8], temperature y = -6 + 50 v - 8 v^2 + eps, where the noise is eps = 1.2 * (a standard Gaussian sample). A row is two draws in this order: v = 0.4 + 2.4 * rng.uniform(), then eps = 1.2 * rng.normal(); v and y are kept unrounded. Each data set is drawn from its own generator (seeds below), rows in turn, and rng.normal() follows the rule of the randomness chapter: a call that finds a held value returns it without drawing. Every model of this chapter uses the feature x = (v - 1.6) / 1.2, which maps the voltage range to [-1, 1], and the columns 1, x, x^2, ..., x^d. Wherever a later example scores on 'fresh' rows, these are the 2000 fresh rows of the second line of the table below, in order.
@@ -64,13 +62,9 @@ The fourth column is the same models scored on two thousand fresh rows that none
 
 ![Training and fresh-data RMSE of polynomial fits of degree 0 to 9 to the same 20 rows, on a log10 scale. The training curve falls at every degree; the fresh-data curve falls to degree 2 or 3, to about 1.2 degrees (the standard deviation of the noise in the labels), and then rises.](img/generalization-u-curve.svg)
 
-This is the question of the chapter. The number the model was built to make small, its error on the rows it was fitted to, is the wrong number to believe, and the gap between it and the number that matters (the error on rows the model has not seen) grows with the freedom of the model. Chapter 1 saw the same effect with a lookup table, and chapter 4 chose the strength of a penalty by comparing fits to the true curve, which a practitioner does not have and promised "the honest version". This chapter builds it: how to measure the error on unseen rows without cheating, why every measurement is spoiled by being used twice, where the gap comes from, and how the world can change after the measurement.
+That is the question this chapter answers. The number the model was built to make small, its error on the rows it was fitted to, is the wrong number to believe, and the gap between it and the number that matters (the error on rows the model has not seen) grows with the freedom of the model. Chapter 1 saw the same effect with a lookup table, and chapter 4 chose the strength of a penalty by comparing fits to the true curve, which a practitioner does not have and promised "the honest version". This chapter builds it: how to measure the error on unseen rows without cheating, why every measurement is spoiled by being used twice, where the gap comes from, and how the world can change after the measurement.
 
-You may use from earlier chapters: datasets and the expected error on a new draw from the source (chapter 1 of this volume), the mean squared error and least squares (chapter 2), the penalty of ridge regression (chapter 4), and from Volume I the variance of a random quantity, the bias of an estimator, the standard error, and the problem of making many comparisons (chapters 10 and 12).
-
-## Before you begin
-
-Six questions to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+Six ideas from earlier chapters carry the argument: the expected error on a new draw from the source, least squares, the penalty of ridge regression, and from Volume I variance, bias, the standard error and the trouble with making many comparisons. Try these from memory before reading on; the answers are at the end of the chapter, under "Recall questions", and if one is hard, go back to the chapter named.
 
 1. (Chapter 12, "Statistics: Learning Facts from Samples", estimators.) What does it mean for an estimator $\hat\theta$ to be biased, and why does the sample variance with divisor $n$ underestimate the true variance?
 2. (Chapter 10, "Probability: Reasoning Under Uncertainty", variance.) Two independent quantities have variances $4$ and $9$. What is the variance of their sum, and of their average?
@@ -79,9 +73,10 @@ Six questions to answer from memory. The answers are at the end of the chapter. 
 5. (Chapter 2 of this volume, the mean squared error.) Predictions $2, 5$ against labels $3, 3$: what is the mean squared error?
 6. (Chapter 4 of this volume, regularization.) When the penalty $\lambda$ of ridge regression grows, what happens to the training error and to the size of the weights?
 
+
 ## Underfitting and overfitting
 
-Read the table of the problem by its two ends. At degrees $0$ and $1$ both columns are bad and close together: $16.052$ against $17.798$, and $3.521$ against $3.830$. A constant and a line cannot follow a curve that bends, so they are wrong on the rows they were fitted to and just as wrong on new rows. **Underfitting** is this failure: the model is too restricted to represent the pattern, so its error is high everywhere, the training error included.
+Read the table of degrees by its two ends. At degrees $0$ and $1$ both columns are bad and close together: $16.052$ against $17.798$, and $3.521$ against $3.830$. A constant and a line cannot follow a curve that bends, so they are wrong on the rows they were fitted to and just as wrong on new rows. **Underfitting** is this failure: the model is too restricted to represent the pattern, so its error is high everywhere, the training error included.
 
 At degrees $4$ to $9$ the two columns separate. The training error is $1.221$ at degree four and $1.005$ at degree nine, below the noise of the labels ($1.2$), which is possible only because the polynomial has bent itself to follow noise in these particular twenty rows. The fresh error is $1.741$ to $2.870$. **Overfitting** is this failure: a model flexible enough to fit the accidents of its training rows does so, its training error is flattering, and its error on new rows is worse than that of a simpler model. The mark of overfitting is a training error that keeps improving while the error on new rows gets worse.
 
@@ -184,7 +179,7 @@ $$
 \boxed{\;\mathbb{E}\bigl[(y - \hat f_{\mathcal{D}}(\mathbf{x}))^2\bigr] = \underbrace{\sigma^2}_{\text{noise}} + \underbrace{(f(\mathbf{x}) - \bar f(\mathbf{x}))^2}_{\text{bias}^2} + \underbrace{\mathrm{Var}_{\mathcal{D}}\bigl[\hat f_{\mathcal{D}}(\mathbf{x})\bigr]}_{\text{variance}}\;}
 $$
 
-The three terms mean three different things. The **noise** is the part of the label that no model can predict; it sets the floor of the error (here $1.2^2 = 1.44$) and is the reason the best possible fresh RMSE in the table of the problem is $1.2$ and not $0$. The **bias** is how far the average model is from the truth: what the model family cannot express, however much data there is. A line is biased for a curved relationship, and it stays biased with a million rows. The variance is how much the fitted model moves from one training set to another: what the family can express but the data do not pin down. A model with many parameters and few rows has high variance. Averaging over $\mathbf{x}$ drawn from the source gives the same decomposition for the whole expected error. The bias and the spread of an estimator, as chapter 12 defined them for a number, are here defined at every input for a function. The loss must be the squared error: for other losses the decomposition takes other forms and the neat sum is lost.
+The three terms mean three different things. The **noise** is the part of the label that no model can predict; it sets the floor of the error (here $1.2^2 = 1.44$) and is the reason the best possible fresh RMSE in the table of degrees is $1.2$ and not $0$. The **bias** is how far the average model is from the truth: what the model family cannot express, however much data there is. A line is biased for a curved relationship, and it stays biased with a million rows. The variance is how much the fitted model moves from one training set to another: what the family can express but the data do not pin down. A model with many parameters and few rows has high variance. Averaging over $\mathbf{x}$ drawn from the source gives the same decomposition for the whole expected error. The bias and the spread of an estimator, as chapter 12 defined them for a number, are here defined at every input for a function. The loss must be the squared error: for other losses the decomposition takes other forms and the neat sum is lost.
 
 The decomposition can be measured, because this book can draw as many training sets as it wants. Draw $1000$ training sets of $20$ rows, fit each degree to each, and at $41$ voltages evaluate the predictions of the $1000$ fits. The average of the $1000$ predictions at a voltage is $\bar f$; its distance from the true curve is the bias; the spread of the $1000$ predictions is the variance. One further check is independent of the algebra: at each voltage a fresh noisy label is drawn for each training set and the squared error of the prediction against it is recorded.
 
@@ -485,9 +480,9 @@ For each N in (20, 40, 80, 160, 320, 640) in turn, 100 training sets of N rows i
 
 The line's column does not fall: $14.994$ at $20$ rows and $13.076$ at $640$. Its error is bias, which more rows of the same kind do not reduce; only a more flexible model does. The parabola's error is nearly all variance, and it falls steadily, from $0.229$ to $0.007$, roughly in proportion to $1/N$. The degree-six polynomial has a large variance at $20$ rows ($29.627$) and loses to the parabola at every size, but the gap closes: $0.205$ against $0.052$ at $80$ rows, $0.019$ against $0.007$ at $640$. More data makes the flexible model safe to use, and the lesson is symmetrical. If the training error is also high, the model underfits and needs more capacity, not more data. If the training error is low and the validation error is high, the model overfits, and either more data or less capacity will help, with more data the more reliable fix and more capacity the wrong direction. Which of the two a project is in is read from the training and validation errors together, as in the first table of the chapter, and a learning curve is the experiment that tells how much more data would help.
 
-## Making it work
+## Keeping an evaluation honest in practice
 
-A few habits keep the machinery of the chapter honest in practice.
+The machinery of the chapter stays honest only if a few habits go with it.
 
 - **Decide the protocol before looking at results**, and write down the split, its seed, and the metric. A split that is changed after a bad score is a search of the kind of the test-set section, with a count of one that nobody recorded.
 - **Size the held-out sets for the claim.** An accuracy measured on $n$ rows has a standard error of $\sqrt{p(1-p)/n}$ (Volume I, chapter 12): $0.07$ for $p = 0.5$ and $n = 50$, and $0.03$ for $p = 0.9$ and $n = 100$. Two models whose scores differ by less than this are not separated, and the sets of ten rows of this chapter's examples were chosen so that this is visible.
@@ -496,7 +491,7 @@ A few habits keep the machinery of the chapter honest in practice.
 - **Refit the winner.** After the choice is made on the validation set or by cross-validation, the model for deployment is usually refitted on everything except the test set, and the test score then describes the procedure, not that exact refit.
 - **Report the number of looks.** A validation score that has selected among $C$ candidates is optimistic by an amount that grows with $C$ (the tables of the test-set section), and the test score is reported once.
 
-## Where this appears in brain
+## Leak-safe splits, probes and early stopping in brain
 
 **Leak-safe windows for forecasting.** Forecasting is the time-series case of the leakage section, and the forecasting crates enforce it by construction. `crates/forecast/src/train_data.rs` turns raw daily bars into (context, horizon) training windows and splits them by the date of the last context bar, along one global calendar, into training, validation and holdout sets. Its `temporal_split` leaves an embargo between the sets, and the line `cfg.embargo.max(horizon)` floors the gap at the forecast horizon even when a caller asks for none, which is exactly the rule of the section above. The comment at the top adds the second rule: scaling is computed per window from past bars only, never globally. The test `temporal_split_has_no_horizon_leak_across_the_embargo` asserts the invariant on a synthetic series: the last future bar of any training window comes strictly before the first context bar of any validation window. The module and its tests were added in commit `5ce448795` (21 July 2026), with the weekly fine-tuning pipeline for the forecasting model, and its header notes that the reference recipe of the model overlaps its split ranges, so that brain's embargoed split is deliberately stricter than the recipe it implements.
 
@@ -519,6 +514,18 @@ A few habits keep the machinery of the chapter honest in practice.
 7. A forecasting team standardizes the whole price series by its overall mean and standard deviation, then splits the series into the first $80\%$ for training and the last $20\%$ for testing. The model is scored well. Name the leak, and say how the evaluation should have been arranged.
 8. A model trained on sensor data at low voltages has the same held-out error as another model, so a manager picks the cheaper one. In deployment the voltages are higher. What in the held-out evaluation could have warned of the difference, and what could not have?
 
+## Summary
+
+The error of a model on the rows it was fitted to is chosen to be small, so it is an optimistic estimate of the error on new rows, and the optimism grows with the freedom of the model: training error keeps falling as a polynomial gains degrees, while the error on new rows falls to the noise floor and then rises. A model too restricted for the pattern underfits and a model too free for its data overfits. To measure honestly, rows are held apart: a training set to fit the parameters, a validation set to choose between models, a test set to report the final score once, because every look at a score and every choice made on it moves information into the model; the best of many noisy scores is biased upward, as the search among coin-flippers and the repeated experiment on the penalty both showed. For squared error the expected error at a point splits exactly into noise, squared bias and variance; adding flexibility lowers the bias and raises the variance, and regularization trades some of one for the other. Cross-validation spends $k$ fits to use every row for both fitting and scoring and steadies the estimate. Leaks (duplicates, statistics from all the rows, the future, the same group on both sides) give high scores on noise, and are avoided by splitting along the unit that is new in use and fitting every data-dependent step on the training rows only. Distribution shift defeats every held-out score taken from the training distribution, so use must be compared with the data, and the labels, when available, scored there. Last, more data cures variance but not bias.
+
+The chapter assumed a number that measures how wrong a prediction is, and used the squared error for regression and the accuracy for a few examples. Whether an error measure answers the question that is really being asked is another matter, and accuracy in particular can be very high for a useless model; the next chapter, "Measuring Models: Metrics and Calibration", is about choosing the number that is reported.
+
+## References
+
+- Trevor Hastie, Robert Tibshirani and Jerome Friedman, *The Elements of Statistical Learning*, second edition, 2009 (the bias-variance decomposition, cross-validation, and the selection of features on all the rows before cross-validation).
+- Stuart Geman, Elie Bienenstock and René Doursat, "Neural Networks and the Bias/Variance Dilemma", 1992.
+- Joaquin Quiñonero-Candela, Masashi Sugiyama, Anton Schwaighofer and Neil Lawrence (editors), *Dataset Shift in Machine Learning*, 2009.
+
 ## Exercises
 
 1. **[Calculate]** For the degree table of the chapter, compute the gap (fresh RMSE minus training RMSE) at degrees $2$, $5$ and $9$. By the definition of overfitting (a fresh error worse than that of a simpler model), say which of the three are overfitted, and compare each fresh error with that of the degree-three model. Then find the first degree at which the training error is below the noise standard deviation $1.2$.
@@ -534,12 +541,6 @@ A few habits keep the machinery of the chapter honest in practice.
 11. **[Implement]** Reproduce `generalization.leak_duplicates`, `generalization.leak_selection`, `generalization.leak_time` and `generalization.leak_groups`, each with its two protocols (a standard deviation in these tables is the sample standard deviation, divisor $n - 1$).
 12. **[Investigate]** In `generalization.three_way_split` change the validation set from ten rows to forty (use more rows of the source). How does the penalty chosen by validation move towards the fresh minimum, and how does the noise of the test score change when the test set is enlarged in the same way? Explain both in terms of the standard error of a mean.
 
-## Summary
-
-The error of a model on the rows it was fitted to is chosen to be small, so it is an optimistic estimate of the error on new rows, and the optimism grows with the freedom of the model: training error keeps falling as a polynomial gains degrees, while the error on new rows falls to the noise floor and then rises. A model too restricted for the pattern underfits and a model too free for its data overfits. To measure honestly, rows are held apart: a training set to fit the parameters, a validation set to choose between models, a test set to report the final score once, because every look at a score and every choice made on it moves information into the model; the best of many noisy scores is biased upward, as the search among coin-flippers and the repeated experiment on the penalty both showed. For squared error the expected error at a point splits exactly into noise, squared bias and variance; adding flexibility lowers the bias and raises the variance, and regularization trades some of one for the other. Cross-validation spends $k$ fits to use every row for both fitting and scoring and steadies the estimate. Leaks (duplicates, statistics from all the rows, the future, the same group on both sides) give high scores on noise, and are avoided by splitting along the unit that is new in use and fitting every data-dependent step on the training rows only. Distribution shift defeats every held-out score taken from the training distribution, so use must be compared with the data, and the labels, when available, scored there. Last, more data cures variance but not bias.
-
-The chapter assumed a number that measures how wrong a prediction is, and used the squared error for regression and the accuracy for a few examples. Whether an error measure answers the question that is really being asked is another matter, and accuracy in particular can be very high for a useless model; the next chapter, "Measuring Models: Metrics and Calibration", is about choosing the number that is reported.
-
 ## Key terms
 
 - **training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. <!-- concept: training-set -->
@@ -554,7 +555,7 @@ The chapter assumed a number that measures how wrong a prediction is, and used t
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. An estimator is biased when its expected value differs from the parameter, $\mathbb{E}[\hat\theta] \ne \theta$. The mean squared deviation about the sample mean uses the sample mean, which sits closer to the points than the true mean does, so the deviations are too small by the factor $(n - 1)/n$; dividing by $n - 1$ corrects it.
 2. For independent quantities the variance of the sum is $4 + 9 = 13$ and the variance of the average is $13/4 = 3.25$.
@@ -573,9 +574,3 @@ The chapter assumed a number that measures how wrong a prediction is, and used t
 6. The split by patient gives $61\%$, the honest figure for new patients. The first team's model probably recognises the patients (their fingerprints in the images: scanner, anatomy, background) and looks up their label, as in the group experiment where a coin-flip label was recognised at $0.905$ by a random split and at chance by a split by subject.
 7. The standardization uses the mean and standard deviation of the whole series, including the test period, which is information from the future (and if the series trends, the training data are scaled by a quantity that depends on the test values). The statistics should be computed on the training period only and applied to the test period unchanged; the series is split chronologically with an embargo of at least the forecast horizon between the last training window and the first test window.
 8. The held-out rows come from the training range, so their error cannot reveal anything about higher voltages; the covariate-shift table shows two models with held-out errors $1.250$ and $1.408$ whose errors on the shifted rows ($1.415$ and $261.497$) differ by a factor of about $185$. What could have warned is a comparison of the feature statistics of the production inputs with the training inputs (the mean differed by $17.51$ standard errors and every production row lay outside the training range), or an evaluation set deliberately drawn at the higher voltages.
-
-## References
-
-- Trevor Hastie, Robert Tibshirani and Jerome Friedman, *The Elements of Statistical Learning*, second edition, 2009 (the bias-variance decomposition, cross-validation, and the selection of features on all the rows before cross-validation).
-- Stuart Geman, Elie Bienenstock and René Doursat, "Neural Networks and the Bias/Variance Dilemma", 1992.
-- Joaquin Quiñonero-Candela, Masashi Sugiyama, Anton Schwaighofer and Neil Lawrence (editors), *Dataset Shift in Machine Learning*, 2009.

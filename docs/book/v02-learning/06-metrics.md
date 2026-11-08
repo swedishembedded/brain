@@ -5,8 +5,6 @@
 
 *Which number tells us whether a model is good, and why is accuracy so often the wrong one?*
 
-## The problem
-
 A factory inspects 100000 parts a month, and one part in a hundred is defective. A vendor offers a defect detector and advertises it as "99% accurate". The line manager asks what it would take to beat that, and an engineer answers with a rule that needs no sensor and no model: *never raise an alarm*. Of the 100000 parts, 99000 are good, so the rule is right on 99000 of them, and its accuracy is $0.99$. It also never finds a single defect.
 
 The detector of Volume I, chapter 10, raises an alarm on $90\%$ of defective parts and on $10\%$ of good ones. Beside the accuracy (the share of parts classified correctly), the table below reports three numbers that the chapter defines properly later: the precision (of the parts that raise an alarm, the share that are defective), the recall (of the defective parts, the share that raise an alarm) and the F1 score (one number that is small when either of those two is small). Counted on the same 100000 parts:
@@ -32,9 +30,7 @@ The detector that finds nine defects in ten has an accuracy of $0.90$, nine poin
 
 Three questions follow. Which number summarizes a classifier's decisions, and which summarizes how well it ranks parts regardless of where the line is drawn (the first half of the chapter)? When a model says "$80\%$ likely defective", does that mean what it says, and if not, how do we measure and repair it (the second half)? And how do the answers change for numbers on a scale and for the text a language model writes, where there is a measure of right and wrong that a probability does not capture? The chapter ends with the rules that tie these together: choose the number from the decision it serves, and say how uncertain it is.
 
-## Before you begin
-
-Six questions to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+Before the machinery starts, six ideas from earlier chapters need to be at hand: the sigmoid and the threshold, conditional probability, the trapezoid rule, perplexity, the discipline of the validation set and the standard error. Try them from memory; the answers are at the end of the chapter, under "Recall questions", and if one is hard, go back to the chapter named.
 
 1. (Chapter 3 of this volume, "Classification and Logistic Regression", the sigmoid and the threshold.) A model gives a part the logit $z = 2.1972$. What probability does it assign to "defective", and for which thresholds $t$ is the part called defective?
 2. (Volume I, chapter 10, "Probability: Reasoning Under Uncertainty", conditional probability.) Of 200 parts, 20 are defective. A test flags 30 parts, and 15 of the flagged parts are defective. Compute $P(\text{defective} \mid \text{flagged})$ and $P(\text{flagged} \mid \text{defective})$. Which one answers "how much should I trust an alarm"?
@@ -43,9 +39,8 @@ Six questions to answer from memory. The answers are at the end of the chapter. 
 5. (Chapter 5 of this volume, "Generalization, Overfitting and Honest Evaluation", the validation set.) A threshold is to be chosen from held-out data. Why should it be chosen on the validation set and the score reported on the test set?
 6. (Volume I, chapter 12, "Statistics: Learning Facts from Samples", standard error.) A model answers $90$ of $100$ questions correctly. What is the standard error of its accuracy, and about how wide is a $95\%$ interval?
 
-## Accuracy and the confusion matrix
 
-*What it is for: naming exactly which mistakes a classifier makes, so that a score can be built from them.*
+## Accuracy and the confusion matrix
 
 A classifier that answers yes or no (chapter 3) can be wrong in two different ways, and the two are not alike. Call the label $1$ (a defective part) the **positive** class. A decision at a fixed threshold $t$ (call the part defective when $\hat{p} \ge t$) falls into one of four boxes, counted over a dataset:
 
@@ -74,8 +69,6 @@ Two consequences follow, and both will recur. First, a classifier is always comp
 
 ## Precision and recall
 
-*What it is for: scoring each kind of mistake separately, in a form that answers a question a person would actually ask.*
-
 Two questions can be asked about a detector. When it raises an alarm, how often is the alarm real? Of the defects that exist, how many does it find? Each is a conditional probability (Volume I, chapter 10).
 
 The first is the **precision**, $P(y = 1 \mid \text{decision positive})$: among the parts called defective, the share that are,
@@ -92,7 +85,7 @@ $$
 
 Recall is also the **true positive rate**, $\mathrm{TPR}$. The matching quantity for the good parts is the **false positive rate**, $\mathrm{FPR} = \mathrm{FP}/n_-$: the share of good parts that raise an alarm. (One minus it is the specificity, the true negative rate.) In the factory table, the detector's precision is $900/10800 = 0.0833$ and its recall $900/1000 = 0.9$; the rule that never alarms has recall $0$ and no precision at all, because it never makes a positive decision and $0/0$ is not a number. A precision with an empty denominator is reported as undefined, never as $0$ or $1$ (see the making-it-work section).
 
-The table of the problem section shows why the vendor's phrase is empty and why precision matters. Of the 10800 alarms, only 900 are real. This is the base-rate arithmetic of Volume I, chapter 10, and precision is its output. Bayes' rule written for a classifier says: take $P(y = 1 \mid \text{positive}) = P(\text{positive} \mid y = 1)\,P(y = 1) / P(\text{positive})$ and expand the denominator over the two classes,
+The table that opened the chapter shows why the vendor's phrase is empty and why precision matters. Of the 10800 alarms, only 900 are real. This is the base-rate arithmetic of Volume I, chapter 10, and precision is its output. Bayes' rule written for a classifier says: take $P(y = 1 \mid \text{positive}) = P(\text{positive} \mid y = 1)\,P(y = 1) / P(\text{positive})$ and expand the denominator over the two classes,
 
 $$
 \text{precision} = \frac{\mathrm{TPR}\cdot \xi}{\mathrm{TPR}\cdot \xi + \mathrm{FPR}\cdot (1 - \xi)}.
@@ -123,9 +116,7 @@ The training cross-entropy is $0.0733$ and the validation cross-entropy $0.4664$
 
 ## Moving the threshold
 
-*What it is for: seeing that precision and recall are not properties of a model but of a model and a threshold.*
-
-The model outputs $\hat{p} = \sigma(z)$, and a decision needs a threshold $t$: call the part defective when $\hat{p} \ge t$, equivalently when $z \ge \mathrm{logit}(t)$ (chapter 3). Every table so far fixed $t$. Moving it changes all four counts. (The F1 column is defined in the next section; until then read it as one number that is large only when precision and recall are both large.)
+The model outputs $\hat{p} = \sigma(z)$, and a decision needs a threshold $t$: call the part defective when $\hat{p} \ge t$, equivalently when $z \ge \mathrm{logit}(t)$ (chapter 3). Every table so far fixed $t$, which hides the fact that precision and recall describe a model together with a threshold, not the model alone. Moving $t$ changes all four counts. (The F1 column is defined in the next section; until then read it as one number that is large only when precision and recall are both large.)
 
 <!-- worked: metrics.threshold_sweep -->
 The 1000 validation parts (106 defective). A part is called defective when sigmoid(z) >= t.
@@ -150,8 +141,6 @@ The figure below sweeps the cut on the logit from $-8$ to $8$ in steps of $0.1$ 
 The accuracy column rises as the threshold grows: $0.7210$ at $t = 0.001$, $0.9070$ at $t = 0.99$. A reader who trusted accuracy would raise the threshold to $0.99$ and so find only $29$ of the $106$ defects. The reason is the one of the problem section. The never-alarm rule has accuracy $1 - 106/1000 = 0.894$ on these validation parts, and every increase of the threshold moves the model toward that rule. At the default $t = 0.5$ the model's accuracy is $0.8920$, below the rule that never looks at the part. The model finds $59$ of $106$ defects, which the rule does not.
 
 ## One number for both: the F1 score
-
-*What it is for: choosing a threshold, or comparing two models, when a single number is needed and both mistakes count.*
 
 Sometimes a table of precision and recall is not enough: a search over thresholds, or over models, needs one number to compare. The obvious candidate is the average of the two. It has a flaw that one extreme pair shows: a detector that raises one alarm, on a part that is defective, has precision $1.0$ and recall $0.01$ (one of a hundred defects), and the arithmetic mean $0.505$ says it is as good as one with both at $0.505$. A single lucky alarm earns half marks.
 
@@ -185,15 +174,13 @@ $$
 \frac{1}{F_1} = \frac{1}{2}\left(\frac{\mathrm{TP} + \mathrm{FP}}{\mathrm{TP}} + \frac{\mathrm{TP} + \mathrm{FN}}{\mathrm{TP}}\right) = \frac{2\,\mathrm{TP} + \mathrm{FP} + \mathrm{FN}}{2\,\mathrm{TP}}, \qquad F_1 = \frac{2\,\mathrm{TP}}{2\,\mathrm{TP} + \mathrm{FP} + \mathrm{FN}}.
 $$
 
-The last form is the one to compute: it needs only the counts and is defined whenever at least one positive exists or has been called. It is also the definition used for the rule that never alarms in the problem section: there $\mathrm{TP} = \mathrm{FP} = 0$ and $\mathrm{FN} = 1000$, so $F_1 = 0/1000 = 0$, although its precision is undefined and the ratio form $2PR/(P + R)$ is not available. (Only when no part is positive and none is called positive is $F_1$ itself undefined, $0/0$.) The paragraph under the table checks it on the validation parts at $t = 0.5$, with the counts of the threshold table: the two ratios and the count form give the same $F_1$ to six places.
+The last form is the one to compute: it needs only the counts and is defined whenever at least one positive exists or has been called. It is also the definition used for the rule that never alarms in the opening example: there $\mathrm{TP} = \mathrm{FP} = 0$ and $\mathrm{FN} = 1000$, so $F_1 = 0/1000 = 0$, although its precision is undefined and the ratio form $2PR/(P + R)$ is not available. (Only when no part is positive and none is called positive is $F_1$ itself undefined, $0/0$.) The paragraph under the table checks it on the validation parts at $t = 0.5$, with the counts of the threshold table: the two ratios and the count form give the same $F_1$ to six places.
 
 The form shows what $F_1$ ignores: $\mathrm{TN}$ does not appear. That is deliberate when good parts are plentiful and uninteresting, and the paragraph under the table makes it concrete: adding a million correctly passed good parts leaves precision, recall and $F_1$ unchanged and sends accuracy from $0.8920$ to $0.999892$. The other thing $F_1$ fixes is that it weights precision and recall equally; a factory where a miss costs ten times a false alarm needs a different weighting, which is the subject of the last section. In the threshold table, $F_1$ is largest at $t = 0.5$ ($0.5221$) and nearly as large at $t = 0.1$ ($0.5193$): a broad plateau, not a sharp peak, which is typical.
 
 ## The ROC curve
 
-*What it is for: judging how well a model ranks defective parts above good ones, without choosing a threshold.*
-
-The threshold table is a few points of a continuous story. Move $t$ through every possible value and record, at each, the pair $(\mathrm{FPR}, \mathrm{TPR})$. The curve through those points is the **ROC curve** (the name, receiver operating characteristic, comes from radar engineering, where the receiver's threshold was the knob). Start with a case small enough to do by hand: eight parts, scored by some model, with the label next to each score. The score is a logit, or a probability, or any number where higher means more likely defective.
+The threshold table is a few points of a continuous story, and the whole story says how well a model ranks defective parts above good ones without ever choosing a threshold. Move $t$ through every possible value and record, at each, the pair $(\mathrm{FPR}, \mathrm{TPR})$. The curve through those points is the **ROC curve** (the name, receiver operating characteristic, comes from radar engineering, where the receiver's threshold was the knob). Start with a case small enough to do by hand: eight parts, scored by some model, with the label next to each score. The score is a logit, or a probability, or any number where higher means more likely defective.
 
 <!-- worked: metrics.roc_by_hand -->
 Scores and labels, highest first: 0.95+, 0.85+, 0.80-, 0.70+, 0.60+, 0.60-, 0.40-, 0.30-. '+' is defective (4 parts), '-' is good (4 parts). A part is called defective when its score is at or above the threshold; tied scores cross it together.
@@ -223,7 +210,7 @@ The **area under the ROC curve**, $\mathrm{AUC}$, is a one-number summary. Compu
 
 The block prints a second computation of the same number. There are $n_+ n_- = 16$ pairs consisting of one defective and one good part. Count a pair when the defective part has the higher score: this happens for $13$ pairs. One pair is tied (the two parts at $0.60$), and a tie gets half credit. The share is $(13 + \tfrac{1}{2})/16 = 0.84375$, the area. This is not a coincidence, and the equivalence gives the AUC its second, more useful meaning.
 
-**Derivation.** Let $z_i^{+}$ be the score of the $i$-th positive example and $z_j^{-}$ that of the $j$-th negative. First suppose all scores differ. As the threshold falls past the scores in decreasing order the curve moves up $1/n_+$ at each positive and right $1/n_-$ at each negative. The area under a path of up and right steps is the sum, over its *right* steps, of the width $1/n_-$ times the height at that moment, and the height is $(\text{positives already passed})/n_+$. A positive has been passed when its score is above the negative's. So the right step for negative $j$ contributes
+The equivalence comes from the shape of the path. Let $z_i^{+}$ be the score of the $i$-th positive example and $z_j^{-}$ that of the $j$-th negative. First suppose all scores differ. As the threshold falls past the scores in decreasing order the curve moves up $1/n_+$ at each positive and right $1/n_-$ at each negative. The area under a path of up and right steps is the sum, over its *right* steps, of the width $1/n_-$ times the height at that moment, and the height is $(\text{positives already passed})/n_+$. A positive has been passed when its score is above the negative's. So the right step for negative $j$ contributes
 
 $$
 \frac{1}{n_-} \cdot \frac{\#\{i : z_i^{+} > z_j^{-}\}}{n_+},
@@ -235,7 +222,7 @@ $$
 \mathrm{AUC} = \frac{1}{n_+ n_-}\sum_{i=1}^{n_+}\sum_{j=1}^{n_-} \mathbf{1}\!\left[z_i^{+} > z_j^{-}\right].
 $$
 
-Now allow ties. A group of $p$ positives and $q$ negatives with the same score is passed in one step, from a point $(x, y)$ to $(x + q/n_-, y + p/n_+)$, a straight segment. Its trapezoid has width $q/n_-$ and average height $y + p/(2 n_+)$, so it contributes $\frac{q}{n_-}\,y + \frac{p\,q}{2\,n_+ n_-}$. The first term is the credit for those $q$ negatives against the positives *strictly above* them, as before; the second is exactly one half for each of the $p q$ tied pairs. In general,
+Ties change the path only slightly. A group of $p$ positives and $q$ negatives with the same score is passed in one step, from a point $(x, y)$ to $(x + q/n_-, y + p/n_+)$, a straight segment. Its trapezoid has width $q/n_-$ and average height $y + p/(2 n_+)$, so it contributes $\frac{q}{n_-}\,y + \frac{p\,q}{2\,n_+ n_-}$. The first term is the credit for those $q$ negatives against the positives *strictly above* them, as before; the second is exactly one half for each of the $p q$ tied pairs. In general,
 
 $$
 \mathrm{AUC} = P(z^{+} > z^{-}) + \tfrac{1}{2} P(z^{+} = z^{-}),
@@ -302,8 +289,6 @@ Without ties all five columns are equal: $0.87778700$. With ties the trapezoid, 
 
 ## When the positives are rare: the PR curve
 
-*What it is for: seeing whether a ranking is good enough to be acted on when the positives are a small fraction.*
-
 The left panel of the figure below is the ROC curve of the model on the test parts, with its area, $0.8778$, shaded. The ROC curve is the same whatever share of the parts are defective, because both of its axes are rates *given the label*. That is a strength when the base rate is unknown or will change. It is a weakness when the question is the one the factory asked: of the parts flagged, how many are real?
 
 The **precision-recall curve** plots precision against recall as the threshold moves (the right panel), the same sweep with different axes. Since precision combines $\mathrm{TPR}$, $\mathrm{FPR}$ and the base rate, it carries the base rate with it. To see it, keep the model fixed and change the share of defective parts by giving each good part a weight, as if the factory had more of them or fewer. (The third column of the table, the average precision, summarizes a whole precision-recall curve in one number; it is defined right after the table.)
@@ -336,8 +321,6 @@ where $R_k$ and $P_k$ are the recall and precision after the $k$-th distinct sco
 The two curves answer different questions. Use the ROC curve to compare models on their ability to rank, independent of the population; use the PR curve when the population is known, positives are rare and what matters is the quality of what is flagged. Reporting both costs nothing.
 
 ## Calibration
-
-*What it is for: knowing whether a probability can be used as one, in a product, a cost or a decision rule.*
 
 The metrics so far use only the *order* of the scores, or a fixed threshold. They never ask whether "$\hat{p} = 0.9$" is true. A model has good **calibration** when its probabilities match frequencies: among all the parts to which it gives probability $0.8$, about $80\%$ should be defective. In symbols, $P(y = 1 \mid \hat{p} = p) = p$ for every $p$. This is a strong property and it is the one that lets a downstream user multiply the probability by a cost (the last sections), combine it with another probability, or decide with it.
 
@@ -396,9 +379,7 @@ Brain's calibration metrics use a variant. For a classifier choosing among sever
 
 ## Temperature scaling
 
-*What it is for: repairing the overconfidence of a model from held-out data, without touching its ranking.*
-
-If the logits are too large, shrink them. Replace $\sigma(z)$ by $\sigma(a z)$ with a single number $a > 0$, chosen so that the probabilities fit the data. Its reciprocal $T = 1/a$ is called the temperature, and fitting $a$ is **temperature scaling**: a larger temperature flattens the probabilities toward one half. (Where the word comes from, and what it does to a sampling distribution, is a topic for the volume on language models; here it only scales a logit.)
+A model that is overconfident can be repaired from held-out data without touching its ranking. If the logits are too large, shrink them. Replace $\sigma(z)$ by $\sigma(a z)$ with a single number $a > 0$, chosen so that the probabilities fit the data. Its reciprocal $T = 1/a$ is called the temperature, and fitting $a$ is **temperature scaling**: a larger temperature flattens the probabilities toward one half. (Where the word comes from, and what it does to a sampling distribution, is a topic for the volume on language models; here it only scales a logit.)
 
 How should $a$ be chosen? Not on the training set: there the model is already overconfident by construction, and a fit on those parts would see nothing wrong. This is the situation of chapter 5, and the same rule applies: the parameters of the model are fitted on the training set, the single extra parameter is fitted on the validation set, and the result is reported on the test set. The fit is the cross-entropy of chapter 3 as a function of $a$ alone, on the validation parts $(z_n, y_n)$:
 
@@ -576,8 +557,6 @@ function ece_equal_mass(p: array<real>[N], y: array<int>[N], B: int) -> real:
 
 ## Metrics for numbers
 
-*What it is for: scoring a prediction that is a quantity, not a class.*
-
 For a quantity the labels are numbers $y$ and the predictions $\hat{y}$. The mean squared error of chapter 2 is the average of $(\hat{y} - y)^2$. Its square is the unit of the quantity squared, and a single large error dominates it. The **mean absolute error**, $\mathrm{MAE} = \frac{1}{N}\sum_n |\hat{y}_n - y_n|$, is in the quantity's own unit and weighs every error in proportion to its size. The choice follows the loss one cares about: the constant that minimizes the squared error is the mean (set $\frac{d}{dc}\sum_n (y_n - c)^2 = 0$), the constant that minimizes the absolute error is the median (the derivative of $\sum_n |y_n - c|$ is the number of labels below $c$ minus the number above it, which vanishes at the middle value).
 
 A third number gives the error a scale. The **coefficient of determination**, $R^2 = 1 - \mathrm{SSE}/\mathrm{SST}$, compares the squared errors, $\mathrm{SSE} = \sum_n (\hat{y}_n - y_n)^2$, with those of the baseline that always predicts the mean of the labels $\bar{y} = \frac{1}{N}\sum_n y_n$, $\mathrm{SST} = \sum_n (y_n - \bar{y})^2$ (so $\mathrm{MSE} = \mathrm{SSE}/N$). It is the regression counterpart of the majority-class baseline: it is $0$ for the baseline itself, $1$ for perfect predictions, and negative for a model worse than the baseline.
@@ -595,8 +574,6 @@ Labels y = [2.0, 4.0, 6.0, 8.0, 10.0], mean 6.0, SST = sum of (y - mean)^2 = 40.
 One error of size $10$ among five predictions multiplies the MSE by eighty ($0.25$ to $20$) and the MAE by four ($0.5$ to $2$), and sends $R^2$ to $-1.5$, below the baseline's $0$.
 
 ## Metrics for language models and tasks with one right answer
-
-*What it is for: scoring text, where a model's probabilities and its answers can tell different stories.*
 
 A language model assigns a probability to every possible next token (Volume I, chapter 13). The natural score of the probabilities is the perplexity of that chapter, $\exp$ of the mean cross-entropy of the correct tokens; it is the validation score of every language model, and it is computed from the probabilities alone. It is comparable only between models that use the same tokenizer and the same text, because a model that splits text into characters and one that splits it into words average over different units.
 
@@ -626,8 +603,6 @@ Model A is unsure everywhere (probability $0.45$ for the correct token) but its 
 The second table shows why token-level success understates sequence-level failure. If each token is right independently with probability $a$, an answer of $L$ tokens is right with probability $a^L$. A model that is $99\%$ right per token is right on $60.5\%$ of $50$-token answers; at $95\%$ per token it falls to $0.0769$. Metrics at the token level (perplexity, token accuracy) answer *how well does the model predict text*; metrics at the answer level (exact match) answer *does the system do the task*. Which is reported depends on which question is being asked, and a serious evaluation reports both.
 
 ## Choosing a metric
-
-*What it is for: closing the gap between the number that is easy to compute and the decision that will be made with it.*
 
 **Metric selection** is the step that comes before any of the formulas above: write down the decision the model's output feeds, what each wrong outcome costs, and pick the number whose best value is the best decision. A procedure that works:
 
@@ -668,8 +643,6 @@ The rule that flags everything costs $0.8980$ per part on the test parts and the
 
 ## Reporting uncertainty
 
-*What it is for: separating a difference that is real from one a different test sample would have erased.*
-
 Every number above was computed from a finite test set, so it carries a sampling error (Volume I, chapter 12). For the accuracy there is a formula, the standard error $\sqrt{p(1-p)/n}$; for the $\mathrm{AUC}$, the $F_1$ score or the $\mathrm{ECE}$ the easiest honest tool is the bootstrap of that chapter: resample the test parts with replacement, recompute the metric, and read the interval from the spread of the replicates. The cut for $F_1$ is chosen on the validation parts first and then held fixed, so that the interval describes the test sample and not the choice of the cut.
 
 <!-- worked: metrics.bootstrap_intervals -->
@@ -687,7 +660,9 @@ Formula for the accuracy, with p the estimate above and n = 3000: sqrt(p (1 - p)
 
 The $\mathrm{AUC}$ is $0.8778$ with a $95\%$ interval from $0.8582$ to $0.8968$; the accuracy $0.8693$ from $0.8567$ to $0.8813$, close to the formula's $0.8573$ to $0.8814$. The $F_1$ score, which depends on a few hundred positives, is the least certain: $0.4909$ with an interval of $0.4488$ to $0.5354$, a width of nearly nine points. Two models whose $F_1$ differ by two points on this test set are not distinguished; and for two models scored on the *same* test parts the paired comparison of Volume I, chapter 12, is far sharper than two separate intervals. These intervals describe the variation of the test sample for a fixed model; they do not include the variation from retraining (a different seed, a different training sample), which is the subject of the experiments chapter.
 
-## Making it work
+## Habits for reporting a metric
+
+The formulas above are the easy half of measuring a model. What decides whether the number can be believed is a short list of habits.
 
 **Choose on the validation set, report on the test set.** The threshold, the temperature, the number of bins and the metric itself are decisions (chapter 5). Look at the test set once.
 
@@ -703,7 +678,7 @@ The $\mathrm{AUC}$ is $0.8778$ with a $95\%$ interval from $0.8582$ to $0.8968$;
 
 **Compute the loss on logits.** The cross-entropy and the slope used in the temperature fit are stable when written in the logit (chapter 3); form $\sigma(a z)$ with the two-branch sigmoid, never from a probability that has already saturated to $1$.
 
-## Where this appears in brain
+## Perplexity, calibration error and rank statistics in brain's crates
 
 **The evaluation harness.** `crates/eval` is brain's model-comparison crate, and the first two functions of `crates/eval/src/lib.rs` are the language-model metrics of this chapter. `gpt_val_perplexity` loads a checkpoint, draws `batches` random batches of $16$ windows (each as long as the checkpoint's block size) from the validation split with a seeded generator, averages the per-batch cross-entropy and returns its exponential: perplexity as defined in Volume I, chapter 13, as the exponential of a mean cross-entropy. `gpt_exact_match` is exact match as defined above, for datasets of lines `LHS=RHS` (a calculator, a string reverser): it takes the last tenth of the lines of the source text, keeps the lines with exactly one `=`, samples `n_samples` of them with replacement, decodes the right-hand side greedily from the prompt `LHS=` (always taking the highest-probability character) until a newline or until the length of the true answer plus two characters, and counts a hit when the decoded string equals the right-hand side exactly. It returns the accuracy and the number actually scored (prompts too long for the model's block are skipped and not counted). The command `brain gpt2 eval` (`crates/cli/src/gpt_cli.rs`) prints both numbers, with $20$ batches and $200$ samples by default. The doc comment on `gpt_exact_match` says what the section above argued: it is "the honest 'did it actually learn the rule' number, not perplexity". The function compares the strings as they are, with no normalization. The one place in brain that scores an answer by exact match and normalizes does so with a stated rule: `normalize` in `crates/promote/src/document.rs` collapses whitespace and lower-cases, and its comment calls this "the ONLY latitude an exact match gets", because anything looser (substring containment, edit distance, another model's opinion) "would stop being exact match". When no candidate line exists it returns `(0.0, 0)` and the command prints nothing for a count of zero, so an unmeasured score is not shown as a measured $0$. Be aware of what is and is not tested: the only unit test in `crates/eval/src/lib.rs` checks that $\exp(\ln V) = V$; the exact-match path is exercised by running the command, not by an assertion in the crate. The crate's other modules apply the same ideas to other tasks: `crates/eval/src/mlm.rs` reports a pseudo-perplexity and a masked-token accuracy for the encoder model, `crates/eval/src/asr.rs` the word error rate (word-level edit distance over the reference length) for speech recognition, and `crates/eval/src/detection.rs` the precision, recall and average precision of an object detector. The detector is scored against a box overlap threshold as well as a confidence threshold, which is the subject of the vision volume; what carries over from this chapter is the definition of precision and recall at an operating point and of $\mathrm{AP}$ as the area under the precision-recall curve, with its stated convention that precision with no predictions is $0$ (this chapter reports such a precision as undefined; the module says which it chose, and that a class with no ground truth is left out of the mean). The detection module's own header says that "the evaluator is golden-tested BEFORE any mAP is trusted", which is step 3 of the procedure above.
 
@@ -724,7 +699,7 @@ The crate came with the first language model: commit `8c26af5e0` (24 June 2026) 
 Share of pairs: 3 of 4 = 0.7500. Trapezoid area of the ROC curve: 0.7500. With all four scores equal to 0.5 the curve is the diagonal and both counts give 0.5000 (0.5000 by pairs).
 <!-- /worked -->
 
-The same crate's `crates/survival/src/binary.rs` has the version for a plain yes-or-no outcome: `auroc`, computed from tie groups with half credit, which refuses (a test expects the panic "both outcome classes") when a class has no examples, where `failure_auroc` in the calibration module returns `NaN`: the undefined-not-zero rule of the making-it-work section; `average_precision`, the step-wise area under the PR curve defined above; `brier`; and `predictive_values`, the Bayes formula for precision from a sensitivity, a specificity and a prevalence, with its test using the numbers of the problem section. They were added in commits `f70285a06` (6 October 2026, the AUC, which it checks against a reference implementation) and `8d01f12f9` (8 October 2026, the binary evaluation). `crates/survival/src/recalibration.rs` is the scale-and-shift calibration of this chapter in the log-odds: `logit P = a + b logit F`, fitted on held-out subjects, with an option to estimate only the intercept, and an evidence-gated option that fits the slope only when it differs from one by more than a stated number of standard errors, because "estimating a slope from a few hundred events is itself noisy". Its fit returns nothing when the data are separable or the slope is not positive, the two cases that the `require` lines of `fit_scale` above refuse. It arrived in commit `6d2ad5d50` (6 October 2026).
+The same crate's `crates/survival/src/binary.rs` has the version for a plain yes-or-no outcome: `auroc`, computed from tie groups with half credit, which refuses (a test expects the panic "both outcome classes") when a class has no examples, where `failure_auroc` in the calibration module returns `NaN`: the undefined-not-zero rule of the making-it-work section; `average_precision`, the step-wise area under the PR curve defined above; `brier`; and `predictive_values`, the Bayes formula for precision from a sensitivity, a specificity and a prevalence, with its test using the numbers of the opening example. They were added in commits `f70285a06` (6 October 2026, the AUC, which it checks against a reference implementation) and `8d01f12f9` (8 October 2026, the binary evaluation). `crates/survival/src/recalibration.rs` is the scale-and-shift calibration of this chapter in the log-odds: `logit P = a + b logit F`, fitted on held-out subjects, with an option to estimate only the intercept, and an evidence-gated option that fits the slope only when it differs from one by more than a stated number of standard errors, because "estimating a slope from a few hundred events is itself noisy". Its fit returns nothing when the data are separable or the slope is not positive, the two cases that the `require` lines of `fit_scale` above refuse. It arrived in commit `6d2ad5d50` (6 October 2026).
 
 **What the harness could not see.** Knowledge #23 is a story about a metric that could not fail. A feature (training a low-rank adapter and saving it) did nothing: the checkpoint's configuration did not record the adapter, so every reload silently produced the untrained base model. The only test of the feature asserted that the exact-match score after training was at least the score before. That statistic could not distinguish success from failure: the base model passes it exactly. The test that replaced it (`crates/qwen3/tests/it/lora_roundtrip.rs`) reloads the checkpoint, requires that it reproduce the trained model's outputs, and also requires that those outputs differ from the base model's by a real margin; its failure message says that the first check alone "would pass even if LoRA adapters are silently dropped at load". A metric is useful to the extent that a broken system can score badly on it.
 
@@ -741,6 +716,25 @@ Answers are at the end of the chapter.
 7. **Find the error.** "The model is $99.5\%$ right per token, so a $100$-token answer is right $99.5\%$ of the time." Compute what is expected under independence, and say what the assumption is.
 8. **Predict.** A missed defect costs $19$ times a false alarm. What threshold should a calibrated model use? The cost table of the chapter is for a ratio of $10$ (threshold $0.0909$), not $19$; use it only for the direction of the comparison: does the raw model's cut at the derived threshold err on the stricter or the looser side relative to the calibrated one, and what is the evidence?
 
+## Summary
+
+Accuracy, the share of decisions that are right, is a weighted average of the success rate on each class with the *class shares* as weights, so when one class is rare it reports almost only the other: a rule that never raises an alarm is $99\%$ accurate on a population with $1\%$ defects and finds no defects. The confusion matrix names the four outcomes of a decision at a threshold; **precision**, $\mathrm{TP}/(\mathrm{TP} + \mathrm{FP})$, and **recall**, $\mathrm{TP}/(\mathrm{TP} + \mathrm{FN})$, are two conditional probabilities of it, and Bayes' rule ties precision to the base rate. Moving the threshold trades one for the other. The **F1 score** is their harmonic mean, which is $2\mathrm{TP}/(2\mathrm{TP} + \mathrm{FP} + \mathrm{FN})$, near the smaller of the two and blind to the true negatives. The **ROC curve** plots the true positive rate against the false positive rate over every threshold; its area, computed by the trapezoid rule, equals the probability that a random positive is scored above a random negative, ties counting half, so it depends on the scores only through their order and does not change with the base rate. Where the positives are rare the precision-recall curve is the more informative, because precision carries the base rate: on the same scores the $\mathrm{AUC}$ stays at $0.8778$ while the precision at a fixed operating point goes from $0.8079$ to $0.0042$.
+
+A model is **calibrated** when its probabilities match frequencies. The reliability diagram bins the predictions and compares each bin's mean prediction with the observed share, and the expected calibration error is their gap averaged over the examples. A nearly separable fit is overconfident; a scale $a$ on the logit fitted on the validation set (temperature scaling) is a one-dimensional convex problem, leaves every ranking and every decision at a threshold of one half unchanged, and here lowers the cross-entropy from $0.4733$ to $0.2664$ but the $\mathrm{ECE}$ only from $0.0856$ to $0.0687$; adding a shift brings it to $0.0116$, near the noise floor of the measurement. For quantities the metrics are the MSE, the MAE and $R^2$; for language models perplexity scores the probabilities and **exact match** scores the answers, and they can disagree because one averages a logarithm over tokens and the other counts whole answers. **Metric selection** starts from the decision and its costs (the best threshold on a calibrated probability is $c_{\mathrm{FP}}/(c_{\mathrm{FP}} + c_{\mathrm{FN}})$), tests the metric on a trivial and on a perfect predictor, and reports an interval from the bootstrap.
+
+The limits are in what a held-out test set can say. Every number here describes the model on a sample drawn the way the training data were drawn (chapter 5): a shift in the population changes the base rate and the calibration alike, and none of these numbers reveals it in advance. The next chapter, *Machine Learning Before Deep Learning*, turns from how to score a model to which models existed before the neural network: nearest neighbours, trees, ensembles and kernels, whose merits are exactly what these metrics, applied honestly, measure.
+
+## References
+
+- Davis, J. and Goadrich, M., "The Relationship Between Precision-Recall and ROC Curves", *Proceedings of the International Conference on Machine Learning*, 2006 (the two curves, and why linear interpolation is not valid on a precision-recall curve).
+- Fawcett, T., "An introduction to ROC analysis", *Pattern Recognition Letters*, 2006 (the ROC curve, the area and its probabilistic reading).
+- Hanley, J. A. and McNeil, B. J., "The meaning and use of the area under a receiver operating characteristic (ROC) curve", *Radiology*, 1982 (the area as the probability of ranking a positive above a negative).
+- Mann, H. B. and Whitney, D. R., "On a test of whether one of two random variables is stochastically larger than the other", *Annals of Mathematical Statistics*, 1947 (the rank-sum statistic).
+- Guo, C., Pleiss, G., Sun, Y. and Weinberger, K. Q., "On Calibration of Modern Neural Networks", *Proceedings of the International Conference on Machine Learning*, 2017 (temperature scaling and the expected calibration error).
+- Platt, J., "Probabilistic outputs for support vector machines and comparisons to regularized likelihood methods", in *Advances in Large Margin Classifiers*, 1999 (fitting a scale and a shift to a classifier's scores).
+- Brier, G. W., "Verification of forecasts expressed in terms of probability", *Monthly Weather Review*, 1950 (the squared-error probability score).
+- van Rijsbergen, C. J., *Information Retrieval*, second edition, 1979 (the F measure).
+
 ## Exercises
 
 1. **[Calculate]** A detector's counts on $1000$ parts are $\mathrm{TP} = 30$, $\mathrm{FP} = 20$, $\mathrm{FN} = 10$, $\mathrm{TN} = 940$. Compute accuracy, precision, recall, false positive rate and $F_1$, and the accuracy of the majority-class rule. Verify the identity accuracy $= \xi\,\mathrm{TPR} + (1 - \xi)(1 - \mathrm{FPR})$.
@@ -756,14 +750,6 @@ Answers are at the end of the chapter.
 11. **[Investigate]** Redo `metrics.cost_threshold` for cost ratios $3$, $10$ and $30$. For each, compare the derived threshold of the scale-and-shift probabilities with the best cut on the test parts. When does the derived cut fail, and what does that say about the probabilities?
 12. **[Investigate]** Using the true probabilities of the hidden law as predictions (as `metrics.ece_binning` does), measure the $\mathrm{ECE}$ with ten equal-width bins on test sets of $100$, $300$, $1000$ and $3000$ parts drawn from the same generator. How does the noise floor scale with $n$, and what test-set size would you need for an $\mathrm{ECE}$ difference of $0.01$ to be visible?
 
-## Summary
-
-Accuracy, the share of decisions that are right, is a weighted average of the success rate on each class with the *class shares* as weights, so when one class is rare it reports almost only the other: a rule that never raises an alarm is $99\%$ accurate on a population with $1\%$ defects and finds no defects. The confusion matrix names the four outcomes of a decision at a threshold; **precision**, $\mathrm{TP}/(\mathrm{TP} + \mathrm{FP})$, and **recall**, $\mathrm{TP}/(\mathrm{TP} + \mathrm{FN})$, are two conditional probabilities of it, and Bayes' rule ties precision to the base rate. Moving the threshold trades one for the other. The **F1 score** is their harmonic mean, which is $2\mathrm{TP}/(2\mathrm{TP} + \mathrm{FP} + \mathrm{FN})$, near the smaller of the two and blind to the true negatives. The **ROC curve** plots the true positive rate against the false positive rate over every threshold; its area, computed by the trapezoid rule, equals the probability that a random positive is scored above a random negative, ties counting half, so it depends on the scores only through their order and does not change with the base rate. Where the positives are rare the precision-recall curve is the more informative, because precision carries the base rate: on the same scores the $\mathrm{AUC}$ stays at $0.8778$ while the precision at a fixed operating point goes from $0.8079$ to $0.0042$.
-
-A model is **calibrated** when its probabilities match frequencies. The reliability diagram bins the predictions and compares each bin's mean prediction with the observed share, and the expected calibration error is their gap averaged over the examples. A nearly separable fit is overconfident; a scale $a$ on the logit fitted on the validation set (temperature scaling) is a one-dimensional convex problem, leaves every ranking and every decision at a threshold of one half unchanged, and here lowers the cross-entropy from $0.4733$ to $0.2664$ but the $\mathrm{ECE}$ only from $0.0856$ to $0.0687$; adding a shift brings it to $0.0116$, near the noise floor of the measurement. For quantities the metrics are the MSE, the MAE and $R^2$; for language models perplexity scores the probabilities and **exact match** scores the answers, and they can disagree because one averages a logarithm over tokens and the other counts whole answers. **Metric selection** starts from the decision and its costs (the best threshold on a calibrated probability is $c_{\mathrm{FP}}/(c_{\mathrm{FP}} + c_{\mathrm{FN}})$), tests the metric on a trivial and on a perfect predictor, and reports an interval from the bootstrap.
-
-The limits are in what a held-out test set can say. Every number here describes the model on a sample drawn the way the training data were drawn (chapter 5): a shift in the population changes the base rate and the calibration alike, and none of these numbers reveals it in advance. The next chapter, *Machine Learning Before Deep Learning*, turns from how to score a model to which models existed before the neural network: nearest neighbours, trees, ensembles and kernels, whose merits are exactly what these metrics, applied honestly, measure.
-
 ## Key terms
 
 - **accuracy**: the share of a classifier's decisions that are right, $(\mathrm{TP} + \mathrm{TN})/N$; equivalently the average of the per-class success rates weighted by the class shares, so a rare class barely affects it. <!-- concept: accuracy -->
@@ -776,7 +762,7 @@ The limits are in what a held-out test set can say. Every number here describes 
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $\sigma(2.1972) = 0.9$, because $\mathrm{logit}(0.9) = \ln 9 = 2.1972$. The part is called defective at every threshold $t \le 0.9$, and not at $t > 0.9$.
 2. $P(\text{defective} \mid \text{flagged}) = 15/30 = 0.5$ and $P(\text{flagged} \mid \text{defective}) = 15/20 = 0.75$. The first, how often a flag is real, says how much to trust an alarm.
@@ -795,14 +781,3 @@ The limits are in what a held-out test set can say. Every number here describes 
 6. Perplexity averages the logarithm of the probability of the correct token over all positions, so it rewards sharpness on most tokens and tolerates a single slip (B: $1.2768$ against A's $2.2222$). Exact match counts whole answers, so it loses an answer to any single wrong top choice (B: $0.8$ against A's $1.0$). To answer arithmetic questions, where an answer is right or wrong as a whole, model A, which gets every answer right; B's better perplexity is a better fit to the text on average, not a better answer rate.
 7. Under independence the answer is right with probability $0.995^{100} = 0.6058$, about $61\%$, not $99.5\%$. The assumption is that the tokens of an answer are right or wrong independently with the same probability. In practice errors are correlated (one wrong digit often follows from an earlier wrong one) and positions differ in difficulty, so the real value differs from $0.6058$, but the order of magnitude is the point: per-token accuracy overstates the accuracy of whole answers.
 8. The threshold is $t^\star = 1/(1 + 19) = 0.05$. In the table (which is for the ratio $10$, $t^\star = 0.0909$, so it shows the direction and not the numbers for $19$) the raw model's cut at its derived threshold ($-2.303$) is stricter than the calibrated one ($-5.580$): it flags $581$ parts ($211$ defective, $370$ good) where the calibrated cut flags $937$, and it misses $95$ defective parts where the calibrated cut misses $42$. The raw model's tails are overconfident (parts it gives about $0.005$ are defective $3.9\%$ of the time), so a threshold on the raw probability cuts too high. The test cost is $0.4400$ against $0.3643$.
-
-## References
-
-- Davis, J. and Goadrich, M., "The Relationship Between Precision-Recall and ROC Curves", *Proceedings of the International Conference on Machine Learning*, 2006 (the two curves, and why linear interpolation is not valid on a precision-recall curve).
-- Fawcett, T., "An introduction to ROC analysis", *Pattern Recognition Letters*, 2006 (the ROC curve, the area and its probabilistic reading).
-- Hanley, J. A. and McNeil, B. J., "The meaning and use of the area under a receiver operating characteristic (ROC) curve", *Radiology*, 1982 (the area as the probability of ranking a positive above a negative).
-- Mann, H. B. and Whitney, D. R., "On a test of whether one of two random variables is stochastically larger than the other", *Annals of Mathematical Statistics*, 1947 (the rank-sum statistic).
-- Guo, C., Pleiss, G., Sun, Y. and Weinberger, K. Q., "On Calibration of Modern Neural Networks", *Proceedings of the International Conference on Machine Learning*, 2017 (temperature scaling and the expected calibration error).
-- Platt, J., "Probabilistic outputs for support vector machines and comparisons to regularized likelihood methods", in *Advances in Large Margin Classifiers*, 1999 (fitting a scale and a shift to a classifier's scores).
-- Brier, G. W., "Verification of forecasts expressed in terms of probability", *Monthly Weather Review*, 1950 (the squared-error probability score).
-- van Rijsbergen, C. J., *Information Retrieval*, second edition, 1979 (the F measure).
