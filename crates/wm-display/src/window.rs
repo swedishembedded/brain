@@ -61,9 +61,11 @@ pub struct SdlWindow {
 
 impl SdlWindow {
     /// Create a window scaled `scale`x from the model's `fw x fh` frames.
-    /// Fails with the SDL error string when no video driver is available
-    /// (headless CI: run with SDL_VIDEODRIVER=dummy or skip).
+    /// Fails saying what to install when SDL2 is missing, and with the SDL
+    /// error string when no video driver is available (headless CI: run with
+    /// SDL_VIDEODRIVER=dummy or skip).
     pub fn new(title: &str, fw: u32, fh: u32, scale: u32) -> Result<SdlWindow, String> {
+        sys::load()?;
         unsafe {
             if sys::SDL_Init(sys::SDL_INIT_VIDEO) != 0 {
                 return Err(sdl_error("SDL_Init"));

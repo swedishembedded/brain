@@ -1349,8 +1349,8 @@ wm:
 	$(LIST_CHILDREN)
 
 # Play the deterministic fake world model in an SDL window (WASD; Esc quits).
-# The SDL window is always compiled into the standard build (needs system
-# libSDL2 at link); it only OPENS when a run needs it.
+# The SDL window is always compiled into the standard build; libSDL2 is
+# loaded only when a run opens it.
 ## wm/play - play the fake world model in an SDL window (WASD)
 wm/play: build/release
 	./target/release/brain diamond play --model fake

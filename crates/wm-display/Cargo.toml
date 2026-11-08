@@ -3,7 +3,7 @@ name = "brain-wm-display"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Realtime display + input for world models: SDL2 software-blit window (minimal FFI, always compiled), WASD key chords, fixed-timestep pacing, and headless sinks for CI. The window opens only when a run needs it; headless runs never touch SDL."
+description = "Realtime display + input for world models: SDL2 software-blit window (minimal FFI, always compiled, SDL2 loaded only when a window opens), WASD key chords, fixed-timestep pacing, and headless sinks for CI. Headless runs never touch SDL."
 
 [lib]
 name = "wm_display"
@@ -14,6 +14,9 @@ brain-wm-core.workspace = true
 # Recording sink (`record::RecorderSink`) writes episode datasets.
 brain-data.workspace = true
 brain-imaging.workspace = true
+# SDL2 is loaded when a window opens, so the binary neither links it nor
+# needs it installed to run headless.
+libloading.workspace = true
 
 [dev-dependencies]
 # `testutil::skip` / `skip_unavailable` - the two skip helpers, so an

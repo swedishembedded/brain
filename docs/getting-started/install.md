@@ -11,16 +11,12 @@ Opus recordings (the format browsers record) and generated video carries Opus
 sound. Video is written and read in process: AV1 (royalty-free) in `.mp4`,
 `.mov`, `.mkv` and `.webm`, coded by the pure-Rust rav1e and rav1d.
 
-The standard build also links the system **SDL2** library, because the
-world-model window (`crates/wm-display`) is compiled in even though a headless
-run never opens it. Install it with your package manager (`brew install sdl2`
-on macOS, `apt install libsdl2-dev` on Debian/Ubuntu). On macOS a Homebrew
-install lives outside the linker's default search path; `wm-display`'s
-`build.rs` asks `pkg-config` and `brew --prefix sdl2` for the lib dir and
-passes it to the linker, so no flags are needed. If you install SDL2 after a
-failed build, run `cargo clean -p brain-wm-display` so the probe reruns. If
-SDL2 lives somewhere unusual, point the build at it with
-`RUSTFLAGS="-L[path/to/lib]"`.
+The world-model window (`crates/wm-display`) is drawn with **SDL2**, which
+`brain` loads when a run opens a window: building needs no SDL2, and a headless
+run never touches it. To open windows, install it with your package manager
+(`apt install libsdl2-2.0-0` on Debian/Ubuntu, `brew install sdl2` on macOS;
+`brain` asks Homebrew where it put it), or put `SDL2.dll` beside `brain.exe` on
+Windows. A run that needs a window without SDL2 present says what to install.
 
 A few things are optional, needed only for specific paths:
 
@@ -49,22 +45,26 @@ both.
 
 ### Windows
 
-The video stack (`brain-videocodec`, `brain-imaging`) builds and links for
-`x86_64-pc-windows-msvc`, including its tests: the AV1 coders are pure Rust
-and libopus builds with CMake and the MSVC (or clang-cl) compiler. From Linux,
-[cargo-xwin](https://github.com/rust-cross/cargo-xwin) cross-builds it
-against the Microsoft CRT and SDK it downloads:
+The `brain` CLI builds for Windows. Natively, with the MSVC toolchain and
+CMake (libopus builds from its bundled source):
 
 ```bash
-rustup target add x86_64-pc-windows-msvc
-cargo install cargo-xwin
-cargo xwin build -p brain-imaging --target x86_64-pc-windows-msvc
+cargo build --release -p brain-cli
 ```
 
-The whole `brain` CLI does not build for Windows yet: `brain-dbus` (D-Bus) and
-`brain-server` (Unix domain sockets) do not compile there, and the CLI's TTS
-server and daemon use Unix sockets and descriptors as well. The window and
-the viewport recorder link SDL2, which a Windows build has to be given.
+From Linux, with MinGW-w64 (`apt install mingw-w64`):
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+cargo build --release -p brain-cli --target x86_64-pc-windows-gnu \
+  --config 'target.x86_64-pc-windows-gnu.linker="x86_64-w64-mingw32-gcc"'
+```
+
+The result imports only Windows system DLLs. What Windows lacks is refused
+with a message rather than left out: the D-Bus surface, the Unix-socket
+servers (`brain tts serve`, the event socket) and detached serving
+(`brain serve -d`); plain `brain serve` runs in the foreground. Opening a
+window needs `SDL2.dll` beside `brain.exe`.
 
 ## Test
 
