@@ -87,4 +87,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 8. [Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md): Why is the cheapest computation the one whose intermediate result never touches memory?
 9. [One Program, Many Devices](v04-computation/09-backends.md): How can one set of kernels run on CPUs, Vulkan GPUs and CUDA GPUs with the same results?
 10. [Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md): How does an engine run near the roofline on hardware nobody tuned it for?
+11. [Measuring Performance Honestly](v04-computation/11-profiling.md): Why do most performance numbers lie, and how do we produce ones that do not?
 <!-- /contents -->

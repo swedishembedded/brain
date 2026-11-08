@@ -377,6 +377,16 @@ bytes), `subgroup` (the width of a subgroup, 0 when the device does not say) and
 it. `compile` either returns a kernel that computes what its source computes or reports an error that names the kernel; a backend never
 substitutes an approximation. A backend may also provide `begin_commands`, `record` and `submit`.
 
+**Measuring (Volume IV, Chapter 11).** Two operations let a host program read a clock and wait, and two let a command list carry the
+device's own clock. They are a model of what every backend offers in some form, and the chapter's pseudocode uses nothing else to time work:
+
+| Operation | Meaning |
+|---|---|
+| `now() -> real` | the host's clock, in seconds; only differences of two readings mean anything |
+| `wait_idle()` | blocks until every submission made so far has finished on the device (the wait that `read_back` performs before it copies, without the copy); a list still open (recorded, not submitted) is not part of it |
+| `record_stamp(c: commands) -> int` | appends to the list `c` a point at which the device writes its own clock, between the launches recorded before and after it, and returns the index of that stamp; stamps are numbered 0, 1, 2, ... in the order recorded |
+| `stamp_span(c: commands, i: int, j: int) -> real` | the seconds of the device's clock between stamps `i` and `j` of the list `c` after it has run (`i <= j`); an error before `wait_idle()` has returned for the submission of `c` |
+
 ## Functions and mutation
 
 ```text

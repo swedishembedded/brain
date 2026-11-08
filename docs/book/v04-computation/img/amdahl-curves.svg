@@ -1,0 +1,41 @@
+<!-- source-sha256: 58fa7ed136a584dd26e42981d2e7d49f2d6aad7a5557aa88b215f2f75826cec4 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 405" width="620" height="405">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="405" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="194" y1="334" x2="194" y2="30" stroke="#edf2f7"/>
+<text x="194" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="330" y1="334" x2="330" y2="30" stroke="#edf2f7"/>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="466" y1="334" x2="466" y2="30" stroke="#edf2f7"/>
+<text x="466" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="602" y1="334" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="58" y1="300.22" x2="602" y2="300.22" stroke="#edf2f7"/>
+<text x="52" y="304.22" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="232.67" x2="602" y2="232.67" stroke="#edf2f7"/>
+<text x="52" y="236.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="165.11" x2="602" y2="165.11" stroke="#edf2f7"/>
+<text x="52" y="169.11" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<line x1="58" y1="97.56" x2="602" y2="97.56" stroke="#edf2f7"/>
+<text x="52" y="101.56" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">8</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,334 71.6,332.83 85.2,331.66 98.8,330.5 112.4,329.35 126,328.2 139.6,327.08 153.2,325.96 166.8,324.87 180.4,323.79 194,322.74 207.6,321.71 221.2,320.71 234.8,319.73 248.4,318.79 262,317.87 275.6,316.98 289.2,316.12 302.8,315.29 316.4,314.5 330,313.73 343.6,313 357.2,312.3 370.8,311.62 384.4,310.98 398,310.37 411.6,309.79 425.2,309.23 438.8,308.7 452.4,308.2 466,307.73 479.6,307.28 493.2,306.85 506.8,306.45 520.4,306.07 534,305.71 547.6,305.37 561.2,305.05 574.8,304.75 588.4,304.46 602,304.2"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,334 71.6,332.09 85.2,330.1 98.8,328.03 112.4,325.88 126,323.66 139.6,321.37 153.2,319 166.8,316.56 180.4,314.05 194,311.48 207.6,308.85 221.2,306.16 234.8,303.43 248.4,300.64 262,297.82 275.6,294.97 289.2,292.08 302.8,289.18 316.4,286.26 330,283.33 343.6,280.41 357.2,277.49 370.8,274.58 384.4,271.7 398,268.84 411.6,266.02 425.2,263.24 438.8,260.5 452.4,257.82 466,255.19 479.6,252.61 493.2,250.11 506.8,247.67 520.4,245.3 534,243 547.6,240.78 561.2,238.64 574.8,236.57 588.4,234.58 602,232.67"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,334 71.6,331.83 85.2,329.55 98.8,327.13 112.4,324.59 126,321.91 139.6,319.09 153.2,316.13 166.8,313.02 180.4,309.77 194,306.36 207.6,302.8 221.2,299.09 234.8,295.22 248.4,291.19 262,287.01 275.6,282.67 289.2,278.18 302.8,273.55 316.4,268.77 330,263.85 343.6,258.79 357.2,253.62 370.8,248.32 384.4,242.91 398,237.41 411.6,231.82 425.2,226.15 438.8,220.42 452.4,214.64 466,208.82 479.6,202.98 493.2,197.13 506.8,191.28 520.4,185.45 534,179.65 547.6,173.9 561.2,168.21 574.8,162.58 588.4,157.05 602,151.6"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="58,334 71.6,331.71 85.2,329.26 98.8,326.67 112.4,323.91 126,320.98 139.6,317.87 153.2,314.57 166.8,311.07 180.4,307.36 194,303.44 207.6,299.29 221.2,294.9 234.8,290.27 248.4,285.39 262,280.24 275.6,274.82 289.2,269.13 302.8,263.14 316.4,256.87 330,250.29 343.6,243.41 357.2,236.22 370.8,228.72 384.4,220.91 398,212.79 411.6,204.36 425.2,195.62 438.8,186.57 452.4,177.24 466,167.61 479.6,157.71 493.2,147.55 506.8,137.14 520.4,126.5 534,115.65 547.6,104.6 561.2,93.38 574.8,82.02 588.4,70.53 602,58.95"/><polyline fill="none" stroke="#6b46c1" stroke-width="2.0" stroke-dasharray="6 4" points="58,334 71.6,331.94 85.2,329.78 98.8,327.52 112.4,325.15 126,322.67 139.6,320.08 153.2,317.39 166.8,314.58 180.4,311.67 194,308.64 207.6,305.51 221.2,302.28 234.8,298.94 248.4,295.51 262,291.98 275.6,288.36 289.2,284.66 302.8,280.88 316.4,277.03 330,273.11 343.6,269.15 357.2,265.13 370.8,261.08 384.4,257 398,252.9 411.6,248.79 425.2,244.68 438.8,240.59 452.4,236.51 466,232.46 479.6,228.46 493.2,224.5 506.8,220.6 520.4,216.76 534,213 547.6,209.31 561.2,205.71 574.8,202.2 588.4,198.78 602,195.47"/><circle cx="194" cy="308.64" r="4.5" fill="#6b46c1"/><circle cx="141.22" cy="319.77" r="4.5" fill="#6b46c1"/><text x="214.4" y="151.6" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">g = 2: speedup 1.75</text><line x1="221.2" y1="158.36" x2="196.72" y2="305.27" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/><text x="78.4" y="97.56" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">every product at the roofline, g = 1.53: 1.42</text><line x1="126" y1="104.31" x2="138.5" y2="316.39" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log2 of the factor g by which the part is made faster</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">speedup of the whole pass</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Amdahl&#x27;s law</text>
+<line x1="41.57" y1="393" x2="61.57" y2="393" stroke="#2b6cb0" stroke-width="2"/>
+<text x="67.57" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">p = 0.5</text>
+<line x1="126.11" y1="393" x2="146.11" y2="393" stroke="#c05621" stroke-width="2"/>
+<text x="152.11" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">p = 0.8</text>
+<line x1="210.65" y1="393" x2="230.65" y2="393" stroke="#2f855a" stroke-width="2"/>
+<text x="236.65" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">p = 0.9</text>
+<line x1="295.19" y1="393" x2="315.19" y2="393" stroke="#9b2c2c" stroke-width="2"/>
+<text x="321.19" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">p = 0.95</text>
+<line x1="385.89" y1="393" x2="405.89" y2="393" stroke="#6b46c1" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="411.89" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">the matrix products, p = 0.858</text>
+</svg>

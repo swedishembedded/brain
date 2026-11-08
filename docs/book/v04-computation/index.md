@@ -65,8 +65,8 @@ more than one kind of device.
    CPUs, Vulkan GPUs and CUDA GPUs with the same results.
 10. [Choosing the Fastest Correct Kernel](10-kernel-selection.md): how an engine runs near
     the roofline on hardware nobody tuned it for.
-11. Measuring Performance Honestly: why most performance numbers lie, and how
-    to produce ones that do not.
+11. [Measuring Performance Honestly](11-profiling.md): why most performance numbers
+    lie, and how to produce ones that do not.
 12. Quantization: Fewer Bits per Weight: how a model's weights can be stored in
     four bits each and still work.
 13. Neural Processing Units and Graph Compilers: how a whole network becomes one

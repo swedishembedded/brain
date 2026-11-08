@@ -1,0 +1,33 @@
+<!-- source-sha256: ec21aeeedd7e14c83dd7a9b1cc82adb5c00b4956dbca8076a09e6c6d40c9f693 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 452" width="800" height="452"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="452" fill="#ffffff"/>
+<rect x="20" y="14" width="760" height="204" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Clock stopped when the call returns</text>
+<text x="66" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">host</text>
+<text x="66" y="168.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">device</text>
+<rect x="118" y="79" width="45" height="38" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140.5" y="71.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">enqueue 5.0</text>
+<rect x="163" y="145" width="209.65" height="38" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="267.82" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">kernel runs</text>
+<text x="267.82" y="176.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">23.3 microseconds</text>
+<line x1="163" y1="75" x2="163" y2="191" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="5 3"/>
+<text x="175" y="94.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">the clock stops here and reads 5.0 microseconds,</text>
+<text x="175" y="110.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">while the kernel has only just started</text>
+<rect x="20" y="234" width="760" height="204" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="256" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Clock stopped after waiting for the device</text>
+<text x="66" y="322.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">host</text>
+<text x="66" y="388.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">device</text>
+<rect x="118" y="299" width="45" height="38" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140.5" y="291.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">enqueue 5.0</text>
+<rect x="163" y="299" width="209.65" height="38" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="267.82" y="314.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">blocked until</text>
+<text x="267.82" y="330.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the device is done</text>
+<rect x="372.65" y="299" width="360" height="38" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="552.65" y="314.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the wait itself</text>
+<text x="552.65" y="330.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">40.0 microseconds</text>
+<rect x="163" y="365" width="209.65" height="38" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="267.82" y="380.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">kernel runs</text>
+<text x="267.82" y="396.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">23.3 microseconds</text>
+<text x="267.82" y="423.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">device stamps read 23.3</text>
+<line x1="732.65" y1="295" x2="732.65" y2="411" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="5 3"/>
+<text x="724.65" y="291.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">the clock stops here and reads 68.3 microseconds</text>
+</svg>
