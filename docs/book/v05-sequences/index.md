@@ -66,8 +66,8 @@ generation.
    sequence to the next, and why that memory fades.
 6. [Encoder-Decoder Models and the Birth of Attention](06-seq2seq.md): how a model can read one
    sequence and write another, and why a fixed-size summary failed.
-7. Self-Attention: how every position in a sequence can look at every other
-   position in parallel.
+7. [Self-Attention](07-self-attention.md): how every position in a sequence can look at every
+   other position in parallel.
 8. Positional Information: how attention, which ignores order, is told where each
    token is.
 9. The Transformer Block: how attention, a feed-forward network, residuals and

@@ -1,0 +1,53 @@
+<!-- source-sha256: 043f90eabea388ebb3b17c17ba99dc53e4d5f017f8741f6334414ca7cfe37e66 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 400" width="1000" height="400"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="400" fill="#ffffff"/>
+<ellipse cx="62" cy="200" rx="45" ry="32" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="62" y="196.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">X</text>
+<text x="62" y="212.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 3</text>
+<rect x="140" y="67" width="100" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="190" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">times W_Q</text>
+<ellipse cx="335" cy="90" rx="48" ry="26" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="335" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Q</text>
+<text x="335" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 2</text>
+<line x1="107.86" y1="197.13" x2="139.14" y2="92.87" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="243" y1="90" x2="284" y2="90" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="140" y="177" width="100" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="190" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">times W_K</text>
+<ellipse cx="335" cy="200" rx="48" ry="26" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="335" y="196.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">K</text>
+<text x="335" y="212.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 2</text>
+<line x1="110" y1="200" x2="137" y2="200" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="243" y1="200" x2="284" y2="200" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="140" y="287" width="100" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="190" y="314.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">times W_V</text>
+<ellipse cx="335" cy="310" rx="48" ry="26" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="335" y="306.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">V</text>
+<text x="335" y="322.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 2</text>
+<line x1="107.86" y1="202.87" x2="139.14" y2="307.13" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="243" y1="310" x2="284" y2="310" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="450" y="85" width="110" height="120" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="505" y="133.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Q K^T</text>
+<text x="505" y="149.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">divided by</text>
+<text x="505" y="165.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sqrt(d_k) = sqrt(2)</text>
+<line x1="385.81" y1="91.05" x2="447.19" y2="113.95" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="385.81" y1="198.95" x2="447.19" y2="176.05" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="610" y="115" width="100" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="660" y="141.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">softmax</text>
+<text x="660" y="157.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">of each row</text>
+<ellipse cx="660" cy="45" rx="50" ry="18" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="660" y="49.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mask (optional)</text>
+<line x1="660" y1="66" x2="660" y2="112" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="669" y="93.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">adds -inf where hidden</text>
+<line x1="563" y1="145" x2="607" y2="145" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="585" y="136.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">S  4 x 4</text>
+<rect x="750" y="115" width="100" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="800" y="141.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P V</text>
+<text x="800" y="157.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">weighted sums</text>
+<line x1="713" y1="145" x2="747" y2="145" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="730" y="136.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">P  4 x 4</text>
+<ellipse cx="935" cy="145" rx="45" ry="26" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="935" y="141.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">O</text>
+<text x="935" y="157.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 2</text>
+<line x1="853" y1="145" x2="887" y2="145" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M383,310 L790,310 Q800,310 800,300 L800,178" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="500" y="386.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">every row of Q asks, every row of K advertises, every row of V is what gets handed over; the same X feeds all three</text>
+</svg>

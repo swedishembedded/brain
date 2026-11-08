@@ -34,6 +34,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **asymptotic complexity**: the growth rate of an algorithm's cost as the size of its input grows, stated with $O$, $\Omega$ and $\Theta$ so that constants and lower-order terms are dropped and only the shape (such as $n$, $n \log n$ or $n^2$) remains. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
+**attention backward**: the gradient of attention, obtained by undoing in order the weighted average, the softmax rule on each row, the score product with its scale and the three projections, with the input collecting three contributions and no step of its own for the mask. *([Self-Attention](v05-sequences/07-self-attention.md))*
+
 **autoencoder**: a network trained to output its own input after passing it through a bottleneck layer much narrower than the input, so that it must learn a short code from which the input can be rebuilt. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 **autoregressive factorization**: writing the probability of a sequence as the product, over its positions, of the probability of each token given all the tokens before it, an identity that holds for every distribution over sequences. *([Language Modeling](v05-sequences/04-language-modeling.md))*
@@ -105,6 +107,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **categorical distribution**: a table of $K$ non-negative probabilities summing to $1$, one per outcome of a choice among $K$ possibilities such as the next word; the case $K = 2$ is the Bernoulli distribution. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **causal language model**: a model whose output at each position depends only on the tokens up to that position and gives the distribution of the next one, so that its probabilities multiply into a valid probability of a sequence; in the data it means that the targets are the inputs shifted by one place. *([Language Modeling](v05-sequences/04-language-modeling.md))*
+
+**causal mask**: the matrix of zeros and minus infinities added to the scores before the softmax so that position $i$ gives no weight to positions after it, which makes the output at each position a function of its prefix alone and lets all positions of a sequence be trained in one pass. *([Self-Attention](v05-sequences/07-self-attention.md))*
 
 **central difference**: the finite difference $(f(x+h) - f(x-h))/(2h)$, whose error is proportional to $h^2$ because the first error term cancels by symmetry. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
@@ -450,6 +454,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **monotonic function**: a function that never reverses direction, always increasing or always decreasing, and so keeps the order of single values. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
+**multi-head attention**: attention run $H$ times on slices of the width, each head with its own queries, keys and values, the outputs placed side by side and mixed by one output matrix, so that a position can ask several different questions of the same set at once. *([Self-Attention](v05-sequences/07-self-attention.md))*
+
 **multilayer perceptron**: a network of fully connected layers, each followed by an activation function (usually except the last), so that each layer reads all of the outputs of the one before it; the name is historical, since its units rarely use the step. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **multiple comparisons**: the problem that testing many hypotheses makes some significant by chance, so that the chance of at least one false positive grows with their number, controlled by tests at a smaller level such as the Bonferroni correction. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
@@ -550,6 +556,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **quantization error**: the difference $e = w' - w$ between a decoded weight and the original, bounded by half a step, and summarized by its mean squared error or the signal-to-quantization-noise ratio $10\log_{10}(\mathrm{mean}(w^2)/\mathrm{MSE})$ in decibels. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
+**query, key and value**: the three vectors that each position's input gives by three separate learned linear maps: the query is what the position asks of the others, the key is what it can be matched on, and the value is what it hands over when matched. *([Self-Attention](v05-sequences/07-self-attention.md))*
+
 ## R
 
 **radix sort**: a sort of integer keys digit by digit from the least significant, each pass made of per-chunk histograms, one scan of the digit-major histogram array and a stable scatter, so that no two invocations write the same counter or the same position. *([Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md))*
@@ -613,6 +621,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **scalar multiplication**: multiplying every entry of a vector by one number, which stretches, shrinks or flips the arrow. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **scale and zero point**: the pair $(\Delta, q_0)$ of a group: the distance between neighbouring levels and the code that stands for the number 0, chosen so that the codes cover the group's range and 0 is exactly a code. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
+
+**scaled dot-product attention**: the layer in which every query is compared with every key by a dot product divided by the square root of their width, a softmax along each row turns the scores into weights, and the weighted sums of the values are the output, $\mathrm{softmax}(\mathbf{Q}\mathbf{K}^\top/\sqrt{d_k})\mathbf{V}$. *([Self-Attention](v05-sequences/07-self-attention.md))*
 
 **seed**: the number from which a generator's starting state is computed; the same seed gives the same stream, and a seed used by a run must be recorded for the run to be repeated. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 

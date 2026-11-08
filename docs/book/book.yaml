@@ -437,7 +437,7 @@ volumes:
         title: "Self-Attention"
         question: "How can every position in a sequence look at every other position in parallel?"
         introduces: [query-key-value, scaled-dot-product-attention, causal-mask, multi-head-attention, attention-backward]
-        requires: [cross-attention, softmax, matrix-multiplication, softmax-cross-entropy, matmul-backward]
+        requires: [cross-attention, softmax, stable-softmax, matrix-multiplication, transpose, dot-product, variance, variance-preservation, softmax-cross-entropy, matmul-backward, gradient-check, test-dimension-choice, adam, teacher-forcing, causal-language-model, recurrent-neural-network, roofline-model]
         brain: [model]
       - id: positions
         title: "Positional Information"

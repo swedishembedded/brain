@@ -100,4 +100,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 4. [Language Modeling](v05-sequences/04-language-modeling.md): How can predicting the next token teach a model about language?
 5. [Recurrent Networks](v05-sequences/05-recurrent-networks.md): How can a network carry memory from one step of a sequence to the next, and why does that memory fade?
 6. [Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md): How can a model read one sequence and write another, and why did a fixed-size summary fail?
+7. [Self-Attention](v05-sequences/07-self-attention.md): How can every position in a sequence look at every other position in parallel?
 <!-- /contents -->
