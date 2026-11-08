@@ -183,12 +183,15 @@ def recycled(page_list, errors):
 def _labels(path, rel, errors, where):
     """Collect one chapter's headings and run-in labels; report its template slots and repeats."""
     local: dict[str, int] = {}
-    in_fence = False
+    in_fence = in_apparatus = False
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("```"):
             in_fence = not in_fence
-        m = None if in_fence else (HEADING.match(line) or RUN_IN.match(line))
-        if not m or m.group(1).strip() in APPARATUS:
+        if not in_fence and line.startswith("## "):
+            in_apparatus = line[3:].strip() in APPARATUS
+        # Inside the end apparatus, labels (such as the groups of answers) are apparatus too.
+        m = None if in_fence or in_apparatus else (HEADING.match(line) or RUN_IN.match(line))
+        if not m:
             continue
         label = m.group(1).strip().lower()
         if label in TEMPLATE_LABELS:
