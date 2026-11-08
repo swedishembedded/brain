@@ -459,18 +459,10 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
             (Some(m), Some(starts)) if m.len() == tok.len() && has_token_mask && !tok.is_empty() => {
                 match TokenDataset::new_examples(tok, m, &starts, 0, &batch_cfg) {
                     Ok(d) => return Ok(d),
-                    // Examples too long to be rows of their own: this is
-                    // document-scale data, where a window IS the unit of
-                    // training and packing is not the problem it is for short
-                    // instruction-tuning examples. Fall back, but say so -
-                    // silently windowing a dataset that should have been one
-                    // example per row is the defect this branch exists to
-                    // make visible.
-                    Err(e) => {
-                        eprintln!("{label}: {e}; sampling windows across examples instead");
-                        let (tok, m) = e.returned();
-                        (tok, Some(m))
-                    }
+                    // An example longer than a row is refused, never windowed:
+                    // a window across examples lets a supervised token attend
+                    // to, and be trained on, another example's context.
+                    Err(e) => return Err(std::io::Error::other(format!("{label}: {e}"))),
                 }
             }
             (other, _) => (tok, other),
@@ -3395,6 +3387,16 @@ mod tests {
             std::fs::remove_file(dir.join(format!("{missing}.mask.bin"))).unwrap();
             assert!(load_dataset(&dir, &opts).is_err(), "{missing} mask missing while the other split is masked");
         }
+    }
+
+    /// An indexed example longer than the row used to fall back to windows
+    /// across examples, so a supervised token could see another example.
+    #[test]
+    fn an_example_longer_than_the_row_refuses_instead_of_windowing_across_examples() {
+        let dir = masked_chat_dir("example-too-long");
+        let opts = FitOpts { block_size: 3, batch_size: 2, ..Default::default() };
+        let Err(err) = load_dataset(&dir, &opts) else { panic!("a 4-token example in a 3-token row must be refused") };
+        assert!(err.to_string().contains("block"), "{err}");
     }
 
     /// A chat dataset written before examples were indexed closed each one

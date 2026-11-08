@@ -14,7 +14,7 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 
 ## Items
 - [x] T001 P0 - crates/model/src/train.rs (mask read, `.ok()` fallback) - mask problem refuses before step 1; corrupt-byte/length test
-- [ ] T002 P0 - crates/model/src/train.rs (example-indexed dataset fallback) - oversized example refuses or splits into masked windows; no cross-example supervision test
+- [x] T002 P0 - crates/model/src/train.rs (example-indexed dataset fallback) - oversized example refuses or splits into masked windows; no cross-example supervision test
 - [ ] T003 P0 - crates/rl/src/objective/grpo.rs (RatioBasis::Trainer) - stale rollouts: behaviour policy identity; two-policy ratio test
 - [ ] T004 P0 - crates/rl/src/objective/grpo.rs (top-k/top-p old_lp) - exact truncated likelihood or refuse; truncated-sampling test
 - [ ] T005 P0 - crates/rl/src/objective/grpo_term.rs (capped log-ratio / k3) - forward and backward agree; FP64 reference + finite differences
