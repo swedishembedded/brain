@@ -109,7 +109,16 @@ fn an_empty_placement_list_changes_nothing() {
 /// then the payloads back to back - enough to stand in for a third-party
 /// (ai-toolkit / ComfyUI) adapter.
 fn write_st(path: &std::path::Path, tensors: &[(&str, Vec<usize>, Vec<f32>)]) {
+    write_st_with_metadata(path, tensors, &[]);
+}
+
+/// [`write_st`] with a `__metadata__` block.
+fn write_st_with_metadata(path: &std::path::Path, tensors: &[(&str, Vec<usize>, Vec<f32>)], metadata: &[(&str, &str)]) {
     let mut header = serde_json::Map::new();
+    if !metadata.is_empty() {
+        let meta: serde_json::Map<String, serde_json::Value> = metadata.iter().map(|(k, v)| ((*k).to_string(), serde_json::json!(v))).collect();
+        header.insert("__metadata__".into(), serde_json::Value::Object(meta));
+    }
     let mut blob: Vec<u8> = Vec::new();
     for (name, shape, data) in tensors {
         let start = blob.len();
@@ -414,4 +423,67 @@ fn an_unmatched_external_key_fails_loudly_naming_the_architecture() {
     assert!(e.contains("no_such_module"), "the error must name the tensor: {e}");
     assert!(e.contains("FLUX.2"), "the error must name the architecture: {e}");
     assert_eq!(ts["img_in.weight"].1, vec![0.0; 6], "a rejected adapter writes nothing");
+}
+
+/// A PEFT save that keeps its adapter name in every key
+/// (`.lora_A.default.weight`) and records `alpha` once in the header rather
+/// than per target: the pairs read, scaled by `alpha/r` as PEFT applies them;
+/// a per-target `.alpha` is more specific and wins; a header alpha that is
+/// not a number is refused rather than read as 1.0.
+#[test]
+fn a_peft_save_with_its_adapter_name_and_a_header_alpha_scales_by_alpha_over_rank() {
+    let stem = "transformer_blocks.0.attn.to_q";
+    let pair = |dir: &str| {
+        vec![
+            (format!("{stem}.lora_A.{dir}.weight"), vec![2, 3], vec![1.0; 6]),
+            (format!("{stem}.lora_B.{dir}.weight"), vec![4, 2], vec![1.0; 8]),
+        ]
+    };
+    let write = |tag: &str, extra: Vec<(String, Vec<usize>, Vec<f32>)>, alpha: &str| {
+        let p = tmp(&format!("{tag}.safetensors"));
+        let mut ts = pair("default");
+        ts.extend(extra);
+        let refs: Vec<(&str, Vec<usize>, Vec<f32>)> = ts.iter().map(|(n, s, d)| (n.as_str(), s.clone(), d.clone())).collect();
+        write_st_with_metadata(&p, &refs, &[("format", "pt"), ("alpha", alpha)]);
+        p.to_str().unwrap().to_string()
+    };
+
+    let pairs = model::lora::read_external_adapter(&write("peft-header-alpha", vec![], "1")).expect("a PEFT save reads");
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].base_key, format!("{stem}.weight"));
+    assert_eq!((pairs[0].out, pairs[0].inn, pairs[0].r), (4, 3, 2));
+    assert_eq!(pairs[0].alpha_mult, 0.5, "header alpha 1 over rank 2");
+
+    let own = vec![(format!("{stem}.alpha"), vec![], vec![4.0])];
+    let pairs = model::lora::read_external_adapter(&write("peft-own-alpha", own, "1")).expect("reads");
+    assert_eq!(pairs[0].alpha_mult, 2.0, "a target's own alpha is more specific than the header's");
+
+    let e = model::lora::read_external_adapter(&write("peft-bad-alpha", vec![], "eight")).err().expect("refused");
+    assert!(e.contains("alpha"), "{e}");
+}
+
+/// One delta over a tensor that a build splits into row bands (a fused
+/// projection uploaded as two linears) becomes one delta per band, each
+/// claimable on its own and together exactly the whole correction.
+#[test]
+fn a_whole_tensor_delta_splits_into_row_bands() {
+    let (out, inn, r) = (4, 3, 2);
+    let a: Vec<f32> = (0..r * inn).map(|i| i as f32 + 1.0).collect();
+    let b: Vec<f32> = (0..out * r).map(|i| 0.5 * i as f32 - 1.0).collect();
+    let whole = model::lora::RuntimeDelta { key: "ff.weight".into(), row0: 0, row_stride: inn, col0: 0, elems: out * inn, pair: Pair::from_ab(out, inn, r, a, b) };
+    let mut want = vec![0.0; out * inn];
+    whole.fold_into(&mut want);
+
+    let top = whole.row_band(0, 2).expect("in range");
+    let bottom = whole.row_band(2, 2).expect("in range");
+    assert!(whole.row_band(3, 2).is_err(), "a band past the delta's rows is refused");
+    let lora = model::lora::RuntimeLora::new(vec![top, bottom]);
+    let mut got = Vec::new();
+    for row0 in [0, 2] {
+        let mut band = vec![0.0; 2 * inn];
+        lora.claim("ff.weight", inn, row0, 2, 0, inn).expect("each band is claimable").fold_into(&mut band);
+        got.extend(band);
+    }
+    assert!(lora.unapplied().is_empty());
+    assert_eq!(got, want);
 }

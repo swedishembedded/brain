@@ -419,8 +419,11 @@ fn kron_delta(kr: &Lokr, scale: f32, w: &mut [f32]) {
 
 /// The `(A-suffix, B-suffix)` spellings a third-party adapter may use, in the
 /// aliases ComfyUI's own loader accepts. `A`/"down" first, `B`/"up" second.
-const EXTERNAL_SUFFIXES: [(&str, &str); 3] = [
+/// PEFT's own spelling keeps the adapter's name (`default` unless one was
+/// given) when a state dict is saved without stripping it.
+const EXTERNAL_SUFFIXES: [(&str, &str); 4] = [
     (".lora_A.weight", ".lora_B.weight"),
+    (".lora_A.default.weight", ".lora_B.default.weight"),
     (".lora_down.weight", ".lora_up.weight"),
     (".lora.down.weight", ".lora.up.weight"),
 ];
@@ -455,6 +458,7 @@ const LOKR_SUFFIXES: [&str; 6] =
 /// output that looks like a successful adapted run, which is the single worst
 /// outcome for this feature.
 pub fn read_external_adapter(path: &str) -> Result<Vec<ExternalPair>, String> {
+    let header_alpha = header_alpha(path)?;
     let tensors = checkpoint::safetensors::read(path)?;
     let mut a: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
     let mut b: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
@@ -541,7 +545,7 @@ pub fn read_external_adapter(path: &str) -> Result<Vec<ExternalPair>, String> {
     let mut out = Vec::with_capacity(stems.len());
     for stem in stems {
         let base_key = format!("{}.weight", stem.strip_prefix("diffusion_model.").unwrap_or(&stem));
-        let al = alpha.get(&stem).copied();
+        let al = alpha.get(&stem).copied().or(header_alpha);
         let pair = match kr.remove(&stem) {
             Some(factors) => read_lokr(path, &stem, base_key, factors, al)?,
             None => {
@@ -583,6 +587,19 @@ pub fn read_external_adapter(path: &str) -> Result<Vec<ExternalPair>, String> {
         out.push(pair);
     }
     Ok(out)
+}
+
+/// The file-wide `alpha` a diffusers-side PEFT trainer records once in the
+/// safetensors header instead of per target, or `None` when the header
+/// carries none. A value that is not a number is refused: reading it as
+/// absent would apply the adapter at `r/alpha` times its trained strength.
+fn header_alpha(path: &str) -> Result<Option<f32>, String> {
+    let meta = checkpoint::st::read_metadata(path).map_err(|e| format!("lora {path}: cannot read the header: {e}"))?;
+    let Some(v) = meta.get("alpha") else { return Ok(None) };
+    match v.trim().parse::<f32>() {
+        Ok(a) if a.is_finite() && a > 0.0 => Ok(Some(a)),
+        _ => Err(format!("lora {path}: the header's alpha {v:?} is not a positive number")),
+    }
 }
 
 /// One LoKr target: resolve `W1`/`W2` (reconstructing either from its own
@@ -732,6 +749,26 @@ impl RuntimeDelta {
             elems: p.elems,
             pair: Pair::from_ab(p.pair.out, p.pair.inn, p.pair.r, p.pair.a.clone(), p.pair.b.iter().map(|v| v * scale).collect()),
         }
+    }
+
+    /// The rows `row0..row0 + out` of this delta, relative to its own first
+    /// row, as a delta of their own: what a build that uploads one stored
+    /// tensor as several linears (a fused projection's halves) claims per
+    /// linear. `A` is shared, `B` keeps only the band's rows.
+    pub fn row_band(&self, row0: usize, out: usize) -> Result<RuntimeDelta, String> {
+        if out == 0 || row0 + out > self.pair.out {
+            return Err(format!("lora: rows {row0}..{} of {} are outside its {} rows", row0 + out, self.key, self.pair.out));
+        }
+        let r = self.pair.r;
+        let b = self.pair.b[row0 * r..(row0 + out) * r].to_vec();
+        Ok(RuntimeDelta {
+            key: self.key.clone(),
+            row0: self.row0 + row0,
+            row_stride: self.row_stride,
+            col0: self.col0,
+            elems: self.elems,
+            pair: Pair::from_ab(out, self.pair.inn, r, self.pair.a.clone(), b),
+        })
     }
 
     /// Does this delta correct exactly the rectangle a build is about to

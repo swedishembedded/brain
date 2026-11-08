@@ -37,9 +37,9 @@ use std::collections::HashMap;
 /// One LoRA adapter a generation applies: a file and its strength.
 ///
 /// `scale` is ComfyUI's `strength_model`, multiplying the whole delta; 1.0 is
-/// the reference default. Third-party files carry no alpha, so this is their
-/// only scale; brain's own adapters record `alpha/rank` in their header and
-/// apply it on top.
+/// the reference default. A file's own alpha applies on top: a third-party
+/// file's per-target `.alpha` or header `alpha` (`crate::lora::read_external_adapter`),
+/// brain's own adapters' recorded `alpha/rank`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdapterSpec {
     pub path: String,
