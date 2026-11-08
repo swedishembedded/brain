@@ -24,8 +24,8 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [ ] T009 P1 - crates/rl/src/objective/distill.rs - one normalisation convention; dense-softmax mean-KL oracle, unequal lengths
 - [ ] T010 P1 - crates/rl/src/objective/dpo.rs (pack_row) - streaming DPO refuses truncation
 - [ ] T011 P1 - crates/rl/src/objective/distill.rs (pack_row, TopK::from_logits) - refuse truncation and zero-information batches; validated teacher distribution
-- [ ] T012 P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers Adam beta1/beta2/eps; resume refuses a change
-- [ ] T013 P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers GEMM compute precision and the whole resolved run configuration
+- [x] T012 P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers Adam beta1/beta2/eps; resume refuses a change
+- [x] T013 (adam, gemm precision, native sparse attention; the rest of the resolved configuration is not yet persisted) P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers GEMM compute precision and the whole resolved run configuration
 - [ ] T014 P1 - crates/model/src/train.rs (build_or_resume) - separate exact resume, weight warm start, adapter continuation (names and lineage)
 - [x] T015 P1 - crates/rl/src/objective/grpo.rs (attach_references) - incomplete references refuse; unsupported EOS positions distinguished
 - [ ] T016 P1 - crates/rl/src/objective/external.rs - explicit exact vs proxy behaviour logprobs with provenance

@@ -1430,6 +1430,19 @@ fn schedule_fingerprint(opts: &FitOpts) -> serde_json::Value {
     if !opts.precision.is_default() {
         fingerprint["precision"] = serde_json::Value::String(format!("{:?}", opts.precision));
     }
+    // The same rule for the rest of the arithmetic: AdamW's constants (by bits), the GEMM precision and
+    // native sparse attention are recorded only when they depart from the default, so a state saved
+    // before they were recorded still resumes under the defaults it was written with, and a change in
+    // either direction is refused.
+    if opts.adam != crate::Adam::default() {
+        fingerprint["adam_bits"] = serde_json::json!([opts.adam.beta1.to_bits(), opts.adam.beta2.to_bits(), opts.adam.eps.to_bits()]);
+    }
+    if opts.gemm_precision != gpu_core::provider::library::GemmPrecision::default() {
+        fingerprint["gemm_precision"] = serde_json::Value::String(format!("{:?}", opts.gemm_precision));
+    }
+    if let Some(sparse) = &opts.native_sparse {
+        fingerprint["native_sparse"] = serde_json::Value::String(format!("{sparse:?}"));
+    }
     fingerprint
 }
 
@@ -2962,6 +2975,34 @@ mod tests {
         let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None, grad_sync: None };
         fit_controlled(model, Verdicts(Default::default()), &opts, None, control).expect("fit");
         assert_eq!(*indices.borrow(), vec![2, 3]);
+    }
+
+    /// A saved state is only the same run when every number its arithmetic depends on is the same:
+    /// AdamW's betas and epsilon, the GEMM precision and native sparse attention included. Resuming
+    /// under others would continue a different optimiser from the saved moments.
+    #[test]
+    fn a_resume_under_changed_optimizer_or_gemm_arithmetic_is_refused() {
+        let identity = serde_json::json!({"run": 1});
+        let base = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
+        let dir = tmp("arithmetic-identity");
+        let state = dir.join("train.state");
+        let mut stop_at_two = |s: &StepReport| s.step < 2;
+        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+        fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &base, None, control).expect("fit");
+
+        let changed: Vec<(&str, FitOpts)> = vec![
+            ("beta1", FitOpts { adam: crate::Adam { beta1: 0.8, ..base.adam }, ..base.clone() }),
+            ("beta2", FitOpts { adam: crate::Adam { beta2: 0.99, ..base.adam }, ..base.clone() }),
+            ("eps", FitOpts { adam: crate::Adam { eps: 1e-6, ..base.adam }, ..base.clone() }),
+            ("gemm precision", FitOpts { gemm_precision: gpu_core::provider::library::GemmPrecision::Fp32Reference, ..base.clone() }),
+        ];
+        for (what, opts) in changed {
+            let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+            let result = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &opts, None, control);
+            assert!(result.is_err(), "a resume with a different {what} must be refused");
+        }
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None, grad_sync: None };
+        fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &base, None, control).expect("the same options resume");
     }
 
     /// An abort stops the run with the objective's own error.
