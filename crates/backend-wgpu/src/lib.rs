@@ -638,8 +638,10 @@ struct DeviceShared {
     /// is absent (wasm, non-Vulkan) or there is nowhere to persist.
     plcache: Option<std::sync::Arc<PlCache>>,
     /// `--kernel-profile` per-kernel GPU timing (native only, and only when the
-    /// adapter has TIMESTAMP_QUERY): each dispatch runs in its own compute pass
-    /// with begin/end timestamps, resolved and accumulated per kernel name.
+    /// adapter has TIMESTAMP_QUERY): `flush_timed` writes a timestamp between
+    /// the dispatches of the production single pass where the device allows
+    /// timestamps inside passes, and `flush_profiled` falls back to one compute
+    /// pass per dispatch where it does not; both accumulate per kernel name.
     /// Pure observability - the non-profiling flush path is untouched.
     #[cfg(not(target_arch = "wasm32"))]
     gpu_profile: Option<GpuProfile>,
