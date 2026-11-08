@@ -26,7 +26,7 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [x] T011 P1 - crates/rl/src/objective/distill.rs (pack_row, TopK::from_logits) - refuse truncation and zero-information batches; validated teacher distribution
 - [x] T012 P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers Adam beta1/beta2/eps; resume refuses a change
 - [x] T013 (adam, gemm precision, native sparse attention; the rest of the resolved configuration is not yet persisted) P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers GEMM compute precision and the whole resolved run configuration
-- [ ] T014 P1 - crates/model/src/train.rs (build_or_resume) - separate exact resume, weight warm start, adapter continuation (names and lineage)
+- [x] T014 (the warm start is announced and returned as StartKind; it is not written into the checkpoint header, which is each model's own save) P1 - crates/model/src/train.rs (build_or_warm_start) - separate exact resume, weight warm start, adapter continuation (names and lineage)
 - [x] T015 P1 - crates/rl/src/objective/grpo.rs (attach_references) - incomplete references refuse; unsupported EOS positions distinguished
 - [ ] T016 P1 - crates/rl/src/objective/external.rs - explicit exact vs proxy behaviour logprobs with provenance
 - [ ] T017 P1 - crates/rl/src/objective/external.rs - missing rollout sidecars never select imitation semantics silently

@@ -534,24 +534,50 @@ pub fn targets_to_u32(y: &[i32]) -> Vec<u32> {
     y.iter().map(|&v| if v < 0 { IGNORE } else { v as u32 }).collect()
 }
 
-/// Build a fresh model from `cfg` (finalized against `dataset_vocab`/
-/// `opts.block_size`), or resume from `out`'s existing checkpoint if one is
-/// already there - the resume-vs-fresh-init block shared by [`fit`] and
-/// `crates/rl`'s `fit_weighted`. On resume the checkpoint's own architecture
-/// wins (and must match `opts.block_size`/`dataset_vocab` - weights resume,
-/// AdamW moments restart); otherwise a fresh random init runs from `opts.seed`.
+/// How a run's weights were obtained. The three ways of not starting from scratch are different
+/// promises, each with its own entry point:
+///
+/// - **exact resume** ([`FitControl::state`]): weights, AdamW moments, schedule position, data order and
+///   generator continue, so the run computes the updates an uninterrupted one would have;
+/// - **weight warm start** ([`build_or_warm_start`], [`fit_from`]): only the weights are taken over, from a
+///   checkpoint or from tensors the caller supplies; the moments, schedule, data order and generator start
+///   fresh, so it is a new run that begins at those weights;
+/// - **adapter continuation** (the SDK's `continue_from`): a new adapter that records the digest of the one it
+///   continues as its parent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartKind {
+    /// Randomly initialised from the run's seed.
+    Fresh,
+    /// The weights of the checkpoint at this path; nothing else of the run that wrote it.
+    WarmStart { checkpoint: std::path::PathBuf },
+}
+
+impl std::fmt::Display for StartKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartKind::Fresh => write!(f, "fresh initialisation"),
+            StartKind::WarmStart { checkpoint } => write!(f, "weight warm start from {} (weights only: optimizer moments, schedule position, data order and generator restart; an exact resume is FitControl::state)", checkpoint.display()),
+        }
+    }
+}
+
+/// Build a fresh model from `cfg` (finalized against `dataset_vocab`/`opts.block_size`), or WARM-START
+/// it from the checkpoint already at `out`: the starting-point block shared by [`fit`] and `crates/rl`'s
+/// `fit_weighted`. A warm start takes the checkpoint's weights and its own architecture (which must match
+/// `opts.block_size` and `dataset_vocab`) and nothing else of the run that wrote it - AdamW's moments, the
+/// learning-rate schedule's position, the data order and the generator all begin again. It is announced
+/// as a warm start and returned as [`StartKind::WarmStart`]; continuing a run exactly is
+/// [`FitControl::state`].
 #[cfg(not(target_arch = "wasm32"))]
-pub fn build_or_resume<M: Model>(cfg: M::Config, opts: &FitOpts, out: Option<&Path>, dataset_vocab: u32) -> M {
-    let resume = out.map(|p| p.exists()).unwrap_or(false);
-    let (cfg, init) = if resume {
-        let p = out.unwrap();
-        eprintln!("resuming from existing checkpoint {}", p.display());
+pub fn build_or_warm_start<M: Model>(cfg: M::Config, opts: &FitOpts, out: Option<&Path>, dataset_vocab: u32) -> (M, StartKind) {
+    let warm = out.filter(|p| p.exists());
+    let (cfg, init) = if let Some(p) = warm {
         let c = checkpoint::load(p.to_str().expect("utf-8 path"));
         let rcfg = M::Config::from_json(&c.header["config"]);
         assert_eq!(
             rcfg.block_size(),
             opts.block_size,
-            "checkpoint block_size {} != --block {} - resume with the same --block",
+            "checkpoint block_size {} != --block {} - warm-start with the same --block",
             rcfg.block_size(),
             opts.block_size
         );
@@ -563,7 +589,9 @@ pub fn build_or_resume<M: Model>(cfg: M::Config, opts: &FitOpts, out: Option<&Pa
         let init = M::init_weights(&cfg, opts.seed);
         (cfg, init)
     };
-    build_for::<M>(cfg, opts, &init).unwrap_or_else(|e| panic!("{e}"))
+    let start = warm.map_or(StartKind::Fresh, |p| StartKind::WarmStart { checkpoint: p.to_path_buf() });
+    eprintln!("start: {start}");
+    (build_for::<M>(cfg, opts, &init).unwrap_or_else(|e| panic!("{e}")), start)
 }
 
 /// Build `M` sized for `opts`: with its layers streaming from the start when the run asks for f32 layers through a
@@ -2161,7 +2189,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
 ///
 /// This is `gpt2::train::train` lifted to `M: Model` - same control flow, same
 /// resume/eval/checkpoint semantics, no GPT-specific code. Delegates to
-/// [`build_or_resume`] + [`fit_with`] over the [`CausalLm`] objective; the
+/// [`build_or_warm_start`] + [`fit_with`] over the [`CausalLm`] objective; the
 /// loop body itself lives once, in `fit_with`.
 ///
 /// Native-only: it reads token `.bin` datasets and writes checkpoints, neither
@@ -2170,14 +2198,14 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
 pub fn fit<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
     refuse_images(dir)?;
     let loaded = load(dir, opts)?;
-    let model = build_or_resume::<M>(cfg, opts, out, loaded.vocab);
+    let (model, _start) = build_or_warm_start::<M>(cfg, opts, out, loaded.vocab);
     let obj = CausalLm::new(loaded.train, loaded.val, loaded.batch_cfg, loaded.itos);
     fit_with(model, obj, opts, out)
 }
 
-/// [`fit`], starting from WEIGHTS THE CALLER SUPPLIES.
+/// [`fit`], WARM-STARTING from WEIGHTS THE CALLER SUPPLIES (see [`StartKind`]).
 ///
-/// [`fit`] has exactly two starting points: an existing checkpoint at `out`,
+/// [`fit`] has exactly two starting points: a warm start from an existing checkpoint at `out`,
 /// or fresh random initialisation. That is right for a training job that
 /// owns its output path and either starts or resumes. It is wrong for a
 /// caller fine-tuning a PRETRAINED model into a new file, which is neither:
@@ -2216,6 +2244,7 @@ pub fn fit_from<M: Model>(
         )));
     }
     let cfg = cfg.finalize_for_dataset(vocab, opts.block_size);
+    eprintln!("start: weight warm start from the supplied weights (weights only: optimizer moments, schedule position, data order and generator restart; an exact resume is FitControl::state)");
     let mut weights = M::init_weights(&cfg, opts.seed);
     for (name, values) in init {
         // Only what the architecture actually has, and only at the shape it
@@ -2262,7 +2291,7 @@ pub fn fit_distributed<M: Model>(
     grad_sync: GradSync<'_>,
 ) -> std::io::Result<(FitReport, M)> {
     let (train, val, batch_cfg, vocab, itos) = load_dataset_with_itos(dir, opts)?;
-    let model = build_or_resume::<M>(cfg, opts, out, vocab);
+    let (model, _start) = build_or_warm_start::<M>(cfg, opts, out, vocab);
     let obj = CausalLm::new(train, val, batch_cfg, itos);
     let shard = (grad_sync.rank, grad_sync.collective.world_size());
     let write = if grad_sync.rank == 0 { out } else { None };

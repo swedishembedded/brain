@@ -17,3 +17,4 @@ mod optimizer_state;
 mod recompute;
 mod shard_parity;
 mod streamed_construction;
+mod warm_start;

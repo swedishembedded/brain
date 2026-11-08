@@ -411,7 +411,7 @@ clipping, AdamW, resume, wall-clock checkpointing, eval cadence, the final
 save - stays in one loop, owned by `train::fit_with`, never by the
 objective.
 
-`crates/model/src/train.rs` gains `build_or_resume::<M>(cfg, opts, out,
+`crates/model/src/train.rs` gains `build_or_warm_start::<M>(cfg, opts, out,
 dataset_vocab)` (the resume-vs-fresh-init block hoisted verbatim out of
 `fit`) and `fit_with::<M, O: Objective<M>>(model, obj, opts, out)`. `fit`
 and `fit_weighted` become delegates through `CausalLm`/`WeightedLm` with
@@ -999,7 +999,7 @@ loudly rather than silently re-shaping the adapter. The
 assignment regardless of resume-vs-fresh) is hoisted above the resume/fresh
 branch so it still runs on the resume path. Once P8 lands, the better end
 state is `qwen3::finetune` collapsing onto `fit_with(CausalLm)` and getting
-resume from `build_or_resume` for free.
+resume from `build_or_warm_start` for free.
 
 Gate: train -> save -> resume -> train; loss keeps dropping and `‖B·A‖`
 grows monotonically across the resume boundary, mirroring `crates/qwen3/

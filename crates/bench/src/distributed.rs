@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 
 use gpt2::GptConfig;
 use model::collective::{SimulatedLink, TimedCollective};
-use model::train::{build_or_resume, causal_lm, fit_controlled_sharded, load_dataset_with_itos, FitOpts, FitControl, StepReport};
+use model::train::{build_or_warm_start, causal_lm, fit_controlled_sharded, load_dataset_with_itos, FitOpts, FitControl, StepReport};
 use model::netcollective::GroupHello;
 use model::{Collective, GradSync, HostCollective, JobSecret, Model, NetworkCollective, ShapedCollective, Snapshot};
 
@@ -207,7 +207,7 @@ fn train_rank(timed: &TimedCollective<'_>, rank: usize, world: usize, cfg: &Prof
     let opts = cfg.fit_opts();
     let (train, val, batch_cfg, vocab, itos) =
         load_dataset_with_itos(data, &opts).map_err(|e| format!("rank {rank}: load the profile dataset: {e}"))?;
-    let model = build_or_resume::<gpt2::Gpt>(cfg.model_config(), &opts, None, vocab);
+    let (model, _start) = build_or_warm_start::<gpt2::Gpt>(cfg.model_config(), &opts, None, vocab);
     let objective = causal_lm::<gpt2::Gpt>(train, val, batch_cfg, itos);
 
     let mut stamps: Vec<Instant> = Vec::with_capacity(cfg.steps as usize + 2);

@@ -155,7 +155,7 @@ impl<M: Model> Objective<M> for WeightedLm {
 
 /// Train any weighted-loss-capable [`Model`] on the weighted dataset in
 /// `dir`, writing the final checkpoint to `out`. Same resume/eval/checkpoint
-/// semantics as [`model::train::fit`] (reused via [`model::build_or_resume`] +
+/// semantics as [`model::train::fit`] (reused via [`model::build_or_warm_start`] +
 /// [`model::fit_with`], not duplicated) - the only difference is every batch
 /// is [`Batch::LmWeighted`] instead of [`Batch::Lm`], via the [`WeightedLm`]
 /// objective, which also opts the model into weighted-loss mode via
@@ -173,7 +173,7 @@ impl<M: Model> Objective<M> for WeightedLm {
 /// immediate failure rather than silently training unweighted.
 pub fn fit_weighted<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
     let (train, val, batch_cfg, vocab, itos) = load_weighted(dir, opts)?;
-    let model = model::build_or_resume::<M>(cfg, opts, out, vocab);
+    let (model, _start) = model::build_or_warm_start::<M>(cfg, opts, out, vocab);
     let obj = WeightedLm { train, val, batch_cfg, itos };
     model::fit_with(model, obj, opts, out)
 }
