@@ -68,4 +68,5 @@ pub mod rope;
 pub mod schedule;
 pub mod spec;
 pub mod video_vae;
+pub mod vsa;
 pub mod vocoder;

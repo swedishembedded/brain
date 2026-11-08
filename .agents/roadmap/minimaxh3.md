@@ -904,6 +904,46 @@ The 0.43 s/block wall-minus-device gap was the driver allocating each op's
 fresh multi-hundred-MB buffer (94% of host samples in the NVIDIA kernel
 module); the arena (`Gpu::scratch_scope_in`) removed it.
 
+## Few-step ref2va: adapter and video sparse attention
+
+The target is ref2va at 4 forwards with a few-step LoRA
+(`lightx2v/Minimax-h3-Turbo`, `minimax_h3_ref2v_turbo_4step_v0.1_bf16`,
+diffusers PEFT, rank 128, header alpha 8) and VSA over the generated video
+with the trained `to_gate_compress` of every block
+(`barelymining/ComfyUI-MiniMax-H3-FastVideo/fasth3_vsa_gate.safetensors`,
+50 x bf16 `[7168, 5376]`, extracted from
+`FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree`). Both are
+MiniMax H3 Community License derivatives.
+
+- [x] `steps` counts forwards; the schedule is the diffusers grid of
+      `steps + 1` points, as `ModelTC/Minimax-H3-Turbo`'s
+      `inference_minimax_h3.py` runs it (its 4-forward grid is the shifted
+      `[1, 0.75, 0.5, 0.25, 0]`, FastVideo's `dmd_denoising_steps`
+      `[999, 749, 500, 250]`). ComfyUI's H3 sampler steps the audio as a
+      rescaled variable in the video sigma instead of its own Euler
+      schedule; the distillation's own inference is the authority here.
+- [x] The adapter (`crate::lora`): resident int8 corrections beside each
+      linear, the streamed fp32 fold, strict target checks, placement.
+- [x] Segment boundaries recorded by the layout builders
+      (`pipeline::Segment`), the tile geometry and the host reference
+      attention (`crate::vsa`).
+- [ ] Device VSA: tile means, scores, the per-region top-k, the block-
+      sparse flash attention over the selected tiles and the gated coarse
+      branch, each a WGSL kernel gated against `vsa::attention_host`, then
+      the block's attention arm and the gate import.
+- [ ] Real-weight runs: dense ref2va (20 steps), adapter at 4 steps, VSA
+      at 4 steps; measured per step and per card.
+
+The VSA oracle is FastVideo's `video_sparse_attn_h3.py` (Apache-2.0):
+64-row tiles, `(4, 4, 4)` over video; dense segments lead as segment-pure
+chunks wherever they sit; per head, scores are mean q . mean k over
+`sqrt(d)`; prefix queries attend every tile; video queries attend every
+prefix tile ("exempt") and `ceil((1 - s) * n)` tiles of each video region,
+reference videos at their own rate; the coarse branch `softmax(scores) .
+mean(v)` is added per row scaled by `to_gate_compress(x)`, `x` the
+modulated block input. The distillation ran at 0.9 sparsity; the ComfyUI
+transplant onto ref2va uses 0.75.
+
 ## Recorded gaps (kept current)
 
 - `matmul_i8_dyn` runs at 51-54% of the measured int8 roof at H3's shapes
