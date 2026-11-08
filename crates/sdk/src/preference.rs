@@ -397,6 +397,10 @@ impl PreferenceFineTune {
             "alpha_bits": alpha.to_bits(),
             "beta_bits": self.beta.to_bits(),
             "beta_ablation": self.beta_ablation,
+            // The reference is the policy the run starts from: the base (by digest) and the adapter continued (by
+            // digest), scored in the format the frozen base is held in. A different base format scores a different
+            // reference, so a state saved under another is a different run.
+            "reference": { "base_digest": base_digest, "adapter_digest": parent, "base_format": self.base_format },
             "nll_weight_bits": self.nll_weight.to_bits(),
             "grad_accum": self.grad_accum,
             "keep_reasoning": self.keep_reasoning,

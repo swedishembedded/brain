@@ -208,6 +208,10 @@ fn a_cancelled_preference_run_resumes_to_the_uninterrupted_result() {
     let err = fine_tune(&model, &out).beta(0.2).run().unwrap_err();
     assert!(err.to_string().contains("different data or a different starting point"), "{err}");
 
+    // The reference is scored over the base as it is held: another base format is another reference.
+    let err = fine_tune(&model, &out).base_format("bf16").run().unwrap_err();
+    assert!(err.to_string().contains("different data or a different starting point"), "{err}");
+
     let resumed = fine_tune(&model, &out).run().unwrap();
     assert_eq!(resumed.status, FineTuneStatus::Completed);
     assert_eq!(resumed.resumed_at, Some(3));

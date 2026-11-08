@@ -163,6 +163,11 @@ fn a_cancelled_run_resumes_to_the_uninterrupted_result() {
 
     let err = fine_tune(&model, &out).lr(5e-3).run().unwrap_err();
     assert!(err.to_string().contains("different training options"), "{err}");
+    // What is rendered and how the frozen base is held are part of the run too, beyond the optimiser's options.
+    for (what, changed) in [("thinking", fine_tune(&model, &out).thinking(false)), ("pack_answers", fine_tune(&model, &out).pack_answers(true)), ("base format", fine_tune(&model, &out).base_format("bf16"))] {
+        let err = changed.run().unwrap_err();
+        assert!(err.to_string().contains("different data or a different starting point"), "{what}: {err}");
+    }
 
     let resumed = fine_tune(&model, &out).run().unwrap();
     assert_eq!(resumed.status, FineTuneStatus::Completed);

@@ -1217,6 +1217,13 @@ impl ChatFineTune {
             "weight_decay_bits": self.weight_decay.to_bits(),
             "repeats": repeats,
             "grad_accum": self.grad_accum,
+            // What else the resolved run depends on beyond the optimiser options the loop records itself: how the
+            // frozen base is held (whatever the automatic choice came to), how the records are rendered, and which
+            // base tensors train beside the adapter.
+            "base_tier": family.tier_name(),
+            "thinking": self.thinking,
+            "pack_answers": self.pack_answers,
+            "modules_to_save": self.modules_to_save,
             "policy_gradient": self.policy_gradient.map(|c| serde_json::json!({
                 "clip_eps_bits": c.clip_eps.to_bits(),
                 "kl_beta_bits": c.kl_beta.to_bits(),
