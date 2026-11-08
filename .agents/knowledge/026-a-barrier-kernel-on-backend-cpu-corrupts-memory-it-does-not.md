@@ -7,8 +7,10 @@
 branches must wrap the recording, and a new kernel test is not done when it is green on the GPU.
 
 ## What happened
-`DeviceCaps::workgroup_reductions` is false on the CPU JIT because it cannot compile
-`workgroupBarrier`. What it does with one is worse than an error.
+`DeviceCaps::workgroup_reductions` is false on the CPU JIT: it runs a barrier kernel as
+per-invocation loops split at the barrier, and that model mis-executes the cooperative reduction
+kernels (the field's documentation in `crates/backend-api/src/lib.rs` is the current statement).
+What it does with one is worse than an error.
 `crates/gradcheck/tests/it/layernorm2d_kernels.rs` recorded `layernorm_rows` (2 barriers) there
 and the process died with
 
