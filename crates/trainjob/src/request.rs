@@ -54,6 +54,7 @@ pub fn action_spec() -> ActionSpec {
         .param(optional_f("lr", "peak learning rate", 0.0, 1.0))
         .param(optional_f("weight_decay", "AdamW weight decay on the adapter", 0.0, 1.0))
         .param(ParamSpec::new("grad_accum", ParamType::Int, "records averaged into one optimiser step").default(json!(1)).min(1.0).max(4096.0).step(1.0))
+        .param(ParamSpec::new("strict_updates", ParamType::Bool, "abort at the first optimiser step whose loss or gradient is not finite (off: such a step is skipped, and the run aborts on the third in a row); the adapter is never updated with a non-finite value").default(json!(false)))
         .param(ParamSpec::new("seed", ParamType::Int, "seed of a fresh adapter's initialisation and the batch order (random when omitted; the report carries the one used)").min(0.0))
         .param(ParamSpec::new("max_block", ParamType::Int, "the longest training row in tokens: the memory reserved for the run is sized to it, and a record longer than it is refused by name").default(json!(8192)).min(64.0).max(1_048_576.0).step(1.0))
         .param(ParamSpec::new("thinking", ParamType::Bool, "train the model to reason before it answers (off: trained for no-think mode)").default(json!(true)))
@@ -236,6 +237,7 @@ pub struct Params {
     pub lr: Option<f32>,
     pub weight_decay: Option<f32>,
     pub grad_accum: u32,
+    pub strict_updates: bool,
     pub seed: Option<u64>,
     pub max_block: u32,
     pub thinking: bool,
@@ -342,6 +344,9 @@ mod tests {
         assert_eq!((r.params.objective, r.params.steps, r.params.max_block, r.params.grad_accum, r.params.thinking), (Objective::Sft, 100, 8192, 1, true));
         assert_eq!((r.params.rank, r.params.lr, r.params.seed), (None, None, None), "what the caller does not name stays the trainer's own default");
         assert_eq!(r.data.digests().len(), 1);
+        assert!(!r.params.strict_updates, "a non-finite step is skipped by default");
+        let strict = request(json!({"base": "Qwen/Qwen3.8-27B-FP8", "data": json!({"train": {"digest": digest(1)}}).to_string(), "strict_updates": true}), &[]).unwrap();
+        assert!(strict.params.strict_updates);
     }
 
     #[test]

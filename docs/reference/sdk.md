@@ -567,7 +567,7 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   base that is not `qwen35`; `eval_every`, `patience`, `keep_best`, `held_out` and `held_out_text` (a run has no
   monitoring loss to select on: score the exported adapter with `score_tokens_qwen35`); a held-out or monitoring set
   that carries advantages; `SeqMean` with more than one sequence per batch row.
-- `.continue_from`, `.grad_accum`, `.steps`, `.lr`, `.rank`, `.base_format`, `.activations`, `.checkpoint_every` and
+- `.continue_from`, `.grad_accum`, `.strict_updates`, `.steps`, `.lr`, `.rank`, `.base_format`, `.activations`, `.checkpoint_every` and
   `run_with(&cancel, ..)` behave as on supervised `ChatFineTune`; an interrupted run resumes from its state (a state
   from other policy-gradient settings is refused like any other different run).
 

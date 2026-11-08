@@ -249,6 +249,7 @@ pub fn build_fine_tune(request: &Request, base_dir: &Path, staged: &Staged, out_
         .out_dir(out_dir)
         .steps(p.steps)
         .grad_accum(p.grad_accum)
+        .strict_updates(p.strict_updates)
         .thinking(p.thinking)
         .pack_answers(p.pack_answers)
         .max_block(p.max_block)

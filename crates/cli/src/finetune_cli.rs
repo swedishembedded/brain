@@ -28,6 +28,8 @@ brain finetune BASE --dataset FILE --out DIR [options]
   --lr X             the peak learning rate.
   --weight-decay X   AdamW weight decay.
   --grad-accum N     micro-batches per step.
+  --strict-updates   abort at the first optimiser step whose loss or gradient is not finite (default: skip it and
+                     abort on the third in a row); the weights are never updated with a non-finite value.
   --seed N           the seed of the initial adapter and the batch order (default random, reported).
   --max-block N      the longest record, in tokens.
   --base-format F    the frozen base's format for an adapter: f32|bf16|int8|nf4|fp8, as far as the
@@ -75,6 +77,7 @@ struct Args {
     lr: Option<f32>,
     weight_decay: Option<f32>,
     grad_accum: Option<u32>,
+    strict_updates: bool,
     stages: Option<u32>,
     native_sparse: bool,
     lsa_window: Option<usize>,
@@ -121,6 +124,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--lr" => a.lr = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--weight-decay" => a.weight_decay = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--grad-accum" => a.grad_accum = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--strict-updates" => a.strict_updates = true,
             "--native-sparse" => a.native_sparse = true,
             "--lsa-window-only" => a.lsa_window_only = true,
             "--lsa-window" => a.lsa_window = Some(number(&need(&mut i, &flag)?, &flag)?),
@@ -220,6 +224,7 @@ fn lora(a: &Args, rank: u32) -> brain::ChatFineTune {
     if let Some(v) = a.grad_accum {
         t = t.grad_accum(v);
     }
+    t = t.strict_updates(a.strict_updates);
     if let Some(v) = a.stages {
         t = t.stages(v);
     }
@@ -277,6 +282,7 @@ fn full(a: &Args) -> brain::ChatFullFineTune {
     if let Some(v) = a.grad_accum {
         t = t.grad_accum(v);
     }
+    t = t.strict_updates(a.strict_updates);
     if let Some(v) = a.stages {
         t = t.stages(v);
     }
@@ -414,6 +420,12 @@ mod tests {
     }
 
     #[test]
+    fn strict_updates_is_a_flag_and_off_by_default() {
+        assert!(!parse(&argv("base --steps 3")).unwrap().strict_updates);
+        assert!(parse(&argv("base --strict-updates")).unwrap().strict_updates);
+    }
+
+    #[test]
     fn a_number_that_does_not_parse_is_an_error_naming_the_flag() {
         let err = parse(&argv("base --steps many")).unwrap_err();
         assert!(err.contains("--steps") && err.contains("many"), "{err}");
@@ -421,7 +433,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }

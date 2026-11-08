@@ -102,6 +102,7 @@ pub struct ChatFineTune {
     replay_share: Option<f32>,
     weighted_replay: Vec<(PathBuf, f32)>,
     grad_accum: u32,
+    strict_updates: bool,
     continue_from: Option<PathBuf>,
     out_dir: Option<PathBuf>,
     adapter_id: Option<String>,
@@ -569,6 +570,7 @@ impl ChatFineTune {
             replay_share: None,
             weighted_replay: Vec::new(),
             grad_accum: 1,
+            strict_updates: false,
             stages: 0,
             native_sparse: None,
             modules_to_save: Vec::new(),
@@ -744,6 +746,14 @@ impl ChatFineTune {
     /// and so is a device without workgroup-barrier kernels (use a GPU or `software`).
     pub fn native_sparse_attention(mut self, cfg: model::lsa::LsaConfig, long_range: bool) -> Self {
         self.native_sparse = Some(model::NativeSparse { cfg, long_range });
+        self
+    }
+
+    /// Abort the run at the first optimiser step whose loss or gradient is not finite, instead of skipping
+    /// it and going on (the default skips up to two in a row and aborts on the third). The weights are left as
+    /// they were either way: a non-finite value never reaches them.
+    pub fn strict_updates(mut self, strict: bool) -> Self {
+        self.strict_updates = strict;
         self
     }
 
@@ -1173,6 +1183,7 @@ impl ChatFineTune {
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         let opts = model::FitOpts {
             grad_accum: self.grad_accum,
+            strict_updates: self.strict_updates,
             eval_interval: self.eval_every,
             // Every monitoring record, once, each time.
             eval_batches: 0,

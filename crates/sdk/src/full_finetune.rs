@@ -77,6 +77,7 @@ pub struct ChatFullFineTune {
     replay_share: Option<f32>,
     weighted_replay: Vec<(PathBuf, f32)>,
     grad_accum: u32,
+    strict_updates: bool,
     stages: u32,
     native_sparse: Option<model::NativeSparse>,
     out_dir: Option<PathBuf>,
@@ -105,6 +106,7 @@ impl ChatFullFineTune {
             replay_share: None,
             weighted_replay: Vec::new(),
             grad_accum: 1,
+            strict_updates: false,
             stages: 0,
             native_sparse: None,
             out_dir: None,
@@ -170,6 +172,14 @@ impl ChatFullFineTune {
     }
 
     /// Micro-batches summed into each optimizer step (default 1).
+    /// Abort the run at the first optimiser step whose loss or gradient is not finite, instead of skipping
+    /// it and going on (the default skips up to two in a row and aborts on the third). The weights are left as
+    /// they were either way: a non-finite value never reaches them.
+    pub fn strict_updates(mut self, strict: bool) -> Self {
+        self.strict_updates = strict;
+        self
+    }
+
     pub fn grad_accum(mut self, micro_batches: u32) -> Self {
         self.grad_accum = micro_batches;
         self
@@ -299,7 +309,7 @@ impl ChatFullFineTune {
         plan_before_load(&open, block, &set)?;
 
         let seed = resolve_seed(self.seed, None)?;
-        let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, ..fit_opts(self.steps, block, self.lr, seed) };
+        let opts = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, ..fit_opts(self.steps, block, self.lr, seed) };
         let digest_clock = std::time::Instant::now();
         let base_digest = base_digest(&open)?;
         model::finetune::stage_time("sdk: digest the base weights", digest_clock);

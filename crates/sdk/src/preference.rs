@@ -78,6 +78,7 @@ pub struct PreferenceFineTune {
     beta: f32,
     nll_weight: f32,
     grad_accum: u32,
+    strict_updates: bool,
     stages: u32,
     native_sparse: Option<model::NativeSparse>,
     keep_reasoning: bool,
@@ -112,6 +113,7 @@ impl PreferenceFineTune {
             beta: DEFAULT_DPO_BETA,
             nll_weight: 0.0,
             grad_accum: 1,
+            strict_updates: false,
             stages: 0,
             native_sparse: None,
             keep_reasoning: false,
@@ -228,6 +230,14 @@ impl PreferenceFineTune {
     /// [`crate::ChatFullFineTune::native_sparse_attention`].
     pub fn native_sparse_attention(mut self, cfg: model::lsa::LsaConfig, long_range: bool) -> Self {
         self.native_sparse = Some(model::NativeSparse { cfg, long_range });
+        self
+    }
+
+    /// Abort the run at the first optimiser step whose loss or gradient is not finite, instead of skipping
+    /// it and going on (the default skips up to two in a row and aborts on the third). The weights are left as
+    /// they were either way: a non-finite value never reaches them.
+    pub fn strict_updates(mut self, strict: bool) -> Self {
+        self.strict_updates = strict;
         self
     }
 
@@ -363,7 +373,7 @@ impl PreferenceFineTune {
         let state_path = out_dir.join(STATE_FILE);
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         // Both rows of a pair share one forward.
-        let opts = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, stages: self.stages, native_sparse: self.native_sparse, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
+        let opts = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, strict_updates: self.strict_updates, stages: self.stages, native_sparse: self.native_sparse, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
         let base_digest = digest(&weights)?;
         let dataset_id = digest(dataset)?;
         let identity = serde_json::json!({
