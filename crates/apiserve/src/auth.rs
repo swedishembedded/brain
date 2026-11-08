@@ -143,7 +143,7 @@ impl Caller {
     /// Take one of the caller's in-flight slots, or `None` when all are taken.
     pub(crate) fn begin(self: &Arc<Caller>) -> Option<InFlight> {
         use std::sync::atomic::Ordering;
-        let taken = self.in_flight.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < self.max_in_flight).then_some(n + 1));
+        let taken = self.in_flight.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < self.max_in_flight).then_some(n + 1));
         taken.ok().map(|_| InFlight(self.clone()))
     }
 }
