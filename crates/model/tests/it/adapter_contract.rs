@@ -58,3 +58,38 @@ fn a_card_that_matches_its_tensors_loads_and_a_card_without_targets_still_loads(
     let legacy = write("legacy", None, &["blocks.0.attn.wq.weight"]);
     assert_eq!(read_adapter(&legacy).unwrap().sites.len(), 1);
 }
+
+/// An adapter of one site whose file holds `held` as saved tensors while its card lists `listed`.
+fn write_saved(name: &str, listed: Option<&[&str]>, held: &[&str]) -> String {
+    let path = std::env::temp_dir().join(format!("brain-adapter-contract-{name}-{}.safetensors", std::process::id()));
+    let mut card = ModelCard::new("contract", "qwen");
+    card.adapter = Some(Adapter {
+        kind: "lora".to_string(),
+        rank: Some(2),
+        alpha: Some(4.0),
+        modules_to_save: listed.map(|l| l.iter().map(|s| s.to_string()).collect()),
+        ..Default::default()
+    });
+    let mut tensors = vec![("blocks.0.attn.wq.weight.lora_a".to_string(), vec![2, 4], vec![0.1f32; 8]), ("blocks.0.attn.wq.weight.lora_b".to_string(), vec![4, 2], vec![0.1f32; 8])];
+    for base in held {
+        tensors.push((format!("{base}.saved"), vec![3], vec![0.5f32; 3]));
+    }
+    let path = path.to_str().unwrap().to_string();
+    checkpoint::st::save_safetensors(&path, &tensors, &serde_json::json!({"rank": 2, "alpha": 4.0}), Some(&card)).unwrap();
+    path
+}
+
+#[test]
+fn full_tensors_are_read_as_the_card_lists_them_and_a_disagreeing_file_is_refused() {
+    let ok = write_saved("saved-ok", Some(&["blocks.0.ln.weight", "blocks.0.gate"]), &["blocks.0.ln.weight", "blocks.0.gate"]);
+    let adapter = read_adapter(&ok).unwrap();
+    assert_eq!(adapter.sites.len(), 1);
+    assert_eq!(adapter.saved.iter().map(|t| t.base.as_str()).collect::<Vec<_>>(), ["blocks.0.gate", "blocks.0.ln.weight"], "sorted by name");
+    assert!(adapter.saved.iter().all(|t| t.data == vec![0.5; 3]));
+
+    let missing = read_adapter(&write_saved("saved-missing", Some(&["blocks.0.ln.weight"]), &[])).err().expect("refused").to_string();
+    assert!(missing.contains("blocks.0.ln.weight") && missing.contains("modules_to_save"), "{missing}");
+    let unlisted = read_adapter(&write_saved("saved-unlisted", None, &["blocks.0.ln.weight"])).err().expect("refused").to_string();
+    assert!(unlisted.contains("blocks.0.ln.weight.saved") && unlisted.contains("does not list"), "{unlisted}");
+    assert!(read_adapter(&write("plain", Some(&["wq"]), &["blocks.0.attn.wq.weight"])).unwrap().saved.is_empty(), "an adapter of factors only has no full tensors");
+}

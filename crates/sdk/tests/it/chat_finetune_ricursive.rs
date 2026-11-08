@@ -341,3 +341,43 @@ fn a_policy_gradient_is_refused_by_an_architecture_that_does_not_declare_it() {
     let err = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).arch("qwen3").dataset(write_dataset(&model)).out_dir(model.join("run")).policy_gradient(PolicyGradientConfig::default()).device(cpu()).run().expect_err("refused");
     assert!(err.to_string().contains("qwen3") && err.to_string().contains("policy_gradient"), "{err}");
 }
+
+/// Spec: `modules_to_save` trains the named base tensors beside the factors, the adapter file carries them and its card
+/// lists them, and a run that continues the adapter keeps training them; an architecture whose trainer does not declare
+/// it refuses by name.
+#[test]
+fn a_ricursive_adapter_carries_the_norms_and_gates_it_trained() {
+    let model = ripple_model_dir("ripple-saved");
+    let run = |tag: &str, saved: Vec<String>, from: Option<&Path>| {
+        let t = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+            .arch("ricursive")
+            .dataset(write_dataset(&model))
+            .out_dir(model.join(tag))
+            .rank(2)
+            .steps(6)
+            .lr(5e-2)
+            .seed(7) // seed: runs compared with each other need the same stream
+            .modules_to_save(saved)
+            .device(cpu());
+        (if let Some(from) = from { t.continue_from(from) } else { t }).run().expect("the LoRA fine-tune runs")
+    };
+    let first = run("first", vec!["norms".into(), "gates".into()], None);
+    assert!(first.final_loss.zip(first.initial_loss).is_some_and(|(last, start)| last < start), "{first:?}");
+    let adapter = first.adapter.clone().expect("an adapter");
+    let read = model::lora::device_adapter::read_adapter(adapter.to_str().unwrap()).unwrap();
+    let names: Vec<&str> = read.saved.iter().map(|t| t.base.as_str()).collect();
+    assert!(names.contains(&"model.norm.weight") && names.iter().any(|n| n.ends_with("value_res_lambda")) && names.iter().any(|n| n.ends_with("q_norm.weight")), "{names:?}");
+    let card = checkpoint::st::read_card(adapter.to_str().unwrap()).unwrap().unwrap().adapter.unwrap();
+    assert_eq!(card.modules_to_save.as_deref().map(|l| l.len()), Some(read.saved.len()), "the card lists what the file holds");
+
+    // Continuing keeps the full tensors (the card's list is the run's) and moves them on.
+    let second = run("second", Vec::new(), Some(&adapter));
+    let again = model::lora::device_adapter::read_adapter(second.adapter.unwrap().to_str().unwrap()).unwrap();
+    assert_eq!(again.saved.iter().map(|t| &t.base).collect::<Vec<_>>(), read.saved.iter().map(|t| &t.base).collect::<Vec<_>>());
+    assert!(again.saved.iter().zip(&read.saved).any(|(a, b)| a.data != b.data), "the continued run trained them further");
+
+    let err = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).arch("qwen3").dataset(write_dataset(&model)).out_dir(model.join("q")).modules_to_save(vec!["norms".into()]).device(cpu()).run().expect_err("refused");
+    assert!(err.to_string().contains("qwen3") && err.to_string().contains("modules_to_save"), "{err}");
+    let err = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).arch("ricursive").dataset(write_dataset(&model)).out_dir(model.join("bad")).modules_to_save(vec!["nonesuch".into()]).device(cpu()).run().expect_err("refused");
+    assert!(err.to_string().contains("nonesuch"), "{err}");
+}

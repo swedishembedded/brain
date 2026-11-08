@@ -182,6 +182,9 @@ pub struct LoraRequest<'a> {
     /// fine-tuners refuse any other before a checkpoint is opened
     /// ([`LoraRequest::checked`]).
     pub base: &'a TierPolicy,
+    /// Base tensors to train in full beside the factors and carry in the adapter file (PEFT's `modules_to_save`),
+    /// by leaf, name or group as the family resolves them ([`ChatTrainer::MODULES_TO_SAVE`]). Empty: factors only.
+    pub modules_to_save: &'a [String],
 }
 
 impl<'a> LoraRequest<'a> {
@@ -248,6 +251,10 @@ pub trait ChatTrainer {
     /// whose trainable model carries [`crate::training::TokenObjectives`] declares it). A request for it is refused by name
     /// before the base is read where this is false.
     const POLICY_GRADIENT: bool = false;
+
+    /// Whether [`Self::train_lora`] trains the base tensors a request names in `modules_to_save` in full beside the
+    /// factors and saves them with the adapter. A request for it is refused by name where this is false.
+    const MODULES_TO_SAVE: bool = false;
 
     /// Whether the held-out record sets of a run are scored on the resident model before the first step and after the
     /// last ([`ScoredFit`]). A request for it is refused by name where this is false.

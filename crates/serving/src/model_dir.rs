@@ -1319,7 +1319,7 @@ mod tests {
         std::fs::create_dir_all(&adapter_dir).unwrap();
         let mut adapter_card = ModelCard::new(adapter_id, "qwen");
         adapter_card.variant_of = Some("Qwen/Qwen3-Toy".to_string());
-        adapter_card.adapter = Some(st::Adapter { kind: "lora".into(), rank: Some(4), base: Some("Qwen/Qwen3-Toy".to_string()), alpha: Some(8.0), targets: Some(vec!["wq".into()]), dataset_id: None, per_target: None });
+        adapter_card.adapter = Some(st::Adapter { kind: "lora".into(), rank: Some(4), base: Some("Qwen/Qwen3-Toy".to_string()), alpha: Some(8.0), targets: Some(vec!["wq".into()]), dataset_id: None, per_target: None, modules_to_save: None });
         let adapter_file = adapter_dir.join("adapter.brain.safetensors");
         st::save_safetensors(
             adapter_file.to_str().unwrap(),
@@ -1422,7 +1422,7 @@ mod tests {
         st::save_safetensors(repo.join("model.brain.safetensors").to_str().unwrap(), &[("w".into(), vec![1u64], vec![0.0f32])], &serde_json::json!({}), Some(&base_card)).unwrap();
         write_tokenizer(&repo);
         let mut card = ModelCard::new("Qwen/Qwen3-Toy:lab:wide:v1", "qwen");
-        card.adapter = Some(st::Adapter { kind: "lora".into(), rank: Some(32), base: Some("Qwen/Qwen3-Toy".to_string()), alpha: Some(64.0), targets: Some(vec!["wq".into(), "down".into()]), dataset_id: None, per_target: None });
+        card.adapter = Some(st::Adapter { kind: "lora".into(), rank: Some(32), base: Some("Qwen/Qwen3-Toy".to_string()), alpha: Some(64.0), targets: Some(vec!["wq".into(), "down".into()]), dataset_id: None, per_target: None, modules_to_save: None });
         let (a, b) = (vec![0.1f32; 32 * 2], vec![0.1f32; 2 * 32]);
         st::save_safetensors(
             adapter_dir.join("adapter.brain.safetensors").to_str().unwrap(),

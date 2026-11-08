@@ -69,7 +69,7 @@ fn write_tune(dir: &Path, cfg: &MiniCpmVConfig, tune: &Path) {
         alpha: Some(alpha),
         targets: Some(qwen35::config::lora_targets()),
         dataset_id: None,
-        per_target: None,
+        per_target: None, modules_to_save: None,
     });
     checkpoint::st::save_safetensors(tune.join(TUNE_DECODER_ADAPTER).to_str().unwrap(), &decoder, &serde_json::json!({}), Some(&card)).unwrap();
 

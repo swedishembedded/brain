@@ -122,7 +122,7 @@ fn load_adapter(e: &mut Qwen35GgufEngine) -> AdapterId {
             b: (0..s.spec.out * rank).map(|_| next(0.8)).collect(),
         })
         .collect();
-    let adapter = DeviceAdapter { rank: rank as u32, alpha: 4.0, sites };
+    let adapter = DeviceAdapter { rank: rank as u32, alpha: 4.0, sites, saved: Vec::new() };
     e.load_adapter(VerifiedAdapter { label: format!("adapter-{seed}"), digest: format!("sha256:{seed:064x}"), adapter }).expect("the adapter fits the tiny GGUF's sites")
 }
 

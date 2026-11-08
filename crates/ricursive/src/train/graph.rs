@@ -245,7 +245,9 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
     // Which linears are held packed (outside the store). Training a packed linear is a straight-through dead end:
     // only an adapter build, whose base is frozen, may hold one.
     let linear_shapes: Vec<(String, usize, usize)> = crate::weights::all_linears(&c).into_iter().filter(|(name, ..)| cfg.shard_owns(name, &shard)).collect();
-    let packed: std::collections::HashSet<String> = linear_shapes.iter().filter(|(name, ..)| opts.tiers.want(name) != gpu_core::select::Dtype::F32).map(|(name, ..)| name.clone()).collect();
+    // A linear the adapter also saves in full is trained, so it lives in the store as f32 whatever tier the rest is held at.
+    let saved_in_full = |name: &str| cfg.lora.as_ref().is_some_and(|lora| lora.saves(name));
+    let packed: std::collections::HashSet<String> = linear_shapes.iter().filter(|(name, ..)| opts.tiers.want(name) != gpu_core::select::Dtype::F32 && !saved_in_full(name)).map(|(name, ..)| name.clone()).collect();
     if train && cfg.lora.is_none() && !packed.is_empty() {
         return Err(format!("ricursive training: a full fine-tune trains f32 weights; {} linear(s) are asked for as {} (train an adapter over a packed base instead)", packed.len(), opts.tiers.describe()));
     }
@@ -488,6 +490,10 @@ impl Ripple {
         if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(lin.leaf)) {
             let params = TieredBase { params: &self.ps, ops: &self.ops, weights: &self.weights };
             rt.backward(self.ops.tensor_gemm(), s, &params, &lin.name, d_out, x, dx, m, lin.k(), lin.n(), &base_dx);
+            // A linear the adapter also saves in full has its own weight gradient beside the factors'.
+            if self.is_trainable(&lin.name) {
+                self.ops.matmul_dw(s, x, d_out, m, lin.n(), lin.k(), self.ps.g(&lin.name));
+            }
             return;
         }
         if self.is_trainable(&lin.name) {

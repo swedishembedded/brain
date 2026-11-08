@@ -318,7 +318,7 @@ fn resuming_an_adapter_continues_its_factors_and_refuses_a_mismatched_one() {
     let (rank, alpha) = (4u32, 8.0f32);
     // An adapter on the `gate` projections only, with recognisable factors.
     let mut card = ModelCard::new("resume-adapter", "qwen35");
-    card.adapter = Some(Adapter { kind: "lora".into(), rank: Some(rank), base: None, alpha: Some(alpha), targets: Some(vec!["gate".into()]), dataset_id: None, per_target: None });
+    card.adapter = Some(Adapter { kind: "lora".into(), rank: Some(rank), base: None, alpha: Some(alpha), targets: Some(vec!["gate".into()]), dataset_id: None, per_target: None, modules_to_save: None });
     let (d, ff, r) = (cfg.d_model as usize, cfg.intermediate_size as usize, rank as usize);
     let mut tensors = Vec::new();
     for l in 0..cfg.n_layers {

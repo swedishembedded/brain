@@ -141,6 +141,8 @@ pub(crate) struct ChatEntry {
     pub scores_exported_pairs: bool,
     /// The family runs the policy-gradient objective ([`ChatTrainer::POLICY_GRADIENT`]).
     pub policy_gradient: bool,
+    /// The family trains and saves base tensors beside the adapter ([`ChatTrainer::MODULES_TO_SAVE`]).
+    pub modules_to_save: bool,
     /// A supervised or policy-gradient LoRA run, with held-out scoring around it.
     pub lora: LoraFn,
     /// The weight formats the family's serving engine holds per linear.
@@ -176,6 +178,7 @@ impl ChatEntry {
             lora_bases: T::LORA_BASES,
             scores_exported_pairs: T::SCORES_EXPORTED_PAIRS,
             policy_gradient: T::POLICY_GRADIENT,
+            modules_to_save: T::MODULES_TO_SAVE,
             lora: lora::<T>,
             served_weights: T::SERVED_WEIGHTS,
             pipelined: T::PIPELINED,
@@ -201,6 +204,9 @@ fn lora<T: ChatTrainer + 'static>(job: LoraJob<'_>, control: FitControl<'_>) -> 
     let unsupported = |what: &str| std::io::Error::new(std::io::ErrorKind::Unsupported, format!("{}: {what} is not wired for this architecture's trainer", T::LORA_BASES.model));
     if job.policy_gradient.is_some() && !T::POLICY_GRADIENT {
         return Err(unsupported("policy-gradient training on rollouts"));
+    }
+    if !job.lora.modules_to_save.is_empty() && !T::MODULES_TO_SAVE {
+        return Err(unsupported("training base tensors in full beside the adapter (modules_to_save)"));
     }
     if !job.held_out.is_empty() && !T::SCORES_HELD_OUT {
         return Err(unsupported("scoring held-out sets before and after the run"));
@@ -253,7 +259,7 @@ fn search<T: ChatTrainer>(job: SearchJob<'_>, on_progress: &mut dyn FnMut(Progre
 fn measure<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, tiers: &TierPolicy, adapter: AdapterArg<'_>) -> std::io::Result<f64> {
     let mut fit = MeasureFit { dir, opts, loss: None };
     let (continue_from, rank, alpha) = adapter.map_or((None, 1, 1.0), |(path, rank, alpha)| (Some(path), rank, alpha));
-    T::train_lora(base, &LoraRequest { rank, alpha, continue_from, base: tiers }, opts, &mut fit)?;
+    T::train_lora(base, &LoraRequest { rank, alpha, continue_from, base: tiers, modules_to_save: &[] }, opts, &mut fit)?;
     fit.loss.ok_or_else(|| std::io::Error::other("the measurement did not run"))
 }
 

@@ -36,7 +36,7 @@ fn example() -> DistillExample {
 }
 
 fn lora(base: &TierPolicy) -> LoraRequest<'_> {
-    LoraRequest { rank: 2, alpha: 2.0, continue_from: None, base }
+    LoraRequest { rank: 2, alpha: 2.0, continue_from: None, base, modules_to_save: &[] }
 }
 
 fn every_declared_base_trains_and_an_undeclared_one_is_refused<Trainer: ChatTrainer>(write_base: impl Fn(&Path)) {

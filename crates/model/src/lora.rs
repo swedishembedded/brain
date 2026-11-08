@@ -1135,6 +1135,7 @@ pub mod device_adapter {
     use checkpoint::st::{Adapter, ModelCard};
 
     use crate::adapter::kind::{LORA_A, LORA_B};
+    use crate::adapter::SAVED_SUFFIX;
     use crate::Model;
 
     /// Write only `model`'s adapter tensors - never the frozen base - to
@@ -1224,6 +1225,10 @@ pub mod device_adapter {
         // complete, or foldable, without it.
         let names: Vec<String> = model.param_names().into_iter().chain(model.frozen_adapter_param_names()).filter(|n| is_adapter_param(n)).collect();
         assert!(!names.is_empty(), "save_adapter: no adapter tensors in the param store");
+        // The base tensors this adapter trains in full: written whole, beside the factors.
+        let mut saved_names: Vec<String> = model.param_names().into_iter().filter(|n| !is_adapter_param(n) && lora.saves(n)).collect();
+        saved_names.sort();
+        let saved_tensors: Vec<(String, Vec<u64>, Vec<f32>)> = saved_names.iter().map(|n| { let data = model.read_weight(n); (format!("{n}{SAVED_SUFFIX}"), vec![data.len() as u64], data) }).collect();
         let mut data: std::collections::HashMap<String, Vec<f32>> = names.iter().map(|n| (n.clone(), model.read_weight(n))).collect();
         if !uniform {
             for base in names.iter().filter_map(|n| n.strip_suffix(LORA_A)).map(str::to_string).collect::<Vec<_>>() {
@@ -1264,6 +1269,7 @@ pub mod device_adapter {
             targets: Some(targets.to_vec()),
             dataset_id: dataset_id.map(str::to_string),
             per_target: None,
+            modules_to_save: (!saved_names.is_empty()).then(|| saved_names.clone()),
         });
         card.training = training;
 
@@ -1271,6 +1277,7 @@ pub mod device_adapter {
         if !dims.is_empty() {
             config["sites"] = dims.iter().map(|(k, (o, i))| (k.clone(), serde_json::json!([o, i]))).collect::<serde_json::Map<_, _>>().into();
         }
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = tensors.into_iter().chain(saved_tensors).collect();
         checkpoint::st::save_safetensors(path, &tensors, &config, Some(&card))
     }
 
@@ -1304,6 +1311,17 @@ pub mod device_adapter {
         pub alpha: f32,
         /// Every targeted linear, sorted by base name.
         pub sites: Vec<AdapterSite>,
+        /// Base tensors the adapter carries in full (PEFT's `modules_to_save`), sorted by name: each REPLACES the
+        /// base's tensor of that name wherever the adapter applies. Empty for an adapter of factors only.
+        pub saved: Vec<SavedTensor>,
+    }
+
+    /// A base tensor an adapter carries in full: `data` is the whole tensor, in the base's own layout.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct SavedTensor {
+        /// The base tensor's name (a norm gain, a gate scalar, a linear).
+        pub base: String,
+        pub data: Vec<f32>,
     }
 
     impl DeviceAdapter {
@@ -1381,7 +1399,20 @@ pub mod device_adapter {
         if let Some(declared) = a.targets.as_deref() {
             check_declared_targets(declared, &sites).map_err(|why| invalid(adapter_path, why))?;
         }
-        Ok((DeviceAdapter { rank, alpha, sites }, card))
+        // The full tensors: the card lists them, the file holds each as `<name>.saved`; a listed one the file lacks,
+        // or one the card does not list, is a file that disagrees with its card.
+        let mut listed = a.modules_to_save.clone().unwrap_or_default();
+        listed.sort();
+        listed.dedup();
+        let mut saved = Vec::with_capacity(listed.len());
+        for base in listed {
+            let data = st.tensors.remove(&format!("{base}{SAVED_SUFFIX}")).ok_or_else(|| invalid(adapter_path, format!("its card lists {base} in modules_to_save but the file holds no {base}{SAVED_SUFFIX}")))?;
+            saved.push(SavedTensor { base, data });
+        }
+        if let Some(unlisted) = st.tensors.keys().find(|n| n.ends_with(SAVED_SUFFIX)) {
+            return Err(invalid(adapter_path, format!("{unlisted} is a saved tensor its card does not list in modules_to_save")));
+        }
+        Ok((DeviceAdapter { rank, alpha, sites, saved }, card))
     }
 
     /// The leaf a site corrects: its base weight's last name component, the
@@ -1431,10 +1462,19 @@ pub mod device_adapter {
                 return Err(invalid(adapter_path, format!("{}: adapter is [{out}, {inn}] but the base weight holds {} values", site.base, w.len())));
             }
         }
+        for saved in &adapter.saved {
+            let w = base.get(&saved.base).ok_or_else(|| invalid(adapter_path, format!("base has no tensor named {} for the adapter to replace", saved.base)))?;
+            if w.len() != saved.data.len() {
+                return Err(invalid(adapter_path, format!("{}: the adapter carries {} values but the base tensor holds {}", saved.base, saved.data.len(), w.len())));
+            }
+        }
         let scale = adapter.scale();
         for site in &adapter.sites {
             let w = base.get_mut(&site.base).expect("checked above");
             fold_delta(w, &site.a, &site.b, adapter.rank as usize, scale);
+        }
+        for saved in adapter.saved {
+            base.insert(saved.base, saved.data);
         }
         Ok((adapter.rank, adapter.alpha))
     }
@@ -1463,6 +1503,13 @@ pub mod device_adapter {
                     _ => {}
                 }
             }
+            for saved in &adapter.saved {
+                match base.numel(&saved.base) {
+                    Some(n) if n != saved.data.len() => return Err(invalid(adapter_path, format!("{}: the adapter carries {} values but the base tensor holds {n}", saved.base, saved.data.len()))),
+                    Some(_) => {}
+                    None => return Err(invalid(adapter_path, format!("the base has no tensor named {} for the adapter to replace", saved.base))),
+                }
+            }
             Ok(FoldedSource { base, adapter })
         }
 
@@ -1474,10 +1521,19 @@ pub mod device_adapter {
         fn site(&self, name: &str) -> Option<&AdapterSite> {
             self.adapter.sites.binary_search_by(|s| s.base.as_str().cmp(name)).ok().map(|i| &self.adapter.sites[i])
         }
+
+        /// The full tensor the adapter carries in place of the base's `name`.
+        fn replaced(&self, name: &str) -> Option<&[f32]> {
+            self.adapter.saved.binary_search_by(|s| s.base.as_str().cmp(name)).ok().map(|i| self.adapter.saved[i].data.as_slice())
+        }
     }
 
     impl checkpoint::TensorSource for FoldedSource<'_> {
         fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+            if let Some(data) = self.replaced(name) {
+                f(data);
+                return true;
+            }
             if self.site(name).is_none() {
                 return self.base.with_tensor(name, f);
             }
@@ -1492,6 +1548,12 @@ pub mod device_adapter {
         /// A targeted linear is folded a block of whole rows at a time (row `o` of the delta needs only row `o` of
         /// `B`), so reading it takes one block of host memory, not the matrix.
         fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+            if let Some(data) = self.replaced(name) {
+                for (i, chunk) in data.chunks(max_elems.max(1)).enumerate() {
+                    f((i * max_elems.max(1)) as u64, chunk);
+                }
+                return true;
+            }
             let Some(site) = self.site(name) else { return self.base.with_tensor_chunks(name, max_elems, f) };
             let (rank, scale) = (self.adapter.rank as usize, self.adapter.scale());
             let inn = site.a.len() / rank;
@@ -1505,7 +1567,7 @@ pub mod device_adapter {
         }
 
         fn raw_words(&self, name: &str) -> Option<&[u32]> {
-            if self.site(name).is_some() { None } else { self.base.raw_words(name) }
+            if self.site(name).is_some() || self.replaced(name).is_some() { None } else { self.base.raw_words(name) }
         }
 
         fn numel(&self, name: &str) -> Option<usize> {
@@ -1517,11 +1579,11 @@ pub mod device_adapter {
         }
 
         fn packed_descriptor(&self, name: &str) -> Option<checkpoint::packed::TensorDescriptor> {
-            if self.site(name).is_some() { None } else { self.base.packed_descriptor(name) }
+            if self.site(name).is_some() || self.replaced(name).is_some() { None } else { self.base.packed_descriptor(name) }
         }
 
         fn load_packed(&self, names: &[&str], req: &checkpoint::packed::LoadRequest<'_>, sink: &mut dyn checkpoint::packed::TensorSink) -> Result<Option<checkpoint::packed::LoadReport>, String> {
-            if names.iter().any(|n| self.site(n).is_some()) {
+            if names.iter().any(|n| self.site(n).is_some() || self.replaced(n).is_some()) {
                 return Ok(None);
             }
             self.base.load_packed(names, req, sink)
@@ -1781,7 +1843,7 @@ pub mod resumable {
             alpha: Some(alpha),
             targets: Some(pairs.iter().map(|(k, _)| k.clone()).collect()),
             dataset_id: None,
-            per_target: None,
+            per_target: None, modules_to_save: None,
         });
         let config = serde_json::json!({ "rank": rank, "alpha": alpha, "resumable": true });
         checkpoint::st::save_safetensors(path, &tensors, &config, Some(&card))

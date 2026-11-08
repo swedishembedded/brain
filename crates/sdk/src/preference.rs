@@ -428,7 +428,7 @@ impl PreferenceFineTune {
         };
         let job = PreferenceJob {
             base: &weights,
-            lora: model::finetune::LoraRequest { rank, alpha, continue_from: self.continue_from.as_deref(), base: &base_tiers },
+            lora: model::finetune::LoraRequest { rank, alpha, continue_from: self.continue_from.as_deref(), base: &base_tiers, modules_to_save: &[] },
             opts: &opts,
             dpo: rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight },
             pairs: packed,

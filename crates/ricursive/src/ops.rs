@@ -150,12 +150,75 @@ pub(crate) fn value_mix(gpu: &Gpu, s: &mut Vec<Step>, x0: &DeviceBuffer, xn: &De
     out
 }
 
+/// The rows of one forward under a bank that holds full tensors (`modules_to_save`): each row's slot, the gathers of
+/// the per-slot tables the forward records where it would read a base norm gain, and a gain of one for the norms whose
+/// own gain is applied by the gather.
+pub(crate) struct SavedRows<'a> {
+    bank: &'a AdapterBank,
+    slots: Vec<u32>,
+    /// The table-row index of each row, repeated per head for a per-head norm, by repeat count.
+    index: std::cell::RefCell<std::collections::HashMap<u32, DeviceBuffer>>,
+    ones: DeviceBuffer,
+}
+
+impl<'a> SavedRows<'a> {
+    /// The saved rows of a forward whose rows run under `namespaces`; `None` when the bank holds no full tensors.
+    /// `width` is the widest norm the forward applies.
+    pub(crate) fn new(gpu: &Gpu, bank: &'a AdapterBank, namespaces: &[model::paged::KvNamespace], width: u32) -> Option<SavedRows<'a>> {
+        if !bank.has_saved() {
+            return None;
+        }
+        let ones = gpu.storage(u64::from(width));
+        gpu.write_f32(&ones, &vec![1.0; width as usize]);
+        Some(SavedRows { bank, slots: bank.slots_of(namespaces), index: Default::default(), ones })
+    }
+
+    fn index(&self, gpu: &Gpu, repeat: u32) -> DeviceBuffer {
+        self.index.borrow_mut().entry(repeat).or_insert_with(|| self.bank.saved().index(gpu, &self.slots, repeat)).clone()
+    }
+
+    /// `rmsnorm` of `rows * repeat` rows of `dim` by the gain of tensor `name`: each row's own (its adapter's, or the
+    /// base's), gathered from the bank's table. A tensor the bank does not hold takes `gain`, the base's.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn norm(&self, gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, name: &str, gain: &DeviceBuffer, dim: u32, rows: u32, repeat: u32, eps: f32) -> DeviceBuffer {
+        let total = rows * repeat;
+        let Some(ix) = self.bank.saved().site_index(name) else { return rmsnorm(gpu, s, x, gain, dim, total, eps) };
+        let gains = self.bank.saved().gather(gpu, s, ix, &self.index(gpu, repeat), total);
+        let unit = rmsnorm(gpu, s, x, &self.ones, dim, total, eps);
+        binary(gpu, s, K_MUL, &unit, &gains, total * dim)
+    }
+
+    /// The value residual's input `(1 - m) x0 + m xn` with each row's own gate `m = sigmoid(value_res_lambda)`: the
+    /// adapter's, or the base's `base_mix`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn value_mix(&self, gpu: &Gpu, s: &mut Vec<Step>, name: &str, x0: &DeviceBuffer, xn: &DeviceBuffer, base_mix: f32, rows: u32, hidden: u32) -> DeviceBuffer {
+        if self.bank.saved().site_index(name).is_none() {
+            return value_mix(gpu, s, x0, xn, base_mix, rows, hidden);
+        }
+        let coeffs: Vec<f32> = self
+            .slots
+            .iter()
+            .flat_map(|&slot| {
+                let m = self.bank.saved().value(name, slot).map_or(base_mix, |v| crate::layer::sigmoid(v[0]));
+                [1.0 - m, m]
+            })
+            .collect();
+        let ab = gpu.storage(coeffs.len() as u64);
+        gpu.write_f32(&ab, &coeffs);
+        let out = gpu.storage(u64::from(rows) * u64::from(hidden));
+        s.push(gpu.step(K_MIX, &[x0, xn, &ab, &out], &[rows * hidden, hidden], rows * hidden));
+        out
+    }
+}
+
 /// The adapter bank's correction of one layer's linears: after a targeted linear `y = x W^T` the bank adds each row's own
 /// adapter's `scale * (x A^T) B^T` to `y` (nothing for a base row), the arithmetic the trainer differentiates, in two
-/// dispatches whatever number of distinct adapters the batch holds.
+/// dispatches whatever number of distinct adapters the batch holds. The layer's norm gains and value gate are each
+/// row's own too when an adapter carries them ([`SavedRows`]).
 pub(crate) struct LayerAdapter<'a> {
     pub bank: &'a AdapterBank,
     pub layer: usize,
+    pub saved: Option<&'a SavedRows<'a>>,
 }
 
 impl LayerAdapter<'_> {
@@ -163,6 +226,24 @@ impl LayerAdapter<'_> {
     /// (`[rows, k]`) to its output `y` (`[rows, n]`); nothing when the bank does not target `leaf`.
     pub(crate) fn correct(&self, ops: &Ops, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, y: &DeviceBuffer, rows: u32, _k: u32, n: u32) {
         self.bank.correct(ops.gpu(), s, self.layer, leaf, x, y, rows, n, 0);
+    }
+
+    /// The norm `suffix` (`input_layernorm.weight` ...) of this layer over `rows * repeat` rows of `dim`, by each row's
+    /// own gain.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn norm(&self, gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, suffix: &str, gain: &DeviceBuffer, dim: u32, rows: u32, repeat: u32, eps: f32) -> DeviceBuffer {
+        match self.saved {
+            Some(saved) => saved.norm(gpu, s, x, &crate::import::layer_tensor(self.layer, suffix), gain, dim, rows, repeat, eps),
+            None => rmsnorm(gpu, s, x, gain, dim, rows * repeat, eps),
+        }
+    }
+
+    /// The value residual's input of this layer, by each row's own gate.
+    pub(crate) fn value_mix(&self, gpu: &Gpu, s: &mut Vec<Step>, x0: &DeviceBuffer, xn: &DeviceBuffer, base_mix: f32, rows: u32, hidden: u32) -> DeviceBuffer {
+        match self.saved {
+            Some(saved) => saved.value_mix(gpu, s, &crate::import::layer_tensor(self.layer, "self_attn.value_res_lambda"), x0, xn, base_mix, rows, hidden),
+            None => value_mix(gpu, s, x0, xn, base_mix, rows, hidden),
+        }
     }
 }
 
@@ -184,7 +265,10 @@ pub(crate) struct FeedForward<'a> {
 impl FeedForward<'_> {
     pub(crate) fn record(&self, ops: &Ops, s: &mut Vec<Step>, x1: &DeviceBuffer, rows: u32) -> DeviceBuffer {
         let gpu = ops.gpu();
-        let m = rmsnorm(gpu, s, x1, self.pre_ln, self.hidden, rows, self.eps);
+        let m = match self.adapter {
+            Some(a) => a.norm(gpu, s, x1, "pre_feedforward_layernorm.weight", self.pre_ln, self.hidden, rows, 1, self.eps),
+            None => rmsnorm(gpu, s, x1, self.pre_ln, self.hidden, rows, self.eps),
+        };
         let mut gate_up = linears(ops, s, &m, &[self.gate, self.up], rows);
         let (mut up, mut gate) = (gate_up.pop().expect("up"), gate_up.pop().expect("gate"));
         if let Some(a) = self.adapter {
@@ -200,7 +284,10 @@ impl FeedForward<'_> {
         if let Some(a) = self.adapter {
             a.correct(ops, s, "down_proj", &act, &mlp, rows, self.inter, self.hidden);
         }
-        let mlp_normed = rmsnorm(gpu, s, &mlp, self.post_ln, self.hidden, rows, self.eps);
+        let mlp_normed = match self.adapter {
+            Some(a) => a.norm(gpu, s, &mlp, "post_feedforward_layernorm.weight", self.post_ln, self.hidden, rows, 1, self.eps),
+            None => rmsnorm(gpu, s, &mlp, self.post_ln, self.hidden, rows, self.eps),
+        };
         binary(gpu, s, K_ADD2, x1, &mlp_normed, rows * self.hidden)
     }
 }

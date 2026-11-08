@@ -246,7 +246,7 @@ fn an_adapter_that_does_not_fit_the_model_is_refused_by_name() {
     let model = synthetic(&["sliding_attention", "full_attention"], Shape { heads: 4, kv_heads: 2, head_dim: 16 });
     let mut engine = model.engine(serve_config(4, 0));
     engine.enable_adapters(AdapterBankConfig::new(1, 2, &LORA_LEAVES)).unwrap();
-    let bad = model::lora::device_adapter::DeviceAdapter { rank: 2, alpha: 4.0, sites: vec![model::lora::device_adapter::AdapterSite { base: "model.layers.9.self_attn.q_proj.weight".into(), a: vec![0.0; 2 * 64], b: vec![0.0; 64 * 2] }] };
+    let bad = model::lora::device_adapter::DeviceAdapter { rank: 2, alpha: 4.0, sites: vec![model::lora::device_adapter::AdapterSite { base: "model.layers.9.self_attn.q_proj.weight".into(), a: vec![0.0; 2 * 64], b: vec![0.0; 64 * 2] }], saved: Vec::new() };
     let err = engine.load_adapter(VerifiedAdapter { label: "bad".into(), digest: "sha256:bad".into(), adapter: bad }).expect_err("a layer the model does not have");
     assert!(err.to_string().contains("model.layers.9.self_attn.q_proj.weight"), "{err}");
 }

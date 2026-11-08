@@ -1797,7 +1797,7 @@ mod tests {
             alpha: Some(rank as f32 * 2.0),
             targets: Some(vec!["wo".to_string(), "gate".to_string(), "up".to_string(), "down".to_string()]),
             dataset_id: None,
-            per_target: None,
+            per_target: None, modules_to_save: None,
         });
         checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &json!({"rank": rank, "alpha": rank * 2}), Some(&card)).unwrap();
     }

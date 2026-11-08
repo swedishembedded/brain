@@ -20,10 +20,15 @@ pub mod fold;
 pub mod file;
 pub mod kind;
 pub mod pair_file;
+pub mod saved_bank;
 pub mod peft;
 pub mod plan;
 pub mod select;
 pub mod sites;
+
+/// The suffix a base tensor an adapter carries in full is stored under in the adapter file (`<name>.saved`), and
+/// the one name the card's `modules_to_save` lists it by (`<name>`).
+pub const SAVED_SUFFIX: &str = ".saved";
 
 pub use kind::{AdapterDefinition, AdapterExecution, AdapterGroups, AdapterOptimization, DeviceKind, ParamGroup, ParamInit, ParamSpec};
 

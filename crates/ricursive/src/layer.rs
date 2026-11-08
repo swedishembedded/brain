@@ -56,7 +56,7 @@ pub(crate) fn read_small(src: &dyn TensorSource, name: &str, n: usize) -> Result
     Ok(out)
 }
 
-fn sigmoid(x: f32) -> f32 {
+pub(crate) fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 

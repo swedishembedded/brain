@@ -166,7 +166,7 @@ fn conformance_adapter(e: &mut RicursiveEngine) -> AdapterId {
         .iter()
         .map(|s| model::lora::device_adapter::AdapterSite { base: s.name.clone(), a: (0..rank * s.spec.inn).map(|_| 0.3 * rng.next_gaussian() as f32).collect(), b: (0..s.spec.out * rank).map(|_| 0.3 * rng.next_gaussian() as f32).collect() })
         .collect();
-    e.load_adapter(VerifiedAdapter { label: format!("conformance/{n}"), digest: format!("sha256:conformance-{n}"), adapter: model::lora::device_adapter::DeviceAdapter { rank: rank as u32, alpha: 4.0, sites: pairs } }).unwrap()
+    e.load_adapter(VerifiedAdapter { label: format!("conformance/{n}"), digest: format!("sha256:conformance-{n}"), adapter: model::lora::device_adapter::DeviceAdapter { rank: rank as u32, alpha: 4.0, sites: pairs, saved: Vec::new() } }).unwrap()
 }
 
 fn conformance_engine() -> RicursiveEngine {

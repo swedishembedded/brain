@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use data::rng::Rng;
 use model::adapter::device::LoraCfg;
-use model::adapter::sites::LoraSites;
+use model::adapter::sites::{LoraSites, SavedSite};
 use model::adapter::{LinearSite, TargetSpec};
 use model::Shard;
 
@@ -50,6 +50,19 @@ pub fn linear_suffix(leaf: &str) -> String {
 /// The adapter leaves the standard recipe corrects: attention and the feed-forward.
 pub fn default_targets() -> Vec<String> {
     LORA_LEAVES.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// The tensors outside the linears that a run may train in full beside its adapter (`modules_to_save`) and a served
+/// bank gathers per row, by the groups `--modules-to-save` names them in: every norm gain, and the value-residual gate.
+pub const SAVED_GROUPS: [(&str, &[&str]); 2] = [
+    ("norms", &["input_layernorm", "post_attention_layernorm", "pre_feedforward_layernorm", "post_feedforward_layernorm", "q_norm", "k_norm", "model.norm"]),
+    ("gates", &["value_res_lambda"]),
+];
+
+/// `patterns` with each group name replaced by the tensor names it stands for ([`SAVED_GROUPS`]); a pattern that is
+/// not a group is a tensor name or leaf as `LoraCfg::saves` matches it.
+pub fn expand_modules_to_save(patterns: &[String]) -> Vec<String> {
+    patterns.iter().flat_map(|p| SAVED_GROUPS.iter().find(|(g, _)| g == p).map_or_else(|| vec![p.clone()], |(_, members)| members.iter().map(|m| (*m).to_string()).collect())).collect()
 }
 
 /// A Ripple training run: the model, the longest sequence a row may hold and the adapter (if any).
@@ -101,6 +114,12 @@ impl TrainConfig {
         if let Some(lora) = &self.lora {
             if lora.rank == 0 {
                 return Err("ricursive training: the adapter rank must be positive".into());
+            }
+            let names: Vec<String> = self.param_list().into_iter().map(|(n, _)| n).filter(|n| !model::adapter::device::is_adapter_param(n)).collect();
+            for pattern in &lora.modules_to_save {
+                if !names.iter().any(|n| LoraCfg::new(1, 1.0, Vec::new()).with_modules_to_save(vec![pattern.clone()]).saves(n)) {
+                    return Err(format!("ricursive training: modules_to_save {pattern:?} matches no tensor of the model"));
+                }
             }
             for t in &lora.targets {
                 if !LORA_LEAVES.contains(&t.as_str()) {
@@ -228,6 +247,32 @@ impl TrainConfig {
         let cfg = TrainConfig { model, block_size, lora };
         cfg.validate()?;
         Ok(cfg)
+    }
+}
+
+impl TrainConfig {
+    /// The full tensors an adapter of this model may carry that a serving bank applies: every norm gain and each
+    /// layer's value-residual gate, per row of a batch ([`model::adapter::saved_bank`]). A whole linear (`g_proj`) or a
+    /// table (the embedding, the head) trains in full but is not gathered per row, so an adapter carrying one is refused
+    /// at load by name.
+    pub fn saved_sites(&self) -> Vec<SavedSite> {
+        let layers: Vec<usize> = (0..self.model.num_hidden_layers).collect();
+        let layer_of = |name: &str| name.strip_prefix("model.layers.").and_then(|rest| rest.split('.').next()).and_then(|n| n.parse::<usize>().ok());
+        manifest(&self.model, &layers)
+            .into_iter()
+            .filter(|(name, _)| name.contains("norm") || name.ends_with("value_res_lambda"))
+            .map(|(name, shape)| SavedSite { layer: layer_of(&name), numel: shape.iter().product(), name })
+            .collect()
+    }
+}
+
+impl TrainConfig {
+    /// The base tensors this run trains in full beside its adapter (`modules_to_save`), which an adapter of the run
+    /// carries.
+    pub fn trained_in_full(&self) -> Vec<SavedSite> {
+        let Some(lora) = &self.lora else { return Vec::new() };
+        let layer_of = |name: &str| name.strip_prefix("model.layers.").and_then(|rest| rest.split('.').next()).and_then(|n| n.parse::<usize>().ok());
+        self.param_list().into_iter().filter(|(name, _)| !model::adapter::device::is_adapter_param(name) && lora.saves(name)).map(|(name, numel)| SavedSite { layer: layer_of(&name), numel, name }).collect()
     }
 }
 

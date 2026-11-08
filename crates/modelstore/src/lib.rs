@@ -957,7 +957,7 @@ mod tests {
             alpha: Some(16.0),
             targets: Some(vec!["wq".into()]),
             dataset_id: None,
-            per_target: None,
+            per_target: None, modules_to_save: None,
         });
         checkpoint::st::save_safetensors(
             adapter_dir.join(ADAPTER_WEIGHTS_FILE).to_str().unwrap(),

@@ -527,6 +527,8 @@ each layer is rebuilt in the backward.
 | policy gradient on a tiny Ripple (`ChatFineTune::policy_gradient`, rollouts with an `advantage`), the rewarded actions and the penalised ones scored as held-out sets before and after on the resident model (`ScoredFit`, CPU backend) | rewarded actions' loss 3.8021 -> 3.4217, penalised 3.8529 -> 4.1263; first-step ratio 1 +- 1e-4; adapter card regime `policy_gradient_lora`; SFT held-out loss 3.8228 -> 0.8712 |
 | GRPO against a verifiable reward (share of even tokens) on a tiny Ripple over a bf16, NF4 and FP8 base (`rl` `objective_fits`, software adapter, 40 steps, 96 samples each side) | mean reward 0.534 -> 0.844, 0.539 -> 0.802, 0.557 -> 0.839; only the adapters move |
 | the trainer's token log-probabilities vs the serving engine's, the engine under a trained adapter in its bank, sampler temperature 0.7, 11 positions of tokens the adapter was not fitted to (`train_lora`) | worst difference 1.9e-6 |
+| adapter full tensors (`train_saved`, CPU backend): `--modules-to-save norms,gates` trains every norm gain and value gate beside the factors on the 3-layer synthetic model and nothing else of the base; the adapter file holds each as `<name>.saved` and its card lists them; read back they equal the trainer's, `Ripple::load_adapter`, `AdapterInit::continued` and `fold_adapter_into` apply them; a run that does not train a tensor the adapter carries refuses it | loss 5.0625 -> 0.2237 in 20 steps; all full tensors moved, every base linear bit-identical |
+| a mixed batch (base row, an adapter with norms+gates, an adapter with norms) from ONE resident base, one stage and two, per-row gathers of the bank's tables | each row equals that row decoded alone (0.0 for the adapters, 5e-7 for the base row's reduction order) and the training forward (worst 3.7e-7 scaled); the same factors without the full tensors answer 0.43 away; an adapter carrying a full linear is refused at load naming `g_proj` and `modules_to_save`; Qwen3's bank refuses any adapter carrying full tensors by name, and its adapters without them are unchanged |
 | `brain ricursive finetune` / `brain finetune --arch ricursive` end to end (`tests/e2e/ripple.bats`, `--device cpu`) | a LoRA run on the scripted model lowers the loss and writes the adapter, a second run continues it at its own rank and a different rank is refused; a full run writes a checkpoint |
 
 How a stage is cut: with the value residual every stage holds the embedding table and recomputes `x0` from the
@@ -666,11 +668,14 @@ engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
   linear instead of per group, `AdapterServing::input_groups`), and KV-clip calibration warnings do not apply (no calibration
   yet). A sequence running under an adapter keeps its K and V in the adapter's namespace, so a prefix is shared among rows of
   the same adapter only.
-- Training: norms and `value_res_lambda` (and `g_proj` as a full tensor) train alongside an adapter only in a full
-  fine-tune. The adapter policy (`model::adapter`) has no "also train these tensors" notion: an adapter file holds
-  factors only, and the engine and the serving path apply factors only. Adding it means a `modules_to_save` list in
-  the adapter file's card, the tensors in the file (PEFT represents them as `modules_to_save`), the trainer's roles,
-  the engine applying them and the continue path reading them: a change to the shared format, not to Ripple.
+- Adapter full tensors (`modules_to_save`, shared adapter format). Ripple trains and serves the norm gains and the
+  value-residual gates (`--modules-to-save norms,gates`); a full `g_proj` (any linear, the embedding, the head) trains
+  and is written and read back, but the engine refuses to serve an adapter carrying one by name, because a per-row
+  linear in a mixed batch is one product per distinct adapter (the bank gathers vectors, not matrices): serve such an
+  adapter as a folded checkpoint (`fold_adapter_into` replaces the tensors) or in an instance of its own. A bare
+  parameter (`value_res_lambda`) has no PEFT module form, so `export_peft` refuses an adapter that carries one by
+  name; norms export as PEFT `modules_to_save`. Not measured on a card: the gather adds an `embed` and a `mul` pass per
+  norm site while a non-base row is in the batch (a base-only batch records none of it).
 - Training: an adapter trains over an NVFP4 base only as the ModelOpt release stores it (nothing quantizes into
   NVFP4), and a full fine-tune needs a float base (f32 weights, AdamW on the device); layer-streamed and
   resident bf16/fp8 full fine-tuning (`Model::set_resident`) are not wired, so the 65B cannot be fully

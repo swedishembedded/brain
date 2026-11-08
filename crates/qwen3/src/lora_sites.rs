@@ -87,7 +87,7 @@ mod tests {
             let (a, b) = tensor_shapes(s, 2);
             AdapterSite { base: s.name.clone(), a: vec![0.0; a[0] * a[1]], b: vec![0.0; b[0] * b[1]] }
         };
-        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: sites.iter().map(pair).collect() };
+        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: sites.iter().map(pair).collect(), saved: Vec::new() };
         assert_eq!(validate(&adapter, &sites), Ok(()));
         // A wk pair filed under wq's name: same rank, wrong widths (12 vs 24 outputs).
         let mut wrong = adapter.clone();

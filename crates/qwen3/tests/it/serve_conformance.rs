@@ -53,7 +53,7 @@ fn adapter(cfg: &QwenConfig, rank: u32, seed: u64) -> DeviceAdapter {
             sites.push(AdapterSite { base: format!("blocks.{l}.{leaf}.weight"), a, b });
         }
     }
-    DeviceAdapter { rank, alpha: 2.0 * rank as f32, sites }
+    DeviceAdapter { rank, alpha: 2.0 * rank as f32, sites, saved: Vec::new() }
 }
 
 fn verified(cfg: &QwenConfig, rank: u32, seed: u64) -> VerifiedAdapter {

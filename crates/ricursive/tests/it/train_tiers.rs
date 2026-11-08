@@ -195,7 +195,7 @@ fn the_generic_trainer_holds_the_nvfp4_release_as_published_and_refuses_the_form
     let (release, _) = nvfp4_release(&cfg, &weights, tmp.path());
     std::fs::write(tmp.path().join("config.json"), cfg.model.to_json().to_string()).unwrap();
     let tiers = TierPolicy::uniform(Dtype::F4E2M1);
-    let request = LoraRequest { rank: 2, alpha: 4.0, continue_from: None, base: &tiers };
+    let request = LoraRequest { rank: 2, alpha: 4.0, continue_from: None, base: &tiers, modules_to_save: &[] };
     let opts = model::FitOpts { batch_size: ROWS, block_size: SEQ, ..model::FitOpts::default() };
 
     let mut fit = StopAtTheModel(None);

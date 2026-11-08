@@ -60,7 +60,8 @@ use std::fmt;
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-use super::sites::LoraSites;
+use super::saved_bank::SavedBank;
+use super::sites::{LoraSites, SavedSite};
 use super::LinearSite;
 use crate::dispatch::{lora_bank_group_rows, lora_bank_rows, LoraBank, LoraBankKernels, LoraBankRows, LoraGroupBank, LoraGroupOut, LORA_GROUP_MAX, LORA_SLOT_NONE};
 use crate::lora::device_adapter::DeviceAdapter;
@@ -318,6 +319,9 @@ pub struct AdapterBankConfig {
     /// targeted members of a group in one layer share a stacked bank and are
     /// corrected together. Empty: every linear is corrected on its own.
     pub groups: Vec<Vec<String>>,
+    /// The base tensors an adapter may carry in full (`modules_to_save`) that this bank gathers per row
+    /// ([`SavedBank`]); an adapter carrying any other is refused. Device cost is `(slots + 1) * numel * 4` bytes each.
+    pub saved: Vec<SavedSite>,
 }
 
 impl AdapterBankConfig {
@@ -326,7 +330,7 @@ impl AdapterBankConfig {
     /// upload quantum. Names are checked against the model when the bank is
     /// built ([`AdapterBank::new`]).
     pub fn new<T: SiteLeaf>(slots: u32, r_max: u32, targets: &[T]) -> AdapterBankConfig {
-        AdapterBankConfig { slots, r_max, targets: targets.iter().map(|t| t.site_leaf().to_string()).collect(), max_registered: 64, upload_quantum_bytes: 4 << 20, groups: Vec::new() }
+        AdapterBankConfig { slots, r_max, targets: targets.iter().map(|t| t.site_leaf().to_string()).collect(), max_registered: 64, upload_quantum_bytes: 4 << 20, groups: Vec::new(), saved: Vec::new() }
     }
 
     /// A bank with `model`'s default size, correcting what `targets` resolves
@@ -399,7 +403,7 @@ impl AdapterBankConfig {
     pub fn device_bytes<M: LoraSites + ?Sized>(&self, model: &M, rows: u32) -> u64 {
         let sites = model.lora_sites();
         let units: u64 = self.units(&sites, &(0..usize::MAX)).iter().map(|u| self.unit_bytes(&sites, u)).sum();
-        units + self.row_scratch_bytes(rows)
+        units + self.row_scratch_bytes(rows) + SavedBank::bytes_of(&self.saved, self.slots)
     }
 }
 
@@ -538,6 +542,8 @@ struct Entry {
     digest: String,
     rank: u32,
     sites: Vec<HostUnit>,
+    /// The full tensors this adapter carries that the bank holds: `(table index, values)`.
+    saved: Vec<(usize, Vec<f32>)>,
     phase: Phase,
     pins: u32,
     draining: bool,
@@ -556,6 +562,8 @@ pub struct AdapterBank {
     /// Per layer, the bank index of each banked site by leaf.
     by_layer: Vec<HashMap<&'static str, usize>>,
     slot_buf: DeviceBuffer,
+    /// The per-slot tables of the full tensors adapters may carry.
+    saved: SavedBank,
     /// `[rows, r_max · largest group]` projection scratch shared by every corrected linear.
     tscr: DeviceBuffer,
     entries: HashMap<AdapterId, Entry>,
@@ -652,10 +660,12 @@ impl AdapterBank {
             }
         }
         let slot_buf = gpu.storage(rows as u64);
+        let saved = SavedBank::new(gpu, &cfg.saved, cfg.slots).map_err(AdapterError::BadConfig)?;
+        bytes += saved.bytes();
         let tscr = gpu.storage(rows as u64 * cfg.scratch_width());
         bytes += cfg.row_scratch_bytes(rows);
         let slot_owner = vec![None; cfg.slots as usize];
-        Ok(AdapterBank { cfg, kernels, sites: banked, groups: grouped, model_sites, by_layer, slot_buf, tscr, entries: HashMap::new(), by_digest: HashMap::new(), slot_owner, resident_slot: HashMap::new(), ids: NamespaceIds::default(), offered: None, pending_purge: Vec::new(), tick: 0, bytes })
+        Ok(AdapterBank { cfg, kernels, sites: banked, groups: grouped, model_sites, by_layer, slot_buf, saved, tscr, entries: HashMap::new(), by_digest: HashMap::new(), slot_owner, resident_slot: HashMap::new(), ids: NamespaceIds::default(), offered: None, pending_purge: Vec::new(), tick: 0, bytes })
     }
 
     /// Device bytes the bank occupies.
@@ -726,6 +736,27 @@ impl AdapterBank {
             let outs: Vec<LoraGroupOut> = members.iter().map(|&(m, out)| LoraGroupOut { out, n: gs.ns[m], stride: gs.ns[m], col0: 0 }).collect();
             steps.extend(lora_bank_group_rows(gpu, self.kernels, &gs.bank, &self.slot_buf, &self.tscr, x, &outs, rows, gs.k));
         }
+    }
+
+    /// Does the bank hold full tensors adapters may carry?
+    pub fn has_saved(&self) -> bool {
+        !self.saved.is_empty()
+    }
+
+    /// Set the base's value of the full tensor `name`: what base rows read, and what a slot reads for an adapter that
+    /// does not carry it. Call once per tensor after the bank is built.
+    pub fn set_base_saved(&mut self, gpu: &Gpu, name: &str, values: &[f32]) -> Result<(), String> {
+        self.saved.set_base(gpu, name, values)
+    }
+
+    /// The per-slot tables of the full tensors, to record gathers from.
+    pub fn saved(&self) -> &SavedBank {
+        &self.saved
+    }
+
+    /// The slots of the rows of a batch running under `namespaces` ([`AdapterBank::slot_of`] each).
+    pub fn slots_of(&self, namespaces: &[KvNamespace]) -> Vec<u32> {
+        namespaces.iter().map(|&ns| self.slot_of(ns)).collect()
     }
 
     /// Write each row's slot ([`AdapterBank::slot_of`]) for the batch about to
@@ -799,9 +830,24 @@ impl AdapterBank {
         }
         units.extend(group_members.into_iter().map(|(group, members)| HostUnit::Group { group, members }));
         let sites = units;
+        // The full tensors: the ones this bank holds are kept for the upload; the others belong to another stage's bank.
+        if self.saved.is_empty() {
+            if let Some(t) = a.adapter.saved.first() {
+                return Err(bad(format!("{}: the adapter carries this tensor in full (modules_to_save), which this model's bank does not apply", t.base)));
+            }
+        }
+        let mut saved = Vec::new();
+        for t in &a.adapter.saved {
+            if let Some(ix) = self.saved.site_index(&t.base) {
+                if t.data.len() != self.saved.numel_of(ix) {
+                    return Err(bad(format!("{}: the adapter carries {} values for a tensor of {}", t.base, t.data.len(), self.saved.numel_of(ix))));
+                }
+                saved.push((ix, t.data.clone()));
+            }
+        }
         let id = AdapterId::new(self.ids.fresh()).expect("fresh namespaces are never the base's");
         self.by_digest.insert(a.digest.clone(), id);
-        self.entries.insert(id, Entry { label: a.label, digest: a.digest, rank, sites, phase: Phase::Cold, pins: 0, draining: false, last_used: 0 });
+        self.entries.insert(id, Entry { label: a.label, digest: a.digest, rank, sites, saved, phase: Phase::Cold, pins: 0, draining: false, last_used: 0 });
         Ok(id)
     }
 
@@ -848,6 +894,8 @@ impl AdapterBank {
             e.phase = Phase::Uploading { slot, next };
             return false;
         }
+        // The full tensors with the factors: a slot that is named by a row has every one of them in.
+        self.saved.upload(gpu, slot, &e.saved);
         // Ranks last: a row can only name this slot once every factor is in.
         // A linear the adapter does not correct gets rank 0 (row untouched); a
         // group gets the width of its stacked rank axis when the adapter

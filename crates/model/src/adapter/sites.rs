@@ -46,6 +46,10 @@ pub fn tensor_shapes(site: &LinearSite, rank: usize) -> ([usize; 2], [usize; 2])
 pub enum SiteMismatch {
     /// The adapter corrects a weight the model has no site for.
     UnknownSite { name: String },
+    /// The adapter carries a full tensor this model does not serve or train in full.
+    UnsavableTensor { name: String },
+    /// A full tensor is not the size of the base tensor it replaces.
+    SavedShape { name: String, expected: usize, got: usize },
     /// A pair's factors are not the rank-`rank` shapes of the site.
     Shape { name: String, rank: u32, expected_a: [usize; 2], expected_b: [usize; 2], got_a: usize, got_b: usize },
 }
@@ -54,6 +58,8 @@ impl fmt::Display for SiteMismatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SiteMismatch::UnknownSite { name } => write!(f, "{name} is not an adapter site of this model"),
+            SiteMismatch::UnsavableTensor { name } => write!(f, "{name}: the adapter carries this tensor in full (modules_to_save), which this model does not apply; serve the adapter on an architecture that does, or fold it into the base"),
+            SiteMismatch::SavedShape { name, expected, got } => write!(f, "{name}: the adapter carries {got} values for a tensor of {expected}"),
             SiteMismatch::Shape { name, rank, expected_a, expected_b, got_a, got_b } => write!(
                 f,
                 "{name}: a rank-{rank} adapter needs A {expected_a:?} ({} values) and B {expected_b:?} ({} values) but holds {got_a} and {got_b}",
@@ -69,7 +75,31 @@ impl std::error::Error for SiteMismatch {}
 /// Check that every pair of `adapter` belongs to one of `sites` and has the
 /// shapes of that site at the adapter's rank. The adapter need not cover every
 /// site (a rank-r adapter on the attention projections only is valid).
+///
+/// An adapter that carries full tensors (`modules_to_save`) is refused here: a model that applies them calls
+/// [`validate_with_saved`] with the tensors it can, so a consumer that knows nothing of them never drops them silently.
 pub fn validate(adapter: &DeviceAdapter, sites: &[LinearSite]) -> Result<(), SiteMismatch> {
+    validate_with_saved(adapter, sites, &[])
+}
+
+/// A base tensor a model applies in full when an adapter carries one: its name and element count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedSite {
+    pub name: String,
+    pub numel: usize,
+    /// The layer it belongs to, `None` for a tensor outside the layers (the final norm).
+    pub layer: Option<usize>,
+}
+
+/// [`validate`] for a model that applies the full tensors in `saved_sites`: each full tensor of the adapter must be
+/// one of them, at its size.
+pub fn validate_with_saved(adapter: &DeviceAdapter, sites: &[LinearSite], saved_sites: &[SavedSite]) -> Result<(), SiteMismatch> {
+    for t in &adapter.saved {
+        let site = saved_sites.iter().find(|s| s.name == t.base).ok_or_else(|| SiteMismatch::UnsavableTensor { name: t.base.clone() })?;
+        if site.numel != t.data.len() {
+            return Err(SiteMismatch::SavedShape { name: t.base.clone(), expected: site.numel, got: t.data.len() });
+        }
+    }
     let rank = adapter.rank as usize;
     for pair in &adapter.sites {
         let site = sites.iter().find(|s| s.name == pair.base).ok_or_else(|| SiteMismatch::UnknownSite { name: pair.base.clone() })?;
@@ -85,7 +115,7 @@ pub fn validate(adapter: &DeviceAdapter, sites: &[LinearSite]) -> Result<(), Sit
 mod tests {
     use super::*;
     use crate::adapter::TargetSpec;
-    use crate::lora::device_adapter::AdapterSite;
+    use crate::lora::device_adapter::{AdapterSite, SavedTensor};
 
     fn site(name: &str, out: usize, inn: usize) -> LinearSite {
         LinearSite { name: name.to_string(), leaf: "wq", layer: Some(0), spec: TargetSpec::whole(out, inn), save_name: None }
@@ -106,21 +136,35 @@ mod tests {
     #[test]
     fn an_adapter_that_fits_its_sites_validates_and_may_skip_sites() {
         let sites = [site("w0", 6, 5), site("w1", 4, 7)];
-        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[1], 2)] };
+        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[1], 2)], saved: Vec::new() };
         assert_eq!(validate(&adapter, &sites), Ok(()));
     }
 
     #[test]
     fn an_unknown_site_is_named() {
         let sites = [site("w0", 6, 5)];
-        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![AdapterSite { base: "nope".into(), a: vec![0.0; 10], b: vec![0.0; 12] }] };
+        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![AdapterSite { base: "nope".into(), a: vec![0.0; 10], b: vec![0.0; 12] }], saved: Vec::new() };
         assert_eq!(validate(&adapter, &sites), Err(SiteMismatch::UnknownSite { name: "nope".into() }));
+    }
+
+    #[test]
+    fn full_tensors_are_refused_unless_the_model_applies_them_at_their_size() {
+        let sites = [site("w0", 6, 5)];
+        let gain = SavedSite { name: "norm.weight".into(), numel: 6, layer: Some(0) };
+        let mut adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[0], 2)], saved: vec![SavedTensor { base: "norm.weight".into(), data: vec![1.0; 6] }] };
+        // A model that knows nothing of them never drops them silently.
+        let err = validate(&adapter, &sites).unwrap_err();
+        assert_eq!(err, SiteMismatch::UnsavableTensor { name: "norm.weight".into() });
+        assert!(err.to_string().contains("modules_to_save"), "{err}");
+        assert_eq!(validate_with_saved(&adapter, &sites, std::slice::from_ref(&gain)), Ok(()));
+        adapter.saved[0].data.push(0.0);
+        assert_eq!(validate_with_saved(&adapter, &sites, &[gain]), Err(SiteMismatch::SavedShape { name: "norm.weight".into(), expected: 6, got: 7 }));
     }
 
     #[test]
     fn a_wrong_rank_or_transposed_factor_is_refused_with_the_expected_shapes() {
         let sites = [site("w0", 6, 5)];
-        let mut adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[0], 3)] };
+        let mut adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[0], 3)], saved: Vec::new() };
         let err = validate(&adapter, &sites).unwrap_err();
         assert!(matches!(err, SiteMismatch::Shape { rank: 2, expected_a: [2, 5], expected_b: [6, 2], .. }), "{err:?}");
         assert!(err.to_string().contains("w0") && err.to_string().contains("[2, 5]"), "{err}");

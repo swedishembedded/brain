@@ -180,7 +180,12 @@ trained on this checkpoint (its card records the base) and fit the model, and is
 (`--adapter-id`, a reference of the form `vendor/repo:owner:name:tag`). All adapters and the base share one copy of the
 weights; the adapters' slots on each device are part of the memory plan. A variant of the adapter Ripple does not train (rank-stabilised, LoRA+, frozen A) is refused by name.
 
-`--held-out FILE` scores a chat JSONL set on the model in the training process before the first step and after the
+`--modules-to-save norms,gates` (a comma list of tensor names, leaves such as `input_layernorm`, or the groups `norms`
+and `gates`) also trains those base tensors in full and carries them in the adapter file (PEFT's `modules_to_save`):
+the card lists them, and `brain serve` applies each row's own copy in a batch that mixes the base and several
+adapters. A full linear (`g_proj`, the embedding, the head) trains and is saved, but an adapter carrying one is
+refused when served, by name; `export_peft` writes the norms as PEFT `modules_to_save` and refuses the bare
+`value_res_lambda`. `--held-out FILE` scores a chat JSONL set on the model in the training process before the first step and after the
 last (the loss is printed). `--policy-gradient` (with `--ratio-clip` and `--kl-beta`) trains the clipped policy gradient on
 rollout records, each carrying the `advantage` of its rollout, instead of the supervised loss: the actions of
 well-rewarded rollouts become likelier and those of badly rewarded ones less likely. The log-probabilities the

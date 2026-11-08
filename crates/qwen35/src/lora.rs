@@ -109,7 +109,7 @@ mod tests {
             // A card names linears by leaf (`gate`), the tensors by base weight name.
             targets: Some(vec![leaf.trim_end_matches(".weight").rsplit('.').next().unwrap().to_string()]),
             dataset_id: None,
-            per_target: None,
+            per_target: None, modules_to_save: None,
         });
         let tensors = vec![
             (format!("{leaf}.lora_a"), vec![a.len() as u64], a),

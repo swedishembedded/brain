@@ -116,7 +116,7 @@ mod tests {
             let (a, b) = tensor_shapes(s, 3);
             AdapterSite { base: s.name.clone(), a: vec![0.0; a[0] * a[1]], b: vec![0.0; b[0] * b[1]] }
         };
-        let adapter = DeviceAdapter { rank: 3, alpha: 3.0, sites: sites.iter().map(pair).collect() };
+        let adapter = DeviceAdapter { rank: 3, alpha: 3.0, sites: sites.iter().map(pair).collect(), saved: Vec::new() };
         assert_eq!(validate(&adapter, &sites), Ok(()));
         // The second site's pair filed under the first's name: same rank, wrong widths.
         let mut wrong = adapter.clone();

@@ -45,6 +45,11 @@ pub struct Adapter {
     /// target shares one rank/alpha (the common case).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_target: Option<Vec<AdapterTarget>>,
+    /// Base tensors the adapter carries in full beside its factors (PEFT's `modules_to_save`: norm gains, a gate
+    /// scalar, a whole linear), named as the base names them; each is a tensor of the file named `<name>.saved`.
+    /// Additive: absent on any card written before the field existed, and when the adapter holds factors only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modules_to_save: Option<Vec<String>>,
 }
 
 /// One target's own rank/alpha, when [`Adapter::per_target`] is present.
@@ -624,7 +629,7 @@ mod tests {
                 alpha: Some(32.0),
                 targets: Some(vec!["wq".into(), "wk".into(), "wv".into(), "wo".into()]),
                 dataset_id: Some("sha256:abc123".into()),
-                per_target: None,
+                per_target: None, modules_to_save: None,
             }),
             capabilities: vec!["text".into(), "chat".into()],
             modalities: Some(Modalities { input: vec!["text".into()], output: vec!["text".into()] }),

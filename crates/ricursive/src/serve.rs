@@ -443,8 +443,25 @@ impl RicursiveEngine {
             return Err(AdapterError::BadConfig("the adapter bank is already enabled".into()));
         }
         let rows = self.serve.prefill_chunk.max(self.serve.max_batch);
-        let sites = TrainConfig::new(self.cfg.clone(), 1).lora_sites();
-        let banks = self.stages.iter().map(|s| AdapterBank::new_for_layers(s.gpu(), &sites, cfg.clone(), rows, s.range.clone())).collect::<Result<Vec<_>, _>>()?;
+        let train = TrainConfig::new(self.cfg.clone(), 1);
+        let sites = train.lora_sites();
+        // The norm gains and value gates an adapter may carry in full: each stage's bank holds those of its layers, and
+        // the last stage the final norm.
+        let saved = train.saved_sites();
+        let last = self.stages.len() - 1;
+        let mut banks = Vec::with_capacity(self.stages.len());
+        for (i, stage) in self.stages.iter().enumerate() {
+            let held: Vec<_> = saved.iter().filter(|site| site.layer.map_or(i == last, |l| stage.range.contains(&l))).cloned().collect();
+            let mut bank = AdapterBank::new_for_layers(stage.gpu(), &sites, AdapterBankConfig { saved: held.clone(), ..cfg.clone() }, rows, stage.range.clone())?;
+            for site in &held {
+                let mut base = Vec::new();
+                if !self.src.with_tensor_chunks(&site.name, site.numel.max(1), &mut |_, part| base.extend_from_slice(part)) {
+                    return Err(AdapterError::BadConfig(format!("the checkpoint has no tensor {}", site.name)));
+                }
+                bank.set_base_saved(stage.gpu(), &site.name, &base).map_err(AdapterError::BadConfig)?;
+            }
+            banks.push(bank);
+        }
         for (stage, bank) in self.stages.iter_mut().zip(banks) {
             *stage.bank_mut() = Some(bank);
         }
@@ -739,8 +756,8 @@ impl RicursiveEngine {
     }
 
     /// Final norm and logits for `rows` rows of the residual stream `x` (on the last stage): `(normed, logits)`.
-    fn head(&self, x: &DeviceBuffer, rows: u32) -> (Vec<f32>, Vec<f32>) {
-        self.last().head_rows(self.cfg.rms_norm_eps, x, rows, self.cfg.hidden_size as u32, self.cfg.vocab_size as u32)
+    fn head(&self, x: &DeviceBuffer, rows: u32, namespaces: &[KvNamespace]) -> (Vec<f32>, Vec<f32>) {
+        self.last().head_rows(self.cfg.rms_norm_eps, x, rows, self.cfg.hidden_size as u32, self.cfg.vocab_size as u32, namespaces)
     }
 
     /// Copy ring slot `from` over ring slot `to` on every sliding layer.
@@ -827,7 +844,7 @@ impl RicursiveEngine {
             let all = gpu.read(&x, (to - from) * hidden);
             let row = gpu.storage(hidden as u64);
             gpu.write_f32(&row, &all[(to - from - 1) * hidden..]);
-            self.head(&row, 1).0
+            self.head(&row, 1, &[table.kv_namespace()]).0
         })
     }
 
@@ -916,7 +933,7 @@ impl RicursiveEngine {
         let vocab = self.cfg.vocab_size;
         let mut out = Vec::new();
         self.run_chunks(prompt, |e, _, start, to, x| {
-            let (_, logits) = e.head(x, (to - start) as u32);
+            let (_, logits) = e.head(x, (to - start) as u32, &vec![BASE_KV_NAMESPACE; to - start]);
             for (i, row) in logits.chunks(vocab).enumerate() {
                 let p = start + i;
                 if p >= from && p + 1 < prompt.len() {
@@ -957,7 +974,8 @@ impl RicursiveEngine {
         let rows: Vec<RowPlan<'_>> = owned.iter().map(|(token, pos, ring, blocks, namespace)| RowPlan { token: *token, pos: *pos, ring: *ring, blocks, namespace: *namespace }).collect();
         let x = self.forward_hidden(&rows).unwrap_or_else(|e| panic!("{e}"));
         let n = rows.len();
-        let logits = self.head(&x, n as u32).1;
+        let namespaces: Vec<KvNamespace> = rows.iter().map(|r| r.namespace).collect();
+        let logits = self.head(&x, n as u32, &namespaces).1;
         logits.chunks(self.cfg.vocab_size).map(<[f32]>::to_vec).collect()
     }
 }
@@ -1014,7 +1032,8 @@ impl RowsForward for RicursiveEngine {
         let row_plans: Vec<RowPlan<'_>> = plans.iter().map(|&(token, pos, ring, seq, namespace)| RowPlan { token, pos, ring, blocks: &blocks[seq], namespace }).collect();
         let x = self.forward_hidden(&row_plans).unwrap_or_else(|e| panic!("{e}"));
         let k = cands.clamp(1, self.topk_capacity());
-        let logits = self.head(&x, total as u32).1;
+        let namespaces: Vec<KvNamespace> = row_plans.iter().map(|r| r.namespace).collect();
+        let logits = self.head(&x, total as u32, &namespaces).1;
         let mut ranked = logits.chunks(self.cfg.vocab_size).map(|l| top_k(l, k));
         rows.iter().map(|row| ranked.by_ref().take(row.len()).collect()).collect()
     }

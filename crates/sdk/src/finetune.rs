@@ -139,6 +139,8 @@ pub struct ChatFineTune {
     stages: u32,
     /// Native sparse attention training ([`ChatFineTune::native_sparse_attention`]).
     native_sparse: Option<model::NativeSparse>,
+    /// Base tensors trained in full beside the adapter ([`ChatFineTune::modules_to_save`]).
+    modules_to_save: Vec<String>,
 }
 
 /// The architecture a [`ChatFineTune`] trains, with the tier its frozen base
@@ -309,6 +311,7 @@ impl ChatFamily {
         continue_from: Option<&Path>,
         control: model::FitControl<'_>,
         held_out: &[&Path],
+        modules_to_save: &[String],
     ) -> std::io::Result<(model::FitReport, TrainedLora, Vec<model::ScoredSet>)> {
         match self {
             ChatFamily::Qwen3(tier) => {
@@ -326,7 +329,7 @@ impl ChatFamily {
                 Ok((report, TrainedLora::Qwen35(Box::new(trained)), scored))
             }
             ChatFamily::Ripple(dtype) => {
-                let (report, trained, scored, _) = self.train_chat(*dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, None)?;
+                let (report, trained, scored, _) = self.train_chat(*dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, None, modules_to_save)?;
                 Ok((report, trained, scored))
             }
         }
@@ -348,6 +351,7 @@ impl ChatFamily {
         control: model::FitControl<'_>,
         config: PolicyGradientConfig,
         held_out: &[&Path],
+        modules_to_save: &[String],
     ) -> std::io::Result<(model::FitReport, TrainedLora, PolicyGradientStats, Vec<model::ScoredSet>)> {
         match self {
             ChatFamily::Qwen3(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "policy-gradient training on rollouts is not wired for qwen3 bases")),
@@ -358,7 +362,7 @@ impl ChatFamily {
                 Ok((report, TrainedLora::Qwen35(Box::new(trained)), fit.into_stats().unwrap_or_default(), Vec::new()))
             }
             ChatFamily::Ripple(dtype) => {
-                let (report, trained, scored, stats) = self.train_chat(*dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, Some(config))?;
+                let (report, trained, scored, stats) = self.train_chat(*dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, Some(config), modules_to_save)?;
                 Ok((report, trained, stats.unwrap_or_default(), scored))
             }
         }
@@ -380,13 +384,14 @@ impl ChatFamily {
         control: model::FitControl<'_>,
         held_out: &[&Path],
         policy_gradient: Option<PolicyGradientConfig>,
+        modules_to_save: &[String],
     ) -> std::io::Result<(model::FitReport, TrainedLora, Vec<model::ScoredSet>, Option<PolicyGradientStats>)> {
         if tuning != model::adapter::device::AdapterTuning::default() {
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive trains the plain LoRA adapter; a rank-stabilised, LoRA+ or frozen-A variant is not wired for it"));
         }
         let entry = crate::study::arch("ricursive").map_err(std::io::Error::other)?.chat.ok_or_else(|| std::io::Error::other("ricursive has no chat trainer"))?;
         let tiers = model::ops::TierPolicy::uniform(dtype);
-        let job = crate::chat_trainer::LoraJob { base: open, lora: model::finetune::LoraRequest { rank, alpha, continue_from, base: &tiers }, opts, dir: prepared_dir, policy_gradient, held_out };
+        let job = crate::chat_trainer::LoraJob { base: open, lora: model::finetune::LoraRequest { rank, alpha, continue_from, base: &tiers, modules_to_save }, opts, dir: prepared_dir, policy_gradient, held_out };
         let run = (entry.lora)(job, control)?;
         Ok((run.report, TrainedLora::Chat(run.save), run.scored, run.policy_gradient))
     }
@@ -539,6 +544,7 @@ impl ChatFineTune {
             grad_accum: 1,
             stages: 0,
             native_sparse: None,
+            modules_to_save: Vec::new(),
             continue_from: None,
             out_dir: None,
             adapter_id: None,
@@ -694,6 +700,15 @@ impl ChatFineTune {
     /// fewest that fit the selected cards). Only architectures whose trainer takes a count accept one.
     pub fn stages(mut self, stages: u32) -> Self {
         self.stages = stages;
+        self
+    }
+
+    /// Also train the base tensors `patterns` name in full and save them with the adapter (PEFT's `modules_to_save`):
+    /// a tensor name, a leaf (`input_layernorm`, `value_res_lambda`) or a group the architecture defines (Ripple:
+    /// `norms`, `gates`). They are applied wherever the adapter is: the adapter file lists them on its card, a served
+    /// adapter's rows read them per row of a batch. Architectures whose trainer does not declare it refuse by name.
+    pub fn modules_to_save(mut self, patterns: Vec<String>) -> Self {
+        self.modules_to_save = patterns;
         self
     }
 
@@ -1036,6 +1051,9 @@ impl ChatFineTune {
             return Err(Error::Backend(format!("ChatFineTune: native sparse attention training is not available for {}", arch.id)));
         }
         self.check_policy_gradient_setup(arch.id)?;
+        if !self.modules_to_save.is_empty() && !arch.chat.is_some_and(|chat| chat.modules_to_save) {
+            return Err(Error::Backend(format!("ChatFineTune: {} does not train base tensors in full beside an adapter (modules_to_save)", arch.id)));
+        }
 
         // Every file is checked against the base's own template before a
         // device is claimed.
@@ -1188,11 +1206,11 @@ impl ChatFineTune {
         let held_out_refs: Vec<&Path> = held_out_dirs.iter().map(PathBuf::as_path).collect();
         let (report, trained, scored, policy_gradient) = match self.policy_gradient {
             Some(config) => {
-                let (report, trained, stats, scored) = family.train_policy_gradient(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, config, &held_out_refs).map_err(|e| Error::Backend(format!("training: {e}")))?;
+                let (report, trained, stats, scored) = family.train_policy_gradient(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, config, &held_out_refs, &self.modules_to_save).map_err(|e| Error::Backend(format!("training: {e}")))?;
                 (report, trained, scored, Some(PolicyGradientOutcome { config, stats }))
             }
             None => {
-                let (report, trained, scored) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, &held_out_refs).map_err(|e| Error::Backend(format!("training: {e}")))?;
+                let (report, trained, scored) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, &held_out_refs, &self.modules_to_save).map_err(|e| Error::Backend(format!("training: {e}")))?;
                 (report, trained, scored, None)
             }
         };
@@ -2329,7 +2347,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("brain-sdk-rs-card-{}.safetensors", std::process::id()));
         let trained = LoraCfg::new(4, 8.0, vec!["wq".into()]).with_tuning(AdapterTuning { rank_stabilized: true, ..Default::default() });
         let mut card = checkpoint::st::ModelCard::new("test:adapter", "qwen");
-        card.adapter = Some(checkpoint::st::Adapter { kind: "lora".into(), rank: Some(4), base: None, alpha: Some(trained.card_alpha()), targets: Some(vec!["wq".into()]), dataset_id: None, per_target: None });
+        card.adapter = Some(checkpoint::st::Adapter { kind: "lora".into(), rank: Some(4), base: None, alpha: Some(trained.card_alpha()), targets: Some(vec!["wq".into()]), dataset_id: None, per_target: None, modules_to_save: None });
         checkpoint::st::save_safetensors(path.to_str().unwrap(), &[("a.lora_a".to_string(), vec![4, 2], vec![0.0; 8])], &serde_json::json!({}), Some(&card)).unwrap();
         let tuning = AdapterTuning { rank_stabilized: true, ..Default::default() };
         let (rank, alpha, parent) = lora_shape(Some(&path), None, None, tuning).unwrap();

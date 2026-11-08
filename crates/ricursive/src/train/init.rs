@@ -40,8 +40,11 @@ impl<'a> AdapterInit<'a> {
         if adapter.rank != lora.rank {
             return Err(format!("ricursive: the adapter has rank {}, the run trains rank {}", adapter.rank, lora.rank));
         }
-        model::adapter::sites::validate(adapter, &cfg.lora_sites()).map_err(|e| format!("ricursive: {e}"))?;
+        model::adapter::sites::validate_with_saved(adapter, &cfg.lora_sites(), &cfg.trained_in_full()).map_err(|e| format!("ricursive: {e}"))?;
         let mut adapters = Self::fresh(cfg, base, 0).adapters;
+        for t in &adapter.saved {
+            adapters.insert(t.base.clone(), t.data.clone());
+        }
         for pair in &adapter.sites {
             let (a, b) = model::adapter::device::lora_names(&pair.base);
             if !adapters.contains_key(&a) {
@@ -130,7 +133,7 @@ mod tests {
     fn a_continued_adapter_must_be_the_runs_rank() {
         let cfg = TrainConfig::tiny().with_lora(LoraCfg::new(2, 4.0, default_targets()));
         let base = TrainConfig::tiny().tiny_weights(1);
-        let wrong = model::lora::device_adapter::DeviceAdapter { rank: 3, alpha: 4.0, sites: Vec::new() };
+        let wrong = model::lora::device_adapter::DeviceAdapter { rank: 3, alpha: 4.0, sites: Vec::new(), saved: Vec::new() };
         assert!(AdapterInit::continued(&cfg, &base, &wrong).err().unwrap().contains("rank 3"));
     }
 }

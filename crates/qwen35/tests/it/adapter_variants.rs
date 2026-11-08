@@ -68,7 +68,7 @@ fn served(cfg: &Qwen35Config, alpha: f32, with_lora: &HashMap<String, Vec<f32>>,
             b: with_lora[&model::adapter::device::param_name(&s.name, model::adapter::kind::LORA_B)].clone(),
         })
         .collect();
-    VerifiedAdapter { label: label.into(), digest: format!("sha256:{label}"), adapter: DeviceAdapter { rank: RANK, alpha, sites } }
+    VerifiedAdapter { label: label.into(), digest: format!("sha256:{label}"), adapter: DeviceAdapter { rank: RANK, alpha, sites, saved: Vec::new() } }
 }
 
 /// The last position's logits of a sequence prefilled under `adapter`.

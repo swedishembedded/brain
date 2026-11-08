@@ -77,7 +77,7 @@ fn served(cfg: &Qwen35Config, with_lora: &HashMap<String, Vec<f32>>, label: &str
         .iter()
         .map(|s| AdapterSite { base: s.name.clone(), a: with_lora[&format!("{}.lora_a", s.name)].clone(), b: with_lora[&format!("{}.lora_b", s.name)].clone() })
         .collect();
-    VerifiedAdapter { label: label.into(), digest: format!("sha256:{label}"), adapter: DeviceAdapter { rank: RANK, alpha: ALPHA, sites } }
+    VerifiedAdapter { label: label.into(), digest: format!("sha256:{label}"), adapter: DeviceAdapter { rank: RANK, alpha: ALPHA, sites, saved: Vec::new() } }
 }
 
 /// Logits of the training forward with the adapter, row per position.

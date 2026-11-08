@@ -58,7 +58,7 @@ use model::saved::{Residuals, SavedFormat, SavedPolicy};
 use model::Shard;
 use paramstore::{ParamStore, Role};
 
-pub use config::{default_targets, linear_suffix, TrainConfig, LORA_LEAVES};
+pub use config::{default_targets, expand_modules_to_save, linear_suffix, TrainConfig, LORA_LEAVES, SAVED_GROUPS};
 pub use init::AdapterInit;
 pub use shard::estimate_stage_bytes;
 use graph::{Grad, Kernels, LayerParams, Lin, Scratch};
@@ -283,9 +283,11 @@ impl Ripple {
         self.ps.grad.contains_key(name)
     }
 
-    /// Role of every parameter in a build with `lora`: only adapter factors train when there is an adapter.
+    /// Role of every parameter in a build with `lora`: only adapter factors train when there is an adapter, and
+    /// the base tensors it also saves in full (`modules_to_save`).
     fn role(cfg: &TrainConfig, name: &str) -> Role {
         match &cfg.lora {
+            Some(lora) if lora.saves(name) && !model::adapter::device::is_adapter_param(name) => Role::Trainable,
             Some(lora) => model::adapter::device::role_of(name, &lora.hp()),
             None => Role::Trainable,
         }

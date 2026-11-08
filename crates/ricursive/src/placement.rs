@@ -92,12 +92,23 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
 
     // The adapter bank is charged to the stage that holds each layer, and its row scratch to every stage.
     let rows_max = serve.prefill_chunk.max(serve.max_batch);
-    let (bank_by_layer, bank_scratch) = match &serve.adapter_bank {
+    // Its per-slot tables of the norm gains and value gates an adapter may carry in full are charged with it: each
+    // layer's to its stage, the final norm's to the head.
+    let (bank_by_layer, bank_scratch, bank_head) = match &serve.adapter_bank {
         Some(bank) => {
             let train = crate::train::TrainConfig::new(cfg.clone(), 1);
-            (bank.device_bytes_by_layer(&train, cfg.num_hidden_layers), bank.row_scratch_bytes(rows_max))
+            let mut by_layer = bank.device_bytes_by_layer(&train, cfg.num_hidden_layers);
+            let mut head = 0;
+            for site in train.saved_sites() {
+                let bytes = (u64::from(bank.slots) + 1) * site.numel as u64 * 4;
+                match site.layer {
+                    Some(l) => by_layer[l] += bytes,
+                    None => head += bytes,
+                }
+            }
+            (by_layer, bank.row_scratch_bytes(rows_max), head)
         }
-        None => (Vec::new(), 0),
+        None => (Vec::new(), 0, 0),
     };
     let mut weights = 0u64;
     let per_layer: Vec<u64> = (0..cfg.num_hidden_layers)
@@ -117,7 +128,7 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
     // A draft model rides the last stage's device beside the head.
     let draft = serve.drafter.as_ref().map_or(0, |d| d.device_bytes(serve.max_batch, serve.max_seq_len));
     let taps_host = serve.drafter.as_ref().map_or(0, |d| d.tap_bytes(cfg.hidden_size, serve.num_blocks, serve.block_size));
-    let head = head_weight + draft + 4 * cfg.hidden_size as u64 + 4 * rows * cfg.vocab_size as u64;
+    let head = head_weight + draft + bank_head + 4 * cfg.hidden_size as u64 + 4 * rows * cfg.vocab_size as u64;
 
     // The dense triad's two score slabs, sized by the keys a dense read may span.
     let keys = u64::from(serve.dense_keys.unwrap_or(serve.max_seq_len).max(cfg.sliding_window as u32));

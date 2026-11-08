@@ -479,7 +479,7 @@ pub(crate) fn distill_recovery(work: &Workload, req: &RecoveryRequest<'_>, on_pr
     };
     let job = crate::chat_trainer::DistillJob {
         base: req.student,
-        lora: model::finetune::LoraRequest { rank: req.rank, alpha: req.rank as f32, continue_from: None, base: req.base_tiers },
+        lora: model::finetune::LoraRequest { rank: req.rank, alpha: req.rank as f32, continue_from: None, base: req.base_tiers, modules_to_save: &[] },
         opts: &student,
         examples,
         adapter: &adapter,

@@ -28,7 +28,7 @@ use model::ops::{Ops, PagedDecodeShape, Weight};
 
 use crate::config::{LayerType, RicursiveConfig};
 use crate::layer::LayerWeights;
-use crate::ops::{self, LayerAdapter, K_ADD2, K_COPY_WITHIN, K_MUL, K_ROPE_PAGED, K_SOFTMAX};
+use crate::ops::{self, LayerAdapter, SavedRows, K_ADD2, K_COPY_WITHIN, K_MUL, K_ROPE_PAGED, K_SOFTMAX};
 use crate::serve::ServeConfig;
 
 /// What every stage needs to know about the engine it serves.
@@ -280,32 +280,42 @@ impl Stage {
             let slots: Vec<u32> = index.namespaces.iter().map(|&ns| bank.slot_of(ns)).collect();
             bank.write_slots(gpu, &slots);
         }
+        // The norm gains and value gates the adapters of the batch carry, gathered per row.
+        let saved = banked.and_then(|bank| SavedRows::new(gpu, bank, &index.namespaces, hidden.max(hd)));
+        let eps = c.rms_norm_eps;
         for (w, l) in self.layers.iter().zip(self.range.clone()) {
             let layer = self.kv_of(l);
-            let adapter = banked.map(|bank| LayerAdapter { bank, layer: l });
+            let adapter = banked.map(|bank| LayerAdapter { bank, layer: l, saved: saved.as_ref() });
+            let norm = |s: &mut Vec<Step>, x: &DeviceBuffer, suffix: &str, gain: &DeviceBuffer, dim: u32, repeat: u32| match &adapter {
+                Some(a) => a.norm(gpu, s, x, suffix, gain, dim, n, repeat, eps),
+                None => ops::rmsnorm(gpu, s, x, gain, dim, n * repeat, eps),
+            };
             let correct = |s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, y: &DeviceBuffer, k: u32, out: u32| {
                 if let Some(a) = &adapter {
                     a.correct(ops, s, leaf, x, y, n, k, out);
                 }
             };
-            let xn = ops::rmsnorm(gpu, &mut s, &x, &w.input_ln, hidden, n, c.rms_norm_eps);
+            let xn = norm(&mut s, &x, "input_layernorm.weight", &w.input_ln, hidden, 1);
             let mut qk = ops::linears(ops, &mut s, &xn, &[&w.q, &w.k], n);
             let (k_pre, q_pre) = (qk.pop().expect("k"), qk.pop().expect("q"));
             correct(&mut s, "q_proj", &xn, &q_pre, hidden, q_dim);
             correct(&mut s, "k_proj", &xn, &k_pre, hidden, kv_dim);
             let v_in = match w.value_mix {
-                Some(mix) => ops::value_mix(gpu, &mut s, x0, &xn, mix, n, hidden),
+                Some(mix) => match &adapter {
+                    Some(a) => a.value_mix(gpu, &mut s, x0, &xn, mix, n, hidden),
+                    None => ops::value_mix(gpu, &mut s, x0, &xn, mix, n, hidden),
+                },
                 None => xn.clone(),
             };
             let v = ops::linear(ops, &mut s, &v_in, &w.v, n);
             correct(&mut s, "v_proj", &v_in, &v, hidden, kv_dim);
-            let q = ops::rmsnorm(gpu, &mut s, &q_pre, &w.q_norm, hd, n * heads, c.rms_norm_eps);
+            let q = norm(&mut s, &q_pre, "self_attn.q_norm.weight", &w.q_norm, hd, heads);
             if c.layer_type(l) == LayerType::Full {
                 if let Some(taken) = capture.as_deref_mut() {
                     taken.push(q.clone());
                 }
             }
-            let k = ops::rmsnorm(gpu, &mut s, &k_pre, &w.k_norm, hd, n * kv_heads, c.rms_norm_eps);
+            let k = norm(&mut s, &k_pre, "self_attn.k_norm.weight", &w.k_norm, hd, kv_heads);
 
             let ctx = match c.layer_type(l) {
                 LayerType::Sliding => {
@@ -348,7 +358,7 @@ impl Stage {
             };
             let attn_out = ops::linear(ops, &mut s, &ctx, &w.o, n);
             correct(&mut s, "o_proj", &ctx, &attn_out, q_dim, hidden);
-            let attn_normed = ops::rmsnorm(gpu, &mut s, &attn_out, &w.post_attn_ln, hidden, n, c.rms_norm_eps);
+            let attn_normed = norm(&mut s, &attn_out, "post_attention_layernorm.weight", &w.post_attn_ln, hidden, 1);
             let x1 = ops::binary(gpu, &mut s, K_ADD2, &x, &attn_normed, n * hidden);
             x = w.feed_forward(c, adapter.as_ref()).record(ops, &mut s, &x1, n);
             if taps.contains(&l) {
@@ -360,11 +370,16 @@ impl Stage {
     }
 
     /// Final norm and logits for `rows` rows of the residual stream `x`: `(normed, logits)`. Only the last stage has a head.
-    pub(crate) fn head_rows(&self, eps: f32, x: &DeviceBuffer, rows: u32, hidden: u32, vocab: u32) -> (Vec<f32>, Vec<f32>) {
+    pub(crate) fn head_rows(&self, eps: f32, x: &DeviceBuffer, rows: u32, hidden: u32, vocab: u32, namespaces: &[KvNamespace]) -> (Vec<f32>, Vec<f32>) {
         let head = self.head.as_ref().expect("the last stage owns the head");
         let gpu = self.gpu();
-        let normed = gpu.storage(u64::from(rows) * u64::from(hidden));
-        let mut steps = vec![gpu.step(ops::K_RMSNORM, &[x, &head.norm, &normed], &[hidden, rows, f(eps)], rows)];
+        let mut steps = Vec::new();
+        // A row under an adapter that carries the final norm is normed by its own gain.
+        let banked = self.bank.as_ref().filter(|_| namespaces.iter().any(|&ns| ns != BASE_KV_NAMESPACE));
+        let normed = match banked.and_then(|bank| SavedRows::new(gpu, bank, namespaces, hidden)) {
+            Some(saved) => saved.norm(gpu, &mut steps, x, "model.norm.weight", &head.norm, hidden, rows, 1, eps),
+            None => ops::rmsnorm(gpu, &mut steps, x, &head.norm, hidden, rows, eps),
+        };
         let logits = ops::linear(&self.ops, &mut steps, &normed, &head.lm_head, rows);
         gpu.submit(&[], &steps);
         (gpu.read(&normed, (rows * hidden) as usize), gpu.read(&logits, rows as usize * vocab as usize))

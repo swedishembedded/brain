@@ -130,6 +130,10 @@ pub struct LoraCfg {
     /// Targets that take their own rank and/or alpha instead of the shared
     /// ones, first match wins.
     pub overrides: Vec<TargetOverride>,
+    /// Base tensors trained in full beside the factors (PEFT's `modules_to_save`: norm gains, a gate scalar, a whole
+    /// linear), matched like targets: the whole name, a trailing dotted suffix of it, or its leaf component. The
+    /// adapter file carries them ([`crate::lora::device_adapter::SavedTensor`]) and its card lists them.
+    pub modules_to_save: Vec<String>,
 }
 
 /// One target's own rank and alpha. `leaf` is matched like a target: the whole
@@ -215,12 +219,23 @@ fn target_matches(name: &str, target: &str) -> bool {
 impl LoraCfg {
     /// Plain LoRA on `targets`.
     pub fn new(rank: u32, alpha: f32, targets: Vec<String>) -> LoraCfg {
-        LoraCfg { rank, alpha, targets, rank_stabilized: false, lr_ratio: 1.0, freeze_a: false, kind: DeviceKind::Lora, overrides: Vec::new() }
+        LoraCfg { rank, alpha, targets, rank_stabilized: false, lr_ratio: 1.0, freeze_a: false, kind: DeviceKind::Lora, overrides: Vec::new(), modules_to_save: Vec::new() }
     }
 
     /// The default Qwen LoRA target set: the four attention projections.
     pub fn attn(rank: u32, alpha: f32) -> LoraCfg {
         LoraCfg::new(rank, alpha, ["wq", "wk", "wv", "wo"].iter().map(|s| s.to_string()).collect())
+    }
+
+    /// This config also training (and saving with the adapter) the base tensors `patterns` name.
+    pub fn with_modules_to_save(mut self, patterns: Vec<String>) -> LoraCfg {
+        self.modules_to_save = patterns;
+        self
+    }
+
+    /// Does this config train the base tensor `name` in full beside the factors?
+    pub fn saves(&self, name: &str) -> bool {
+        self.modules_to_save.iter().any(|p| target_matches(name, p))
     }
 
     pub fn targets_leaf(&self, leaf: &str) -> bool {
@@ -320,6 +335,9 @@ impl LoraCfg {
         if self.kind != DeviceKind::Lora {
             v["kind"] = self.kind.name().into();
         }
+        if !self.modules_to_save.is_empty() {
+            v["modules_to_save"] = self.modules_to_save.clone().into();
+        }
         if !self.overrides.is_empty() {
             v["overrides"] = self.overrides.iter().map(|o| serde_json::json!({ "leaf": o.leaf, "rank": o.rank, "alpha": o.alpha })).collect::<Vec<_>>().into();
         }
@@ -337,6 +355,7 @@ impl LoraCfg {
             lr_ratio: v.get("lr_ratio").and_then(Value::as_f64).map_or(1.0, |r| r as f32),
             freeze_a: v.get("freeze_a").and_then(Value::as_bool).unwrap_or(false),
             kind: v.get("kind").and_then(Value::as_str).and_then(DeviceKind::from_name).unwrap_or_default(),
+            modules_to_save: v.get("modules_to_save").and_then(Value::as_array).map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
             overrides: v
                 .get("overrides")
                 .and_then(Value::as_array)

@@ -88,7 +88,7 @@ fn adapter(cfg: &QwenConfig, rank: u32, seed: u64) -> DeviceAdapter {
             sites.push(AdapterSite { base: format!("blocks.{l}.{leaf}.weight"), a, b });
         }
     }
-    DeviceAdapter { rank, alpha: 2.0 * rank as f32, sites }
+    DeviceAdapter { rank, alpha: 2.0 * rank as f32, sites, saved: Vec::new() }
 }
 
 fn verified(cfg: &QwenConfig, rank: u32, seed: u64) -> VerifiedAdapter {
@@ -577,4 +577,18 @@ fn run_oracle_greedy(s: &Setup, which: Option<usize>, row: usize, n: usize) -> V
         out.push(argmax(&m.decode_logits()));
     }
     out
+}
+
+/// An adapter that carries a full tensor (`modules_to_save`) is refused by an engine whose bank applies factors only,
+/// by name, rather than served without it; the same adapter without the tensor loads.
+#[test]
+fn an_adapter_carrying_full_tensors_is_refused_by_an_engine_that_applies_factors_only() {
+    let setup = Setup::new(QwenConfig::tiny_i8(), false, false);
+    let mut eng = setup.engine(Some(2));
+    let mut adapter = adapter(&setup.cfg, 2, 11);
+    adapter.saved = vec![qwen3::lora::SavedTensor { base: "blocks.0.ln1.weight".into(), data: vec![1.0; setup.cfg.d_model as usize] }];
+    let err = eng.load_adapter(VerifiedAdapter { label: "saved".into(), digest: "sha256:saved".into(), adapter: adapter.clone() }).expect_err("refused");
+    assert!(err.to_string().contains("blocks.0.ln1.weight") && err.to_string().contains("modules_to_save"), "{err}");
+    adapter.saved.clear();
+    eng.load_adapter(VerifiedAdapter { label: "plain".into(), digest: "sha256:plain".into(), adapter }).expect("the same adapter without the tensor is served");
 }

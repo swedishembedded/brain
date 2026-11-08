@@ -143,6 +143,7 @@ impl ChatTrainer for RippleTrainer {
     const PIPELINED: bool = true;
     const NATIVE_SPARSE: bool = true;
     const POLICY_GRADIENT: bool = true;
+    const MODULES_TO_SAVE: bool = true;
     const SCORES_HELD_OUT: bool = true;
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> PathBuf {
@@ -179,12 +180,14 @@ impl ChatTrainer for RippleTrainer {
         } else {
             asked
         };
-        let cfg = opened.train_config(opts.block_size).with_lora(LoraCfg::new(lora.rank, lora.alpha, default_targets()));
-        let init = match lora.continue_from {
-            Some(path) => {
-                let adapter = model::lora::device_adapter::read_adapter(path_str(path)?)?;
-                AdapterInit::continued(&cfg, &*opened.source, &adapter).map_err(std::io::Error::other)?
-            }
+        // The adapter being continued brings its own full tensors along: they keep training unless the run names others too.
+        let continued = lora.continue_from.map(|path| model::lora::device_adapter::read_adapter(path_str(path)?)).transpose()?;
+        let mut saved = crate::train::expand_modules_to_save(lora.modules_to_save);
+        saved.extend(continued.iter().flat_map(|a| a.saved.iter().map(|t| t.base.clone())));
+        let cfg = opened.train_config(opts.block_size).with_lora(LoraCfg::new(lora.rank, lora.alpha, default_targets()).with_modules_to_save(saved));
+        cfg.validate().map_err(|e| invalid(base, e))?;
+        let init = match &continued {
+            Some(adapter) => AdapterInit::continued(&cfg, &*opened.source, adapter).map_err(std::io::Error::other)?,
             None => AdapterInit::fresh(&cfg, &*opened.source, opts.seed),
         };
         let train_opts = TrainOpts { tiers, gemm: opts.gemm_precision, ..TrainOpts::default() };

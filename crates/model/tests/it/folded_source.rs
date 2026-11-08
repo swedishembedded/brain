@@ -19,7 +19,7 @@ const LEAF: &str = "blocks.0.mlp.gate.weight";
 fn write_adapter(path: &std::path::Path, rank: u32, alpha: f32, a: Vec<f32>, b: Vec<f32>) {
     let mut card = ModelCard::new("test-adapter", "qwen3");
     card.variant_of = Some("test-base".to_string());
-    card.adapter = Some(Adapter { kind: "lora".to_string(), rank: Some(rank), base: Some("test-base".to_string()), alpha: Some(alpha), targets: Some(vec!["gate".to_string()]), dataset_id: None, per_target: None });
+    card.adapter = Some(Adapter { kind: "lora".to_string(), rank: Some(rank), base: Some("test-base".to_string()), alpha: Some(alpha), targets: Some(vec!["gate".to_string()]), dataset_id: None, per_target: None, modules_to_save: None });
     let tensors = vec![(format!("{LEAF}.lora_a"), vec![a.len() as u64], a), (format!("{LEAF}.lora_b"), vec![b.len() as u64], b)];
     checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({}), Some(&card)).expect("write adapter");
 }
