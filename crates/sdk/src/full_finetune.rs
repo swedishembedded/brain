@@ -309,7 +309,8 @@ impl ChatFullFineTune {
         plan_before_load(&open, block, &set)?;
 
         let seed = resolve_seed(self.seed, None)?;
-        let opts = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, ..fit_opts(self.steps, block, self.lr, seed) };
+        let requested = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, ..fit_opts(self.steps, block, self.lr, seed) };
+        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("ChatFullFineTune: {e}")))?.into_opts();
         let digest_clock = std::time::Instant::now();
         let base_digest = base_digest(&open)?;
         model::finetune::stage_time("sdk: digest the base weights", digest_clock);

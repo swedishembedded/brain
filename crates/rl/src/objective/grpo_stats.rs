@@ -39,6 +39,12 @@ pub enum BehaviourRefusal {
     InvalidNumeric { field: &'static str, value: f32 },
     /// A count no run can honour: `field` (`group_size`) is `got`, below the `least` it can be.
     InvalidCount { field: &'static str, got: usize, least: usize },
+    /// A verifier returned a reward that is not a number (`NaN` or infinite): every advantage of its group would be.
+    NonFiniteReward { value: f32 },
+    /// A token id (of a task's prompt or a sampled completion) the model has no embedding row for.
+    TokenOutOfRange { id: u32, vocab: u32 },
+    /// A task's prompt of `len` tokens does not leave room for a completion in rows of `seq_len` (or is empty).
+    PromptLength { len: usize, seq_len: usize },
     /// The engine declares it samples from `declared`, but the objective's ratio assumes `expected`.
     SamplingMismatch { declared: String, expected: String },
 }
@@ -54,6 +60,9 @@ impl fmt::Display for BehaviourRefusal {
             BehaviourRefusal::IncompleteReference { expected, got } => write!(f, "the reference log-probability source returned {got} values for a completion of {expected} tokens; an incomplete reference would silently change the KL term"),
             BehaviourRefusal::InvalidNumeric { field, value } => write!(f, "{field} must be finite and {}, got {value}", if *field == "kl_beta" || *field == "temp" { "not negative" } else { "positive" }),
             BehaviourRefusal::InvalidCount { field, got, least } => write!(f, "{field} must be at least {least}, got {got}"),
+            BehaviourRefusal::NonFiniteReward { value } => write!(f, "the verifier returned the reward {value}, which no advantage can be computed from"),
+            BehaviourRefusal::TokenOutOfRange { id, vocab } => write!(f, "token id {id} is outside the model's vocabulary of {vocab}"),
+            BehaviourRefusal::PromptLength { len, seq_len } => write!(f, "a prompt of {len} tokens leaves no room for a completion in rows of {seq_len} (it must be between 1 and {} tokens)", seq_len.saturating_sub(1)),
             BehaviourRefusal::SamplingMismatch { declared, expected } => write!(f, "the rollout engine samples from {declared}, but the objective's ratio assumes {expected}"),
         }
     }

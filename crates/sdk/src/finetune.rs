@@ -1181,7 +1181,7 @@ impl ChatFineTune {
         }
         let state_path = out_dir.join(STATE_FILE);
         let seed = resolve_seed(self.seed, Some(&state_path))?;
-        let opts = model::FitOpts {
+        let requested = model::FitOpts {
             grad_accum: self.grad_accum,
             strict_updates: self.strict_updates,
             eval_interval: self.eval_every,
@@ -1198,6 +1198,8 @@ impl ChatFineTune {
             native_sparse: self.native_sparse,
             ..fit_opts(self.steps, block, self.lr, seed)
         };
+        let checks: Vec<&dyn model::training_plan::PlanCheck> = self.policy_gradient.iter().map(|c| c as &dyn model::training_plan::PlanCheck).collect();
+        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &checks).map_err(|e| Error::Backend(format!("ChatFineTune: {e}")))?.into_opts();
         let base_digest = base_digest(&open)?;
         let identity = serde_json::json!({
             "base": base_digest,

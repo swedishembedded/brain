@@ -64,7 +64,7 @@ use data::chat_rollout::TeacherStream;
 use data::loader::{BatchConfig, TokenDataset};
 use data::rng::Rng;
 use model::training::{self, Capability, Unsupported};
-use model::{Batch, FitOpts, Model, Objective, Split, StepVerdict, IGNORE};
+use model::{Batch, FitOpts, Model, ModelConfig, Objective, Split, StepVerdict, IGNORE};
 
 use super::grpo::LossAgg;
 use super::grpo_stats::{NonFiniteSteps, MAX_CONSECUTIVE_NONFINITE};
@@ -169,6 +169,16 @@ pub struct PolicyGradientConfig {
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
         PolicyGradientConfig { clip_eps: 0.2, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None }
+    }
+}
+
+impl model::training_plan::PlanCheck for PolicyGradientConfig {
+    fn plan_name(&self) -> &'static str {
+        "policy gradient"
+    }
+
+    fn check(&self, _opts: &FitOpts) -> Result<(), String> {
+        self.validate()
     }
 }
 
@@ -396,6 +406,8 @@ pub struct ExternalPolicyGradient {
     order: Option<Order>,
     /// What each drawn example was measured to be, filled the first time a step draws it.
     cache: ScoreCache,
+    /// The largest token id the training split (and any teacher rendering) holds, which the model must have a row for.
+    max_token: u32,
     /// Set by `prepare`.
     anchors: Option<Anchors>,
     /// The adapter may differ from the one the run started from: a step ran, or a resumed run restored its weights.
@@ -438,6 +450,13 @@ impl ExternalPolicyGradient {
             }));
         };
         let (advantage, behavior) = (recorded.advantage, recorded.behavior);
+        // NaN marks an imitation record; anything else must be a number a loss can be built from.
+        if let Some(e) = advantage.iter().position(|a| a.is_infinite()) {
+            return Err(invalid(format!("{}: example {e} has an infinite advantage", dir.display())));
+        }
+        if let Some(t) = behavior.iter().position(|b| b.is_infinite() || *b > 1e-3) {
+            return Err(invalid(format!("{}: token {t} has behaviour log-probability {}, which is not a log-probability", dir.display(), behavior[t])));
+        }
         let teacher = data::chat_rollout::read_teacher(dir, "train", starts.len())?;
         if let Some(teacher) = &teacher {
             check_teacher(teacher, &starts, &ends, &mask, batch_cfg.block_size).map_err(invalid)?;
@@ -475,7 +494,8 @@ impl ExternalPolicyGradient {
         let tag_examples = ["train", "val"].iter().any(|split| dir.join(format!("{split}.img.bin")).exists());
         let rows = Rows { starts, ends, advantage, behavior, teacher };
         let cache = ScoreCache::create(dir, rows.starts.len())?;
-        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, anchors: None, weights_moved: false, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, verdict: None })
+        let max_token = tokens.iter().copied().chain(rows.teacher.iter().flat_map(|t| (0..rows.starts.len()).filter_map(|e| t.example(e)).flat_map(|(ids, _)| ids.iter().copied()))).max().unwrap_or(0);
+        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, verdict: None })
     }
 
     /// What the run has measured so far.
@@ -789,6 +809,14 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
             return Err(Unsupported::of::<M>(Capability::ChatLoraFineTune));
         }
         self.anchors = Some(Anchors { start, wants_reference });
+        Ok(())
+    }
+
+    fn check_data(&mut self, model: &M) -> Result<(), std::io::Error> {
+        let vocab = model.config().vocab();
+        if self.max_token >= vocab {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("the dataset holds token id {} but the model's vocabulary is {vocab}", self.max_token)));
+        }
         Ok(())
     }
 

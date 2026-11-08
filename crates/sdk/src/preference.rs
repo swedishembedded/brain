@@ -79,6 +79,7 @@ pub struct PreferenceFineTune {
     nll_weight: f32,
     grad_accum: u32,
     strict_updates: bool,
+    beta_ablation: bool,
     stages: u32,
     native_sparse: Option<model::NativeSparse>,
     keep_reasoning: bool,
@@ -114,6 +115,7 @@ impl PreferenceFineTune {
             nll_weight: 0.0,
             grad_accum: 1,
             strict_updates: false,
+            beta_ablation: false,
             stages: 0,
             native_sparse: None,
             keep_reasoning: false,
@@ -204,6 +206,13 @@ impl PreferenceFineTune {
     /// inside the sigmoid (default [`DEFAULT_DPO_BETA`]).
     pub fn beta(mut self, beta: f32) -> Self {
         self.beta = beta;
+        self
+    }
+
+    /// Allow a `beta` that is zero or negative. Such a run removes or reverses the preference, so it is refused
+    /// unless it is asked for as an ablation control.
+    pub fn beta_ablation(mut self, allow: bool) -> Self {
+        self.beta_ablation = allow;
         self
     }
 
@@ -342,9 +351,10 @@ impl PreferenceFineTune {
         if self.grad_accum == 0 {
             return Err(Error::Backend("PreferenceFineTune: grad_accum must be at least 1".to_string()));
         }
-        if !(self.beta.is_finite() && self.beta > 0.0) {
-            return Err(Error::Backend(format!("PreferenceFineTune: beta must be a positive number, got {}", self.beta)));
-        }
+        // The cheap numeric refusals first, before the base is read; the plan below re-checks them with the row length.
+        rl::objective::dpo::DpoConfig { beta: self.beta, seq_len: 2, nll_weight: self.nll_weight, beta_ablation: self.beta_ablation }
+            .validate()
+            .map_err(|why| Error::Backend(format!("PreferenceFineTune: invalid dpo configuration: {why}")))?;
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
         let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         
@@ -373,7 +383,9 @@ impl PreferenceFineTune {
         let state_path = out_dir.join(STATE_FILE);
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         // Both rows of a pair share one forward.
-        let opts = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, strict_updates: self.strict_updates, stages: self.stages, native_sparse: self.native_sparse, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
+        let requested = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, strict_updates: self.strict_updates, stages: self.stages, native_sparse: self.native_sparse, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
+        let dpo = rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight, beta_ablation: self.beta_ablation };
+        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&dpo]).map_err(|e| Error::Backend(format!("PreferenceFineTune: {e}")))?.into_opts();
         let base_digest = digest(&weights)?;
         let dataset_id = digest(dataset)?;
         let identity = serde_json::json!({
@@ -384,6 +396,7 @@ impl PreferenceFineTune {
             "rank": rank,
             "alpha_bits": alpha.to_bits(),
             "beta_bits": self.beta.to_bits(),
+            "beta_ablation": self.beta_ablation,
             "nll_weight_bits": self.nll_weight.to_bits(),
             "grad_accum": self.grad_accum,
             "keep_reasoning": self.keep_reasoning,
@@ -440,7 +453,7 @@ impl PreferenceFineTune {
             base: &weights,
             lora: model::finetune::LoraRequest { rank, alpha, continue_from: self.continue_from.as_deref(), base: &base_tiers, modules_to_save: &[] },
             opts: &opts,
-            dpo: rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight },
+            dpo,
             pairs: packed,
             adapter: &adapter_path,
             lineage: model::finetune::AdapterLineage { card_id: &adapter_id, base_id: &base_id, dataset_id: Some(&dataset_id), provenance: Some(provenance) },

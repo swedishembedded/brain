@@ -155,6 +155,10 @@ impl<M: Model> Objective<M> for Mixture<M> {
         Ok(())
     }
 
+    fn check_data(&mut self, model: &M) -> Result<(), std::io::Error> {
+        self.arms.iter_mut().try_for_each(|arm| arm.check_data(model))
+    }
+
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
         let idx = draw_arm(&self.weights, rng);
         self.drawn[idx] = true;

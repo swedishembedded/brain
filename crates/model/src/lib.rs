@@ -110,6 +110,7 @@ pub mod tape;
 pub mod train;
 pub mod trainprec;
 pub mod training;
+pub mod training_plan;
 pub mod vit;
 pub mod vlm;
 pub mod rope_scaling;

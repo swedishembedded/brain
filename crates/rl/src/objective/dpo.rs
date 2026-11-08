@@ -73,7 +73,7 @@
 //! [`Dpo::try_from_dataset`] trains on a fixed set of [`PackedPair`]s (rendered
 //! conversations with a per-token supervision mask, see
 //! [`PackedPair::from_masked`]) and takes its frozen reference to be the model
-//! the run STARTS from: [`Objective::prepare`] scores every pair once on the
+//! the run STARTS from: [`Objective::check_data`] scores every pair once on the
 //! model it is handed, before the first step, and the scores never change
 //! after that. So no second model copy exists during training, and the first
 //! step's margin is exactly zero. A resumed run is prepared on the same
@@ -86,7 +86,7 @@ use std::collections::VecDeque;
 use data::rng::Rng;
 use super::stream::{self, IndexedStream};
 use model::rollout::Completion;
-use model::{Batch, Model, Objective, StepVerdict, IGNORE};
+use model::{Batch, Model, ModelConfig, Objective, StepVerdict, IGNORE};
 use model::training::Unsupported;
 
 /// One verifier-derived preference pair for a single prompt: `chosen` is a
@@ -134,21 +134,39 @@ pub struct DpoConfig {
     /// log-likelihood is added to the loss (see [`add_chosen_nll`]). Zero is
     /// plain DPO.
     pub nll_weight: f32,
+    /// An ablation: allow a `beta` that is zero or negative (it removes or reverses the preference, so
+    /// it is only a control experiment). A non-finite `beta` is refused either way.
+    pub beta_ablation: bool,
 }
 
 impl DpoConfig {
     /// Refuse a configuration DPO cannot train: `beta` must be finite and positive (it scales
-    /// the margin, and a non-positive one reverses or removes the preference), `nll_weight`
-    /// finite and not negative, and the row must hold a prompt token and a target.
+    /// the margin, and a non-positive one reverses or removes the preference) unless the run is an
+    /// explicit [`Self::beta_ablation`], `nll_weight` finite and not negative, and the row must hold a
+    /// prompt token and a target.
     pub fn validate(&self) -> Result<(), String> {
-        if !(self.beta.is_finite() && self.beta > 0.0) {
-            return Err(format!("beta must be finite and positive, got {}", self.beta));
+        if !self.beta.is_finite() || (self.beta <= 0.0 && !self.beta_ablation) {
+            return Err(format!("beta must be finite and positive (set beta_ablation to run a control with beta <= 0), got {}", self.beta));
         }
         if !(self.nll_weight.is_finite() && self.nll_weight >= 0.0) {
             return Err(format!("nll_weight must be finite and not negative, got {}", self.nll_weight));
         }
         if self.seq_len < 2 {
             return Err(format!("seq_len {} leaves no position that predicts a token", self.seq_len));
+        }
+        Ok(())
+    }
+}
+
+impl model::training_plan::PlanCheck for DpoConfig {
+    fn plan_name(&self) -> &'static str {
+        "dpo"
+    }
+
+    fn check(&self, opts: &model::FitOpts) -> Result<(), String> {
+        self.validate()?;
+        if self.seq_len != opts.block_size as usize {
+            return Err(format!("rows are packed at seq_len {} but the model is built for the block size {}", self.seq_len, opts.block_size));
         }
         Ok(())
     }
@@ -362,6 +380,15 @@ impl PackedPair {
         ((new_c - ref_c) - (new_r - ref_r)) as f64
     }
 
+    /// Refuse a token id the model has no embedding row for, in the inputs or the supervised targets.
+    pub fn check_vocab(&self, vocab: u32) -> Result<(), String> {
+        let bad = self.tokens.iter().copied().chain(self.targets.iter().copied().filter(|&y| y != IGNORE)).find(|&id| id >= vocab);
+        match bad {
+            Some(id) => Err(format!("token id {id} is outside the model's vocabulary of {vocab}")),
+            None => Ok(()),
+        }
+    }
+
     /// The packed `[2 * seq_len]` token ids, row 0 chosen, row 1 rejected.
     pub fn tokens(&self) -> &[u32] {
         &self.tokens
@@ -390,11 +417,15 @@ fn pack_pair(cfg: &DpoConfig, pair: &DpoPair, chosen_ref: &[f32], rejected_ref: 
 /// Make sure `pending` holds a packed pair, drawing and packing one from the source when it is
 /// empty. `Ok(false)`: the source had none this round. `Err`: the pair it supplied does not fit
 /// the row or its reference is the wrong length.
-fn enqueue(cfg: &DpoConfig, next: &mut IndexedStream<DpoPair>, ref_logprobs: &RefLogprobFn, pending: &mut VecDeque<PackedPair>) -> Result<bool, String> {
+fn enqueue(cfg: &DpoConfig, vocab: Option<u32>, next: &mut IndexedStream<DpoPair>, ref_logprobs: &RefLogprobFn, pending: &mut VecDeque<PackedPair>) -> Result<bool, String> {
     if pending.is_empty() {
         let Some(pair) = next.draw() else { return Ok(false) };
         let (chosen_ref, rejected_ref) = ref_logprobs(&pair);
-        pending.push_back(pack_pair(cfg, &pair, &chosen_ref, &rejected_ref)?);
+        let packed = pack_pair(cfg, &pair, &chosen_ref, &rejected_ref)?;
+        if let Some(vocab) = vocab {
+            packed.check_vocab(vocab)?;
+        }
+        pending.push_back(packed);
     }
     Ok(true)
 }
@@ -451,6 +482,8 @@ pub struct Dpo {
     trained: u32,
     /// A pair the source supplied that cannot be packed faithfully; aborts the run at the step's verdict.
     refusal: Option<String>,
+    /// The model's vocabulary, known once [`Objective::check_data`] ran: ids past it are refused.
+    vocab: Option<u32>,
 }
 
 /// Where a [`Dpo`]'s pairs and their reference come from.
@@ -459,7 +492,7 @@ enum Source {
     /// reference function when it is queued.
     Stream { next: IndexedStream<DpoPair>, ref_logprobs: RefLogprobFn, pending: VecDeque<PackedPair> },
     /// A fixed dataset, scored once against the starting model by
-    /// [`Objective::prepare`] (`referenced` once it has been).
+    /// [`Objective::check_data`] (`referenced` once it has been).
     Dataset { pairs: Vec<PackedPair>, referenced: bool },
 }
 
@@ -475,7 +508,7 @@ impl Dpo {
         R: Fn(&DpoPair) -> (Vec<f32>, Vec<f32>) + 'static,
     {
         cfg.validate().map_err(DpoConfigError::Invalid)?;
-        Ok(Dpo { cfg, source: Source::Stream { next: IndexedStream::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0, refusal: None })
+        Ok(Dpo { cfg, source: Source::Stream { next: IndexedStream::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0, refusal: None, vocab: None })
     }
 
     /// A fixed preference dataset (see the module doc): each micro-step
@@ -490,7 +523,7 @@ impl Dpo {
         if let Some((index, pair)) = pairs.iter().enumerate().find(|(_, p)| p.seq_len() != cfg.seq_len) {
             return Err(DpoConfigError::PairWidth { index, got: pair.seq_len(), expected: cfg.seq_len });
         }
-        Ok(Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0, trained: 0, refusal: None })
+        Ok(Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0, trained: 0, refusal: None, vocab: None })
     }
 
     /// Convenience over [`Self::try_new`]: a fixed, cycling dataset of
@@ -515,7 +548,17 @@ impl<M: Model> Objective<M> for Dpo {
 
     fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
         model::training::require_token_objectives(model)?.enable_weighted_loss();
+        Ok(())
+    }
+
+    fn check_data(&mut self, model: &M) -> Result<(), std::io::Error> {
+        let vocab = model.config().vocab();
+        self.vocab = Some(vocab);
         if let Source::Dataset { pairs, referenced } = &mut self.source {
+            for (index, pair) in pairs.iter().enumerate() {
+                pair.check_vocab(vocab).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("preference pair {index}: {why}")))?;
+            }
+            // The frozen reference is the model as it starts; scored once the pairs are known to be ones the model can take.
             if !*referenced {
                 for pair in pairs.iter_mut() {
                     pair.score_reference(model);
@@ -532,7 +575,7 @@ impl<M: Model> Objective<M> for Dpo {
                 // No pair available this round is a legitimate no-op micro-step, matching GRPO's own
                 // "every completion this round was dropped" convention; a pair that cannot be packed
                 // faithfully is not.
-                match enqueue(&self.cfg, next, ref_logprobs, pending) {
+                match enqueue(&self.cfg, self.vocab, next, ref_logprobs, pending) {
                     Ok(true) => {}
                     Ok(false) => return 0.0,
                     Err(why) => {
@@ -544,7 +587,7 @@ impl<M: Model> Objective<M> for Dpo {
                 weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, &packed)
             }
             Source::Dataset { pairs, referenced } => {
-                assert!(*referenced, "Dpo::micro_step: a dataset objective scores its reference in prepare(), which was not called");
+                assert!(*referenced, "Dpo::micro_step: a dataset objective scores its reference in check_data(), which was not called");
                 weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, rng.choice(pairs))
             }
         };
@@ -561,7 +604,7 @@ impl<M: Model> Objective<M> for Dpo {
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         match &mut self.source {
             Source::Stream { next, ref_logprobs, pending } => {
-                match enqueue(&self.cfg, next, ref_logprobs, pending) {
+                match enqueue(&self.cfg, self.vocab, next, ref_logprobs, pending) {
                     Ok(true) => {}
                     Ok(false) => return 0.0,
                     Err(why) => {
@@ -732,7 +775,7 @@ mod tests {
 
     #[test]
     fn a_pair_that_overruns_the_row_is_refused_not_truncated() {
-        let cfg = DpoConfig { beta: 0.1, seq_len: 5, nll_weight: 0.0 };
+        let cfg = DpoConfig { beta: 0.1, seq_len: 5, nll_weight: 0.0, beta_ablation: false };
         let fits = DpoPair { prompt: vec![1, 2], chosen: vec![3, 4, 5], rejected: vec![6, 7, 8] };
         assert!(pack_pair(&cfg, &fits, &[0.0; 3], &[0.0; 3]).is_ok(), "exactly full is allowed");
         let long = DpoPair { prompt: vec![1, 2], chosen: vec![3, 4, 5, 6], rejected: vec![6] };
@@ -744,7 +787,7 @@ mod tests {
 
     #[test]
     fn a_dpo_configuration_that_cannot_train_is_refused() {
-        let ok = DpoConfig { beta: 0.1, seq_len: 8, nll_weight: 0.0 };
+        let ok = DpoConfig { beta: 0.1, seq_len: 8, nll_weight: 0.0, beta_ablation: false };
         assert!(ok.validate().is_ok());
         for (field, cfg) in [
             ("beta", DpoConfig { beta: 0.0, ..ok }),
@@ -759,7 +802,7 @@ mod tests {
 
     #[test]
     fn the_constructors_return_a_typed_error_instead_of_panicking() {
-        let ok = DpoConfig { beta: 0.1, seq_len: 8, nll_weight: 0.0 };
+        let ok = DpoConfig { beta: 0.1, seq_len: 8, nll_weight: 0.0, beta_ablation: false };
         let source = |_: u64| None::<DpoPair>;
         let reference = |_: &DpoPair| (Vec::new(), Vec::new());
         assert!(matches!(Dpo::try_new(DpoConfig { beta: 0.0, ..ok }, source, reference), Err(DpoConfigError::Invalid(why)) if why.contains("beta")));
@@ -767,5 +810,17 @@ mod tests {
         assert_eq!(Dpo::try_from_pairs(ok, Vec::new(), reference).err(), Some(DpoConfigError::NoPairs));
         let narrow = PackedPair::from_masked(4, (&[1, 2, 3], &[false, true, true]), (&[1, 2, 4], &[false, true, true])).unwrap();
         assert_eq!(Dpo::try_from_dataset(ok, vec![narrow]).err(), Some(DpoConfigError::PairWidth { index: 0, got: 4, expected: 8 }));
+    }
+
+    #[test]
+    fn a_non_positive_beta_is_an_ablation_that_has_to_be_asked_for() {
+        use model::training_plan::ValidatedTrainingPlan;
+        let opts = model::FitOpts { block_size: 8, batch_size: 2, ..Default::default() };
+        let control = DpoConfig { beta: 0.0, seq_len: 8, nll_weight: 0.0, beta_ablation: false };
+        assert!(ValidatedTrainingPlan::build(opts.clone(), &[&control]).unwrap_err().to_string().contains("beta"));
+        assert!(ValidatedTrainingPlan::build(opts.clone(), &[&DpoConfig { beta_ablation: true, ..control }]).is_ok());
+        assert!(ValidatedTrainingPlan::build(opts.clone(), &[&DpoConfig { beta: f32::NAN, beta_ablation: true, ..control }]).is_err(), "not even an ablation takes a NaN");
+        let wrong_row = DpoConfig { beta: 0.1, seq_len: 6, ..control };
+        assert!(ValidatedTrainingPlan::build(opts, &[&wrong_row]).unwrap_err().to_string().contains("block size"));
     }
 }

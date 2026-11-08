@@ -43,7 +43,7 @@
 use data::rng::Rng;
 use model::rollout::{Completion, ModelRollout, Rollout, RolloutParams, StopReason};
 use model::training::{self, Unsupported};
-use model::{Batch, Model, Objective, StepVerdict, IGNORE};
+use model::{Batch, Model, ModelConfig, Objective, StepVerdict, IGNORE};
 
 pub use super::advantage::{group_advantages, group_advantages_with, AdvantageNorm};
 pub use super::grpo_stats::{BehaviourRefusal, CycleLog, GrpoStats, NonFiniteSteps, RowRefusal, MAX_CONSECUTIVE_NONFINITE};
@@ -143,6 +143,20 @@ pub struct GrpoConfig {
     pub options: GrpoOptions,
 }
 
+impl model::training_plan::PlanCheck for GrpoConfig {
+    fn plan_name(&self) -> &'static str {
+        "grpo"
+    }
+
+    fn check(&self, opts: &model::FitOpts) -> Result<(), String> {
+        self.validate().map_err(|refusal| refusal.to_string())?;
+        if self.seq_len != opts.block_size as usize {
+            return Err(format!("rows are packed at seq_len {} but the model is built for the block size {}", self.seq_len, opts.block_size));
+        }
+        Ok(())
+    }
+}
+
 impl GrpoConfig {
     /// Refuse a configuration whose importance ratio would not be taken against the
     /// distribution the tokens were sampled from. On the trainer's basis the behaviour
@@ -234,6 +248,13 @@ struct Drawn {
     refusal: Option<BehaviourRefusal>,
 }
 
+impl Drawn {
+    /// A group that cannot be trained on, with the reason.
+    fn refused(refusal: BehaviourRefusal) -> Drawn {
+        Drawn { rows: Vec::new(), spans: Vec::new(), rewards: Vec::new(), attempts: 0, zero_variance: false, truncated: 0, eos_targets: 0, truncated_sampling_rows: 0, sampler_gap: 0.0, refusal: Some(refusal) }
+    }
+}
+
 /// One GRPO (or, with `cfg.group_size == 1`, RFT/STaR) training objective over
 /// environment `E`'s tasks, scored by verifier `V`, for any `M: Model` that
 /// provides [`training::TokenObjectives`].
@@ -254,6 +275,8 @@ pub struct Grpo<E: Environment, V: Verifier> {
     consecutive_nonfinite: u32,
     /// Why the next step must abort instead of training what was sampled.
     refusal: Option<BehaviourRefusal>,
+    /// The model's vocabulary, known once [`Objective::check_data`] ran: ids past it are refused.
+    vocab: Option<u32>,
 }
 
 impl<E: Environment, V: Verifier> Grpo<E, V> {
@@ -276,6 +299,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             verdict: None,
             consecutive_nonfinite: 0,
             refusal: None,
+            vocab: None,
         })
     }
 
@@ -352,7 +376,12 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     /// without touching the queue, the log or the counters.
     fn draw_group<M: Model>(&self, model: &M, task: &Task, roll: &mut dyn Rollout, own: bool, rng: &mut Rng) -> Drawn {
         let plen = task.prompt.len();
-        assert!(plen > 0 && plen < self.cfg.seq_len, "Grpo: a prompt of {plen} tokens leaves no room in rows of {}", self.cfg.seq_len);
+        if !(plen > 0 && plen < self.cfg.seq_len) {
+            return Drawn::refused(BehaviourRefusal::PromptLength { len: plen, seq_len: self.cfg.seq_len });
+        }
+        if let Some(refusal) = self.out_of_vocabulary(&task.prompt) {
+            return Drawn::refused(refusal);
+        }
         let fit = self.cfg.seq_len - plen;
         let params = if own { self.own_params(fit) } else { self.cfg.rollout };
         let eos = self.cfg.rollout.eos;
@@ -388,6 +417,13 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             for c in roll.sample_n(&task.prompt, self.cfg.group_size, &params, rng) {
                 score(c);
             }
+        }
+        // Nothing is scored or packed from a group the model cannot take or no advantage can be computed from.
+        if let Some(refusal) = self
+            .out_of_vocabulary(spans.iter().flatten())
+            .or_else(|| rewards.iter().copied().find(|r| !r.is_finite()).map(|value| BehaviourRefusal::NonFiniteReward { value }))
+        {
+            return Drawn::refused(refusal);
         }
         let advs: Vec<f32> = if star {
             let mut advs = vec![0.0; kept.len()];
@@ -437,6 +473,12 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         let refusal = self.attach_references(model, task, &kept, &advs, &mut rows).err();
         let truncated_sampling_rows = if truncated_sampling { rows.len() } else { 0 };
         Drawn { rows, spans, rewards, attempts, zero_variance, truncated, eos_targets, truncated_sampling_rows, sampler_gap, refusal }
+    }
+
+    /// The first token id of `ids` the model has no embedding row for, once the model's vocabulary is known.
+    fn out_of_vocabulary<'a>(&self, ids: impl IntoIterator<Item = &'a u32>) -> Option<BehaviourRefusal> {
+        let vocab = self.vocab?;
+        ids.into_iter().copied().find(|&id| id >= vocab).map(|id| BehaviourRefusal::TokenOutOfRange { id, vocab })
     }
 
     /// Pack one completion (`trained` = its span plus the stop token when that
@@ -678,6 +720,11 @@ fn adapter_off_logprobs<M: Model>(model: &M, rows: &[PackedRow]) -> Option<Vec<V
 impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
     fn regime(&self) -> &'static str {
         "grpo"
+    }
+
+    fn check_data(&mut self, model: &M) -> Result<(), std::io::Error> {
+        self.vocab = Some(model.config().vocab());
+        Ok(())
     }
 
     fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {

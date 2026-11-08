@@ -80,7 +80,7 @@ use std::collections::VecDeque;
 
 use data::rng::Rng;
 use super::stream::{self, IndexedStream};
-use model::{Batch, Model, Objective, StepVerdict, IGNORE};
+use model::{Batch, Model, ModelConfig, Objective, StepVerdict, IGNORE};
 use model::training::Unsupported;
 
 /// One position's top-K teacher distribution: `ids[k]`/`probs[k]` pairs,
@@ -165,6 +165,30 @@ pub struct DistillConfig {
     pub seq_len: usize,
 }
 
+impl DistillConfig {
+    /// Refuse a row too short to hold a prompt token and a distilled one.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.seq_len < 2 {
+            return Err(format!("seq_len {} leaves no position that predicts a token", self.seq_len));
+        }
+        Ok(())
+    }
+}
+
+impl model::training_plan::PlanCheck for DistillConfig {
+    fn plan_name(&self) -> &'static str {
+        "distillation"
+    }
+
+    fn check(&self, opts: &model::FitOpts) -> Result<(), String> {
+        self.validate()?;
+        if self.seq_len != opts.block_size as usize {
+            return Err(format!("rows are packed at seq_len {} but the model is built for the block size {}", self.seq_len, opts.block_size));
+        }
+        Ok(())
+    }
+}
+
 /// Pass `k`'s weight for one position, scaled by `count` (the model's own `/count` weighted-CE
 /// divisor of that pass, cancelled exactly - see the module doc comment's derivation) and divided
 /// by `active`, the number of teacher-scored positions, so the loss is their mean. `prob` is pure
@@ -239,7 +263,7 @@ struct PackedExample {
 /// does not fit the row, has no prompt, carries a malformed teacher
 /// distribution, or has no teacher signal at all is refused, never truncated or
 /// skipped.
-fn pack_row(seq_len: usize, prompt: &[u32], completion: &[u32], teacher: &[TopK]) -> Result<PackedExample, String> {
+fn pack_row(seq_len: usize, vocab: Option<u32>, prompt: &[u32], completion: &[u32], teacher: &[TopK]) -> Result<PackedExample, String> {
     if completion.len() != teacher.len() {
         return Err(format!("{} completion tokens but {} teacher distributions", completion.len(), teacher.len()));
     }
@@ -254,6 +278,12 @@ fn pack_row(seq_len: usize, prompt: &[u32], completion: &[u32], teacher: &[TopK]
     }
     if teacher.iter().all(|t| t.ids.is_empty()) {
         return Err("no completion position carries a teacher distribution".to_string());
+    }
+    if let Some(vocab) = vocab {
+        let ids = prompt.iter().chain(completion).copied().chain(teacher.iter().flat_map(|t| t.ids.iter().copied()));
+        if let Some(id) = ids.into_iter().find(|&id| id >= vocab) {
+            return Err(format!("token id {id} is outside the model's vocabulary of {vocab}"));
+        }
     }
     let mut tokens = vec![0u32; seq_len];
     let mut packed_teacher = vec![TopK::default(); seq_len];
@@ -283,6 +313,8 @@ pub struct DistillTopK {
     passes: u32,
     /// An example the source supplied that cannot be packed faithfully; aborts the run at the step's verdict.
     refusal: Option<String>,
+    /// The model's vocabulary, known once [`Objective::check_data`] ran: ids past it are refused.
+    vocab: Option<u32>,
 }
 
 impl DistillTopK {
@@ -292,7 +324,7 @@ impl DistillTopK {
     fn enqueue(&mut self) -> bool {
         if self.pending.is_empty() {
             let Some(example) = self.source.draw() else { return false };
-            match pack_row(self.cfg.seq_len, &example.prompt, &example.completion, &example.teacher) {
+            match pack_row(self.cfg.seq_len, self.vocab, &example.prompt, &example.completion, &example.teacher) {
                 Ok(packed) => self.pending.push_back(packed),
                 Err(why) => {
                     self.refusal = Some(why);
@@ -310,7 +342,7 @@ impl DistillTopK {
     where
         S: FnMut(u64) -> Option<DistillExample> + 'static,
     {
-        DistillTopK { cfg, source: IndexedStream::new(source), pending: VecDeque::new(), last_loss: 0.0, passes: 0, refusal: None }
+        DistillTopK { cfg, source: IndexedStream::new(source), pending: VecDeque::new(), last_loss: 0.0, passes: 0, refusal: None, vocab: None }
     }
 
     /// Convenience over [`Self::new`]: a fixed, cycling dataset of
@@ -351,6 +383,11 @@ impl<M: Model> Objective<M> for DistillTopK {
 
     fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
         model::training::require_token_objectives(model)?.enable_weighted_loss();
+        Ok(())
+    }
+
+    fn check_data(&mut self, model: &M) -> Result<(), std::io::Error> {
+        self.vocab = Some(model.config().vocab());
         Ok(())
     }
 
@@ -487,7 +524,7 @@ mod tests {
         let completion = [4u32, 5];
         let teacher = vec![TopK { ids: vec![4, 9], probs: vec![0.9, 0.1] }, TopK { ids: vec![5], probs: vec![1.0] }];
 
-        let packed = pack_row(seq_len, &prompt, &completion, &teacher).expect("fits");
+        let packed = pack_row(seq_len, None, &prompt, &completion, &teacher).expect("fits");
 
         assert_eq!(packed.tokens, vec![1, 2, 3, 4, 5, 0]);
         // Position 2 (prompt.len()-1) predicts completion[0]=4, position 3
@@ -502,16 +539,16 @@ mod tests {
     #[test]
     fn pack_row_refuses_a_completion_that_overruns_seq_len_instead_of_truncating_it() {
         let teacher: Vec<TopK> = (0..4).map(|i| TopK { ids: vec![10 + i as u32], probs: vec![1.0] }).collect();
-        let Err(err) = pack_row(4, &[1, 2], &[3, 4, 5, 6], &teacher) else { panic!("2 + 4 tokens do not fit a row of 4") };
+        let Err(err) = pack_row(4, None, &[1, 2], &[3, 4, 5, 6], &teacher) else { panic!("2 + 4 tokens do not fit a row of 4") };
         assert!(err.contains("do not fit"), "{err}");
-        assert!(pack_row(6, &[1, 2], &[3, 4, 5, 6], &teacher).is_ok(), "exactly full is allowed");
+        assert!(pack_row(6, None, &[1, 2], &[3, 4, 5, 6], &teacher).is_ok(), "exactly full is allowed");
     }
 
     #[test]
     fn pack_row_refuses_a_zero_information_example() {
         let none = vec![TopK::default(); 2];
-        assert!(pack_row(8, &[1, 2], &[3, 4], &none).is_err());
-        assert!(pack_row(8, &[], &[3, 4], &[TopK { ids: vec![1], probs: vec![1.0] }, TopK { ids: vec![1], probs: vec![1.0] }]).is_err(), "no prompt");
+        assert!(pack_row(8, None, &[1, 2], &[3, 4], &none).is_err());
+        assert!(pack_row(8, None, &[], &[3, 4], &[TopK { ids: vec![1], probs: vec![1.0] }, TopK { ids: vec![1], probs: vec![1.0] }]).is_err(), "no prompt");
     }
 
     #[test]
@@ -534,5 +571,15 @@ mod tests {
     #[should_panic(expected = "need k >= 1")]
     fn top_k_of_zero_is_refused() {
         let _ = TopK::from_logits(&[0.1, 0.2], 0);
+    }
+
+    #[test]
+    fn the_plan_refuses_a_row_the_model_is_not_built_for() {
+        use model::training_plan::ValidatedTrainingPlan;
+        let opts = model::FitOpts { block_size: 8, batch_size: 1, ..Default::default() };
+        assert!(ValidatedTrainingPlan::build(opts.clone(), &[&DistillConfig { seq_len: 8 }]).is_ok());
+        for seq_len in [0, 1, 9] {
+            assert!(ValidatedTrainingPlan::build(opts.clone(), &[&DistillConfig { seq_len }]).is_err(), "seq_len {seq_len}");
+        }
     }
 }

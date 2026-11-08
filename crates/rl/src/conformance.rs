@@ -172,7 +172,7 @@ fn refuses_every_objective<M: Model>(subject: &Subject<M>, seed: u64) -> Result<
     };
     let mut grpo = Grpo::try_new(OneTask, NoReward, grpo_cfg).expect("a valid GRPO configuration");
     refused("grpo", Objective::<M>::prepare(&mut grpo, &mut m))?;
-    let dpo_cfg = crate::objective::dpo::DpoConfig { beta: BETA, seq_len: SEQ as usize, nll_weight: 0.0 };
+    let dpo_cfg = crate::objective::dpo::DpoConfig { beta: BETA, seq_len: SEQ as usize, nll_weight: 0.0, beta_ablation: false };
     let pair = crate::objective::dpo::DpoPair { prompt: vec![0], chosen: vec![1], rejected: vec![2] };
     let mut dpo = crate::objective::dpo::Dpo::try_from_pairs(dpo_cfg, vec![pair], |_| (Vec::new(), Vec::new())).expect("a valid DPO configuration");
     refused("dpo", Objective::<M>::prepare(&mut dpo, &mut m))?;

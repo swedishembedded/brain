@@ -514,4 +514,34 @@ fn numeric_settings_no_run_can_honour_are_refused() {
     let (judge, _) = Judge::new(first_wins);
     let refusal = Grpo::try_new(Env { variable: always_variable }, judge, GrpoConfig { group_size: 0, ..base }).err().expect("an empty group is refused, not a panic");
     assert_eq!(refusal, BehaviourRefusal::InvalidCount { field: "group_size", got: 0, least: 1 });
+
+    // The same refusals, through the plan every entry point builds before it allocates anything.
+    let opts = model::FitOpts { block_size: base.seq_len as u32, batch_size: 1, ..Default::default() };
+    assert!(model::training_plan::ValidatedTrainingPlan::build(opts.clone(), &[&base]).is_ok());
+    let bad = GrpoConfig { kl_beta: -0.1, ..base };
+    assert!(model::training_plan::ValidatedTrainingPlan::build(opts, &[&bad]).unwrap_err().to_string().contains("kl_beta"));
+}
+
+/// T019: a reward that is not a number would make every advantage of its group one; a token id the model has no row
+/// for would index outside its embedding. Either aborts the step with a typed reason before any row is trained.
+#[test]
+fn a_non_finite_reward_or_an_out_of_vocabulary_token_aborts_the_step() {
+    let s = seed();
+    let abort_reason = |judge: Judge, group: Vec<Completion>, m: &mut Qwen, vocab: u32| {
+        let mut obj = scripted(Env { variable: always_variable }, judge, config(2, 1.0, GrpoOptions::default()), group);
+        obj.prepare(m).unwrap();
+        model::Objective::<Qwen>::check_data(&mut obj, m).unwrap();
+        assert_eq!(vocab, 23);
+        obj.micro_steps(m, &mut Rng::new(s), 2);
+        let StepVerdict::Abort(e) = verdict(&mut obj) else { panic!("the step must abort") };
+        e.get_ref().and_then(|source| source.downcast_ref::<BehaviourRefusal>()).cloned().expect("a typed error")
+    };
+    let (mut m, _, _) = lora_model(s);
+    let (judge, _) = Judge::new(|_, _| f32::NAN);
+    let refusal = abort_reason(judge, vec![completion(&[4, 4]), completion(&[5, 5])], &mut m, 23);
+    assert!(matches!(refusal, BehaviourRefusal::NonFiniteReward { value } if value.is_nan()), "{refusal}");
+
+    let (judge, _) = Judge::new(first_wins);
+    let refusal = abort_reason(judge, vec![completion(&[4, 23]), completion(&[5, 5])], &mut m, 23);
+    assert_eq!(refusal, BehaviourRefusal::TokenOutOfRange { id: 23, vocab: 23 });
 }

@@ -369,3 +369,22 @@ fn a_rollout_dataset_missing_its_sidecars_is_refused_not_trained_as_imitation() 
     let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig::default()).err().expect("an all-imitation dataset");
     assert!(err.to_string().contains("imitation"), "{err}");
 }
+
+/// T019: a dataset holding a token id past the model's vocabulary is refused before any step, and an infinite
+/// advantage when the dataset is opened.
+#[test]
+fn a_token_id_past_the_vocabulary_or_an_infinite_advantage_is_refused() {
+    let mut m = lora_model(data::rng::random_seed());
+    let vocab = Model::config(&m).vocab as u32;
+    let config = no_kl();
+    let dir = tempfile::tempdir().unwrap();
+    write_dataset(dir.path(), &[Row::new(&[1, 2, 3, vocab, 5, 6], 3, Some(1.0))]);
+    let mut obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), config).unwrap();
+    Objective::<Qwen35>::prepare(&mut obj, &mut m).unwrap();
+    let err = Objective::<Qwen35>::check_data(&mut obj, &m).unwrap_err();
+    assert!(err.to_string().contains("vocabulary"), "{err}");
+
+    write_dataset(dir.path(), &[Row::new(&[1, 2, 3, 4, 5, 6], 3, Some(f32::INFINITY))]);
+    let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), config).err().expect("an infinite advantage");
+    assert!(err.to_string().contains("infinite advantage"), "{err}");
+}

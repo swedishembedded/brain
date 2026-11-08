@@ -63,6 +63,14 @@ pub trait Objective<M: Model> {
         Ok(())
     }
 
+    /// Refuse data this objective holds that `model` cannot take - a token id past the model's vocabulary, a
+    /// row longer than its block - before any step is taken. Called once, after [`Self::prepare`] and before
+    /// the first step (a resumed run included). The default accepts: an objective whose data is checked
+    /// where it is read needs nothing here.
+    fn check_data(&mut self, _model: &M) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+
     /// The run is about to take its first step, `draws_done` micro-steps
     /// into its data (more than 0 on a resume), seeded by `seed`: an
     /// objective that orders its data by epochs positions itself here, so a
@@ -222,6 +230,9 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for Box<O> {
     fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
         (**self).prepare(model)
     }
+    fn check_data(&mut self, model: &M) -> Result<(), std::io::Error> {
+        (**self).check_data(model)
+    }
     fn begin(&mut self, seed: u64, draws_done: u64) {
         (**self).begin(seed, draws_done)
     }
@@ -274,6 +285,9 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for &mut O {
     }
     fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
         (**self).prepare(model)
+    }
+    fn check_data(&mut self, model: &M) -> Result<(), std::io::Error> {
+        (**self).check_data(model)
     }
     fn begin(&mut self, seed: u64, draws_done: u64) {
         (**self).begin(seed, draws_done)

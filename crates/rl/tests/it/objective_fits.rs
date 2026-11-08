@@ -169,7 +169,7 @@ fn dpo_widens_its_margin<M: Model>(b: &Build<M>) {
     let before = snapshot(&policy);
 
     let opts = fit_opts(8);
-    let mut fit = DpoFit::new(DpoConfig { beta: 0.5, seq_len: T, nll_weight: 0.0 }, vec![pair()], vec![vec![pair()]], &opts, FitControl::default());
+    let mut fit = DpoFit::new(DpoConfig { beta: 0.5, seq_len: T, nll_weight: 0.0, beta_ablation: false }, vec![pair()], vec![vec![pair()]], &opts, FitControl::default());
     let (report, trained) = fit.fit(policy).unwrap_or_else(|e| panic!("{what}: {e}"));
 
     finite(&what, &report);

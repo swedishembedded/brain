@@ -129,7 +129,9 @@ impl FitOpts {
     /// Refuse numeric configuration no run can honour, naming the field: a zero batch or
     /// accumulation (which the loop would otherwise quietly raise to one), a rate or decay that is
     /// negative or not finite, a floor above the peak rate, AdamW betas outside `[0, 1)` or an
-    /// epsilon that is not positive. Called by the shared fit loop, so every trainer passes it.
+    /// epsilon that is not positive, and contradictory schedules (a warmup longer than the decay, a cooldown
+    /// longer than the run, a patience with nothing evaluated). Called by the shared fit loop, so every trainer
+    /// passes it, and by [`crate::training_plan::ValidatedTrainingPlan`] before any resource is allocated.
     pub fn validate(&self) -> Result<(), String> {
         let finite_non_negative = |name: &str, value: f32| {
             if value.is_finite() && value >= 0.0 {
@@ -149,6 +151,15 @@ impl FitOpts {
         finite_non_negative("grad_clip", self.grad_clip)?;
         if self.min_lr > self.lr {
             return Err(format!("min_lr {} is above lr {}: the schedule would rise at the end instead of decaying", self.min_lr, self.lr));
+        }
+        if self.decay_iters > 0 && self.warmup > self.decay_iters {
+            return Err(format!("warmup {} is longer than decay_iters {}: the schedule would reach its floor before it finished warming up", self.warmup, self.decay_iters));
+        }
+        if self.cooldown_steps > self.steps {
+            return Err(format!("cooldown_steps {} is more than the run's {} steps", self.cooldown_steps, self.steps));
+        }
+        if self.patience > 0 && self.eval_interval == 0 {
+            return Err(format!("patience {} selects on held-out loss, but eval_interval is 0 so nothing is ever evaluated", self.patience));
         }
         let crate::Adam { beta1, beta2, eps } = self.adam;
         for (name, beta) in [("adam beta1", beta1), ("adam beta2", beta2)] {
@@ -1874,6 +1885,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         obj.shard(rank, world)?;
     }
     obj.prepare(&mut model)?;
+    obj.check_data(&model)?;
     // The run's optimizer-state precision reaches every model here, before any step or resume.
     crate::trainprec::apply_train_precision(&mut model, &opts.precision, std::any::type_name::<M>()).map_err(std::io::Error::other)?;
     if let Some(sparse) = opts.native_sparse {

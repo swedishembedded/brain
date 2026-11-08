@@ -76,6 +76,23 @@ fn a_preference_dataset_is_validated_against_the_base() {
     assert!(err.to_string().contains("max_block"), "{err}");
 }
 
+/// T019: a configuration no run can honour is refused by name before a model is built, by the validated plan every
+/// entry point goes through; a zero beta is only a control experiment and has to be asked for as one.
+#[test]
+fn a_preference_run_the_plan_refuses_never_builds_a_model() {
+    let model = chat_model_dir("pref-plan");
+    let out = model.join("run");
+    for (what, run) in [
+        ("beta", fine_tune(&model, &out).beta(0.0)),
+        ("beta", fine_tune(&model, &out).beta(f32::NAN).beta_ablation(true)),
+        ("lr", fine_tune(&model, &out).lr(f32::NAN)),
+    ] {
+        let err = run.run().unwrap_err().to_string();
+        assert!(err.contains(what) && err.contains("invalid"), "{what}: {err}");
+        assert!(!out.join("adapter.safetensors").exists(), "{what}: nothing was trained");
+    }
+}
+
 /// DPO over a quantized frozen base: the policy trains its adapter over the base held in the
 /// named format, the starting policy is the reference (the first loss is exactly `ln 2`), the
 /// margin on the training pairs rises, and a format the architecture does not hold is refused by
