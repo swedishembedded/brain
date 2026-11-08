@@ -14,7 +14,7 @@ measurement of the kernel. It measures **launch + execute + fence**, and the flo
 roughly constant, so the error is inversely proportional to how small the kernel is.
 
 Measured both ways on the same workload, host-timed slices against the backend's **GPU timestamp
-queries** (`BRAIN_PROFILE=1`, which brackets each dispatch with
+queries** (then `BRAIN_PROFILE=1`, now the `--kernel-profile` flag, which brackets each dispatch with
 `beginning_of_pass_write_index`/`end_of_pass_write_index`):
 
 | kernel | host-timed ms/call | timestamped ms/call | inflation |
@@ -45,7 +45,7 @@ It also explains an "impossible rate" that three rounds of fixing the byte model
 Where this left the tooling before the fix, neither source was clean:
 
 - The host method has the floor above.
-- `BRAIN_PROFILE`'s timestamps measure real device execution, but only in a mode that puts **one
+- The timestamp profile's timestamps measure real device execution, but only in a mode that puts **one
   compute pass per dispatch**, which changes the execution the production single-pass flush
   actually performs. So its *absolute* times are not production times either.
 
@@ -62,7 +62,7 @@ stands). It must not be used to attribute time *between* kernels.
   measured is the one that ships. This is one query pair per dispatch, resolved once at the end,
   so per-kernel attribution and the whole-pass number come from the same execution.
 - Treat every per-kernel *share* recorded before this fix as suspect for small kernels, and
-  re-derive any ranking from `BRAIN_PROFILE`'s distribution. Whole-pass numbers, and every speedup
+  re-derive any ranking from the timestamp profile's distribution. Whole-pass numbers, and every speedup
   in this document that was judged by one, are unaffected.
 
 ## Evidence
