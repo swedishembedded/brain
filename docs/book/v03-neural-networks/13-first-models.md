@@ -5,9 +5,9 @@
 
 *What does it take to build, train and verify a small network end to end?*
 
-## The problem
+## From parts to two models
 
-Twelve chapters have given you the parts: a layer, a loss, a backward pass, a way to prove the gradients right, an optimizer, a schedule, a clip, a starting point, and a practice for reading a run that goes wrong. A part is not a model. A model is a decision about every one of them at once, written down so that someone else can run it again and get the same numbers, and checked at every joint. This chapter builds two models that way, from a blank page to a verified result, and counts the work each one costs.
+A layer is not a model, and neither is a loss, a backward pass or an optimizer. A model is a decision about every one of them at once, written down so that someone else can run it again and get the same numbers, and checked at every joint. Two such models are built here from a blank page to a verified result, and the work each one costs is counted.
 
 The first is an **autoencoder**. Sixteen sensors stand along a pipe and report one reading each, every second. You want to store three numbers per second instead of sixteen, and to be able to rebuild the sixteen from the three. The recipe of the readings is known in this chapter (three hidden causes drive all sixteen sensors, plus a little noise), so the answer is known too: three numbers should be enough. The model has to find that out by itself, from examples, with no label anywhere. A reading in which only the first cause is active, with strength 1, is the pattern $\cos(\pi\,\mathrm{pos})$ at the sensor positions $\mathrm{pos}_j = j/15$: it reads $1.0000$ at sensor 0 and $-1.0000$ at sensor 15. Rebuilding such a reading from three numbers means that the network has found the three patterns.
 
@@ -15,9 +15,7 @@ The second is a **learned controller**. A tank follows the law $y_{t+1} = y_t + 
 
 Both builds use only what earlier chapters taught: layers with GELU (chapter 2), the mean squared error (Volume II, chapter 2), the backward pass (chapters 4 and 5), the gradient check (chapter 6), AdamW (chapter 7), the schedule and the clip (chapter 8), the starting scale (chapter 9), the checklist (chapter 12) and the principal components of Volume II, chapter 7. Every table of this chapter was produced by the chapter's reference program, with randomness from the book's own generator, so that you can rebuild each model in your own language and compare numbers.
 
-## Before you begin
-
-Six questions on earlier chapters, to answer from memory. The answers are at the end of the chapter.
+Six ideas from the earlier chapters will be used at once, and it is worth answering these from memory before the first build. The answers are at the end of the chapter; if one is hard, go back to the chapter named.
 
 1. ("Multilayer Networks", chapter 2 of this volume.) Two linear layers follow each other with no activation between them, $16 \to 3 \to 16$. What single map do they compute, and what is the largest rank it can have?
 2. ("Optimizers: From SGD to AdamW", chapter 7.) What is the size of the first AdamW step of a weight whose first gradient is $g = 0.002$, with rate $\eta = 0.01$ and no weight decay?
@@ -28,9 +26,7 @@ Six questions on earlier chapters, to answer from memory. The answers are at the
 
 ## Sixteen sensors, three causes
 
-*What it is for: a data set whose structure is known, so that what the autoencoder finds can be checked against the truth.*
-
-Sensor $j$ stands at position $\mathrm{pos}_j = j/15$. Three smooth patterns run along the pipe, $\mathrm{pat}_1 = \cos(\pi\,\mathrm{pos})$, $\mathrm{pat}_2 = \sin(2\pi\,\mathrm{pos})$ and $\mathrm{pat}_3 = \cos(2\pi\,\mathrm{pos})$. A reading is a mixture of them with random strengths plus a little noise, one noise value per sensor:
+To check what the autoencoder finds against the truth, the data must have a structure we know. Sensor $j$ stands at position $\mathrm{pos}_j = j/15$. Three smooth patterns run along the pipe, $\mathrm{pat}_1 = \cos(\pi\,\mathrm{pos})$, $\mathrm{pat}_2 = \sin(2\pi\,\mathrm{pos})$ and $\mathrm{pat}_3 = \cos(2\pi\,\mathrm{pos})$. A reading is a mixture of them with random strengths plus a little noise, one noise value per sensor:
 
 $$
 x_j = 1.0\, s_1\, \mathrm{pat}_{1,j} + 0.5\, s_2\, \mathrm{pat}_{2,j} + 0.25\, s_3\, \mathrm{pat}_{3,j} + 0.05\, n_j ,
@@ -65,9 +61,7 @@ Two facts about this data decide what a good model looks like. The readings live
 
 ## The autoencoder
 
-*What it is for: a network whose target is its own input, so that no labels are needed and the only way to succeed is to find structure.*
-
-An **autoencoder** is a network trained to output its own input after passing it through a **bottleneck**, a layer much narrower than the input. The part before the bottleneck, the encoder, turns the sixteen readings into a short vector $\mathbf{z}$ called the **code**; the part after it, the decoder, turns the code back into sixteen numbers $\hat{\mathbf{x}}$. The **reconstruction loss** is the mean squared error between the output and the input, the loss of Volume II, chapter 2 with the input as its own target:
+Many problems come without labels, and a network whose target is its own input needs none: the only way to succeed is to find structure. An **autoencoder** is a network trained to output its own input after passing it through a **bottleneck**, a layer much narrower than the input. The part before the bottleneck, the encoder, turns the sixteen readings into a short vector $\mathbf{z}$ called the **code**; the part after it, the decoder, turns the code back into sixteen numbers $\hat{\mathbf{x}}$. The **reconstruction loss** is the mean squared error between the output and the input, the loss of Volume II, chapter 2 with the input as its own target:
 
 $$
 L_{\mathrm{rec}} = \frac{1}{B\,D}\sum_{n=0}^{B-1}\sum_{j=0}^{D-1}\left(\hat{x}_{nj} - x_{nj}\right)^2 ,
@@ -95,9 +89,7 @@ There is also a baseline to beat before any training: the **mean predictor**, wh
 
 ## Before training: three checks
 
-*What it is for: certifying the model and the loss on a handful of examples, at a cost of a few percent of one run, before the run is paid for.*
-
-The checklist of chapter 12 orders its checks from cheapest to most expensive. Three of them can be done before the first update. Each is a measurement with an expected value:
+The checklist of chapter 12 orders its checks from cheapest to most expensive, and three of them can be done before the first update. They certify the model and the loss on a handful of examples, at a cost of a few percent of one run, before the run is paid for. Each is a measurement with an expected value:
 
 - **The initial loss.** With weights drawn as in chapter 9 ($N(0, 1/n_{\mathrm{in}})$, biases zero) the output starts as a random mixture of the input's directions, not as zero, so the loss starts above the mean predictor's: about the variance of the data plus the variance of the random output.
 - **The gradient check** of chapter 6, of the whole model, on every one of its 499 parameters, on a fixed batch of 8 readings. The central difference uses $h = 10^{-5}$ in double precision and the gate $\mathrm{atol} = 10^{-8}$, $\mathrm{rtol} = 10^{-5}$.
@@ -117,9 +109,7 @@ The loss starts at $1.0337$ on the training set, above the mean predictor's $0.6
 
 ## The training loop, written in full
 
-*What it is for: one function in which the stages of earlier chapters meet, so that nothing between the data and the checkpoint is left to a framework.*
-
-An **end-to-end training loop** is the whole path from the data to the saved model: it shuffles the training set, cuts it into batches, runs the forward pass, the loss and the backward pass on each batch, clips the gradient, takes an AdamW step at the rate the schedule gives, logs what the step did, and after every epoch evaluates on the validation set and keeps the best parameters. The figure shows the order. Each box is a chapter of this volume.
+The stages of the earlier chapters meet in one function, so that nothing between the data and the checkpoint is left to a framework. An **end-to-end training loop** is the whole path from the data to the saved model: it shuffles the training set, cuts it into batches, runs the forward pass, the loss and the backward pass on each batch, clips the gradient, takes an AdamW step at the rate the schedule gives, logs what the step did, and after every epoch evaluates on the validation set and keeps the best parameters. The figure shows the order. Each box is a chapter of this volume.
 
 ![The training loop as a block diagram: every step takes a shuffled batch from the training set, runs forward, loss, backward, clip and the AdamW update with the rate from the schedule, and logs; every epoch evaluates on the validation set and checkpoints the best parameters; the test set is scored once at the end.](img/fm-training-loop.svg)
 
@@ -202,9 +192,7 @@ Read it with the tools of chapter 12. The curve starts at 0 on the logarithmic a
 
 ## What the network rebuilds
 
-*What it is for: looking at the output itself, because a single number such as $0.00254$ hides what kind of error it is made of.*
-
-Take test reading 0 and pass it through the checkpoint:
+A single number such as $0.00254$ hides what kind of error it is made of, so look at the output itself. Take test reading 0 and pass it through the checkpoint:
 
 <!-- worked: first_models.ae_reconstruction -->
 Test example 0 through the checkpoint. The code is z = (0.2224, -0.0525, 1.2969): three numbers stand for sixteen. Mean squared error of this one example: 0.00277.
@@ -244,9 +232,7 @@ The three numbers $(0.2224, -0.0525, 1.2969)$ stand for sixteen. The reconstruct
 
 ## What the bottleneck learns: the principal components
 
-*What it is for: to say, with numbers, what the three-number code means, by comparing it with the method of Volume II, chapter 7.*
-
-Principal component analysis finds the directions of largest variance of the readings. For $k$ components the mean squared distance of the training rows to their projection onto the first $k$ principal directions is, per value, the sum of the discarded eigenvalues of the covariance divided by $D = 16$ (Volume II, chapter 7: the discarded variance is the cost). Among all rank-$k$ linear summaries of the data this is the smallest squared error (the low-rank approximation of Volume I, chapter 6). The table computes it for $k = 0$ to $7$.
+What the three-number code means can be said with numbers by comparing it with the method of Volume II, chapter 7. Principal component analysis finds the directions of largest variance of the readings. For $k$ components the mean squared distance of the training rows to their projection onto the first $k$ principal directions is, per value, the sum of the discarded eigenvalues of the covariance divided by $D = 16$ (Volume II, chapter 7: the discarded variance is the cost). Among all rank-$k$ linear summaries of the data this is the smallest squared error (the low-rank approximation of Volume I, chapter 6). The table computes it for $k = 0$ to $7$.
 
 <!-- worked: first_models.pca_spectrum -->
 Covariance of the 256 training readings (divisor 256), its eigenvalues by the Jacobi rotation method. Error with k components = (sum of the discarded eigenvalues) / 16, which the next column confirms by reconstructing; the last column is the same error on the test set.
@@ -305,9 +291,7 @@ The autoencoder with GELU layers of this chapter ($0.00254$ on the test set) is 
 
 ## Where a nonlinear autoencoder beats PCA
 
-*What it is for: the one thing a linear bottleneck cannot do, on a data set with a curved structure.*
-
-Replace the recipe by one cause $s$ uniform on $[-1, 1)$ and a quadratic dependence on it,
+A linear bottleneck cannot follow a curved structure, and a data set with one shows it. Replace the recipe by one cause $s$ uniform on $[-1, 1)$ and a quadratic dependence on it,
 
 $$
 x_j = s\, \mathrm{pat}_{1,j} + 1.5\,(s^2 - 1/3)\, \mathrm{pat}_{2,j} + 0.05\, n_j ,
@@ -334,9 +318,7 @@ This is the whole case for the nonlinear autoencoder: its code can follow a curv
 
 ## A denoising variant
 
-*What it is for: to make the bottleneck's filtering explicit, by asking the network to rebuild the clean reading from a corrupted one.*
-
-A **denoising autoencoder** is trained on pairs (corrupted input, clean target): the loop is the same and only `corrupt` changes. Here each of the 16 values is moved by $0.3$ times a standard normal draw, a corruption much larger than the sensors' own noise, with a fresh draw at every step. The network cannot copy its input to get the clean target (the copy would carry the corruption), so it must learn which parts of a reading are structure.
+To make the bottleneck's filtering explicit, ask the network to rebuild the clean reading from a corrupted one. A **denoising autoencoder** is trained on pairs (corrupted input, clean target): the loop is the same and only `corrupt` changes. Here each of the 16 values is moved by $0.3$ times a standard normal draw, a corruption much larger than the sensors' own noise, with a fresh draw at every step. The network cannot copy its input to get the clean target (the copy would carry the corruption), so it must learn which parts of a reading are structure.
 
 <!-- worked: first_models.denoising_table -->
 Corruption: add 0.3 times a N(0, 1) draw to every one of the 16 values. The denoising autoencoder has the architecture, start, shuffle and settings of the plain one; each step draws fresh noise from `first_models.dae_train_noise` (seed 0xf8d187007ee83262) (the batch's 32 examples in order, 16 values each, a corruption per step), start stream `first_models.dae_init` (seed 0x02a17e833af2a9a8). The test noise is drawn once from `first_models.dae_eval_noise` (seed 0x44e98a7a0bcb101a) (128 examples in order, 16 values each). Every row is the mean squared error against the clean test readings.
@@ -354,7 +336,7 @@ Using the noisy reading as it is scores $0.08489$ against the clean one, close t
 
 ## A learned controller
 
-*What it is for: the second kind of model, where the output is an action, the label comes from a classical controller, and the test of success is how a system behaves under the model's decisions.*
+The second kind of model produces an action, its labels come from a classical controller, and the test of success is how a system behaves under the model's decisions.
 
 ### The plant and the controller it imitates
 
@@ -595,9 +577,7 @@ The tracking error of the network is $0.114$ to $0.145$ against the plant-tuned 
 
 ## The checklist, applied to both builds
 
-*What it is for: to show what each check of chapter 12 cost and found for the two models, in the order of the practice.*
-
-The numbered checks of chapter 12 were: shapes and finiteness; the initial loss against what it should be; the label prior; the gradient check; a baseline; monitoring; overfit one batch; a rate sweep. For these two models they read as follows.
+Each check of chapter 12 cost something and found something on the two models, and they are set out here in the order of the practice. The numbered checks of chapter 12 were: shapes and finiteness; the initial loss against what it should be; the label prior; the gradient check; a baseline; monitoring; overfit one batch; a rate sweep. For these two models they read as follows.
 
 | check | autoencoder | controller |
 |---|---|---|
@@ -629,9 +609,7 @@ The gradient check of the autoencoder costs $2.4\%$ of its run, and the overfit 
 
 ## Same seed, same result
 
-*What it is for: a run that cannot be repeated cannot be debugged or compared.*
-
-Every source of randomness of both builds is a named stream of the book's generator: the data, the initial weights, the order of the batches, the noise of the denoising run. The loop has no other. To check that this is enough, run each training twice from the start in the same process and compare every parameter bit for bit.
+A run that cannot be repeated cannot be debugged or compared. Every source of randomness of both builds is a named stream of the book's generator: the data, the initial weights, the order of the batches, the noise of the denoising run. The loop has no other. To check that this is enough, run each training twice from the start in the same process and compare every parameter bit for bit.
 
 <!-- worked: first_models.determinism -->
 The hashed bytes: the parameters after the last epoch (the final weights, not the best-validation checkpoint), layer by layer from the first layer to the last; within a layer the weight matrix W of shape [n_out, n_in] in row-major order (row j holds the weights of output unit j), then the bias vector b of n_out entries; every number as an IEEE 754 binary64 value in 8 bytes, least significant byte first (little-endian), with no header, separator or padding (499 numbers, 3992 bytes for the autoencoder; 353 numbers, 2824 bytes for the controller). The digest is SHA-256 of that byte string, written as lowercase hexadecimal and cut to its first 16 digits.
@@ -646,7 +624,7 @@ The final parameters of both runs are identical, and so is every logged loss. Th
 
 ## What it costs
 
-*What it is for: to state the speed of both builds as work, in FLOPs and bytes, before anyone quotes a time.*
+The speed of both builds is stated as work, in FLOPs and bytes, before anyone quotes a time.
 
 <!-- worked: first_models.work_counts -->
 Matrix-product FLOPs follow chapter 12's rule: forward 2 M B, weight gradients 2 M B, gradients passed down 2 (M - M_1) B with M_1 the first layer's multiply-adds; the clip costs 3 FLOPs and AdamW 16 per parameter (chapter 7). An epoch adds one forward pass over the training and the validation set. All arrays are counted as 4-byte floats. The last column divides the 19 FLOPs per parameter of the clip and AdamW together (3 + 16) by the 28 bytes the optimizer step moves; AdamW alone is 16 / 28 = 0.571 (chapter 7).
@@ -681,7 +659,7 @@ toypid's default model (`default_small`: vocabulary 263, window 256, one layer, 
 
 One decision of the book's controller is $640$ FLOPs. One decision of `toypid`'s default model, with a full window of 256 tokens, is $18.1$ million FLOPs by the counting rule stated: a factor of about $28{,}000$ for a model that sees the history and can infer the plant. Whether that is a good trade depends on whether the plant is known; the book's controller is the right size for a plant that is.
 
-## Where this appears in brain
+## The two builds in brain's crates
 
 **`crates/toyautoencoder`** is this chapter's autoencoder. `crates/toyautoencoder/src/model.rs` states the architecture in its header, four matrix products with a GELU after the encoder and the decoder, and `crates/toyautoencoder/src/init.rs` draws each weight from a normal with standard deviation $1/\sqrt{n_{\mathrm{in}}}$ and sets every bias to zero, the initialization used above. The objective is the mean squared reconstruction error, computed by two kernels, `mse_value` and `mse_grad`, whose gradient $2(\hat{x} - x)/n$ is the one derived above. The crate's tests are the chapter's checks. `forward_finite_and_deterministic` runs the forward pass twice and requires the same finite loss. `overfit_reduces_reconstruction_loss` trains on 4 fixed vectors for 100 AdamW steps with a clip of 1 and requires the loss to fall below half. The gradient check is `check_autoencoder` in `crates/gradcheck/src/lib.rs`, with the configuration $12 \to 16 \to 4 \to 16 \to 12$ and two examples, the engine's directional check of chapter 6, along four random directions with a step of $5\times10^{-3}$; and the loss kernels are checked on their own, apart from any model, in `crates/gradcheck/tests/it/mse_fd.rs`. The model is first used by a benchmark: `crates/bench/src/mad_compress.rs` squeezes a short token sequence through a one-vector bottleneck and asks the decoder to rebuild every token, an autoencoder task that a causal language model cannot express (the file's own argument). History: the crate was added, with the MSE kernels, the gradient check and the benchmark, in one change (commit `306ef3471`, 24 June 2026, under its first name, `autoencoder`), and renamed with brain's other toy architectures to the `toy` prefix on 13 August 2026 (commit `a126e9b22`: they are registered with `Source::Toy` in `crates/arch`, gradient-checked like every other architecture but, as the commit says, excluded from `brain caps` and the model list of the docs). A later change, commit `355f6c28f` (26 October 2026), lets the encoder's and the decoder's pre-activations share one buffer and rebuilds the encoder's from the input before its backward, with bit-equal loss and gradients (the trade of chapter 4); its test is `crates/toyautoencoder/tests/it/recompute.rs`.
 
@@ -702,6 +680,23 @@ Answers are at the end of the chapter.
 7. **Explain.** The gradient check is run on a fixed batch of 8 examples and not on the training run's batches. Why must the batch be fixed, and why do 8 examples and not 256 suffice?
 8. **Explain.** Two runs with the same seeds give different final parameters in the last digits. Give two causes that the chapter's list of pinned quantities does not cover, and say what each does to the result.
 
+## Summary
+
+A model is a set of decisions made together and checked at every joint. The **end-to-end training loop** of this chapter is one function from the data to a checkpoint (shuffle, batch, forward, loss, backward, clip, AdamW at the scheduled rate, log, evaluate, checkpoint), and every number it produces is fixed by named streams of a generator, so that two runs of it give identical parameters. Each build was verified before it was trained (shapes, the initial loss, a gradient check of every parameter, overfitting one batch, a baseline) at a cost of a few percent of a run, and counted afterwards in FLOPs and bytes.
+
+The **autoencoder** compresses sixteen readings to a code of three numbers under the **reconstruction loss**, with no labels. On data with three causes it reaches $0.00254$ on the test set against $0.728$ for the mean predictor and $0.00203$ for PCA with three components, which is also the floor set by the noise. A linear autoencoder reaches PCA's error and spans PCA's subspace without computing an eigenvalue, but its code is an arbitrary basis of that subspace. A nonlinear one earns its extra layers only on curved data, where it beats the best straight projection by a factor of about 10, and a denoising variant, trained on corrupted inputs, learns to shrink noise.
+
+The **learned controller** imitates a pole-placed PI controller on a first-order plant from states labeled by the expert, and tracks the setpoints with a tracking error of $0.12475$ and $0.12718$ against the expert's $0.11869$. Its validation loss is a poor guide to its closed-loop behaviour: the tracking error is dominated by the setpoint changes, the settled error does not follow the one-step error, and a small persistent command error is multiplied by $1/(K_{\mathrm{i}}\Delta t) = 3.14$ by the integral term of the loop. Brain's `toypid` and the browser demo of `crates/web` do the same job with a transformer that can infer the plant from history, and test it exactly as this chapter does, in closed loop.
+
+These two builds finish what the volume taught: a model, a loss, a verified gradient, an optimizer with its schedule, a start, a practice for reading the run. The project that ends the volume asks you to do it yourself, in your own language, with a library of your own whose every gradient is proven, and then to train it.
+
+## References
+
+- Pierre Baldi and Kurt Hornik, "Neural networks and principal component analysis: learning from examples without local minima", 1989.
+- Geoffrey E. Hinton and Ruslan R. Salakhutdinov, "Reducing the dimensionality of data with neural networks", 2006.
+- Pascal Vincent, Hugo Larochelle, Yoshua Bengio and Pierre-Antoine Manzagol, "Extracting and composing robust features with denoising autoencoders", 2008.
+- Stephane Ross, Geoffrey J. Gordon and J. Andrew Bagnell, "A reduction of imitation learning and structured prediction to no-regret online learning", 2011 (the source of the relabeling of a learner's own states by an expert).
+
 ## Exercises
 
 1. **[Calculate]** For the autoencoder $16 \to 24 \to 2 \to 24 \to 16$, count the parameters, the multiply-adds per example, the FLOPs of one training step at batch 64 by the rule of `first_models.work_counts`, and the bytes of the parameters and of the AdamW state in 4-byte floats.
@@ -717,16 +712,6 @@ Answers are at the end of the chapter.
 11. **[Investigate]** Train the denoising autoencoder at corruptions $0.1$, $0.3$ and $1.0$ and report its error against the clean test readings next to PCA with three components. At which corruption does the denoising autoencoder gain the most over PCA, and why does the gain vanish at both ends?
 12. **[Investigate]** Train the controller on data from all nine training plants of `toypid` with the same three inputs, and test on the four validation plants. What is the best error it can reach, and what does adding $y_{t-1}$ and $u_{t-2}$ to the state change? Explain with the relation between $K_{\mathrm{p}}$, $K_{\mathrm{i}}$ and the plant's two numbers.
 
-## Summary
-
-A model is a set of decisions made together and checked at every joint. The **end-to-end training loop** of this chapter is one function from the data to a checkpoint (shuffle, batch, forward, loss, backward, clip, AdamW at the scheduled rate, log, evaluate, checkpoint), and every number it produces is fixed by named streams of a generator, so that two runs of it give identical parameters. Each build was verified before it was trained (shapes, the initial loss, a gradient check of every parameter, overfitting one batch, a baseline) at a cost of a few percent of a run, and counted afterwards in FLOPs and bytes.
-
-The **autoencoder** compresses sixteen readings to a code of three numbers under the **reconstruction loss**, with no labels. On data with three causes it reaches $0.00254$ on the test set against $0.728$ for the mean predictor and $0.00203$ for PCA with three components, which is also the floor set by the noise. A linear autoencoder reaches PCA's error and spans PCA's subspace without computing an eigenvalue, but its code is an arbitrary basis of that subspace. A nonlinear one earns its extra layers only on curved data, where it beats the best straight projection by a factor of about 10, and a denoising variant, trained on corrupted inputs, learns to shrink noise.
-
-The **learned controller** imitates a pole-placed PI controller on a first-order plant from states labeled by the expert, and tracks the setpoints with a tracking error of $0.12475$ and $0.12718$ against the expert's $0.11869$. Its validation loss is a poor guide to its closed-loop behaviour: the tracking error is dominated by the setpoint changes, the settled error does not follow the one-step error, and a small persistent command error is multiplied by $1/(K_{\mathrm{i}}\Delta t) = 3.14$ by the integral term of the loop. Brain's `toypid` and the browser demo of `crates/web` do the same job with a transformer that can infer the plant from history, and test it exactly as this chapter does, in closed loop.
-
-These two builds finish what the volume taught: a model, a loss, a verified gradient, an optimizer with its schedule, a start, a practice for reading the run. The project that ends the volume asks you to do it yourself, in your own language, with a library of your own whose every gradient is proven, and then to train it.
-
 ## Key terms
 
 - **autoencoder**: a network trained to output its own input after passing it through a bottleneck layer much narrower than the input, so that it must learn a short code from which the input can be rebuilt. <!-- concept: autoencoder -->
@@ -736,7 +721,7 @@ These two builds finish what the volume taught: a model, a loss, a verified grad
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. The map is $\mathbf{x} \mapsto \mathbf{W}_2(\mathbf{W}_1\mathbf{x} + \mathbf{b}_1) + \mathbf{b}_2 = (\mathbf{W}_2\mathbf{W}_1)\mathbf{x} + (\mathbf{W}_2\mathbf{b}_1 + \mathbf{b}_2)$: one linear map plus a constant. $\mathbf{W}_2\mathbf{W}_1$ has shape $[16, 16]$ and rank at most the smallest of the widths it passes through, which is 3.
 2. At $t = 1$, $\hat{m} = g$ and $\hat{v} = g^2$, so the step is $\eta\,g/(|g| + \epsilon)$, almost exactly $\eta\,\mathrm{sign}(g)$: $0.01$, whatever the size of the gradient.
@@ -755,10 +740,3 @@ These two builds finish what the volume taught: a model, a loss, a verified grad
 6. The command error on the network's own states, and the closed-loop tracking and steady-state errors, would show it; the one-step validation error on expert-driven states would hide it, because it never asks about those states. (Exploration data, and rounds of relabeling the learner's own states, are the answers; the data of this chapter did not show a clear gain for them with one seed.)
 7. The loss must be the same function in the two evaluations of a central difference and in the backward pass, which a fresh batch would change. The check costs two forward passes per parameter, $2P$ in all, so a small batch is chosen; a gradient formula is right for 8 examples exactly when it is right for 256, because the loss is a mean of per-example terms.
 8. Two causes: the order of a floating-point sum that is not fixed (a parallel reduction that adds in a different order each run), which changes the last bits and then, through the nonlinear training, more; and a library function that differs between runs or machines (a different implementation of `exp` or `erf`). A third is a stream consumed in an order that depends on timing.
-
-## References
-
-- Pierre Baldi and Kurt Hornik, "Neural networks and principal component analysis: learning from examples without local minima", 1989.
-- Geoffrey E. Hinton and Ruslan R. Salakhutdinov, "Reducing the dimensionality of data with neural networks", 2006.
-- Pascal Vincent, Hugo Larochelle, Yoshua Bengio and Pierre-Antoine Manzagol, "Extracting and composing robust features with denoising autoencoders", 2008.
-- Stephane Ross, Geoffrey J. Gordon and J. Andrew Bagnell, "A reduction of imitation learning and structured prediction to no-regret online learning", 2011 (the source of the relabeling of a learner's own states by an expert).

@@ -5,11 +5,11 @@
 
 *When a loss curve looks wrong, how do we find out why?*
 
-## The problem
+## A curve that sits at 1.08
 
-You have written a network, a loss and a training loop, and you start a run. Nothing crashes. A number is printed at every step, and after a few hundred steps you plot it. The picture is the **loss curve**: the loss on the vertical axis, the step (or the epoch) on the horizontal one. A healthy curve falls and flattens. Yours does something else: it sits at 1.08 and never moves, or it climbs to $10^{22}$, or it prints `NaN`. A network is a pipeline of a dozen interacting parts (data, initialization, forward pass, loss, backward pass, optimizer, schedule), and a flat or exploding curve is the same symptom for many different faults. Guessing is expensive: each guess is a new run.
+One run sits at 1.08 and never moves. Another climbs to $10^{22}$. A third prints `NaN` at its third step. In all three nothing crashes: a number is printed at every step, and after a few hundred steps you plot the numbers. The picture is the **loss curve**, the loss on the vertical axis and the step (or the epoch) on the horizontal one, and a healthy curve falls and flattens. A network is a pipeline of a dozen interacting parts (data, initialization, forward pass, loss, backward pass, optimizer, schedule), and a flat or exploding curve is the same symptom for many different faults. Guessing is expensive, because each guess is a new run.
 
-This chapter turns the symptom into a procedure. It is built on one small network and one small task, so that every claim is something you can reproduce.
+What follows turns the symptom into a procedure, built on one small network and one small task so that every claim is something you can reproduce.
 
 The **gallery network** reads an input of 8 numbers and has two hidden layers of 32 ReLU units and 3 output logits; it is trained with softmax cross-entropy (chapter 3) by minibatch gradient descent, with backward-pass gradients (chapters 4 and 5). It has 1443 parameters. The task has three classes, a label being the largest of three quadratic-plus-linear scores of the input, so that a hidden layer is needed. Seven runs of this one network are the gallery of the chapter; each differs from a healthy run in one way, and each of them is a loss curve you will meet again in a real project.
 
@@ -48,20 +48,9 @@ Read the table before reading any explanation. The healthy run falls from $1.260
 
 ![Training loss of four runs of the gallery network over 400 steps: the healthy run falls steadily; the too-slow run falls slowly; the plateau run sits near 1.08; the noisy run falls with large wobbles. The two dashed lines are ln 3 and the entropy of the training labels, the losses of two models that ignore the input.](img/dyn-gallery-flat.svg)
 
-The rest of the chapter is the method for telling these apart without running the experiment that finds out, and the tools that make it cheap. It has six steps.
+The rest of the chapter is the method for telling these apart without running the experiment that finds out, and the tools that make it cheap. It starts with how to read a curve: which loss is plotted, why it is noisy, what smoothing and a logarithmic axis reveal, and what the first number of a curve already says. Then each failure of the gallery is taken in turn, with the measurement that confirms its cause and the fix. Two of the causes need more room. Vanishing and exploding gradients are one mechanism, a product of layer Jacobians, behind plateaus and blow-ups in deep networks, and it is derived and measured per layer; residual connections are the identity path that keeps that product from shrinking, derived and measured on the same deep network. Dead units, the ReLU's way of switching a unit off for good, get their own measurement and cures. The chapter closes with a debugging practice: the overfit-one-batch test, a checklist ordered from cheapest to most expensive with its cost counted in FLOPs, and a method for hunting a NaN.
 
-1. **Reading a curve.** Which loss is plotted, why it is noisy, what smoothing and a logarithmic axis show, and what the first number of a curve already tells.
-2. **The gallery, one cause at a time.** For each failure, the measurement that confirms the cause, and the fix.
-3. **Vanishing and exploding gradients.** The one mechanism (a product of layer Jacobians) behind plateaus and blow-ups in deep networks, derived and measured per layer.
-4. **Residual connections.** The identity path that keeps the product from shrinking, derived and measured on the same deep network.
-5. **Dead units.** The ReLU's way of switching a unit off for good, how to measure it and what revives it.
-6. **A debugging practice.** The overfit-one-batch test, a checklist ordered from cheapest to most expensive with its cost counted in FLOPs, and how to hunt a NaN.
-
-You may use from earlier chapters: the backward pass (chapters 4 and 5), gradient clipping (chapter 8), He initialization (chapter 9) and layer normalization (chapter 10). Their reasoning is recalled where it is used.
-
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+Six ideas from earlier chapters (backpropagation and the multilayer network, He initialization, clipping, layer normalization, and two pieces of numerical arithmetic from Volume I) come up repeatedly, and it is worth answering these from memory first. The answers are at the end of the chapter; if one is hard, go back to the chapter named.
 
 1. ("Backpropagation Derived from Scratch" and "Multilayer Networks".) In one layer, the gradient arriving at the previous layer is $d\mathbf{a}_{\ell-1} = \mathbf{W}_\ell^\top\,(g'(\mathbf{z}_\ell)\odot d\mathbf{a}_\ell)$. If $g$ is tanh and every pre-activation is $z = 2$, by what factor does the slope alone scale the gradient, and what is the factor after 10 such layers?
 2. ("Initialization: Where Training Starts", He initialization.) What variance does He initialization give the weights of a ReLU layer with 32 inputs, and why is the factor 2 there?
@@ -770,7 +759,7 @@ function guarded_update(theta: array<real>[P], loss: real, g: array<real>[P],
 
 The finiteness test comes before the clip. With a `NaN` norm, `tau / (norm + 0.000001)` is `NaN`, comparisons with `NaN` are false and `min(1.0, NaN)` carries the `NaN` into every weight; the clip of chapter 8 protects against a large finite gradient and is no defence against a non-finite one. The guard skips and counts rather than hiding: a single bad step may be a bad batch, three in a row is a run that is broken, and the abort says so, with the number.
 
-## Making it work
+## Habits for diagnosing a run
 
 **Change one thing and measure one thing.** The gallery is built this way: each run differs from the healthy one in a single setting. A run that changes three things at once cannot tell which one mattered.
 
@@ -782,7 +771,7 @@ The finiteness test comes before the clip. With a `NaN` norm, `tau / (norm + 0.0
 
 **Debug on the smallest model that shows the failure.** Every table above was computed by a network that trains in seconds. A failure that appears only at scale is still diagnosed by the same measurements on a prefix of the run.
 
-## Where this appears in brain
+## Where brain watches its own curves
 
 brain trains models from tiny test networks to a fine-tune of a 27-billion-parameter model, and the practices of this chapter appear in four places.
 
@@ -811,6 +800,21 @@ Answers are at the end of the chapter.
 7. **Predict.** A ReLU unit has weights $(0.5, -0.5)$ and bias $-3$, and every input lies in $[-2, 2]^2$. What is the largest pre-activation, and what is the gradient of its incoming weights?
 8. **Explain.** A run prints `NaN` at step 3, with finite weights at step 2. Give two different kinds of cause and say which measurement separates them.
 
+## Summary
+
+A loss curve is a measurement with a noise level, and it is read with the tools of a measurement: the minibatch loss is noisy by construction, with a spread that falls as $1/\sqrt{B}$ (the table of the standard deviations times $\sqrt{B}$, constant at about $0.25$); an exponential average with bias correction smooths it at the cost of a lag of about $\beta_{\mathrm{sm}}/(1-\beta_{\mathrm{sm}})$ steps; a logarithmic axis turns a geometric decay into a line whose slope is the rate; and the full-set curves are the ones to trust, at the price of a forward pass over their examples. The first number of a curve, compared with $\ln C$, is already a test. With these, the gallery of failures turns into a table of causes: a diverging curve has a gradient that grows with the step (the update ratio is of order one) and is cured by the rate; a plateau at the label prior has gradients that do not reach the hidden weights, or dead units; a too-slow curve has a normal gradient and a tiny update ratio; a noisy curve is a measurement problem; an overfitting curve is told by the validation curve alone; and a NaN is an operation applied outside its range, found by scanning the arrays in the order they were computed and fixed in two places, the operation and the rate that drove it there.
+
+Two mechanisms explain much of what goes wrong with depth. The gradient is a product of layer Jacobians, $d\mathbf{a}_{\ell-k} = \mathbf{J}_{\ell-k+1}^\top\cdots\mathbf{J}_\ell^\top d\mathbf{a}_\ell$, whose norm is bounded above by the product of the norms and typically scaled by $\sqrt{\Gamma_{\mathrm{b}}}$ per layer. The **vanishing gradient** (a factor below one, geometric in depth) and the **exploding gradient** (above one) are one effect on both sides of one threshold; in the measured stacks the sigmoid reaches $10^{-16}$ in 24 layers and a tanh gain of 2.5 grows by a factor of about 230 toward the input. A **residual connection**, $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, makes the layer's Jacobian $\mathbf{I} + \mathbf{J}_f$ and so gives the gradient a path with no weights; with branches small enough the norm is held between $\prod(1\mp s_i)$, and in the measured stack the same weights that pass $3\times10^{-8}$ of the gradient plain pass $1.08$ residual, and train where the plain network sits at the prior. The branch must start small ($\omega = 1/(2L)$), or the stream and the gradient grow as $(1+\omega)^L$. **Dead units** are ReLU units that are off on every input: their slope is zero, so their incoming gradient is exactly zero, and they come only from a step that is too big, a bad start or a drifted bias; they are counted at the cost of one comparison per unit and example, and a leaky slope keeps their gradient alive.
+
+The **overfit-one-batch** test is the cheapest end-to-end check of the pipeline: a correct network must drive one fixed small batch to a loss near zero, and it fails for a wrong sign, wrong labels or a wrong loss, but it passes a wrong gradient that the other parameters can compensate for, so it is paired with the gradient check, the initial loss, the label prior, a linear baseline, five cheap monitors, and only then the rate sweep, in the order of their cost in FLOPs. The limits are those of the experiments: one network, one task, plain gradient descent, a few hundred steps; the plain 24-layer ReLU stall is reported without a mechanism; and the typical-gain prediction is within an order of magnitude, not a proof. What the chapter has built is a practice, not a library, and the next chapter, First Complete Models, applies it: it builds, trains and verifies a first complete model from the pieces of this volume, with the checks of this chapter as its acceptance tests.
+
+## References
+
+- Yoshua Bengio, Patrice Simard and Paolo Frasconi, "Learning long-term dependencies with gradient descent is difficult", 1994.
+- Kaiming He, Xiangyu Zhang, Shaoqing Ren and Jian Sun, "Deep residual learning for image recognition", 2015.
+- Andrew L. Maas, Awni Y. Hannun and Andrew Y. Ng, "Rectifier nonlinearities improve neural network acoustic models", 2013.
+- Andrej Karpathy, "A recipe for training neural networks", 2019 (a blog post; the source of the habit of overfitting a single batch first).
+
 ## Exercises
 
 1. **[Calculate]** For the one-hidden-layer, single-weight model of chapter 4 ($x = 2$, $t = 3$, start $w = 0.5$), find the rate above which the descent diverges, run six steps at a rate $10\%$ above it and report the update ratio $\eta\lvert g\rvert/\lvert w\rvert$ at every step. Compare with the update ratios of `training_dynamics.update_ratio_table` for the diverging run.
@@ -825,14 +829,6 @@ Answers are at the end of the chapter.
 10. **[Investigate]** Reproduce `training_dynamics.dead_units_table` and add a run with the same high rate and weight decay on the biases, and one with a bias initialized at $+0.5$. Which cause of death of the chapter does each change? Plot the dead fraction against the rate for rates from $0.1$ to $4$ at step 200.
 11. **[Investigate]** Replace the plain gradient descent in the gallery by a version with an exponential average of the gradient (chapter 7) and by AdamW (chapter 7), at their own best rate of a sweep, and describe which curves of the gallery change shape. Which failure is least affected by the optimizer, and why?
 
-## Summary
-
-A loss curve is a measurement with a noise level, and it is read with the tools of a measurement: the minibatch loss is noisy by construction, with a spread that falls as $1/\sqrt{B}$ (the table of the standard deviations times $\sqrt{B}$, constant at about $0.25$); an exponential average with bias correction smooths it at the cost of a lag of about $\beta_{\mathrm{sm}}/(1-\beta_{\mathrm{sm}})$ steps; a logarithmic axis turns a geometric decay into a line whose slope is the rate; and the full-set curves are the ones to trust, at the price of a forward pass over their examples. The first number of a curve, compared with $\ln C$, is already a test. With these, the gallery of failures turns into a table of causes: a diverging curve has a gradient that grows with the step (the update ratio is of order one) and is cured by the rate; a plateau at the label prior has gradients that do not reach the hidden weights, or dead units; a too-slow curve has a normal gradient and a tiny update ratio; a noisy curve is a measurement problem; an overfitting curve is told by the validation curve alone; and a NaN is an operation applied outside its range, found by scanning the arrays in the order they were computed and fixed in two places, the operation and the rate that drove it there.
-
-Two mechanisms explain much of what goes wrong with depth. The gradient is a product of layer Jacobians, $d\mathbf{a}_{\ell-k} = \mathbf{J}_{\ell-k+1}^\top\cdots\mathbf{J}_\ell^\top d\mathbf{a}_\ell$, whose norm is bounded above by the product of the norms and typically scaled by $\sqrt{\Gamma_{\mathrm{b}}}$ per layer. The **vanishing gradient** (a factor below one, geometric in depth) and the **exploding gradient** (above one) are one effect on both sides of one threshold; in the measured stacks the sigmoid reaches $10^{-16}$ in 24 layers and a tanh gain of 2.5 grows by a factor of about 230 toward the input. A **residual connection**, $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, makes the layer's Jacobian $\mathbf{I} + \mathbf{J}_f$ and so gives the gradient a path with no weights; with branches small enough the norm is held between $\prod(1\mp s_i)$, and in the measured stack the same weights that pass $3\times10^{-8}$ of the gradient plain pass $1.08$ residual, and train where the plain network sits at the prior. The branch must start small ($\omega = 1/(2L)$), or the stream and the gradient grow as $(1+\omega)^L$. **Dead units** are ReLU units that are off on every input: their slope is zero, so their incoming gradient is exactly zero, and they come only from a step that is too big, a bad start or a drifted bias; they are counted at the cost of one comparison per unit and example, and a leaky slope keeps their gradient alive.
-
-The **overfit-one-batch** test is the cheapest end-to-end check of the pipeline: a correct network must drive one fixed small batch to a loss near zero, and it fails for a wrong sign, wrong labels or a wrong loss, but it passes a wrong gradient that the other parameters can compensate for, so it is paired with the gradient check, the initial loss, the label prior, a linear baseline, five cheap monitors, and only then the rate sweep, in the order of their cost in FLOPs. The limits are those of the experiments: one network, one task, plain gradient descent, a few hundred steps; the plain 24-layer ReLU stall is reported without a mechanism; and the typical-gain prediction is within an order of magnitude, not a proof. What the chapter has built is a practice, not a library, and the next chapter, First Complete Models, applies it: it builds, trains and verifies a first complete model from the pieces of this volume, with the checks of this chapter as its acceptance tests.
-
 ## Key terms
 
 - **loss curve**: the loss plotted against the training step or epoch; it can show the minibatch loss, the loss on the whole training set or on a validation set, each with a different noise level and cost, and it is read by its start, direction, slope and gap. <!-- concept: loss-curve -->
@@ -844,7 +840,7 @@ The **overfit-one-batch** test is the cheapest end-to-end check of the pipeline:
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $g'(2) = 1 - \tanh^2(2) = 0.0707$, so each layer scales the gradient by at most $0.0707$ from the slope alone, and 10 such layers by $0.0707^{10} = 3.1\times10^{-12}$ (the tanh row of chapter 2's table).
 2. $\sigma_w^2 = 2/32 = 0.0625$. The ReLU keeps half the second moment of its input, so the variance of the weights is doubled to restore a layer gain of 1.
@@ -863,10 +859,3 @@ The **overfit-one-batch** test is the cheapest end-to-end check of the pipeline:
 6. A wrong ReLU slope in the backward pass, and a dropped gradient of the first layer: both reach a loss near zero, since the other parameters have enough capacity and the update still decreases the loss, and both fail the gradient check with relative errors of $0.58$ and $1.2$.
 7. The largest pre-activation is $0.5\cdot2 + 0.5\cdot2 - 3 = -1 < 0$, at the corner $(2, -2)$: for every input the pre-activation is at most $-1$, so the unit is dead on all of them. The slope of a ReLU for $z \le 0$ is $0$, so the gradient of its incoming weights and bias is exactly $0$.
 8. One kind is an arithmetic fault that turns a finite value into a non-finite one at that step (an `exp` overflow, a division by zero, a negative variance under a root); the other is a divergence that drove a value to a magnitude where the fault occurs. The scan of the arrays of the forward pass of step 3, in order, separates them: the first non-finite array names the operation, and the magnitudes of the arrays before it (largest finite value) say whether the inputs of that operation were already enormous (divergence) or ordinary (a defect in the operation itself, as with a constant row under a zero epsilon).
-
-## References
-
-- Yoshua Bengio, Patrice Simard and Paolo Frasconi, "Learning long-term dependencies with gradient descent is difficult", 1994.
-- Kaiming He, Xiangyu Zhang, Shaoqing Ren and Jian Sun, "Deep residual learning for image recognition", 2015.
-- Andrew L. Maas, Awni Y. Hannun and Andrew Y. Ng, "Rectifier nonlinearities improve neural network acoustic models", 2013.
-- Andrej Karpathy, "A recipe for training neural networks", 2019 (a blog post; the source of the habit of overfitting a single batch first).

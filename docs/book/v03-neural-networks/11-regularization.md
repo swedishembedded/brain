@@ -5,11 +5,11 @@
 
 *How do we stop a network with millions of parameters from memorizing its training set?*
 
-## The problem
+## A training loss of a third of the noise
 
-Chapter 10 ended with a network that trains well: its activations keep a known size, and its loss falls. A falling training loss is not what we want. We want a network that is right on examples it has never seen, and a network with more parameters than examples can drive its training loss to nothing by remembering each example, noise included. Volume II named the failure (overfitting) and taught how to see it: keep some data back and score the model on it. This chapter is about what to do once you see it, for the models of this volume.
+A training loss of 0.0274 sounds like a triumph. On the task below it is a warning: the labels carry noise whose variance alone is 0.09, so a network that has learned only the underlying curve would sit near that figure on average, and one that goes far below it has learned something it should not have. A network with more parameters than examples can drive its training loss to nothing by remembering each example, noise included, and it is then wrong on every example it has not seen. Volume II named the failure (overfitting) and taught how to see it: keep some data back and score the model on it. The question here is what to do once you see it, for the networks of this volume.
 
-Here is the failure on a task small enough to follow completely. A curve, $y = \sin(2\pi x)$, is observed at 16 random points with Gaussian noise of standard deviation $\sigma = 0.3$, so even the true curve has a mean squared error of $\sigma^2 = 0.09$ on fresh labels: that number is the **noise floor**, the best any model can do. The network has one hidden layer of 64 tanh units, which is 193 parameters for 16 examples. Everything is specified here, and every later table of the chapter uses the same task, the same network and the same eight seeds.
+The failure is easiest to study on a task small enough to follow completely. A curve, $y = \sin(2\pi x)$, is observed at 16 random points with Gaussian noise of standard deviation $\sigma = 0.3$, so even the true curve has a mean squared error of $\sigma^2 = 0.09$ on fresh labels: that number is the **noise floor**, the best any model can do. The network has one hidden layer of 64 tanh units, which is 193 parameters for 16 examples. Everything is specified here, and every later table of the chapter uses the same task, the same network and the same eight seeds.
 
 <!-- worked: regularization_nn.task_setup -->
 Task: x ~ uniform on [0, 1), y = sin(2 pi x) + 0.3 * normal(); the noise floor of the mean squared error is 0.09. Network: u = (x - 0.5) * sqrt(12); 64 hidden units tanh(w_j u + b_j); output c + sum_j v_j h_j. Parameters: 64 + 64 + 64 + 1 = 193, against 16 training examples (12.1 per example).
@@ -83,21 +83,11 @@ The training loss falls below the noise floor of 0.09 around step 1000 and ends 
 
 ![The curve sin(2 pi x), the 16 noisy training points, and three trained networks on the interval from 0 to 1: the unregularized network oscillates wildly through the points between 0.35 and 0.7, while the networks trained with weight decay and with dropout follow a smooth curve close to the true one.](img/reg-fits.svg)
 
-*Figure 1. The function after 3000 steps for seed 0. The unregularized network passes through the cluster of points near $x = 0.5$ by swinging up and down by more than the noise; the two regularized networks (settings chosen later in the chapter) do not.*
+Figure 1 shows the function after 3000 steps for seed 0. The unregularized network passes through the cluster of points near $x = 0.5$ by swinging up and down by more than the noise; the two regularized networks (settings chosen later in the chapter) do not.
 
-Regularization (Volume II, chapter 4) is the name for everything that reduces this gap: any change to the training that trades a little fit to the training set for a better fit to new data. Volume II used one, the penalty of the prior (chapter 4). This chapter has four more, each with a different mechanism, and ends by comparing them on this task with the paired practice of Volume II, chapter 8.
+Regularization (Volume II, chapter 4) is the name for everything that reduces this gap: any change to the training that trades a little fit to the training set for a better fit to new data. Volume II used one, the penalty of the prior. Four more follow, each with a different mechanism. Weight decay is that penalty inside a neural-network optimizer, and the first question is what it does to the weights and to the function they compute. Dropout removes units at random during training; it needs a scaling that keeps the expectation right, a behaviour in train and in eval mode, a backward pass, and an account of the ensemble it stands for and of the cases where it does nothing. Data augmentation trains on altered copies of the examples, and is the strongest regularizer when the alteration is valid and a source of wrong labels when it is not. Early stopping uses the validation curve to decide when to quit, and on a quadratic loss it turns out to be an L2 penalty in disguise. The chapter ends by setting all of them side by side over eight paired seeds, in the paired practice of Volume II, chapter 8, and by counting what each costs in arithmetic and memory.
 
-1. **Weight decay.** The L2 penalty inside a neural-network optimizer: what it does to the weights and to the function, and how it was connected to the prior and to AdamW.
-2. **Dropout.** Randomly removing units during training: the mechanism, the scaling that keeps the expectation right, the behaviour in train and in eval mode, the ensemble it stands for, its backward pass, and when it does nothing.
-3. **Data augmentation.** Training on altered copies of the examples, why it is the strongest regularizer when the alteration is valid, and what happens when it changes the label.
-4. **Early stopping.** Using the validation curve to decide when to stop, and why on a quadratic loss it is an L2 penalty in disguise.
-5. **Comparison and cost.** All the methods, together and alone, on the same task over eight paired seeds, and what each costs in arithmetic and memory.
-
-You may use from earlier chapters: overfitting and the validation set (Volume II, chapter 5); the L2 penalty and its Gaussian prior (Volume II, chapter 4); decoupled weight decay and AdamW (chapter 7); the train and eval modes of a layer (chapter 10); label smoothing (chapter 3); and the paired comparison over seeds (Volume II, chapter 8).
-
-## Before you begin
-
-Five questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+Five ideas from earlier chapters carry the rest, and it is worth answering them from memory before going on. The answers are at the end of the chapter; if one is hard, go back to the chapter named.
 
 1. (Volume II, "Generalization, Overfitting and Honest Evaluation", overfitting and the validation set.) A model has training loss 0.02 and validation loss 0.44. What is this called, and why can the training loss alone never reveal it?
 2. (Volume II, "Maximum Likelihood, Priors and Regularization", the L2 penalty, four chapters back.) Which prior on the weights gives the penalty $\frac{\lambda}{2}\lVert\mathbf{w}\rVert^2$, and what does a larger $\lambda$ say about the prior?
@@ -105,9 +95,11 @@ Five questions on ideas from earlier chapters, to answer from memory. The answer
 4. (Chapter 10, "Normalization Layers", train and eval mode.) Name a layer that has two modes and say what differs between them.
 5. (Volume I, "Statistics", expectation and variance, many chapters back.) A random variable $B$ equals 1 with probability 0.8 and 0 otherwise. What are the mean and the variance of $B$, and of $5B$?
 
+Label smoothing (chapter 3) returns near the end as the fifth member of the family.
+
 ## Weight decay
 
-**Purpose.** The first method needs nothing new: it is the penalty of Volume II applied to the weights of a network. This section checks what it does to a network, because the effect is not obvious from the formula: a network with small weights is a smooth function, and smoothness is what the noisy points above lack.
+The first method needs nothing new: it is the penalty of Volume II applied to the weights of a network. What it does to a network is not obvious from the formula, though. A network with small weights is a smooth function, and smoothness is what the noisy points above lack.
 
 Two forms of the same idea were met before. Volume II added $\frac{\lambda}{2}\lVert\mathbf{w}\rVert^2$ to the loss, which is the maximum a posteriori estimate under a Gaussian prior on each weight. Chapter 7 turned it into an update: one step of gradient descent on loss plus penalty is $\theta \leftarrow (1 - \eta\lambda)\theta - \eta\,\mathbf{g}$, "shrink, then step", and for Adam the shrink must be applied to the weights directly (decoupled weight decay) because a penalty inside Adam's gradient is divided by the gradient's own scale. In this chapter **weight decay** means the shrinking of every weight toward zero by the fraction $\eta\lambda$ at every step, as a regularizer of a neural network; the update rule is chapter 7's, and what is new is the evidence about what it does.
 
@@ -156,7 +148,7 @@ The formula shrinks every parameter. Common practice does not: it leaves biases 
 
 ## Dropout
 
-**Purpose.** Weight decay restrains the weights. Dropout restrains something else: it prevents units from depending on each other, by making any unit disappear at random, so that no unit can count on another being there to correct it.
+Weight decay restrains the weights. Dropout restrains something else: it prevents units from depending on each other, by making any unit disappear at random, so that no unit can count on another being there to correct it.
 
 Start with the smallest case. A layer produces six activations $a = (1, -0.5, 2, 0.5, -1.5, 0.25)$. During training, for each unit independently, a coin decides whether the unit is **dropped**: with probability $p_{\mathrm{drop}}$ its output is replaced by 0. The array of zeros and ones that records the decision (1 for a kept unit) is the **mask** $\mathbf{M}$. Take $p_{\mathrm{drop}} = 0.5$, and send the kept units on at twice their value:
 
@@ -173,7 +165,7 @@ Six activations a = (1, -0.5, 2, 0.5, -1.5, 0.25) and p = 0.5, so the scale is 1
 
 ![Three dropout masks over six activations at p = 0.5. The top row shows eval mode, where all six values pass through unchanged and sum to 1.75. In each mask row the kept units pass at twice their value and the dropped units pass 0; the sums of the three rows are 4, 3.5 and 2.](img/reg-dropout-masks.svg)
 
-*Figure 2. Three masks of the table above. Each training step sends the next layer a different random subset of the units, scaled up.*
+Figure 2 draws three masks of the table above. Each training step sends the next layer a different random subset of the units, scaled up.
 
 The three rows have sums 4, 3.5 and 2, different from each other and from the 1.75 of eval mode. That is the point of the method: the layer after this one never sees the same input twice. It is also a problem, which the factor 2 solves.
 
@@ -348,7 +340,7 @@ With 8 examples (24 parameters per example) dropout takes the test loss from abo
 
 ## Data augmentation
 
-**Purpose.** The other methods work on the model. The next one works on the data: if the amount of data is what limits generalization, make more. **Data augmentation** replaces a training example by an altered copy of it whose label is known to be unchanged, a fresh copy at every pass.
+The methods so far work on the model. The next one works on the data: if the amount of data is what limits generalization, make more. **Data augmentation** replaces a training example by an altered copy of it whose label is known to be unchanged, a fresh copy at every pass.
 
 The alteration comes from what you know about the problem, and it is a statement about **invariance**: the label does not depend on the thing that you change. For an image of an object, a shift by a few pixels, a small rotation and a flip (for some objects), a change of brightness or a crop do not change what is in it. For a sensor reading, additive noise of the size of the sensor's own noise and a small calibration gain do not change which state the machine is in. For audio, a small time shift or background noise does not change the words. Each such statement is knowledge about the world that the network, which sees only 16 points, cannot learn from them. An augmentation adds that knowledge to the training set, which is why it is the most powerful regularizer when it is valid: it is the only one that adds information.
 
@@ -408,11 +400,11 @@ function noisy_inputs(x: array<real>[B, D], s_aug: real, rng: Generator) -> arra
 
 ## Early stopping
 
-**Purpose.** The three methods so far change what is trained. The fourth changes how long. Look again at the validation loss of the unregularized network: it does not rise from the start, it falls to a minimum and then rises. If the weights at the minimum are kept, nothing else is needed.
+The three methods so far change what is trained. Early stopping changes how long. Look again at the validation loss of the unregularized network: it does not rise from the start, it falls to a minimum and then rises. If the weights at the minimum are kept, nothing else is needed.
 
 ![Training and validation loss of the unregularized network for seed 0 over 3000 steps. The validation loss falls to its lowest value of 0.1367 at step 380, marked with a green point and vertical line, and then rises; a red vertical line at step 480 marks where a patience of 10 evaluations would stop the run. The training loss falls below the dashed noise floor at 0.09 after step 1000.](img/reg-curves-baseline.svg)
 
-*Figure 3. The unregularized run of the problem section. The validation loss is evaluated every 10 steps. The best checkpoint is at step 380; the run could have stopped at step 480.*
+Figure 3 is the unregularized run of the opening section. The validation loss is evaluated every 10 steps. The best checkpoint is at step 380; the run could have stopped at step 480.
 
 **Early stopping** is this: evaluate the validation loss at regular intervals, keep a copy of the parameters with the lowest value seen, and stop training when it has not improved for a fixed number of evaluations, the **patience**. Two choices are in the rule and both matter.
 
@@ -524,7 +516,7 @@ The same problem. Along the eigenvector of H with curvature c (the eigenvalue; H
 
 ![The path in the plane of the two weights of gradient descent from zero, drawn as a solid line with dots at t = 1, 5, 20, 100 and 500, and of ridge regression for lambda from 20 down to 0, drawn dashed with dots at the matching strengths 1/(eta t). The two curves leave the origin together, separate slightly near the bend, and meet again at the least squares solution at about (0.96, -0.38).](img/reg-ridge-path.svg)
 
-*Figure 4. The weights reached by stopping gradient descent early, and by ridge regression. They are two routes to the same family of solutions.*
+Figure 4 compares the weights reached by stopping gradient descent early with those of ridge regression; they are two routes to the same family of solutions.
 
 The second table shows both the agreement and its limit. Along the flat direction (curvature 0.037) the two fractions are close at small $t$ (0.0093 and 0.0092 at $t = 1$, 0.1698 and 0.1563 at $t = 20$) and drift apart in the middle (0.6056 against 0.4808 at $t = 100$); along the steep direction (curvature 2.800) gradient descent has fitted everything by $t = 5$ while the ridge still keeps 0.7778 of it. The paths of Figure 4 never differ by more than 0.18 in the plane (the first table's last column, largest at $t = 200$) though the norms of the weight vectors there are between 0.3 and 1.0. So the two methods are not identical, and early stopping with a given number of steps is not the same function as any single ridge penalty. They are the same kind of thing: a smooth shrinkage that spares the well-determined directions. For a neural network there is no clean eigendecomposition, and the equivalence is only a way of thinking: training longer is training with a weaker penalty, which is what the climbing curves of Figure 3 and the curves of the weight decay table say from two sides.
 
@@ -585,19 +577,19 @@ The second table stops each run at its best validation step. Now the unregulariz
 
 ![Mean validation loss over the 8 seeds against the gradient step for the unregularized network and three regularized ones. The unregularized curve rises from about 0.15 to 0.44 while the weight decay, dropout and input noise curves stay flat near 0.15 to 0.17 from step 500 to 3000; the dropout and noise curves are noisy, the weight decay curve smooth. A dashed line marks the noise floor 0.09 below all of them.](img/reg-curves-methods.svg)
 
-*Figure 5. Validation loss, mean of 8 seeds. The two noisy curves are the ones with random draws in the training step.*
+Figure 5 gives the validation loss, mean of 8 seeds. The two noisy curves are the ones with random draws in the training step.
 
 ![Mean training loss over the 8 seeds against the gradient step for the same four settings: the unregularized network falls below the dashed noise floor 0.09 to 0.022, while the three regularized networks stay between 0.047 and 0.059.](img/reg-curves-train.svg)
 
-*Figure 6. Training loss in eval mode for the same runs. A regularizer's job is to keep this number from going below the noise floor on its own.*
+Figure 6 gives the training loss in eval mode for the same runs. A regularizer's job is to keep this number from going below the noise floor on its own.
 
 Figure 6 shows the other side of the same trade. The training loss of the unregularized network ends at 0.022, a quarter of the noise floor; the three regularized ones end near 0.05, and none is below 0.047. The gap between the training and validation curves, which was 0.414 for the unregularized network at step 3000 (0.436 against 0.022), is 0.108 for weight decay (0.155 against 0.047). Regularization is paid for in training loss, and it is the validation loss that tells you whether the price was right.
 
 This is one task, eight seeds and a coarse grid, and it gives evidence for the pattern and not for a ranking: on another task with another ratio of parameters to data the order would change, as the dropout table already showed. What the evidence supports without reservation is the shape: unregularized training followed to its end is clearly worse; any of the four methods repairs most of it; the methods substitute for each other more than they add.
 
-## What each method costs
+## What each method costs in work and bytes
 
-**Purpose.** The methods differ more in what they cost than in what they buy on this task, and the cost is stated, as everywhere in the book, as work: arithmetic and bytes. The task above is too small to show it, so the table counts the operations on one dense hidden layer of a size where the counts matter: 256 examples, 1024 inputs, 1024 outputs.
+The methods differ more in what they cost than in what they buy on this task, and the cost is stated, as everywhere in the book, as work: arithmetic and bytes. The task above is too small to show it, so the table counts the operations on one dense hidden layer of a size where the counts matter: 256 examples, 1024 inputs, 1024 outputs.
 
 <!-- worked: regularization_nn.regularizer_costs -->
 One dense hidden layer with B = 256 examples, D = 1024 inputs and H = 1024 outputs, 32-bit floats. FLOPs: a multiply-add counts 2, so the layer forward is 2 B D H and its backward (the gradient of the weights and of the input) 4 B D H. Dropout forward: one comparison and one multiplication per output element; backward: one multiplication. Bytes moved: the layer forward reads x and W and writes y; the backward reads dy, x and W and writes dx and dW; dropout forward reads x, writes y and a one-byte mask, backward reads dy and the mask and writes dx. Weight decay: 2 FLOPs per parameter (the 'decay 2' of the AdamW count of chapter 7, whose update is 16 FLOPs and 28 bytes of traffic per parameter).
@@ -619,7 +611,7 @@ Early stopping with one validation pass of 2048 examples every 100 steps adds 0.
 
 *Weight decay* is free in memory and nearly so in arithmetic: it is two FLOPs per parameter, one eighth of the sixteen of the AdamW update of chapter 7, and it reads and writes the weight that the update already moves, so it adds no bytes when it is fused into the update (applied as a separate pass it would add a read and a write of every weight). *Dropout* adds almost no arithmetic, 0.00098 of the layer's, and a lot of traffic: an elementwise pass over the activations that reads and writes the whole array again and, in the backward pass, reads the mask. The pass moves 0.375 of the bytes the matrix multiply moves, and the cost of a pass like this is its bytes, not its arithmetic, which is the lesson of chapter 7's optimizer table too. It also needs one random number per element, 262,144 draws per layer per step, and a mask that the backward pass needs. The mask can be stored (a byte per element, or a bit if packed, or a float, four times as much) or regenerated in the backward pass from the generator's state: with a counter-based generator, whose output is a function of (seed, step, element index) and needs no state carried between elements, the mask costs no memory and a second round of draws. *Augmentation* costs one draw per input element, trivial next to the model and often paid by the data pipeline on another processor. *Early stopping* costs a validation pass every $E$ steps, 0.0267 of the training arithmetic for 2048 validation examples every 100 steps, and one copy of the parameters.
 
-## Making it work
+## Habits that make a regularized run trustworthy
 
 **Order of work.** Start with the cheapest and the one whose strength you can reason about: early stopping (or simply watch the validation curve), then weight decay, then augmentation if you know a valid invariance, and dropout last, when the model is still far over capacity. Add a second regularizer only when the first has been tuned and the validation curve still diverges: the comparison above shows the gains do not add.
 
@@ -633,7 +625,7 @@ Early stopping with one validation pass of 2048 examples every 100 steps adds 0.
 
 **Match the regularizer to the data.** An augmentation that is valid for one task is a wrong label for another (the gain above), and dropout on a model that does not overfit costs accuracy (the 128-example row).
 
-## Where this appears in brain
+## Regularization in brain's training code
 
 brain's training is built from the optimizer and the loop of the previous chapters, and it uses the four methods of this chapter very unequally. Two are well developed, one is a deliberate absence, and one is absent from training altogether.
 
@@ -658,6 +650,22 @@ Answers are at the end of the chapter.
 7. **Explain.** Dropout reduced the test loss by about 0.8 with 8 examples and, with 128, won on only 3 of 8 seeds with a mean difference too small to print. What differs between the two settings?
 8. **Find the error.** "An augmentation never hurts, since it only adds training examples." Use the half-period shift to say what is wrong, and say how you would measure the damage if you knew the true function.
 
+## Summary
+
+A network with more parameters than examples can lower its training loss below the noise floor by following the noise, and the validation loss, which kept falling to its minimum, then climbs: on the task of this chapter 0.138 at the best step against 0.436 at the end, over eight seeds. Regularization is every change that trades training loss for validation loss. **Weight decay** shrinks every weight by the fraction $\eta\lambda$ per step; it is the Gaussian prior of Volume II and the decoupled decay of chapter 7, and it works by bounding the slope of the function (a steepest slope of about 34 against 11.1 at the best strength). **Dropout** removes units at random during training and rescales the kept ones by $1/(1-p_{\mathrm{drop}})$ so that the expectation is the activation; its backward pass multiplies by the same mask, a fresh mask gives a gradient of a function that was not computed, eval mode is the identity and is the average of the exponentially many subnetworks exactly when a linear layer follows. It helped at 8 and 16 examples and did nothing at 64 and above. **Data augmentation** adds knowledge in the form of invariances: noise on the inputs is a ridge penalty of strength $N s_{\mathrm{aug}}^2$ for a linear model, and an augmentation that changes the label, measured by its label drift, adds wrong labels instead. **Early stopping** keeps the checkpoint of the lowest validation loss, needs a patience matched to the noise of the curve, and on a quadratic loss is a shrinkage of the same family as ridge with $\lambda \approx 1/(\eta t)$. Compared over eight paired seeds, each method beats no regularization on all eight; the methods are substitutes, and at the best validation step none improves on the others.
+
+The limits are the ones named along the way. One task, one network and a coarse grid give a pattern, not a ranking; every setting is chosen on a validation set that early stopping has also used, so the validation loss of the chosen model is optimistic; the equivalences are exact for a linear model or a quadratic and approximate for a network. The methods also cost: dropout adds a pass over the activations and a mask, weight decay two FLOPs per parameter, early stopping a validation pass and a copy. The next chapter turns from preventing one failure to finding them all: when a loss curve looks wrong, which of the many things that can be wrong is it?
+
+## References
+
+- Geoffrey E. Hinton, Nitish Srivastava, Alex Krizhevsky, Ilya Sutskever and Ruslan R. Salakhutdinov, "Improving neural networks by preventing co-adaptation of feature detectors", 2012.
+- Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya Sutskever and Ruslan Salakhutdinov, "Dropout: a simple way to prevent neural networks from overfitting", 2014.
+- Ilya Loshchilov and Frank Hutter, "Decoupled weight decay regularization", 2019.
+- Chris M. Bishop, "Training with noise is equivalent to Tikhonov regularization", 1995.
+- Lutz Prechelt, "Early stopping - but when?", 1998.
+- Ian Goodfellow, Yoshua Bengio and Aaron Courville, "Deep Learning", chapter 7, "Regularization for deep learning", 2016.
+- Christian Szegedy, Vincent Vanhoucke, Sergey Ioffe, Jonathon Shlens and Zbigniew Wojna, "Rethinking the Inception architecture for computer vision", 2016.
+
 ## Exercises
 
 1. **[Calculate]** A weight with zero loss gradient is decayed with $\eta = 0.01$ and $\lambda = 0.3$. What is left of it after 100, 200 and 1000 steps? After how many steps is it below 1% of its start?
@@ -673,12 +681,6 @@ Answers are at the end of the chapter.
 11. **[Investigate]** Rerun the weight-decay experiment at $\lambda = 0.3$ with decay on the 128 hidden weights and biases and the 64 output weights but not on the output bias $c$, then not on the 64 hidden biases either. Does the result of the table change? What does that say about which tensors need decay in this network?
 12. **[Investigate]** The dropout table says it does nothing at 128 examples. Increase the hidden layer to 256 units and rerun the 64-example row with $p_{\mathrm{drop}} = 0.3$ and $0.5$. Does dropout help more when the layer is wider, and how do the best validation step and the final test loss move?
 
-## Summary
-
-A network with more parameters than examples can lower its training loss below the noise floor by following the noise, and the validation loss, which kept falling to its minimum, then climbs: on the task of this chapter 0.138 at the best step against 0.436 at the end, over eight seeds. Regularization is every change that trades training loss for validation loss. **Weight decay** shrinks every weight by the fraction $\eta\lambda$ per step; it is the Gaussian prior of Volume II and the decoupled decay of chapter 7, and it works by bounding the slope of the function (a steepest slope of about 34 against 11.1 at the best strength). **Dropout** removes units at random during training and rescales the kept ones by $1/(1-p_{\mathrm{drop}})$ so that the expectation is the activation; its backward pass multiplies by the same mask, a fresh mask gives a gradient of a function that was not computed, eval mode is the identity and is the average of the exponentially many subnetworks exactly when a linear layer follows. It helped at 8 and 16 examples and did nothing at 64 and above. **Data augmentation** adds knowledge in the form of invariances: noise on the inputs is a ridge penalty of strength $N s_{\mathrm{aug}}^2$ for a linear model, and an augmentation that changes the label, measured by its label drift, adds wrong labels instead. **Early stopping** keeps the checkpoint of the lowest validation loss, needs a patience matched to the noise of the curve, and on a quadratic loss is a shrinkage of the same family as ridge with $\lambda \approx 1/(\eta t)$. Compared over eight paired seeds, each method beats no regularization on all eight; the methods are substitutes, and at the best validation step none improves on the others.
-
-The limits are the ones named along the way. One task, one network and a coarse grid give a pattern, not a ranking; every setting is chosen on a validation set that early stopping has also used, so the validation loss of the chosen model is optimistic; the equivalences are exact for a linear model or a quadratic and approximate for a network. The methods also cost: dropout adds a pass over the activations and a mask, weight decay two FLOPs per parameter, early stopping a validation pass and a copy. The next chapter turns from preventing one failure to finding them all: when a loss curve looks wrong, which of the many things that can be wrong is it?
-
 ## Key terms
 
 - **dropout**: randomly setting each unit of a layer to zero with probability $p_{\mathrm{drop}}$ during training, and scaling the kept units by $1/(1 - p_{\mathrm{drop}})$ so that the expected output is unchanged; the layer is the identity at prediction time. <!-- concept: dropout -->
@@ -688,7 +690,7 @@ The limits are the ones named along the way. One task, one network and a coarse 
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. It is overfitting: the model has fitted accidents of its 16 or so training examples, so it is excellent on them and poor on others. The training loss cannot reveal it because the model was optimized on exactly those examples, so its training loss is a flattering estimate and falls with every extra parameter; only data the model did not train on measures generalization.
 2. A Gaussian prior with mean 0 and variance $\sigma_w^2$ on each weight; the penalty is $\frac{\lambda}{2}\lVert\mathbf{w}\rVert^2$ with $\lambda = \sigma^2/\sigma_w^2$, $\sigma$ being the noise of the labels. A larger $\lambda$ is a smaller $\sigma_w$: a stronger belief that the weights are close to zero, or noisier data that deserve less trust.
@@ -706,13 +708,3 @@ The limits are the ones named along the way. One task, one network and a coarse 
 6. Early. A dropout curve is noisy, so a single evaluation without improvement is likely just noise, and a patience of one stops in the first few dozen steps (step 56 on average in the table, with a test loss of 0.205 against 0.128 for a patience of 50), before the curve has had time to fall.
 7. With 8 examples the network has 24 parameters per example and memorizes noise, so there is a large variance for dropout to remove. With 128 examples (1.5 per example) the unregularized network is already near the noise floor and there is little variance to remove, while the noise that dropout injects slows the fit.
 8. The half-period shift gives every training point a wrong label for the shifted input, because the true curve changes sign there. An augmentation adds wrong labels whenever the label depends on what is changed. If the true function $f$ were known, the damage is the label drift, $\sqrt{\mathbb{E}[(f(x') - f(x))^2]}$: 1.004 for the half-period shift, 0.133 for noise of standard deviation 0.03, against label noise of 0.3.
-
-## References
-
-- Geoffrey E. Hinton, Nitish Srivastava, Alex Krizhevsky, Ilya Sutskever and Ruslan R. Salakhutdinov, "Improving neural networks by preventing co-adaptation of feature detectors", 2012.
-- Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya Sutskever and Ruslan Salakhutdinov, "Dropout: a simple way to prevent neural networks from overfitting", 2014.
-- Ilya Loshchilov and Frank Hutter, "Decoupled weight decay regularization", 2019.
-- Chris M. Bishop, "Training with noise is equivalent to Tikhonov regularization", 1995.
-- Lutz Prechelt, "Early stopping - but when?", 1998.
-- Ian Goodfellow, Yoshua Bengio and Aaron Courville, "Deep Learning", chapter 7, "Regularization for deep learning", 2016.
-- Christian Szegedy, Vincent Vanhoucke, Sergey Ioffe, Jonathon Shlens and Zbigniew Wojna, "Rethinking the Inception architecture for computer vision", 2016.
