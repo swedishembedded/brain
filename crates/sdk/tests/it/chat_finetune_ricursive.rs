@@ -383,8 +383,8 @@ fn a_ricursive_adapter_carries_the_norms_and_gates_it_trained() {
 }
 
 /// Spec: a resident full fine-tune (the linears and tables in bf16 with an off-device master, streamed through a window
-/// of one layer) through the SDK learns and writes the masters as a base the architecture opens again; a stage count is
-/// refused by name.
+/// of one layer) through the SDK learns and writes the masters as a base the architecture opens again; two stages (each with its own resident state and
+/// optimizer) learn and write the same base, and a window with several stages is refused by name.
 #[test]
 fn a_resident_layer_streamed_full_fine_tune_writes_its_masters_as_a_base() {
     let model = ripple_model_dir("ripple-resident");
@@ -411,6 +411,14 @@ fn a_resident_layer_streamed_full_fine_tune_writes_its_masters_as_a_base() {
     // The window changes where the weights live, not the arithmetic.
     let resident = run("weights=bf16", 0, "resident").expect("the resident run");
     assert_eq!(resident.final_loss.map(f32::to_bits), outcome.final_loss.map(f32::to_bits), "a layer-streamed run ends where the resident one does");
-    let err = run("weights=bf16", 2, "staged").expect_err("refused");
-    assert!(err.to_string().contains("one stage"), "{err}");
+    // Two stages, each with its own resident state and optimizer: the same task learned, a base written.
+    let staged = run("weights=bf16", 2, "staged").expect("the two-stage resident full fine-tune runs");
+    assert!(staged.final_loss.zip(staged.initial_loss).is_some_and(|(last, first)| last < first), "{staged:?}");
+    let (a, b) = (staged.final_loss.unwrap(), resident.final_loss.unwrap());
+    assert!((a - b).abs() <= 1e-3 * b.max(1e-2), "two stages end where one does: {a} vs {b}");
+    let written = checkpoint::weightio::WeightReader::open(staged.checkpoint.unwrap().join("model.safetensors").to_str().unwrap()).expect("the checkpoint opens");
+    assert_eq!(written.names().count(), cfg.param_list().len(), "every tensor once, the replicated embedding included");
+    // A window and several stages do not compose: refused by name.
+    let err = run("weights=bf16,window=1", 2, "staged-window").expect_err("refused");
+    assert!(err.to_string().contains("do not compose"), "{err}");
 }

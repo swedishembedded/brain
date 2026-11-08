@@ -266,9 +266,7 @@ fn what_the_resident_build_cannot_honour_is_refused_by_name() {
 
     let nowhere = Path::new("/nonexistent/ricursive-base");
     let resident = model::TrainPrecision::parse("weights=bf16").unwrap();
-    let staged = model::FitOpts { precision: resident, stages: 2, ..model::FitOpts::default() };
-    let err = model::finetune::fit_full::<ricursive::finetune::RippleTrainer>(nowhere, nowhere, &staged, nowhere, model::finetune::OptimizerState::HostOffload, model::FitControl::default()).expect_err("refused");
-    assert!(err.to_string().contains("one stage"), "{err}");
+    let _ = resident;
     for spec in ["state=int8", "weights=f32,window=2"] {
         let o = model::FitOpts { precision: model::TrainPrecision::parse(spec).unwrap(), ..model::FitOpts::default() };
         let err = model::finetune::fit_full::<ricursive::finetune::RippleTrainer>(nowhere, nowhere, &o, nowhere, model::finetune::OptimizerState::HostOffload, model::FitControl::default()).expect_err(spec);
@@ -343,4 +341,128 @@ fn the_65b_full_fine_tune_placement_on_two_and_four_gh200() {
 
 fn stage_costs_of(cfg: &TrainConfig, shards: &[Shard], b: u32, t: u32, resident: &ResidentFtConfig) -> Vec<ricursive::train::StageCost> {
     ricursive::train::stage_costs(cfg, shards, b, t, resident).unwrap()
+}
+
+
+// ---- the pipeline: every stage owns its resident state and optimizer ----
+
+use model::PipelineModel;
+
+/// The tiny model cut into `stages` stages, each with its own resident state.
+fn build_pipeline(stages: usize, value: ResidentValue) -> PipelineModel<Ripple> {
+    use model::Shardable;
+    let cfg = TrainConfig::tiny();
+    let shards = model::plan_balanced(&<Ripple as Shardable>::shard_cost(&cfg, 1, SEQ), &vec![Shard::ANY_GPU; stages]);
+    let src = cfg.tiny_weights(7);
+    let resident = resident_cfg(value, None, ClipPass::TwoPass);
+    let pipe = model::Pipeline::<Ripple>::from_stages(cfg.clone(), shards, |c, shard| {
+        let opts = TrainOpts { resident: Some(plan_resident(&c, &shard, 1, SEQ, &resident, Capacity { device_bytes: 1 << 30, host_bytes: 1 << 30 })), ..TrainOpts::default() };
+        Ripple::build_shard(c, 1, SEQ, &src, &opts, true, shard).unwrap_or_else(|e| panic!("{e}"))
+    });
+    PipelineModel::new(pipe, cfg)
+}
+
+fn pipeline_tensors(m: &PipelineModel<Ripple>) -> Vec<(String, Vec<f32>)> {
+    let mut names = m.param_names();
+    names.sort();
+    names.into_iter().map(|n| (n.clone(), m.read_weight(&n))).collect()
+}
+
+fn fit_pipeline(m: PipelineModel<Ripple>, dir: &Path, o: &model::FitOpts) -> (model::FitReport, PipelineModel<Ripple>) {
+    let (train, val, bcfg, _, itos) = model::load_dataset_with_itos(dir, o).unwrap();
+    model::fit_controlled(m, model::causal_lm::<PipelineModel<Ripple>>(train, val, bcfg, itos), o, None, model::FitControl::default()).unwrap()
+}
+
+/// The largest difference of two tensor lists relative to the larger tensor's scale.
+fn worst_scaled(a: &[(String, Vec<f32>)], b: &[(String, Vec<f32>)]) -> (f64, String) {
+    assert_eq!(a.len(), b.len());
+    let mut worst = (0f64, String::new());
+    for ((name, x), (_, y)) in a.iter().zip(b) {
+        let scale = x.iter().chain(y).fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+        let d = x.iter().zip(y).fold(0f32, |m, (p, q)| m.max((p - q).abs())) / scale;
+        if f64::from(d) > worst.0 {
+            worst = (f64::from(d), name.clone());
+        }
+    }
+    worst
+}
+
+/// Spec: two resident stages train what one resident stage does. The sums are reordered (the embedding's gradient is
+/// the sum of two stages' accumulations, the clip's norm of two partial sums), so the weights agree to float rounding
+/// rather than to the bit: within 1e-5 of the tensor's scale after eight clipped steps, the clip engaging in the same
+/// steps with the same norm, the loss identical to 1e-6.
+#[test]
+fn two_resident_stages_train_what_one_does() {
+    let dir = scratch("stages");
+    write_dataset(&dir);
+    for value in [ResidentValue::Bf16, ResidentValue::Fp8E4M3 { block: 128 }] {
+        let o = opts(8, 0.05);
+        // One stage.
+        let one = build(value, None, ClipPass::TwoPass);
+        let mut one_norms = Vec::new();
+        let mut hook = |s: &model::StepReport| {
+            one_norms.push(s.grad_norm);
+            true
+        };
+        let control = model::FitControl { on_step: Some(&mut hook), ..Default::default() };
+        let (want_report, want) = model::fit_controlled(one, objective(&dir, &o), &o, None, control).unwrap();
+        // Two stages.
+        let two = build_pipeline(2, value);
+        assert!(model::Model::stage_local_optimizer(&two));
+        let mut two_norms = Vec::new();
+        let mut hook = |s: &model::StepReport| {
+            two_norms.push(s.grad_norm);
+            true
+        };
+        let (train, val, bcfg, _, itos) = model::load_dataset_with_itos(&dir, &o).unwrap();
+        let control = model::FitControl { on_step: Some(&mut hook), ..Default::default() };
+        let (report, got) = model::fit_controlled(two, model::causal_lm::<PipelineModel<Ripple>>(train, val, bcfg, itos), &o, None, control).unwrap();
+        let (w, g) = (want_report.final_loss.unwrap(), report.final_loss.unwrap());
+        assert!((w - g).abs() <= 1e-4, "{value:?}: final loss {w} vs {g}");
+        let (diff, name) = worst_scaled(&tensors(&want), &pipeline_tensors(&got));
+        eprintln!("{value:?}: two stages vs one: worst weight difference {diff:.2e} of scale ({name})");
+        assert!(diff < 1e-4, "{value:?}: {name} differs by {diff:.2e}");
+        // The clip engaged, identically: the norm it measured agrees step by step.
+        assert!(one_norms.iter().all(Option::is_some) && one_norms.iter().any(|n| n.unwrap() > 0.05), "the clip of 0.05 engages: {one_norms:?}");
+        for (a, b) in one_norms.iter().zip(&two_norms) {
+            let (a, b) = (a.unwrap(), b.expect("the pipeline measures the norm"));
+            assert!((a - b).abs() <= 1e-4 * a.max(1e-3), "grad norm {a} vs {b}");
+        }
+        // The replicated embedding is the same tensor in every stage.
+        let pipe = got.pipeline();
+        let first = model::Model::read_weight(pipe.stage(0), "model.embed_tokens.weight");
+        for i in 1..pipe.n_stages() {
+            assert_eq!(first, model::Model::read_weight(pipe.stage(i), "model.embed_tokens.weight"), "stage {i}'s embedding is stage 0's after eight steps");
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Spec: a pipeline of resident stages stopped at step 4 and resumed (every stage's master and state under its own
+/// directory) ends exactly where the uninterrupted pipeline ends.
+#[test]
+fn a_resumed_pipeline_ends_exactly_where_the_uninterrupted_one_does() {
+    let dir = scratch("stages-resume");
+    write_dataset(&dir);
+    let o = opts(8, 0.05);
+    let value = ResidentValue::Fp8E4M3 { block: 128 };
+    let identity = serde_json::json!({"test": "ricursive-pipeline-resume"});
+    let stages = 2;
+    let (straight_report, straight) = fit_pipeline(build_pipeline(stages, value), &dir, &o);
+    let state = dir.join("run.state");
+    let mut stop_at_4 = |s: &model::StepReport| s.step < 4;
+    let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+    let (train, val, bcfg, _, itos) = model::load_dataset_with_itos(&dir, &o).unwrap();
+    let (first, _) = model::fit_controlled(build_pipeline(stages, value), model::causal_lm::<PipelineModel<Ripple>>(train, val, bcfg, itos), &o, None, control).unwrap();
+    assert!(first.interrupted && state.is_file());
+    assert!(dir.join("run.offdevice").join("stage-0").is_dir(), "each stage commits under its own directory");
+    let (train, val, bcfg, _, itos) = model::load_dataset_with_itos(&dir, &o).unwrap();
+    let control = model::FitControl { state: Some(&state), identity, ..Default::default() };
+    let (second, resumed) = model::fit_controlled(build_pipeline(stages, value), model::causal_lm::<PipelineModel<Ripple>>(train, val, bcfg, itos), &o, None, control).unwrap();
+    assert_eq!(second.resumed_at, Some(4));
+    assert_eq!(second.final_loss.unwrap().to_bits(), straight_report.final_loss.unwrap().to_bits());
+    for ((name, a), (_, b)) in pipeline_tensors(&straight).iter().zip(pipeline_tensors(&resumed)) {
+        assert_eq!(a, &b, "{name}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -860,6 +860,15 @@ impl ResidentFullFt {
         ops.weight_grad(s, &self.weights[i], x, dy, m, &self.grads[i], self.cfg.grad);
     }
 
+    /// Replace tensor `i`'s accumulated gradient by `data` (f32 values, stored in the state's gradient dtype): what a
+    /// pipeline writes back after summing the gradient of a tensor several stages hold.
+    pub fn write_grad(&self, ops: &dyn DeviceIo, i: usize, data: &[f32]) {
+        match self.cfg.grad {
+            GradDtype::F32 => ops.gpu().write_f32(&self.grads[i], data),
+            GradDtype::Bf16 => ops.gpu().write(&self.grads[i], &crate::half::pack_bf16(data)),
+        }
+    }
+
     /// Zero every gradient: call once before the accumulating backward passes of a step.
     pub fn zero_grads(&self, ops: &dyn DeviceIo) {
         let clears: Vec<&DeviceBuffer> = match &self.window {

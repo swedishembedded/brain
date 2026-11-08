@@ -67,7 +67,7 @@ use gpu_core::select::Dtype;
 use backend_cpu::par;
 
 use crate::training::TokenObjectives;
-use crate::Model;
+use crate::{Model, OffDeviceState};
 
 /// One pipeline stage: a contiguous layer range `[start, end)` plus whether it
 /// owns the token embedding (stage 0) and/or the final-norm+lm_head+loss (last
@@ -680,6 +680,8 @@ pub struct Pipeline<M: Shardable> {
     /// tied weight).
     holders: Vec<(String, Vec<usize>)>,
     fused: Option<FusedAdam>,
+    /// The global gradient norm the latest clipped stage-local step measured.
+    last_norm: std::cell::Cell<Option<f32>>,
 }
 
 impl<M: Shardable> Pipeline<M> {
@@ -729,7 +731,10 @@ impl<M: Shardable> Pipeline<M> {
                 })
                 .collect()
         });
-        stages.iter_mut().for_each(crate::trainprec::release_device_moments);
+        // Stages that own their optimizer (resident state) keep their device moments: only the host-fused path releases them.
+        if !stages.iter().all(Model::stage_local_optimizer) {
+            stages.iter_mut().for_each(crate::trainprec::release_device_moments);
+        }
         // param name -> holder stage indices, in a stable (first-seen) order.
         let mut holders: Vec<(String, Vec<usize>)> = Vec::new();
         let mut idx: HashMap<String, usize> = HashMap::new();
@@ -744,7 +749,7 @@ impl<M: Shardable> Pipeline<M> {
                 }
             }
         }
-        Pipeline { stages, shards, holders, fused: None }
+        Pipeline { stages, shards, holders, fused: None, last_norm: std::cell::Cell::new(None) }
     }
 
     pub fn n_stages(&self) -> usize {
@@ -857,6 +862,10 @@ impl<M: Shardable> Pipeline<M> {
     /// update with a global grad-norm clip, write the new weights back to the
     /// owning stage(s). Mirrors the single-device `adamw_step(.., 1/K)`.
     pub fn adamw_step(&mut self, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>, extra_scale: f32) {
+        if self.stage_local() {
+            self.stage_local_step(t, lr, wd, adam, clip, extra_scale);
+            return;
+        }
         // Gather grads (summed across holders for replicated params).
         let grads: Vec<Vec<f32>> = self
             .holders
@@ -888,6 +897,42 @@ impl<M: Shardable> Pipeline<M> {
             }
         }
         for st in stages.iter() {
+            st.poll_wait();
+        }
+    }
+
+    /// Whether every stage owns its optimizer ([`Model::stage_local_optimizer`]): the pipeline then exchanges only the
+    /// gradient norm and the replicated tensors' gradients, and each stage updates its own resident state.
+    pub fn stage_local(&self) -> bool {
+        !self.stages.is_empty() && self.stages.iter().all(Model::stage_local_optimizer)
+    }
+
+    /// The stage-local optimizer step. A tensor several stages hold (the embedding, which the value residual reads in
+    /// every stage) has the SUM of its holders' gradients written back to each holder, so each applies the same update
+    /// to the same master and the replicas stay identical; the global gradient norm is the stages' own, with that
+    /// tensor counted once. One multiplier (the accumulation scale and the clip) then reaches every stage.
+    fn stage_local_step(&mut self, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>, extra_scale: f32) {
+        let mut replicated_sq = 0.0f64;
+        for (name, hs) in self.holders.iter().filter(|(_, hs)| hs.len() > 1) {
+            let sum = self.reduced_grad(name);
+            let sq: f64 = sum.iter().map(|&g| f64::from(g) * f64::from(g)).sum();
+            for &si in hs {
+                self.stages[si].write_grad(name, &sum).unwrap_or_else(|e| panic!("stage-local step: {e}"));
+            }
+            // Every holder's own sum of squares now includes the summed gradient once.
+            replicated_sq += sq * (hs.len() - 1) as f64;
+        }
+        let sum_sq = if clip.is_some() {
+            self.stages.iter().map(|s| s.local_grad_sum_sq().expect("a stage-local optimizer measures its gradients")).sum::<f64>() - replicated_sq
+        } else {
+            0.0
+        };
+        let multiplier = optim::grad_multiplier(sum_sq, clip, extra_scale);
+        self.last_norm.set(clip.map(|_| (sum_sq.max(0.0).sqrt() * f64::from(extra_scale)) as f32));
+        for stage in &self.stages {
+            stage.local_step(t, lr, wd, adam, multiplier).unwrap_or_else(|e| panic!("stage-local step: {e}"));
+        }
+        for st in &self.stages {
             st.poll_wait();
         }
     }
@@ -1027,6 +1072,9 @@ impl<M: Shardable> Pipeline<M> {
 
     /// `name`'s AdamW `(m, v)` moments from the fused optimiser.
     pub fn read_moments(&mut self, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+        if self.stage_local() {
+            return self.stages.iter().find(|s| s.optimized_params().is_some_and(|p| p.iter().any(|n| n == name))).and_then(|s| s.read_moments(name));
+        }
         self.ensure_fused();
         self.fused.as_ref()?.state.iter().find(|(n, ..)| n == name).map(|(_, _, m, v)| (m.clone(), v.clone()))
     }
@@ -1034,6 +1082,10 @@ impl<M: Shardable> Pipeline<M> {
     /// Restore `name`'s moments, the master weight taken from the stages
     /// (write the weights first).
     pub fn write_moments(&mut self, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
+        if self.stage_local() {
+            let stage = self.stages.iter().find(|s| s.optimized_params().is_some_and(|p| p.iter().any(|n| n == name))).ok_or_else(|| format!("no stage optimises {name} on the device"))?;
+            return stage.write_moments(name, m, v);
+        }
         self.ensure_fused();
         let slot = self.fused.as_mut().expect("built above").state.iter_mut().find(|(n, ..)| n == name).ok_or_else(|| format!("no stage holds {name}"))?;
         if m.len() != slot.2.len() || v.len() != slot.3.len() {
@@ -1255,8 +1307,31 @@ impl<M: Shardable> Model for PipelineModel<M> {
     fn write_weight(&self, name: &str, data: &[f32]) {
         self.pipe.borrow_mut().write_weight(name, data);
     }
+    /// The parameters the pipeline's host optimizer owns, or, with stage-local optimizers, the ones the stages update on
+    /// the device (the rest live in their off-device state, [`Model::off_device_state`]).
     fn optimized_params(&self) -> Option<Vec<String>> {
-        Some(self.pipe.borrow().param_names())
+        let pipe = self.pipe.borrow();
+        if !pipe.stage_local() {
+            return Some(pipe.param_names());
+        }
+        let mut names: Vec<String> = Vec::new();
+        for stage in &pipe.stages {
+            for n in stage.optimized_params()? {
+                if !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+        Some(names)
+    }
+    fn stage_local_optimizer(&self) -> bool {
+        self.pipe.borrow().stage_local()
+    }
+    fn last_grad_norm(&self) -> Option<f32> {
+        self.pipe.borrow().last_norm.get()
+    }
+    fn off_device_state(&self) -> Option<&dyn OffDeviceState> {
+        (self.pipe.borrow().stage_local() && self.pipe.borrow().stages.iter().all(|s| s.off_device_state().is_some())).then_some(self as &dyn OffDeviceState)
     }
     fn read_moments(&self, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
         self.pipe.borrow_mut().read_moments(name)
@@ -1281,6 +1356,26 @@ impl<M: Shardable> Model for PipelineModel<M> {
     }
     fn config_json(&self) -> serde_json::Value {
         crate::ModelConfig::to_json(&self.cfg)
+    }
+}
+
+/// Each stage commits its off-device state under `stage-<i>` of the directory and restores it from there, so a resumed
+/// pipeline of stage-local optimizers continues exactly.
+impl<M: Shardable> OffDeviceState for PipelineModel<M> {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        for (i, stage) in self.pipe.borrow().stages.iter().enumerate() {
+            let sub = dir.join(format!("stage-{i}"));
+            std::fs::create_dir_all(&sub)?;
+            stage.off_device_state().ok_or_else(|| std::io::Error::other(format!("stage {i} has no off-device state to commit")))?.commit(&sub, step)?;
+        }
+        Ok(())
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        for (i, stage) in self.pipe.borrow().stages.iter().enumerate() {
+            stage.off_device_state().ok_or_else(|| std::io::Error::other(format!("stage {i} has no off-device state to restore")))?.restore(&dir.join(format!("stage-{i}")), step)?;
+        }
+        Ok(())
     }
 }
 

@@ -352,6 +352,27 @@ pub trait Model {
         None
     }
 
+    /// Whether this model updates itself from a gradient norm and a multiplier a caller decides
+    /// ([`Model::local_grad_sum_sq`], [`Model::local_step`]): the protocol a [`Pipeline`] drives when every stage
+    /// owns its optimizer (resident low-precision state, off-device master and moments) instead of handing its
+    /// gradients to the pipeline's host AdamW. `false` (the default) for a model whose optimizer is the pipeline's.
+    fn stage_local_optimizer(&self) -> bool {
+        false
+    }
+
+    /// The sum of squares of every gradient this model's own optimizer updates, accumulated over the micro-batches
+    /// since [`Model::zero_grads`]: a stage's share of the global norm a clip bounds. Only for a
+    /// [`Model::stage_local_optimizer`].
+    fn local_grad_sum_sq(&self) -> Option<f64> {
+        None
+    }
+
+    /// One update step `t` of every parameter this model owns with its gradients multiplied by `multiplier` (the
+    /// accumulation scale and the clip, decided globally): [`Model::adamw_step`] with the norm taken elsewhere.
+    fn local_step(&self, _t: u32, _lr: f32, _wd: f32, _adam: Adam, _multiplier: f32) -> Result<(), String> {
+        Err("this model has no stage-local optimizer".into())
+    }
+
     /// Block until submitted device work completes (memory-aperture hygiene).
     fn poll_wait(&self);
 

@@ -533,7 +533,9 @@ each layer is rebuilt in the backward.
 | the same through the generic fit loop, 40 steps | both fall to 0.0000 from 4.92; bf16 resident ends within 0.1 x the starting loss of the f32 run |
 | layer-streamed vs resident, windows of one and two layers, bf16 and FP8, clip off and an active global clip (two-pass), 8 steps | final loss and every master weight bit for bit equal; the device holds 3, 2, 1 layers' bytes beside the two bf16 tables; the single-pass running clip learns (40 steps) |
 | a run stopped at step 4 and resumed (resident and layer-streamed FP8) | final loss and every weight bit for bit equal to the uninterrupted run |
-| `ChatFullFineTune` with `weights=bf16,window=1` through the SDK on the scripted model | learns, writes the masters as a base the trainer opens again with every tensor, ends where the resident run does; a stage count is refused by name |
+| two resident stages vs one (`train_resident`, tiny Ripple cut 2 + 1 layers, bf16 and FP8, eight steps under an active clip of 0.05) | weights equal to 3.9e-8 of the tensor's scale (the embedding's gradient is the sum of two stages' accumulations and the norm two partial sums, so the bits differ in the last place; the step norms agree to 1e-4, the clip engages in the same steps), the final loss within 1e-4, the replicated embedding bit-identical in both stages |
+| a two-stage resident run stopped at step 4 and resumed (per-stage off-device state) | final loss and every weight bit for bit equal to the uninterrupted run |
+| `ChatFullFineTune` with `--stages 2` + `weights=bf16`, and `weights=bf16,window=1`, through the SDK on the scripted model | learns, writes the masters as a base the trainer opens again with every tensor, ends where the resident run does; a stage count is refused by name |
 | `brain ricursive finetune` / `brain finetune --arch ricursive` end to end (`tests/e2e/ripple.bats`, `--device cpu`) | a LoRA run on the scripted model lowers the loss and writes the adapter, a second run continues it at its own rank and a different rank is refused; a full run writes a checkpoint |
 
 How a stage is cut: with the value residual every stage holds the embedding table and recomputes `x0` from the
@@ -571,17 +573,20 @@ prints it) for the published configuration at one row of 4096 tokens, bf16 gradi
 | fp8 resident, 4 cards | 15.8 + 30.6 + 28.9 = 77.3 GiB | 378 GiB | fits |
 | bf16, window of 2 layers, 1 card | 4.9 + 3.4 + 33.6 = 41.9 GiB | 490 GiB (f32 master, int8 state), 370 GiB (bf16 master) | fits |
 
-What runs today is the last row: one stage on one card, the layers streamed through the window (the stored bf16
-values and the master on the host, every layer loaded for the forward and again for each backward pass: two passes
-under an active clip). The multi-card rows are placements, not runs: the generic `Pipeline` updates every parameter
-with its own host-fused AdamW (all gradients to the host, f32 weights and both moments there, 12 B a parameter, 780 GB
-at 65B, and a streamed layer's gradient does not outlive its layer), so it cannot drive a stage's resident state;
-`RippleTrainer` refuses a stage count with a resident precision by name. Missing for 2 and 4 cards: stage-local
-optimizers under `Pipeline` with the global clip norm and the replicated embedding's gradient exchanged between
-stages (each stage holds the table the value residual reads). Host memory is the constraint of the one-card run: 370 to
-490 GiB, which this node (858 GiB) holds and a 215 GiB job limit does not. Nothing here has run on a card: the first
-check is `train_resident` with `--device gpu0` against the CPU numbers above, then one windowed step of the real base
-with `--kernel-profile` (host transfers and the host update are the cost to read first).
+What runs: every row of the table that fits. A resident run is one stage on one card (the last row, the layers
+streamed through the window: the stored bf16 values and the master on the host, every layer loaded for the forward and
+again for each backward pass, two passes under an active clip) or a pipeline of stages (the 2- and 4-card rows without a
+window), where each stage owns its resident bf16/fp8 weights, gradients, master and optimizer state
+(`Model::stage_local_optimizer`, driven by the generic `Pipeline`): the pipeline sums the replicated embedding's gradient
+across the stages that hold it and writes the sum back to each, takes the global gradient norm from the stages' own
+(counting that tensor once), hands every stage the one multiplier of the accumulation scale and the clip, and each stage
+updates its own state, so the embedding stays identical in every stage. Resume is per stage (`<state>.offdevice/stage-<i>`).
+Not wired: a layer window together with several stages (a streamed stage runs its backward inside its update, while the
+pipeline hands the boundary gradient from stage to stage): refused by name. So the 2-card row needs the window and cannot
+run; 4 cards (92.2 GiB of 95.6 for bf16, 77.3 for fp8) or one card with a window do. Host memory is the constraint of
+the windowed run: 370 to 490 GiB, which this node (858 GiB) holds and a 215 GiB job limit does not. Nothing here has run
+on a card: the first check is `train_resident` with `--device gpu0` against the CPU numbers above, then one step of the real
+base with `--kernel-profile` (host transfers and the host update are the cost to read first).
 
 ### GPU phase runbook
 
@@ -613,6 +618,11 @@ brain finetune ricursiveAI/Ripple-65B-Preview-NVFP4 --arch ricursive --dataset c
 brain finetune ricursiveAI/Ripple-65B-Preview --arch ricursive --dataset chat.jsonl --out run-lora-bf16 \
     --lora 16 --base-format bf16 --activations bf16 --max-block 4096 --device gpu0,gpu1
 
+# FULL fine-tune of the bf16 release across FOUR cards: each stage holds its bf16 layers, gradients, master and state
+# (92 GiB of 95.6 per card at 4096 tokens; --stages 2 does not fit without a window, which does not compose with stages)
+brain finetune ricursiveAI/Ripple-65B-Preview --arch ricursive --dataset chat.jsonl --out run-full4 --stages 4 \
+    --train-precision weights=bf16,state=int8,grad=bf16 --max-block 4096 --steps 200 --lr 1e-5 --device gpu0,gpu1,gpu2,gpu3
+
 # FULL fine-tune of the bf16 release on ONE card: bf16 linears and tables on the device two layers at a time, the f32
 # master and int8 optimizer state in host RAM (370 to 490 GiB, see "Full fine-tuning at 65B"); no --stages
 brain finetune ricursiveAI/Ripple-65B-Preview --arch ricursive --dataset chat.jsonl --out run-full \
@@ -638,7 +648,7 @@ brain serve --models-dir <models> --openai 8080 --adapter run-lora/adapter.safet
 # the adapter also exports as a PEFT directory (ricursive::train::adapter::export_peft)
 ```
 
-First checks on a card, in order: `train_resident` and `train_saved` (`--device gpu0`), `train_lora`, `train_pipeline` and `train_tiers::a_chunked_head_*` with `--device gpu0` / `gpu0,gpu1` against
+First checks on a card, in order: `train_resident` (one stage, then two: `--device gpu0,gpu1`) and `train_saved` (`--device gpu0`), `train_lora`, `train_pipeline` and `train_tiers::a_chunked_head_*` with `--device gpu0` / `gpu0,gpu1` against
 the CPU numbers above; the real-weight step (`train_real_lora`, set the testdata link) on a card against the
 CPU loss 13.992954 and gradients; one `brain finetune` step with `--kernel-profile` against the GH200 roofline
 (`kernels.md` section F) before any tuning, with the head in view (below).
@@ -726,8 +736,8 @@ engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
   name; norms export as PEFT `modules_to_save`. Not measured on a card: the gather adds an `embed` and a `mul` pass per
   norm site while a non-base row is in the batch (a base-only batch records none of it).
 - Training: an adapter trains over an NVFP4 base only as the ModelOpt release stores it (nothing quantizes into
-  NVFP4). The full fine-tune of the 65B is wired for one stage on one card (resident bf16/fp8, layer-streamed); on 2 and
-  4 cards it is not (see "Full fine-tuning at 65B"): stage-local optimizers under `Pipeline` are missing. The resident
+  NVFP4). The full fine-tune of the 65B is wired for one card (resident bf16/fp8, layer-streamed) and for a pipeline of
+  resident stages; a window with several stages is not (see "Full fine-tuning at 65B"). The resident
   embedding gradient uses the shared `embedding_grad` by the batch's distinct ids; the f32 build still scatters with the
   vocabulary-wide `emb_bwd`. Resident `int8` and `nf4` values (quantization-aware training) are refused for Ripple: not tested.
 - Training: on the CPU backend `matmul_dx` with a very large contraction (the head's, vocabulary 152k) is a
@@ -738,6 +748,10 @@ engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
   so an indexer distilled for serving (D-LSA) is a separate artifact from the N-LSA model. Not measured at
   context lengths where it pays (the Qwen3 crossover is near 8k tokens); a sparse-budget pipeline stage is built but
   only the one-stage run is checked against dense.
+- Diagnose on a card (step 8): `train_tiers::an_adapter_over_a_packed_base_trains_like_one_over_its_decoded_values` fails
+  for the int8 tier on a GH200 (loss 4.208457 vs 4.20684, worst adapter gradient error 0.26 at
+  `layers.0.mlp.gate_proj.lora_a`) and passes on the CPU backend; seen once by accident before the cards were hidden,
+  not investigated. Run it with `--device gpu0` and compare the int8 activation-quantized product with the decoded one.
 - Real-weight training numbers on a card (tokens/s against the GH200 roofline, the two-card pipeline's bubble,
   N-LSA's crossover against the dense flash path at Ripple's head dimension) are step 8.
 

@@ -406,6 +406,8 @@ mod tests {
         let a = parse(&argv("base --train-precision weights=bf16,window=2 --activations recompute")).unwrap();
         let precision = a.train_precision.unwrap();
         assert!(precision.resident.is_some_and(|r| r.window == Some(2)) && precision.activations.is_some());
+        let staged = parse(&argv("base --stages 2 --train-precision weights=bf16")).unwrap();
+        assert_eq!((staged.stages, staged.train_precision.is_some_and(|p| p.resident.is_some())), (Some(2), true), "a pipeline of resident stages is one command");
         assert!(parse(&argv("base --lora 4 --train-precision weights=bf16")).unwrap_err().contains("--base-format"));
         assert!(parse(&argv("base --train-precision weights=quantum")).unwrap_err().contains("--train-precision"));
         assert!(parse(&argv("base --train-precision activations=keep --activations recompute")).unwrap_err().contains("conflicts"));

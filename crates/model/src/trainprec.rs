@@ -327,7 +327,9 @@ pub fn apply_train_precision<M: crate::Model>(model: &mut M, precision: &TrainPr
     let uniform_f32 = precision.policy.rules.is_empty() && precision.policy.default == ParamPrecision::FP32;
     if model.optimizer_parts().is_none() {
         // No device optimizer state: a model whose parameters and update live on the host takes the format there.
-        if uniform_f32 {
+        // A build with a resident state of its own (a pipeline of stages that each own one) made its store under the
+        // run's format when it was built.
+        if uniform_f32 || model.off_device_state().is_some() {
             return Ok(());
         }
         if !precision.policy.rules.is_empty() {

@@ -159,6 +159,33 @@ impl Model for Ripple {
         opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
     }
 
+    /// A resident build that keeps every layer on the device updates itself from the global norm and multiplier a
+    /// pipeline decides; a layer-streamed one runs its backward inside its update and cannot.
+    fn stage_local_optimizer(&self) -> bool {
+        self.resident.is_some() && !self.layer_streamed()
+    }
+
+    fn local_grad_sum_sq(&self) -> Option<f64> {
+        use model::resident_ft::ResidentBackward;
+        let ft = self.resident.as_ref().filter(|_| !self.layer_streamed())?;
+        self.gpu.flush();
+        let resident = ft.borrow_mut().grad_sum_sq(&self.ops).ok()?;
+        Some(resident + self.remainder_grad_sum_sq(ft.borrow().device_norm()))
+    }
+
+    fn local_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, multiplier: f32) -> Result<(), String> {
+        use model::resident_ft::ResidentBackward;
+        let ft = self.resident.as_ref().filter(|_| !self.layer_streamed()).ok_or("ricursive: no stage-local optimizer on this build")?;
+        self.gpu.flush();
+        {
+            let mut ft = ft.borrow_mut();
+            ft.set_rule(optim::rule::Rule::AdamW { adam, wd });
+            ft.step_scaled(&self.ops, lr, multiplier).map_err(|e| format!("ricursive resident full fine-tune: update: {e}"))?;
+        }
+        self.update_remainder(&model::resident_ft::StepArgs { step: t, lr, wd, adam, clip: None, extra_scale: 1.0 }, multiplier);
+        Ok(())
+    }
+
     fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
         self.resident.is_some().then_some(self as &dyn model::OffDeviceState)
     }
@@ -243,8 +270,12 @@ impl Model for Ripple {
     }
 
     fn write_grad(&self, name: &str, data: &[f32]) -> Result<(), String> {
-        if self.resident_index(name).is_some() {
-            return Err(format!("{name}: a resident tensor accumulates its gradient in the resident state; it cannot be written back"));
+        if let Some(i) = self.resident_index(name) {
+            // The accumulating buffer of the resident state, in its own dtype: what a pipeline writes back after summing
+            // the gradient of a tensor several stages hold.
+            self.gpu.flush();
+            self.resident.as_ref().expect("indexed").borrow().write_grad(&self.ops, i, data);
+            return Ok(());
         }
         if !self.is_trainable(name) {
             return Err(format!("{name}: not a trainable parameter of this ricursive model, so it has no gradient to reduce"));

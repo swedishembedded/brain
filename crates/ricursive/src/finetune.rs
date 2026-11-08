@@ -109,11 +109,22 @@ impl RippleRun {
 /// `cfg` built over `src` and laid out over the machine as the generic planner ([`model::plan_stage_layout`]) says:
 /// one stage when a device holds the model, the fewest stages that fit otherwise, or exactly `opts.stages`. The
 /// layout is printed, so an automatic split is never a silent one.
-fn build_run(cfg: TrainConfig, opts: &FitOpts, src: &dyn TensorSource, train_opts: &TrainOpts, base: &Path) -> std::io::Result<RippleRun> {
+fn build_run(cfg: TrainConfig, opts: &FitOpts, src: &dyn TensorSource, train_opts: &TrainOpts, resident: Option<&model::resident_ft::ResidentFtConfig>, base: &Path) -> std::io::Result<RippleRun> {
     let (b, t) = (opts.batch_size, opts.block_size);
     let place = |needs: &[gpu_core::devices::Need]| gpu_core::devices::place(needs).map(|homes| homes.parts().iter().map(|(_, home)| *home).collect());
-    let shards = model::plan_stage_layout::<Ripple>("ricursive finetune", &cfg, b, t, gpu_core::devices::gpus().len(), opts.stages, |sh| crate::train::estimate_stage_bytes(&cfg, sh, &train_opts.tiers, b, t), place).map_err(|e| invalid(base, e))?;
-    let make = |cfg: TrainConfig, shard: Shard| Ripple::build_shard(cfg, b, t, src, train_opts, true, shard).unwrap_or_else(|e| panic!("{}: {e}", base.display()));
+    // A resident stage costs what its resident state and the planner say; any other, what the f32 or packed build holds.
+    let stage_bytes = |sh: &Shard| match resident {
+        Some(r) => crate::train::stage_costs(&cfg, std::slice::from_ref(sh), b, t, r).map_or(u64::MAX, |c| c[0].device()),
+        None => crate::train::estimate_stage_bytes(&cfg, sh, &train_opts.tiers, b, t),
+    };
+    let shards = model::plan_stage_layout::<Ripple>("ricursive finetune", &cfg, b, t, gpu_core::devices::gpus().len(), opts.stages, stage_bytes, place).map_err(|e| invalid(base, e))?;
+    if resident.is_some_and(|r| r.window.is_some()) && shards.len() > 1 {
+        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive: a layer window and several pipeline stages do not compose: a streamed stage runs its backward inside its update, while the pipeline hands the gradient of the boundary from stage to stage; give weights= without window= for a pipeline"));
+    }
+    let make = |cfg: TrainConfig, shard: Shard| {
+        let stage_opts = TrainOpts { resident: resident.map(|r| crate::train::plan_resident(&cfg, &shard, b, t, r, model::memplan::Capacity::measured())), ..train_opts.clone() };
+        Ripple::build_shard(cfg, b, t, src, &stage_opts, true, shard).unwrap_or_else(|e| panic!("{}: {e}", base.display()))
+    };
     if let [whole] = shards.as_slice() {
         let cfg_whole = TrainConfig { ..cfg };
         let whole = Shard { start: 0, end: cfg_whole.model.num_hidden_layers, embed: true, head: true, gpu_index: whole.gpu_index };
@@ -169,25 +180,23 @@ impl ChatTrainer for RippleTrainer {
         let opened = Base::open(base)?;
         let cfg = opened.train_config(opts.block_size);
         let train_opts = TrainOpts { gemm: opts.gemm_precision, ..TrainOpts::default() };
-        let run = state.scope(|| build_run(cfg, opts, &*opened.source, &train_opts, base))?;
+        let run = state.scope(|| build_run(cfg, opts, &*opened.source, &train_opts, None, base))?;
         fit_run(run, fit)
     }
 
     /// The linears and the two tables resident in `resident`'s encoding with a master copy and the optimizer state off
-    /// the device, optionally streamed through a window of layers; the norms and gates train in f32 beside them. One
-    /// stage on one device: the pipeline's host optimizer cannot drive the resident state, so a stage count is refused
-    /// by name. Refused before the base is read when the planner finds it does not fit.
+    /// the device, optionally streamed through a window of layers; the norms and gates train in f32 beside them. Over
+    /// several stages each stage owns its resident state and optimizer (the pipeline exchanges the gradient norm and the
+    /// replicated embedding's gradient); a layer window is one stage's. Refused when the planner finds it does not fit.
     fn train_full_resident(base: &Path, opts: &FitOpts, resident: &model::resident_ft::ResidentFtConfig, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, RippleRun)> {
-        if opts.stages > 1 {
-            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive: a resident full fine-tune is one stage on one device; the pipeline's host optimizer cannot drive its off-device state"));
+        if !matches!(resident.value, model::resident_ft::ResidentValue::Bf16 | model::resident_ft::ResidentValue::Fp8E4M3 { .. }) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive: a resident full fine-tune holds its linears in bf16 or fp8; int8 and nf4 (quantization-aware training) are not tested for it"));
         }
         let opened = Base::open(base)?;
         let cfg = opened.train_config(opts.block_size);
-        let shard = Shard::whole(cfg.model.num_hidden_layers);
-        let plan = crate::train::plan_resident(&cfg, &shard, opts.batch_size, opts.block_size, resident, model::memplan::Capacity::measured());
-        let train_opts = TrainOpts { gemm: opts.gemm_precision, resident: Some(plan), ..TrainOpts::default() };
-        let built = Ripple::build_shard(cfg, opts.batch_size, opts.block_size, &*opened.source, &train_opts, true, shard).map_err(|e| invalid(base, e))?;
-        fit_run(RippleRun::Single(Box::new(built)), fit)
+        let train_opts = TrainOpts { gemm: opts.gemm_precision, ..TrainOpts::default() };
+        let run = build_run(cfg, opts, &*opened.source, &train_opts, Some(resident), base)?;
+        fit_run(run, fit)
     }
 
     fn train_lora(base: &Path, lora: &LoraRequest<'_>, opts: &FitOpts, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, RippleRun)> {
@@ -214,7 +223,7 @@ impl ChatTrainer for RippleTrainer {
             None => AdapterInit::fresh(&cfg, &*opened.source, opts.seed),
         };
         let train_opts = TrainOpts { tiers, gemm: opts.gemm_precision, ..TrainOpts::default() };
-        let run = OptimizerState::Device.scope(|| build_run(cfg, opts, &init, &train_opts, base))?;
+        let run = OptimizerState::Device.scope(|| build_run(cfg, opts, &init, &train_opts, None, base))?;
         fit_run(run, fit)
     }
 
