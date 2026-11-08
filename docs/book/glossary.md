@@ -68,6 +68,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **broadcasting**: the rule that aligns two shapes from the right and treats an axis of size 1 as stretched to match the other, by giving it stride 0, so that arrays of different shapes combine without copying. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
+**buffer alignment**: the rule that a value starts at an address that is a multiple of its alignment, which fixes where the fields of a parameter block and the slices of a buffer may begin and leaves padding between them. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
+
 ## C
 
 **cache hierarchy**: the stack of memories between a core's registers and main memory, each level larger and slower than the one above it and holding copies of the lines most recently used from the level below. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
@@ -95,6 +97,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **composition**: feeding the output of one function into another, $(g \circ f)(x) = g(f(x))$; it is associative but not commutative. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 **computational graph**: a record of a calculation as nodes (values) and edges showing which values were used to compute which. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
+
+**compute kernel**: the program that one invocation of a data-parallel computation runs, together with the declaration of the buffers and constants it is given, written once and launched over a grid of workgroups. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
 **compute-bound**: limited by arithmetic: the arithmetic intensity is at or above the machine's ridge point, so the attainable rate is the peak arithmetic rate and only fewer or cheaper operations, or a faster unit, make it faster. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
 
@@ -285,6 +289,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **k-means**: the method that finds $k$ group centres by alternately assigning each row to its nearest centre and moving each centre to the mean of its rows (Lloyd's algorithm), lowering the total squared distance to the centres at every step. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
 **k-nearest neighbours**: a classifier that stores the training rows and predicts the most common label among the $k$ rows nearest to a new one; $k$ trades bias against variance. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
+
+**kernel dispatch**: the host-side act of running a kernel: binding buffers to its slots, writing its uniform parameters and enqueueing it over a grid of workgroups, after which the host may continue while the device runs it. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
 **kernel method**: a method that fits a linear model on a (possibly enormous) feature map of the inputs while computing only the kernel, the dot product of the features of two rows, as in kernel ridge regression and the support vector machine. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
@@ -532,6 +538,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **stochastic gradient descent**: gradient descent that steps along the gradient of a small random batch of examples instead of the whole training set, $\theta \leftarrow \theta - \eta\,\mathbf{g}_t$, an unbiased but noisy estimate of the full step. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
+**storage buffer**: a large array in device memory that a kernel reads or reads and writes, whose element type the kernel declares and whose length the host chooses when it binds the buffer. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
+
 **stride**: the distance in memory, counted in elements, between two neighbours along one axis; a view is described by one stride per axis, and stride 0 repeats one number. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **subgroup**: the group of consecutive invocations of a workgroup, 32 in this book's model, that the hardware executes with one instruction at a time. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
@@ -568,6 +576,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **underfitting**: a model too restricted to represent the pattern, so that its error is high on the training rows and on new rows alike. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
+**uniform parameters**: the small block of constants, the same for every invocation and read-only, that the host writes into a separate buffer for a kernel: element counts, scalars, shapes and strides. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
+
 **universal-approximation**: the theorem that, for any continuous function on a closed bounded set and any tolerance, some one-hidden-layer network with a non-polynomial activation stays within that tolerance everywhere on the set; it guarantees that the weights exist, not how many units they need or how to find them. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **unsupervised learning**: learning from examples without labels, to find structure such as groups in the features themselves. *([The Learning Problem](v02-learning/01-learning-problem.md))*
@@ -591,6 +601,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## W
 
 **weight decay**: shrinking every weight toward zero by the fraction $\eta\lambda$ at each step, as a regularizer of a neural network; the L2 penalty of Volume II, applied directly to the weights in the decoupled form of chapter 7. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
+
+**WGSL**: the WebGPU Shading Language, a small kernel language that compiles to the native graphics interfaces and in which the book writes its kernel examples. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
 **workgroup**: a set of invocations of one dispatch that run together on one compute unit, share an on-chip memory and can wait for each other at a barrier, while different workgroups are independent. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 

@@ -53,7 +53,7 @@ more than one kind of device.
    by arithmetic or by moving data, and how to tell.
 4. [The GPU: Thousands of Small Workers](04-gpu.md): how a GPU organizes its thousands of
    threads, and what that demands of our algorithms.
-5. Writing Compute Kernels: how to express one parallel computation so a GPU
+5. [Writing Compute Kernels](05-compute-kernels.md): how to express one parallel computation so a GPU
    can run it.
 6. Making Matrix Multiplication Fast: how a matrix multiply goes from a
    three-line loop to running near the hardware's peak.

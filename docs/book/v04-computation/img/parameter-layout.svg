@@ -1,0 +1,53 @@
+<!-- source-sha256: 92b0db3d455d0272f41267545b5e15d5915d603b42f109e43f86fdd8158d3c62 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 424" width="780" height="424"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="424" fill="#ffffff"/>
+<rect x="20" y="14" width="740" height="188" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Kernel layout (WGSL rules, struct alignment 16): 48 bytes; unfilled bytes are padding</text>
+<text x="172" y="59.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">+0</text>
+<text x="324" y="59.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">+4</text>
+<text x="476" y="59.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">+8</text>
+<text x="628" y="59.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">+12</text>
+<text x="84" y="89.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">byte 0</text>
+<rect x="96" y="68" width="608" height="34" fill="none" stroke="#a0aec0" stroke-width="1" stroke-dasharray="2 3"/>
+<text x="84" y="133.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">byte 16</text>
+<rect x="96" y="112" width="608" height="34" fill="none" stroke="#a0aec0" stroke-width="1" stroke-dasharray="2 3"/>
+<text x="84" y="177.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">byte 32</text>
+<rect x="96" y="156" width="608" height="34" fill="none" stroke="#a0aec0" stroke-width="1" stroke-dasharray="2 3"/>
+<rect x="97.5" y="70" width="149" height="30" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="172" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">n</text>
+<rect x="249.5" y="70" width="149" height="30" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="324" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">scale</text>
+<rect x="97.5" y="114" width="453" height="30" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="324" y="133.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">origin</text>
+<rect x="553.5" y="114" width="149" height="30" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="628" y="133.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">flag</text>
+<rect x="97.5" y="158" width="301" height="30" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="248" y="177.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">dims</text>
+<rect x="401.5" y="158" width="149" height="30" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="476" y="177.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gain</text>
+<rect x="20" y="222" width="740" height="188" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="244" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Host layout (every field aligned to 4 bytes): 36 bytes, the same fields at other offsets</text>
+<text x="172" y="267.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">+0</text>
+<text x="324" y="267.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">+4</text>
+<text x="476" y="267.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">+8</text>
+<text x="628" y="267.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">+12</text>
+<text x="84" y="297.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">byte 0</text>
+<rect x="96" y="276" width="608" height="34" fill="none" stroke="#a0aec0" stroke-width="1" stroke-dasharray="2 3"/>
+<text x="84" y="341.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">byte 16</text>
+<rect x="96" y="320" width="608" height="34" fill="none" stroke="#a0aec0" stroke-width="1" stroke-dasharray="2 3"/>
+<text x="84" y="385.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">byte 32</text>
+<rect x="96" y="364" width="608" height="34" fill="none" stroke="#a0aec0" stroke-width="1" stroke-dasharray="2 3"/>
+<rect x="97.5" y="278" width="149" height="30" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="172" y="297.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">n</text>
+<rect x="249.5" y="278" width="149" height="30" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="324" y="297.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">scale</text>
+<rect x="401.5" y="278" width="301" height="30" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="552" y="297.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">origin</text>
+<rect x="97.5" y="322" width="149" height="30" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="172" y="341.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">origin (cont.)</text>
+<rect x="249.5" y="322" width="149" height="30" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="324" y="341.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">flag</text>
+<rect x="401.5" y="322" width="301" height="30" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="552" y="341.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">dims</text>
+<rect x="97.5" y="366" width="149" height="30" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="172" y="385.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gain</text>
+</svg>

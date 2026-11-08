@@ -283,6 +283,47 @@ sentence forms "swap `a[i]` and `a[j]`" and "swap rows `r` and `p` of `M`"
 mean the same. `print "text", value` writes to the program's output, and
 `record x in the run's output` stores `x` so that it can be shown afterwards.
 
+## Kernels (Volume IV)
+
+A **kernel** is the program of one invocation of a data-parallel computation; a `launch` runs it for every invocation of a grid
+of workgroups (Volume IV, Chapters 4 and 5).
+
+```text
+kernel scale_shift(x: array<f32>[N], y: inout array<f32>[N], scale: f32, shift: f32, N: int) workgroup n_wg:
+    if g >= N: return                  # the guard for the idle tail of the grid
+    y[g] = scale * x[g] + shift
+
+launch scale_shift(x, y, 2.0, 1.0, N) over ceil(N / n_wg) workgroups
+```
+
+- The header names the inputs, the outputs (`inout`, as everywhere in this book) and the constants, and gives the
+  workgroup size `n_wg` (a positive `int`). A kernel may also declare workgroup memory in the header,
+  `shared tile: array<f32>[k]`.
+- Inside the body three read-only `int` values are defined: the local index `l` of the invocation in its workgroup
+  (`0 <= l < n_wg`), the index `w` of its workgroup, and the global index `g = w * n_wg + l`. A launch over a two-dimensional
+  grid of `n_x` by `n_y` workgroups gives each workgroup the coordinates `w_x` and `w_y` and defines `w = w_y * n_x + w_x`.
+- `return` ends this invocation only. The body of a kernel reads and writes its arguments and its `shared` arrays and nothing else.
+- `launch name(arguments) over n workgroups` (or `over n_x by n_y workgroups`) runs the body once for every pair `(w, l)`.
+  The workgroups run in any order, and so may the invocations of one workgroup; a result that depends on that order is a data
+  race. A launch with no `barrier` is a `parallel for` over all `g`: no invocation reads an element that another writes.
+- A `shared` array holds unspecified values when a workgroup starts; the kernel writes an element before any invocation reads it.
+- `barrier` is a statement of the body. Every invocation of the workgroup that is still running must reach it, and none passes it
+  until all have arrived, so the statements before it have finished, for every invocation of the workgroup, before any statement
+  after it begins. A `return` before a `barrier` is legal only if every invocation of the workgroup takes it; a kernel in which
+  some invocations of a workgroup reach the barrier and others do not is wrong, and the book says its result is undefined.
+
+The **host** program that runs a kernel uses six operations on a device (Volume IV, Chapter 5). The device keeps a queue of work and
+runs it in the order it was enqueued.
+
+| Operation | Meaning |
+|---|---|
+| `compile(source: text) -> kernel` | turns the text of a kernel into a kernel the device can run; done once per program, not once per launch |
+| `create_buffer(bytes: int) -> buffer` | allocates that many bytes of device memory; the contents are unspecified |
+| `upload(b: buffer, data)` | enqueues a copy of host values into the buffer; `data` is read when the call returns, so the host may reuse it |
+| `dispatch(k: kernel, buffers: list<buffer>, params: list<u32>, n_grp: int)` | enqueues a launch of `k` over `n_grp` workgroups with the buffers bound in order and the parameters in a small constant block; returns at once, without waiting |
+| `read_back(b: buffer, count: int) -> array<f32>[count]` | waits until every queued operation has finished, then copies the first `count` numbers of the buffer to the host |
+| `release(b: buffer)` | gives the buffer's memory back; the buffer is not used again |
+
 ## Functions and mutation
 
 ```text
