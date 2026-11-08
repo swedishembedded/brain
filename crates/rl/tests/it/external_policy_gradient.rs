@@ -22,24 +22,24 @@ use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, PolicyGra
 use rl::objective::grpo::LossAgg;
 use rl::objective::grpo_term::k3_kl;
 
-const T: usize = 8;
+pub(crate) const T: usize = 8;
 
 /// One sequence of the dataset: its tokens, where its supervised answer starts, and what its rollout recorded.
-struct Row {
-    ids: Vec<u32>,
-    answer_from: usize,
-    advantage: Option<f32>,
+pub(crate) struct Row {
+    pub(crate) ids: Vec<u32>,
+    pub(crate) answer_from: usize,
+    pub(crate) advantage: Option<f32>,
     /// One value per supervised token.
-    behavior: Option<Vec<f32>>,
+    pub(crate) behavior: Option<Vec<f32>>,
 }
 
 impl Row {
-    fn new(ids: &[u32], answer_from: usize, advantage: Option<f32>) -> Row {
+    pub(crate) fn new(ids: &[u32], answer_from: usize, advantage: Option<f32>) -> Row {
         Row { ids: ids.to_vec(), answer_from, advantage, behavior: None }
     }
 }
 
-fn write_dataset(dir: &Path, rows: &[Row]) {
+pub(crate) fn write_dataset(dir: &Path, rows: &[Row]) {
     let mut split = EncodedSplit::default();
     for row in rows {
         let mask: Vec<bool> = (0..row.ids.len()).map(|i| i >= row.answer_from).collect();
@@ -55,7 +55,7 @@ fn write_dataset(dir: &Path, rows: &[Row]) {
     std::fs::write(dir.join("meta.json"), data::binio::Meta::vocab_only(29)).unwrap();
 }
 
-fn lora_model(seed: u64) -> Qwen35 {
+pub(crate) fn lora_model(seed: u64) -> Qwen35 {
     let cfg = Qwen35Config { lora: Some(lora_cfg(3, 6.0)), ..Qwen35Config::tiny() };
     let init = qwen35::init::init_weights(&cfg, seed);
     let m = Qwen35::new_train_on(gpu_core::Gpu::new(pipelines()), cfg, 1, T as u32, &init);
@@ -68,12 +68,12 @@ fn lora_model(seed: u64) -> Qwen35 {
     m
 }
 
-fn opts(steps: u32, grad_accum: u32, lr: f32) -> FitOpts {
+pub(crate) fn opts(steps: u32, grad_accum: u32, lr: f32) -> FitOpts {
     FitOpts { steps, batch_size: 1, block_size: T as u32, lr, grad_accum, seed: 17, ..Default::default() }
 }
 
 /// The model's log-probability of each supervised token of `row`.
-fn answer_logprobs(m: &Qwen35, row: &Row) -> Vec<f32> {
+pub(crate) fn answer_logprobs(m: &Qwen35, row: &Row) -> Vec<f32> {
     let (mut tokens, mut targets) = (vec![0u32; T], vec![model::IGNORE; T]);
     tokens[..row.ids.len()].copy_from_slice(&row.ids);
     let (from, to) = (row.answer_from - 1, row.ids.len() - 1);

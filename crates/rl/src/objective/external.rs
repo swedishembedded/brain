@@ -138,6 +138,14 @@ impl std::str::FromStr for BehaviourSource {
     }
 }
 
+/// What a run would leave unread: a step draws `grad_accum` batches of `batch_size` records, so a run of `steps`
+/// steps reads `steps * grad_accum * batch_size` records however many the dataset holds. A shorter run trains on a
+/// subset, which is easy to mistake for training on the whole dataset; `None` when every record is drawn at least once.
+fn coverage_note(opts: &FitOpts, records: usize) -> Option<String> {
+    let drawn = u64::from(opts.steps) * u64::from(opts.grad_accum.max(1)) * u64::from(opts.batch_size.max(1));
+    (drawn < records as u64).then(|| format!("{} steps of {} batches of {} records draw {drawn} of the dataset's {records} records ({:.1}%); the rest are never read. Raise steps or grad_accum to use them", opts.steps, opts.grad_accum.max(1), opts.batch_size.max(1), 100.0 * drawn as f64 / records as f64))
+}
+
 /// The knobs of [`ExternalPolicyGradient`]. [`Default`] is the recommended configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PolicyGradientConfig {
@@ -491,6 +499,9 @@ impl ExternalPolicyGradient {
             )));
         }
         stats.behaviour = cfg.behaviour;
+        if let Some(note) = coverage_note(opts, starts.len()) {
+            eprintln!("policy gradient: {note}");
+        }
         let tag_examples = ["train", "val"].iter().any(|split| dir.join(format!("{split}.img.bin")).exists());
         let rows = Rows { starts, ends, advantage, behavior, teacher };
         let cache = ScoreCache::create(dir, rows.starts.len())?;
@@ -914,5 +925,22 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
             m.extend([("pg_token_advantage_mean", last.token_advantage_mean), ("pg_token_advantage_max", last.token_advantage_max), ("pg_token_advantage_clip_fraction", last.token_advantage_clip_fraction)]);
         }
         m
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run that draws fewer records than the dataset holds says how many it leaves unread; one that covers the
+    /// dataset says nothing.
+    #[test]
+    fn a_run_that_leaves_records_unread_says_so() {
+        let run = |steps, grad_accum, batch_size| FitOpts { steps, grad_accum, batch_size, ..FitOpts::default() };
+        let note = coverage_note(&run(100, 1, 1), 2400).expect("100 of 2400 records");
+        assert!(note.contains("100 of the dataset's 2400") && note.contains("4.2%"), "{note}");
+        assert!(coverage_note(&run(100, 24, 1), 2400).is_none(), "2400 draws read every record");
+        assert!(coverage_note(&run(10, 4, 8), 300).is_none(), "320 draws");
+        assert!(coverage_note(&run(10, 4, 8), 321).is_some());
     }
 }

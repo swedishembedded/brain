@@ -81,3 +81,17 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
       precision, streaming, offload and multi-GPU mode, with token-weighted global normalisation.
 - [ ] C. Exact resume: data order, objective cursors, weights, moments, schedule, RNG, reference identity, artifact hashes.
 - [ ] D. Reload the saved artifact from disk and evaluate it through the serving API.
+
+## Findings
+
+- Policy-gradient update scale (2026-11-08, served `brain/train` on a 4B model: no change at lr 1e-6, divergence at 2e-5).
+  Checked against an FP64 reference on a tiny CPU model with unequal record lengths and both advantage signs
+  (`crates/rl/tests/it/external_policy_gradient_scale.rs`): the step's gradient is the documented aggregation (sequence
+  mean: mean over records of each record's token mean; token sum: all tokens over the step's token count) to 0.5%;
+  advantages are not renormalised in brain; negative advantages are not clipped on the upper side; the k3 KL is a
+  per-token mean. The shared loop gives AdamW the accumulated gradient divided by `grad_accum`. AdamW normalises the
+  gradient, so a step moves each adapter element by about the learning rate whatever the advantage scale, the
+  aggregation or the KL coefficient (a 1000x advantage gives the same step), and the policy change per step is linear
+  in the learning rate. No objective defect found. The one silent factor was the number of records read: a run draws
+  `steps * grad_accum * batch` records, 100 by default, so 2400 rollouts at default steps train on 4% of them; the run
+  now says so when it opens.
