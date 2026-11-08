@@ -50,36 +50,29 @@ know at least one model family well.
 
 ## The shape of a chapter
 
-Every chapter answers one question, stated under its title, and every
-chapter is laid out the same way, so that after the first few you always
-know where you are.
+Every chapter answers one question, stated under its title. How it gets
+there depends on the subject: some begin with a failure, some with a
+calculation you can do on paper, some with a piece of history. Wherever the
+argument is about to lean on an idea from an earlier chapter, it first asks
+you to recall it and tells you where it was taught. Answer those questions
+from memory before reading on; if one is hard, go back first, because the
+new material will not hold on a shaky foundation and repairing it now is
+cheap.
 
-1. **The problem.** What we cannot yet do, why it matters, and a small
-   concrete case you can see and compute.
-2. **Before you begin.** A handful of short questions about ideas from
-   earlier chapters that this one builds on, each naming where the idea was
-   taught. Answer them from memory before reading on. If one is hard, go
-   back to that chapter first: the new material will not make sense on top
-   of a shaky foundation, and it is much cheaper to repair the foundation
-   now.
-3. **The explanation.** One new idea at a time: first in plain language with
-   a concrete example and a picture, then derived properly from what you
-   already know, then written as a precise algorithm with the shape and type
-   of every array. New terms appear in **bold** where they are defined, and
-   never before.
-4. **Making it work.** Memory layout, numerical pitfalls, cost, and what goes
-   wrong in practice.
-5. **In brain.** Where the idea lives in a real engine, how it is tested
-   there, and often the story of a mistake that shaped it.
-6. **Check your understanding.** Short questions that ask you to explain,
-   predict or spot an error, with answers at the end of the chapter.
-7. **Exercises.** Calculations by hand, implementations in your own
-   language, and investigations that ask you to change something and
-   explain what happens.
-8. **Summary** and **Key terms.** What the chapter established and why the
-   next one follows, then every new term with a plain-language definition.
-   The same definitions, from every chapter, make up the
-   [Glossary](glossary.md).
+Inside the chapter, each idea is first met as a concrete case you can
+compute, then derived properly from what you already know, then written as
+a precise algorithm with the shape and type of every array. New terms appear
+in **bold** where they are defined, and never before. Most chapters also
+show where the idea lives in brain, how it is tested there, and often the
+mistake that shaped it.
+
+The end of every chapter is laid out the same way, so you can always find
+it: questions that check your understanding, a summary of what the chapter
+established and why the next one follows, exercises (calculations by hand,
+implementations in your own language, and investigations that ask you to
+change something and explain what happens), the key terms with
+plain-language definitions, and the answers. The definitions from every
+chapter make up the [Glossary](glossary.md).
 
 Each volume ends with a **project**: a larger piece of work, built from
 nothing in the language of your choice, that uses everything the volume
@@ -92,7 +85,7 @@ Read with something to write on. When a derivation appears, cover the next
 line and try to produce it yourself. When a worked example appears, compute
 at least its first row by hand before reading the table.
 
-Answer the "Before you begin" questions honestly, from memory. Recalling an
+Answer the recall questions honestly, from memory. Recalling an
 idea is what makes it stay; rereading it is much weaker. The questions
 deliberately reach back several chapters, so that ideas come back to you
 after you have had time to forget them a little.

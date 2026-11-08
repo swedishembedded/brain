@@ -14,8 +14,10 @@ Structure (from book.yaml):
     its introduction.
 
 Content (of every written page):
-  - each chapter starts with `# <its title>` and has the recurring sections
-    every chapter shares (a project chapter has its own set);
+  - each chapter starts with `# <its title>` and ends with the reference
+    apparatus a reader looks up (exercises, key terms, answers; a project's
+    milestones and acceptance tests); the body above it is the author's own,
+    and no heading or run-in label is recycled from chapter to chapter;
   - a chapter's Key terms define exactly the concepts it introduces, each
     marked with its concept id;
   - every `commit <hash>` citation resolves to a commit in this repository
@@ -44,9 +46,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bookspec import BOOK, ROOT, load  # noqa: E402
 from glossary import key_terms  # noqa: E402
 
-CHAPTER_SECTIONS = ["The problem", "Before you begin", "Check your understanding", "Exercises",
-                    "Summary", "Key terms", "Answers"]
-PROJECT_SECTIONS = ["The goal", "Before you begin", "Milestones", "Acceptance tests", "Summary"]
+# The reference apparatus at the end of a chapter, the only headings every chapter shares.
+CHAPTER_SECTIONS = ["Exercises", "Key terms", "Answers"]
+PROJECT_SECTIONS = ["Milestones", "Acceptance tests"]
+# Apparatus a chapter may also carry under the same names; every other heading or
+# run-in label (`**Label.**`) belongs to one chapter's subject, so the same one
+# in more than RECYCLED_LIMIT chapters is a template showing through.
+APPARATUS = {"Exercises", "Key terms", "Answers", "Milestones", "Acceptance tests", "Extensions",
+             "Summary", "Check your understanding", "References", "Further reading"}
+RECYCLED_LIMIT = 3
+# Labels that announce a template slot instead of a subject; purpose and
+# prerequisites belong in the prose.
+TEMPLATE_LABELS = {"the problem", "before you begin", "what this is for", "what it is for", "purpose",
+                   "why it matters", "why it matters later", "making it work", "the goal"}
+# The same label repeated inside one chapter is the same template at a smaller scale.
+REPEAT_LIMIT = 2
+HEADING = re.compile(r"^#{2,4} (.+?)\s*$")
+RUN_IN = re.compile(r"^\*\*([^*]+?)[.:]\*\*")
 
 SVG_BUDGET = 120 * 1024
 COMMIT = re.compile(r"\bcommit `?([0-9a-f]{7,40})`?", re.I)
@@ -134,6 +150,58 @@ def slug(term: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", term.casefold()).strip("-")
 
 
+# Chapters written before the gate existed, still to be rewritten as prose. The
+# list only shrinks: an entry whose chapter already passes is an error, so it is
+# removed in the same change that rewrites the chapter.
+PENDING_PROSE = ROOT / "scripts" / "book" / "pending-prose.txt"
+
+
+def recycled(page_list, errors):
+    """Headings and run-in labels repeated across chapters: a template, not writing."""
+    pending = {l.strip() for l in PENDING_PROSE.read_text(encoding="utf-8").splitlines()
+               if l.strip() and not l.startswith("#")} if PENDING_PROSE.is_file() else set()
+    real, where = [], {}
+    for path, ch in page_list:
+        if ch is None:
+            continue
+        rel = path.relative_to(ROOT).as_posix()
+        own: list[str] = []
+        _labels(path, rel, own, where)
+        if rel in pending:
+            if not own:
+                real.append(f"{rel}: listed in {PENDING_PROSE.name} but already passes: remove it")
+        else:
+            real += own
+    for label, files in sorted(where.items()):
+        files = files - pending
+        if len(files) > RECYCLED_LIMIT:
+            real.append(f"'{label}' heads a section in {len(files)} chapters (limit {RECYCLED_LIMIT}): "
+                        "give each its own subject-specific wording")
+    errors += real
+
+
+def _labels(path, rel, errors, where):
+    """Collect one chapter's headings and run-in labels; report its template slots and repeats."""
+    local: dict[str, int] = {}
+    in_fence = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+        m = None if in_fence else (HEADING.match(line) or RUN_IN.match(line))
+        if not m or m.group(1).strip() in APPARATUS:
+            continue
+        label = m.group(1).strip().lower()
+        if label in TEMPLATE_LABELS:
+            errors.append(f"{rel}: '{m.group(1).strip()}' is a template slot, not a subject: "
+                          "say it in the prose or name what the section is about")
+        where.setdefault(label, set()).add(rel)
+        local[label] = local.get(label, 0) + 1
+    for label, n in sorted(local.items()):
+        if n > REPEAT_LIMIT:
+            errors.append(f"{rel}: '{label}' heads {n} sections (limit {REPEAT_LIMIT}): "
+                          "say what each one is about")
+
+
 def content(page_list, errors, owner=None):
     """owner maps each concept id to the chapter that introduces it."""
     owner = owner or {}
@@ -208,6 +276,7 @@ def main() -> int:
     introduced = structure(book, errors)
     page_list = pages(book, errors)
     content(page_list, errors, introduced)
+    recycled(page_list, errors)
     if errors:
         print("\n".join(errors), file=sys.stderr)
         print(f"book check: {len(errors)} problem(s)", file=sys.stderr)

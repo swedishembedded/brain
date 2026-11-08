@@ -35,22 +35,28 @@ the chapter where a reader should first meet it.
   implementable from the text alone, in any language. brain is evidence that
   the idea works, never the definition of it. Begin with the problem, never
   with a source file.
-- **Follow the layout** in `docs/book/how-to-read.md`. The first heading is
-  `# <title from book.yaml>`, followed by the question as an italic line.
-  Every chapter has, in this order, `## The problem` (purpose and a small
-  concrete case the reader can compute), `## Before you begin`, the teaching
-  sections, `## Check your understanding`, `## Exercises`, `## Summary`,
-  `## Key terms` and `## Answers`; `make check/book` enforces them. A project
-  chapter (`project-*`) has `## The goal`, `## Before you begin`,
-  `## Milestones`, `## Acceptance tests` and `## Summary`.
-- **Concrete before abstract.** Every new idea first appears as a small case
-  with real numbers, an observable input and output, and where possible a
-  picture; the general statement and its derivation come after. Introduce
-  one unfamiliar idea at a time; when two can be separated, separate them.
-- **Before you begin** has 3 to 6 short recall questions on concepts from the
-  chapter's `requires`, each naming the chapter that taught it; at least one
-  reaches back three or more chapters (or to an earlier volume) when the
-  chapter has such prerequisites. Answers go in `## Answers`.
+- **Write it, do not fill it in.** A chapter reads like a thoughtful author
+  explaining something they care about, not like a form. The first heading is
+  `# <title from book.yaml>`, followed by the question as an italic line; the
+  body after that is the author's own. Open with a situation, a puzzle, a
+  failure or a number, whatever makes this subject urgent, and let the reason
+  for each idea come out of the story of the previous one. Headings name the
+  subject of their section ("Why a column walk misses the cache", not "Common
+  mistakes" or "What this is for"), and no two chapters should feel cut from
+  the same template. `make check/book` rejects template-slot labels and any
+  heading or run-in label recycled across chapters
+  (`scripts/book/pending-prose.txt` lists chapters still to be rewritten).
+- **The end of a chapter is reference apparatus**, the one place every
+  chapter is alike so a reader can find it: `## Exercises`, `## Key terms`
+  and `## Answers`, optionally preceded by `## Check your understanding`, a
+  `## Summary` and `## References`. A project chapter (`project-*`) has
+  `## Milestones` and `## Acceptance tests`, and optionally `## Extensions`.
+- **Prerequisites are recalled, not listed.** Early in the chapter, before the
+  new material leans on them, the reader is asked to bring back 3 to 6 ideas
+  from the chapter's `requires` (at least one from three or more chapters
+  back, when the chapter has such prerequisites), each naming where it was
+  taught, as questions woven into the opening or set apart briefly in
+  whatever form suits the chapter. Their answers go in `## Answers`.
 - **Check your understanding** has 4 to 8 questions that ask the reader to
   explain, predict an outcome, or find the error in a short argument or
   computation. Answers go in `## Answers`.
@@ -60,8 +66,9 @@ the chapter where a reader should first meet it.
   each: `- **term**: plain-language definition. <!-- concept: <id> -->`. A
   definition never relies on a term the reader has not met. The glossary
   (`make generate/book/glossary`) is built from these lines.
-- **Purpose throughout.** Each section says what it is for before it
-  explains how; the summary says why the next chapter follows.
+- **Purpose throughout, in the prose.** Every idea arrives because the
+  reader needs it; say why in the sentence that introduces it, never under a
+  label. The summary says why the next chapter follows.
 - **No negative-space sections.** Never write "what this is not" or
   "non-goals" sections; state scope positively in a sentence where needed.
 - **Projects** end each volume: a larger build in the reader's own language
