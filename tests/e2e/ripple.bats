@@ -10,6 +10,13 @@
 
 # Ripple-65B served end to end by the real `brain` binary over the OpenAI API, on the CPU backend.
 #
+# DEVICE. Without RIPPLE_DEVICE every case runs where it always did: the cases that need no workgroup-barrier kernel on
+# `--device cpu`, the sparse-attention cases on the software Vulkan adapter (`--device software`, the lavapipe environment
+# of BRAIN_LAVAPIPE_ENV). With RIPPLE_DEVICE=<device> (and RIPPLE_BACKEND=cuda|vulkan for a card) EVERY case runs on that
+# device, the sparse-attention ones included, and the lavapipe environment is not sourced; `make test/gpu/ripple/e2e
+# DEVICE=gpu0` sets both. A case whose point cannot hold on that device (the CPU backend's refusal of barrier kernels, the
+# 5 GB partial checkpoint on lavapipe's 128 MiB storage binding) skips by name.
+#
 # Three servers, each its own model directory under a scratch root:
 #
 #  * a tiny SCRIPTED Ripple (tools/goldens/ripple_serve_fixture.py scripted): the published `chat_template.jinja`, a
@@ -60,6 +67,26 @@ start_server() {
 
 key_of() { jq -r .openai "$SCRATCH/keys-$1.json"; }
 
+# Fill DF with the device flags of a case whose default device is $1 (`cpu` or `software`): RIPPLE_DEVICE when set.
+device_flags() {
+  DF=(--device "${RIPPLE_DEVICE:-$1}")
+  [ -z "${RIPPLE_BACKEND:-}" ] || DF+=(--backend "$RIPPLE_BACKEND")
+}
+
+# Whether the case's device runs the workgroup-barrier kernels (the CPU JIT does not).
+has_barriers() { case "${RIPPLE_DEVICE:-software}" in cpu*) return 1 ;; *) return 0 ;; esac; }
+
+# The sparse-attention cases need the lavapipe environment only when they run on the software adapter by default; an
+# explicit device (a card) must keep seeing its own drivers.
+lavapipe_or_skip() {
+  [ -z "${RIPPLE_DEVICE:-}" ] || return 0
+  [ -n "${BRAIN_LAVAPIPE_ENV:-}" ] && [ -f "$BRAIN_LAVAPIPE_ENV" ] || skip "set BRAIN_LAVAPIPE_ENV to the lavapipe environment file (.agents/rules/testing.md)"
+}
+with_lavapipe() {
+  # shellcheck disable=SC1090
+  [ -n "${RIPPLE_DEVICE:-}" ] || source "$BRAIN_LAVAPIPE_ENV"
+}
+
 # POST a chat request body to the server on port $1; the JSON reply on stdout.
 chat() {
   curl -sS --max-time 900 -H "Authorization: Bearer $(key_of "$1")" -H 'content-type: application/json' "http://127.0.0.1:$1/v1/chat/completions" -d "$2"
@@ -79,7 +106,8 @@ setup_file() {
   : >"$SCRATCH/pids"
   export PORT="${RIPPLE_PORT:-8931}"
   python3 -I "$REPO/tools/goldens/ripple_serve_fixture.py" scripted "$SCRATCH/scripted" "$PARTIAL_DIR/chat_template.jinja" >/dev/null
-  start_server "$SCRATCH/scripted" "$PORT" --device cpu || skip "brain serve did not become ready"
+  device_flags cpu
+  start_server "$SCRATCH/scripted" "$PORT" "${DF[@]}" || skip "brain serve did not become ready"
 }
 
 teardown_file() {
@@ -140,7 +168,8 @@ teardown_file() {
 
 @test "speculative decoding with the DFlash2 draft pulled beside the target answers the same call and reports its rounds" {
   local port=$((PORT + 5)) body plain spec
-  start_server "$SCRATCH/scripted" "$port" --device cpu --speculative dflash --verbose 2
+  device_flags cpu
+  start_server "$SCRATCH/scripted" "$port" "${DF[@]}" --speculative dflash --verbose 2
   grep -q "default draft model .*Ripple-scripted-DFlash2" "$SCRATCH/serve-$port.log"
   body=$(jq -n --arg m "$MODEL" --argjson tools "$TOOLS" '{model: $m, messages: [{role: "user", content: "What is the weather in Zürich?"}], tools: $tools, max_tokens: 64, temperature: 0}')
   plain=$(chat "$PORT" "$body")
@@ -158,23 +187,27 @@ teardown_file() {
 
 @test "a draft model that is not there is refused by name and the model is not served" {
   local port=$((PORT + 6))
-  start_server "$SCRATCH/scripted" "$port" --device cpu --speculative dflash --draft-model nowhere/Not-Pulled --verbose 1
+  device_flags cpu
+  start_server "$SCRATCH/scripted" "$port" "${DF[@]}" --speculative dflash --draft-model nowhere/Not-Pulled --verbose 1
   grep -q "no draft model directory with a config.json" "$SCRATCH/serve-$port.log"
   curl -fsS -H "Authorization: Bearer $(key_of "$port")" "http://127.0.0.1:$port/v1/models" | jq -e --arg m "$MODEL" '[.data[].id] | index($m) == null'
 }
 
 @test "a Ripple served with a sparse-attention indexer on the software adapter answers the same call" {
-  [ -n "${BRAIN_LAVAPIPE_ENV:-}" ] && [ -f "$BRAIN_LAVAPIPE_ENV" ] || skip "set BRAIN_LAVAPIPE_ENV to the lavapipe environment file (.agents/rules/testing.md)"
+  has_barriers || skip "the sparse-attention kernels need workgroup barriers, which the CPU backend does not run"
+  lavapipe_or_skip
+  local DF
   mkdir -p "$SCRATCH/corpus"
   head -c 6000 "$REPO/AGENTS.md" | iconv -c -f UTF-8 -t UTF-8 >"$SCRATCH/corpus/a.txt"
   head -c 6000 "$REPO/docs/reference/models/ricursive.md" | iconv -c -f UTF-8 -t UTF-8 >"$SCRATCH/corpus/b.txt"
+  device_flags cpu
   "$BRAIN" lsa distill --arch ricursive --checkpoint "$SCRATCH/scripted/$MODEL" --corpus "$SCRATCH/corpus" --out "$SCRATCH/indexer.safetensors" \
-    --tokens 1024 --train-docs 2 --epochs 1 --queries 8 --top-k 32 --top-p 16 --index-dim 8 --cluster-block 16 --window 16 --sink 2 --device cpu >"$SCRATCH/distill.log" 2>&1 || { cat "$SCRATCH/distill.log" >&3; false; }
+    --tokens 1024 --train-docs 2 --epochs 1 --queries 8 --top-k 32 --top-p 16 --index-dim 8 --cluster-block 16 --window 16 --sink 2 "${DF[@]}" >"$SCRATCH/distill.log" 2>&1 || { cat "$SCRATCH/distill.log" >&3; false; }
   [ -f "$SCRATCH/indexer.safetensors" ]
-  # shellcheck disable=SC1090
+  device_flags software
   (
-    source "$BRAIN_LAVAPIPE_ENV"
-    start_server "$SCRATCH/scripted" $((PORT + 1)) --device software --sparse-attention "$SCRATCH/indexer.safetensors"
+    with_lavapipe
+    start_server "$SCRATCH/scripted" $((PORT + 1)) "${DF[@]}" --sparse-attention "$SCRATCH/indexer.safetensors"
   ) || skip "the software adapter server did not become ready"
   local body
   body=$(jq -n --arg m "$MODEL" --argjson tools "$TOOLS" '{model: $m, messages: [{role: "user", content: "What is the weather in Zürich? Check carefully and answer."}], tools: $tools, max_tokens: 64, temperature: 0}')
@@ -183,23 +216,26 @@ teardown_file() {
   grep -q "default kv-cache int8" "$SCRATCH/serve-$((PORT + 1)).log"
   # Speculation with the draft beside the index: the same reply, the verify held inside one cluster block of the index.
   (
-    source "$BRAIN_LAVAPIPE_ENV"
-    start_server "$SCRATCH/scripted" $((PORT + 7)) --device software --sparse-attention "$SCRATCH/indexer.safetensors" --speculative dflash --verbose 2
+    with_lavapipe
+    start_server "$SCRATCH/scripted" $((PORT + 7)) "${DF[@]}" --sparse-attention "$SCRATCH/indexer.safetensors" --speculative dflash --verbose 2
   ) || skip "the software adapter server with a draft model did not become ready"
   chat $((PORT + 7)) "$body" >"$SCRATCH/sparse-spec.json"
   [ "$(jq -c '.choices[0] | [.finish_reason, .message.reasoning_content, .message.tool_calls[0].function]' "$SCRATCH/sparse.json")" = "$(jq -c '.choices[0] | [.finish_reason, .message.reasoning_content, .message.tool_calls[0].function]' "$SCRATCH/sparse-spec.json")" ]
   for _ in $(seq 1 20); do grep -qE "spec_rounds=[1-9][0-9]* spec_accept_rate=" "$SCRATCH/serve-$((PORT + 7)).log" && break; sleep 0.5; done
   grep -E "spec_rounds=[1-9][0-9]* spec_accept_rate=" "$SCRATCH/serve-$((PORT + 7)).log"
   # An indexer that cannot be read is refused at startup, naming the flag, and the model is not listed.
-  start_server "$SCRATCH/scripted" $((PORT + 2)) --device cpu --sparse-attention "$SCRATCH/corpus/a.txt" || skip "the refusing server did not become ready"
+  device_flags cpu
+  start_server "$SCRATCH/scripted" $((PORT + 2)) "${DF[@]}" --sparse-attention "$SCRATCH/corpus/a.txt" || skip "the refusing server did not become ready"
   grep -q "skip $MODEL.*--sparse-attention" "$SCRATCH/serve-$((PORT + 2)).log"
   curl -fsS -H "Authorization: Bearer $(key_of $((PORT + 2)))" "http://127.0.0.1:$((PORT + 2))/v1/models" | jq -e --arg m "$MODEL" '[.data[].id] | index($m) == null'
 }
 
 @test "the real layers 0 and 4 of Ripple-65B serve through the same path" {
+  [ "${RIPPLE_DEVICE:-}" != software ] || skip "the 5 GB partial checkpoint binds a 200 MiB weight matrix and lavapipe caps a storage binding at 128 MiB"
   [ -f "$PARTIAL_DIR/layers-0-4.safetensors" ] && [ -f "$PARTIAL_DIR/tokenizer.json" ] || skip "no real partial checkpoint under testdata/ricursive/ripple-65b-partial"
   python3 -I "$REPO/tools/goldens/ripple_serve_fixture.py" partial "$SCRATCH/partial" "$PARTIAL_DIR" >/dev/null
-  start_server "$SCRATCH/partial" $((PORT + 3)) --device cpu || skip "the partial server did not become ready"
+  device_flags cpu
+  start_server "$SCRATCH/partial" $((PORT + 3)) "${DF[@]}" || skip "the partial server did not become ready"
   local body
   body=$(jq -n --arg m "$PARTIAL" --argjson tools "$TOOLS" '{model: $m, messages: [{role: "system", content: "You are terse."}, {role: "user", content: "Say hello."}], tools: $tools, max_tokens: 3, temperature: 0}')
   chat $((PORT + 3)) "$body" >"$SCRATCH/partial.json"
@@ -217,8 +253,9 @@ write_finetune_data() {
 
 @test "a LoRA fine-tune trains an adapter over the served checkpoint, and a second run continues it at its own rank" {
   write_finetune_data
+  device_flags cpu
   local base="$SCRATCH/scripted/$MODEL"
-  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora" --lora 4 --adapter-id "$MODEL:lab:one:v1" --steps 6 --lr 5e-2 --seed 3 --device cpu
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora" --lora 4 --adapter-id "$MODEL:lab:one:v1" --steps 6 --lr 5e-2 --seed 3 "${DF[@]}"
   [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
   grep -q '^status: Completed, 6 steps, loss ' <<<"$output"
   [ -s "$SCRATCH/lora/adapter.safetensors" ]
@@ -228,36 +265,43 @@ write_finetune_data() {
   last=$(sed -n 's/^status: .* -> \([0-9.]*\)$/\1/p' <<<"$output")
   awk -v a="$first" -v b="$last" 'BEGIN { exit !(b < a) }'
   # Continued at its own rank; a different rank is refused by name.
-  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora2" --lora 4 --continue "$SCRATCH/lora/adapter.safetensors" --steps 2 --seed 3 --device cpu
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora2" --lora 4 --continue "$SCRATCH/lora/adapter.safetensors" --steps 2 --seed 3 "${DF[@]}"
   [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
-  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora3" --lora 8 --continue "$SCRATCH/lora/adapter.safetensors" --steps 1 --device cpu
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora3" --lora 8 --continue "$SCRATCH/lora/adapter.safetensors" --steps 1 "${DF[@]}"
   [ "$status" -ne 0 ]
   grep -qi 'rank' <<<"$output"
 }
 
 @test "a LoRA fine-tune cut into two pipeline stages trains what the one-stage run does" {
   write_finetune_data
+  device_flags cpu
   local base="$SCRATCH/scripted/$MODEL" one two
-  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora-one" --lora 4 --steps 4 --lr 5e-2 --seed 3 --device cpu
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora-one" --lora 4 --steps 4 --lr 5e-2 --seed 3 "${DF[@]}"
   [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
   one=$(sed -n 's/^status: .* -> \([0-9.]*\)$/\1/p' <<<"$output")
-  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora-two" --lora 4 --steps 4 --lr 5e-2 --seed 3 --stages 2 --device cpu
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora-two" --lora 4 --steps 4 --lr 5e-2 --seed 3 --stages 2 "${DF[@]}"
   [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
   grep -q 'pipeline of 2 stages' <<<"$output"
   two=$(sed -n 's/^status: .* -> \([0-9.]*\)$/\1/p' <<<"$output")
   awk -v a="$one" -v b="$two" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= 1e-3 * a + 1e-4) }'
 }
 
-@test "native sparse attention training runs on the software adapter and is refused by name on the CPU backend" {
+@test "native sparse attention training runs where barrier kernels do and is refused by name on the CPU backend" {
   write_finetune_data
   local base="$SCRATCH/scripted/$MODEL" flags=(--lora 4 --steps 3 --lr 5e-2 --seed 3 --native-sparse --lsa-window 16 --lsa-sink 2 --lsa-top-k 64 --lsa-top-p 64 --lsa-cluster-block 8)
-  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/nlsa-cpu" "${flags[@]}" --device cpu
-  [ "$status" -ne 0 ]
-  grep -q 'workgroup-barrier' <<<"$output"
-  [ -n "${BRAIN_LAVAPIPE_ENV:-}" ] && [ -f "$BRAIN_LAVAPIPE_ENV" ] || skip "set BRAIN_LAVAPIPE_ENV to the lavapipe environment file (.agents/rules/testing.md)"
+  # The refusal is the CPU backend's: on the default split it runs there, and RIPPLE_DEVICE=cpu is that backend.
+  if [ -z "${RIPPLE_DEVICE:-}" ] || ! has_barriers; then
+    device_flags cpu
+    run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/nlsa-cpu" "${flags[@]}" "${DF[@]}"
+    [ "$status" -ne 0 ]
+    grep -q 'workgroup-barrier' <<<"$output"
+  fi
+  has_barriers || skip "the sparse-attention kernels need workgroup barriers, which the CPU backend does not run"
+  lavapipe_or_skip
+  device_flags software
   (
-    source "$BRAIN_LAVAPIPE_ENV"
-    run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/nlsa" "${flags[@]}" --device software
+    with_lavapipe
+    run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/nlsa" "${flags[@]}" "${DF[@]}"
     [ "$status" -eq 0 ] || { echo "$output" >&3; exit 1; }
     grep -q '^status: Completed, 3 steps' <<<"$output"
   )
@@ -271,12 +315,13 @@ write_finetune_data() {
 
 @test "a full fine-tune trains every weight and writes a checkpoint directory; an adapter flag without --lora is refused" {
   write_finetune_data
+  device_flags cpu
   local base="$SCRATCH/scripted/$MODEL"
-  run "$BRAIN" finetune "$base" --arch ricursive --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/full" --steps 3 --lr 1e-3 --seed 3 --device cpu
+  run "$BRAIN" finetune "$base" --arch ricursive --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/full" --steps 3 --lr 1e-3 --seed 3 "${DF[@]}"
   [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
   grep -q '^checkpoint: ' <<<"$output"
   find "$SCRATCH/full" -name model.safetensors | grep -q .
-  run "$BRAIN" finetune "$base" --arch ricursive --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/refused" --alpha 8 --device cpu
+  run "$BRAIN" finetune "$base" --arch ricursive --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/refused" --alpha 8 "${DF[@]}"
   [ "$status" -eq 2 ]
   grep -q -- '--lora' <<<"$output"
 }
@@ -284,13 +329,14 @@ write_finetune_data() {
 @test "two trained adapters and the base are served from one process over one resident base" {
   [ -s "$SCRATCH/lora/adapter.safetensors" ] || skip "the LoRA fine-tune test did not leave an adapter"
   write_finetune_data
+  device_flags cpu
   local base="$SCRATCH/scripted/$MODEL" one="$MODEL:lab:one:v1" two="$MODEL:lab:two:v1" port=$((PORT + 4))
   # The second adapter lives in the model store, beside the base, where a scan finds it; the first is pinned with --adapter.
-  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora-two" --lora 4 --adapter-id "$two" --steps 6 --lr 5e-2 --seed 5 --device cpu
+  run "$BRAIN" ricursive finetune "$base" --dataset "$SCRATCH/finetune.jsonl" --out "$SCRATCH/lora-two" --lora 4 --adapter-id "$two" --steps 6 --lr 5e-2 --seed 5 "${DF[@]}"
   [ "$status" -eq 0 ] || { echo "$output" >&3; return 1; }
   mkdir -p "$base/adapters/lab/two/v1"
   cp "$SCRATCH/lora-two/adapter.safetensors" "$base/adapters/lab/two/v1/adapter.brain.safetensors"
-  start_server "$SCRATCH/scripted" "$port" --device cpu --adapter "$SCRATCH/lora/adapter.safetensors"
+  start_server "$SCRATCH/scripted" "$port" "${DF[@]}" --adapter "$SCRATCH/lora/adapter.safetensors"
   grep -q "brain serve: .* adapter=$one digest=sha256:" "$SCRATCH/serve-$port.log"
   curl -fsS -H "Authorization: Bearer $(key_of "$port")" "http://127.0.0.1:$port/v1/models" | jq -e --arg a "$one" --arg b "$two" --arg m "$MODEL" '[.data[].id] | (index($a) != null and index($b) != null and index($m) != null)'
   local id body
@@ -309,7 +355,8 @@ write_finetune_data() {
   [ -s "$SCRATCH/lora/adapter.safetensors" ] || skip "the LoRA fine-tune test did not leave an adapter"
   local port=$((PORT + 8)) one="$MODEL:lab:one:v1" body
   mkdir -p "$SCRATCH/watch"
-  start_server "$SCRATCH/scripted" "$port" --device cpu --watch-adapters "$SCRATCH/watch"
+  device_flags cpu
+  start_server "$SCRATCH/scripted" "$port" "${DF[@]}" --watch-adapters "$SCRATCH/watch"
   ! curl -fsS -H "Authorization: Bearer $(key_of "$port")" "http://127.0.0.1:$port/v1/models" | jq -e --arg a "$one" '[.data[].id] | index($a) != null'
   cp "$SCRATCH/lora/adapter.safetensors" "$SCRATCH/watch/adapter-000001.safetensors.part"
   mv "$SCRATCH/watch/adapter-000001.safetensors.part" "$SCRATCH/watch/adapter-000001.safetensors"

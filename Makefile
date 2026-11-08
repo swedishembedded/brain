@@ -661,6 +661,30 @@ test/e2e/samples: build/debug
 test/e2e/ripple: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/ripple.bats
 
+# The Ripple-65B GPU validation phase (.agents/roadmap/ripple-gpu-validation.md): the suites of every crate the
+# port touched, and the end-to-end file, on one chosen device. DEVICE is the brain --device grammar (cpu,
+# software, gpu0, gpu0,gpu1), BACKEND cuda or vulkan for a card (default cuda); REQUIRE=1 makes a skip by name a
+# failure. `make test/gpu/ripple DEVICE=cpu` and `DEVICE=software` run it GPU-free; a card run is the plan's.
+## test/gpu - lists the per-model GPU validation runs; does nothing
+test/gpu:
+	$(LIST_CHILDREN)
+
+## test/gpu/ripple - default: Ripple-65B cargo suites, then its e2e file, on DEVICE (default cpu) and BACKEND
+##   DEVICE=gpu0 BACKEND=cuda|vulkan runs on a card; REQUIRE=1 turns a skip into a failure
+test/gpu/ripple: test/gpu/ripple/cargo test/gpu/ripple/e2e
+
+## test/gpu/ripple/suites - list the cargo suites of test/gpu/ripple/cargo and what each guards
+test/gpu/ripple/suites:
+	@scripts/test/ripple-gpu.sh suites
+
+## test/gpu/ripple/cargo - every Ripple-relevant cargo suite (engine, draft, catalog, sdk, gradcheck, shared model code, Qwen3 and Qwen3.8 regressions) on DEVICE
+test/gpu/ripple/cargo:
+	@DEVICE=$(or $(DEVICE),cpu) BACKEND=$(BACKEND) REQUIRE=$(REQUIRE) scripts/test/ripple-gpu.sh cargo
+
+## test/gpu/ripple/e2e - tests/e2e/ripple.bats with every case on DEVICE (cpu: the file's own cpu and software split)
+test/gpu/ripple/e2e: build/debug
+	@DEVICE=$(or $(DEVICE),cpu) BACKEND=$(BACKEND) REQUIRE=$(REQUIRE) BRAIN_BIN=$(BRAIN_BIN) scripts/test/ripple-gpu.sh e2e
+
 # End-to-end: `brain serve --ready-file PATH` fires only once EVERY requested
 # surface (HTTP dialects + D-Bus) has actually bound, never on a failed or
 # partial bind, and strictly AFTER --api-keys-out is written - so a script can
@@ -2240,6 +2264,7 @@ help:
         test/gradcheck test/rl test/conformance test/cuda-matrix \
         test/parity test/parity/strict test/parity/forecast test/parity/wan \
         test/e2e test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e/samples test/e2e/ready test/e2e/ripple \
+        test/gpu test/gpu/ripple test/gpu/ripple/suites test/gpu/ripple/cargo test/gpu/ripple/e2e \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
         check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/copyright check/paths check/scope check/saved-policy check/hf-fixtures \

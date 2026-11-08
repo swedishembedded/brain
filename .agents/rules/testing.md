@@ -247,6 +247,10 @@ tuned from the environment instead of a recompile.
   `tests/e2e/ripple.bats` also reads `testdata/ricursive/ripple-65b-partial/` (the published
   `chat_template.jinja`, and for the last case the two-layer partial checkpoint); the models it serves are built
   by `tools/goldens/ripple_serve_fixture.py`.
+- `RIPPLE_DEVICE` / `RIPPLE_BACKEND` / `RIPPLE_PORT` - `tests/e2e/ripple.bats` runs every case on that `--device` (and
+  `--backend cuda|vulkan` for a card) instead of its default split (cpu cases on the CPU backend, sparse-attention
+  cases on `software`); a case that cannot hold on the device skips by name. Set by
+  `make test/gpu/ripple/e2e DEVICE=gpu0 BACKEND=cuda`; the plan is `.agents/roadmap/ripple-gpu-validation.md`.
 
 **Benchmark knobs:**
 - `BRAIN_BENCH_REPS` - repetition count for a benchmark harness.
