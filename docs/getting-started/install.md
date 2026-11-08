@@ -13,6 +13,14 @@ sound. Video is written and read in process: AV1 (royalty-free) in `.mp4`,
 
 A few things are optional, needed only for specific paths:
 
+- **SDL2** (the system C library) - the standard build always links it, because
+  the world-model window (`crates/wm-display`) is compiled in even though a
+  headless run never opens it. Install it with your package manager
+  (`brew install sdl2` on macOS, `apt install libsdl2-dev` on Debian/Ubuntu).
+  On macOS a Homebrew install lives outside the linker's default search path;
+  `wm-display`'s `build.rs` asks `pkg-config` and `brew --prefix sdl2` for the
+  lib dir and passes it to the linker, so no flags are needed. If SDL2 lives
+  somewhere unusual, point the build at it with `RUSTFLAGS="-L[path/to/lib]"`.
 - **A GPU with a Vulkan/Metal/DX12 driver** — for the GPU backend. Not
   required: brain also runs entirely on CPU (see [Hardware](../guides/hardware/choosing-hardware.md)).
 - **Node.js 18+ and a WebGPU-capable browser** (Chrome/Edge 113+) — only for
