@@ -5,8 +5,6 @@
 
 *How does a matrix multiply go from a three-line loop to running near the hardware's peak?*
 
-## The problem
-
 Multiply two 4 by 4 matrices with the definition of Volume I, Chapter 4: output $C_{ij}$ is the dot product of row $i$ of $A$ and column $j$ of
 $B$. As three nested loops it is this, with the sum kept in a variable $\mathrm{acc}$:
 
@@ -71,13 +69,11 @@ At this size nobody minds. At $n = 1024$, a size a single layer of a modest netw
 loads are as many numbers as operations. Every layer of Volume III's networks is such a product, and a training step runs one for each layer, forwards and backwards; Chapter 3 gave the vocabulary to say what
 that costs: the arithmetic intensity of this loop is about a quarter of an operation per byte, far to the left of the ridge point of any machine of that chapter, so a machine
 that could do 40,000 (GFLOP/s) is fed by a memory that allows 200. Yet the product itself, counted as Chapter 3 counted it, reads each input once and has an intensity of
-$n/6 = 170.7$, to the right of both ridge points. The gap between 0.25 and 170.7 is not a property of the product. It is a property of the loop, and this chapter closes it, in
+$n/6 = 170.7$, to the right of both ridge points. The gap between 0.25 and 170.7 belongs to the loop and not to the product, and this chapter closes it, in
 four steps: reuse in the cache of a CPU, reuse in the shared memory of a GPU workgroup, reuse in the registers of one invocation, and finally arithmetic units built for the
 product itself. A last section asks what these rearrangements do to the numbers, since a sum added in a different order is, in floating point, a different sum.
 
-## Before you begin
-
-Answer from memory; the answers are at the end of the chapter.
+Five ideas from earlier chapters carry the argument, from the cost of a product (Volume IV, Chapter 3) to the order of floating-point additions (Volume I, Chapter 15). Try them from memory first; the answers are at the end of the chapter, under "Recall questions".
 
 1. (Volume IV, Chapter 3, arithmetic intensity.) How many floating-point operations does $C = AB$ take for two $[512, 512]$ fp32 matrices, how many bytes must cross
    the memory boundary at the very least (read $A$ and $B$ once, write $C$ once), and what is the intensity?
@@ -92,9 +88,7 @@ Answer from memory; the answers are at the end of the chapter.
 
 ## Counting the three-line loop
 
-*What this is for: before changing the loop we say exactly what it costs in the two units of Chapter 3, operations and bytes, and where it stands on the roofline.*
-
-The loop above is **naive matmul**: the product computed exactly as its definition reads, one output at a time, each output a dot product of a row of $A$ and a column of $B$,
+Before changing the loop we say exactly what it costs in the two units of Chapter 3, operations and bytes, and where it stands on the roofline. The loop above is **naive matmul**: the product computed exactly as its definition reads, one output at a time, each output a dot product of a row of $A$ and a column of $B$,
 with nothing kept from one output to the next. On a GPU the same idea is one invocation per output (Chapter 5):
 
 ```text
@@ -143,9 +137,7 @@ place to see it is the cache of a CPU, where the machinery is Chapter 2's.
 
 ## Loop order and the cache
 
-*What this is for: the same reuse problem on a CPU shows what a reordered or blocked loop buys, counted in cache lines with the simulator of Chapter 2, before the GPU adds its own memory.*
-
-Run the loop on the cache simulator of Chapter 2: a 32 KiB cache of 64-byte lines with least-recently-used replacement, either 8-way (64 sets) or fully associative. The three matrices are
+The same reuse problem appears first on a CPU, where the machinery is Chapter 2's, so a reordered or blocked loop can be priced in cache lines before the GPU adds a memory of its own. Run the loop on the cache simulator of Chapter 2: a 32 KiB cache of 64-byte lines with least-recently-used replacement, either 8-way (64 sets) or fully associative. The three matrices are
 fp32, row-major, and each starts on a line boundary. Three loop nests are compared. **ijk** is the loop above: the inner loop reads $A[i, k]$ along a row and $B[k, j]$ down a column. **ikj**
 swaps the inner two loops, so that the inner loop runs along row $k$ of $B$ and row $i$ of $C$ and $A[i, k]$ is a constant for it. The **blocked** nest cuts all three loops into blocks of
 $16$ and runs ijk inside each block, so that a $16 \times 16$ block of each matrix is used for a while before the next. All three perform the same $2n^3$ operations. Only the lines fetched differ:
@@ -180,7 +172,7 @@ output, the *tile*, is also the unit of work of a workgroup.
 
 ## Tiling in shared memory
 
-*What this is for: a workgroup computes a tile of $C$ and keeps the matching tiles of $A$ and $B$ in shared memory, so that every number loaded from device memory is used $T$ times. We count the loads on the simulator of Chapter 5 and derive their formula.*
+A workgroup that computes a tile of $C$ and keeps the matching tiles of $A$ and $B$ in shared memory uses every number it loads from device memory $T$ times. We count the loads on the simulator of Chapter 5 and derive their formula.
 
 **Tiled matmul** is the product computed one tile of the output at a time: a workgroup of $T \times T$ invocations owns a $T \times T$ tile of $C$, one output per invocation, and walks along the shared dimension in steps of $T$. In each step the workgroup copies a
 $T \times T$ tile of $A$ and a $T \times T$ tile of $B$ from device memory into shared memory, each invocation copying one number of each, waits at a barrier, and then every invocation does $T$ multiply-adds from shared memory. The figure
@@ -222,7 +214,7 @@ There are two barriers per step, and each has its own job. The first makes the t
 dropping it passes every test with a single step ($K \le T$) and fails with more, the same signature as the missing barrier of Chapter 5. Elements outside the matrices are loaded as zeros, so the inner loop needs no guard and
 a partial last step adds zero terms.
 
-Now run it. The simulator of Chapter 5 executes the body of every invocation of every workgroup; the kernel counts each load it issues, and the product is compared with the direct one. The first product is $16 \times 16$; the second has
+Run it. The simulator of Chapter 5 executes the body of every invocation of every workgroup; the kernel counts each load it issues, and the product is compared with the direct one. The first product is $16 \times 16$; the second has
 ragged sides, so that tiles at the edges are partial:
 
 <!-- worked: matmul_fast.tiled_trace -->
@@ -247,7 +239,7 @@ $$
 The ragged case agrees: $7\,(6 \cdot 3 + 10 \cdot 2) = 266$ against the naive $2 \cdot 6 \cdot 10 \cdot 7 = 840$. Chapter 4's count of $2n^3/T$ is the square case, and the counted loads in the table are the simulator agreeing with the formula, not
 the formula repeated. (The last column, the 32-byte transactions that the loads cost, falls less than the loads do at this size, 768 to 512 at $T = 4$, because the naive kernel's loads were already well formed, as noted above; it is the count of numbers loaded that carries the reuse.)
 
-**Intensity.** Add the $n^2$ stores of $C$ and the bytes are $4(2n^3/T + n^2)$, so
+Intensity follows from the same count. Add the $n^2$ stores of $C$ and the bytes are $4(2n^3/T + n^2)$, so
 
 $$
 \mathcal{I}(T) = \frac{2n^3}{4\,(2n^3/T + n^2)} = \frac{1}{4/T + 2/n} \approx \frac{T}{4},
@@ -256,7 +248,7 @@ $$
 the formula of Chapter 3's cache tiling, now for a tile in shared memory. The depth of a step, $T$ here, does not appear: a step of depth $b_k$ loads $2Tb_k$ numbers and does $T^2 b_k$ multiply-adds, so $b_k$ cancels. Deepening the
 steps changes the number of barriers and the latency exposed, never the traffic. (Commit 455f8054a lists exactly this as a hypothesis it killed with the arithmetic: the intensity of the register-tiled kernel is independent of its step depth.)
 
-**How large can $T$ be?** Three limits meet. A workgroup has $T^2$ invocations, one per output, and the portable limit of Chapter 4 is 256, so $T \le 16$. The shared memory is $2T^2$ numbers, $8T^2$ bytes, against a limit of 16 KiB. And the
+How large can $T$ be? Three limits meet. A workgroup has $T^2$ invocations, one per output, and the portable limit of Chapter 4 is 256, so $T \le 16$. The shared memory is $2T^2$ numbers, $8T^2$ bytes, against a limit of 16 KiB. And the
 tile competes for the compute unit with other workgroups, so occupancy (Chapter 4) decides how many run at once.
 
 <!-- worked: matmul_fast.tile_size_table -->
@@ -281,7 +273,7 @@ The way past the wall is to stop tying the tile's side to the number of invocati
 
 ## Register blocking
 
-*What this is for: the tile of the output can be bigger than the workgroup if each invocation computes an $r \times r$ block of it and keeps the block in registers. We derive what that saves, what it costs in registers, and where the limit is.*
+Letting one invocation compute more than one output makes the tile of the output bigger than the workgroup, at a price in registers that we can count. We derive what the block saves, what it costs and where the limit is.
 
 **Register blocking** is giving each invocation an $r \times r$ block of outputs, held in registers, instead of one output. A workgroup of $q \times q$ invocations then computes a tile of side $T = q\,r$ with $q^2$ invocations. For one step along the shared dimension an
 invocation reads the $r$ numbers of its rows of $A$ and the $r$ numbers of its columns of $B$ from shared memory, once, into registers, and uses each of the $2r$ numbers $r$ times: $r^2$ multiply-adds from $2r$ shared-memory reads. The pseudocode is the tiled kernel with these changes, a
@@ -341,7 +333,7 @@ The product of two [8, 8] integer matrices (as in `matmul_fast.naive_small`) on 
 Two things are visible at once. The global loads, 256 in each of the last three rows, depend on $T$ alone, as the formula says, whichever way the workgroup splits it. The shared-memory reads fall with $r$: 1,024, 512, 256, which is $2n^3/r$ (the naive kernel
 reads none, and pays for its loads in global memory). Nothing else changed: the 512 multiply-adds are the same, and so is the product.
 
-**What it buys.** Two quantities fall. The global traffic falls with the tile side $T = 16r$ of a workgroup of 256 invocations, so that a block of $r = 8$ gives a tile of 128, eight times the 16 of the portable tiled kernel, and 16.8 million loads
+What does the block buy? Two quantities fall. The global traffic falls with the tile side $T = 16r$ of a workgroup of 256 invocations, so that a block of $r = 8$ gives a tile of 128, eight times the 16 of the portable tiled kernel, and 16.8 million loads
 instead of 134 million for $n = 1024$. And the shared-memory traffic per operation falls with $r$ itself, to $2/r$ numbers per multiply-add. That second saving matters because shared memory has a bandwidth too. In the model (a parameter of this chapter, as the 32 banks of 4 bytes
 that real devices have) each compute unit's shared memory delivers 128 bytes per cycle, while its 128 lanes do 128 multiply-adds per cycle, 256 operations. A tile with $r = 1$ asks for 8 bytes of operands per multiply-add, 4 bytes per operation: $128/4 = 32$ operations per cycle can be fed, an eighth of the 256 the lanes can do. In general
 
@@ -351,7 +343,7 @@ $$
 
 and $r \ge 8$ is needed for the shared memory to keep up with the lanes (the argument of Volkov and Demmel for the register block of a GPU matrix product, restated in this chapter's model). This is a second roofline, with shared-memory bandwidth in place of device bandwidth and $4/r$ bytes per operation in place of $1/\mathcal{I}$.
 
-**What it costs.** An invocation now holds $r^2$ accumulators and $2r$ operand registers, besides the registers for its indices and loop counters. In the model, $N_{\mathrm{reg}} = 32 + r^2 + 2r$, where the 32 is a parameter of this chapter. By Chapter 4 the registers
+The price is paid in registers. An invocation now holds $r^2$ accumulators and $2r$ operand registers, besides the registers for its indices and loop counters. In the model, $N_{\mathrm{reg}} = 32 + r^2 + 2r$, where the 32 is a parameter of this chapter. By Chapter 4 the registers
 set the occupancy, and below about 500 resident invocations per compute unit the latency of the loads is no longer hidden.
 
 <!-- worked: matmul_fast.register_blocking -->
@@ -370,7 +362,7 @@ Read the rows downwards. The global loads fall with $T = 16r$ and the intensity 
 512 resident invocations, just above the 500 that Chapter 4 asks for. At $r = 16$ the invocation would need 320 registers, more than the 255 an invocation can name, and the kernel cannot run: the block is bounded above by registers. In the last column the global roof is the lower of the two in every row, so in this model the
 shared-memory roof never binds, because the tile that makes it fit ($r \ge 8$) is also the tile that lifts the global roof. The choice $r = 8$ is what the model picks and it is what brain's register-tiled kernels use (the last section); both limits, 112 registers against the limit of 255 and shared-memory bandwidth against $r \ge 8$, bracket it.
 
-**The same trade on a CPU core.** A core has registers too, and the CPU backend of brain applies the same idea there. A vector core with 16 vector registers, a fused multiply-add of latency 5 cycles started twice per cycle (Chapter 2) needs 10 independent accumulators to keep both ports busy, and
+The same trade exists on a CPU core. A core has registers too, and the CPU backend of brain applies the same idea there. A vector core with 16 vector registers, a fused multiply-add of latency 5 cycles started twice per cycle (Chapter 2) needs 10 independent accumulators to keep both ports busy, and
 a block of $r_m \times r_n$ vector accumulators needs $r_m r_n$ accumulators, $r_m$ vectors of $A$ and one temporary for the vector of $B$ just loaded:
 
 <!-- worked: matmul_fast.cpu_register_block -->
@@ -391,7 +383,7 @@ The kernel `block3x4_abt` in `crates/backend-cpu/src/fast_ops.rs` has this block
 
 ## Shared memory has banks
 
-*What this is for: Chapter 5 left a cost of shared memory open, the access pattern `tile[lx * T + ly]` of its transposing kernel. Reading a tile column by column is exactly what a matrix product does with $B$, so we count it here.*
+Chapter 5 left a cost of shared memory open, the access pattern `tile[lx * T + ly]` of its transposing kernel. Reading a tile column by column is exactly what a matrix product does with $B$, so we count it here.
 
 Shared memory is organized in **banks**: in the model, 32 banks of 4-byte words, with word $a$ in bank $a \bmod 32$. A bank serves one word per cycle. The 32 lanes of a subgroup issue one access together, and it takes as many cycles as the most distinct words that fall in a single bank; lanes
 that read the same word are served together by a broadcast. That count is a **bank conflict** of that **degree** (degree 1 means no conflict). If lane $t$ reads word $s\,t$, a column of a row-major tile of row stride $s$, the banks it touches are $s t \bmod 32$,
@@ -429,11 +421,9 @@ The first table is the rule. The second applies it to the accesses of this chapt
 1: lane 0 of row 0 and lane 15 of row 1 land on bank 0 again). In the register-tiled kernels, a thread that owns 8 adjacent columns of the $B$ tile reads words $8\,t_x + j$ for $t_x = 0 \ldots 15$, which fall on 4 banks, a 4-way conflict; giving thread $t_x$ the columns $t_x, t_x + 16, t_x + 32, \dots$ instead
 makes the 16 reads consecutive words, one per bank. And the staging store, where consecutive invocations take consecutive $k$ of one row of the tile (so that their global loads coalesce) and write it $k$-major, is an 8-way conflict at a stride of 128 words, 4-way at 129 and conflict-free at 132. Padding and interleaving change nothing in the arithmetic, only the cycles of each shared access.
 
-## The roofline climbing
+## How far each idea climbed
 
-*What this is for: the sections above each moved the product up the roofline of Chapter 3. We place every kernel on the model GPU with one computation, to read how far each idea took it and what is left.*
-
-The kernels are the naive loop, the tiled kernels of the largest portable tile ($T = 16$) and of $T = 32$, and the register-blocked kernels of 16 by 16 invocations with $r = 4$ and $r = 8$, all on $n = 1024$ with fp32 operands. The table adds two rows for the matrix unit of the next section; read those once you have it.
+Each section above moved the product up the roofline of Chapter 3. To read how far each idea took it and what is left, we place every kernel on the model GPU with one computation. The kernels are the naive loop, the tiled kernels of the largest portable tile ($T = 16$) and of $T = 32$, and the register-blocked kernels of 16 by 16 invocations with $r = 4$ and $r = 8$, all on $n = 1024$ with fp32 operands. The table adds two rows for the matrix unit of the next section; read those once you have it.
 
 <!-- worked: matmul_fast.roofline_climb -->
 C = A B, n = 1024, on the model GPU: arithmetic peak 40,000 (GFLOP/s) (Chapter 3), bandwidth 800 (GB/s), ridge 50 FLOP per byte; the matrix unit's peak is 8 times the vector peak, 320,000 (GFLOP/s), a PARAMETER of this chapter, with ridge 400. Bytes: fp32 operands 4 (2 n^3 / T + n^2); matrix-unit rows read fp16 operands (2 bytes) and write the fp32 output. Attainable = min(peak, intensity x 800) with global traffic only, the model's roofline of Chapter 3; shared memory is not the limit in any row.
@@ -460,7 +450,7 @@ roofline is a ceiling: how close a kernel gets depends on whether its instructio
 
 ## Tensor cores and cooperative matrices
 
-*What this is for: the vector lanes of Chapter 4 do one multiply-add per lane per cycle, however cleverly they are fed. A GPU can have units that multiply a small matrix by a small matrix in one operation, and the matrix product is the computation they exist for. We count what one such operation does, and what it changes in the roofline and in the program.*
+The vector lanes of Chapter 4 do one multiply-add per lane per cycle, however cleverly they are fed. A GPU can have units that multiply a small matrix by a small matrix in one operation, and the matrix product is the computation they exist for. We count what one such operation does, and what it changes in the roofline and in the program.
 
 A **tensor core** (the vendors' names for the idea differ, and the book uses this one) is a hardware unit that multiplies two small fixed-size matrices and adds a third in one operation: $D = AB + C$ with $A$ of $m_f \times k_f$, $B$ of $k_f \times n_f$ and $C$, $D$ of $m_f \times n_f$. A shape of
 $16 \times 16 \times 16$ is common. The inputs are usually in a narrow format (fp16 here) and the sum is accumulated in fp32, the arrangement that Chapter 1 gave a reason for: a product of two fp16 numbers has a significand of at most 22 bits, which fp32's 24 hold exactly, and an fp32 accumulator does not stall as an fp16 one does.
@@ -488,7 +478,7 @@ product, and the table says where the difference is. Against the exact product o
 the rounding of the inputs to fp16, whose relative error $2^{-11}$ is $2^{13} = 8192$ times the unit roundoff of fp32, and a sum of 32 such terms keeps a good part of it. A sequential fp32 loop is within $2.2 \times 10^{-6}$ of the exact product.
 This is the first-order rule of Volume I: each rounding contributes a relative error of at most the unit roundoff of the format it happens in, so rounding the *inputs* to fp16 contributes up to about $2 \times 2^{-11}$ of $S = \sum_k |a_{ik} b_{kj}|$ (the sum of the magnitudes of the terms) whatever the accumulator does, while the accumulator's own roundings are of order $2^{-24}$ per term. The precision of real tensor cores is the subject of Markidis and colleagues' study; here the speed is bought with the width of the inputs, and the accumulator is where the book spends bits to keep that error from growing.
 
-**The peak and the roofline.** The speed of the unit is a parameter of this chapter, in the way Chapter 3's machines are: a device whose matrix units complete eight times the operations per cycle of its vector lanes, $F_{\mathrm{tc}} = 8 \times 40000 = 320000$ (GFLOP/s) (real ratios on real devices differ and are a datasheet property
+The speed of the unit is the other half of the story, and it is a parameter of this chapter, in the way Chapter 3's machines are: a device whose matrix units complete eight times the operations per cycle of its vector lanes, $F_{\mathrm{tc}} = 8 \times 40000 = 320000$ (GFLOP/s) (real ratios on real devices differ and are a datasheet property
 of a particular part; this one is a model). Its ridge point against the same 800 (GB/s) is $320000/800 = 400$ operations per byte, eight times higher than the vector ridge of 50, so a kernel that was compute-bound on the vector lanes is bandwidth-bound on the matrix unit unless it moves less. The operands help: fp16 halves their bytes, so
 the intensity of a tile of side $T$ is about $T/2$ instead of $T/4$.
 
@@ -505,7 +495,7 @@ The rows of the previous roofline table for the matrix unit agree: a tile of 128
 shared memory holds. Real kernels bridge it by the means of the last section's cache between workgroups, by larger tiles with narrower operands (fp8 and int8 halve the bytes again), and by a hierarchy of tiles, a workgroup tile made of warp tiles made of fragments. The qualitative reading is the one to keep: the faster the units, the more reuse the program must arrange, and matrix units
 raise the bar for reuse eightfold at the same bandwidth.
 
-**The cooperative-matrix programming model.** A fragment is a matrix, but not one that any single invocation holds. The 256 elements of a $16 \times 16$ accumulator are spread over the 32 lanes of a subgroup, 8 registers per lane, and the program may not say which lane has which element. A **cooperative matrix** is that: a small matrix whose elements are held jointly by the invocations of one subgroup,
+A fragment is a matrix, but not one that any single invocation holds. The 256 elements of a $16 \times 16$ accumulator are spread over the 32 lanes of a subgroup, 8 registers per lane, and the program may not say which lane has which element. A **cooperative matrix** is that: a small matrix whose elements are held jointly by the invocations of one subgroup,
 operated on by subgroup-wide operations (load a fragment from memory, multiply-add fragments, store a fragment), each executed by all the lanes together. The pseudocode of the book has four such operations (defined in `docs/book/pseudocode.md`). The kernel with one subgroup per output fragment:
 
 ```text
@@ -538,13 +528,13 @@ Output [m, 2560] from a 128 x 128 workgroup tile (n = 2560 is exactly 20 tiles w
 | 512 | 80 | 100.0 | 512 | 100.0 |
 <!-- /worked -->
 
-**Why it is a capability-gated path.** Chapter 4 explained a subgroup, and brain's kernels, written in the portable subset, do not use subgroup operations at all: they are core compute that runs on any device that runs the language. A cooperative matrix cannot follow that rule, because it is by definition an operation among the lanes of a
+Why must this path be gated on a capability? Chapter 4 explained a subgroup, and brain's kernels, written in the portable subset, do not use subgroup operations at all: they are core compute that runs on any device that runs the language. A cooperative matrix cannot follow that rule, because it is by definition an operation among the lanes of a
 subgroup, with a shape and an element type that the hardware fixes. Devices differ in which shapes and which type triples (fp16 inputs with fp32 accumulation, int8 inputs with int32 accumulation, and so on) they support, and many support none. So the path is an optional one: the program has to ask the device which fragment shapes and types it has,
 and run the fragment kernel only if the answer matches what the kernel was written for; otherwise it falls back to the portable kernels, whose results the fast path is checked against. The question "does the device have it" is answered by a query, not by whether compiling the kernel happens to succeed, and the last section shows a case where the difference mattered.
 
-## The order of the additions
+## Which rearrangements change a sum
 
-*What this is for: every rearrangement above reorders arithmetic. We find which reorderings change a result and by how much, so that a test compares what it should compare.*
+Every rearrangement above reorders arithmetic. In exact arithmetic that is invisible; in floating point it is not, so we find which reorderings change a result, and by how much, in order that a test compares what it should compare.
 
 Volume I, Chapter 15 showed that floating-point addition is not associative: $(1 + 2^{-24}) + 2^{-24} = 1$ in fp32 and $1 + (2^{-24} + 2^{-24}) = 1 + 2^{-23}$. A product $C_{ij}$ is a sum of $K$ terms, so a kernel that adds them in another order may return another number in the last bits. Which rearrangements do?
 
@@ -586,7 +576,7 @@ Three consequences follow. A test of a tuned kernel against a reference needs a 
 should not be tightened to the zero that happened to come out, since the next legitimate reordering would then look like a regression (knowledge #119 says this). And the order of additions is itself a property worth recording: a kernel that is reproducible from run to run needs a fixed order, which split-K and a tree
 reduction can have, as long as the slices are folded in a fixed sequence, and which an unordered accumulate (an atomic add) cannot give.
 
-## Where this appears in brain
+## The matmul ladder in brain's kernels
 
 The matmul kernels of brain live in `crates/kernels/wgsl/`, one file per variant, and between them they are the chapter's ladder.
 
@@ -638,6 +628,26 @@ unvalidated against a real dispatch for want of hardware. It (September 2026) mo
 7. Find the error: "tiling reassociates the sum, so the tiled kernel's output differs from the naive kernel's in the last bits, and a bitwise comparison of the two is a bug in the test."
 8. A cooperative-matrix pipeline compiles and runs without an error on a device whose capability query lists no fragment shapes. A developer concludes that the capability check is unnecessary. What is wrong?
 
+## Summary
+
+The three-line loop for $C = AB$ performs $2n^3$ operations and loads $2n^3$ numbers, so its intensity is $1/(4 + 2/n)$, about a quarter of an operation per byte at every size, a fraction 0.005 of the peak of the model GPU, while the product itself can reach $n/6$. The gap is reuse: each of the $2n^2$ inputs is needed $n$ times
+and the loop loads it each time. On a CPU, a blocked loop nest raises the reuse at the cache and cuts the lines fetched from 56,448 to 4,608 at $n = 96$. On a GPU, a workgroup computes a tile of $C$, stages tiles of $A$ and $B$ in shared memory and uses each loaded number $T$ times: the global loads are $k(m\lceil n/T\rceil + n\lceil m/T \rceil)$, $2n^3/T$ for a square product, and the intensity is about $T/4$, independent of the step depth. One output per invocation caps $T$ at 16 on a portable
+workgroup of 256 invocations, so each invocation computes an $r \times r$ block in registers, lifting the tile to $16r$, cutting the shared-memory reads to $2/r$ per multiply-add (which makes $r \ge 8$ necessary to keep the lanes fed) and costing $r^2$ registers, which bound $r$ by the register file and set the occupancy. Shared-memory banks add a cost of their own, the degree of a bank conflict, removed by padding and interleaving without any change of the arithmetic. These steps took the model kernel
+from a fraction 0.005 of the peak to 0.602.
+
+A tensor core multiplies fragments in one operation, 8,192 operations for a $16 \times 16 \times 16$ fragment, with narrow inputs and an fp32 accumulator; in the model it lifts the peak eightfold and the ridge point to 400, so it demands still more reuse, and its programming model, a cooperative matrix held jointly by a subgroup, depends on a subgroup capability and a device-specific shape and type, so a program must query for it and keep the portable kernels as the fallback. The order of the additions is preserved by tiling and register
+blocking with a carried accumulator, bit for bit, and changed by split-K, fused multiply-add, several accumulators and fragments, all within a small multiple of $uS$ except the narrowing of the inputs to fp16, which costs about 374 $uS$ in the seeded example. In brain the ladder is `matmul.wgsl`, `matmul_tiled.wgsl`, `matmul_reg*.wgsl`, selected by shape in `crates/backend-api/src/select.rs`, with a capability-gated cooperative-matrix path beside them.
+
+What the chapter leaves is everything around the product. A network is not one matrix product: it is products, additions, reductions and normalizations, each a kernel with its own traffic. The next chapter takes up the reductions, which a product also needs at its edges and which the parallel machine handles differently.
+
+## References
+
+- Kazushige Goto and Robert A. van de Geijn, "Anatomy of high-performance matrix multiplication", 2008.
+- Vasily Volkov and James W. Demmel, "Benchmarking GPUs to tune dense linear algebra", 2008.
+- Junjie Lai and Andre Seznec, "Performance upper bound analysis and optimization of SGEMM on Fermi and Kepler GPUs", 2013.
+- Stefano Markidis, Steven Wei Der Chien, Erwin Laure, Ivy Bo Peng and Jeffrey S. Vetter, "NVIDIA Tensor Core programmability, performance and precision", 2018.
+- Nicholas J. Higham, "Accuracy and Stability of Numerical Algorithms", second edition, 2002.
+
 ## Exercises
 
 1. **[Calculate]** For $C = AB$ with $A$ of $[2048, 1024]$ and $B$ of $[1024, 512]$, find the global loads of the naive kernel and of the tiled kernel with $T = 16$ from the exact formula, and their ratio.
@@ -653,18 +663,6 @@ unvalidated against a real dispatch for want of hardware. It (September 2026) mo
 11. **[Investigate]** Query your device (or your CPU) for its matrix-unit capability: the supported fragment or matrix shapes and element types, or their absence. State the interface and driver, whether the capability is optional, and what a program should do when it is missing.
 12. **[Investigate]** Write the tiled kernel for a CPU or a GPU available to you and measure its bytes with your platform's counters, or count its cache-line fetches as the chapter's simulator does. Report the fraction of your machine's measured roofline for $n = 512$ and $n = 1024$ with the naive loop and the tiled one, stating the machine, compiler, repetitions and minimum, and explain any fraction above 1.
 
-## Summary
-
-The three-line loop for $C = AB$ performs $2n^3$ operations and loads $2n^3$ numbers, so its intensity is $1/(4 + 2/n)$, about a quarter of an operation per byte at every size, a fraction 0.005 of the peak of the model GPU, while the product itself can reach $n/6$. The gap is reuse: each of the $2n^2$ inputs is needed $n$ times
-and the loop loads it each time. On a CPU, a blocked loop nest raises the reuse at the cache and cuts the lines fetched from 56,448 to 4,608 at $n = 96$. On a GPU, a workgroup computes a tile of $C$, stages tiles of $A$ and $B$ in shared memory and uses each loaded number $T$ times: the global loads are $k(m\lceil n/T\rceil + n\lceil m/T \rceil)$, $2n^3/T$ for a square product, and the intensity is about $T/4$, independent of the step depth. One output per invocation caps $T$ at 16 on a portable
-workgroup of 256 invocations, so each invocation computes an $r \times r$ block in registers, lifting the tile to $16r$, cutting the shared-memory reads to $2/r$ per multiply-add (which makes $r \ge 8$ necessary to keep the lanes fed) and costing $r^2$ registers, which bound $r$ by the register file and set the occupancy. Shared-memory banks add a cost of their own, the degree of a bank conflict, removed by padding and interleaving without any change of the arithmetic. These steps took the model kernel
-from a fraction 0.005 of the peak to 0.602.
-
-A tensor core multiplies fragments in one operation, 8,192 operations for a $16 \times 16 \times 16$ fragment, with narrow inputs and an fp32 accumulator; in the model it lifts the peak eightfold and the ridge point to 400, so it demands still more reuse, and its programming model, a cooperative matrix held jointly by a subgroup, depends on a subgroup capability and a device-specific shape and type, so a program must query for it and keep the portable kernels as the fallback. The order of the additions is preserved by tiling and register
-blocking with a carried accumulator, bit for bit, and changed by split-K, fused multiply-add, several accumulators and fragments, all within a small multiple of $uS$ except the narrowing of the inputs to fp16, which costs about 374 $uS$ in the seeded example. In brain the ladder is `matmul.wgsl`, `matmul_tiled.wgsl`, `matmul_reg*.wgsl`, selected by shape in `crates/backend-api/src/select.rs`, with a capability-gated cooperative-matrix path beside them.
-
-What the chapter leaves is everything around the product. A network is not one matrix product: it is products, additions, reductions and normalizations, each a kernel with its own traffic. The next chapter takes up the reductions, which a product also needs at its edges and which the parallel machine handles differently.
-
 ## Key terms
 
 - **naive matmul**: the matrix product computed as its definition reads, one output at a time as a dot product of a row and a column, loading both from memory for every output and keeping nothing between outputs; its intensity is about a quarter of an operation per byte at any size. <!-- concept: naive-matmul -->
@@ -675,7 +673,7 @@ What the chapter leaves is everything around the product. A network is not one m
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $2n^3 = 2 \times 512^3 = 268{,}435{,}456$ operations; at least $12 n^2 = 12 \times 262{,}144 = 3{,}145{,}728$ bytes; intensity $268{,}435{,}456 / 3{,}145{,}728 = n/6 = 85.33$. (Volume IV, Chapter 3.)
 2. 256 lines, one per row (a row of 256 numbers is 1,024 bytes, 16 lines, and the column takes one number from one line of each row); one number of 16 per line. (Volume IV, Chapter 2.)
@@ -683,7 +681,7 @@ What the chapter leaves is everything around the product. A network is not one m
 4. $\lfloor 65536 / (40 \times 256) \rfloor = 6$ from registers, $\lfloor 65536 / 2048 \rfloor = 32$ from shared memory, $2048/256 = 8$ from slots, cap 16: 6 workgroups, 1,536 invocations, 75 percent. (Volume IV, Chapter 4.)
 5. No. $1 + 2^{-24}$ is a tie between 1 and $1 + 2^{-23}$ and rounds to even, 1, so the first sum is $1 + 2^{-24} \to 1$, then $1 + 2^{-24} \to 1$: the result is 1. The second adds the two small numbers first, $2^{-23}$, and $1 + 2^{-23}$ is representable. A program that adds the same numbers in another order can therefore return another result, in the last bits. (Volume I, Chapter 15.)
 
-**Check your understanding**
+**Check your understanding.**
 
 1. At $n = 96$ the matrix $B$ (36 KiB) no longer fits the 32 KiB cache and both orders stream all of $B$ through it once for each of the 96 rows of $C$: $96 \times 576 = 55{,}296$ lines plus 1,152 for $A$ and $C$. Neither order reuses a line of $B$ before it is evicted; they differ only in the direction of the walk. At $n = 128$ a row of $B$ is 8 lines, the 128 lines of a column map to 8 of the 64 sets, and ijk, which walks a column, thrashes those sets (2,130,960 lines); ikj walks a row and does not (133,120). A third nest must reuse $B$ across several rows of $C$ before leaving it: blocking, which streams $B$ $n/T$ times.
 2. Without the second barrier a fast invocation can begin the next step and overwrite the tile while a slow one is still reading it. With $K = T$ there is one step and nothing is overwritten, so the test passes; with $K = 64$ there are four steps and the race appears. (Chapter 5's missing-barrier test has the same shape.)
@@ -693,11 +691,3 @@ What the chapter leaves is everything around the product. A network is not one m
 6. No: its intensity 56.89 is far below the ridge of 400, so the attainable rate is $56.89 \times 800 = 45{,}511$ (GFLOP/s), 0.142 of the matrix unit's 320,000. A faster unit moves the ridge up, so the same bytes per operation leave it further below its roof; it needs more reuse (or fewer bytes) to be fed.
 7. Tiling does not change the order of the additions of an output when one accumulator is carried across the steps in ascending $k$, so the tiled kernel is bit-identical to the naive one (the table's first two rows agree in 16 of 16 outputs, and brain's `reg3_parity` test compares bit for bit). Split-K, a fused multiply-add and several accumulators do reorder. The test is correct for a kernel meant to keep the order, and a tolerance is needed only for one that does not.
 8. Creating a pipeline succeeds on a driver that does not validate its capabilities, and says nothing about whether the device executes the fragment instructions correctly: the commit of the story reports exactly this on a device that enumerates no shapes. Only the query of the supported shapes and types is evidence, which is why the gate is the queried requirement.
-
-## References
-
-- Kazushige Goto and Robert A. van de Geijn, "Anatomy of high-performance matrix multiplication", 2008.
-- Vasily Volkov and James W. Demmel, "Benchmarking GPUs to tune dense linear algebra", 2008.
-- Junjie Lai and Andre Seznec, "Performance upper bound analysis and optimization of SGEMM on Fermi and Kepler GPUs", 2013.
-- Stefano Markidis, Steven Wei Der Chien, Erwin Laure, Ivy Bo Peng and Jeffrey S. Vetter, "NVIDIA Tensor Core programmability, performance and precision", 2018.
-- Nicholas J. Higham, "Accuracy and Stability of Numerical Algorithms", second edition, 2002.

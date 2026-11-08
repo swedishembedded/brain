@@ -5,8 +5,6 @@
 
 *How do thousands of threads add up one array, and why is the obvious way slow?*
 
-## The problem
-
 Sixteen numbers sit in memory, $x = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3]$, and a kernel has sixteen invocations, one for each. We want their sum. A loop would add them one after another. The machine of Chapter 4 offers sixteen workers instead, and the obvious program is the one the kernel model of Chapter 5 invites: every invocation does its own small piece, here "add my number to the total".
 
 ```text
@@ -60,9 +58,7 @@ A loop and the single cell have depth $n - 1$ and $n$: no number of workers help
 
 So the question of the chapter has two halves. Why is the obvious way slow? Because its depth is its work: the shared word is a queue. And how do thousands of threads add up an array? With a tree that never makes two of them wait for the same word, spread over the machine's levels of cooperation: inside a workgroup with shared memory and barriers, across workgroups with several dispatches. The tree changes the order of the additions, which for floating-point numbers changes the answer, and the same pattern (a reduction, a prefix sum, a sort built from them) turns up wherever a kernel needs a total, an offset or an ordering. The chapter takes them in that order.
 
-## Before you begin
-
-Answer from memory; the answers are at the end of the chapter.
+Six ideas from earlier chapters carry the argument, from the tree of Volume I to the barrier rule of Chapter 5. Try them from memory first; the answers are at the end of the chapter, under "Recall questions".
 
 1. (Volume I, Chapter 16, reduction algorithm.) How many layers does a tree need to add 1,000 numbers, and how many additions does it perform?
 2. (Volume I, Chapter 16, prefix sum.) Write the exclusive scan of $[2, 7, 1, 8]$. How many additions does the doubling scan of that chapter use for $n = 8$?
@@ -73,9 +69,7 @@ Answer from memory; the answers are at the end of the chapter.
 
 ## Summing in one workgroup: the tree
 
-*What this is for: a workgroup can share memory and wait at barriers, so inside one workgroup the tree can be written down exactly. We fix the kernel, check it by simulation and count what it uses.*
-
-Let a workgroup of $n_{\mathrm{wg}}$ invocations (a power of two) add $n_{\mathrm{wg}}$ numbers. Each invocation first copies its number into the shared array `s`. Then comes a series of steps with stride $s = n_{\mathrm{wg}}/2, n_{\mathrm{wg}}/4, \ldots, 1$: in the step of stride $s$ the invocations $l < s$ add the slot $l + s$ to the slot $l$. A barrier follows each step.
+A workgroup can share memory and wait at barriers, so inside one workgroup the tree can be written down exactly. We fix the kernel, check it by simulation and count what it uses. Let a workgroup of $n_{\mathrm{wg}}$ invocations (a power of two) add $n_{\mathrm{wg}}$ numbers. Each invocation first copies its number into the shared array `s`. Then comes a series of steps with stride $s = n_{\mathrm{wg}}/2, n_{\mathrm{wg}}/4, \ldots, 1$: in the step of stride $s$ the invocations $l < s$ add the slot $l + s$ to the slot $l$. A barrier follows each step.
 
 ```text
 kernel reduce_tree(x: array<f32>[N], part: inout array<f32>[n_grp], N: int) workgroup n_wg:
@@ -113,13 +107,11 @@ The store phase writes part[0] = 80 (the sum of x is 80). Barriers between phase
 
 Why is it right? After the step of stride $s$, the slot $l < s$ holds the sum of all $x_j$ with $j \equiv l \pmod s$. Before the first step ($s = n_{\mathrm{wg}}$) that is $x_l$ itself. If it holds for stride $2\,s$, the step adds slot $l + s$, which holds the sum over $j \equiv l + s \pmod{2\,s}$, to slot $l$, which holds the sum over $j \equiv l \pmod{2\,s}$; together they are all $j \equiv l \pmod s$. At the last step $s = 1$ every $j$ qualifies and slot 0 holds the total. The kernel has no race inside a step: it writes only slots below $s$, each by one invocation, and reads slots $l$ and $l + s$ where $l + s \ge s$ is never written in the step. That is why the descending order of the invocations in the trace gives the same answer as the ascending one, and why a barrier is needed *between* steps only: the reads of a step must see the writes of the one before.
 
-The cost of the kernel, counted: $n_{\mathrm{wg}} - 1$ additions, $\log_2 n_{\mathrm{wg}}$ steps, $\log_2 n_{\mathrm{wg}} + 1$ barriers. The first step has half of the invocations adding, the second a quarter, and so on: the invocations $n_{\mathrm{wg}}/2 \ldots n_{\mathrm{wg}} - 1$ do nothing after their first step and the whole workgroup is occupied for $\log_2 n_{\mathrm{wg}}$ steps in order to do $n_{\mathrm{wg}} - 1$ additions. For $n_{\mathrm{wg}} = 256$ that is $255$ additions in $256 \times 8 = 2{,}048$ invocation-steps, 12.5 percent. A tree is fast in depth and wasteful in occupation, and the way out (give every invocation many numbers to add first, and keep the tree for the last, small stage) is the subject of the section on two passes.
+The cost of the kernel, counted: $n_{\mathrm{wg}} - 1$ additions, $\log_2 n_{\mathrm{wg}}$ steps, $\log_2 n_{\mathrm{wg}} + 1$ barriers. The first step has half of the invocations adding, the second a quarter, and so on: the invocations $n_{\mathrm{wg}}/2 \ldots n_{\mathrm{wg}} - 1$ do nothing after their first step and the whole workgroup is occupied for $\log_2 n_{\mathrm{wg}}$ steps in order to do $n_{\mathrm{wg}} - 1$ additions. For $n_{\mathrm{wg}} = 256$ that is $255$ additions in $256 \times 8 = 2{,}048$ invocation-steps, 12.5 percent. A tree is fast in depth and wasteful in occupation, and the way out (give every invocation many numbers to add first, and keep the tree for the last, small stage) is the subject of the section on the second pass.
 
 ## Three ways to address the slots
 
-*What this is for: the tree fixes which values are added, not which invocation adds them. The choice interacts with the subgroups and the banks of Chapters 4 and 6, and the cost differs severalfold with the same additions.*
-
-Kernel C above is called **sequential addressing**: the active invocations are the first $s$ ones, and consecutive invocations touch consecutive slots. The older textbook form (the first kernel of the progression in Harris 2007) runs the strides upward and adds neighbours first. Written naively, invocation $l$ is active when $l \bmod 2s = 0$ (kernel A):
+The tree fixes which values are added, but not which invocation adds them. The choice interacts with the subgroups and the banks of Chapters 4 and 6, and the cost differs severalfold with the same additions. Call the kernel above kernel C. Its form is **sequential addressing**: the active invocations are the first $s$ ones, and consecutive invocations touch consecutive slots. The older textbook form (the first kernel of the progression in Harris 2007) runs the strides upward and adds neighbours first. Written naively, invocation $l$ is active when $l \bmod 2s = 0$ (kernel A):
 
 ```text
     stride = 1
@@ -161,13 +153,11 @@ Read the totals. A and C do the same 255 additions with the same barriers. A iss
 
 ![Two balanced binary trees over the sixteen numbers of the first example. In the top tree, kernels A and B, neighbours are added first: 3 and 1 give 4, 4 and 1 give 5, and so on up to 31, 49 and the root 80. In the bottom tree, kernel C, the leaves appear in the order 0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15, so 3 and 5 give 8, 5 and 9 give 14, up to 42, 38 and the root 80.](img/tree-reduction.svg)
 
-The figure shows what the three kernels build. A and B are the same tree: the same pairs are added, only the invocation doing it differs. C is another tree: it adds the number $l$ to the number $l + n_{\mathrm{wg}}/2$ first, so its leaves, read left to right, are in the order of the bits of the index reversed. Both have four levels and fifteen additions, and for whole numbers they give the same 80. For float32 numbers they do not always give the same bits, which is the subject of the section on the order of the additions.
+The figure shows what the three kernels build. A and B are the same tree: the same pairs are added, only the invocation doing it differs. C is another tree: it adds the number $l$ to the number $l + n_{\mathrm{wg}}/2$ first, so its leaves, read left to right, are in the order of the bits of the index reversed. Both have four levels and fifteen additions, and for whole numbers they give the same 80. For float32 numbers they do not always give the same bits, which is the subject of the section on why a tree and a loop give different sums.
 
 ## More than one workgroup: the second pass
 
-*What this is for: arrays have millions of elements and a workgroup has at most a few hundred invocations. We split the array, reduce each piece in its own workgroup and combine the pieces, and we find why the combination cannot be in the same dispatch.*
-
-Give each workgroup its own slice and let it write one **partial** sum, `part[w]`. The $n_{\mathrm{grp}}$ partials must then be added too, and the natural wish is to have the last workgroup to finish do it, or all workgroups to wait at a barrier across the grid and then one of them to continue. Chapter 4 ruled both out: workgroups run in any order, on any compute unit, and nothing in a dispatch orders one against another. It is worse than "not available". A grid-wide barrier is correct only if every workgroup of the grid is resident while the others arrive, and the number of resident workgroups is fixed by the occupancy model of Chapter 4:
+Arrays have millions of elements and a workgroup has at most a few hundred invocations. We split the array, reduce each piece in its own workgroup and combine the pieces, and we find why the combination cannot happen in the same dispatch. Give each workgroup its own slice and let it write one **partial** sum, `part[w]`. The $n_{\mathrm{grp}}$ partials must then be added too, and the natural wish is to have the last workgroup to finish do it, or all workgroups to wait at a barrier across the grid and then one of them to continue. Chapter 4 ruled both out: workgroups run in any order, on any compute unit, and nothing in a dispatch orders one against another. It is worse than "not available". A grid-wide barrier is correct only if every workgroup of the grid is resident while the others arrive, and the number of resident workgroups is fixed by the occupancy model of Chapter 4:
 
 <!-- worked: reductions.single_dispatch_limit -->
 A reduction kernel of 256 invocations, 24 registers per invocation and 1,024 bytes of shared memory per workgroup fills 8 workgroups per compute unit by the model of Chapter 4 (`gpu.occupancy`: limited by invocation slots, 2,048 // 256), so the 80 compute units hold 640 workgroups at once. A barrier across the whole grid is only safe if every workgroup of the grid is resident while it waits. With one element per invocation:
@@ -228,11 +218,9 @@ Every row performs the same $n - 1$ additions. The bytes are $4n$ for the array 
 
 The last sentence of the table is the one to remember. A reduction performs one addition per four bytes read, a quarter of an operation per byte, the intensity of the naive matrix product of Chapter 6 and 0.005 of the peak of the model GPU, which has a ridge point of 50. However the tree is arranged, the best a reduction can do is to read its input once at the bandwidth of the device. Depth was the problem of the single cell; once the tree is in place it is the bytes that count, and the whole of the second pass and of the partials is under one percent of them. (The second dispatch has a cost the table does not show, the launch itself, which the next chapter counts.)
 
-## The order of the additions
+## Why a tree and a loop give different sums
 
-*What this is for: every tree above adds the numbers in a different order from the loop. In exact arithmetic that is invisible. In float32 it is not, and a kernel's order is part of what it computes.*
-
-Volume I, Chapter 15 gave the bound for a sum of $n$ terms: each addition may round, and a term that passes through $m$ additions before reaching the total picks up $m$ rounding factors $1 + \delta$ with $|\delta| \le u = 2^{-24}$. In the left fold the first two terms pass through $n - 1$ additions, so the bound is $(n - 1)\,u \sum_i |x_i|$; in a tree every term passes through exactly $\lceil \log_2 n \rceil$ additions and the bound is $\lceil \log_2 n \rceil\,u \sum_i |x_i|$ (Higham 1993 analyses the general case). What do the errors look like in practice? Seeded numbers, six vectors of $2^{18}$ uniform numbers and the constant $0.1$:
+Every tree above adds the numbers in a different order from the loop. In exact arithmetic that is invisible. In float32 it is not, and a kernel's order is part of what it computes. Volume I, Chapter 15 gave the bound for a sum of $n$ terms: each addition may round, and a term that passes through $m$ additions before reaching the total picks up $m$ rounding factors $1 + \delta$ with $|\delta| \le u = 2^{-24}$. In the left fold the first two terms pass through $n - 1$ additions, so the bound is $(n - 1)\,u \sum_i |x_i|$; in a tree every term passes through exactly $\lceil \log_2 n \rceil$ additions and the bound is $\lceil \log_2 n \rceil\,u \sum_i |x_i|$ (Higham 1993 analyses the general case). What do the errors look like in practice? Seeded numbers, six vectors of $2^{18}$ uniform numbers and the constant $0.1$:
 
 <!-- worked: reductions.summation_error -->
 Relative error |computed - exact| / exact of a float32 sum, in units of u = 2^-24, against the bounds (n - 1) u of the left fold and ceil(log2 n) u of the tree (Volume I, Chapter 15). Every addition is rounded to float32. 'Uniform' data: 6 vectors of 262,144 numbers x_i = float32(`uniform()`), drawn vector after vector in order from one generator; the first n of each vector are summed and the table prints the mean error over the 6 vectors. Generator: the book's SplitMix64, seed 0xdb25091fdd691a22 (the seed of the name `reductions.summation_error`). 'Constant' data: n copies of float32(0.1) = 0.10000000149011612. 'Left fold' adds x_0, x_1, ... in order; 'tree' adds adjacent pairs layer by layer; 'lanes' is the arrangement of a workgroup: invocation j (of 256) adds x_j, x_(j+256), ... left to right, then a sequential-addressing tree adds the 256 results. The exact sum is computed in integer arithmetic.
@@ -309,9 +297,7 @@ The simple rule "keep the left operand unless the right is strictly larger", cor
 
 ## Parallel scans
 
-*What this is for: Chapter 16 used the prefix sum as the offset of each item's output, and said where the sort and the packing would need it. A kernel needs it computed by many invocations at once, a **parallel scan**. We build two and count which one to use when.*
-
-Volume I, Chapter 16 gave the doubling scan: in round $k$ every position adds the value $2^k$ places to its left, and after $\log_2 n$ rounds the inclusive scan is done, at a cost of 17 additions for eight numbers where the sequential scan uses seven. Written as a kernel it is the **Hillis-Steele scan** (Hillis and Steele 1986). One new difficulty appears: in a round every position reads a value that another position writes in the same round, so a position first reads into a register, then all wait, then all write:
+Volume I, Chapter 16 used the prefix sum as the offset of each item's output, and said where the sort and the packing would need it. A kernel needs it computed by many invocations at once, a **parallel scan**. We build two and count which one to use when. The doubling scan of that chapter runs in rounds: in round $k$ every position adds the value $2^k$ places to its left, and after $\log_2 n$ rounds the inclusive scan is done, at a cost of 17 additions for eight numbers where the sequential scan uses seven. Written as a kernel it is the **Hillis-Steele scan** (Hillis and Steele 1986). One new difficulty appears: in a round every position reads a value that another position writes in the same round, so a position first reads into a register, then all wait, then all write:
 
 ```text
 kernel scan_hillis_steele(x: array<u32>[n_wg], y: inout array<u32>[n_wg]) workgroup n_wg:
@@ -419,7 +405,7 @@ Work, depth and the least number of steps on n_wk = min(n, 10,240) workers, max(
 
 Neither is better everywhere. At $n = 1{,}024$ on 1,024 workers Hillis-Steele needs 10 steps and Blelloch 20: depth rules, and the doubled depth loses. At $n = 2^{20}$ on the 10,240 lanes of the model GPU the work rules: $19.9$ million additions are at least 1,946 steps, while Blelloch's $2.1$ million are at least 205, nine and a half times fewer, with its depth of 40 irrelevant. Inside one workgroup of at most 256 invocations either works and Hillis-Steele has fewer barriers per addition of work; across a long array, the work-efficient one wins. (The Blelloch scan's slots are $2\,s$ words apart, so it has the bank pattern of kernel B; padding the shared array, as Chapter 6 did for tiles, removes it, and Harris, Sengupta and Owens 2007 describe the layout.)
 
-**A scan longer than a workgroup** meets the wall of the previous section again and has the same cure, applied recursively. It is the blocked scan of Chapter 16: scan every block independently and record its total; scan the totals; add each block's scanned total back to its block. Each phase is a dispatch, because each needs the one before it to be finished. The totals are a shorter array, so the second phase is itself a scan, until they fit one block:
+A scan longer than a workgroup meets the wall of the previous section again and has the same cure, applied recursively. It is the blocked scan of Chapter 16: scan every block independently and record its total; scan the totals; add each block's scanned total back to its block. Each phase is a dispatch, because each needs the one before it to be finished. The totals are a shorter array, so the second phase is itself a scan, until they fit one block:
 
 <!-- worked: reductions.block_scan_dispatches -->
 The exclusive scan of n u32 words in blocks of 256: a dispatch with one invocation per block scans its block serially in place and writes the block's total; the totals are scanned the same way, recursively, until they fit one block; then one dispatch per level above the first adds the scanned totals back. 'Levels' lists the number of words scanned at each level. Dispatches = levels block scans + (levels - 1) add-backs. 'Chain' = the longest chain of dependent additions (each block scan adds up to 255 times in sequence, each add-back once). Words are counted once per dispatch (block scan: read n_j, write n_j + totals; add-back: read n_j + totals, write n_j); the minimum for a scan is 2n (read every word, write every word).
@@ -437,7 +423,7 @@ A scan of floating-point numbers is reordered too, with the consequences of the 
 
 ## Sorting by digits
 
-*What this is for: Chapter 16 sorted integer keys without comparing them, by a histogram, a scan and a scatter, one digit at a time. Each of the three parts must now run on many invocations without any two writing the same word.*
+Volume I, Chapter 16 sorted integer keys without comparing them, by a histogram, a scan and a scatter, one digit at a time. Each of the three parts must now run on many invocations without any two writing the same word.
 
 The sequential **radix sort** of Chapter 16 (Merrill and Grimshaw 2011 describe a tuned GPU form) made a pass per digit, from the least significant: count the keys with each digit value (the histogram), take the exclusive scan of the counts (the first position of each digit's block), and place each key at its position and increment it; the placement is stable, so the order of an earlier digit survives. In parallel the count and the placement are the problems, since all keys increment the same counters. The answer is to give each invocation a **chunk** of $L_{\mathrm{ch}}$ consecutive keys and its own private row of counters, so that no counter is shared and no atomic is needed. With $n_{\mathrm{ch}} = \lceil n / L_{\mathrm{ch}} \rceil$ chunks and $2^{b_{\mathrm{dg}}}$ digit values per pass, the histogram $\mathrm{hist}[d \cdot n_{\mathrm{ch}} + j]$ is the number of keys of chunk $j$ with digit $d$, stored *digit-major*: all chunks of digit 0, then all chunks of digit 1, and so on. One exclusive scan of that whole array then gives, in position $(d, j)$, the number of keys with a smaller digit, plus the number of keys with digit $d$ in the chunks before $j$: exactly where chunk $j$ has to start writing its keys with digit $d$. The scatter walks each chunk in order from its starting offsets, so keys with equal digits keep their order inside a chunk (the walk is in order) and across chunks (the offsets are in chunk order): stable.
 
@@ -495,7 +481,7 @@ The keys of the last pass are sorted: yes; equal keys keep their input order (po
 
 The histogram table is the whole mechanism in one view. Digit 0 has four keys, held two by chunk 0, one by chunk 1 and one by chunk 2, and the scan places chunk 0's first key with digit 0 at position 0, chunk 1's at 2, chunk 2's at 3 and chunk 3's (it has none) at 4, which is where digit 1's block begins at chunk 0 (4). After pass 0 the pairs are ordered by the low digit with the original positions in ascending order within each digit (the two keys equal to 9 stay in the order 6, 14); after pass 1 by the whole key. The last lines of the block count the words the three dispatches moved and compare them with a formula, which can then be used for sizes that cannot be traced by hand.
 
-**Counting a pass.** With keys and values, one pass reads the keys once to count, writes the histogram ($N_{\mathrm{hist}} = 2^{b_{\mathrm{dg}}} n_{\mathrm{ch}}$ words), scans it, and then reads keys, values and histogram and writes keys and values: $5n + 2 N_{\mathrm{hist}} + S(N_{\mathrm{hist}})$ words, where $S$ counts the scan (about $4 N_{\mathrm{hist}}$ for a long histogram, by the previous table). The histogram is the new cost, and it grows with the number of chunks. Two choices, the digit width and the chunk length, trade the passes against it:
+Counting a pass shows what the histogram costs. With keys and values, one pass reads the keys once to count, writes the histogram ($N_{\mathrm{hist}} = 2^{b_{\mathrm{dg}}} n_{\mathrm{ch}}$ words), scans it, and then reads keys, values and histogram and writes keys and values: $5n + 2 N_{\mathrm{hist}} + S(N_{\mathrm{hist}})$ words, where $S$ counts the scan (about $4 N_{\mathrm{hist}}$ for a long histogram, by the previous table). The histogram is the new cost, and it grows with the number of chunks. Two choices, the digit width and the chunk length, trade the passes against it:
 
 <!-- worked: reductions.radix_costs -->
 The words a radix sort of 32-bit keys with 32-bit payloads moves, counted by the rule of the trace above: one pass moves 5n + 2 N_hist + S(N_hist) words, N_hist = 2^b_dg n / L_ch histogram words for digits of b_dg bits and chunks of L_ch keys, S(N_hist) the words of the 256-element block scan of N_hist words (previous block).
@@ -526,7 +512,7 @@ Then n = 2^24 keys, b_dg = 8 (four passes), the chunk length L_ch varying; 'lane
 
 For $2^{20}$ keys and 1,024 chunks, digits of 8 bits move about $26 n$ words in four passes, the least of the widths tried: narrower digits mean more passes (40.8 $n$ at 4 bits), wider ones a histogram that outgrows the keys (51.1 $n$ at 11 bits, with a histogram twice as long as the input). The chunk length is a second compromise. A short chunk gives many invocations and a histogram as large as the input; at $n = 2^{24}$ and 256 keys per chunk the histogram has $n$ words and a sort moves $44.1 n$, against $23.0 n$ at 2,048 keys. A longer chunk lowers the words and, past 2,048, begins to leave lanes idle (a fill of 0.80, then 0.40). The words keep falling as the chunk grows (20.8 $n$ at 8,192 keys), so they alone would say "longer"; what stops the growth is the lanes, and where it stops depends on the device.
 
-**Selecting, not sorting.** A sampler needs the $k$ largest of a vocabulary of $V$ logits, not their order. Sorting everything costs the four passes above. Taking the maximum $k$ times, masking the winner each time, costs $k$ reductions of $V$ words:
+Sorting is sometimes more than the job needs. A sampler wants the $k$ largest of a vocabulary of $V$ logits, not their order, and sorting everything costs the four passes above. Taking the maximum $k$ times, masking the winner each time, costs $k$ reductions of $V$ words:
 
 <!-- worked: reductions.topk_vs_sort -->
 Selecting the k largest of V = 2^17 = 131,072 logits. Sort: the radix sort of the previous block, 32-bit keys, four passes of b_dg = 8, chunks of L_ch = 256 keys (so N_hist = 131,072 histogram words), 5,779,492 words in all. Rounds: k two-pass argmax reductions, each reading V words, writing 256 (value, index) pairs, reading them and writing the winner (132,097 words a round; masking the winner is one word and not counted). The cheaper way is the one with fewer words; the rounds stop being cheaper from k = 44.
@@ -544,7 +530,7 @@ Selecting the k largest of V = 2^17 = 131,072 logits. Sort: the radix sort of th
 
 For $V = 2^{17}$ the rounds move fewer words than the sort for every $k$ up to 43 and more from 44: a $k$ of 1 to 16, the usual range of sampling and of a mixture-of-experts router, costs 2 to 37 percent of the sort's words. The comparison counts words only, and rounds have a launch cost each (the next chapter's subject); the choice between them is a choice of what to count, as Chapter 16 said.
 
-## Where this appears in brain
+## Reductions, scans and sorts in brain's kernels
 
 All of the chapter's kernels exist in `crates/kernels/wgsl/`, in the shapes the repository's constraints allow: core compute, no atomics, no subgroups (`AGENTS.md`, quoted in Chapter 4), and a barrier only where the device reports `DeviceCaps::workgroup_reductions`.
 
@@ -584,6 +570,25 @@ The lesson common to these stories is the first section's: a single invocation i
 7. For $n = 2^{20}$ on the model GPU, which scan, Hillis-Steele or Blelloch, needs fewer steps at least, by the formulas, and why does the answer reverse for $n = 1{,}024$?
 8. Find the error: "in the radix sort the histogram can be stored chunk-major, hist[j * R + d], and a single scan over it still gives every chunk's starting offsets."
 
+## Summary
+
+A sum of $n$ numbers computed by every invocation updating one cell has depth $n$: the cell serves one update at a time, in an order nobody controls. A tree has the same $n - 1$ additions and depth $\lceil \log_2 n \rceil$, and with $n_{\mathrm{wk}}$ workers cannot take fewer than $\max(\lceil N_{\mathrm{work}} / n_{\mathrm{wk}} \rceil, N_{\mathrm{dep}})$ steps, which for a million numbers on 10,240 lanes is 103 and for the cell a million. In a workgroup the tree is a loop with a barrier per step, correct by a short invariant, and the choice of which invocation does each addition decides the cost: sequential addressing issues the addition in 12 subgroup-steps and 36 shared cycles for 256 invocations, where the textbook interleaved form issues it in 47 and, renumbered, costs 141 cycles of bank conflicts. Past one workgroup a dispatch cannot synchronize its workgroups (a grid barrier deadlocks once the grid outgrows the resident workgroups), so the array is reduced in two passes, with a grid-stride loop that keeps every invocation busy and moves under one percent more bytes than the input, at a quarter of an operation per byte, bandwidth-bound like the naive matrix product.
+
+The tree changes the order of the additions. Its error bound is $\lceil \log_2 n \rceil u$ against $(n - 1) u$, and the seeded example shows the left fold at 63 $u$ and the trees below 1 $u$ for $2^{18}$ numbers. Different trees give different bits, a reduction's order is fixed by its shape, and an unordered accumulate returns different results on identical runs; a maximum or an argmax with a proper tie rule is exact under any order. The prefix sum has two parallel forms, Hillis-Steele with $n \log n$ work and depth $\log n$, and Blelloch with $2(n-1)$ work and depth $2 \log n$, the first better for short arrays and the second, 205 steps against 1,946 for a million numbers, for long ones; a scan longer than a workgroup takes one dispatch per level and about twice the minimum words. The radix sort is private chunk histograms, one scan of the digit-major array and a stable scatter, with a word count that picks 8-bit digits and chunks long enough that the histogram stays small, and a selection of the $k$ largest by $k$ rounds of argmax costs fewer words than the sort up to $k = 43$ for 131,072 logits.
+
+What these programs have in common is that they are short, bandwidth-bound kernels, each followed by another. A softmax, a normalization or a gradient norm is such a reduction between two elementwise kernels, and every kernel boundary writes its result to memory and reads it back. The next chapter counts what that costs, and what fusing the kernels saves.
+
+## References
+
+- Richard P. Brent, "The parallel evaluation of general arithmetic expressions", 1974.
+- W. Daniel Hillis and Guy L. Steele Jr., "Data parallel algorithms", 1986.
+- Guy E. Blelloch, "Prefix sums and their applications", 1990.
+- Nicholas J. Higham, "The accuracy of floating point summation", 1993.
+- Mark Harris, "Optimizing parallel reduction in CUDA", 2007.
+- Mark Harris, Shubhabrata Sengupta and John D. Owens, "Parallel prefix sum (scan) with CUDA", 2007.
+- Duane Merrill and Andrew Grimshaw, "High performance and scalable radix sorting", 2011.
+- Duane Merrill and Michael Garland, "Single-pass parallel prefix scan with decoupled look-back", 2016.
+
 ## Exercises
 
 1. **[Calculate]** For $n = 10^7$ numbers, workgroups of 256 and $n_{\mathrm{el}} = 64$, find the number of workgroups of pass 1, the partials, the words read and written by each pass, the additions in all and the depth of the chain, with the counting rules of `reductions.two_pass`.
@@ -599,14 +604,6 @@ The lesson common to these stories is the first section's: a single invocation i
 11. **[Implement]** Reproduce `reductions.radix_trace` (the three dispatches per pass, the digit-major histogram) and then sort 16 keys of 12 bits with 4-bit digits, comparing with your language's stable sort.
 12. **[Investigate]** Run the sum of $2^{22}$ float32 numbers in a thread pool of your own with 1, 2, 4 and 8 threads, each thread adding a contiguous slice and the slices added in thread order. Report which thread counts give identical bits, and what a fixed number of slices independent of the thread count does to the answer.
 
-## Summary
-
-A sum of $n$ numbers computed by every invocation updating one cell has depth $n$: the cell serves one update at a time, in an order nobody controls. A tree has the same $n - 1$ additions and depth $\lceil \log_2 n \rceil$, and with $n_{\mathrm{wk}}$ workers cannot take fewer than $\max(\lceil N_{\mathrm{work}} / n_{\mathrm{wk}} \rceil, N_{\mathrm{dep}})$ steps, which for a million numbers on 10,240 lanes is 103 and for the cell a million. In a workgroup the tree is a loop with a barrier per step, correct by a short invariant, and the choice of which invocation does each addition decides the cost: sequential addressing issues the addition in 12 subgroup-steps and 36 shared cycles for 256 invocations, where the textbook interleaved form issues it in 47 and, renumbered, costs 141 cycles of bank conflicts. Past one workgroup a dispatch cannot synchronize its workgroups (a grid barrier deadlocks once the grid outgrows the resident workgroups), so the array is reduced in two passes, with a grid-stride loop that keeps every invocation busy and moves under one percent more bytes than the input, at a quarter of an operation per byte, bandwidth-bound like the naive matrix product.
-
-The tree changes the order of the additions. Its error bound is $\lceil \log_2 n \rceil u$ against $(n - 1) u$, and the seeded example shows the left fold at 63 $u$ and the trees below 1 $u$ for $2^{18}$ numbers. Different trees give different bits, a reduction's order is fixed by its shape, and an unordered accumulate returns different results on identical runs; a maximum or an argmax with a proper tie rule is exact under any order. The prefix sum has two parallel forms, Hillis-Steele with $n \log n$ work and depth $\log n$, and Blelloch with $2(n-1)$ work and depth $2 \log n$, the first better for short arrays and the second, 205 steps against 1,946 for a million numbers, for long ones; a scan longer than a workgroup takes one dispatch per level and about twice the minimum words. The radix sort is private chunk histograms, one scan of the digit-major array and a stable scatter, with a word count that picks 8-bit digits and chunks long enough that the histogram stays small, and a selection of the $k$ largest by $k$ rounds of argmax costs fewer words than the sort up to $k = 43$ for 131,072 logits.
-
-What these programs have in common is that they are short, bandwidth-bound kernels, each followed by another. A softmax, a normalization or a gradient norm is such a reduction between two elementwise kernels, and every kernel boundary writes its result to memory and reads it back. The next chapter counts what that costs, and what fusing the kernels saves.
-
 ## Key terms
 
 - **parallel reduction**: a reduction algorithm carried out by many invocations at once, whose cost is described by its work (the operations it performs) and its depth (the longest chain of operations that must wait for one another). <!-- concept: parallel-reduction -->
@@ -617,7 +614,7 @@ What these programs have in common is that they are short, bandwidth-bound kerne
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $\lceil \log_2 1000 \rceil = 10$ layers, $999$ additions (Volume I, Chapter 16).
 2. $[0, 2, 9, 10]$. The doubling scan uses $8 \cdot 3 - 8 + 1 = 17$ additions for $n = 8$ (Volume I, Chapter 16).
@@ -626,7 +623,7 @@ What these programs have in common is that they are short, bandwidth-bound kerne
 5. $\lfloor 65536 / (24 \cdot 64) \rfloor = 42$ by registers, $\lfloor 65536 / 512 \rfloor = 128$ by shared memory, $2048 / 64 = 32$ by slots, a cap of 16: 16 workgroups, 1,024 invocations, occupancy 50 percent (Volume IV, Chapter 4).
 6. Only if every invocation of the workgroup takes the return, so that none reaches the barrier. If some return and others reach it, the others wait for invocations that never arrive and the result is undefined; the guard belongs around the memory accesses (Volume IV, Chapter 5).
 
-**Check your understanding**
+**Check your understanding.**
 
 1. $\lceil 999{,}999 / 10{,}240 \rceil = 98$ and the depth is 20, so the work per worker binds; the steps are between 98 and 118. A shallower tree would not change the bound: the way to fewer steps is less work per worker (more workers), and the first lever on a real device is the bytes, not the depth.
 2. Right: the same 255 additions and the same 9 barriers. Wrong: A issues the addition in 47 subgroup-steps, all divergent (17.0 percent of issue slots useful), C in 12 (66.4 percent); additions are not the cost, subgroup-steps are.
@@ -636,14 +633,3 @@ What these programs have in common is that they are short, bandwidth-bound kerne
 6. Invocation 0 owns indices 0, 4, 8, so its best pair is $(9, 4)$, and invocation 1 owns 1, 5, 9 and has $(9, 1)$. The final combination has invocation 0's pair on the left and keeps it on the tie, returning the higher index 4. With contiguous chunks the left operand always has lower indices than the right, so keeping the left on a tie is the scan's rule.
 7. Hillis-Steele needs at least 1,946 steps and Blelloch 205 for $n = 2^{20}$, because the work divides by 10,240. At $n = 1{,}024$ on 1,024 workers the work does not bind: Hillis-Steele needs 10 (its depth) and Blelloch 20.
 8. A scan of the chunk-major array puts all digits of chunk 0 before those of chunk 1, so chunk 0 would write all its keys, of every digit, before chunk 1's: the output is grouped by chunk and not by digit. The digit-major layout makes the order of the scan digit first, then chunk.
-
-## References
-
-- Richard P. Brent, "The parallel evaluation of general arithmetic expressions", 1974.
-- W. Daniel Hillis and Guy L. Steele Jr., "Data parallel algorithms", 1986.
-- Guy E. Blelloch, "Prefix sums and their applications", 1990.
-- Nicholas J. Higham, "The accuracy of floating point summation", 1993.
-- Mark Harris, "Optimizing parallel reduction in CUDA", 2007.
-- Mark Harris, Shubhabrata Sengupta and John D. Owens, "Parallel prefix sum (scan) with CUDA", 2007.
-- Duane Merrill and Andrew Grimshaw, "High performance and scalable radix sorting", 2011.
-- Duane Merrill and Michael Garland, "Single-pass parallel prefix scan with decoupled look-back", 2016.

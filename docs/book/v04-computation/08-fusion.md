@@ -5,8 +5,6 @@
 
 *Why is the cheapest computation the one whose intermediate result never touches memory?*
 
-## The problem
-
 A transformer layer contains a small piece of arithmetic that every framework writes in one line: take the activations $x$ of shape $[n, d]$, multiply by a weight matrix, add a bias, apply the GELU function, add the input back (the residual connection) and normalize each row,
 
 $$y = \mathrm{layernorm}\bigl(x + \mathrm{gelu\_tanh}(x W + b)\bigr).$$
@@ -30,9 +28,7 @@ Read the last column against the ridge point of 50. The matrix product, at 204.8
 
 A single kernel could read $x$, $W$, $b$, $\gamma$ and $\beta$ once and write $y$ once. That is 20,983,808 bytes, 4.6 times fewer, and the numbers it computes are the same. This chapter is about when that is possible, what it saves, what it costs, and what changes in the last bits of the answer. Its central claim is the one in the title: the cheapest computation is the one whose intermediate result never touches memory.
 
-## Before you begin
-
-Answer from memory; the answers are at the end of the chapter.
+Six ideas from earlier chapters carry the argument, from the roofline to the layer normalization of Volume III. Try them from memory first; the answers are at the end of the chapter, under "Recall questions".
 
 1. (Volume IV, Chapter 3, bandwidth-bound.) For $c = a + b$ on $2^{20}$ float32 numbers, count the FLOPs, the bytes and the intensity. Is it limited by arithmetic or by bandwidth on the model GPU, whose ridge point is 50 FLOP per byte?
 2. (Volume IV, Chapter 3, fixed costs.) Starting one dispatch costs 5 microseconds in the model, and the model GPU moves 800 (GB/s). How many bytes of memory traffic is the start worth?
@@ -43,9 +39,7 @@ Answer from memory; the answers are at the end of the chapter.
 
 ## Counting what moves: memory-traffic accounting
 
-*What this is for: to compare two ways of running the same arithmetic we need a count that does not depend on the machine. Chapter 3 gave the two quantities; this section turns them into a routine for a whole program.*
-
-**Memory-traffic accounting** is the routine of listing, for every kernel of a program, the FLOPs it executes, the bytes it reads and the bytes it writes, and adding them up. The rule for one kernel is Chapter 3's: each distinct operand it reads counts once, each result it writes counts once, whatever the kernel does inside. The kernel reads $z$ and $b$ and writes $u$: $4nd + 4d$ bytes read, $4nd$ written. The count is a lower bound on what a real kernel moves (a kernel that reads an operand twice, or reads it with a stride that wastes part of every 32-byte transaction, moves more), and a lower bound is the right thing to compare, because it is the floor the kernel could reach.
+To compare two ways of running the same arithmetic we need a count that does not depend on the machine. Chapter 3 gave the two quantities; this section turns them into a routine for a whole program. **Memory-traffic accounting** is the routine of listing, for every kernel of a program, the FLOPs it executes, the bytes it reads and the bytes it writes, and adding them up. The rule for one kernel is Chapter 3's: each distinct operand it reads counts once, each result it writes counts once, whatever the kernel does inside. The kernel reads $z$ and $b$ and writes $u$: $4nd + 4d$ bytes read, $4nd$ written. The count is a lower bound on what a real kernel moves (a kernel that reads an operand twice, or reads it with a stride that wastes part of every 32-byte transaction, moves more), and a lower bound is the right thing to compare, because it is the floor the kernel could reach.
 
 Two derived quantities do the work. The arithmetic intensity $\mathcal{I} = N_{\mathrm{flop}} / N_{\mathrm{byte}}$ of a kernel against the ridge point $\mathcal{I}_{\mathrm{ridge}} = 50$ says which side of the roofline the kernel is on. And the **cost** of a kernel can be put in bytes. The roofline time of Chapter 3 is $\max(N_{\mathrm{flop}}/F_{\mathrm{pk}},\, N_{\mathrm{byte}}/\mathrm{BW})$; multiplied by the bandwidth it becomes
 
@@ -71,7 +65,7 @@ That is the whole case for fusing them. A bandwidth-bound kernel does almost no 
 
 ## Fusing an elementwise chain
 
-*What this is for: the simplest fusion has no obstacle, and it shows what fusion is.* Take the part of the chain that is elementwise, $r_i = \mathrm{gelu\_tanh}(z_i + b_{i \bmod d}) + x^{\mathrm{r}}_i$ (the residual input is called $x^{\mathrm{r}}$ here to keep it apart from the matrix product's input). Each output depends on one element of $z$, one of $b$ and one of $x^{\mathrm{r}}$, so each invocation of a kernel can compute its element start to finish. Three kernels, one per operation, store $u$ and $g$:
+The simplest fusion has no obstacle, and it shows what fusion is. Take the part of the chain that is elementwise, $r_i = \mathrm{gelu\_tanh}(z_i + b_{i \bmod d}) + x^{\mathrm{r}}_i$ (the residual input is called $x^{\mathrm{r}}$ here to keep it apart from the matrix product's input). Each output depends on one element of $z$, one of $b$ and one of $x^{\mathrm{r}}$, so each invocation of a kernel can compute its element start to finish. Three kernels, one per operation, store $u$ and $g$:
 
 ```text
 kernel bias_add(z: array<f32>[N], b: array<f32>[d], u: inout array<f32>[N], N: int, d: int) workgroup n_wg:
@@ -149,7 +143,7 @@ The bytes are not the cost. In bytes of cost, the product dominates: it is 85.9 
 
 ## When a fusion is not allowed, or does not pay
 
-*What this is for: fusion is not free and not always possible. Four obstacles recur, and each has a number.*
+Fusion is neither free nor always possible. Four obstacles recur, and each has a number.
 
 **The consumer needs a whole row.** A layer normalization cannot write element $j$ of its row until it has seen every element, to find the mean and the variance. The elementwise chain above is easy to fuse because every output depends on one input element; a reduction followed by an elementwise pass over the same row, as in normalization or softmax, can be fused only when one workgroup holds the whole row. For the matrix product that is a demand on the shape of its tile. The tiles of Chapter 6 are $T \times T$ squares, and a row of 1024 outputs is spread over $1024 / T$ workgroups, none of which sees the rest. To normalize in the epilogue a workgroup must compute $n_{\mathrm{rw}}$ whole rows of the output, each $d$ wide, so it holds $n_{\mathrm{rw}}\, d$ accumulators, and the matrix $W$ is loaded once per block of rows instead of once per tile of columns. Counting both with the rules of Chapters 4 and 6:
 
@@ -224,9 +218,7 @@ Two smaller obstacles belong with these. A fused kernel needs more registers and
 
 ## Launch overhead
 
-*What this is for: the bytes of the intermediates are one cost of separate kernels. Starting each kernel is the other, and it matters most where the kernels are smallest.*
-
-Every dispatch pays, before its first invocation runs, for work that does not depend on how big it is: the host builds the request, the driver checks and queues it, the device sets up a grid. That fixed cost per dispatch is the **launch overhead**. Chapter 3 took it as 5 microseconds and showed that a vector addition reached half its roofline only above 333,333 elements. The model now splits that cost in two, as two labelled parameters, round numbers invented for the book and not a measurement of any product:
+The bytes of the intermediates are one cost of separate kernels. Starting each kernel is the other, and it matters most where the kernels are smallest. Every dispatch pays, before its first invocation runs, for work that does not depend on how big it is: the host builds the request, the driver checks and queues it, the device sets up a grid. That fixed cost per dispatch is the **launch overhead**. Chapter 3 took it as 5 microseconds and showed that a vector addition reached half its roofline only above 333,333 elements. The model now splits that cost in two, as two labelled parameters, round numbers invented for the book and not a measurement of any product:
 
 - $L_{\mathrm{sub}}$, the cost of handing the device one **submission** (a list of dispatches given to it together): 4 microseconds, which at 800 (GB/s) is $L_{\mathrm{sub}} = 3{,}200{,}000$ bytes;
 - $L_{\mathrm{dsp}}$, the cost of starting one more dispatch once the device is running a list: 1 microsecond, $L_{\mathrm{dsp}} = 800{,}000$ bytes.
@@ -257,9 +249,7 @@ For a chain of *small* kernels the first thing to do is to stop paying for each 
 
 ## Command recording
 
-*What this is for: a program often has several dispatches ready at once and the host should hand them over once.*
-
-The host program of Chapter 5 makes one submission per dispatch: `dispatch` returns at once but each call hands the device one launch. **Command recording** is the alternative: the host appends launches to a list with `record`, and `submit` hands the whole list to the device as one submission (the three operations are defined in `docs/book/pseudocode.md`; `dispatch` is shorthand for a list of one). The device runs the list in order, each launch seeing the writes of those before it, so the chain of Chapter 5 needs no `read_back` between its kernels:
+A program often has several dispatches ready at once, and the host should hand them over once. The host program of Chapter 5 makes one submission per dispatch: `dispatch` returns at once but each call hands the device one launch. **Command recording** is the alternative: the host appends launches to a list with `record`, and `submit` hands the whole list to the device as one submission (the three operations are defined in `docs/book/pseudocode.md`; `dispatch` is shorthand for a list of one). The device runs the list in order, each launch seeing the writes of those before it, so the chain of Chapter 5 needs no `read_back` between its kernels:
 
 ```text
 function run_chain(x: array<f32>[N], k: kernel, scale: array<f32>[3], shift: array<f32>[3], n_wg: int) -> array<f32>[N]:
@@ -300,9 +290,7 @@ What recording does not do is move fewer bytes. Every kernel in the list still r
 
 ## The numbers change in the last bits
 
-*What this is for: a fused kernel is a different program. Whether it is the same function in floating point depends on two things the table above did not show.*
-
-In the first simulation the fused and unfused kernels agreed to the bit because each operation was rounded to float32 and the intermediate stored was float32. Change the second of those. A pipeline whose activations live in half precision stores $u$ and $g$ as float16 between the kernels; the fused kernel has no reason to, and keeps float32 in registers until the result. Both are legitimate, and they are different functions:
+A fused kernel is a different program, and whether it is the same function in floating point depends on two things that the tables above did not show. In the first simulation the fused and unfused kernels agreed to the bit because each operation was rounded to float32 and the intermediate stored was float32. Change the second of those. A pipeline whose activations live in half precision stores $u$ and $g$ as float16 between the kernels; the fused kernel has no reason to, and keeps float32 in registers until the result. Both are legitimate, and they are different functions:
 
 <!-- worked: fusion.precision -->
 The epilogue chain r = gelu_tanh(z + b) + xr on N = 4096 elements with float16 inputs and a float16 result. Generator: the book's SplitMix64, seed 0x2dac3e0196658a47 (the seed of the name `fusion.precision`). Draws in order: z[0..4095] = 2 normal(), b[0..63] = 0.5 normal() (b[i mod 64] multiplies element i), xr[0..4095] = normal(), each rounded to float16 (ties to even). Every arithmetic operation is rounded to float32 one at a time; the unfused design also rounds u and g to float16 where they are stored. The reference evaluates the chain in float64 (library tanh) and rounds once to float16; errors are against the unrounded float64 value. The two designs differ in 924 of 4096 results.
@@ -334,9 +322,7 @@ x y + z for N = 4096 float32 triples. Generator: the book's SplitMix64, seed 0xa
 
 ## The famous fusion: attention in bytes
 
-*What this is for: the largest saving in this chapter, and the reason a later volume exists. Here only the traffic is counted.*
-
-Attention computes, for each of $n$ positions, scores against all $n$ positions, normalizes them (softmax) and averages the values by the normalized scores. Written as three kernels, the scores $S = Q K^{\mathsf T}$ are an $n \times n$ matrix that the first kernel writes, the softmax kernel reads and rewrites as $P$, and the third kernel reads. Counting one head of width $d = 64$ in float32:
+The largest saving in this chapter, and the reason a later volume exists, is attention. Here only the traffic is counted. Attention computes, for each of $n$ positions, scores against all $n$ positions, normalizes them (softmax) and averages the values by the normalized scores. Written as three kernels, the scores $S = Q K^{\mathsf T}$ are an $n \times n$ matrix that the first kernel writes, the softmax kernel reads and rewrites as $P$, and the third kernel reads. Counting one head of width $d = 64$ in float32:
 
 <!-- worked: fusion.attention_bytes -->
 One attention head in float32, head width d = 64, n positions, scores S = Q K^T of shape [n, n]. Unfused: QK^T reads Q and K and writes S; softmax reads S and writes P (same size); P V reads P and V and writes the output. Bytes = 4 (2 n d + n^2) + 4 (2 n^2) + 4 (n^2 + 2 n d) = 16 n^2 + 16 n d. Fused: Q, K, V in, output out: 16 n d. FLOPs 4 n^2 d for the two products plus n (5 n - 2) for the row softmaxes (maximum, subtraction, exp, sum, division). Ridge point 50.
@@ -348,17 +334,19 @@ One attention head in float32, head width d = 64, n positions, scores S = Q K^T 
 | 32,768 | 4,096.0 | 17,213,423,616 | 33,554,432 | 513.0 | 16.3 | 8352.0 |
 <!-- /worked -->
 
-The three kernels move $16 n^2 + 16 n d$ bytes and the fused one $16 n d$, a ratio of $1 + n/d$: 65 at $n = 4096$. The matrix $S$ at that length is 64 MiB for each head of each sequence, and at $n = 32{,}768$ it is 4,096 MiB, larger than the binding limits of many devices. The intensity changes class: the three kernels run at 16 FLOP per byte, below the ridge point and bandwidth-bound, while the fused kernel runs at 1,044, far above it and compute-bound. Fusion here does not remove a few memory passes from a compute-bound kernel; it turns a bandwidth-bound computation into a compute-bound one.
+The three kernels move $16 n^2 + 16 n d$ bytes and the fused one $16 n d$, a ratio of $1 + n/d$: 65 at $n = 4096$. The matrix $S$ at that length is 64 MiB for each head of each sequence, and at $n = 32{,}768$ it is 4,096 MiB, larger than the binding limits of many devices. The intensity changes class: the three kernels run at 16 FLOP per byte, below the ridge point and bandwidth-bound, while the fused kernel runs at 1,044, far above it and compute-bound. Fusion here turns a bandwidth-bound computation into a compute-bound one, which is a different kind of gain from trimming a few memory passes off a kernel that was compute-bound already.
 
 The fusion is possible because of something that is not obvious from the three kernels: the softmax of a row needs the whole row's maximum and sum, and the consumer ($P V$) needs the normalized weights. The way out is to process the keys in blocks and to keep a running maximum and a running sum that are corrected as each block arrives (the "online" softmax), so that no workgroup ever needs the whole row of scores at once; and the scores of a block are not stored but recomputed in the backward pass, as the recompute-or-store table above predicts. This is the subject of the volume on attention, and the algorithm of Dao and coauthors (2022) that gave the idea its name. This chapter claims only the byte count, and it needs nothing beyond what has been taught.
 
-## Where this appears in brain
+## Fused kernels and recorded submissions in brain's backends
+
+Fusion in brain is three things: native kernels that replace chains of portable ones, a portable catalogue that follows the same pattern, and a submission path that records dispatches in bounded lists. Each has code to read and a commit that shows why it is built as it is.
 
 **`crates/kernels-cuda`: a registry of fused native kernels.** The crate holds native CUDA C++ sources (`crates/kernels-cuda/cu/*.cu`, included as text and compiled at run time by the CUDA backend) and a table in `crates/kernels-cuda/src/lib.rs`: one `CudaKernel` entry per kernel, with its name, the operator and weight tier it implements, its entry point, a one-line `what`, its block size and shared-memory use. It is a registry of its own, separate from the WGSL catalogue in `crates/kernels`; the crate header gives the reason, that four pieces of machinery (the generator, the catalogue-validation test, the cost-formula check, the metadata cross-checks) treat every WGSL entry as WGSL text and have no purchase on C++. Most of its kernels are the matrix kernels of Chapter 6 for the quantized and half-precision weights of Chapter 12, and the attention and recurrent-state kernels of later volumes. The ones that matter here are the fused front ends: `add_rms_quant.cu` (residual add, RMS normalization, per-group scale and int8 packing), `quant_epilogue.cu` (the SwiGLU product or a sigmoid gate, then the same scale and pack), `rmsnorm_fused.cu`, `silu_mul_quant_e4m3_128.cu`, `swiglu_bwd_fused.cu`, and the single-launch Gated DeltaNet decode step `gdn_decode.cu`.
 
 **How a fused kernel relates to the WGSL chain.** A fused CUDA kernel has no WGSL twin. Its entry has `by_name: true`: the selector that picks a kernel by operator and weight tier never offers it, because it replaces a chain the *model* builds. The model asks for it by name, `Gpu::fused_step(Fused::AddRmsQuant, ...)` in `crates/gpu-core/src/lib.rs`, with the contract of each kernel documented on the `Fused` enum in `crates/gpu-core/src/native_upgrade.rs`, and gets `None` when the device is not offered it or the shape is not served; the caller then builds the WGSL chain the kernel replaces, so the chain stays the reference on every device. The accounting of this chapter is in the headers. `add_rms_quant.cu` states the chain it replaces (`add2`, `rmsnorm_rows`, `max_abs_rows`, `quant_pack`) and that it produces what the chain produces "to the last bit"; it explains how: the sum of squares is the only order-sensitive step, so the kernel keeps the reference's lane ownership and ascending order (the reduction order of Chapter 7), and an element stays in one thread's registers from its load to the quantizer, never visiting memory. It also records the register cost of that choice, the limit of the fusion: a row wider than the number of registers allows is not served and the host keeps the chain (the header names 5,120 elements). The gate `crates/gpu-core/tests/it/add_rms_quant_native.rs` compares the output byte for byte with the chain, and says why: with identity achievable, a tolerance would only hide a defect. And `crates/backend-cuda/src/nvrtc.rs` compiles every kernel with `--fmad=false`; its comment is this chapter's last paragraph, that NVRTC contracts `a*b + c` by default, rounding once where the portable reference rounds twice, and that the project's cross-backend agreement is absolute.
 
-**Fused kernels in `crates/kernels/wgsl`.** The portable catalogue has the same pattern. `silu_mul.wgsl` is the SwiGLU product in one elementwise kernel. `conv_epilogue.wgsl` and `conv_act.wgsl` apply a per-channel affine (batch normalization at evaluation time, folded into one scale and one bias per channel, a change of algebra that costs nothing at run time) and an activation chosen by an `act` word of the parameter block, the one-kernel-per-selector design of the section on code explosion; the header of `conv_act.wgsl` notes that a uniform branch "is coherent across the dispatch, so it costs nothing". `rmsnorm_quant_fused.wgsl` fuses a normalization with the int8 quantization after it and never writes the normalized row; to find the group maximum and then quantize, it computes each value twice, "with the identical expression and operand order", instead of storing it, the recompute-or-store trade at the smallest scale. `qknorm_rope_fused.wgsl` applies a per-head RMS normalization and the rotary rotation in one workgroup per row: the rotation pairs two elements of the row the normalization has just finished, so the row never leaves the workgroup, and the kernel re-reads its own pair after the reduction instead of keeping a runtime-sized array per thread (the register argument). And the attention kernels (`flash_attn_bidir.wgsl` and `flash_attn_bidir_bias.wgsl`) say in their headers that scores, softmax and application are fused so that the $[B, H, T, T]$ matrices are never materialised and peak attention memory is $O(T \cdot \text{head dim})$, which is this chapter's last table; knowledge #240 records the unfused alternative at head width 256 as $24\,T^2 \cdot 4$ bytes per slab, about 1.6 billion bytes at $T = 4096$.
+**Fused kernels in `crates/kernels/wgsl`.** The portable catalogue has the same pattern. `silu_mul.wgsl` is the SwiGLU product in one elementwise kernel. `conv_epilogue.wgsl` and `conv_act.wgsl` apply a per-channel affine (batch normalization at evaluation time, folded into one scale and one bias per channel, a change of algebra that costs nothing at run time) and an activation chosen by an `act` word of the parameter block, the one-kernel-with-a-selector design that answers the obstacle of too many kernels; the header of `conv_act.wgsl` notes that a uniform branch "is coherent across the dispatch, so it costs nothing". `rmsnorm_quant_fused.wgsl` fuses a normalization with the int8 quantization after it and never writes the normalized row; to find the group maximum and then quantize, it computes each value twice, "with the identical expression and operand order", instead of storing it, the recompute-or-store trade at the smallest scale. `qknorm_rope_fused.wgsl` applies a per-head RMS normalization and the rotary rotation in one workgroup per row: the rotation pairs two elements of the row the normalization has just finished, so the row never leaves the workgroup, and the kernel re-reads its own pair after the reduction instead of keeping a runtime-sized array per thread (the register argument). And the attention kernels (`flash_attn_bidir.wgsl` and `flash_attn_bidir_bias.wgsl`) say in their headers that scores, softmax and application are fused so that the $[B, H, T, T]$ matrices are never materialised and peak attention memory is $O(T \cdot \text{head dim})$, which is this chapter's last table; knowledge #240 records the unfused alternative at head width 256 as $24\,T^2 \cdot 4$ bytes per slab, about 1.6 billion bytes at $T = 4096$.
 
 **Fusions as stories.** The first two are the same lesson in two backends.
 
@@ -384,6 +372,20 @@ Knowledge #21 (September 2026) is the warning that goes with all of these: a per
 7. For the attention heads of a model at $n = 8192$, $d = 64$, find the ratio of the unfused to the fused bytes, and say why the fused kernel is compute-bound and the unfused is not.
 8. Find the error: "recording the whole prefill into one command buffer is always best: one submission, minimum starts."
 
+## Summary
+
+Memory-traffic accounting lists, for every kernel of a program, the FLOPs it does and the distinct bytes it reads and writes; the cost of a kernel is the larger of its bytes and its FLOPs divided by the ridge point. For the chain $y = \mathrm{layernorm}(x + \mathrm{gelu\_tanh}(xW + b))$ on a $[2048, 1024]$ activation the five kernels move 96,481,280 bytes, 69.6 percent of them intermediate tensors written and read back; the elementwise kernels are bandwidth-bound at 0.08 to 1.1 FLOP per byte, and their cost is their bytes. Kernel fusion removes the intermediates: two dispatches move 37,761,024 bytes, one moves the floor of 20,983,808, 4.6 times fewer, and, because the matrix product is compute-bound and unchanged, the cost falls by 1.9 times. A fusion is legal where each output element depends on one element of each input, in a matrix product's epilogue, and for a reduction whose consumer needs only the row a workgroup holds; it costs more where the consumer needs the whole row (the row owner multiplies the loads of $W$ and uses the register file), where it needs other workgroups (the end of a dispatch is the barrier), where the backward pass needs the intermediate (recompute where the FLOPs are worth fewer bytes than storing), and where the combinations multiply the number of kernels.
+
+Launch overhead is a fixed cost per submission and per dispatch, here $L_{\mathrm{sub}} = 3{,}200{,}000$ and $L_{\mathrm{dsp}} = 800{,}000$ bytes; for a chain of 16 kernels over $2^{12}$ floats it is 99.2 percent of the cost. Command recording submits a list of dispatches once and removes starts, not bytes, and a read-back that the host needs ends the list; the list is bounded because a device cannot run an unbounded submission. A fused kernel is a different program in floating point: it is bit-identical to the chain when it keeps every format and every order, and more accurate and different (924 of 4,096 results) when it keeps a wider intermediate; contraction into one multiply-add changes 22.7 percent of the results of $x y + z$ in the example. Fused attention turns the $n \times n$ scores into registers: $16 n^2 + 16 n d$ bytes against $16 n d$, a factor $1 + n/d$ of 65 at $n = 4096$, moving the computation from bandwidth-bound to compute-bound.
+
+Everything here is a count, and so it holds on any machine with the model's ridge point; the starts are the one place where an invented parameter enters, labelled as such. What the chapter has not done is to ask how one fused kernel is to run on a CPU, a Vulkan GPU and a CUDA GPU with the same results, which is the question of the next chapter.
+
+## References
+
+- Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra and Christopher Re, "FlashAttention: Fast and memory-efficient exact attention with IO-awareness", 2022.
+- Maxim Milakov and Natalia Gimelshein, "Online normalizer calculation for softmax", 2018.
+- Markus N. Rabe and Charles Staats, "Self-attention does not need O(n^2) memory", 2021.
+
 ## Exercises
 
 1. **[Calculate]** For the chain with $n = 4096$ and $d = 2048$, find the FLOPs, bytes read and bytes written of each of the five kernels, the totals, the bytes of the fully fused kernel and the ratio, with the counting rules of `fusion.chain_traffic`.
@@ -399,14 +401,6 @@ Knowledge #21 (September 2026) is the warning that goes with all of these: a per
 11. **[Investigate]** Time an elementwise chain of five operations over $2^{24}$ floats on your device as five kernels and as one, in a kernel language you have. Report the bytes by the accounting rule, the ratio of times and whether it lies near the ratio of bytes, and say what else the time contains.
 12. **[Investigate]** Profile one layer of a model you have with the profiler of your framework. Count the dispatches, the share of them that are elementwise, estimate their bytes by the accounting rule, and list which could be fused by the rules of this chapter and which could not, with the reason.
 
-## Summary
-
-Memory-traffic accounting lists, for every kernel of a program, the FLOPs it does and the distinct bytes it reads and writes; the cost of a kernel is the larger of its bytes and its FLOPs divided by the ridge point. For the chain $y = \mathrm{layernorm}(x + \mathrm{gelu\_tanh}(xW + b))$ on a $[2048, 1024]$ activation the five kernels move 96,481,280 bytes, 69.6 percent of them intermediate tensors written and read back; the elementwise kernels are bandwidth-bound at 0.08 to 1.1 FLOP per byte, and their cost is their bytes. Kernel fusion removes the intermediates: two dispatches move 37,761,024 bytes, one moves the floor of 20,983,808, 4.6 times fewer, and, because the matrix product is compute-bound and unchanged, the cost falls by 1.9 times. A fusion is legal where each output element depends on one element of each input, in a matrix product's epilogue, and for a reduction whose consumer needs only the row a workgroup holds; it costs more where the consumer needs the whole row (the row owner multiplies the loads of $W$ and uses the register file), where it needs other workgroups (the end of a dispatch is the barrier), where the backward pass needs the intermediate (recompute where the FLOPs are worth fewer bytes than storing), and where the combinations multiply the number of kernels.
-
-Launch overhead is a fixed cost per submission and per dispatch, here $L_{\mathrm{sub}} = 3{,}200{,}000$ and $L_{\mathrm{dsp}} = 800{,}000$ bytes; for a chain of 16 kernels over $2^{12}$ floats it is 99.2 percent of the cost. Command recording submits a list of dispatches once and removes starts, not bytes, and a read-back that the host needs ends the list; the list is bounded because a device cannot run an unbounded submission. A fused kernel is a different program in floating point: it is bit-identical to the chain when it keeps every format and every order, and more accurate and different (924 of 4,096 results) when it keeps a wider intermediate; contraction into one multiply-add changes 22.7 percent of the results of $x y + z$ in the example. Fused attention turns the $n \times n$ scores into registers: $16 n^2 + 16 n d$ bytes against $16 n d$, a factor $1 + n/d$ of 65 at $n = 4096$, moving the computation from bandwidth-bound to compute-bound.
-
-Everything here is a count, and so it holds on any machine with the model's ridge point; the starts are the one place where an invented parameter enters, labelled as such. What the chapter has not done is to ask how one fused kernel is to run on a CPU, a Vulkan GPU and a CUDA GPU with the same results, which is the question of the next chapter.
-
 ## Key terms
 
 - **memory-traffic accounting**: the routine of listing for every kernel of a program the FLOPs it executes and the distinct bytes it reads and writes, each operand counted once, so that designs of the same computation can be compared by bytes and by arithmetic intensity before anything is run. <!-- concept: memory-traffic-accounting -->
@@ -416,7 +410,7 @@ Everything here is a count, and so it holds on any machine with the model's ridg
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $2^{20} = 1{,}048{,}576$ FLOPs, $12 \cdot 2^{20} = 12{,}582{,}912$ bytes, intensity $1/12 = 0.083$: bandwidth-bound, at 0.17 percent of the ridge point (Volume IV, Chapter 3).
 2. $5 \times 10^{-6} \cdot 800 \times 10^{9} = 4{,}000{,}000$ bytes (Volume IV, Chapter 3).
@@ -425,7 +419,7 @@ Everything here is a count, and so it holds on any machine with the model's ridg
 5. $2^{24}$ numbers with one per invocation need 65,536 workgroups and only some are resident; those that are resident would wait at a grid-wide barrier for workgroups that never get a slot. The end of a dispatch is the barrier between workgroups (Volume IV, Chapter 7).
 6. All $d$ of them: the first output needs the mean and the variance of the whole row (Volume III, Chapter 10).
 
-**Check your understanding**
+**Check your understanding.**
 
 1. The matrix product is compute-bound and stays at 85.9 million bytes of cost however much is fused into it; the fused elementwise kernels were bandwidth-bound and their cost vanishes. The bytes ratio counts all kernels, the cost ratio counts only what limits each. The two would be nearly equal if the memory-bound kernels dominated the chain (a decode step of one row, where the products themselves are bandwidth-bound).
 2. Recording removes starts, not bytes: each of the 16 kernels still reads and writes its operands. Only fusion removes the bytes (`fusion.launch_overhead`: recorded costs 1.02 times less at $N = 2^{24}$, fused 16).
@@ -435,9 +429,3 @@ Everything here is a count, and so it holds on any machine with the model's ridg
 6. The division needs the sum of every workgroup's partial result, and a dispatch has no barrier across workgroups (the end of a dispatch is it), so the reduction and the division are at least two dispatches. While $n_{\mathrm{wg}} < \sqrt{L_{\mathrm{dsp}}/4} \approx 447$, the division kernel can add the partials itself and save the third.
 7. $1 + n/d = 129$, since the unfused bytes are $16 n^2 + 16 n d = 1{,}082{,}130{,}432$ and the fused $8{,}388{,}608$. The FLOPs are 17,515,397,120: 16.2 FLOP per byte unfused (below the ridge point of 50) and 2,088 fused (above).
 8. A command buffer that grows with the prompt hands the driver work it cannot preempt; commit 09fc19d2e records a reset of the engine on a long prefill. A list is bounded by accumulated workgroups, with a flush and a wait at the cap.
-
-## References
-
-- Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra and Christopher Re, "FlashAttention: Fast and memory-efficient exact attention with IO-awareness", 2022.
-- Maxim Milakov and Natalia Gimelshein, "Online normalizer calculation for softmax", 2018.
-- Markus N. Rabe and Charles Staats, "Self-attention does not need O(n^2) memory", 2021.
