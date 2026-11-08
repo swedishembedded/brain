@@ -1,0 +1,243 @@
+<!-- source-sha256: bc9b19c7fd7dca36915764c98e68cb814dad0f8443f554a4492f8aa79bd0c3d9 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 864 662" width="864" height="662"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="864" height="662" fill="#ffffff"/>
+<rect x="14" y="14" width="836" height="316" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="28" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Kernels A and B: neighbours first, invocation l adds the value of l + s</text>
+<rect x="194" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="210" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3</text>
+<text x="210" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">0</text>
+<rect x="234" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="250" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<text x="250" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">1</text>
+<rect x="214" y="215" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4</text>
+<path d="M210,269 L210,261 Q210,255 216,255 L224,255 Q230,255 230,249 L230,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M250,269 L250,261 Q250,255 244,255 L236,255 Q230,255 230,249 L230,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="274" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4</text>
+<text x="290" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">2</text>
+<rect x="314" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<text x="330" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">3</text>
+<rect x="294" y="215" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="310" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5</text>
+<path d="M290,269 L290,261 Q290,255 296,255 L304,255 Q310,255 310,249 L310,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M330,269 L330,261 Q330,255 324,255 L316,255 Q310,255 310,249 L310,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="254" y="161" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="270" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<path d="M230,215 L230,207 Q230,201 236,201 L264,201 Q270,201 270,195 L270,190" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M310,215 L310,207 Q310,201 304,201 L276,201 Q270,201 270,195 L270,190" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="354" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="370" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5</text>
+<text x="370" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">4</text>
+<rect x="394" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="410" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<text x="410" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">5</text>
+<rect x="374" y="215" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">14</text>
+<path d="M370,269 L370,261 Q370,255 376,255 L384,255 Q390,255 390,249 L390,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M410,269 L410,261 Q410,255 404,255 L396,255 Q390,255 390,249 L390,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="434" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="450" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2</text>
+<text x="450" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">6</text>
+<rect x="474" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="490" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6</text>
+<text x="490" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">7</text>
+<rect x="454" y="215" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8</text>
+<path d="M450,269 L450,261 Q450,255 456,255 L464,255 Q470,255 470,249 L470,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M490,269 L490,261 Q490,255 484,255 L476,255 Q470,255 470,249 L470,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="414" y="161" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="430" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">22</text>
+<path d="M390,215 L390,207 Q390,201 396,201 L424,201 Q430,201 430,195 L430,190" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M470,215 L470,207 Q470,201 464,201 L436,201 Q430,201 430,195 L430,190" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="334" y="107" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="350" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">31</text>
+<path d="M270,161 L270,153 Q270,147 276,147 L344,147 Q350,147 350,141 L350,136" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M430,161 L430,153 Q430,147 424,147 L356,147 Q350,147 350,141 L350,136" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="514" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="530" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5</text>
+<text x="530" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">8</text>
+<rect x="554" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3</text>
+<text x="570" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">9</text>
+<rect x="534" y="215" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="550" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8</text>
+<path d="M530,269 L530,261 Q530,255 536,255 L544,255 Q550,255 550,249 L550,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M570,269 L570,261 Q570,255 564,255 L556,255 Q550,255 550,249 L550,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="594" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="610" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5</text>
+<text x="610" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">10</text>
+<rect x="634" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8</text>
+<text x="650" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">11</text>
+<rect x="614" y="215" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="630" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">13</text>
+<path d="M610,269 L610,261 Q610,255 616,255 L624,255 Q630,255 630,249 L630,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M650,269 L650,261 Q650,255 644,255 L636,255 Q630,255 630,249 L630,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="574" y="161" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="590" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">21</text>
+<path d="M550,215 L550,207 Q550,201 556,201 L584,201 Q590,201 590,195 L590,190" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M630,215 L630,207 Q630,201 624,201 L596,201 Q590,201 590,195 L590,190" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="674" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="690" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<text x="690" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">12</text>
+<rect x="714" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="730" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">7</text>
+<text x="730" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">13</text>
+<rect x="694" y="215" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="710" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16</text>
+<path d="M690,269 L690,261 Q690,255 696,255 L704,255 Q710,255 710,249 L710,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M730,269 L730,261 Q730,255 724,255 L716,255 Q710,255 710,249 L710,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="754" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="770" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<text x="770" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">14</text>
+<rect x="794" y="269" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="810" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3</text>
+<text x="810" y="309.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">15</text>
+<rect x="774" y="215" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="790" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12</text>
+<path d="M770,269 L770,261 Q770,255 776,255 L784,255 Q790,255 790,249 L790,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M810,269 L810,261 Q810,255 804,255 L796,255 Q790,255 790,249 L790,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="734" y="161" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="750" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">28</text>
+<path d="M710,215 L710,207 Q710,201 716,201 L744,201 Q750,201 750,195 L750,190" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M790,215 L790,207 Q790,201 784,201 L756,201 Q750,201 750,195 L750,190" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="654" y="107" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="670" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">49</text>
+<path d="M590,161 L590,153 Q590,147 596,147 L664,147 Q670,147 670,141 L670,136" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M750,161 L750,153 Q750,147 744,147 L676,147 Q670,147 670,141 L670,136" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="494" y="53" width="32" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="510" y="70.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">80</text>
+<path d="M350,107 L350,99 Q350,93 356,93 L504,93 Q510,93 510,87 L510,82" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M670,107 L670,99 Q670,93 664,93 L516,93 Q510,93 510,87 L510,82" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="34" y="220.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">stride s = 1</text>
+<text x="34" y="236.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">8 additions</text>
+<text x="34" y="166.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">stride s = 2</text>
+<text x="34" y="182.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">4 additions</text>
+<text x="34" y="112.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">stride s = 4</text>
+<text x="34" y="128.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">2 additions</text>
+<text x="34" y="58.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">stride s = 8</text>
+<text x="34" y="74.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">1 addition</text>
+<text x="34" y="274.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">load</text>
+<text x="34" y="290.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">16 numbers x_l</text>
+<rect x="14" y="332" width="836" height="316" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="28" y="354" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Kernel C: sequential addressing, invocation l &lt; s adds the value of l + s</text>
+<rect x="194" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="210" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3</text>
+<text x="210" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">0</text>
+<rect x="234" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="250" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5</text>
+<text x="250" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">8</text>
+<rect x="214" y="533" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="550.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8</text>
+<path d="M210,587 L210,579 Q210,573 216,573 L224,573 Q230,573 230,567 L230,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M250,587 L250,579 Q250,573 244,573 L236,573 Q230,573 230,567 L230,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="274" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5</text>
+<text x="290" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">4</text>
+<rect x="314" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<text x="330" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">12</text>
+<rect x="294" y="533" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="310" y="550.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">14</text>
+<path d="M290,587 L290,579 Q290,573 296,573 L304,573 Q310,573 310,567 L310,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M330,587 L330,579 Q330,573 324,573 L316,573 Q310,573 310,567 L310,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="254" y="479" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="270" y="496.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">22</text>
+<path d="M230,533 L230,525 Q230,519 236,519 L264,519 Q270,519 270,513 L270,508" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M310,533 L310,525 Q310,519 304,519 L276,519 Q270,519 270,513 L270,508" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="354" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="370" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4</text>
+<text x="370" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">2</text>
+<rect x="394" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="410" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5</text>
+<text x="410" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">10</text>
+<rect x="374" y="533" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="550.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<path d="M370,587 L370,579 Q370,573 376,573 L384,573 Q390,573 390,567 L390,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M410,587 L410,579 Q410,573 404,573 L396,573 Q390,573 390,567 L390,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="434" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="450" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2</text>
+<text x="450" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">6</text>
+<rect x="474" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="490" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<text x="490" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">14</text>
+<rect x="454" y="533" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="550.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">11</text>
+<path d="M450,587 L450,579 Q450,573 456,573 L464,573 Q470,573 470,567 L470,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M490,587 L490,579 Q490,573 484,573 L476,573 Q470,573 470,567 L470,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="414" y="479" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="430" y="496.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">20</text>
+<path d="M390,533 L390,525 Q390,519 396,519 L424,519 Q430,519 430,513 L430,508" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M470,533 L470,525 Q470,519 464,519 L436,519 Q430,519 430,513 L430,508" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="334" y="425" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="350" y="442.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">42</text>
+<path d="M270,479 L270,471 Q270,465 276,465 L344,465 Q350,465 350,459 L350,454" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M430,479 L430,471 Q430,465 424,465 L356,465 Q350,465 350,459 L350,454" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="514" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="530" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<text x="530" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">1</text>
+<rect x="554" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3</text>
+<text x="570" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">9</text>
+<rect x="534" y="533" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="550" y="550.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4</text>
+<path d="M530,587 L530,579 Q530,573 536,573 L544,573 Q550,573 550,567 L550,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M570,587 L570,579 Q570,573 564,573 L556,573 Q550,573 550,567 L550,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="594" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="610" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<text x="610" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">5</text>
+<rect x="634" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">7</text>
+<text x="650" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">13</text>
+<rect x="614" y="533" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="630" y="550.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16</text>
+<path d="M610,587 L610,579 Q610,573 616,573 L624,573 Q630,573 630,567 L630,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M650,587 L650,579 Q650,573 644,573 L636,573 Q630,573 630,567 L630,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="574" y="479" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="590" y="496.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">20</text>
+<path d="M550,533 L550,525 Q550,519 556,519 L584,519 Q590,519 590,513 L590,508" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M630,533 L630,525 Q630,519 624,519 L596,519 Q590,519 590,513 L590,508" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="674" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="690" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<text x="690" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">3</text>
+<rect x="714" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="730" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8</text>
+<text x="730" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">11</text>
+<rect x="694" y="533" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="710" y="550.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<path d="M690,587 L690,579 Q690,573 696,573 L704,573 Q710,573 710,567 L710,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M730,587 L730,579 Q730,573 724,573 L716,573 Q710,573 710,567 L710,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="754" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="770" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6</text>
+<text x="770" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">7</text>
+<rect x="794" y="587" width="32" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="810" y="604.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3</text>
+<text x="810" y="627.5" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#4a5568" text-anchor="middle">15</text>
+<rect x="774" y="533" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="790" y="550.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<path d="M770,587 L770,579 Q770,573 776,573 L784,573 Q790,573 790,567 L790,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M810,587 L810,579 Q810,573 804,573 L796,573 Q790,573 790,567 L790,562" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="734" y="479" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="750" y="496.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">18</text>
+<path d="M710,533 L710,525 Q710,519 716,519 L744,519 Q750,519 750,513 L750,508" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M790,533 L790,525 Q790,519 784,519 L756,519 Q750,519 750,513 L750,508" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="654" y="425" width="32" height="26" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="670" y="442.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">38</text>
+<path d="M590,479 L590,471 Q590,465 596,465 L664,465 Q670,465 670,459 L670,454" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M750,479 L750,471 Q750,465 744,465 L676,465 Q670,465 670,459 L670,454" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="494" y="371" width="32" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="510" y="388.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">80</text>
+<path d="M350,425 L350,417 Q350,411 356,411 L504,411 Q510,411 510,405 L510,400" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M670,425 L670,417 Q670,411 664,411 L516,411 Q510,411 510,405 L510,400" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="34" y="538.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">stride s = 8</text>
+<text x="34" y="554.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">8 additions</text>
+<text x="34" y="484.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">stride s = 4</text>
+<text x="34" y="500.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">4 additions</text>
+<text x="34" y="430.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">stride s = 2</text>
+<text x="34" y="446.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">2 additions</text>
+<text x="34" y="376.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">stride s = 1</text>
+<text x="34" y="392.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">1 addition</text>
+<text x="34" y="592.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">load</text>
+<text x="34" y="608.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">16 numbers x_l</text>
+</svg>

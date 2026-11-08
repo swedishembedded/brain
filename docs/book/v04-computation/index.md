@@ -57,8 +57,8 @@ more than one kind of device.
    can run it.
 6. [Making Matrix Multiplication Fast](06-matmul.md): how a matrix multiply goes
    from a three-line loop to running near the hardware's peak.
-7. Parallel Reductions, Scans and Sorting: how thousands of threads add up one
-   array, and why the obvious way is slow.
+7. [Parallel Reductions, Scans and Sorting](07-reductions.md): how thousands of
+   threads add up one array, and why the obvious way is slow.
 8. Kernel Fusion and Memory Traffic: why the cheapest computation is the one
    whose intermediate result never touches memory.
 9. One Program, Many Devices: how one set of kernels can run on CPUs, Vulkan

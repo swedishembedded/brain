@@ -424,6 +424,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **paired test**: a comparison of two systems scored on the same examples through the per-example differences, whose standard error is smaller than an unpaired one when the systems' answers are correlated; the paired z-test and the exact sign test are two of them. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
+**parallel reduction**: a reduction algorithm carried out by many invocations at once, whose cost is described by its work (the operations it performs) and its depth (the longest chain of operations that must wait for one another). *([Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md))*
+
+**parallel scan**: a prefix sum computed by many invocations in a number of steps that grows with $\log n$, either with $n \log n$ additions (Hillis-Steele) or with $2(n - 1)$ additions and twice the depth (Blelloch), and across workgroups by scanning blocks, scanning their totals and adding the totals back. *([Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md))*
+
 **parameter**: one of the numbers that set a model's behaviour; fixed while the model predicts and changed while it learns. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **partial derivative**: the derivative of a function of several variables with respect to one of them while all the others are held fixed, $\partial L/\partial w_j$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
@@ -455,6 +459,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **pseudo-random generator**: a deterministic state machine (a state, a rule that advances it, and a rule that turns it into a number) whose outputs are judged by how closely they resemble draws from a uniform distribution, not by being unpredictable to someone who knows the rule. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 ## R
+
+**radix sort**: a sort of integer keys digit by digit from the least significant, each pass made of per-chunk histograms, one scan of the digit-major histogram array and a stable scatter, so that no two invocations write the same counter or the same position. *([Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md))*
 
 **random variable**: a function from the outcomes of an experiment to numbers, such as the number of heads in three flips; the rule is fixed and the randomness is in which outcome occurs. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
@@ -580,7 +586,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **transpose**: the matrix $\mathbf{A}^\top$ with rows and columns swapped; $(\mathbf{A}\mathbf{B})^\top = \mathbf{B}^\top\mathbf{A}^\top$. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
+**tree reduction**: a parallel reduction that combines the values in pairs, then the pairs in pairs, so that $n$ values need $n - 1$ combinations in only $\lceil \log_2 n \rceil$ dependent steps; inside a workgroup it is a loop over strides with a barrier after each step. *([Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md))*
+
 **two's complement**: the representation of negative whole numbers in which the pattern of $-x$ is $2^n - x$ (the bits of $x$ inverted, plus one), so that the same addition works for both signs, the top bit is the sign, and the range is $-2^{n-1} \dots 2^{n-1} - 1$. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
+
+**two-pass reduction**: the reduction of an array longer than a workgroup by two dispatches, one in which every workgroup writes a partial result for its slice and a second that reduces the partials, the end of the first dispatch serving as the barrier between workgroups that a dispatch cannot have. *([Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md))*
 
 ## U
 

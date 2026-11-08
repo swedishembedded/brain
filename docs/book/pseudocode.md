@@ -311,6 +311,10 @@ launch scale_shift(x, y, 2.0, 1.0, N) over ceil(N / n_wg) workgroups
   until all have arrived, so the statements before it have finished, for every invocation of the workgroup, before any statement
   after it begins. A `return` before a `barrier` is legal only if every invocation of the workgroup takes it; a kernel in which
   some invocations of a workgroup reach the barrier and others do not is wrong, and the book says its result is undefined.
+- `atomic_add(a, i, v)` (Volume IV, Chapter 7) sets `a[i] = a[i] + v` as one indivisible step. Calls on the same word
+  from different invocations are served one at a time, in an order the device chooses and the program cannot see. The
+  book uses it only to describe the obvious way of summing; its kernels, like the portable reference shaders of brain,
+  do not use atomics.
 
 **Fragments (Volume IV, Chapter 6).** A **fragment** is a small matrix that the invocations of one subgroup hold jointly: a value of type
 `fragment<T>[R, C]` with `R` rows and `C` columns of element type `T`. The language does not say which invocation holds which
