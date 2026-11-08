@@ -59,6 +59,7 @@ pub mod config;
 pub mod dit_shard;
 pub mod grad;
 pub mod import;
+pub mod lora;
 pub mod model;
 pub mod pipeline;
 pub mod presentation;

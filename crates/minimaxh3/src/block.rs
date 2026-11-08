@@ -59,6 +59,7 @@
 
 use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
+use model::lora::RuntimeLora;
 use model::ops::{Ops, Weight};
 
 use crate::config::{H3TransformerConfig, MODALITY_NUM};
@@ -87,8 +88,11 @@ const K_FLASH_ATTN_BIDIR: usize = 13;
 const K_FLASH_ATTN_BIDIR_SPLIT: usize = 14;
 const K_FLASH_ATTN_BIDIR_REG: usize = 15;
 const K_FLASH_ATTN_BIDIR_REG2: usize = 16;
+/// `out += t·Bᵀ`: the accumulate half of an adapter's correction beside a
+/// linear ([`Linear`]).
+const K_LORA_DELTA: usize = 17;
 
-pub const KERNELS: [(&str, &str); 17] = [
+pub const KERNELS: [(&str, &str); 18] = [
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("rope2d_partial", kernels::ROPE2D_PARTIAL),
@@ -106,6 +110,7 @@ pub const KERNELS: [(&str, &str); 17] = [
     ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
+    ("lora_delta", kernels::LORA_DELTA),
 ];
 
 /// This crate's rung set for [`model::block::flash_bidir_variant`] - all four
@@ -187,15 +192,55 @@ pub enum ActLevels {
     Two,
 }
 
+/// One DiT linear: its weight at the build's tier and, when an adapter
+/// targets it, the adapter's low-rank correction, evaluated beside the
+/// product on the fp32 input. A correction is never folded into a quantized
+/// weight, where most of it would round away (`model::lora::RuntimeDelta`).
+#[derive(Clone)]
+pub struct Linear {
+    pub w: Weight,
+    lora: Option<LowRank>,
+}
+
+/// One correction `y += (x·Aᵀ)·Bᵀ`: `A [r, k]` as an fp32 weight the op
+/// façade multiplies, `B` transposed to `[r, n]` with the adapter's scale
+/// folded in ([`model::lora::RuntimeDelta::b_transposed`]).
+#[derive(Clone)]
+struct LowRank {
+    a: Weight,
+    bt: DeviceBuffer,
+    r: u32,
+}
+
+impl Linear {
+    /// A linear no adapter corrects.
+    pub fn plain(w: Weight) -> Linear {
+        Linear { w, lora: None }
+    }
+
+    /// `w` with the correction `adapter` holds for rows `row0..row0 + n` of
+    /// tensor `key`, if it holds one, uploaded beside it and claimed.
+    fn adapted(ctx: &Ctx, w: Weight, adapter: Option<&RuntimeLora>, key: &str, row_stride: usize, row0: usize) -> Linear {
+        let (n, k) = (w.n() as usize, w.k() as usize);
+        let lora = adapter.and_then(|a| a.claim(key, row_stride, row0, n, 0, k)).map(|d| {
+            let r = d.pair.r;
+            let a: std::collections::HashMap<String, Vec<f32>> = [("a".to_string(), d.pair.a.clone())].into_iter().collect();
+            let a = Weight::upload_from(&ctx.ops, &a, "a", r, k, Dtype::F32).unwrap_or_else(|e| panic!("minimaxh3 model: {key}: adapter A: {e}"));
+            LowRank { a, bt: ctx.upload(&d.b_transposed()), r: r as u32 }
+        });
+        Linear { w, lora }
+    }
+}
+
 /// `y = x @ w^T (+ bias)` for `m` rows of `x`, the activation quantized to
 /// `levels` against a quantized weight. `w` is `[n, k]` (PyTorch `nn.Linear`
 /// convention) at whatever tier it was loaded at; `bias` is `[n]` or `None`
 /// for the attention/FFN linears, which the reference builds with
 /// `bias=False` throughout.
-pub(crate) fn linear(cx: &Ctx, levels: ActLevels, x: &DeviceBuffer, w: &Weight, bias: Option<&DeviceBuffer>, m: u32) -> DeviceBuffer {
+pub(crate) fn linear(cx: &Ctx, levels: ActLevels, x: &DeviceBuffer, w: &Linear, bias: Option<&DeviceBuffer>, m: u32) -> DeviceBuffer {
     let [y] = linears(cx, levels, x, [w], m);
     if let Some(b) = bias {
-        cx.gpu.submit(&[], &[cx.gpu.step(K_BIAS_ADD, &[&y, b], &[m, w.n()], m * w.n())]);
+        cx.gpu.submit(&[], &[cx.gpu.step(K_BIAS_ADD, &[&y, b], &[m, w.w.n()], m * w.w.n())]);
     }
     y
 }
@@ -204,23 +249,33 @@ pub(crate) fn linear(cx: &Ctx, levels: ActLevels, x: &DeviceBuffer, w: &Weight, 
 /// modulated row block, the SwiGLU halves over another. `model::ops` picks
 /// each product's kernel from its weight's tier and the shape; the input is
 /// quantized once for all of them, to `levels`, when any weight is quantized,
-/// and read as f32 when none is.
-pub(crate) fn linears<const N: usize>(cx: &Ctx, levels: ActLevels, x: &DeviceBuffer, ws: [&Weight; N], m: u32) -> [DeviceBuffer; N] {
-    let k = ws[0].k();
+/// and read as f32 when none is. An adapter's correction reads the fp32
+/// input whatever the weight's tier.
+pub(crate) fn linears<const N: usize>(cx: &Ctx, levels: ActLevels, x: &DeviceBuffer, ws: [&Linear; N], m: u32) -> [DeviceBuffer; N] {
+    let k = ws[0].w.k();
     let mut steps = Vec::new();
-    let act = if ws.iter().all(|w| w.reads_f32_activations()) {
+    let act = if ws.iter().all(|l| l.w.reads_f32_activations()) {
         cx.ops.act_f32(x, 0, m, k)
     } else if levels == ActLevels::Two {
         cx.ops.act_two_level(&mut steps, x, 0, m, k)
     } else {
         cx.ops.act(&mut steps, x, 0, m, k)
     };
-    let ys = ws.map(|w| {
-        assert_eq!(w.k(), k, "minimaxh3 linears: every weight must read the same input width");
-        let y = cx.gpu.storage((m * w.n()) as u64);
-        cx.ops.matmul(&mut steps, w, &act, &y, 0);
+    let ys = ws.map(|l| {
+        assert_eq!(l.w.k(), k, "minimaxh3 linears: every weight must read the same input width");
+        let y = cx.gpu.storage((m * l.w.n()) as u64);
+        cx.ops.matmul(&mut steps, &l.w, &act, &y, 0);
         y
     });
+    if ws.iter().any(|l| l.lora.is_some()) {
+        let fp32 = cx.ops.act_f32(x, 0, m, k);
+        for (l, y) in ws.iter().zip(&ys) {
+            let Some(lo) = &l.lora else { continue };
+            let t = cx.gpu.storage((m * lo.r) as u64);
+            cx.ops.matmul(&mut steps, &lo.a, &fp32, &t, 0);
+            steps.push(cx.gpu.step(K_LORA_DELTA, &[y, &t, &lo.bt], &[m, l.w.n(), lo.r], m * l.w.n()));
+        }
+    }
     cx.gpu.submit(&[], &steps);
     ys
 }
@@ -471,34 +526,34 @@ pub fn row_scatter(cx: &Ctx, idx: &DeviceBuffer, src: &DeviceBuffer, out: &Devic
 /// [`block_forward`] per forward.
 #[derive(Clone)]
 pub struct BlockWeights {
-    pub wq: Weight,
-    pub wk: Weight,
-    pub wv: Weight,
-    pub wo: Weight,
+    pub wq: Linear,
+    pub wk: Linear,
+    pub wv: Linear,
+    pub wo: Linear,
     pub norm_q: DeviceBuffer,
     pub norm_k: DeviceBuffer,
     pub norm1: DeviceBuffer,
     pub norm2: DeviceBuffer,
-    pub fc1_value: Weight,
-    pub fc1_gate: Weight,
-    pub fc2: Weight,
+    pub fc1_value: Linear,
+    pub fc1_gate: Linear,
+    pub fc2: Linear,
 }
 
 /// One `MiniMaxH3TokenRefinerBlock`'s weights - the same attention/FFN
 /// shape as [`BlockWeights`] with no AdaLN and no RoPE.
 #[derive(Clone)]
 pub struct RefinerBlockWeights {
-    pub wq: Weight,
-    pub wk: Weight,
-    pub wv: Weight,
-    pub wo: Weight,
+    pub wq: Linear,
+    pub wk: Linear,
+    pub wv: Linear,
+    pub wo: Linear,
     pub norm_q: DeviceBuffer,
     pub norm_k: DeviceBuffer,
     pub norm1: DeviceBuffer,
     pub norm2: DeviceBuffer,
-    pub fc1_value: Weight,
-    pub fc1_gate: Weight,
-    pub fc2: Weight,
+    pub fc1_value: Linear,
+    pub fc1_gate: Linear,
+    pub fc2: Linear,
 }
 
 // ---------------- streaming per-block loading ----------------
@@ -553,18 +608,20 @@ pub fn load_host(tensors: &dyn checkpoint::TensorSource, name: &str) -> Vec<f32>
 
 /// One `[n, k]` linear at `tier`, read in bounded chunks
 /// (`model::ops::Weight::upload_from`); the device's own capability has the
-/// last word on the tier (`Dtype::promote`).
-pub fn load_linear(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, name: &str, n: u32, k: u32, tier: Dtype) -> Weight {
+/// last word on the tier (`Dtype::promote`). `adapter`'s correction for it,
+/// if it holds one, is attached ([`Linear`]).
+pub fn load_linear(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, name: &str, (n, k): (u32, u32), tier: Dtype, adapter: Option<&RuntimeLora>) -> Linear {
     let w = Weight::upload_from(&ctx.ops, tensors, name, n as usize, k as usize, tier).unwrap_or_else(|e| panic!("minimaxh3 model: {e}"));
     tensors.advise_drop(name);
-    w
+    Linear::adapted(ctx, w, adapter, name, k as usize, 0)
 }
 
 /// The fused SwiGLU projection's two output-feature halves (value rows
 /// first, then gate) as two linears, each read straight out of its row range
 /// of the one checkpoint tensor by a declarative slice plan - never the
-/// whole fused tensor at once.
-pub fn load_fc1(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, hidden: u32, ffn: u32, tier: Dtype) -> (Weight, Weight) {
+/// whole fused tensor at once. An adapter corrects each half with its own
+/// row band of the fused tensor's correction.
+pub fn load_fc1(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, (hidden, ffn): (u32, u32), tier: Dtype, adapter: Option<&RuntimeLora>) -> (Linear, Linear) {
     let name = format!("{prefix}.ff.net.0.proj.weight");
     let half = (ffn * hidden) as usize;
     let plan = [("value", 0), ("gate", half)].into_iter().map(|(part, start)| (part.to_string(), checkpoint::remap::Fetch::Slice { name: name.clone(), start, len: half })).collect();
@@ -572,40 +629,42 @@ pub fn load_fc1(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str,
     let value = Weight::upload_from(&ctx.ops, &halves, "value", ffn as usize, hidden as usize, tier).unwrap_or_else(|e| panic!("minimaxh3 model: {name}: {e}"));
     let gate = Weight::upload_from(&ctx.ops, &halves, "gate", ffn as usize, hidden as usize, tier).unwrap_or_else(|e| panic!("minimaxh3 model: {name}: {e}"));
     tensors.advise_drop(&name);
-    (value, gate)
+    let stride = hidden as usize;
+    (Linear::adapted(ctx, value, adapter, &name, stride, 0), Linear::adapted(ctx, gate, adapter, &name, stride, ffn as usize))
 }
 
 /// The attention projections and q/k norms shared by both block kinds'
 /// `.attn` sub-module naming (`to_q`/`to_k`/`to_v`/`norm_q`/`norm_k`/`to_out.0`).
 pub struct AttnWeights {
-    pub wq: Weight,
-    pub wk: Weight,
-    pub wv: Weight,
+    pub wq: Linear,
+    pub wk: Linear,
+    pub wv: Linear,
     pub norm_q: DeviceBuffer,
     pub norm_k: DeviceBuffer,
-    pub wo: Weight,
+    pub wo: Linear,
 }
 
-pub fn load_attn(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, hidden: u32, inner: u32, tier: Dtype) -> AttnWeights {
+pub fn load_attn(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, prefix: &str, (hidden, inner): (u32, u32), tier: Dtype, adapter: Option<&RuntimeLora>) -> AttnWeights {
+    let lin = |leaf: &str, shape| load_linear(tensors, ctx, &format!("{prefix}.{leaf}.weight"), shape, tier, adapter);
     AttnWeights {
-        wq: load_linear(tensors, ctx, &format!("{prefix}.to_q.weight"), inner, hidden, tier),
-        wk: load_linear(tensors, ctx, &format!("{prefix}.to_k.weight"), inner, hidden, tier),
-        wv: load_linear(tensors, ctx, &format!("{prefix}.to_v.weight"), inner, hidden, tier),
+        wq: lin("to_q", (inner, hidden)),
+        wk: lin("to_k", (inner, hidden)),
+        wv: lin("to_v", (inner, hidden)),
         norm_q: load_dev(tensors, ctx, &format!("{prefix}.norm_q.weight")),
         norm_k: load_dev(tensors, ctx, &format!("{prefix}.norm_k.weight")),
-        wo: load_linear(tensors, ctx, &format!("{prefix}.to_out.0.weight"), hidden, inner, tier),
+        wo: lin("to_out.0", (hidden, inner)),
     }
 }
 
 /// Load `transformer_blocks.{index}`'s weights - a single [`BlockWeights`],
 /// its linears at `tier`, nothing else. A caller processing blocks one at a
 /// time drops the returned value (freeing its device buffers) before loading
-/// the next index.
-pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig, tier: Dtype) -> BlockWeights {
+/// the next index. `adapter`'s corrections for the block are attached.
+pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig, tier: Dtype, adapter: Option<&RuntimeLora>) -> BlockWeights {
     let p = format!("transformer_blocks.{index}");
     let (hidden, inner, ffn) = (cfg.hidden_size, cfg.inner_dim(), cfg.ffn_dim);
-    let attn = load_attn(tensors, ctx, &format!("{p}.attn"), hidden, inner, tier);
-    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn, tier);
+    let attn = load_attn(tensors, ctx, &format!("{p}.attn"), (hidden, inner), tier, adapter);
+    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, (hidden, ffn), tier, adapter);
     BlockWeights {
         wq: attn.wq,
         wk: attn.wk,
@@ -617,7 +676,7 @@ pub fn load_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usiz
         norm2: load_dev(tensors, ctx, &format!("{p}.norm2.weight")),
         fc1_value,
         fc1_gate,
-        fc2: load_linear(tensors, ctx, &format!("{p}.ff.net.2.weight"), hidden, ffn, tier),
+        fc2: load_linear(tensors, ctx, &format!("{p}.ff.net.2.weight"), (hidden, ffn), tier, adapter),
     }
 }
 
@@ -639,8 +698,8 @@ fn write_dev(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, name: &str, buf:
 }
 
 /// The dense buffer a streamed slot's linear is rewritten through.
-fn slot(w: &Weight) -> &DeviceBuffer {
-    w.dense_buffer().expect("a streamed block's linears are dense f32 slots")
+fn slot(l: &Linear) -> &DeviceBuffer {
+    l.w.dense_buffer().expect("a streamed block's linears are dense f32 slots")
 }
 
 /// [`load_block_streaming`]'s in-place rewrite of one block's device tensors.
@@ -687,7 +746,7 @@ pub fn load_block_streaming(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, i
     let p = format!("transformer_blocks.{index}");
     let mut slots = ctx.block_slots.borrow_mut();
     match slots.as_ref() {
-        None => *slots = Some(load_block(tensors, ctx, index, cfg, Dtype::F32)),
+        None => *slots = Some(load_block(tensors, ctx, index, cfg, Dtype::F32, None)),
         Some(s) => write_block(tensors, ctx, &p, cfg.hidden_size, cfg.ffn_dim, s),
     }
     let s = slots.as_ref().expect("filled above");
@@ -707,11 +766,11 @@ pub fn load_block_streaming(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, i
 }
 
 /// [`load_block`]'s `token_refiner.refiner_blocks.{index}` analogue.
-pub fn load_refiner_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig, tier: Dtype) -> RefinerBlockWeights {
+pub fn load_refiner_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, index: usize, cfg: &H3TransformerConfig, tier: Dtype, adapter: Option<&RuntimeLora>) -> RefinerBlockWeights {
     let p = format!("token_refiner.refiner_blocks.{index}");
     let (hidden, inner, ffn) = (cfg.hidden_size, cfg.inner_dim(), cfg.ffn_dim);
-    let attn = load_attn(tensors, ctx, &format!("{p}.attn"), hidden, inner, tier);
-    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, hidden, ffn, tier);
+    let attn = load_attn(tensors, ctx, &format!("{p}.attn"), (hidden, inner), tier, adapter);
+    let (fc1_value, fc1_gate) = load_fc1(tensors, ctx, &p, (hidden, ffn), tier, adapter);
     RefinerBlockWeights {
         wq: attn.wq,
         wk: attn.wk,
@@ -723,7 +782,7 @@ pub fn load_refiner_block(tensors: &dyn checkpoint::TensorSource, ctx: &Ctx, ind
         norm2: load_dev(tensors, ctx, &format!("{p}.norm2.weight")),
         fc1_value,
         fc1_gate,
-        fc2: load_linear(tensors, ctx, &format!("{p}.ff.net.2.weight"), hidden, ffn, tier),
+        fc2: load_linear(tensors, ctx, &format!("{p}.ff.net.2.weight"), (hidden, ffn), tier, adapter),
     }
 }
 

@@ -38,7 +38,7 @@
 use std::time::Instant;
 
 use gpu_core::select::Dtype;
-use minimaxh3::block::{attn_mode, block_forward, ActLevels, AttnMode, BlockInputs, BlockWeights, Ctx};
+use minimaxh3::block::{attn_mode, block_forward, ActLevels, AttnMode, BlockInputs, BlockWeights, Ctx, Linear};
 use minimaxh3::config::{H3TransformerConfig, MODALITY_NUM};
 use model::ops::Weight;
 
@@ -78,7 +78,7 @@ fn main() {
     // Values are irrelevant to an allocation measurement but must be finite, so
     // a cheap deterministic ramp is enough.
     let fill = |n: usize| -> Vec<f32> { (0..n).map(|i| ((i % 97) as f32 - 48.0) * 0.01).collect() };
-    let lin = |n: u32, k: u32| Weight::upload(&cx.ops, &fill((n * k) as usize), n as usize, k as usize, tier);
+    let lin = |n: u32, k: u32| Linear::plain(Weight::upload(&cx.ops, &fill((n * k) as usize), n as usize, k as usize, tier));
     let w = BlockWeights {
         wq: lin(inner, hidden),
         wk: lin(inner, hidden),

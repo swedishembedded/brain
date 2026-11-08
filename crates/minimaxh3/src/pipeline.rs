@@ -754,6 +754,9 @@ pub struct H3Checkpoint<'a> {
     /// eager `Tensors` map every real `TensorSource` implementor still
     /// satisfies.
     pub dit_tensors: &'a dyn checkpoint::TensorSource,
+    /// The adapter corrections the DiT runs with (`crate::lora`), `None` for
+    /// the base model.
+    pub dit_lora: Option<&'a model::lora::RuntimeLora>,
     pub dit_cfg: H3TransformerConfig,
     pub video_vae_tensors: &'a Tensors,
     pub video_vae_cfg: VideoVaeConfig,
@@ -1022,7 +1025,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     let seq_len = (packed.position_ids.len() / 3) as u32;
     let owned = match model {
         Some(_) => None,
-        None => match H3Transformer::load(ckpt.dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels)) {
+        None => match H3Transformer::load(ckpt.dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels), ckpt.dit_lora) {
             Ok(m) => Some(m),
             Err(reason) => {
                 tracing::info!(%reason, "minimaxh3 DiT streamed one block at a time");
@@ -1032,6 +1035,13 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     };
     let resident = model.or(owned.as_ref());
     let streaming_ctx = resident.is_none().then(|| StreamingDit::open(dit_cfg, device));
+    // A streamed DiT is fp32, where an adapter folds exactly as each block is
+    // read.
+    let folded = ckpt.dit_lora.filter(|_| resident.is_none()).map(|lora| lora.folded(ckpt.dit_tensors));
+    let streamed_tensors: &dyn checkpoint::TensorSource = match &folded {
+        Some(f) => f,
+        None => ckpt.dit_tensors,
+    };
     let sched = DualSchedule::for_denoise_steps(opts.denoise_steps)?;
     let num_steps = sched.num_steps();
     let num_text_tokens = packed.text_indices.len();
@@ -1078,8 +1088,11 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
         };
         let out = match resident {
             Some(m) => m.forward(&inp),
-            None => H3Transformer::forward_streaming(ckpt.dit_tensors, dit_cfg, streaming_ctx.as_ref().expect("streamed whenever nothing is resident"), &inp),
+            None => H3Transformer::forward_streaming(streamed_tensors, dit_cfg, streaming_ctx.as_ref().expect("streamed whenever nothing is resident"), &inp),
         };
+        if let Some(missed) = folded.is_some().then(|| ckpt.dit_lora.map(model::lora::RuntimeLora::unapplied)).flatten().filter(|m| !m.is_empty()) {
+            return Err(format!("generate: the adapter targets {} rectangles no DiT linear read: {}", missed.len(), missed.join(", ")));
+        }
 
         // Only the generated rows are ever written, so the conditioning rows
         // ride through every step unchanged (`MiniMaxH3LoopSchedulerStep`).
@@ -1435,6 +1448,7 @@ pub(crate) mod tests {
         let vocoder_cfg = tiny_vocoder_cfg();
         H3Checkpoint {
             dit_tensors,
+            dit_lora: None,
             dit_cfg: tiny_dit_cfg(),
             video_vae_tensors,
             video_vae_cfg: video_vae_cfg.clone(),

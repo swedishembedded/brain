@@ -69,6 +69,27 @@ generated audio and video under the same rotary clock, and the prompt is
 encoded with the references themselves presented to Qwen3-VL. Every run
 reports per-step progress and stops at the next step boundary when cancelled.
 
+Every task takes a LoRA adapter for its DiT with `--adapter` (`adapter` on a
+served request, a path the model store resolves) and its strength with
+`--lora_scale` (1.0 as trained, on top of the file's own alpha/rank). A
+diffusers PEFT save reads as it is, including one that keeps its adapter name
+in each key and its alpha in the header, such as a few-step distillation; run
+it with the step count it was distilled for:
+
+```
+brain minimaxh3 ref2va --allow-community \
+  --prompt "the woman from <Picture 1> turns to the camera and laughs" \
+  --references woman.png --width 768 --height 448 --num_frames 121 \
+  --adapter lightx2v/Minimax-h3-Turbo/minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors \
+  --steps 4 --out video=woman.mp4
+```
+
+Each target is checked against the DiT by name and shape before a weight is
+read. A resident int8 DiT evaluates each correction beside its linear on the
+fp32 input, never folded into the int8 weights; a streamed fp32 DiT folds it
+exactly as each block is read. The corrections are held on the cards with the
+blocks they belong to and count toward the placement.
+
 * **The text encoder is placed per prompt.** The first 50 layers of the
   Qwen3-VL language tower (~27 GB at int8) are spread over as many of the
   `--device` cards as hold them, run once, and dropped before the DiT loads.
