@@ -26,11 +26,29 @@
 //! verifiable rewards you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-/// The largest exponent of the importance ratio: `exp(20)` is about 4.9e8, far
-/// outside any trust region and still finite in f32, so a policy that has
-/// drifted (or an `old_lp` that was never the behaviour policy's) cannot make
-/// the weight overflow to infinity.
+/// The largest exponent evaluated exactly: `exp(20)` is about 4.9e8, far
+/// outside any trust region and still finite in f32. Past it the exponential
+/// continues along its tangent at the cap ([`bounded_exp`]), so a policy that
+/// has drifted (or an `old_lp` that was never the behaviour policy's) cannot
+/// make the loss or the weight overflow, and the weight stays the derivative
+/// of the loss that is reported.
 pub const MAX_LOG_RATIO: f32 = 20.0;
+
+/// `exp(x)` and its slope, continued linearly beyond [`MAX_LOG_RATIO`]:
+/// `exp(c) * (1 + x - c)` there, whose value and slope match the exponential at
+/// the cap. The objective built on it is C1, so the loss and the analytic
+/// gradient weight agree everywhere, including past the cap. Evaluated in f64
+/// so the extension does not round at the cap.
+fn bounded_exp(x: f64) -> (f64, f64) {
+    let cap = f64::from(MAX_LOG_RATIO);
+    if x <= cap {
+        let e = x.exp();
+        (e, e)
+    } else {
+        let at_cap = cap.exp();
+        (at_cap * (1.0 + x - cap), at_cap)
+    }
+}
 
 /// The clip band of the importance ratio: `[1 - low, 1 + high]`. The upper
 /// edge may be wider than the lower so that a low-probability token that turns
@@ -77,21 +95,23 @@ pub fn token_term(old_lp: f32, new_lp: f32, advantage: f32, clip_eps: f32, ref_l
 /// `A*r`. When the clipped term is strictly smaller, the surrogate is locally
 /// constant in `r` (the clamp has saturated), so the weight is exactly `0.0`.
 ///
-/// The ratio is computed from the log-probability difference, capped at
-/// [`MAX_LOG_RATIO`] before it is exponentiated.
+/// The ratio `exp(new_lp - old_lp)` is evaluated by [`bounded_exp`], and so is the
+/// k3 exponent: past [`MAX_LOG_RATIO`] both continue along their tangent, and `weight`
+/// is the derivative of the `loss` reported with it.
 pub fn token_term_banded(old_lp: f32, new_lp: f32, advantage: f32, band: ClipBand, ref_lp: Option<f32>, kl_beta: f32) -> TokenTerm {
-    let ratio = (new_lp - old_lp).min(MAX_LOG_RATIO).exp();
-    let mut weight = 0.0f32;
-    let mut loss = 0.0f32;
+    let (ratio, ratio_slope) = bounded_exp(f64::from(new_lp) - f64::from(old_lp));
+    let advantage = f64::from(advantage);
+    let mut weight = 0.0f64;
+    let mut loss = 0.0f64;
     let mut clipped_out = false;
 
     if advantage != 0.0 {
         let unclipped = ratio * advantage;
-        let clipped = ratio.clamp(1.0 - band.low, 1.0 + band.high) * advantage;
+        let clipped = ratio.clamp(1.0 - f64::from(band.low), 1.0 + f64::from(band.high)) * advantage;
         let surrogate = unclipped.min(clipped);
         loss += -surrogate;
         if unclipped <= clipped {
-            weight += advantage * ratio;
+            weight += advantage * ratio_slope;
         } else {
             clipped_out = true;
         }
@@ -99,29 +119,31 @@ pub fn token_term_banded(old_lp: f32, new_lp: f32, advantage: f32, band: ClipBan
 
     if kl_beta > 0.0 {
         let ref_lp = ref_lp.expect("token_term: kl_beta > 0.0 requires a reference logprob");
-        let (eu, u) = k3_exponent(ref_lp, new_lp);
-        weight += kl_beta * (eu - 1.0);
-        loss += kl_beta * (eu - u - 1.0);
+        let (k3, slope) = k3_with_slope(ref_lp, new_lp);
+        weight += f64::from(kl_beta) * (slope - 1.0);
+        loss += f64::from(kl_beta) * k3;
     }
 
-    TokenTerm { weight, loss, clipped: clipped_out }
+    TokenTerm { weight: weight as f32, loss: loss as f32, clipped: clipped_out }
 }
 
 /// The k3 estimator of `KL(policy || reference)` at one sampled token,
 /// `e^u - u - 1` with `u = ref_lp - new_lp`; non-negative, zero iff the two
 /// log-probabilities agree. Its gradient weight is `e^u - 1`: with
 /// `d(new_lp)/dz = onehot - softmax` the KL gradient is `(e^u - 1)` more weight
-/// on the ordinary cross-entropy direction.
+/// on the ordinary cross-entropy direction. The exponential is continued
+/// linearly past [`MAX_LOG_RATIO`] ([`bounded_exp`]) so a reference far more
+/// confident than the policy cannot overflow, and the weight stays this
+/// function's derivative.
 pub fn k3_kl(ref_lp: f32, new_lp: f32) -> f32 {
-    let (eu, u) = k3_exponent(ref_lp, new_lp);
-    eu - u - 1.0
+    k3_with_slope(ref_lp, new_lp).0 as f32
 }
 
-/// `(e^u, u)` for `u = ref_lp - new_lp`, with `u` capped at [`MAX_LOG_RATIO`]
-/// so that a reference far more confident than the policy cannot overflow.
-fn k3_exponent(ref_lp: f32, new_lp: f32) -> (f32, f32) {
-    let u = (ref_lp - new_lp).min(MAX_LOG_RATIO);
-    (u.exp(), u)
+/// The k3 value and the derivative of `e^u` in `u` (the gradient weight is that minus one).
+fn k3_with_slope(ref_lp: f32, new_lp: f32) -> (f64, f64) {
+    let u = f64::from(ref_lp) - f64::from(new_lp);
+    let (eu, slope) = bounded_exp(u);
+    (eu - u - 1.0, slope)
 }
 
 /// True if `ratio` sits within `margin` of either clip boundary (`1 -
@@ -234,5 +256,81 @@ mod tests {
         assert!(near_clip_boundary(0.81, 0.2, 0.05));
         assert!(!near_clip_boundary(1.6, 0.2, 0.05));
         assert!(!near_clip_boundary(0.5, 0.2, 0.05));
+    }
+
+    // ---- T005: the loss and the gradient weight are one function ----------------------------
+
+    /// FP64 scalar reference of the documented objective: the importance ratio and the k3
+    /// exponent are exact up to [`MAX_LOG_RATIO`] and continue linearly (value and slope
+    /// match at the cap) beyond it, so the objective is C1 and bounded in slope.
+    fn reference(old_lp: f64, new_lp: f64, advantage: f64, band: ClipBand, ref_lp: Option<f64>, kl_beta: f64) -> (f64, f64) {
+        let cap = f64::from(MAX_LOG_RATIO);
+        let ext = |x: f64| if x <= cap { (x.exp(), x.exp()) } else { (cap.exp() * (1.0 + x - cap), cap.exp()) };
+        let (mut weight, mut loss) = (0.0, 0.0);
+        if advantage != 0.0 {
+            let (r, slope) = ext(new_lp - old_lp);
+            let (unclipped, clipped) = (r * advantage, r.clamp(1.0 - f64::from(band.low), 1.0 + f64::from(band.high)) * advantage);
+            loss -= unclipped.min(clipped);
+            if unclipped <= clipped {
+                weight += advantage * slope;
+            }
+        }
+        if let (true, Some(ref_lp)) = (kl_beta > 0.0, ref_lp) {
+            let u = ref_lp - new_lp;
+            let (eu, slope) = ext(u);
+            weight += kl_beta * (slope - 1.0);
+            loss += kl_beta * (eu - u - 1.0);
+        }
+        (weight, loss)
+    }
+
+    /// Log-probability gaps that exercise every regime: ordinary, past the cap on both sides,
+    /// f32-subnormal ratios, and one step either side of each clip boundary.
+    fn gaps() -> Vec<f32> {
+        let b = ClipBand::symmetric(0.2);
+        let edge = |r: f32| r.ln();
+        vec![0.0, 0.3, -0.7, 5.0, -5.0, 19.9, 20.0, 20.1, 25.0, 60.0, 400.0, -60.0, -100.0, -400.0, edge(1.0 + b.high) - 1e-2, edge(1.0 + b.high) + 1e-2, edge(1.0 - b.low) - 1e-2, edge(1.0 - b.low) + 1e-2]
+    }
+
+    #[test]
+    fn the_term_matches_the_fp64_reference_at_normal_extreme_and_boundary_inputs() {
+        let band = ClipBand::symmetric(0.2);
+        for gap in gaps() {
+            for advantage in [1.5f32, -1.5, 0.0] {
+                for (ref_lp, beta) in [(None, 0.0f32), (Some(-1.0f32), 0.04)] {
+                    let (old_lp, new_lp) = (-2.0f32, -2.0 + gap);
+                    let t = token_term_banded(old_lp, new_lp, advantage, band, ref_lp, beta);
+                    let (w, l) = reference(f64::from(old_lp), f64::from(new_lp), f64::from(advantage), band, ref_lp.map(f64::from), f64::from(beta));
+                    let rel = |a: f64, b: f64| (a - b).abs() / b.abs().max(1.0);
+                    assert!(t.weight.is_finite() && t.loss.is_finite(), "gap {gap} A {advantage}: {t:?}");
+                    assert!(rel(f64::from(t.weight), w) < 1e-4 && rel(f64::from(t.loss), l) < 1e-4, "gap {gap} A {advantage} kl {ref_lp:?}: got {t:?}, reference weight {w} loss {l}");
+                }
+            }
+        }
+    }
+
+    /// `d(loss)/d(new_lp) = -weight`: the weight is the gradient of the loss the forward
+    /// reports, beyond the cap as much as inside it. Central differences on the f32 term,
+    /// stepping only within one clip regime.
+    #[test]
+    fn the_weight_is_the_derivative_of_the_loss_including_beyond_the_cap() {
+        let band = ClipBand::symmetric(0.2);
+        for gap in gaps() {
+            for advantage in [1.5f32, -1.5] {
+                for (ref_lp, beta) in [(None, 0.0f32), (Some(-1.0f32), 0.04)] {
+                    let (old_lp, new_lp) = (-2.0f32, -2.0 + gap);
+                    let t = token_term_banded(old_lp, new_lp, advantage, band, ref_lp, beta);
+                    let h = 1e-2f32;
+                    let lo = token_term_banded(old_lp, new_lp - h, advantage, band, ref_lp, beta);
+                    let hi = token_term_banded(old_lp, new_lp + h, advantage, band, ref_lp, beta);
+                    if lo.clipped != hi.clipped || lo.clipped != t.clipped {
+                        continue; // the step straddles a clip kink, where no derivative exists
+                    }
+                    let fd = -f64::from(hi.loss - lo.loss) / f64::from(2.0 * h);
+                    let tol = 1e-2 * fd.abs().max(f64::from(t.weight).abs()) + 1e-3;
+                    assert!((fd - f64::from(t.weight)).abs() <= tol, "gap {gap} A {advantage} kl {ref_lp:?}: finite difference {fd}, weight {}", t.weight);
+                }
+            }
+        }
     }
 }

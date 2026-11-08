@@ -17,7 +17,7 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [x] T002 P0 - crates/model/src/train.rs (example-indexed dataset fallback) - oversized example refuses or splits into masked windows; no cross-example supervision test
 - [ ] T003 P0 - crates/rl/src/objective/grpo.rs (RatioBasis::Trainer) - stale rollouts: behaviour policy identity; two-policy ratio test
 - [ ] T004 P0 - crates/rl/src/objective/grpo.rs (top-k/top-p old_lp) - exact truncated likelihood or refuse; truncated-sampling test
-- [ ] T005 P0 - crates/rl/src/objective/grpo_term.rs (capped log-ratio / k3) - forward and backward agree; FP64 reference + finite differences
+- [x] T005 P0 - crates/rl/src/objective/grpo_term.rs (capped log-ratio / k3) - forward and backward agree; FP64 reference + finite differences
 - [x] T006 P0 - crates/rl/src/objective/dpo.rs (empty step) - empty step changes no weights, moments or step count
 - [x] T007 P0 - crates/rl/src/objective/distill.rs (empty step) - same as T006 for distillation
 - [x] T008 P0 - crates/model/src/train.rs (fit_controlled) - transactional update gate in the shared loop; strict mode; NaN injection test (shared gate landed as `model::stepgate`; `FitOpts::strict_updates` is not yet exposed as a CLI flag; GRPO and external policy gradient keep their own verdict counters)
