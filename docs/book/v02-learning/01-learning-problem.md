@@ -5,8 +5,6 @@
 
 *What exactly is a model, what is it learning, and from what?*
 
-## The problem
-
 A small electronics workshop builds a temperature sensor. It is a cheap
 component that puts out a voltage, and the voltage depends on the temperature
 of the thing it touches, but nobody has a formula that turns one into the
@@ -59,11 +57,9 @@ chapter 2), vectors (chapter 3), probability and its distributions
 (chapters 10 and 11), and the idea that a measurement taken from a sample
 estimates a number about the whole source (chapter 12).
 
-## Before you begin
-
-Five questions on ideas from Volume I, to answer from memory. The answers are
-at the end of the chapter. If one is hard, go back to the chapter named before
-reading on.
+Five questions on those ideas, to answer from memory before the vocabulary
+starts. The answers are at the end of the chapter; if one is hard, go back to
+the chapter named.
 
 1. (Chapter 2, "Functions and Their Shapes", families and parameters.) The line $f(x) = w x + b$ has the numbers $w = 3$ and $b = 1$ set. What is $f(2)$, and which of $w$, $b$, $x$ is changed to move from one member of the family of lines to another?
 2. (Chapter 2, "Functions and Their Shapes", polynomials.) How many points with different $x$ values determine exactly one parabola through them, and what happens to the count for a family with $k$ parameters?
@@ -139,7 +135,7 @@ one the rest of the book makes.
 
 ## A model is a function with parameters
 
-Now we can state the task exactly. Given a dataset of examples, produce a
+With that vocabulary the task can be stated exactly. Given a dataset of examples, produce a
 function that takes the features of a new example, one the dataset has not
 seen, and returns a good guess for its label. The function is the **model**,
 and the guess is a **prediction**, written $\hat{y}$ (the hat means "an
@@ -271,7 +267,7 @@ reason to square the difference instead of ignoring its sign), and derives a
 method that finds the best parameters of a line without trying them. Here the
 only requirement is that a smaller $E$ means a better fit to these rows.
 
-Now try to improve on it by hand. The table showed where the line is wrong: it
+Improving on it by hand is the obvious next try. The table showed where the line is wrong: it
 is below the data through the middle (eight of the ten predictions are too low)
 and above it at the two ends. Three attempts,
 each a change a person might try after reading the previous score: the second
@@ -496,7 +492,7 @@ same $p$ as the ones it learned from. If the sensors in the machines run hotter
 than the ones in the experiment, or the model will be used in a different way
 than the way its data was collected, the guarantee in this section does not
 apply. The chapter on generalization names this problem (distribution shift),
-and the "Where this appears in brain" section below shows a real instance.
+and the last section below shows a real instance from brain.
 
 ## Three ways to learn
 
@@ -738,7 +734,9 @@ learning, because it is the setting in which "how good is this model" has the
 most direct answer, and because the tools it develops carry over to the other
 two.
 
-## Making it work
+## Questions to settle before trusting a dataset
+
+Three questions are cheap to ask and expensive to skip.
 
 **Know the unit of an example.** The ten rows were ten separate measurements.
 If the same sensor had been measured ten times in a row, the rows would not be
@@ -757,7 +755,8 @@ The two thousand fresh rows were drawn from the same source, so they answer
 "how well will it do on sensors like these?". They say nothing about sensors
 that are hotter, older or built differently.
 
-**Common mistakes.**
+Three mistakes follow from skipping them, the first of which is the lesson of
+the whole chapter.
 
 - Reporting the error on the rows used to choose the parameters as if it were the
   error on new data. The lookup table's $0.00$ against its $3.14$ is the whole
@@ -768,7 +767,7 @@ that are hotter, older or built differently.
 - Treating a label as ground truth. The reference thermometer had its own error;
   a model that learns the labels well learns the labels' errors with them.
 
-## Where this appears in brain
+## Generated data, trained parameters and a mismatched distribution in brain
 
 brain is a collection of models, but each one starts from the same three things
 this chapter named: examples, a function with parameters, and a rule for picking
@@ -845,30 +844,6 @@ Answers are at the end of the chapter.
 7. **Explain.** For each of the following, say which of the three settings it is and what the data or feedback consists of: (a) grouping customers by their purchases with no categories given; (b) predicting a stock's next price from its history; (c) a robot learning to balance by being told only whether it fell.
 8. **Explain.** Why does the "data comes from a distribution" assumption make the average error on the known rows an estimate rather than the answer?
 
-## Exercises
-
-1. **[Calculate]** For the line $f(v) = 24v + 9$ compute by hand the prediction and the off-by amount for rows 1, 5 and 10 of the sensor table, and check them against the table of `learning_problem.first_attempt`. Then compute the average error of the same line on only those three rows, and say whether the difference from $4.29$ is a surprise.
-
-2. **[Calculate]** Starting from $\theta = (20, 18)$ (attempt 3), raise $w$ by $1$ and recompute the average error over the ten rows. Then, again from $(20, 18)$, lower $b$ by $1$ and recompute. Which single change is better, and what does the comparison say about trying one parameter at a time?
-
-3. **[Calculate]** A model has $d$ features and predicts $\hat{y} = w_1 x_1 + \dots + w_d x_d + b$. How many parameters does it have? How many for the lookup table over $N$ examples of $d$ features each? Evaluate both for $d = 3$ and $N = 5$ (the houses table) and for $d = 1000$ and $N = 10^6$.
-
-4. **[Calculate]** Count the work of a grid search. For $N = 10$ rows, $k = 2$ parameters and $m = 241$ values each, how many settings and how many single predictions? Compare with the number printed by `learning_problem.grid_search`. Then for $k = 3$ with $m = 241$ and $N = 10$.
-
-5. **[Calculate]** Do two rounds of the grouping loop by hand on the four one-feature rows $1, 2, 8, 9$ with starting centres $1$ and $2$. Give the assignment, the new centres, and say whether a third round changes anything.
-
-6. **[Implement]** Implement the book's generator (chapter "Randomness on a Deterministic Machine"), the source of `learning_problem.data_source` and the grid search of the pseudocode. Seed the generator with the seed printed for the sensor table, draw the ten rows in the stated order and check that sorted by voltage they are the table of `learning_problem.sensor_table`; then reproduce `learning_problem.grid_search` (the grid, the best setting and its average error $2.77$, to the digits printed) and the three hand attempts of `learning_problem.hand_tuning`.
-
-7. **[Implement]** Implement `group_rows` of this chapter and reproduce `learning_problem.grouping_loop` and `learning_problem.grouping_points`: take the twelve rows of `learning_problem.readings_table` as input (or regenerate them from the seed and recipe printed there), start from the centres $(0, 0)$ and $(1, 0.5)$ with at most 10 rounds, and your centres (to the 5 decimals printed) and group sizes round by round must match.
-
-8. **[Implement]** Implement the decision rule of the button game: first from the ten rewards of the table of `learning_problem.button_game` (use them as input), reproduce the two average rewards and the button chosen; then regenerate the whole table, including the ten later presses, from the seed and the draw order printed in its header. Then reproduce `learning_problem.explore_study` from the seed and draw order printed in its header: the counts of wrong picks must match exactly, and your exact probabilities and rewards per step to the digits printed. Which length earns the most per step for each pair of buttons, and why does the answer depend on how close the two probabilities are?
-
-9. **[Investigate]** Reproduce the three rows of `learning_problem.hypothesis_spaces` with your implementation of exercise 6 (the fresh rows come from the seed printed in `learning_problem.data_source`), including the parabola grid of `learning_problem.parabola_grid`. Then add a fourth hypothesis space: cubic polynomials. Does the error on the fresh rows fall below the parabola's? Repeat with a dataset of $N = 100$ rows instead of $10$ and say what changed.
-
-10. **[Investigate]** Reproduce `learning_problem.resampled_lines` (seed and draw order in its header), then redo it with $N = 100$ rows per dataset instead of $10$. Report the range of the best $w$ across five datasets and compare with the range at $N = 10$. How does the spread seem to scale with $N$, and what does chapter 12 predict?
-
-11. **[Investigate]** Make the fresh rows come from a slightly different distribution (for example, voltages from $[2.0, 3.2]$ V, partly outside the range of the known rows) and score the line, the parabola and the lookup table on them. Which of the three degrades most, and why?
-
 ## Summary
 
 A **dataset** is a collection of $N$ examples, each a vector of **features**
@@ -903,6 +878,37 @@ The next chapter, Linear Regression and the First Descent, takes the question of
 the score seriously (it gives it a name and a justification), solves the line
 exactly, and replaces the grid by following the gradient.
 
+## References
+
+- Mitchell, T. M., *Machine Learning*, McGraw-Hill, 1997 (the formulation of learning as improvement from data on a task, and the term hypothesis space).
+- Vapnik, V. N., *The Nature of Statistical Learning Theory*, 1995 (learning as choosing a function from a space using draws from an unknown distribution).
+- Hastie, T., Tibshirani, R. and Friedman, J., *The Elements of Statistical Learning*, second edition, 2009 (supervised and unsupervised learning).
+- Sutton, R. S. and Barto, A. G., *Reinforcement Learning: An Introduction*, second edition, 2018.
+
+## Exercises
+
+1. **[Calculate]** For the line $f(v) = 24v + 9$ compute by hand the prediction and the off-by amount for rows 1, 5 and 10 of the sensor table, and check them against the table of `learning_problem.first_attempt`. Then compute the average error of the same line on only those three rows, and say whether the difference from $4.29$ is a surprise.
+
+2. **[Calculate]** Starting from $\theta = (20, 18)$ (attempt 3), raise $w$ by $1$ and recompute the average error over the ten rows. Then, again from $(20, 18)$, lower $b$ by $1$ and recompute. Which single change is better, and what does the comparison say about trying one parameter at a time?
+
+3. **[Calculate]** A model has $d$ features and predicts $\hat{y} = w_1 x_1 + \dots + w_d x_d + b$. How many parameters does it have? How many for the lookup table over $N$ examples of $d$ features each? Evaluate both for $d = 3$ and $N = 5$ (the houses table) and for $d = 1000$ and $N = 10^6$.
+
+4. **[Calculate]** Count the work of a grid search. For $N = 10$ rows, $k = 2$ parameters and $m = 241$ values each, how many settings and how many single predictions? Compare with the number printed by `learning_problem.grid_search`. Then for $k = 3$ with $m = 241$ and $N = 10$.
+
+5. **[Calculate]** Do two rounds of the grouping loop by hand on the four one-feature rows $1, 2, 8, 9$ with starting centres $1$ and $2$. Give the assignment, the new centres, and say whether a third round changes anything.
+
+6. **[Implement]** Implement the book's generator (chapter "Randomness on a Deterministic Machine"), the source of `learning_problem.data_source` and the grid search of the pseudocode. Seed the generator with the seed printed for the sensor table, draw the ten rows in the stated order and check that sorted by voltage they are the table of `learning_problem.sensor_table`; then reproduce `learning_problem.grid_search` (the grid, the best setting and its average error $2.77$, to the digits printed) and the three hand attempts of `learning_problem.hand_tuning`.
+
+7. **[Implement]** Implement `group_rows` of this chapter and reproduce `learning_problem.grouping_loop` and `learning_problem.grouping_points`: take the twelve rows of `learning_problem.readings_table` as input (or regenerate them from the seed and recipe printed there), start from the centres $(0, 0)$ and $(1, 0.5)$ with at most 10 rounds, and your centres (to the 5 decimals printed) and group sizes round by round must match.
+
+8. **[Implement]** Implement the decision rule of the button game: first from the ten rewards of the table of `learning_problem.button_game` (use them as input), reproduce the two average rewards and the button chosen; then regenerate the whole table, including the ten later presses, from the seed and the draw order printed in its header. Then reproduce `learning_problem.explore_study` from the seed and draw order printed in its header: the counts of wrong picks must match exactly, and your exact probabilities and rewards per step to the digits printed. Which length earns the most per step for each pair of buttons, and why does the answer depend on how close the two probabilities are?
+
+9. **[Investigate]** Reproduce the three rows of `learning_problem.hypothesis_spaces` with your implementation of exercise 6 (the fresh rows come from the seed printed in `learning_problem.data_source`), including the parabola grid of `learning_problem.parabola_grid`. Then add a fourth hypothesis space: cubic polynomials. Does the error on the fresh rows fall below the parabola's? Repeat with a dataset of $N = 100$ rows instead of $10$ and say what changed.
+
+10. **[Investigate]** Reproduce `learning_problem.resampled_lines` (seed and draw order in its header), then redo it with $N = 100$ rows per dataset instead of $10$. Report the range of the best $w$ across five datasets and compare with the range at $N = 10$. How does the spread seem to scale with $N$, and what does chapter 12 predict?
+
+11. **[Investigate]** Make the fresh rows come from a slightly different distribution (for example, voltages from $[2.0, 3.2]$ V, partly outside the range of the known rows) and score the line, the parabola and the lookup table on them. Which of the three degrades most, and why?
+
 ## Key terms
 
 - **dataset**: a collection of $N$ examples, each a vector of features paired with a label, written as the pairs $(\mathbf{x}_n, y_n)$. <!-- concept: dataset -->
@@ -918,7 +924,7 @@ exactly, and replaces the grid by following the gradient.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $f(2) = 3 \cdot 2 + 1 = 7$. Moving between members of the family changes the parameters $w$ and $b$; $x$ is the input and is not part of the choice of member.
 2. Three points with different $x$ values determine one parabola; in general a family with $k$ parameters can be made to pass through $k$ chosen points (given the usual conditions), and $n + 1$ points determine a polynomial of degree at most $n$.
@@ -936,10 +942,3 @@ exactly, and replaces the grid by following the gradient.
 6. $100^3 = 10^6$ settings, and $100^{10} = 10^{20}$ for $k = 10$.
 7. (a) Unsupervised: features only, the structure (the customer groups) is to be found. (b) Supervised: the label is the next price, which the history itself supplies. (c) Reinforcement: no examples of correct actions, only a reward signal (a fall or not) after the agent acts.
 8. We care about new draws from the distribution, and the known rows are only $N$ of them. Their average error is the expectation under the empirical distribution of the sample, which varies with the sample and, for parameters chosen on these same rows, is also biased toward being too small. It is an estimate of the quantity we want, not the quantity itself.
-
-## References
-
-- Mitchell, T. M., *Machine Learning*, McGraw-Hill, 1997 (the formulation of learning as improvement from data on a task, and the term hypothesis space).
-- Vapnik, V. N., *The Nature of Statistical Learning Theory*, 1995 (learning as choosing a function from a space using draws from an unknown distribution).
-- Hastie, T., Tibshirani, R. and Friedman, J., *The Elements of Statistical Learning*, second edition, 2009 (supervised and unsupervised learning).
-- Sutton, R. S. and Barto, A. G., *Reinforcement Learning: An Introduction*, second edition, 2018.

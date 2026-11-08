@@ -5,9 +5,9 @@
 
 *How does a deterministic computer produce random numbers, and how do we make random experiments repeatable?*
 
-## The problem
+Fit a line $y = w x$ to eight points by stepping through them one at a time and nudging $w$ after each. The points, the loss, the update rule and the learning rate are fixed, and the block below lists them. Two things are left to chance: where $w$ starts (a number in $[-1, 1)$) and in what order the eight points are visited in each of two passes (called epochs). Run the program three times. The first and third runs are given the same seed, a 64-bit number defined properly further on, and the second a different one.
 
-Fit a line $y = w x$ to eight points by stepping through them one at a time and nudging $w$ after each. The points, the loss, the update rule and the learning rate are fixed, and the block below lists them. Two things are left to chance: where $w$ starts (a number in $[-1, 1)$) and in what order the eight points are visited in each of two passes (called epochs). Run the program three times; the first and third runs are given the same seed, a 64-bit number that we will define properly below, and the second a different one. Every worked example in this chapter that draws random numbers prints its seed, and the seed is simply given: to reproduce a table, start the generator built below at the printed seed and draw in the printed order. How the book chose the seeds does not matter; any other seed gives a table of the same kind with different digits.
+Every worked example in this chapter that draws random numbers prints its seed, and the seed is simply given: to reproduce a table, start the generator built below at the printed seed and draw in the printed order. How the book chose the seeds does not matter; any other seed gives a table of the same kind with different digits.
 
 <!-- worked: randomness.toy_runs -->
 Points (x, y): (0.5, 1.4), (1.0, 2.1), (1.5, 4.6), (2.0, 5.8), (2.5, 7.9), (3.0, 9.3), (3.5, 10.2), (4.0, 12.4). Model y = w x. Loss: L(w) = (1/8) sum over the eight points of (w x - y)^2. Each visited point (x, y) updates w <- w - 0.01 * 2 (w x - y) x. Learning rate 0.01, 2 epochs of eight steps each. Generator: the book's SplitMix64 started at the printed seed (state = seed before the first draw). Draw order: first w0 = 2 uniform() - 1; then, once per epoch, a new array [0, 1, ..., 7] is shuffled in place with the same generator (epoch 1 first) and the points are visited in that order. Final loss is L at the final w; "last epoch order" is the order of epoch 2.
@@ -21,13 +21,11 @@ Points (x, y): (0.5, 1.4), (1.0, 2.1), (1.5, 4.6), (2.0, 5.8), (2.5, 7.9), (3.0,
 
 The first two runs end at different weights and different losses ($0.45$ and $0.72$), so a number such as "the loss of this method is $0.45$" is already a statement about one draw of the dice, not about the method. The third run ends exactly where the first did, to every printed digit, in the initial weight, the order of the visits and the loss. Randomness that can be switched on and off by a number is the subject of this chapter.
 
-Randomness enters machine learning in at least five places, and each of them needs it for a different reason. The initial weights are drawn at random so that the units of a layer do not all compute the same thing (Volume III). The order of the training examples is shuffled so that each step sees a varied mix. Dropout (Volume III) zeroes a random subset of activations to stop units from co-adapting. A language model chooses its next word by drawing from a probability table, so that the same prompt can have several answers. Image generators start from a cloud of Gaussian noise. In every case the code needs numbers that behave as if they were drawn by chance, and a computer, which does exactly what its instructions say, has no chance in it.
+Why would a learning program want chance at all? It enters machine learning in at least five places, each for a different reason. The initial weights are drawn at random so that the units of a layer do not all compute the same thing (Volume III). The order of the training examples is shuffled so that each step sees a varied mix. Dropout (Volume III) zeroes a random subset of activations to stop units from co-adapting. A language model chooses its next word by drawing from a probability table, so that the same prompt can have several answers. Image generators start from a cloud of Gaussian noise. In every case the code needs numbers that behave as if they were drawn by chance, and a computer, which does exactly what its instructions say, has no chance in it.
 
 This chapter resolves that apparent contradiction in three steps. First, a deterministic recipe can produce a sequence that passes every test of randomness we can state, so long as nobody looks at the recipe: that recipe is a **pseudo-random generator**. We build two of them by hand, a classical one that fails in instructive ways and a modern one that does not, and measure their quality by counting. Second, one stream of uniform numbers can be turned into whatever else we need: a fair integer, a draw from a table, a draw from an exponential or a Gaussian distribution, a shuffled list. Each conversion has a correct form and a tempting wrong form, and each wrong form is shown to be wrong by an exact count. Third, the recipe is deterministic only if the **seed** that starts it is controlled, and the controls (what to fix, what to record, what never to hard-code) decide whether an experiment can be repeated or only repeated by luck.
 
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+The recipes below lean on six older ideas, from remainders to prefix sums. Answer these from memory (the answers are at the end of the chapter), and go back to the chapter named if one is hard.
 
 1. (Chapter 1, division with remainder.) Write $38 = 16 q + r$ with $0 \le r < 16$. What are $q$ and $r$? With the floor convention, what is the remainder of $-7$ divided by $5$?
 2. (Chapter 1, bits.) How many different patterns can $64$ bits hold, and what is the largest unsigned integer in $64$ bits?
@@ -212,7 +210,7 @@ Each row is a fair source: a generator started at the printed seed (state = seed
 | 256 | 25600 | 150 | 0xc53f9039f6222a22 | 253.6 | 255 | 22.1 | 22.6 | 368 |
 <!-- /worked -->
 
-The measured means match $k - 1$ and the measured spreads match the formula. A value more than five spreads above the mean is a failure that chance does not produce. From here on the **alarm level** is the value $k - 1 + 5\sqrt{2(k - 1)}$, which the last column computes (the measured mean plus five measured spreads of the third row, $253.6 + 5 \cdot 22.1 = 364$, is close to the formula's $368$; the formula is used because $150$ experiments measure a spread only roughly). Now put the generators to three questions, asked of one sequence of outputs $x_1, x_2, \dots$ per generator (the first $1600$ values for the first question, the next $1601$ for the second, the next $25{,}601$ for the third). Is the top nibble (4 bits) of the output evenly spread over $16$ buckets? Are the pairs of the lowest two bits of consecutive outputs evenly spread over their $16$ combinations? Here a pair means two **overlapping** neighbours $(x_i, x_{i+1})$, so $1601$ values give $1600$ pairs, and the pair goes to cell $4\,(x_i \bmod 4) + (x_{i+1} \bmod 4)$. And are the pairs of top nibbles of consecutive outputs evenly spread over their $256$ combinations (cell $16 \cdot \text{nibble}(x_i) + \text{nibble}(x_{i+1})$, with $25{,}600$ pairs)? The table gives each generator's seed; an LCG starts from the initial state $x_0$ listed and yields $x_1 = (a x_0 + c) \bmod m$ first, SplitMix64 yields its first output first. The $b$-bit values of the LCGs are used whole: $b = 32$ for the first, $16$ for the others.
+The measured means match $k - 1$ and the measured spreads match the formula. A value more than five spreads above the mean is a failure that chance does not produce. From here on the **alarm level** is the value $k - 1 + 5\sqrt{2(k - 1)}$, which the last column computes (the measured mean plus five measured spreads of the third row, $253.6 + 5 \cdot 22.1 = 364$, is close to the formula's $368$; the formula is used because $150$ experiments measure a spread only roughly). Three questions then put the generators to the test, asked of one sequence of outputs $x_1, x_2, \dots$ per generator (the first $1600$ values for the first question, the next $1601$ for the second, the next $25{,}601$ for the third). Is the top nibble (4 bits) of the output evenly spread over $16$ buckets? Are the pairs of the lowest two bits of consecutive outputs evenly spread over their $16$ combinations? Here a pair means two **overlapping** neighbours $(x_i, x_{i+1})$, so $1601$ values give $1600$ pairs, and the pair goes to cell $4\,(x_i \bmod 4) + (x_{i+1} \bmod 4)$. And are the pairs of top nibbles of consecutive outputs evenly spread over their $256$ combinations (cell $16 \cdot \text{nibble}(x_i) + \text{nibble}(x_{i+1})$, with $25{,}600$ pairs)? The table gives each generator's seed; an LCG starts from the initial state $x_0$ listed and yields $x_1 = (a x_0 + c) \bmod m$ first, SplitMix64 yields its first output first. The $b$-bit values of the LCGs are used whole: $b = 32$ for the first, $16$ for the others.
 
 <!-- worked: randomness.bucket_tests -->
 Alarm levels (calibration table): 42 for 16 cells, 368 for 256 cells. Each generator yields the values x_1, x_2, ... (a b-bit integer each; an LCG starts from x_0 and the first value it yields is x_1 = (a x_0 + c) mod m; SplitMix64's x_1 is its first output). One sequence per row feeds the three tests one after the other: the first 1600 values, the next 1601, the next 25601. Top 4 bits: cell = x >> (b - 4) for a b-bit value. Pairs of low 2 bits: with the 1601 consecutive values x_i, the 1600 overlapping pairs (x_i, x_(i+1)) go to the cell 4 (x_i and 3) + (x_(i+1) and 3). Pairs of top 4 bits: the 25600 overlapping pairs of 25601 consecutive values go to the cell 16 (x_i >> (b - 4)) + (x_(i+1) >> (b - 4)).
@@ -251,7 +249,7 @@ The top-$53$-bit recipe avoids this: the numerator $\text{raw} \gg 11$ is an int
 
 ### An integer in $0 \dots n - 1$ and the remainder trap
 
-For an integer the obvious recipe is `raw mod n`. Let us see what it does on a generator small enough to count: pretend the generator emits $3$ random bits, so $8$ equally likely values $0, \dots, 7$, and we want a fair die of $n = 6$ faces. The remainders of $0, \dots, 7$ modulo $6$ are $0, 1, 2, 3, 4, 5, 0, 1$.
+For an integer the obvious recipe is `raw mod n`. A generator small enough to count shows what it does: pretend the generator emits $3$ random bits, so $8$ equally likely values $0, \dots, 7$, and we want a fair die of $n = 6$ faces. The remainders of $0, \dots, 7$ modulo $6$ are $0, 1, 2, 3, 4, 5, 0, 1$.
 
 <!-- worked: randomness.modulo_bias_small -->
 | result k | probability of r mod 6 = k | probability after rejecting r < 2 |
@@ -713,11 +711,13 @@ The seeds above the largest signed 64-bit integer, 9,223,372,036,854,775,807, ar
 
 A caller who passes back what was printed, in decimal or in hexadecimal, gets the same run; a malformed seed is refused by name; and a system that stores the seed in a signed $64$-bit field loses exactly half of all seeds (those above $2^{63} - 1$), which turn negative, as the round-trip table shows.
 
-## Making it work
+## Traps that pass a smoke test
 
-**Seeding with zero.** The multiplicative trap: an LCG with $c = 0$ never leaves the state $0$, and the similar xor-shift generators are stuck on $0$ as well. SplitMix64 advances before mixing and has no such state, but the habit is worth having: state in a test that a zero seed gives a working stream.
+Three defects survive a quick look at the output and are worth a test each.
 
-**Predictable, by design.** The scramble is a bijection (each step, xor-shift or odd multiplication, is undone by an inverse), so one output reveals the state and every later output follows. A generator in this chapter is a statistical tool, not a cryptographic one; secrets and tokens need a generator designed to resist this.
+The first is the seed zero. An LCG with $c = 0$ never leaves the state $0$, and the similar xor-shift generators are stuck on $0$ as well. SplitMix64 advances before mixing and has no such state, but the habit is worth having: state in a test that a zero seed gives a working stream.
+
+The second is that a good generator is not a secret one. The scramble is a bijection (each step, xor-shift or odd multiplication, is undone by an inverse), so one output reveals the state and every later output follows. A generator in this chapter is a statistical tool, not a cryptographic one; secrets and tokens need a generator designed to resist this.
 
 <!-- worked: randomness.predict_from_output -->
 Generator: the book's SplitMix64, seed 0x7a6a91fc7815f2f0 (8821023333691028208), used as the state before the first draw. Draw 1 is the observed output; draws 2 to 4 are the later ones. One observed output `0xdfc8cf78de53244f` was undone step by step (xor-shift, multiply by the inverse of C2 modulo 2^64, xor-shift, multiply by the inverse of C1, xor-shift) to the state `0x18a20bb5f7606f05`.
@@ -731,7 +731,7 @@ Generator: the book's SplitMix64, seed 0x7a6a91fc7815f2f0 (8821023333691028208),
 
 The prediction is exact. It is also why "deterministic" and "unpredictable" are different properties: what we need for experiments is the first and the statistical quality of the second.
 
-**Reading the range.** A recipe that gets a range wrong passes every smoke test. A value meant to lie in $[-1, 1)$ is made from the top bits of a $64$-bit state by taking the top $31$ bits, dividing by $2^{31}$ and subtracting $1$. The top $31$ bits divided by $2^{31}$ lie in $[0, 1)$, so after subtracting $1$ every value is in $[-1, 0)$:
+The third is a range that is wrong on one side. A recipe that gets a range wrong passes every smoke test. A value meant to lie in $[-1, 1)$ is made from the top bits of a $64$-bit state by taking the top $31$ bits, dividing by $2^{31}$ and subtracting $1$. The top $31$ bits divided by $2^{31}$ lie in $[0, 1)$, so after subtracting $1$ every value is in $[-1, 0)$:
 
 <!-- worked: randomness.one_sided_range -->
 Generator: the book's SplitMix64, seed 0x0211c0af4a94b35f (149112121783006047), used as the state before the first draw. The LCG state s starts as the first draw `next()`; then each of the 100,000 steps sets s = (a s + c) mod 2^64 with a = 6364136223846793005, c = 1442695040888963407 and reads the new s with both recipes (same s for both rows).
@@ -744,7 +744,9 @@ Generator: the book's SplitMix64, seed 0x0211c0af4a94b35f (149112121783006047), 
 
 The fix is one shift: keep $32$ bits, and divide by $2^{31}$. The lesson is to test the range and sign of a generator, not just that its output varies.
 
-## Where this appears in brain
+## The chapter's generator, and where brain departs from it
+
+The engine in the case study uses this chapter's generator, with a few departures that are visible once you know what to look for, and most of the chapter's lessons arrived there as bug reports. Each paragraph below takes one of them.
 
 **The generator.** `crates/data/src/rng.rs` holds the SplitMix64 of this chapter, `Rng`, as a state and four lines of mixing: add `GAMMA`, then the two shift-xor-multiply rounds with `0xBF58476D1CE4E5B9` and `0x94D049BB133111EB`, then the last xor-shift. `Rng::next_f64` takes the top $53$ bits and divides by $2^{53}$, the recipe above. `Rng::new` starts the state at the seed plus `GAMMA`, one step further along the cycle than the plain description of this chapter, where the state starts at the seed (its comment says so that seed $0$ still gives a mixed stream, which this generator would also do without the offset). So the brain stream for a seed is the chapter's stream for that seed with its first draw skipped, and the chapter's printed values cannot be compared with `Rng::new` draw for draw. `Rng::state` and `Rng::from_state` expose the state so an interrupted training run can continue its stream exactly; a unit test resumes from a saved state and checks eight draws against the original, and commit `5b3ecc51d` (September 2026) added them for the sake of a fine-tune that resumes "bit for bit". Two simplifications are visible against what this chapter built: `gen_range_inclusive` takes `next_u64() % span`, which has the bias of the table above (about $5 \times 10^{-17}$ at a span of $1000$, immeasurable), and `next_gaussian` evaluates only the cosine half of Box-Muller, discards the sine partner, and clamps the uniform number to at least $10^{-12}$ so $\ln$ is defined. By the tail table, that clamp bounds the output at $7.43$ standard deviations. Chapter 11 told how the three Gaussian generators in the workspace differ as streams while agreeing as distributions.
 
@@ -771,6 +773,23 @@ The fix is one shift: keep $32$ bits, and divide by $2^{31}$. The lesson is to t
 7. **Explain.** A paper reports that method $A$ beats method $B$ on "seed 0", and the code's default seed is $0$. Give two reasons the claim is weak and two things the authors should have done.
 8. **Predict.** For $n = 3 \cdot 2^{62}$ the rejecting integer sampler keeps a $64$-bit draw with probability $3/4$. What is the expected number of draws per result, and what would the plain remainder have done to the results?
 
+## Summary
+
+A deterministic machine produces random-looking numbers from a state and a rule. The linear congruential generator, $x_{i+1} = (a x_i + c) \bmod m$, needs odd $c$ and $a \equiv 1 \pmod 4$ (for a power-of-two modulus) to visit every state, yet its low bits cycle with period $2^{k+1}$ and its pairs lie on a lattice of lines whose spacing the spectral test measures. Separating the advance from the output, adding an odd constant and scrambling the state with shift-xors and multiplications (SplitMix64), removes both flaws and passes the bucket tests that expose them. Quality is judged by counting against a calibrated reference, never by a proof, and each test finds one kind of structure.
+
+From uniform bits come the rest. The top $53$ bits give a double in $[0, 1)$ without ever reaching $1$. An integer in $0 \dots n - 1$ needs rejection of the raw values that would make some results likelier; the bias is $n/2^{64}$ and invisible for small $n$, complete near $2^{64}$. A table is sampled by walking its prefix sums, a curve with an invertible cumulative distribution by inverting it (the exponential), the Gaussian by the Box-Muller transform derived from the polar integral of Chapter 11, and any bounded density by throwing darts at its rectangle. The Fisher-Yates shuffle is exactly uniform because it makes $n!$ equally likely choices that reach each order once; the natural alternative makes $n^n$ choices and cannot be.
+
+Reproducibility needs the same seed, the same order and number of draws, and the same arithmetic. A stream per purpose, derived from the seed and a name, makes draws independent of unrelated code, and makes parallel work safe. The opposite error is a hard-coded seed, which turns a sample into a fact: methods must be compared over many seeds, with shared seeds as a deliberate variance reduction, and the case-study engine makes every default seed random, prints it, records it and refuses a malformed one, over the full $64$-bit range. The limits are those of the tool: the generators here are statistical, predictable from one output, and the numbers they make are only as good as the questions we have tested. The next chapter, the project that closes this volume, uses the generator for its own tests of a numerical library, each of which will need a seed that is drawn, printed and reproducible.
+
+## References
+
+- Box, G. E. P. and Muller, M. E., "A Note on the Generation of Random Normal Deviates", *Annals of Mathematical Statistics*, 1958.
+- Durstenfeld, R., "Algorithm 235: Random Permutation", *Communications of the ACM*, 1964.
+- Hull, T. E. and Dobell, A. R., "Random Number Generators", *SIAM Review*, 1962.
+- Marsaglia, G., "Random Numbers Fall Mainly in the Planes", *Proceedings of the National Academy of Sciences*, 1968.
+- Marsaglia, G. and Bray, T. A., "A Convenient Method for Generating Normal Variables", *SIAM Review*, 1964.
+- Steele, G. L., Lea, D. and Flood, C. H., "Fast Splittable Pseudorandom Number Generators", *OOPSLA*, 2014.
+
 ## Exercises
 
 1. **[Calculate]** For the generator $x_{i+1} = (5 x_i + 3) \bmod 16$ start at $x_0 = 2$ and write the first $8$ states. Then find the period of the generator $x_{i+1} = (3 x_i + 1) \bmod 16$ from $x_0 = 1$ and explain from the parity of the states why it is shorter than $16$.
@@ -786,14 +805,6 @@ The fix is one shift: keep $32$ bits, and divide by $2^{31}$. The lesson is to t
 11. **[Investigate]** Reproduce the three comparisons of `randomness.hidden_luck` on a toy model of your own. How many seeds per arm do you need before the change of learning rate from $0.01$ to $0.0105$ is detected with a standard error well below the gap? Does the pairing of arms on the same seed change the number?
 12. **[Investigate]** Make the broken LCG of `randomness.lattice_lines` ($a = 4097$, $c = 1$, $m = 65536$) a Gaussian source by feeding pairs of it into Box-Muller and plot or count the output. What structure survives the transform, and what does that say about using a poor generator under a good transform?
 
-## Summary
-
-A deterministic machine produces random-looking numbers from a state and a rule. The linear congruential generator, $x_{i+1} = (a x_i + c) \bmod m$, needs odd $c$ and $a \equiv 1 \pmod 4$ (for a power-of-two modulus) to visit every state, yet its low bits cycle with period $2^{k+1}$ and its pairs lie on a lattice of lines whose spacing the spectral test measures. Separating the advance from the output, adding an odd constant and scrambling the state with shift-xors and multiplications (SplitMix64), removes both flaws and passes the bucket tests that expose them. Quality is judged by counting against a calibrated reference, never by a proof, and each test finds one kind of structure.
-
-From uniform bits come the rest. The top $53$ bits give a double in $[0, 1)$ without ever reaching $1$. An integer in $0 \dots n - 1$ needs rejection of the raw values that would make some results likelier; the bias is $n/2^{64}$ and invisible for small $n$, complete near $2^{64}$. A table is sampled by walking its prefix sums, a curve with an invertible cumulative distribution by inverting it (the exponential), the Gaussian by the Box-Muller transform derived from the polar integral of Chapter 11, and any bounded density by throwing darts at its rectangle. The Fisher-Yates shuffle is exactly uniform because it makes $n!$ equally likely choices that reach each order once; the natural alternative makes $n^n$ choices and cannot be.
-
-Reproducibility needs the same seed, the same order and number of draws, and the same arithmetic. A stream per purpose, derived from the seed and a name, makes draws independent of unrelated code, and makes parallel work safe. The opposite error is a hard-coded seed, which turns a sample into a fact: methods must be compared over many seeds, with shared seeds as a deliberate variance reduction, and the case-study engine makes every default seed random, prints it, records it and refuses a malformed one, over the full $64$-bit range. The limits are those of the tool: the generators here are statistical, predictable from one output, and the numbers they make are only as good as the questions we have tested. The next chapter, the project that closes this volume, uses the generator for its own tests of a numerical library, each of which will need a seed that is drawn, printed and reproducible.
-
 ## Key terms
 
 - **pseudo-random generator**: a deterministic state machine (a state, a rule that advances it, and a rule that turns it into a number) whose outputs are judged by how closely they resemble draws from a uniform distribution, not by being unpredictable to someone who knows the rule. <!-- concept: pseudo-random-generator -->
@@ -805,7 +816,7 @@ Reproducibility needs the same seed, the same order and number of draws, and the
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $38 = 16 \cdot 2 + 6$, so $q = 2$ and $r = 6$. With the floor convention $-7 = 5 \cdot (-2) + 3$, so the remainder is $3$.
 2. $2^{64} = 18{,}446{,}744{,}073{,}709{,}551{,}616$ patterns; the largest unsigned integer is $2^{64} - 1 = 18{,}446{,}744{,}073{,}709{,}551{,}615$.

@@ -5,8 +5,6 @@
 
 *Can you build the numerical toolkit every later chapter relies on, and prove each piece correct?*
 
-## The goal
-
 Seventeen chapters have taught ideas. This one asks you to turn them into a program. You will write, in a language of your choice and using nothing but its standard library, a small numerical library with seven parts:
 
 1. A **strided array** with views (transpose, slice) and explicit broadcasting.
@@ -21,15 +19,13 @@ None of this is new. Every part was derived in an earlier chapter; the project a
 
 The library is also what the rest of the book quietly assumes. Volume III checks every gradient it derives against a numerical one, Volume IV spends whole chapters on making the matrix product and the reductions fast, and every experiment from Volume II onward starts from a seeded generator. Having your own version of these pieces, verified to the bit where bits can be verified, gives you a trusted base to compare everything else against.
 
-How the project is organised. Each milestone says what to build (in the book's pseudocode, which fixes the interface and nothing else), why it matters later, a check you run before moving on, and the mistakes that readers actually make. The **acceptance tests** at the end give concrete inputs and the exact outputs a correct library produces, written so that any implementation in any language can be tested against them. Every expected value was computed by a second, independent implementation, `scripts/book/worked/project_numlib.py`, and is regenerated whenever the book is built.
+Each milestone below states what to build in the book's pseudocode, which fixes the interface and nothing else, says why the piece will be needed again, gives numbers to check against before you move on, and names the slips readers actually make. The **acceptance tests** at the end give concrete inputs and the exact outputs a correct library produces, written so that any implementation in any language can be tested against them. Every expected value was computed by a second, independent implementation, `scripts/book/worked/project_numlib.py`, and is regenerated whenever the book is built.
 
 ![Seven boxes labelled with the milestones 1 to 7, placed in four layers with no crossing arrows. Arrows show that milestone 2 and milestone 5 use milestone 1, milestone 5 also uses milestones 2 and 3, milestone 6 uses 3 and 4, and the integration task, highlighted, uses 4, 5 and 6.](img/numlib-milestones.svg)
 
 The figure shows which milestone calls which, so the order 1 to 7 is a valid build order. Build and test each before starting the next; a failure in milestone 7 that traces back to milestone 1 costs an afternoon, and the same failure caught by milestone 1's own check costs a minute.
 
-## Before you begin
-
-These questions reach across the whole volume. Answer each from memory before reading on; the answers are at the end.
+Before the first line of code, six questions that reach across the whole volume. Answer each from memory; the answers are at the end.
 
 1. (Chapter 5, [Arrays, Shapes, Strides and Broadcasting](05-arrays.md)) A row-major array of shape $[3, 4]$ has strides $(4, 1)$. What are the shape and strides of its transpose, and does transposing move any number?
 2. (Chapter 4, [Matrices as Linear Maps](04-matrices.md), and Chapter 16, [Algorithms, Cost and Complexity](16-algorithms.md)) How many multiplications and additions does the product of an $[m, k]$ matrix and a $[k, n]$ matrix take, counted as multiply-adds?
@@ -44,7 +40,7 @@ A note on language and style. The pseudocode below follows [Pseudocode Conventio
 
 ### Milestone 1: a strided array with views and explicit broadcasting
 
-**What to build.** An `Array` is flat shared storage plus an offset, a shape and a list of strides (equation (1) of Chapter 5: element $(i_0, \dots, i_{R-1})$ lives at $o_0 + \sum_k i_k s_k$). Views share storage; only `copy` and `reshape` of a non-contiguous view move numbers.
+Everything else stands on one record, so it comes first. An `Array` is flat shared storage plus an offset, a shape and a list of strides (equation (1) of Chapter 5: element $(i_0, \dots, i_{R-1})$ lives at $o_0 + \sum_k i_k s_k$). Views share storage; only `copy` and `reshape` of a non-contiguous view move numbers.
 
 ```text
 record Array:
@@ -67,9 +63,9 @@ function reshape(a: Array, shape: array<int>[Q]) -> Array                # view 
 
 `slice` requires `0 <= start[k] <= stop[k] <= shape[k]` and `step[k] >= 1` on every axis (anything else is an error); `start[k] == stop[k]` gives an empty axis of size $0$. The new axis $k$ has $\lceil (\mathrm{stop}_k - \mathrm{start}_k)/\mathrm{step}_k \rceil$ elements (the integers $\mathrm{start}_k, \mathrm{start}_k + \mathrm{step}_k, \dots$ below $\mathrm{stop}_k$), its stride is the old stride times $\mathrm{step}_k$, and the offset moves by $\sum_k \mathrm{start}_k\,\mathrm{stride}_k$; for $\mathrm{step} = 1$ the length is $\mathrm{stop} - \mathrm{start}$. `reshape` of a contiguous view keeps the view's offset. `add` accepts only equal shapes. To add a column to a row you call `broadcast_to` on both, which is Chapter 5's explicit-broadcast policy. This is not a limitation to be fixed later; it is the design, because a silent broadcast is the origin of the attention-heads bug of that chapter.
 
-**Why it matters later.** Every tensor in Volumes III to XVI is this record. The transpose that costs nothing, the slice that aliases, and the reshape that sometimes copies explain why a model's layout change is free in one place and a copy of gigabytes in another (Volume IV), and why a kernel needs the strides as arguments.
+Every tensor in Volumes III to XVI is this record. The transpose that costs nothing, the slice that aliases, and the reshape that sometimes copies explain why a model's layout change is free in one place and a copy of gigabytes in another (Volume IV), and why a kernel needs the strides as arguments.
 
-**Check.** Reproduce the table below by hand for its first two rows, then run your library on all rows.
+To check it, reproduce the table below by hand for its first two rows, then run your library on all rows.
 
 <!-- worked: project_numlib.array_views -->
 | view | shape | strides | offset | elements in row-major order | contiguous |
@@ -101,7 +97,7 @@ Column (10, 20, 30) of shape [3, 1] plus row (1, 2, 3, 4) of shape [1, 4], both 
 The same sum without the explicit broadcast is refused.
 <!-- /worked -->
 
-**Common mistakes.**
+Four slips are common in this milestone.
 
 - Computing the shape and the strides of a slice but forgetting to move the offset by `start[k] * strides[k]`; the view then reads the right pattern from the wrong place.
 - Letting `reshape` return a view of a transposed array. The numbers are in the wrong order, and no error is raised. `reshape` must copy unless the view is contiguous.
@@ -110,7 +106,7 @@ The same sum without the explicit broadcast is refused.
 
 ### Milestone 2: matrix multiplication with a check and a count
 
-**What to build.** Two functions with the same result, and the number of multiply-adds each performed.
+The matrix product is written twice, as two functions with the same result that each also return the number of multiply-adds they performed.
 
 ```text
 function matmul_naive(a: Array, b: Array) -> (Array, int):
@@ -125,9 +121,9 @@ function matmul(a: Array, b: Array) -> (Array, int):
 
 The point of the pair is the standard method for checking an optimised routine: keep the slow obvious one as the oracle, and compare on inputs that exercise the awkward cases, here transposed (non-contiguous) operands. Compare exactly on integer-valued inputs, where every sum is exact in floating point. On real-valued inputs the two functions above also agree exactly, which is worth knowing rather than assuming: in both loop orders each output element accumulates its products in the same order, $p = 0, 1, \dots, k - 1$, starting from $0$, so every rounding happens at the same place. A difference in the rounding appears only when the order of the additions along $p$ changes (a version that sums from $p = k - 1$ down, a blocked version, a version split over workers, as in Volume IV), and then a tolerance is needed (Chapter 15). The check below includes one such order-changing version. Add a function that, given three shapes, returns the cost of each of the two ways to bracket a product of three matrices; this is the same count used for sizing real models.
 
-**Why it matters later.** The matrix product is the dominant cost of everything in Volumes III to VI. Volume IV, "Making Matrix Multiplication Fast", starts from exactly this loop nest and asks what the memory system does with it. The method of keeping a naive oracle beside a fast kernel returns in every kernel chapter.
+The matrix product is the dominant cost of everything in Volumes III to VI. Volume IV, "Making Matrix Multiplication Fast", starts from exactly this loop nest and asks what the memory system does with it. The method of keeping a naive oracle beside a fast kernel returns in every kernel chapter.
 
-**Check.**
+Three tables check the pair: the products themselves, the agreement of the two loop orders on real numbers, and the operation counts.
 
 <!-- worked: project_numlib.matmul_cases -->
 A = [[1, 2, 3], [4, 5, 6]], B = [[7, 8], [9, 10], [11, 12]]: A B = [[58, 64], [139, 154]], 12 multiply-adds.
@@ -159,7 +155,7 @@ Two [16, 16] matrices from the generator seeded with 0x9c5e17297e131301: each en
 Chain of A [10, 100], B [100, 5], C [5, 50]: (A B) C costs 10*100*5 + 10*5*50 = 7,500; A (B C) costs 100*5*50 + 10*100*50 = 75,000; the ratio is 10.0.
 <!-- /worked -->
 
-**Common mistakes.**
+Three slips to look for.
 
 - Counting the additions that initialise the accumulator, or only the multiplications; fix the unit (one multiply-add) and document it.
 - Testing only square, contiguous, small-integer inputs. A routine that reads `b.strides[0]` where it meant `b.strides[1]` passes on a symmetric matrix.
@@ -167,7 +163,7 @@ Chain of A [10, 100], B [100, 5], C [5, 50]: (A B) C costs 10*100*5 + 10*5*50 = 
 
 ### Milestone 3: reductions that survive: compensated sum and log-sum-exp
 
-**What to build.**
+Two reductions that survive input which breaks the obvious versions come next.
 
 ```text
 function kahan_sum(x: array<real>[N]) -> real          # Chapter 15: running total s and lost-part c
@@ -179,9 +175,9 @@ function logsumexp(z: array<real>[N]) -> real:
 
 Two details beyond the chapter. First, the language must not be allowed to "optimise" the compensation away: if your compiler has a fast-math mode, leave it off for this file, and let the acceptance test be the proof. Second, define what happens at the edges of `logsumexp`: a list of $-\infty$ must return $-\infty$ without computing $-\infty - (-\infty)$, which is not a number.
 
-**Why it matters later.** Log-sum-exp is the denominator of the softmax and the core of the loss every classifier and language model in Volumes III and V trains on. Kahan summation is the cheapest repair for the sums of millions of terms that appear in losses, norms and statistics (Volume IV, "Parallel Reductions, Scans and Sorting", asks how to get the same accuracy when the sum is spread over thousands of workers).
+Log-sum-exp is the denominator of the softmax and the core of the loss every classifier and language model in Volumes III and V trains on. Kahan summation is the cheapest repair for the sums of millions of terms that appear in losses, norms and statistics (Volume IV, "Parallel Reductions, Scans and Sorting", asks how to get the same accuracy when the sum is spread over thousands of workers).
 
-**Check.**
+The compensated sum is checked against the exactly rounded sum of three inputs designed to defeat the plain loop.
 
 <!-- worked: project_numlib.compensated_sums -->
 | input | exact sum | left to right | error / sum of absolute values | compensated | error / sum of absolute values |
@@ -222,7 +218,7 @@ The naive column evaluates the formula as written in IEEE arithmetic (exp overfl
 
 The first case is the clearest: each of the $10^6$ terms $10^{-16}$ is smaller than half the gap above $1$ ($1.1 \times 10^{-16}$), so a left-to-right sum never moves off $1.0$, and loses all $10^{-10}$ of the true excess. The compensated sum recovers it. The third case adds $10^6$ small terms to a large one and then cancels the large one (Chapter 15, "Cancellation"): the left-to-right sum is off by about $6 \times 10^{-11}$ on an answer of $0.01$, a relative error near $6 \times 10^{-9}$, while the compensated sum is exact to the last digit shown.
 
-**Common mistakes.**
+Three slips are worth testing for.
 
 - Getting the compensation wrong. Three genuine mistakes, each shown in the last table of the check to fail the test on all three inputs: storing the lost part with the opposite sign (`c = y - (t - s)` instead of `c = (t - s) - y`), resetting `c` to zero at the start of every step so it is never carried, and adding the carried part instead of subtracting it (`y = x + c`). Separately, the correct line `c = (t - s) - y` is reduced to zero by a compiler that reassociates floating-point expressions (fast-math), which turns the compensated sum back into the plain one; the test with $10^6$ copies of $10^{-16}$ catches that at once.
 - Subtracting the maximum of the absolute values rather than the maximum of the values. For $z = (-1000, 0)$ the shift is $1000$, the exponents become $-2000$ and $-1000$, both underflow to zero, and the logarithm of zero follows.
@@ -230,7 +226,7 @@ The first case is the clearest: each of the $10^6$ terms $10^{-16}$ is smaller t
 
 ### Milestone 4: a seeded generator and its samplers
 
-**What to build.** SplitMix64 (Chapter 17) and four samplers built only on its `next` function, so that a test can replace `next` with a script.
+The generator of Chapter 17 comes next: SplitMix64 and four samplers built only on its `next` function, so that a test can replace `next` with a script.
 
 ```text
 record Generator:
@@ -251,9 +247,9 @@ function shuffle(a: inout array<T>[n], g: inout Generator) -> none     # Fisher-
 
 The constants are in Chapter 17: `GAMMA` = `0x9E3779B97F4A7C15`, and the two multipliers `0xBF58476D1CE4E5B9` and `0x94D049BB133111EB`; the mixing steps are shifts by $30$, $27$ and $31$. `integer(g, n)` needs the integer $2^{64}$ (Pseudocode Conventions: `int` is exact): in a language with only $64$-bit unsigned integers, compute the threshold $2^{64} \bmod n$ as $(2^{64} - n) \bmod n$ and treat $n = 2^{64}$ separately (threshold $0$, the result is the raw value). `integer(g, 1)` has threshold $0$, so it consumes one raw value and returns $0$. `normal` is the rule of Chapter 17 (the call returns the cosine half first and holds the sine half for the next call, drawing nothing); spelled out, it uses $u_1$ then $u_2$ as the two uniforms of a pair, computes $R = \sqrt{-2\ln(1 - u_1)}$ with angle $2\pi u_2$, returns $R\cos$ first and holds $R\sin$ for the next call. `shuffle` draws exactly one `integer(g, i + 1)` per position, from the last position down to position $1$.
 
-**Why it matters later.** Every experiment in Volumes II to XVI starts from a seed, and a result you cannot reproduce is a result you cannot debug. Every seed below is simply given: a generator started at a seed has the state equal to that seed before its first call, and each test names the calls it makes, in order. The tests below are bit-exact on purpose: unlike almost everything else in this volume, the generator's output is an integer sequence that either matches or does not, and a match is a strong sign that the shifts, the constants and the order of operations are all right.
+Every experiment in Volumes II to XVI starts from a seed, and a result you cannot reproduce is a result you cannot debug. Every seed below is simply given: a generator started at a seed has the state equal to that seed before its first call, and each test names the calls it makes, in order. The tests below are bit-exact on purpose: unlike almost everything else in this volume, the generator's output is an integer sequence that either matches or does not, and a match is a strong sign that the shifts, the constants and the order of operations are all right.
 
-**Check.** First the raw outputs, then each sampler.
+The checks run from the bottom up, the raw outputs first and then each sampler.
 
 <!-- worked: project_numlib.splitmix_vectors -->
 Each line below starts a new generator at the stated seed (state = seed before the first call) and makes the stated calls in order; `next_u64` is `next`.
@@ -313,7 +309,7 @@ The statistical test is a safeguard, not a proof: it checks that the mean and va
 | share with absolute value at most 1 | 0.68284 | 0.68269 | 0.0066 |
 <!-- /worked -->
 
-**Common mistakes.**
+Five slips are common here.
 
 - Dividing the 64-bit output by $2^{64}$ in a 64-bit float. The result can round to exactly $1.0$ (Chapter 17); the shift by $11$ avoids it. The scripted test with the raw value $2^{64} - 1$ catches this.
 - Using `raw mod n` without the threshold. The scripted test with $n = 3 \cdot 2^{62}$ fails, and the test with `integer(3)` shows whether the first raw value $0$ was refused.
@@ -323,7 +319,7 @@ The statistical test is a safeguard, not a proof: it checks that the mean and va
 
 ### Milestone 5: derivatives and gradients, checked
 
-**What to build.** A central difference with a step chosen from the arithmetic, a gradient built from it, and the comparison rule.
+The fifth piece is the numerical derivative: a central difference with a step chosen from the arithmetic, a gradient built from it, and the comparison rule.
 
 ```text
 function derivative(f: function(real) -> real, x: real) -> real:
@@ -344,9 +340,9 @@ The gradient check has a fixed shape. Take a function that uses the earlier mile
 $$f(\mathbf{x}) = \log \sum_{i} e^{z_i} + \tfrac{1}{2}\lVert \mathbf{x} \rVert^2, \qquad \mathbf{z} = A\mathbf{x},$$
 with $A$ of shape $[3, 2]$. Its gradient, derived with the chain rule of Chapter 8, is $A^{\mathsf T}\mathbf{p} + \mathbf{x}$, where $p_i = e^{z_i - \mathrm{lse}(\mathbf{z})}$ are weights that sum to $1$. Compute $f$ with your `matmul` and `logsumexp`, the analytic gradient with `matmul` of the transposed view, and compare the analytic gradient to `gradient(f, x)`.
 
-**Why it matters later.** In Volume III, every layer's backward pass is written by hand and every one is checked this way ("Proving Gradients Correct"); the habit of keeping a numerical gradient beside an analytic one is what makes a network trainable in practice, and the step rule and the tolerance are the same. The check you build here is the same idea as brain's gradient checker in `crates/gradcheck/src/lib.rs`, at a scale you can read in one sitting.
+In Volume III, every layer's backward pass is written by hand and every one is checked this way ("Proving Gradients Correct"); the habit of keeping a numerical gradient beside an analytic one is what makes a network trainable in practice, and the step rule and the tolerance are the same. The check you build here is the same idea as brain's gradient checker in `crates/gradcheck/src/lib.rs`, at a scale you can read in one sitting.
 
-**Check.**
+The derivative is checked on six functions with known derivatives, and the gradient on the function above.
 
 <!-- worked: project_numlib.derivative_cases -->
 | function | x | step h | analytic derivative | relative error of the check |
@@ -376,7 +372,7 @@ With close(analytic, numerical, rtol = 1e-6, atol = 1e-8): the correct gradient 
 
 The second half of that last paragraph is the more important test. A check that passes a correct gradient proves little unless it also rejects a wrong one. Here the wrong one forgets the term $\mathbf{x}$ contributed by the half squared norm, a realistic omission, and it must fail.
 
-**Common mistakes.**
+Four slips are common here.
 
 - A step that is too small. A step of $10^{-12}$ looks like a precise choice and gives an error near $10^{-4}$ on the exponential of the table in Chapter 15; the rule gives $10^{-12}$ relative error.
 - Perturbing all coordinates at once and calling the result a gradient; it is a directional derivative and can pass a gradient with two compensating bugs (Chapter 8).
@@ -385,7 +381,7 @@ The second half of that last paragraph is the more important test. A check that 
 
 ### Milestone 6: mean, standard error and a bootstrap interval
 
-**What to build.**
+The statistics module needs a mean, a standard error, a percentile and a bootstrap.
 
 ```text
 function mean(x: array<real>[n]) -> real                        # kahan_sum(x) / n
@@ -404,9 +400,9 @@ function bootstrap_interval(x: array<T>[n], statistic: function(array<T>[n]) -> 
 
 Note that `bootstrap_interval` takes a statistic as a function and a list of units of any type: in the integration task the units are pairs of numbers, which keeps the two values of a point together when it is resampled.
 
-**Why it matters later.** From Volume II on, every number reported about a model, an accuracy, a gap between two models, a latency, is an estimate from a sample, and Chapter 12's discipline is the difference between a finding and an accident. The bootstrap is the tool you reach for when the statistic has no formula, which is most statistics of interest.
+From Volume II on, every number reported about a model, an accuracy, a gap between two models, a latency, is an estimate from a sample, and Chapter 12's discipline is the difference between a finding and an accident. The bootstrap is the tool you reach for when the statistic has no formula, which is most statistics of interest.
 
-**Check.** The data are the twenty-five latencies of Chapter 12.
+The data for the check are the twenty-five latencies of Chapter 12.
 
 <!-- worked: project_numlib.statistics_cases -->
 Twenty-five latencies in milliseconds: [18.9, 19.8, 22.7, 23.5, 25.9, 27.5, 28.3, 36.4, 37.2, 37.8, 38.8, 46.9, 52.3, 56.1, 57.4, 58.5, 62.9, 67.0, 72.8, 77.3, 79.2, 81.2, 84.1, 90.0, 116.7]
@@ -428,7 +424,7 @@ The bootstrap draws, for each resample, n indices in order from integer(n), each
 
 The normal-formula interval and the bootstrap interval of the mean agree to within about a quarter of a millisecond at each end, as they did in Chapter 12; the difference is simulation noise plus the mild skew of the data. The interval of the median is wide, and is the same interval as in Chapter 12, for the same reason.
 
-**Common mistakes.**
+Five slips are common here.
 
 - A variance with divisor $n$: the standard error comes out about $2\%$ small at $n = 25$ (Chapter 12).
 - Resampling without replacement. Every resample is then a permutation of the data, and the statistic of a mean never varies.
@@ -438,7 +434,7 @@ The normal-formula interval and the bootstrap interval of the mean agree to with
 
 ### Milestone 7: putting it together
 
-**What to build.** One program, using only the six modules above, that carries out the following.
+The last milestone is one program, using only the six modules above, that carries out the following.
 
 1. Generate $n = 50$ points. Seed the generator with the given seed; for $i = 0, \dots, 49$ let $x_i = 4 i / 49$ and $y_i = 2 x_i + 1 + 0.5\, z_i$, where $z_i$ is the $i$-th call of `normal` (Chapter 17's rule). (The calls are in order: the cosine half of a pair for even $i$, the sine half for odd $i$.)
 2. Define the mean squared residual of a line $y = a x + b$:
@@ -455,11 +451,11 @@ Check the analytic gradient against `gradient` at the starting point $(0, 0)$ wi
 4. Compare the result with the closed-form straight line through the points: slope $\sum_i (x_i - \bar x)(y_i - \bar y) \big/ \sum_i (x_i - \bar x)^2$ and intercept $\bar y - \text{slope}\cdot\bar x$. These are the values at which both partial derivatives vanish, and the stepped values must agree with them to $10^{-12}$.
 5. Report a $95\%$ bootstrap interval for the slope. The units are the $(x_i, y_i)$ pairs, the statistic is the closed-form slope, there are $2000$ resamples, and the generator is a second one with the given second seed. The closed form is used inside the resamples because it is the quantity step 3 converges to, as step 4 has just verified, and it is $3000$ times cheaper.
 
-**Summation order.** Every sum in this task (the means, the loss, the gradient, the sums of the closed form) is a plain left-to-right sum in index order starting from $0.0$, divided by $n$ where a mean is meant; the compensated sum is not used here, so that the residual sizes below are those of one stated order. The residual of point $i$ is $r_i = (a x_i + b) - y_i$, the entries of the gradient are $2$ times the mean of $r_i x_i$ and $2$ times the mean of $r_i$, and $x_i$ is computed as $4.0 \cdot i / 49$ and $y_i$ as $((2 x_i) + 1) + 0.5 z_i$. A step computes both gradient entries before changing either value.
+The order of summation is fixed. Every sum in this task (the means, the loss, the gradient, the sums of the closed form) is a plain left-to-right sum in index order starting from $0.0$, divided by $n$ where a mean is meant; the compensated sum is not used here, so that the residual sizes below are those of one stated order. The residual of point $i$ is $r_i = (a x_i + b) - y_i$, the entries of the gradient are $2$ times the mean of $r_i x_i$ and $2$ times the mean of $r_i$, and $x_i$ is computed as $4.0 \cdot i / 49$ and $y_i$ as $((2 x_i) + 1) + 0.5 z_i$. A step computes both gradient entries before changing either value.
 
-**Why it matters later.** This is the shape of every experiment in the rest of the book, in miniature: generate data from a known truth, fit by following a checked gradient, and report the answer with its uncertainty. Volume II names the pieces and generalises them. The fact that the true slope $2$ is known lets you ask whether the interval does its job; the extension below asks for that over many repetitions.
+This is the shape of every experiment in the rest of the book, in miniature: generate data from a known truth, fit by following a checked gradient, and report the answer with its uncertainty. Volume II names the pieces and generalises them. The fact that the true slope $2$ is known lets you ask whether the interval does its job; the extension below asks for that over many repetitions.
 
-**Check.**
+The run to reproduce is this one.
 
 <!-- worked: project_numlib.integration_run -->
 Data: n = 50 points, x_i = 4 i / 49, y_i = 2 x_i + 1 + 0.5 z_i, where z_0, z_1, ... are the first fifty normal() draws of the generator seeded with 0xee2df5014fee1a4d, taken in order; x_i is computed as 4.0 * i / 49 and y_i as ((2 x_i) + 1) + 0.5 z_i. Every sum below (the means, the loss, the gradient, the closed-form sums) is a plain left-to-right sum starting from 0.0 in index order, not `kahan_sum`, and a mean is such a sum divided by n. The residual of point i is r_i = (a x_i + b) - y_i; the loss is the mean of r_i^2; the gradient entries are 2 times the mean of r_i x_i and 2 times the mean of r_i; a step replaces a by a - 0.05 g_a and b by b - 0.05 g_b, both gradient entries having been computed before either value changes. The numerical gradient uses the step rule of `derivative` on each coordinate. The lines about sizes below are tested by their stated bounds, not digit for digit.
@@ -473,7 +469,7 @@ Data: n = 50 points, x_i = 4 i / 49, y_i = 2 x_i + 1 + 0.5 z_i, where z_0, z_1, 
 - 95 percent bootstrap interval of the slope, resampling whole (x, y) pairs, 2000 resamples, generator seeded with 0x04b462cf8895c323: [1.8749999057354618, 2.121799586388773]; it contains the true slope 2.
 <!-- /worked -->
 
-**Common mistakes.**
+Four slips are common here.
 
 - Using the same generator for the data and the bootstrap. It works, but then the interval depends on how many numbers the data generation consumed, and a harmless change to step 1 changes step 5; give each job its own seed (Chapter 17, "Seeds and reproducibility").
 - Taking a step that is too large. With $x$ running to $4$, the curvature of $L$ is large enough that the step $0.2$ makes the iteration diverge (try it); if the gradient check passes and $L$ rises, the step is the suspect.
@@ -529,7 +525,7 @@ These are optional. Each is a bigger test of the same ideas.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. The transpose has shape $[4, 3]$ and strides $(1, 4)$. No number moves: it is a new description of the same storage (Chapter 5).
 2. $m k n$ multiply-adds: $k$ for each of the $m n$ outputs.
