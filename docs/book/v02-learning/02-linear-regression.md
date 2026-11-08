@@ -5,8 +5,6 @@
 
 *How do we find the straight line that best explains our measurements, and what does "best" mean?*
 
-## The problem
-
 The previous chapter ended with a promise and a complaint. The promise: a model
 is a function with open parameters, and learning is choosing them with data. The
 complaint: the only way we had to choose was to try thousands of lines on a grid
@@ -15,20 +13,17 @@ as $m^k$ with $k$ parameters. The workshop that built the temperature sensor
 still wants an answer for a sensor that reads $1.75$ V, and it would like to
 get it without computing $58{,}081$ scores.
 
-There are really three questions hiding in that complaint, and this chapter
-answers them in order.
-
-1. **What does "best" mean?** The average of absolute differences was chosen
-   because it is easy to read, not because it is right. We need a number that
-   scores a choice of parameters, with a name, a definition and a reason.
-2. **Can the best line be computed instead of searched for?** For a line with a
-   score of the right kind, yes: it is the solution of a short system of
-   equations, and the same derivation works for any number of features.
-3. **What do we do when that cannot be done?** When there are too many
-   parameters or too much data for a direct solution, we need a method that
-   improves a guess step by step. That method, which gets its name in its own
-   section below, is the one that will train every network in this book. We study it here on the one
-   problem where we can see all of it: the line.
+Three questions hide in that complaint. The first is what "best" ought to mean.
+The average of absolute differences was chosen because it is easy to read, not
+because it is right, so we need a number that scores a choice of parameters,
+with a name, a definition and a reason. The second is whether the best line can
+be computed instead of searched for. For a line scored the right way it can: it
+is the solution of a short system of equations, and the same derivation works
+for any number of features. The third is what to do when that system cannot be
+solved, because there are too many parameters or too much data. Then a guess has
+to be improved step by step, and that method, which earns its name in a section
+below, is the one that will train every network in this book. We study it on the
+one problem where all of it can be seen at once: the line.
 
 The data are the ten sensor rows of chapter 1 (their generator and seed are given there, in the section "Too small, too big").
 
@@ -49,16 +44,9 @@ N = 10 measured rows (sorted by voltage; the source that produced them and the o
 | 10 | 2.68 | 70.6 |
 <!-- /worked -->
 
-You may use from earlier chapters: the model, its parameters and the idea of a
-score for a choice of parameters (chapter 1 of this volume); the transpose, the
-matrix inverse and elimination (Volume I, chapter 4); convexity (chapter 7);
-the gradient and the condition number (chapter 8); gradient flow and the
-stability of Euler's method (chapter 9); and z-scores (chapter 12).
-
-## Before you begin
-
-Six questions to answer from memory. The answers are at the end of the chapter.
-If one is hard, go back to the chapter named before reading on.
+The derivations that follow lean on six ideas from earlier chapters. Try these
+from memory before reading on; the answers are at the end of the chapter, and
+a hard one names the chapter to revisit.
 
 1. (Chapter 1 of this volume, "The Learning Problem".) The score of chapter 1 for the line $f(v) = 24v + 9$ was $4.29$ degrees. If we change the line to $f(v) = 20v + 18$, which things change: the ten rows, the parameters, the score?
 2. (Volume I, chapter 8, "Gradients, Jacobians and Many Variables", the gradient.) For $L(w_1, w_2) = w_1^2 + 3 w_1 w_2$, what is the gradient at $(1, 1)$, and in which direction does $L$ fall fastest?
@@ -1094,42 +1082,42 @@ squares of *relative* errors, so every size counts equally rather than the
 largest losses dominating. That is a modelling decision, made by the transformation, and
 is worth making deliberately.
 
-## Making it work
+## Keeping a hand-written regression honest
 
-**Include the column of ones.** A line through the origin is a different model
-and usually a wrong one. The most common bug in a hand-written regression is
-a missing intercept column, and the residuals' failing to sum to zero is the
-symptom: a least-squares fit with an intercept always has residuals that sum to zero.
+A hand-written regression fails in a few recurring ways, and each leaves a trace
+that can be looked for. Forget the column of ones and the program fits a line
+through the origin, which is a different model and usually a wrong one; the
+trace is that the residuals no longer sum to zero, as they always do for a
+least-squares fit with an intercept.
 
-**Solve; do not invert.** Use elimination on the normal equations (chapter 4).
-Check that the solver reports a vanishing pivot instead of returning numbers, and
-check the condition number before trusting individual weights.
+Solve the normal equations by elimination (Volume I, chapter 4) instead of
+inverting, make the solver report a vanishing pivot instead of returning numbers,
+and read the condition number before trusting individual weights. With
+correlated features the weights are not a ranking of importance, as the
+collinearity table showed.
 
-**Check the gradient.** If you write the gradient by hand for a new model,
-compare it with finite differences on a small case, as the table above did. A
-descent with a wrong gradient still runs and still lowers the loss for a while,
-and then stalls somewhere meaningless.
+A gradient written by hand for a new model deserves a finite-difference check on
+a small case, as the table above did, because a descent with a wrong gradient
+still runs and still lowers the loss for a while before it stalls somewhere
+meaningless. After that, watch the loss, not the weights. A rising loss means the
+learning rate is above the limit (or, for models that are not quadratic, that the
+step overshoots a feature of the surface): halve the rate. A loss that falls but
+very slowly means bad conditioning or a rate that is too small, and the scales of
+the features should be examined before the rate is touched.
 
-**Watch the loss, not the weights.** A rising loss means the learning rate is
-above the limit (or, for models that are not quadratic, that the step overshoots
-a feature of the surface); halve the rate. A loss that falls but very slowly means
-bad conditioning or a rate that is too small: look at the scales of the features
-before touching the rate.
+That points at the habit that pays most: scale the features, then start with a
+rate near $1/\lambda_{\max}$. For z-scored features of a linear model
+$\lambda_{\max}$ is of order $1$ times a small constant, so a rate of $0.1$ to
+$0.5$ is a safe first try. For larger models the reasoning does not transfer
+unchanged, and the next volume's optimizers chapter asks what to do instead.
+Scaling also protects against three misreadings. A stopping rule on the change
+in the loss is not a guarantee of being near the minimum. A loss in z-score
+units and one in raw units cannot be compared by their weights, which change with
+the scale, although the predictions and the loss do not. And a learning rate that
+worked on one scale of data can be millions of times too large, or too small, on
+another with no change to the code.
 
-**Scale the features, then start with the rate $1/\lambda_{\max}$.** For z-scored
-features of a linear model, $\lambda_{\max}$ is of order $1$ times a small
-constant, so a rate of $0.1$ to $0.5$ is a safe first try. For larger models the
-reasoning does not transfer unchanged, and the next volume's optimizers chapter
-asks what to do instead.
-
-**Common mistakes.**
-
-- Taking a stopping rule on loss change as a guarantee of being near the minimum.
-- Comparing the loss of a fit in z-score units with one in raw units as if the weights were comparable: the weights change with the scale; the predictions and the loss do not.
-- Reading individual weights as importance when features are correlated, as the collinearity table showed.
-- Using the learning rate that worked on one scale of data on another: millions of times too large, or too small, with no change to the code.
-
-## Where this appears in brain
+## Least squares and the plain step in brain's crates
 
 brain is mostly about models that no formula can solve, so exact least squares
 is rare in it, but the closed form turns up wherever a small fit is needed
@@ -1278,7 +1266,7 @@ shows; it needs a model whose output is a probability, and a loss that fits it.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. The parameters change (from $(24, 9)$ to $(20, 18)$), and so does the score. The ten rows do not change: they are the fixed data, so the score is a function of the parameters only.
 2. The gradient is $(2w_1 + 3w_2,\ 3w_1)$, which is $(5, 3)$ at $(1, 1)$. $L$ falls fastest in the direction $-(5, 3)$, the negative of the gradient.

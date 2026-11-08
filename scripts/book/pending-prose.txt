@@ -1,8 +1,5 @@
 # Chapters still to be rewritten as prose (scripts/book/check.py, recycled()).
 # Remove a line in the same change that rewrites its chapter; the list only shrinks.
-docs/book/v02-learning/02-linear-regression.md
-docs/book/v02-learning/03-logistic-regression.md
-docs/book/v02-learning/04-likelihood.md
 docs/book/v02-learning/05-generalization.md
 docs/book/v02-learning/06-metrics.md
 docs/book/v02-learning/07-classical-methods.md

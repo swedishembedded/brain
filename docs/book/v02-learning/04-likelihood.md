@@ -5,17 +5,13 @@
 
 *Why are the losses we use the right ones, and what does it mean to prefer simple explanations?*
 
-## The problem
-
 A coin is flipped ten times and the sequence is H H T H H T H T H H: seven heads and three tails. What is the probability $\theta$ that this coin lands heads? Everyone answers "seven tenths", and almost nobody asks why that answer is better than $0.5$, or $0.6$, or $0.75$. The question has a precise answer, and the answer is the idea behind every loss function in the last two chapters.
 
 Suppose the coin has bias $\theta$ and the flips are independent. The probability of this exact sequence is a product of ten numbers, $\theta$ for each head and $1 - \theta$ for each tail: $\theta^7(1-\theta)^3$. Compute it for two candidate biases by hand. At $\theta = 0.5$ it is $0.5^{10} = 0.000977$. At $\theta = 0.7$ it is $0.7^7 \times 0.3^3 = 0.0022236$. The data we saw are about $2.3$ times as probable if the coin has bias $0.7$ as if it is fair. That ratio is a reason to prefer $0.7$, and the whole chapter grows from taking it seriously.
 
 Two puzzles from the previous chapters get answered along the way. Chapter 2 minimised the mean squared error and chapter 3 the binary cross-entropy, and each time the justification was "it works": the first is smooth and has a closed-form minimiser, the second does not saturate. Both were also promised a deeper reason, and here it is: each is the probability of the data under an assumption about how the data arose, read backwards. The second puzzle is the one chapter 3 ended on. Data that a straight boundary separates have no best weights; gradient descent pushes them to infinity. Something has to say that huge weights are implausible, and saying it with probability turns out to be exactly an added penalty on the size of the weights, the practice called regularization (defined where it arises, below).
 
-## Before you begin
-
-Answer these from memory; the answers are at the end of the chapter.
+Six ideas from earlier chapters do the work below. Try them from memory first; the answers are at the end of the chapter, under "Recall questions".
 
 1. (Chapter 10, Bayes' rule) A defect occurs in 1% of parts. A detector alarms on 90% of defective parts and on 10% of good parts. Given an alarm, is the probability of a defect near $0.9$? Compute it.
 2. (Chapter 1, logarithms) What is $\ln(ab)$ in terms of $\ln a$ and $\ln b$, and what is $\ln(0.5^{10})$?
@@ -559,19 +555,19 @@ Data (x, y): (0.5, 0), (1.0, 0), (2.0, 1), (3.0, 1); the features of an example 
 
 The gradient norm is the length of the gradient of the penalised objective, $\lambda\mathbf{w}$ included, at the final weights; $k$ counts completed steps, and the feature order is the constant $1$ first, so $w_0$ is the intercept and $w_1$ the weight of $x$. The first row reproduces chapter 3: the norm keeps growing ($10.9720$, $18.9164$, $27.1733$) and the gradient norm is still $7.20 \times 10^{-5}$ after $10^5$ steps, so the fit has not converged and never will. With any $\lambda > 0$ the descent reaches a stationary point and stays there: at $\lambda = 0.01$ the norm is $4.5071$ at $10^3$ steps and still $4.5071$ at $10^5$, and the gradient norm of every penalised row is below $10^{-12}$, which is round-off: the table prints the bound and not the digits, because the digits of a residue that small depend on the order of summation. The probabilities stop short of the extremes, and more strongly the larger the penalty: the model's probability that the part at $x = 1$ is rejected is $0.0006$ unpenalised, $0.0766$ at $\lambda = 0.001$, $0.2551$ at $0.01$ and $0.4801$ at $0.1$, which says what four examples can honestly say. The corresponding prior widths, from $\sigma_w^2 = 1/(N\lambda)$ with $N = 4$, are $15.8$, $5.0$ and $1.6$ for the three penalties: the more the model is told to doubt large weights, the less confidently it separates the parts. The boundary moves too, from $1.4845$ to $1.0858$ at $\lambda = 0.1$; this is partly because both weights are penalised, the intercept included, which pulls the boundary away from the midpoint of the classes. Penalising the intercept is a choice, discussed below, and Exercise 11 asks for the comparison.
 
-## Making it work
+## Turning the theory into a training run
 
-**Work in logarithms and logits.** Nothing in a training computation forms the probability of a dataset. A sum of $\ln p$ per example is formed, and each $\ln p$ is evaluated by the stable forms of earlier chapters: the logit form $\mathrm{softplus}(z) - yz$ of chapter 3 for a binary label, log-sum-exp for a category. The product of the table above, which underflowed at ten thousand flips, is a computation no program should ever perform.
+Work in logarithms and logits. Nothing in a training computation forms the probability of a dataset. A sum of $\ln p$ per example is formed, and each $\ln p$ is evaluated by the stable forms of earlier chapters: the logit form $\mathrm{softplus}(z) - yz$ of chapter 3 for a binary label, log-sum-exp for a category. The product of the table above, which underflowed at ten thousand flips, is a computation no program should ever perform.
 
-**The penalty compares weights across features, so their scales must be comparable.** A feature measured in millimetres needs a weight a thousand times larger than the same feature in metres, and a penalty on $\lVert\mathbf{w}\rVert^2$ would punish it a million times more for no reason. Standardise features first (z-scores, chapter 12) before penalising.
+A penalty compares weights across features, so their scales must be comparable. A feature measured in millimetres needs a weight a thousand times larger than the same feature in metres, and a penalty on $\lVert\mathbf{w}\rVert^2$ would punish it a million times more for no reason. Standardise features first (z-scores, chapter 12) before penalising.
 
-**The intercept is usually left out of the penalty.** A prior centred at zero for the intercept says that the average label is probably zero, which is arbitrary. Leaving it unpenalised makes the fit invariant to shifting the labels. The worked tables of this chapter penalise it for simplicity and say so.
+The intercept is usually left out of the penalty. A prior centred at zero for the intercept says that the average label is probably zero, which is arbitrary. Leaving it unpenalised makes the fit invariant to shifting the labels. The worked tables of this chapter penalise it for simplicity and say so.
 
-**The penalty strength is not learned by the loss.** The training loss is lowest at $\lambda = 0$ in every table above, because a penalty can only move the weights away from the training minimum. $\lambda$ is a setting chosen by the person, and it is chosen by trying several values and judging each on examples that were not used for fitting, the subject of the next chapter. In MAP terms, the prior's width is a choice and the data cannot fully check it.
+Nor can the loss learn the penalty strength. The training loss is lowest at $\lambda = 0$ in every table above, because a penalty can only move the weights away from the training minimum. $\lambda$ is a setting chosen by the person, and it is chosen by trying several values and judging each on examples that were not used for fitting, the subject of the next chapter. In MAP terms, the prior's width is a choice and the data cannot fully check it.
 
-**MAP is a point, not the posterior.** The MAP estimate keeps only the peak of the posterior and discards its width, which, as the first table of the chapter showed, is how much the data say. Using the whole posterior, predicting by averaging over every plausible parameter value weighted by its posterior probability, is the Bayesian answer and is usually intractable for a large model; the later chapters on variational autoencoders and on forecasting uncertainty return to the question.
+Last, MAP is a point, not the posterior. The MAP estimate keeps only the peak of the posterior and discards its width, which, as the first table of the chapter showed, is how much the data say. Using the whole posterior, predicting by averaging over every plausible parameter value weighted by its posterior probability, is the Bayesian answer and is usually intractable for a large model; the later chapters on variational autoencoders and on forecasting uncertainty return to the question.
 
-## Where this appears in brain
+## Weight decay, log-probabilities and censored likelihoods in brain
 
 **Weight decay in the optimisers.** The penalty of this chapter is applied in `crates/optim` as a decay term, in two forms. `Rule::SgdMomentum` in `crates/optim/src/rule.rs` adds `wd * w` to the gradient before the momentum step, which is exactly the L2 penalty's gradient $\lambda\mathbf{w}$ (the comment in the source calls it "coupled L2 weight decay, as torch"). `Rule::AdamW` instead subtracts `lr * wd * w` from the weight directly, in `Adam::update` in `crates/optim/src/lib.rs` and in the WGSL kernel `crates/kernels/wgsl/adamw.wgsl` (whose header gives the update as `p = p - lr*wd*p - lr * m_hat / (sqrt(v_hat) + eps)`): the decay is not part of the gradient at all, and that difference (the "W" in AdamW, "decoupled") is the subject of the optimisers chapter, which explains why it matters once the gradient is divided by an adaptive scale. In the regularization of this chapter the two forms are the same method; with a plain gradient step the effect of either on a weight is the multiplication by $1 - \eta\lambda$ derived above.
 
@@ -630,7 +626,7 @@ The limits are in the choices that remain. The loss is only as right as the dist
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. No. $P(\text{defect}\mid\text{alarm}) = \frac{0.9 \times 0.01}{0.9 \times 0.01 + 0.1 \times 0.99} = \frac{0.009}{0.108} = 0.0833$, about $8\%$: the rare base rate dominates.
 2. $\ln(ab) = \ln a + \ln b$, so $\ln(0.5^{10}) = 10\ln 0.5 = -6.9315$, the value in the coin table at $\theta = 0.5$.

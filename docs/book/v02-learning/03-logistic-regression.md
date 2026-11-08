@@ -5,8 +5,6 @@
 
 *How does a model output a probability for a yes-or-no question, and how do we train it?*
 
-## The problem
-
 A workshop turns out machine parts and inspects every one. An inspector measures how far the diameter is from the drawing (in hundredths of a millimetre) and then says one word: pass or reject. The workshop wants a program that does the same from the measurement alone, and, because a wrong call costs money in both directions, it wants more than a word. It wants a number: *how likely is it that this part would be rejected?* A part with a probability of $0.51$ and a part with $0.99$ are both "reject", and the workshop treats them differently.
 
 The previous chapter predicted a number on a scale: a temperature. Here the answer is one of two outcomes. A model that answers with one of a fixed set of categories, rather than a number on a scale, is a **classifier**, and the task of building one from labelled examples is **classification**. The label $y$ of a part is $1$ if it was rejected and $0$ if it passed. When there are exactly two classes, as here, the label takes the values $0$ and $1$ and the task is *binary* classification; the word is used for any number of classes, and the last section points at what changes for many.
@@ -35,18 +33,9 @@ Draw order, part by part (N = 12): x = round(5 u1, 1) with u1 = uniform(), then 
 
 (The generating law that appears in the draw order is nature's, written down here only so that the table can be reproduced; the learner never sees it.) The pattern is plain but not clean: large errors are mostly rejected and small ones mostly passed, yet one part at $x = 1.2$ was rejected and one at $x = 2.7$ passed. No single cut-off value of $x$, with every part above it called rejected and every part below it called passed, gets all twelve right. A model has to say that the chance of rejection rises with $x$ and that it is neither $0$ nor $1$ in the middle.
 
-This chapter builds that model in four steps, each answering a question the previous step raises.
+Building that model takes four steps, each forced by a question the one before leaves open. The first is to try the straight line we already own, fitted to the labels, and to watch it fail in two specific, measurable ways. What the model should output instead is a probability, which must lie between $0$ and $1$, and the idea of odds forces one function on us that turns a linear score into one. A score for a probability against an observed yes or no then has to be chosen, and it turns out to be the cross-entropy of Volume I applied to a coin with two sides, while the squared error of chapter 2 is the wrong choice here. Last come the weights themselves: gradient descent again, with a gradient so simple that it is worth deriving twice, a check that the problem has one valley, and the numerical care that a loss made of logarithms of probabilities demands.
 
-1. **Why not the line we already have?** We fit the straight line of chapter 2 to the labels and watch it fail in two specific, measurable ways.
-2. **What should the model output?** A probability, which must lie between $0$ and $1$. We find the one function that turns a linear score into a probability and show that it is forced on us by the idea of odds.
-3. **What should we minimise?** A score for a probability against an observed yes or no. It is the cross-entropy of Volume I applied to a coin with two sides, and we show why the squared error of chapter 2 is the wrong choice here.
-4. **How do we get the weights?** Gradient descent again, with a gradient so simple that it is worth deriving twice, a check that the problem has one valley, and the numerical care that a loss made of logarithms of probabilities demands.
-
-You may use from earlier chapters: gradient descent, the learning rate and the design matrix with a column of ones (chapter 2 of this volume); the dot product (Volume I, chapter 3); the logarithm (chapter 1); the derivative of the sigmoid (chapter 7); the gradient, convexity and the Hessian (chapters 7 and 8); the Bernoulli distribution (chapter 11); cross-entropy (chapter 13); and log-sum-exp and floating-point overflow (chapter 15).
-
-## Before you begin
-
-Six questions to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+Six ideas from earlier chapters carry that argument. Try them from memory before reading on; the answers are at the end of the chapter, and a hard one names the chapter to revisit.
 
 1. (Chapter 2 of this volume, "Linear Regression and the First Descent", gradient descent.) For $\mathcal{L}(w) = (w - 1)^2$, write one step of gradient descent from $w = 2$ with learning rate $\eta = 0.25$. What is the new $w$ and what is the loss before and after?
 2. (Volume I, chapter 11, "The Distributions Machine Learning Uses", the Bernoulli distribution.) A Bernoulli variable takes the value $1$ with probability $q = 0.3$. What is the probability of the value $0$, and what is the mean? Write the probability of an observed value $y \in \{0, 1\}$ as one formula in $q$ and $y$.
@@ -568,7 +557,7 @@ function bce_from_logit(z: real, y: real) -> real:
 
 The sigmoid of the pseudocode above has two branches for the same reason: the exponent is never positive, so the argument of `exp` can never overflow.
 
-**The tempting wrong fix.** The common repair is to clamp the probability into $[\varepsilon, 1 - \varepsilon]$ before taking the log. It removes the infinities and produces silent damage: the clamp is a flat region, so a model that is confidently wrong gets *no gradient* with which to climb out. The last section tells how that was found in brain.
+**The tempting wrong fix.** The common repair is to clamp the probability into $[\varepsilon, 1 - \varepsilon]$ before taking the log. It removes the infinities and produces silent damage: the clamp is a flat region, so a model that is confidently wrong gets *no gradient* with which to climb out. The section on brain's kernels tells how that was found in brain.
 
 ## When the data can be separated
 
@@ -596,26 +585,17 @@ The consequence for use is practical. Separable data are common when there are f
 
 A part is passed or rejected; an image shows one of a thousand objects. For $C$ classes the model produces one logit per class, and the sigmoid is replaced by the softmax, which turns $C$ scores into $C$ probabilities that sum to one. For $C = 2$ it reduces to this chapter: the probability of class $1$ is $\sigma(z_1 - z_0)$, a sigmoid of the difference of the two logits, and the loss is again the cross-entropy of chapter 13. The multiclass case, in which the gradient is again "probability minus the label", belongs to Volume III. Where each class is an independent yes-or-no question (an image may contain a dog *and* a ball), the model uses one sigmoid per class and this chapter's loss is applied per class, as the first story below shows.
 
-## Making it work
+## Using logistic regression without being surprised
 
-**Use the loss on logits.** Give the loss function the score $z$, never the probability. The library functions of every framework named "with logits" exist for this reason.
+Most of the trouble comes from handing the loss the wrong thing. Give the loss function the score $z$, never the probability: the library functions of every framework named "with logits" exist for this reason. The same goes for the threshold. A threshold of $1/2$ applies to the probability and $0$ to the logit, the two scales differ, and the threshold on $z$ for probability $t$ is $\mathrm{logit}(t)$; thresholding the logit at $1/2$, or the probability at $0$, is a quiet error.
 
-**Check the gradient.** $\hat{p} - y$ is easy to write and easy to get the sign wrong; the finite-difference table above is the standing test.
+Labels need the same care. Coded as $\{-1, +1\}$ they need the loss $\mathrm{softplus}(-y z)$, and a mix-up between that coding and the formula for $\{0, 1\}$ (or the reverse) gives a model that is exactly wrong. Forgetting the column of ones forces the boundary through the origin.
 
-**Initialise at zero.** For logistic regression with a column of ones, $\mathbf{w} = \mathbf{0}$ is a valid start: the loss is convex, so no symmetry has to be broken, and $\hat{p} = 1/2$ everywhere. (For networks, Volume III, the answer is different.)
+Gradients are easy to get wrong in sign, since $\hat{p} - y$ is so short, and the finite-difference table above is the standing test. Starting from zero is safe here, unlike in networks (Volume III): with a column of ones $\mathbf{w} = \mathbf{0}$ is a valid start, the loss is convex so no symmetry has to be broken, and $\hat{p} = 1/2$ everywhere. The learning rate $1/\lambda_{\mathrm{cap}}$ depends on $\lambda_{\max}(\mathbf{X}^\top\mathbf{X}/N)$, so the features should be scaled and chapter 2's lesson about conditioning applies unchanged.
 
-**Scale the features.** The learning rate $1/\lambda_{\mathrm{cap}}$ depends on $\lambda_{\max}(\mathbf{X}^\top\mathbf{X}/N)$, and chapter 2's lesson about conditioning applies unchanged.
+Finally, look at the probabilities and not only the decisions. A model can classify well while its probabilities are badly wrong, the separable case being an example, and chapter 6 develops the tools to measure it. An accuracy of $0.9167$ on the training set, in particular, says nothing yet about future parts.
 
-**Look at the probabilities, not only the decisions.** A model can classify well while its probabilities are badly wrong (the separable case is an example); chapter 6 develops the tools to measure it.
-
-**Common mistakes.**
-
-- Labels coded as $\{-1, +1\}$ with the formula for $\{0, 1\}$ (or the reverse). The loss in the $\pm 1$ coding is $\mathrm{softplus}(-y z)$; a mix-up gives a model that is exactly wrong.
-- Thresholding the logit at $1/2$, or the probability at $0$: the two scales differ, and the threshold on $z$ for probability $t$ is $\mathrm{logit}(t)$.
-- Forgetting the column of ones, which forces the boundary through the origin.
-- Reading an accuracy of $0.9167$ on the training set as a statement about future parts.
-
-## Where this appears in brain
+## The sigmoid and the logit loss in brain's kernels
 
 Logistic regression as a stand-alone model is not what brain is for, but every piece of this chapter is a kernel or a loss in it: the sigmoid, the cross-entropy on logits, the gradient $\hat{p} - y$, and the stable evaluation.
 
@@ -687,7 +667,7 @@ The limits of the chapter are in the data and in the model. A separable training
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. The gradient is $2(w - 1) = 2$ at $w = 2$, so $w \leftarrow 2 - 0.25 \cdot 2 = 1.5$. The loss falls from $(2 - 1)^2 = 1$ to $(1.5 - 1)^2 = 0.25$.
 2. $P(0) = 1 - 0.3 = 0.7$ and the mean is $q = 0.3$. One formula for both outcomes: $P(y) = q^{y}(1 - q)^{1 - y}$.
