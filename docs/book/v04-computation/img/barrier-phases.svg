@@ -1,0 +1,92 @@
+<!-- source-sha256: 4601c716a8f9f40eab1ab95ead231d1b30736af3d4c8d62abd0ae31b3868510d -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440" width="900" height="440"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="900" height="440" fill="#ffffff"/>
+<rect x="20" y="14" width="420" height="410" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">GPU: the 4 invocations run each phase together</text>
+<rect x="39" y="85" width="82" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="80" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 0</text>
+<text x="80" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s[0] = 5</text>
+<rect x="39" y="225" width="82" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="80" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 0</text>
+<text x="80" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">out = 26</text>
+<rect x="139" y="85" width="82" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 1</text>
+<text x="180" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s[1] = 6</text>
+<rect x="139" y="225" width="82" height="46" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 1</text>
+<text x="180" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">idle</text>
+<rect x="239" y="85" width="82" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="280" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 2</text>
+<text x="280" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s[2] = 7</text>
+<rect x="239" y="225" width="82" height="46" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="280" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 2</text>
+<text x="280" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">idle</text>
+<rect x="339" y="85" width="82" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="380" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 3</text>
+<text x="380" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s[3] = 8</text>
+<rect x="339" y="225" width="82" height="46" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="380" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 3</text>
+<text x="380" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">idle</text>
+<rect x="28" y="74" width="404" height="68" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<rect x="28" y="214" width="404" height="68" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<text x="230" y="56.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">phase 1: all at once</text>
+<text x="230" y="299.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">phase 2: all at once</text>
+<rect x="40" y="164" width="380" height="28" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="182.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">barrier: all 4 have arrived</text>
+<rect x="39" y="313" width="82" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="80" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5</text>
+<rect x="139" y="313" width="82" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6</text>
+<rect x="239" y="313" width="82" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="280" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">7</text>
+<rect x="339" y="313" width="82" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="380" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8</text>
+<text x="230" y="370.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">shared array s, one per workgroup</text>
+<text x="230" y="388.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">zeroed when the workgroup starts</text>
+<rect x="460" y="14" width="420" height="410" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="474" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">CPU: each phase is a loop over the 4 invocations</text>
+<rect x="479" y="85" width="82" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 0</text>
+<text x="520" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s[0] = 5</text>
+<rect x="479" y="225" width="82" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 0</text>
+<text x="520" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">out = 26</text>
+<rect x="579" y="85" width="82" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 1</text>
+<text x="620" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s[1] = 6</text>
+<rect x="579" y="225" width="82" height="46" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 1</text>
+<text x="620" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">idle</text>
+<rect x="679" y="85" width="82" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="720" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 2</text>
+<text x="720" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s[2] = 7</text>
+<rect x="679" y="225" width="82" height="46" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="720" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 2</text>
+<text x="720" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">idle</text>
+<rect x="779" y="85" width="82" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="820" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 3</text>
+<text x="820" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s[3] = 8</text>
+<rect x="779" y="225" width="82" height="46" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="820" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">l = 3</text>
+<text x="820" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">idle</text>
+<line x1="562" y1="108" x2="578" y2="108" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="562" y1="248" x2="578" y2="248" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="662" y1="108" x2="678" y2="108" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="662" y1="248" x2="678" y2="248" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="762" y1="108" x2="778" y2="108" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="762" y1="248" x2="778" y2="248" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="670" y="56.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">loop 1: for l in 0 .. 4, in order</text>
+<text x="670" y="299.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">loop 2: for l in 0 .. 4, in order</text>
+<rect x="480" y="164" width="380" height="28" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="670" y="182.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">end of loop 1 is the barrier</text>
+<rect x="479" y="313" width="82" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5</text>
+<rect x="579" y="313" width="82" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6</text>
+<rect x="679" y="313" width="82" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="720" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">7</text>
+<rect x="779" y="313" width="82" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="820" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8</text>
+<text x="670" y="370.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">shared array s, one per workgroup</text>
+<text x="670" y="388.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">one stack array, cleared at the start of each workgroup</text>
+<text x="670" y="406.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">mask alive[l] carries a return across the two loops</text>
+</svg>

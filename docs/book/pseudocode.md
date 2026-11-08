@@ -156,6 +156,7 @@ row of `x: [T, D]`".
 | `abs(x)` | absolute value; for a `complex` number its modulus |
 | `sign(x)` | **+1 if `x >= 0`, otherwise -1**. In particular `sign(0) = +1`, unlike the sign function of mathematics, which gives 0 there. Algorithms that need the convention say so (the rotation formulas of Jacobi's method in Chapter 6 divide by `abs(theta) + ...` and need a nonzero rotation when `theta = 0`) |
 | `min(a, b, ...)`, `max(a, b, ...)` | smallest and largest of two or more scalars |
+| `fma(a, b, c)` | the fused multiply-add of Volume IV, Chapter 9: `a * b + c` formed exactly and rounded **once** to the stated format (ties to even), where the expression `a * b + c` evaluated one operation at a time rounds twice (the product, then the sum); on `f32` operands `fma(a, b, c)` is the `f32` nearest to the exact value of `a * b + c` |
 | `floor(x)`, `ceil(x)` | the largest integer not above `x`, the smallest integer not below `x`; both return an `int` |
 | `sqrt`, `exp`, `log`, `sin`, `cos` | the usual functions; `log` is the natural logarithm and `sin`, `cos` take radians |
 | `log1p(x)` | `log(1 + x)` for `x > -1`, computed so that it stays accurate when `x` is tiny (Volume I, Chapter 15); where `1 + x` would round to 1, `log1p(x)` still returns about `x` |
@@ -353,6 +354,28 @@ can record them first and hand them over together, with three more operations:
 `dispatch(k, buffers, params, n_grp)` is `begin_commands`, one `record` and `submit`: one submission holding one launch.
 `read_back` waits for every submission made before it, and a list that is still open (recorded, not submitted) is not part of
 that wait: a program reads back only after it has submitted what the result depends on.
+
+**Backends (Volume IV, Chapter 9).** A **backend** is a program that provides the host operations above for one kind of device;
+code above it uses only these operations, and the book states the contract as an `interface` block, a list of operation
+signatures that every backend implements with the meanings given here:
+
+```text
+interface Backend:
+    capabilities() -> record
+    compile(source: text) -> kernel
+    create_buffer(bytes: int) -> buffer
+    upload(b: buffer, data)
+    dispatch(k: kernel, buffers: list<buffer>, params: list<u32>, n_grp: int)
+    read_back(b: buffer, count: int) -> array<f32>[count]
+    release(b: buffer)
+```
+
+`capabilities()` returns a record that describes the device and never changes while the backend lives. Its fields are
+`max_workgroup` (the largest workgroup size a kernel may declare, an `int`), `shared_bytes` (the shared memory of one workgroup in
+bytes), `subgroup` (the width of a subgroup, 0 when the device does not say) and `max_barriers` (the most barriers one kernel may contain: 0,
+1, or `infinity`). A capability a backend cannot establish is reported as the value that forbids the feature (0 or `false`), never as the value that allows
+it. `compile` either returns a kernel that computes what its source computes or reports an error that names the kernel; a backend never
+substitutes an approximation. A backend may also provide `begin_commands`, `record` and `submit`.
 
 ## Functions and mutation
 

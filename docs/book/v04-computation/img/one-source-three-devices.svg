@@ -1,0 +1,64 @@
+<!-- source-sha256: cf0cdbc6d6797eff109fd4f24767d5c36f6531a8efba6f4e2307f2f85e8fa3d8 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 450" width="900" height="450"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="900" height="450" fill="#ffffff"/>
+<text x="85" y="26.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#4a5568" text-anchor="middle">source</text>
+<text x="245" y="26.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#4a5568" text-anchor="middle">front end</text>
+<text x="430" y="26.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#4a5568" text-anchor="middle">text or IR for the target</text>
+<text x="625" y="26.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#4a5568" text-anchor="middle">compiler, at run time</text>
+<text x="805" y="26.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#4a5568" text-anchor="middle">device</text>
+<rect x="23" y="192" width="124" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="85" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">WGSL kernel</text>
+<text x="85" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">one text</text>
+<rect x="174" y="192" width="142" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="245" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">parse, validate</text>
+<text x="245" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">one checked IR</text>
+<line x1="150" y1="220" x2="171" y2="220" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="359" y="72" width="142" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="430" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">SPIR-V words</text>
+<text x="430" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">binary IR</text>
+<rect x="554" y="72" width="142" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="625" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">driver compiler</text>
+<text x="625" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">builds a pipeline</text>
+<rect x="734" y="72" width="142" height="56" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="805" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Vulkan GPU</text>
+<text x="805" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 workgroups x 4</text>
+<text x="805" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12 invocations</text>
+<line x1="504" y1="100" x2="551" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="699" y1="100" x2="731" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M316,220 L334,220 Q344,220 344,210 L344,110 Q344,100 354,100 L356,100" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="359" y="192" width="142" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="430" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">CUDA C++ text</text>
+<text x="430" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">indices clamped</text>
+<rect x="554" y="192" width="142" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="625" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">NVRTC compiles</text>
+<text x="625" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">to a cubin</text>
+<rect x="734" y="192" width="142" height="56" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="805" y="208.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">CUDA GPU</text>
+<text x="805" y="224.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 blocks x 4</text>
+<text x="805" y="240.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12 threads</text>
+<line x1="504" y1="220" x2="551" y2="220" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="699" y1="220" x2="731" y2="220" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="319" y1="220" x2="356" y2="220" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="359" y="312" width="142" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="430" y="336.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">native-compiler IR</text>
+<text x="430" y="352.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per-invocation code</text>
+<rect x="554" y="312" width="142" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="625" y="336.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">JIT compiler</text>
+<text x="625" y="352.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">to machine code</text>
+<rect x="734" y="312" width="142" height="56" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="805" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">CPU cores</text>
+<text x="805" y="344.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 x 4 loop nest</text>
+<text x="805" y="360.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12 body runs</text>
+<line x1="504" y1="340" x2="551" y2="340" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="699" y1="340" x2="731" y2="340" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M316,220 L334,220 Q344,220 344,230 L344,330 Q344,340 354,340 L356,340" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="554" y="263" width="142" height="34" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="625" y="276.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">or a cubin built</text>
+<text x="625" y="292.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ahead of time</text>
+<line x1="625" y1="248" x2="625" y2="263" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<rect x="40" y="422" width="22" height="14" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="70" y="434.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">text or IR the target&#x27;s tools take</text>
+<rect x="330" y="422" width="22" height="14" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="360" y="434.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">translator or compiler stage</text>
+<rect x="590" y="422" width="22" height="14" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="434.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">the device runs the kernel</text>
+</svg>

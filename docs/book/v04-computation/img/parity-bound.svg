@@ -1,0 +1,43 @@
+<!-- source-sha256: 0e656bf707a9ca5a9f7b6e410ab4279f4f0b1546870f70d8d20c4d7f0f9aa65f -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 442" width="640" height="442">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="442" fill="#ffffff"/>
+<line x1="58" y1="354" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="158.71" y1="354" x2="158.71" y2="30" stroke="#edf2f7"/>
+<text x="158.71" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1.5</text>
+<line x1="259.43" y1="354" x2="259.43" y2="30" stroke="#edf2f7"/>
+<text x="259.43" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="360.14" y1="354" x2="360.14" y2="30" stroke="#edf2f7"/>
+<text x="360.14" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2.5</text>
+<line x1="460.86" y1="354" x2="460.86" y2="30" stroke="#edf2f7"/>
+<text x="460.86" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="561.57" y1="354" x2="561.57" y2="30" stroke="#edf2f7"/>
+<text x="561.57" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3.5</text>
+<line x1="58" y1="318.65" x2="622" y2="318.65" stroke="#edf2f7"/>
+<text x="52" y="322.65" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-1</text>
+<line x1="58" y1="259.75" x2="622" y2="259.75" stroke="#edf2f7"/>
+<text x="52" y="263.75" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="200.84" x2="622" y2="200.84" stroke="#edf2f7"/>
+<text x="52" y="204.84" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="141.93" x2="622" y2="141.93" stroke="#edf2f7"/>
+<text x="52" y="145.93" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="83.02" x2="622" y2="83.02" stroke="#edf2f7"/>
+<text x="52" y="87.02" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">3</text>
+<rect x="58" y="30" width="564" height="324" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="564" height="324"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#4a5568" stroke-width="2.0" stroke-dasharray="6 4" points="99.12,188.81 220.39,153.34 341.66,117.88 462.93,82.41 584.2,46.94"/><polyline fill="none" stroke="#6b46c1" stroke-width="2.0" stroke-dasharray="6 4" points="99.12,218.57 220.39,209.96 341.66,203.53 462.93,198.4 584.2,194.12"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="99.12,254.65 220.39,247.41 341.66,251.61 462.93,263.41 584.2,254.61"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="99.12,277.48 220.39,266.88 341.66,300.56 462.93,312.81 584.2,319.53"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="99.12,257.83 220.39,249.89 341.66,255.7 462.93,259.95 584.2,253.79"/></g>
+<text x="340" y="390" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log10 of the number of terms n</text>
+<text x="14" y="192" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 192)">log10 of the error in units of u S</text>
+<text x="340" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Parity tolerance of a float32 dot product</text>
+<line x1="18.8" y1="413" x2="38.8" y2="413" stroke="#4a5568" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="44.8" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">bound of the left fold, k = n</text>
+<line x1="204.54" y1="413" x2="224.54" y2="413" stroke="#6b46c1" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="230.54" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">bound of the tree, k = 1 + ceil(log2 n)</text>
+<line x1="440.44" y1="413" x2="460.44" y2="413" stroke="#c05621" stroke-width="2"/>
+<text x="466.44" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">left fold, largest error of 40</text>
+<line x1="110.68" y1="430" x2="130.68" y2="430" stroke="#2b6cb0" stroke-width="2"/>
+<text x="136.68" y="434" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">tree, largest error of 40</text>
+<line x1="288.94" y1="430" x2="308.94" y2="430" stroke="#2f855a" stroke-width="2"/>
+<text x="314.94" y="434" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">left fold against tree, largest difference</text>
+</svg>

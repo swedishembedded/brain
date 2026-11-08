@@ -18,6 +18,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **AdamW**: Adam with decoupled weight decay: $\theta \leftarrow \theta - \eta\lambda\theta - \eta\hat{\mathbf{m}}/(\sqrt{\hat{\mathbf{v}}} + \epsilon_{\mathrm{den}})$. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
+**ahead-of-time compilation**: compiling kernels for a list of known device architectures before the program ships and loading the results at run time with a key that identifies their inputs, so that a machine without a compiler can run them, at the price of storage and of devices outside the list. *([One Program, Many Devices](v04-computation/09-backends.md))*
+
 **algorithm**: a finite list of definite steps that turns any input of a stated kind into an output of a stated kind, whose correctness can be argued with an invariant that holds before and after every pass of its loops. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
 **arithmetic intensity**: the number of floating-point operations a computation performs per byte it must move between main memory and the arithmetic, a property of the algorithm and the sizes and formats and not of the machine. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
@@ -29,6 +31,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **autoencoder**: a network trained to output its own input after passing it through a bottleneck layer much narrower than the input, so that it must learn a short code from which the input can be rebuilt. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 ## B
+
+**backend abstraction**: the narrow set of operations (capabilities, compile, create a buffer, upload, dispatch, read back, release) that every device-specific backend provides with the same meaning, so that the code that builds a model never names the device that runs it. *([One Program, Many Devices](v04-computation/09-backends.md))*
 
 **backward pass**: visiting the nodes of the graph in reverse order, multiplying the gradient that arrives from the next quantity by the local derivative and adding contributions where a value is used more than once. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
@@ -129,6 +133,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **CPU core**: one unit of a processor that fetches, decodes and executes instructions in a pipeline, with its own registers and first-level caches, sharing the rest of the memory system with the other cores of the chip. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 
 **critical point**: a point where the derivative is zero, so the tangent is horizontal; it may be a minimum, a maximum or neither. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
+**cross-backend parity**: the property that every backend gives results for the same inputs that agree to a stated criterion, bit for bit where the kernel fixes every rounding and order, and otherwise within a tolerance derived from the error bound of the operation. *([One Program, Many Devices](v04-computation/09-backends.md))*
 
 **cross-entropy**: the expected surprise under a belief $q$ of data drawn from $p$, $H(p, q) = -\sum_k p_k \log q_k$, the average code length paid for believing $q$; it is never below $H(p)$. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
@@ -285,6 +291,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## J
 
 **Jacobian**: the matrix of shape outputs by inputs whose entry $(i, j)$ is $\partial f_i/\partial x_j$; it is the best linear approximation of a vector function near a point. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**JIT compilation**: compiling a kernel to machine code at the moment a program needs it, on the machine that runs it, so that it fits the device present; the work of the compiler is paid at run time, usually saved in a cache. *([One Program, Many Devices](v04-computation/09-backends.md))*
 
 **joint distribution**: the probability $p(x, y)$ of each pair of values of two random variables on the same experiment, whose row and column sums are the marginal distributions. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
@@ -527,6 +535,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **seed**: the number from which a generator's starting state is computed; the same seed gives the same stream, and a seed used by a run must be recorded for the run to be repeated. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **set**: a collection of distinct elements, written with braces and combined by union, intersection and difference. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
+
+**shader translation**: rewriting a kernel from its own language into the form a device accepts so that it still computes what the source computes, which requires keeping every promise the language makes (clamped bounds, wrapping integers, barrier and return semantics, zeroed workgroup memory, layout) that the target does not make by itself. *([One Program, Many Devices](v04-computation/09-backends.md))*
 
 **shape**: the list of the sizes of a tensor's axes, outermost first; the number of elements is their product. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
