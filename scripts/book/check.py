@@ -62,7 +62,8 @@ TEMPLATE_LABELS = {"the problem", "before you begin", "what this is for", "what 
 # The same label repeated inside one chapter is the same template at a smaller scale.
 REPEAT_LIMIT = 2
 HEADING = re.compile(r"^#{2,4} (.+?)\s*$")
-RUN_IN = re.compile(r"^\*\*([^*]+?)[.:]\*\*")
+# A run-in label: `**Label.**`, or the italic form `*Label: ...*` that opens a line.
+RUN_IN = re.compile(r"^\*\*([^*]+?)[.:]\*\*|^\*([A-Z][^*:.]{1,40})[:.]")
 
 SVG_BUDGET = 120 * 1024
 COMMIT = re.compile(r"\bcommit `?([0-9a-f]{7,40})`?", re.I)
@@ -193,9 +194,10 @@ def _labels(path, rel, errors, where):
         m = None if in_fence or in_apparatus else (HEADING.match(line) or RUN_IN.match(line))
         if not m:
             continue
-        label = m.group(1).strip().lower()
+        text = next(g for g in m.groups() if g)
+        label = text.strip().lower()
         if label in TEMPLATE_LABELS:
-            errors.append(f"{rel}: '{m.group(1).strip()}' is a template slot, not a subject: "
+            errors.append(f"{rel}: '{text.strip()}' is a template slot, not a subject: "
                           "say it in the prose or name what the section is about")
         where.setdefault(label, set()).add(rel)
         local[label] = local.get(label, 0) + 1
