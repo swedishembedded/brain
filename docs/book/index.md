@@ -82,4 +82,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 3. [Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md): Is a computation limited by arithmetic or by moving data, and how do we tell?
 4. [The GPU: Thousands of Small Workers](v04-computation/04-gpu.md): How does a GPU organize its thousands of threads, and what does that demand of our algorithms?
 5. [Writing Compute Kernels](v04-computation/05-compute-kernels.md): How do we express one parallel computation so a GPU can run it?
+6. [Making Matrix Multiplication Fast](v04-computation/06-matmul.md): How does a matrix multiply go from a three-line loop to running near the hardware's peak?
 <!-- /contents -->

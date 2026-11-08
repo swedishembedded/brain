@@ -312,6 +312,19 @@ launch scale_shift(x, y, 2.0, 1.0, N) over ceil(N / n_wg) workgroups
   after it begins. A `return` before a `barrier` is legal only if every invocation of the workgroup takes it; a kernel in which
   some invocations of a workgroup reach the barrier and others do not is wrong, and the book says its result is undefined.
 
+**Fragments (Volume IV, Chapter 6).** A **fragment** is a small matrix that the invocations of one subgroup hold jointly: a value of type
+`fragment<T>[R, C]` with `R` rows and `C` columns of element type `T`. The language does not say which invocation holds which
+element, so a kernel never reads or writes one element of a fragment; it only passes whole fragments to the four operations below. A kernel
+that uses fragments has a workgroup of exactly one subgroup (`workgroup n_sg`, 32 invocations in the book's model), and every invocation of
+the subgroup executes each fragment operation together, so none sits inside a branch the invocations take differently.
+
+| Operation | Meaning |
+|---|---|
+| `fragment_zero(T, R, C)` | a fragment of type `fragment<T>[R, C]` with every element zero |
+| `fragment_load(src, r0, c0, R, C)` | for a two-dimensional `src` of element type `T`: the fragment whose element `[i, j]` is `src[r0 + i, c0 + j]`; the whole block `r0 .. r0 + R - 1` by `c0 .. c0 + C - 1` must lie inside `src` (there is no per-element guard) |
+| `fragment_mad(a, b, c)` | for `a: fragment<f16>[R, K]`, `b: fragment<f16>[K, C]` and `c: fragment<f32>[R, C]`: the fragment `d: fragment<f32>[R, C]` with `d[i, j] = c[i, j] + sum_p a[i, p] * b[p, j]`; the book's model forms every product exactly and rounds the whole sum, `c[i, j]` included, once to `f32` (real units differ in how they align and truncate the sum, and the order of the `K` terms is not specified) |
+| `fragment_store(f, dst, r0, c0)` | the inverse of `fragment_load`: `dst[r0 + i, c0 + j] = f[i, j]` for the whole block, which must lie inside `dst` |
+
 The **host** program that runs a kernel uses six operations on a device (Volume IV, Chapter 5). The device keeps a queue of work and
 runs it in the order it was enqueued.
 

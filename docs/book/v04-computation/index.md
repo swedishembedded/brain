@@ -55,8 +55,8 @@ more than one kind of device.
    threads, and what that demands of our algorithms.
 5. [Writing Compute Kernels](05-compute-kernels.md): how to express one parallel computation so a GPU
    can run it.
-6. Making Matrix Multiplication Fast: how a matrix multiply goes from a
-   three-line loop to running near the hardware's peak.
+6. [Making Matrix Multiplication Fast](06-matmul.md): how a matrix multiply goes
+   from a three-line loop to running near the hardware's peak.
 7. Parallel Reductions, Scans and Sorting: how thousands of threads add up one
    array, and why the obvious way is slow.
 8. Kernel Fusion and Memory Traffic: why the cheapest computation is the one

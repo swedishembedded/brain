@@ -1,0 +1,33 @@
+<!-- source-sha256: aaf047d11b3ba313ff8707b85ab7c49e1ad64d60f0a83c8e6ac24fbadac9c7e4 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 422" width="620" height="422">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="422" fill="#ffffff"/>
+<line x1="82.73" y1="334" x2="82.73" y2="30" stroke="#edf2f7"/>
+<text x="82.73" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="247.58" y1="334" x2="247.58" y2="30" stroke="#edf2f7"/>
+<text x="247.58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="412.42" y1="334" x2="412.42" y2="30" stroke="#edf2f7"/>
+<text x="412.42" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="577.27" y1="334" x2="577.27" y2="30" stroke="#edf2f7"/>
+<text x="577.27" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<line x1="58" y1="249.56" x2="602" y2="249.56" stroke="#edf2f7"/>
+<text x="52" y="253.56" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">7</text>
+<line x1="58" y1="165.11" x2="602" y2="165.11" stroke="#edf2f7"/>
+<text x="52" y="169.11" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">8</text>
+<line x1="58" y1="80.67" x2="602" y2="80.67" stroke="#edf2f7"/>
+<text x="52" y="84.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">9</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="82.73,52.64 132.35,78.06 181.98,103.48 231.6,128.9 281.22,154.32 330.85,179.74 380.47,205.16 430.1,230.58 479.72,256 529.35,281.42 578.97,306.84"/><circle cx="82.73" cy="52.64" r="3.5" fill="#2f855a"/><circle cx="132.35" cy="78.06" r="3.5" fill="#2f855a"/><circle cx="181.98" cy="103.48" r="3.5" fill="#2f855a"/><circle cx="231.6" cy="128.9" r="3.5" fill="#2f855a"/><circle cx="281.22" cy="154.32" r="3.5" fill="#2f855a"/><circle cx="330.85" cy="179.74" r="3.5" fill="#9b2c2c"/><circle cx="380.47" cy="205.16" r="3.5" fill="#9b2c2c"/><circle cx="430.1" cy="230.58" r="3.5" fill="#9b2c2c"/><line x1="281.22" y1="334" x2="281.22" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="58" y1="306.84" x2="602" y2="306.84" stroke="#a0aec0" stroke-dasharray="4 4"/><text x="287.82" y="51.11" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">256 invocations</text><text x="90.97" y="296.71" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">T = n: each number loaded once</text><text x="339.09" y="167.92" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">r = 2</text><text x="388.72" y="193.34" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">r = 4</text><text x="438.34" y="218.76" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">r = 8</text></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log10 of the side T of the workgroup tile</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">log10 of global loads (numbers)</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Global loads of a 1024 by 1024 product, 2 n^3 / T</text>
+<line x1="137.2" y1="393" x2="157.2" y2="393" stroke="#2b6cb0" stroke-width="2"/>
+<text x="163.2" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">loads = 2 n^3 / T</text>
+<circle cx="283.22" cy="393" r="3.5" fill="#2f855a"/>
+<text x="299.22" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">one output per invocation, T &lt;= 16</text>
+<circle cx="199.37" cy="410" r="3.5" fill="#9b2c2c"/>
+<text x="215.37" y="414" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">256 invocations of r x r blocks, T = 16 r</text>
+</svg>

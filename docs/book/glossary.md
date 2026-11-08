@@ -116,6 +116,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **convolution theorem**: the fact that the discrete Fourier transform of a circular convolution of two signals is the pointwise product of their transforms, so that convolution acts independently on each frequency and a long convolution can be computed with three fast transforms. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
+**cooperative matrix**: a small matrix whose elements are held jointly by the invocations of one subgroup and operated on by subgroup-wide load, multiply-add and store operations; the programming interface to tensor cores, available only where the device reports the shapes and types it supports. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
+
 **cosine schedule**: a decay of the learning rate from its peak to a floor along half a period of the cosine, $\eta_{\min} + (\eta_{\max} - \eta_{\min})\tfrac12(1 + \cos\pi u)$, which starts and ends with zero slope. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
 
 **cosine similarity**: the dot product of two vectors after dividing each by its norm, a number from $-1$ to $1$ that ignores positive scaling. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
@@ -388,6 +390,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **naive Bayes**: a classifier that applies Bayes' rule with the assumption that the features are independent given the class, so that the class probabilities come from simple counts or per-feature distributions. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
+**naive matmul**: the matrix product computed as its definition reads, one output at a time as a dot product of a row and a column, loading both from memory for every output and keeping nothing between outputs; its intensity is about a quarter of an operation per byte at any size. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
+
 **negative log-likelihood**: minus the natural logarithm of the likelihood, a sum over independent examples of the surprise at each observed label; the loss that maximum likelihood minimises. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
 **Newton's method**: the iteration that replaces a function by its tangent line (or, for minimisation, by a quadratic with the same slope and curvature) and jumps to its zero (or bottom), $x \leftarrow x - f(x)/f'(x)$ or $x \leftarrow x - f'(x)/f''(x)$; its error is squared at each step near a simple root. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
@@ -461,6 +465,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **reconstruction-loss**: the mean squared error between an autoencoder's output and its input, $L_{\mathrm{rec}} = \frac{1}{BD}\sum(\hat{x} - x)^2$; it needs no labels. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 **reduction algorithm**: an algorithm that combines the elements of an array into one value by repeated use of a binary operation, as a sum, a maximum or an argmax does; it takes $n - 1$ applications, and if the operation is associative they can be regrouped into a tree of depth $\lceil \log_2 n \rceil$. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
+
+**register blocking**: giving each invocation of a kernel a small square block of outputs held in its registers, so that each operand it reads is used once per row or column of the block, which enlarges the output tile beyond the number of invocations and cuts the reads of shared memory per multiply-add. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 
 **reinforcement learning (overview)**: learning by an agent that acts in an environment and receives rewards, without being told the right action; full treatment in Volume XII. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
@@ -558,11 +564,15 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **tensor**: an array of numbers with any number of axes (zero for a scalar, one for a vector, two for a matrix), described by its shape. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
+**tensor core**: a hardware unit that multiplies two small fixed-size matrices and adds a third in one operation, usually with narrow inputs and a wider accumulator, raising the peak arithmetic rate of a device for matrix products. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
+
 **test set**: rows used once, after every choice is made, to report the final score of the chosen model; looking at it more than once turns it into a validation set. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **test-dimension choice**: choosing the sizes of the model a test runs on (batch, features, widths, heads) all different and above 1, so that bugs that confuse two sizes or depend on a size of 1 change the result. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
 **thread parallelism**: using several threads, each running on its own core with its own registers and first caches and sharing the later caches and memory, to carry out the pieces of one computation at the same time. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
+
+**tiled matmul**: the matrix product computed one tile of the output at a time, with the matching tiles of the two inputs staged in a fast memory so that each number loaded is used once per row or column of the tile, cutting the loads from $2n^3$ to $2n^3/T$ for a tile of side $T$. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 
 **train-vs-eval-mode**: the two behaviours of a layer that has a state of its own: in train mode batch normalization uses the batch statistics and updates its running averages, in eval mode it uses the running averages and changes nothing. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
