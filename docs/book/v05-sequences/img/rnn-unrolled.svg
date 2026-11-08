@@ -1,0 +1,68 @@
+<!-- source-sha256: cf9cd57de9e37e4525445cf396f65c01aff35a448dae2787c96288a2ca8e6003 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" width="960" height="520"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="960" height="520" fill="#ffffff"/>
+<rect x="10" y="10" width="940" height="170" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Folded: one cell, used again for every token</text>
+<rect x="315" y="82" width="250" height="52" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="440" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">h(t) = tanh(W h(t-1) + u(x(t)) + b)</text>
+<rect x="100" y="90" width="120" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="160" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">token x(t)</text>
+<ellipse cx="780" cy="108" rx="50" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="780" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">state h(t)</text>
+<line x1="223" y1="108" x2="312" y2="108" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="267.5" y="99.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">u(x(t))</text>
+<line x1="568" y1="108" x2="727" y2="108" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M780,88 L780,70 Q780,62 772,62 L448,62 Q440,62 440,70 L440,79" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="610" y="56.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">h(t) becomes h(t-1) at the next token</text>
+<rect x="10" y="194" width="940" height="316" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="216" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Unrolled over three tokens: the same W, u and b in every box</text>
+<ellipse cx="70" cy="300" rx="27" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="70" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">h(0)</text>
+<ellipse cx="250" cy="300" rx="27" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="250" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">h(1)</text>
+<ellipse cx="430" cy="300" rx="27" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="430" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">h(2)</text>
+<ellipse cx="610" cy="300" rx="27" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="610" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">h(3)</text>
+<rect x="120" y="276" width="80" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="160" y="296.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">step 1</text>
+<text x="160" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tanh</text>
+<rect x="300" y="276" width="80" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="296.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">step 2</text>
+<text x="340" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tanh</text>
+<rect x="480" y="276" width="80" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="296.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">step 3</text>
+<text x="520" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tanh</text>
+<rect x="762" y="276" width="96" height="48" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="810" y="296.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">loss L</text>
+<text x="810" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(h(3), y)</text>
+<line x1="95.55" y1="311" x2="117" y2="311" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="203" y1="311" x2="224.45" y2="311" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="275.55" y1="311" x2="297" y2="311" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="383" y1="311" x2="404.45" y2="311" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="455.55" y1="311" x2="477" y2="311" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="563" y1="311" x2="584.45" y2="311" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="635.55" y1="311" x2="759" y2="311" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="759" y1="289" x2="635.55" y2="289" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="584.45" y1="289" x2="563" y2="289" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="477" y1="289" x2="455.55" y2="289" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="404.45" y1="289" x2="383" y2="289" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="297" y1="289" x2="275.55" y2="289" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="224.45" y1="289" x2="203" y2="289" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="117" y1="289" x2="95.55" y2="289" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<text x="722" y="272.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">dh(3) = h(3) - y</text>
+<text x="340" y="254.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">dh(t-1) = W^T ((1 - h(t)^2) * dh(t)) at every step</text>
+<rect x="118" y="383" width="84" height="34" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="160" y="404.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<line x1="160" y1="380" x2="160" y2="327" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="169" y="357.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">u(x(1))</text>
+<rect x="298" y="383" width="84" height="34" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="404.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cats</text>
+<line x1="340" y1="380" x2="340" y2="327" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="349" y="357.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">u(x(2))</text>
+<rect x="478" y="383" width="84" height="34" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="404.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">near</text>
+<line x1="520" y1="380" x2="520" y2="327" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="529" y="357.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">u(x(3))</text>
+<text x="480" y="472.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">each box contributes d a(t) h(t-1)^T to dW, d a(t) to db and d a(t) to the column u(x(t)); the three terms are added</text>
+<text x="480" y="494.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">forward: black arrows, h(t) from h(t-1) and the token; backward: red arrows, d h(t-1) from d h(t)</text>
+</svg>

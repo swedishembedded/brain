@@ -425,7 +425,7 @@ volumes:
         title: "Recurrent Networks"
         question: "How can a network carry memory from one step of a sequence to the next, and why does that memory fade?"
         introduces: [recurrent-neural-network, backpropagation-through-time, lstm, gru, gating]
-        requires: [multilayer-perceptron, backward-pass, vanishing-gradient, sigmoid]
+        requires: [multilayer-perceptron, backward-pass, vanishing-gradient, exploding-gradient, sigmoid, tanh-activation, jacobian, singular-value-decomposition, one-hot-encoding, softmax-cross-entropy, gradient-check, adam, gradient-clipping, next-token-prediction]
         brain: []
       - id: seq2seq
         title: "Encoder-Decoder Models and the Birth of Attention"

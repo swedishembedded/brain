@@ -40,6 +40,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **backend abstraction**: the narrow set of operations (capabilities, compile, create a buffer, upload, dispatch, read back, release) that every device-specific backend provides with the same meaning, so that the code that builds a model never names the device that runs it. *([One Program, Many Devices](v04-computation/09-backends.md))*
 
+**backpropagation through time**: the backward pass on a recurrent network unrolled over the steps of a sequence, in which the gradient of the state is passed back one step at a time and the gradients of the shared weights are summed over the steps. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
+
 **backward pass**: visiting the nodes of the graph in reverse order, multiplying the gradient that arrives from the next quantity by the local derivative and adding contributions where a value is used more than once. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **backward pass of a broadcast**: the rule that sums the incoming gradient over every axis the forward pass stretched, so a copy in the forward becomes a sum in the backward. *([The Backward Pass of Every Layer](v03-neural-networks/05-layer-gradients.md))*
@@ -266,6 +268,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## G
 
+**gating**: multiplying a signal elementwise by a vector of sigmoid outputs, each between 0 and 1 and computed from the current input and state, so that the network decides for each unit and each step how much of the signal passes. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
+
 **Gaussian distribution**: the bell-shaped distribution with density $\frac{1}{\sigma\sqrt{2\pi}}e^{-(x-\mu)^2/(2\sigma^2)}$, fixed by its mean $\mu$ and variance $\sigma^2$, written $\mathcal{N}(\mu, \sigma^2)$ and also called the normal distribution. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **gelu**: the Gaussian error linear unit $z\,\Phi(z)$, the input times the probability that a standard Gaussian variable lies below it, a smooth cousin of the ReLU that dips slightly below zero for negative inputs; it is computed exactly with the error function or approximately by a tanh form or a sigmoid form that are different functions. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
@@ -291,6 +295,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **group-normalization**: normalizing groups of consecutive channels of one example, over the group's channels and all spatial positions, with a learned gain and shift per channel; one group is layer normalization and one group per channel is instance normalization. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
 **group-wise quantization**: giving each run of $G$ consecutive weights its own scale, so that one large weight sets the step for its group only; it costs $(\text{scale bits})/G$ bits per weight in addition to the codes. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
+
+**gru**: gated recurrent unit, a recurrent cell with one state, an update gate that sets how far the state moves toward a new candidate and a reset gate that sets how much of the old state the candidate may read, so that the old state reaches the new one through a gate and not through a matrix. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
 
 ## H
 
@@ -393,6 +399,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **loss function**: a rule that scores one prediction against its label with a non-negative number, zero for a perfect prediction; its average over the data is the quantity learning minimises. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
 **low-rank approximation**: replacing a matrix by one of small rank, best obtained by keeping the largest singular values; it stores $r(m + n)$ numbers instead of $mn$ and its error is the dropped singular values. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
+
+**lstm**: long short-term memory, a recurrent cell with a cell state that is kept by a forget gate and added to by an input gate and shown through an output gate, so that the gradient has a path along the cell state with no weight matrix and no slope of the activation. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
 
 ## M
 
@@ -545,6 +553,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **real number**: any number on the number line, including fractions and irrational numbers such as $\sqrt{2}$; a computer holds only an approximation of most of them. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **reconstruction-loss**: the mean squared error between an autoencoder's output and its input, $L_{\mathrm{rec}} = \frac{1}{BD}\sum(\hat{x} - x)^2$; it needs no labels. *([First Complete Models](v03-neural-networks/13-first-models.md))*
+
+**recurrent neural network**: a network that reads a sequence one element at a time, keeping a state of fixed size that is rewritten at every step from its previous value and the current element by the same weights, so that its parameters do not grow with the length of the sequence. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
 
 **reduction algorithm**: an algorithm that combines the elements of an array into one value by repeated use of a binary operation, as a sum, a maximum or an argmax does; it takes $n - 1$ applications, and if the operation is associative they can be regrouped into a tree of depth $\lceil \log_2 n \rceil$. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 

@@ -1,0 +1,54 @@
+<!-- source-sha256: c64e9d0cd194f41f4a505879f9ca51a8e9ad36435a422d4eba8ba019baff1ce4 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 430" width="800" height="430"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="430" fill="#ffffff"/>
+<rect x="10" y="10" width="780" height="410" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">One LSTM step: the cell state c is kept by a gate and added to by a gate</text>
+<ellipse cx="75" cy="182" rx="45" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="75" y="186.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">h(t-1)</text>
+<ellipse cx="75" cy="292" rx="45" ry="20" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="75" y="296.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">token x(t)</text>
+<rect x="170" y="162" width="110" height="150" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="217.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a = W h(t-1)</text>
+<text x="225" y="233.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ u(x(t)) + b</text>
+<text x="225" y="249.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(4H numbers,</text>
+<text x="225" y="265.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">in four blocks)</text>
+<line x1="123" y1="182" x2="167" y2="182" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="123" y1="292" x2="167" y2="292" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="325" y="119" width="120" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="385" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">forget gate f</text>
+<text x="385" y="154.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sigmoid</text>
+<rect x="325" y="184" width="120" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="385" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">input gate i</text>
+<text x="385" y="219.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sigmoid</text>
+<rect x="325" y="249" width="120" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="385" y="268.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">candidate g</text>
+<text x="385" y="284.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tanh</text>
+<rect x="325" y="339" width="120" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="385" y="358.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">output gate o</text>
+<text x="385" y="374.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sigmoid</text>
+<line x1="282.24" y1="180.01" x2="322.76" y2="143.99" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="282.93" y1="216.35" x2="322.07" y2="207.65" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="282.85" y1="257.95" x2="322.15" y2="271.05" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="281.8" y1="304.4" x2="323.2" y2="359.6" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="500" y="122" width="130" height="170" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="565" y="195.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">c(t) =</text>
+<text x="565" y="211.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">f * c(t-1)</text>
+<text x="565" y="227.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ i * g</text>
+<line x1="448" y1="142" x2="497" y2="142" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="448" y1="207" x2="497" y2="207" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="448" y1="272" x2="497" y2="272" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="565" cy="62" rx="50" ry="18" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="565" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">c(t-1)</text>
+<line x1="565" y1="83" x2="565" y2="119" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="574" y="105.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">kept by f</text>
+<rect x="490" y="339" width="150" height="46" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="565" y="366.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">h(t) = o * tanh(c(t))</text>
+<line x1="448" y1="362" x2="487" y2="362" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="745" cy="207" rx="35" ry="18" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="745" y="211.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">c(t)</text>
+<line x1="633" y1="207" x2="707" y2="207" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M650,207 L664,207 Q672,207 672,215 L672,309 Q672,317 664,317 L608,317 Q600,317 600,325 L600,336" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="700" y="276.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">tanh</text>
+<ellipse cx="745" cy="362" rx="35" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="745" y="366.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">h(t)</text>
+<line x1="643" y1="362" x2="707" y2="362" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

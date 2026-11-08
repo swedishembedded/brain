@@ -98,4 +98,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 2. [Tokenization](v05-sequences/02-tokenization.md): How do we cut text into pieces a model can count, and why does the choice matter so much?
 3. [Embeddings](v05-sequences/03-embeddings.md): How does a model turn a token id into numbers it can compute with, and how do those numbers come to mean something?
 4. [Language Modeling](v05-sequences/04-language-modeling.md): How can predicting the next token teach a model about language?
+5. [Recurrent Networks](v05-sequences/05-recurrent-networks.md): How can a network carry memory from one step of a sequence to the next, and why does that memory fade?
 <!-- /contents -->
