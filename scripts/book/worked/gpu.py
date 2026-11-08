@@ -481,7 +481,7 @@ def transfers():
     rows = [("a and b up, c down over the bus", _n(byts), _ms(t_bus)),
             ("the addition itself, memory bound on the device", _n(byts), _ms(t_dev)),
             ("bus time / device time", "-", f"{t_bus / t_dev:.1f}")]
-    return (f"c = a + b of Section 1 with the data starting on the host: bytes over the bus = {_n(byts)} (a and b "
+    return (f"c = a + b of the chapter's opening, with the data starting on the host: bytes over the bus = {_n(byts)} (a and b "
             "up, c back), bus 32 (GB/s), device memory 800 (GB/s). Times are bytes / rate, a model.\n\n"
             + _table(["step", "bytes", "milliseconds"], rows))
 

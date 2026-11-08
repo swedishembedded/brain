@@ -5,9 +5,7 @@
 
 *How does a GPU organize its thousands of threads, and what does that demand of our algorithms?*
 
-## The problem
-
-Add two vectors of 16 million floating-point numbers, $c_i = a_i + b_i$ for $i = 0, \ldots, 2^{24} - 1$. The work is as
+Sixteen million additions are not a demanding job, which makes them a fair first test of a machine with ten thousand lanes. Take $c_i = a_i + b_i$ for $i = 0, \ldots, 2^{24} - 1$. The work is as
 plain as work gets: $2^{24}$ additions, each reading two numbers and writing one, so 201,326,592 bytes cross between memory
 and the arithmetic (Volume IV, Chapter 3 counted 12 bytes per element). Here are the three machines of the last two
 chapters doing it: one core of the CPU, the whole 10-core CPU, and the GPU of the roofline chapter, whose lanes the next
@@ -37,9 +35,7 @@ the same time. This chapter is about how such a machine is built, how its thread
 that the grouping works for it and not against it: which threads may cooperate, what happens when they disagree, how many
 fit at once, and which addresses they must ask for so that memory answers all of them with few transactions.
 
-## Before you begin
-
-Answer from memory; the answers are at the end of the chapter.
+A GPU is easiest to understand with six earlier ideas fresh in mind, so bring them back first. Answer from memory; the answers are at the end of the chapter.
 
 1. (Volume I, Chapter 4, matrix multiplication.) How many floating-point operations does the product of an $[n, n]$ matrix
    with an $[n, n]$ matrix cost, counting a multiplication and an addition as one operation each?
@@ -55,11 +51,7 @@ Answer from memory; the answers are at the end of the chapter.
 
 ## The design of a GPU
 
-*What this is for: the table of the problem leaves one fact unexplained, why a machine with ten thousand lanes is built at
-all. We count what such a machine must contain, so that the rules of the later sections (groups of threads, limits on
-residents, addresses) read as consequences of the design and not as arbitrary rules.*
-
-Start from the counts. The CPU of Chapter 3 has 10 cores, each issuing vector instructions on 2 units of 8 lanes: 160
+The table leaves one fact unexplained, why a machine with ten thousand lanes is built at all. Counting what such a machine must contain makes the rules of the later sections (groups of threads, limits on residents, addresses) read as consequences of the design and not as arbitrary rules. Start from the counts. The CPU of Chapter 3 has 10 cores, each issuing vector instructions on 2 units of 8 lanes: 160
 lanes. The GPU has 10,240. A CPU core is built to make one thread fast. It spends most of its silicon on caches, on a
 machinery that finds independent instructions and runs them out of order, and on predicting branches, all so that a single
 sequence of instructions waits as little as possible. A GPU spends the same silicon on lanes instead. Each thread gets little:
@@ -145,11 +137,7 @@ fit, is the question of the section on occupancy.
 
 ## SIMT: one instruction for a group of threads
 
-*What this is for: a scheduler that chose an instruction for each of 10,240 lanes separately would cost more than the
-arithmetic. The GPU's answer is to decide once for a group of lanes. We count what that costs when the lanes of a group
-want different things.*
-
-The lanes of Chapter 2 were the positions of a vector register, and one instruction worked on all of them: SIMD. A GPU
+A scheduler that chose an instruction for each of 10,240 lanes separately would cost more than the arithmetic. The GPU's answer is to decide once for a group of lanes, and the price falls due when the lanes of a group want different things. The lanes of Chapter 2 were the positions of a vector register, and one instruction worked on all of them: SIMD. A GPU
 is programmed differently. The program describes one **thread**'s work, using scalar code for its own data, and the hardware
 runs many copies of it. But it does not run them independently. The hardware gathers the threads into fixed groups of
 $n_{\mathrm{sg}}$ threads (32 in this book's model; some hardware uses 64) and issues each instruction once for the whole
@@ -206,10 +194,7 @@ return at once while their subgroup mates work: a small, bounded divergence that
 
 ## The programming hierarchy: invocation, workgroup, grid
 
-*What this is for: a GPU is told what to do by one call that says "run this program for each of these many items". We name
-the units of that call, show how a thread finds its own item, and see which units may cooperate.*
-
-Take the vector addition of $n = 1000$ elements. The program for one **invocation**, one running copy of the program (this
+A GPU is told what to do by a single call that says "run this program for each of these many items". The units of that call, the way a thread finds its own item and the question of which units may cooperate are the vocabulary of every kernel in the chapters ahead. Take the vector addition of $n = 1000$ elements. The program for one **invocation**, one running copy of the program (this
 book also says thread), handles one element. Where does it learn which one? Each invocation is given an index. The 1000
 invocations are not numbered in a single flat space that the hardware schedules freely, for that would give no room for
 cooperation. They are cut into **workgroups** of $n_{\mathrm{wg}}$ invocations (64 here). A workgroup is a set of invocations
@@ -259,7 +244,7 @@ the table shows `idle`. A grid is rounded up to whole workgroups, and the guard 
 The dispatch call needs a number, and there are two plausible numbers: how many invocations, or how many workgroups. For the
 vector addition each invocation owns one element, so the count is of invocations and the machine derives the workgroups. For a
 program whose 64 invocations cooperate on one row of a matrix (the layer normalization of Volume III, Chapter 10, in the form
-the last section shows), the unit of work is the workgroup, and the count must be rows, not invocations:
+the account of `layernorm_rows.wgsl` in the brain section shows), the unit of work is the workgroup, and the count must be rows, not invocations:
 
 <!-- worked: gpu.dispatch_units -->
 A kernel in which one workgroup of 64 invocations normalizes one row (the shape of a layer normalization over 512 rows). The dispatch must count workgroups, one per row. If the caller passes the row count as an invocation count, the grid holds ceil(512 / 64) workgroups.
@@ -272,14 +257,11 @@ A kernel in which one workgroup of 64 invocations normalizes one row (the shape 
 
 Handing the row count to a call that counts invocations dispatches 8 workgroups, and 504 of 512 rows are never written. The
 program does not crash, and the buffer holds whatever was there before. This is a hard mistake to see, because a wrong count
-gives wrong numbers, not an error. The last section tells how brain made the unit part of the call.
+gives wrong numbers, not an error. The brain section at the end tells how brain made the unit part of the call.
 
 ## Shared memory: a cache you manage
 
-*What this is for: invocations of one workgroup can read each other's results without going to device memory. We count the
-reads this saves in a case small enough to trace by hand, and then in the matrix product that the next chapters build on.*
-
-Each compute unit has an on-chip scratch memory, fast and small, that all invocations of a workgroup can read and write. It
+The invocations of one workgroup can read each other's results without going to device memory, and the reads this saves are countable: first in a case small enough to trace by hand, then in the matrix product the next chapters build on. Each compute unit has an on-chip scratch memory, fast and small, that all invocations of a workgroup can read and write. It
 is the **shared memory** of the workgroup: memory that belongs to the workgroup, lives as long as it runs and is invisible to
 every other workgroup. Chapter 2's caches decide by themselves what to keep; shared memory keeps exactly what the program
 puts in it, so it is a cache managed by the programmer: nothing enters or leaves without an instruction saying so. That is
@@ -337,7 +319,7 @@ C = A B with n = 1024, fp32, one workgroup per T x T tile of C; for each of n/T 
 
 The loads fall in proportion to $T$, because every number loaded is used $T$ times, the same law as the tiling of Chapter 3. Two
 limits appear at once. The shared memory per workgroup is $8T^2$ bytes and the invocations per workgroup are $T^2$, and both are capped:
-brain's portable floor is 256 invocations and 16 KiB per workgroup (the last section), so $T = 32$ does not fit that floor even
+brain's portable floor is 256 invocations and 16 KiB per workgroup (see the brain section at the end), so $T = 32$ does not fit that floor even
 though it fits this chapter's 64 KiB model. And even $T = 32$ reaches 7.88 FLOP per byte, below the ridge point of 50 of
 Chapter 3: a tile in shared memory alone does not make the product compute-bound on this GPU. Chapter 6 adds the second level,
 a small tile held in each invocation's registers, which is where the remaining factor comes from. The point for now is the
@@ -345,10 +327,7 @@ mechanism: reuse is something the program arranges, and it is limited by the siz
 
 ## Occupancy
 
-*What this is for: the previous sections asked for thousands of resident threads, each holding registers, and for shared
-memory per workgroup. A compute unit has fixed amounts of both. We count how many workgroups fit.*
-
-A compute unit holds a workgroup only if it can give it everything the workgroup needs for its whole life: its registers, its
+The previous sections asked for thousands of resident threads, each holding registers, and for shared memory per workgroup. A compute unit has fixed amounts of both, so the question is how many workgroups fit. A compute unit holds a workgroup only if it can give it everything the workgroup needs for its whole life: its registers, its
 shared memory and a slot. In the model a compute unit has 65,536 registers, 65,536 bytes of shared memory, room for 2,048
 resident invocations and for at most 16 resident workgroups. A kernel (the program that every invocation runs) uses $N_{\mathrm{reg}}$ registers
 per invocation, has $n_{\mathrm{wg}}$ invocations per workgroup and $N_{\mathrm{sh}}$ bytes of shared memory per workgroup. The number of workgroups
@@ -385,7 +364,7 @@ of counting does not change.
 
 ![Occupancy against registers per invocation for workgroups of 64, 256 and 1024 invocations: staircases that fall as registers grow, the workgroup of 1024 dropping to zero above 64 registers, with a dashed line at the 24.4 percent needed to keep 160,000 bytes in flight](img/occupancy-registers.svg)
 
-Why does anyone care about the percentage? Because of the latency count of the first section: with one 4-byte load per
+Why does anyone care about the percentage? Because of the latency count of the design section: with one 4-byte load per
 invocation in flight, a compute unit needs 500 resident invocations (24.4 percent of 2,048) to keep its share of memory
 busy, and occupancy below that leaves the memory idle part of the time and the kernel starved. The staircase turns that into a
 rule for registers:
@@ -416,10 +395,7 @@ bytes in flight that the kernel's threads keep outstanding, and high occupancy i
 
 ## Memory coalescing
 
-*What this is for: the memory delivers bytes in blocks, and a subgroup asks for 32 addresses at once. Whether those addresses
-fall in few blocks or in many decides how much of the bandwidth the program uses.*
-
-Device memory does not return single numbers. It answers in aligned blocks of a fixed size, which the model takes to be 32
+Memory delivers its bytes in blocks and a subgroup asks for 32 addresses at once, so whether those addresses fall in few blocks or in many decides how much of the bandwidth the program uses. Device memory does not return single numbers. It answers in aligned blocks of a fixed size, which the model takes to be 32
 bytes and calls a **transaction** (Chapter 2's cache line, for the GPU's memory system). When a subgroup issues one load, the
 hardware looks at the 32 addresses, finds the distinct blocks they fall in, and issues one transaction for each. Adjacent
 invocations reading adjacent addresses fall in the same blocks and are merged into few transactions; this merging is **memory coalescing**.
@@ -473,7 +449,7 @@ A is [1024, 1024] fp32 in row-major layout, 4 MiB, starting on a 32-byte boundar
 
 Reading by columns requests 8 times the transactions of reading by rows. A transpose that reads rows (coalesced) must write
 columns (strided), 1,179,648 transactions in all, because one of its two sides is always against the layout. The remedy is the
-shared memory of the last section. A workgroup reads a $32 \times 32$ tile with its lanes along rows, stores it in shared
+shared memory of the section above. A workgroup reads a $32 \times 32$ tile with its lanes along rows, stores it in shared
 memory, and after a barrier writes it back with its lanes again along rows of the *output*, taking the numbers from shared memory
 in the transposed order. Both global sides are coalesced and the count falls to 262,144, 4.5 times fewer. The transposition happens in
 shared memory, where the access order costs nothing in transactions. (Shared memory is itself organized in banks that have their own
@@ -487,16 +463,12 @@ The remedy does not depend on this: make the consecutive lanes consecutive in me
 
 ## Host and device
 
-*What this is for: the GPU is a second computer attached to the first by a bus. The cheapest computation on the device can still be
-the most expensive part of a program if its data has to cross the bus each time.*
-
-Everything so far took the data as already being in device memory. A GPU is a separate computer with its own memory, attached
-to the host by a bus that is much slower than the memory on either side of it: 32 (GB/s) in the model, against the GPU's 800. (Integrated GPUs, which share memory with the
+Everything so far took the data as already being in device memory. The GPU, however, is a second computer attached to the first by a bus, and the cheapest computation on the device can still be the most expensive part of a program if its data has to cross the bus each time. The bus is much slower than the memory on either side of it: 32 (GB/s) in the model, against the GPU's 800. (Integrated GPUs, which share memory with the
 host, have no such copy, and a program can ask the device whether it is one.) The host prepares work and sends it; the device
-executes it later, on its own. Take the addition of the first section with its vectors starting on the host and the result needed on the host:
+executes it later, on its own. Take the addition that opened the chapter with its vectors starting on the host and the result needed on the host:
 
 <!-- worked: gpu.transfers -->
-c = a + b of Section 1 with the data starting on the host: bytes over the bus = 201,326,592 (a and b up, c back), bus 32 (GB/s), device memory 800 (GB/s). Times are bytes / rate, a model.
+c = a + b of the chapter's opening, with the data starting on the host: bytes over the bus = 201,326,592 (a and b up, c back), bus 32 (GB/s), device memory 800 (GB/s). Times are bytes / rate, a model.
 
 | step | bytes | milliseconds |
 |---|---:|---:|
@@ -527,7 +499,7 @@ The rule that follows is the most important one for a program: data goes to the 
 the model is loaded, activations are produced and consumed on the device, and what comes back is the small result that the host
 needs (a loss, a token), not the intermediates. The host and the device also run at different times: the host *enqueues* a
 dispatch and goes on, and the device performs it later. A program that measures the time of a loop of enqueues measures the host.
-The last section tells what that did to a measurement in brain.
+The brain section at the end tells what that did to a measurement in brain.
 
 ## What a GPU demands of an algorithm
 
@@ -546,12 +518,14 @@ Collect what the sections counted, in the order an algorithm meets it:
 None of these changes the arithmetic of the algorithm. All of them change how many bytes move, how many lanes work, and how many waits are hidden.
 The next chapter turns them into programs.
 
-## Where this appears in brain
+## How `crates/gpu-core` makes the hierarchy explicit
 
 brain is organized so that a model never states any of this. `crates/gpu-core` is the one facade over the compute devices, and
 its code is the book's hierarchy made explicit.
 
-**The facade: `crates/gpu-core/src/lib.rs`.** A `Gpu` wraps a backend (`backend_api::Backend`) chosen at run time among the four
+### The facade: `crates/gpu-core/src/lib.rs`
+
+A `Gpu` wraps a backend (`backend_api::Backend`) chosen at run time among the four
 that the repository rules name: wgpu (the default), a CPU just-in-time compiler of the same shaders, Vulkan and CUDA. Model code
 holds only the neutral types `DeviceBuffer` (a buffer in device memory) and `Step` (one recorded dispatch). It allocates with
 `Gpu::storage` or `Gpu::storage_init` (an upload, once), records a dispatch with `Gpu::dispatch(kind, bufs, params, grid)`, hands a list of steps to
@@ -560,7 +534,9 @@ kernel in the list of programs the `Gpu` was built with, and `params` are the 32
 a process may use is the `--device` grammar of `crates/gpu-core/src/devices.rs`: `gpu`, `cpu`, `gpu0`, `gpu0,gpu1`, `cpu0-7`, `gpu1,cpu0-3`
 and so on, parsed by a pure function (`DeviceSpec::parse`) that needs no hardware, and resolved against the machine in a second step.
 
-**The device queried, not assumed: `DeviceCaps`.** The numbers that this chapter took as parameters are fields that
+### The device queried, not assumed: `DeviceCaps`
+
+The numbers that this chapter took as parameters are fields that
 the backend asks the device for: `compute_units` (absent where the interface does not report it, as in wgpu),
 `max_workgroup_size`, `workgroup_mem_bytes`, `subgroup_size` (`None` on the WebGPU baseline), `unified_memory`, and the
 `peak_bandwidth_gbs` and `peak_gflops` (no interface reports those two, so `crates/gpu-core/src/roof.rs` measures them, as Chapter 3 told). Commit
@@ -568,7 +544,9 @@ the backend asks the device for: `compute_units` (absent where the interface doe
 `None` or `false`, never a guess. The portable baseline in the code (`DeviceCaps::portable_baseline`) is a workgroup of at most 256 invocations and 16 KiB of
 shared memory, which are the numbers of the tile table above.
 
-**The unit of a dispatch.** The `Dispatch` type of `crates/gpu-core/src/lib.rs` is the section "Counting in the right unit" as code:
+### The unit of a dispatch
+
+The `Dispatch` type of `crates/gpu-core/src/lib.rs` is the section "Counting in the right unit" as code:
 `Dispatch::Threads(n)` dispatches $n$ invocations and `Dispatch::Workgroups(n)` dispatches $n \times n_{\mathrm{wg}}$, where the
 workgroup size is read from the kernel's own `@workgroup_size` at registration. A kernel that calls `workgroupBarrier` is a *cooperative* one,
 and `Gpu::step`, which takes a raw invocation count, refuses it with a panic that names the kernel. Commit 5fecb11ff (September 2026)
@@ -582,7 +560,9 @@ to say they have none) were refused their correct dispatches. The reading is now
 (`wgsl_code_only`). The two commits count 77 and then 69 cooperative kernels; that count is theirs, and the number is not
 what the lesson depends on. The lesson is to put the unit into the type and to read facts about a program from the program.
 
-**Why the portable kernels are written as they are.** The repository's rule (`AGENTS.md`) is that the reference shaders live in
+### Why the portable kernels are written as they are
+
+The repository's rule (`AGENTS.md`) is that the reference shaders live in
 `crates/kernels/wgsl/` and stay core-compute: fp32 arithmetic, at most 8 storage buffers, no atomics, no subgroups, no
 half-precision. Faster providers (tensor cores, CUDA, cooperative matrices) are selected through a seam and gated against them. The
 reason is portability: the same files run on old desktop GPUs, in the browser and on the CPU compiler, and the portable subset is
@@ -596,7 +576,9 @@ A capability still gates the choice: a variant that needs a barrier is selected 
 true. It is false on the CPU compiler, and knowledge #26 records what happens without the gate: a kernel with barriers recorded on the CPU backend
 aborted the whole process with a memory error and no kernel name, because the guard had been put around the submission and not around the recording.
 
-**Coalescing in a real kernel: `layernorm.wgsl` and `layernorm_rows.wgsl`.** The two layer-normalization kernels are the chapter's two
+### Coalescing in a real kernel: `layernorm.wgsl` and `layernorm_rows.wgsl`
+
+The two layer-normalization kernels are the chapter's two
 access patterns in code. In `crates/kernels/wgsl/layernorm.wgsl` invocation $t$ owns row $t$ and walks it with three serial loops, so
 the 32 lanes of a subgroup read addresses $d$ numbers apart. In `crates/kernels/wgsl/layernorm_rows.wgsl` one workgroup of 64 invocations
 walks one row with stride 64, two subgroups reading 32 consecutive numbers each, and the partial sums go through a 64-entry shared
@@ -625,7 +607,9 @@ The range contains the count of 8, but the two are different things: the count i
 measurement is of whole kernels. The commit also records a limit worth keeping: the layer normalization was a small part of the whole training step, which was dominated
 by a different serial reduction. The selection rule that keeps the kernel in use is in `crates/backend-api/src/select.rs`.
 
-**An idle part of a tile: knowledge #15.** A selection rule can also be wrong about waste. `pick_gemm` in `crates/model/src/block.rs`
+### An idle part of a tile: knowledge #15
+
+A selection rule can also be wrong about waste. `pick_gemm` in `crates/model/src/block.rs`
 returned a count of $\lceil m/128 \rceil \lceil n/128 \rceil$ workgroups for a $128 \times 128$ tile, and used to refuse the tile when $m < 128$ on the
 reading that a partial tile wastes lanes. The case that exposed it was $m = 77$, $n = 2560$: 20 workgroups, of which the
 rows are $77/128 = 60.2$ percent full. In this chapter's model, 20 workgroups also occupy 20 of 80 compute units at most. Knowledge #15
@@ -634,7 +618,9 @@ serially, was far worse: the tile kernel was faster from 8 rows on, and the thre
 (`GEMM_TILE_MIN_ROWS`, tested in `pick_gemm_routes_by_the_measured_crossover`). The idle fraction of a partial tile is a cost
 that has to be compared with the cost of the other choice and not with zero.
 
-**One device per process.** The rule of `AGENTS.md` is that a process holds one GPU device and shares it (`Gpu::share`, `Gpu::new_like`,
+### One device per process
+
+The rule of `AGENTS.md` is that a process holds one GPU device and shares it (`Gpu::share`, `Gpu::new_like`,
 `share_or_new`), and that tests get theirs from `gpu_core::testgpu::dev`. Knowledge #13 states a consequence of the `kind` index
 described above: kernel indices are positions in a crate's own list, so a `Gpu` built from one crate's kernel set binds the wrong pipelines
 for another's, and a process that mixes models uses `Gpu::new_like`, which gives a different kernel set on the same device. The rule itself came from
@@ -645,7 +631,9 @@ Those numbers belong to one driver and one box. The general lesson is that a GPU
 the number of devices something a reader can count by reading the code, which is why sharing is explicit and the test fixture
 is a pool of weak handles that lets the device die in an orderly way with its last user.
 
-**Timing: knowledge #6.** `Gpu::submit` on the wgpu backend usually only *enqueues* work: with no buffers to clear it appends the steps to a pending list. A loop of
+### Timing: knowledge #6
+
+`Gpu::submit` on the wgpu backend usually only *enqueues* work: with no buffers to clear it appends the steps to a pending list. A loop of
 bare `submit` calls therefore timed the host building bind groups and reported it as device bandwidth.
 
 <!-- perf-number: historical measurement, commit 883b40b0c -->
@@ -672,9 +660,35 @@ region (`.agents/rules/kernels.md`, section E.0), and the habit of the roofline 
 6. Find the error: "To make the column-wise read of a $[1024, 1024]$ matrix as fast as the row-wise one, launch eight times as many
    invocations so that more transactions are in flight."
 7. Two layers are alike, but the first has rows of 768 numbers and the second rows of 770 numbers. Both are read by a workgroup per row
-   with 64 invocations. Explain from the table of the last section why the second reads more transactions than the ideal and the first does not.
+   with 64 invocations. Explain from the layer-normalization table why the second reads more transactions than the ideal and the first does not.
 8. A program computes a small function of two vectors of $2^{20}$ numbers on the device, once per training step, and uploads the
    vectors every step. Estimate the bus traffic and say what to change.
+
+## Summary
+
+A GPU spends its silicon on lanes where a CPU spends it on making one thread fast. The machine is a set of compute units, each with
+lanes, a large register file and a small on-chip memory, over a memory that has high bandwidth and high latency. It reaches its
+bandwidth by having bytes in flight equal to the product of bandwidth and latency, 160,000 bytes in the model, which takes tens of thousands of
+resident threads: waiting is hidden by running others, which costs nothing because the registers of every resident thread are in the
+register file. The threads execute in subgroups of 32, one instruction at a time for the whole group, so lanes of a subgroup that
+branch differently make the group run both paths, and the cost is set by how the data is assigned to lanes. A program names its work
+as a grid of workgroups of invocations; the invocations of a workgroup share a memory on the compute unit that the programmer manages, and
+wait for each other at barriers; workgroups are independent. A compute unit holds as many workgroups as its registers, its shared memory
+and its slots allow, and the occupancy so computed has to supply the invocations that latency hiding needs. Memory is read in blocks, so
+adjacent lanes should read adjacent addresses: a stride of eight numbers wastes seven eighths of the bandwidth. And the bus between
+the host and the device is far slower than device memory, so data stays on the device.
+
+All the counts are of work: invocations, rounds, bytes in flight, issue slots, resident workgroups, transactions and bus bytes. None
+needs a clock beyond the model's stated parameters.
+
+What this chapter could not say is how one writes the programs that run on this machine. It used a kernel as a given and named
+its index arithmetic, its guard and its barriers in pseudocode. Chapter 5 turns that into the way a computation is expressed so that a GPU can
+run it: the kernel, the dispatch, the buffers, and the discipline of describing their layout.
+
+## References
+
+- Vasily Volkov, "Better Performance at Lower Occupancy", 2010.
+- Samuel Williams, Andrew Waterman and David Patterson, "Roofline: An Insightful Visual Performance Model for Multicore Architectures", 2009.
 
 ## Exercises
 
@@ -704,27 +718,6 @@ region (`.agents/rules/kernels.md`, section E.0), and the habit of the roofline 
     coalesced and a strided form, and report the achieved bandwidth as a fraction of the device's measured copy bandwidth. State the timer, the
     way you wait for the device before reading it, and the minimum over repetitions.
 
-## Summary
-
-A GPU spends its silicon on lanes where a CPU spends it on making one thread fast. The machine is a set of compute units, each with
-lanes, a large register file and a small on-chip memory, over a memory that has high bandwidth and high latency. It reaches its
-bandwidth by having bytes in flight equal to the product of bandwidth and latency, 160,000 bytes in the model, which takes tens of thousands of
-resident threads: waiting is hidden by running others, which costs nothing because the registers of every resident thread are in the
-register file. The threads execute in subgroups of 32, one instruction at a time for the whole group, so lanes of a subgroup that
-branch differently make the group run both paths, and the cost is set by how the data is assigned to lanes. A program names its work
-as a grid of workgroups of invocations; the invocations of a workgroup share a memory on the compute unit that the programmer manages, and
-wait for each other at barriers; workgroups are independent. A compute unit holds as many workgroups as its registers, its shared memory
-and its slots allow, and the occupancy so computed has to supply the invocations that latency hiding needs. Memory is read in blocks, so
-adjacent lanes should read adjacent addresses: a stride of eight numbers wastes seven eighths of the bandwidth. And the bus between
-the host and the device is far slower than device memory, so data stays on the device.
-
-All the counts are of work: invocations, rounds, bytes in flight, issue slots, resident workgroups, transactions and bus bytes. None
-needs a clock beyond the model's stated parameters.
-
-What this chapter could not say is how one writes the programs that run on this machine. It used a kernel as a given and named
-its index arithmetic, its guard and its barriers in pseudocode. Chapter 5 turns that into the way a computation is expressed so that a GPU can
-run it: the kernel, the dispatch, the buffers, and the discipline of describing their layout.
-
 ## Key terms
 
 - **GPU architecture**: the organization of a graphics processor used for computing: many compute units, each with lanes, a large register file, a small on-chip memory and a scheduler, over a memory of high bandwidth and high latency, built for throughput and not for the speed of one thread. <!-- concept: gpu-architecture -->
@@ -737,7 +730,7 @@ run it: the kernel, the dispatch, the buffers, and the discipline of describing 
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $2n^3$: $n^2$ outputs, each a dot product of length $n$ with $n$ multiplications and about $n$ additions. (Volume I, Chapter 4.)
 2. 4 bytes along a row and $1024 \times 4 = 4096$ bytes down a column, because an element is 4 bytes and a row holds 1024 of them. (Volume I, Chapter 5.)
@@ -771,8 +764,3 @@ run it: the kernel, the dispatch, the buffers, and the discipline of describing 
 8. The two vectors are $2 \times 4 \times 2^{20}$ bytes = 8,388,608 bytes (8 MiB) up, and the result is a few bytes back. At 32 (GB/s) the bus needs
    about 0.262 milliseconds; the device reads the same bytes from its memory in about 0.0105 milliseconds ($8{,}388{,}608 / (800 \times 10^9)$), 25 times less. Keep the vectors on the device
    across steps and upload only what changes.
-
-## References
-
-- Vasily Volkov, "Better Performance at Lower Occupancy", 2010.
-- Samuel Williams, Andrew Waterman and David Patterson, "Roofline: An Insightful Visual Performance Model for Multicore Architectures", 2009.

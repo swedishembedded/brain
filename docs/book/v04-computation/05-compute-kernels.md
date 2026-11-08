@@ -5,9 +5,7 @@
 
 *How do we express one parallel computation so a GPU can run it?*
 
-## The problem
-
-Take ten numbers $x_0, \ldots, x_9$ and compute $y_i = 2 x_i + 1$ for each. On a CPU this is a loop. Chapter 4 built a machine
+Ten numbers $x_0, \ldots, x_9$, and one rule for each of them: $y_i = 2 x_i + 1$. On a CPU this is a loop. Chapter 4 built a machine
 with thousands of lanes that no loop can drive: a loop says "first this element, then the next", and the machine wants to be told what to
 do with *one* element and to be given the whole set of elements at once. So the computation has to be written differently. Its
 program is the body for one element, and everything the loop used to say (how many elements, which one am I, where do the numbers
@@ -47,9 +45,7 @@ Next come kernels that read tensors through strides, a kernel that uses shared m
 parameters (where the host and the kernel can silently disagree), and the host side that creates the buffers, launches the kernel and reads the answer
 back. Every claim about a kernel is checked by the simulator against a direct computation.
 
-## Before you begin
-
-Answer from memory; the answers are at the end of the chapter.
+Writing a kernel leans on four ideas from the chapter just behind us and one from much further back. Answer from memory; the answers are at the end of the chapter.
 
 1. (Volume IV, Chapter 4, workgroup and grid.) A kernel is launched for 1000 elements with workgroups of 64 invocations. How many
    workgroups does the grid have, and how many invocations have no element?
@@ -64,10 +60,7 @@ Answer from memory; the answers are at the end of the chapter.
 
 ## The kernel: the program of one invocation
 
-*What this is for: a data-parallel computation is written once, for one invocation, and the machine runs it for all of them. We fix
-what that program may see and do.*
-
-A **compute kernel** is the program one invocation runs, together with the declaration of what it is given. The book writes
+A data-parallel computation is written once, for one invocation, and the machine runs that program for all of them, so the first job is to fix what the program may see and do. A **compute kernel** is the program one invocation runs, together with the declaration of what it is given. The book writes
 it in the pseudocode of `docs/book/pseudocode.md`, where a kernel has a header and a body and a `launch` statement runs it:
 
 ```text
@@ -95,10 +88,7 @@ in the same frame with more in the body; the next sections add those.
 
 ## WGSL: the language the book writes kernels in
 
-*What this is for: pseudocode cannot be run by a device. To make the contract concrete, and because the engine this book follows uses
-it, the examples are also written in one real kernel language, and every construct is mapped to the other languages.*
-
-**WGSL** (the WebGPU Shading Language) is the kernel language that the book's examples use. It was designed to run in browsers and
+Pseudocode cannot be run by a device. To make the contract concrete, and because the engine this book follows uses it, the examples are also written in one real kernel language, with every construct mapped to the others. **WGSL** (the WebGPU Shading Language) is the kernel language that the book's examples use. It was designed to run in browsers and
 to be translated to the native graphics interfaces, and a WGSL kernel compiles to Vulkan, Metal and DirectX programs. It is small, and only the
 subset below appears here. This is the kernel above, as one WGSL file:
 
@@ -173,8 +163,7 @@ from one to another must change what it passes.
 
 ## The contract between kernel and host
 
-*What this is for: a kernel is useless until a host program gives it buffers, constants and a grid. The contract has four parts, and each
-has a mistake that produces a wrong answer instead of an error.*
+A kernel is useless until a host program gives it buffers, constants and a grid. That contract has four parts, and each has a mistake that produces a wrong answer instead of an error.
 
 **Buffers.** A **storage buffer** is the array a kernel reads from or writes to: a block of device memory, bound to a numbered slot, whose
 element type the kernel declares and whose length the host chooses. A kernel declares each as `read` or `read_write`. The distinction is
@@ -192,7 +181,7 @@ keep the quantities that change per call, such as $N$, in the uniform. The layou
 **The grid.** The host must say how many workgroups to launch, and the right number is
 $$n_{\mathrm{grp}} = \left\lceil \frac{N}{n_{\mathrm{wg}}} \right\rceil.$$
 Too few and the tail of the output is never written; none of the invocations knows. No guard, and the invocations of the last
-workgroup that are past the end of the data read and write memory beyond the buffers. This table runs the kernel of the problem, $N = 10$ and
+workgroup that are past the end of the data read and write memory beyond the buffers. This table runs the opening kernel, $N = 10$ and
 workgroup size 4, with each mistake in turn. The memory is one flat list in which the buffers sit one after another:
 
 <!-- worked: compute_kernels.grid_failures -->
@@ -215,7 +204,7 @@ If the next buffer is packed right behind $y$, two of its words are overwritten 
 allocators usually arrange, the words fall in padding and nothing happens (fourth row). The bug is real in both and shows up in one. The
 fifth row applies the rule that WGSL states for robust access: an index past the end of a buffer may be replaced by the last valid one. Then
 the three invocations 9, 10 and 11 all store the same correct value to $y[9]$ and the answer is right *by accident*. The engine this book studies
-turns that protection off by default to save an instruction on every access (the last section), so a kernel's own guard is the only check. The last
+turns that protection off by default to save an instruction on every access (see the brain section at the end), so a kernel's own guard is the only check. The last
 row is the trap for tests: with $N = 12$, a multiple of the workgroup size, flooring the grid is harmless, and a kernel tested only at such sizes keeps its bug.
 
 **Larger grids.** A grid has up to three dimensions and a limit per dimension; the baseline of the portable interfaces is 65,535 workgroups
@@ -264,14 +253,11 @@ With the toy limit the wrong kernel writes 12 of 30 outputs, the first row of wo
 and over. At the real limit and a workgroup size of 64 the first row reaches $65{,}535 \times 64 = 4{,}194{,}240$ elements, so the weight gradient
 of a $3 \times 3$ convolution with 1024 channels in and out, $9{,}437{,}184$ numbers, has 55.6 percent of its elements never written, and the answer
 looks like any other tensor. A kernel is correct for every grid only if it computes $g$ from both coordinates, which is why every kernel in the engine of
-this book starts with the same two lines (the last section shows the incident).
+this book starts with the same two lines (the brain section at the end tells the incident).
 
 ## Reading tensors through strides
 
-*What this is for: a tensor in a kernel is a flat buffer plus a shape and strides, so every kernel that touches a tensor turns an
-output position into a storage offset. We write that once, for any view, and count what it costs in memory transactions.*
-
-Volume I, Chapter 5 defined a view of flat storage by a shape $[d_0, d_1]$, strides $(s_0, s_1)$ and an offset $o$, with element
+A tensor in a kernel is a flat buffer plus a shape and strides, so every kernel that touches a tensor turns an output position into a storage offset. We can write that once, for any view, and count what it costs in memory transactions. Volume I, Chapter 5 defined a view of flat storage by a shape $[d_0, d_1]$, strides $(s_0, s_1)$ and an offset $o$, with element
 $(i, j)$ at storage cell $o + i s_0 + j s_1$. A kernel that materializes a view gives each invocation one output element and lets it compute where to read. The output
 is stored contiguously, so invocation $g$ owns output element $(i, j)$ with $i = \lfloor g / d_1 \rfloor$ and $j = g \bmod d_1$:
 
@@ -342,10 +328,7 @@ in the other direction. The strided side can only be avoided by changing which n
 
 ## Shared memory and the barrier: a tiled transpose
 
-*What this is for: a workgroup can read a block of the input with its lanes along rows, keep it in shared memory, and write it out
-with its lanes along rows of the output. The program needs two phases and a barrier between them, and the barrier has a rule.*
-
-Let the workgroup own a $T \times T$ tile of the input: it loads the tile into a shared array, every invocation waits for the others, and then each stores one element of the
+The strided side of the transpose can be avoided if a workgroup reads a block of the input with its lanes along rows, keeps it in shared memory, and writes it out with its lanes along rows of the output. That takes two phases with a barrier between them, and the barrier has a rule. Let the workgroup own a $T \times T$ tile of the input: it loads the tile into a shared array, every invocation waits for the others, and then each stores one element of the
 transposed tile. With $T = 16$ a workgroup has 256 invocations, the portable limit of Chapter 4, and the tile takes 1 KiB of shared memory. In the pseudocode (the
 launch is two-dimensional, $n_x = \lceil n / T \rceil$ workgroups across and $n_y = \lceil m / T \rceil$ down):
 
@@ -430,7 +413,7 @@ The whole simulated y equals the direct transpose of x: yes.
 Twelve of the 16 invocations load nothing and leave their slot as it was; the four that did load wrote the 2 x 2 corner. After the barrier four invocations store, and the
 block of $y$ is the transpose of the block of $x$. Slots that nobody wrote are never read, because the store guard excludes the invocations that would read them.
 
-**The barrier rule.** Every invocation of the workgroup must reach a barrier. The barrier is a rendezvous: if some invocations have returned, or are inside a branch that
+The barrier carries a rule of its own. Every invocation of the workgroup must reach it. The barrier is a rendezvous: if some invocations have returned, or are inside a branch that
 skips it, the others wait for ones that never arrive. Some compilers refuse such a program; on some devices it hangs, and a CPU compiler that runs a workgroup as phases
 computes something. The natural way to write the guard breaks the rule, and it is wrong in a way that only edge tiles reveal:
 
@@ -467,10 +450,7 @@ is racy. (The reads `tile[lx * T + ly]` of 16 lanes also hit shared memory in a 
 
 ## Buffer alignment: the layout of parameters in bytes
 
-*What this is for: the host writes a block of bytes and the kernel reads fields from it at fixed offsets. The two must agree about every
-offset, and the rules that fix them are not the ones one would guess.*
-
-**Buffer alignment** is the rule that a value of $s$ bytes starts at an address that is a multiple of its alignment (for a 4-byte number, 4), so that hardware can read it
+The host writes a block of bytes and the kernel reads fields from it at fixed offsets. The two must agree about every offset, and the rules that fix them are not the ones one would guess. **Buffer alignment** is the rule that a value of $s$ bytes starts at an address that is a multiple of its alignment (for a 4-byte number, 4), so that hardware can read it
 in one piece; the bytes skipped to satisfy it are padding. Two places need it here. The first is the layout of the fields of a parameter struct.
 
 The rules of WGSL, for the types of this chapter: a scalar (`u32`, `i32`, `f32`) has alignment 4 and size 4; `vec2` has alignment 8 and size 8; `vec3` has alignment 16 and
@@ -534,7 +514,7 @@ Flat blocks of 4-byte scalars have alignment 4, so the struct is 4 x (number of 
 <!-- /worked -->
 
 A block of 4-byte scalars needs no holes: its size is $4 \times$ the number of fields, and only the final rounding to 16 bytes remains. The zero words after the fields are the buffer's padding. They
-make a second silent failure possible: if a host passes fewer words than the kernel's block has fields, the missing fields read zero, not an error (knowledge #171, the last section). A scale or a tolerance that
+make a second silent failure possible: if a host passes fewer words than the kernel's block has fields, the missing fields read zero, not an error (knowledge #171, in the brain section at the end). A scale or a tolerance that
 is silently 0 is as hard to find as the misread `origin`. The same applies to arrays: an `array<vec3<f32>>` has a stride of 16 bytes, not 12, so a kernel that wants three floats per element reads a flat
 `array<f32>` and computes `3 * i + c` itself.
 
@@ -558,10 +538,7 @@ read a slice see only its first 800 words.
 
 ## The host side: kernel dispatch
 
-*What this is for: the kernel is half the program. The other half runs on the host, sets up the buffers, launches the kernel and gets the answer. Its cost is counted in bytes over the bus
-and in the times the host waits.*
-
-A **kernel dispatch** is the host-side act of running a kernel: bind buffers to the slots of a compiled kernel, write its uniform parameters, and enqueue it over a grid. The device
+The kernel is half the program. The other half runs on the host, which sets up the buffers, launches the kernel and gets the answer, and its cost is counted in bytes over the bus and in the times the host waits. A **kernel dispatch** is the host-side act of running a kernel: bind buffers to the slots of a compiled kernel, write its uniform parameters, and enqueue it over a grid. The device
 runs the queue in order, in its own time. The host program of the example, in the book's six host operations (defined in `docs/book/pseudocode.md`), is:
 
 ```text
@@ -613,11 +590,13 @@ The two designs of the previous block for N = 2^24 = 16,777,216 fp32 numbers and
 three times the bytes in each direction and three waits against one: the gap grows with the length of the chain, and a transformer layer has tens of kernels. What *must* be read back is the small
 answer the host needs (a loss, a token), not the intermediates. A related problem is the cost of the queue itself, one dispatch per small kernel, which Chapter 8 takes up as kernel fusion.
 
-## Where this appears in brain
+## From kernel files to devices: `crates/kernels` and its backends
 
 `crates/kernels` holds brain's kernels as text; `crates/vulkan` and the backend crates compile and run them.
 
-**Kernels as files.** `crates/kernels/wgsl/` has one WGSL file per kernel, and `crates/kernels/src/lib.rs` embeds each as a string constant (`pub const AXPY: &str = include_str!(...)`).
+### Kernels as files
+
+`crates/kernels/wgsl/` has one WGSL file per kernel, and `crates/kernels/src/lib.rs` embeds each as a string constant (`pub const AXPY: &str = include_str!(...)`).
 `crates/kernels/wgsl/axpy.wgsl` is this chapter's example almost word for word: a `Params { n: u32, s: f32 }` uniform at binding 0, a `read_write` buffer and a `read` buffer at 1 and 2,
 `@workgroup_size(64)`, and the guard `if (idx >= p.n) { return; }`. Every one-invocation-per-element kernel starts with the 2D-safe index (`let gidx = gid.y * (nwg.x * 64u) + gid.x;`),
 the formula of the section on larger grids. `crates/kernels/wgsl/swap_axes12_vec.wgsl` is the strided kernel of this chapter, written for one rank-4 permutation: one invocation
@@ -626,13 +605,17 @@ per output element, decomposing its index by division and remainder and reading 
 with `@what`, `@how` and similar header lines that scripts read. `crates/kernels/src/template.rs` rewrites the literals (tile sizes, the `@workgroup_size`) of a source before compilation, so tuned
 variants are other `(name, source)` pairs rather than other files.
 
-**Registering and compiling.** A model lists the kernels it needs as `(name, source)` pairs, for example `("axpy", kernels::AXPY)` in `crates/arcface/src/model.rs`, and a dispatch names a kernel by its position in
+### Registering and compiling
+
+A model lists the kernels it needs as `(name, source)` pairs, for example `("axpy", kernels::AXPY)` in `crates/arcface/src/model.rs`, and a dispatch names a kernel by its position in
 that list (Chapter 4). At construction, `crates/backend-wgpu/src/lib.rs` compiles each source into a shader module and a compute pipeline with entry point `main`, once. A dispatch is one bind group: the uniform at
 binding 0 and the storage buffers at bindings 1 and up, in the order of the list given (and at most 8, the rule Chapter 4 explained). The kernel's workgroup size is read from its own `@workgroup_size`
 by `backend_api::workgroup_size_of`, and `backend_api::grid_ws` in `crates/backend-api/src/lib.rs` computes the grid by the formula of this chapter (`threads.div_ceil(wg)`) and folds it into rows of
 `MAX_GROUPS_PER_DIM`, 65,535.
 
-**How `crates/vulkan` relates to the wgpu path.** `crates/vulkan` is the same idea built on the native interface without the portable layer. Its `VkContext`
+### How `crates/vulkan` relates to the wgpu path
+
+`crates/vulkan` is the same idea built on the native interface without the portable layer. Its `VkContext`
 (`crates/vulkan/src/context.rs`) creates the instance, device and queue, allocates buffers, records a one-dispatch command buffer and waits on a fence. `crates/vulkan/src/shader.rs` compiles the *same*
 WGSL text to the intermediate form of Vulkan (`wgsl_to_spirv`, through the `naga` library) and reads the kernel's bindings back from the source (`wgsl_bindings`) to build the matching descriptor-set layout, with the uniform at 0 and the storage buffers
 at 1 and up, which is the contract of this chapter. WGSL remains the source of truth; the crate adds a second route from it to a device, and one hand-written GLSL kernel
@@ -640,35 +623,47 @@ at 1 and up, which is the contract of this chapter. WGSL remains the source of t
 promoted it to a run-time-selected backend alongside wgpu and the CPU compiler, now in `crates/backend-vulkan`, which implements the same neutral `Backend` over `crates/vulkan`. What follows from this design for the
 reader of this chapter is that a kernel is written once, in the layout rules of WGSL, and every backend sees the same bytes of parameters.
 
-**Parameters are four-byte words.** `crates/backend-wgpu/src/lib.rs` takes a dispatch's parameters as a list of 32-bit words and pads the uniform buffer with zeros to a multiple of 16 bytes (`uniform`); the Vulkan backend sizes
+### Parameters are four-byte words
+
+`crates/backend-wgpu/src/lib.rs` takes a dispatch's parameters as a list of 32-bit words and pads the uniform buffer with zeros to a multiple of 16 bytes (`uniform`); the Vulkan backend sizes
 its buffers by `(len * 4).div_ceil(16) * 16`. The parameter structs of the kernels are, almost all of them, flat lists of `u32` and `f32` (a few nest a struct), which sidesteps the vector alignment rules; floats cross the host boundary as bit patterns. The padding has a cost that knowledge #171 records:
 a dispatch that passed fewer words than the kernel's block declared was not an error, since the missing trailing fields read zero. An `eps` added to a kernel became 0.0 at every call site nobody had updated. Commit 365bb582d (September 2026) reads the
 size of each kernel's block from the struct its source binds as `var<uniform>` and makes `Gpu::step`, `dispatch` and the sliced variants refuse a shorter list, naming the kernel. The function that reads the size, `parse_params_words` in `crates/gpu-core/src/lib.rs`,
 counts only flat blocks of 4-byte scalars and declines vector or nested layouts: they carry the alignment padding of the section above, and a guessed size would refuse correct dispatches.
 
-**A grid that dropped half its output: commit 3ad494a12.** The kernel `crates/kernels/wgsl/dw_splitk_reduce.wgsl`, which folds partial sums into a weight gradient, took only `global_invocation_id` and used `gid.x` as its index. The commit (August 2026)
+### A grid that dropped half its output: commit 3ad494a12
+
+The kernel `crates/kernels/wgsl/dw_splitk_reduce.wgsl`, which folds partial sums into a weight gradient, took only `global_invocation_id` and used `gid.x` as its index. The commit (August 2026)
 records that this is right only while the grid has one row; past 65,535 workgroups the backends tile the dispatch into two dimensions and the kernel left every output past $65535 \times 64 = 4{,}194{,}240$ untouched: "a wrong weight gradient with no crash", reachable at a 3 x 3 convolution over 1024 channels (the table of this chapter).
 The fix was the two-line index of every other kernel, and the same missing argument had made the kernel fail to compile on the CPU backend, which is how the test `compile_all` was red on one kernel in 357. Its header also claimed a property the code did
 not have. The lessons are those of this chapter: a grid is bigger than one row, and a failing test on one kernel is a finding.
 
-**Alignment of binding offsets: commits bda58efb1 and 8d69f8b11, knowledge #41.** The GEMM attention path of `crates/model/src/block.rs` bound per-head sub-ranges of shared scratch buffers, and its strides were raw products.
+### Alignment of binding offsets: commits bda58efb1 and 8d69f8b11, knowledge #41
+
+The GEMM attention path of `crates/model/src/block.rs` bound per-head sub-ranges of shared scratch buffers, and its strides were raw products.
 Commit bda58efb1 (July 2026) describes a test that failed on a real adapter with "Buffer offset 3200 does not respect device's requested min_storage_buffer_offset_alignment limit 256" for $h = 1$,
 200 positions and head dimension 4, the number in the table of this chapter; the fix is `pad64`, which rounds each stride to 64 words, and it also resized the scratch buffers for the padded size, since padding without enlarging them would
 have overflowed. The second case is knowledge #41 and commit 8d69f8b11 (August 2026): a decode step bound a source buffer at an offset that was not a multiple of 256. Knowledge #41 records that the obvious repair, passing the offset as a uniform instead, replaced the crash with a silent wrong value, because the existing kernel's `base`
 parameter offset only its *destination*. The commit's repair is a new kernel, `crates/kernels/wgsl/splice_add_offset_src.wgsl`, that offsets the source. The general lesson is to read what a parameter addresses before reusing it, and to prefer a failure that is loud.
 
-**The barrier rule in a compiler: commit 3f489e789.** brain's CPU backend compiles a workgroup kernel as two loops split at the barrier, which is the simulator of this chapter's section on the barrier. September 2026's commit
+### The barrier rule in a compiler: commit 3f489e789
+
+brain's CPU backend compiles a workgroup kernel as two loops split at the barrier, which is the simulator of this chapter's section on the barrier. September 2026's commit
 shows two guarantees that WGSL makes and that model dropped: an early `return` before the barrier was scoped to the first loop only, so the invocations a padded-grid guard excludes ran the second half and wrote output, and `var<workgroup>` memory was reused from one
 workgroup to the next instead of being zeroed. The commit's own account is that neither was reachable from a model run at the time, and that they were found by comparing the compiler with a second one over the same WGSL; its tests are
 `an_invocation_that_returned_before_the_barrier_stays_returned` and `workgroup_memory_is_zero_at_the_start_of_every_workgroup` in `crates/wgsl-cpu/tests/it/workgroup_semantics.rs`. Knowledge #112 states the lesson: enumerate what a language guarantees and test each guarantee on every target. Here the
 lesson restates the barrier rule: a return before a barrier is only legal when the whole workgroup takes it.
 
-**Bounds: the guard is the only check.** The language promises that an out-of-range access cannot touch memory outside the buffer (knowledge #202 records that a translation to CUDA had to reproduce that promise by clamping every index, because the target did not give it).
+### Bounds: the guard is the only check
+
+The language promises that an out-of-range access cannot touch memory outside the buffer (knowledge #202 records that a translation to CUDA had to reproduce that promise by clamping every index, because the target did not give it).
 But `crates/backend-wgpu/src/lib.rs` creates its shader modules without runtime bounds checks unless the environment variable `BRAIN_GPU_CHECKED` is set, and `crates/vulkan/src/shader.rs` reads the same switch: the code's comments state the argument,
 that every kernel bounds itself on its uniform and buffer sizes are fixed by the model. This is the "the guard is the only check" row of the table of launch mistakes, as a design decision. A related bug of the same kind is commit e3019d191 (August 2026): a shader-local
 `array<f32, 64>` in `crates/kernels/wgsl/router_gate.wgsl` was a second literal that a bump of the maximum expert count from 64 to 128 never touched, so experts 64 and up indexed past it.
 
-**Read-back.** `read` in `crates/backend-wgpu/src/lib.rs` is the synchronizing step of this chapter's host section: it flushes the pending dispatches, copies the buffer into a staging buffer, maps it and waits
+### Read-back
+
+`read` in `crates/backend-wgpu/src/lib.rs` is the synchronizing step of this chapter's host section: it flushes the pending dispatches, copies the buffer into a staging buffer, maps it and waits
 for the device (`poll_wait_bounded`) before copying the bytes out, reusing the staging buffer between reads. Chapter 4's timing story (knowledge #6) is the other face of the same fact: an enqueue returns at once, so only the read-back or an explicit wait shows when the device has finished.
 
 ## Check your understanding
@@ -683,23 +678,6 @@ for the device (`poll_wait_bounded`) before copying the bytes out, reusing the s
    transaction count against the original and say why shared memory is needed at all.
 7. A uniform struct has two `vec3<f32>` fields one after the other. Where does the second start, and what is the struct's size?
 8. Find the error: "My kernel uses `gid.x` as its index, and it is correct on the 10-element test and on a 4-million-element test, so it is correct."
-
-## Exercises
-
-1. **[Calculate]** A kernel works on $N = 1{,}000{,}003$ elements with workgroups of 256. Find the number of workgroups, the invocations launched and the idle ones. Then take $N = 20{,}000{,}000$, workgroups of 256 and a limit of
-   65,535 workgroups per dimension: find the grid $(n_x, n_y)$, the workgroups launched and the invocations that fail the guard.
-2. **[Calculate]** Lay out `{ a: f32, b: vec3<f32>, c: f32, d: vec2<f32>, e: u32 }` by the rules of the alignment section: the offset of each field, the struct's alignment and size, the bytes of padding, and the bytes of the uniform buffer.
-3. **[Calculate]** Transpose a $[64, 2048]$ fp32 matrix by the naive kernel (64 invocations per workgroup) and by the $16 \times 16$ tiled kernel. Using the formulas of the stride section, count the transactions of each and the bytes moved.
-4. **[Calculate]** Slices of 50 positions of 6 fp32 numbers are stacked in one buffer and bound at offsets that must be multiples of 256 bytes. Find the padded stride in words, the offset in bytes of slice 5 with and without padding, which unpadded slices of the first eight are aligned, and the fraction of the buffer that is padding.
-5. **[Calculate]** A chain of 5 kernels runs on $N = 2^{22}$ fp32 numbers, each with a 3-word parameter block. Find the bytes up, the bytes down and the number of waits for the round-trip design and for the resident design, and the model bus time of each at 32 (GB/s).
-6. **[Implement]** Reproduce `compute_kernels.axpb_trace` and `compute_kernels.grid_failures`: write a simulator that runs the body of one invocation for every invocation of every workgroup over a flat memory with buffers laid out in it, with a clamp option. Add the case $N = 13$, workgroup size 4, no guard,
-   and say which words of which buffer are changed.
-7. **[Implement]** Reproduce `compute_kernels.view_gather` and `compute_kernels.transpose_traffic`: simulate the gather kernel, record every load and store, and count the 32-byte blocks per subgroup of 32. Add the view of shape $[3, 4]$, strides $(0, 1)$ over $x = [1, 2, 3, 4]$ and give its output and its load blocks.
-8. **[Implement]** Reproduce `compute_kernels.tile_trace`, `compute_kernels.barrier_rule` and `compute_kernels.missing_barrier`: write the tiled transpose as phases with a barrier check between them. Add $T = 8$ and the shape $[20, 12]$ and report the faulting workgroups of the early-return form.
-9. **[Implement]** Reproduce `compute_kernels.struct_layout` and `compute_kernels.host_disagreement` by packing and unpacking bytes with the rules of the alignment section. Add a field `tint: vec3<f32>` after `gain` and report the new offsets, the struct size and what the kernel reads for it.
-10. **[Investigate]** Write the kernel of the problem section in a kernel language available on your device, run it for $N$ equal to the workgroup size and to the workgroup size plus one, with and without the guard. Report whether your runtime clamps, checks, or lets the write through,
-    and how you found out. State the language, the driver and what your device did.
-11. **[Investigate]** Query your device for the three limits of this chapter: the maximum workgroups per dimension, the required alignment of storage-buffer binding offsets, and the largest uniform buffer. Compare each with 65,535, 256 bytes and 64 KiB, and say which of this chapter's tables would change.
 
 ## Summary
 
@@ -716,6 +694,23 @@ All the numbers of this chapter are counts: invocations, transactions, bytes, by
 What the chapter does not yet do is make a kernel *fast*. The transpose reached the copy's floor, but the matrix product, the operation that dominates a network, needs more than a tile in shared memory: Chapter 6 combines the tile of this chapter with a second
 level of reuse in registers.
 
+## Exercises
+
+1. **[Calculate]** A kernel works on $N = 1{,}000{,}003$ elements with workgroups of 256. Find the number of workgroups, the invocations launched and the idle ones. Then take $N = 20{,}000{,}000$, workgroups of 256 and a limit of
+   65,535 workgroups per dimension: find the grid $(n_x, n_y)$, the workgroups launched and the invocations that fail the guard.
+2. **[Calculate]** Lay out `{ a: f32, b: vec3<f32>, c: f32, d: vec2<f32>, e: u32 }` by the rules of the alignment section: the offset of each field, the struct's alignment and size, the bytes of padding, and the bytes of the uniform buffer.
+3. **[Calculate]** Transpose a $[64, 2048]$ fp32 matrix by the naive kernel (64 invocations per workgroup) and by the $16 \times 16$ tiled kernel. Using the formulas of the stride section, count the transactions of each and the bytes moved.
+4. **[Calculate]** Slices of 50 positions of 6 fp32 numbers are stacked in one buffer and bound at offsets that must be multiples of 256 bytes. Find the padded stride in words, the offset in bytes of slice 5 with and without padding, which unpadded slices of the first eight are aligned, and the fraction of the buffer that is padding.
+5. **[Calculate]** A chain of 5 kernels runs on $N = 2^{22}$ fp32 numbers, each with a 3-word parameter block. Find the bytes up, the bytes down and the number of waits for the round-trip design and for the resident design, and the model bus time of each at 32 (GB/s).
+6. **[Implement]** Reproduce `compute_kernels.axpb_trace` and `compute_kernels.grid_failures`: write a simulator that runs the body of one invocation for every invocation of every workgroup over a flat memory with buffers laid out in it, with a clamp option. Add the case $N = 13$, workgroup size 4, no guard,
+   and say which words of which buffer are changed.
+7. **[Implement]** Reproduce `compute_kernels.view_gather` and `compute_kernels.transpose_traffic`: simulate the gather kernel, record every load and store, and count the 32-byte blocks per subgroup of 32. Add the view of shape $[3, 4]$, strides $(0, 1)$ over $x = [1, 2, 3, 4]$ and give its output and its load blocks.
+8. **[Implement]** Reproduce `compute_kernels.tile_trace`, `compute_kernels.barrier_rule` and `compute_kernels.missing_barrier`: write the tiled transpose as phases with a barrier check between them. Add $T = 8$ and the shape $[20, 12]$ and report the faulting workgroups of the early-return form.
+9. **[Implement]** Reproduce `compute_kernels.struct_layout` and `compute_kernels.host_disagreement` by packing and unpacking bytes with the rules of the alignment section. Add a field `tint: vec3<f32>` after `gain` and report the new offsets, the struct size and what the kernel reads for it.
+10. **[Investigate]** Write the opening kernel of the chapter in a kernel language available on your device, run it for $N$ equal to the workgroup size and to the workgroup size plus one, with and without the guard. Report whether your runtime clamps, checks, or lets the write through,
+    and how you found out. State the language, the driver and what your device did.
+11. **[Investigate]** Query your device for the three limits of this chapter: the maximum workgroups per dimension, the required alignment of storage-buffer binding offsets, and the largest uniform buffer. Compare each with 65,535, 256 bytes and 64 KiB, and say which of this chapter's tables would change.
+
 ## Key terms
 
 - **compute kernel**: the program that one invocation of a data-parallel computation runs, together with the declaration of the buffers and constants it is given, written once and launched over a grid of workgroups. <!-- concept: compute-kernel -->
@@ -727,7 +722,7 @@ level of reuse in registers.
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $\lceil 1000 / 64 \rceil = 16$ workgroups, $16 \times 64 = 1024$ invocations, so $1024 - 1000 = 24$ have no element. (Volume IV, Chapter 4.)
 2. The reading invocations use values that other invocations of the workgroup wrote. Without a barrier nothing orders a write before the read that needs it, so a read may see a leftover value; the barrier makes every write finish before any read starts. (Volume IV, Chapter 4.)
