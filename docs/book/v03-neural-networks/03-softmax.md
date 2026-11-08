@@ -5,9 +5,9 @@
 
 *How does a network choose among many classes, and why is its gradient so simple?*
 
-## The problem
+Four numbers come out of a classifier: $2.4$, $0.4$, $-0.4$ and $0.5$. Read them as probabilities and every rule is broken at once. They add to $2.9$ rather than to one, and one of them lies below zero. Yet the largest is a good guess at the answer, and nothing in the four numbers says how sure the guess is. They need repairing into a proper probability vector without disturbing that guess, in a way a computer can carry out for numbers of any size, and with a loss at the end whose gradient training can use.
 
-A machine part comes off a line with a defect, and the inspection station measures three numbers on it: how rough the surface is, how deep the mark goes and how long it is. The defect is one of four kinds, a scratch, a dent, a crack or a burr, and each kind sends the part to a different repair bench. A classifier has to say which. Its last layer is the linear map of Volume II with one row per class: it takes the three measurements $\mathbf{x}$ and produces four numbers, one logit per class, $\mathbf{z} = \mathbf{W}\mathbf{x} + \mathbf{b}$ (Volume II, chapter 3 used the word for the score whose sigmoid is a probability; here every class has one).
+Their source is the last layer of a classifier that sorts a defective machine part into one of four kinds, a scratch, a dent, a crack or a burr, each of which sends the part to a different repair bench. The inspection station measures three numbers on the part: how rough the surface is, how deep the mark goes and how long it is. The last layer is the linear map of Volume II with one row per class. It takes the three measurements $\mathbf{x}$ and produces one logit per class, $\mathbf{z} = \mathbf{W}\mathbf{x} + \mathbf{b}$ (Volume II, chapter 3 used the word for the score whose sigmoid is a probability; here every class has one).
 
 <!-- worked: softmax.defect_inputs -->
 Classes: 0 = scratch, 1 = dent, 2 = crack, 3 = burr. Measurements: 0 = roughness, 1 = depth, 2 = length. The part has x = (1.0, 0.5, 0.8) and its true defect is 1 (dent). The classifier is z = W x + b with W of shape [4, 3] and b of shape [4].
@@ -26,24 +26,9 @@ The part has logits $(2.4, 0.4, -0.4, 0.5)$: the classifier leans towards a scra
 - **To act on it we need confidence.** Whether a part goes to the scratch bench or to a second inspection depends on how sure the classifier is, and that is a statement about probabilities, not about the largest of four unconstrained numbers.
 - **To learn from it we need a smooth connection.** The decision "the largest logit wins" changes abruptly when two logits cross, so it has no gradient to follow; whatever replaces it must change smoothly as the logits move.
 
-The function that turns the four numbers into four probabilities is the **softmax**. This chapter builds it from the requirement that it must satisfy, shows that for two classes it is the sigmoid you already know, and then solves four problems that appear the moment one writes it in code: it overflows, its logarithm underflows, its loss has a gradient that looks complicated and turns out to be one subtraction, and a loss that demands certainty pushes the logits to infinity. Along the way every number is computed, including the count of operations that a loss over a vocabulary of fifty thousand classes costs per example.
+The function that turns the four numbers into four probabilities is the **softmax**. The chapter builds it from the requirements above and shows that for two classes it is the sigmoid you already know. Then come four problems that appear the moment one writes it in code: it overflows, its logarithm underflows, its loss has a gradient that looks complicated and turns out to be one subtraction, and a loss that demands certainty pushes the logits to infinity. Two things the softmax cannot see, a constant added to every logit and a common factor multiplied into them, lead to the safe way of computing it. The one-hot target and the cross-entropy follow, with the Jacobian that gives their gradient $\mathbf{p} - \mathbf{t}$. The last questions concern the output layer itself: targets that are not certain, a sigmoid per class in place of a softmax, and the work per row, which for a vocabulary of fifty thousand classes is counted exactly, before the kernels in brain. Every number on the way is computed.
 
-The chapter has eight steps.
-
-1. **From scores to a probability vector.** Why dividing by the sum fails, what exponentiating repairs, and the definition.
-2. **The sigmoid is the two-class softmax.** And what a logit means with many classes.
-3. **Adding a constant, and scaling.** What the softmax ignores, and what a common factor on the logits does to it.
-4. **Computing it safely.** Overflow, the stable softmax, underflow, and the log-softmax.
-5. **One-hot targets and the loss.** Cross-entropy as the negative log-likelihood of the categorical.
-6. **The Jacobian and the gradient.** The matrix $\mathrm{diag}(\mathbf{p}) - \mathbf{p}\mathbf{p}^\top$, and why the gradient of the loss is $\mathbf{p} - \mathbf{t}$.
-7. **Label smoothing, one class or several, and the cost.** Targets that are not certain, the sigmoid per class, and the work per row.
-8. **Where this appears in brain.**
-
-You may use from earlier chapters: the logit and the sigmoid (Volume II, chapter 3), the categorical distribution (Volume I, chapter 11), the cross-entropy (Volume I, chapter 13), the log-sum-exp (Volume I, chapter 15) and the Jacobian (Volume I, chapter 8). The weights of the classifier are taken as given; how they are found by repeating the gradient step through many layers is the subject of the next chapters.
-
-## Before you begin
-
-Five questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+The chapter uses the logit and the sigmoid (Volume II, chapter 3), the categorical distribution (Volume I, chapter 11), the cross-entropy (Volume I, chapter 13), the log-sum-exp (Volume I, chapter 15) and the Jacobian (Volume I, chapter 8). The weights of the classifier are taken as given; how they are found by repeating the gradient step through many layers is the subject of the next chapters. Five questions bring those ideas back; answer them from memory, because the answers are at the end of the chapter, and a hard one sends you to the chapter it names.
 
 1. (Volume II, chapter 3, "Classification and Logistic Regression", the logit and the sigmoid.) A classifier gives a part the logit $z = 1.5$ for the class "rejected". What probability does it assign, and what is the probability of "accepted"?
 2. (Volume I, chapter 11, "Distributions", the categorical distribution.) What two conditions must a list of four numbers satisfy to be the probabilities of a categorical distribution on four outcomes? If the third outcome occurred, what is the list of indicators of the outcome?
@@ -52,8 +37,6 @@ Five questions on ideas from earlier chapters, to answer from memory. The answer
 5. (Volume I, chapter 8, "Gradients, Jacobians and Many Variables", the Jacobian.) What is the shape of the Jacobian of a function from four inputs to four outputs, and what is its entry in row $i$, column $j$?
 
 ## From scores to a probability vector
-
-*What it is for: turning any list of real numbers into a list of probabilities without changing which entry is largest.*
 
 Take the four logits of the part and ask what a conversion into probabilities has to do. Three properties are needed: every output positive (a probability cannot be negative, and a zero would make the loss of an example whose label is that class infinite), the outputs adding to one, and the largest logit staying the largest probability, so that the conversion does not change the classifier's decision.
 
@@ -83,9 +66,7 @@ Three names will be used throughout. The logits $\mathbf{z}$ are the scores befo
 
 ## The sigmoid is the two-class softmax
 
-*What it is for: knowing that nothing new has been added to Volume II, and what a logit means when there are many classes.*
-
-Take $C = 2$ and write the softmax for class $1$:
+Nothing new has been added to Volume II, and seeing why also settles what a logit means when there are many classes. Take $C = 2$ and write the softmax for class $1$:
 
 $$
 p_1 = \frac{e^{z_1}}{e^{z_0} + e^{z_1}} = \frac{1}{1 + e^{z_0 - z_1}} = \sigma(z_1 - z_0),
@@ -136,9 +117,7 @@ The first table confirms it: the scratch is $e^{2} \approx 7.39$ times as probab
 
 ## Adding a constant, and scaling
 
-*What it is for: knowing what the softmax cannot see, which is the tool of the next section, and what a common factor on the logits does to it.*
-
-The second table above adds the same number $c$ to every logit of the part, including $c = 1000$, and the probabilities do not move. The reason is one line:
+The softmax is blind to some changes of its input, and knowing which ones is what the safe computation of the next section is built on. The second table above adds the same number $c$ to every logit of the part, including $c = 1000$, and the probabilities do not move. The reason is one line:
 
 $$
 \mathrm{softmax}(\mathbf{z} + c\mathbf{1})_i = \frac{e^{z_i + c}}{\sum_j e^{z_j + c}} = \frac{e^{c}\,e^{z_i}}{e^{c}\sum_j e^{z_j}} = \mathrm{softmax}(\mathbf{z})_i,
@@ -171,8 +150,6 @@ The same knob has a second name when a language model chooses its next word: the
 The figure plots the four outputs as one logit moves. The scratch curve is an S, the sigmoid's shape, because against the other three classes taken together it is a two-class problem. The other three curves fall together, and their ratios never change: raising one logit takes probability from the others in proportion to what they have, which is the log-ratio property again.
 
 ## Computing it safely
-
-*What it is for: getting the right answer when the logits are large or small, and when a probability is tiny.*
 
 The definition says: exponentiate, add, divide. For logits of a few units that works. Logits are not always a few units. A language model's logits are sometimes in the tens, and in the middle of a training run that has gone wrong they can be in the hundreds. The exponential of a 32-bit number overflows above about $88.7$ and underflows to zero below about $-104$ (Volume I, chapter 15 has the table); in 64 bits the limits are about $709.8$ and $-745$. The table runs the definition in each format, one operation at a time, against the shifted version of the next paragraph and against exact arithmetic:
 
@@ -235,8 +212,6 @@ the **log-softmax**: a logit minus the log-sum-exp of Volume I, chapter 15, comp
 
 ## One-hot targets and the loss
 
-*What it is for: a number that says how wrong the probability vector is about the class that occurred.*
-
 The label of an example is a class index $c$. To compare it with a probability vector, write it as a vector of the same length. The **one-hot encoding** of the class $c$ is the vector $\mathbf{t} = \mathbf{e}_c$ with $t_c = 1$ and every other entry $0$ (the indicator list of Volume I, chapter 11): for the dent, $\mathbf{t} = (0, 1, 0, 0)$. It is itself a probability vector, one that puts all its weight on one class.
 
 Volume II, chapter 4 gave the loss of a classifier: the negative logarithm of the probability the model gave to the label that occurred. Here that probability is $p_c$, so the loss of one example is
@@ -286,9 +261,7 @@ Mean loss over the 3 rows: 1.0523. Gradient of the mean loss with respect to the
 
 ## The Jacobian and the gradient
 
-*What it is for: the one formula that every classifier's training loop depends on.*
-
-Gradient descent needs $\partial L/\partial z_j$ for every logit. The path from the logits to the loss passes through the softmax, so the chain rule of Volume I (chapter 8) needs the derivative of the softmax: how every probability $p_i$ changes when any logit $z_j$ changes. That is a $C \times C$ matrix, the Jacobian of the softmax, and we derive it first.
+Every classifier's training loop depends on one formula, and this section derives it. Gradient descent needs $\partial L/\partial z_j$ for every logit. The path from the logits to the loss passes through the softmax, so the chain rule of Volume I (chapter 8) needs the derivative of the softmax: how every probability $p_i$ changes when any logit $z_j$ changes. That is a $C \times C$ matrix, the Jacobian of the softmax, and we derive it first.
 
 Write $s = \sum_j e^{z_j}$, so $p_i = e^{z_i}/s$. Changing $z_j$ changes the numerator of $p_i$ only when $j = i$, and changes the denominator for every $i$, with $\partial s/\partial z_j = e^{z_j}$. The quotient rule gives, for $j = i$,
 
@@ -366,9 +339,9 @@ An arbitrary upstream vector u = (1.0, -2.0, 0.5, 3.0) sent through the same Jac
 
 The columns of the first table agree. Look at the column $\mathbf{u}$: it holds $-9.9436$ for the dent and zeros elsewhere, a large number, and the Jacobian times it gives entries between $-0.9$ and $0.74$. The factor $1/p_c$ and the factor $p_c$ in the Jacobian cancelled exactly, which is why the final gradient never exceeds $1$ in magnitude.
 
-**A shortcut.** The result can also be reached without the Jacobian, from the fused form $L = \mathrm{lse}(\mathbf{z}) - z_c$. The derivative of the log-sum-exp is $\partial\,\mathrm{lse}/\partial z_j = e^{z_j}/\sum_k e^{z_k} = p_j$, and the derivative of $-z_c$ is $-t_j$, so $\partial L/\partial z_j = p_j - t_j$ directly. This is the real reason for the fused form: the softmax and the logarithm are not two operations to be differentiated and multiplied, but one function whose derivative is short.
+The Jacobian is not the only road to this result. It can be reached without it, from the fused form $L = \mathrm{lse}(\mathbf{z}) - z_c$. The derivative of the log-sum-exp is $\partial\,\mathrm{lse}/\partial z_j = e^{z_j}/\sum_k e^{z_k} = p_j$, and the derivative of $-z_c$ is $-t_j$, so $\partial L/\partial z_j = p_j - t_j$ directly. This is the real reason for the fused form: the softmax and the logarithm are not two operations to be differentiated and multiplied, but one function whose derivative is short.
 
-**The general rule for a softmax in the middle of a network.** The loss is not always the next operation. Attention (Volume V) applies a softmax and then does more arithmetic with it, so the gradient $\mathbf{u}$ arriving at $\mathbf{p}$ can be any vector. The product $\mathbf{u}\mathbf{J}$ is then, using $\mathbf{J} = \mathrm{diag}(\mathbf{p}) - \mathbf{p}\mathbf{p}^\top$,
+The loss is not always the next operation. Attention (Volume V) applies a softmax and then does more arithmetic with it, so the gradient $\mathbf{u}$ arriving at $\mathbf{p}$ can be any vector. The product $\mathbf{u}\mathbf{J}$ is then, using $\mathbf{J} = \mathrm{diag}(\mathbf{p}) - \mathbf{p}\mathbf{p}^\top$,
 
 $$
 \left(\mathbf{u}\mathbf{J}\right)_j = p_j u_j - p_j \sum_i p_i u_i = p_j\bigl(u_j - \mathbf{u}\cdot\mathbf{p}\bigr),
@@ -376,7 +349,7 @@ $$
 
 one dot product and one elementwise product: about $3C$ operations. The second table above sends an arbitrary $\mathbf{u}$ through the matrix and through this formula and gets the same four numbers. The matrix itself has $C^2$ entries, and for the vocabulary of fifty thousand words used below that is $2.5 \times 10^9$ numbers per example, which nobody would build. The next chapter makes it a principle that a backward pass multiplies a row vector by a Jacobian and never forms the matrix; for the softmax, this one line is that product.
 
-**Why the fused form is simpler and safer.** Compose the two operations in code: compute $\mathbf{p}$, take its logarithm, and differentiate through both. The backward pass divides by $p_c$ and then multiplies by $p_c(1 - p_c)$ and $p_c p_j$; the two factors cancel in exact arithmetic, but a computer first evaluates the quotient. Take a confidently wrong example, logits $(30, -100, 5, 0)$ whose true class is the second:
+The fused form is also the safer one. Compose the two operations in code: compute $\mathbf{p}$, take its logarithm, and differentiate through both. The backward pass divides by $p_c$ and then multiplies by $p_c(1 - p_c)$ and $p_c p_j$; the two factors cancel in exact arithmetic, but a computer first evaluates the quotient. Take a confidently wrong example, logits $(30, -100, 5, 0)$ whose true class is the second:
 
 <!-- worked: softmax.fused_against_composed -->
 Logits z = (30, -100, 5, 0), true class 1 (dent), 32-bit arithmetic one operation at a time for the first two columns. Stable softmax p = (1, 0, 1.3888 x 10^-11, 9.3576 x 10^-14). The last column is a squared error on the probabilities, sum (p - t)^2, with its gradient 2 (p - t) J, in 64-bit arithmetic.
@@ -394,7 +367,7 @@ The composed route underflows: $p_1$ is $e^{-130}$, below the smallest 32-bit nu
 
 The last column of the table is a warning of what the alternative loss does. A squared error on the probabilities, $\sum_i (p_i - t_i)^2$, has the gradient $2(\mathbf{p} - \mathbf{t})\mathbf{J}$, whose factor $\mathbf{J}$ is almost zero when the softmax is saturated. For this example the squared error is $2$, as wrong as it can be, and the gradient is $3 \times 10^{-11}$ or smaller (the entry of the true class itself is $10^{-56}$): the model cannot learn from its worst mistake. This is the many-class version of the result of Volume II, chapter 3, where the squared error trained poorly on a sigmoid for the same reason; the cross-entropy's logarithm exactly undoes the saturation.
 
-**What the gradient says.** In words, $\mathbf{p} - \mathbf{t}$ says: for every wrong class, push its logit down by its own probability; for the true class, push its logit up by the probability that it is missing, $1 - p_c$, which equals the sum of the wrong classes' probabilities. For the part, the gradient is $(0.7431, -0.8994, 0.0452, 0.1111)$: the scratch, which the model believed in, is pushed down hard, the dent pulled up, and the unlikely crack barely touched. Three properties follow. The entries add to zero, so a step changes no logit's average, in agreement with shift invariance. The gradient is large when the model is wrong and small when it is right, and it vanishes only when $\mathbf{p} = \mathbf{t}$, which for a one-hot target needs $p_c = 1$, a logit gap that is infinite. And its size is bounded: no logit can be told to move by more than $1$ per example, however confidently wrong the model is.
+In words, $\mathbf{p} - \mathbf{t}$ says: for every wrong class, push its logit down by its own probability; for the true class, push its logit up by the probability that it is missing, $1 - p_c$, which equals the sum of the wrong classes' probabilities. For the part, the gradient is $(0.7431, -0.8994, 0.0452, 0.1111)$: the scratch, which the model believed in, is pushed down hard, the dent pulled up, and the unlikely crack barely touched. Three properties follow. The entries add to zero, so a step changes no logit's average, in agreement with shift invariance. The gradient is large when the model is wrong and small when it is right, and it vanishes only when $\mathbf{p} = \mathbf{t}$, which for a one-hot target needs $p_c = 1$, a logit gap that is infinite. And its size is bounded: no logit can be told to move by more than $1$ per example, however confidently wrong the model is.
 
 The loss and the gradient together, from the logits of one example and its class index, in the book's pseudocode:
 
@@ -415,7 +388,7 @@ function cross_entropy_row(z: array<real>[C], c: int) -> (real, array<real>[C]):
 
 For a batch of $B$ rows each gradient is divided by $B$ (the mean). The last table of the previous section did exactly that.
 
-**Training the classifier.** The gradient with respect to the logits is the start of the backward pass. For the last layer $\mathbf{z} = \mathbf{W}\mathbf{x} + \mathbf{b}$ a logit is $z_i = \sum_j W_{ij}x_j + b_i$, so $\partial L/\partial W_{ij} = (p_i - t_i)\,x_j$ and $\partial L/\partial b_i = p_i - t_i$: with $d\mathbf{W}$ the matrix of all $\partial L/\partial W_{ij}$, $d\mathbf{W} = (\mathbf{p} - \mathbf{t})\mathbf{x}^\top$ and $d\mathbf{b} = \mathbf{p} - \mathbf{t}$, an outer product of the error and the input. The table computes both for the part and then follows plain gradient descent on the single example:
+The gradient with respect to the logits is the start of the backward pass. For the last layer $\mathbf{z} = \mathbf{W}\mathbf{x} + \mathbf{b}$ a logit is $z_i = \sum_j W_{ij}x_j + b_i$, so $\partial L/\partial W_{ij} = (p_i - t_i)\,x_j$ and $\partial L/\partial b_i = p_i - t_i$: with $d\mathbf{W}$ the matrix of all $\partial L/\partial W_{ij}$, $d\mathbf{W} = (\mathbf{p} - \mathbf{t})\mathbf{x}^\top$ and $d\mathbf{b} = \mathbf{p} - \mathbf{t}$, an outer product of the error and the input. The table computes both for the part and then follows plain gradient descent on the single example:
 
 <!-- worked: softmax.gradient_descent_on_weights -->
 Gradient at the starting weights for the part x = (1.0, 0.5, 0.8) and true class 1 (dent):
@@ -443,8 +416,6 @@ Plain gradient descent, w <- w - eta dW and b <- b - eta db with eta = 0.5, from
 The first step already changes the answer: the dent overtakes the scratch ($0.4855$ against $0.3342$) and the loss drops from $2.2969$ to $0.7226$. After that the loss keeps falling, but more slowly, because the gradient $\mathbf{p} - \mathbf{t}$ shrinks as $p_c$ approaches $1$: after six steps the dent has $0.9156$ and the loss is $0.0882$. It never reaches zero, and the next section is about what to do with that.
 
 ## Label smoothing
-
-*What it is for: keeping a classifier from being driven towards a certainty that no finite logit can express.*
 
 The one-hot target asks for $p_c = 1$ and $p_i = 0$ for every other class. The softmax can only reach that in the limit: $p_c \to 1$ needs the gap between the true logit and the others to grow without bound. The loss $\ln(1 + \sum_{i\neq c} e^{z_i - z_c})$ falls towards zero as the gap grows, but never reaches it, and every step of gradient descent makes the gap larger. (This is the same behaviour as logistic regression on separable data in Volume II, chapter 3: the weights grew like $\ln k$ without limit.) The consequences are the ones seen there: large logits, probabilities pinned at the extremes whatever the evidence, and a model that keeps growing its weights on examples it already gets right.
 
@@ -511,9 +482,7 @@ Label smoothing is a design choice, not a law: it limits confidence by construct
 
 ## One class or several
 
-*What it is for: choosing between two output layers that look alike and answer different questions.*
-
-The softmax assumes that exactly one class is true: the probabilities compete, and raising one lowers the others. A part with one defect is that case. A photograph may contain a dog and a ball; a part may have a scratch and a dent. Then each class is its own yes-or-no question and the model gives each its own sigmoid and its own binary cross-entropy (Volume II, chapter 3), with no constraint that they add to one. The same four logits through both heads:
+Two output layers look alike and answer different questions, so the choice between them is worth making deliberately. The softmax assumes that exactly one class is true: the probabilities compete, and raising one lowers the others. A part with one defect is that case. A photograph may contain a dog and a ball; a part may have a scratch and a dent. Then each class is its own yes-or-no question and the model gives each its own sigmoid and its own binary cross-entropy (Volume II, chapter 3), with no constraint that they add to one. The same four logits through both heads:
 
 <!-- worked: softmax.multi_label_against_multi_class -->
 | class | z | softmax (one class) | sigmoid per class (any subset) |
@@ -528,8 +497,6 @@ The softmax assumes that exactly one class is true: the probabilities compete, a
 The softmax column adds to $1$: it has to say how its one unit of belief is shared. The sigmoid column adds to $2.5393$: it says that a scratch is very likely ($0.9168$) and a burr more likely than not ($0.6225$), both at once. A softmax trained on a part labelled "scratch and dent" cannot represent it: the best target it can be given is half on each ($0.5, 0.5, 0, 0$), which says "one of the two", not "both". The rule is to match the head to the world: one label from a list, softmax and cross-entropy; any subset of labels, a sigmoid and a binary cross-entropy per class. A consequence of the softmax's competition is worth knowing: it sees only the differences of the scores (shift invariance), so options that produce nearly identical scores give nearly no signal, however different the quantity underneath is; knowledge #133, described below, is a model that failed this way.
 
 ## What it costs
-
-*What it is for: seeing that the loss over a large vocabulary is cheap in arithmetic and expensive in data, and counting both.*
 
 A language model's last layer has one logit per word of its vocabulary, so $C$ is not $4$ but $50\,000$ or more. Count the operations of one row, counting each compare, add, subtract, divide, exponential and logarithm as one operation and listing the exponentials separately, since an exponential costs several multiply-adds in hardware. The softmax needs $C - 1$ compares for the maximum, then a subtraction, an exponential, an addition and a division per class: $5C - 1$ operations, $C$ of them exponentials. The fused loss value $\mathrm{lse}(\mathbf{z}) - z_c$ needs no division: $4C + 2$ operations, $C$ exponentials. The gradient has a choice of two designs. Both use the same two parts. The row statistics (the maximum and the sum) cost $C - 1$ compares plus three operations per class (the subtraction $z_i - m$, the exponential, the addition into the sum): $4C - 1$ operations. The gradient entry $i$ then costs five operations: the subtraction $z_i - m$, the exponential, the division by the sum, the subtraction of the one-hot entry $t_i$, and the division by the number of rows of the batch that scales the batch mean; over the row that is $5C$. One thread per logit, each recomputing the row's maximum and sum before its own entry, costs $C\,((4C - 1) + 5) = C(4C + 4)$ operations per row, with $C(C + 1)$ exponentials: quadratic in $C$. Computing the two row statistics, the maximum and the sum, once per row and letting each entry read them costs $(4C - 1) + 5C = 9C - 1$ operations, $2C$ exponentials: linear. The table runs each algorithm with a counter to confirm the formulas at three small sizes, then evaluates them at the large ones:
 
@@ -565,7 +532,7 @@ f32 logits (4 bytes each), a batch of 4,096 rows, and a final linear layer with 
 
 Two readings. The arithmetic of the loss is about $0.2\%$ of the arithmetic of the layer that makes the logits ($4C + 2$ against $2DC$ operations with $D = 1024$): the loss is not where the operations are. But the logits of $4096$ rows at $C = 50\,000$ are $819\,200\,000$ bytes, and the loss reads each one at least twice (the maximum pass and the sum pass), about $4C + 2$ operations for $8C$ bytes, a half operation per byte. A computation that does so little arithmetic per byte moved is limited by memory, not by arithmetic, so what shortens it is moving fewer bytes: reading each logit fewer times, or not materialising all the logits at all (the next section shows brain doing that). A variant of the stable softmax that reads the row once, with a running maximum and a rescaled running sum, is the subject of the flash-attention chapter of Volume V.
 
-## Where this appears in brain
+## Fused kernels, chunked heads and the absence of label smoothing in brain
 
 The softmax cross-entropy is the loss of every language model in brain, the loss of the classifier heads, and, through the same formula, the softmax inside attention. Everything above is visible in a handful of kernels.
 
@@ -601,6 +568,22 @@ Answers are at the end of the chapter.
 7. **Find the error.** "A photograph can contain a dog and a ball, so we label it $(1, 1, 0)$ and train a softmax cross-entropy on it." What goes wrong, and what is the right output layer?
 8. **Explain.** Why does a gradient kernel in which every logit's thread recomputes the row's maximum and sum do $C(4C + 4)$ operations per row, and what two numbers per row does the two-pass version store between its passes?
 
+## Summary
+
+A classifier with $C$ classes ends in $C$ logits $\mathbf{z}$, and the **softmax** turns them into a probability vector, $p_i = e^{z_i}/\sum_j e^{z_j}$: positive, adding to one, in the order of the logits. For two classes it is the sigmoid of the logit difference, and in general it is the only probability vector whose log-ratios are the differences of the logits. It is unchanged by adding a constant to every logit (so only the differences count) and sharpened or flattened by multiplying them. The **stable softmax** subtracts the largest logit first, which is allowed by that invariance and keeps every exponent at most zero; the log-softmax $z_i - \mathrm{lse}(\mathbf{z})$ never forms a probability whose logarithm would underflow. With a **one-hot encoding** $\mathbf{t}$ of the true class, the loss is the negative log-likelihood of the categorical, the **softmax cross-entropy** $L = \mathrm{lse}(\mathbf{z}) - z_c$. The Jacobian of the softmax is $\mathrm{diag}(\mathbf{p}) - \mathbf{p}\mathbf{p}^\top$, symmetric, with rows adding to zero; composed with the derivative $-t_i/p_i$ of the logarithm it collapses, because the division cancels the factor of the Jacobian, to the gradient $\mathbf{p} - \mathbf{t}$: push every wrong logit down by its probability and the true one up by what is missing, a gradient bounded by $1$ that vanishes only when the prediction matches the target. Computing it fused is shorter and safer than composing the two functions, as the example with logits $(30, -100, 5, 0)$ shows (loss $130$ and a finite gradient against $\infty$ and not-a-number). **Label smoothing** mixes the target with the uniform distribution, $\mathbf{t}' = (1 - \epsilon_{\mathrm{ls}})\mathbf{t} + \epsilon_{\mathrm{ls}}\mathbf{1}/C$, which changes the gradient to $\mathbf{p} - \mathbf{t}'$ and gives the loss a minimum at a finite logit gap, $\ln 37 = 3.6109$ for four classes at $0.1$, instead of an infimum approached only at infinity. A softmax is for one true class; independent yes-or-no questions get a sigmoid each. For a row of $C$ logits the loss needs $4C + 2$ operations and the gradient $9C - 1$ in the two-pass form against $4C^2 + 4C$ when every entry recomputes the row, a ratio of $22\,223$ at $C = 50\,000$; the loss is a fraction of a percent of the arithmetic of the layer that produces the logits but reads its whole output, which is why brain keeps only a chunk of the logits alive.
+
+In brain this is `ce_value.wgsl` and `ce_grad.wgsl` with their masked and two-pass variants, the chunked head `crates/model/src/head_ce.rs`, the host log-softmax in `crates/model/src/logprobs.rs`, and a family of softmax kernels whose backward is the one-line rule of this chapter. Label smoothing is not implemented in brain.
+
+Limits: we have treated the loss of one example and its gradient with respect to the logits, and have taken the logits as given. How the gradient travels through the layers below, with the cost of one more pass, is the next chapter, which derives backpropagation from the chain rule; the one after it writes out the backward pass of every layer, including the softmax in the middle of a network.
+
+## References
+
+- Bridle, J. S., *Probabilistic interpretation of feedforward classification network outputs, with relationships to statistical pattern recognition*, 1990 (the name softmax and its use as the output of a classifier).
+- Szegedy, C., Vanhoucke, V., Ioffe, S., Shlens, J. and Wojna, Z., *Rethinking the Inception architecture for computer vision*, 2016 (label smoothing).
+- Müller, R., Kornblith, S. and Hinton, G., *When does label smoothing help?*, 2019.
+- Blanchard, P., Higham, D. J. and Higham, N. J., *Accurately computing the log-sum-exp and softmax functions*, 2021.
+- Milakov, M. and Gimelshein, N., *Online normalizer calculation for softmax*, 2018.
+
 ## Exercises
 
 1. **[Calculate]** For $\mathbf{z} = (1, 0, -1)$ compute the softmax by hand to four decimals. Take the true class to be the last, compute the loss as $\mathrm{lse}(\mathbf{z}) - z_c$ and the gradient $\mathbf{p} - \mathbf{t}$, and check that the gradient adds to zero. Then repeat with $\mathbf{z} + 7$ and explain what changed and what did not.
@@ -625,14 +608,6 @@ Answers are at the end of the chapter.
 
 11. **[Investigate]** Instrument the three algorithms (softmax, loss value, two-pass gradient) with an operation counter and reproduce `softmax.work_counts`. Then count the operations of a one-pass softmax that keeps a running maximum $m$ and a running sum $s$, rescaling $s \leftarrow s\,e^{m_{\text{old}} - m_{\text{new}}}$ whenever the maximum changes, and say when it does more exponentials than the two-pass version.
 
-## Summary
-
-A classifier with $C$ classes ends in $C$ logits $\mathbf{z}$, and the **softmax** turns them into a probability vector, $p_i = e^{z_i}/\sum_j e^{z_j}$: positive, adding to one, in the order of the logits. For two classes it is the sigmoid of the logit difference, and in general it is the only probability vector whose log-ratios are the differences of the logits. It is unchanged by adding a constant to every logit (so only the differences count) and sharpened or flattened by multiplying them. The **stable softmax** subtracts the largest logit first, which is allowed by that invariance and keeps every exponent at most zero; the log-softmax $z_i - \mathrm{lse}(\mathbf{z})$ never forms a probability whose logarithm would underflow. With a **one-hot encoding** $\mathbf{t}$ of the true class, the loss is the negative log-likelihood of the categorical, the **softmax cross-entropy** $L = \mathrm{lse}(\mathbf{z}) - z_c$. The Jacobian of the softmax is $\mathrm{diag}(\mathbf{p}) - \mathbf{p}\mathbf{p}^\top$, symmetric, with rows adding to zero; composed with the derivative $-t_i/p_i$ of the logarithm it collapses, because the division cancels the factor of the Jacobian, to the gradient $\mathbf{p} - \mathbf{t}$: push every wrong logit down by its probability and the true one up by what is missing, a gradient bounded by $1$ that vanishes only when the prediction matches the target. Computing it fused is shorter and safer than composing the two functions, as the example with logits $(30, -100, 5, 0)$ shows (loss $130$ and a finite gradient against $\infty$ and not-a-number). **Label smoothing** mixes the target with the uniform distribution, $\mathbf{t}' = (1 - \epsilon_{\mathrm{ls}})\mathbf{t} + \epsilon_{\mathrm{ls}}\mathbf{1}/C$, which changes the gradient to $\mathbf{p} - \mathbf{t}'$ and gives the loss a minimum at a finite logit gap, $\ln 37 = 3.6109$ for four classes at $0.1$, instead of an infimum approached only at infinity. A softmax is for one true class; independent yes-or-no questions get a sigmoid each. For a row of $C$ logits the loss needs $4C + 2$ operations and the gradient $9C - 1$ in the two-pass form against $4C^2 + 4C$ when every entry recomputes the row, a ratio of $22\,223$ at $C = 50\,000$; the loss is a fraction of a percent of the arithmetic of the layer that produces the logits but reads its whole output, which is why brain keeps only a chunk of the logits alive.
-
-In brain this is `ce_value.wgsl` and `ce_grad.wgsl` with their masked and two-pass variants, the chunked head `crates/model/src/head_ce.rs`, the host log-softmax in `crates/model/src/logprobs.rs`, and a family of softmax kernels whose backward is the one-line rule of this chapter. Label smoothing is not implemented in brain.
-
-Limits: we have treated the loss of one example and its gradient with respect to the logits, and have taken the logits as given. How the gradient travels through the layers below, with the cost of one more pass, is the next chapter, which derives backpropagation from the chain rule; the one after it writes out the backward pass of every layer, including the softmax in the middle of a network.
-
 ## Key terms
 
 - **softmax**: the function that turns a vector of real scores into a probability vector by exponentiating each score and dividing by the sum of the exponentials, so that the outputs are positive, add to one and keep the order of the scores. <!-- concept: softmax -->
@@ -643,7 +618,7 @@ Limits: we have treated the loss of one example and its gradient with respect to
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $\sigma(1.5) = 1/(1 + e^{-1.5}) = 0.8176$ for "rejected", so $0.1824$ for "accepted".
 2. All four numbers non-negative and adding to $1$. The indicator list is $(0, 0, 1, 0)$: a one in the position of the outcome that occurred.
@@ -661,11 +636,3 @@ Limits: we have treated the loss of one example and its gradient with respect to
 6. It reflects shift invariance: adding a constant to all logits changes nothing, so the derivative along $\mathbf{1}$ is zero, and the gradient is orthogonal to $\mathbf{1}$ (the entries add to zero). A gradient step raises and lowers logits by equal total amounts, so it never changes the mean logit.
 7. The softmax says exactly one class is true, so its probabilities compete and the best it can fit to $(1, 1, 0)$ is a target of $(0.5, 0.5, 0)$ after normalising, which says "one of the two". The right output layer is one sigmoid per class with a binary cross-entropy each, so that "dog" and "ball" can both be near $1$.
 8. Each of the $C$ threads computes the maximum ($C - 1$ compares) and the sum ($3C$ operations: subtract, exponential, add per class), which is $4C - 1$ operations, plus its own $5$ operations; $C$ threads give $C(4C + 4)$, quadratic in $C$. The two-pass version stores the row maximum and the row sum, two numbers per row, and every thread of the second pass reads them.
-
-## References
-
-- Bridle, J. S., *Probabilistic interpretation of feedforward classification network outputs, with relationships to statistical pattern recognition*, 1990 (the name softmax and its use as the output of a classifier).
-- Szegedy, C., Vanhoucke, V., Ioffe, S., Shlens, J. and Wojna, Z., *Rethinking the Inception architecture for computer vision*, 2016 (label smoothing).
-- Müller, R., Kornblith, S. and Hinton, G., *When does label smoothing help?*, 2019.
-- Blanchard, P., Higham, D. J. and Higham, N. J., *Accurately computing the log-sum-exp and softmax functions*, 2021.
-- Milakov, M. and Gimelshein, N., *Online normalizer calculation for softmax*, 2018.

@@ -5,29 +5,15 @@
 
 *Why does stacking layers with a nonlinearity between them let a network represent almost anything?*
 
-## The problem
+The previous chapter ended with a network that works and cannot be trained. Two threshold neurons read the inputs $x_1, x_2$, a third reads their outputs, and together they compute the exclusive or that no single neuron can. Every weight in it was found by thinking. A step activation gives a gradient method nothing to follow: nudge a weight and the output does not move at all, until the nudge is large enough to make it jump. And a hidden neuron has no label of its own, so the perceptron rule could not touch it.
 
-The previous chapter ended with a network that works and cannot be trained. Two threshold neurons read the inputs $x_1, x_2$, a third reads their outputs, and together they compute the exclusive or that no single neuron can. Every weight in it was found by thinking. The step activation gave a gradient method nothing to follow, and a hidden neuron has no label of its own, so the perceptron rule could not touch it.
-
-This chapter keeps the shape of that network and changes the two things that blocked it. The units get activation functions that vary smoothly, so that a small change of a weight makes a small change of the output. And the layers are written as matrices acting on a whole batch of examples at once, which is how every network in this book and in brain is computed. With those two changes in place we can ask the question the chapter is named for: what can such a network represent? A network that cannot represent the function we want is a dead end however well it is trained, so the answer has to come before the training.
+Two changes remove those obstacles and leave the shape of the network alone. The units get activation functions that vary smoothly, so that a small change of a weight makes a small change of the output. And the layers are written as matrices acting on a whole batch of examples at once, which is how every network in this book and in brain is computed. What is left is the doubt whether anything was lost on the way. A network that cannot represent the function we want is a dead end however well it is trained, so what such a network can represent has to be settled before anyone asks how to train it.
 
 The answer has three parts, and each is measured rather than asserted. A nonlinearity between the layers is essential, because without it any number of layers is one layer. With it, a single hidden layer can follow any continuous curve as closely as we like, at a price that we count: in one dimension the error falls like $1/k^2$ in the number of units $k$, and in $D$ dimensions the same construction needs a number of units that grows like a power of $D$. And depth buys something that width does not: a function with $2^d$ linear pieces that a network $d$ layers deep builds from $2d$ units needs at least $2^d - 1$ units if it has one layer.
 
-The chapter has seven steps.
+The route starts with chapter 1's XOR network rebuilt from tanh and ReLU units, which shows what a hidden layer does. The shapes $[B, D] \to [B, H] \to [B, O]$ follow, with the cost of a forward computation in parameters, FLOPs and bytes, and then a computed demonstration that stacked linear layers collapse into one. That is why the activation functions come next, with their derivatives and the reasons ReLU, GELU and SiLU displaced the sigmoid and tanh in deep networks. The representation question is answered after them, with a curve built from ReLU ramps and the universal approximation theorem, and the comparison of depth with width closes the argument with a sawtooth whose pieces double at every layer. Training stays out of it: how weights are found is the subject of the chapters from the fourth on, and this chapter only makes sure that something worth finding exists.
 
-1. **The XOR network again, smooth.** Chapter 1's network rebuilt with tanh and ReLU units, and what the hidden layer is for.
-2. **One layer, then a batch.** The shapes $[B, D] \to [B, H] \to [B, O]$, the algorithm, and what a forward computation costs in parameters, FLOPs and bytes.
-3. **Why the nonlinearity is essential.** Stacked linear layers collapse into one, computed.
-4. **The activation functions.** Tanh, ReLU, GELU and SiLU with their derivatives, and why the last three replaced the sigmoid and tanh in deep networks.
-5. **What a network can represent.** A curve built from ReLU ramps, its error against the number of units, and the universal approximation theorem with its limits.
-6. **Depth against width.** A sawtooth whose pieces double with every layer.
-7. **Where this appears in brain.**
-
-You may use from earlier chapters: the neuron and the activation function (chapter 1), the matrix-vector product and the composition of linear maps (Volume I, chapter 4), composition of functions and the ReLU as a piecewise function (Volume I, chapter 2) and the derivative of a product (Volume I, chapter 7). Training is not in this chapter: the way weights are found is the subject of the chapters from the fourth on, and this chapter only makes sure that something worth finding exists.
-
-## Before you begin
-
-Five questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+The argument leans on the neuron and the activation function (chapter 1), the matrix-vector product and the composition of linear maps (Volume I, chapter 4), and composition of functions (Volume I, chapter 2). Five questions bring these back; answer them from memory, because the answers are at the end of the chapter, and a hard one sends you to the chapter it names.
 
 1. (Chapter 1, "The Neuron and the Perceptron", the artificial neuron.) A neuron has weights $\mathbf{w} = (2, -1)$, bias $b = 0.5$ and the identity as its activation. What does it output for $\mathbf{x} = (1, 3)$?
 2. (Chapter 1, the activation function.) Which activation turns the neuron $g(\mathbf{w}\cdot\mathbf{x} + b)$ into linear regression, which into logistic regression and which into the perceptron? Why could the perceptron's activation not be used to train a hidden neuron?
@@ -67,7 +53,7 @@ Two ReLU hidden units, z1 = x1 + x2 and z2 = x1 + x2 - 1, h = relu(z), and the o
 
 Here $y = h_1 - 2h_2$ with $h_1 = \mathrm{relu}(x_1 + x_2)$ and $h_2 = \mathrm{relu}(x_1 + x_2 - 1)$. As a function of the sum $s = x_1 + x_2$ it is $\mathrm{relu}(s) - 2\,\mathrm{relu}(s - 1)$: zero at $s = 0$, one at $s = 1$, back to zero at $s = 2$. It is a tent, the shape Volume I built from three ramps. XOR is "the sum is exactly one", and a tent peaked at one says that.
 
-### What the hidden layer is for
+### The hidden pair as new coordinates
 
 Look at the columns $h_1, h_2$ of the ReLU table as a pair of coordinates. The four inputs, which sat on the corners of a square where no line separates the classes, become four points $(h_1, h_2)$:
 
@@ -579,7 +565,7 @@ Pieces were counted exactly: one plus the number of grid points at which the slo
 
 This is a statement about one function chosen to favour depth. It shows that a gap in efficiency exists and what it looks like, and nothing more. It does not say that deep networks find such sawtooth structure in real problems, nor that gradient descent finds weights like these: the slope of $\mathrm{tent}^{\circ 10}$ is $\pm 1024$, a landscape no one expects a training method to navigate from random weights. The case for depth in practice combines this representational argument with a second one, that the layers can reuse features built in earlier layers, and with experience: networks of many layers train to lower losses than shallow ones of the same size. The weights' count is a coarse measure either way, and the two measures do not move together: depth multiplies the pieces and also lengthens the product of slopes of the previous section.
 
-## Where this appears in brain
+## Feed-forward blocks, activation kernels and a lesson in matching pairs
 
 The multilayer perceptron of this chapter is the *feed-forward block* of every transformer in brain, and the toy models are small enough to read whole.
 
@@ -606,6 +592,26 @@ Answers are at the end of the chapter.
 7. A unit has $\mathrm{relu}(\mathbf{w}\cdot\mathbf{x} + b)$ with $b = -12$ and its weights have length about $1.65$ on inputs that are unit Gaussians in each coordinate. Explain what fraction of examples activate it, and why this unit is useless to the network.
 8. The sawtooth network of depth $12$ has how many hidden units, how many parameters, how many linear pieces, and at least how many units would a one-hidden-layer network need?
 
+## Summary
+
+A multilayer perceptron is a chain of fully connected layers: $\mathbf{Z}_\ell = \mathbf{A}_{\ell-1}\mathbf{W}_\ell^\top + \mathbf{1}\mathbf{b}_\ell^\top$ and $\mathbf{A}_\ell = g(\mathbf{Z}_\ell)$ on a batch, shapes $[B, D] \to [B, H] \to [B, O]$, with weights stored outputs by inputs. A hidden layer is a learned change of coordinates: in the XOR network it moves the four corners of a square to points that one line separates. Parameters number $\sum_\ell (d_\ell d_{\ell-1} + d_\ell)$ and the matrix products cost $2 d_\ell d_{\ell-1}$ FLOPs per example per layer; a larger batch leaves the work per example unchanged and raises the number of FLOPs per byte moved, because the weights are read once. Without a nonlinearity any number of layers collapses into one linear map, $\mathbf{M}\mathbf{x} + \mathbf{c}$, so everything a network adds comes from the activation. Tanh, ReLU, GELU and SiLU differ in their shapes and slopes: saturating units have slopes that multiply to nothing over many layers, a ReLU has slope exactly $1$ where active and $0$ elsewhere (so a unit that is never active receives no gradient), and the exact GELU, its tanh form and its sigmoid form are three distinct functions (the tanh form within $4.7\times 10^{-4}$ of the exact one and the sigmoid form within $2.0\times 10^{-2}$ on the grid used), while the SiLU, which is no approximation of it, is up to $0.193$ away. A one-hidden-layer ReLU network with $k$ units follows $\sin(2\pi x)$ with an error that falls like $1/k^2$, and the universal approximation theorem says that for any continuous function on a bounded set some such network gets as close as asked: it asserts existence, not size ($23^D$ cells for the grid construction), nor learnability, nor generalisation. Depth changes the arithmetic of size: $d$ layers of width $2$ make $2^d$ pieces where one layer needs at least $2^d - 1$ units.
+
+What remains is the way to choose the weights. A network that can represent a function is of no use until something finds its weights, and the next three chapters build that something: how the network chooses among classes with the softmax and the cross-entropy, which gives it a loss, then backpropagation, which turns that loss into a gradient for every weight at the cost of about one extra pass through the layers of this chapter, and then the backward pass of each layer written out exactly. The activation derivatives computed above are the elementwise factors that those chapters multiply along the way.
+
+## References
+
+- George Cybenko, "Approximation by superpositions of a sigmoidal function", 1989.
+- Kurt Hornik, Maxwell Stinchcombe and Halbert White, "Multilayer feedforward networks are universal approximators", 1989.
+- Kurt Hornik, "Approximation capabilities of multilayer feedforward networks", 1991.
+- Moshe Leshno, Vladimir Ya. Lin, Allan Pinkus and Shimon Schocken, "Multilayer feedforward networks with a nonpolynomial activation function can approximate any function", 1993.
+- Vinod Nair and Geoffrey E. Hinton, "Rectified linear units improve restricted Boltzmann machines", 2010.
+- Xavier Glorot, Antoine Bordes and Yoshua Bengio, "Deep sparse rectifier neural networks", 2011.
+- Dan Hendrycks and Kevin Gimpel, "Gaussian error linear units (GELUs)", 2016.
+- Stefan Elfwing, Eiji Uchibe and Kenji Doya, "Sigmoid-weighted linear units for neural network function approximation in reinforcement learning", 2017.
+- Prajit Ramachandran, Barret Zoph and Quoc V. Le, "Searching for activation functions", 2017.
+- Matus Telgarsky, "Benefits of depth in neural networks", 2016.
+- Guido Montúfar, Razvan Pascanu, Kyunghyun Cho and Yoshua Bengio, "On the number of linear regions of deep neural networks", 2014.
+
 ## Exercises
 
 1. **[Calculate]** For the ReLU XOR network, compute $y$ by hand at $(x_1, x_2) = (0.5, 0.5)$ and at $(0.5, 1)$. Sketch $y$ as a function of $s = x_1 + x_2$.
@@ -621,12 +627,6 @@ Answers are at the end of the chapter.
 11. **[Investigate]** In `mlp.relu_sparsity`, vary the bias of the last unit through $-9, -6, -3, 0$ and record how many of the $1000$ inputs activate it. Find the smallest magnitude of bias at which the count is zero, and relate it to the length of that unit's weights and the spread of its pre-activation.
 12. **[Investigate]** For $k = 8$, replace the equally spaced knots of `relu_interpolant` with knots spaced so that the chord's error is about the same on every interval (for the sine, closer together where the curvature is large). Compare the largest error with the $0.0704$ of the equally spaced network and say how much of the gain remains at $k = 64$.
 
-## Summary
-
-A multilayer perceptron is a chain of fully connected layers: $\mathbf{Z}_\ell = \mathbf{A}_{\ell-1}\mathbf{W}_\ell^\top + \mathbf{1}\mathbf{b}_\ell^\top$ and $\mathbf{A}_\ell = g(\mathbf{Z}_\ell)$ on a batch, shapes $[B, D] \to [B, H] \to [B, O]$, with weights stored outputs by inputs. A hidden layer is a learned change of coordinates: in the XOR network it moves the four corners of a square to points that one line separates. Parameters number $\sum_\ell (d_\ell d_{\ell-1} + d_\ell)$ and the matrix products cost $2 d_\ell d_{\ell-1}$ FLOPs per example per layer; a larger batch leaves the work per example unchanged and raises the number of FLOPs per byte moved, because the weights are read once. Without a nonlinearity any number of layers collapses into one linear map, $\mathbf{M}\mathbf{x} + \mathbf{c}$, so everything a network adds comes from the activation. Tanh, ReLU, GELU and SiLU differ in their shapes and slopes: saturating units have slopes that multiply to nothing over many layers, a ReLU has slope exactly $1$ where active and $0$ elsewhere (so a unit that is never active receives no gradient), and the exact GELU, its tanh form and its sigmoid form are three distinct functions (the tanh form within $4.7\times 10^{-4}$ of the exact one and the sigmoid form within $2.0\times 10^{-2}$ on the grid used), while the SiLU, which is no approximation of it, is up to $0.193$ away. A one-hidden-layer ReLU network with $k$ units follows $\sin(2\pi x)$ with an error that falls like $1/k^2$, and the universal approximation theorem says that for any continuous function on a bounded set some such network gets as close as asked: it asserts existence, not size ($23^D$ cells for the grid construction), nor learnability, nor generalisation. Depth changes the arithmetic of size: $d$ layers of width $2$ make $2^d$ pieces where one layer needs at least $2^d - 1$ units.
-
-What remains is the way to choose the weights. A network that can represent a function is of no use until something finds its weights, and the next three chapters build that something: how the network chooses among classes with the softmax and the cross-entropy, which gives it a loss, then backpropagation, which turns that loss into a gradient for every weight at the cost of about one extra pass through the layers of this chapter, and then the backward pass of each layer written out exactly. The activation derivatives computed above are the elementwise factors that those chapters multiply along the way.
-
 ## Key terms
 
 - **hidden layer**: a layer of units between the input and the output whose values are not given by the data; it computes a new description of the input from which the next layer can compute the answer with a simpler rule. <!-- concept: hidden-layer -->
@@ -640,7 +640,7 @@ What remains is the way to choose the weights. A network that can represent a fu
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $z = 2\cdot 1 + (-1)\cdot 3 + 0.5 = -0.5$, and the identity returns $-0.5$.
 2. The identity gives linear regression, the sigmoid logistic regression and the step the perceptron. The step has slope zero everywhere except at its jump, so a small change of a hidden weight does not change the output and a gradient method sees a flat landscape.
@@ -658,17 +658,3 @@ What remains is the way to choose the weights. A network that can represent a fu
 6. SiLU's slope is not bounded by $1$: it rises to $1.0998$ at $z = 2.399$ and is still $1.0527$ at $z = 4$, approaching $1$ from above. The activation is close to the identity for large $z$ but not equal to it; the slope of $z\,\sigma(z)$ is $\sigma(z) + z\,\sigma(z)(1 - \sigma(z))$, and the second term stays positive though shrinking.
 7. The pre-activation is $b$ plus a Gaussian of standard deviation about $1.65$, so activating needs a value more than about $7.3$ standard deviations above its mean: essentially never, none in $1000$ in the table. Its output is $0$ and its slope is $0$ for every input, so it contributes nothing to the output, and it cannot receive a gradient that would move it.
 8. $2d = 24$ hidden units, $6d + 1 = 73$ parameters, $2^{12} = 4096$ linear pieces, and at least $4096 - 1 = 4095$ units in one hidden layer ($3\cdot 4095 + 1 = 12{,}286$ parameters).
-
-## References
-
-- George Cybenko, "Approximation by superpositions of a sigmoidal function", 1989.
-- Kurt Hornik, Maxwell Stinchcombe and Halbert White, "Multilayer feedforward networks are universal approximators", 1989.
-- Kurt Hornik, "Approximation capabilities of multilayer feedforward networks", 1991.
-- Moshe Leshno, Vladimir Ya. Lin, Allan Pinkus and Shimon Schocken, "Multilayer feedforward networks with a nonpolynomial activation function can approximate any function", 1993.
-- Vinod Nair and Geoffrey E. Hinton, "Rectified linear units improve restricted Boltzmann machines", 2010.
-- Xavier Glorot, Antoine Bordes and Yoshua Bengio, "Deep sparse rectifier neural networks", 2011.
-- Dan Hendrycks and Kevin Gimpel, "Gaussian error linear units (GELUs)", 2016.
-- Stefan Elfwing, Eiji Uchibe and Kenji Doya, "Sigmoid-weighted linear units for neural network function approximation in reinforcement learning", 2017.
-- Prajit Ramachandran, Barret Zoph and Quoc V. Le, "Searching for activation functions", 2017.
-- Matus Telgarsky, "Benefits of depth in neural networks", 2016.
-- Guido Montúfar, Razvan Pascanu, Kyunghyun Cho and Yoshua Bengio, "On the number of linear regions of deep neural networks", 2014.

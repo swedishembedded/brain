@@ -6,38 +6,11 @@
 *How do we compute the gradient of one loss with respect to millions of
 parameters in about the cost of one forward pass?*
 
-## The problem
+Gradient descent asks one thing of a network at every step: the gradient $\nabla_\theta L$ of the loss $L$ on a batch, a vector with one entry per parameter saying how much the loss changes if that parameter is nudged. The most direct way to get an entry is the definition of the derivative. Nudge the parameter by a small amount, run the network again, and see how the loss moved. One nudge costs one forward pass. A network with a million parameters therefore costs a million forward passes for a single gradient, for a single step of training, and training takes hundreds of thousands of steps. This is not slow; it is impossible.
 
-You have a network with a million parameters and a loss $L$ that measures how
-wrong it is on a batch of examples. Gradient descent needs one thing from you
-at every step: the gradient $\nabla_\theta L$, a vector with one entry per
-parameter saying how much the loss changes if that parameter is nudged.
+The way out is not a cleverer nudge. It is to notice that the million derivatives are not independent facts. They all come from the same network, whose layers share almost all of their arithmetic, and the chain rule lets that shared work be done once. **Backpropagation** is the name for doing it: one forward pass, then one backward pass, and every parameter's gradient falls out. The derivation starts from a single weight and builds up to a full two-layer network with batches. It then explains why the method is cheap (the cost argument is the heart of the chapter), what it forces the forward pass to remember, and why no one ever builds the matrices of derivatives that the chain rule seems to ask for.
 
-The most direct way to get an entry is the definition of the derivative. Nudge
-the parameter by a small amount, run the network again, and see how the loss
-moved. One nudge costs one forward pass. A million parameters cost a million
-forward passes, for a single gradient, for a single step of training. Training
-takes hundreds of thousands of steps. This is not slow; it is impossible.
-
-The way out is not a cleverer nudge. It is to notice that the million
-derivatives are not independent facts. They all come from the same network,
-whose layers share almost all of their arithmetic, and the chain rule lets
-that shared work be done once. **Backpropagation** is the name for doing it:
-one forward pass, then one backward pass, and every parameter's gradient
-falls out. This chapter derives it from a single weight, builds it up to a
-full two-layer network with batches, explains why it is cheap (the cost
-argument is the heart of the chapter), what it forces the forward pass to
-remember, and why no one ever builds the matrices of derivatives that the
-chain rule seems to ask for.
-
-You may use from earlier chapters: the chain rule for several variables and
-the Jacobian (Volume I), the squared-error loss and gradient descent
-(Volume II), and the multilayer network with its activation functions and
-softmax with cross-entropy (the earlier chapters of this volume).
-
-## Before you begin
-
-Five questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+The argument uses the chain rule for several variables and the Jacobian (Volume I), the squared-error loss and gradient descent (Volume II), and the multilayer network with its activation functions and softmax with cross-entropy (the earlier chapters of this volume). Five questions bring those back; answer them from memory, because the answers are at the end of the chapter, and a hard one sends you to the chapter it names.
 
 1. ("Gradients, Jacobians and Many Variables", chain rule.) A quantity $z$ depends on $x$ through two intermediate quantities $y_1(x)$ and $y_2(x)$. Write $\frac{dz}{dx}$ in terms of partial derivatives.
 2. ("Gradients, Jacobians and Many Variables", Jacobian.) What is the shape of the Jacobian of a function from three inputs to two outputs, and what is its entry in row $i$, column $j$?
@@ -867,23 +840,13 @@ and in what number format, is a decision with its own chapter in
 Volume XIII; here you only need to know that the *set of things a backward pass
 reads* is a property of its operations, and that the memory it implies is real.
 
-## Making it work
+## Four quiet failures of a backward pass
 
-**Zero before you accumulate.** The backward pass of the network above can be
-called once per step and produces fresh gradients. Many engines instead
-*add* into persistent gradient buffers, so that several batches (or several
-uses of a shared weight) can be summed. That is the right design, and it
-means the buffers must be zeroed once per optimiser step. A missing
-zeroing produces gradients that grow every step. Gradient accumulation is
-treated properly in the next chapter.
+A backward pass can compile, run and even lower the loss for a while and still be wrong, and none of the failures below raises an error. The first lives in the gradient buffers. The backward pass of the network above can be called once per step and produces fresh gradients. Many engines instead *add* into persistent gradient buffers, so that several batches (or several uses of a shared weight) can be summed. That is the right design, and it means the buffers must be zeroed once per optimiser step. A missing zeroing produces gradients that grow every step. Gradient accumulation is treated properly in the next chapter.
 
-**Know which direction each product goes.** A transposed matrix in a backward
-product produces the right shape only when dimensions coincide, which is why
-the reference network has distinct sizes and why a test dimension should
-never be chosen to be square.
+The second is the direction of a product. A transposed matrix in a backward product produces the right shape only when dimensions coincide, which is why the reference network has distinct sizes and why a test dimension should never be chosen to be square.
 
-**Errors in a backward pass stay local to what is upstream of them.** Suppose
-the tanh derivative is forgotten: the code uses $d\mathbf{Z}_1 = d\mathbf{A}$ and skips the factor
+The third is a forgotten factor, and it damages only what lies upstream of it. Suppose the tanh derivative is forgotten: the code uses $d\mathbf{Z}_1 = d\mathbf{A}$ and skips the factor
 $1 - A^2$. The loss still falls for a while, because the direction is
 roughly right. Compare the wrong gradients with finite differences ($h = 10^{-5}$, as in the next section). The relative error of an estimate $a$ against a reference $n$ is $|a - n|/\max(|a|, |n|)$: zero for equal numbers, near one when they differ in size or sign by their own size (chapter 6 uses it as the main comparison):
 
@@ -905,7 +868,7 @@ mistake) and the first layer's are wrong by tens of percent. A model with
 this bug trains badly and never throws an error. The next section is the
 instrument that finds it.
 
-**Non-differentiable points.** ReLU has no derivative at zero. Engines pick a
+The fourth is a kink. ReLU has no derivative at zero. Engines pick a
 convention (usually zero). A parameter initialised exactly at such a point
 receives no gradient, and nothing ever moves it; knowledge #166 records a model
 whose environment parameters started at the kink of a clamp and never learned,
@@ -968,7 +931,7 @@ given*, nothing more. If the forward is the wrong function (the wrong loss, a
 weight on the wrong term), the backward can be exactly its derivative and the
 check passes. It proves the derivative, not the objective (knowledge #3).
 
-## In brain
+## Hand-written backward passes in brain
 
 brain is a collection of models whose backward passes are written by hand.
 There is no general-purpose differentiation engine in it. This is a design
@@ -1095,6 +1058,57 @@ Answers are at the end of the chapter.
 6. **Explain.** The Jacobian of a layer from 4096 inputs to 4096 outputs has how many entries per example? Why does backpropagation never build it?
 7. **Explain.** Why must the forward pass keep some of its intermediate values until the backward pass, and what grows as the network gets deeper?
 
+## Summary
+
+We began with one weight and derived $\frac{dL}{dw} = 2(y-t)x$ and the update
+$w \leftarrow w - \eta\,\frac{dL}{dw}$. A second weight and a nonlinearity forced
+the chain rule, and the observation that parameters share most of the
+product of derivatives led to the backward sweep: start from $\bar{L} = 1$,
+and at each step multiply the gradient arriving from the next quantity by the
+local derivative, adding contributions where a value is used more than once.
+A **computational graph** records which value came from which; the **forward
+pass** computes it in topological order, and the **backward pass** visits
+the same nodes in reverse. Reverse mode costs about the same as one forward
+pass for a scalar output however many inputs there are, because it carries a
+row vector through the chain of Jacobians, while **forward mode** carries a
+matrix as wide as the number of inputs; for a loss and $P$ parameters that is
+the difference between a few passes and $P$ of them. The backward pass is a
+sequence of **vector-Jacobian products**, never formed as matrices, one rule
+per operation: for a linear layer
+$d\mathbf{W} = d\mathbf{Z}^\top\mathbf{X}$, $d\mathbf{b} = \sum_b d\mathbf{Z}$
+and $d\mathbf{X} = d\mathbf{Z}\,\mathbf{W}$, for an elementwise function a
+product with its local derivative. The backward pass reads values from the
+forward pass, **saved activations**, whose memory grows with depth and batch
+size and is the first thing training engines trade for recomputation. A
+central-difference check against the forward gives an independent confirmation
+of every gradient, at two forward passes per parameter.
+
+In brain this is realised as hand-written backward kernels per layer, built
+into one cached list per model, validated by a gradient checker, with a small
+reverse-mode tape only for a family of shared convolutional blocks; the
+history shows why a general autodiff crate was planned, never written, and
+deleted.
+
+Limits: we have derived the backward pass for one linear layer, one elementwise
+function and one loss. A real network has convolutions, attention,
+normalisation, softmax, embeddings and shared weights, and each needs its own
+derivation. The next chapter, The Backward Pass of Every Layer,
+writes them out systematically, and the one after it makes the finite-difference
+checker previewed here into a proper tool, with a theory of how to choose its step
+and how to read its output.
+
+## References
+
+- Rumelhart, D. E., Hinton, G. E. and Williams, R. J., *Learning
+  representations by back-propagating errors*, 1986.
+- Linnainmaa, S., *The representation of the cumulative rounding error of an
+  algorithm as a Taylor expansion of the local rounding errors*, master's
+  thesis, University of Helsinki, 1970.
+- Griewank, A. and Walther, A., *Evaluating Derivatives: Principles and
+  Techniques of Algorithmic Differentiation*, second edition, 2008.
+- Baydin, A. G., Pearlmutter, B. A., Radul, A. A. and Siskind, J. M.,
+  *Automatic differentiation in machine learning: a survey*, 2018.
+
 ## Exercises
 
 1. **[Calculate]** Take the single-weight model with $x = -1.5$, $t = 2$,
@@ -1169,45 +1183,6 @@ Answers are at the end of the chapter.
     curve, in particular why it rises again as $h$ gets small. (The next chapters
     explain what you will see.)
 
-## Summary
-
-We began with one weight and derived $\frac{dL}{dw} = 2(y-t)x$ and the update
-$w \leftarrow w - \eta\,\frac{dL}{dw}$. A second weight and a nonlinearity forced
-the chain rule, and the observation that parameters share most of the
-product of derivatives led to the backward sweep: start from $\bar{L} = 1$,
-and at each step multiply the gradient arriving from the next quantity by the
-local derivative, adding contributions where a value is used more than once.
-A **computational graph** records which value came from which; the **forward
-pass** computes it in topological order, and the **backward pass** visits
-the same nodes in reverse. Reverse mode costs about the same as one forward
-pass for a scalar output however many inputs there are, because it carries a
-row vector through the chain of Jacobians, while **forward mode** carries a
-matrix as wide as the number of inputs; for a loss and $P$ parameters that is
-the difference between a few passes and $P$ of them. The backward pass is a
-sequence of **vector-Jacobian products**, never formed as matrices, one rule
-per operation: for a linear layer
-$d\mathbf{W} = d\mathbf{Z}^\top\mathbf{X}$, $d\mathbf{b} = \sum_b d\mathbf{Z}$
-and $d\mathbf{X} = d\mathbf{Z}\,\mathbf{W}$, for an elementwise function a
-product with its local derivative. The backward pass reads values from the
-forward pass, **saved activations**, whose memory grows with depth and batch
-size and is the first thing training engines trade for recomputation. A
-central-difference check against the forward gives an independent confirmation
-of every gradient, at two forward passes per parameter.
-
-In brain this is realised as hand-written backward kernels per layer, built
-into one cached list per model, validated by a gradient checker, with a small
-reverse-mode tape only for a family of shared convolutional blocks; the
-history shows why a general autodiff crate was planned, never written, and
-deleted.
-
-Limits: we have derived the backward pass for one linear layer, one elementwise
-function and one loss. A real network has convolutions, attention,
-normalisation, softmax, embeddings and shared weights, and each needs its own
-derivation. The next chapter, The Backward Pass of Every Layer,
-writes them out systematically, and the one after it makes the finite-difference
-checker previewed here into a proper tool, with a theory of how to choose its step
-and how to read its output.
-
 ## Key terms
 
 - **computational graph**: a record of a calculation as nodes (values) and edges showing which values were used to compute which. <!-- concept: computational-graph -->
@@ -1220,7 +1195,7 @@ and how to read its output.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $\frac{dz}{dx} = \frac{\partial z}{\partial y_1}\frac{dy_1}{dx} + \frac{\partial z}{\partial y_2}\frac{dy_2}{dx}$: one product per path from $x$ to $z$, added.
 2. Shape $[2, 3]$ (outputs by inputs); the entry is $\partial f_i / \partial x_j$, how output $i$ changes with input $j$.
@@ -1237,15 +1212,3 @@ and how to read its output.
 5. $d\mathbf{Z}$ is $[B, O]$ and $\mathbf{W}^\top$ is $[D, O]$, so the product is undefined unless $D = O$, and then it has the right shape but the wrong values. The correct formula is $d\mathbf{X} = d\mathbf{Z}\,\mathbf{W}$, shape $[B, D]$.
 6. $4096^2 = 16{,}777{,}216$ entries. The backward pass needs only the product of a row vector with it, which is one matrix-vector product with the weights ($4096^2$ multiply-adds) and needs no table of derivatives.
 7. The backward rules use values of the forward pass (an input to a product, the output of a $\tanh$). Those saved activations must stay in memory until used, so memory grows with depth and batch size, which is why training engines trade it for recomputation.
-
-## References
-
-- Rumelhart, D. E., Hinton, G. E. and Williams, R. J., *Learning
-  representations by back-propagating errors*, 1986.
-- Linnainmaa, S., *The representation of the cumulative rounding error of an
-  algorithm as a Taylor expansion of the local rounding errors*, master's
-  thesis, University of Helsinki, 1970.
-- Griewank, A. and Walther, A., *Evaluating Derivatives: Principles and
-  Techniques of Algorithmic Differentiation*, second edition, 2008.
-- Baydin, A. G., Pearlmutter, B. A., Radul, A. A. and Siskind, J. M.,
-  *Automatic differentiation in machine learning: a survey*, 2018.
