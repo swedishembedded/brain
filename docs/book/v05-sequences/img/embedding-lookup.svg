@@ -1,0 +1,87 @@
+<!-- source-sha256: a65b2ee7c129a028a2d2b27a9fd5a4b2f20dbfd9be25b749e89b931295d3d245 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 560" width="780" height="560"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="560" fill="#ffffff"/>
+<rect x="10" y="10" width="760" height="276" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Lookup: each id picks one row of the table</text>
+<rect x="205" y="80" width="250" height="24" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0  the   -0.52   0.62   0.75</text>
+<rect x="205" y="108" width="250" height="24" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  cat   -1.04  -0.67  -0.15</text>
+<rect x="205" y="136" width="250" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="152.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2  dog    0.04  -0.10  -0.09</text>
+<rect x="205" y="164" width="250" height="24" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="180.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3  sat    0.16  -0.30   0.53</text>
+<rect x="205" y="192" width="250" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="208.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4  ran   -0.43   0.37  -0.53</text>
+<rect x="205" y="220" width="250" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="236.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5  .     -0.37  -0.36   0.51</text>
+<rect x="28" y="80" width="120" height="24" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="88" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">t = 0, id 0</text>
+<line x1="150" y1="92" x2="203" y2="92" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="615" y="80" width="150" height="24" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="690" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-0.52   0.62   0.75</text>
+<line x1="457" y1="92" x2="613" y2="92" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="28" y="108" width="120" height="24" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="88" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">t = 1, id 1</text>
+<line x1="150" y1="120" x2="203" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="615" y="108" width="150" height="24" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="690" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-1.04  -0.67  -0.15</text>
+<line x1="457" y1="120" x2="613" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="28" y="164" width="120" height="24" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="88" y="180.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">t = 2, id 3</text>
+<line x1="150" y1="176" x2="203" y2="176" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="615" y="164" width="150" height="24" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="690" y="180.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle"> 0.16  -0.30   0.53</text>
+<line x1="457" y1="176" x2="613" y2="176" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="88" y="66.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">ids</text>
+<text x="330" y="66.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">table (6 x 3)</text>
+<text x="690" y="66.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">output X (3 x 3)</text>
+<text x="390" y="268.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#2d3748" text-anchor="middle">reads 3 rows of 3 numbers = 9 numbers; multiplies nothing</text>
+<rect x="10" y="300" width="760" height="244" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="322" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">The same rows as a product: one-hot matrix N times the whole table</text>
+<text x="153" y="352.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">N (3 x 6)</text>
+<rect x="60" y="372" width="24" height="24" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="72" y="388.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="87" y="372" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="99" y="388.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="114" y="372" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="126" y="388.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="141" y="372" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="153" y="388.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="168" y="372" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="388.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="195" y="372" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="207" y="388.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="60" y="406" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="72" y="422.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="87" y="406" width="24" height="24" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="99" y="422.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="114" y="406" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="126" y="422.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="141" y="406" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="153" y="422.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="168" y="406" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="422.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="195" y="406" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="207" y="422.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="60" y="440" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="72" y="456.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="87" y="440" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="99" y="456.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="114" y="440" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="126" y="456.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="141" y="440" width="24" height="24" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="153" y="456.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="168" y="440" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="456.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="195" y="440" width="24" height="24" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="207" y="456.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<text x="258" y="425" font-family="Helvetica, Arial, sans-serif" font-size="20" font-weight="normal" fill="#1a202c" text-anchor="middle">x</text>
+<rect x="293" y="343" width="270" height="150" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="428" y="414.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the whole table</text>
+<text x="428" y="430.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 x 3 numbers, all read</text>
+<text x="593" y="425" font-family="Helvetica, Arial, sans-serif" font-size="20" font-weight="normal" fill="#1a202c" text-anchor="middle">=</text>
+<rect x="618" y="358" width="150" height="120" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="693" y="414.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">X (3 x 3)</text>
+<text x="693" y="430.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the same rows</text>
+<text x="390" y="528.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#2d3748" text-anchor="middle">T V D = 3 * 6 * 3 = 54 multiply-adds, 45 of them by zero</text>
+</svg>

@@ -1,0 +1,30 @@
+<!-- source-sha256: 6424f858b7434ca86bea5782734823e3d69aaa2e99b8987b77cef751840143c2 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 318" width="780" height="318"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="780" height="318" fill="#ffffff"/>
+<text x="150" y="30.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">gradient arriving at each position</text>
+<text x="620" y="30.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">gradient of the table</text>
+<rect x="10" y="59" width="280" height="30" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="78.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">t = 0, id 1:  dX = (-1.54, -0.42, -0.15)</text>
+<rect x="10" y="115" width="280" height="30" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="134.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">t = 1, id 3:  dX = (0.16, -0.55, 1.03)</text>
+<rect x="10" y="171" width="280" height="30" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="190.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">t = 2, id 1:  dX = (-0.79, -1.17, -0.40)</text>
+<rect x="10" y="227" width="280" height="30" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">t = 3, id 5:  dX = (-0.62, -0.36, 0.01)</text>
+<rect x="480" y="42" width="280" height="28" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="60.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0 the  dW = (0.00, 0.00, 0.00)</text>
+<rect x="480" y="78" width="280" height="28" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 cat  dW = (-2.33, -1.59, -0.55)</text>
+<rect x="480" y="114" width="280" height="28" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="132.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 dog  dW = (0.00, 0.00, 0.00)</text>
+<rect x="480" y="150" width="280" height="28" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="168.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 sat  dW = (0.16, -0.55, 1.03)</text>
+<rect x="480" y="186" width="280" height="28" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 ran  dW = (0.00, 0.00, 0.00)</text>
+<rect x="480" y="222" width="280" height="28" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="240.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5 .    dW = (-0.62, -0.36, 0.01)</text>
+<line x1="292" y1="74.13" x2="478" y2="85.87" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="291.97" y1="130.35" x2="478.03" y2="163.65" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="291.81" y1="185.16" x2="478.19" y2="98.84" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="292" y1="241.94" x2="478" y2="236.06" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<text x="404" y="308.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#2d3748" text-anchor="middle">row 1 is read twice, so it receives dX[0] + dX[2]; rows 0, 2 and 4 are never read and stay zero</text>
+</svg>

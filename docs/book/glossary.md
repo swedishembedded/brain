@@ -190,6 +190,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **distribution shift**: a difference between the source of the rows a model will meet and the source of the rows it was fitted to and scored on, which no held-out set from the training source can reveal. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
+**distributional hypothesis**: the idea that tokens occurring in similar contexts have similar meanings, so a model trained to predict from context gives such tokens similar vectors. *([Embeddings](v05-sequences/03-embeddings.md))*
+
 **dot product**: the number $\sum_i a_i b_i$ obtained from two vectors of equal length, equal to $\lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert\cos\theta$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **dropout**: randomly setting each unit of a layer to zero with probability $p_{\mathrm{drop}}$ during training, and scaling the kept units by $1/(1 - p_{\mathrm{drop}})$ so that the expected output is unchanged; the layer is the identity at prediction time. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
@@ -203,6 +205,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **eigenvalue**: the number $\lambda$ by which a matrix stretches one of its eigenvectors, $\mathbf{A}\mathbf{v} = \lambda\mathbf{v}$; the roots of $\det(\mathbf{A} - \lambda\mathbf{I}) = 0$. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
 **eigenvector**: a nonzero vector that a matrix sends to a multiple of itself, so that the map only stretches (or flips) it. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
+
+**embedding gradient**: the gradient of the loss with respect to the table: each row is the sum of the gradient rows of the positions that looked it up, so a token used twice receives two contributions added and a token not used receives exactly zero. *([Embeddings](v05-sequences/03-embeddings.md))*
+
+**embedding table**: the array of shape $[V, D]$ with one row for each token of the vocabulary; looking up a token id returns its row, which is the vector the model computes with, and the rows are learned parameters. *([Embeddings](v05-sequences/03-embeddings.md))*
 
 **end-to-end-training-loop**: the whole path from data to saved model in one function: shuffle, batch, forward, loss, backward, clip, optimizer step at the scheduled rate, log, evaluate on the validation set, keep the best checkpoint. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
@@ -649,6 +655,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **test-dimension choice**: choosing the sizes of the model a test runs on (batch, features, widths, heads) all different and above 1, so that bugs that confuse two sizes or depend on a size of 1 change the result. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
 **thread parallelism**: using several threads, each running on its own core with its own registers and first caches and sharing the later caches and memory, to carry out the pieces of one computation at the same time. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
+
+**tied embeddings**: using one table both to embed the input tokens and as the output layer that scores the tokens, so that the logits are $\mathbf{H}\mathbf{W}_{\mathrm{emb}}^\top$, which saves one table of $V D$ parameters and gives that table the gradient of both uses. *([Embeddings](v05-sequences/03-embeddings.md))*
 
 **tiled matmul**: the matrix product computed one tile of the output at a time, with the matching tiles of the two inputs staged in a fast memory so that each number loaded is used once per row or column of the tile, cutting the loads from $2n^3$ to $2n^3/T$ for a tile of side $T$. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 

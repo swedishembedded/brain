@@ -96,4 +96,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 
 1. [Text as Data](v05-sequences/01-text.md): What is text to a computer, byte by byte?
 2. [Tokenization](v05-sequences/02-tokenization.md): How do we cut text into pieces a model can count, and why does the choice matter so much?
+3. [Embeddings](v05-sequences/03-embeddings.md): How does a model turn a token id into numbers it can compute with, and how do those numbers come to mean something?
 <!-- /contents -->

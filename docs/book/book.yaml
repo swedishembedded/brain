@@ -413,7 +413,7 @@ volumes:
         title: "Embeddings"
         question: "How does a model turn a token id into numbers it can compute with, and how do those numbers come to mean something?"
         introduces: [embedding-table, embedding-gradient, tied-embeddings, distributional-hypothesis]
-        requires: [token, one-hot-encoding, matrix-vector-product, reduction-backward]
+        requires: [token, one-hot-encoding, matrix-vector-product, reduction-backward, cosine-similarity, softmax-cross-entropy, gradient-check, adam, principal-component-analysis]
         brain: []
       - id: language-modeling
         title: "Language Modeling"

@@ -1,0 +1,66 @@
+<!-- source-sha256: 1bc4f7bdba7b064f221a2b537824be613ddc191ac0c6b1cf748a1d8352d18270 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 810 402" width="810" height="402">
+<rect width="810" height="402" fill="#ffffff"/>
+<svg x="0" y="0" width="400" height="402" viewBox="0 0 400 402">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="400" height="402" fill="#ffffff"/>
+<line x1="98.92" y1="314" x2="98.92" y2="30" stroke="#edf2f7"/>
+<text x="98.92" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-1</text>
+<line x1="159.26" y1="314" x2="159.26" y2="30" stroke="#edf2f7"/>
+<text x="159.26" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-0.5</text>
+<line x1="219.61" y1="314" x2="219.61" y2="30" stroke="#edf2f7"/>
+<text x="219.61" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="279.95" y1="314" x2="279.95" y2="30" stroke="#edf2f7"/>
+<text x="279.95" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.5</text>
+<line x1="340.3" y1="314" x2="340.3" y2="30" stroke="#edf2f7"/>
+<text x="340.3" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="58" y1="298.65" x2="382" y2="298.65" stroke="#edf2f7"/>
+<text x="52" y="302.65" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-1</text>
+<line x1="58" y1="240.84" x2="382" y2="240.84" stroke="#edf2f7"/>
+<text x="52" y="244.84" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-0.5</text>
+<line x1="58" y1="183.04" x2="382" y2="183.04" stroke="#edf2f7"/>
+<text x="52" y="187.04" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="125.24" x2="382" y2="125.24" stroke="#edf2f7"/>
+<text x="52" y="129.24" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="67.43" x2="382" y2="67.43" stroke="#edf2f7"/>
+<text x="52" y="71.43" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="324" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="324" height="284"/></clipPath>
+<g clip-path="url(#plot)"><circle cx="194.97" cy="207.25" r="4.5" fill="#2b6cb0"/><circle cx="238.42" cy="278.19" r="4.5" fill="#2b6cb0"/><circle cx="311.01" cy="212.2" r="4.5" fill="#2b6cb0"/><circle cx="291.04" cy="252.18" r="4.5" fill="#c05621"/><circle cx="123.13" cy="250.77" r="4.5" fill="#c05621"/><circle cx="152.94" cy="84.77" r="4.5" fill="#c05621"/><circle cx="203.61" cy="162.46" r="4.5" fill="#2f855a"/><circle cx="95.38" cy="127.64" r="4.5" fill="#2f855a"/><circle cx="128.87" cy="169.73" r="4.5" fill="#2f855a"/><circle cx="344.62" cy="119.58" r="4.5" fill="#2f855a"/><circle cx="121.72" cy="271.94" r="4.5" fill="#6b46c1"/><circle cx="280.33" cy="148.8" r="4.5" fill="#6b46c1"/><circle cx="333.97" cy="223.67" r="4.5" fill="#6b46c1"/><circle cx="245.69" cy="65.81" r="4.5" fill="#718096"/><circle cx="228.39" cy="170.62" r="4.5" fill="#718096"/><text x="245.69" y="56.81" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#718096" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">&lt;s&gt;</text><text x="194.97" y="198.25" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#2b6cb0" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">cat</text><text x="238.42" y="269.19" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#2b6cb0" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">dog</text><text x="311.01" y="203.2" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#2b6cb0" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">fox</text><text x="291.04" y="243.18" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#c05621" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">cats</text><text x="123.13" y="241.77" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#c05621" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">dogs</text><text x="152.94" y="75.77" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#c05621" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">foxes</text><text x="203.61" y="153.46" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#2f855a" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">sees</text><text x="95.38" y="118.64" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#2f855a" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">chases</text><text x="128.87" y="160.73" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#2f855a" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">see</text><text x="344.62" y="110.58" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#2f855a" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">chase</text><text x="121.72" y="289.94" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#6b46c1" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">ball</text><text x="280.33" y="139.8" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#6b46c1" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">bone</text><text x="333.97" y="214.67" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#6b46c1" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">fish</text><text x="228.39" y="161.62" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#718096" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">full stop</text></g>
+<text x="220" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">first direction</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">second direction</text>
+<text x="220" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">before training (57% of variance in 2 directions)</text>
+<circle cx="55.1" cy="373" r="3.5" fill="#2b6cb0"/>
+<text x="71.1" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">singular nouns</text>
+<circle cx="182.76" cy="373" r="3.5" fill="#c05621"/>
+<text x="198.76" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">plural nouns</text>
+<circle cx="298.1" cy="373" r="3.5" fill="#2f855a"/>
+<text x="314.1" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">verbs</text>
+<circle cx="105.95" cy="390" r="3.5" fill="#6b46c1"/>
+<text x="121.95" y="394" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">objects</text>
+<circle cx="193.35" cy="390" r="3.5" fill="#718096"/>
+<text x="209.35" y="394" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">&lt;s&gt; and full stop</text>
+</svg>
+<svg x="410" y="0" width="400" height="360" viewBox="0 0 400 360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="400" height="360" fill="#ffffff"/>
+<line x1="126.87" y1="314" x2="126.87" y2="30" stroke="#edf2f7"/>
+<text x="126.87" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-2</text>
+<line x1="234.03" y1="314" x2="234.03" y2="30" stroke="#edf2f7"/>
+<text x="234.03" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="341.2" y1="314" x2="341.2" y2="30" stroke="#edf2f7"/>
+<text x="341.2" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="58" y1="290.15" x2="382" y2="290.15" stroke="#edf2f7"/>
+<text x="52" y="294.15" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-2</text>
+<line x1="58" y1="196.57" x2="382" y2="196.57" stroke="#edf2f7"/>
+<text x="52" y="200.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="102.99" x2="382" y2="102.99" stroke="#edf2f7"/>
+<text x="52" y="106.99" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<rect x="58" y="30" width="324" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="324" height="284"/></clipPath>
+<g clip-path="url(#plot)"><circle cx="307.08" cy="150.84" r="4.5" fill="#2b6cb0"/><circle cx="288.86" cy="130.52" r="4.5" fill="#2b6cb0"/><circle cx="300.78" cy="127.79" r="4.5" fill="#2b6cb0"/><circle cx="224.75" cy="275.4" r="4.5" fill="#c05621"/><circle cx="217.61" cy="281.23" r="4.5" fill="#c05621"/><circle cx="217.24" cy="261.32" r="4.5" fill="#c05621"/><circle cx="113.51" cy="171.94" r="4.5" fill="#2f855a"/><circle cx="100.58" cy="211.14" r="4.5" fill="#2f855a"/><circle cx="95.53" cy="189.53" r="4.5" fill="#2f855a"/><circle cx="138.1" cy="184.13" r="4.5" fill="#2f855a"/><circle cx="344.47" cy="246.56" r="4.5" fill="#6b46c1"/><circle cx="322.29" cy="216.46" r="4.5" fill="#6b46c1"/><circle cx="323.26" cy="218.9" r="4.5" fill="#6b46c1"/><circle cx="226.6" cy="62.77" r="4.5" fill="#718096"/><circle cx="289.8" cy="220.02" r="4.5" fill="#718096"/><text x="298.91" y="118.79" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#2b6cb0" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">cat, dog, fox</text><text x="219.87" y="252.32" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#c05621" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">cats, dogs, foxes</text><text x="95.53" y="162.94" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#2f855a" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">sees, chases, see, chase</text><text x="330.01" y="207.46" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#6b46c1" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">ball, bone, fish</text><text x="226.6" y="53.77" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#718096" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">&lt;s&gt;</text><text x="289.8" y="238.02" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#718096" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">full stop</text></g>
+<text x="220" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">first direction</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">second direction</text>
+<text x="220" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">after training (59% of variance in 2 directions)</text>
+</svg>
+</svg>
