@@ -91,4 +91,8 @@ historical sections draw on in the [Chronology](history/chronology.md).
 12. [Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md): How can a model's weights be stored in four bits each and still work?
 13. [Neural Processing Units and Graph Compilers](v04-computation/13-npu.md): How does a whole network become one compiled program for a fixed-function accelerator?
 14. [Project: A Device-Independent Tensor Engine](v04-computation/14-project-tensor-engine.md): Can you make the same matrix multiply run correctly and fast on more than one kind of hardware?
+
+### [Volume V: Language, Sequences and Transformers](v05-sequences/index.md)
+
+1. [Text as Data](v05-sequences/01-text.md): What is text to a computer, byte by byte?
 <!-- /contents -->

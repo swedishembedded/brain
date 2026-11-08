@@ -1,0 +1,49 @@
+<!-- source-sha256: 5976888923303bcb4efbccd911f977737e31a031f7e3f3f8375164560164c91b -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440" width="900" height="440"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-2b6cb0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2b6cb0"/></marker></defs><rect width="900" height="440" fill="#ffffff"/>
+<ellipse cx="84" cy="210" rx="52" ry="22" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="84" y="214.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">start</text>
+<ellipse cx="340" cy="60" rx="52" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="64.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">after F4</text>
+<ellipse cx="340" cy="130" rx="52" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="134.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">after F0</text>
+<ellipse cx="340" cy="200" rx="52" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">need3</text>
+<ellipse cx="340" cy="285" rx="52" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="289.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">after E0</text>
+<ellipse cx="340" cy="340" rx="52" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="344.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">after ED</text>
+<ellipse cx="610" cy="130" rx="52" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="610" y="134.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">need2</text>
+<ellipse cx="815" cy="255" rx="52" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="815" y="259.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">need1</text>
+<path d="M43.89,196 L18,196 Q12,196 12,202 L12,218 Q12,224 18,224 L40.89,224" fill="none" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<text x="12" y="182.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#2b6cb0" text-anchor="start">00..7F  (emit)</text>
+<path d="M62,229.93 L62,418 Q62,428 72,428 L835,428 Q845,428 845,418 L845,280" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="449.5" y="422.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">C2..DF</text>
+<line x1="138.69" y1="211.33" x2="285.31" y2="283.67" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="282" y="304.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">E0</text>
+<path d="M98,188.81 L98,28 Q98,18 108,18 L600,18 Q610,18 610,28 L610,105" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="387" y="14.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">E1..EC, EE..EF</text>
+<line x1="138.28" y1="211.95" x2="285.72" y2="338.05" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="282" y="359.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">ED</text>
+<line x1="138.65" y1="208.6" x2="285.35" y2="131.4" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="282" y="122.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">F0</text>
+<line x1="138.99" y1="209.8" x2="285.01" y2="200.2" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="282" y="192.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">F1..F3</text>
+<line x1="138.14" y1="207.89" x2="285.86" y2="62.11" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="282" y="52.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">F4</text>
+<path d="M793,277 L793,378 Q793,388 783,388 L116,388 Q106,388 106,378 L106,232.93" fill="none" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<text x="154" y="382.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#2b6cb0" text-anchor="start">80..BF  (emit)</text>
+<line x1="394.99" y1="284.76" x2="760.01" y2="255.24" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="303.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">A0..BF</text>
+<line x1="663.89" y1="132.33" x2="761.11" y2="252.67" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="670" y="122.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">80..BF</text>
+<line x1="394.92" y1="339.33" x2="760.08" y2="255.67" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="358.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">80..9F</text>
+<line x1="395" y1="130" x2="555" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="122.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">90..BF</text>
+<line x1="394.76" y1="198.83" x2="555.24" y2="131.17" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="218.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">80..BF</text>
+<line x1="394.76" y1="61.17" x2="555.24" y2="128.83" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="52.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">80..8F</text>
+</svg>

@@ -32,7 +32,7 @@ Every value has a type, and the book always states it when it matters.
 | `list<T>` | an ordered, growable list of values of type `T`, indexed from 0: `L[i]` reads element `i` (`0 <= i < len(L)`; outside is an error), `len(L)` is its length, `append x to L` adds at the end. The elements may be arrays of different shapes (a network's weight matrices) |
 | `tensor` | a name for `array<real>` of any shape, used where an algorithm treats values of different shapes alike (a graph's node values); `t.shape` is its shape and `numel(t)` its number of elements |
 | `operation` | a value that names one differentiable operation of a graph (an input, a parameter, a matrix product, a `tanh`, ...) and carries the constants it needs; a chapter lists the operations it uses, and `op is input` tests which kind a value is |
-| `bytes` | an ordered sequence of `u8` values (a serialised checkpoint, the input of a hash); `len(b)` is its length. Floats written into bytes are stored as their IEEE 754 bit patterns (little-endian, 8 bytes for a double) so that they read back to the same bits |
+| `bytes` | an ordered sequence of `u8` values (a serialised checkpoint, the input of a hash); `len(b)` is its length, `b[i]` is byte `i` (0-indexed, `0 <= i < len(b)`) and `append x to b` adds one at the end, as for a `list`. Floats written into bytes are stored as their IEEE 754 bit patterns (little-endian, 8 bytes for a double) so that they read back to the same bits |
 | `none` | the value of a function that returns nothing |
 
 A **record** groups named fields into one value:

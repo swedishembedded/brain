@@ -396,6 +396,10 @@ navigation:
           - docs/book/v04-computation/12-quantization.md
           - docs/book/v04-computation/13-npu.md
           - docs/book/v04-computation/14-project-tensor-engine.md
+      - title: "Volume V: Language, Sequences and Transformers"
+        pages:
+          - docs/book/v05-sequences/index.md
+          - docs/book/v05-sequences/01-text.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

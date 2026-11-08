@@ -100,6 +100,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **chain rule**: the derivative of a composition is the derivative of the outer function, evaluated at the inner value, times the derivative of the inner function: $(f\circ g)'(x) = f'(g(x))\,g'(x)$. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
+**character encoding**: an agreement that maps characters to numbers and numbers to bytes, so that a sequence of bytes can be read back as the text it was written from; ASCII, the code pages and UTF-8 are examples. *([Text as Data](v05-sequences/01-text.md))*
+
 **classification**: predicting which of a fixed set of categories an example belongs to, from its features, learned from labelled examples; with two categories, labelled $0$ and $1$, it is binary classification. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
 **command recording**: appending many dispatches to one list and handing the list to the device as a single submission, so that the host pays the submission cost once instead of once per dispatch; a read-back or any other observation of the device ends the list. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
@@ -440,6 +442,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **normal equations**: the system $\mathbf{X}^\top\mathbf{X}\mathbf{w} = \mathbf{X}^\top\mathbf{y}$ obtained by setting the gradient of the squared error to zero; it says the residual is orthogonal (normal) to every column of the design matrix. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
+**normalization of text**: converting a string to a canonical spelling (NFC, NFD, NFKC or NFKD) so that strings the standard declares equivalent become identical sequences of code points, before they are compared, counted or tokenized. *([Text as Data](v05-sequences/01-text.md))*
+
 **numerical integration**: approximating an integral by a weighted sum of function values, such as rectangles, trapezoids or Simpson's rule, whose error falls as a fixed power of the panel width. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
 ## O
@@ -654,11 +658,15 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **underfitting**: a model too restricted to represent the pattern, so that its error is high on the training rows and on new rows alike. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
+**Unicode**: the standard that numbers every character of every writing system once (its code point, from U+0000 to U+10FFFF) and records its properties, such as category, combining class and case. *([Text as Data](v05-sequences/01-text.md))*
+
 **uniform parameters**: the small block of constants, the same for every invocation and read-only, that the host writes into a separate buffer for a kernel: element counts, scalars, shapes and strides. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
 **universal-approximation**: the theorem that, for any continuous function on a closed bounded set and any tolerance, some one-hidden-layer network with a non-polynomial activation stays within that tolerance everywhere on the set; it guarantees that the weights exist, not how many units they need or how to find them. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **unsupervised learning**: learning from examples without labels, to find structure such as groups in the features themselves. *([The Learning Problem](v02-learning/01-learning-problem.md))*
+
+**UTF-8**: the encoding that writes each Unicode scalar value as 1 to 4 bytes whose leading bits announce the sequence's length, compatible with ASCII, self-synchronizing and ordered like the code points; its decoder is a state machine of eight states. *([Text as Data](v05-sequences/01-text.md))*
 
 ## V
 
