@@ -1,0 +1,36 @@
+<!-- source-sha256: bffe8a8bc6e3b7501dcf3cef50bd2c690fae1f5666a3b754e55989e9890102b6 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 360" width="600" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="360" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="221.75" y1="314" x2="221.75" y2="30" stroke="#edf2f7"/>
+<text x="221.75" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="385.5" y1="314" x2="385.5" y2="30" stroke="#edf2f7"/>
+<text x="385.5" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="549.25" y1="314" x2="549.25" y2="30" stroke="#edf2f7"/>
+<text x="549.25" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">15</text>
+<line x1="58" y1="314" x2="582" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="263.29" x2="582" y2="263.29" stroke="#edf2f7"/>
+<text x="52" y="267.29" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<line x1="58" y1="212.57" x2="582" y2="212.57" stroke="#edf2f7"/>
+<text x="52" y="216.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="161.86" x2="582" y2="161.86" stroke="#edf2f7"/>
+<text x="52" y="165.86" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">15</text>
+<line x1="58" y1="111.14" x2="582" y2="111.14" stroke="#edf2f7"/>
+<text x="52" y="115.14" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<line x1="58" y1="60.43" x2="582" y2="60.43" stroke="#edf2f7"/>
+<text x="52" y="64.43" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">25</text>
+<rect x="58" y="30" width="524" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="516.5,275.76 385.5,247.64 320,206.18 287.25,185.84 254.5,161.6 221.75,137.37 189,115.22 156.25,91.66 123.5,65.13"/><circle cx="516.5" cy="275.76" r="3.5" fill="#2b6cb0"/><circle cx="385.5" cy="247.64" r="3.5" fill="#2b6cb0"/><circle cx="320" cy="206.18" r="3.5" fill="#2b6cb0"/><circle cx="287.25" cy="185.84" r="3.5" fill="#2b6cb0"/><circle cx="254.5" cy="161.6" r="3.5" fill="#2b6cb0"/><circle cx="221.75" cy="137.37" r="3.5" fill="#2b6cb0"/><circle cx="189" cy="115.22" r="3.5" fill="#2b6cb0"/><circle cx="156.25" cy="91.66" r="3.5" fill="#2b6cb0"/><circle cx="123.5" cy="65.13" r="3.5" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="516.5,151.02 385.5,138.99 320,130.98 287.25,125.24 254.5,117.04 221.75,107.95 189,96.68 156.25,81.42 123.5,60"/><circle cx="516.5" cy="151.02" r="3.5" fill="#c05621"/><circle cx="385.5" cy="138.99" r="3.5" fill="#c05621"/><circle cx="320" cy="130.98" r="3.5" fill="#c05621"/><circle cx="287.25" cy="125.24" r="3.5" fill="#c05621"/><circle cx="254.5" cy="117.04" r="3.5" fill="#c05621"/><circle cx="221.75" cy="107.95" r="3.5" fill="#c05621"/><circle cx="189" cy="96.68" r="3.5" fill="#c05621"/><circle cx="156.25" cy="81.42" r="3.5" fill="#c05621"/><circle cx="123.5" cy="60" r="3.5" fill="#c05621"/><text x="385.5" y="295.74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">4.02 bits</text><text x="221.75" y="295.74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">4.50 bits</text><text x="156.25" y="295.74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">6.00 bits</text></g>
+<text x="320" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log2 of the group size G (one scale per G weights)</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">SQNR in dB, 4-bit codes</text>
+<text x="320" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Smaller groups buy accuracy and cost scale bits</text>
+<rect x="419.63" y="38" width="154.37" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="427.63" y1="53" x2="447.63" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="453.63" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">heavy-tailed weights</text>
+<line x1="427.63" y1="70" x2="447.63" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="453.63" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">gaussian weights</text>
+</svg>

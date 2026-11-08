@@ -18,6 +18,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **AdamW**: Adam with decoupled weight decay: $\theta \leftarrow \theta - \eta\lambda\theta - \eta\hat{\mathbf{m}}/(\sqrt{\hat{\mathbf{v}}} + \epsilon_{\mathrm{den}})$. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
+**affine quantization**: the map from a real number to an $n_b$-bit integer code and back, $q = \mathrm{clamp}(\mathrm{round}(w/\Delta) + q_0, 0, 2^{n_b} - 1)$ and $w' = \Delta(q - q_0)$, a multiplication and an offset applied to a group of weights. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
+
 **ahead-of-time compilation**: compiling kernels for a list of known device architectures before the program ships and loading the results at run time with a key that identifies their inputs, so that a machine without a compiler can run them, at the price of storage and of devices outside the list. *([One Program, Many Devices](v04-computation/09-backends.md))*
 
 **algorithm**: a finite list of definite steps that turns any input of a stated kind into an output of a stated kind, whose correctness can be argued with an invariant that holds before and after every pass of its loops. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
@@ -264,6 +266,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **group-normalization**: normalizing groups of consecutive channels of one example, over the group's channels and all spatial positions, with a learned gain and shift per channel; one group is layer normalization and one group per channel is instance normalization. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
+**group-wise quantization**: giving each run of $G$ consecutive weights its own scale, so that one large weight sets the step for its group only; it costs $(\text{scale bits})/G$ bits per weight in addition to the codes. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
+
 ## H
 
 **hashing**: computing from a value, by a fixed rule, a fixed-size number used as the address of the value in a table (giving expected constant-time lookup when the rule spreads the keys) or as a fingerprint that changes if any byte of the value changes. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
@@ -309,6 +313,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **k-means**: the method that finds $k$ group centres by alternately assigning each row to its nearest centre and moving each centre to the mean of its rows (Lloyd's algorithm), lowering the total squared distance to the centres at every step. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
 **k-nearest neighbours**: a classifier that stores the training rows and predicts the most common label among the $k$ rows nearest to a new one; $k$ trades bias against variance. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
+
+**k-quantization**: a family of block formats in which a super-block of weights is divided into sub-blocks whose scales and mins are themselves stored as small integers times one or two shared factors (two levels of scale), as in Q4_K: 256 weights, eight sub-blocks, 144 bytes. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
 **kernel dispatch**: the host-side act of running a kernel: binding buffers to its slots, writing its uniform parameters and enqueueing it over a grid of workgroups, after which the host may continue while the device runs it. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
@@ -395,6 +401,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **metric selection**: choosing the number that scores a model from the decision its output feeds and the costs of its mistakes, checking it on a trivial and a perfect predictor, and reporting it with an uncertainty. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **minibatch**: the small set of $B$ examples whose mean loss gradient is used for one update; its gradient has the full gradient's expectation and a variance $1/B$ that of one example. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
+
+**mixed-precision weight search**: choosing the storage width of each tensor so as to minimize the estimated total loss increase within a byte budget, using each tensor's sensitivity; a knapsack problem solved greedily and accepted only after measuring the whole model. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
 **model**: a function whose rule has a fixed shape and whose behaviour is set by a list of parameters, used to turn the features of an example into a prediction. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
@@ -486,6 +494,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **pseudo-random generator**: a deterministic state machine (a state, a rule that advances it, and a rule that turns it into a number) whose outputs are judged by how closely they resemble draws from a uniform distribution, not by being unpredictable to someone who knows the rule. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
+## Q
+
+**quantization error**: the difference $e = w' - w$ between a decoded weight and the original, bounded by half a step, and summarized by its mean squared error or the signal-to-quantization-noise ratio $10\log_{10}(\mathrm{mean}(w^2)/\mathrm{MSE})$ in decibels. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
+
 ## R
 
 **radix sort**: a sort of integer keys digit by digit from the least significant, each pass made of per-chunk histograms, one scan of the digit-major histogram array and a stable scatter, so that no two invocations write the same counter or the same position. *([Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md))*
@@ -545,6 +557,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **saved activations**: the values of the forward pass that are kept in memory because the backward pass reads them. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **scalar multiplication**: multiplying every entry of a vector by one number, which stretches, shrinks or flips the arrow. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
+
+**scale and zero point**: the pair $(\Delta, q_0)$ of a group: the distance between neighbouring levels and the code that stands for the number 0, chosen so that the codes cover the group's range and 0 is exactly a code. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
 **seed**: the number from which a generator's starting state is computed; the same seed gives the same stream, and a seed used by a run must be recorded for the run to be repeated. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
@@ -657,6 +671,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **warmup runs**: the leading runs of a repeated measurement whose cost is dominated by a start-up transient (building pipelines, first-touch memory, cold caches, a clock that has not ramped up) and is not the cost of the steady state; they are detected and kept out of the summary, or reported as a separate cold row. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
 **weight decay**: shrinking every weight toward zero by the fraction $\eta\lambda$ at each step, as a regularizer of a neural network; the L2 penalty of Volume II, applied directly to the weights in the decoupled form of chapter 7. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
+
+**weight-only quantization**: storing the weights as low-bit codes with scales while the activations stay in a higher-precision format, decoding the codes inside the matrix product so that the bytes read, and not the arithmetic, shrink. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
 **WGSL**: the WebGPU Shading Language, a small kernel language that compiles to the native graphics interfaces and in which the book writes its kernel examples. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 

@@ -1,0 +1,137 @@
+<!-- source-sha256: 6602b5062390d08712446ecdbf0f9a7734389287c784b0c94c812d5b36651ca4 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 924 450" width="924" height="450"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="924" height="450" fill="#ffffff"/>
+<text x="14" y="37.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">whole block</text>
+<text x="14" y="53.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">144 bytes</text>
+<rect x="130" y="24" width="86.67" height="34" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="173.33" y="37.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">header</text>
+<text x="173.33" y="53.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">bytes 0..15</text>
+<rect x="216.67" y="24" width="693.33" height="34" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="563.33" y="45.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">codes: bytes 16..143 (128 bytes, 256 nibbles)</text>
+<line x1="130" y1="58" x2="130" y2="100" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<line x1="216.67" y1="58" x2="910" y2="100" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<text x="14" y="116.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">header</text>
+<text x="14" y="132.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">bytes 0..15</text>
+<rect x="130" y="100" width="48.75" height="40" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="154.38" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">d lo</text>
+<text x="154.38" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 0</text>
+<rect x="178.75" y="100" width="48.75" height="40" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="203.12" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">d hi</text>
+<text x="203.12" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 1</text>
+<rect x="227.5" y="100" width="48.75" height="40" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="251.88" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">dmin lo</text>
+<text x="251.88" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 2</text>
+<rect x="276.25" y="100" width="48.75" height="40" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="300.62" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">dmin hi</text>
+<text x="300.62" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 3</text>
+<rect x="325" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="349.38" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s0</text>
+<text x="349.38" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 4</text>
+<rect x="373.75" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="398.12" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s1</text>
+<text x="398.12" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 5</text>
+<rect x="422.5" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="446.88" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s2</text>
+<text x="446.88" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 6</text>
+<rect x="471.25" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="495.62" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s3</text>
+<text x="495.62" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 7</text>
+<rect x="520" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="544.38" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s4</text>
+<text x="544.38" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 8</text>
+<rect x="568.75" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="593.12" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s5</text>
+<text x="593.12" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 9</text>
+<rect x="617.5" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="641.88" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s6</text>
+<text x="641.88" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 10</text>
+<rect x="666.25" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="690.62" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s7</text>
+<text x="690.62" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 11</text>
+<rect x="715" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="739.38" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s8</text>
+<text x="739.38" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 12</text>
+<rect x="763.75" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="788.12" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s9</text>
+<text x="788.12" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 13</text>
+<rect x="812.5" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="836.88" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s10</text>
+<text x="836.88" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 14</text>
+<rect x="861.25" y="100" width="48.75" height="40" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="885.62" y="115.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">s11</text>
+<text x="885.62" y="131.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">byte 15</text>
+<line x1="325" y1="140" x2="130" y2="188" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<line x1="910" y1="140" x2="910" y2="188" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<text x="14" y="207.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">bytes 4..7</text>
+<rect x="130" y="188" width="48.75" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="154.38" y="206.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">sc4 hi</text>
+<rect x="178.75" y="188" width="146.25" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="251.88" y="207.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">sc0</text>
+<rect x="325" y="188" width="48.75" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="349.38" y="206.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">sc5 hi</text>
+<rect x="373.75" y="188" width="146.25" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="446.88" y="207.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">sc1</text>
+<rect x="520" y="188" width="48.75" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="544.38" y="206.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">sc6 hi</text>
+<rect x="568.75" y="188" width="146.25" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="641.88" y="207.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">sc2</text>
+<rect x="715" y="188" width="48.75" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="739.38" y="206.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">sc7 hi</text>
+<rect x="763.75" y="188" width="146.25" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="836.88" y="207.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">sc3</text>
+<text x="14" y="243.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">bytes 8..11</text>
+<rect x="130" y="224" width="48.75" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="154.38" y="242.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">m4 hi</text>
+<rect x="178.75" y="224" width="146.25" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="251.88" y="243.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">m0</text>
+<rect x="325" y="224" width="48.75" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="349.38" y="242.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">m5 hi</text>
+<rect x="373.75" y="224" width="146.25" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="446.88" y="243.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">m1</text>
+<rect x="520" y="224" width="48.75" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="544.38" y="242.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">m6 hi</text>
+<rect x="568.75" y="224" width="146.25" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="641.88" y="243.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">m2</text>
+<rect x="715" y="224" width="48.75" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="739.38" y="242.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">m7 hi</text>
+<rect x="763.75" y="224" width="146.25" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="836.88" y="243.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">m3</text>
+<text x="14" y="279.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">bytes 12..15</text>
+<rect x="130" y="260" width="97.5" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="178.75" y="278.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">m4 lo</text>
+<rect x="227.5" y="260" width="97.5" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="276.25" y="278.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">sc4 lo</text>
+<rect x="325" y="260" width="97.5" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="373.75" y="278.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">m5 lo</text>
+<rect x="422.5" y="260" width="97.5" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="471.25" y="278.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">sc5 lo</text>
+<rect x="520" y="260" width="97.5" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="568.75" y="278.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">m6 lo</text>
+<rect x="617.5" y="260" width="97.5" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="666.25" y="278.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">sc6 lo</text>
+<rect x="715" y="260" width="97.5" height="30" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="763.75" y="278.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">m7 lo</text>
+<rect x="812.5" y="260" width="97.5" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="861.25" y="278.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">sc7 lo</text>
+<text x="130" y="301.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="start">every byte is drawn with its high bits on the left: bits 7..6 | 5..0 in the first two rows, bits 7..4 | 3..0 in the third row and in the code bytes below</text>
+<text x="14" y="341.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">bytes 16..19</text>
+<text x="14" y="357.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">first of the codes</text>
+<rect x="130" y="330" width="97.5" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="178.75" y="348.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">w32 (high)</text>
+<rect x="227.5" y="330" width="97.5" height="30" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="276.25" y="348.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">w0 (low)</text>
+<rect x="325" y="330" width="97.5" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="373.75" y="348.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">w33 (high)</text>
+<rect x="422.5" y="330" width="97.5" height="30" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="471.25" y="348.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">w1 (low)</text>
+<rect x="520" y="330" width="97.5" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="568.75" y="348.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">w34 (high)</text>
+<rect x="617.5" y="330" width="97.5" height="30" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="666.25" y="348.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">w2 (low)</text>
+<rect x="715" y="330" width="97.5" height="30" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="763.75" y="348.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">w35 (high)</text>
+<rect x="812.5" y="330" width="97.5" height="30" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="861.25" y="348.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#1a202c" text-anchor="middle">w3 (low)</text>
+<text x="130" y="388.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">bytes 16..47: low nibbles are weights 0..31 (sub-block 0), high nibbles weights 32..63 (sub-block 1);</text>
+<text x="130" y="406.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">bytes 48..143: the same pattern for weights 64..127, 128..191 and 192..255 (sub-blocks 2 to 7);</text>
+<text x="130" y="424.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">weight i of sub-block j = i // 32 decodes to d sc_j q - dmin m_j.</text>
+</svg>

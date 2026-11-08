@@ -393,6 +393,7 @@ navigation:
           - docs/book/v04-computation/09-backends.md
           - docs/book/v04-computation/10-kernel-selection.md
           - docs/book/v04-computation/11-profiling.md
+          - docs/book/v04-computation/12-quantization.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

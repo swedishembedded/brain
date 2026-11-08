@@ -225,6 +225,7 @@ hexadecimal (`0x7FFF`) or binary (`0b0101`).
 | `pattern(x, n)` | the `n`-bit pattern of the integer `x`, that is `x mod 2^n`; for a negative `x` this is `2^n + x` (`pattern(-1, 8) = 255`) |
 | `signed(a, n)` | the value of the `n`-bit pattern `a` read as a two's complement number: `a` if `a < 2^(n-1)`, otherwise `a - 2^n` (`signed(255, 8) = -1`, `signed(128, 8) = -128`) |
 | `bits(x)`, `from_bits(a)` | for an `f32` value `x`, the `u32` holding its 32 stored bits (sign, exponent, fraction, in that order from the top); and the `f32` whose stored bits are the `u32` `a`. Each undoes the other. Volume IV, chapter 1 defines the layout |
+| `f16_of(a)` | for a `u16` pattern `a`, the `f16` number whose stored bits (sign, 5 exponent bits, 10 fraction bits, from the top) are `a`, decoded with the rule of Volume IV, chapter 1 (so `f16_of(0x3C00) = 1.0` and `f16_of(0x0000) = 0.0`); a file stores it as two bytes, the low byte first, so the number held in bytes `b[0], b[1]` is `f16_of(u16(b[0]) or (u16(b[1]) << 8))` |
 | `round_even(x)` | the integer nearest to `x`, **ties to the even integer** (`round_even(2.5) = 2`, `round_even(3.5) = 4`, `round_even(-2.5) = -2`, `round_even(0.4) = 0`); it returns an `int` and is the rule the book calls round to nearest even |
 | `exponent_of(x)` | for `x > 0`, the integer `e` with `2^e <= x < 2^(e+1)` (`exponent_of(0.75) = -1`, `exponent_of(8) = 3`); computed exactly, never as a rounded `floor(log2(x))` |
 

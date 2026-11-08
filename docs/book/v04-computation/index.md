@@ -67,7 +67,7 @@ more than one kind of device.
     the roofline on hardware nobody tuned it for.
 11. [Measuring Performance Honestly](11-profiling.md): why most performance numbers
     lie, and how to produce ones that do not.
-12. Quantization: Fewer Bits per Weight: how a model's weights can be stored in
+12. [Quantization: Fewer Bits per Weight](12-quantization.md): how a model's weights can be stored in
     four bits each and still work.
 13. Neural Processing Units and Graph Compilers: how a whole network becomes one
     compiled program for a fixed-function accelerator.
