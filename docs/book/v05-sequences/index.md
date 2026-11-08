@@ -72,7 +72,7 @@ generation.
    where each token is.
 9. [The Transformer Block](09-transformer-block.md): how attention, a feed-forward network, residuals and
    normalization fit into one repeating unit.
-10. Training a GPT from Scratch: the full pipeline from raw text to a trained
+10. [Training a GPT from Scratch](10-training-gpt.md): the full pipeline from raw text to a trained
     generative model.
 11. Decoding: Turning Probabilities into Text: how to choose what to say, given
     next-token probabilities.

@@ -455,7 +455,7 @@ volumes:
         title: "Training a GPT from Scratch"
         question: "What does the full pipeline from raw text to a trained generative model look like?"
         introduces: [gpt-architecture, sequence-packing, loss-masking, training-throughput]
-        requires: [transformer-block, causal-language-model, adamw, cosine-schedule, byte-pair-encoding]
+        requires: [transformer-block, causal-language-model, adamw, cosine-schedule, byte-pair-encoding, special-tokens, teacher-forcing, perplexity, validation-set, softmax-cross-entropy, causal-mask, absolute-position-embedding, embedding-table, tied-embeddings, layer-normalization, gelu, variance-preservation, gradient-clipping, learning-rate-warmup, roofline-model, arithmetic-intensity]
         brain: [gpt2, data, eval]
       - id: decoding
         title: "Decoding: Turning Probabilities into Text"

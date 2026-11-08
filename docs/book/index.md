@@ -103,4 +103,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 7. [Self-Attention](v05-sequences/07-self-attention.md): How can every position in a sequence look at every other position in parallel?
 8. [Positional Information](v05-sequences/08-positions.md): Attention ignores order; how do we tell it where each token is?
 9. [The Transformer Block](v05-sequences/09-transformer-block.md): How do attention, a feed-forward network, residuals and normalization fit together into one repeating unit?
+10. [Training a GPT from Scratch](v05-sequences/10-training-gpt.md): What does the full pipeline from raw text to a trained generative model look like?
 <!-- /contents -->

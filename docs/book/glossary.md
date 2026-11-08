@@ -294,6 +294,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **global gradient norm**: the Euclidean norm of the gradient of every parameter of the model, all tensors taken together as one vector, the number a clip compares with its threshold. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
 
+**GPT architecture**: a decoder-only transformer language model: token embeddings plus positions, a stack of pre-norm blocks, a final normalization and a head (tied to the embedding table in GPT-2) that gives one row of logits per position, trained to predict the next token. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
+
 **GPU architecture**: the organization of a graphics processor used for computing: many compute units, each with lanes, a large register file, a small on-chip memory and a scheduler, over a memory of high bandwidth and high latency, built for throughput and not for the speed of one thread. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
 **gradient**: the vector of all the partial derivatives of a scalar function, the same shape as its inputs; it points in the direction of steepest ascent and its length is the steepest rate of change. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
@@ -415,6 +417,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **loss curve**: the loss plotted against the training step or epoch; it can show the minibatch loss, the loss on the whole training set or on a validation set, each with a different noise level and cost, and it is read by its start, direction, slope and gap. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
 **loss function**: a rule that scores one prediction against its label with a non-negative number, zero for a perfect prediction; its average over the data is the quantity learning minimises. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
+
+**loss masking**: giving every position a mask of 1 or 0, so that padding and prompt tokens are computed but contribute nothing to the loss or the gradient, and dividing by the count of positions with mask 1 and not by the size of the batch. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
 
 **low-rank approximation**: replacing a matrix by one of small rank, best obtained by keeping the largest singular values; it stores $r(m + n)$ numbers instead of $mn$ and its error is the dropped singular values. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
@@ -644,6 +648,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **selection cache**: the stored map from a key of device identity, driver version, source digest and shape bucket to the candidate chosen, kept between runs so that a measurement is paid once and discarded when any part of the key changes. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
+**sequence packing**: laying the tokens of many documents end to end in one stream and cutting it into rows of a fixed length, with the targets one place later and a padded, masked last row, so that almost every position of every row does useful work. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
+
 **set**: a collection of distinct elements, written with braces and combined by union, intersection and difference. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **shader translation**: rewriting a kernel from its own language into the form a device accepts so that it still computes what the source computes, which requires keeping every promise the language makes (clamped bounds, wrapping integers, barrier and return semantics, zeroed workgroup memory, layout) that the target does not make by itself. *([One Program, Many Devices](v04-computation/09-backends.md))*
@@ -723,6 +729,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **train-vs-eval-mode**: the two behaviours of a layer that has a state of its own: in train mode batch normalization uses the batch statistics and updates its running averages, in eval mode it uses the running averages and changes nothing. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
 **training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
+**training throughput**: the rate at which a training run consumes tokens, stated as the FLOPs and bytes each token costs and the fraction of the device's roofline that the run reaches, not as seconds. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
 
 **transformer block**: the repeating unit of a transformer, one attention sublayer and one feed-forward sublayer, each with its normalization and its addition to the residual stream. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 

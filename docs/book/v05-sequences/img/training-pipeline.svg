@@ -1,0 +1,44 @@
+<!-- source-sha256: 457097611131017e5092300db46a814e121519e8699076695e2b68c43cc86b56 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 380" width="1000" height="380"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-4a5568" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="1000" height="380" fill="#ffffff"/>
+<ellipse cx="110" cy="62" rx="75" ry="28" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">raw text</text>
+<text x="110" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">documents</text>
+<rect x="265" y="34" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokenizer</text>
+<text x="340" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">byte-pair merges</text>
+<ellipse cx="570" cy="62" rx="75" ry="28" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">token stream</text>
+<text x="570" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">with separators</text>
+<rect x="725" y="34" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="800" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">packing</text>
+<text x="800" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x, y, mask, doc</text>
+<line x1="188" y1="62" x2="262" y2="62" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="418" y1="62" x2="492" y2="62" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="648" y1="62" x2="722" y2="62" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="725" y="154" width="150" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="800" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">GPT</text>
+<text x="800" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">L blocks, tied head</text>
+<rect x="495" y="154" width="150" height="56" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">masked loss</text>
+<text x="570" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mean over supervised</text>
+<rect x="265" y="154" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">AdamW</text>
+<text x="340" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">clip, warmup, cosine</text>
+<ellipse cx="110" cy="182" rx="75" ry="28" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">checkpoint</text>
+<text x="110" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">weights, moments</text>
+<line x1="800" y1="93" x2="800" y2="151" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="809" y="126.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">[B, T] ids</text>
+<line x1="722" y1="182" x2="648" y2="182" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="685" y="173.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">logits</text>
+<line x1="492" y1="182" x2="418" y2="182" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<text x="455" y="173.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">gradients</text>
+<line x1="262" y1="182" x2="188" y2="182" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="225" y="173.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">every k steps</text>
+<path d="M340,210 L340,244 Q340,254 350,254 L790,254 Q800,254 800,244 L800,213" fill="none" stroke="#4a5568" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-4a5568)"/>
+<text x="570" y="276.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">updated weights, next step</text>
+<ellipse cx="110" cy="314" rx="75" ry="28" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="310.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">validation loss</text>
+<text x="110" y="326.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and generated text</text>
+<line x1="110" y1="213" x2="110" y2="283" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

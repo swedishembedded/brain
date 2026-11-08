@@ -1,0 +1,32 @@
+<!-- source-sha256: 4c8035fb1e7fb6c01262c30c1e494dbc55d3c5ba4817bc78063b1b9c990a6600 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 380" width="640" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="380" fill="#ffffff"/>
+<line x1="109.27" y1="334" x2="109.27" y2="30" stroke="#edf2f7"/>
+<text x="109.27" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="237.45" y1="334" x2="237.45" y2="30" stroke="#edf2f7"/>
+<text x="237.45" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">150</text>
+<line x1="365.64" y1="334" x2="365.64" y2="30" stroke="#edf2f7"/>
+<text x="365.64" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">200</text>
+<line x1="493.82" y1="334" x2="493.82" y2="30" stroke="#edf2f7"/>
+<text x="493.82" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">250</text>
+<line x1="622" y1="334" x2="622" y2="30" stroke="#edf2f7"/>
+<text x="622" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">300</text>
+<line x1="58" y1="252.93" x2="622" y2="252.93" stroke="#edf2f7"/>
+<text x="52" y="256.93" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.7</text>
+<line x1="58" y1="151.6" x2="622" y2="151.6" stroke="#edf2f7"/>
+<text x="52" y="155.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="50.27" x2="622" y2="50.27" stroke="#edf2f7"/>
+<text x="52" y="54.27" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.9</text>
+<rect x="58" y="30" width="564" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="564" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,126.28 83.64,170.94 109.27,159.39 134.91,203.85 160.55,192.5 186.18,205.38 211.82,209.26 237.45,212.73 263.09,233.44 288.73,227.25 314.36,221.4 340,233.77 365.64,253.67 391.27,257.85 416.91,245.03 442.55,266.38 468.18,261.18 493.82,270.13 519.45,279.08 545.09,281.85 570.73,281.01 596.36,293.34 622,297.37"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,160.95 83.64,179.6 109.27,181.03 134.91,200.02 160.55,198.77 186.18,204.35 211.82,202.53 237.45,212.25 263.09,198.57 288.73,205.44 314.36,207.83 340,195.71 365.64,198.01 391.27,195.28 416.91,186.12 442.55,185.42 468.18,184.7 493.82,181.69 519.45,172.03 545.09,178.3 570.73,170.74 596.36,170.63 622,169.73"/><circle cx="58" cy="160.95" r="2.5" fill="#2b6cb0"/><circle cx="83.64" cy="179.6" r="2.5" fill="#2b6cb0"/><circle cx="109.27" cy="181.03" r="2.5" fill="#2b6cb0"/><circle cx="134.91" cy="200.02" r="2.5" fill="#2b6cb0"/><circle cx="160.55" cy="198.77" r="2.5" fill="#2b6cb0"/><circle cx="186.18" cy="204.35" r="2.5" fill="#2b6cb0"/><circle cx="211.82" cy="202.53" r="2.5" fill="#2b6cb0"/><circle cx="237.45" cy="212.25" r="2.5" fill="#2b6cb0"/><circle cx="263.09" cy="198.57" r="2.5" fill="#2b6cb0"/><circle cx="288.73" cy="205.44" r="2.5" fill="#2b6cb0"/><circle cx="314.36" cy="207.83" r="2.5" fill="#2b6cb0"/><circle cx="340" cy="195.71" r="2.5" fill="#2b6cb0"/><circle cx="365.64" cy="198.01" r="2.5" fill="#2b6cb0"/><circle cx="391.27" cy="195.28" r="2.5" fill="#2b6cb0"/><circle cx="416.91" cy="186.12" r="2.5" fill="#2b6cb0"/><circle cx="442.55" cy="185.42" r="2.5" fill="#2b6cb0"/><circle cx="468.18" cy="184.7" r="2.5" fill="#2b6cb0"/><circle cx="493.82" cy="181.69" r="2.5" fill="#2b6cb0"/><circle cx="519.45" cy="172.03" r="2.5" fill="#2b6cb0"/><circle cx="545.09" cy="178.3" r="2.5" fill="#2b6cb0"/><circle cx="570.73" cy="170.74" r="2.5" fill="#2b6cb0"/><circle cx="596.36" cy="170.63" r="2.5" fill="#2b6cb0"/><circle cx="622" cy="169.73" r="2.5" fill="#2b6cb0"/><line x1="58" y1="228.47" x2="622" y2="228.47" stroke="#718096" stroke-dasharray="4 4"/><text x="68.25" y="250.76" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">entropy of the generator</text></g>
+<text x="340" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">optimizer step</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">loss, nats per target token</text>
+<text x="340" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Validation loss turns up as training loss keeps falling</text>
+<rect x="430.81" y="38" width="183.19" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="438.81" y1="53" x2="458.81" y2="53" stroke="#c05621" stroke-width="2"/>
+<text x="464.81" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">training (mean of 10 steps)</text>
+<line x1="438.81" y1="70" x2="458.81" y2="70" stroke="#2b6cb0" stroke-width="2"/>
+<text x="464.81" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">validation</text>
+</svg>
