@@ -95,4 +95,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume V: Language, Sequences and Transformers](v05-sequences/index.md)
 
 1. [Text as Data](v05-sequences/01-text.md): What is text to a computer, byte by byte?
+2. [Tokenization](v05-sequences/02-tokenization.md): How do we cut text into pieces a model can count, and why does the choice matter so much?
 <!-- /contents -->

@@ -78,6 +78,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **buffer alignment**: the rule that a value starts at an address that is a multiple of its alignment, which fixes where the fields of a parameter block and the slices of a buffer may begin and leaves padding between them. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
+**byte-level BPE**: byte-pair encoding whose starting symbols are the 256 byte values of a text's UTF-8, so no piece of any input is unknown; GPT-2-style files spell each byte as a printable stand-in character. *([Tokenization](v05-sequences/02-tokenization.md))*
+
+**byte-pair encoding**: a way to learn a vocabulary by repeatedly merging the most frequent pair of adjacent symbols, and to encode text by replaying those merges in the order they were learned. *([Tokenization](v05-sequences/02-tokenization.md))*
+
 ## C
 
 **cache hierarchy**: the stack of memories between a core's registers and main memory, each level larger and slower than the one above it and holding copies of the lines most recently used from the level below. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
@@ -101,6 +105,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **chain rule**: the derivative of a composition is the derivative of the outer function, evaluated at the inner value, times the derivative of the inner function: $(f\circ g)'(x) = f'(g(x))\,g'(x)$. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **character encoding**: an agreement that maps characters to numbers and numbers to bytes, so that a sequence of bytes can be read back as the text it was written from; ASCII, the code pages and UTF-8 are examples. *([Text as Data](v05-sequences/01-text.md))*
+
+**chat template**: the fixed rule that writes a list of role-tagged messages as one string framed by special tokens, so that it encodes to the one id sequence a model was trained on. *([Tokenization](v05-sequences/02-tokenization.md))*
 
 **classification**: predicting which of a fixed set of categories an example belongs to, from its features, learned from labelled examples; with two categories, labelled $0$ and $1$, it is binary classification. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
@@ -496,6 +502,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **prefix sum**: the list of running totals of an array, either inclusive (including the element at each position) or exclusive (stopping just before it), used to turn probabilities into a cumulative distribution and lengths into offsets. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
+**pretokenization**: the fixed split of text into words, digits, symbols and whitespace runs, done before any merge so that merges never cross a boundary; its rules are as much a part of a tokenizer as its vocabulary. *([Tokenization](v05-sequences/02-tokenization.md))*
+
 **principal component analysis**: finding the directions along which centred rows vary most, the eigenvectors of their covariance matrix, so that rows can be summarised by their positions along the first few. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
 **prior**: a probability distribution over the parameters stating what is believed about them before the data are seen. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
@@ -606,6 +614,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **sorting**: rearranging a list into non-decreasing order; comparison sorts need $\Omega(n \log n)$ comparisons in the worst case and merge sort achieves it, while sorts that use the values of integer keys as addresses can be linear. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
+**special tokens**: ids that stand for no piece of text, such as the beginning or end of a sequence, padding, an unknown piece or the markers of a chat turn, matched from their literals before ordinary encoding and never to be produced from text a client wrote. *([Tokenization](v05-sequences/02-tokenization.md))*
+
 **stable-softmax**: the softmax computed after subtracting the largest score from every score, which gives the same probabilities but keeps every exponent at most zero, so nothing overflows and the sum is at least one. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **standard error**: the standard deviation of an estimator over repeated samples, the typical size of its error; for the sample mean it is $\sigma/\sqrt{n}$, estimated by $s/\sqrt{n}$. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
@@ -642,6 +652,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **tiled matmul**: the matrix product computed one tile of the output at a time, with the matching tiles of the two inputs staged in a fast memory so that each number loaded is used once per row or column of the tile, cutting the loads from $2n^3$ to $2n^3/T$ for a tile of side $T$. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 
+**token**: the unit a model counts, one piece of the text a tokenizer cuts, with an integer id in the vocabulary; a token can be a character, a word, a part of a word or a single byte. *([Tokenization](v05-sequences/02-tokenization.md))*
+
 **train-vs-eval-mode**: the two behaviours of a layer that has a state of its own: in train mode batch normalization uses the batch statistics and updates its running averages, in eval mode it uses the running averages and changes nothing. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
 **training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
@@ -661,6 +673,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **Unicode**: the standard that numbers every character of every writing system once (its code point, from U+0000 to U+10FFFF) and records its properties, such as category, combining class and case. *([Text as Data](v05-sequences/01-text.md))*
 
 **uniform parameters**: the small block of constants, the same for every invocation and read-only, that the host writes into a separate buffer for a kernel: element counts, scalars, shapes and strides. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
+
+**unigram tokenizer**: a tokenizer whose vocabulary carries a probability for each piece and which cuts a word into the segmentation of highest total log-probability, found by dynamic programming; it is trained by re-estimating the probabilities and pruning pieces. *([Tokenization](v05-sequences/02-tokenization.md))*
 
 **universal-approximation**: the theorem that, for any continuous function on a closed bounded set and any tolerance, some one-hidden-layer network with a non-polynomial activation stays within that tolerance everywhere on the set; it guarantees that the weights exist, not how many units they need or how to find them. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
@@ -684,6 +698,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
+**vocabulary**: the list of every piece a tokenizer can produce, each with its id; its size $V$ is the number of rows the model's embedding table needs. *([Tokenization](v05-sequences/02-tokenization.md))*
+
 ## W
 
 **warmup runs**: the leading runs of a repeated measurement whose cost is dominated by a start-up transient (building pipelines, first-touch memory, cold caches, a clock that has not ramped up) and is not the cost of the steady state; they are detected and kept out of the summary, or reported as a separate cold row. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
@@ -695,6 +711,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **WGSL**: the WebGPU Shading Language, a small kernel language that compiles to the native graphics interfaces and in which the book writes its kernel examples. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
 **whole-pass measurement**: the time of the whole unit of work a user waits for, with every dispatch, wait, copy and host-side step the real use performs inside the bracket, repeated and summarized with its spread; the number by which a change is judged. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
+
+**WordPiece**: a tokenizer that cuts a word by greedy longest match from the left, marks every piece after the first with `##`, and turns a word it cannot cover into `[UNK]`; its vocabulary is chosen to raise the likelihood of the training text. *([Tokenization](v05-sequences/02-tokenization.md))*
 
 **workgroup**: a set of invocations of one dispatch that run together on one compute unit, share an on-chip memory and can wait for each other at a barrier, while different workgroups are independent. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 

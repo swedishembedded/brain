@@ -452,6 +452,21 @@ the language, and are defined where they are taught.
 - **Memory transactions and flattened views.** `transactions(log, wg)` of Volume IV, chapter 14 (milestone 2) counts the 32-byte memory transactions of one phase of a workgroup from the per-invocation access logs, by the rule of Volume IV, chapter 5 (subgroups of 32, the j-th access of each member is one instruction, one transaction per distinct 32-byte block, loads and stores apart); `flat(t)` of the same chapter (milestone 1) is the list of the elements of a tensor view in the row-major order of its shape.
 - **Selection helpers.** `digest`, `bucket_text`, `order_by_predicted_cost`, `gate_at` and `race` of Volume IV, chapter 10 are defined there, in pseudocode, before `select_kernel` uses them.
 
+## Maps, queues and pieces of text (Volume V)
+
+Volume V's algorithms count pairs, look pieces up and take the smallest of many candidates. Four more types and operations
+serve them; each is defined by what it returns, never by how it is stored.
+
+| Operation | Meaning |
+|---|---|
+| `map<K, V>` | a table from keys of type `K` to values of type `V`. `m[k]` reads the value of a key that is present (an error otherwise), `m[k] = v` sets it, `k in m` is true when the key is present, `len(m)` is the number of keys, and `get(m, k, d)` is `m[k]` when `k in m` and `d` otherwise. A literal empty map is written `map of K to V, empty` |
+| `keys(m)` | the keys of `m` as a list in **ascending order**: integers by value, `text` by its characters' code points, and tuples component by component (first components first). A loop over `keys(m)` therefore visits the keys in a fixed order, so a rule such as "the largest count, ties to the first key visited" has one answer |
+| tuple order | two tuples of the same shape compare lexicographically: `(a, b) < (c, d)` when `a < c`, or `a == c` and `b < d`. `==` is componentwise |
+| `concat(a, b, ...)` | a new `list` holding the elements of `a`, then those of `b`, and so on; for `text` values, the text that joins them in order. A slice of a `list`, `L[i:j]`, is a new list of the elements `i .. j - 1` with the half-open rule of arrays (empty when `i >= j`) |
+| `reverse(L)` | a new list with the elements of `L` in the opposite order |
+| `s[i:j]`, `len(s)` for `text` | the characters (code points, not bytes) `i .. j - 1` of `s` as a `text`, and the number of characters of `s`; `s[i:j]` is the empty text when `i >= j` |
+| `heap<T>` | a priority queue of tuples. `push(q, x)` adds `x`; `pop_min(q)` removes and returns the smallest element in tuple order (an error on an empty queue); `len(q)` is the number of elements |
+
 ## Randomness
 
 Random numbers come from an explicit generator `rng` of type `Generator`,

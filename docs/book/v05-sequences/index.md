@@ -56,8 +56,8 @@ generation.
 ## Chapters
 
 1. [Text as Data](01-text.md): what text is to a computer, byte by byte.
-2. Tokenization: how text is cut into pieces a model can count, and why the choice
-   matters so much.
+2. [Tokenization](02-tokenization.md): how text is cut into pieces a model can count,
+   and why the choice matters so much.
 3. Embeddings: how a token id becomes numbers a model can compute with, and how
    those numbers come to mean something.
 4. Language Modeling: how predicting the next token can teach a model about
