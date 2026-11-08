@@ -260,6 +260,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **feature**: one measurable property of an example that a prediction may depend on; the features of one example form a vector. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
+**feed-forward network**: the sublayer that applies one small network, two or three matrices and an activation, to each position on its own, so that it computes with what attention has gathered and moves nothing between positions. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
+
 **finite difference**: an estimate of a derivative built from values of the function at nearby points, such as the forward difference $(f(x+h) - f(x))/h$. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
 **floating-point number**: a number stored as a sign, an exponent in a fixed range and a significand of fixed precision $p$ bits, $(-1)^s(1 + f/2^{p-1})2^e$; it keeps the same number of significant digits at every scale, so the absolute gap between neighbours doubles with each binade. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
@@ -281,6 +283,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **fundamental theorem of calculus**: the rate of change of the accumulated area $\int_a^x f(t)\,dt$ is $f(x)$, so $\int_a^b f = F(b) - F(a)$ for any antiderivative $F$ with $F' = f$. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
 ## G
+
+**gated linear unit**: a hidden layer whose output is the product of two linear functions of the input, one of them passed through a nonlinearity that acts as a gate, so that each hidden unit can be switched or scaled by a second projection. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 
 **gating**: multiplying a signal elementwise by a vector of sigmoid outputs, each between 0 and 1 and computed from the current input and state, so that the network decides for each unit and each step how much of the signal passes. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
 
@@ -536,6 +540,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **post-training quantization**: converting a trained float network to integer arithmetic without retraining, by choosing the scale and zero point of each weight tensor from the weights and of each activation tensor from ranges measured on data, and rewriting each layer as an integer accumulation followed by a requantization. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
 
+**pre-norm**: the block layout in which each sublayer reads a normalized copy of the stream and its result is added to the stream unnormalized, $\mathbf{x} + g(\mathrm{norm}(\mathbf{x}))$, so that the path through the additions alone carries no norm. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
+
 **precision and recall**: precision is the share of the examples called positive that are positive, $P(y = 1 \mid \text{decision positive})$; recall is the share of the positive examples that are called positive, $P(\text{decision positive} \mid y = 1)$, also the true positive rate. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **prediction**: the value $\hat{y} = f_\theta(\mathbf{x})$ a model returns for an example. *([The Learning Problem](v02-learning/01-learning-problem.md))*
@@ -597,6 +603,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **reproducibility**: the property that running again from the same recorded inputs (seed, data, code, settings) gives the same results exactly, which requires the same draws in the same order and the same floating-point arithmetic. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **reshape-and-view**: reshaping keeps a tensor's line of numbers in row-major order and cuts it into a new shape; a view is a new shape, strides and offset over the same storage, so a reshape of a contiguous array needs no copy. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
+**residual stream**: the matrix of shape $[T, D]$ that enters a transformer block, is added to by each sublayer and leaves it, so that after $L$ blocks it is the embedding plus the $2L$ contributions that the sublayers wrote. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 
 **residual-connection**: a layer that returns its input plus a correction, $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, so that its Jacobian is $\mathbf{I} + \mathbf{J}_f$ and the gradient has a path through it that passes no weights. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
@@ -684,6 +692,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **supervised learning**: learning from examples that all carry labels, in order to predict the label of a new example. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
+**SwiGLU**: the gated feed-forward network $(\mathrm{silu}(\mathbf{x}\mathbf{W}_{\mathrm{gate}}) \odot \mathbf{x}\mathbf{W}_{\mathrm{up}})\mathbf{W}_{\mathrm{down}}$, whose hidden width of $8D/3$ gives it as many parameters as a plain network of width $4D$. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
+
 **symmetry-breaking**: starting the units of a layer with different weights, by random draws, so that their gradients differ; units that start identical stay identical forever. *([Initialization: Where Training Starts](v03-neural-networks/09-initialization.md))*
 
 ## T
@@ -713,6 +723,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **train-vs-eval-mode**: the two behaviours of a layer that has a state of its own: in train mode batch normalization uses the batch statistics and updates its running averages, in eval mode it uses the running averages and changes nothing. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
 **training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
+**transformer block**: the repeating unit of a transformer, one attention sublayer and one feed-forward sublayer, each with its normalization and its addition to the residual stream. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 
 **transpose**: the matrix $\mathbf{A}^\top$ with rows and columns swapped; $(\mathbf{A}\mathbf{B})^\top = \mathbf{B}^\top\mathbf{A}^\top$. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 

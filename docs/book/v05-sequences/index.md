@@ -70,7 +70,7 @@ generation.
    other position in parallel.
 8. [Positional Information](08-positions.md): how attention, which ignores order, is told
    where each token is.
-9. The Transformer Block: how attention, a feed-forward network, residuals and
+9. [The Transformer Block](09-transformer-block.md): how attention, a feed-forward network, residuals and
    normalization fit into one repeating unit.
 10. Training a GPT from Scratch: the full pipeline from raw text to a trained
     generative model.

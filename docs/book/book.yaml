@@ -449,7 +449,7 @@ volumes:
         title: "The Transformer Block"
         question: "How do attention, a feed-forward network, residuals and normalization fit together into one repeating unit?"
         introduces: [residual-stream, pre-norm, feed-forward-network, gated-linear-unit, swiglu, transformer-block]
-        requires: [multi-head-attention, residual-connection, layer-normalization, rms-normalization, gelu, silu]
+        requires: [multi-head-attention, residual-connection, layer-normalization, rms-normalization, gelu, silu, causal-mask, attention-backward, gradient-check, vanishing-gradient, exploding-gradient, variance, variance-preservation, sigmoid, softmax-cross-entropy, adam, embedding-table, tied-embeddings, kernel-fusion, arithmetic-intensity, roofline-model]
         brain: [model]
       - id: training-gpt
         title: "Training a GPT from Scratch"

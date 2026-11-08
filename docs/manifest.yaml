@@ -407,6 +407,7 @@ navigation:
           - docs/book/v05-sequences/06-seq2seq.md
           - docs/book/v05-sequences/07-self-attention.md
           - docs/book/v05-sequences/08-positions.md
+          - docs/book/v05-sequences/09-transformer-block.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

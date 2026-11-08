@@ -1,0 +1,75 @@
+<!-- source-sha256: 55d4374140ee60671bf209777e9c1f4e0ca32e8440c1447a46270e1bfa1edb2d -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 466" width="940" height="466"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="940" height="466" fill="#ffffff"/>
+<text x="176" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">A: GELU, 4 D</text>
+<text x="176" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">T = 1,024</text>
+<rect x="190" y="39" width="206.62" height="26" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="293.31" y="56.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">33%</text>
+<rect x="396.62" y="39" width="413.24" height="26" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="603.24" y="56.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">67%</text>
+<rect x="809.87" y="39" width="0.13" height="26" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="822" y="56.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">parameters</text>
+<rect x="190" y="75" width="168.27" height="26" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="274.13" y="92.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">27%</text>
+<rect x="358.27" y="75" width="114.37" height="26" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="415.45" y="92.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">18%</text>
+<rect x="472.64" y="75" width="336.54" height="26" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640.91" y="92.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">54%</text>
+<rect x="809.18" y="75" width="0.82" height="26" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="822" y="92.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">FLOPs</text>
+<text x="176" y="144.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">B: SwiGLU</text>
+<text x="176" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">T = 2,048</text>
+<rect x="190" y="125" width="190.74" height="26" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="285.37" y="142.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">31%</text>
+<rect x="380.74" y="125" width="429.17" height="26" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="595.32" y="142.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">69%</text>
+<rect x="809.91" y="125" width="0.09" height="26" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="822" y="142.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">parameters</text>
+<rect x="190" y="161" width="145.12" height="26" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="262.56" y="178.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">23%</text>
+<rect x="335.12" y="161" width="147.96" height="26" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="409.1" y="178.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">24%</text>
+<rect x="483.08" y="161" width="326.53" height="26" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="646.35" y="178.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">53%</text>
+<rect x="809.61" y="161" width="0.39" height="26" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="822" y="178.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">FLOPs</text>
+<text x="176" y="230.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">C: SwiGLU</text>
+<text x="176" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">T = 4,096</text>
+<rect x="190" y="211" width="205.59" height="26" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="292.79" y="228.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">33%</text>
+<rect x="395.59" y="211" width="414.39" height="26" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="602.78" y="228.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">67%</text>
+<rect x="809.97" y="211" width="0.03" height="26" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="822" y="228.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">parameters</text>
+<rect x="190" y="247" width="176.08" height="26" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="278.04" y="264.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">28%</text>
+<rect x="366.08" y="247" width="88.9" height="26" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="410.53" y="264.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">14%</text>
+<rect x="454.98" y="247" width="354.91" height="26" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="632.43" y="264.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">57%</text>
+<rect x="809.89" y="247" width="0.11" height="26" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="822" y="264.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">FLOPs</text>
+<text x="176" y="316.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">D: as C, long</text>
+<text x="176" y="332.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">T = 32,768</text>
+<rect x="190" y="297" width="205.59" height="26" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="292.79" y="314.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">33%</text>
+<rect x="395.59" y="297" width="414.39" height="26" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="602.78" y="314.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">67%</text>
+<rect x="809.97" y="297" width="0.03" height="26" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="822" y="314.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">parameters</text>
+<rect x="190" y="333" width="87.88" height="26" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="233.94" y="350.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">14%</text>
+<rect x="277.88" y="333" width="354.94" height="26" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="455.35" y="350.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">57%</text>
+<rect x="632.82" y="333" width="177.13" height="26" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="721.38" y="350.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">29%</text>
+<rect x="809.94" y="333" width="0.06" height="26" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="822" y="350.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">FLOPs</text>
+<rect x="190" y="400" width="16" height="14" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="214" y="411.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">attention projections</text>
+<rect x="520" y="400" width="16" height="14" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="544" y="411.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">score and average products, softmax</text>
+<rect x="190" y="424" width="16" height="14" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="214" y="435.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">feed-forward network</text>
+<rect x="520" y="424" width="16" height="14" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="544" y="435.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">norm gains; norms, adds and activation</text>
+</svg>

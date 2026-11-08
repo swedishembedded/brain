@@ -1,0 +1,40 @@
+<!-- source-sha256: f264e9ab587cab86bdb0c110c3539b8a37e9ba85e27c380571d53a3806c125bc -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" width="640" height="400">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="400" fill="#ffffff"/>
+<line x1="58" y1="354" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="234.25" y1="354" x2="234.25" y2="30" stroke="#edf2f7"/>
+<text x="234.25" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="410.5" y1="354" x2="410.5" y2="30" stroke="#edf2f7"/>
+<text x="410.5" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="586.75" y1="354" x2="586.75" y2="30" stroke="#edf2f7"/>
+<text x="586.75" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">30</text>
+<line x1="58" y1="337.8" x2="622" y2="337.8" stroke="#edf2f7"/>
+<text x="52" y="341.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-6</text>
+<line x1="58" y1="273" x2="622" y2="273" stroke="#edf2f7"/>
+<text x="52" y="277" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-4</text>
+<line x1="58" y1="208.2" x2="622" y2="208.2" stroke="#edf2f7"/>
+<text x="52" y="212.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-2</text>
+<line x1="58" y1="143.4" x2="622" y2="143.4" stroke="#edf2f7"/>
+<text x="52" y="147.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="78.6" x2="622" y2="78.6" stroke="#edf2f7"/>
+<text x="52" y="82.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<rect x="58" y="30" width="564" height="324" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="564" height="324"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#c05621" stroke-width="1.6" stroke-dasharray="6 4" points="58,143.4 75.62,143.4 93.25,143.4 110.88,143.4 128.5,143.4 146.12,143.4 163.75,143.4 181.38,143.4 199,143.4 216.62,143.4 234.25,143.4 251.88,143.4 269.5,143.4 287.12,143.4 304.75,143.4 322.38,143.4 340,143.4 357.62,143.4 375.25,143.4 392.88,143.4 410.5,143.4 428.12,143.4 445.75,143.4 463.38,143.4 481,143.4 498.62,143.4 516.25,143.4 533.88,143.4 551.5,143.4 569.12,143.4 586.75,143.4 604.38,143.4 622,143.4"/><polyline fill="none" stroke="#9b2c2c" stroke-width="1.6" stroke-dasharray="6 4" points="58,143.4 75.62,151.54 93.25,158.56 110.88,166.61 128.5,172.04 146.12,179.33 163.75,184.6 181.38,191.28 199,199.21 216.62,205.27 234.25,213.17 251.88,218.76 269.5,224.2 287.12,230.87 304.75,238.81 322.38,246.17 340,252.24 357.62,258.34 375.25,263.93 392.88,269.81 410.5,276.66 428.12,281.52 445.75,288.04 463.38,293.55 481,300.09 498.62,304.8 516.25,310.12 533.88,314.54 551.5,320.24 569.12,324.95 586.75,329 604.38,333.49 622,338.7"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,143.4 75.62,143.04 93.25,142.89 110.88,142.55 128.5,142.24 146.12,141.97 163.75,141.68 181.38,141.37 199,141.01 216.62,140.53 234.25,140.37 251.88,140.12 269.5,139.61 287.12,139.23 304.75,138.88 322.38,138.45 340,138.06 357.62,137.79 375.25,137.14 392.88,136.34 410.5,135.44 428.12,134.69 445.75,133.82 463.38,133.11 481,132.56 498.62,131.76 516.25,130.77 533.88,129.55 551.5,127.8 569.12,126 586.75,122.64 604.38,118.54 622,111"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="58,143.4 75.62,146.07 93.25,147.2 110.88,148.82 128.5,146.74 146.12,145.88 163.75,143.02 181.38,140.83 199,139.77 216.62,140.67 234.25,140.88 251.88,139.82 269.5,138.64 287.12,138.13 304.75,134.63 322.38,130.65 340,129.51 357.62,129.03 375.25,127.17 392.88,123.9 410.5,124.1 428.12,123.76 445.75,123 463.38,122.1 481,121.12 498.62,121.5 516.25,122.01 533.88,123.28 551.5,122.79 569.12,120.61 586.75,117.6 604.38,118.79 622,116.29"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,143.4 75.62,146.75 93.25,149.11 110.88,141.34 128.5,134.11 146.12,130.11 163.75,127.71 181.38,123.1 199,119.12 216.62,114.24 234.25,115.72 251.88,105.11 269.5,101.07 287.12,101.24 304.75,99.85 322.38,94.85 340,98.4 357.62,93.56 375.25,84.92 392.88,83.26 410.5,78.82 428.12,71.1 445.75,67.47 463.38,59.78 481,57.87 498.62,59.84 516.25,52.05 533.88,49 551.5,45.57 569.12,49.59 586.75,44.79 604.38,46.2 622,50.23"/></g>
+<text x="340" y="390" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">blocks k below the top</text>
+<text x="14" y="192" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 192)">log10 of the gradient norm ratio</text>
+<text x="340" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Gradient passed back along a stack of 32 blocks at initialization</text>
+<rect x="66" y="251" width="185.61" height="95" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="266" x2="94" y2="266" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="270" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">pre-norm, skip paths only</text>
+<line x1="74" y1="283" x2="94" y2="283" stroke="#9b2c2c" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="287" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">post-norm, skip paths only</text>
+<line x1="74" y1="300" x2="94" y2="300" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="304" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">pre-norm, all paths</text>
+<line x1="74" y1="317" x2="94" y2="317" stroke="#9b2c2c" stroke-width="2"/>
+<text x="100" y="321" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">post-norm, all paths</text>
+<line x1="74" y1="334" x2="94" y2="334" stroke="#2f855a" stroke-width="2"/>
+<text x="100" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">no skip, all paths</text>
+</svg>
