@@ -149,7 +149,8 @@ def main() -> int:
         str(md), pdf=str(OUT / "brain-book.pdf"),
         extra=("--toc-depth=1", "--top-level-division=chapter", "-V", "documentclass=book",
                "-V", "classoption=openright", "-V", "mainfont=P052", "-V", "mathfont=Latin Modern Math",
-               "-H", str(ROOT / "docs" / "pandoc" / "book.tex"), "-H", str(title)))
+               "-H", str(ROOT / "docs" / "pandoc" / "book.tex"), "-H", str(title),
+               "--lua-filter", str(ROOT / "docs" / "pandoc" / "book-tables.lua")))
     if bad:
         print("WARNING: some content overflows the page; see build/book/brain-book.pandoc.log", file=sys.stderr)
     # A glyph the font lacks is silently dropped from the page; refuse it.
@@ -158,6 +159,13 @@ def main() -> int:
     if missing:
         print("missing glyphs (the PDF would drop them): " +
               ", ".join(f"{c} {u}" for c, u in missing), file=sys.stderr)
+        return 1
+    # A table wider than even a landscape page overflows it; the table filter
+    # names each one.
+    too_wide = re.findall(r"book-tables: (.+)", log)
+    if too_wide:
+        print("tables too wide to typeset (split or narrow them):\n  " + "\n  ".join(too_wide),
+              file=sys.stderr)
         return 1
     return 0
 

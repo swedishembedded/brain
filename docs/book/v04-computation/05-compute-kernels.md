@@ -140,21 +140,35 @@ Line by line:
   `y[g] = p.scale * x[g] + p.shift;` is the whole computation: a load, a multiply, an add, a store.
 
 Other kernel languages express the same four things, and the book uses WGSL only for examples. The vocabulary differs (a CUDA thread block is a
-workgroup, a Metal threadgroup is a workgroup, an OpenCL work-item is an invocation); the constructs used in this chapter map as follows:
+workgroup, a Metal threadgroup is a workgroup, an OpenCL work-item is an invocation); the constructs used in this chapter map to the two vendor languages as follows,
 
-| this book and WGSL | CUDA | Metal | OpenCL C | GLSL compute |
-|---|---|---|---|---|
-| `@workgroup_size(64)` | block size given at launch, `<<<grid, 64>>>` | threads per threadgroup given at dispatch | local size given at enqueue | `layout(local_size_x = 64) in;` |
-| `global_invocation_id` | `blockIdx * blockDim + threadIdx` | `[[thread_position_in_grid]]` | `get_global_id` | `gl_GlobalInvocationID` |
-| `local_invocation_id` | `threadIdx` | `[[thread_position_in_threadgroup]]` | `get_local_id` | `gl_LocalInvocationID` |
-| `workgroup_id`, `num_workgroups` | `blockIdx`, `gridDim` | `[[threadgroup_position_in_grid]]`, `[[threadgroups_per_grid]]` | `get_group_id`, `get_num_groups` | `gl_WorkGroupID`, `gl_NumWorkGroups` |
-| `var<storage, read>` / `read_write` | `const float*` / `float*` argument | `const device float*` / `device float*` | `__global const float*` / `__global float*` | `readonly buffer` / `buffer` block |
-| `var<uniform>` struct | argument passed by value | `constant Params&` | scalar arguments, or a `__constant` buffer | `uniform` block |
-| `var<workgroup>` | `__shared__` | `threadgroup` | `__local` | `shared` |
-| `workgroupBarrier()` | `__syncthreads()` | `threadgroup_barrier(mem_flags::mem_threadgroup)` | `barrier(CLK_LOCAL_MEM_FENCE)` | `barrier()` with `memoryBarrierShared()` |
-| the launch counts | workgroups | workgroups or invocations, by call | invocations (global size) | workgroups |
+| this book and WGSL | CUDA | Metal |
+|---|---|---|
+| `@workgroup_size(64)` | block size given at launch, `<<<grid, 64>>>` | threads per threadgroup given at dispatch |
+| `global_invocation_id` | `blockIdx * blockDim + threadIdx` | `[[thread_position_in_grid]]` |
+| `local_invocation_id` | `threadIdx` | `[[thread_position_in_threadgroup]]` |
+| `workgroup_id`, `num_workgroups` | `blockIdx`, `gridDim` | `[[threadgroup_position_in_grid]]`, `[[threadgroups_per_grid]]` |
+| `var<storage, read>` / `read_write` | `const float*` / `float*` argument | `const device float*` / `device float*` |
+| `var<uniform>` struct | argument passed by value | `constant Params&` |
+| `var<workgroup>` | `__shared__` | `threadgroup` |
+| `workgroupBarrier()` | `__syncthreads()` | `threadgroup_barrier(mem_flags::mem_threadgroup)` |
+| the launch counts | workgroups | workgroups or invocations, by call |
 
-The last row is the unit of Chapter 4's "Counting in the right unit": the same intention is a different number in different APIs, and a program ported
+and in the two portable compute languages:
+
+| this book and WGSL | OpenCL C | GLSL compute |
+|---|---|---|
+| `@workgroup_size(64)` | local size given at enqueue | `layout(local_size_x = 64) in;` |
+| `global_invocation_id` | `get_global_id` | `gl_GlobalInvocationID` |
+| `local_invocation_id` | `get_local_id` | `gl_LocalInvocationID` |
+| `workgroup_id`, `num_workgroups` | `get_group_id`, `get_num_groups` | `gl_WorkGroupID`, `gl_NumWorkGroups` |
+| `var<storage, read>` / `read_write` | `__global const float*` / `__global float*` | `readonly buffer` / `buffer` block |
+| `var<uniform>` struct | scalar arguments, or a `__constant` buffer | `uniform` block |
+| `var<workgroup>` | `__local` | `shared` |
+| `workgroupBarrier()` | `barrier(CLK_LOCAL_MEM_FENCE)` | `barrier()` with `memoryBarrierShared()` |
+| the launch counts | invocations (global size) | workgroups |
+
+In both tables the last row is the unit of Chapter 4's "Counting in the right unit": the same intention is a different number in different APIs, and a program ported
 from one to another must change what it passes.
 
 ## The contract between kernel and host
