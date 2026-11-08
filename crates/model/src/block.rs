@@ -10,10 +10,12 @@
 //! ParamStore, no buffer ownership - so they stay decoupled from any one model
 //! and are validated by each caller's gradient check.
 //!
-//! Covered today (the Qwen/RMSNorm family): RMSNorm fwd/bwd, half-split RoPE
-//! fwd/bwd, grouped-query attention fwd/bwd, and the SwiGLU activation fwd/bwd.
-//! Linear projections stay in the model (they carry model-specific concerns such
-//! as LoRA adapters and bias). MoE/GPT/PID are not yet ported.
+//! Covered: RMSNorm and LayerNorm fwd/bwd, the RoPE variants, causal
+//! grouped-query and bidirectional attention (materialised, flash and chunked),
+//! cross-attention, the decode and KV-cache steps, and the SwiGLU activation
+//! fwd/bwd. Linear projections stay in the model (they carry model-specific
+//! concerns such as LoRA adapters and bias); mixture-of-experts routing is in
+//! `moe.rs`.
 
 // Every builder here takes a device, a kernel-id set, the kernel's buffer
 // bindings and its Params fields - so the arity IS the WGSL kernel's binding
