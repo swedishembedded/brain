@@ -5,51 +5,44 @@
 
 *How do we describe a rule that turns inputs into outputs, and what shapes can such rules take?*
 
-## The problem
-
-A weather service wants to predict tomorrow's temperature from today's. A
-bank wants to know what a deposit will be worth in ten years. A training run
-needs a number, at every step, that says how large a step to take. These
-three jobs look unrelated, and all three are the same job: given a number,
-produce a number by a fixed rule. We call such a rule a **function**, and
+Somewhere in every training run there is a rule that answers one small
+question over and over: how big a step should we take now? At the first step
+the answer is tiny, a few steps later it has reached its peak, and by the end
+it has sunk to a floor that is never quite zero. Nobody stores that answer for
+each of a million steps. They store a rule and ask it. A bank's rule for what a
+deposit will be worth in ten years, and a weather service's rule from today's
+temperature to tomorrow's, are the same kind of object: give it a number, get a
+number back, by a fixed procedure. We call such a rule a **function**, and
 machine learning is, from end to end, the study of choosing good ones.
 
-Chapter 1 gave us the notation, $f(x)$, and one fact about it: a rule often
-has *parameters*, numbers like $w$ and $b$ in $wx + b$ that are fixed while
-the input varies. That fact is the whole game. A model is a function whose
-parameters are not known in advance; learning is the search for parameter
-values that make the function agree with data. To search we must be able to
-say what family of rules we are choosing from, how the shape of a rule
-changes when a parameter changes, and what we cannot express at all.
+Chapter 1 left us the notation $f(x)$ and one fact about it that carries the
+whole subject. A rule often has *parameters*, numbers like $w$ and $b$ in
+$wx + b$ that stay fixed while the input varies. A model is a function whose
+parameters are not known in advance, and learning is the search for values that
+make it agree with data. To search, we must be able to say which family of
+rules we are choosing from, how the shape of a rule moves when a parameter
+moves, and what no member of the family can express at all.
 
-Four questions come up at once.
+The first hazard is the plainest. Not every formula is a rule everywhere:
+$1/x$ has no value at 0 and $\log x$ has none below 0, and a model fed such an
+input fails without warning. So we start with a vocabulary for the inputs a
+rule accepts and the outputs it can give. A neural network then forces the
+next question on us, because it is dozens of simple rules in a row, the output
+of each the input of the next: what does feeding one rule into another do to
+the shapes we can reach? Sometimes we know the output and want the input back,
+as when a pixel scaled into a range must be scaled back, or when a logarithm
+undoes an exponential; when is that possible, and when has information been
+destroyed? And through all of it runs the question of which shapes there are to
+choose from: straight lines, curves that bend a fixed number of times, curves
+that grow explosively, curves made of straight pieces joined at corners. Each
+has a use in learning and a failure of its own.
 
-1. **What exactly is a function?** Not every formula defines one everywhere:
-   $1/x$ has no value at 0 and $\log x$ has none below 0, and a model that is
-   fed such an input fails without warning. We need a vocabulary for the
-   inputs a rule accepts and the outputs it can give.
-2. **What happens when one rule feeds another?** A neural network is dozens
-   of simple rules in a row, the output of each the input of the next. How do
-   we write that, how do we evaluate it, and what does it do to the set of
-   shapes we can reach?
-3. **Can a rule be run backwards?** Sometimes we know the output and want the
-   input: a pixel scaled into a range must be scaled back, and a logarithm
-   undoes an exponential. When is that possible, and when does information get
-   destroyed?
-4. **What shapes are there?** Straight lines, curves that bend a fixed number
-   of times, curves that grow explosively, curves made of straight pieces
-   joined at corners. Each has a use in machine learning and each has a
-   failure.
-
-This chapter answers them in order and ends with the shapes that the rest of
-the book builds on. You may use from Chapter 1: real numbers, exponents,
-logarithms and function notation, including the idea of a parameter. Nothing
-else is assumed. Where the chapter points forward to vectors, matrices or
-derivatives, it says so and does not use them.
-
-## Before you begin
-
-Five questions on ideas from the previous chapter, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+The chapter takes those questions in order and ends with the shapes the rest of
+the book builds on. It uses real numbers, exponents, logarithms and function
+notation from Chapter 1 and nothing else; where it points forward to vectors,
+matrices or derivatives, it says so and does not use them. Before the first
+definition, bring five ideas from Chapter 1 back to mind. The answers are at the
+end of the chapter.
 
 1. (Chapter 1, real numbers.) Is $\sqrt{2}$ a fraction of two integers? What does a computer store instead of it?
 2. (Chapter 1, exponents.) Write $2^3 \times 2^{-5}$ as a single power of 2 and as a fraction.
@@ -99,7 +92,7 @@ no value, the table says so.
 Read the columns as domains. The rule $1/x$ is a function on all reals except
 0. The square root accepts $x \ge 0$ (we write $[0, \infty)$). The logarithm
 accepts only $x > 0$, the interval $(0, \infty)$. The square $x^2$ and the
-power $2^x$ accept every real number. Now the ranges: $x^2$ gives only
+power $2^x$ accept every real number. Then the ranges: $x^2$ gives only
 nonnegative numbers, so its range is $[0, \infty)$ even though its codomain
 may be written $\mathbb{R}$; $2^x$ gives only positive numbers, range
 $(0, \infty)$; $\log$ gives every real number, range $\mathbb{R}$. Notice the
@@ -126,7 +119,7 @@ idea can be drawn.
 ## Families of functions and their parameters
 
 Chapter 1 wrote $h(x; w, b) = wx + b$ and said that $w$ and $b$ are settings.
-Let us look at what the settings do. A **line** is the function
+Turn them and watch what happens. A **line** is the function
 
 $$
 h(x; w, b) = w x + b .
@@ -401,8 +394,8 @@ section on piecewise functions.
 
 ## Composition
 
-So far one rule has taken a number and returned a number. Now let the output
-of one rule be the input of another. If $g: A \to B$ and $f: B \to C$, the
+One rule has so far taken a number and returned a number, and a network does
+not stop there: let the output of one rule be the input of another. If $g: A \to B$ and $f: B \to C$, the
 **composition** $f \circ g$ ("$f$ after $g$") is the function
 
 $$
@@ -782,7 +775,7 @@ good: at 50 it is still ahead of $2^x$ (about $9.8 \times 10^{16}$ against
 $1.1 \times 10^{15}$), and at 100 it is ten orders of magnitude behind
 ($10^{20}$ against $1.3 \times 10^{30}$).
 The practical consequence is a warning. An exponential of a large number
-overflows quickly (see "Making it work"), a probability that falls
+overflows quickly (the last sections of this chapter show it), a probability that falls
 exponentially with length is what makes the product of Chapter 1 underflow, and
 anything that compounds, such as a rate applied once per layer in a deep network,
 becomes enormous or vanishing in tens of steps.
@@ -1055,9 +1048,11 @@ change between neighbouring steps is the 0.01 of the warmup ramp, so no join
 introduces a jump. These checks are exactly the kind a test can make about any
 piecewise function.
 
-## Making it work
+## Where the real numbers and the machine's numbers part ways
 
-The functions of this chapter all have domains, and machines have finite ones.
+Every shape above was exact on paper. The functions of this chapter all have
+domains, and machines have finite ones; the places where the two disagree are
+few, and they are the same places every time.
 
 **The exponential overflows.** A 32-bit floating-point number tops out near
 $3.4 \times 10^{38}$ and a 64-bit one near $1.8 \times 10^{308}$. Since
@@ -1126,7 +1121,7 @@ and one step either side.
 high degrees for fitting (the degree-12 error above); a general fit uses a
 different basis and a better-conditioned method, which Volume II builds.
 
-## Where this appears in brain
+## Kernels, fused lines and the training schedule in brain
 
 The shapes of this chapter are among the most literal parts of the engine:
 every elementwise kernel is a function written out one input at a time.
@@ -1336,7 +1331,7 @@ the next volumes.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. No: $\sqrt{2}$ is irrational, no fraction of integers equals it. The computer stores an approximation, a nearby number it can represent.
 2. $2^3 \times 2^{-5} = 2^{-2} = \frac{1}{4}$.

@@ -411,14 +411,14 @@ code, in Volume I. A chapter that calls one names it and states the arguments;
 it does not redefine it.
 
 - **Gaussian elimination.** `solve(A, y, partial)` of Volume I, chapter 4
-  ("Solving systems: Gaussian elimination", "The algorithms") returns the
+  (its sections on Gaussian elimination and its pseudocode) returns the
   `x` with `A x = y` for a square `A: [n, n]`, and stops with an error when
   `A` is singular. The third argument is the **pivoting rule**: `true` picks,
   in each column, the row at or below the diagonal with the largest absolute
   value in that column (partial pivoting); `false` takes the first row whose
   entry is not zero. Every use in Volume II passes `true`.
 - **Symmetric eigenproblem.** `jacobi_eigen(S, sweeps)` of Volume I, chapter 6
-  ("The algorithms") returns `(values, V)` for a symmetric `S`: the eigenvalues
+  (its pseudocode) returns `(values, V)` for a symmetric `S`: the eigenvalues
   on the diagonal at the end (in no particular order, so a caller sorts them
   descending with the columns of `V`) and the unit eigenvectors as the columns
   of `V`. A call states the number of sweeps (`20` is ample for the matrices of

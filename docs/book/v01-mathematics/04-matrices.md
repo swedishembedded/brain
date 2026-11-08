@@ -5,59 +5,50 @@
 
 *What does it mean to multiply a matrix by a vector, and why is that the central operation of machine learning?*
 
-## The problem
+Take a layer of a neural network that reads three numbers and writes two. The
+first output weights the three inputs by $2, -1, 1$ and the second weights them
+by $1, 3, 2$. These are two dot products of the kind Chapter 3 defined, sharing
+one input vector, and writing them out one after the other costs nothing for
+two outputs. A real layer reads four thousand numbers and writes four thousand:
+sixteen million weights and four thousand dot products, repeated for every token
+of every sequence, in every layer, at every training step. A pile of loose dot
+products is not something we can reason about. We want the whole family as
+**one object**, with a name and rules of its own, and as soon as we have it
+three questions press.
 
-A small neural network layer takes three numbers in and produces two numbers
-out. Each output is a weighted sum of the inputs: the first output weights the
-three inputs by $2, -1, 1$ and the second by $1, 3, 2$. That is two dot
-products, each of the kind Chapter 3 defined, and they share the same input
-vector. Writing them one after another is fine for two outputs. A real layer
-has four thousand inputs and four thousand outputs: sixteen million weights,
-four thousand dot products, repeated for every token of every sequence, for
-every layer, for every training step. We need to treat the whole family of dot
-products as **one object**, give it a name, and learn its rules, because three
-questions cannot be answered about a pile of loose dot products.
-
-1. **What is the object?** The weights are a table of numbers. But a table is
-   only data; what makes it useful is what it *does* to a vector. We want the
-   table and the action to be the same idea, so that facts about one are facts
-   about the other.
-2. **What happens when layers are stacked?** The output of one layer is the
-   input of the next. If each layer is a family of dot products, what is the
-   family of dot products that does both? Is there a rule for combining two
-   tables into one, and is that rule a choice or is it forced?
-3. **Can it be undone, and what does it lose?** Given the output of a layer,
-   can we recover the input? Sometimes yes and sometimes never, and the
-   difference decides whether information survives a layer, whether a system
-   of equations has one solution, none, or infinitely many, and how many
-   numbers a layer really needs.
+What is the object? The weights are a table of numbers, but a table is only
+data; what makes it useful is what it *does* to a vector. We want the table and
+its action to be the same idea, so that facts about one are facts about the
+other. Next, layers stack: the output of one is the input of the next. If each
+layer is a family of dot products, what is the family that does both? Is there a
+rule for combining two tables into one, and is that rule a choice or is it
+forced? And can a layer be undone? Given its output, can we recover the input?
+Sometimes yes and sometimes never, and the difference decides whether
+information survives a layer, whether a system of equations has one solution,
+none, or infinitely many, and how many numbers a layer really needs.
 
 A fourth question is practical and, for a machine that must pay for every
-multiplication, decisive. **How much does it cost?** The answer turns out to
-depend on the *order* in which we group a chain of products, by factors of
-hundreds, with identical results. That is the first place the book's central
-habit, estimating a computation before running it, pays for itself.
+multiplication, decisive: how much does it cost? The answer depends on the
+*order* in which we group a chain of products, by factors of hundreds, with
+identical results. That is the first place the book's central habit, estimating
+a computation before running it, pays for itself.
 
-Chapter 3 gave us the vector, the dot product and the idea of a linear
-combination. Chapter 2 gave us functions and their composition. This chapter
-joins them: a **matrix** is a table of numbers that is also a function from
+The tools are already on the shelf. Chapter 3 gave us the vector, the dot
+product and the linear combination, and Chapter 2 gave us functions and their
+composition. A **matrix** is a table of numbers that is also a function from
 vectors to vectors, a **linear map**, and multiplying two matrices is composing
-two such functions. We build everything from those two ideas and derive each
-rule from them rather than defining it, so that the one rule that looks
-arbitrary at first (how to multiply two matrices) turns out to be the only
-rule that could work.
+two such functions. We build everything from those two ideas and derive each rule
+from them rather than defining it, so that the one rule that looks arbitrary at
+first, how to multiply two matrices, turns out to be the only rule that could
+work.
 
-You may use from earlier chapters: vectors and the dot product (Chapter 3),
-linear combinations (Chapter 3), functions, domains and composition
-(Chapter 2), and sums (Chapter 1). Not assumed: determinants, eigenvalues,
-anything about subspaces. The one idea we need from that territory, the
-dimension of the set of outputs a map can reach, is built here from scratch
-under the name **rank**. How a matrix is laid out in memory is Chapter 5, and
-what a matrix hides inside it (rotations, low-rank structure) is Chapter 6.
-
-## Before you begin
-
-Five questions on ideas from earlier chapters, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+Sums from Chapter 1 appear throughout. Determinants, eigenvalues and subspaces
+are not assumed: the one idea we need from that territory, the dimension of the
+set of outputs a map can reach, is built here from scratch under the name
+**rank**. How a matrix is laid out in memory is Chapter 5, and what a matrix
+hides inside it (rotations, low-rank structure) is Chapter 6. Before the first
+definition, bring five ideas from earlier chapters back to mind; the answers
+are at the end of the chapter.
 
 1. (Chapter 3, dot product.) Compute $(1, 2, 3) \cdot (4, 5, 6)$.
 2. (Chapter 3, orthogonality.) What does it mean for the dot product of two nonzero vectors to be 0?
@@ -95,7 +86,7 @@ moving between them.
 
 **By rows.** Row $i$ is a vector of $n$ numbers, $\mathbf{a}_{i}^{\top} =
 (A_{i1}, \dots, A_{in})$. A matrix is a stack of $m$ row vectors. The layer
-of the opening problem is $\mathbf{W}$ with rows $(2, -1, 1)$ and $(1, 3, 2)$:
+of the opening paragraph is $\mathbf{W}$ with rows $(2, -1, 1)$ and $(1, 3, 2)$:
 each row is the weight vector of one output.
 
 **By columns.** Column $j$ is a vector of $m$ numbers, $\mathbf{a}_{:j} =
@@ -234,7 +225,7 @@ both are worth knowing.
 
 **The row view: a list of dot products.** Entry $i$ of $\mathbf{A}\mathbf{x}$
 is $\mathbf{a}_i \cdot \mathbf{x}$, the dot product of row $i$ with the input.
-This is the view of the opening problem: each row is a weight vector (a
+This is the view of the opening layer: each row is a weight vector (a
 neuron, in the language of Chapter 3) and the product evaluates all $m$ of them
 on the same input. It is the view to use when asking *how does one output
 depend on the input* (look at one row) or how to compute the product (it is $m$
@@ -946,7 +937,7 @@ offers a nonzero entry).
 
 ## A layer is an affine map
 
-Now the opening problem can be stated exactly. A **linear layer** of a neural
+The layer that opened the chapter can now be stated exactly. A **linear layer** of a neural
 network with $d_{\text{in}}$ inputs and $d_{\text{out}}$ outputs computes
 
 $$
@@ -1035,7 +1026,7 @@ Chapter 6 shows how to find the best narrow factorisation of a given matrix, and
 Volume III adds the bend and the training. For the rest of this volume the
 matrix is a fixed, known linear map.
 
-## The algorithms
+## Products, elimination and rank as pseudocode
 
 The operations above, in the book's [pseudocode](../pseudocode.md): every shape
 assumption is a `require`, arrays are 0-indexed and row-major, and nothing is
@@ -1125,7 +1116,10 @@ dangerous one in floating point; the section below says why and what replaces it
 The loop `for j in c .. n` starts at the pivot column, not at 0, because
 everything to its left is already zero.
 
-## Making it work
+## Shape errors, pivots and inverses in practice
+
+The pseudocode is exact, and a program built from it still fails in a few
+recurring ways. Most of them are caught by habits that cost nothing.
 
 **Shape errors are bugs, not rounding.** The shape rule is the cheapest check in
 all of numerical computing. Every function above `require`s its shapes, and so
@@ -1185,7 +1179,7 @@ different traversal of the same numbers. Chapter 5 makes this exact with
 strides; until then, note that a good kernel multiplies by a transposed weight
 without ever materialising it.
 
-## Where this appears in brain
+## The linear layer in brain's kernels, and what its schedule costs
 
 The operation of this chapter is, by volume of executed code, most of what
 brain does. Four places show it, and one story shows what ignoring its costs.
@@ -1408,7 +1402,7 @@ copying.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $4 + 10 + 18 = 32$.
 2. The vectors are orthogonal: at right angles, with none of one pointing along the other.

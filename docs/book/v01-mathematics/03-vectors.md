@@ -5,55 +5,46 @@
 
 *How can a list of numbers have a length and a direction, and how do we measure how alike two lists are?*
 
-## The problem
+Houses A and B are $(120\ \text{m}^2, 4\text{ rooms}, 30\text{ years})$ and
+$(125, 4, 28)$; house C is $(80, 3, 5)$. Nobody needs a program to say that A
+and B are the alike pair. Put the same question to a search engine that has
+turned every document into a list of a few hundred numbers, produced by a
+trained model so that documents about similar things get similar lists, and
+wants the documents closest to your query. Or put it to a test that holds ten
+thousand numbers from a new implementation of a model beside ten thousand from
+a trusted one, and must say whether they agree. The eye that settled the houses
+is gone and the question is the same: how alike are two lists of numbers?
 
-A real-estate site wants to find houses like the one you are looking at. Each
-house is described by a few numbers: its area, its number of rooms, its age.
-A search engine wants to find documents about the same thing as your query,
-and has turned every document into a list of a few hundred numbers produced
-by a trained model, so that documents about similar things get similar lists.
-A model under test has produced an output of ten thousand numbers and we want
-to know whether it agrees with a reference output produced by a trusted
-implementation. Three different jobs, one shape: we have **lists of numbers**
-and we need to ask how alike two of them are.
+Chapter 2 gave us functions of one number. Everything it said stays true, and
+none of it describes an object that is a list. To answer the question we need a
+name for such an object, with rules for adding two lists and scaling one, so
+that we can say "the list" without naming its entries one at a time; a layer of
+a neural network takes a list in and gives a list out, and we cannot even write
+that down without it. We need a notion of size and closeness, and a list has no
+obvious size: the largest entry, the sum of the entries and half a dozen other
+candidates disagree about whether $(120, 4, 30)$ is nearer to $(125, 4, 28)$ or
+to $(80, 3, 5)$, so we must choose one, know why, and know when another is
+better. And we need a notion of direction, because two embeddings are often
+"the same" in what they mean while differing in overall magnitude. A measure of
+alikeness that looks only at the pattern is exactly what we want, provided we
+know precisely what it throws away, because what it throws away is the kind of
+bug that slips through a test.
 
-Chapter 2 gave us functions of one number. Everything it said about a
-function that takes one input and returns one output stays true, but none of
-it can describe these jobs, because the objects here are not single numbers.
-We need three things.
+All three come from a single operation, the **dot product**, and from a
+picture: a list of numbers can be drawn as an arrow. The picture is exact for
+lists of two and three numbers and, remarkably, the algebra that follows from
+it works unchanged for lists of a thousand. This chapter builds the picture,
+derives the algebra from it, and ends with a practical warning about measuring
+similarity.
 
-1. **A name and a set of rules for a list of numbers as a single object.**
-   We want to add two lists, scale a list, and say "the list" without
-   naming its entries one at a time. A layer of a neural network takes a list
-   in and gives a list out; we cannot even write that down without this.
-2. **A notion of size and of closeness.** Is $(120, 4, 30)$ close to
-   $(125, 4, 28)$? Is it closer than $(80, 3, 5)$ is? A list has no obvious
-   "size", and the obvious candidates (the largest entry, the sum of the
-   entries, something else) disagree. We need to choose one, know why, and
-   know when another is better.
-3. **A notion of direction.** Two embeddings produced by a model are often
-   "the same" in what they mean while differing in their overall magnitude.
-   We need a measure of alikeness that looks only at the pattern, and we need
-   to know what it throws away, because what it throws away is exactly the
-   kind of bug that slips through a test.
-
-The answer to all three comes from a single operation, the **dot product**,
-and from a picture: a list of numbers can be drawn as an arrow. The picture is
-exact for lists of two and three numbers and, remarkably, the algebra that
-follows from it works unchanged for lists of a thousand. This chapter builds
-the picture, derives the algebra from it, and ends with a practical
-warning about measuring similarity.
-
-You may use from Chapter 1: real numbers and the notation for sums,
-$\sum_{i=1}^{n}$. Chapter 2's ideas (functions, parameters) appear in a few
+From Chapter 1 it uses real numbers and the notation for sums,
+$\sum_{i=1}^{n}$; Chapter 2's ideas (functions, parameters) appear in a few
 places and are named when they do. Trigonometry is not assumed: the one piece
 we need, the cosine of an angle, is defined here from a circle. Matrices,
 which are lists of lists, are the subject of the next chapter, and
-derivatives, which give a vector a gradient, are Chapters 7 and 8.
-
-## Before you begin
-
-Three questions on ideas from Chapter 1, to answer from memory. The answers are at the end of the chapter. If one is hard, go back to the chapter named before reading on.
+derivatives, which give a vector a gradient, are Chapters 7 and 8. Three
+questions on Chapter 1 first, to answer from memory; the answers are at the end
+of the chapter.
 
 1. (Chapter 1, summation.) Evaluate $\sum_{i=1}^{3} i^2$.
 2. (Chapter 1, summation.) Write the average of $n$ numbers $x_1, \dots, x_n$ using summation notation.
@@ -840,7 +831,7 @@ direction orthogonal to the first) builds a set of mutually orthogonal
 directions, an idea that recurs in the chapter on decompositions and in every method that
 breaks a signal into independent parts.
 
-## The algorithms
+## The operations as pseudocode
 
 The operations above, in the book's [pseudocode](../pseudocode.md). Every input
 assumption is a `require`, and the zero-vector policy is explicit.
@@ -891,7 +882,11 @@ either an entry-by-entry loop with no interaction between entries or a few
 the dimension, and that fact, multiplied by the number of dot products a model
 performs, is the cost of almost everything in Volume III.
 
-## Making it work
+## Where the formulas meet finite precision, high dimension and unequal scales
+
+The formulas above are exact for real numbers in a space whose axes are all
+measured alike. A machine, and the data it is given, break each of those
+assumptions in a small way, and four of the breaks are worth knowing.
 
 **The order of a sum is a choice, and in finite precision it matters.** The
 mathematical dot product does not depend on the order in which the products
@@ -1009,10 +1004,11 @@ measurement for each.
 This is not hypothetical. The last section of the chapter gives the knowledge entry and the
 commit that closed such a gap in a parity test.
 
-## Where this appears in brain
+## Cosine gates, retrieval and the dot product in brain
 
 The operations of this chapter are some of the most repeated lines of the
-repository. Four places show the idea at work, and one a lesson learned.
+repository, and one of them has a story: the cosine gate that could not see a
+dropped scale.
 
 **Cosine as a parity metric.** A model imported into brain is gated against
 its reference by comparing output vectors, and cosine is the first number
@@ -1236,7 +1232,7 @@ respects addition and scaling.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $1 + 4 + 9 = 14$.
 2. $\frac{1}{n}\sum_{i=1}^{n} x_i$.
