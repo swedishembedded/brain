@@ -13,7 +13,7 @@ behaviour still lands. Each item completes only with its regression test (red be
 Format: `- [ ] T### severity - file pointer - required completion gate`.
 
 ## Items
-- [ ] T001 P0 - crates/model/src/train.rs (mask read, `.ok()` fallback) - mask problem refuses before step 1; corrupt-byte/length test
+- [x] T001 P0 - crates/model/src/train.rs (mask read, `.ok()` fallback) - mask problem refuses before step 1; corrupt-byte/length test
 - [ ] T002 P0 - crates/model/src/train.rs (example-indexed dataset fallback) - oversized example refuses or splits into masked windows; no cross-example supervision test
 - [ ] T003 P0 - crates/rl/src/objective/grpo.rs (RatioBasis::Trainer) - stale rollouts: behaviour policy identity; two-policy ratio test
 - [ ] T004 P0 - crates/rl/src/objective/grpo.rs (top-k/top-p old_lp) - exact truncated likelihood or refuse; truncated-sampling test

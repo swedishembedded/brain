@@ -349,6 +349,23 @@ fn example_starts(dir: &Path, split: &str, tok: &[u32], vocab: u32) -> std::io::
     Ok((sep < vocab && tok.contains(&sep)).then(|| TokenDataset::separator_starts(tok, sep)))
 }
 
+/// The supervision mask of `split`: `None` when the dataset declares none (no
+/// `<split>.mask.bin`), the mask when it has one. A mask that exists but cannot
+/// be read, or does not cover exactly the `tokens` of the split, is an error:
+/// training would otherwise run unmasked and supervise prompt tokens.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_supervision_mask(dir: &Path, split: &str, tokens: usize) -> std::io::Result<Option<Vec<bool>>> {
+    let path = dir.join(format!("{split}.mask.bin"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mask = binio::read_mask_bin(&path).map_err(|e| std::io::Error::other(format!("{}: unreadable supervision mask: {e}", path.display())))?;
+    if mask.len() != tokens {
+        return Err(std::io::Error::other(format!("{}: supervision mask has {} entries for {tokens} tokens of the {split} split", path.display(), mask.len())));
+    }
+    Ok(Some(mask))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
     // Width-detecting read: `train.u32.bin` (large-vocab, e.g. Qwen) wins over
@@ -378,8 +395,17 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
     // supervises only the assistant span at the TOKEN level, and
     // `train.ex.bin` indexes where each example starts. When present the mask
     // takes precedence over the char-boundary `mask_before_token`.
-    let train_mask = binio::read_mask_bin(&dir.join("train.mask.bin")).ok();
-    let val_mask = binio::read_mask_bin(&dir.join("val.mask.bin")).ok();
+    let train_mask = read_supervision_mask(dir, "train", train_tok.len())?;
+    let val_mask = read_supervision_mask(dir, "val", val_tok.len())?;
+    // An empty validation split is the deliberate skip-eval signal and needs no mask.
+    if train_mask.is_some() != val_mask.is_some() && !val_tok.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "{}: the train split is {} and the validation split is {}; both must declare supervision the same way",
+            dir.display(),
+            if train_mask.is_some() { "masked" } else { "unmasked" },
+            if val_mask.is_some() { "masked" } else { "unmasked" },
+        )));
+    }
     let has_token_mask = train_mask.is_some();
     let train_starts = example_starts(dir, "train", &train_tok, vocab)?;
     let val_starts = example_starts(dir, "val", &val_tok, vocab)?;
@@ -3317,6 +3343,57 @@ mod tests {
                     assert_eq!(y[b * 10 + t], data::loader::IGNORE, "row {row:?} supervises position {t}");
                 }
             }
+        }
+    }
+
+    /// Writes a two-split masked chat dataset (four 4-token examples per split).
+    fn masked_chat_dir(label: &str) -> std::path::PathBuf {
+        let dir = tmp(label);
+        let mut split = data::chat::EncodedSplit::default();
+        for e in 0..4u32 {
+            split.push(&[e * 10, e * 10 + 1, e * 10 + 2, e * 10 + 3], &[false, false, true, true]);
+        }
+        data::chat::write_split(&dir, "train", &split).unwrap();
+        data::chat::write_split(&dir, "val", &split).unwrap();
+        std::fs::write(dir.join("meta.json"), Meta::vocab_only(64)).unwrap();
+        dir
+    }
+
+    /// A supervision mask that is present but cannot be used must refuse
+    /// before the first step: falling back to unmasked training would
+    /// silently supervise prompt tokens.
+    #[test]
+    fn a_mask_of_the_wrong_length_refuses_instead_of_training_unmasked() {
+        for split in ["train", "val"] {
+            let dir = masked_chat_dir(&format!("mask-length-{split}"));
+            let path = dir.join(format!("{split}.mask.bin"));
+            let mut mask = std::fs::read(&path).unwrap();
+            mask.pop();
+            std::fs::write(&path, mask).unwrap();
+            let opts = FitOpts { block_size: 10, batch_size: 2, ..Default::default() };
+            let Err(err) = load_dataset(&dir, &opts) else { panic!("a {split} mask one byte short must be refused") };
+            assert!(err.to_string().contains(&format!("{split}.mask.bin")), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_mask_refuses_instead_of_training_unmasked() {
+        let dir = masked_chat_dir("mask-unreadable");
+        // A directory where the file belongs: present, but not readable as a mask.
+        let path = dir.join("train.mask.bin");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let opts = FitOpts { block_size: 10, batch_size: 2, ..Default::default() };
+        assert!(load_dataset(&dir, &opts).is_err());
+    }
+
+    #[test]
+    fn a_split_supervised_in_only_one_of_train_and_val_refuses() {
+        let opts = FitOpts { block_size: 10, batch_size: 2, ..Default::default() };
+        for missing in ["train", "val"] {
+            let dir = masked_chat_dir(&format!("mask-missing-{missing}"));
+            std::fs::remove_file(dir.join(format!("{missing}.mask.bin"))).unwrap();
+            assert!(load_dataset(&dir, &opts).is_err(), "{missing} mask missing while the other split is masked");
         }
     }
 
