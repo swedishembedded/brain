@@ -45,6 +45,7 @@ mod perf_cli;
 mod perf_engine;
 mod perf_longctx;
 mod perf_qwen35;
+mod perf_ricursive;
 mod perf_qwen35moe;
 mod pid_cli;
 mod placement;

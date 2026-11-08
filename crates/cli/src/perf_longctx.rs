@@ -62,7 +62,7 @@ fn selected_budget(gpus: &[(u32, String, u64)], selected: Option<&[u32]>) -> Vec
 
 /// Device memory in use right now, summed over the GPUs, as the driver's own
 /// tool reports it - or `None` where that tool is absent.
-fn driver_used_bytes() -> Option<u64> {
+pub(crate) fn driver_used_bytes() -> Option<u64> {
     let out = std::process::Command::new("nvidia-smi").args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"]).output().ok()?;
     let text = String::from_utf8(out.stdout).ok()?;
     let mut total = 0u64;
@@ -97,7 +97,7 @@ pub struct Qwen35Engine {
 
 /// The artifact's name for a KV tier: `fp32`/`bf16`/`int8`/`fp8`, the spellings the
 /// paged engine's own fingerprint and the weight tier already use.
-fn kv_label(kv: model::kv_tier::KvTier) -> &'static str {
+pub(crate) fn kv_label(kv: model::kv_tier::KvTier) -> &'static str {
     use model::kv_tier::KvElement;
     match kv.element() {
         KvElement::F32 => "fp32",
@@ -625,7 +625,10 @@ pub fn build_engine(spec: &str) -> Result<Box<dyn LongContextEngine>, String> {
     if let Some(weights) = spec.strip_prefix("qwen:") {
         return Ok(Box::new(QwenPagedEngine::open(weights)?));
     }
-    Err(format!("longctx does not support target {spec:?}: use qwen35:<gguf>[:kvf32|:kvbf16|:kvint8], qwen35moe:<gguf>, qwen35moe-gguf or qwen:<weights>[:i8w][:kvf32]"))
+    if let Some(rest) = spec.strip_prefix("ricursive:") {
+        return Ok(Box::new(crate::perf_ricursive::RicursiveLongCtx::open(rest)?));
+    }
+    Err(format!("longctx does not support target {spec:?}: use qwen35:<gguf>[:kvf32|:kvbf16|:kvint8], qwen35moe:<gguf>, qwen35moe-gguf, qwen:<weights>[:i8w][:kvf32] or ricursive:<dir>[:kvbf16|:kvint8|:kvfp8]"))
 }
 
 #[cfg(test)]
