@@ -153,6 +153,11 @@ impl GrpoConfig {
     /// refused rather than approximated.
     pub fn validate(&self) -> Result<(), BehaviourRefusal> {
         let sample = self.rollout.sample;
+        for (field, value, allows_zero) in [("kl_beta", self.kl_beta, true), ("clip_eps", self.clip_eps, false), ("clip_eps_high", self.options.clip_eps_high, false), ("temp", sample.temp, true)] {
+            if !(value.is_finite() && (value > 0.0 || (allows_zero && value == 0.0))) {
+                return Err(BehaviourRefusal::InvalidNumeric { field, value });
+            }
+        }
         if sample.is_greedy() || self.options.ratio_basis != RatioBasis::Trainer {
             return Ok(());
         }

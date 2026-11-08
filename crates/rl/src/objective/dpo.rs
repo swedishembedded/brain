@@ -135,6 +135,24 @@ pub struct DpoConfig {
     pub nll_weight: f32,
 }
 
+impl DpoConfig {
+    /// Refuse a configuration DPO cannot train: `beta` must be finite and positive (it scales
+    /// the margin, and a non-positive one reverses or removes the preference), `nll_weight`
+    /// finite and not negative, and the row must hold a prompt token and a target.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(self.beta.is_finite() && self.beta > 0.0) {
+            return Err(format!("beta must be finite and positive, got {}", self.beta));
+        }
+        if !(self.nll_weight.is_finite() && self.nll_weight >= 0.0) {
+            return Err(format!("nll_weight must be finite and not negative, got {}", self.nll_weight));
+        }
+        if self.seq_len < 2 {
+            return Err(format!("seq_len {} leaves no position that predicts a token", self.seq_len));
+        }
+        Ok(())
+    }
+}
+
 /// One pair's [`model::Batch::LmWeighted`] weights (applied uniformly
 /// across each row's own active positions - see the module doc comment for
 /// why the weight does not vary by token within a row), plus the
@@ -433,6 +451,7 @@ impl Dpo {
         S: FnMut(&mut Rng) -> Option<DpoPair> + 'static,
         R: Fn(&DpoPair) -> (Vec<f32>, Vec<f32>) + 'static,
     {
+        cfg.validate().unwrap_or_else(|why| panic!("Dpo: {why}"));
         Dpo { cfg, source: Source::Stream { next: Box::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0, refusal: None }
     }
 
@@ -441,6 +460,7 @@ impl Dpo {
     /// batch generator, and the frozen reference is the model this objective
     /// is prepared on. Every pair must be packed at `cfg.seq_len`.
     pub fn from_dataset(cfg: DpoConfig, pairs: Vec<PackedPair>) -> Dpo {
+        cfg.validate().unwrap_or_else(|why| panic!("Dpo: {why}"));
         assert!(!pairs.is_empty(), "Dpo::from_dataset: need at least one pair");
         assert!(pairs.iter().all(|p| p.seq_len() == cfg.seq_len), "Dpo::from_dataset: every pair must be packed at seq_len {}", cfg.seq_len);
         Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0, trained: 0, refusal: None }
@@ -681,5 +701,20 @@ mod tests {
         assert!(pack_pair(&cfg, &fits, &[0.0; 2], &[0.0; 3]).is_err(), "a short reference is refused");
         let no_prompt = DpoPair { prompt: vec![], ..fits };
         assert!(pack_pair(&cfg, &no_prompt, &[0.0; 3], &[0.0; 3]).is_err());
+    }
+
+    #[test]
+    fn a_dpo_configuration_that_cannot_train_is_refused() {
+        let ok = DpoConfig { beta: 0.1, seq_len: 8, nll_weight: 0.0 };
+        assert!(ok.validate().is_ok());
+        for (field, cfg) in [
+            ("beta", DpoConfig { beta: 0.0, ..ok }),
+            ("beta", DpoConfig { beta: -0.1, ..ok }),
+            ("beta", DpoConfig { beta: f32::NAN, ..ok }),
+            ("nll_weight", DpoConfig { nll_weight: -1.0, ..ok }),
+            ("seq_len", DpoConfig { seq_len: 1, ..ok }),
+        ] {
+            assert!(cfg.validate().expect_err(field).contains(field));
+        }
     }
 }

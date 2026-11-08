@@ -472,3 +472,21 @@ fn a_reference_without_the_stop_token_position_is_complete() {
     obj.micro_steps(&m, &mut Rng::new(s), 2);
     assert!(matches!(verdict(&mut obj), StepVerdict::Apply));
 }
+
+/// T019: numeric settings no run can honour are refused when the objective is built.
+#[test]
+fn numeric_settings_no_run_can_honour_are_refused() {
+    let base = config(2, 1.0, GrpoOptions::default());
+    let cases: [(&str, GrpoConfig); 5] = [
+        ("kl_beta", GrpoConfig { kl_beta: -0.1, ..base }),
+        ("kl_beta", GrpoConfig { kl_beta: f32::NAN, ..base }),
+        ("clip_eps", GrpoConfig { clip_eps: 0.0, ..base }),
+        ("clip_eps_high", GrpoConfig { options: GrpoOptions { clip_eps_high: f32::INFINITY, ..base.options }, ..base }),
+        ("temp", config(2, f32::NAN, GrpoOptions::default())),
+    ];
+    for (field, cfg) in cases {
+        let (judge, _) = Judge::new(first_wins);
+        let refusal = Grpo::try_new(Env { variable: always_variable }, judge, cfg).err().unwrap_or_else(|| panic!("{field} must be refused"));
+        assert!(matches!(refusal, BehaviourRefusal::InvalidNumeric { field: f, .. } if f == field), "{field}: {refusal}");
+    }
+}

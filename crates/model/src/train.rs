@@ -125,6 +125,44 @@ pub struct FitOpts {
     pub strict_updates: bool,
 }
 
+impl FitOpts {
+    /// Refuse numeric configuration no run can honour, naming the field: a zero batch or
+    /// accumulation (which the loop would otherwise quietly raise to one), a rate or decay that is
+    /// negative or not finite, a floor above the peak rate, AdamW betas outside `[0, 1)` or an
+    /// epsilon that is not positive. Called by the shared fit loop, so every trainer passes it.
+    pub fn validate(&self) -> Result<(), String> {
+        let finite_non_negative = |name: &str, value: f32| {
+            if value.is_finite() && value >= 0.0 {
+                Ok(())
+            } else {
+                Err(format!("{name} must be finite and not negative, got {value}"))
+            }
+        };
+        for (name, value) in [("batch_size", self.batch_size), ("block_size", self.block_size), ("grad_accum", self.grad_accum)] {
+            if value == 0 {
+                return Err(format!("{name} must be at least 1"));
+            }
+        }
+        finite_non_negative("lr", self.lr)?;
+        finite_non_negative("min_lr", self.min_lr)?;
+        finite_non_negative("weight_decay", self.weight_decay)?;
+        finite_non_negative("grad_clip", self.grad_clip)?;
+        if self.min_lr > self.lr {
+            return Err(format!("min_lr {} is above lr {}: the schedule would rise at the end instead of decaying", self.min_lr, self.lr));
+        }
+        let crate::Adam { beta1, beta2, eps } = self.adam;
+        for (name, beta) in [("adam beta1", beta1), ("adam beta2", beta2)] {
+            if !(0.0..1.0).contains(&beta) {
+                return Err(format!("{name} must be in [0, 1), got {beta}"));
+            }
+        }
+        if !(eps.is_finite() && eps > 0.0) {
+            return Err(format!("adam eps must be finite and positive, got {eps}"));
+        }
+        Ok(())
+    }
+}
+
 impl Default for FitOpts {
     fn default() -> Self {
         FitOpts {
@@ -1728,6 +1766,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     grad_sync: Option<GradSync<'_>>,
     shard: Option<(usize, usize)>,
 ) -> std::io::Result<(FitReport, M)> {
+    opts.validate().map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid training options: {why}")))?;
     // The control's group is a request every caller of the shared loop honors,
     // so a trainer that reaches `fit_controlled` cannot silently run the job on
     // one process. Naming two different groups is contradictory, not an
@@ -3003,6 +3042,35 @@ mod tests {
         }
         let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None, grad_sync: None };
         fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &base, None, control).expect("the same options resume");
+    }
+
+    #[test]
+    fn numeric_options_no_run_can_honour_are_refused_before_the_first_step() {
+        let ok = FitOpts::default();
+        assert!(ok.validate().is_ok());
+        let adam = ok.adam;
+        let invalid: Vec<(&str, FitOpts)> = vec![
+            ("batch_size", FitOpts { batch_size: 0, ..ok.clone() }),
+            ("block_size", FitOpts { block_size: 0, ..ok.clone() }),
+            ("grad_accum", FitOpts { grad_accum: 0, ..ok.clone() }),
+            ("lr", FitOpts { lr: f32::NAN, ..ok.clone() }),
+            ("lr", FitOpts { lr: -1e-3, ..ok.clone() }),
+            ("min_lr", FitOpts { min_lr: f32::INFINITY, ..ok.clone() }),
+            ("min_lr", FitOpts { lr: 1e-5, ..ok.clone() }),
+            ("weight_decay", FitOpts { weight_decay: -0.1, ..ok.clone() }),
+            ("grad_clip", FitOpts { grad_clip: f32::NAN, ..ok.clone() }),
+            ("beta1", FitOpts { adam: crate::Adam { beta1: 1.0, ..adam }, ..ok.clone() }),
+            ("beta2", FitOpts { adam: crate::Adam { beta2: -0.1, ..adam }, ..ok.clone() }),
+            ("eps", FitOpts { adam: crate::Adam { eps: 0.0, ..adam }, ..ok.clone() }),
+        ];
+        for (field, opts) in invalid {
+            let why = opts.validate().expect_err(field);
+            assert!(why.contains(field), "{field}: {why}");
+            let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+            let lrs = std::rc::Rc::clone(&model.lrs);
+            assert!(fit_controlled(model, Verdicts(Default::default()), &opts, None, FitControl::default()).is_err(), "{field}");
+            assert!(lrs.borrow().is_empty());
+        }
     }
 
     /// An abort stops the run with the objective's own error.
