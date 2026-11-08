@@ -1032,7 +1032,7 @@ volumes:
         question: "How can a small model's guesses make a large model generate faster without changing its output?"
         introduces: [draft-model, speculative-verification, acceptance-rate]
         requires: [decode-phase, rejection-sampling, top-p-sampling]
-        brain: []
+        brain: [dflash2]
       - id: capabilities-and-apis
         title: "Capabilities, Providers and APIs"
         question: "How does an engine present hundreds of models through a few stable interfaces?"
