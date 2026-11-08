@@ -259,7 +259,11 @@ Sum of dx_i: 1.11e-16. Sum of dx_i * xhat_i: 5.31e-06; the closed form says it e
 The closed form comes from collecting terms. The total gradient at $c_i$ is
 
 $$
-dc_i = r\,d\hat x_i + \frac{2c_i}{n}\Bigl(-\tfrac12 r^3\sum_k d\hat x_k\,c_k\Bigr) = r\,d\hat x_i - \frac{r^3 c_i}{n}\sum_k d\hat x_k\,c_k = r\Bigl(d\hat x_i - \hat x_i\cdot\frac1n\sum_k d\hat x_k\,\hat x_k\Bigr),
+\begin{aligned}
+dc_i &= r\,d\hat x_i + \frac{2c_i}{n}\Bigl(-\tfrac12 r^3\sum_k d\hat x_k\,c_k\Bigr)\\
+&= r\,d\hat x_i - \frac{r^3 c_i}{n}\sum_k d\hat x_k\,c_k\\
+&= r\Bigl(d\hat x_i - \hat x_i\cdot\frac1n\sum_k d\hat x_k\,\hat x_k\Bigr),
+\end{aligned}
 $$
 
 where the last step substitutes $c_i = \hat x_i/r$ twice. Because the $c_i$ sum to zero, so do the $\hat x_i$, and $\sum_i dc_i = r\sum_i d\hat x_i$, so $d\mu = -r\sum_i d\hat x_i$. Then $dx_i = dc_i + d\mu/n$ gives the whole result:

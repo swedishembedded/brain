@@ -142,6 +142,30 @@ toc-title: "Contents"
     return md
 
 
+REPORT = OUT / "overflow.txt"
+
+
+def overflow_report(log: str) -> list[str]:
+    """Every line of the final LaTeX run wider than the text, with its printed
+    page number and the start of what overflows, written to REPORT.
+
+    LaTeX logs a page as "[N" when it ships it out, so the first such mark
+    after a warning is the page the line is on. A display equation shows as an
+    overfull alignment; a table cell or a code span as an overfull paragraph.
+    """
+    last = log.split("LaTeX run number")[-1]
+    found = []
+    for m in re.finditer(r"Overfull \\hbox \(([\d.]+)pt too wide\) ([^\n]*)\n([^\n]*)", last):
+        if float(m.group(1)) <= 2.0:
+            continue  # a hairline
+        page = re.search(r"\[(\d+)(?=[\]\s])", last[m.end():])
+        what = "display or table row" if "detected" in m.group(2) else m.group(3).strip()[:100]
+        found.append(f"page {page.group(1) if page else '?'}: {float(m.group(1)):.0f}pt  {what}")
+    found = list(dict.fromkeys(found))
+    REPORT.write_text("".join(f + "\n" for f in found), encoding="utf-8")
+    return found
+
+
 def main() -> int:
     md = build_markdown()
     title = title_header(load())
@@ -151,10 +175,12 @@ def main() -> int:
                "-V", "classoption=openright", "-V", "mainfont=P052", "-V", "mathfont=Latin Modern Math",
                "-H", str(ROOT / "docs" / "pandoc" / "book.tex"), "-H", str(title),
                "--lua-filter", str(ROOT / "docs" / "pandoc" / "book-tables.lua")))
-    if bad:
-        print("WARNING: some content overflows the page; see build/book/brain-book.pandoc.log", file=sys.stderr)
     # A glyph the font lacks is silently dropped from the page; refuse it.
     log = (OUT / "brain-book.pandoc.log").read_text(encoding="utf-8", errors="replace")
+    overflows = overflow_report(log)
+    if overflows:
+        print(f"{len(overflows)} line(s) run past the margin; see {REPORT.relative_to(ROOT)}", file=sys.stderr)
+        return 1
     missing = sorted(set(re.findall(r"Missing character: There is no (\S+) \((U\+[0-9A-F]+)\)", log)))
     if missing:
         print("missing glyphs (the PDF would drop them): " +

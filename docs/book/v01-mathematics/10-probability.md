@@ -742,9 +742,11 @@ the value of $X$ shows $\mathbb{E}[X] = \sum_{\omega} X(\omega)\,P(\{\omega\})$,
 sum over the sample space. Then
 
 $$
-\mathbb{E}[X + Y] = \sum_{\omega} \bigl(X(\omega) + Y(\omega)\bigr) P(\{\omega\})
-= \sum_{\omega} X(\omega) P(\{\omega\}) + \sum_{\omega} Y(\omega) P(\{\omega\})
-= \mathbb{E}[X] + \mathbb{E}[Y].
+\begin{aligned}
+\mathbb{E}[X + Y] &= \sum_{\omega} \bigl(X(\omega) + Y(\omega)\bigr) P(\{\omega\})\\
+&= \sum_{\omega} X(\omega) P(\{\omega\}) + \sum_{\omega} Y(\omega) P(\{\omega\})\\
+&= \mathbb{E}[X] + \mathbb{E}[Y].
+\end{aligned}
 $$
 
 Independence was never used; the proof only distributes a sum. The second identity
@@ -767,8 +769,10 @@ $\mathbb{E}[X]\,\mathbb{E}[Y]$ in the first row and differs in the others. The
 equality holds for independent variables, by a short argument:
 
 $$
-\mathbb{E}[XY] = \sum_x\sum_y x\,y\,p(x, y) = \sum_x\sum_y x\,y\,p(x)\,p(y)
-= \Bigl(\sum_x x\,p(x)\Bigr)\Bigl(\sum_y y\,p(y)\Bigr) = \mathbb{E}[X]\,\mathbb{E}[Y].
+\begin{aligned}
+\mathbb{E}[XY] &= \sum_x\sum_y x\,y\,p(x, y) = \sum_x\sum_y x\,y\,p(x)\,p(y)\\
+&= \Bigl(\sum_x x\,p(x)\Bigr)\Bigl(\sum_y y\,p(y)\Bigr) = \mathbb{E}[X]\,\mathbb{E}[Y].
+\end{aligned}
 $$
 
 The converse fails: equal products do not imply independence. Let $X$ be $-1$, $0$ or
@@ -864,8 +868,10 @@ Expectations of sums are always sums. Variances are not.
 Expand the square of the sum, with $\mu_X, \mu_Y$ the means:
 
 $$
-\mathrm{Var}[X + Y] = \mathbb{E}[X^2] + 2\,\mathbb{E}[XY] + \mathbb{E}[Y^2] - \mu_X^2 - 2\mu_X\mu_Y - \mu_Y^2
-= \mathrm{Var}[X] + \mathrm{Var}[Y] + 2\bigl(\mathbb{E}[XY] - \mu_X\mu_Y\bigr).
+\begin{aligned}
+\mathrm{Var}[X + Y] &= \mathbb{E}[X^2] + 2\,\mathbb{E}[XY] + \mathbb{E}[Y^2] - \mu_X^2 - 2\mu_X\mu_Y - \mu_Y^2\\
+&= \mathrm{Var}[X] + \mathrm{Var}[Y] + 2\bigl(\mathbb{E}[XY] - \mu_X\mu_Y\bigr).
+\end{aligned}
 $$
 
 The last bracket is zero when $\mathbb{E}[XY] = \mathbb{E}[X]\mathbb{E}[Y]$, which

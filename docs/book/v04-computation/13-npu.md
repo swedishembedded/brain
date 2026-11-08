@@ -199,7 +199,12 @@ With `tail` equal to 0 the pair is the smallest and largest value ever seen, bec
 
 The ranges are turned into codes by the affine rule of Chapter 12, now with the signed 8-bit codes $-128 \ldots 127$ that a device multiplies. Chapter 12 used unsigned codes $0 \ldots 2^{n_b} - 1$; a signed code is the unsigned one less 128, so the rule shifts by 128:
 
-$$\Delta = \frac{\mathrm{hi} - \mathrm{lo}}{255}, \qquad q_0 = \mathrm{clamp}\bigl(\mathrm{round\_even}(-128 - \mathrm{lo}/\Delta),\; -128,\; 127\bigr), \qquad q = \mathrm{clamp}\bigl(\mathrm{round\_even}(r/\Delta) + q_0,\; -128,\; 127\bigr),$$
+$$
+\begin{aligned}
+\Delta &= \frac{\mathrm{hi} - \mathrm{lo}}{255}, \qquad q_0 = \mathrm{clamp}\bigl(\mathrm{round\_even}(-128 - \mathrm{lo}/\Delta),\; -128,\; 127\bigr),\\
+q &= \mathrm{clamp}\bigl(\mathrm{round\_even}(r/\Delta) + q_0,\; -128,\; 127\bigr),
+\end{aligned}
+$$
 
 with the range first widened to contain 0 ($\mathrm{lo} \leftarrow \min(\mathrm{lo}, 0)$, $\mathrm{hi} \leftarrow \max(\mathrm{hi}, 0)$) so that 0 is exactly a code. The real number of code $q$ is $\Delta\,(q - q_0)$. The lowest code, $-128$, stands for $\mathrm{lo}$ (to within half a step) and 127 for $\mathrm{hi}$. The three tensors that the device stores, the input $x$, the hidden activation $a$ and the output $y$, get their own $(\Delta, q_0)$ pair; the pre-rectifier tensor $h_1$ is not stored, because the rectifier will be applied to the accumulator (see below), so it needs none.
 

@@ -368,9 +368,11 @@ Teacher forcing has a cost that does not show in training. When the model *gener
 To share what is learned about `cat` with what is learned about `dog`, the model must compute its probabilities from the tokens instead of looking them up. The simplest such model, in the shape Bengio, Ducharme, Vincent and Jauvin gave it in 2003, uses the pieces of earlier chapters: look up each of the last four tokens in an embedding table, put the four rows side by side, pass them through one hidden layer and score the 18 possible next tokens with a softmax. Written out, with $D = 6$, $H = 12$ and $\mathbf{W}_{\mathrm{emb}}$ of shape $[19, 6]$, for a position whose context is the tokens $u_1, u_2, u_3, u_4$:
 
 $$
-\mathbf{x} = \big(\mathbf{W}_{\mathrm{emb}}[u_1, :],\ \mathbf{W}_{\mathrm{emb}}[u_2, :],\ \mathbf{W}_{\mathrm{emb}}[u_3, :],\ \mathbf{W}_{\mathrm{emb}}[u_4, :]\big),\quad
-\mathbf{a} = \tanh(\mathbf{W}_1 \mathbf{x} + \mathbf{b}_1),\quad
-\mathbf{p} = \mathrm{softmax}(\mathbf{W}_2 \mathbf{a} + \mathbf{b}_2),
+\begin{aligned}
+\mathbf{x} &= \big(\mathbf{W}_{\mathrm{emb}}[u_1, :],\ \mathbf{W}_{\mathrm{emb}}[u_2, :],\ \mathbf{W}_{\mathrm{emb}}[u_3, :],\ \mathbf{W}_{\mathrm{emb}}[u_4, :]\big),\\
+\mathbf{a} &= \tanh(\mathbf{W}_1 \mathbf{x} + \mathbf{b}_1),\\
+\mathbf{p} &= \mathrm{softmax}(\mathbf{W}_2 \mathbf{a} + \mathbf{b}_2),
+\end{aligned}
 $$
 
 with $\mathbf{x}$ of length 24, $\mathbf{W}_1$ of shape $[12, 24]$ and $\mathbf{W}_2$ of shape $[18, 12]$. The loss is the mean of $-\ln p_y$ over the training pairs, the gradient into the logits is $(\mathbf{p} - \mathbf{e}_y)/N$ as in Volume III, and the backward pass is that of a two-layer network (Chapter 4 of that volume) with one addition from this volume: the gradient of $\mathbf{x}$ is cut into its four pieces, and each is added into the row of the table that was looked up (Chapter 3's scatter-add), so that a token that appears in two of the four slots receives both.

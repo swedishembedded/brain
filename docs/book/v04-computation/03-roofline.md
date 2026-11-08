@@ -148,9 +148,10 @@ same rule and differ only in the size.
 With the cost of a computation and the rates of a machine in hand, we can state the shortest time the machine could possibly take, and which of the two resources sets it. A computation with $N_{\mathrm{flop}}$ operations and $N_{\mathrm{byte}}$ bytes runs on a machine with $F_{\mathrm{pk}}$ and $\mathrm{BW}$. Its time $t$ satisfies two inequalities, and neither can be broken:
 
 $$
-t \ge \frac{N_{\mathrm{flop}}}{F_{\mathrm{pk}}} \qquad\text{(the arithmetic cannot go faster than the peak)},
-\qquad
-t \ge \frac{N_{\mathrm{byte}}}{\mathrm{BW}} \qquad\text{(the bytes cannot arrive faster than the bandwidth)}.
+\begin{aligned}
+t &\ge \frac{N_{\mathrm{flop}}}{F_{\mathrm{pk}}} &&\text{(the arithmetic cannot go faster than the peak)},\\[4pt]
+t &\ge \frac{N_{\mathrm{byte}}}{\mathrm{BW}} &&\text{(the bytes cannot arrive faster than the bandwidth)}.
+\end{aligned}
 $$
 
 Both hold at once, so $t \ge \max(N_{\mathrm{flop}}/F_{\mathrm{pk}},\ N_{\mathrm{byte}}/\mathrm{BW})$. The rate at which the operations are completed is $N_{\mathrm{flop}}/t$, and dividing the

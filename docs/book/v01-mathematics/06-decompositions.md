@@ -1062,8 +1062,9 @@ $$
 M_{ij} = \sum_{k=1}^{3} w_k \,\sin\!\Big(\frac{k\pi(i + \tfrac12)}{8}\Big)
 \cos\!\Big(\frac{k\pi(j + \tfrac12)}{6}\Big)
 \;+\; 0.05\cdot\frac{((7i + 13j) \bmod 11) - 5}{5},
-\qquad (w_1, w_2, w_3) = (6, 3, 1.5).
 $$
+
+with $(w_1, w_2, w_3) = (6, 3, 1.5)$.
 
 Each pattern is a rank-one matrix (a function of $i$ times a function of $j$),
 so without the noise this table would have rank $3$. The singular values

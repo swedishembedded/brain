@@ -54,7 +54,10 @@ There are $G = 360$ pumps, numbered $0, \dots, 359$. Pumps $0$ to $299$ are site
 4. for each of the pump's four rows, in order: five calls of `rng.normal()`, the $j$-th giving the measurement $x_j = \mathrm{prof}_{gj} + 0.2\,\mathrm{rng.normal()}$; then, for pumps of site B only, $x_0 \leftarrow x_0 + 2.0$; then the true logit $e^\star$ of the row and the draw
 
 $$
-e^\star = -0.5 + 2.0\,x_0 - 1.2\,x_1 + 0.8\,x_2 - 0.8\,x_0^2 + \mathrm{eff}^{\mathrm{fail}}_g, \qquad \mathrm{fail} = \begin{cases} 1 & \text{if } \mathrm{rng.uniform()} < \sigma(e^\star), \\ 0 & \text{otherwise;} \end{cases}
+\begin{aligned}
+e^\star &= -0.5 + 2.0\,x_0 - 1.2\,x_1 + 0.8\,x_2 - 0.8\,x_0^2 + \mathrm{eff}^{\mathrm{fail}}_g,\\
+\mathrm{fail} &= \begin{cases} 1 & \text{if } \mathrm{rng.uniform()} < \sigma(e^\star), \\ 0 & \text{otherwise;} \end{cases}
+\end{aligned}
 $$
 
    then one more call of `rng.normal()`, $\varepsilon$, and the wear

@@ -104,6 +104,15 @@
     {\end{tcolorbox}}}
 \makeatother
 \fvset{fontsize=\small}
+% Tables are set at \booktablesize, \small unless the table filter
+% (docs/pandoc/book-tables.lua) chose smaller for a wide table; this hook runs
+% after header.tex's \small, so the filter's choice wins.
+\providecommand{\booktablesize}{\small}
+\AtBeginEnvironment{longtable}{\booktablesize}
+% tcolorbox loads the verbatim package, which redefines the environment pandoc
+% writes plain code blocks into and undoes header.tex's line breaking; restore
+% it once every package is loaded, or long lines run off the page.
+\AtBeginDocument{\RecustomVerbatimEnvironment{verbatim}{Verbatim}{breaklines,breakanywhere,fontsize=\small}}
 
 % -- Figures and tables ------------------------------------------------------
 \setkeys{Gin}{width=0.92\linewidth,height=0.42\textheight,keepaspectratio}

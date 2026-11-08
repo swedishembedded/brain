@@ -111,7 +111,7 @@ It runs over the whole real line, $-\infty$ for an impossible event and $+\infty
 | 0.99 | 99.0000 | 4.5951 | 0.9900 |
 <!-- /worked -->
 
-Read the table down the logit column: $-4.5951, -2.1972, -1.0986, 0, 1.0986, 2.1972, 4.5951$. The probabilities $0.25$ and $0.75$ give logits of equal size and opposite sign, because their odds are $1/3$ and $3$. The last column anticipates the next subsection.
+Read the table down the logit column: $-4.5951$, $-2.1972$, $-1.0986$, $0$, $1.0986$, $2.1972$, $4.5951$. The probabilities $0.25$ and $0.75$ give logits of equal size and opposite sign, because their odds are $1/3$ and $3$. The last column anticipates the next subsection.
 
 ### The model: a linear logit
 

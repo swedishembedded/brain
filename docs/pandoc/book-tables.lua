@@ -28,22 +28,29 @@ local LANDSCAPE_PT = 8.1 * 72.27
 
 -- Font sizes the table may be set at (body, then smaller), in points, and
 -- the space LaTeX puts on each side of a column at that size.
+-- The first is the size every table gets (\small, docs/pandoc/header.tex);
+-- the filter selects the others through \booktablesize (docs/pandoc/book.tex).
 local SIZES = {
-  { name = nil, size_pt = 10, sep_pt = 6 },
+  { name = nil, size_pt = 9, sep_pt = 6 },
   { name = "footnotesize", size_pt = 8, sep_pt = 5 },
   { name = "scriptsize", size_pt = 7, sep_pt = 3 },
 }
 
 -- Widths in ems, read off typeset pages with a little room to spare: P052's
--- figures and capitals are just over half an em, its lowercase about half,
+-- figures are just over half an em, capitals up to 0.7, its lowercase about half,
 -- a space a quarter; inline code is a
 -- monospaced font whose every character measures about 0.67 em.
 local function char_em(c)
-  if c:match("[%dA-Z]") then return 0.55 end
+  if c:match("%d") then return 0.55 end
+  if c:match("[A-Z]") then return 0.7 end
   if c == " " then return 0.28 end
-  return 0.5
+  return 0.52
 end
 local CODE_EM = 0.67
+-- Bold is about a tenth wider than the regular weight, and a column needs a
+-- little air beyond its widest cell or the last character touches the next.
+local HEAD_EM = 1.12
+local CELL_PAD_EM = 0.6
 
 local function text_em(s)
   local w = 0
@@ -65,7 +72,7 @@ end
 -- set. A cell of prose (two or more words of three letters or more) may wrap
 -- between words, so it needs only its longest word; a cell of tokens such as
 -- "1 x 2560 x 2048" reads only on one line, except that a list of them may
--- break after a comma.
+-- break after a comma and a space.
 local function measure(cell)
   local code_whole, code_word = 0, 0
   pandoc.Blocks(cell.contents):walk({
@@ -79,7 +86,7 @@ local function measure(cell)
     Code = function() return pandoc.Str("") end,
   })
   local text = pandoc.utils.stringify(stripped)
-  local whole = text_em(text) + code_whole
+  local whole = text_em(text) + code_whole + CELL_PAD_EM
   local words = 0
   for _ in pandoc.utils.stringify(cell.contents):gmatch("%a%a%a+") do
     words = words + 1
@@ -87,15 +94,17 @@ local function measure(cell)
   if words < 2 then
     -- Tokens break only after a comma, as a vector "(0.74, 0.10, 0.11)" may.
     local chunk = 0
-    for part in text:gmatch("[^,]+") do
-      chunk = math.max(chunk, text_em(part:match("^%s*(.-)%s*$")) + 0.3)
+    -- Only a comma followed by a space is a place to break: the commas of
+    -- "549,822,922,752" group digits and hold the number together.
+    for part in (text .. ", "):gmatch("(.-), ") do
+      chunk = math.max(chunk, text_em(part) + 0.3)
     end
     if code_whole > 0 or chunk == 0 then
       return whole, whole
     end
-    return whole, chunk
+    return whole, chunk + CELL_PAD_EM
   end
-  return whole, math.max(code_word, longest_word_em(text, false))
+  return whole, math.max(code_word, longest_word_em(text, false)) + CELL_PAD_EM
 end
 
 local function cell_text(cell)
@@ -136,6 +145,7 @@ function Table(tbl)
     for i, cell in ipairs(row.cells) do
       if i <= ncols then
         local _, w = measure(cell)
+        w = w * HEAD_EM -- the header row is set in bold
         full[i] = math.max(full[i], w)
         word[i] = math.max(word[i], w)
       end
@@ -176,7 +186,8 @@ function Table(tbl)
   end
   local before, after = "", ""
   if size.name then
-    before = "\\begingroup\\" .. size.name .. string.format("\\setlength{\\tabcolsep}{%gpt}", size.sep_pt)
+    before = "\\begingroup\\renewcommand{\\booktablesize}{\\" .. size.name .. "}" ..
+      string.format("\\setlength{\\tabcolsep}{%gpt}", size.sep_pt)
     after = "\\endgroup"
   end
   if line_pt == LANDSCAPE_PT then
@@ -187,3 +198,24 @@ function Table(tbl)
   end
   return { pandoc.RawBlock("latex", before), tbl, pandoc.RawBlock("latex", after) }
 end
+
+-- Inline code set as one unbreakable word runs off the page when it is long
+-- (an identifier such as the_examples_are_drawn_in_epochs). Write it as
+-- \texttt with a permitted break after each underscore, slash, dot or comma.
+local LATEX_ESCAPE = {
+  ["\\"] = "\\textbackslash{}", ["{"] = "\\{", ["}"] = "\\}", ["$"] = "\\$", ["&"] = "\\&",
+  ["#"] = "\\#", ["^"] = "\\^{}", ["_"] = "\\_", ["%"] = "\\%", ["~"] = "\\textasciitilde{}",
+  [" "] = "\\ ",
+}
+function Code(c)
+  if utf8.len(c.text) < 24 then
+    return nil
+  end
+  local out = c.text:gsub("[\\{}$&#^_%%~ ]", LATEX_ESCAPE)
+  out = out:gsub("(\\_)", "%1\\allowbreak{}"):gsub("([/.,])", "%1\\allowbreak{}")
+  return pandoc.RawInline("latex", "\\texttt{" .. out .. "}")
+end
+
+-- Two passes, in this order: the table pass measures inline code as Code
+-- elements, so it must run before Code is rewritten into raw LaTeX.
+return { { Table = Table }, { Code = Code } }

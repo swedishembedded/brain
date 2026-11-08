@@ -136,6 +136,9 @@ def build_pdf(md, pdf=None, header=None, extra=()):
         "-V", "fontsize=10pt",
         "-V", "colorlinks=true", "-V", "linkcolor=blue", "-V", "urlcolor=blue", "-V", "toccolor=black",
         "--pdf-engine-opt=-interaction=nonstopmode",
+        # Without --verbose pandoc keeps LaTeX's log to itself, and the
+        # overflow count below would always read zero.
+        "--verbose",
         *(extra or ("--toc-depth=2", "--top-level-division=chapter", "-V", "documentclass=report")),
     ]
     env = dict(os.environ, TEXMFVAR=os.path.join(out_dir, "texmf"))
@@ -147,8 +150,9 @@ def build_pdf(md, pdf=None, header=None, extra=()):
         sys.exit(1)
     print(f"wrote {pdf} ({os.path.getsize(pdf)//1024} KiB)")
     # Report overflow: xelatex logs 'Overfull \hbox (N.NNpt too wide)'.
-    overfull = re.findall(r"Overfull \\hbox \(([\d.]+)pt too wide\)", r.stdout + r.stderr)
-    bad = [float(x) for x in overfull if float(x) > 2.0]  # ignore < 2pt hairline
+    # LaTeX repeats each warning on every pass; count each place once.
+    overfull = set(re.findall(r"Overfull \\hbox \(([\d.]+)pt too wide\) (.*)", r.stdout + r.stderr))
+    bad = [float(w) for w, _ in overfull if float(w) > 2.0]  # ignore < 2pt hairline
     print(f"overfull hboxes >2pt: {len(bad)}" + (f"  (max {max(bad):.1f}pt)" if bad else ""))
     return pdf, bad
 

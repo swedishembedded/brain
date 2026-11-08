@@ -92,9 +92,10 @@ derivative. These two limits are the **partial derivatives** of $L$ at
 $\mathbf{p}$, written
 
 $$
-\frac{\partial L}{\partial w_1}(\mathbf{p}) = \lim_{h\to 0}\frac{L(p_1 + h,\, p_2) - L(p_1, p_2)}{h},
-\qquad
-\frac{\partial L}{\partial w_2}(\mathbf{p}) = \lim_{h\to 0}\frac{L(p_1,\, p_2 + h) - L(p_1, p_2)}{h}.
+\begin{aligned}
+\frac{\partial L}{\partial w_1}(\mathbf{p}) &= \lim_{h\to 0}\frac{L(p_1 + h,\, p_2) - L(p_1, p_2)}{h},\\[4pt]
+\frac{\partial L}{\partial w_2}(\mathbf{p}) &= \lim_{h\to 0}\frac{L(p_1,\, p_2 + h) - L(p_1, p_2)}{h}.
+\end{aligned}
 $$
 
 The curly $\partial$ reminds us that other inputs exist and are being held
@@ -104,9 +105,10 @@ unchanged, with the frozen variables treated as constants. Freezing $w_2 = 1.5$
 turns $L$ into a function of $w_1$ alone,
 
 $$
-L(w_1, 1.5) = \tfrac{1}{2}\big[(w_1 - 1.5)^2 + (w_1 - 2.5)^2\big],
-\qquad
-\frac{d}{dw_1}L(w_1, 1.5) = (w_1 - 1.5) + (w_1 - 2.5) = 2w_1 - 4,
+\begin{aligned}
+L(w_1, 1.5) &= \tfrac{1}{2}\big[(w_1 - 1.5)^2 + (w_1 - 2.5)^2\big],\\[4pt]
+\frac{d}{dw_1}L(w_1, 1.5) &= (w_1 - 1.5) + (w_1 - 2.5) = 2w_1 - 4,
+\end{aligned}
 $$
 
 and freezing $w_1 = 0.5$ gives $L(0.5, w_2) = \tfrac{1}{2}\big[(w_2 - 2.5)^2 + (3w_2 - 6.5)^2\big]$ with
@@ -194,9 +196,11 @@ $h\mathbf{u} = (hu_1, hu_2)$ into two one-knob moves: first change $w_1$ with
 $w_2$ at its old value, then change $w_2$.
 
 $$
+\begin{aligned}
 L(p_1 + hu_1,\, p_2 + hu_2) - L(p_1, p_2)
-= \underbrace{\big[L(p_1 + hu_1,\, p_2 + hu_2) - L(p_1,\, p_2 + hu_2)\big]}_{\text{only } w_1 \text{ moved}}
-+ \underbrace{\big[L(p_1,\, p_2 + hu_2) - L(p_1,\, p_2)\big]}_{\text{only } w_2 \text{ moved}}.
+= {} &\underbrace{\big[L(p_1 + hu_1,\, p_2 + hu_2) - L(p_1,\, p_2 + hu_2)\big]}_{\text{only } w_1 \text{ moved}}\\
+&+ \underbrace{\big[L(p_1,\, p_2 + hu_2) - L(p_1,\, p_2)\big]}_{\text{only } w_2 \text{ moved}}.
+\end{aligned}
 $$
 
 Each bracket is the change of a one-variable function over a small step, so by

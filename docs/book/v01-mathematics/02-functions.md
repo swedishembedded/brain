@@ -512,9 +512,10 @@ back. A value was passed through $e^x$, and we want $x$ again. A function $f$
 can be undone when there is a function $f^{-1}$ (read "$f$ inverse") such that
 
 $$
-f^{-1}(f(x)) = x \quad \text{for every } x \text{ in the domain of } f,
-\qquad
-f(f^{-1}(y)) = y \quad \text{for every } y \text{ in the range of } f.
+\begin{aligned}
+f^{-1}(f(x)) &= x \quad \text{for every } x \text{ in the domain of } f,\\
+f(f^{-1}(y)) &= y \quad \text{for every } y \text{ in the range of } f.
+\end{aligned}
 $$
 
 Such an $f^{-1}$ is the **inverse function**. The notation is a trap, because

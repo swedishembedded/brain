@@ -338,7 +338,10 @@ instead of 134 million for $n = 1024$. And the shared-memory traffic per operati
 that real devices have) each compute unit's shared memory delivers 128 bytes per cycle, while its 128 lanes do 128 multiply-adds per cycle, 256 operations. A tile with $r = 1$ asks for 8 bytes of operands per multiply-add, 4 bytes per operation: $128/4 = 32$ operations per cycle can be fed, an eighth of the 256 the lanes can do. In general
 
 $$
-\frac{\text{bytes of shared memory}}{\text{operation}} = \frac{8r}{2r^2} = \frac{4}{r}, \qquad \text{operations per cycle that shared memory can feed} = 32\,r,
+\begin{aligned}
+\frac{\text{bytes of shared memory}}{\text{operation}} &= \frac{8r}{2r^2} = \frac{4}{r},\\[4pt]
+\text{operations per cycle that shared memory can feed} &= 32\,r,
+\end{aligned}
 $$
 
 and $r \ge 8$ is needed for the shared memory to keep up with the lanes (the argument of Volkov and Demmel for the register block of a GPU matrix product, restated in this chapter's model). This is a second roofline, with shared-memory bandwidth in place of device bandwidth and $4/r$ bytes per operation in place of $1/\mathcal{I}$.

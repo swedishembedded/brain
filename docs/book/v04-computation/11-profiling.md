@@ -210,7 +210,10 @@ The mean over all runs is 11.9 percent above the steady mean. The standard devia
 The bias of a mean over the first $n$ runs can be derived. The expected time of run $i$ is $\bar f\,(1 + A e^{-i/\tau})$ plus $C$ on run 0, where $\bar f = 1.071$ is the mean of the noise factor (Chapter 10, and the table below). Dividing the mean of $n$ runs by the steady mean $\bar f$ gives
 
 $$
-1 + b(n), \qquad b(n) = \frac{1}{n}\Bigl(A \sum_{i=0}^{n-1} e^{-i/\tau} + \frac{C}{\bar f}\Bigr) \;\longrightarrow\; \frac{1}{n}\Bigl(\frac{A}{1 - e^{-1/\tau}} + \frac{C}{\bar f}\Bigr) = \frac{4.413 + 18.674}{n} = \frac{23.09}{n}.
+\begin{aligned}
+1 + b(n), \qquad b(n) &= \frac{1}{n}\Bigl(A \sum_{i=0}^{n-1} e^{-i/\tau} + \frac{C}{\bar f}\Bigr)\\
+&\longrightarrow\; \frac{1}{n}\Bigl(\frac{A}{1 - e^{-1/\tau}} + \frac{C}{\bar f}\Bigr) = \frac{4.413 + 18.674}{n} = \frac{23.09}{n}.
+\end{aligned}
 $$
 
 <!-- worked: profiling.warmup_bias -->

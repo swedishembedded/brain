@@ -52,8 +52,10 @@ The instrument is built from the backward pass and its cost (Chapters 4 and 5), 
 The check rests on one fact: the derivative can be estimated from function values. Any estimate of a derivative built from values of the function at nearby points is a **finite difference**. Two of them were defined in Volume I, Chapter 7, and are the two we need. For a function $f$ of one variable and a step $h > 0$,
 
 $$
-D_+(h) = \frac{f(x + h) - f(x)}{h}, \qquad
-D_0(h) = \frac{f(x + h) - f(x - h)}{2h}.
+\begin{aligned}
+D_+(h) &= \frac{f(x + h) - f(x)}{h},\\[4pt]
+D_0(h) &= \frac{f(x + h) - f(x - h)}{2h}.
+\end{aligned}
 $$
 
 $D_+$ is the **forward difference**; $D_0$ is the **central difference**, which looks the same distance to both sides of $x$. For a loss $L$ of many parameters $\boldsymbol\theta$, apply them to the one-variable function $\varphi(t) = L(\boldsymbol\theta + t\,\mathbf{e}_i)$ that moves only parameter $i$. By the chain rule of Volume I, Chapter 8, $\varphi'(0) = \partial L / \partial \theta_i$, so
@@ -65,7 +67,10 @@ $$
 How wrong is the estimate? Expand the function around $x$ (Volume I, Chapter 8):
 
 $$
-f(x \pm h) = f(x) \pm f'(x)\,h + \tfrac12 f''(x)\,h^2 \pm \tfrac16 f'''(x)\,h^3 + \tfrac1{24} f''''(x)\,h^4 \pm \dots
+\begin{aligned}
+f(x \pm h) = f(x) &\pm f'(x)\,h + \tfrac12 f''(x)\,h^2\\
+&\pm \tfrac16 f'''(x)\,h^3 + \tfrac1{24} f''''(x)\,h^4 \pm \dots
+\end{aligned}
 $$
 
 For the forward difference only one expansion is used, and $f(x + h) - f(x) = f' h + \tfrac12 f'' h^2 + \dots$, so
@@ -77,9 +82,10 @@ $$
 The leading error is proportional to $h$: the forward difference is **first order**. For the central difference the two expansions are subtracted. The terms with an even power of $h$ are equal in both and cancel; the odd ones have opposite signs and double:
 
 $$
-f(x + h) - f(x - h) = 2 f'(x)\,h + \tfrac13 f'''(x)\,h^3 + \dots
-\quad\Longrightarrow\quad
-D_0(h) - f'(x) = \tfrac16 f'''(x)\,h^2 + O(h^4).
+\begin{aligned}
+f(x + h) - f(x - h) &= 2 f'(x)\,h + \tfrac13 f'''(x)\,h^3 + \dots\\
+\Longrightarrow\quad D_0(h) - f'(x) &= \tfrac16 f'''(x)\,h^2 + O(h^4).
+\end{aligned}
 $$
 
 The central difference is **second order**: the error is proportional to $h^2$, because of a cancellation we get for free from symmetry. Cutting $h$ by a factor of 10 cuts the forward error by 10 and the central error by 100. The price is one extra evaluation of the function, since $D_+$ can reuse the value $f(x)$ that the check computes anyway.
