@@ -39,18 +39,17 @@ Sources: `ricursiveAI/Ripple-65B-Preview` `config.json`,
 The global layers' Q/K are RMS-normed and un-rotated, so the LSA index reads
 them as they are (`Rope::None`); nothing has to be un-rotated.
 
-## What brain already has, and what it lacks
+## Where each need was met
 
-| need | in brain today | gap |
-|---|---|---|
-| hybrid 4:1 sliding/full decoder, PeriNorm, QK-norm | `crates/gemma4` (5:1 sliding/full, sandwich norms, QK-norm, windowed GQA kernel `K_GQA_SCORES_WIN`) | Gemma4 is forward-only, no paged engine; value residual, `g_proj` gate and clipped SwiGLU exist nowhere |
-| HF arch registry, safetensors import, modelopt NVFP4 metadata | `crates/arch`, `crates/checkpoint` (`packed/hfquant.rs` reads `modelopt` NVFP4) | a `ricursive` row and importer; NVFP4 activation (A4) static input scales checked against what the NVFP4 GEMM consumes |
-| paged serving under the generic `Scheduler` | `PagedDecoder` engines: `qwen3/serve.rs` (growing KV), `qwen35/serve_ring.rs` (fixed ring per sequence) | no engine mixes a 1024-row ring for local layers with growing paged KV for global ones; prefix reuse must share global pages and snapshot the rings |
-| LSA index, selection, sparse paged read | `model::lsa` (per-layer `Option` projections, `Rope::None`, flat and tree reads, int8/fp8 KV) | wired into `qwen3/serve.rs` only: `set_lsa`, crossover, kernel set and memory charge live in the Qwen3 engine and must move to a shared place before a second engine can use them |
-| sparse attention kernels for 80/8/128 | per-KV-head `paged_sparse_flash_gqa` with a `GROUP` knob compiled for 2, 4, 5, 8; whole-row kernel requires `64 % n_heads == 0` | group 10 not compiled; whole-row prefill refuses 80 heads (roadmap `lsa.md`: templated workgroup) |
-| D-LSA distillation | `model::lsa::distill` (host math) and `brain lsa` | model-agnostic capture of a layer's Q/K, so a Ripple indexer can be distilled over the 16 global layers; device distillation (`lsa.md`) |
-| speculative decoding | DFlash2 in `crates/qwen35` (bound to its GGUF single-stream path) | done as step 6b: the draft is the shared `crates/dflash2`, the engine retains the taps, the scheduler's verify takes its proposals |
-| training | gradcheck, LoRA, `ModelFit` | backward for value residual lerp, sigmoid gate, clipped SwiGLU (clamp masks), PeriNorm order |
+| need | how the port meets it |
+|---|---|
+| hybrid 4:1 sliding/full decoder, PeriNorm, QK-norm | `crates/ricursive` (own forward, engine and trainer; Gemma4 is forward-only and has no paged engine); value residual, `g_proj` gate and clipped SwiGLU exist only here |
+| HF arch registry, safetensors import, modelopt NVFP4 metadata | the `ricursive` row of `crates/arch`, the importer in `crates/ricursive`, `crates/checkpoint` (`packed/hfquant.rs`); the NVFP4 static input scales are read and checked, not applied |
+| paged serving under the generic `Scheduler` | `ricursive::RicursiveEngine`: a 1024-row ring per sequence for local layers, growing paged KV for global ones, prefix reuse sharing the global pages and snapshotting the rings |
+| LSA index, selection, sparse paged read | `model::lsa::binding`, lifted out of the Qwen3 engine; Ripple's global layers read through it; kernels for group 10 and whole-row for 80 heads |
+| D-LSA distillation | `model::lsa::capture::AttentionCapture`, implemented by Qwen3 and Ripple; `brain lsa`; device distillation stays open (`lsa.md`) |
+| speculative decoding | the shared `crates/dflash2` and the engine's hidden-state taps; the scheduler's verify takes the proposals |
+| training | backward for the value-residual lerp, the sigmoid gate, the clipped SwiGLU and PeriNorm in `ricursive::train`, through gradcheck, LoRA, `ModelFit`, `model::Pipeline` |
 
 KV memory (bf16, per token): global 16 x 2 x 8 x 128 x 2 B = 64 KiB, so
 64 GiB at 1M tokens; local rings 64 x 2 x 8 x 128 x 2 B x 1024 = 256 MiB
@@ -59,33 +58,33 @@ storage; int8/fp8 KV halves it.
 
 ## Plan
 
-Correctness first, on the CPU backend (`BRAIN_DEVICE=cpu`), while the GPUs
-serve other work; CUDA parity and performance follow on the same gates.
+Correctness first, on the CPU backend (`BRAIN_DEVICE=cpu`) and the software Vulkan
+adapter, while the GPUs serve other work; CUDA parity and performance follow on the same gates.
+`[x]` means implemented and gated on those two; nothing is claimed for a card until step 8, whose
+ordered plan is `ripple-gpu-validation.md` (`make test/gpu/ripple`).
 
 1. [x] `crates/ricursive`: config, `ARCHS` row, importer that refuses
        missing/unknown tensors, f32 forward on any backend. Gate: a
        random-weight tiny config (2 local + 1 global, window smaller than
        the prompt) matches `modeling_ricursive.py` logits; real-weight
        per-layer parity on layers 0 (local) and 4 (global) plus embed/head,
-       fetched by tensor (no full 130 GB download: the project drive has
-       ~60 GB free). Done on the CPU backend; CUDA parity is step 8.
+       fetched by tensor (no full 130 GB download: the bf16 release does not fit the
+       project drive). Done on the CPU backend; CUDA parity is step 8.
 2. [x] Paged hybrid engine under the generic `Scheduler`: ring KV for local
        layers, paged KV for global ones; serving conformance suite; decode
        equals full-recompute logits across the window boundary; prefix
-       reuse. Done on the CPU backend as `ricursive::RicursiveEngine`; not in
-       the catalog and not reachable from the CLI yet.
+       reuse. Done on the CPU backend as `ricursive::RicursiveEngine`; served by step 6.
 3. [x] LSA lifted out of the Qwen3 engine into a shared engine-side
        component (`model::lsa::binding`); Ripple's 16 global layers read
        sparsely (`RicursiveEngine::set_lsa`); whole-row and group-10 kernels
-       compiled. Written and statically validated on the CPU backend, which
-       executes none of the LSA kernels: the device gates (full-budget
-       equivalence, prefix reuse, batching, real layers) skip there and are
-       still to be run on a GPU.
+       compiled. The CPU backend executes none of the LSA kernels, so the device gates
+       (full-budget equivalence, prefix reuse, batching) run on the software Vulkan adapter,
+       where they pass; the real-layer one needs a card (it skips on the JIT).
 4. [x] D-LSA indexer capture and distillation, generic: any engine meeting
        `model::lsa::capture::AttentionCapture` (Qwen3, Ripple) is captured,
        PCA/random-initialised, distilled and evaluated by `brain lsa`;
        Ripple's indexer covers its 16 global layers. Tooling and a tiny-scale
-       gate done; the real long-context run is the GPU phase below.
+       gate done; the real long-context run is a GPU-phase step.
 5. [x] Weight tiers (bf16 as stored, fp8, int8, the official NVFP4 release as
        published), compact KV (bf16, int8, fp8) for the rings and the global
        pools, byte-exact placement over cards, the engine in pipeline stages.
@@ -104,8 +103,8 @@ serve other work; CUDA parity and performance follow on the same gates.
        scanner (streaming deltas), `--weight-format`/`--kv-cache`/`--sparse-attention`/`--ctx`/
        `--max-batch` checked against `ricursive::POLICY`, `brain ricursive generate`, a pull that
        fetches `chat_template.jinja`, batched speculative verify with prompt-lookup drafting.
-       End to end on the CPU backend and the software adapter (`tests/e2e/ripple.bats`). The
-       No card has served it (step 8). DFlash2 speculation is step 6b.
+       End to end on the CPU backend and the software adapter (`tests/e2e/ripple.bats`). No
+       card has served it (step 8). DFlash2 speculation is step 6b.
 6b. [x] DFlash2 speculative decoding, through the generic scheduler: the draft model out of `qwen35` into a
        target-agnostic crate (`crates/dflash2`: per-layer sliding, full and NoPE attention, a ring of window plus one
        block per sequence, one batched forward over the blocks of several sequences, safetensors or GGUF), the
@@ -128,9 +127,11 @@ serve other work; CUDA parity and performance follow on the same gates.
        stages, `--adapter`, `--adapter-manifest`, `--watch-adapters`, model-store adapters, `TextGenerationPipeline::adapter`.
 7b. [x] `brain serve --adapter` for Ripple, training across pipeline stages from the memory plan (generic
        `model::plan_stage_layout`), the chunked head, native sparse attention as a model-agnostic trainer option.
-       Open: a bank of adapter slots, norms and `value_res_lambda` beside an adapter (Open items).
-8. [ ] CUDA parity and the measured long-context numbers (both GH200s,
-       when free).
+       The norms and `value_res_lambda` train beside an adapter (`--modules-to-save`) and are served per row from the bank.
+8. [ ] CUDA and Vulkan parity of every gate, the 80-layer correctness and KL/top-1 of each tier, the
+       measured serving, long-context, speculation, D-LSA and training numbers on both GH200s when
+       free: the ordered plan, with commands and thresholds, is `ripple-gpu-validation.md`. Nothing of
+       it has run on a card.
 
 ## Measured
 
@@ -164,10 +165,10 @@ the tiny model with prefix reuse on. Dropping the ring slack, or skipping the
 ring snapshot on a prefix hit, fails the tiny gates (the missing snapshot by
 9e-2 scaled).
 
-Not measured: CUDA or Vulkan parity (GPUs were busy), any prompt longer than 13
-real tokens, a real window-exclusion case on real weights (13 tokens is below
-the 1024 window; the window is gated by the tiny model only), layers other than
-0 and 4, throughput of any kind.
+Not measured: any prompt longer than 13 real tokens, a real window-exclusion case
+on real weights (13 tokens is below the 1024 window; the window is gated by the
+tiny model only), layers other than 0 and 4. The 80-layer comparison and every
+card number are `ripple-gpu-validation.md`.
 
 Step 3, CPU backend. The LSA kernels are workgroup-cooperative and the CPU JIT
 cannot execute them (`@cpu no`), so on this box: the refusals (an indexer that
@@ -176,14 +177,14 @@ without the kernels, and the backend's own refusal by name) pass; every variant
 of the per-KV-head kernel (groups 1 to 10) and of the whole-row kernel (16, 32,
 40, 64, 80 heads and two others) parses and validates under naga within 16 KiB of
 workgroup memory; Qwen3's serve conformance and LSA tests build and pass
-by skipping their device parts. Not run, written and waiting for a GPU:
-`ricursive` tests `a_budget_past_the_context_equals_dense_through_prefill_chunks_and_decode`,
+by skipping their device parts. The device gates that skip on the CPU backend
+(`a_budget_past_the_context_equals_dense_through_prefill_chunks_and_decode`,
 `a_small_budget_reads_fewer_keys_than_dense_attention`,
-`prefix_reuse_and_batching_match_cold_and_alone_runs_with_sparse_attention`,
-`sparse_attention_at_a_full_budget_decodes_real_layers_0_and_4_as_the_reference`,
-and the `brain-model` `paged_sparse` device tests for the new geometries. The
-engine-level sparse-equals-oracle gate is the kernel's (per layer, against
-`lsa::attend`), not a Ripple logits comparison.
+`prefix_reuse_and_batching_match_cold_and_alone_runs_with_sparse_attention`, the
+`brain-model` `paged_sparse` device tests) run on the software adapter below;
+`sparse_attention_at_a_full_budget_decodes_real_layers_0_and_4_as_the_reference`
+needs a card. The engine-level sparse-equals-oracle gate is the kernel's (per
+layer, against `lsa::attend`), not a Ripple logits comparison.
 
 Software Vulkan adapter (lavapipe, `BRAIN_DEVICE=software`, 2026-11-07): the
 `lsa` gates and the tiny-model `parity` and `serve` gates of `brain-ricursive`
@@ -240,7 +241,7 @@ codes, even element in the low nibble), `weight_scale` F8_E4M3 `[n, k/16]`,
 (404), the quantization is declared in `config.json` (`quant_method: modelopt`,
 `quant_algo: NVFP4`, static 4-bit input activations, group 16, every `self_attn*`,
 `embed_tokens` and `lm_head` ignored). 1923 tensors, `total_size` 57,213,636,640 bytes
-(`placement::footprint` costs 57,216,944,320: 5.8e-5 off). Brain executes it
+(`placement::footprint` costs 57,216,944,320: 5.8e-5 off; 53.3 GiB, of which the device holds 52.3 GiB: the 1.0 GiB embedding table is gathered on the host). Brain executes it
 float-read, `Weight::Micro` (`NVFP4`): the tile decode yields `E2M1 x scale_2 x E4M3`
 and multiplies the f32 activations (W4A16 on every backend; on CUDA the library GEMM
 reads bf16 activations by default, `LinearActivations::AUTO`). It does not quantize
@@ -284,8 +285,8 @@ over the release vocabulary):
 | resident weights of the two layers | bf16 x11 1.58 GiB, NVFP4 x6 0.66 GiB (those six matrices in bf16 are 2.3 GiB) |
 
 A two-layer stack of an 80-layer model is not a language model: these are relative damage
-measures of the formats, not task metrics. The 80-layer NVFP4 versus bf16 comparison needs
-the whole release (57 GB) and a card, and is not measured.
+measures of the formats, not task metrics. The 80-layer NVFP4 versus bf16 comparison
+(the whole release, 57 GB, on a card; the reference streams from the bf16 files) is a GPU-phase step.
 
 KV tiers, tiny model, same run, against the f32 cache (rings wrapped three times, global
 pool across 4-row blocks):
@@ -397,10 +398,10 @@ by bisection in the same test; the planes index with 32 bits, so one global laye
 A dense decode token reads the whole cache (64 GiB of bf16 at 1M tokens), so these are capacity limits;
 decode speed at those lengths is the sparse path's reason and is not measured here.
 
-Not measured or not run: any card (CUDA parity of the tiers, the native NVFP4 kernels, the CUDA build of the
-widened fused kernel, peer copies, throughput of any tier, KV format or attention path, loading time), the 80-layer release end to end, int8 on the
-CPU backend (refused), the `brain lsa` staging path (`StreamPlan::cards` probes free card memory), the fused kernels' speed against the triad,
-and the host-RAM figure of the embedding gather (it reads one row per token from the mapped file).
+Not measured or not run on any backend: int8 on the CPU backend (refused), the `brain lsa` staging path
+(`StreamPlan::cards` probes free card memory), the fused kernels' speed against the triad, and the host-RAM
+figure of the embedding gather (it reads one row per token from the mapped file). Every card number is
+`ripple-gpu-validation.md`.
 
 ### Step 6: served like Qwen3 (CPU backend and the software Vulkan adapter, 2026-11-07)
 
@@ -532,7 +533,7 @@ each layer is rebuilt in the backward.
 | adapter gradient = merged-weight gradient through the factors (`dB = s dW A^T`, `dA = s B^T dW`) | worst scaled error 3.4e-6 over 48 factors |
 | zero-init adapter equals the base; a run learns and leaves the base untouched | adapter loss 4.1951 -> 0.0551; base tensors identical |
 | a trained adapter attached to `RicursiveEngine` vs the training model's logits | scaled error 2.3e-7 |
-| adapter over a bf16, FP8, NF4 base vs an f32 build over the decoded values (QLoRA) | loss and gradients identical (0.0); int8 needs a packed-int8 product (skips on this backend) |
+| adapter over a bf16, FP8, NF4 base vs an f32 build over the decoded values (QLoRA) | bf16 identical (0.0); FP8 and NF4 losses equal to 1e-6 relative, worst adapter gradient 1.9e-6; int8 needs a packed-int8 product (skips on the CPU backend); on the software adapter it is a W8A8 product, loss 4.208457 vs 4.206841, gradient 0.128 from the decoded build's as a whole (cosine 0.992), held to loss 5e-3 and gradient 0.25 |
 | adapter over the ModelOpt NVFP4 release (MLP resident in NVFP4, attention and head as stored) vs the decoded values | loss 4.219043 both, worst adapter gradient 1.0e-6 |
 | two-stage `model::Pipeline<Ripple>` vs one stage (cut between the second sliding layer and the global layer, so the value residual reaches across it) | loss identical; every gradient equal (worst 6.4e-8, the embedding, which both stages hold); four AdamW steps to 7.8e-7; also with an adapter and with bf16 boundaries |
 | N-LSA on the global layer, full budget vs dense (`train_nlsa`, software adapter, 2 x 64 tokens) | loss 3.759443 both, worst gradient difference 3.2e-7 of the largest; window-only 3.771009 |
@@ -610,208 +611,61 @@ Not wired: a layer window together with several stages (a streamed stage runs it
 pipeline hands the boundary gradient from stage to stage): refused by name. So the 2-card row needs the window and cannot
 run; 4 cards (92.2 GiB of 95.6 for bf16, 77.3 for fp8) or one card with a window do. Host memory is the constraint of
 the windowed run: 370 to 490 GiB, which this node (858 GiB) holds and a 215 GiB job limit does not. Nothing here has run
-on a card: the first check is `train_resident` with `--device gpu0` against the CPU numbers above, then one step of the real
-base with `--kernel-profile` (host transfers and the host update are the cost to read first).
+on a card (`ripple-gpu-validation.md`, step 12).
 
-### GPU phase runbook
+## Open items
 
-```
-brain lsa distill --arch ricursive --checkpoint <Ripple-65B directory> \
-    --corpus <directory of source files> --out ripple-lsa.safetensors \
-    --tokens 32768 --train-docs 48 --epochs 3 --queries 64 --top-k 1024 --top-p 256 --device gpu0
-brain lsa eval --arch ricursive --checkpoint <directory> --corpus <directory> \
-    --indexer random,pca,ripple-lsa.safetensors --tokens 32768 --skip-docs 48 --held-docs 6
-```
+Each is tagged **GPU phase** (needs a card; the step is in `ripple-gpu-validation.md`, which holds the commands and
+thresholds) or **later** (CPU-side work or a deferred design).
 
-Needs the host parallelism above for the teacher. Serve with the artifact through
-`brain serve --sparse-attention` (below).
-
-Training (step 7), after `brain pull`, one to two GH200s. Every command below ran on the CPU backend at
-tiny scale; none has run on a card.
-
-```
-# LoRA over the NVFP4 release on 1 GH200 (52 GiB of weights; the adapter, its AdamW state and the activations
-# of one row are small beside it). --base-format nvfp4 holds the release as published.
-brain pull ricursiveAI/Ripple-65B-Preview-NVFP4
-brain finetune ricursiveAI/Ripple-65B-Preview-NVFP4 --arch ricursive --dataset chat.jsonl --out run-lora \
-    --lora 16 --alpha 32 --base-format nvfp4 --activations recompute --steps 200 --lr 1e-4 --max-block 4096 \
-    --device gpu0
-
-# The bf16 release (129 GB) does not fit one card: the trainer lays the model out over the selected cards from the
-# memory plan (model::plan_stage_layout), prints the layout ("pipeline of 2 stages: gpu0 layers 0..40, ...") and
-# trains through model::Pipeline<Ripple>; --stages N asks for exactly N stages.
-brain finetune ricursiveAI/Ripple-65B-Preview --arch ricursive --dataset chat.jsonl --out run-lora-bf16 \
-    --lora 16 --base-format bf16 --activations bf16 --max-block 4096 --device gpu0,gpu1
-
-# FULL fine-tune of the bf16 release across FOUR cards: each stage holds its bf16 layers, gradients, master and state
-# (92 GiB of 95.6 per card at 4096 tokens; --stages 2 does not fit without a window, which does not compose with stages)
-brain finetune ricursiveAI/Ripple-65B-Preview --arch ricursive --dataset chat.jsonl --out run-full4 --stages 4 \
-    --train-precision weights=bf16,state=int8,grad=bf16 --max-block 4096 --steps 200 --lr 1e-5 --device gpu0,gpu1,gpu2,gpu3
-
-# FULL fine-tune of the bf16 release on ONE card: bf16 linears and tables on the device two layers at a time, the f32
-# master and int8 optimizer state in host RAM (370 to 490 GiB, see "Full fine-tuning at 65B"); no --stages
-brain finetune ricursiveAI/Ripple-65B-Preview --arch ricursive --dataset chat.jsonl --out run-full \
-    --train-precision weights=bf16,window=2,state=int8,grad=bf16,clip=two-pass --max-block 4096 --steps 200 --lr 1e-5 --device gpu0
-
-# RL: the clipped policy gradient on rollouts (each record carries its `advantage`), the held-out set scored on the
-# model in the training process before and after; the adapter serves as above
-brain finetune ricursiveAI/Ripple-65B-Preview-NVFP4 --arch ricursive --dataset rollouts.jsonl --out run-rl \
-    --lora 16 --base-format nvfp4 --policy-gradient --held-out heldout.jsonl --steps 100 --device gpu0
-
-# norms and value-residual gates trained in full beside the factors, carried in the adapter and served per row
-brain finetune ricursiveAI/Ripple-65B-Preview-NVFP4 --arch ricursive --dataset chat.jsonl --out run-norms \
-    --lora 16 --base-format nvfp4 --modules-to-save norms,gates --device gpu0
-
-# N-LSA continued training of the dense release: the global layers read their selection only (a model trained
-# dense reads it as a restriction: start from a budget near the context and tighten it). Needs barrier kernels.
-brain finetune ricursiveAI/Ripple-65B-Preview-NVFP4 --arch ricursive --dataset long.jsonl --out run-nlsa \
-    --lora 16 --base-format nvfp4 --native-sparse --lsa-window 4096 --lsa-sink 4 --lsa-top-k 16384 --lsa-top-p 1024 \
-    --lsa-cluster-block 512 --max-block 65536 --device gpu0
-
-# serve the result beside its base (its own instance; a model id of the adapter's card id, see --adapter-id):
-brain serve --models-dir <models> --openai 8080 --adapter run-lora/adapter.safetensors --device gpu0
-# the adapter also exports as a PEFT directory (ricursive::train::adapter::export_peft)
-```
-
-First checks on a card, in order: `train_resident` (one stage, then two: `--device gpu0,gpu1`) and `train_saved` (`--device gpu0`), `train_lora`, `train_pipeline` and `train_tiers::a_chunked_head_*` with `--device gpu0` / `gpu0,gpu1` against
-the CPU numbers above; the real-weight step (`train_real_lora`, set the testdata link) on a card against the
-CPU loss 13.992954 and gradients; one `brain finetune` step with `--kernel-profile` against the GH200 roofline
-(`kernels.md` section F) before any tuning, with the head in view (below).
-
-Serving (step 6), after `brain pull`:
-
-```
-# 1 GH200, NVFP4 release, int8 KV, the distilled D-LSA indexer
-brain pull ricursiveAI/Ripple-65B-Preview-NVFP4
-brain serve --openai --device gpu0 --kv-cache int8 --sparse-attention ripple-lsa.safetensors
-
-# the same without the indexer, prompt-lookup speculation on
-brain serve --openai --device gpu0 --kv-cache int8 --speculative ngram
-
-# 1 GH200, NVFP4 target + the DFlash2 drafter + int8 KV (the draft is found beside the target; the startup log prints
-# "default draft model ..." and the placement with the draft's 7.4 GiB and its compact caches charged to the card, the
-# taps to the host; the draft's caches follow --kv-cache; add --sparse-attention ripple-lsa.safetensors to read the global layers sparsely beside it)
-brain pull ricursiveAI/Ripple-65B-Preview-DFlash2
-brain serve --openai --device gpu0 --kv-cache int8 --speculative dflash --verbose 2
-
-# 2 GH200, the bf16 release (staged over both cards; add --kv-cache int8 for 1M tokens)
-brain pull ricursiveAI/Ripple-65B-Preview
-brain serve --openai --device gpu0,gpu1
-```
-
-First checks for the drafter, in order: `make test/one P=brain-dflash2 T=it ARGS=tiny` with `--device gpu0` (the tiny draft
-against the reference on a card, the fused paged decode attention in place of the CPU's triad), then `real` (needs
-`testdata/dflash2/ripple-65b-preview-dflash2` and the golden of `tools/goldens/dflash2_reference_forward.py real`), then
-the same request twice, plain and `--speculative dflash`, and the replies must be identical; `spec_accept_rate` in the
-`--verbose 2` request lines settles the two conventions listed under step 6b (tap layers, unscaled embedding) and is the
-number to record, with tokens/s against plain decode at batch 1 and 4.
-
-First checks: the startup log's placement line and defaults against `nvidia-smi` after the
-first request (the numbers above are the plan's); `BRAIN_BIN=./target/release/brain bats
-tests/e2e/ripple.bats` is CPU only, so on the card send the tool-call request of that file to
-the served id and compare the reply with the CPU run of the same prompt; then
-`brain lsa prefill` timings against `brain serve` latency.
-
-Which tier and placement (all numbers above; the first run on a card checks each against the
-engine's `kv_bytes`/`weight_report` and `nvidia-smi`):
-
-* **1 GH200 (96 GiB), D-LSA distillation and evaluation, serving up to ~0.8M tokens**: the NVFP4
-  release loaded as published (`--checkpoint <Ripple-65B-Preview-NVFP4 directory>`, no
-  `--weights`), `--device gpu0`. 52.3 GiB of weights. Distillation and the capture need an f32
-  cache (`brain lsa distill`: 128 KiB a token over the 16 global layers, 4 GiB at 32k tokens, fine). Serving
-  and `prefill` timing take `--kv-cache int8` (33 KiB a token: the card holds about 921k tokens
-  with sparse attention charged, 962k dense) or `bf16` (479k, 491k dense).
-* **2 GH200, the bf16 release (129 GB), or 1M+ tokens**: `--device gpu0,gpu1`, no `--weights`: the layers
-  are staged over the fewest cards that hold them (bf16 + int8 cache: 2 cards, 62 + 63 GiB at 128k, 77 + 78
-  GiB at 1M). Sparse attention (`set_lsa`, `eval`), the D-LSA capture and scoring all work across stages;
-  dense reads run the fused kernels (to 1.44M tokens at bf16 weights and an int8 cache). The NVFP4 release
-  on two cards with an int8 cache holds 1M tokens at 43.6 + 43.4 GiB, or 3.6M dense. `--weights fp8` or
-  `int8` from the bf16 release quantizes at load (fp8 59.9 GiB, int8 67.3 GiB resident, 1 card to 128k).
-* First checks on a card, in order: the fused kernels against the triad (`fused` with `--device gpu0`), the
-  staged sparse read (`staged_lsa` with `--device gpu0`, then across two cards for the peer copy), the NVFP4 tile decode and the library bf16 GEMM against the CPU
-  numbers in this file (`real_nvfp4` with `--device gpu0`; set `BRAIN_REQUIRE_CAPABILITIES`), the int8
-  tier (`tiers` with `--device gpu0`), peer copy vs host-staged boundary on two cards, then throughput
-  per tier with `brain perf` (`kernels.md` section F) before any tuning.
-
-## Open items for the later steps
-
-- DFlash2, step 6b. The taps are bf16 on the host (50 KiB a position, 13 GiB at 256k) and cross to the draft through a
-  host copy per round; the pool holds the target's own number of positions, so a server sized for many cached
-  prefixes pays the draft cache for positions only live sequences use. The shared tap contract is implemented by
-  Ripple only: Qwen3.8 (`qwen35::dflash2`) still drives the draft single-stream behind its own tap path, and Qwen3's
-  engine retains no taps. Sampled decoding takes the scheduler's rejection sampling; with the draft it ran (seeded,
-  repeatable, verify steps taken) but its distribution was not measured against plain sampling. The fused decode
-  attention at the compact tiers was not run on a card.
-- Prefix branch points, step 6c. A finished turn's reply is not cached (needs the generated tokens at release in the
-  `PagedDecoder` contract); a branch is found where a new prompt leaves a cached one or where the scheduler hints, at
-  block granularity, and uses the existing snapshot slots (256 MiB a slot at 65B, charged), so a deployment with few
-  slots keeps the newest few prefixes only.
-- Adapter serving, step 7c. The bank is allocated per stage with `slots` x `rank_cap` x (in + out) f32 per targeted
-  linear (`--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`; Ripple's default is all eight linears, 4 slots of
-  rank 16): 3.75 GiB at 65B for four rank-16 slots on every linear (48 MiB a layer, computed from the released config; 1.9 GiB for two slots, 15 GiB for four at rank 64), charged to the stage that holds each layer; to be measured on a card.
-  Not wired: the grouped correction of the linears that read one activation (q, k, v, g and gate, up: two dispatches per
-  linear instead of per group, `AdapterServing::input_groups`), and KV-clip calibration warnings do not apply (no calibration
-  yet). A sequence running under an adapter keeps its K and V in the adapter's namespace, so a prefix is shared among rows of
-  the same adapter only.
-- Adapter full tensors (`modules_to_save`, shared adapter format). Ripple trains and serves the norm gains and the
-  value-residual gates (`--modules-to-save norms,gates`); a full `g_proj` (any linear, the embedding, the head) trains
-  and is written and read back, but the engine refuses to serve an adapter carrying one by name, because a per-row
-  linear in a mixed batch is one product per distinct adapter (the bank gathers vectors, not matrices): serve such an
-  adapter as a folded checkpoint (`fold_adapter_into` replaces the tensors) or in an instance of its own. A bare
-  parameter (`value_res_lambda`) has no PEFT module form, so `export_peft` refuses an adapter that carries one by
-  name; norms export as PEFT `modules_to_save`. Not measured on a card: the gather adds an `embed` and a `mul` pass per
-  norm site while a non-base row is in the batch (a base-only batch records none of it).
-- Training: an adapter trains over an NVFP4 base only as the ModelOpt release stores it (nothing quantizes into
-  NVFP4). The full fine-tune of the 65B is wired for one card (resident bf16/fp8, layer-streamed) and for a pipeline of
-  resident stages; a window with several stages is not (see "Full fine-tuning at 65B"). The resident
-  embedding gradient uses the shared `embedding_grad` by the batch's distinct ids; the f32 build still scatters with the
-  vocabulary-wide `emb_bwd`. Resident `int8` and `nf4` values (quantization-aware training) are refused for Ripple: not tested.
-- Training: on the CPU backend `matmul_dx` with a very large contraction (the head's, vocabulary 152k) is a
-  naive strided loop, 25 s a step for a toy model, so toy tests use a 32-token vocabulary; a GPU does not
-  have the problem.
-- N-LSA is a trainer option (`--native-sparse`, `.native_sparse_attention(cfg, long_range)`) for models that
-  declare it (Qwen3 and Ripple); its index space is the NoPE queries and keys as they are (no learned projection),
-  so an indexer distilled for serving (D-LSA) is a separate artifact from the N-LSA model. Not measured at
-  context lengths where it pays (the Qwen3 crossover is near 8k tokens); a sparse-budget pipeline stage is built but
-  only the one-stage run is checked against dense.
-- Diagnose on a card (step 8): `train_tiers::an_adapter_over_a_packed_base_trains_like_one_over_its_decoded_values` fails
-  for the int8 tier on a GH200 (loss 4.208457 vs 4.20684, worst adapter gradient error 0.26 at
-  `layers.0.mlp.gate_proj.lora_a`) and passes on the CPU backend; seen once by accident before the cards were hidden,
-  not investigated. Run it with `--device gpu0` and compare the int8 activation-quantized product with the decoded one.
-- Real-weight training numbers on a card (tokens/s against the GH200 roofline, the two-card pipeline's bubble,
-  N-LSA's crossover against the dense flash path at Ripple's head dimension) are step 8.
-
-- Activation quantization to FP4 (W4A4 as the release was calibrated) as an opt-in beside the float-read default
-  would need the static `input_scale`s applied; the checks and the coverage numbers above are the groundwork.
-- The embedding is gathered on the host a row at a time from the mapped file (no device copy); a bf16 device table
-  would save the host read at 1 GiB.
-
-- Step 1's `Layer::record` still materializes `[heads, t, t]` scores; the
-  engine does not (its scratch is `rows x heads x keys`, rows being one
-  prefill chunk or the decode batch, keys the window or the sequence limit).
-  It dispatches the paged decode triad because the fused paged flash kernels
-  are not CPU-capable; on a GPU the fused prefill and decode kernels (global
-  layers) and a windowed variant for the rings are the candidates, selected
-  by capability, with the triad as the reference.
-- The ring is `window + prefill_chunk` rows: a chunk writes all its rows
-  before any attends. A sliding row's block table is a list of its ring rows
-  (`block_size` 1), uploaded per forward; a windowed paged kernel that walks
-  the ring itself would drop that table.
-- Prefix reuse is at the filed length only (a snapshot of the rings plus the
-  shared global blocks); branch points (`SnapshotPrefixCache::branch_point`,
-  `hint_shared_prefix`) are not wired, so prompts that share a document and
-  then diverge do not reuse it.
-- LSA (step 3) can sit on the engine's global layers: their K is already
-  RMS-normed and unrotated in the pool, and `BlockTable` carries index pages.
-  The engine's `attend` for a global layer is the one place a sparse read
-  replaces the dense triad; the lifted component needs the block pool, the
-  block tables and `cap` from the engine, and a selection that falls back to
-  dense below a crossover.
-- The value-residual lerp uses `edm_mix` with per-row coefficients
-  `(1 - s, s)` (an f32 rounding apart from `x0 + s (xn - x0)`); a fused
+- **GPU phase**: Plan step 8 as a whole: CUDA and Vulkan parity of every gate, the 80-layer comparison with
+  the official reference, KL/top-1 of the NVFP4, int8/fp8 KV, sparse-budget and staged configurations, load-to-ready
+  time, placement bytes against `nvidia-smi`, tokens/s per tier against the roofline, prefill at 32k to 1M, the LSA
+  crossover, D-LSA distillation and retention at 32k and 128k, needle retrieval, training tokens/s, the two-card
+  pipeline's bubble, the 4-card full fine-tune, N-LSA's crossover against the dense flash path, the native NVFP4 and
+  fused-attention kernels and peer copies.
+- **GPU phase**: DFlash2 (step 6b). Acceptance and speedup against the real target, and the two conventions the
+  published files do not settle (tap = output of decoder layer `i` or `i + 1`; noise embedding with or without
+  `embed_scale`); the distribution of sampled decoding with the draft against plain sampling (it ran, seeded and
+  repeatable, but was not measured); the fused decode attention at the compact tiers on a card.
+- **GPU phase**: adapter serving (step 7c). The bank's 3.75 GiB at 65B (four rank-16 slots on every linear) and the
+  cost of the `embed` and `mul` passes per norm site while a non-base row is in the batch are computed, not measured.
+- **later**: DFlash2 plumbing. The taps are bf16 on the host (50 KiB a position, 13 GiB at 256k) and cross to the draft
+  through a host copy per round; the pool holds the target's own number of positions, so a server sized for many
+  cached prefixes pays the draft cache for positions only live sequences use. The shared tap contract is implemented
+  by Ripple only: Qwen3.8 (`qwen35::dflash2`) still drives the draft single-stream behind its own tap path, and
+  Qwen3's engine retains no taps.
+- **later**: prefix branch points (step 6c). A finished turn's reply is not cached (the `PagedDecoder` contract gives
+  a decoder no tokens at release); a branch is found at block granularity and uses the existing snapshot slots
+  (256 MiB a slot at 65B, charged), so a deployment with few slots keeps the newest few prefixes only.
+- **later**: adapter serving. The grouped correction of the linears that read one activation (q, k, v, g and gate, up:
+  two dispatches per linear instead of per group, `AdapterServing::input_groups`) is not wired. A sequence under an
+  adapter keeps its K and V in the adapter's namespace, so a prefix is shared among rows of the same adapter only. An
+  adapter carrying a full linear (`g_proj`, any linear, the embedding, the head) trains and is written but the
+  engine refuses to serve it by name (a per-row linear in a mixed batch is one product per distinct adapter): serve
+  it as a folded checkpoint (`fold_adapter_into`) or in an instance of its own. `value_res_lambda` has no PEFT
+  module form, so `export_peft` refuses an adapter that carries it.
+- **later**: training. An adapter trains over an NVFP4 base only as the ModelOpt release stores it (nothing quantizes
+  into NVFP4). A layer window together with several stages is not wired (refused by name). Resident `int8` and `nf4`
+  values (quantization-aware training) are refused. The f32 build still scatters the embedding gradient with the
+  vocabulary-wide `emb_bwd`. On the CPU backend `matmul_dx` with a very large contraction (the head's) is a naive
+  strided loop, 25 s a step for a toy model, so toy tests use a 32-token vocabulary; a GPU does not have the problem.
+- **later**: an adapter over an int8 base trains W8A8: the shared int8 product quantizes activations, so its gradient
+  is 0.128 away from the decoded-values build's as a whole (cosine 0.992; reproduced on the software Vulkan adapter,
+  the same digits as the one GH200 sighting, so not a card defect). Whether training should read f32 activations
+  against a packed int8 weight, as the other tiers do, is a design decision in the shared `Ops`.
+- **later**: N-LSA is not measured at context lengths where it pays (the Qwen3 crossover is near 8k tokens; the GPU
+  step measures Ripple's); its index space is the NoPE queries and keys as they are (no learned projection), so an
+  indexer distilled for serving (D-LSA) is a separate artifact from the N-LSA model; a sparse-budget pipeline stage is
+  built but only the one-stage run is checked against dense.
+- **later**: activation quantization to FP4 (W4A4 as the release was calibrated) as an opt-in beside the float-read
+  default would need the static `input_scale`s applied; the checks and the coverage numbers above are the groundwork.
+- **later**: the embedding is gathered on the host a row at a time from the mapped file (no device copy); a bf16
+  device table would save the host read at 1 GiB.
+- **later**: step 1's `Layer::record` still materializes `[heads, t, t]` scores (the engine does not; it is the
+  reference path). The ring is `window + prefill_chunk` rows, and a sliding row's block table is a list of its ring
+  rows uploaded per forward; a windowed paged kernel that walks the ring itself would drop that table. The
+  value-residual lerp uses `edm_mix` with per-row coefficients (an f32 rounding apart from `x0 + s (xn - x0)`); a fused
   QK-norm + RoPE + lerp kernel is the decode-path candidate.
-- The global layers' Q/K leave `Layer::record` RMS-normed and unrotated, which
-  is exactly what the LSA index (step 3) reads.
-- Real-weight inputs live under `testdata/ricursive/ripple-65b-partial/`; they
-  are not in the fetch mirror yet, so the real-weight test skips by name on a
-  box without them.
+- **later**: the real-weight inputs under `testdata/ricursive/ripple-65b-partial/` are not in the fetch mirror, so the
+  real-weight tests skip by name on a box without them.

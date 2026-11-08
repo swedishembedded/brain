@@ -35,7 +35,8 @@ scheduler, tokenizer, chat-template, reply-parsing and policy paths.
 | Trained adapters served from a bank over ONE resident base (`--adapter`, `--adapter-manifest`, `--watch-adapters`, adapters in the model store, `--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`): one batch mixes the base and several adapters, selected per request by model id; `TextGenerationPipeline::adapter` | [x] |
 | Training stages laid out over the selected cards from the memory plan (`--stages N` for an exact count) | [x] |
 | Loss over the vocabulary a chunk of rows at a time (no `[rows, vocab]` logits) | [x] |
-| Layer-streamed or resident low-precision full fine-tuning of the 65B; norms and `value_res_lambda` trained beside an adapter | [ ] |
+| Resident or layer-streamed low-precision full fine-tuning (`--train-precision`); norms and `value_res_lambda` trained beside an adapter (`--modules-to-save`) | [x] |
+| Run and measured on a GPU (CUDA or Vulkan): parity, tiers, serving, long context, training | [ ] |
 
 ## Serving it
 
@@ -108,11 +109,13 @@ would have used (int8 needs a packed-int8 dot, which the CPU backend does not
 have).
 
 The NVFP4 release is W4A4: it stores a static input scale per quantized
-module. Brain keeps activations in float (W4A16, at least as precise as the
-reference), so the scales are checked at open (one finite positive scalar per
-module, none missing) and not applied.
+module. Brain keeps activations in float (W4A16: it does not quantize them to FP4 as the
+release was calibrated for), so the scales are checked at open (one finite positive
+scalar per module, none missing) and not applied. How far the release stays from the bf16
+model is measured on two layers only.
 
-The sliding layers keep a fixed ring of recent keys per sequence and the
+The byte counts on this page are the memory plan's arithmetic; no card has measured
+them. The sliding layers keep a fixed ring of recent keys per sequence and the
 global layers keep a growing paged cache, so the memory a sequence costs is a
 fixed ring plus a per-token share of the global layers
 (`ricursive::ring_bytes_per_slot`, `ricursive::global_kv_bytes_per_token`).
@@ -144,7 +147,9 @@ each layer, five 5120-wide taps, fused by a `25600 -> 5120` projection and an RM
 layers (window 4096, RoPE theta 10000) and one full NoPE layer, each wrapped in dynamic four-tap convolutions
 (groups of 16), and a rank-256 candidate selector over predecessor and successor codebooks walks the target head's
 top 32 candidates into one path. The draft shares the target's embedding (the rows as the checkpoint stores them,
-without `embed_scale`) and `lm_head`.
+without `embed_scale`) and `lm_head`. Two conventions the published files do not settle,
+the tap being the output of layer `i` and the unscaled noise embedding, are taken as
+stated until the acceptance against the real target confirms them.
 
 ```bash
 brain pull ricursiveAI/Ripple-65B-Preview-NVFP4

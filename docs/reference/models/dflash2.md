@@ -5,8 +5,8 @@ decoding. It is not a language model that serves on its own: a target's engine
 loads it, and it proposes the next 15 tokens of every sequence in one forward
 instead of one token per step. The scheduler verifies the proposals in one batched
 target step and keeps the longest prefix the target agrees with, so greedy output is
-unchanged and a sampled sequence keeps the target's distribution (rejection
-sampling).
+unchanged and a sampled sequence goes through rejection sampling (its distribution
+against plain sampling has not been measured).
 
 What makes it more than a small decoder:
 
@@ -53,6 +53,10 @@ activations to the last stage's card (the caches at the target's `--kv-cache` ti
 values a position) to the host, so the default context shrinks to leave room. A draft
 built for another target (width, vocabulary, the layers it reads, the mask token) is
 refused by name.
+
+The target layers are read as the output of each listed decoder layer and the block's
+noise embedding is the target's unscaled embedding row; the published files do not settle
+either, and the acceptance against the real target has not been measured.
 
 Beside `--sparse-attention` the verify is kept inside one cluster block of the
 index, so every row reads the index a plain decode step at its position would.

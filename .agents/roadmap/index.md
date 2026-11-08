@@ -83,6 +83,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`qwen3omnimoe`](qwen3omnimoe.md) | qwen3omnimoe | Qwen3-Omni-30B (`crates/qwen3omnimoe`). |
 | [`qwen3tts`](qwen3tts.md) | qwen3tts | Qwen3-TTS synthesis stack (`crates/qwen3tts`, `mimi`, `ecapatdnn`). |
 | [`research-upgrades`](research-upgrades.md) | research-to-stack - brain share | brain's share of the cross-project research upgrades. |
+| [`ripple-gpu-validation`](ripple-gpu-validation.md) | ripple-gpu-validation | The ordered, runnable plan that takes Ripple-65B from "finished on the CPU backend and the software Vulkan adapter" to "validated and measured on GH200 cards": every step's command, the number it should reproduce and what a failure points to. |
 | [`ripple`](ripple.md) | ripple | Ripple-65B (`RicursiveForCausalLM`, `model_type: ricursive`) inference, serving and training, with latent sparse attention on its global layers. |
 | [`rknpu`](rknpu.md) | rknpu | native Rockchip RV1103/RV1106 NPU support (own compiler and `/dev/rknpu` runtime, no vendor SDK), a lean low-RAM build of brain for 32-bit ARM boards, and YOLOv5 detection served on such a board. |
 | [`rlcd`](rlcd.md) | rlcd | Reinforcement learning for calibrated decisions (`crates/rlcd`). |
