@@ -44,8 +44,7 @@ the chapter where a reader should first meet it.
   subject of their section ("Why a column walk misses the cache", not "Common
   mistakes" or "What this is for"), and no two chapters should feel cut from
   the same template. `make check/book` rejects template-slot labels and any
-  heading or run-in label recycled across chapters
-  (`scripts/book/pending-prose.txt` lists chapters still to be rewritten).
+  heading or run-in label recycled across chapters.
 - **The end of a chapter is reference apparatus**, the one place every
   chapter is alike so a reader can find it: `## Exercises`, `## Key terms`
   and `## Answers`, optionally preceded by `## Check your understanding`, a

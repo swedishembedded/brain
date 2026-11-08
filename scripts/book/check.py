@@ -151,34 +151,16 @@ def slug(term: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", term.casefold()).strip("-")
 
 
-# Chapters written before the gate existed, still to be rewritten as prose. The
-# list only shrinks: an entry whose chapter already passes is an error, so it is
-# removed in the same change that rewrites the chapter.
-PENDING_PROSE = ROOT / "scripts" / "book" / "pending-prose.txt"
-
-
 def recycled(page_list, errors):
     """Headings and run-in labels repeated across chapters: a template, not writing."""
-    pending = {l.strip() for l in PENDING_PROSE.read_text(encoding="utf-8").splitlines()
-               if l.strip() and not l.startswith("#")} if PENDING_PROSE.is_file() else set()
-    real, where = [], {}
+    where: dict[str, set[str]] = {}
     for path, ch in page_list:
-        if ch is None:
-            continue
-        rel = path.relative_to(ROOT).as_posix()
-        own: list[str] = []
-        _labels(path, rel, own, where)
-        if rel in pending:
-            if not own:
-                real.append(f"{rel}: listed in {PENDING_PROSE.name} but already passes: remove it")
-        else:
-            real += own
+        if ch is not None:
+            _labels(path, path.relative_to(ROOT).as_posix(), errors, where)
     for label, files in sorted(where.items()):
-        files = files - pending
         if len(files) > RECYCLED_LIMIT:
-            real.append(f"'{label}' heads a section in {len(files)} chapters (limit {RECYCLED_LIMIT}): "
-                        "give each its own subject-specific wording")
-    errors += real
+            errors.append(f"'{label}' heads a section in {len(files)} chapters (limit {RECYCLED_LIMIT}): "
+                          "give each its own subject-specific wording")
 
 
 def _labels(path, rel, errors, where):

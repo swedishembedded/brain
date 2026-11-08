@@ -1,5 +1,0 @@
-# Chapters still to be rewritten as prose (scripts/book/check.py, recycled()).
-# Remove a line in the same change that rewrites its chapter; the list only shrinks.
-docs/book/v04-computation/12-quantization.md
-docs/book/v04-computation/13-npu.md
-docs/book/v04-computation/14-project-tensor-engine.md

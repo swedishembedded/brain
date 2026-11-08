@@ -5,8 +5,6 @@
 
 *How can a model's weights be stored in four bits each and still work?*
 
-## The problem
-
 A 7-billion-weight model in 16-bit floating point is 14 GB, and generating one token reads all of it
 (Chapter 3). The speed of that decoding is set by how many bytes cross the memory bus, so the way to a
 quicker model is a smaller one: the same weights in fewer bits. Four bits is a quarter of sixteen. Yet four bits can name only 16 different
@@ -39,9 +37,7 @@ range the group really occupies, has a step of 0.0085 against 0.0125, and a mean
 it grows, shows what a single large weight does to a scale, and builds the group-wise and two-level formats that real checkpoints use,
 down to the bytes of one block. It ends with the question of which tensors may have fewer bits than others.
 
-## Before you begin
-
-Answers are at the end of the chapter.
+Five older ideas carry the rest of this chapter: the integer code and the fp8 format of Chapter 1, rounding to a grid, the mean squared error, and the roofline account of a decode step. Bring them back from memory; the answers are at the end of the chapter.
 
 1. (Chapter 1, number formats.) An int8 code $q = -37$ is stored with the scale $\Delta = 0.01$. What number does it stand for, and what is the largest error that
    rounding to the nearest code can make?
@@ -52,8 +48,6 @@ Answers are at the end of the chapter.
 5. (Chapter 3, the roofline.) A model with $7 \times 10^9$ weights is stored at 2 bytes per weight. How many bytes does one token read at batch size 1, and what limits the speed of decoding?
 
 ## Affine quantization: a step and a zero
-
-*What this is for: to turn a real number into one of $2^{n_b}$ codes in a way that can be undone, and to say which two numbers the decoder needs.*
 
 The table above did the same three things in each column. It chose a **scale** $\Delta$, the distance between neighbouring levels; it chose a **zero point**
 $q_0$, the code that stands for the number 0; and it mapped each weight $w$ to the code $q$ and back to $w'$. Together, the pair $(\Delta, q_0)$ is the
@@ -104,9 +98,7 @@ Every weight between two neighbouring levels is moved to the nearer one. That mo
 
 ## Quantization error: the bound, the average and the decibel
 
-*What this is for: to predict the error of a code from its step alone, so that we can choose the number of bits before quantizing anything.*
-
-The **quantization error** of a weight is the difference between the decoded and the original number, $e = w' - w$. With the map above and a weight inside
+Before quantizing anything we want to predict what a code will cost from its step alone, so that the number of bits can be chosen in advance. The **quantization error** of a weight is the difference between the decoded and the original number, $e = w' - w$. With the map above and a weight inside
 the range of the codes, $e = \Delta\,(\mathrm{round}(t) - t)$ where $t = w/\Delta$. Rounding to the nearest integer moves a number by at most one half
 (the rounding error of Volume I, Chapter 15, with a grid of spacing 1), so
 $$|e| \le \Delta/2.$$
@@ -137,17 +129,14 @@ cover $[-A, A]$ with $2^{n_b}$ levels, $\Delta = 2A/2^{n_b}$ and $\mathrm{MSE} =
 
 From 3 bits up the measured MSE is the prediction $\Delta^2/12$ within 0.3%, and the worst error is exactly the bound: some weight lies half a step from a level. The gain per
 bit falls from 7.3 decibels towards 6.02 as the model becomes accurate. At 2 bits the model fails: with only three levels, $\Delta = 4.22$ is larger than the standard deviation of the weights, most weights round to zero
-and their error is the weight itself, whose mean square (the variance) is smaller than $\Delta^2/12$; the ratio of measured to predicted is 0.603 and the SQNR is 0.48 dB. The 2-bit row is not an error of
-arithmetic. It is the point at which one step is no longer small against the spread of the data, and the model's assumption (a density that is flat over one step) does not hold.
+and their error is the weight itself, whose mean square (the variance) is smaller than $\Delta^2/12$; the ratio of measured to predicted is 0.603 and the SQNR is 0.48 dB. The 2-bit row marks the point at which one step is no longer small against the spread of the data, and the model's assumption (a density that is flat over one step) does not hold.
 
 The table also shows the cost of a scale taken from the largest weight: the step $\Delta = \max|w|/q_{\max}$ is set by the single most extreme of 100,000 values (4.2 standard deviations here), not by the bulk. That is harmless for a bell-shaped
 tensor and ruinous for a heavy-tailed one.
 
 ## One large weight stretches every step
 
-*What this is for: to see the failure that forces every practical format to use more than one scale per tensor.*
-
-A trained weight tensor often has a few weights much larger than the rest. Build one: 16,384 weights $0.02\,z$ with $z$ normal, of which each, with probability 0.004, is replaced by one ten times
+One failure forces every practical format to use more than one scale per tensor. A trained weight tensor often has a few weights much larger than the rest. Build one: 16,384 weights $0.02\,z$ with $z$ normal, of which each, with probability 0.004, is replaced by one ten times
 as large (the seeded flags are drawn after the normals, as the table states). We quantize to 4 bits with one scale for the whole tensor and then with one scale per 32 consecutive weights, and we
 look only at the weights that are not outliers, because those carry nearly all of the tensor's information.
 
@@ -168,9 +157,7 @@ groups when no outlier is present. This is the lesson that every format after th
 
 ## Group-wise quantization
 
-*What this is for: to choose how many weights share a scale, since a smaller group buys accuracy and costs scale bits.*
-
-**Group-wise quantization** gives each run of $G$ consecutive weights (along the axis a matrix product reduces over) its own scale. Each group is quantized by the rule of Chapter 1; the scale is stored in
+The remedy is to let a small group share a scale, and the open question is how small, since a smaller group buys accuracy and costs scale bits. **Group-wise quantization** gives each run of $G$ consecutive weights (along the axis a matrix product reduces over) its own scale. Each group is quantized by the rule of Chapter 1; the scale is stored in
 a floating-point format, and the decoder multiplies.
 
 ```text
@@ -219,9 +206,7 @@ Real formats settle on $G$ of 16 or 32, with the scale itself in 16 bits or less
 
 ## Weight-only quantization
 
-*What this is for: to turn fewer stored bytes into fewer bytes moved, without changing the arithmetic of the activations.*
-
-In **weight-only quantization** the weights are stored as low-bit codes with their scales, and the activations stay in a higher-precision format (16 or 32 bits). The codes are decoded
+Smaller storage should mean less traffic, and it can, without touching the arithmetic of the activations. In **weight-only quantization** the weights are stored as low-bit codes with their scales, and the activations stay in a higher-precision format (16 or 32 bits). The codes are decoded
 on the fly, inside the matrix product, to numbers of the arithmetic format; no full decoded copy of the weights is kept in memory. This is the "store narrow, compute wide" rule of Chapter 1 applied to the weights alone, and Chapter 3 gives the
 reason it pays: a decode step at batch size 1 is bandwidth-bound, so its time is bounded by the bytes of weights read, and the arithmetic is nearly free. Counting those bytes for the formats of this chapter:
 
@@ -268,9 +253,7 @@ so that the product itself runs on integers, is the next chapter's subject; this
 
 ## K-quantization: scales that are themselves quantized
 
-*What this is for: to see how a format keeps a small group, and therefore a small error, without paying 16 bits for every group's scale.*
-
-A step and a floor per 32 weights, each stored in 16 bits, cost 32 bits beside the 128 bits of the codes: one more bit per weight, which makes 4-bit codes a 5-bit format. The **k-quantization** formats of GGML, whose block layouts the GGUF file format carries,
+Small groups give small errors, but each group's scale costs bits, and the question is how to keep the first without paying the second. A step and a floor per 32 weights, each stored in 16 bits, cost 32 bits beside the 128 bits of the codes: one more bit per weight, which makes 4-bit codes a 5-bit format. The **k-quantization** formats of GGML, whose block layouts the GGUF file format carries,
 store the scale of a small group in fewer bits and attach to it one higher-level number. A **super-block** of 256 weights is divided into 8 sub-blocks of 32. Each sub-block has an affine code of its own, with a step $d\,\mathrm{sc}_j$ and a floor
 $d_{\min}\,\mathrm{m}_j$ built from two 6-bit integers $\mathrm{sc}_j$ and $\mathrm{m}_j$, and the whole super-block stores only two 16-bit factors $d$ and $d_{\min}$. This is Q4_K when the codes have 4 bits, and the decoding is
 $$w' = d\,\mathrm{sc}_j\,q - d_{\min}\,\mathrm{m}_j \qquad \text{for weight } i \text{ with } j = \lfloor i/32 \rfloor,\ q \in 0\ldots 15.$$
@@ -519,9 +502,7 @@ differ by an offset: how well the scales follow the data. Fourth, the per-tensor
 
 ## A floating-point code with a scale
 
-*What this is for: to see where an 8-bit floating-point format beats an 8-bit integer, and where it does not.*
-
-Chapter 1 gave the fp8 formats E4M3 and E5M2 and said they are always used with a scale. Used as a weight format they are quantization with a different set of 256 levels: instead of equally spaced levels, levels whose spacing grows with the magnitude.
+Which is the better 8-bit code for a weight, an integer or a float? Chapter 1 gave the fp8 formats E4M3 and E5M2 and said they are always used with a scale. Used as a weight format they are quantization with a different set of 256 levels: instead of equally spaced levels, levels whose spacing grows with the magnitude.
 Both store a scale per group (here the group maximum divided by the format's largest finite number), and the error profile differs: an integer code has an absolute error that is the same for every weight of the group, a floating-point code has a relative error that is the same
 for every magnitude. We measure it on the heavy-tailed weights, grouped by 32, by the position $t = |w|/\max|\mathrm{group}|$ of each weight under its group's largest:
 
@@ -547,9 +528,7 @@ carry information that a large value must not drown (activations with a wide ran
 
 ## What the layer's output sees
 
-*What this is for: to connect the error of the weights to the error of what the model computes, since the second is the one that matters.*
-
-A weight error matters through the products it enters. For $y = \sum_j w_j x_j$ with weights $w'_j = w_j + e_j$, the output error is $\sum_j e_j x_j$. If the errors $e_j$ are uncorrelated with each other and with the inputs, its mean square is
+The error of the weights is not the one that matters; the one that does is the error of what the model computes from them. A weight error matters through the products it enters. For $y = \sum_j w_j x_j$ with weights $w'_j = w_j + e_j$, the output error is $\sum_j e_j x_j$. If the errors $e_j$ are uncorrelated with each other and with the inputs, its mean square is
 $k\,\mathrm{MSE}\,\mathbb{E}[x^2]$ for $k$ inputs, while the output power is $k\,\sigma_w^2\,\mathbb{E}[x^2]$ for weights of variance $\sigma_w^2$. The $k$ and the input power cancel in the ratio:
 the SQNR of the output equals the SQNR of the weights, however wide the layer. We check the prediction on a seeded layer of 64 outputs and 256 inputs, quantized group-wise at 2 to 8 bits:
 
@@ -573,9 +552,7 @@ when those meet the large weights the errors are not independent, so the measure
 
 ## Which tensors need how many bits
 
-*What this is for: to spend a fixed budget of bytes where the model is most sensitive, instead of the same bits everywhere.*
-
-Tensors differ. A projection that sets the scale of everything after it tolerates less error than one inside a residual branch, and an embedding table is read once per token and a layer's weights many times. Suppose each tensor $i$ has a **sensitivity** $\mathrm{sens}_i$, the increase of the loss per unit of squared weight error,
+A fixed budget of bytes should go where the model is most sensitive, and not be spread as the same bits everywhere. Tensors differ. A projection that sets the scale of everything after it tolerates less error than one inside a residual branch, and an embedding table is read once per token and a layer's weights many times. Suppose each tensor $i$ has a **sensitivity** $\mathrm{sens}_i$, the increase of the loss per unit of squared weight error,
 and we can store it at one of several widths $n$. The estimated loss increase of tensor $i$ at $n$ bits is then the second-order term of the loss around the trained weights,
 $$E_{in} = \tfrac12\,\mathrm{sens}_i\,N_i\,\sigma_i^2\,\mathrm{rel}_n,$$
 where $N_i$ is its number of weights, $\sigma_i^2$ their variance and $\mathrm{rel}_n$ the MSE over the variance of an $n$-bit code (measured below; it falls by about a factor 4 per bit at the wider widths, as derived). The bytes are $N_i(n + 0.5)/8$. The **mixed-precision weight search** chooses one width per tensor to minimize the total
@@ -700,17 +677,13 @@ The twelve tensors of the input table, tiers n in {2, 3, 4, 6, 8}, budget 4.5 bi
 The value of an upgrade is independent of the size of the tensor (error and bytes both scale with $N_i$) and proportional to $\mathrm{sens}_i\sigma_i^2$, so the two tensors with the least $\mathrm{sens}_i\sigma_i^2$ per weight (6 and 9) end at 3 bits, the others at 4, and the two small tensors 3 and 4 get 6 bits with the bytes that were left over when no upgrade of a large tensor fitted. The best uniform width that fits the same bytes (all tensors at 4 bits) has 1.18 times greedy's error, 7.1288 against 6.0655. The median random plan that fits the budget has 18.2 times greedy's error, because chance puts 2-bit codes on tensors that cannot take them: where the bits are placed matters more than how many there are.
 These errors are estimates from a model. A real search must measure the plan on held-out data before accepting it, and the next section shows that brain does exactly that.
 
-## Making it work
+## What a careful quantizer counts, chooses and checks
 
-- **Count the bits the format stores, scales included.** A 4-bit code with a 16-bit scale per 32 weights is 4.5 bits per weight, not 4. Compare formats at equal $\mathrm{bpw}$.
-- **Make the group a divisor of the reduction axis, and never let one straddle a row.** A group that crosses a row boundary shares one scale between two output channels; a tensor whose reduction length is not a whole number of groups is kept in floating point, and a quantizer refuses it rather than guess.
-- **Choose codes against the stored scales.** The decoder only sees what is stored.
-- **Use signed codes with a symmetric range for weights, and an offset where a group is not centred.** Symmetric ranges keep the product free of correction terms; a floor per sub-block removes the cost of an off-centre group at one 6-bit number.
-- **Pack with a single stated order and test it on a negative code.** A nibble read as unsigned instead of signed changes only the negative weights, and a decoder that does so passes any test that has only positive values.
-- **Report the error as MSE or SQNR together with cosine, and test the whole output.** The error that counts is the one a layer's output sees, and ultimately the held-out loss of the whole model.
-- **Report a speed as counted bytes and FLOPs**, and measure any time the way Chapter 11 says.
+The sections above leave a short list of habits. A format is compared by the bits it stores, scales included: a 4-bit code with a 16-bit scale per 32 weights is 4.5 bits per weight, not 4, and formats are compared at equal $\mathrm{bpw}$. The group is a divisor of the reduction axis and never straddles a row, because a group that crosses a row boundary shares one scale between two output channels; a tensor whose reduction length is not a whole number of groups is kept in floating point, and a quantizer refuses it rather than guess. Codes are chosen against the stored scales, since the decoder only sees what is stored.
 
-## Where this appears in brain
+Weights use signed codes with a symmetric range, which keeps the product free of correction terms, and an offset only where a group is not centred; a floor per sub-block removes the cost of an off-centre group at one 6-bit number. Packing follows a single stated order and is tested on a negative code, because a nibble read as unsigned instead of signed changes only the negative weights, and a decoder that does so passes any test that has only positive values. Error is reported as MSE or SQNR together with cosine, and the test is on the whole output, since the error that counts is the one a layer's output sees and ultimately the held-out loss of the whole model. A speed is reported as counted bytes and FLOPs, and any time is measured the way Chapter 11 says.
+
+## Quantization in brain: decoders, encoders, tiers, import and search
 
 **The file format layer.** `crates/checkpoint/src/gguf.rs` reads the block formats that GGML originated and that GGUF files carry. `GgmlType` lists each format's weights per block (`block_elems`) and bytes per block (`block_bytes`): Q4_0 is 18 bytes for 32 weights, Q8_0 34, Q4_K 144 for 256, Q5_K 176, Q6_K 210, the numbers of the byte table above. The decoders are one function per format
 (`deq_q4_0`, `deq_q8_0`, `deq_q4_k`, `deq_q5_k`, `deq_q6_k`) and they are the specification. `deq_q4_k` is this chapter's `dequantize_q4k` line for line: a 12-byte scale field unpacked by `scale_min_k4`, then for each of four chunks of 32 bytes the low nibbles with the scale of sub-block $2c$ and the high nibbles with that of $2c+1$; Q4_0's two halves of 16 are in `deq_q4_0`.
@@ -751,7 +724,7 @@ and its comment states the guarantee above (exact on convex options when the bud
 required to be disjoint from the calibration batches (a test checks that overlapping sets are refused), and compares it with every uniform tier that fits the budget. The acceptance test builds a small trained model, searches at a budget halfway between uniform int8 and uniform 4-bit, and asserts that the plan meets
 the budget, has a lower held-out loss than every uniform tier that fits and than the median of shuffles of its own tiers among sites of the same shape. The candidate tiers are those `Weight::packs` accepts (int8, 4-bit, NF4, fp8 and the 16- and 32-bit floats), so the K-quant tiers of the import path are not among them.
 
-### Story 1: one outlier and the scale of a whole row
+### One outlier and the scale of a whole row
 
 Until August 2026 brain's int8 and int4 quantizers emitted one scale per output row, with the reduction axis of the models it served reaching 17,408 weights. Commit f9c3977e7 (28 August 2026) replaced this by a scale per group of 32 for every consumer, deleting the old path rather than keeping it. Its message
 names the defect as the one of this chapter's outlier section and the reason for 32: it is Q8_0's block size. The measurement behind it is the repository's test `group_wise_confines_a_row_outlier_that_whole_channel_spreads_over_the_row` (in `crates/model/src/int8.rs`): two rows of 512 weights, one weight replaced by 100.0. Re-implemented from its description:
@@ -770,13 +743,13 @@ Ratio of the two largest errors: 262.
 The numbers equal those of knowledge #65 to the digit: with one scale per row, the largest error outside the outlier's group is 0.312 and 687 of 1022 weights are destroyed; with a scale per 32 weights it is 0.001189 and 39 (only the outlier's own group). The lesson of that entry is the general one, that a bound should be set by the block and not by the length of the row, so a test asserts boundedness and not a ratio.
 Two consequences are visible in the code. Because the group is now 32, a scale tensor of the old row-wise shape would still parse as the first row's group scales and produce plausible garbage, so `check_scale_len` recognises exactly that length and says the format changed. And the storage ceiling of int8 moved from 4 times smaller than f32 to $4/1.125 = 3.56$: the scale is not free.
 
-### Story 2: keep the two-level structure on the device
+### Keeping the two-level structure on the device
 
 Commit 76161efc9 (2 September 2026) added the relayout of GGUF blocks into a device layout, with the first version storing the product of the two levels, one f32 `(scale, min)` pair per group of 32. Commit c0954e8df (3 September 2026) replaced it with the two pieces the file already carries: a pair of bytes per group
 and an f16 pair per super-block. The table above gives the effect on the bytes of Q4_K, computed from the layout: 6.0 bits per weight with the flat pair against 4.625 with the two-level one, and its last column is the reason the same commit left Q5_K's footprint at 1.57 times the file's: the layout stores a 5-bit code in an 8-bit slot, and the follow-up
 design to fix it was recorded and not built. The lesson is that a quantized format's structure is information: storing the product of the two levels throws it away and costs bytes in the very place where bytes are what is being bought.
 
-### Story 3: the estimate chooses, the measurement accepts
+### The estimate chooses, the measurement accepts
 
 Commit e68da7686 (4 November 2026) added `modelopt` with one rule above the rest: sensitivities are additive estimates that pick candidates, and only a whole-model measurement on held-out data accepts a result. The rule is in the code (`search_weights` returns the plan together with the held-out loss of the original and of each uniform baseline,
 and `beats_baselines` is the comparison a plan has to win) and is stated in the invariants of `.agents/roadmap/modelopt.md`. The ledger there also records, among its runs, one where the plan was refused because the measurement of a code model on prose text disagreed with the second-order estimate (which assumes the mean gradient is near zero);
@@ -796,6 +769,23 @@ Answers are at the end of the chapter.
 7. **Find the error.** "Greedy search by error removed per byte is optimal, because it always makes the best move." Use the six-tensor table to refute it.
 8. **Explain.** After the 6-bit scales and mins of a Q4_K block have been rounded, why must the codes be chosen again?
 
+## Summary
+
+A weight is stored as a small integer code and read back through a scale and, when the group is not centred on zero, a zero point: affine quantization, $w' = \Delta(q - q_0)$. The error of a code is bounded by half a step and, when the density of the weights is flat over a step, has the mean square $\Delta^2/12$; each added bit quarters the error power and adds 6.02 dB (measured: 7.3 dB from 2 to 3 bits, 6.09 dB from 7 to 8), and the model fails only when the step is as large as the spread of the data (2 bits). A scale taken from the largest weight of a tensor is set by its most extreme member: 58 outliers among 16,384 weights
+left 81.7 percent of the ordinary weights at zero. Group-wise scales confine an outlier to its group, at a price of scale bits per weight, $n_b + (\text{scale bits})/G$, and the break-even between smaller groups and wider codes is visible in the tables. Weight-only quantization keeps activations in floating point, reads a
+fraction of the bytes (4.5 bits against 16 is 3.56 times fewer, 14.000 GB to 3.938 GB for 7 billion weights), and factors the scale out of the dot product so that decoding adds about $3/G$ FLOPs per weight. K-quantization quantizes the scales again: Q4_K stores 256 weights in 144 bytes (4.5 bits per weight) as eight 32-weight sub-blocks with 6-bit scales and mins and two f16 factors,
+in a packing whose rules (the twelve scale bytes, the low and high nibbles of a chunk) are exact enough to decode by hand; the codes must be chosen against the stored scales. Integer and floating-point codes differ in their error profile, absolute for the first and relative for the second, and the output error of a layer follows the weights' SQNR when the errors are independent of the inputs. Last, tensors differ in sensitivity,
+and a greedy knapsack on error removed per byte places the bits: optimal in 8 of 9 budgets on a tiny instance, 0.62 percent off in the ninth, and on a larger one the best uniform width has 1.18 times its error. brain applies the same ideas in the decoders and encoders of `checkpoint`, in the relayout of `gguf`, in its group-wise int8 and int4 tiers and in the measured search of `modelopt`, which accepts nothing that the held-out loss does not confirm.
+
+The weights are now small; the activations and the arithmetic are still floating point. The next chapter, Neural Processing Units and Graph Compilers, quantizes the activations as well, calibrates the ranges on data (post-training quantization), and compiles the whole network into integer arithmetic for a fixed-function accelerator.
+
+## References
+
+- Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu, Matthew Tang, Andrew Howard, Hartwig Adam and Dmitry Kalenichenko, "Quantization and training of neural networks for efficient integer-arithmetic-only inference", 2018.
+- Elias Frantar, Saleh Ashkboos, Torsten Hoefler and Dan Alistarh, "GPTQ: Accurate post-training quantization for generative pre-trained transformers", 2023.
+- Tim Dettmers, Mike Lewis, Younes Belkada and Luke Zettlemoyer, "LLM.int8(): 8-bit matrix multiplication for transformers at scale", 2022.
+- Bernard Widrow and Istvan Kollar, "Quantization noise: roundoff error in digital computation, signal processing, control, and communications", 2008.
+
 ## Exercises
 
 1. **[Calculate]** For the weights $0.31, -0.12, 0.05, 0.22, -0.40, 0.18, 0.00, 0.27$ find the symmetric 4-bit scale and codes ($q_{\max} = 7$) and the affine scale, zero point and codes (16 codes), with ties to even. Which decodes with the smaller largest error, and is it within $\Delta/2$?
@@ -812,16 +802,6 @@ Answers are at the end of the chapter.
 12. **[Investigate]** From the rows of `quantization.device_layouts`, say which formats pay most, relative to the file, for the layout they are held in, and why. What would a layout with a 4-bit plane and a separate 1-bit plane for Q5_K cost per weight (the scales and factors as in the table), and how would that compare with the 1.57 of the table?
 13. **[Investigate]** Read `crates/modelopt/src/sensitivity.rs` and `solve.rs`. State, for each of the three hypotheses of the estimate (second order, diagonal curvature, sites independent), a situation in which it fails, and say what in `search_weights` guards against each failure.
 
-## Summary
-
-A weight is stored as a small integer code and read back through a scale and, when the group is not centred on zero, a zero point: affine quantization, $w' = \Delta(q - q_0)$. The error of a code is bounded by half a step and, when the density of the weights is flat over a step, has the mean square $\Delta^2/12$; each added bit quarters the error power and adds 6.02 dB (measured: 7.3 dB from 2 to 3 bits, 6.09 dB from 7 to 8), and the model fails only when the step is as large as the spread of the data (2 bits). A scale taken from the largest weight of a tensor is set by its most extreme member: 58 outliers among 16,384 weights
-left 81.7 percent of the ordinary weights at zero. Group-wise scales confine an outlier to its group, at a price of scale bits per weight, $n_b + (\text{scale bits})/G$, and the break-even between smaller groups and wider codes is visible in the tables. Weight-only quantization keeps activations in floating point, reads a
-fraction of the bytes (4.5 bits against 16 is 3.56 times fewer, 14.000 GB to 3.938 GB for 7 billion weights), and factors the scale out of the dot product so that decoding adds about $3/G$ FLOPs per weight. K-quantization quantizes the scales again: Q4_K stores 256 weights in 144 bytes (4.5 bits per weight) as eight 32-weight sub-blocks with 6-bit scales and mins and two f16 factors,
-in a packing whose rules (the twelve scale bytes, the low and high nibbles of a chunk) are exact enough to decode by hand; the codes must be chosen against the stored scales. Integer and floating-point codes differ in their error profile, absolute for the first and relative for the second, and the output error of a layer follows the weights' SQNR when the errors are independent of the inputs. Last, tensors differ in sensitivity,
-and a greedy knapsack on error removed per byte places the bits: optimal in 8 of 9 budgets on a tiny instance, 0.62 percent off in the ninth, and on a larger one the best uniform width has 1.18 times its error. brain applies the same ideas in the decoders and encoders of `checkpoint`, in the relayout of `gguf`, in its group-wise int8 and int4 tiers and in the measured search of `modelopt`, which accepts nothing that the held-out loss does not confirm.
-
-The weights are now small; the activations and the arithmetic are still floating point. The next chapter, Neural Processing Units and Graph Compilers, quantizes the activations as well, calibrates the ranges on data (post-training quantization), and compiles the whole network into integer arithmetic for a fixed-function accelerator.
-
 ## Key terms
 
 - **affine quantization**: the map from a real number to an $n_b$-bit integer code and back, $q = \mathrm{clamp}(\mathrm{round}(w/\Delta) + q_0, 0, 2^{n_b} - 1)$ and $w' = \Delta(q - q_0)$, a multiplication and an offset applied to a group of weights. <!-- concept: affine-quantization -->
@@ -834,7 +814,7 @@ The weights are now small; the activations and the arithmetic are still floating
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $-37 \times 0.01 = -0.37$; the largest error is half a step, $0.005$.
 2. $448$. The format spans about five decades ($448/2^{-9} \approx 2.3 \times 10^5$), less than a tensor's weights, so a scale moves each block's largest value to the top of the format.
@@ -852,10 +832,3 @@ The weights are now small; the activations and the arithmetic are still floating
 6. About 20 dB: the output SQNR equals the weights' when the errors are independent of each other and of the inputs, because the number of inputs cancels from the ratio (the table showed 20.32 against 20.39 for 256 inputs). The assumption is independence; real activations with large channels can break it.
 7. At 5.75 bits per weight greedy gives `444888` with error 2.6297 and the exhaustive optimum is `448844` with 2.6136. Each greedy move was the most efficient one available, but the sequence of such moves does not have to fill the budget best.
 8. The decoder reads the stored $d\,\mathrm{sc}_j$ and $d_{\min}\mathrm{m}_j$, not the ideal steps and floors; codes found against the ideal ones are decoded with different levels and the error is higher (MSE $9.5759 \times 10^{-6}$ against $9.0587 \times 10^{-6}$ for the block of the chapter).
-
-## References
-
-- Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu, Matthew Tang, Andrew Howard, Hartwig Adam and Dmitry Kalenichenko, "Quantization and training of neural networks for efficient integer-arithmetic-only inference", 2018.
-- Elias Frantar, Saleh Ashkboos, Torsten Hoefler and Dan Alistarh, "GPTQ: Accurate post-training quantization for generative pre-trained transformers", 2023.
-- Tim Dettmers, Mike Lewis, Younes Belkada and Luke Zettlemoyer, "LLM.int8(): 8-bit matrix multiplication for transformers at scale", 2022.
-- Bernard Widrow and Istvan Kollar, "Quantization noise: roundoff error in digital computation, signal processing, control, and communications", 2008.

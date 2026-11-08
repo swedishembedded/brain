@@ -5,9 +5,7 @@
 
 *Can you make the same matrix multiply run correctly and fast on more than one kind of hardware?*
 
-## The goal
-
-Thirteen chapters have taken a matrix multiplication from three lines of arithmetic to a family of kernels, and have taught the habits that keep a family honest: count the work before timing it, run every kernel on a simulator that exposes its edges, derive a tolerance instead of choosing one, gate every candidate before it is allowed to be fast, and measure with a clock that has been waited for. This chapter asks you to turn those habits into one program. You will write, in a language of your choice, a small tensor engine with seven parts:
+A matrix product that is right on the machine where it was written has proved nothing about the next machine. Thirteen chapters have taken a matrix multiplication from three lines of arithmetic to a family of kernels, and have taught the habits that keep a family honest: count the work before timing it, run every kernel on a simulator that exposes its edges, derive a tolerance instead of choosing one, gate every candidate before it is allowed to be fast, and measure with a clock that has been waited for. This chapter asks you to turn those habits into one program. You will write, in a language of your choice, a small tensor engine with seven parts:
 
 1. **A tensor and an oracle.** A strided tensor (shape, strides, offset over flat storage) and a reference matrix product in 64-bit arithmetic that every later result is judged against (Volume I, Chapter 5; Chapter 6).
 2. **A CPU backend.** The backend interface of Chapter 9, a workgroup-and-barrier executor that runs kernels written as the program of one invocation (the simulator transformation of Chapters 5 and 9), and the naive matrix-product kernel on top of it.
@@ -21,15 +19,13 @@ Four words recur and are defined by use. The **oracle** is the float64 reference
 
 Nothing here is new. Every part was derived and worked by hand in Volume IV; the project asks whether the parts compose into an engine you would trust on a device you have not seen, which is a different thing from following a derivation. The failures it is designed to expose are the ordinary ones of this volume: a kernel that is right on tile-sized shapes and wrong on others, a barrier that a ragged edge skips, a tolerance chosen after looking at what passes, a fused kernel that changes the bits, a selector that picks the fastest kernel without asking whether it is right, and a timing that includes the transient of a cold device.
 
-**How the project is organised.** Each milestone says what to build (in the book's pseudocode, which fixes the interface and nothing else), why it matters later, a check you run before moving on, and the mistakes readers actually make. The **acceptance tests** at the end give inputs and the outputs a correct engine produces, written so that any language can be tested against them. Every expected value was computed by a second, independent implementation, `scripts/book/worked/project_tensor_engine.py`, and is regenerated whenever the book is built. Use only your language's standard library. You need the book's generator (Volume I, Chapter 17), correctly rounded float32 arithmetic and a fused multiply-add (Volume IV, Chapters 1 and 9), SHA-256, and nothing else.
+The project is built in order, and each milestone says what to build (in the book's pseudocode, which fixes the interface and nothing else), why it matters later, a check you run before moving on, and the mistakes readers actually make. The **acceptance tests** at the end give inputs and the outputs a correct engine produces, written so that any language can be tested against them. Every expected value was computed by a second, independent implementation, `scripts/book/worked/project_tensor_engine.py`, and is regenerated whenever the book is built. Use only your language's standard library. You need the book's generator (Volume I, Chapter 17), correctly rounded float32 arithmetic and a fused multiply-add (Volume IV, Chapters 1 and 9), SHA-256, and nothing else.
 
 ![Seven boxes labelled with the milestones. Milestone 1 (tensor and oracle) is at the top, with milestone 2 (CPU backend) below it and milestone 3 (tiled kernels) below that. Milestone 4 (reductions, epilogue) and milestone 5 (parity) are in the next row, 5 directly below 3 and 4 to its left. Milestone 6 (quantized product) is below 4 and milestone 7 (selection), highlighted, is at the bottom right; both receive an arrow from milestone 5.](img/engine-milestones.svg)
 
 The figure shows which milestone feeds which, so the order 1 to 7 is a valid build order. The oracle of milestone 1 and the tolerance of milestone 5 are used by every check after them. Build and test each milestone before starting the next: a failure in milestone 7 that traces back to the executor of milestone 2 costs an afternoon, and the same failure caught by the check of milestone 2 costs a minute.
 
-## Before you begin
-
-These questions reach across the volume, and the first reaches back to Volume I. Answer each from memory before reading on; the answers are at the end.
+Before the first milestone, six questions bring back what it leans on. They reach across the volume, and the first reaches back to Volume I. Answer each from memory before reading on; the answers are at the end.
 
 1. (Volume I, Chapter 5, [Arrays](../v01-mathematics/05-arrays.md)) A row-major array of shape $[3, 4]$ holds the numbers $0, 1, \ldots, 11$. What are the shape, the strides and the offset of its transpose as a view, and which storage position does element $[1, 2]$ of that view read?
 2. (Chapter 5, [Writing Compute Kernels](05-compute-kernels.md)) A tiled kernel with $4 \times 4$ workgroups computes a $[13, 10]$ output and, to save a branch, executes `return` before its barrier for every invocation whose row or column is outside the output. How many of the workgroups of the grid reach the barrier with only some of their invocations?
@@ -40,13 +36,13 @@ These questions reach across the volume, and the first reaches back to Volume I.
 
 ## Milestones
 
-A note on language and style. The pseudocode follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. Every `f32` operation rounds to float32 one operation at a time, as the pseudocode defines; a fused multiply-add is written `fma`. Store every matrix row-major. Every random input comes from the book's SplitMix64 at a seed printed beside the table, and the draws are taken in the order the table states. Write the checks of each milestone as a test file that you rerun after every change.
+The pseudocode follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. Every `f32` operation rounds to float32 one operation at a time, as the pseudocode defines; a fused multiply-add is written `fma`. Store every matrix row-major. Every random input comes from the book's SplitMix64 at a seed printed beside the table, and the draws are taken in the order the table states. Write the checks of each milestone as a test file that you rerun after every change.
 
-**What "the same" means in the tables.** A digest is SHA-256 over the bytes of a result in row-major order, written as 64 lowercase hexadecimal digits and cut to the first 16, with each number as its IEEE 754 value in little-endian byte order: 4 bytes (binary32) for a result held in float32 and 8 bytes (binary64) for a result of the oracle. A digest is the check of a table that would be too long to print, and it is exact: one different bit changes it. Counts are exact integers. A quantity that depends on a rounding in a library function (`exp`, `log`, `tanh`) is printed to the few digits that do not depend on the library, and the tolerance column says so.
+Results are compared by digest wherever a table would be too long to print. A digest is SHA-256 over the bytes of a result in row-major order, written as 64 lowercase hexadecimal digits and cut to the first 16, with each number as its IEEE 754 value in little-endian byte order: 4 bytes (binary32) for a result held in float32 and 8 bytes (binary64) for a result of the oracle. The check is exact: one different bit changes the digest. Counts are exact integers. A quantity that depends on a rounding in a library function (`exp`, `log`, `tanh`) is printed to the few digits that do not depend on the library, and the tolerance column says so.
 
 ### Milestone 1: the tensor and the oracle
 
-**What to build.** A tensor of two dimensions that is a view of flat storage, two view operations that copy nothing, and the reference product.
+The first thing to build is a tensor of two dimensions that is a view of flat storage, with two view operations that copy nothing, and the reference product.
 
 ```text
 record Tensor:
@@ -81,9 +77,9 @@ function matmul_oracle(a: Tensor, b: Tensor) -> array<real>[M, N]:
 
 The oracle is a left fold in float64. The product of two float32 numbers has at most 48 significant bits and is exact in float64, so the only rounding is that of the sums, with a bound of $k\,2^{-53}/(1 - k\,2^{-53})$ times $S$ for $k$ terms (the bound factor of Chapter 9 at the unit roundoff $2^{-53}$ of float64, written out in milestone 5), some $2^{29}$ times smaller than the float32 bounds the oracle will judge. The second function you need now is $S_{ij} = \sum_p |a_{ip}\, b_{pj}|$, the scale of every error bound in this chapter.
 
-**Why it matters later.** Every other milestone ends in a comparison with this function. A kernel that reads its operands through strides (milestone 2) is tested on views of the same storage, and the oracle reads the views in the same way, so a stride that is wrong in a kernel and right in the oracle cannot go unseen.
+Every other milestone ends in a comparison with this function. A kernel that reads its operands through strides (milestone 2) is tested on views of the same storage, and the oracle reads the views in the same way, so a stride that is wrong in a kernel and right in the oracle cannot go unseen.
 
-**Check.** Reproduce the four views of one storage, then a product through a transposed view:
+To check it, reproduce the four views of one storage, then a product through a transposed view:
 
 <!-- worked: project_tensor_engine.tensor_views -->
 Storage = [0, 1, ..., 11] (twelve float32 words), A = shape [3, 4] with the row-major strides (4, 1) and offset 0. A transpose is the same storage with the shape and the strides exchanged; a row slice moves the offset and keeps the strides. Element (i, j) of a view is storage[offset + i s0 + j s1]; the table reads the element at the index shown.
@@ -112,15 +108,11 @@ Integer matrices for the oracle and the exact device tests. seed 0xd6cc7f538459b
 | 17 x 19 x 23 | 14,858 | 5fda9b1148c4a482 | b8fd4b7d1cc0d08a | 54e3b2fbfc449aec |
 <!-- /worked -->
 
-**Common mistakes.**
-
-- Storing the transpose by copying it in the tests and by view in the engine, so that the stride code is never exercised. Test through the view.
-- Taking the oracle's accumulator in float32 "to match the kernel". The oracle exists to be more accurate than the kernels it judges.
-- Subtracting 4 from the draw `integer(9)` in unsigned arithmetic, which wraps: the entries are $-4, \ldots, 4$ and the subtraction must happen in a signed type.
+Three mistakes recur here. One is to store the transpose by copying it in the tests and by view in the engine, so that the stride code is never exercised; test through the view. Another is to take the oracle's accumulator in float32 "to match the kernel", when the oracle exists to be more accurate than the kernels it judges. The third is to subtract 4 from the draw `integer(9)` in unsigned arithmetic, which wraps: the entries are $-4, \ldots, 4$ and the subtraction must happen in a signed type.
 
 ### Milestone 2: the CPU backend and the naive kernel
 
-**What to build.** The seven operations of the backend interface of Chapter 9, a workgroup executor that runs a kernel written as the program of one invocation, and the naive matrix-product kernel.
+The second milestone builds the seven operations of the backend interface of Chapter 9, a workgroup executor that runs a kernel written as the program of one invocation, and the naive matrix-product kernel.
 
 ```text
 interface Backend:
@@ -185,9 +177,9 @@ launch matmul_naive(...) over ceil(M * N / n_wg) workgroups
 
 Here `A[...]` is a flat index into the buffer, and `oa`, `sa0`, `sa1` are the offset and strides of the tensor that the host uploaded (the whole storage, not a copy of the view). The host function `matmul(kind, a, b)` creates three buffers, uploads the storage of the two tensors, picks the grid, dispatches, reads $C$ back and releases the buffers. The workgroup size of the naive kernel is a device property (16 on the first device of milestone 5).
 
-**Why it matters later.** This kernel is the portable reference of the whole engine, the candidate that is always admitted and always present (Chapter 10). The executor under it is where every later defect becomes visible, because it is the only place where a load past the end of a buffer reads defined words.
+This kernel is the portable reference of the whole engine, the candidate that is always admitted and always present (Chapter 10). The executor under it is where every later defect becomes visible, because it is the only place where a load past the end of a buffer reads defined words.
 
-**Check.** Run the naive kernel on the integer cases of milestone 1 (the same seed and draws), print the words and transactions, and compare $C$ with the oracle. On integers every sum is exact, so "equal" means equal:
+To check it, run the naive kernel on the integer cases of milestone 1 (the same seed and draws), print the words and transactions, and compare $C$ with the oracle. On integers every sum is exact, so "equal" means equal:
 
 <!-- worked: project_tensor_engine.backend_exact -->
 The naive kernel of Chapter 6 (one output per invocation, workgroups of 16, the guard `g >= m n` returns) on the CPU backend, device A (left fold, no contraction), on the cases of `project_tensor_engine.oracle_cases` (same seed, same draws). Buffers are allocated in the order A, B, C, each starting at a multiple of 8 words (32 bytes) with -777 in the padding words; C starts as 1000. 'loads' and 'stores' count single words as the executor saw the kernel touch memory; 'blocks' are the 32-byte transactions of Chapter 5 (32-lane subgroups, one instruction per j-th access, one transaction per distinct block). 'Expected' is 2 m n k loads and m n stores.
@@ -203,16 +195,11 @@ The naive kernel of Chapter 6 (one output per invocation, workgroups of 16, the 
 
 For the smallest case, with $A = \begin{pmatrix} -2 & 0 & -2 \\ 0 & -4 & 4 \end{pmatrix}$ and the $B$ printed in milestone 1, the kernel launches one workgroup of 16 invocations, of which 4 have an output, loads 12 words of $A$ and 12 of $B$, and stores 4. Any change to the guard `g >= M * N` shows in the loads at once.
 
-**Common mistakes.**
-
-- Writing `return` for the guard but running the invocations of a barrier-free kernel as a single loop that `break`s: the early invocations then skip the rest of the grid.
-- Counting a word in the kernel as it issues the load, and so missing the load that an unguarded kernel makes outside the matrix (milestone 5 needs it).
-- Giving each buffer its own memory region with a gap, so that a read past the end of a buffer faults instead of reading the next buffer: the layout above is part of the test.
-- Packing the buffers without alignment, which changes the transaction counts and not the results.
+Four mistakes cost readers time. Writing `return` for the guard but running the invocations of a barrier-free kernel as a single loop that `break`s makes the early invocations skip the rest of the grid. Counting a word in the kernel as it issues the load misses the load that an unguarded kernel makes outside the matrix, which milestone 5 needs. Giving each buffer its own memory region with a gap makes a read past the end of a buffer fault instead of reading the next buffer, and the layout above is part of the test. Packing the buffers without alignment changes the transaction counts and not the results.
 
 ### Milestone 3: tiled and register-blocked kernels
 
-**What to build.** The tiled matrix product and the register-blocked matrix product of Chapter 6, correct for every $m$, $n$, $k$.
+Third come the tiled matrix product and the register-blocked matrix product of Chapter 6, correct for every $m$, $n$, $k$.
 
 The register-blocked kernel of Chapter 6 (`matmul_blocked`) is the model: a workgroup of $q \times q$ invocations computes a tile of side $T = q\,r$, each invocation an $r \times r$ block in registers, and the loop over $k$ moves in steps of $b_k$ with a barrier between loading the two tiles into shared memory and using them. The tiled kernel (`matmul_tiled`) is the same kernel with $r = 1$ and $b_k = T$, and one implementation serves both. Write it as a list of phases, a load phase and a compute phase for each step $c = 0, \ldots, \lceil k / b_k \rceil - 1$, the barrier being the boundary between phases. The kernel reads $A$ and $B$ through the strides of milestone 2 and keeps its accumulators in a local array that lives across phases (a per-invocation array indexed by the workgroup and local index, the promotion of a local across a barrier that Chapter 9 required). The tile loads use the index decomposition of Chapter 6's listing: the invocation copies the elements $idx = l,\ l + q^2,\ l + 2q^2, \ldots$ below $T b_k$ of each chunk, with $(\mathrm{row}, \mathrm{kk}) = (\lfloor idx / b_k \rfloor,\ idx \bmod b_k)$ for the chunk of $A$ and $(\mathrm{kk2}, \mathrm{col}) = (\lfloor idx / T \rfloor,\ idx \bmod T)$ for the chunk of $B$. The edges follow the guard rule of Chapter 5:
 
@@ -234,9 +221,9 @@ $$
 
 (every element of $A$ once per column tile, every element of $B$ once per row tile), and the naive kernel's are $2mnk$. The stores are $mn$ for every kernel. The last compute phase stores the block of the invocation where `row < M and col < N`.
 
-**Why it matters later.** These are the kernels that the parity test of milestone 5 compares across devices, that the epilogue of milestone 4 is fused into, and that the selection of milestone 7 chooses between. They are the only kernels in the engine whose loads depend on the tile, so the traffic numbers below are the engine's first measured gain, in words.
+These are the kernels that the parity test of milestone 5 compares across devices, that the epilogue of milestone 4 is fused into, and that the selection of milestone 7 chooses between. They are the only kernels in the engine whose loads depend on the tile, so the traffic numbers below are the engine's first measured gain, in words.
 
-**Check.** Two ragged products, on integers, with the three kernels at the same number of invocations per workgroup for the tiled and the blocked one (16): the tiled kernel with $T = 4$ ($q = 4$, $r = 1$), and the blocked kernel with $q = 4$, $r = 2$, $T = 8$, step depth 4. Your executor must report these exact integers:
+The check is two ragged products, on integers, with the three kernels at the same number of invocations per workgroup for the tiled and the blocked one (16): the tiled kernel with $T = 4$ ($q = 4$, $r = 1$), and the blocked kernel with $q = 4$, $r = 2$, $T = 8$, step depth 4. Your executor must report these exact integers:
 
 <!-- worked: project_tensor_engine.tiled_traffic -->
 Ragged products on the CPU backend, device A, integer matrices (`integer(9) - 4`; seed 0xeac58f1360da3e00 (16917084888679202304) for 13 x 10 x 7; seed 0x39ea5775c09ae0c0 (4173244167966351552) for 20 x 18 x 9; draw order: the m k entries of A, then the k n entries of B, row-major). The tiled kernel is the blocked kernel with r = 1 and step depth bk = T; the blocked kernel uses q = 4 invocations per side, r = 2, step depth 4. Elements outside the matrices are not loaded (the guards sit around the loads). Expected loads: naive 2 m n k; tiled and blocked k (m ceil(n / T) + n ceil(m / T)), T the side of the workgroup tile. Stores are m n for every kernel.
@@ -267,16 +254,11 @@ All three digests equal: yes. Tiling changes where the numbers are read from, no
 
 The tolerance printed is the one milestone 5 derives; here it is only the statement that the left fold stays within $k$ roundings of the oracle.
 
-**Common mistakes.**
-
-- Loading out-of-range elements and multiplying them by a mask afterwards: the loads (and, for an out-of-range address, the memory read) happen anyway, and the counts above change.
-- Dropping the barrier between the compute phase of step $c$ and the load phase of step $c + 1$, which the phase list makes impossible by construction and a hand-written kernel makes easy. It passes every test with one step ($k \le b_k$) and fails with more.
-- Accumulating in an order that depends on the tile ($r$ partial sums combined at the end). That is a legitimate kernel, and milestone 5 makes it a different device; but it is not this one, and the digests above will not match.
-- Testing only shapes that are multiples of the tile. Every defect of this milestone shows only on a ragged edge.
+The defects of this milestone show only on a ragged edge, so a test that uses only shapes that are multiples of the tile passes all of them. Loading out-of-range elements and multiplying them by a mask afterwards is one: the loads (and, for an out-of-range address, the memory read) happen anyway, and the counts above change. Dropping the barrier between the compute phase of step $c$ and the load phase of step $c + 1$ is another, which the phase list makes impossible by construction and a hand-written kernel makes easy; it passes every test with one step ($k \le b_k$) and fails with more. The last is accumulating in an order that depends on the tile ($r$ partial sums combined at the end): that is a legitimate kernel, and milestone 5 makes it a different device, but it is not this one, and the digests above will not match.
 
 ### Milestone 4: reductions and the fused epilogue
 
-**What to build.** The row sums and the global sum of Chapter 7, and the bias-and-GELU epilogue of Chapter 8, fused into the tiled kernel and as three separate kernels.
+Fourth are the row sums and the global sum of Chapter 7, and the bias-and-GELU epilogue of Chapter 8, fused into the tiled kernel and as three separate kernels.
 
 *Reductions.* The tree of Chapter 7 as phases: each invocation first adds its numbers into one value held in shared memory (a loop with the stride of the grid), then steps of stride $n_{\mathrm{wg}}/2, \ldots, 1$ add slot $l + s$ into slot $l$ for $l < s$, then invocation 0 stores. The row-sum kernel gives each row a workgroup:
 
@@ -306,9 +288,9 @@ The global sum is `reduce_pass` of Chapter 7 launched twice: pass 1 over $n_{\ma
 
 *Epilogue.* Three kernels (`bias_add`, `gelu` and the product) against the product with the epilogue inside: after the accumulators are final, `u = acc + bias[col]` and the output is the GELU of $u$ with the nine operations of Chapter 8 in the order listed there, each rounded to float32, the constants $\sqrt{2/\pi}$ and $0.044715$ rounded to float32 first, and `tanh` the library function of the float32 argument rounded to float32.
 
-**Why it matters later.** A reduction and an epilogue are the two ways a matrix product is followed by something that is not a matrix product. The reduction is where the order of the additions is chosen by the kernel and not by the data, which is what lets milestone 5 derive a tolerance from the shape of the tree. The epilogue is the one fusion in the engine, and its bytes are the first number in the engine that measures the memory traffic a design avoids.
+A reduction and an epilogue are the two ways a matrix product is followed by something that is not a matrix product. The reduction is where the order of the additions is chosen by the kernel and not by the data, which is what lets milestone 5 derive a tolerance from the shape of the tree. The epilogue is the one fusion in the engine, and its bytes are the first number in the engine that measures the memory traffic a design avoids.
 
-**Check.** Row sums of an $[6, 37]$ array and a two-pass sum of 1000 numbers on each of the two devices of milestone 5 (reduction workgroups of 8 and of 16; five workgroups in pass 1 for both). The tolerance column is the derived one: the longest chain of roundings is the loop of an invocation (its first addition is exact), then the levels of the tree, and the global sum adds the chains of its two passes:
+The check is row sums of an $[6, 37]$ array and a two-pass sum of 1000 numbers on each of the two devices of milestone 5 (reduction workgroups of 8 and of 16; five workgroups in pass 1 for both). The tolerance column is the derived one: the longest chain of roundings is the loop of an invocation (its first addition is exact), then the levels of the tree, and the global sum adds the chains of its two passes:
 
 <!-- worked: project_tensor_engine.reductions -->
 Row sums of an [6, 37] array X (one workgroup per row, each invocation adds the elements l, l + wg, ... of its row, then the tree of Chapter 7) and the two-pass sum of 1000 numbers Y (pass 1 over 5 workgroups with a grid-stride loop, pass 2 one workgroup over the 5 partials). seed 0xbc854a4019abb9b5 (13584345490202016181). Draw order: the 222 entries of X row-major, then the 1000 entries of Y, each `2 uniform() - 1` rounded to float32. Device A reduces with workgroups of 8, device B with workgroups of 16. 'k_rd' counts the roundings on the longest chain (an invocation's loop adds ceil(N / (n_grp wg)) numbers to a zero accumulator, the first addition being exact, then log2 wg levels of the tree; the global sum adds the chains of its two passes). 'Tolerance' is gamma(k_rd, u) in units of u S with u = 2^-24, S = sum |x|, plus the float64 oracle's own gamma(N - 1, 2^-53) S (a left fold in float64 is the oracle); 'error' is the largest |sum - oracle| / (u S). Digests of the row sums are SHA-256 over binary32 little-endian bytes (first 16 hex digits); a single total is printed as its 32 bits.
@@ -338,16 +320,11 @@ Words saved: 520 = 4 m n = 520: the intermediate z and the intermediate u are ea
 
 Fusion removed two intermediates, each stored once and loaded once, and nothing else; the result is bit-identical to the unfused chain because the fused kernel keeps the format of the intermediates and the order of the operations (Chapter 8).
 
-**Common mistakes.**
-
-- A barrier inside a loop whose trip count differs between invocations (the grid-stride loop of invocation $l$ runs a different number of times from that of invocation $l + 1$): every invocation must reach each barrier the same number of times, so the loop ends before the first barrier and the tree that follows has its own, uniform loop.
-- Padding the unused slots of a tree with a value that is not the identity of the sum.
-- Fusing the epilogue with `fma(acc, 1.0, bias)` or contracting the GELU's multiply-add: the unfused kernels round the product, and the digest above will differ.
-- Counting the bias as one load per output in one design and one load per column in the other. The executor counts words, so the two designs load the bias the same number of times.
+A barrier inside a loop whose trip count differs between invocations (the grid-stride loop of invocation $l$ runs a different number of times from that of invocation $l + 1$) breaks the rule that every invocation must reach each barrier the same number of times; the loop ends before the first barrier and the tree that follows has its own, uniform loop. Padding the unused slots of a tree with a value that is not the identity of the sum is a second mistake. A third is fusing the epilogue with `fma(acc, 1.0, bias)` or contracting the GELU's multiply-add: the unfused kernels round the product, and the digest above will differ. The last is counting the bias as one load per output in one design and one load per column in the other; the executor counts words, so the two designs load the bias the same number of times.
 
 ### Milestone 5: parity across two devices
 
-**What to build.** A second device configuration of the executor, and a parity test.
+Fifth, a second device configuration of the executor, and a parity test.
 
 ```text
 record DeviceConfig:
@@ -393,9 +370,9 @@ function parity_check(out: array<f32>[M, N], ref: array<real>[M, N], s: array<re
 
 The tolerance of two devices against each other is the sum of their two float32 bound factors times $S$, $\bigl(\mathrm{gamma}(k_{\mathrm{rd},A}, 2^{-24}) + \mathrm{gamma}(k_{\mathrm{rd},B}, 2^{-24})\bigr)\,S$: two programs, each within its own bound of the same exact value, differ by at most the sum of the bounds. The criterion is the one that Chapter 9 assigns each kernel: where the kernel fixes every rounding and no device may contract, bit-identity; otherwise a tolerance derived from $k_{\mathrm{rd}}$ and $S$. The transposition of a tensor and the four-slot sum are bit-identical on every device, and a tolerance would only hide a defect there.
 
-**Why it matters later.** The parity test is also the gate of milestone 7: a candidate is admitted when this function reports nothing outside the tolerance on the shapes the gate covers. A test that cannot fail is not evidence, so the milestone ends with a kernel it must reject.
+The parity test is also the gate of milestone 7: a candidate is admitted when this function reports nothing outside the tolerance on the shapes the gate covers. A test that cannot fail is not evidence, so the milestone ends with a kernel it must reject.
 
-**Check.** Both devices on three seeded real-valued products, the naive and the tiled kernel on each. The kernels of one device are bit-identical to each other (the digests of the naive and tiled rows agree on every shape), the two devices are not, and every error is far inside its bound:
+The check is both devices on three seeded real-valued products, the naive and the tiled kernel on each. The kernels of one device are bit-identical to each other (the digests of the naive and tiled rows agree on every shape), the two devices are not, and every error is far inside its bound:
 
 <!-- worked: project_tensor_engine.parity_devices -->
 Two device configurations of the CPU backend (the same kernels, different compilers).
@@ -447,17 +424,11 @@ The tiled kernel (T = 4, step depth 4) with and without the bound check of the k
 
 The kernel passes at the three shapes whose $k$ is a multiple of 4, which is every shape a test would pick by habit, and fails at the two that are not, on every output. Your test must report the failure at $13 \times 10 \times 7$ with all 130 outputs outside the tolerance, and must pass the guarded kernel on all five shapes. The size of the worst ratio at the failing shapes depends on the words that happen to lie after the buffer, which is why the table prints only that it is above $10^6$; the count of outputs outside the tolerance does not.
 
-**Common mistakes.**
-
-- Comparing the two devices with the larger of their two tolerances, or with the oracle's: the first accepts a defect of one device that the other's bound hides, and the second is the wrong bound.
-- Choosing the tolerance by running the test and picking a number above the largest error. The derived value has a reason; an observed maximum is a fact about the seeds.
-- Holding device B to the bound of device A's order, $k_{\mathrm{rd}} = k$: it passes, and the test then has no teeth for a defect in the lanes.
-- Computing $S$ in float32: $S$ is the scale of the bound and should be exact to its first digits, so compute it in float64.
-- Running the parity test on the shapes where the defect hides. The shape list is part of the test, and it must contain a ragged edge in every dimension.
+Comparing the two devices with the larger of their two tolerances, or with the oracle's, is the first mistake: the first accepts a defect of one device that the other's bound hides, and the second is the wrong bound. Choosing the tolerance by running the test and picking a number above the largest error is another; the derived value has a reason, and an observed maximum is a fact about the seeds. Holding device B to the bound of device A's order, $k_{\mathrm{rd}} = k$, passes and leaves the test with no teeth for a defect in the lanes. Computing $S$ in float32 is a fourth, since $S$ is the scale of the bound and should be exact to its first digits; compute it in float64. The last is running the parity test on the shapes where the defect hides: the shape list is part of the test, and it must contain a ragged edge in every dimension.
 
 ### Milestone 6: group-wise quantized weights
 
-**What to build.** The quantizer of Chapter 12 for symmetric codes with a float32 scale, and a matrix product that decodes inside the loop.
+Sixth, the quantizer of Chapter 12 for symmetric codes with a float32 scale, and a matrix product that decodes inside the loop.
 
 ```text
 function quantize_groups(w: array<f32>[n], G: int, nbits: int) -> (scales: array<f32>[n // G], q: array<int>[n]):
@@ -495,9 +466,9 @@ kernel matmul_q(A: array<f32>[M, K], Q: array<int>[N * K], S: array<f32>[N * (K 
 
 A second kernel decodes each weight first (`inner = inner + A[...] * (scale * Q[...])`) and is the comparison. The simulator keeps one code in a word; the stored size of the matrix is computed from the format, $n_b + 32/G$ bits per weight, because that is what a device that packs the codes reads.
 
-**Why it matters later.** This is the kernel that a model with quantized weights runs on every layer. It also shows the tolerance of milestone 5 on a kernel whose longest chain is not the length of the dot product, and separates the two errors the quantized product has: the error of the weights, which is the point of the format and is large, and the error of the arithmetic, which must be small.
+This is the kernel that a model with quantized weights runs on every layer. It also shows the tolerance of milestone 5 on a kernel whose longest chain is not the length of the dot product, and separates the two errors the quantized product has: the error of the weights, which is the point of the format and is large, and the error of the arithmetic, which must be small.
 
-**Check.** A product $[6, 128] \times [128, 24]$, with Gaussian weights and activations, both widths, both forms. Each row reports the quantization error (the kernel against the float64 product of the *original* weights, the number to expect) and the arithmetic error (the kernel against the float64 product of the *decoded* weights, which must stay under its derived tolerance):
+The check is a product $[6, 128] \times [128, 24]$, with Gaussian weights and activations, both widths, both forms. Each row reports the quantization error (the kernel against the float64 product of the *original* weights, the number to expect) and the arithmetic error (the kernel against the float64 product of the *decoded* weights, which must stay under its derived tolerance):
 
 <!-- worked: project_tensor_engine.quantized_matmul -->
 The product C = A W, A of shape [6, 128] (activations), W of shape [128, 24] (weights), W quantized along k in groups of G = 32 for each column (symmetric codes -qmax .. qmax, qmax = 2^(bits - 1) - 1, scale = amax / qmax stored as float32, code = clamp(round_even(w / scale), -qmax, qmax)). seed 0x546969a482b88101 (6082508927029248257). Draw order: the 3072 weights `0.05 normal()` rounded to float32, row-major over [k, n], then the 768 activations `normal()` rounded to float32, row-major. Device A. 'Bits per weight' counts the 32-bit scale of every group: bits + 32 / G. 'Weight SQNR' is 10 log10 (mean w^2 / MSE of the decoded weights); 'output SQNR' and 'relative error' compare the kernel's C with the float64 product of the original weights (the error to expect from quantizing); 'worst ratio' compares the kernel's C with the float64 product of the decoded weights scale x code (the float32 arithmetic alone) over a tolerance (gamma(k_rd, 2^-24) + gamma(k, 2^-53)) S with S = sum |a w'|, k_rd = G + k / G for the factored form (the group's chain, the scale's product, the additions across groups) and k + 1 for dequantizing first (the product with the rounded weight scale x code adds one rounding to the chain of k). Digest: binary32 little-endian bytes of C, first 16 hex digits.
@@ -519,16 +490,11 @@ What the factored kernel reads (executor words) and the stored size of the weigh
 
 The weight SQNR and the output SQNR agree to within a few tenths of a decibel, which is the prediction of Chapter 12 for white inputs: 20.15 dB of the weights at 4 bits becomes 20.22 dB at the output, a relative error of 9.7 percent, and 8 bits gives 45 dB and 0.56 percent. The two forms have the same quantization error, since they compute the same decoded weights; they differ in the last bits, within the tolerance each one's chain gives it (36 roundings for the factored form, 129 for decoding first). The stored size is the gain: 5 bits per weight is 1,920 bytes where float32 needs 12,288, the saving of 6.4 times in the bytes that a bandwidth-bound product reads.
 
-**Common mistakes.**
-
-- Taking the scale from the float64 maximum and then using the unrounded value in the decoder: the codes must be computed with the stored (float32) scale, or the decoded weights are not the weights the kernel uses.
-- Quantizing along $n$ instead of along $k$, so that a group straddles outputs and the factored form no longer applies.
-- Rounding $w / \mathrm{scale}$ half away from zero. The rule is round to nearest even, and the two differ on exact ties, which a coarse scale produces.
-- Comparing the kernel with the original weights and calling a 9.7 percent error a bug, or with the decoded weights and calling a 45 dB error a feature: the two comparisons answer different questions.
+Taking the scale from the float64 maximum and then using the unrounded value in the decoder is a trap: the codes must be computed with the stored (float32) scale, or the decoded weights are not the weights the kernel uses. Quantizing along $n$ instead of along $k$ lets a group straddle outputs, and the factored form no longer applies. Rounding $w / \mathrm{scale}$ half away from zero differs from the rule, round to nearest even, on exact ties, which a coarse scale produces. And comparing the kernel with the original weights and calling a 9.7 percent error a bug, or with the decoded weights and calling a 45 dB error a feature, mixes up two comparisons that answer different questions.
 
 ### Milestone 7: candidates, a gate and an honest choice
 
-**What to build.** The selection pipeline of Chapter 10 on the engine, with the measurement protocol of Chapter 11.
+The last milestone puts the selection pipeline of Chapter 10 on the engine, with the measurement protocol of Chapter 11.
 
 *Candidates and capabilities.* Four candidates of the matrix product: the naive kernel, `tiled` (the blocked kernel with $q = 8$, $r = 4$, step depth 8, so $T = 32$), `reg` ($q = 16$, $r = 8$, step depth 8, $T = 128$), and `reg-nok`, which is `reg` with the bound check of the $k$ edge removed, the defect of milestone 5 on a faster-looking kernel. A candidate declares what it needs, and you read the declaration from its kernel: barriers, bytes of shared memory ($2\,T\,b_k$ words of 4 bytes), the workgroup size ($q^2$). A device is the `capabilities()` record of Chapter 9, and the filter reads the record and never the name of the device:
 
@@ -639,15 +605,9 @@ The problem itself, and what measurement alone would have picked:
 
 The engine's choices are `tiled` for the single row, where 20.99 million bytes must be read whatever the kernel and the larger tile only wastes lanes, and `reg` for the three taller shapes, with fractions of the measured roofline of 0.843, 0.328, 0.492 and 0.572. Read the second table: measurement alone would have chosen `reg-nok` at all three shapes where `reg` is chosen, by 4 to 5 percent of the mean, which is 2.5, 4.3 and 3.9 standard errors of the difference. A selector that only times caches that answer for the bucket and computes garbage whenever $k$ is not a multiple of 8; the gate is the only part of the pipeline that knows the difference. The same table is the honest statement of how far the engine is from the device. At $48 \times 2560 \times 2048$ the best candidate reaches 0.328 of the roofline, and the reason is in the work columns, not in the clock: the tile of `reg` is 128 rows, the problem has 48, so the kernel executes 1.34 billion FLOPs for a problem that needs 0.50 billion. Selection chooses among the candidates that exist; a fraction this low names a missing candidate, a tile of fewer rows, not a failure of the choice.
 
-**Why it matters later.** This is the stage at which the engine stops assuming and starts asking: which kernels may run on this device, which are right on this device, and which of those is cheapest by a measurement that was taken the way Chapter 11 says. Everything a larger engine adds (a cache of the answers, more candidates, a tuner that searches schedules) is a refinement of this pipeline.
+This is the stage at which the engine stops assuming and starts asking: which kernels may run on this device, which are right on this device, and which of those is cheapest by a measurement that was taken the way Chapter 11 says. Everything a larger engine adds (a cache of the answers, more candidates, a tuner that searches schedules) is a refinement of this pipeline.
 
-**Common mistakes.**
-
-- Filtering by the name of the device ("the CPU never runs barrier kernels") instead of by the record. The first stays true until a new device appears.
-- Timing the first run, or the mean of all 300: the transient is 80 percent over the floor at run 0 and the compile adds twenty floors, and the mean of all runs differs from the steady mean by more than the gap that is being resolved.
-- Comparing two means without the standard error of their difference, and so choosing between candidates whose gap is noise.
-- Measuring a candidate that has not passed the gate, and recording its fraction as the engine's: a fraction is a statement about a kernel that gives the right answer.
-- Reporting the time and not the work. A fraction of the roofline from a stated roofline is a number someone can check; a bare time is not.
+Filtering by the name of the device ("the CPU never runs barrier kernels") instead of by the record stays true only until a new device appears. Timing the first run, or the mean of all 300, is a second mistake: the transient is 80 percent over the floor at run 0 and the compile adds twenty floors, and the mean of all runs differs from the steady mean by more than the gap that is being resolved. Comparing two means without the standard error of their difference chooses between candidates whose gap is noise. Measuring a candidate that has not passed the gate and recording its fraction as the engine's is another, since a fraction is a statement about a kernel that gives the right answer. Finally, reporting the time and not the work leaves a number nobody can check, where a fraction of the roofline from a stated roofline can be checked.
 
 ## Acceptance tests
 
@@ -686,7 +646,7 @@ A compact fingerprint of a correct engine, to check at the end:
 | 7 | fraction of the measured roofline of the choice at 512 x 2560 x 2048 (median of the steady runs) | 0.572 | 0.002 |
 <!-- /worked -->
 
-## Where this appears in brain
+## The engine's counterpart in brain's backend layer
 
 The engine of this chapter is the structure of brain's backend layer with the scale removed. `crates/backend-api/src/lib.rs` holds the `Backend` trait, the seven operations of milestone 2 with opaque handles; commit 7c8c97045 (July 2026) moved the three existing backends behind it with no change to the public API, so that a new backend is a crate that depends on the interface and nothing else. `crates/backend-cpu/src/lib.rs` is the CPU backend, and `crates/wgsl-cpu/src/lib.rs` is its kernel compiler, the executor of milestone 2 emitted as machine code. Commit 3f489e789 (September 2026) is the story of the two rules the executor has to keep: it found, by comparing that compiler with a second one over the same kernel source, that an early return was scoped to the first loop only and that workgroup memory was reused without clearing between workgroups; knowledge #112 draws the lesson, and `crates/wgsl-cpu/tests/it/workgroup_semantics.rs` is the test. The kernels of milestones 2 and 3 are `crates/kernels/wgsl/matmul.wgsl`, `matmul_tiled.wgsl` and `matmul_reg.wgsl` in the same directory, the naive, the $32 \times 32$ and the $128 \times 128$ kernels of milestone 7, with the shapes at which each is chosen in `crates/backend-api/src/select.rs`. The reference gate, the capability declarations and the measured fraction of the roofline are in `crates/gpu-core/src/native_tune.rs`; commit 72b363135 (October 2026) introduced the table of per-device choices for one quantized product, with each candidate declaring the capability it needs, a gate against a float64 oracle before any timing, and the achieved fraction of the device's own bound recorded beside the choice. What differs from this project is scale and execution, not the contract: brain's kernels run on real devices, its roofline comes from probes on the device, and its tolerance for a quantized candidate is derived from the formats of its inputs, the extension of milestone 5 to a kernel whose own inputs are rounded.
 
@@ -713,7 +673,7 @@ These are optional. Each is a bigger test of the same ideas.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. The transpose is the same storage with the shape $[4, 3]$ and the strides $(1, 4)$ exchanged, and the offset stays 0. Element $[1, 2]$ is at storage position $0 + 1 \cdot 1 + 2 \cdot 4 = 9$, which holds the number 9.
 2. The grid has $\lceil 10 / 4 \rceil = 3$ workgroups across and $\lceil 13 / 4 \rceil = 4$ down, 12 in all. A workgroup whose tile lies fully inside the output reaches the barrier with all 16 invocations: those are the $2 \times 3 = 6$ workgroups of columns 0 and 1 and rows 0 to 2. The other 6 (the last column tile, which holds columns 8 and 9 of 12, and the last row tile, which holds row 12 of 16) have invocations that returned before the barrier and others that did not, and the executor reports the error.
