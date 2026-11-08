@@ -27,7 +27,7 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
 - [ ] T012 P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers Adam beta1/beta2/eps; resume refuses a change
 - [ ] T013 P1 - crates/model/src/train.rs (schedule_fingerprint) - identity covers GEMM compute precision and the whole resolved run configuration
 - [ ] T014 P1 - crates/model/src/train.rs (build_or_resume) - separate exact resume, weight warm start, adapter continuation (names and lineage)
-- [ ] T015 P1 - crates/rl/src/objective/grpo.rs (attach_references) - incomplete references refuse; unsupported EOS positions distinguished
+- [x] T015 P1 - crates/rl/src/objective/grpo.rs (attach_references) - incomplete references refuse; unsupported EOS positions distinguished
 - [ ] T016 P1 - crates/rl/src/objective/external.rs - explicit exact vs proxy behaviour logprobs with provenance
 - [ ] T017 P1 - crates/rl/src/objective/external.rs - missing rollout sidecars never select imitation semantics silently
 - [ ] T018 P1 - crates/model/src/train.rs (loss_probe) - pure probe; persistent objective cursor; resume equivalence test

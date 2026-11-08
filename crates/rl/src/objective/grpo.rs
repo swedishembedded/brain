@@ -222,6 +222,8 @@ struct Drawn {
     eos_targets: usize,
     truncated_sampling_rows: usize,
     sampler_gap: f32,
+    /// Set when the group cannot be trained on; its rows are dropped.
+    refusal: Option<BehaviourRefusal>,
 }
 
 /// One GRPO (or, with `cfg.group_size == 1`, RFT/STaR) training objective over
@@ -430,9 +432,9 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
                 row.old_lp = trainer;
             }
         }
-        self.attach_references(model, task, &kept, &advs, &mut rows);
+        let refusal = self.attach_references(model, task, &kept, &advs, &mut rows).err();
         let truncated_sampling_rows = if truncated_sampling { rows.len() } else { 0 };
-        Drawn { rows, spans, rewards, attempts, zero_variance, truncated, eos_targets, truncated_sampling_rows, sampler_gap }
+        Drawn { rows, spans, rewards, attempts, zero_variance, truncated, eos_targets, truncated_sampling_rows, sampler_gap, refusal }
     }
 
     /// Pack one completion (`trained` = its span plus the stop token when that
@@ -458,24 +460,31 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
 
     /// Fill the rows' reference log-probabilities: from the caller's source,
     /// else from the model with its adapters disabled. A no-op when no KL is
-    /// trained or logged.
-    fn attach_references<M: Model>(&self, model: &M, task: &Task, kept: &[Completion], advs: &[f32], rows: &mut [PackedRow]) {
+    /// trained or logged. A source that returns fewer values than a completion
+    /// has supervised tokens is refused, never padded: the one position that
+    /// legitimately has no value is the stop token (a reference scores the
+    /// sampled text, not the stop the trainer learns), which takes its own
+    /// behaviour log-probability.
+    fn attach_references<M: Model>(&self, model: &M, task: &Task, kept: &[Completion], advs: &[f32], rows: &mut [PackedRow]) -> Result<(), BehaviourRefusal> {
         let wanted = self.cfg.kl_beta > 0.0 || self.cfg.options.log_kl;
         if !wanted || rows.is_empty() {
-            return;
+            return Ok(());
         }
         if let Some(f) = &self.ref_logprobs {
             let completions = kept.iter().zip(advs).filter(|(_, &a)| a != 0.0).map(|(c, _)| c);
             for (row, c) in rows.iter_mut().zip(completions) {
                 let lps = f(task, c);
                 let positions: Vec<usize> = (0..row.targets.len()).filter(|&i| row.targets[i] != IGNORE).collect();
+                let sampled = positions.len().min(c.tokens.len());
+                if lps.len() < sampled || lps.len() > positions.len() {
+                    return Err(BehaviourRefusal::IncompleteReference { expected: sampled, got: lps.len() });
+                }
                 for (j, &i) in positions.iter().enumerate() {
-                    // A stop-token target has no reference value from the caller: it adds no KL.
                     row.ref_lp[i] = lps.get(j).copied().unwrap_or(row.old_lp[i]);
                 }
                 row.has_ref = true;
             }
-            return;
+            return Ok(());
         }
         match adapter_off_logprobs(model, rows) {
             Some(all) => {
@@ -486,6 +495,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             }
             None => assert!(self.cfg.kl_beta <= 0.0, "Grpo: kl_beta > 0.0 requires with_reference() or a model with LoRA adapters to disable"),
         }
+        Ok(())
     }
 
     /// Sample one group from the real task stream and queue its rows.
@@ -520,6 +530,10 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             None => self.draw_group(model, &task, &mut ModelRollout::new(model), true, rng),
         };
         self.external = external;
+        if let Some(refusal) = drawn.refusal {
+            self.refusal = Some(refusal);
+            return;
+        }
         for s in &drawn.spans {
             self.log.push_sampled(s.clone());
         }

@@ -31,6 +31,10 @@ pub enum BehaviourRefusal {
     /// scoring them with the current trainer would put the ratio against the wrong behaviour policy.
     /// Sync the engine every group (`sync_every` 1) or train on the sampler's likelihood.
     StaleEngine { engine_version: u64, trainer_version: u64 },
+    /// The reference log-probability source returned `got` values for a completion of `expected`
+    /// supervised tokens (its stop token, which no reference scores, aside): substituting the
+    /// behaviour log-probabilities for the missing ones would silently change the KL term.
+    IncompleteReference { expected: usize, got: usize },
     /// The engine declares it samples from `declared`, but the objective's ratio assumes `expected`.
     SamplingMismatch { declared: String, expected: String },
 }
@@ -43,6 +47,7 @@ impl fmt::Display for BehaviourRefusal {
                 f,
                 "the rollout engine holds the policy of step {engine_version} but the trainer is at step {trainer_version}: the behaviour policy of its samples cannot be reconstructed; sync the engine every group (sync_every 1)"
             ),
+            BehaviourRefusal::IncompleteReference { expected, got } => write!(f, "the reference log-probability source returned {got} values for a completion of {expected} tokens; an incomplete reference would silently change the KL term"),
             BehaviourRefusal::SamplingMismatch { declared, expected } => write!(f, "the rollout engine samples from {declared}, but the objective's ratio assumes {expected}"),
         }
     }

@@ -437,3 +437,38 @@ fn an_engine_declaring_another_sampling_distribution_is_refused() {
     let StepVerdict::Abort(e) = verdict(&mut obj) else { panic!("a declared top_p 0.9 against an assumed plain sampler must abort") };
     assert!(matches!(e.get_ref().and_then(|source| source.downcast_ref::<BehaviourRefusal>()), Some(BehaviourRefusal::SamplingMismatch { .. })));
 }
+
+/// T015: a reference source that returns fewer log-probabilities than the completion has
+/// tokens is refused; the old code filled the gap with the behaviour log-probabilities and
+/// trained a different KL term without saying so.
+#[test]
+fn an_incomplete_reference_is_refused_not_padded_with_behaviour_logprobs() {
+    let s = seed();
+    let (mut m, _, _) = lora_model(s);
+    let (judge, _) = Judge::new(first_wins);
+    let group = vec![completion(&[4, 4]), completion(&[5, 5])];
+    let mut cfg = config(2, 1.0, GrpoOptions::default());
+    cfg.kl_beta = 0.1;
+    let mut obj = scripted(Env { variable: always_variable }, judge, cfg, group).with_reference(|_, _| vec![-1.0]);
+    obj.prepare(&mut m).unwrap();
+    obj.micro_steps(&m, &mut Rng::new(s), 2);
+    let StepVerdict::Abort(e) = verdict(&mut obj) else { panic!("one reference value for a two-token completion must abort") };
+    let refusal = e.get_ref().and_then(|source| source.downcast_ref::<BehaviourRefusal>()).expect("a typed error");
+    assert_eq!(*refusal, BehaviourRefusal::IncompleteReference { expected: 2, got: 1 });
+}
+
+/// The stop token has no value in a reference that scores the sampled text: that, and only that, is allowed to be missing.
+#[test]
+fn a_reference_without_the_stop_token_position_is_complete() {
+    let s = seed();
+    let (mut m, _, _) = lora_model(s);
+    let (judge, _) = Judge::new(first_wins);
+    let mut cfg = config(2, 1.0, GrpoOptions::default());
+    cfg.kl_beta = 0.1;
+    cfg.rollout.eos = Some(EOS);
+    let group = vec![stopped(&[4, 5]), completion(&[5, 5, 5])];
+    let mut obj = scripted(Env { variable: always_variable }, judge, cfg, group).with_reference(|_, c| vec![-1.0; c.tokens.len()]);
+    obj.prepare(&mut m).unwrap();
+    obj.micro_steps(&m, &mut Rng::new(s), 2);
+    assert!(matches!(verdict(&mut obj), StepVerdict::Apply));
+}
