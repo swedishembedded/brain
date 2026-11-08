@@ -1,6 +1,5 @@
 # Chapters still to be rewritten as prose (scripts/book/check.py, recycled()).
 # Remove a line in the same change that rewrites its chapter; the list only shrinks.
-docs/book/v01-mathematics/01-numbers.md
 docs/book/v01-mathematics/02-functions.md
 docs/book/v01-mathematics/03-vectors.md
 docs/book/v01-mathematics/04-matrices.md

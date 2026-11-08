@@ -5,96 +5,92 @@
 
 *What are the numbers a machine learns with, and how do we write about them precisely?*
 
-## The problem
+Ask four questions about an ordinary language model. How many adjustable
+numbers does it hold? About seven billion; these are its **parameters**. How
+much text was it trained on? Roughly two trillion pieces. How far did training
+move a parameter at each step? By about three ten-thousandths. And what does a
+formula somewhere inside it add to a quantity to keep from dividing by zero?
+One hundred-millionth.
 
-Here are four facts about an ordinary language model, each stated the way a
-person would say it aloud.
+Each answer is easy to say aloud and miserable to write down. In digits they
+are `7000000000`, `2000000000000`, `0.0003` and `0.00000001`, and nobody reads
+strings like these reliably: one miscounted zero changes the meaning by a
+factor of ten. What we want is a notation where the size of a number shows at
+a glance, and the digits that matter are kept apart from the zeros that merely
+place the decimal point.
 
-- It has seven billion adjustable numbers (its **parameters**).
-- It was trained on about two trillion pieces of text.
-- Training changed each parameter by steps of roughly three ten-thousandths.
-- To avoid dividing by zero, a formula somewhere adds one hundred-millionth
-  to a quantity.
+Sizes are the lesser trouble. Watch what the model does with a single piece of
+text. It assigns a chance to every word it might see next, and the chance it
+gave to the words that actually came is a measure of how well it predicted
+them. For a whole document those chances are *multiplied*, one factor per
+word. A 400-word document in which every word had chance 0.1 has chance
+$0.1 \times 0.1 \times \dots$ four hundred times, a number with 399 zeros after
+the decimal point before the first nonzero digit. A computer cannot store it.
+It stores zero instead, and a program that takes that zero for the answer is
+wrong in a way that raises no error at all. Somewhere there must be a device
+that makes such products harmless, by turning them into sums.
 
-Try writing those four numbers with digits and you meet the first problem of
-this book: `7000000000`, `2000000000000`, `0.0003`, `0.00000001`. Nobody
-reads these reliably, and a miscounted zero changes the meaning by a factor of
-ten. We need a notation in which the size of a number is visible at a glance
-and the digits that matter are separated from the zeros that merely place the
-decimal point.
+The third trouble is the one every number a model reports about its own
+quality shares. That number, the **loss**, is built the same way each time:
+compute something small for each example in a dataset, add the results up, and
+divide by how many there were. Saying "do this for every example and add them
+all up" without ambiguity, for a dataset of any size, takes a notation of its
+own.
 
-Now look at what the model does with one piece of text. It assigns a chance
-to every word it might see next, and the chance it assigned to the words that
-actually occurred measures how well it predicted them. For a whole document
-those chances are *multiplied*, one factor per word. A 400-word document in
-which each word had chance 0.1 has chance $0.1 \times 0.1 \times \dots$ four
-hundred times, which is a number with 399 zeros after the decimal point before
-the first nonzero digit. A computer cannot store it. It stores zero, and a
-program that treats that zero as the answer is wrong in a way that raises no
-error.
+So the chapter is a toolkit for those three troubles. It starts with the
+number systems machine learning computes with, then builds powers and
+scientific notation for sizes, the device that turns products into sums, the
+$\sum$ and $\prod$ symbols for repeated addition and multiplication, braces
+for collections, and the $f(x)$ notation for a rule with inputs and outputs.
+Nothing here goes beyond school arithmetic in difficulty. What is new is the
+care: every rule is derived from the one before it, and every numerical claim
+is computed by a program rather than typed, so that you can check it.
 
-Third, every number a model reports about its own quality (its **loss**) is
-built the same way: compute something small for each example in a dataset,
-then add the results up and divide by how many there were. Writing "do this
-for every example and add them all up" without ambiguity, for a dataset of
-any size, needs a notation of its own.
+School arithmetic is the whole prerequisite, and it is worth five quick checks
+before we lean on it. Answer these from memory; the answers are at the end of
+the chapter. There is no earlier chapter to go back to, so if one is hard, work
+it through on paper before reading on.
 
-So this chapter gives you the number systems machine learning computes with,
-and the handful of notations that every later page uses: powers and scientific
-notation for sizes, **logarithms** for turning products into sums, the
-$\sum$ and $\prod$ symbols for repeated addition and multiplication,
-braces for collections, and the $f(x)$ notation for a rule with inputs and
-outputs. Nothing here goes beyond school arithmetic in difficulty. What is new
-is the care: every rule is derived from the one before it, and every numerical
-claim is computed by a program rather than typed, so that you can check it.
+1. Compute $\frac{1}{2} + \frac{1}{3}$ as a single fraction.
+2. What is $2^5$, and what is $10^3 \times 10^2$ written as a single power of 10?
+3. Evaluate $3 + 4 \times 2^2$.
+4. Evaluate $-3 - (-5)$.
+5. Write $\frac{3}{4}$ as a decimal and $0.25$ as a fraction.
 
-You may use only school arithmetic: addition, subtraction, multiplication,
-division and fractions. Everything else is introduced below.
+## Integers, and where they run out
 
-## Before you begin
+The simplest numbers are the ones we count with. A **natural number** answers
+"how many?": $0, 1, 2, 3, \dots$. An **integer** is a natural number or the
+negative of one: $\dots, -3, -2, -1, 0, 1, 2, 3, \dots$. The set of all
+integers is written $\mathbb{Z}$, and the natural numbers $\mathbb{N}$ (a
+**set** is a collection of things; the notation is introduced a few sections
+below).
 
-Five facts from school arithmetic that this chapter builds on, to answer from memory. The answers are at the end of the chapter. There is no earlier chapter to return to, so if one is hard, work it through on paper before reading on.
-
-1. (School arithmetic, fractions.) Compute $\frac{1}{2} + \frac{1}{3}$ as a single fraction.
-2. (School arithmetic, powers.) What is $2^5$, and what is $10^3 \times 10^2$ written as a single power of 10?
-3. (School arithmetic, order of operations.) Evaluate $3 + 4 \times 2^2$.
-4. (School arithmetic, negative numbers.) Evaluate $-3 - (-5)$.
-5. (School arithmetic, decimals.) Write $\frac{3}{4}$ as a decimal and $0.25$ as a fraction.
-
-## Integers
-
-A **natural number** answers "how many?": $0, 1, 2, 3, \dots$. An
-**integer** is a natural number or the negative of one:
-$\dots, -3, -2, -1, 0, 1, 2, 3, \dots$. The set of all integers is written
-$\mathbb{Z}$, and the natural numbers $\mathbb{N}$ (a **set** is a collection
-of things; the notation is introduced two sections below).
-
-Integers are the numbers of counting and of naming. A vocabulary of 50,000
-tokens numbers them $0, 1, \dots, 49999$, and the number is the token's
-identity. The position of an element in a list is an integer. The number of
+Integers are also the numbers of naming. A vocabulary of 50,000 tokens numbers
+them $0, 1, \dots, 49999$, and the number is the token's identity. The
+position of an element in a list is an integer, and so are the number of
 examples in a dataset, the number of layers in a network and the number of
-steps taken so far in training are integers. Wherever the question is "which
-one?" or "how many?", the answer is an integer, and the integers are exactly
-the numbers where nothing lies between neighbours: after 7 comes 8.
+steps taken so far in training. Wherever the question is "which one?" or "how
+many?", the answer is an integer, and integers are exactly the numbers where
+nothing lies between neighbours: after 7 comes 8.
 
-Adding, subtracting and multiplying two integers always gives an integer. We
-say the integers are **closed** under these operations. Division is the
-exception: $7 / 2$ is not an integer. When we need to stay among integers we
-use **division with remainder**. For any integers $a$ and $b \neq 0$ we can
-write
+Add, subtract or multiply two integers and you get an integer; we say the
+integers are **closed** under these operations. Division breaks the pattern,
+since $7 / 2$ is not an integer. When we need to stay among integers we use
+**division with remainder**. For any integers $a$ and $b \neq 0$ we can write
 
 $$
 a = b\,q + r ,
 $$
 
 where $q$ is the **quotient** and $r$ the **remainder**. Take $a = 17$ and
-$b = 5$: $17 = 5 \cdot 3 + 2$, so $q = 3$ and $r = 2$. For negative numbers
-the statement above does not by itself fix $q$ and $r$. For $a = -17$,
-$b = 5$ both $-17 = 5 \cdot (-4) + 3$ and $-17 = 5 \cdot (-3) + (-2)$ are true.
-Languages disagree on which one they report. Two conventions exist: the
-**floor** convention rounds the quotient down, so the remainder takes the sign
-of $b$; the **truncating** convention rounds it toward zero, so the remainder
-takes the sign of $a$.
+$b = 5$: $17 = 5 \cdot 3 + 2$, so $q = 3$ and $r = 2$. Negative numbers are
+where it gets slippery, because the statement above does not by itself fix $q$
+and $r$. For $a = -17$, $b = 5$ both $-17 = 5 \cdot (-4) + 3$ and
+$-17 = 5 \cdot (-3) + (-2)$ are true, and languages disagree on which one they
+report. Two conventions exist. The **floor** convention rounds the quotient
+down, so the remainder takes the sign of $b$; the **truncating** convention
+rounds it toward zero, so the remainder takes the sign of $a$.
 
 <!-- worked: numbasics.integer_division -->
 | a, b | floor q | floor r | truncating q | truncating r |
@@ -107,14 +103,15 @@ takes the sign of $a$.
 
 Every row satisfies $a = bq + r$ under both conventions. Which convention your
 language uses for `%` is a fact you must look up, and when an index is wrapped
-around with a remainder (as in a ring buffer), a negative input is where the
-two diverge.
+around with a remainder (as in a ring buffer), a negative input is exactly where
+the two diverge.
 
-A computer stores an integer in a fixed number of binary digits, called
-**bits**. With $n$ bits it can distinguish $2^n$ different patterns (the
-notation $2^n$ is defined in the section on exponents). If the patterns are
-used for the non-negative integers they cover $0$ to $2^n - 1$; if half of
-them are used for negatives, the range is $-2^{n-1}$ to $2^{n-1} - 1$.
+A computer keeps an integer in a fixed number of binary digits, called
+**bits**, and that fixed width is the other thing to know about integers. With
+$n$ bits it can distinguish $2^n$ different patterns (the notation $2^n$ is
+defined in the section on exponents). If the patterns are spent on the
+non-negative integers they cover $0$ to $2^n - 1$; if half of them are spent
+on negatives, the range is $-2^{n-1}$ to $2^{n-1} - 1$.
 
 <!-- worked: numbasics.integer_ranges -->
 | bits n | smallest signed -2^(n-1) | largest signed 2^(n-1) - 1 | largest unsigned 2^n - 1 |
@@ -125,21 +122,21 @@ them are used for negatives, the range is $-2^{n-1}$ to $2^{n-1} - 1$.
 | 64 | -9,223,372,036,854,775,808 | 9,223,372,036,854,775,807 | 18,446,744,073,709,551,615 |
 <!-- /worked -->
 
-Two lessons follow. A 32-bit signed integer tops out near two billion, which
-is smaller than the number of parameters of a modern model: counting
-parameters in 32 bits silently wraps around. And integers never become
-approximate: an integer that fits is stored exactly. Hold on to that; the
-numbers in the next section are not so lucky.
+Two lessons follow from the table. A 32-bit signed integer tops out near two
+billion, which is smaller than the number of parameters of a modern model, so
+counting parameters in 32 bits silently wraps around. And an integer never
+becomes approximate: one that fits is stored exactly. Hold on to that, because
+the numbers in the next section are not so lucky.
 
-## Real numbers and the number line
+## Between the integers
 
 Measurements, probabilities and weights are not whole numbers. A learning rate
 of $0.0003$, a probability of $0.4$, a weight of $-1.7$: these live between
-the integers. Start with fractions.
+the integers, and the first way to reach them is the fraction.
 
 A **rational number** is a ratio of two integers $p/q$ with $q \neq 0$:
 $\tfrac12$, $-\tfrac32$, $\tfrac{22}{7}$. Every integer is rational
-($5 = 5/1$). Writing a rational number in decimal always ends in one of two
+($5 = 5/1$). Write a rational number in decimal and it always ends one of two
 ways. Long division of $p$ by $q$ produces a remainder at each step, and there
 are only $q$ possible remainders, so either the remainder becomes $0$ (the
 expansion **terminates**) or some remainder repeats and the digits cycle from
@@ -160,34 +157,36 @@ Repeating blocks are why $\tfrac13$ cannot be written exactly with a finite
 number of decimal digits, and (as a later chapter shows) why $0.1$ cannot be
 written exactly with a finite number of binary digits either.
 
-Are the rationals enough? The ancient answer is no. Consider a square with
-side 1; its diagonal has length $\sqrt{2}$, the positive number whose square
-is $2$. Suppose $\sqrt{2} = p/q$ with the fraction in lowest terms, meaning $p$
-and $q$ share no common factor. Squaring gives $p^2 = 2q^2$, so $p^2$ is even,
-so $p$ is even (the square of an odd number is odd), say $p = 2k$. Then
-$4k^2 = 2q^2$, so $q^2 = 2k^2$ and $q$ is even too. But then $p$ and $q$ share
-the factor 2, contradicting lowest terms. No such fraction exists.
+Do fractions exhaust the numbers? The ancient answer is no. Consider a square
+with side 1; its diagonal has length $\sqrt{2}$, the positive number whose
+square is $2$. Suppose $\sqrt{2} = p/q$ with the fraction in lowest terms,
+meaning $p$ and $q$ share no common factor. Squaring gives $p^2 = 2q^2$, so
+$p^2$ is even, so $p$ is even (the square of an odd number is odd), say
+$p = 2k$. Then $4k^2 = 2q^2$, so $q^2 = 2k^2$ and $q$ is even too. But then
+$p$ and $q$ share the factor 2, contradicting lowest terms. No such fraction
+exists.
 
 A number that is not rational is **irrational**. $\sqrt{2}$ is one; so are
 $\pi$ and the number $e$ we meet below. Their decimal expansions never end and
-never repeat. The collection of all rational and irrational numbers together
-is the set of **real numbers**, written $\mathbb{R}$. Think of $\mathbb{R}$ as
-a line with no gaps: every point on it is a real number.
+never repeat. The rationals and irrationals together make up the **real
+numbers**, written $\mathbb{R}$, and the picture to hold is a line with no
+gaps, every point of which is a real number.
 
 ![A number line from -2.5 to 4.5 with integers marked in blue, fractions in green and the irrational numbers sqrt 2, e and pi in orange, each at its computed position.](img/number-line.svg)
 
-The picture shows how the three kinds of number sit together. Integers are
-spaced out. Fractions fill in between them, and between any two fractions,
-however close, there is another fraction. Yet the irrational numbers are in
-the gaps too, and in a precise sense there are far more of them. You cannot
-tell by looking which kind a point is: $\tfrac32 = 1.5$ and $\sqrt{2} = 1.414\dots$
-are close neighbours of different kinds.
+The three kinds of number sit together on that line. Integers are spaced out.
+Fractions fill in between them, and between any two fractions, however close,
+there is another fraction. Yet the irrational numbers are in the gaps too, and
+in a precise sense there are far more of them. You cannot tell by looking
+which kind a point is: $\tfrac32 = 1.5$ and $\sqrt{2} = 1.414\dots$ are close
+neighbours of different kinds.
 
-Irrational numbers can be approached by rational ones as closely as we please.
-Here is a recipe that does so for $\sqrt{2}$. If $x$ is too small then $2/x$ is
-too big (their product is 2), so their average lies closer to the answer.
-Start with $x = 1$ and repeat $x \leftarrow \tfrac12\left(x + \tfrac{2}{x}\right)$,
-keeping every value as an exact fraction.
+That closeness is useful, because irrational numbers can be approached by
+rational ones as closely as we please. Here is a recipe that does so for
+$\sqrt{2}$. If $x$ is too small then $2/x$ is too big (their product is 2), so
+their average lies closer to the answer. Start with $x = 1$ and repeat
+$x \leftarrow \tfrac12\left(x + \tfrac{2}{x}\right)$, keeping every value as an
+exact fraction.
 
 <!-- worked: numbasics.sqrt2_approximations -->
 | step | fraction x | x as decimal | x squared | x squared minus 2 |
@@ -199,48 +198,49 @@ keeping every value as an exact fraction.
 | 4 | 665857/470832 | 1.414213562375 | 2.000000000005 | 4.51e-12 |
 <!-- /worked -->
 
-The error of $x^2$ against $2$ shrinks from $2.5 \times 10^{-1}$ to $6.9 \times 10^{-3}$ to
-$6.0 \times 10^{-6}$ to $4.5 \times 10^{-12}$: the number of correct digits roughly
-doubles each step. (This is Newton's method; the chapter on derivatives
-explains why it works.) Each value is a genuine fraction, and the sequence
-walks toward a number that is not one. This is the sense in which a computer,
-which only has fractions to work with, can work with $\mathbb{R}$ at all: it
-stores a rational approximation, with finitely many digits, and every
-computation carries a small error. How small, and when the errors stop being
-small, is the subject of the chapter on floating-point numbers. For the rest
-of this chapter we treat real numbers as exact and use a program only to
-print them.
+The error of $x^2$ against $2$ shrinks from $2.5 \times 10^{-1}$ to
+$6.9 \times 10^{-3}$ to $6.0 \times 10^{-6}$ to $4.5 \times 10^{-12}$: the
+number of correct digits roughly doubles each step. (This is Newton's method;
+the chapter on derivatives explains why it works.) Each value is a genuine
+fraction, and the sequence walks toward a number that is not one. That is the
+sense in which a computer, which only has fractions to work with, can work
+with $\mathbb{R}$ at all: it stores a rational approximation with finitely many
+digits, and every computation carries a small error. How small, and when the
+errors stop being small, is the subject of the chapter on floating-point
+numbers. For the rest of this chapter we treat real numbers as exact and use a
+program only to print them.
 
-Real numbers are ordered (for any two, one is smaller) and we write stretches
-of the line as **intervals**: $[a, b]$ is all $x$ with $a \le x \le b$, the
-**closed interval** that includes both ends; $(a, b)$ is all $x$ with
-$a < x < b$, the **open interval** without them. A probability, for example,
-is a real number in $[0, 1]$.
+Real numbers are ordered (for any two, one is smaller), so we can name
+stretches of the line as **intervals**: $[a, b]$ is all $x$ with
+$a \le x \le b$, the **closed interval** that includes both ends; $(a, b)$ is
+all $x$ with $a < x < b$, the **open interval** without them. A probability,
+for example, is a real number in $[0, 1]$.
 
-## Sets
+## Collections, and the pairs that make a dataset
 
-We have started to talk about "the set of integers" and "all $x$ with
+We have already been talking about "the set of integers" and "all $x$ with
 $a \le x \le b$". Machine learning is full of collections (a vocabulary, a
-dataset, the set of possible labels), so we fix the language now.
+dataset, the set of possible labels), so it is time to fix the language for
+them.
 
 A **set** is a collection of distinct objects, called its **elements**. We
 write a finite set by listing its elements in braces: $A = \{1, 2, 3, 4\}$.
 Two facts define it. Order does not matter ($\{1,2\} = \{2,1\}$) and repeats
 do not count ($\{1, 2, 2, 3, 2\} = \{1, 2, 3\}$). We write $x \in A$ for
 "$x$ is an element of $A$" and $x \notin A$ for "is not". The number of
-elements of a finite set $A$ is written $\lvert A \rvert$. The set with no
+elements of a finite set $A$ is written $\lvert A \rvert$, and the set with no
 elements is the **empty set**, $\varnothing$.
 
-Sets can be described by a rule instead of a list. The **set-builder**
+A rule can describe a set where a list would be too long. The **set-builder**
 notation $\{\, n \in \mathbb{Z} : n^2 < 20 \,\}$ reads "the set of integers $n$
-such that $n^2 < 20$", and the colon means "such that". We also use the
+such that $n^2 < 20$", the colon meaning "such that". We also use the
 shorthand $\{1, \dots, n\}$ for the integers from $1$ to $n$ (the book's
 notation page lists it), and $\mathbb{R}$, $\mathbb{Z}$, $\mathbb{N}$ are sets
-in this sense. Because $\mathbb{N}$, $\mathbb{Z}$, $\mathbb{R}$ contain one
+in this sense. Since $\mathbb{N}$, $\mathbb{Z}$ and $\mathbb{R}$ contain one
 another, we say that $B$ is a **subset** of $A$, written $B \subseteq A$, when
 every element of $B$ is in $A$.
 
-Three operations combine sets. The **union** $A \cup B$ holds everything in
+Sets combine in three ways. The **union** $A \cup B$ holds everything in
 either; the **intersection** $A \cap B$ holds what is in both; the
 **difference** $A \setminus B$ holds what is in $A$ and not in $B$.
 
@@ -259,21 +259,23 @@ either; the **intersection** $A \cap B$ holds what is in both; the
 | A x B (ordered pairs) | 12 pairs | \|A\| * \|B\| |
 <!-- /worked -->
 
-The last row introduces the **product** of two sets: $A \times B$ is the set
-of **ordered pairs** $(a, b)$ with $a \in A$ and $b \in B$. A pair differs
-from a two-element set because order matters and repeats are allowed:
-$(3, 3)$ is a pair, $\{3, 3\} = \{3\}$ is not. A dataset of $N$ labelled
-examples is exactly a collection of $N$ pairs $(x_n, y_n)$, input and desired
-output. One subtlety to remember: a set collapses repeats, but a real dataset
-may contain the same example twice, and each copy counts. When that matters
-the book says "the list of examples" and indexes it by $n = 1, \dots, N$,
-which is how we write datasets in the sections below.
+The last row of the table brings in the **product** of two sets: $A \times B$
+is the set of **ordered pairs** $(a, b)$ with $a \in A$ and $b \in B$. A pair
+differs from a two-element set because order matters and repeats are allowed:
+$(3, 3)$ is a pair, $\{3, 3\} = \{3\}$ is not. This is the structure of a
+dataset of $N$ labelled examples, which is exactly a collection of $N$ pairs
+$(x_n, y_n)$, input and desired output. One subtlety deserves remembering: a
+set collapses repeats, but a real dataset may contain the same example twice,
+and each copy counts. When that matters the book says "the list of examples"
+and indexes it by $n = 1, \dots, N$, which is how datasets are written in the
+sections below.
 
-## Exponents
+## Counting factors, and what happens when the count is not a count
 
-Return to the opening problem. Repeated multiplication is the first compact
-notation: $2 \times 2 \times 2 \times 2 \times 2$ is written $2^5$. In general,
-for a number $b$ (the **base**) and a positive integer $n$ (the **exponent**),
+Back to the sizes that opened the chapter. Repeated multiplication is the first
+compact notation for them: $2 \times 2 \times 2 \times 2 \times 2$ is written
+$2^5$. In general, for a number $b$ (the **base**) and a positive integer $n$
+(the **exponent**),
 
 $$
 b^n = \underbrace{b \times b \times \cdots \times b}_{n \text{ factors}} .
@@ -288,32 +290,34 @@ b^m \cdot b^n = b^{m+n} ,
 $$
 
 and every other rule follows from it. For example $(b^m)^n$ is $n$ copies of
-$b^m$, each with $m$ factors, so it has $m n$ factors:
-$(b^m)^n = b^{mn}$. And $(ab)^n = a^n b^n$, because we may rearrange the $n$
-copies of $a$ and the $n$ copies of $b$ in a product.
+$b^m$, each with $m$ factors, so it has $m n$ factors: $(b^m)^n = b^{mn}$. And
+$(ab)^n = a^n b^n$, because the $n$ copies of $a$ and the $n$ copies of $b$ in
+a product may be rearranged.
 
-So far an exponent had to be a positive integer. We now extend it, and the
-extension is not a free choice: we demand that the product rule keep holding.
+So far an exponent had to be a positive integer, which is a limitation we can
+lift, but only on one condition: the product rule must keep holding. The
+extension is not a free choice; each new kind of exponent is forced.
 
-**Zero.** The rule says $b^0 \cdot b^n = b^{0+n} = b^n$. A number that leaves
-every $b^n$ unchanged when multiplied is $1$, so $b^0$ must equal $1$ (for
-$b \neq 0$). The book also takes $0^0 = 1$, the empty product, because
-formulas such as $\sum_j c_j x^j$ must give $c_0$ at $x = 0$; a program's
-power function usually agrees.
+Take zero first. The rule says $b^0 \cdot b^n = b^{0+n} = b^n$. A number that
+leaves every $b^n$ unchanged when multiplied is $1$, so $b^0$ must equal $1$
+(for $b \neq 0$). The book also takes $0^0 = 1$, the empty product, because
+formulas such as $\sum_j c_j x^j$ must give $c_0$ at $x = 0$; a program's power
+function usually agrees.
 
-**Negative integers.** The rule says $b^{-n} \cdot b^{n} = b^{0} = 1$, so
-$b^{-n}$ must be the reciprocal: $b^{-n} = 1 / b^n$. Thus $2^{-3} = 1/8$.
+Negative integers follow the same logic. The rule says
+$b^{-n} \cdot b^{n} = b^{0} = 1$, so $b^{-n}$ must be the reciprocal:
+$b^{-n} = 1 / b^n$, and $2^{-3} = 1/8$.
 
-**Fractions.** The power rule says $(b^{1/2})^2 = b^{1} = b$, so $b^{1/2}$ is
-a number whose square is $b$: the square root. In general $b^{1/k}$ is the
+Fractions come next. The power rule says $(b^{1/2})^2 = b^{1} = b$, so $b^{1/2}$
+is a number whose square is $b$: the square root. In general $b^{1/k}$ is the
 $k$-th root of $b$ (for positive $b$), and $b^{m/k} = (b^{1/k})^m$.
 
-**Any real number.** An irrational exponent such as $2^{\sqrt{2}}$ is
-defined by squeezing: $2^{1.4}$, $2^{1.41}$, $2^{1.414}$, ... are powers with
-rational exponents, and they close in on one number, which we call
+For an arbitrary real exponent the definition goes by squeezing. A power such
+as $2^{\sqrt{2}}$ is approached by $2^{1.4}$, $2^{1.41}$, $2^{1.414}$, ..., which
+have rational exponents and close in on one number, the one we call
 $2^{\sqrt{2}}$. We take the existence of this limit for granted until the
-chapters on functions and derivatives. From here on, $b^x$ is defined for
-every positive base $b$ and every real exponent $x$.
+chapters on functions and derivatives. From here on, $b^x$ is defined for every
+positive base $b$ and every real exponent $x$.
 
 <!-- worked: numbasics.exponent_rules -->
 | rule | left side | value | right side | value | equal |
@@ -330,16 +334,16 @@ every positive base $b$ and every real exponent $x$.
 
 The program checks each rule with specific numbers, and the "equal" column
 tests for equality up to the tiny error of the machine's own arithmetic. Two
-cautions are in order. Parentheses decide meaning: $-2^2$ is $-(2^2) = -4$ but
-$(-2)^2 = 4$. And a tower $a^{b^c}$ is read from the top, as $a^{(b^c)}$.
+cautions before moving on. Parentheses decide meaning: $-2^2$ is $-(2^2) = -4$
+but $(-2)^2 = 4$. And a tower $a^{b^c}$ is read from the top, as $a^{(b^c)}$.
 
-### Scientific notation
+### Writing size as an exponent
 
-Every positive number can be written as $m \times 10^k$ with a **mantissa**
-$m$ in $[1, 10)$ and an integer exponent $k$. The exponent says how big the
-number is (its **order of magnitude**) and the mantissa carries the digits.
-Programs write the same thing as `7e9` for $7 \times 10^9$ and `1e-8` for
-$10^{-8}$.
+Exponents give us the notation the opening asked for. Every positive number
+can be written as $m \times 10^k$ with a **mantissa** $m$ in $[1, 10)$ and an
+integer exponent $k$. The exponent says how big the number is (its **order of
+magnitude**) and the mantissa carries the digits. Programs write the same
+thing as `7e9` for $7 \times 10^9$ and `1e-8` for $10^{-8}$.
 
 <!-- worked: numbasics.scientific_notation -->
 | quantity | written out | scientific notation | as a program writes it |
@@ -355,10 +359,10 @@ exponents, by the product rule: $(7 \times 10^9) \times (2 \times 10^{12}) =
 14 \times 10^{21} = 1.4 \times 10^{22}$. Sizes in machine learning span so many
 orders of magnitude that this is how one compares them: the exponents of a
 learning rate of $3 \times 10^{-4}$ and a parameter count of $7 \times 10^{9}$
-are $-4$ and $9$, which differ by 13, so the two quantities are thirteen
-orders of magnitude apart.
+are $-4$ and $9$, which differ by 13, so the two quantities are thirteen orders
+of magnitude apart.
 
-### Sizes of models
+### How wide layers add up to billions
 
 Exponents also let us count. A natural way to organise the numbers in a model
 is as square grids of $d \times d$ numbers, each with $d$ extra numbers
@@ -375,7 +379,7 @@ them; the table repeats the same grid 32 times.
 
 Doubling the width $d$ multiplies the grid size by close to four, because of
 the exponent $2$ in $d^2$. Parameter counts therefore grow quickly with width,
-and memory with them. Each number costs a fixed number of bytes in memory (the
+and memory with them, since each number costs a fixed number of bytes (the
 number format is the subject of the chapter on floating point). For a model of
 $7 \times 10^9$ parameters:
 
@@ -389,21 +393,21 @@ $7 \times 10^9$ parameters:
 One GiB is 1,073,741,824 bytes, which is 7.4 percent more than one GB of 1,000,000,000.
 <!-- /worked -->
 
-The two memory columns differ, and the difference is itself an exponent
-story. The prefix "giga" in everyday use means $10^9$, but memory comes in
-powers of two, and $2^{30}$ is the closest power of two to $10^9$. The book
-writes $\mathrm{GiB}$ for $2^{30}$ bytes and GB for $10^9$ bytes, as the
-notation page states, and a claim about a model fitting in memory is only
-meaningful with the right one.
+The two memory columns differ, and the difference is itself an exponent story.
+The prefix "giga" in everyday use means $10^9$, but memory comes in powers of
+two, and $2^{30}$ is the closest power of two to $10^9$. The book writes
+$\mathrm{GiB}$ for $2^{30}$ bytes and GB for $10^9$ bytes, as the notation
+page states, and a claim about a model fitting in memory is only meaningful
+with the right one.
 
-## Logarithms
+## Undoing the exponent
 
-An exponent answers "what do I get after multiplying $b$ by itself $x$
-times?". Reverse the question. If $2^x = 1024$, what is $x$? You can find
-$x = 10$ by trying. The answer deserves a name, because the question
-(how many times must I multiply to reach this?) comes up constantly. The
-**logarithm** to base $b$ of a positive number $y$, written $\log_b y$, is the
-exponent $x$ such that $b^x = y$:
+An exponent answers "what do I get after multiplying $b$ by itself $x$ times?".
+Ask the question the other way round. If $2^x = 1024$, what is $x$? Trying
+values finds $x = 10$, but the question (how many times must I multiply to
+reach this?) comes up constantly, and an answer that common deserves a name.
+The **logarithm** to base $b$ of a positive number $y$, written $\log_b y$, is
+the exponent $x$ such that $b^x = y$:
 
 $$
 \log_b y = x \iff b^x = y \qquad (b > 0,\; b \neq 1,\; y > 0).
@@ -412,32 +416,32 @@ $$
 So $\log_2 1024 = 10$, $\log_{10} 1000 = 3$ and $\log_{10} 0.001 = -3$. The
 restriction $y > 0$ is not a technicality: a positive base raised to any real
 power is positive, so no exponent produces $0$ or a negative number, and
-$\log_b y$ is undefined there. We will see in a moment why a program that is
-asked for $\log 0$ answers $-\infty$ and not an error.
+$\log_b y$ is undefined there. We will see shortly why a program that is asked
+for $\log 0$ answers $-\infty$ and not an error.
 
-A logarithm and an exponent undo one another, by definition:
+By definition, a logarithm and an exponent undo one another:
 $\log_b(b^x) = x$ and $b^{\log_b y} = y$.
 
-### The rules, derived
+### Why a logarithm turns products into sums
 
 Every rule of logarithms is a rule of exponents read backwards. Let
 $x = \log_b u$ and $z = \log_b v$, so that $u = b^x$ and $v = b^z$.
 
-- **Product.** $uv = b^x b^z = b^{x+z}$, and so by definition
+- For a product, $uv = b^x b^z = b^{x+z}$, and so by definition
   $\log_b(uv) = x + z$:
   $$
   \log_b(uv) = \log_b u + \log_b v .
   $$
-- **Quotient.** The same argument with $b^{x}/b^{z} = b^{x-z}$ gives
+- The same argument with $b^{x}/b^{z} = b^{x-z}$ gives the quotient rule,
   $\log_b(u/v) = \log_b u - \log_b v$.
-- **Power.** $u^k = (b^x)^k = b^{kx}$, so
+- For a power, $u^k = (b^x)^k = b^{kx}$, so
   $$
   \log_b(u^k) = k \log_b u .
   $$
   With $k = -1$ this says $\log_b(1/u) = -\log_b u$, and $\log_b 1 = 0$ because
   $b^0 = 1$.
-- **Change of base.** Let $x = \log_b y$, so $y = b^x$. Take $\log_c$ of both
-  sides and use the power rule: $\log_c y = x \log_c b$. Hence
+- To change base, let $x = \log_b y$, so $y = b^x$. Take $\log_c$ of both sides
+  and use the power rule: $\log_c y = x \log_c b$. Hence
   $$
   \log_b y = \frac{\log_c y}{\log_c b} .
   $$
@@ -445,9 +449,9 @@ $x = \log_b u$ and $z = \log_b v$, so that $u = b^x$ and $v = b^z$.
   the choice of base is mostly a convention.
 
 The product rule is the one that matters most for this book: **a logarithm
-turns multiplication into addition**. The following table checks each rule
-numerically. The "difference" column shows the rounding error of the
-computer's arithmetic, a few parts in $10^{16}$.
+turns multiplication into addition**. The next table checks each rule
+numerically. Its "difference" column shows the rounding error of the computer's
+arithmetic, a few parts in $10^{16}$.
 
 <!-- worked: numbasics.log_rules -->
 | rule | left side | value | right side | value | difference |
@@ -461,10 +465,10 @@ computer's arithmetic, a few parts in $10^{16}$.
 | reciprocal | log(1/8) | -2.0794415417 | -log 8 | -2.0794415417 | 0.0e+00 |
 <!-- /worked -->
 
-### The number $e$ and natural logarithms
+### A third base that finds itself
 
-Three bases are in use: 10 (digits), 2 (bits) and a third that arises by
-itself. Suppose a quantity grows by a fraction $1/n$ at each of $n$ equal
+Three bases are in common use: 10 (digits), 2 (bits) and a third that arises
+by itself. Suppose a quantity grows by a fraction $1/n$ at each of $n$ equal
 steps, so that after all of them it has been multiplied by $(1 + 1/n)^n$. If
 $n = 1$ the factor is $2$. What happens with more and finer steps?
 
@@ -488,18 +492,19 @@ e = 2.718281828459
 The values settle: $2$, $2.59$, $2.7048$, $2.71692$, and so on toward a number
 written $e = 2.718281828\ldots$, an irrational number. (We will not prove that
 the values converge; the chapter on derivatives defines the limit properly.)
-The bottom rows warn us of something else: for very large $n$ the printed
-value drifts away from $e$ and at $n = 10^{16}$ it is exactly $1$. The
-mathematics has not changed; the computer cannot distinguish $1 + 10^{-16}$
-from $1$, and the cause is the finite-digit storage described in the chapter
-on floating-point numbers. We have just seen our first numerical failure.
+The bottom rows warn of something else. For very large $n$ the printed value
+drifts away from $e$, and at $n = 10^{16}$ it is exactly $1$. The mathematics
+has not changed; the computer cannot distinguish $1 + 10^{-16}$ from $1$, and
+the cause is the finite-digit storage described in the chapter on
+floating-point numbers. That is our first numerical failure, and it will not
+be the last.
 
 The function that takes $x$ to $e^x$ is written $\exp(x)$, and its inverse, the
 logarithm to base $e$, is the **natural logarithm**. The book's notation page
 fixes the convention: $\log x$ with no base means the natural logarithm, and
 bases other than $e$ are written out as $\log_2$ and $\log_{10}$. (Programming
-languages mostly agree: `log` is natural, `log2` and `log10` are the others.
-A formula copied from a paper that writes "log" must be checked for which it
+languages mostly agree: `log` is natural, `log2` and `log10` are the others. A
+formula copied from a paper that writes "log" must be checked for which it
 means.) Why $e$ is the natural choice is an observation about rates of change
 that the derivatives chapter makes precise.
 
@@ -510,13 +515,12 @@ $b = e^a$, then $a = \log b$, so $(b, a)$ is on the graph of $\log$.
 ![The curves y = exp(x) in blue and y = log(x) in orange with the dashed line y = x between them; the points (0, 1), (1, e) on exp and their mirror images (1, 0), (e, 1) on log are marked.](img/exp-log-mirror.svg)
 
 The picture exposes three habits worth keeping. The exponential is positive
-everywhere, tiny for negative arguments and explosive for positive ones.
-The logarithm is defined only for positive inputs; it plunges toward $-\infty$
-as the input approaches 0 from above, and it grows slowly, so slowly that
-$\log$ of a million is only about 13.8. And the logarithm of 1 is 0, with
-inputs below 1 giving negative values; a probability is at most 1, so the
-logarithm of a probability is never positive. Check it against inverses on
-actual numbers:
+everywhere, tiny for negative arguments and explosive for positive ones. The
+logarithm is defined only for positive inputs; it plunges toward $-\infty$ as
+the input approaches 0 from above, and it grows slowly, so slowly that $\log$
+of a million is only about 13.8. And the logarithm of 1 is 0, with inputs
+below 1 giving negative values; a probability is at most 1, so the logarithm
+of a probability is never positive. Numbers confirm the inverses:
 
 <!-- worked: numbasics.exp_log_inverse -->
 Going exp then log returns the starting number:
@@ -541,13 +545,13 @@ Going log then exp does too, for positive inputs:
 | 1000 | 6.907755 | 1000 |
 <!-- /worked -->
 
-### Logarithms count digits and bits
+### A ruler for sizes
 
-The last property is the one that rescues the opening problem. For a power of
-ten, $\log_{10}$ is the number of zeros. For other numbers it is a fraction,
-and the integer part tells the order of magnitude. $\log_{10}$ is how we turn
-"how many digits?" into a smooth quantity, and $\log_2$ turns "how many
-binary digits?" into one:
+One property of the logarithm remains, and it is the one that begins to rescue
+the opening problem. For a power of ten, $\log_{10}$ is the number of zeros.
+For other numbers it is a fraction whose integer part gives the order of
+magnitude. So $\log_{10}$ turns "how many digits?" into a smooth quantity, and
+$\log_2$ does the same for "how many binary digits?":
 
 <!-- worked: numbasics.digits_and_bits -->
 | quantity x | log_10 x | log_2 x | bits to number x things (log_2 x rounded up) |
@@ -563,21 +567,22 @@ binary digits?" into one:
 
 A vocabulary of $50{,}000$ tokens needs $\lceil \log_2 50000 \rceil = 16$ bits
 to name each token, where $\lceil\cdot\rceil$ rounds up to the next integer,
-and $128{,}000$ needs 17. Seven billion parameters is a ten-digit number but
-a 33-bit one. The logarithm is a ruler on which sizes that differ by factors
-of ten or a thousand are the same distance apart, and that is exactly what we
-want when comparing quantities that range from $10^{-8}$ to $10^{12}$.
+and $128{,}000$ needs 17. Seven billion parameters is a ten-digit number but a
+33-bit one. The logarithm is a ruler on which sizes that differ by factors of
+ten or a thousand are the same distance apart, which is exactly what we want
+when comparing quantities that range from $10^{-8}$ to $10^{12}$.
 
-## Function notation
+## A rule with a name
 
 We have been writing expressions like $e^x$ and $\log_b y$, where a letter
-stands for an input and the expression says what to do with it. This is the
-idea of a function, and this section only introduces its notation. The next
-chapter builds the theory.
+stands for an input and the expression says what to do with it. That is the
+idea of a function, and this section introduces only its notation; the next
+chapter builds the theory. We need the notation now because the loss, the
+quantity this chapter promised to make precise, is one.
 
-A function is a rule that takes an input and produces an output. We give
-the rule a name, usually a single letter, and write $f(x)$ for the output the
-rule $f$ produces from the input $x$. To define a function we give the rule:
+A function is a rule that takes an input and produces an output. We give the
+rule a name, usually a single letter, and write $f(x)$ for the output the rule
+$f$ produces from the input $x$. To define a function we give the rule:
 
 $$
 f(x) = 3x - 2 .
@@ -591,10 +596,10 @@ $f(a + 1) = 3(a + 1) - 2 = 3a + 1$. The name of the placeholder is arbitrary
 ($f(t) = 3t - 2$ is the same rule), and *what we do to the input* is the only
 content of $f$.
 
-Notation that is easy to misread: $f(x)$ names the output for input $x$, not
-the function itself, which is $f$. And $f(x)$ is not $f$ times $x$. Even
-the familiar $\log x$ is this notation without parentheses: the function
-$\log$ applied to $x$.
+Two misreadings are easy. $f(x)$ names the output for input $x$, not the
+function itself, which is $f$; and $f(x)$ is not $f$ times $x$. Even the
+familiar $\log x$ is this notation without parentheses: the function $\log$
+applied to $x$.
 
 A rule often has two kinds of numbers in it. In $h(x) = wx + b$ the quantity
 $x$ is the input we vary from one use to the next, while $w$ and $b$ are
@@ -616,22 +621,22 @@ collected in $\theta$ and the model written $f_\theta$.
 | 2.5 | 5.5 | 6.25 | 5.5 | 2.25 |
 <!-- /worked -->
 
-To say which numbers a function takes and gives, we write
-$f: A \to B$, "$f$ is a function from the set $A$ to the set $B$": the set $A$
-of acceptable inputs and the set $B$ that contains the outputs. $f(x) = 3x - 2$
-is a function $\mathbb{R} \to \mathbb{R}$. The logarithm is not: its inputs
-are only the positive reals, so we write $\log: (0, \infty) \to \mathbb{R}$,
-and the rule "the input must be in the set $A$" is part of what a function
-is. Intervals and sets, as above, are how we state it.
+To say which numbers a function takes and gives, we write $f: A \to B$, "$f$ is
+a function from the set $A$ to the set $B$": the set $A$ of acceptable inputs
+and the set $B$ that contains the outputs. $f(x) = 3x - 2$ is a function
+$\mathbb{R} \to \mathbb{R}$. The logarithm is not: its inputs are only the
+positive reals, so we write $\log: (0, \infty) \to \mathbb{R}$, and the rule
+"the input must be in the set $A$" is part of what a function is. Intervals and
+sets, as above, are how we state it.
 
 A **loss** is a function too: its input is the parameters (everything else is
 held fixed) and its output is one number saying how badly the model does. We
-write it $L(w)$. We construct one in the next section.
+write it $L(w)$, and the next section constructs one.
 
-## Summation notation
+## Adding up a loss
 
-An example. We have a dataset of five points $(x_n, y_n)$, and a candidate
-rule $f(x) = 2x + 1$. For each point the prediction is $f(x_n)$, the error is
+Take a dataset of five points $(x_n, y_n)$ and a candidate rule
+$f(x) = 2x + 1$. For each point the prediction is $f(x_n)$, the error is
 $f(x_n) - y_n$, and we square it so that positive and negative errors cannot
 cancel. The loss is the average of the five squared errors.
 
@@ -648,22 +653,23 @@ Sum of squared errors 0.22, divided by N = 5: L = 0.044.
 <!-- /worked -->
 
 Writing out "add the first, add the second, ..., add the fifth" works for five
-examples. For a million examples or for $N$ examples, we need a symbol. The
-**summation** symbol $\Sigma$ (capital Greek sigma) says "add":
+examples. It does not work for a million, or for $N$ examples with $N$ unknown,
+and there we need a symbol. The **summation** symbol $\Sigma$ (capital Greek
+sigma) says "add":
 
 $$
 \sum_{i=a}^{b} t_i = t_a + t_{a+1} + \dots + t_b .
 $$
 
 The symbol $i$ is the **index** (a placeholder, like $x$ in a function), the
-numbers $a$ and $b$ are its **lower and upper bound**, both included, and
-$t_i$ is the **term**, which usually depends on $i$. The loss is
+numbers $a$ and $b$ are its **lower and upper bound**, both included, and $t_i$
+is the **term**, which usually depends on $i$. The loss is
 
 $$
 L = \frac{1}{N} \sum_{n=1}^{N} \bigl(f(x_n) - y_n\bigr)^2 ,
 $$
 
-and **every loss in machine learning has this shape**: an average, over the
+and every loss in machine learning has this shape: an average, over the
 dataset, of a per-example quantity. In pseudocode a sum is an ordinary loop
 with a variable initialised to zero:
 
@@ -678,7 +684,7 @@ function mean_squared_error(x: array<real>[N], y: array<real>[N],
     return total / N
 ```
 
-Note the loop's range. Mathematics indexes from 1 and pseudocode from 0, so
+Watch the loop's range. Mathematics indexes from 1 and pseudocode from 0, so
 the sum over $n = 1, \dots, N$ becomes a loop over `0 .. N`, as the notation
 page promises. The number of terms in a sum from $a$ to $b$ is $b - a + 1$ if
 $b \ge a$ and zero otherwise; mistakes in this count are among the commonest
@@ -697,7 +703,7 @@ bugs in code that sums, which is why the table below is worth reading.
 A sum with no terms is $0$, the starting value of the loop. That convention
 keeps every rule below valid even for empty ranges.
 
-Because the loss is a function of the model's parameters, we can see it as
+Because the loss is a function of the model's parameters, we can treat it as
 one. Holding $b = 1$ fixed, here is $L$ at five values of $w$; it is lowest
 near $w = 2$, and we will later learn how to find that minimum without trying
 values.
@@ -712,19 +718,18 @@ values.
 | 3.0 | 6.0840 |
 <!-- /worked -->
 
-### Rules of sums
+### What a sum lets you do
 
-Adding is commutative and associative, so a sum can be rearranged, split and
-scaled. Each rule below follows by writing out the terms.
-
-- **Constants come out.** $\sum_i c\,t_i = c \sum_i t_i$, because
-  $c t_1 + \dots + c t_n = c (t_1 + \dots + t_n)$.
-- **Sums split.** $\sum_i (s_i + t_i) = \sum_i s_i + \sum_i t_i$: regroup the
-  terms.
-- **Ranges split.** $\sum_{i=1}^{n} t_i = \sum_{i=1}^{m} t_i + \sum_{i=m+1}^{n} t_i$.
-- **A constant term** added $n$ times: $\sum_{i=1}^{n} c = n c$.
-- **The index is a dummy.** $\sum_{i} t_i = \sum_{j} t_j$, and shifting it
-  changes the bounds: $\sum_{i=1}^{n} t_i = \sum_{j=0}^{n-1} t_{j+1}$.
+Having a symbol for a sum is only useful if we can also compute with it, and
+the reassuring fact is that addition is commutative and associative, so a sum
+can be rearranged, split and scaled. Each rule follows by writing out the
+terms. Constants come out: $\sum_i c\,t_i = c \sum_i t_i$, because
+$c t_1 + \dots + c t_n = c (t_1 + \dots + t_n)$. Sums split:
+$\sum_i (s_i + t_i) = \sum_i s_i + \sum_i t_i$, by regrouping the terms. Ranges
+split: $\sum_{i=1}^{n} t_i = \sum_{i=1}^{m} t_i + \sum_{i=m+1}^{n} t_i$. A
+constant term added $n$ times gives $\sum_{i=1}^{n} c = n c$. And the index is
+a dummy: $\sum_{i} t_i = \sum_{j} t_j$, while shifting it changes the bounds,
+$\sum_{i=1}^{n} t_i = \sum_{j=0}^{n-1} t_{j+1}$.
 
 <!-- worked: numbasics.sum_linearity -->
 | i | x_i | y_i | 3 x_i + y_i |
@@ -738,11 +743,11 @@ Sum of the last column: 68. Three times the sum of x (20) plus the sum of y (8):
 <!-- /worked -->
 
 The first two rules together are called **linearity**: a sum of a scaled
-combination equals the scaled combination of the sums. They are what lets us
-differentiate a loss one example at a time later on.
+combination equals the scaled combination of the sums. They are what will let
+us differentiate a loss one example at a time later on.
 
-Nested sums add over two indices, as when a table of numbers is summed by rows
-and by columns. Finite sums can be performed in either order:
+Sums can also nest, adding over two indices, as when a table of numbers is
+summed by rows and by columns. For finite sums the order does not matter:
 
 <!-- worked: numbasics.double_sum -->
 |  | j = 1 | j = 2 | j = 3 | sum |
@@ -754,8 +759,8 @@ and by columns. Finite sums can be performed in either order:
 Summing rows first gives 21; summing columns first gives 21.
 <!-- /worked -->
 
-We should get a feel for what a sum computes by deriving one closed form. The
-sum $1 + 2 + \dots + n$ looks like it needs $n$ additions. Write it twice,
+Sometimes a sum can be done without adding anything. The sum
+$1 + 2 + \dots + n$ looks as if it needs $n$ additions, but write it twice,
 once forwards and once backwards, and add column by column:
 
 $$
@@ -797,10 +802,10 @@ such statement:
 The sum is 55; the closed form n(n+1)(2n+1)/6 with n = 5 gives 55.
 <!-- /worked -->
 
-## Product notation
+## The same idea for multiplication
 
-The same notation exists for multiplication. The capital Greek letter pi,
-$\Pi$, means "multiply":
+Repeated multiplication has a symbol too. The capital Greek letter pi, $\Pi$,
+means "multiply":
 
 $$
 \prod_{i=a}^{b} t_i = t_a \cdot t_{a+1} \cdots t_b .
@@ -808,13 +813,14 @@ $$
 
 An empty product is $1$, the starting value for a multiplication loop, for the
 reason that an empty sum is $0$: the starting value must leave the next factor
-unchanged. Products have the rules of sums, translated: constants raised to the
-number of terms ($\prod_{i=1}^{n} c\,t_i = c^n \prod_i t_i$), and ranges split
-as before.
+unchanged. Products have the rules of sums, translated: constants are raised
+to the number of terms ($\prod_{i=1}^{n} c\,t_i = c^n \prod_i t_i$), and ranges
+split as before.
 
-The **factorial** $n! = \prod_{i=1}^{n} i = 1 \cdot 2 \cdots n$ is the best
-known product, with $0! = 1$ for the empty product. It counts the orders in
-which $n$ different things can be arranged, and it grows alarmingly:
+The best-known product is the **factorial**,
+$n! = \prod_{i=1}^{n} i = 1 \cdot 2 \cdots n$, with $0! = 1$ for the empty
+product. It counts the orders in which $n$ different things can be arranged,
+and it grows alarmingly:
 
 <!-- worked: numbasics.factorials -->
 | n | n! | fits in a signed 64-bit integer |
@@ -836,11 +842,12 @@ The first n whose n! exceeds 2^63 - 1 = 9,223,372,036,854,775,807 is n = 21.
 Here the integer limits of the first section bite: $21!$ does not fit into a
 signed 64-bit integer, so a program computing it with fixed-width integers
 returns a wrong answer without complaint. (Languages with arbitrary-precision
-integers, like the one that computed this table, do not wrap but their
+integers, like the one that computed this table, do not wrap, but their
 numbers get slow and large.)
 
-Products can hide surprising structure. Take $\prod_{i=1}^{n} \tfrac{i+1}{i}$.
-Written out, the numerator of each factor cancels the denominator of the next:
+Products can also hide surprising structure. Take
+$\prod_{i=1}^{n} \tfrac{i+1}{i}$. Written out, the numerator of each factor
+cancels the denominator of the next:
 
 <!-- worked: numbasics.product_expanded -->
 | i | factor (i+1)/i | running product |
@@ -856,23 +863,24 @@ Every numerator cancels the next denominator, so the product of the first n fact
 <!-- /worked -->
 
 so the product collapses to $n + 1$. Cancellations of this kind, called
-**telescoping**, are the other main tool for evaluating sums and products
-in closed form.
+**telescoping**, are the other main tool for evaluating sums and products in
+closed form.
 
-## Why products of probabilities become sums of logarithms
+## The vanishing product
 
-We now have all the pieces. A model reading a text assigns, to each word, a
-chance that it would have appeared there: a number $p_i$ in $(0, 1]$. (What
-these chances mean, and how a model computes them, are the subjects of the
-probability and learning volumes. For now they are just numbers between 0 and
-1.) The chance the model gives to the whole text, when each word's chance is
-judged given the words before it, is their product,
+Every piece is now on the table, and the question from the opening can be
+answered. A model reading a text assigns, to each word, a chance that it would
+have appeared there: a number $p_i$ in $(0, 1]$. (What these chances mean, and
+how a model computes them, are the subjects of the probability and learning
+volumes. For now they are just numbers between 0 and 1.) The chance the model
+gives to the whole text, when each word's chance is judged given the words
+before it, is their product,
 
 $$
 P = \prod_{i=1}^{n} p_i .
 $$
 
-Taking the logarithm and applying the product rule once for each factor,
+Take the logarithm and apply the product rule once for each factor:
 
 $$
 \log P = \log \prod_{i=1}^{n} p_i = \sum_{i=1}^{n} \log p_i .
@@ -881,10 +889,10 @@ $$
 The product has become a sum, and a sum of per-example quantities is the shape
 of a loss. Better predictions mean larger $P$ and therefore a larger
 $\log P$, since $\log$ is increasing. Everything about the quality of a text
-model can be read from $\sum_i \log p_i$, and this is why log-probabilities
+model can be read from $\sum_i \log p_i$, which is why log-probabilities
 (rather than probabilities) are the language of model evaluation.
 
-Check it on four words with chances $0.5, 0.2, 0.1, 0.4$:
+Try it on four words with chances $0.5, 0.2, 0.1, 0.4$:
 
 <!-- worked: numbasics.log_of_product -->
 | i | p_i | log p_i | running product | running sum of logs | exp of that sum |
@@ -899,17 +907,17 @@ The last column recovers the product from the sum of logs: $\exp(\log P) = P$.
 Each log is negative, because each $p_i < 1$, and the sum gets more negative
 with more words. A longer text always has a smaller chance.
 
-There is a second reason for the logarithm, and it is not about elegance but
-about whether the answer can be computed at all. Computers store numbers in a
-fixed number of bits. The **64-bit** format common in scientific programs can
+Elegance is not the main reason for the logarithm, though. The main reason is
+whether the answer can be computed at all. Computers store numbers in a fixed
+number of bits. The **64-bit** format common in scientific programs can
 represent positive numbers only down to about $5 \times 10^{-324}$, and the
 **32-bit** format common in machine learning only down to about
 $1.4 \times 10^{-45}$; anything smaller is stored as $0$. This is
-**underflow**. Multiply $0.1$ by itself $n$ times in each format and compare
-with the sum of $n$ natural logarithms of $0.1$. The rule for the products:
-start from 1, round the factor $0.1$ to the format once, and after every
-multiplication round the result to that format before the next one (no
-wider intermediate format, which some processors use silently). Columns
+**underflow**. To watch it happen, multiply $0.1$ by itself $n$ times in each
+format and compare with the sum of $n$ natural logarithms of $0.1$. The rule
+for the products: start from 1, round the factor $0.1$ to the format once, and
+after every multiplication round the result to that format before the next one
+(no wider intermediate format, which some processors use silently). Columns
 print four significant digits, so a reproduction agrees when it matches to
 those digits.
 
@@ -932,17 +940,17 @@ In 32 bits the product vanishes at $n = 46$, after only 46 words, and in
 $9.881 \times 10^{-324}$ are the smallest numbers of their formats: below the
 ordinary range the formats keep going with fewer and fewer significant digits,
 down to a single bit, before they reach 0. These are **subnormal** numbers;
-Chapter 15 explains them.) The sum of logs is an ordinary number all the way:
-$-105.92$ and $-746.04$ at the points where the products disappear, and
-$-921.03$ for 400 factors. The picture plots the base-10 logarithm of each
-quantity.
+Chapter 15 explains them.) The sum of logs, by contrast, is an ordinary number
+all the way: $-105.92$ and $-746.04$ at the points where the products
+disappear, and $-921.03$ for 400 factors. The picture plots the base-10
+logarithm of each quantity.
 
 ![Base-10 logarithm of the product of n factors of 0.1 for n from 0 to 400: the true value falls on a straight line; the 32-bit product leaves the line at n = 46 and sits at zero, drawn on a floor at minus 330; the 64-bit product follows the line to n = 324 and then sits on the same floor.](img/product-underflow.svg)
 
 Nothing is wrong with any single multiplication: each is accurate. What fails
 is the range of the numbers; the final answer is smaller than the smallest
-representable number. Taking logarithms moves the problem to a scale where
-the magnitudes are modest: 400 factors of $0.1$ become the number $-921$.
+representable number. Taking logarithms moves the problem to a scale where the
+magnitudes are modest: 400 factors of $0.1$ become the number $-921$.
 
 <!-- worked: numbasics.stable_log_sum_demo -->
 Direct product of 400 factors of 0.1 in 64 bits: 0.0.
@@ -950,10 +958,10 @@ Direct product of 400 factors of 0.1 in 64 bits: 0.0.
 Sum of 400 logs: -921.0340; average per token: -2.3026; and exp of that average: 0.1000.
 <!-- /worked -->
 
-The same demo shows the second use of the logarithm: dividing the sum by $n$
-gives the average log-probability per word, about $-2.3026$, and its
-exponential is $0.1$, the typical chance per word. A log-probability of a
-long text has little meaning to a human, but the average per word does.
+The same demo shows a second use of the logarithm. Dividing the sum by $n$ gives
+the average log-probability per word, about $-2.3026$, and its exponential is
+$0.1$, the typical chance per word. The log-probability of a long text has
+little meaning to a human, but the average per word does.
 
 The algorithm in the book's pseudocode:
 
@@ -976,16 +984,21 @@ logarithm: they compute $\log p_i$ directly from the model's raw scores, so
 that no tiny probability is ever formed. The chapter on floating-point numbers
 shows how.)
 
-## Making it work
+## Five ways a correct formula still goes wrong
 
-**Which log?** A program's `log` is the natural logarithm. Information content
-measured with $\log_2$ is in bits, with $\log$ in nats; they differ by the
-constant factor $\log 2 \approx 0.693$ of the change-of-base rule. Mixing them
-silently is a classic error: a loss reported in nats and compared with a
-published figure in bits is off by 44 percent.
+The logarithm rescued the product, but it would be a mistake to leave with the
+impression that the algebra of this chapter is safe to apply mechanically. It
+fails in five different ways, and each is worth knowing by name.
 
-**Identities that are not.** Several equalities look plausible and are false.
-They all come from treating an operation as if it distributed over addition.
+The mildest is a question of units. A program's `log` is the natural
+logarithm. Information content measured with $\log_2$ is in bits, with $\log$
+in nats, and the two differ by the constant factor $\log 2 \approx 0.693$ of
+the change-of-base rule. Mixing them silently is a classic error: a loss
+reported in nats and compared with a published figure in bits is off by 44
+percent.
+
+More tempting are the equalities that look plausible and are false. They all
+come from treating an operation as if it distributed over addition.
 
 <!-- worked: numbasics.common_mistakes -->
 | claimed identity | values | left side | right side |
@@ -997,11 +1010,11 @@ They all come from treating an operation as if it distributed over addition.
 <!-- /worked -->
 
 The logarithm is the best example. It turns products to sums, so it is tempting
-to believe it also turns sums to something simple, but there is no rule for
+to believe it also turns sums into something simple, but there is no rule for
 $\log(a + b)$ at all. The same warning applies to sums: the sum of squares is
 not the square of the sum.
 
-**Exponentials overflow.** $\exp$ is the one function here that can leave the
+Third, the exponential. $\exp$ is the one function here that can leave the
 representable range from the other side: it grows so quickly that moderate
 arguments overflow.
 
@@ -1029,30 +1042,30 @@ probabilities rather than multiply them: $\log(a + b)$ cannot be computed from
 $\log a$ and $\log b$ by any of the rules above, and the way out (the
 log-sum-exp trick) is the central technique of the floating-point chapter.
 
-**Off-by-one in sums.** Mathematics counts from 1, arrays from 0, and ranges in
-pseudocode exclude the upper end. A sum over $n = 1, \dots, N$ has $N$ terms,
-and is the loop `for n in 0 .. N`; checking the number of terms against
-$b - a + 1$ (the term count table) catches most mistakes.
+The fourth is the plainest bug in code that sums. Mathematics counts from 1,
+arrays from 0, and ranges in pseudocode exclude the upper end. A sum over
+$n = 1, \dots, N$ has $N$ terms and is the loop `for n in 0 .. N`; checking the
+number of terms against $b - a + 1$ (the term count table) catches most
+mistakes.
 
-**Large sums lose small terms.** Adding a million numbers one after another in
-32 bits is not guaranteed to give the right sum, because once the running
-total is large, small terms fall below its resolution. The order and grouping
-of the additions matter, in a way the mathematics of $\sum$ does not show. We
-return to this under compensated summation in the floating-point chapter.
+The last is subtler, because nothing in the mathematics of $\sum$ shows it.
+Adding a million numbers one after another in 32 bits is not guaranteed to
+give the right sum: once the running total is large, small terms fall below its
+resolution, so the order and grouping of the additions matter. We return to
+this under compensated summation in the floating-point chapter.
 
-## Where this appears in brain
+## Where the exponents and logarithms show up in the code
 
-This chapter's ideas are not preliminaries that the engine outgrew; they are
-in the code.
+None of this is a preliminary the engine outgrew; it is in the code.
 
-**Log-probabilities.** `crates/model/src/logprobs.rs` defines `row_logprob`,
-the log of the chance a model gave to one chosen word, computed from the
-model's raw scores for every word in the vocabulary. Its doc comment calls it
-"numerically-stable", which is the problem of the last two sections: the
-function never forms the tiny probability itself. Its tests include one that
-asserts the result is never positive (`row_logprob_is_never_positive`), which
-is the statement of this chapter that the logarithm of a number at most 1 is
-at most 0. The function arrived in commit `78c381b52` (5 September 2026),
+Start with the log-probabilities. `crates/model/src/logprobs.rs` defines
+`row_logprob`, the log of the chance a model gave to one chosen word, computed
+from the model's raw scores for every word in the vocabulary. Its doc comment
+calls it "numerically-stable", which is the problem of the last two sections:
+the function never forms the tiny probability itself. Its tests include one
+that asserts the result is never positive (`row_logprob_is_never_positive`),
+which is the statement of this chapter that the logarithm of a number at most
+1 is at most 0. The function arrived in commit `78c381b52` (5 September 2026),
 which gave models a per-token log-probability primitive and replaced two
 hand-written copies of the same reduction in the evaluation code with one
 shared function. The commit also says that the objectives for preference
@@ -1060,17 +1073,18 @@ optimisation, policy-gradient and distillation training are built from this
 primitive: every one of them is a sum of log-probabilities of the shape
 $\sum_i \log p_i$ derived above.
 
-**Parameter counts.** `crates/bench/src/arch.rs` computes a model's parameter
-count with `param_list().iter().map(|(_, n)| *n as u64).sum()`: a sum over
-the model's list of parameter tensors, accumulated in a 64-bit unsigned integer, so that counts of several billion
-do not wrap, as the integer-range table above warned. The same crate's scaling-law sweep, `crates/bench/src/scaling.rs`
-(introduced in commit `f6069a024`, 24 June 2026), fits the law
-$L(N) \approx E + A N^{-\alpha}$ relating a loss to the parameter count $N$. A
-power law is a curve with an exponent, and the fit works by taking logarithms
-so that the curve becomes a straight line in $\log N$ and $\log(L - E)$,
-where an ordinary line-fitting method applies; its doc comment describes
-the method as ordinary least squares in log-log space. An exponent and a
-logarithm, used for exactly the reasons this chapter gives.
+Counting is the other half. `crates/bench/src/arch.rs` computes a model's
+parameter count with `param_list().iter().map(|(_, n)| *n as u64).sum()`: a sum
+over the model's list of parameter tensors, accumulated in a 64-bit unsigned
+integer, so that counts of several billion do not wrap, as the integer-range
+table above warned. The same crate's scaling-law sweep,
+`crates/bench/src/scaling.rs` (introduced in commit `f6069a024`, 24 June 2026),
+fits the law $L(N) \approx E + A N^{-\alpha}$ relating a loss to the parameter
+count $N$. A power law is a curve with an exponent, and the fit works by taking
+logarithms so that the curve becomes a straight line in $\log N$ and
+$\log(L - E)$, where an ordinary line-fitting method applies; its doc comment
+describes the method as ordinary least squares in log-log space. An exponent
+and a logarithm, used for exactly the reasons this chapter gives.
 
 ## Check your understanding
 
@@ -1082,6 +1096,43 @@ Answers are at the end of the chapter.
 4. **Explain.** A model multiplies 1000 chances, each equal to $0.01$. Why does the product cause trouble on a machine while the sum of the base-10 logarithms does not?
 5. **Find the error.** "$b^0 = 0$, because zero factors of $b$ multiply to nothing." Use the rule $b^m b^n = b^{m+n}$ to say what $b^0$ must be.
 6. **Predict.** How many elements has $\{1, 2, 2, 3\}$, and what are $\{1, 2\} \cup \{2, 3\}$ and $\{1, 2\} \cap \{2, 3\}$?
+
+## Summary
+
+The chapter began with a model of seven billion parameters and a learning rate
+of $3 \times 10^{-4}$, and with the need to write both. The numbers themselves
+come in layers. **Integers** are the exact numbers of counting and naming; held
+in a fixed number of bits, they have a range and wrap when it is exceeded.
+**Real numbers** fill the line between them, including irrational numbers such
+as $\sqrt{2}$ that no fraction equals, and a computer only ever holds
+approximations to them. A **set** is a collection of distinct elements, written
+with braces and combined by union, intersection and difference, and a dataset
+is a list of pairs.
+
+An **exponent** counts factors, and the rule $b^m b^n = b^{m+n}$ forces the
+meaning of $b^0$, $b^{-n}$ and $b^{1/k}$; scientific notation turns sizes into
+exponents so that orders of magnitude can be compared. A **logarithm** undoes
+the exponent, and its product rule $\log(uv) = \log u + \log v$ turns
+multiplication into addition. The logarithms to bases 10, 2 and $e$ count
+digits, bits and, by convention in this book, natural growth. **Summation** and
+**product** notation write repeated addition and multiplication over an index,
+a loss is an average of per-example terms, and **function notation** $f(x)$
+names the output of a rule for an input, with $f(x; w, b)$ separating inputs
+from parameters.
+
+The central result is practical: a product of many chances underflows, and the
+sum of their logarithms does not, which is why log-probabilities are what
+models compute and report. The limits are equally practical. A logarithm cannot
+add two probabilities; an exponential overflows quickly; sums lose small terms;
+and all of it happens on a machine that stores approximations. Those points are
+taken up in the chapter on floating-point numbers.
+
+Before that, one idea remains unfinished, the one we used most and defined
+least: the function. We wrote $f(x)$ and $L(w)$ and treated them as rules, but
+we have not asked what happens when one rule feeds another, when a rule can be
+reversed, or what shapes the graphs of rules can take. The next chapter,
+Functions and Their Shapes, builds exactly that, starting from the notation
+introduced here.
 
 ## Exercises
 
@@ -1158,41 +1209,6 @@ Answers are at the end of the chapter.
     seeing a preview of the floating-point chapter: say in a sentence why the
     order of additions matters.
 
-## Summary
-
-We began with seven billion parameters and a learning rate of $3 \times 10^{-4}$
-and needed a notation for both. **Integers** are the exact numbers of counting
-and naming; stored in a fixed number of bits, they have a range and wrap when
-it is exceeded. **Real numbers** fill the line between them, including
-irrational numbers such as $\sqrt{2}$ that no fraction equals, and a computer
-only ever holds approximations to them. A **set** is a collection of distinct
-elements, written with braces, combined by union, intersection and difference;
-a dataset is a list of pairs. An **exponent** counts factors, and the rule
-$b^m b^n = b^{m+n}$ forces the meaning of $b^0$, $b^{-n}$ and $b^{1/k}$;
-scientific notation turns sizes into exponents so that orders of magnitude
-can be compared. A **logarithm** is the inverse of the exponent, and the
-product rule $\log(uv) = \log u + \log v$ turns multiplication into addition;
-the logarithms to bases 10, 2 and $e$ count digits, bits and, by
-convention in this book, natural growth. **Summation** and **product**
-notation write repeated addition and multiplication over an index, and a loss
-is an average of per-example terms. **Function notation** $f(x)$ names the
-output of a rule for an input, with $f(x; w, b)$ separating inputs from
-parameters.
-
-The central result is practical: a product of many chances underflows, and the
-sum of their logarithms does not, which is why log-probabilities are what
-models compute and report. The limits are equally practical. A logarithm
-cannot add two probabilities; an exponential overflows quickly; sums lose
-small terms; and all of it happens on a machine that stores approximations.
-Those points are taken up in the chapter on floating-point numbers.
-
-What remains unfinished is the idea we used most and defined least: the
-function. We wrote $f(x)$ and $L(w)$ and treated them as rules, but we have
-not asked what happens when one rule feeds another, when a rule can be
-reversed, or what shapes the graphs of rules can take. The next chapter,
-Functions and Their Shapes, builds exactly that, starting
-from the notation introduced here.
-
 ## Key terms
 
 - **integer**: a whole number, positive, negative or zero, with no fractional part; the exact numbers of counting and naming. <!-- concept: integer -->
@@ -1206,7 +1222,7 @@ from the notation introduced here.
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $\frac{3}{6} + \frac{2}{6} = \frac{5}{6}$.
 2. $2^5 = 32$; $10^3 \times 10^2 = 10^5$ (the exponents add).
