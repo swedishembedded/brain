@@ -1,0 +1,51 @@
+<!-- source-sha256: b9794a0bf0d0df8ccf0576e1824a325a2d257d1241c4b651353f8209d9b5e8ef -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 452" width="780" height="452"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="452" fill="#ffffff"/>
+<rect x="20" y="14" width="740" height="124" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Five dispatches: 92.0 MiB through memory</text>
+<rect x="20" y="150" width="740" height="124" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="172" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Two dispatches: 36.0 MiB through memory</text>
+<rect x="20" y="286" width="740" height="124" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="308" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">One dispatch: 20.0 MiB through memory</text>
+<rect x="47" y="70" width="96" height="52" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="95" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">matmul</text>
+<text x="95" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x W</text>
+<rect x="197" y="70" width="96" height="52" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="245" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bias</text>
+<text x="245" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ b</text>
+<rect x="347" y="70" width="96" height="52" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="395" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gelu</text>
+<rect x="497" y="70" width="96" height="52" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="545" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">residual</text>
+<text x="545" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ x</text>
+<rect x="647" y="70" width="96" height="52" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="695" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layer</text>
+<text x="695" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">norm</text>
+<line x1="146" y1="96" x2="194" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="170" y="71.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">z</text>
+<text x="170" y="87.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">16 MiB</text>
+<line x1="296" y1="96" x2="344" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="320" y="71.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">u</text>
+<text x="320" y="87.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">16 MiB</text>
+<line x1="446" y1="96" x2="494" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="470" y="71.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">g</text>
+<text x="470" y="87.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">16 MiB</text>
+<line x1="596" y1="96" x2="644" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="620" y="71.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">r</text>
+<text x="620" y="87.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">16 MiB</text>
+<rect x="47" y="206" width="546" height="52" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="320" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">matmul + bias + gelu + residual</text>
+<text x="320" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">z, u and g stay in registers</text>
+<rect x="647" y="206" width="96" height="52" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="695" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layer</text>
+<text x="695" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">norm</text>
+<line x1="596" y1="232" x2="644" y2="232" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="620" y="207.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">r</text>
+<text x="620" y="223.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">16 MiB</text>
+<rect x="47" y="342" width="696" height="52" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="395" y="364.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">matmul + bias + gelu + residual + layer norm</text>
+<text x="395" y="380.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reads x, W, b, gamma, beta once and writes y once</text>
+<rect x="40" y="426" width="22" height="14" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="70" y="438.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">compute-bound dispatch (intensity above the ridge point)</text>
+<rect x="430" y="426" width="22" height="14" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="460" y="438.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">bandwidth-bound dispatch</text>
+</svg>

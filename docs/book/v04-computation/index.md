@@ -59,8 +59,8 @@ more than one kind of device.
    from a three-line loop to running near the hardware's peak.
 7. [Parallel Reductions, Scans and Sorting](07-reductions.md): how thousands of
    threads add up one array, and why the obvious way is slow.
-8. Kernel Fusion and Memory Traffic: why the cheapest computation is the one
-   whose intermediate result never touches memory.
+8. [Kernel Fusion and Memory Traffic](08-fusion.md): why the cheapest computation is
+   the one whose intermediate result never touches memory.
 9. One Program, Many Devices: how one set of kernels can run on CPUs, Vulkan
    GPUs and CUDA GPUs with the same results.
 10. Choosing the Fastest Correct Kernel: how an engine runs near the roofline on

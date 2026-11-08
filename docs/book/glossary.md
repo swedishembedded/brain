@@ -90,6 +90,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **classification**: predicting which of a fixed set of categories an example belongs to, from its features, learned from labelled examples; with two categories, labelled $0$ and $1$, it is binary classification. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
+**command recording**: appending many dispatches to one list and handing the list to the device as a single submission, so that the host pays the submission cost once instead of once per dispatch; a read-back or any other observation of the device ends the list. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
+
 **compensated summation**: a way of adding many numbers in which a second variable carries the rounding error of each addition into the next, so that the error of the total stays near $2u$ times the sum of absolute values however many terms there are (Kahan's algorithm). *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **complex number**: a point of the plane written $a + bi$, added like a vector and multiplied by the rule $(ac - bd) + (ad + bc)i$, which turns by the angle of one factor and stretches by its length; $i = (0, 1)$ is a quarter turn and $i^2 = -1$. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
@@ -294,6 +296,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **kernel dispatch**: the host-side act of running a kernel: binding buffers to its slots, writing its uniform parameters and enqueueing it over a grid of workgroups, after which the host may continue while the device runs it. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
+**kernel fusion**: replacing a chain of kernels, each consuming what the one before produced, by one kernel that computes the whole chain and keeps the intermediate results in registers or shared memory instead of writing them to buffers and reading them back. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
+
 **kernel method**: a method that fits a linear model on a (possibly enormous) feature map of the inputs while computing only the kernel, the dot product of the features of two rows, as in kernel ridge regression and the support vector machine. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
 **KL divergence**: the excess of the cross-entropy over the entropy, $D_{\mathrm{KL}}(p \,\Vert\, q) = \sum_k p_k \log(p_k/q_k)$; it is never negative, zero only when $q = p$, and not symmetric in its arguments. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
@@ -307,6 +311,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **label**: the answer attached to an example, the quantity a supervised model is asked to predict. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **label-smoothing**: replacing the one-hot target by a mixture of it with the uniform distribution, so that the loss is smallest at a finite gap between the scores instead of only in the limit of infinite confidence. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
+
+**launch overhead**: the fixed cost of starting work on a device, paid per submission and per dispatch regardless of how much the kernel does, which makes many tiny kernels cost mostly their starts. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
 
 **law of large numbers**: the statement that the average of $n$ independent draws with finite variance converges to their expectation, with the probability of an error above any fixed amount going to zero as $n$ grows. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
@@ -365,6 +371,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **memory coalescing**: the merging of the loads or stores of the lanes of a subgroup into few memory transactions when they touch adjacent addresses, so that all the bytes of each block moved are used. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
 **memory complexity**: the amount of memory, counted in cells and measured at the peak, that an algorithm needs as a function of its input size; it can be traded against time by storing a result instead of recomputing it, or the reverse. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
+
+**memory-traffic accounting**: the routine of listing for every kernel of a program the FLOPs it executes and the distinct bytes it reads and writes, each operand counted once, so that designs of the same computation can be compared by bytes and by arithmetic intensity before anything is run. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
 
 **metric selection**: choosing the number that scores a model from the decision its output feeds and the costs of its mistakes, checking it on a trivial and a perfect predictor, and reporting it with an uncertainty. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 

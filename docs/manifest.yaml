@@ -389,6 +389,7 @@ navigation:
           - docs/book/v04-computation/05-compute-kernels.md
           - docs/book/v04-computation/06-matmul.md
           - docs/book/v04-computation/07-reductions.md
+          - docs/book/v04-computation/08-fusion.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

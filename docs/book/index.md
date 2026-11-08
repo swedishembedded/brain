@@ -84,4 +84,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 5. [Writing Compute Kernels](v04-computation/05-compute-kernels.md): How do we express one parallel computation so a GPU can run it?
 6. [Making Matrix Multiplication Fast](v04-computation/06-matmul.md): How does a matrix multiply go from a three-line loop to running near the hardware's peak?
 7. [Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md): How do thousands of threads add up one array, and why is the obvious way slow?
+8. [Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md): Why is the cheapest computation the one whose intermediate result never touches memory?
 <!-- /contents -->

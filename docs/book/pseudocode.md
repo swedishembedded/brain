@@ -341,6 +341,19 @@ runs it in the order it was enqueued.
 | `read_back(b: buffer, count: int) -> array<f32>[count]` | waits until every queued operation has finished, then copies the first `count` numbers of the buffer to the host |
 | `release(b: buffer)` | gives the buffer's memory back; the buffer is not used again |
 
+**Recording (Volume IV, Chapter 8).** `dispatch` hands the device one launch at a time. A host that has several launches ready
+can record them first and hand them over together, with three more operations:
+
+| Operation | Meaning |
+|---|---|
+| `begin_commands() -> commands` | starts an empty list of commands; only one list is open at a time |
+| `record(c: commands, k: kernel, buffers: list<buffer>, params: list<u32>, n_grp: int)` | appends one launch, with the arguments of `dispatch`, to the list `c`; nothing reaches the device and nothing is bound or checked until the list is submitted |
+| `submit(c: commands)` | closes the list and enqueues all of it as one **submission**: the launches run in the order they were recorded, each seeing the writes of those before it, and the call returns at once |
+
+`dispatch(k, buffers, params, n_grp)` is `begin_commands`, one `record` and `submit`: one submission holding one launch.
+`read_back` waits for every submission made before it, and a list that is still open (recorded, not submitted) is not part of
+that wait: a program reads back only after it has submitted what the result depends on.
+
 ## Functions and mutation
 
 ```text
