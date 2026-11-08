@@ -1,0 +1,38 @@
+<!-- source-sha256: 614cbe97289c4d931a1885e1ffe38869ef6626e8761bdbeacfa1b3648b505a19 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 360" width="600" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="360" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="207.71" y1="314" x2="207.71" y2="30" stroke="#edf2f7"/>
+<text x="207.71" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="357.43" y1="314" x2="357.43" y2="30" stroke="#edf2f7"/>
+<text x="357.43" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="507.14" y1="314" x2="507.14" y2="30" stroke="#edf2f7"/>
+<text x="507.14" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="58" y1="314" x2="582" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="266.67" x2="582" y2="266.67" stroke="#edf2f7"/>
+<text x="52" y="270.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<line x1="58" y1="219.33" x2="582" y2="219.33" stroke="#edf2f7"/>
+<text x="52" y="223.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="172" x2="582" y2="172" stroke="#edf2f7"/>
+<text x="52" y="176" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">15</text>
+<line x1="58" y1="124.67" x2="582" y2="124.67" stroke="#edf2f7"/>
+<text x="52" y="128.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<line x1="58" y1="77.33" x2="582" y2="77.33" stroke="#edf2f7"/>
+<text x="52" y="81.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">25</text>
+<line x1="58" y1="30" x2="582" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">30</text>
+<rect x="58" y="30" width="524" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,262.03 132.86,255.64 207.71,241.14 282.57,151.41 357.43,151.41 432.29,118.55 507.14,102.19 582,62.8"/><circle cx="58" cy="262.03" r="3.5" fill="#2b6cb0"/><circle cx="132.86" cy="255.64" r="3.5" fill="#2b6cb0"/><circle cx="207.71" cy="241.14" r="3.5" fill="#2b6cb0"/><circle cx="282.57" cy="151.41" r="3.5" fill="#2b6cb0"/><circle cx="357.43" cy="151.41" r="3.5" fill="#2b6cb0"/><circle cx="432.29" cy="118.55" r="3.5" fill="#2b6cb0"/><circle cx="507.14" cy="102.19" r="3.5" fill="#2b6cb0"/><circle cx="582" cy="62.8" r="3.5" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,301.38 132.86,299.44 207.71,297.63 282.57,289.26 357.43,285.47 432.29,272.14 507.14,270.87 582,270.8"/><circle cx="58" cy="301.38" r="3.5" fill="#c05621"/><circle cx="132.86" cy="299.44" r="3.5" fill="#c05621"/><circle cx="207.71" cy="297.63" r="3.5" fill="#c05621"/><circle cx="282.57" cy="289.26" r="3.5" fill="#c05621"/><circle cx="357.43" cy="285.47" r="3.5" fill="#c05621"/><circle cx="432.29" cy="272.14" r="3.5" fill="#c05621"/><circle cx="507.14" cy="270.87" r="3.5" fill="#c05621"/><circle cx="582" cy="270.8" r="3.5" fill="#c05621"/></g>
+<text x="320" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log2 of the number of calibration inputs</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">SQNR of the output in dB</text>
+<text x="320" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">A calibration set must show the network what it will see</text>
+<rect x="66" y="38" width="192.32" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">inputs of the deployed size</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">inputs a quarter of that size</text>
+</svg>

@@ -69,7 +69,7 @@ more than one kind of device.
     lie, and how to produce ones that do not.
 12. [Quantization: Fewer Bits per Weight](12-quantization.md): how a model's weights can be stored in
     four bits each and still work.
-13. Neural Processing Units and Graph Compilers: how a whole network becomes one
+13. [Neural Processing Units and Graph Compilers](13-npu.md): how a whole network becomes one
     compiled program for a fixed-function accelerator.
 14. Project: A Device-Independent Tensor Engine: make the same matrix multiply
     run correctly and fast on more than one kind of hardware.

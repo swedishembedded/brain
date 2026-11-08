@@ -86,6 +86,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **calibration**: the property that a model's probabilities match frequencies, so that among the examples given probability $p$ about a share $p$ are positive; measured with a reliability diagram and the expected calibration error. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
+**calibration set**: the sample of inputs that is run through the float graph to record the range of every tensor; it must be representative of the deployment, because a range that is too narrow clamps real values and one that is too wide wastes codes. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
+
 **capability declaration**: the statement of what a device can execute correctly, queried from the device and absent when unknown, matched against what each candidate needs, so that a candidate that cannot run is removed before any cost is considered. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
 **catastrophic cancellation**: the loss of leading digits when two nearly equal numbers that carry rounding errors are subtracted; the subtraction is exact but promotes the earlier errors to the leading digits of a much smaller result, losing about $\log_{10}$ of the ratio of the operands to the result. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
@@ -263,6 +265,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **gradient clipping**: multiplying the gradient by $\min(1, \tau_{\mathrm{clip}}/(\lVert\mathbf{g}\rVert + \epsilon_{\mathrm{clip}}))$ so that its length never exceeds a threshold and its direction is kept, as a guard against rare very large gradients. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
 
 **gradient descent**: the iteration that repeatedly moves the parameters a small step against the gradient of the loss, $\mathbf{w} \leftarrow \mathbf{w} - \eta\nabla\mathcal{L}(\mathbf{w})$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
+
+**graph compiler**: a program that takes a whole graph and produces the program an accelerator runs, by passes that no single kernel can make: fusing operations, choosing layouts, tiling layers to the on-chip buffer, planning memory from tensor lifetimes and emitting the command words. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
+
+**graph export**: the one-time conversion of a model's forward computation into a static dataflow graph, with every operation a node of a known type, every tensor of a fixed shape and every constant stored in the graph, so that a compiler or device can run it without any of the model's own code. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
 
 **group-normalization**: normalizing groups of consecutive channels of one example, over the group's channels and all spatial positions, with a learned gain and shift per channel; one group is layer normalization and one group per channel is instance normalization. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
@@ -442,6 +448,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **one-hot-encoding**: writing a class index as a vector with a one in the position of that class and zeros elsewhere, the probability vector that puts all its weight on that class. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
+**ONNX graph**: the interchange form of an exported graph: typed and shaped inputs and outputs, constant tensors (initializers), nodes in an order that defines every input before use, each naming an operator, its inputs, its output and its attributes, and an opset number that fixes the meaning of every operator. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
+
 **ordinary differential equation**: an equation $dx/dt = f(t, x)$ that gives the rate of change of an unknown function of one variable in terms of the function itself; its solution is a curve that follows the prescribed slopes from a given starting value. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
 **orthogonal matrix**: a square matrix whose columns are orthonormal, so that $\mathbf{Q}^\top\mathbf{Q} = \mathbf{I}$, its inverse is its transpose, and it preserves lengths and angles. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
@@ -475,6 +483,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **piecewise function**: a function defined by different rules on different parts of its domain, such as the absolute value, ReLU and a schedule with a warmup. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 **polynomial**: a sum of constant multiples of powers of $x$; one of degree $n$ has $n + 1$ parameters and is fixed by $n + 1$ points. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
+
+**post-training quantization**: converting a trained float network to integer arithmetic without retraining, by choosing the scale and zero point of each weight tensor from the weights and of each activation tensor from ranges measured on data, and rewriting each layer as an integer accumulation followed by a requantization. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
 
 **precision and recall**: precision is the share of the examples called positive that are positive, $P(y = 1 \mid \text{decision positive})$; recall is the share of the positive examples that are called positive, $P(\text{decision positive} \mid y = 1)$, also the true positive rate. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 

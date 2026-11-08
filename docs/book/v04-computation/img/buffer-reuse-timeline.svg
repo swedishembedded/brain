@@ -1,0 +1,46 @@
+<!-- source-sha256: 5b217a4b65eae67dbd0818bcbfee8643e9f3938aa1752668fa604f041cbab5db -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 392" width="880" height="392"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="880" height="392" fill="#ffffff"/>
+<rect x="20" y="12" width="840" height="368" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="34" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Tensor lifetimes and the bytes they share</text>
+<text x="162" y="340.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">op 0</text>
+<text x="262" y="340.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">op 1</text>
+<line x1="212" y1="54" x2="212" y2="316" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="2 4"/>
+<text x="362" y="340.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">op 2</text>
+<line x1="312" y1="54" x2="312" y2="316" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="2 4"/>
+<text x="462" y="340.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">op 3</text>
+<line x1="412" y1="54" x2="412" y2="316" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="2 4"/>
+<text x="562" y="340.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">op 4</text>
+<line x1="512" y1="54" x2="512" y2="316" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="2 4"/>
+<text x="662" y="340.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">after</text>
+<line x1="612" y1="54" x2="612" y2="316" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="2 4"/>
+<line x1="112" y1="316" x2="712" y2="316" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="1 0"/>
+<text x="102" y="319.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="end">0</text>
+<line x1="108" y1="316" x2="112" y2="316" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="1 0"/>
+<text x="102" y="234.52" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="end">4,096</text>
+<line x1="108" y1="230.67" x2="112" y2="230.67" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="1 0"/>
+<text x="102" y="149.18" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="end">8,192</text>
+<line x1="108" y1="145.33" x2="112" y2="145.33" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="1 0"/>
+<text x="102" y="63.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="end">12,288</text>
+<line x1="108" y1="60" x2="112" y2="60" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="1 0"/>
+<rect x="115" y="60" width="94" height="85.33" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="162" y="106.87" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">t0  4,096 B</text>
+<rect x="115" y="145.33" width="194" height="170.67" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="212" y="234.87" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">t1  8,192 B</text>
+<rect x="215" y="102.67" width="294" height="42.67" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="362" y="128.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">t2  2,048 B</text>
+<rect x="315" y="273.33" width="194" height="42.67" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="412" y="298.87" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">t3  2,048 B</text>
+<rect x="415" y="230.67" width="194" height="42.67" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="512" y="256.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">t4  2,048 B</text>
+<rect x="515" y="294.67" width="194" height="21.33" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="612" y="309.53" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">t5  1,024 B</text>
+<line x1="112" y1="59.5" x2="712" y2="59.5" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="6 3"/>
+<text x="720" y="50.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">12,288 B alive</text>
+<text x="720" y="66.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">at op 0</text>
+<text x="720" y="252.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">plan ends at</text>
+<text x="720" y="268.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">12,288 B,</text>
+<text x="720" y="284.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">without reuse</text>
+<text x="720" y="300.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">19,456 B</text>
+<text x="54" y="184.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">byte</text>
+<text x="54" y="200.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">offset</text>
+</svg>

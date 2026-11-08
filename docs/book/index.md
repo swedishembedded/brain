@@ -89,4 +89,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 10. [Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md): How does an engine run near the roofline on hardware nobody tuned it for?
 11. [Measuring Performance Honestly](v04-computation/11-profiling.md): Why do most performance numbers lie, and how do we produce ones that do not?
 12. [Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md): How can a model's weights be stored in four bits each and still work?
+13. [Neural Processing Units and Graph Compilers](v04-computation/13-npu.md): How does a whole network become one compiled program for a fixed-function accelerator?
 <!-- /contents -->
