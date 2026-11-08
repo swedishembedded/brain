@@ -20,12 +20,14 @@ impl Ripple {
     /// linears are held packed owns only the adapter and the norms, embeddings and gates: its base is the source
     /// checkpoint it was built over, and the file says so.
     pub(super) fn saved_tensors(&self) -> Vec<(String, Vec<u64>, Vec<f32>)> {
-        self.ps.params.iter().map(|(name, numel)| (name.clone(), vec![*numel as u64], Model::read_weight(self, name))).collect()
+        // A resident build's linears and tables are saved from their master copies.
+        let resident: Vec<(String, usize)> = self.resident.as_ref().map(|ft| ft.borrow().specs().iter().map(|s| (s.name.clone(), s.n as usize * s.k as usize)).collect()).unwrap_or_default();
+        self.ps.params.iter().cloned().chain(resident).map(|(name, numel)| (name.clone(), vec![numel as u64], Model::read_weight(self, &name))).collect()
     }
 
     /// The linears this build holds outside the store, at a packed tier.
     pub(super) fn external_base(&self) -> bool {
-        self.cfg.shard_param_list(&self.shard).iter().any(|(name, _)| !self.ps.weight.contains_key(name))
+        self.cfg.shard_param_list(&self.shard).iter().any(|(name, _)| !self.ps.weight.contains_key(name) && self.resident_index(name).is_none())
     }
 
     /// The logits of the first `rows` positions of the batch last run forward. A training build holds one chunk of
@@ -135,12 +137,34 @@ impl Model for Ripple {
     }
 
     fn zero_grads(&self) {
+        self.backward_pending.set(false);
         self.ps.zero_grads(&self.gpu);
+        if let Some(ft) = &self.resident {
+            self.gpu.flush();
+            ft.borrow().zero_grads(&self.ops);
+        }
     }
 
     fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        // A resident build updates its linears and tables against their host masters through the generic resident
+        // step, whose global clip spans them and the norms; that step also updates the norms.
+        if let Some(ft) = &self.resident {
+            assert!(!self.layer_streamed() || self.backward_pending.replace(false), "ricursive layer-streamed full fine-tune: adamw_step without a backward before it");
+            let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+            let norm = model::resident_ft::adamw_step(self, ft, &self.ops, &args).unwrap_or_else(|e| panic!("ricursive resident full fine-tune: update: {e}"));
+            self.resident_norm.set(norm);
+            return;
+        }
         let opt = self.opt.as_ref().expect("adamw_step on an inference-only build");
         opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+    }
+
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.resident.is_some().then_some(self as &dyn model::OffDeviceState)
+    }
+
+    fn last_grad_norm(&self) -> Option<f32> {
+        self.resident.as_ref().and_then(|_| self.resident_norm.get())
     }
 
     fn poll_wait(&self) {
@@ -179,7 +203,8 @@ impl Model for Ripple {
 
     /// The optimised set: the weights of a full fine-tune, the adapter's factors under an adapter.
     fn param_names(&self) -> Vec<String> {
-        self.ps.trained_params().map(|(n, _)| n.clone()).collect()
+        let resident: Vec<String> = self.resident.as_ref().map(|ft| ft.borrow().specs().iter().map(|s| s.name.clone()).collect()).unwrap_or_default();
+        self.ps.trained_params().map(|(n, _)| n.clone()).chain(resident).collect()
     }
 
     fn frozen_adapter_param_names(&self) -> Vec<String> {
@@ -191,19 +216,36 @@ impl Model for Ripple {
     }
 
     fn read_weight(&self, name: &str) -> Vec<f32> {
+        if let Some(i) = self.resident_index(name) {
+            // The master copy: the highest-precision weight, which is what a saved checkpoint should carry.
+            self.gpu.flush();
+            return self.resident.as_ref().expect("indexed").borrow_mut().read_master(&self.ops, i).unwrap_or_else(|e| panic!("ricursive resident full fine-tune: reading {name}: {e}"));
+        }
         self.ps.read_weight(&self.gpu, name)
     }
 
     fn write_weight(&self, name: &str, data: &[f32]) {
+        if let Some(i) = self.resident_index(name) {
+            self.gpu.flush();
+            self.resident.as_ref().expect("indexed").borrow_mut().write_master(&self.ops, i, data).unwrap_or_else(|e| panic!("ricursive resident full fine-tune: writing {name}: {e}"));
+            return;
+        }
         assert!(self.ps.weight.contains_key(name), "ricursive: {name} is not a tensor of this build's parameter store");
         self.gpu.write_f32(self.ps.w(name), data);
     }
 
     fn read_grad(&self, name: &str) -> Vec<f32> {
+        if let Some(grad) = self.read_resident_grad(name) {
+            assert!(!self.layer_streamed(), "ricursive: {name} streams through a layer window; no gradient outlives its layer");
+            return grad;
+        }
         self.ps.read_grad(&self.gpu, name)
     }
 
     fn write_grad(&self, name: &str, data: &[f32]) -> Result<(), String> {
+        if self.resident_index(name).is_some() {
+            return Err(format!("{name}: a resident tensor accumulates its gradient in the resident state; it cannot be written back"));
+        }
         if !self.is_trainable(name) {
             return Err(format!("{name}: not a trainable parameter of this ricursive model, so it has no gradient to reduce"));
         }

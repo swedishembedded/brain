@@ -113,7 +113,7 @@ fn a_ripple_pipeline_serves_an_adapter_and_switches_without_reloading() {
     assert_eq!(say(&plain).text, base.text, "detached, exactly the base");
     assert!(pipe.attach_adapter("/nonexistent/adapter.safetensors").is_err(), "a refused adapter is an error and changes nothing");
     assert_eq!(say(&pipe).text, base.text);
-    let precision = TextGenerationPipeline::builder(dir.to_str().unwrap()).precision("int8").unwrap().device(Device::parse("cpu").unwrap()).load().err().expect("a weight format is not a pipeline knob for Ripple");
+    let precision = TextGenerationPipeline::builder(dir.to_str().unwrap()).precision("int8").unwrap().device(Device::parse("cpu").unwrap()).load().expect_err("a weight format is not a pipeline knob for Ripple");
     assert!(precision.to_string().contains("int8"), "{precision}");
     std::fs::remove_dir_all(dir.parent().unwrap()).ok();
 }

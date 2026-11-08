@@ -43,6 +43,7 @@ mod init;
 mod io;
 mod nlsa;
 mod objectives;
+mod resident;
 mod shard;
 
 use std::cell::Cell;
@@ -50,16 +51,19 @@ use std::collections::HashMap;
 
 use gpu_core::provider::library::GemmPrecision;
 use gpu_core::select::Dtype;
-use gpu_core::{DeviceBuffer, Gpu, Step};
+use gpu_core::{DeviceBuffer, Gpu};
 use model::adapter::device::LoraCfg;
 use model::adapter::exec::AdapterRuntime;
 use model::ops::{Ops, TierPolicy, Weight};
 use model::saved::{Residuals, SavedFormat, SavedPolicy};
+use model::tape::LayerTape;
 use model::Shard;
 use paramstore::{ParamStore, Role};
 
 pub use config::{default_targets, expand_modules_to_save, linear_suffix, TrainConfig, LORA_LEAVES, SAVED_GROUPS};
 pub use init::AdapterInit;
+pub use resident::{plan_resident, resident_specs, stage_costs, StageCost};
+use resident::check_resident_fits;
 pub use shard::estimate_stage_bytes;
 use graph::{Grad, Kernels, LayerParams, Lin, Scratch};
 
@@ -81,11 +85,16 @@ pub struct TrainOpts {
     /// Rows of logits the training head holds at once; `None`: as many as fit one GiB (all of them for a small batch).
     /// A multiple of 64 unless it covers the whole batch.
     pub head_chunk_rows: Option<u32>,
+    /// A resident low-precision full fine-tune: the linears and the two tables live on the device in the encoding the
+    /// plan's configuration names with their master copy and optimizer state off it (`model::resident_ft`), optionally
+    /// streamed through a window of layers. A full fine-tune only; the plan is checked against the device before
+    /// anything is allocated. Built by [`plan_resident`].
+    pub resident: Option<model::resident_ft::ResidentPlan>,
 }
 
 impl Default for TrainOpts {
     fn default() -> TrainOpts {
-        TrainOpts { tiers: TierPolicy::uniform(Dtype::F32), gemm: GemmPrecision::Fp32Reference, saved: SavedPolicy::recompute_with(SavedFormat::F32), head_chunk_rows: None }
+        TrainOpts { tiers: TierPolicy::uniform(Dtype::F32), gemm: GemmPrecision::Fp32Reference, saved: SavedPolicy::recompute_with(SavedFormat::F32), head_chunk_rows: None, resident: None }
     }
 }
 
@@ -188,8 +197,17 @@ pub struct Ripple {
     inv_count: DeviceBuffer,
     /// The training head: the loss and its gradient a chunk of rows at a time; `None` on an inference build.
     head_ce: Option<model::head_ce::HeadCe>,
-    fwd: Vec<Step>,
-    bwd: Vec<Step>,
+    /// The recorded passes, in segments that name the layer each runs: a layer-streamed build acts between the layers.
+    fwd: LayerTape,
+    bwd: LayerTape,
+    /// The linears and the two tables of a resident full fine-tune, their master copies and optimizer state.
+    resident: Option<std::cell::RefCell<model::resident_ft::ResidentFullFt>>,
+    /// The global gradient norm of the latest clipped resident step.
+    resident_norm: Cell<Option<f32>>,
+    /// A layer-streamed backward runs inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
+    /// The distinct token ids of the batch, padded: what the embedding gradient of a resident build scatters by.
+    tok_uniq: Option<DeviceBuffer>,
     opt: Option<optim::Optim>,
     nlsa: Option<nlsa::NativeLsa>,
     /// Per-position loss weights, once [`model::training::TokenObjectives::enable_weighted_loss`] opted in.
@@ -238,6 +256,9 @@ impl Ripple {
         assert!(tokens.iter().all(|&x| x < vocab), "ricursive: a token id is outside the vocabulary of {vocab}");
         assert!(targets.iter().all(|&x| x == IGNORE || x < vocab), "ricursive: a target id is outside the vocabulary of {vocab}");
         self.gpu.write(&self.tokens, tokens);
+        if let Some(uniq) = &self.tok_uniq {
+            self.gpu.write(uniq, &model::ops::uniq_padded(tokens, n));
+        }
         self.gpu.write(&self.targets, targets);
         let count = targets.iter().filter(|&&v| v != IGNORE).count();
         self.count.set(count.max(1) as f32);
@@ -275,7 +296,7 @@ impl Ripple {
 
     /// Does this model hold a parameter named `name`?
     pub fn has_param(&self, name: &str) -> bool {
-        self.ps.weight.contains_key(name)
+        self.ps.weight.contains_key(name) || self.resident_index(name).is_some()
     }
 
     /// Names a [`Role::Trainable`] parameter of the store has.

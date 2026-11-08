@@ -17,6 +17,7 @@ use model::block::{self, Gqa, KernelIds};
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
 use model::ops::{Act, Ops, Weight};
 use model::saved::{Residuals, SavedFormat};
+use model::tape::LayerTape;
 use model::Shard;
 use paramstore::ParamStore;
 
@@ -252,25 +253,52 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
         return Err(format!("ricursive training: a full fine-tune trains f32 weights; {} linear(s) are asked for as {} (train an adapter over a packed base instead)", packed.len(), opts.tiers.describe()));
     }
 
+    // A resident full fine-tune holds the linears and the two tables in its own state, with their master copies and
+    // optimizer state off the device; the store keeps what is left (the norms and the gates).
+    let resident_specs = opts.resident.as_ref().map(|_| super::resident_specs(&cfg, &shard)).unwrap_or_default();
+    if let Some(plan) = &opts.resident {
+        if !train || cfg.lora.is_some() {
+            return Err("ricursive training: a resident low-precision build is a full fine-tune: training, no adapter".into());
+        }
+        if opts.tiers.dtypes().any(|t| t != gpu_core::select::Dtype::F32) {
+            return Err(format!("ricursive training: a resident full fine-tune holds its linears in the encoding of its plan, not in {} (give the encoding as weights=)", opts.tiers.describe()));
+        }
+        super::check_resident_fits(&cfg, &shard, plan)?;
+    }
+    let resident_names: std::collections::HashSet<&str> = resident_specs.iter().map(|spec| spec.name.as_str()).collect();
     let roles: Vec<(String, usize, paramstore::Role)> = cfg
         .shard_param_list(&shard)
         .into_iter()
-        .filter(|(name, _)| !packed.contains(name))
+        .filter(|(name, _)| !packed.contains(name) && !resident_names.contains(name.as_str()))
         .map(|(name, numel)| {
             let role = if train { Ripple::role(&cfg, &name) } else { paramstore::Role::Frozen };
             (name, numel, role)
         })
         .collect();
-    let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+    let mut ps = match &opts.resident {
+        // The store trains as the store runs it: the run's optimizer-state format, f32 values and gradients.
+        Some(plan) => {
+            let policy = paramstore::precision::PrecisionPolicy::uniform(paramstore::precision::ParamPrecision { state: plan.cfg.state, ..paramstore::precision::ParamPrecision::FP32 });
+            ParamStore::new_with_policy_src(&gpu, roles, src, &policy)
+        }
+        None => ParamStore::new_with_roles_src(&gpu, roles, src),
+    };
     if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
         model::adapter::device::apply_groups(&mut ps, &lora.hp());
     }
+    let resident = opts.resident.as_ref().map(|plan| model::resident_ft::ResidentFullFt::new(&ops, plan.cfg.clone(), resident_specs.clone(), src, &plan.budget())).transpose()?;
 
     // Every linear as a `Weight` at its tier.
     let loader = Loader::new(&ops, src, &opts.tiers);
     let mut weights: HashMap<String, Weight> = HashMap::new();
     for (name, n, k) in &linear_shapes {
-        let w = if packed.contains(name) { loader.linear(name, *n, *k)? } else { Weight::dense_f32(ps.w(name).clone(), *n as u32, *k as u32) };
+        let w = if let Some(ft) = &resident {
+            ft.weight(ft.index_of(name).expect("every linear of a resident build is a resident tensor")).clone()
+        } else if packed.contains(name) {
+            loader.linear(name, *n, *k)?
+        } else {
+            Weight::dense_f32(ps.w(name).clone(), *n as u32, *k as u32)
+        };
         weights.insert(name.clone(), w);
     }
     let lin = |leaf: &'static str, name: String, weights: &mut HashMap<String, Weight>| -> Lin {
@@ -309,6 +337,8 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
     let st = |x: u64| gpu.storage(x);
 
     let tokens = gpu.buffer("tokens", nn * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
+    // The embedding gradient of a resident build scatters by the distinct ids of the batch.
+    let tok_uniq = (resident.is_some() && (shard.embed || c.use_valres)).then(|| gpu.storage(nn));
     let targets = gpu.buffer("targets", nn * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
     let x0 = st(nn * d);
     // Boundary `l` is held by the stage that writes it (`shard.end` included) and by the one that reads it as its input.
@@ -436,8 +466,12 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
         ce_grad_uniform,
         inv_count,
         head_ce,
-        fwd: Vec::new(),
-        bwd: Vec::new(),
+        fwd: LayerTape::default(),
+        bwd: LayerTape::default(),
+        resident: resident.map(std::cell::RefCell::new),
+        resident_norm: Cell::new(None),
+        backward_pending: Cell::new(false),
+        tok_uniq,
         opt,
         nlsa: None,
         weighted: None,
@@ -451,8 +485,8 @@ impl Ripple {
     /// Record the forward and (for a training build) the backward over the buffers as they are now. Called again
     /// whenever one of them is replaced (the boundary store narrowing).
     pub(super) fn record(&mut self) {
-        self.fwd = self.forward_steps();
-        self.bwd = if self.train { self.backward_steps() } else { Vec::new() };
+        self.fwd = self.forward_tape();
+        self.bwd = if self.train { self.backward_tape() } else { LayerTape::default() };
     }
 
     fn boundary(&self, i: usize) -> &DeviceBuffer {
@@ -491,15 +525,24 @@ impl Ripple {
             let params = TieredBase { params: &self.ps, ops: &self.ops, weights: &self.weights };
             rt.backward(self.ops.tensor_gemm(), s, &params, &lin.name, d_out, x, dx, m, lin.k(), lin.n(), &base_dx);
             // A linear the adapter also saves in full has its own weight gradient beside the factors'.
-            if self.is_trainable(&lin.name) {
-                self.ops.matmul_dw(s, x, d_out, m, lin.n(), lin.k(), self.ps.g(&lin.name));
-            }
+            self.weight_grad(s, lin, d_out, x);
             return;
         }
-        if self.is_trainable(&lin.name) {
-            self.ops.matmul_dw(s, x, d_out, m, lin.n(), lin.k(), self.ps.g(&lin.name));
-        }
+        self.weight_grad(s, lin, d_out, x);
         base_dx(s, d_out);
+    }
+
+    /// The weight gradient `dW += d_out^T x` of `lin` where the weight trains: in the store's f32 buffer, or in the
+    /// resident state's accumulating one against the stored tier (the shared op). Nothing for a frozen weight.
+    fn weight_grad(&self, s: &mut Vec<Step>, lin: &Lin, d_out: &DeviceBuffer, x: &DeviceBuffer) {
+        if self.is_trainable(&lin.name) {
+            self.ops.matmul_dw(s, x, d_out, self.rows(), lin.n(), lin.k(), self.ps.g(&lin.name));
+        } else if let Some(ft) = &self.resident {
+            let ft = ft.borrow();
+            if let Some(i) = ft.index_of(&lin.name) {
+                ft.weight_grad(&self.ops, s, i, x, d_out, self.rows());
+            }
+        }
     }
 
     /// The gain gradient buffer of a norm, `None` when the gain is frozen.
@@ -650,27 +693,35 @@ impl Ripple {
         s.push(self.elementwise(self.k.add2, &[&g.d_x1, &g.d_hin_part, dh_in], n * d));
     }
 
-    fn forward_steps(&self) -> Vec<Step> {
+    /// The recorded forward in segments: the embedding, one per layer, then the head and the loss.
+    fn forward_tape(&self) -> LayerTape {
         let c = &self.cfg.model;
         let (n, d, v) = (self.rows(), c.hidden_size as u32, c.vocab_size as u32);
         let layers = c.num_hidden_layers;
+        let mut tape = LayerTape::default();
         let mut s = Vec::new();
         // The embedding feeds the stream on the first stage and every layer's value residual on any stage.
         if self.shard.embed || c.use_valres {
-            s.push(self.gpu.step(self.k.embed, &[&self.tokens, self.ps.w("model.embed_tokens.weight"), &self.x0], &[d, n], n * d));
+            match self.resident_table("model.embed_tokens.weight") {
+                Some(table) => self.ops.embed(&mut s, &table, &self.tokens, n, &self.x0),
+                None => s.push(self.gpu.step(self.k.embed, &[&self.tokens, self.ps.w("model.embed_tokens.weight"), &self.x0], &[d, n], n * d)),
+            }
             if let Some(scale) = c.embed_scale {
                 s.push(self.gpu.step(self.k.grad_scale, &[&self.x0], &[n * d, f(scale)], n * d));
             }
         }
+        tape.segment(&mut s, None);
         for l in self.shard.start..self.shard.end {
             self.layer_fwd(&mut s, l, self.boundary(l), &self.res[l + 1], false);
             self.res.round_trip(&self.gpu, &mut s, l + 1);
+            tape.segment(&mut s, Some(l));
         }
-        let Some(head) = &self.head else { return s };
+        let Some(head) = &self.head else { return tape };
         s.push(self.rmsnorm_fwd(&self.res[layers], "model.norm.weight", &self.hs, d, n));
         if let Some(chunked) = &self.head_ce {
             chunked.forward_steps(&self.ops, &mut s, &self.hs, n, &self.targets, &self.ce_rows, self.logit_scale);
-            return s;
+            tape.segment(&mut s, None);
+            return tape;
         }
         let act = self.act(&mut s, &self.hs, d, &[&head.w]);
         self.ops.matmul(&mut s, &head.w, &act, &self.logits, 0);
@@ -678,20 +729,44 @@ impl Ripple {
             s.push(self.gpu.step(self.k.grad_scale, &[&self.logits], &[n * v, f(self.logit_scale)], n * v));
         }
         s.push(self.gpu.step(self.k.ce_value, &[&self.logits, &self.targets, &self.ce_rows], &[n, v, IGNORE], n));
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
-    fn backward_steps(&self) -> Vec<Step> {
+    /// The table `name` of a resident build as the `Weight` its products read, `None` when the store holds it.
+    pub(super) fn resident_table(&self, name: &str) -> Option<Weight> {
+        let ft = self.resident.as_ref()?.borrow();
+        ft.index_of(name).map(|i| ft.weight(i).clone())
+    }
+
+    /// The gradient buffer of tensor `name` and the dtype it accumulates in: the resident state's on a resident build,
+    /// the store's f32 one where the tensor trains there, `None` for a frozen tensor.
+    pub(super) fn table_grad(&self, name: &str) -> Option<(DeviceBuffer, model::ops::GradDtype)> {
+        if let Some(ft) = &self.resident {
+            let ft = ft.borrow();
+            if let Some(i) = ft.index_of(name) {
+                return Some((ft.grad_buffer(i).clone(), ft.grad_dtype()));
+            }
+        }
+        self.is_trainable(name).then(|| (self.ps.g(name).clone(), model::ops::GradDtype::F32))
+    }
+
+    /// The recorded backward in segments: the head and final norm, one per layer from the last down (each rebuilds its
+    /// layer from the saved boundary before differentiating it), then the embedding.
+    fn backward_tape(&self) -> LayerTape {
         let c = &self.cfg.model;
         let g = self.grad.as_ref().expect("a backward needs the training build");
         let (n, d, v) = (self.rows(), c.hidden_size as u32, c.vocab_size as u32);
         let layers = c.num_hidden_layers;
+        let mut tape = LayerTape::default();
+        tape.clear_on_submit(&g.dx0);
         let mut s = Vec::new();
         // The head stage starts the chain from the loss; any other receives the gradient of its output boundary.
         if let (Some(head), Some(chunked)) = (&self.head, &self.head_ce) {
             // The chunked head recomputes each chunk's logits, turns them into the loss gradient (scaled by 1/count, then by
             // the per-token weights of a weighted loss) and applies the head: no row's logits outlive its chunk.
-            let dw = self.is_trainable(&head.name).then(|| model::head_ce::HeadGrad { buf: self.ps.g(&head.name), dtype: model::ops::GradDtype::F32 });
+            let dw = self.table_grad(&head.name);
+            let dw = dw.as_ref().map(|(buf, dtype)| model::head_ce::HeadGrad { buf, dtype: *dtype });
             let row_weights = self.weighted.as_ref().map(|w| RowWeights { weights: w.weights(), scratch: w.scratch() });
             chunked.backward_steps(&self.ops, &mut s, &HeadBackward { hidden: &self.hs, d_hidden: &g.d_hs, n, labels: &self.targets, grad_scale: GradScale::Buf(&self.inv_count), logit_scale: self.logit_scale, row_weights, dw, forward_state_held: false });
             self.res.restore(&self.gpu, &mut s, layers);
@@ -705,13 +780,16 @@ impl Ripple {
                 Some(w) => w.hook(&self.gpu, &mut s, self.k.scale_row, &g.dlogits),
                 None => &g.dlogits,
             };
-            if self.is_trainable(&head.name) {
-                self.ops.matmul_dw(&mut s, &self.hs, dlogits, n, v, d, self.ps.g(&head.name));
+            if let Some((buf, dtype)) = self.table_grad(&head.name) {
+                assert_eq!(dtype, model::ops::GradDtype::F32, "ricursive: the unchunked head accumulates an f32 gradient");
+                self.ops.matmul_dw(&mut s, &self.hs, dlogits, n, v, d, &buf);
             }
             self.ops.matmul_dx(&mut s, &head.w, dlogits, n, &g.d_hs, false);
             self.res.restore(&self.gpu, &mut s, layers);
             self.rmsnorm_bwd(&mut s, &self.res[layers], "model.norm.weight", &g.d_hs, &g.dres[layers % 2], d, n);
         }
+        // The head and final norm are complete; the layers follow, the last first.
+        tape.segment(&mut s, None);
         for l in (self.shard.start..self.shard.end).rev() {
             if l >= 1 {
                 self.res.restore(&self.gpu, &mut s, l);
@@ -719,6 +797,7 @@ impl Ripple {
             let h_in = self.boundary(l);
             self.layer_fwd(&mut s, l, h_in, &self.res[l + 1], true);
             self.layer_bwd(&mut s, l, h_in, &g.dres[(l + 1) % 2], &g.dres[l % 2]);
+            tape.segment(&mut s, Some(l));
         }
         // x0 is both layer 0's input and every layer's value source: its gradient is the stream's plus the sum of
         // the value paths', scaled back through the embedding's multiplier. A later stage holds its own copy of the
@@ -729,25 +808,47 @@ impl Ripple {
         } else {
             &g.dx0
         };
-        if self.is_trainable("model.embed_tokens.weight") {
+        if let Some((dw, grad)) = self.table_grad("model.embed_tokens.weight") {
             if let Some(scale) = c.embed_scale {
                 s.push(self.gpu.step(self.k.grad_scale, &[dx0], &[n * d, f(scale)], n * d));
             }
-            s.push(self.gpu.step(self.k.emb_bwd, &[&self.tokens, dx0, self.ps.g("model.embed_tokens.weight")], &[n, d, v], v * d));
+            match &self.tok_uniq {
+                // The shared op scatters by the batch's distinct ids: a vocabulary-wide kernel per token would cost
+                // `vocab * hidden * rows` at the real model's size.
+                Some(uniq) => self.ops.embedding_grad(&mut s, &model::ops::EmbeddingGrad { tokens: &self.tokens, uniq, n_uniq: n, d_x: dx0, n_rows: n, width: d, dw: &dw, grad }),
+                None => {
+                    assert_eq!(grad, model::ops::GradDtype::F32, "ricursive: the store accumulates an f32 embedding gradient");
+                    s.push(self.gpu.step(self.k.emb_bwd, &[&self.tokens, dx0, &dw], &[n, d, v], v * d));
+                }
+            }
         }
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
-    /// Run the recorded forward on the batch already set.
+    /// Run the recorded forward on the batch already set. A layer-streamed build loads each layer's weights into its
+    /// device slots as the forward reaches it.
     pub(super) fn run_forward(&self) {
-        self.gpu.submit(&[], &self.fwd);
+        if !self.layer_streamed() {
+            self.fwd.submit(&self.gpu);
+            return;
+        }
+        self.fwd.submit_hooked(&self.gpu, &mut |edge| {
+            if let model::tape::TapeEdge::Before { layer: Some(layer), .. } = edge {
+                self.stream_load(layer);
+            }
+        });
     }
 
-    /// Run the recorded backward on the batch already set.
+    /// Run the recorded backward on the batch already set. A layer-streamed build runs it inside the update instead
+    /// ([`model::resident_ft::adamw_step`]), where the layers it loads are the ones it updates.
     pub(super) fn run_backward(&self) {
-        let g = self.grad.as_ref().expect("a backward needs the training build");
         self.gpu.write(&self.ce_grad_uniform, &[self.rows(), self.cfg.model.vocab_size as u32, IGNORE, f(self.count.get())]);
         self.gpu.write(&self.inv_count, &[(1.0 / self.count.get()).to_bits()]);
-        self.gpu.submit(&[&g.dx0], &self.bwd);
+        if self.layer_streamed() {
+            assert!(!self.backward_pending.replace(true), "ricursive layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
+        self.bwd.submit(&self.gpu);
     }
 }

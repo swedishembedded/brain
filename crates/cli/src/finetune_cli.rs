@@ -49,12 +49,18 @@ brain finetune BASE --dataset FILE --out DIR [options]
   --policy-gradient  train the clipped policy gradient on rollout records (`advantage` on each record) instead of the
                      supervised loss, for an adapter; --ratio-clip X and --kl-beta X set its clip band and KL weight.
   --activations P    what the backward keeps of the forward: keep|recompute|bf16|fp8.
+  --train-precision SPEC
+                     a full fine-tune's storage: `state=f32|bf16|int8[:B]|log8[:B]` for the optimizer state,
+                     `weights=bf16|fp8[:B]` to hold the linears and the tables on the device in that encoding with
+                     their f32 master copy and the optimizer state off it, `window=N` to keep only N layers on the
+                     device (the rest streamed from the host), `clip=two-pass|running`. An architecture that does not
+                     run a choice refuses it by name.
   --no-thinking      render records without the reasoning block.
 
 Run on a device with `--device` (default: every device brain finds).
 ";
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 struct Args {
     base: String,
     dataset: Option<String>,
@@ -82,6 +88,7 @@ struct Args {
     base_format: Option<String>,
     activations: Option<model::saved::SavedPolicy>,
     no_thinking: bool,
+    train_precision: Option<model::TrainPrecision>,
     held_out: Option<String>,
     modules_to_save: Vec<String>,
     policy_gradient: bool,
@@ -127,6 +134,10 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--base-format" => a.base_format = Some(need(&mut i, &flag)?),
             "--activations" => a.activations = Some(crate::args::parse_activations(&need(&mut i, &flag)?).map_err(|e| format!("brain finetune: {e}"))?),
             "--no-thinking" => a.no_thinking = true,
+            "--train-precision" => {
+                let spec = need(&mut i, &flag)?;
+                a.train_precision = Some(model::TrainPrecision::parse(&spec).map_err(|e| format!("brain finetune: --train-precision {spec:?}: {e}"))?);
+            }
             "--held-out" => a.held_out = Some(need(&mut i, &flag)?),
             "--modules-to-save" => a.modules_to_save = need(&mut i, &flag)?.split(',').map(str::trim).filter(|p| !p.is_empty()).map(String::from).collect(),
             "--policy-gradient" => a.policy_gradient = true,
@@ -156,6 +167,12 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 return Err(format!("brain finetune: {flag} shapes the policy gradient; give --policy-gradient"));
             }
         }
+    }
+    if a.lora.is_some() && a.train_precision.is_some() {
+        return Err("brain finetune: --train-precision stores a full fine-tune's weights and optimizer state; an adapter run takes --base-format".to_string());
+    }
+    if let (Some(precision), Some(policy)) = (a.train_precision.as_mut(), a.activations) {
+        crate::args::merge_activations(Some(policy), precision).map_err(|e| format!("brain finetune: {e}"))?;
     }
     if a.lora.is_none() {
         // Each of these shapes an adapter; a full fine-tune that was given one would silently ignore it.
@@ -272,7 +289,9 @@ fn full(a: &Args) -> brain::ChatFullFineTune {
     if let Some(v) = a.max_block {
         t = t.max_block(v);
     }
-    if let Some(v) = a.activations {
+    if let Some(precision) = &a.train_precision {
+        t = t.train_precision(precision.clone());
+    } else if let Some(v) = a.activations {
         t = t.train_precision(model::TrainPrecision { activations: Some(v), ..Default::default() });
     }
     t
@@ -383,6 +402,16 @@ mod tests {
     }
 
     #[test]
+    fn the_train_precision_is_a_full_fine_tunes_and_folds_in_the_activations() {
+        let a = parse(&argv("base --train-precision weights=bf16,window=2 --activations recompute")).unwrap();
+        let precision = a.train_precision.unwrap();
+        assert!(precision.resident.is_some_and(|r| r.window == Some(2)) && precision.activations.is_some());
+        assert!(parse(&argv("base --lora 4 --train-precision weights=bf16")).unwrap_err().contains("--base-format"));
+        assert!(parse(&argv("base --train-precision weights=quantum")).unwrap_err().contains("--train-precision"));
+        assert!(parse(&argv("base --train-precision activations=keep --activations recompute")).unwrap_err().contains("conflicts"));
+    }
+
+    #[test]
     fn a_number_that_does_not_parse_is_an_error_naming_the_flag() {
         let err = parse(&argv("base --steps many")).unwrap_err();
         assert!(err.contains("--steps") && err.contains("many"), "{err}");
@@ -390,7 +419,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }

@@ -136,9 +136,11 @@ fn fit_run(run: RippleRun, fit: &mut impl ModelFit) -> std::io::Result<(FitRepor
 impl ChatTrainer for RippleTrainer {
     type Trained = RippleRun;
     const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "ricursive", bases: &[Dtype::F32, Dtype::BF16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3, Dtype::F4E2M1] };
-    /// The optimizer is the device AdamW over the parameter store with f32 moments; every other choice is refused by
-    /// name.
-    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "ricursive", state: model::StateSupport::Fp32, resident: false, layer_streamed: false, f32_streamed: false };
+    /// A plain full fine-tune trains f32 weights with f32 moments ([`Self::train_full`] refuses any other precision by
+    /// name); a resident one (`weights=bf16|fp8`, with or without a layer `window`) holds the optimizer state of its
+    /// off-device master in any format the resident state runs, the f32 layers' streaming through a parameter-store
+    /// window is not wired.
+    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "ricursive", state: model::StateSupport::Any, resident: true, layer_streamed: true, f32_streamed: false };
 
     const PIPELINED: bool = true;
     const NATIVE_SPARSE: bool = true;
@@ -160,11 +162,32 @@ impl ChatTrainer for RippleTrainer {
 
     fn train_full(base: &Path, opts: &FitOpts, state: OptimizerState, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, RippleRun)> {
         Self::TRAIN_PRECISION.check(&opts.precision).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))?;
+        let default = paramstore::precision::PrecisionPolicy::uniform(paramstore::precision::ParamPrecision::FP32);
+        if opts.precision.policy.default != default.default || !opts.precision.policy.rules.is_empty() || opts.precision.narrow_state || opts.precision.host_moments {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive: a plain full fine-tune trains f32 weights with f32 moments on the device; give weights=bf16 or weights=fp8 for a low-precision optimizer state"));
+        }
         let opened = Base::open(base)?;
         let cfg = opened.train_config(opts.block_size);
         let train_opts = TrainOpts { gemm: opts.gemm_precision, ..TrainOpts::default() };
         let run = state.scope(|| build_run(cfg, opts, &*opened.source, &train_opts, base))?;
         fit_run(run, fit)
+    }
+
+    /// The linears and the two tables resident in `resident`'s encoding with a master copy and the optimizer state off
+    /// the device, optionally streamed through a window of layers; the norms and gates train in f32 beside them. One
+    /// stage on one device: the pipeline's host optimizer cannot drive the resident state, so a stage count is refused
+    /// by name. Refused before the base is read when the planner finds it does not fit.
+    fn train_full_resident(base: &Path, opts: &FitOpts, resident: &model::resident_ft::ResidentFtConfig, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, RippleRun)> {
+        if opts.stages > 1 {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive: a resident full fine-tune is one stage on one device; the pipeline's host optimizer cannot drive its off-device state"));
+        }
+        let opened = Base::open(base)?;
+        let cfg = opened.train_config(opts.block_size);
+        let shard = Shard::whole(cfg.model.num_hidden_layers);
+        let plan = crate::train::plan_resident(&cfg, &shard, opts.batch_size, opts.block_size, resident, model::memplan::Capacity::measured());
+        let train_opts = TrainOpts { gemm: opts.gemm_precision, resident: Some(plan), ..TrainOpts::default() };
+        let built = Ripple::build_shard(cfg, opts.batch_size, opts.block_size, &*opened.source, &train_opts, true, shard).map_err(|e| invalid(base, e))?;
+        fit_run(RippleRun::Single(Box::new(built)), fit)
     }
 
     fn train_lora(base: &Path, lora: &LoraRequest<'_>, opts: &FitOpts, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, RippleRun)> {
@@ -208,12 +231,12 @@ impl ChatTrainer for RippleTrainer {
 mod tests {
     use super::*;
 
-    /// Spec: a train precision outside the f32 run is refused by name through the generic entry point, before the
-    /// base is opened.
+    /// Spec: a train precision the trainer does not run is refused by name through the generic entry point, before
+    /// the base is opened.
     #[test]
     fn a_train_precision_it_does_not_run_is_refused_by_name_before_anything_is_opened() {
         let nowhere = Path::new("/nonexistent/ricursive-base");
-        for spec in ["weights=fp8", "weights=bf16,window=2"] {
+        for spec in ["weights=f32,window=2", "state=int8"] {
             let opts = FitOpts { precision: model::TrainPrecision::parse(spec).unwrap(), ..FitOpts::default() };
             let e = model::finetune::fit_full::<RippleTrainer>(nowhere, nowhere, &opts, nowhere, OptimizerState::HostOffload, model::FitControl::default()).expect_err(spec);
             assert_eq!(e.kind(), std::io::ErrorKind::Unsupported, "{spec}: {e}");

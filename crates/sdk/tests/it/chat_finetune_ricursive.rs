@@ -381,3 +381,36 @@ fn a_ricursive_adapter_carries_the_norms_and_gates_it_trained() {
     let err = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).arch("ricursive").dataset(write_dataset(&model)).out_dir(model.join("bad")).modules_to_save(vec!["nonesuch".into()]).device(cpu()).run().expect_err("refused");
     assert!(err.to_string().contains("nonesuch"), "{err}");
 }
+
+/// Spec: a resident full fine-tune (the linears and tables in bf16 with an off-device master, streamed through a window
+/// of one layer) through the SDK learns and writes the masters as a base the architecture opens again; a stage count is
+/// refused by name.
+#[test]
+fn a_resident_layer_streamed_full_fine_tune_writes_its_masters_as_a_base() {
+    let model = ripple_model_dir("ripple-resident");
+    let run = |precision: &str, stages: u32, tag: &str| {
+        ChatFullFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+            .arch("ricursive")
+            .dataset(write_dataset(&model))
+            .out_dir(model.join(tag))
+            .steps(4)
+            .lr(1e-2)
+            .stages(stages)
+            .train_precision(model::TrainPrecision::parse(precision).unwrap())
+            .seed(7) // seed: runs compared with each other need the same stream
+            .device(cpu())
+            .run()
+    };
+    let outcome = run("weights=bf16,window=1", 0, "streamed").expect("the resident full fine-tune runs");
+    assert_eq!(outcome.status, FineTuneStatus::Completed);
+    assert!(outcome.final_loss.zip(outcome.initial_loss).is_some_and(|(last, first)| last < first), "{outcome:?}");
+    let checkpoint = outcome.checkpoint.expect("a completed run writes its checkpoint directory");
+    let trained = checkpoint::weightio::WeightReader::open(checkpoint.join("model.safetensors").to_str().unwrap()).expect("the checkpoint opens");
+    let cfg = ricursive::TrainConfig::from_json(&trained.config()).expect("the header carries the training configuration");
+    assert_eq!(trained.names().count(), cfg.param_list().len(), "every tensor of the architecture is written, the resident ones from their masters");
+    // The window changes where the weights live, not the arithmetic.
+    let resident = run("weights=bf16", 0, "resident").expect("the resident run");
+    assert_eq!(resident.final_loss.map(f32::to_bits), outcome.final_loss.map(f32::to_bits), "a layer-streamed run ends where the resident one does");
+    let err = run("weights=bf16", 2, "staged").expect_err("refused");
+    assert!(err.to_string().contains("one stage"), "{err}");
+}

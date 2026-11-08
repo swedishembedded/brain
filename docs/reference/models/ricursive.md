@@ -180,7 +180,12 @@ trained on this checkpoint (its card records the base) and fit the model, and is
 (`--adapter-id`, a reference of the form `vendor/repo:owner:name:tag`). All adapters and the base share one copy of the
 weights; the adapters' slots on each device are part of the memory plan. A variant of the adapter Ripple does not train (rank-stabilised, LoRA+, frozen A) is refused by name.
 
-`--modules-to-save norms,gates` (a comma list of tensor names, leaves such as `input_layernorm`, or the groups `norms`
+A full fine-tune (no `--lora`) trains f32 weights with f32 AdamW on the device by default. `--train-precision
+weights=bf16` (or `fp8`) instead holds the linears and the two tables on the device in that encoding with an f32
+master copy and the optimizer state in host memory (`state=int8` shrinks it), and `window=N` keeps only N layers on
+the device at a time, streaming the rest from the host: a bf16 65B fine-tune then needs one card of about 42 GiB at
+one row of 4096 tokens and 370 to 490 GiB of host memory. A resident run is one stage on one device; it writes the
+masters as a base the trainer opens again. `--modules-to-save norms,gates` (a comma list of tensor names, leaves such as `input_layernorm`, or the groups `norms`
 and `gates`) also trains those base tensors in full and carries them in the adapter file (PEFT's `modules_to_save`):
 the card lists them, and `brain serve` applies each row's own copy in a batch that mixes the base and several
 adapters. A full linear (`g_proj`, the embedding, the head) trains and is saved, but an adapter carrying one is
