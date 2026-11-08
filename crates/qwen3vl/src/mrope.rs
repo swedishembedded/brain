@@ -9,8 +9,10 @@
 //! is the standard half-split `rotate_half`, this needs **no new device kernel**:
 //! the host builds the per-token `(cos, sin)` tables with the right axis feeding
 //! each channel, and the existing `rope2d.wgsl` (table-driven, half-split, pairs
-//! `(d, d+half)`) applies them — exactly as `crates/dit` does for Z-Image, but
-//! with the interleaved stride-3 slot→axis map instead of contiguous blocks.
+//! `(d, d+half)`) applies them. `crates/dit` builds host tables the same way for
+//! Z-Image, but pairs adjacent channels through `rope_interleave_table.wgsl`;
+//! here the pairing is half-split and the slot-to-axis map is the interleaved
+//! stride-3 one instead of contiguous blocks.
 //!
 //! Layout (matching HF `apply_interleaved_mrope`, `mrope_section = [T,H,W]`, sum
 //! = head_dim/2): start every channel on axis T, then for axis H overwrite
