@@ -183,6 +183,12 @@ impl<M: Model> Objective<M> for Mixture<M> {
         }
     }
 
+    fn updates_applied(&mut self, applied: u32) {
+        for arm in &mut self.arms {
+            arm.updates_applied(applied);
+        }
+    }
+
     fn eval(&mut self, model: &M, rng: &mut Rng, batches: u32) -> Option<f32> {
         self.arms.first_mut()?.eval(model, rng, batches)
     }

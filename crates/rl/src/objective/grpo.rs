@@ -702,12 +702,16 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
     }
 
     fn step_verdict(&mut self) -> StepVerdict {
-        let verdict = self.verdict.take().unwrap_or(StepVerdict::Apply);
-        if matches!(verdict, StepVerdict::Apply) {
-            self.version += 1;
-            self.stats.steps_applied += 1;
-        }
-        verdict
+        self.verdict.take().unwrap_or(StepVerdict::Apply)
+    }
+
+    /// The policy version is the number of updates the weights absorbed. The shared loop's update
+    /// gate can skip a step this objective allowed, so counting its own `Apply` verdicts would let
+    /// the trainer's version run ahead of the weights (a spurious stale-engine refusal) and be
+    /// wrong after a resume.
+    fn updates_applied(&mut self, applied: u32) {
+        self.version = u64::from(applied);
+        self.stats.steps_applied = applied as usize;
     }
 
     /// The loss of a freshly drawn group, forward only. The queue, the log and

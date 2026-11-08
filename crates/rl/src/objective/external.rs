@@ -737,8 +737,12 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
 
     fn begin(&mut self, seed: u64, draws_done: u64) {
         self.order = Some(Order::new(seed, self.rows.starts.len(), draws_done));
-        // A resumed run has restored the weights it stopped with, which are no longer the start-of-run ones.
-        self.weights_moved = draws_done > 0;
+    }
+
+    /// The weights differ from the start-of-run ones exactly when an update was applied (also true of a
+    /// resumed run, which restored the weights it stopped with). A step the update gate skipped moved nothing.
+    fn updates_applied(&mut self, applied: u32) {
+        self.weights_moved = applied > 0;
     }
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
@@ -784,7 +788,6 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
             }
             self.accumulating.terms.push(terms);
         }
-        self.weights_moved = true;
         finite &= model.optimized_params().is_none_or(|names| names.iter().all(|n| model.read_grad(n).iter().all(|g| g.is_finite())));
         self.verdict = Some(self.rule(finite));
         self.close_step();

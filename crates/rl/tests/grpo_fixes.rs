@@ -256,6 +256,7 @@ fn rows_older_than_the_staleness_bound_are_refused() {
         let mut rng = Rng::new(s);
         obj.micro_steps(&m, &mut rng, 2);
         assert!(matches!(verdict(&mut obj), StepVerdict::Apply));
+        Objective::<Qwen>::updates_applied(&mut obj, 1);
         obj.micro_steps(&m, &mut rng, 2);
         assert_eq!(obj.stats().rows_refused, refused, "bound {bound}");
         if refused > 0 {
@@ -399,10 +400,31 @@ fn samples_from_an_engine_the_trainer_has_left_behind_are_refused() {
     let mut rng = Rng::new(s);
     obj.micro_steps(&m, &mut rng, 2);
     assert!(matches!(verdict(&mut obj), StepVerdict::Apply), "the first step trains on the synced engine's samples");
+    Objective::<Qwen>::updates_applied(&mut obj, 1);
     obj.micro_steps(&m, &mut rng, 2);
     let StepVerdict::Abort(e) = verdict(&mut obj) else { panic!("the engine is one update behind: the step must abort") };
     let refusal = e.get_ref().and_then(|source| source.downcast_ref::<BehaviourRefusal>()).expect("a typed error");
     assert_eq!(*refusal, BehaviourRefusal::StaleEngine { engine_version: 0, trainer_version: 1 });
+}
+
+/// T003 bookkeeping: the trainer's policy version is the shared loop's applied-update count. A step
+/// the objective allowed but the loop's update gate skipped left the weights where the engine was synced,
+/// so the next group is not stale.
+#[test]
+fn a_step_the_update_gate_skipped_leaves_the_engine_current() {
+    let s = seed();
+    let (mut m, _, _) = lora_model(s);
+    let (judge, _) = Judge::new(first_wins);
+    let group = vec![completion(&[4, 4]), completion(&[5, 5])];
+    let mut obj = Grpo::new(Env { variable: always_variable }, judge, config(2, 1.0, GrpoOptions::default())).with_rollout(Box::new(Scripted { group }), 2);
+    obj.prepare(&mut m).unwrap();
+    let mut rng = Rng::new(s);
+    obj.micro_steps(&m, &mut rng, 2);
+    assert!(matches!(verdict(&mut obj), StepVerdict::Apply));
+    Objective::<Qwen>::updates_applied(&mut obj, 0);
+    obj.micro_steps(&m, &mut rng, 2);
+    assert!(matches!(verdict(&mut obj), StepVerdict::Apply), "no update was applied, so the engine still holds the trainer's policy");
+    assert_eq!(obj.stats().steps_applied, 0);
 }
 
 /// An engine synced every group always holds the current policy, however many updates pass.

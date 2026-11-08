@@ -1862,6 +1862,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         }
     }
 
+    obj.updates_applied(applied);
     obj.begin(opts.seed, u64::from(first_step) * u64::from(opts.grad_accum.max(1)) * opts.batch_size.max(1) as u64);
 
     let initial = {
@@ -1885,7 +1886,10 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     let mut stopped_early = false;
 
     for step in first_step..opts.steps {
-        let lr = selection.cooldown.map_or_else(|| cosine_lr(step, opts), |c| c.lr(step, opts.min_lr));
+        // The schedule counts applied updates (AdamW's `t` counts the same), so a step that applies none does not
+        // consume warmup or shorten the decay. A cooldown is a window of loop steps with its own end, so it is
+        // positioned by the loop step.
+        let lr = selection.cooldown.map_or_else(|| cosine_lr(applied, opts), |c| c.lr(step, opts.min_lr));
         let step_clock = std::time::Instant::now();
         if let Some(parts) = model.optimizer_parts() {
             parts.gpu.reset_memory_peak();
@@ -1919,6 +1923,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             StepVerdict::Skip(why) => eprintln!("step {:>6}: no optimiser step taken: {why}", step + 1),
             StepVerdict::Abort(e) => return Err(e),
         }
+        obj.updates_applied(applied);
         model.poll_wait();
         gpu_core::profile::stage_time("fit: step optimizer update", update_clock);
         gpu_core::profile::stage_time("fit: step total", step_clock);
@@ -2628,6 +2633,51 @@ mod tests {
         }
     }
 
+    /// An objective that records the applied-update counts the loop reports to it.
+    struct Reporting(std::collections::VecDeque<StepVerdict>, std::rc::Rc<std::cell::RefCell<Vec<u32>>>);
+    impl Objective<Recorder> for Reporting {
+        fn regime(&self) -> &'static str {
+            "reporting"
+        }
+        fn micro_step(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            0.0
+        }
+        fn step_verdict(&mut self) -> StepVerdict {
+            self.0.pop_front().unwrap_or(StepVerdict::Apply)
+        }
+        fn updates_applied(&mut self, applied: u32) {
+            self.1.borrow_mut().push(applied);
+        }
+    }
+
+    /// The objective is told the loop's applied-update count before the first step and after every step,
+    /// including a step its own verdict allowed that the update gate then skipped.
+    #[test]
+    fn the_objective_is_told_the_applied_update_count_after_every_step() {
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        let told = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let nan = (f32::NAN, 0.0);
+        let script = Scripted([(1.0, 0.5), nan, (1.0, 0.5)].into());
+        struct Both(Scripted, Reporting);
+        impl Objective<Recorder> for Both {
+            fn regime(&self) -> &'static str {
+                "both"
+            }
+            fn micro_step(&mut self, m: &Recorder, r: &mut Rng) -> f32 {
+                self.0.micro_step(m, r)
+            }
+            fn loss_probe(&mut self, m: &Recorder, r: &mut Rng) -> f32 {
+                self.0.loss_probe(m, r)
+            }
+            fn updates_applied(&mut self, applied: u32) {
+                self.1.updates_applied(applied)
+            }
+        }
+        let opts = FitOpts { steps: 3, eval_interval: 0, ..Default::default() };
+        fit_controlled(model, Both(script, Reporting(Default::default(), told.clone())), &opts, None, FitControl::default()).expect("fit");
+        assert_eq!(*told.borrow(), vec![0, 1, 1, 2], "start, then after each step: the gate-skipped second step adds none");
+    }
+
     /// An objective that draws from no stream and does not override
     /// [`Objective::shard`]: the shape of every rollout-driven regime.
     struct Whole;
@@ -2651,7 +2701,20 @@ mod tests {
         let opts = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
         let (report, _) = fit_controlled(model, Verdicts(script.into()), &opts, None, FitControl::default()).expect("fit");
         assert_eq!(lrs.borrow().len(), 2, "two of the four steps were applied");
-        assert_eq!(report.steps_completed, 4, "a skipped step still advances the schedule");
+        assert_eq!(report.steps_completed, 4, "a loop step counts as completed even when no update was applied");
+    }
+
+    /// The learning-rate schedule counts applied optimiser updates, the same count AdamW's bias correction uses: a
+    /// step the objective skips neither consumes a warmup step nor shortens the decay.
+    #[test]
+    fn a_skipped_step_does_not_advance_the_learning_rate_schedule() {
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        let lrs = std::rc::Rc::clone(&model.lrs);
+        let script = [StepVerdict::Skip("empty".into()), StepVerdict::Apply, StepVerdict::Skip("empty".into()), StepVerdict::Apply, StepVerdict::Apply];
+        let opts = FitOpts { steps: 5, eval_interval: 0, lr: 1e-3, min_lr: 1e-4, warmup: 3, ..Default::default() };
+        fit_controlled(model, Verdicts(script.into()), &opts, None, FitControl::default()).expect("fit");
+        let expected: Vec<f32> = (0..3).map(|applied| cosine_lr(applied, &opts)).collect();
+        assert_eq!(*lrs.borrow(), expected, "the n-th applied update runs at the schedule's n-th rate");
     }
 
     /// An objective whose micro-steps report a scripted `(loss, gradient)`.

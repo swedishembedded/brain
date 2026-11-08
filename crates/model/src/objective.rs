@@ -117,6 +117,14 @@ pub trait Objective<M: Model> {
         StepVerdict::Apply
     }
 
+    /// How many optimiser updates the run has applied so far: reported before the first step (the
+    /// count a resumed run continues from, 0 when fresh) and again after every step. It is the
+    /// shared loop's count - a step this objective's [`Self::step_verdict`] allowed can still be
+    /// skipped by the loop's update gate - so an objective that tracks "which policy the weights
+    /// hold" (a version stamped on its rollouts, a moved-weights flag) must derive it from this
+    /// and not from its own verdicts. Default: not interested.
+    fn updates_applied(&mut self, _applied: u32) {}
+
     /// A loss on a training batch without differentiating it: what the
     /// estimate of the loss a run starts from is made of. Defaults to
     /// [`Self::micro_step`] (which differentiates, into gradients the first
@@ -213,6 +221,9 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for Box<O> {
     fn step_verdict(&mut self) -> StepVerdict {
         (**self).step_verdict()
     }
+    fn updates_applied(&mut self, applied: u32) {
+        (**self).updates_applied(applied)
+    }
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         (**self).loss_probe(model, rng)
     }
@@ -256,6 +267,9 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for &mut O {
     }
     fn step_verdict(&mut self) -> StepVerdict {
         (**self).step_verdict()
+    }
+    fn updates_applied(&mut self, applied: u32) {
+        (**self).updates_applied(applied)
     }
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         (**self).loss_probe(model, rng)
