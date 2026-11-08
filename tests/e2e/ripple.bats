@@ -300,7 +300,7 @@ write_finetune_data() {
 
 @test "an adapter promoted into a watched directory is offered by the running server, beside the base" {
   [ -s "$SCRATCH/lora/adapter.safetensors" ] || skip "the LoRA fine-tune test did not leave an adapter"
-  local port=$((PORT + 5)) one="$MODEL:lab:one:v1" body
+  local port=$((PORT + 8)) one="$MODEL:lab:one:v1" body
   mkdir -p "$SCRATCH/watch"
   start_server "$SCRATCH/scripted" "$port" --device cpu --watch-adapters "$SCRATCH/watch"
   ! curl -fsS -H "Authorization: Bearer $(key_of "$port")" "http://127.0.0.1:$port/v1/models" | jq -e --arg a "$one" '[.data[].id] | index($a) != null'
