@@ -5,8 +5,6 @@
 
 *How do we add up infinitely many small pieces, and how do we follow a system that changes continuously?*
 
-## The problem
-
 A car's speedometer is read once a second. During the first three seconds of a
 test drive it showed these speeds, in metres per second:
 
@@ -41,11 +39,10 @@ quantity depends on the quantity itself, how do we follow it forward in time?
 That is a differential equation, and the simplest method for following it is
 the one that, in disguise, trains every neural network.
 
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The answers
-are at the end of the chapter. If one is hard, go back to the chapter named
-before reading on.
+The derivative and the exponential of Chapter 7 carry the first half of what
+follows; the second half leans on the gradient and the Taylor expansion of
+Chapter 8. Six questions to try from memory before we start; the answers are at
+the end, and the chapter each names is where to go back if one is hard.
 
 1. (Chapter 7, derivative.) What is the derivative of $x^3$, and of $e^{2x}$?
 2. (Chapter 7, limit.) What number does $(e^h - 1)/h$ approach as $h \to 0$, and why is that the reason $\tfrac{d}{dx}e^x = e^x$?
@@ -103,7 +100,7 @@ proportion to the width, and both sums are squeezed towards $9$. This is the sam
 limit of Chapter 7: we never reach zero width, but we can say what the values
 approach and how far from it we still are.
 
-**The integral.** For a function $f$ on $[a, b]$ whose Riemann sums approach one
+For a function $f$ on $[a, b]$ whose Riemann sums approach one
 number as the width goes to zero, that number is the **integral**,
 
 $$
@@ -117,7 +114,7 @@ exactly from a formula in the next section; for now the table is the evidence.
 (Continuous functions have an integral; so do functions with a finite number of
 jumps. That covers everything in this book.)
 
-**Signed area.** A speed is never negative but a velocity is: a car reversing has
+A speed is never negative but a velocity is: a car reversing has
 negative velocity. A rectangle of negative height contributes negative area, so the
 integral counts area above the axis as positive and below as negative. Take the
 velocity $v(t) = t - 2$, which is backwards for the first two seconds and forwards
@@ -192,7 +189,7 @@ This is the **fundamental theorem of calculus**: the rate of change of the
 accumulated area is the height of the function. Accumulating and differentiating
 undo each other.
 
-**Evaluating an integral from an antiderivative.** Call $F$ an **antiderivative**
+The theorem turns integration into a search. Call $F$ an **antiderivative**
 of $f$ if $F' = f$. The area function $A$ is one. Suppose $F$ is another. Then
 $F - A$ has derivative $f - f = 0$ everywhere, and a function whose slope is zero
 everywhere cannot go anywhere: it is a constant $c$. So $F(x) = A(x) + c$, and the
@@ -228,7 +225,7 @@ rule (a method described below; the point is that it does not use antiderivative
 
 The two columns agree to the last printed digit.
 
-**Making the Taylor remainder exact.** Chapter 8 bounded the error of a Taylor
+The theorem also repays a promise of Chapter 8, which bounded the error of a Taylor
 polynomial by the argument that "a quantity that starts at $0$ and changes at a
 rate of at most $s$ cannot move more than $s\lvert h\rvert$", and said that the
 integrals chapter would make "area under a rate gives the change" exact. The
@@ -272,17 +269,17 @@ shows how good the bound is: the ratio of the true error to $M h^3/3!$ climbs to
 $1$ as $h$ shrinks, because over a short interval the third derivative is nearly
 constant, so the bound is nearly the exact value.
 
-## Why integrals matter for learning
+## Integrals with no antiderivative: expectations, densities and scores
 
 Most integrals in machine learning are not distances, and the antiderivative
 trick does not apply to them. Three appear again and again in later chapters.
 
-**Expectations.** The average of a quantity $g(x)$ over a continuous variable $x$
+The first is the expectation. The average of a quantity $g(x)$ over a continuous variable $x$
 that occurs with density $p(x)$ is $\int g(x)\,p(x)\,dx$, the sum over all $x$ of
 the value times how likely it is. This is the expectation of the probability chapter
 that follows, and every loss that is "an average over the data distribution" is one.
 
-**Normalising a density.** A density must integrate to $1$ over everything it
+The second is normalisation. A density must integrate to $1$ over everything it
 could be. The bell curve $e^{-x^2/2}$ does not: its area is a number we can
 compute, and dividing by it makes a density.
 
@@ -305,7 +302,7 @@ will use and not derive.) Note what is missing: there is no formula for an
 antiderivative of $e^{-x^2/2}$ in terms of the functions of Chapter 2. It is
 known that none exists. The only way to a number is a numerical method.
 
-**Areas under curves as scores.** The area under a receiver operating
+The third is a score. The area under a receiver operating
 characteristic curve, a standard summary of how well a classifier ranks, is a sum
 of trapezoids over a few measured points. Volume II (*Measuring Models*) defines it; the point here is
 that evaluation code integrates.
@@ -319,7 +316,7 @@ square of the same area) approximates $\int_a^b f$ by a weighted sum of function
 values. Such a sum is a *quadrature rule*. The left sum is one. Its error is large: halving $\Delta t$ halves
 it. We can do better by choosing which piece of curve each panel represents.
 
-**Trapezoid rule.** The left rectangle replaces the curve over a panel by a
+The first improvement changes the shape drawn over a panel. The left rectangle replaces the curve over a panel by a
 horizontal line at its left height. Replace it by the straight chord joining its
 two ends instead. The area under a chord is a trapezoid, its width times the
 average of the two heights:
@@ -334,7 +331,7 @@ the shrinking-width table: at $\Delta t = 0.5$ it gives $8.875$, closer to $9$ t
 either alone. With unequally spaced readings the same idea reads
 $\sum \tfrac12(f_i + f_{i+1})(t_{i+1} - t_i)$.
 
-**Simpson's rule.** Replace the curve over a pair of panels by the parabola
+A second improvement goes one degree higher. Replace the curve over a pair of panels by the parabola
 through three points. Shift the pair so its middle is at $s = 0$, with panel
 width $\Delta t$ and heights $f_0, f_1, f_2$ at $s = -\Delta t, 0, \Delta t$. The
 parabola $c_0 + c_1 s + c_2 s^2$ through them has $c_0 = f_1$ and
@@ -436,7 +433,7 @@ value $x_0$ at the start is the initial condition. The equation does not give $x
 at any time; it gives the slope at each point $(t, x)$ of the plane, and we must
 find a curve that follows those slopes.
 
-**The simplest case.** Let the rate be proportional to the quantity, with a decay
+The simplest case is a rate proportional to the quantity, with a decay
 constant $k > 0$:
 
 $$
@@ -453,7 +450,7 @@ Chapter 2 with $\gamma = e^{-k}$, and the same shape as a cooling cup of coffee
 (whose rate is proportional to the difference from room temperature, and so decays
 the same way). With a negative sign replaced by a positive one, it is growth.
 
-**Compounding as a limit, once more.** Chapter 1 met $e$ as the limit of
+Compound interest is the same arithmetic. Chapter 1 met $e$ as the limit of
 $(1 + 1/n)^n$, and Chapter 2 compounded a balance once a year. A balance that earns
 at rate $r$ per year satisfies $dy/dt = r y$: the interest earned at each instant is
 proportional to what is there. Compounding $n$ times a year multiplies the balance
@@ -524,7 +521,7 @@ The first value $0.5$ is below the exact $0.6065$, because the true curve bends
 upward (its slope shrinks as $x$ falls) while the tangent keeps going straight
 down. Each step makes the same kind of mistake and the errors carry forward.
 
-**Local and global error.** The error of *one* step, started from the exact
+How wrong is the method? The error of *one* step, started from the exact
 value, is the **local error** (in the table below, for $dx/dt = -x$ started at
 $x(0) = 1$, it is $\lvert e^{-h} - (1 - h)\rvert$). By the Taylor expansion of Chapter 8 the exact
 solution is $x(t + h) = x(t) + h\,x'(t) + \tfrac12 h^2 x''(t) + \dots$, and the
@@ -560,7 +557,7 @@ the last column converges to its predicted limit $0.1353$.
 
 ![The exact curve e to the minus t from 1 towards 0, and the paths Euler's method takes with step 0.5, 1.5 and 2.5. The step 0.5 path follows the curve from above-the-line points that fall just short of it. The step 1.5 path jumps below zero at t = 1.5 and then returns, flipping sign at every step while shrinking. The step 2.5 path alternates in sign and grows, reaching minus 3.4 at t = 7.5.](img/euler-trajectories.svg)
 
-**When a step is too large.** The figure shows something the error table hid. The
+The figure shows something the error table hid. The
 step $h = 1.5$ gives a path that flips sign every step although the true solution
 never changes sign, and $h = 2.5$ explodes. On this equation each step multiplies
 $x$ by $1 - h$ (more generally $1 - kh$ for $dx/dt = -kx$), so the iterates are
@@ -584,7 +581,7 @@ decays, and beyond that the error is multiplied by more than $1$ in size each st
 and grows without bound. The limit of **stability** is $h < 2/k$: how fast the
 true solution decays sets the largest step the method tolerates.
 
-**Gradient descent is Euler's method.** This should look familiar. Chapter 8 found
+The stability limit should look familiar. Chapter 8 found
 that stepping against the gradient on a quadratic bowl multiplies each curvature
 direction of the error by $1 - \eta\lambda$ and is stable only for $\eta < 2/\lambda_{\max}$.
 Take the one-knob bowl $L(w) = \tfrac12\lambda w^2$, whose gradient is $\lambda w$.
@@ -651,7 +648,7 @@ starting radius, and the table matches the formula $(1 + h^2)^{n/2}$. Euler's
 method can fail through low accuracy, through instability at large steps or, as
 here, through a systematic drift that no step size removes and only slows.
 
-**The gradient flow.** Now choose the field to be the arrows pointing downhill on
+The field that matters for learning is the one whose arrows point downhill on
 a loss $L$:
 
 $$
@@ -750,7 +747,7 @@ dx/dt = v(t) = t (4 - t), x(0) = 0, up to t = 3 with 6 steps of h = 0.5; exact a
 | midpoint | 9.062500 | midpoint rectangles | 9.062500 |
 <!-- /worked -->
 
-Euler's method *is* the left Riemann sum. Now improve it as we improved the sum.
+Euler's method *is* the left Riemann sum, so it can be improved the way the sum was.
 Over a step the exact change is the integral of the slope, $\int_t^{t+h} f(s, x(s))\,ds$,
 which Euler approximates by $h$ times the slope at the start. Two rules do better
 by sampling the slope at a second place, and each costs two evaluations of $f$
@@ -833,10 +830,21 @@ sum of the step lengths is the total length. The last column is $0.3$, the exact
 end value, for every $n$. Where the slope varies, the second-order step is far
 better: on $3\sigma^2$, Heun's error at $n = 8$ is $0.0078$ against $0.195$.
 
-## Making it work
+## Stability, stiffness and the cost of a slope
 
-- **Check the stability limit before the accuracy.** An explicit method such as Euler's is stable only for $h < 2/k$ on a decay of rate $k$. A solution may be smooth, with no accuracy reason for small steps, and the step is still capped by the fastest decay anywhere in the system. Equations with a fast and a slow time scale are called **stiff**, and the bowl of this chapter ($\lambda_1/\lambda_2 = 34$) is the smallest example.
-- **When the fast part is linear, solve it exactly.** Over one step the equation $dx/dt = -B(x - x_\infty)$, with $B$ and $x_\infty$ held fixed, has the exact solution $x_\infty + (x - x_\infty)e^{-hB}$ (shift by $x_\infty$ and use the decay solution above). This **exponential step** is stable for every $h$ and exact when $B$ and $x_\infty$ really are constant. Euler uses $1 - hB$ in place of $e^{-hB}$:
+An explicit method such as Euler's is stable only for $h < 2/k$ on a decay of rate
+$k$, so stability has to be checked before accuracy. A solution may be smooth, with
+no accuracy reason for small steps, and the step is still capped by the fastest
+decay anywhere in the system. Equations with a fast and a slow time scale are
+called **stiff**, and the bowl of this chapter ($\lambda_1/\lambda_2 = 34$) is the
+smallest example.
+
+When the fast part is linear, it can be solved exactly instead. Over one step the
+equation $dx/dt = -B(x - x_\infty)$, with $B$ and $x_\infty$ held fixed, has the
+exact solution $x_\infty + (x - x_\infty)e^{-hB}$ (shift by $x_\infty$ and use the
+decay solution above). This **exponential step** is stable for every $h$ and exact
+when $B$ and $x_\infty$ really are constant. Euler uses $1 - hB$ in place of
+$e^{-hB}$:
 
 <!-- worked: integrals.exponential_step -->
 One step of size h on dx/dt = -x multiplies x by this factor: Euler uses 1 - h, the exact solution over the step is e^(-h).
@@ -851,16 +859,27 @@ One step of size h on dx/dt = -x multiplies x by this factor: Euler uses 1 - h, 
 | 10.0 | -9.0000 | 0.0000 |
 <!-- /worked -->
 
-  The exponential factor stays in $(0, 1)$ however large the step, while the Euler factor passes $-1$ at $h = 2$ and keeps falling.
-- **Pick the order by the cost of a slope.** Evaluate the slope as few times as the accuracy allows. A cheap slope favours small Euler steps; a slope that costs a network pass favours a higher-order method and larger steps.
-- **Smoothness is an assumption.** The order of a rule is a statement about functions with moderate derivatives. A function with a jump or a kink in a panel breaks it and brings every rule back to order $1$ or lower in that panel. Special functions can beat their order: the trapezoid rule applied to $e^{-x^2/2}$ over $[-8, 8]$ is more accurate with sixteen panels than Simpson's rule (Exercise 11).
-- **Grids do not scale with dimension.** A grid of $10$ points per axis needs $10^d$ evaluations in $d$ dimensions: $10^3$ at $d = 3$, $10^6$ at $d = 6$ and $10^{10}$ at $d = 10$. Expectations over the millions of dimensions of an image are estimated by averaging over random samples, not by quadrature; the probability and statistics chapters build that tool.
-- **Keep the sums honest.** A sum of a million terms in 32-bit arithmetic loses digits; the floating-point chapter explains how, and the chapters that use integrals inherit its remedies.
+The exponential factor stays in $(0, 1)$ however large the step, while the Euler
+factor passes $-1$ at $h = 2$ and keeps falling.
 
-## Where this appears in brain
+How many times to evaluate the slope is a question of price. A cheap slope favours
+small Euler steps; a slope that costs a network pass favours a higher-order method
+and larger steps. The orders themselves are statements about smooth functions: a
+jump or a kink in a panel brings every rule back to order $1$ or lower in that
+panel, although special functions can beat their order (the trapezoid rule applied
+to $e^{-x^2/2}$ over $[-8, 8]$ is more accurate with sixteen panels than Simpson's
+rule, Exercise 11). Grids do not survive dimension either: ten points per axis need
+$10^d$ evaluations in $d$ dimensions, $10^3$ at $d = 3$, $10^6$ at $d = 6$ and
+$10^{10}$ at $d = 10$, so expectations over the millions of dimensions of an image
+are estimated by averaging over random samples and not by quadrature; the
+probability and statistics chapters build that tool. And a sum of a million terms
+in 32-bit arithmetic loses digits; the floating-point chapter explains how, and
+the chapters that use integrals inherit its remedies.
 
-**The flow-matching sampler is Euler's method.** `crates/diffusion/src/scheduler.rs`
-documents the model of the process in its header: the noisy latent is a straight
+## Euler steps, a leaky neuron and trapezoids in brain's crates
+
+The flow-matching sampler is Euler's method in plain sight. The header of
+`crates/diffusion/src/scheduler.rs` documents the model of the process: the noisy latent is a straight
 line between a data point $x_0$ and noise $\varepsilon$, $x_\sigma = (1-\sigma)x_0 + \sigma\varepsilon$,
 the denoising network predicts the velocity $v = dx/d\sigma$, and sampling
 "integrates that ODE backwards from $\sigma_{\max}$ toward 0 with explicit Euler
@@ -878,13 +897,13 @@ multistep methods that reuse earlier slopes to gain order; the test
 `first_step_is_euler` there records the consequence that the very first step of
 both is a plain Euler step, because no earlier slope exists yet.
 
-**A spiking neuron is an ODE with a stability limit.** The leaky
+A spiking neuron shows the stability limit at work. The leaky
 integrate-and-fire membrane of `crates/neuro` obeys a relaxation equation of the
 exponential-decay kind. `crates/neuro/src/lif.rs` documents `dt_over_tau`, the step
 in units of the membrane time constant, as "must be in `(0, 1]`: at `a > 1` the
 Euler update overshoots the resting potential and the membrane oscillates". That is
 the factor $1 - kh$ of the stability table: for $kh > 1$ the sign flips. The
-story of this kernel is the lesson of the "Making it work" list. The first version
+story of this kernel is the lesson of the section on stability above. The first version
 (commit `36bee10b7`, September 2026) used forward Euler and was gated on the closed
 form of the Euler recurrence, a geometric sequence, compared with the kernel's
 output with no tolerance fitted. The next day commit `3945b43c6` made synapses
@@ -901,7 +920,7 @@ within $10^{-6}$. (The header comment of the kernel still describes the earlier
 forward-Euler update and its $(1-a)^k$ closed form; the code below it is the
 exponential step.)
 
-**Evaluation metrics integrate with the trapezoid rule.**
+Evaluation code integrates too, with the trapezoid rule.
 `crates/survival/src/brier.rs` has `integrated_brier`, the squared-error score of
 a survival prediction averaged over a window of follow-up time. It computes the
 score on a grid of times and sums `0.5 * (s[0] + s[1]) * (t[1] - t[0])` over
@@ -985,7 +1004,7 @@ to $1$.
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $3x^2$ (power rule) and $2e^{2x}$ (chain rule: $e^{2x}$ times the derivative $2$ of the inside).
 2. It approaches $1$. Then $\tfrac{d}{dx}e^x = e^x\cdot\lim_{h\to0}(e^h - 1)/h = e^x$.

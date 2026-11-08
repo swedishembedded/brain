@@ -1,8 +1,5 @@
 # Chapters still to be rewritten as prose (scripts/book/check.py, recycled()).
 # Remove a line in the same change that rewrites its chapter; the list only shrinks.
-docs/book/v01-mathematics/08-multivariable-calculus.md
-docs/book/v01-mathematics/09-integrals-and-odes.md
-docs/book/v01-mathematics/10-probability.md
 docs/book/v01-mathematics/11-distributions.md
 docs/book/v01-mathematics/12-statistics.md
 docs/book/v01-mathematics/13-information-theory.md

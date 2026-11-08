@@ -5,8 +5,6 @@
 
 *How do we put numbers on uncertainty and update them when we see evidence?*
 
-## The problem
-
 A mail service runs a spam filter. To find out how good it is, someone reads
 1000 emails, decides for each one whether it really was spam, and counts how the
 filter's verdict (flagged or not flagged) lined up with the truth:
@@ -39,11 +37,9 @@ probability in them can be counted, build the rules from the counts, and only
 then use them on the filter, on a defect detector for rare faults, and on the
 average that training minimises.
 
-## Before you begin
-
-Five questions on ideas from earlier chapters, to answer from memory. The answers
-are at the end of the chapter. If one is hard, go back to the chapter named
-before reading on.
+The counting needs only sets, sums, functions and areas from earlier chapters.
+Five questions to try from memory before we start; the answers are at the end, and
+the chapter each names is where to go back if one is hard.
 
 1. (Chapter 1, set.) For $A = \{1, 2, 3, 4\}$ and $B = \{3, 4, 5\}$, what are $A \cap B$, $A \cup B$ and $\lvert A \cup B \rvert$?
 2. (Chapter 1, summation notation.) Evaluate $\sum_{i=1}^{4} i/10$.
@@ -162,12 +158,12 @@ disjoint events; we need only the version above and its repeated use.) Every
 other rule is derived from these three. That is the point of choosing so few:
 anything we prove from them holds for dice, filters and neural networks alike.
 
-**The complement.** $A$ and $A^c$ are disjoint and their union is $\Omega$, so by
+The complement comes first. $A$ and $A^c$ are disjoint and their union is $\Omega$, so by
 rules 3 and 2, $P(A) + P(A^c) = 1$, hence $P(A^c) = 1 - P(A)$. In the table,
 $P(\text{sum} < 10) = 1 - 6/36 = 30/36$, as counted. In particular $P(\varnothing) = 1 - P(\Omega) = 0$,
 and, by rule 1 applied to $A^c$, no probability exceeds $1$.
 
-**The union.** Split $A \cup B$ into the disjoint pieces $A$ and $B \setminus A$
+The union is next. Split $A \cup B$ into the disjoint pieces $A$ and $B \setminus A$
 (the part of $B$ outside $A$), and split $B$ into the disjoint pieces
 $B \setminus A$ and $A \cap B$. Rule 3 twice gives
 $P(A \cup B) = P(A) + P(B \setminus A)$ and $P(B) = P(B \setminus A) + P(A \cap B)$.
@@ -179,7 +175,7 @@ $$
 
 This is the inclusion-exclusion rule the table just confirmed: $6/36 + 18/36 - 3/36 = 21/36$.
 
-**Partitions.** If events $B_1, \dots, B_k$ are pairwise disjoint and together
+One more consequence is used constantly. If events $B_1, \dots, B_k$ are pairwise disjoint and together
 cover $\Omega$ (a **partition**), then repeated use of rule 3 gives
 $\sum_i P(B_i) = 1$, and for any event $A$,
 $P(A) = \sum_i P(A \cap B_i)$, because the pieces $A \cap B_i$ are disjoint and
@@ -372,7 +368,7 @@ replaced by the integral.
 Given that the filter flagged an email, how likely is it spam? "Given" changes
 the question: we no longer draw from all $1000$ emails but only from the $220$ that
 were flagged. Among those, $180$ are spam, so the answer is $180/220$. The
-reasoning is in the counts, and it is worth doing it systematically:
+reasoning is in the counts, and it pays to do it systematically:
 
 <!-- worked: probability.spam_conditionals -->
 | quantity | count ratio | value |
@@ -545,7 +541,7 @@ Bayes' rule from the manufacturer's numbers gives the same $0.8182$ that countin
 the flagged emails gave. That agreement is the check that the rule is correct,
 and it will matter when the data are not available as a table of counts.
 
-**The base-rate fallacy.** The rule has a famous consequence. A factory inspects
+The rule has a famous consequence, the base-rate fallacy. A factory inspects
 parts with a detector. It raises an alarm on $90\%$ of defective parts and, by
 mistake, on $10\%$ of good ones. Defects are rare: $1\%$ of parts. A part
 triggers the alarm. How likely is it defective? Most people answer "about
@@ -593,7 +589,7 @@ rare-event detector in machine learning (fraud, disease screening, a safety
 monitor) faces this arithmetic, and a high accuracy figure reported without the
 base rate is meaningless.
 
-**Updating again.** The posterior of one piece of evidence is the prior for the
+The posterior of one piece of evidence is the prior for the
 next. Suppose a second and then a third detector, each with the same $90\%$ and $10\%$
 rates and with errors independent of the others' once we know the truth, also raise
 an alarm:
@@ -687,7 +683,7 @@ but the figure's three runs wander back and forth), and the figure shows that th
 early swings are large: ten rolls gave $8.0$ here. How quickly the error
 shrinks is the business of the variance, below.
 
-**Expectation of a function.** The average of $g(X)$ over the outcomes is
+Expectation is not limited to $X$ itself. The average of $g(X)$ over the outcomes is
 $\mathbb{E}[g(X)] = \sum_x g(x)\,p(x)$: group the outcomes by the value of $X$ and
 use the probability of each group. The same formula covers every quantity we
 care about. If $\mathbf{1}_A$ is the indicator of an event, its expectation is
@@ -713,7 +709,7 @@ emails, the $20$ missed spam emails account for only $0.02$ of the $0.42$, and
 the $40$ lost good emails for $0.40$. Choosing the
 quantity whose expectation we want is the design decision; computing it is a sum.
 
-**A dataset is a distribution.** The mean of the per-example losses of a dataset
+A dataset is a distribution too. The mean of the per-example losses of a dataset
 of $N$ examples is an expectation too: give each example probability $1/N$. Equal
 values pool their weights:
 
@@ -734,7 +730,7 @@ the **empirical distribution** of the data, and it is why "the average loss over
 the dataset" and "the expected loss" are the same operation on two distributions:
 the empirical one and the unknown one the data came from.
 
-**Linearity.** The most useful property of expectation is that it respects sums,
+The most useful property of expectation is its linearity: it respects sums,
 whatever the relation between the variables:
 
 $$
@@ -817,7 +813,7 @@ The faces $1$ and $6$ are $2.5$ from the mean and contribute most; the variance
 is $35/12 \approx 2.92$ and the standard deviation about $1.71$, so a roll is
 typically within one to two units of $3.5$.
 
-**A better formula.** Expand the square and use linearity ($\mu$ is a constant):
+The definition has a shortcut. Expand the square and use linearity ($\mu$ is a constant):
 
 $$
 \mathbb{E}[(X - \mu)^2] = \mathbb{E}[X^2 - 2\mu X + \mu^2]
@@ -844,7 +840,7 @@ integrals give the variance of a density: for $f(x) = 6\,x\,(1-x)$,
 
 the expectation is $0.5$ by symmetry and the variance is $0.05$, by both routes.
 
-**Shifting and scaling.** Adding a constant moves the whole distribution and
+How does the variance respond to shifting and scaling? Adding a constant moves the whole distribution and
 changes no deviation, and multiplying by $a$ multiplies every deviation by $a$ and
 so the variance by $a^2$:
 
@@ -864,7 +860,7 @@ $$
 
 The standard deviation scales by $\lvert a\rvert$, in the units of the data.
 
-**The variance of a sum.** Expectations of sums are always sums. Variances are not.
+Expectations of sums are always sums. Variances are not.
 Expand the square of the sum, with $\mu_X, \mu_Y$ the means:
 
 $$
@@ -893,7 +889,7 @@ variance is $0$. The last column, computed from the gap formula, matches the gap
 in every row. Adding quantities that move together makes spread grow; adding
 quantities that move oppositely cancels it.
 
-**Averaging shrinks spread.** Apply the rules to the mean of $n$ independent
+The rules say how much averaging shrinks spread. Apply them to the mean of $n$ independent
 rolls $\bar{X} = (X_1 + \dots + X_n)/n$, each with variance $\sigma^2$. Variances
 of the independent sum add to $n\sigma^2$, and dividing by $n$ divides the variance
 by $n^2$:
@@ -941,9 +937,9 @@ centre, and a larger batch buys precision at a square-root price. Volume II buil
 the losses and Volume III the gradient; this chapter has supplied the meaning of
 "average" they use.
 
-## Making it work
+## Tables that must be valid, and drawing from one
 
-**Probabilities live in tables that must be valid.** A table passed around a
+A table passed around a
 program is a distribution only if its entries are non-negative and sum to $1$.
 Check this at the boundary with a tolerance (Chapter 15 explains why a float sum is
 rarely exactly $1$). Marginalising and conditioning are one-liners on a joint
@@ -971,7 +967,7 @@ function condition_on_row(p: array<real>[R, C], r: int) -> array<real>[C]:
     return q
 ```
 
-**Drawing from a table.** Every simulation in this chapter needs a random draw
+Every simulation in this chapter needs a random draw
 from a distribution given as a table. One uniform number is enough: lay the
 probabilities end to end on $[0, 1)$ and see which segment the number lands in.
 
@@ -1004,7 +1000,10 @@ Generator: the book's SplitMix64, seed 0xe8d9d1dc21d0d0bc (16778672630135836860)
 The frequencies are close to $p$, differing by amounts consistent with the
 $\sigma/\sqrt{n}$ rule. Chapter 17 builds the uniform generator itself.
 
-**Common mistakes.**
+## Six ways to misread a probability
+
+The same few errors recur, each easy to make when a number is read aloud without
+its condition.
 
 - *Swapping the conditional.* $P(A \mid B) \ne P(B \mid A)$. Ask "given what?" of
   every probability read aloud.
@@ -1021,12 +1020,12 @@ $\sigma/\sqrt{n}$ rule. Chapter 17 builds the uniform generator itself.
 - *Conditioning on an impossible event.* The division by $P(B)$ has no meaning at
   $0$; code that reaches it should stop.
 
-## Where this appears in brain
+## Token sampling, log-probabilities and a screening test in brain
 
 This chapter is background for most of Volume II onwards, and brain uses it in
 small, concrete places.
 
-**Sampling a token is `sample_discrete`.** A language model's output for one
+Sampling a token is `sample_discrete`. A language model's output for one
 position is a table of scores over the vocabulary; exponentiating and
 normalising it (the softmax of the notation page) turns it into a distribution, and generating text means drawing from it. `sample_from_topk_impl`
 in `crates/model/src/serve.rs` does exactly the pseudocode above. It scales the
@@ -1042,8 +1041,8 @@ compares the returned value with an independent hand-written softmax, and
 `sample_from_topk_is_reproducible_for_a_fixed_seed` checks that a fixed seed gives
 the same draws, which is what makes a stochastic procedure testable.
 
-**A NaN is not a probability.** The sampler of `crates/qwen3/src/sample.rs`
-used to crash when a score was NaN, because the sort that ranks candidates
+A NaN is not a probability, and the sampler of `crates/qwen3/src/sample.rs`
+once had to learn it: it used to crash when a score was NaN, because the sort that ranks candidates
 panicked on it; commit `072148692` (August 2026) fixed that. The fix maps a NaN score to negative infinity right
 after the temperature division (so its weight $e^{-\infty}$ is $0$, a probability
 that cannot be drawn) and gives the sort an order in which NaN always loses. The
@@ -1052,7 +1051,7 @@ non-negative numbers, and an invalid entry has to be removed at the boundary
 rather than allowed to poison the sum that normalises everything. Its regression
 test is `nan_logit_does_not_panic_and_is_never_preferred`.
 
-**Log-probability of a target.** `row_logprob` in `crates/model/src/logprobs.rs`
+Log-probabilities are what a model actually reports. `row_logprob` in `crates/model/src/logprobs.rs`
 returns $\log p(\text{target})$ for a row of scores, computed so that the tiny
 probability itself is never formed. It was introduced as a shared primitive in
 commit `78c381b52` (September 2026), replacing two hand-written copies of the same
@@ -1060,7 +1059,7 @@ three lines in the evaluation code of one model. The chain rule above is why
 this single number is the building block: the log-probability of a whole
 completion is the sum of one `row_logprob` per position.
 
-**Expectations over data.** `gpt_val_perplexity` in `crates/eval/src/lib.rs`
+Expectations over data appear as plain averages. `gpt_val_perplexity` in `crates/eval/src/lib.rs`
 averages the loss of random validation batches and exponentiates the mean, which
 is an estimate of an expectation by a sample average (the long-run table above),
 so it carries the $\sigma/\sqrt{n}$ uncertainty of one. In
@@ -1070,8 +1069,8 @@ confidence bins, the share of examples in each bin times the gap between the
 bin's accuracy and its mean confidence: a weighted average whose weights are
 probabilities of the bins.
 
-**Bayes' rule for a screening threshold.** `predictive_values` in
-`crates/survival/src/binary.rs` takes a screen's sensitivity and specificity and
+Bayes' rule for a screening test lives in `predictive_values` in
+`crates/survival/src/binary.rs`, which takes a screen's sensitivity and specificity and
 a prevalence and returns the positive and negative predictive values by Bayes'
 rule, the computation of the defect detector above. It arrived with the
 binary-outcome evaluation code in commit `8d01f12f9` (October 2026). Its test
@@ -1151,7 +1150,7 @@ the wrong distribution, which is Chapter 13.
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $A \cap B = \{3, 4\}$, $A \cup B = \{1, 2, 3, 4, 5\}$, and $\lvert A \cup B \rvert = 5$.
 2. $(1 + 2 + 3 + 4)/10 = 1$.

@@ -5,12 +5,10 @@
 
 *When a quantity depends on millions of numbers, which way should we move them all to make it smaller?*
 
-## The problem
-
-Chapter 7 gave us a tool for one knob: the derivative says which way to turn it
-and how strongly the score responds. A real model has many knobs, and they are
-turned together. Take the smallest case that shows the new difficulty, a model
-with two knobs $w_1$ and $w_2$. It sees an input made of two numbers
+One knob is a comfortable place to do calculus. Chapter 7's derivative says which
+way to turn it and how strongly the score responds. A real model has many knobs,
+and they are turned together. The smallest case that shows the new difficulty is
+a model with two knobs $w_1$ and $w_2$. It sees an input made of two numbers
 $(x_1, x_2)$ and predicts $w_1 x_1 + w_2 x_2$. Two examples are given: the input
 $(1, 1)$ with target $3$, and the input $(1, 3)$ with target $7$. The score is
 half the sum of the squared errors,
@@ -47,8 +45,8 @@ $(2, 3)$ scores $10$. The picture is a long narrow valley.
 Standing at one point of this landscape with only the ability to evaluate $L$,
 which way is downhill, and how far should we walk? One knob at a time is no
 longer enough: a step changes both knobs, and the total change in the score
-depends on how the two effects combine. This chapter builds the tools to answer
-the question for any number of knobs. The **partial derivative** measures the
+depends on how the two effects combine. Answering for any number of knobs takes a
+handful of tools, each built on the one before. The **partial derivative** measures the
 effect of one knob with the others held still. The **gradient** collects them
 and points uphill. The **Jacobian** does the same for a function with many
 outputs, and with it the chain rule becomes a product of tables of slopes.
@@ -56,15 +54,11 @@ The **Hessian** measures how the slope itself bends, and the **Taylor
 expansion** puts the pieces together into a local model of the function. At the
 end we use the model to see why a narrow valley makes walking downhill slow.
 
-You may use from earlier chapters: the derivative and the chain rule (Chapter
-7), vectors and the dot product (Chapter 3), and matrices as linear maps
-(Chapter 4).
-
-## Before you begin
-
-Six questions on ideas from earlier chapters, to answer from memory. The
-answers are at the end of the chapter. If one is hard, go back to the chapter
-named before reading on.
+The derivative and the chain rule of Chapter 7, vectors and the dot product of
+Chapter 3 and matrices as linear maps of Chapter 4 carry most of the weight, with
+a little from Chapters 1 and 2. Six questions to try from memory before we start;
+the answers are at the end, and if one is hard, the chapter it names is the place
+to go back to.
 
 1. (Chapter 7, derivative.) For $L(w) = (2w - 3)^2$, what is $L'(0.5)$?
 2. (Chapter 7, chain rule.) What is the derivative of $(3x + 1)^2$ at $x = 1$?
@@ -245,8 +239,9 @@ At p = (0.5, 1.5) the gradient is (-3.00, -7.00) with length 7.6158. Angles are 
 The formula and the experiment agree on every row. The pattern across the rows
 is the content of the next paragraph.
 
-**Why the gradient points uphill.** Among all unit directions, which one makes
-$\nabla L\cdot\mathbf{u}$ largest? Chapter 3 proved the Cauchy-Schwarz
+The rows have a pattern: the slope is large and positive toward the lower left,
+large and negative toward the upper right, and zero in one direction between.
+Among all unit directions, which one makes $\nabla L\cdot\mathbf{u}$ largest? Chapter 3 proved the Cauchy-Schwarz
 inequality, $\mathbf{a}\cdot\mathbf{b} \le \lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert$,
 with equality exactly when one vector is a positive multiple of the other. With
 $\lVert\mathbf{u}\rVert = 1$,
@@ -277,7 +272,7 @@ Each direction is u = (cos t, sin t) with t = 2 pi times one uniform draw of the
 
 This is the answer to the question of the chapter, in the local sense that a
 derivative always gives: to lower the score fastest per unit of distance
-travelled, move against the gradient. A subtlety is worth marking now. Steepest
+travelled, move against the gradient. One subtlety first: steepest
 is measured in the ordinary length of Chapter 3. If the knobs have different
 scales (one measured in metres, one in kilometres), a different measure of
 length picks a different "steepest" direction. In all that follows we use the
@@ -426,8 +421,8 @@ f(x, y) = (x^2 y, 5x + sin y) at (1, 2): f = (2.0000, 5.9093). Central differenc
 | row 1 (output 1) | (5.0000, -0.4161) | (5.0000, -0.4161) |
 <!-- /worked -->
 
-**The Jacobian is the best linear approximation.** A matrix is a linear map
-(Chapter 4), and a Jacobian is the linear map that best imitates $\mathbf{f}$
+The table is more than bookkeeping. A matrix is a linear map
+(Chapter 4), and the Jacobian is the linear map that best imitates $\mathbf{f}$
 near the point. The argument is the one that gave the directional derivative,
 applied to each output entry. For a small step $\mathbf{d}$ we found
 $f_i(\mathbf{x} + \mathbf{d}) \approx f_i(\mathbf{x}) + \nabla f_i\cdot\mathbf{d}$.
@@ -460,7 +455,7 @@ what "best linear approximation" means. (The Taylor section below explains why t
 error has this size.) The approximation is useful only for small steps; at
 $s = 1$ the two columns disagree in the first digit.
 
-**A linear layer has a constant Jacobian.** The map $\mathbf{y} = \mathbf{W}\mathbf{x}$
+The case we need most is a layer of a network. The map $\mathbf{y} = \mathbf{W}\mathbf{x}$
 with $\mathbf{W}$ of shape $[m, n]$ has entries $y_i = \sum_j W_{ij}x_j$. Only the
 term with $j$ involves $x_j$, so
 $\partial y_i/\partial x_j = W_{ij}$, and therefore
@@ -517,7 +512,8 @@ $x = 1.2$. The right-hand side of the formula is a row of two partial derivative
 times a column of two derivatives, a dot product. It is a matrix product in
 disguise, and the general statement says so.
 
-**The rule, derived.** Let $\mathbf{f}:\mathbb{R}^n\to\mathbb{R}^m$ and
+The general statement follows from the best linear approximation. Let
+$\mathbf{f}:\mathbb{R}^n\to\mathbb{R}^m$ and
 $\mathbf{g}:\mathbb{R}^m\to\mathbb{R}^p$, and let $\mathbf{h}(\mathbf{x}) =
 \mathbf{g}(\mathbf{f}(\mathbf{x}))$. Fix $\mathbf{x}$ and take a small step
 $\mathbf{d}$. Writing the best linear approximation of $\mathbf{f}$ with its
@@ -573,7 +569,8 @@ g(a, b) = a b composed after f(x, y) = (x^2 y, 5x + sin y) at (1, 2). J_g = [5.9
 
 The error falls like $s^2$ again, as the derivation promised.
 
-**A chain of three.** A layer's pre-activation, its nonlinearity and its loss:
+Take a chain of three links, a layer's pre-activation, its nonlinearity and its
+loss:
 $\mathbf{u} = \mathbf{W}\mathbf{x}$ (input of width $2$, output of width $3$),
 $\mathbf{h} = \tanh(\mathbf{u})$ entry by entry, and
 $L = \tfrac{1}{2}\lVert\mathbf{h} - \mathbf{t}\rVert^2$. Each link has a Jacobian, and
@@ -604,8 +601,7 @@ The product of the three matrices equals the gradient found by finite difference
 on $L(\mathbf{x})$. The result has shape $[1, 2]$, one row, which is the
 transpose of the gradient column.
 
-**Which way to multiply.** The product can be evaluated in either order, and the
-shapes decide the cost. From the left, multiplying the row $[1, 3]$ by $[3, 3]$ and
+The product can be evaluated in either order, and the shapes decide the cost. From the left, multiplying the row $[1, 3]$ by $[3, 3]$ and
 then by $[3, 2]$ only ever combines a row with a matrix. From the right, we would
 build the $[3, 2]$ matrix first, which is a full matrix product, and at the widths of a real
 network that is the difference between tiny and impossible. Taking the transpose
@@ -679,8 +675,7 @@ column shows that the matrix is symmetric: $\partial^2 f/\partial x\,\partial y 
 partial derivatives are continuous, and it is why the Hessian can be stored as a
 symmetric table. (It also halves the work of computing one by hand.)
 
-**Curvature in a direction.** The Hessian answers the question of the first look.
-Walk from $\mathbf{p}$ in a direction $\mathbf{u}$ and let
+The Hessian answers the question the first steps left open. Walk from $\mathbf{p}$ in a direction $\mathbf{u}$ and let
 $\varphi(t) = L(\mathbf{p} + t\mathbf{u})$ be the score along the way. We found
 $\varphi'(t) = \sum_i \partial_i L(\mathbf{p} + t\mathbf{u})\,u_i$, the dot product
 of the gradient at the current point with $\mathbf{u}$. Differentiate once more,
@@ -721,7 +716,8 @@ unit vectors are the extreme eigenvalues. The ratio of the largest to the smalle
 here $33.97$, measures how far from round the bowl is. It decides much of what
 follows.
 
-**The best step along a line.** On the line $\mathbf{p} - t\,\mathbf{g}$ with
+With the curvature in hand, the best distance along the gradient line can be
+computed. On the line $\mathbf{p} - t\,\mathbf{g}$ with
 $\mathbf{g} = \nabla L(\mathbf{p})$, the score is a quadratic polynomial in $t$,
 $\varphi(t) = L(\mathbf{p}) - t\,\mathbf{g}\cdot\mathbf{g} + \tfrac{1}{2}t^2\,\mathbf{g}^\top\mathbf{H}\mathbf{g}$
 (the slope at $t = 0$ is $-\lVert\mathbf{g}\rVert^2$ and the curvature is
@@ -745,7 +741,7 @@ for more accuracy. We start in one variable, where the idea is cleanest, and
 which is also the unfinished business of Chapter 7: its numerical-differentiation
 section used the expansion without deriving it.
 
-**One variable: the polynomial that matches.** We want a polynomial
+We want a polynomial
 $p_n(h) = c_0 + c_1 h + c_2 h^2 + \dots + c_n h^n$ that imitates $f(a + h)$ for
 small $h$. The natural requirement is that it agrees with $f$ at $a$ in value and
 in the first $n$ derivatives. Differentiate $p_n$ at $h = 0$: the value is $c_0$,
@@ -763,7 +759,7 @@ order $1$ is the tangent line of Chapter 7, and order $2$ adds the curvature:
 $\tfrac{1}{2}f''(a)h^2$, the term that explained the error of the tangent line
 there. For $f = e^x$ at $a = 0$ every derivative is $1$ (Chapter 7), so
 $c_k = 1/k!$ and $p_n(x) = 1 + x + x^2/2 + x^3/6 + \dots$, the polynomial that
-Before-you-begin question 6 evaluated at $1$.
+the sixth recall question above evaluated at $1$.
 
 <!-- worked: multivariable.taylor_exp_partial_sums -->
 Order-n Taylor polynomial of e^x at 0, evaluated at x = 1 (e = 2.71828183).
@@ -788,7 +784,7 @@ and each is accurate near $a$ and unreliable far from it. At $x = 1$ the sums
 $2, 2.5, 2.667, 2.708, \dots$ approach $e = 2.71828$, and the order-8 polynomial
 is within $3\times10^{-6}$.
 
-**How big is the error?** Look at the error of orders $1$, $2$ and $3$ for steps
+How fast does the error shrink? Look at the error of orders $1$, $2$ and $3$ for steps
 $h$ that are halved repeatedly.
 
 <!-- worked: multivariable.taylor_error_order -->
@@ -839,7 +835,9 @@ Error at h = 0.01 against the first dropped term h^(n+1) / (n+1)!.
 | 4 | 8.35e-13 | 8.33e-13 | 1.0016 |
 <!-- /worked -->
 
-**What Chapter 7 relied on.** The forward difference is
+The expansion also pays a debt. Chapter 7 quoted the errors of the forward and
+central differences without proof, and now they can be derived. The forward
+difference is
 $D_+(h) = \big(f(x + h) - f(x)\big)/h$. Insert the order-3 expansion
 $f(x + h) = f + f'h + \tfrac{1}{2}f''h^2 + \tfrac{1}{6}f'''h^3 + \dots$:
 
@@ -866,7 +864,7 @@ measured error of the forward difference:
 
 Each further term removes most of what is left: the gap between the measured error and the sum falls from $4.6\times10^{-3}$ to $1.2\times10^{-4}$ to $2\times10^{-6}$.
 
-**Many variables.** To expand a function of $\mathbf{w}$ about $\mathbf{p}$ by a
+In several variables the expansion reduces to the one-variable case. To expand a function of $\mathbf{w}$ about $\mathbf{p}$ by a
 step $\mathbf{d}$, reduce to one variable. The function
 $\varphi(t) = L(\mathbf{p} + t\mathbf{d})$ of the distance $t$ along the line has
 $\varphi(0) = L(\mathbf{p})$, $\varphi'(0) = \nabla L\cdot\mathbf{d}$ (the
@@ -1021,33 +1019,36 @@ with a large $\kappa$. The Hessian itself has one entry per pair of knobs, and f
 a model with millions of knobs that is millions squared entries, which cannot be
 stored; every method that wants curvature information has to get it indirectly.
 
-## Making it work
+## Keeping shapes, order and step size straight
 
-- **The gradient has the shape of the parameters.** A parameter of shape $[n, k]$
-  has a gradient of shape $[n, k]$; if a derivative comes out with another shape,
-  a transpose or a sum is missing.
-- **Jacobians are outputs by inputs.** Fix the convention and check each product
-  by its shapes: $[p, m]\,[m, n]$. Wrong-order products rarely have compatible
-  shapes, and when they do, the shapes of the result tell on them.
-- **Do not form a Jacobian you do not need.** The product of a long chain of
-  Jacobians has the cost of its bracketing. For a scalar loss, multiply from the
-  loss end and keep a vector.
-- **Check a gradient entry by entry, and then in random directions.** A central
-  difference per knob costs $2n$ evaluations of the loss; a difference along one
-  random direction costs two and checks the dot product $\nabla L\cdot\mathbf{v}$.
-  Use the first on small tensors, the second on large ones, and read the
-  next section before trusting the second alone.
-- **Choose the finite-difference step for the number format.** A central
-  difference in 32-bit arithmetic has a best step near $4\times10^{-3}$ (Chapter
-  7). A difference along a direction $\mathbf{v}$ of $n$ entries of size $1$ moves
-  every entry at once, so the step it takes has length $h\sqrt{n}$.
-- **Curvature, not slope, limits the step.** The slope tells which way to go; the
-  largest curvature caps how far: $\eta < 2/\lambda_{\max}$ on a quadratic.
+Most mistakes in this chapter's mathematics show up first as a shape. A parameter
+of shape $[n, k]$ has a gradient of shape $[n, k]$; if a derivative comes out with
+another shape, a transpose or a sum is missing. A Jacobian is outputs by inputs,
+and each product in a chain can be checked by its shapes, $[p, m]\,[m, n]$:
+products in the wrong order rarely have compatible shapes, and when they do, the
+shape of the result tells on them.
 
-## Where this appears in brain
+Shapes also decide cost. The product of a long chain of Jacobians costs what its
+bracketing costs, so for a scalar loss one multiplies from the loss end and keeps
+a vector, and never forms a Jacobian that is not needed.
 
-**The backward pass is a product of transposed Jacobians.** For a linear layer,
-the derivative of the loss with respect to the input is $\mathbf{W}^\top$ times
+A gradient formula is checked against numbers, and there are two ways to do it. A
+central difference per knob costs $2n$ evaluations of the loss and checks every
+entry; a difference along one random direction costs two and checks only the dot
+product $\nabla L\cdot\mathbf{v}$. The first suits small tensors and the second
+large ones, and the story in the next section shows why the second alone cannot be
+trusted. Either way the finite-difference step has to suit the number format: a
+central difference in 32-bit arithmetic has a best step near $4\times10^{-3}$
+(Chapter 7), and a difference along a direction $\mathbf{v}$ of $n$ entries of
+size $1$ moves every entry at once, so the step it takes has length $h\sqrt{n}$.
+
+Last, curvature and not slope limits the step. The slope tells which way to go;
+the largest curvature caps how far, $\eta < 2/\lambda_{\max}$ on a quadratic.
+
+## Transposed Jacobians in the kernels, and a check that missed a third of a gradient
+
+In brain the backward pass is a product of transposed Jacobians, as derived
+above. For a linear layer the derivative of the loss with respect to the input is $\mathbf{W}^\top$ times
 the derivative with respect to the output, which is what we derived. The kernel
 `crates/kernels/wgsl/matmul_dx.wgsl` documents it in its header for the batched,
 row-per-example layout: `dX[m, k] = sum_n dY[m, n] * W[n, k]`, the matrix-vector
@@ -1059,8 +1060,8 @@ section (a weight used twice collects both contributions). The chapter on
 backpropagation in Volume III builds the whole backward pass from these
 pieces: [Backpropagation Derived from Scratch](../v03-neural-networks/04-backpropagation.md).
 
-**The gradient checker perturbs knobs one at a time, or along a direction.**
-`crates/gradcheck/src/lib.rs` has the two checks of the previous section. Its
+The two checks described in the previous section live in
+`crates/gradcheck/src/lib.rs`. Its
 `directional_check` picks a random direction $\mathbf{v}$ of $\pm 1$ entries per
 parameter tensor and compares the analytic $\nabla L\cdot\mathbf{v}$, the formula
 of this chapter's directional-derivative section, with a central difference
@@ -1068,7 +1069,7 @@ $(L(\mathbf{w} + h\mathbf{v}) - L(\mathbf{w} - h\mathbf{v}))/2h$. Its
 `elementwise_check` perturbs one entry at a time and compares each partial
 derivative, at a cost of two evaluations of the loss per entry.
 
-**Story: a gradient with a third missing passed the check.** In August 2026,
+There are two checks because one of them once let a bug through. In August 2026,
 commit `4171bccb0` added `elementwise_check` after finding that the directional
 check could not see a particular bug. The doc comment of `directional_check`
 (which the commit corrected) records it: in T5, a weight shared across blocks had its
@@ -1103,8 +1104,8 @@ check lets the bug through for more than half of the problems, while the per-ent
 check fails for almost all of them. (The toy is an illustration of the mechanism,
 not a measurement of brain's checker.)
 
-**Curvature without the Hessian.** `crates/modelopt/src/sensitivity.rs` estimates
-how much the loss would rise if a weight tensor were stored at lower precision
+The quadratic term of the Taylor expansion does practical work in
+`crates/modelopt/src/sensitivity.rs`, which estimates how much the loss would rise if a weight tensor were stored at lower precision
 (a tier of rounding). Its documentation says that it uses the second-order Taylor
 expansion of the loss around the trained weights, in which the increase is
 $\tfrac{1}{2}\sum_j F_j(w_j - Q(w_j))^2$ for rounding $Q$: the quadratic term of this
@@ -1204,7 +1205,7 @@ that stepping against it approximates.
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. $L'(w) = 2(2w - 3)\cdot 2 = 4(2w - 3)$, so $L'(0.5) = 4(1 - 3) = -8$.
 2. $2(3x + 1)\cdot 3 = 6(3x + 1)$, which is $24$ at $x = 1$.
