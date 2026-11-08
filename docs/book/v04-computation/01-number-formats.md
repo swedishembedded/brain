@@ -5,8 +5,6 @@
 
 *How many bits does a number need, and what do we lose with each bit we remove?*
 
-## The problem
-
 A trained network is a long list of numbers, and the list has to live
 somewhere: in memory, on a disk, in the registers of a chip. Every number is a
 pattern of bits, and how many bits we give it decides three things at once:
@@ -59,9 +57,7 @@ count the bytes. Volume I, Chapter 15 derived how 32- and 64-bit floating
 point rounds and where it fails; this chapter builds on that and does not
 repeat its derivations.
 
-## Before you begin
-
-Answer from memory; the answers are at the end of the chapter.
+The chapter leans on Volume I's account of floating point and on one number from the optimizer chapter of Volume III. Answer from memory; the answers are at the end of the chapter.
 
 1. (Volume I, Chapter 1, integers.) How many different patterns can 8 bits
    take? What range of whole numbers do they cover if all are non-negative, and
@@ -84,10 +80,8 @@ Answer from memory; the answers are at the end of the chapter.
 
 ### Unsigned numbers: place values
 
-*What this is for: every other format in the chapter is built from bit
-patterns, so we first fix what a pattern of bits means as a whole number.*
-
-A **bit** is a digit that is 0 or 1. A **binary representation** writes a
+Every other format in the chapter is built from bit patterns, so we first fix
+what a pattern of bits means as a whole number. A **bit** is a digit that is 0 or 1. A **binary representation** writes a
 non-negative whole number as bits, the way decimal writes it as digits: each
 position has a place value, a power of the base, and the number is the sum of
 the place values of the positions that hold a 1. For bits $b_{n-1}\dots b_1
@@ -141,11 +135,8 @@ throughout.
 
 ### Negative numbers: two's complement
 
-*What this is for: a network's weights and gradients are negative half the
-time, so a format needs negatives that the same adder handles without special
-cases.*
-
-Suppose a pattern $N(x)$ is to stand for $-x$. The test of a good
+A network's weights and gradients are negative half the time, so a format needs
+negatives that the same adder handles without special cases. Suppose a pattern $N(x)$ is to stand for $-x$. The test of a good
 representation of $-x$ is that adding it to $x$ gives zero, so that subtraction
 is just addition. Because addition on $n$ bits is addition modulo $2^n$, the
 requirement is
@@ -220,11 +211,9 @@ accumulated in 32-bit integers.
 
 ## Floating point as a layout of bits
 
-*What this is for: a floating-point format is a rule for turning a pattern of
-bits into a number. If the rule is written down once, every format of the
-chapter, from 32 bits to 8, is the same rule with different field widths.*
-
-Volume I, Chapter 15 wrote a normal floating-point number as $(-1)^s (1 +
+A floating-point format is a rule for turning a pattern of bits into a number.
+If the rule is written down once, every format of the chapter, from 32 bits to
+8, is the same rule with different field widths. Volume I, Chapter 15 wrote a normal floating-point number as $(-1)^s (1 +
 f/2^{p-1})\,2^{e}$. A machine stores three fields next to each other, from the top bit
 down: one **sign** bit $s$, an **exponent field** $E$ of $n_e$ bits and a
 **fraction field** $f$ of $n_m$ bits. The significand has $p = n_m + 1$
@@ -491,9 +480,7 @@ the number, and anything below half of it is stored as zero.
 
 ## Integers as a number format: a code and a scale
 
-*What this is for: the cheapest format of all stores a small integer for each number and one shared number that says what the integer stands for.*
-
-Return to the last row of the first table: a weight stored as the 8-bit pattern `00001010`, the integer 10, with a
+The cheapest format of all stores a small integer for each number and one shared number that says what the integer stands for. Return to the last row of the first table: a weight stored as the 8-bit pattern `00001010`, the integer 10, with a
 group scale of $0.00708661$. The stored integer is a **code** $q$ and the number it stands for is
 $\Delta q$, where $\Delta$ is a scale shared by a group of values. An **integer-quantized format** is a
 storage format of this kind: small integer codes, such as 8-bit or 4-bit two's complement numbers, plus the scale (and sometimes an offset, the zero point, below)
@@ -608,8 +595,7 @@ rounding rule decide whether the result is usable. The memory table below counts
 
 ## Converting between formats
 
-*What this is for: a model is stored in one format, multiplied in another and accumulated in a third; every
-arrow between formats is a rounding step, and each has to be defined.*
+A model is stored in one format, multiplied in another and accumulated in a third, so every arrow between formats is a rounding step, and each has to be defined. Two directions behave differently.
 
 **Widening is exact.** Every finite value of fp16, bf16, E4M3 and E5M2 is also a value of fp32, so moving a number to a wider format changes nothing. The same holds for the
 relations the formats were designed with: bf16 is the top half of fp32, and E5M2 the top byte of fp16, which the table checks on every code.
@@ -746,9 +732,7 @@ format therefore keeps the weights, or a master copy of them, in 32 bits, or rou
 
 ## Bytes and bandwidth
 
-*What this is for: the reason to put up with all of the above is the number of bytes, so we count them.*
-
-A weight stored in $b$ bytes costs $b$ bytes of memory and, each time it is used, $b$ bytes of traffic. Generating one token with a dense model at batch size 1 reads each
+The reason to put up with all of the above is the number of bytes, so we count them. A weight stored in $b$ bytes costs $b$ bytes of memory and, each time it is used, $b$ bytes of traffic. Generating one token with a dense model at batch size 1 reads each
 weight once and does 2 FLOPs with it (a multiply and an add), so the work per token is $2P$ FLOPs and $Pb$ bytes: $2/b$ FLOPs per byte. The scales of the
 block and group formats are charged in full.
 
@@ -786,7 +770,9 @@ The second row is the surprise of mixed precision: with a 32-bit master copy and
 parameter. The saving of that configuration is in the activations and the bandwidth of the matrix products, not in the parameter memory. Only narrower moments, or dropping the master copy,
 reduce the bill, and each of those costs precision somewhere else; the trade is worked out in Volume XIII, "Where Training Memory Goes".
 
-## Making it work
+## Rules that keep narrow formats safe
+
+The sections above leave five working rules, each of which a bug has taught someone.
 
 - **Store narrow, compute wide.** Weights are stored in the narrowest format that preserves the result, decoded as they are loaded,
   and multiplied and summed in a wider one. Sums and dot products accumulate in 32 bits, as the stalls above require.
@@ -799,7 +785,7 @@ reduce the bill, and each of those costs precision somewhere else; the trade is 
 - **Check a decode on every code.** An 8-bit format has 256 codes and a 16-bit one 65536: a decoder can be tested against an independent
   reference exhaustively, not by examples, and the NaN pattern of E4M3 is exactly the kind of case an example misses.
 
-## Where this appears in brain
+## How brain stores and converts these formats
 
 **The conversions.** `crates/model/src/half.rs` is the host side of brain's 16-bit tiers. `f32_to_bf16`
 is this chapter's shortcut: the doc comment states why rounding is not truncation ("Truncation always rounds toward zero, so every packed weight would be silently biased low in
@@ -850,6 +836,20 @@ Answers are at the end of the chapter.
 7. **Predict.** A group of 4-bit weights has largest magnitude $0.35$. What is the scale, and what do the weights $0.12$ and $-0.35$ decode to?
 8. **Explain.** One weight in a group of 32 is ten times larger than the rest. What happens to the other 31 under an int8 code with one scale for the group, and what is the remedy?
 
+## Summary
+
+A number format is a rule that reads a bit pattern. Whole numbers use the binary place values, wrap modulo $2^n$, and represent negatives in two's complement, the pattern $2^n - x$, which is the bits inverted plus one and lets one adder serve
+both signs. Floating point splits the pattern into sign, exponent field and fraction field, and one decoding rule covers fp32, fp16, bf16 and both 8-bit formats: each fraction bit halves the gap
+between numbers, each exponent bit squares the range. Of the two 16-bit formats, fp16 has a range of 12 decades and 3.3 digits, bf16 79 decades and 2.4 digits, which is why bf16 trains without loss
+scaling and fp16 does not. The 8-bit formats E4M3 (448, one NaN and no infinity) and E5M2 (57344, IEEE special values) are usable only with a scale per block. Integer-quantized formats store small codes and a shared scale (and sometimes a zero point), with
+constant absolute error, so the scale must belong to a small group, and four-bit codes pack two to a byte with shifts and masks. Narrowing rounds once and the rounding rule matters: truncation makes the bf16 error one-sided and
+twice as large, accumulators in narrow formats stop growing at $2^p$, and an update smaller than half a gap vanishes. The bill is in bytes: 28 GB for seven billion parameters in fp32, 14 in a 16-bit format, 7 and 4.4 in the
+8-bit and 4-bit formats with scales, and a mixed-precision training run with a master copy and 32-bit moments saves no parameter memory at all.
+
+The limits are the chapter's own: the formats are described from their bit definitions, but how to choose a scale from data, how much precision a given layer can lose, and how to train in
+low precision are open questions that later chapters and volumes answer. The next chapter turns from the numbers to the machine that computes with them, a CPU with its caches and vector registers,
+because a format that moves fewer bytes only helps if the machine is waiting for bytes.
+
 ## Exercises
 
 1. **[Calculate]** Convert 83 to binary by repeated division by 2. Then form the 8-bit two's complement pattern of $-83$ by invert-and-add-one, and check that the two patterns add to 0 modulo 256.
@@ -865,20 +865,6 @@ Answers are at the end of the chapter.
 11. **[Investigate]** There are six ways to split 7 bits between exponent and fraction (at least one bit each). For each, with the finite-only convention and with the IEEE convention, compute the largest number, the number of decades of range and the number of decimal digits using your `decode_float`. Which splits have both more range and more precision than E5M2? Which is E4M3?
 12. **[Investigate]** For $u = 2^{-k}$, $k = 1, 2, \dots$, use your `encode_float` to find the largest $k$ for which $1 + u$ rounds to a number other than 1, in fp16 and in bf16, and explain the answer from the tie rule. Then find an update that is stored as nearly twice its size, and say what that does to a sum of many small updates.
 
-## Summary
-
-A number format is a rule that reads a bit pattern. Whole numbers use the binary place values, wrap modulo $2^n$, and represent negatives in two's complement, the pattern $2^n - x$, which is the bits inverted plus one and lets one adder serve
-both signs. Floating point splits the pattern into sign, exponent field and fraction field, and one decoding rule covers fp32, fp16, bf16 and both 8-bit formats: each fraction bit halves the gap
-between numbers, each exponent bit squares the range. Of the two 16-bit formats, fp16 has a range of 12 decades and 3.3 digits, bf16 79 decades and 2.4 digits, which is why bf16 trains without loss
-scaling and fp16 does not. The 8-bit formats E4M3 (448, one NaN and no infinity) and E5M2 (57344, IEEE special values) are usable only with a scale per block. Integer-quantized formats store small codes and a shared scale (and sometimes a zero point), with
-constant absolute error, so the scale must belong to a small group, and four-bit codes pack two to a byte with shifts and masks. Narrowing rounds once and the rounding rule matters: truncation makes the bf16 error one-sided and
-twice as large, accumulators in narrow formats stop growing at $2^p$, and an update smaller than half a gap vanishes. The bill is in bytes: 28 GB for seven billion parameters in fp32, 14 in a 16-bit format, 7 and 4.4 in the
-8-bit and 4-bit formats with scales, and a mixed-precision training run with a master copy and 32-bit moments saves no parameter memory at all.
-
-The limits are the chapter's own: the formats are described from their bit definitions, but how to choose a scale from data, how much precision a given layer can lose, and how to train in
-low precision are open questions that later chapters and volumes answer. The next chapter turns from the numbers to the machine that computes with them, a CPU with its caches and vector registers,
-because a format that moves fewer bytes only helps if the machine is waiting for bytes.
-
 ## Key terms
 
 - **binary representation**: writing a non-negative whole number as bits, each with a place value that is a power of 2, so that $n$ bits give the $2^n$ numbers $0 \dots 2^n - 1$ and arithmetic on them wraps modulo $2^n$. <!-- concept: binary-representation -->
@@ -891,7 +877,7 @@ because a format that moves fewer bytes only helps if the machine is waiting for
 
 ## Answers
 
-**Before you begin.**
+**Recall questions.**
 
 1. $2^8 = 256$ patterns: $0 \dots 255$ unsigned, $-128 \dots 127$ with half used for negatives.
 2. The sign $s$, the exponent $e$ and the fraction $f$ (the significand has $p - 1$ stored bits plus an implied leading 1). Within a binade the gap is $2^{e-(p-1)}$, so entering the next binade doubles $e$'s contribution and doubles the gap while the number also roughly doubles: the relative gap stays between $2^{-p}$ and $2^{-(p-1)}$.

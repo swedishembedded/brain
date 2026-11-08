@@ -5,8 +5,6 @@
 
 *Why does the same arithmetic run ten times faster when the data is arranged differently?*
 
-## The problem
-
 Take a table of 16 rows and 16 columns of 4-byte numbers and add up every entry. There are 256 additions, and
 nothing about them depends on the order, so you may add the table row by row or column by column. A
 mathematician would say the two programs do the same work. A processor does not agree, and the reason is
@@ -75,9 +73,7 @@ length of the longest chain of dependent operations are the same wherever you ru
 reasons with counts. Where it needs a cost in cycles it takes it from a small model whose assumptions are
 printed beside the result, and says so; it never reports a stopwatch reading as a fact about your computer.
 
-## Before you begin
-
-Answer from memory; the answers are at the end of the chapter.
+The cache arguments below lean on layout and strides from Volume I and on its treatment of floating-point sums. Answer from memory; the answers are at the end of the chapter.
 
 1. (Volume I, Chapter 5, row-major layout.) A $[m, n]$ array of 4-byte numbers is stored row-major starting at
    address 0. At what address is element $(i, j)$? What is the stride of the first axis, in elements?
@@ -93,10 +89,8 @@ Answer from memory; the answers are at the end of the chapter.
 
 ### Instructions, registers and a pipeline
 
-*What this is for: before we can say why an arrangement of data matters, we need a picture of the machine that
-consumes it. The picture has to be small enough to count with.*
-
-A program, to the processor, is a list of **instructions**: load the number at this address into a register, add
+Before we can say why an arrangement of data matters, we need a picture of the machine that consumes it, small
+enough to count with. A program, to the processor, is a list of **instructions**: load the number at this address into a register, add
 two registers, store a register to an address, jump. A **register** is a storage slot inside the arithmetic
 unit itself, a few bytes wide, named in the instruction, and reading it costs nothing extra. A **CPU core** is
 one such executing unit: it fetches instructions from memory, decodes them, finds the registers and numbers
@@ -121,10 +115,8 @@ another must wait out that instruction's latency, while an independent instructi
 
 ### The dependency chain
 
-*What this is for: the simplest loop in this book, a sum, already shows the cost of waiting, and it does so
-without any cache or memory in the picture.*
-
-Take eight numbers and add them with one running total, the way every textbook writes it:
+The simplest loop in this book, a sum, already shows the cost of waiting, and it does so without any cache or
+memory in the picture. Take eight numbers and add them with one running total, the way every textbook writes it:
 $s \leftarrow s + x_i$ for $i = 1, \dots, 7$ after starting from $x_0$. Each addition needs the previous
 total, so each must wait for the one before: a **dependency chain** of seven additions in a row, however many
 execution units the core has. With a latency of 4 cycles, seven dependent additions take 28 cycles, while the
@@ -185,10 +177,8 @@ lost.
 
 ## The memory hierarchy
 
-*What this is for: one number of memory cannot be both large and near. We need to know what the levels are, how
-large each is, and how a program's accesses move data between them, to count the cost of a loop.*
-
-Fast memory is small, because it has to sit close to the arithmetic and be wired to it directly; large memory
+To count the cost of a loop we need to know what the levels of memory are, how large each is, and how a program's
+accesses move data between them. No memory can be both large and near: fast memory is small, because it has to sit close to the arithmetic and be wired to it directly; large memory
 is slow, because it is far away and shared. Hardware answers by stacking several memories of increasing size
 and decreasing speed between the arithmetic and main memory. The stack is the **cache hierarchy**: each level
 keeps copies of the lines most recently used from the level below it, so that a number needed again soon is
@@ -234,10 +224,8 @@ returns to.
 
 ## A cache you can run
 
-*What this is for: "the cache is small, so lines get evicted" is not something you can count with. A precise,
-small rule is, and the same rule gives every table in this chapter.*
-
-The model is a **set-associative cache with least-recently-used replacement**. A cache of $C$ bytes is made of
+"The cache is small, so lines get evicted" is not something you can count with. A precise, small rule is, and the
+same rule gives every table in this chapter. The model is a **set-associative cache with least-recently-used replacement**. A cache of $C$ bytes is made of
 lines of $s_{\mathrm{line}} = 64$ bytes, grouped into $n_{\mathrm{sets}}$ sets of $n_{\mathrm{ways}}$ lines each,
 so $C = n_{\mathrm{sets}} \cdot n_{\mathrm{ways}} \cdot s_{\mathrm{line}}$. Memory is cut into line numbers
 $\ell = \lfloor a / 64 \rfloor$ for address $a$, and a line may live only in the set $\ell \bmod
@@ -290,8 +278,8 @@ $4(16 i + j)$ of the elements in the order of the loop, with $n_{\mathrm{sets}} 
 
 ## Reading a matrix by rows and by columns
 
-*What this is for: the first page showed a cliff at a small size. Real matrices are big, and the cliff, and the
-extra cliffs the associativity adds, decide whether a loop nest is cheap or expensive.*
+The first page showed a cliff at a small size. Real matrices are big, and the cliff, together with the extra cliffs
+that associativity adds, decides whether a loop nest is cheap or expensive.
 
 ### The cliff
 
@@ -377,10 +365,8 @@ which order has more to do.
 
 ## Tiling: making the loop fit the cache
 
-*What this is for: sometimes both orders are needed. The transpose of a matrix reads one by rows and writes the
-other by columns whatever order you pick. A tiling changes the order of visits so that the working set fits.*
-
-Copy a matrix into its transpose: $B_{ji} = A_{ij}$ for all $i, j$. Visiting $(i, j)$ in row order reads $A$ by
+Sometimes both orders are needed. The transpose of a matrix reads one by rows and writes the other by columns
+whatever order you pick, and a tiling changes the order of visits so that the working set fits. Copy a matrix into its transpose: $B_{ji} = A_{ij}$ for all $i, j$. Visiting $(i, j)$ in row order reads $A$ by
 rows and writes $B$ by columns, or the other way round; one of the two is the column order of the last section.
 The matrices here are 256 by 256 (256 KiB each), and the cache of this experiment is smaller, 8 KiB or 128 lines, to
 keep the arithmetic short; the story is the same at 32 KiB with larger matrices.
@@ -444,10 +430,8 @@ number in them is used many times.
 
 ## Vectors: one instruction on many numbers
 
-*What this is for: the previous sections kept the arithmetic fixed and changed which memory it touched. The
-next lever changes how many numbers one instruction handles.*
-
-The registers of a modern core are wider than one number. A 256-bit register holds eight f32 numbers, and an
+The previous sections kept the arithmetic fixed and changed which memory it touched. The next lever changes how
+many numbers one instruction handles. The registers of a modern core are wider than one number. A 256-bit register holds eight f32 numbers, and an
 instruction that works on all of them at once adds eight pairs, or multiplies eight pairs, in a single
 instruction with the latency and issue rate of a single one. This is **SIMD** (single instruction, multiple
 data), and the groups are **vectors** in the machine sense, distinct from the mathematical vectors of Volume I;
@@ -603,10 +587,8 @@ loop, which the CPU backend uses where it needs that guarantee, as the last sect
 
 ## Many cores: data-parallel loops
 
-*What this is for: a chip has several cores, and the cores are the third lever, after the data layout and the
-instructions. To use them, a loop must be split so that the pieces can run at once without disturbing each other.*
-
-A **thread** is a sequence of instructions that the operating system schedules onto a core; several threads run
+A chip has several cores, and the cores are the third lever, after the data layout and the instructions. To use
+them, a loop must be split so that the pieces can run at once without disturbing each other. A **thread** is a sequence of instructions that the operating system schedules onto a core; several threads run
 at once on several cores. **Thread parallelism** is using several threads, each on its own core with its
 own registers and first caches, to do the pieces of one computation at the same time. The cores share the
 last-level cache and main memory and have no other common state unless a program makes one.
@@ -747,10 +729,8 @@ meant that the work was sitting in a serial step and not in the loops that were 
 
 ## Counting the work
 
-*What this is for: the three levers of this chapter, layout, vectors and cores, help different limits. To tell
-which limit a computation is at, one counts what it does and what it moves.*
-
-For an operation, count the arithmetic operations it needs (**FLOPs**: one multiplication or one addition is
+The three levers of this chapter, layout, vectors and cores, help different limits, and to tell which limit a
+computation is at, one counts what it does and what it moves. For an operation, count the arithmetic operations it needs (**FLOPs**: one multiplication or one addition is
 one, a fused multiply-add is two) and the bytes it must at least move into or out of the core's caches (every
 input once, every output once). The ratio, FLOPs per byte, says how much arithmetic each byte supports.
 
@@ -775,7 +755,7 @@ computation is on, and into a bound on how fast it can run. Until then it is a c
 chapter, and it is the reason that the layout and tiling work above is the first thing to do for a loop with a
 low ratio, and the vectors and cores the first thing for one with a high ratio.
 
-## Where this appears in brain
+## The CPU backend in brain's crates
 
 `crates/backend-cpu` is brain's CPU backend, and everything in this chapter has a counterpart in it.
 
@@ -919,6 +899,28 @@ workers" rule of the parallel-sum section, in production.
 7. Find the error: "A vectorized sum and a scalar sum of the same f32 numbers give the same answer, because
    addition is commutative and the vector sum only reorders the additions."
 
+## Summary
+
+A core executes instructions that name registers; an instruction's result is ready a latency after it starts, so
+a loop whose every step depends on the last, like a sum with one running total, is limited by the length of
+its dependency chain and not by the core's issue rate, and independent accumulators shorten the chain. Memory is
+a hierarchy of levels, each larger and slower than the one above, and data moves between the levels in cache lines
+of 64 bytes, so a program is cheap when it uses all of a line before the line leaves the cache (spatial locality)
+and returns to a line while it is still there (temporal locality). With a cache model that can be run, the same
+256 additions touch 16 lines or 256 depending on loop order; the penalty is a cliff set by the
+comparison of a working set with the cache, with extra conflict cliffs when strides are powers of two, and a
+tiling moves the cliff by shrinking the working set. A vector instruction does the work of several scalar ones
+in one issue, cutting the instruction count by the lane count, and changes the grouping of a floating-point sum,
+so vectorized and scalar results differ in the last digits. Several cores run a data-parallel loop, one whose
+iterations are independent, with each worker writing only its own results, balanced by splitting into chunks that
+are neither one equal block nor so small that starting them dominates, and without two workers writing one cache
+line. Counting FLOPs against bytes tells which of these levers will help.
+
+What this chapter could not do is say, for a given machine, whether a computation is limited by its arithmetic or by
+the bytes it moves, and how to compare it with the best the machine could do. The ratio of FLOPs to bytes counted at
+the end is half of that answer; the other half is the machine's own rates of arithmetic and of memory traffic.
+Chapter 3 defines them and combines them into the roofline.
+
 ## Exercises
 
 1. **[Calculate]** A row-major $[100, 160]$ matrix of 4-byte numbers starts at a line boundary. How many lines does
@@ -956,28 +958,6 @@ workers" rule of the parallel-sum section, in production.
     $n$ up to 1024. For which sizes does the second level absorb the column order's misses, and what is the
     matrix size at which it stops doing so?
 
-## Summary
-
-A core executes instructions that name registers; an instruction's result is ready a latency after it starts, so
-a loop whose every step depends on the last, like a sum with one running total, is limited by the length of
-its dependency chain and not by the core's issue rate, and independent accumulators shorten the chain. Memory is
-a hierarchy of levels, each larger and slower than the one above, and data moves between the levels in cache lines
-of 64 bytes, so a program is cheap when it uses all of a line before the line leaves the cache (spatial locality)
-and returns to a line while it is still there (temporal locality). With a cache model that can be run, the same
-256 additions touch 16 lines or 256 depending on loop order; the penalty is a cliff set by the
-comparison of a working set with the cache, with extra conflict cliffs when strides are powers of two, and a
-tiling moves the cliff by shrinking the working set. A vector instruction does the work of several scalar ones
-in one issue, cutting the instruction count by the lane count, and changes the grouping of a floating-point sum,
-so vectorized and scalar results differ in the last digits. Several cores run a data-parallel loop, one whose
-iterations are independent, with each worker writing only its own results, balanced by splitting into chunks that
-are neither one equal block nor so small that starting them dominates, and without two workers writing one cache
-line. Counting FLOPs against bytes tells which of these levers will help.
-
-What this chapter could not do is say, for a given machine, whether a computation is limited by its arithmetic or by
-the bytes it moves, and how to compare it with the best the machine could do. The ratio of FLOPs to bytes counted at
-the end is half of that answer; the other half is the machine's own rates of arithmetic and of memory traffic.
-Chapter 3 defines them and combines them into the roofline.
-
 ## Key terms
 
 - **CPU core**: one unit of a processor that fetches, decodes and executes instructions in a pipeline, with its own registers and first-level caches, sharing the rest of the memory system with the other cores of the chip. <!-- concept: cpu-core -->
@@ -989,7 +969,7 @@ Chapter 3 defines them and combines them into the roofline.
 
 ## Answers
 
-**Before you begin**
+**Recall questions.**
 
 1. The address is $4(i n + j)$ bytes; the stride of the first axis is $n$ elements. (Volume I, Chapter 5.)
 2. The strides are $(1, 4)$. Reading the transpose row by row moves the storage position by 4 elements at each step: it reads

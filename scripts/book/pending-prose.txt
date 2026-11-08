@@ -1,8 +1,5 @@
 # Chapters still to be rewritten as prose (scripts/book/check.py, recycled()).
 # Remove a line in the same change that rewrites its chapter; the list only shrinks.
-docs/book/v03-neural-networks/14-project-neural-network.md
-docs/book/v04-computation/01-number-formats.md
-docs/book/v04-computation/02-cpu.md
 docs/book/v04-computation/03-roofline.md
 docs/book/v04-computation/04-gpu.md
 docs/book/v04-computation/05-compute-kernels.md
