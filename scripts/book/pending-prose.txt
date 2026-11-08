@@ -1,8 +1,5 @@
 # Chapters still to be rewritten as prose (scripts/book/check.py, recycled()).
 # Remove a line in the same change that rewrites its chapter; the list only shrinks.
-docs/book/v03-neural-networks/08-schedules-and-clipping.md
-docs/book/v03-neural-networks/09-initialization.md
-docs/book/v03-neural-networks/10-normalization.md
 docs/book/v03-neural-networks/11-regularization.md
 docs/book/v03-neural-networks/12-training-dynamics.md
 docs/book/v03-neural-networks/13-first-models.md
