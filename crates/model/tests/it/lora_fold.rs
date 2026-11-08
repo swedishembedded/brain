@@ -487,3 +487,35 @@ fn a_whole_tensor_delta_splits_into_row_bands() {
     assert!(lora.unapplied().is_empty());
     assert_eq!(got, want);
 }
+
+/// A base read through `RuntimeLora::folded` serves each targeted tensor with
+/// every one of its corrections folded in (each row band of a fused tensor
+/// into its own rows), however the reader asks for it - whole, in chunks or
+/// as a range - and every other tensor exactly as stored. Reading marks the
+/// corrections applied.
+#[test]
+fn a_base_read_through_a_runtime_lora_has_every_band_folded_in() {
+    use checkpoint::TensorSource;
+    let (out, inn, r) = (4, 3, 1);
+    let whole = model::lora::RuntimeDelta { key: "ff.weight".into(), row0: 0, row_stride: inn, col0: 0, elems: out * inn, pair: Pair::from_ab(out, inn, r, vec![1.0, 2.0, 3.0], vec![1.0, 10.0, 100.0, 1000.0]) };
+    let mut want = vec![0.5; out * inn];
+    whole.fold_into(&mut want);
+    let lora = model::lora::RuntimeLora::new(vec![whole.row_band(0, 2).unwrap(), whole.row_band(2, 2).unwrap()]);
+    let base: std::collections::HashMap<String, Vec<f32>> = [("ff.weight".to_string(), vec![0.5; out * inn]), ("norm.weight".to_string(), vec![7.0; 3])].into_iter().collect();
+    let src = lora.folded(&base);
+
+    let mut got = Vec::new();
+    assert!(src.with_tensor("ff.weight", &mut |d| got = d.to_vec()));
+    assert_eq!(got, want);
+    let mut chunks = vec![0.0; out * inn];
+    assert!(src.with_tensor_chunks("ff.weight", 5, &mut |off, d| chunks[off as usize..off as usize + d.len()].copy_from_slice(d)));
+    assert_eq!(chunks, want);
+    let mut tail = Vec::new();
+    assert!(src.with_tensor_range("ff.weight", 2 * inn, 2 * inn, &mut |d| tail = d.to_vec()));
+    assert_eq!(tail, want[2 * inn..]);
+    assert!(src.raw_words("ff.weight").is_none(), "a folded tensor no longer holds its stored words");
+    let mut norm = Vec::new();
+    assert!(src.with_tensor("norm.weight", &mut |d| norm = d.to_vec()));
+    assert_eq!(norm, vec![7.0; 3]);
+    assert!(lora.unapplied().is_empty());
+}

@@ -827,6 +827,127 @@ impl RuntimeDelta {
     }
 }
 
+/// A base [`checkpoint::TensorSource`] read with a [`RuntimeLora`]'s
+/// corrections folded in ([`RuntimeLora::folded`]). Every read goes through
+/// the base's bounded chunked reader: a targeted tensor is folded a block of
+/// whole rows at a time (row `o` of a correction needs only row `o` of `B`),
+/// so folding never holds more than one chunk beyond what the caller asked
+/// for. Every other tensor is the base's own, packed views included.
+pub struct FoldedTensors<'a> {
+    base: &'a dyn checkpoint::TensorSource,
+    lora: &'a RuntimeLora,
+}
+
+/// Values per chunk [`FoldedTensors`] reads a tensor in.
+const FOLD_CHUNK: usize = 1 << 22;
+
+impl FoldedTensors<'_> {
+    fn targeted(&self, name: &str) -> bool {
+        self.lora.deltas.iter().any(|d| d.key == name)
+    }
+
+    /// `name` in ordered chunks of whole rows, each with every correction
+    /// aimed at its rows folded in; the corrections are marked applied.
+    fn folded_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        let deltas: Vec<(&RuntimeDelta, &std::cell::Cell<bool>)> = self.lora.deltas.iter().zip(&self.lora.used).filter(|(d, _)| d.key == name).collect();
+        let stride = deltas[0].0.row_stride;
+        assert!(deltas.iter().all(|(d, _)| d.row_stride == stride), "lora: the corrections of {name} disagree on its row length");
+        let found = self.base.with_tensor_chunks(name, (max_elems / stride).max(1) * stride, &mut |off, chunk| {
+            assert!((off as usize).is_multiple_of(stride) && chunk.len().is_multiple_of(stride), "lora: {name}: a chunk of {} values at {off} is not whole rows of {stride}", chunk.len());
+            let (first, rows) = (off as usize / stride, chunk.len() / stride);
+            let mut out = chunk.to_vec();
+            for (d, _) in &deltas {
+                let (r, inn) = (d.pair.r, d.pair.inn);
+                for row in first.max(d.row0)..(first + rows).min(d.row0 + d.pair.out) {
+                    let b = &d.pair.b[(row - d.row0) * r..][..r];
+                    let w = &mut out[(row - first) * stride + d.col0..][..inn];
+                    for (k, &bk) in b.iter().enumerate() {
+                        for (wi, &ai) in w.iter_mut().zip(&d.pair.a[k * inn..(k + 1) * inn]) {
+                            *wi += bk * ai;
+                        }
+                    }
+                }
+            }
+            f(off, &out);
+        });
+        if found {
+            deltas.iter().for_each(|(_, used)| used.set(true));
+        }
+        found
+    }
+
+    fn chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        if self.targeted(name) { self.folded_chunks(name, max_elems, f) } else { self.base.with_tensor_chunks(name, max_elems, f) }
+    }
+}
+
+impl checkpoint::TensorSource for FoldedTensors<'_> {
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+        let mut whole = Vec::new();
+        let found = self.chunks(name, FOLD_CHUNK, &mut |_, part| whole.extend_from_slice(part));
+        if found {
+            f(&whole);
+        }
+        found
+    }
+
+    fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        self.chunks(name, max_elems, f)
+    }
+
+    fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+        let mut range = Vec::with_capacity(len);
+        let found = self.chunks(name, FOLD_CHUNK, &mut |off, part| {
+            let (lo, hi) = (off as usize, off as usize + part.len());
+            let (from, to) = (start.max(lo), (start + len).min(hi));
+            if from < to {
+                range.extend_from_slice(&part[from - lo..to - lo]);
+            }
+        });
+        if !found || range.len() != len {
+            return false;
+        }
+        f(&range);
+        true
+    }
+
+    /// None of the stored views of a targeted tensor holds its folded values.
+    fn raw_words(&self, name: &str) -> Option<&[u32]> {
+        if self.targeted(name) { None } else { self.base.raw_words(name) }
+    }
+
+    fn with_tensor_u32_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[u32])) -> bool {
+        !self.targeted(name) && self.base.with_tensor_u32_chunks(name, max_elems, f)
+    }
+
+    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, std::borrow::Cow<'_, [u8]>)> {
+        if self.targeted(name) { None } else { self.base.raw_blocks(name) }
+    }
+
+    fn raw_block_layout(&self, name: &str) -> Option<checkpoint::gguf::BlockLayout> {
+        if self.targeted(name) { None } else { self.base.raw_block_layout(name) }
+    }
+
+    fn numel(&self, name: &str) -> Option<usize> {
+        self.base.numel(name)
+    }
+
+    fn advise_drop(&self, name: &str) {
+        self.base.advise_drop(name)
+    }
+
+    fn packed_descriptor(&self, name: &str) -> Option<checkpoint::packed::TensorDescriptor> {
+        if self.targeted(name) { None } else { self.base.packed_descriptor(name) }
+    }
+
+    fn load_packed(&self, names: &[&str], req: &checkpoint::packed::LoadRequest<'_>, sink: &mut dyn checkpoint::packed::TensorSink) -> Result<Option<checkpoint::packed::LoadReport>, String> {
+        if names.iter().any(|n| self.targeted(n)) {
+            return Ok(None);
+        }
+        self.base.load_packed(names, req, sink)
+    }
+}
+
 /// Every [`RuntimeDelta`] a model build must apply, with **consumption
 /// tracking**.
 ///
@@ -884,6 +1005,14 @@ impl RuntimeLora {
         let i = self.deltas.iter().position(|d| d.covers(key, row_stride, row0, out, col0, inn))?;
         self.used[i].set(true);
         Some(&self.deltas[i])
+    }
+
+    /// `base` with every correction folded into the tensor it targets as that
+    /// tensor is read - what a build that uploads at fp32, where a fold is
+    /// exact, reads through instead of attaching each correction beside its
+    /// linear. A tensor's corrections are claimed when it is first read.
+    pub fn folded<'a>(&'a self, base: &'a dyn checkpoint::TensorSource) -> FoldedTensors<'a> {
+        FoldedTensors { base, lora: self }
     }
 
     /// Every rectangle no linear claimed, as `key[row0..][col0..]` labels -
