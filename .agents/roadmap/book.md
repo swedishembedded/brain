@@ -49,7 +49,8 @@ reproduced its worked examples from the text alone in another language.
       digits than survive a 1e-12 nudge). All were fixed in the following
       commit with a shared five-run stable-digits rule and exact captions;
       a third pass has not been run.
-- [ ] Volume IV, Computation and Hardware: chapters 1 to 13 written.
+- [ ] Volume IV, Computation and Hardware: all 13 chapters and the project
+      written; the independent reader pass has not been run.
 
 ## Open
 

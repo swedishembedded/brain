@@ -71,5 +71,7 @@ more than one kind of device.
     four bits each and still work.
 13. [Neural Processing Units and Graph Compilers](13-npu.md): how a whole network becomes one
     compiled program for a fixed-function accelerator.
-14. Project: A Device-Independent Tensor Engine: make the same matrix multiply
-    run correctly and fast on more than one kind of hardware.
+14. [Project: A Device-Independent Tensor Engine](14-project-tensor-engine.md): build a
+    small engine whose kernels run on two device configurations, agree within a
+    derived tolerance, catch a planted defect and are chosen by a gated, honest
+    measurement.

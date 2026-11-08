@@ -1,0 +1,30 @@
+<!-- source-sha256: 455693f42da27761e1689ca6ede5876da52b11c7cbcd62e3e194154a6ec391f4 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 504" width="800" height="504"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="504" fill="#ffffff"/>
+<rect x="290" y="23" width="220" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="46.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  Tensor and oracle</text>
+<text x="400" y="62.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">shape, strides, float64</text>
+<rect x="290" y="119" width="220" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2  CPU backend</text>
+<text x="400" y="158.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">executor, naive kernel</text>
+<rect x="290" y="215" width="220" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="238.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3  Tiled kernels</text>
+<text x="400" y="254.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">shared memory, registers</text>
+<rect x="30" y="311" width="220" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4  Reductions, epilogue</text>
+<text x="140" y="350.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">two passes, fused bias</text>
+<rect x="290" y="311" width="220" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="334.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5  Parity</text>
+<text x="400" y="350.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">two devices, derived bound</text>
+<rect x="30" y="407" width="220" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140" y="430.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6  Quantized product</text>
+<text x="140" y="446.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">int8 and int4 groups</text>
+<rect x="550" y="407" width="220" height="54" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="660" y="430.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">7  Selection</text>
+<text x="660" y="446.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gate, model clock, choice</text>
+<line x1="400" y1="80" x2="400" y2="116" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="400" y1="176" x2="400" y2="212" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="400" y1="272" x2="400" y2="308" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M290,242 L150,242 Q140,242 140,252 L140,308" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M400,365 L400,376 Q400,386 390,386 L150,386 Q140,386 140,396 L140,404" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M400,365 L400,376 Q400,386 410,386 L650,386 Q660,386 660,396 L660,404" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

@@ -395,6 +395,7 @@ navigation:
           - docs/book/v04-computation/11-profiling.md
           - docs/book/v04-computation/12-quantization.md
           - docs/book/v04-computation/13-npu.md
+          - docs/book/v04-computation/14-project-tensor-engine.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md
