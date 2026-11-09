@@ -1,0 +1,41 @@
+<!-- source-sha256: fda3e38d6620d6f3cbe44cdedd32ec53d5bc0867f9c6dc552af700e56b9255dc -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420" width="800" height="420"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="420" fill="#ffffff"/>
+<text x="400" y="28.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Memory by component, GiB (bar length proportional to the total)</text>
+<text x="20" y="88.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">inference, Gemma-4 tower, bf16, one cache of 32,768 tokens</text>
+<rect x="20.00" y="100.0" width="53.45" height="28" fill="#bfd7ea" stroke="#4a5568" stroke-width="1"/>
+<rect x="73.45" y="100.0" width="1.78" height="28" fill="#fdd0a2" stroke="#4a5568" stroke-width="1"/>
+<text x="85.24" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">25.1 GiB  (weights 24.3, KV cache 0.8)</text>
+<text x="20" y="156.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">inference, Gemma-4 tower, int8, same cache</text>
+<rect x="20.00" y="168.0" width="30.07" height="28" fill="#bfd7ea" stroke="#4a5568" stroke-width="1"/>
+<rect x="50.07" y="168.0" width="1.78" height="28" fill="#fdd0a2" stroke="#4a5568" stroke-width="1"/>
+<text x="61.85" y="186.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">14.5 GiB  (weights 13.7, KV cache 0.8)</text>
+<text x="20" y="224.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">inference, MiniMax-H3 backbone, int8, 13,312 rows</text>
+<rect x="20.00" y="236.0" width="46.29" height="28" fill="#bfd7ea" stroke="#4a5568" stroke-width="1"/>
+<rect x="66.29" y="236.0" width="12.40" height="28" fill="#c7e9c0" stroke="#4a5568" stroke-width="1"/>
+<text x="88.69" y="254.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">26.7 GiB  (weights 21.1, workspace 5.6)</text>
+<text x="20" y="292.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">training, Gemma-4 tower, mixed precision, activations kept (8,192 tokens)</text>
+<rect x="20.00" y="304.0" width="53.45" height="28" fill="#bfd7ea" stroke="#4a5568" stroke-width="1"/>
+<rect x="73.45" y="304.0" width="53.45" height="28" fill="#fcbba1" stroke="#4a5568" stroke-width="1"/>
+<rect x="126.90" y="304.0" width="320.71" height="28" fill="#d6c9ee" stroke="#4a5568" stroke-width="1"/>
+<text x="287.26" y="322.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">146.0</text>
+<rect x="447.62" y="304.0" width="132.38" height="28" fill="#c7e9c0" stroke="#4a5568" stroke-width="1"/>
+<text x="513.81" y="322.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">60.3</text>
+<text x="590" y="322.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">254.9 GiB</text>
+<text x="20" y="360.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">training, same, activations recomputed</text>
+<rect x="20.00" y="372.0" width="53.45" height="28" fill="#bfd7ea" stroke="#4a5568" stroke-width="1"/>
+<rect x="73.45" y="372.0" width="53.45" height="28" fill="#fcbba1" stroke="#4a5568" stroke-width="1"/>
+<rect x="126.90" y="372.0" width="320.71" height="28" fill="#d6c9ee" stroke="#4a5568" stroke-width="1"/>
+<text x="287.26" y="390.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">146.0</text>
+<rect x="447.62" y="372.0" width="9.08" height="28" fill="#c7e9c0" stroke="#4a5568" stroke-width="1"/>
+<text x="466.7" y="390.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">198.8 GiB</text>
+<rect x="20" y="50" width="12" height="12" rx="2" fill="#bfd7ea" stroke="#4a5568" stroke-width="1"/>
+<text x="37" y="60" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c">weights</text>
+<rect x="105" y="50" width="12" height="12" rx="2" fill="#fdd0a2" stroke="#4a5568" stroke-width="1"/>
+<text x="122" y="60" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c">KV cache</text>
+<rect x="190" y="50" width="12" height="12" rx="2" fill="#c7e9c0" stroke="#4a5568" stroke-width="1"/>
+<text x="207" y="60" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c">workspace or activations</text>
+<rect x="365" y="50" width="12" height="12" rx="2" fill="#fcbba1" stroke="#4a5568" stroke-width="1"/>
+<text x="382" y="60" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c">gradients</text>
+<rect x="460" y="50" width="12" height="12" rx="2" fill="#d6c9ee" stroke="#4a5568" stroke-width="1"/>
+<text x="477" y="60" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c">optimizer state and master copy</text>
+</svg>

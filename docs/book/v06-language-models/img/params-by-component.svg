@@ -1,0 +1,51 @@
+<!-- source-sha256: ea013e07856813b9015bc234772b651e3007b6d452dae583660fb8d7449e2d25 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 360" width="780" height="360"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="360" fill="#ffffff"/>
+<text x="390" y="30.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Share of each model&#x27;s own parameters, by component</text>
+<text x="20" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">small decoder</text>
+<text x="20" y="110.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">292,480</text>
+<rect x="250.00" y="78.0" width="218.82" height="34" fill="#bfd7ea" stroke="#4a5568" stroke-width="1"/>
+<text x="359.41" y="99.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">44%</text>
+<rect x="468.82" y="78.0" width="70.02" height="34" fill="#fdd0a2" stroke="#4a5568" stroke-width="1"/>
+<text x="503.83" y="99.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">14%</text>
+<rect x="538.84" y="78.0" width="210.07" height="34" fill="#c7e9c0" stroke="#4a5568" stroke-width="1"/>
+<text x="643.87" y="99.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">42%</text>
+<rect x="748.91" y="78.0" width="1.09" height="34" fill="#e2e8f0" stroke="#4a5568" stroke-width="1"/>
+<text x="20" y="152.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">Qwen3 8B</text>
+<text x="20" y="170.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">8.19 billion</text>
+<rect x="250.00" y="138.0" width="75.98" height="34" fill="#bfd7ea" stroke="#4a5568" stroke-width="1"/>
+<text x="287.99" y="159.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">15%</text>
+<rect x="325.98" y="138.0" width="92.17" height="34" fill="#fdd0a2" stroke="#4a5568" stroke-width="1"/>
+<text x="372.07" y="159.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">18%</text>
+<rect x="418.15" y="138.0" width="331.83" height="34" fill="#c7e9c0" stroke="#4a5568" stroke-width="1"/>
+<text x="584.07" y="159.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">66%</text>
+<rect x="749.98" y="138.0" width="0.02" height="34" fill="#e2e8f0" stroke="#4a5568" stroke-width="1"/>
+<text x="20" y="212.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">Gemma-4 text tower</text>
+<text x="20" y="230.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">13.06 billion</text>
+<rect x="250.00" y="198.0" width="38.53" height="34" fill="#bfd7ea" stroke="#4a5568" stroke-width="1"/>
+<text x="269.26" y="219.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">8%</text>
+<rect x="288.53" y="198.0" width="92.11" height="34" fill="#fdd0a2" stroke="#4a5568" stroke-width="1"/>
+<text x="334.58" y="219.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">18%</text>
+<rect x="380.64" y="198.0" width="325.09" height="34" fill="#c7e9c0" stroke="#4a5568" stroke-width="1"/>
+<text x="543.18" y="219.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">65%</text>
+<rect x="705.72" y="198.0" width="44.28" height="34" fill="#e2e8f0" stroke="#4a5568" stroke-width="1"/>
+<text x="727.86" y="219.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">9%</text>
+<text x="20" y="272.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">MiniMax-H3 DiT</text>
+<text x="20" y="290.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">33.12 billion</text>
+<rect x="250.00" y="258.0" width="116.34" height="34" fill="#fdd0a2" stroke="#4a5568" stroke-width="1"/>
+<text x="308.17" y="279.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">23%</text>
+<rect x="366.34" y="258.0" width="174.51" height="34" fill="#c7e9c0" stroke="#4a5568" stroke-width="1"/>
+<text x="453.59" y="279.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">35%</text>
+<rect x="540.85" y="258.0" width="12.75" height="34" fill="#e2e8f0" stroke="#4a5568" stroke-width="1"/>
+<rect x="553.60" y="258.0" width="196.40" height="34" fill="#d6c9ee" stroke="#4a5568" stroke-width="1"/>
+<text x="651.8" y="279.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">39%</text>
+<rect x="250" y="314" width="14" height="14" rx="2" fill="#bfd7ea" stroke="#4a5568" stroke-width="1"/>
+<text x="270" y="326" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c">embedding and head</text>
+<rect x="420" y="314" width="14" height="14" rx="2" fill="#fdd0a2" stroke="#4a5568" stroke-width="1"/>
+<text x="440" y="326" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c">attention matrices</text>
+<rect x="590" y="314" width="14" height="14" rx="2" fill="#c7e9c0" stroke="#4a5568" stroke-width="1"/>
+<text x="610" y="326" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c">feed-forward matrices</text>
+<rect x="250" y="334" width="14" height="14" rx="2" fill="#e2e8f0" stroke="#4a5568" stroke-width="1"/>
+<text x="270" y="346" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c">norms and other</text>
+<rect x="420" y="334" width="14" height="14" rx="2" fill="#d6c9ee" stroke="#4a5568" stroke-width="1"/>
+<text x="440" y="346" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c">adaln_proj</text>
+</svg>

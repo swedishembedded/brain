@@ -1,0 +1,39 @@
+<!-- source-sha256: 9219b2e1ac3ffeaf4ea649ed7d61e69748f9ea2cffda76271a5505f23fb0a957 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 425" width="620" height="425">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="425" fill="#ffffff"/>
+<line x1="89.55" y1="354" x2="89.55" y2="30" stroke="#edf2f7"/>
+<text x="89.55" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="252.32" y1="354" x2="252.32" y2="30" stroke="#edf2f7"/>
+<text x="252.32" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1,000</text>
+<line x1="415.1" y1="354" x2="415.1" y2="30" stroke="#edf2f7"/>
+<text x="415.1" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10,000</text>
+<line x1="577.87" y1="354" x2="577.87" y2="30" stroke="#edf2f7"/>
+<text x="577.87" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100,000</text>
+<line x1="58" y1="354" x2="597" y2="354" stroke="#edf2f7"/>
+<text x="52" y="358" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.001</text>
+<line x1="58" y1="289.2" x2="597" y2="289.2" stroke="#edf2f7"/>
+<text x="52" y="293.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.01</text>
+<line x1="58" y1="224.4" x2="597" y2="224.4" stroke="#edf2f7"/>
+<text x="52" y="228.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.1</text>
+<line x1="58" y1="159.6" x2="597" y2="159.6" stroke="#edf2f7"/>
+<text x="52" y="163.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="94.8" x2="597" y2="94.8" stroke="#edf2f7"/>
+<text x="52" y="98.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="30" x2="597" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100</text>
+<rect x="58" y="30" width="539" height="324" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="539" height="324"/></clipPath>
+<g clip-path="url(#plot)"><line x1="58" y1="159.6" x2="597" y2="159.6" stroke="#a0aec0" stroke-dasharray="4 4"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.8" points="58,214.17 107,194.67 156,175.16 205,155.65 254,136.15 303,116.64 352,97.13 401,77.63 450,58.12 499,38.61 548,19.11 597,-0.4"/><polyline fill="none" stroke="#c05621" stroke-width="1.8" points="58,328.28 107,308.78 156,289.27 205,269.76 254,250.25 303,230.75 352,211.24 401,191.73 450,172.23 499,152.72 548,133.21 597,113.71"/><polyline fill="none" stroke="#2f855a" stroke-width="1.8" points="58,328.95 107,309.44 156,289.94 205,270.43 254,250.92 303,243.85 352,233.5 401,220.01 450,204.07 499,186.53 548,168.06 597,149.09"/><polyline fill="none" stroke="#9b2c2c" stroke-width="1.8" stroke-dasharray="6 4" points="58,329.59 107,310.08 156,290.57 205,271.07 254,251.56 303,232.05 352,212.55 401,193.04 450,173.53 499,154.03 548,134.52 597,115.01"/></g>
+<text x="327.5" y="390" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">keys seen by a token, or packed rows (log scale)</text>
+<text x="14" y="192" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 192)">attention term / parameter term (log scale)</text>
+<text x="327.5" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">When the attention term overtakes the parameters</text>
+<line x1="52.16" y1="413" x2="72.16" y2="413" stroke="#2b6cb0" stroke-width="2"/>
+<text x="78.16" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">small decoder</text>
+<line x1="176.85" y1="413" x2="196.85" y2="413" stroke="#c05621" stroke-width="2"/>
+<text x="202.85" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">Qwen3 8B</text>
+<line x1="279.1" y1="413" x2="299.1" y2="413" stroke="#2f855a" stroke-width="2"/>
+<text x="305.1" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">Gemma-4 text tower</text>
+<line x1="433.71" y1="413" x2="453.71" y2="413" stroke="#9b2c2c" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="459.71" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">MiniMax-H3 blocks</text>
+</svg>

@@ -1,0 +1,37 @@
+<!-- source-sha256: 14e2eef651f9cf890e5fd4a6e6ef4a5c3bf5809ee8b520c5c84630f174219cfd -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 479" width="620" height="479">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="479" fill="#ffffff"/>
+<line x1="86.22" y1="374" x2="86.22" y2="30" stroke="#edf2f7"/>
+<text x="86.22" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1,000,000</text>
+<line x1="179.95" y1="374" x2="179.95" y2="30" stroke="#edf2f7"/>
+<text x="179.95" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10,000,000</text>
+<line x1="273.69" y1="374" x2="273.69" y2="30" stroke="#edf2f7"/>
+<text x="273.69" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100,000,000</text>
+<line x1="367.43" y1="374" x2="367.43" y2="30" stroke="#edf2f7"/>
+<text x="367.43" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1,000,000,000</text>
+<line x1="461.16" y1="374" x2="461.16" y2="30" stroke="#edf2f7"/>
+<text x="461.16" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10,000,000,000</text>
+<line x1="554.9" y1="374" x2="554.9" y2="30" stroke="#edf2f7"/>
+<text x="554.9" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100,000,000,000</text>
+<line x1="58" y1="289.69" x2="575" y2="289.69" stroke="#edf2f7"/>
+<text x="52" y="293.69" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="73.1" x2="575" y2="73.1" stroke="#edf2f7"/>
+<text x="52" y="77.1" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<rect x="58" y="30" width="517" height="344" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="517" height="344"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,60.09 481.26,259"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" stroke-dasharray="6 4" points="481.26,259 575,303.05"/><circle cx="86.22" cy="77.18" r="3.5" fill="#2b6cb0"/><circle cx="142.65" cy="97.93" r="3.5" fill="#2b6cb0"/><circle cx="199.09" cy="123.82" r="3.5" fill="#2b6cb0"/><circle cx="255.52" cy="153.44" r="3.5" fill="#2b6cb0"/><circle cx="311.96" cy="178.11" r="3.5" fill="#2b6cb0"/><circle cx="368.39" cy="205.12" r="3.5" fill="#2b6cb0"/><circle cx="424.83" cy="233.85" r="3.5" fill="#2b6cb0"/><circle cx="481.26" cy="259.98" r="3.5" fill="#2b6cb0"/><line x1="58" y1="328.11" x2="575" y2="328.11" stroke="#a0aec0" stroke-dasharray="4 4"/><circle cx="86.22" cy="253.19" r="3.5" fill="#c05621"/><circle cx="142.65" cy="276.11" r="3.5" fill="#c05621"/><circle cx="199.09" cy="292.55" r="3.5" fill="#c05621"/><circle cx="255.52" cy="304.06" r="3.5" fill="#c05621"/><circle cx="311.96" cy="311.97" r="3.5" fill="#c05621"/><circle cx="368.39" cy="317.34" r="3.5" fill="#c05621"/><circle cx="424.83" cy="320.95" r="3.5" fill="#c05621"/><circle cx="481.26" cy="323.36" r="3.5" fill="#c05621"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" stroke-dasharray="6 4" points="58,247.67 575,402.53"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" stroke-dasharray="6 4" points="58,295.73 575,330.34"/><text x="118.32" y="342.44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">floor 1.7</text></g>
+<text x="316.5" y="410" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">parameters P (log scale)</text>
+<text x="14" y="202" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 202)">loss (log scale)</text>
+<text x="316.5" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Fitting a power law to synthetic points</text>
+<line x1="79.78" y1="433" x2="99.78" y2="433" stroke="#2b6cb0" stroke-width="2"/>
+<text x="105.78" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">least-squares line through the blue points</text>
+<circle cx="355.6" cy="433" r="3.5" fill="#2b6cb0"/>
+<text x="371.6" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">loss = 15 P^-0.08 with 1% noise</text>
+<circle cx="95.39" cy="450" r="3.5" fill="#c05621"/>
+<text x="111.39" y="454" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">loss = 1.7 + 40 P^-0.3, no noise</text>
+<line x1="293.79" y1="450" x2="313.79" y2="450" stroke="#2f855a" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="319.79" y="454" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">line fitted to the first four orange points</text>
+<line x1="191.24" y1="467" x2="211.24" y2="467" stroke="#9b2c2c" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="217.24" y="471" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">line fitted to the last four orange points</text>
+</svg>

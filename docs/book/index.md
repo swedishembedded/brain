@@ -121,4 +121,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 7. [Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md): What if a model could think longer by reusing the same layers more times?
 8. [Long Context](v06-language-models/08-long-context.md): How do models trained on short texts read long ones?
 9. [A Research Architecture: The Spectral Language Model](v06-language-models/09-spectral-lm.md): How do you test a new architectural idea honestly, using brain's spectral language model as the example?
+10. [Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md): Before running a model, how do we know what it will cost?
 <!-- /contents -->

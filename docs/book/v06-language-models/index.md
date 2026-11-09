@@ -26,5 +26,5 @@ You can write down the recipe of a modern decoder and say what each of its choic
 7. [Looped and Recurrent-Depth Transformers](07-recurrent-depth.md): what happens when a model thinks longer by reusing the same layers more times.
 8. [Long Context](08-long-context.md): how models trained on short texts read long ones.
 9. [A Research Architecture: The Spectral Language Model](09-spectral-lm.md): how to test a new architectural idea honestly, using brain's spectral language model as the example.
-10. Counting Parameters, FLOPs and Memory: how to know, before running a model, what it will cost.
+10. [Counting Parameters, FLOPs and Memory](10-model-cost.md): how to know, before running a model, what it will cost.
 11. Project: Comparing Language Model Blocks: implement several alternative language-model blocks and compare their quality, cost and memory fairly.

@@ -300,6 +300,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **floating-point number**: a number stored as a sign, an exponent in a fixed range and a significand of fixed precision $p$ bits, $(-1)^s(1 + f/2^{p-1})2^e$; it keeps the same number of significant digits at every scale, so the absolute gap between neighbours doubles with each binade. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
+**FLOPs per token**: the arithmetic of a forward pass for one token, two FLOPs for every active parameter plus four per layer, query-head width and key seen for the attention products, $2N_{\mathrm{act}} + 4LHd_hT$; a property of the shapes and not of the hardware. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
+
 **forward pass**: computing every value of the computational graph in order, from the inputs to the loss. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **forward-mode differentiation**: computing derivatives by carrying the derivative with respect to one input forward through the graph, which costs one pass per input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
@@ -383,6 +385,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **implementation candidate**: one implementation of an operation together with the conditions under which it is valid (the capabilities it needs, the shapes it serves, the contract of its result), one of several that a selector chooses among. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
 **independence**: the property that $P(A \cap B) = P(A)P(B)$, so that knowing one event tells nothing about the other; it is not the same as being unable to occur together. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
+
+**inference memory formula**: the sum that bounds what a loaded model holds: the weights at their bytes per parameter, the cache summed over layers with each layer's window, the scratch of one forward pass over a chunk of rows, and an overhead for the allocator and the driver. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
 
 **information content**: the surprise of an event, $-\log_2 p$ bits (or $-\ln p$ nats) for an event of probability $p$, the only measure for which certain events carry zero, rarer events carry more and independent events add. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
@@ -602,6 +606,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **parameter**: one of the numbers that set a model's behaviour; fixed while the model predicts and changed while it learns. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
+**parameter count**: the number of numbers a model stores, the sum over its tensors of the product of their shape; multiplied by the bytes of a format it gives the size of the weights, and it is larger than the number a token's arithmetic uses for a mixture or a model with parameters that are not products. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
+
 **parity tolerance**: the largest difference between two implementations of the same function that rounding alone can explain, derived from the count of roundings along the longest chain of dependent operations times the unit round-off, so that anything above it is evidence of a bug. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
 
 **partial derivative**: the derivative of a function of several variables with respect to one of them while all the others are held fixed, $\partial L/\partial w_j$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
@@ -736,6 +742,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **scaled dot-product attention**: the layer in which every query is compared with every key by a dot product divided by the square root of their width, a softmax along each row turns the scores into weights, and the weighted sums of the values are the output, $\mathrm{softmax}(\mathbf{Q}\mathbf{K}^\top/\sqrt{d_k})\mathbf{V}$. *([Self-Attention](v05-sequences/07-self-attention.md))*
 
+**scaling laws**: measured relations, close to power laws, between the loss of a language model and its parameters, its training tokens and its compute, with the compute estimate $6Pn_{\mathrm{tok}}$ and the finding of about 20 tokens per parameter for a fixed compute; findings of particular studies under their assumptions. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
+
 **seed**: the number from which a generator's starting state is computed; the same seed gives the same stream, and a seed used by a run must be recorded for the run to be repeated. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **selection cache**: the stored map from a key of device identity, driver version, source digest and shape bucket to the candidate chosen, kept between runs so that a measurement is paid once and discarded when any part of the key changes. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
@@ -841,6 +849,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **top-p sampling**: keeping the smallest set of most probable tokens whose cumulative probability reaches a threshold, also called nucleus sampling, so that the number of tokens kept follows how spread out the distribution is. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
 
 **train-vs-eval-mode**: the two behaviours of a layer that has a state of its own: in train mode batch normalization uses the batch statistics and updates its running averages, in eval mode it uses the running averages and changes nothing. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
+
+**training memory formula**: the sum for a training step: for each parameter its value, gradient, optimizer slots and master copy (16 bytes under Adam in either f32 or mixed precision), plus the numbers kept per token for the backward pass, reduced by recomputation, plus scratch. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
 
 **training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 

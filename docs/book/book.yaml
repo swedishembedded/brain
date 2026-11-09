@@ -551,7 +551,7 @@ volumes:
         title: "Counting Parameters, FLOPs and Memory"
         question: "Before running a model, how do we know what it will cost?"
         introduces: [parameter-count, flops-per-token, inference-memory-formula, training-memory-formula, scaling-laws]
-        requires: [transformer-block, router, kv-cache, bf16-format]
+        requires: [transformer-block, router, kv-cache, bf16-format, swiglu, grouped-query-attention, sliding-window-attention, hybrid-architecture, shared-expert, tied-embeddings, adam, saved-activations, group-wise-quantization, least-squares, logarithm]
         brain: [modelcost, gemma4, minimaxh3]
 
       - id: project-architecture-comparison
