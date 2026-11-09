@@ -12,10 +12,14 @@
 //! a decoder's candidate list (the top logits of the step) before temperature,
 //! top-k, top-p and min-p, for every model the scheduler serves.
 //!
-//! Every processor only ever LOWERS a logit, so working on the candidate list
-//! (the decoder's `topk_capacity` best tokens) is exact for the tokens that can
-//! be chosen: a penalised token drops down the list and the next candidate takes
-//! its place; a token outside the list was already behind all of them.
+//! Working on the candidate list (the decoder's `topk_capacity` best tokens) is
+//! an approximation once a processor is on. It is exact while the best
+//! processed candidate is still at or above the lowest unprocessed candidate
+//! logit, because every token outside the list started at or below that. It is
+//! not exact when the processors push all candidates below a token outside the
+//! list (a heavily repeated context), nor when a request asks for a negative
+//! presence or frequency penalty or a repetition penalty below 1, which raise
+//! logits: a raised token outside the list is never seen.
 //!
 //! All processors are off by default ([`SampleParams::has_processors`]); a request
 //! that asks for none is sampled exactly as before.
