@@ -1558,16 +1558,23 @@ mod tests {
             let norm = |v: &[f32]| v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
             dot / (norm(a) * norm(b))
         };
-        // 1 - cosine measured on this config across seeds: up to ~1.6e-6
-        // with one activation level, near 1e-7 with two, where what is left
-        // is the int8 weights' own rounding. The floors hold each with a
-        // margin; `model`'s `ops_two_level_act` gates the activation side
-        // exactly.
-        for (levels, floor) in [(block::ActLevels::One, 0.999_99), (block::ActLevels::Two, 0.999_999_5)] {
-            let int8 = run(Dtype::I8, levels);
-            assert!(cosine(&int8.video, &fp32.video) > floor, "{levels:?}: video cosine {}", cosine(&int8.video, &fp32.video));
-            assert!(cosine(&int8.audio, &fp32.audio) > floor, "{levels:?}: audio cosine {}", cosine(&int8.audio, &fp32.audio));
-        }
+        // One activation level against the fp32 model: 1 - cosine measured up
+        // to ~1.6e-6 across seeds on this config.
+        let one = run(Dtype::I8, block::ActLevels::One);
+        assert!(cosine(&one.video, &fp32.video) > 0.999_99, "One: video cosine {}", cosine(&one.video, &fp32.video));
+        assert!(cosine(&one.audio, &fp32.audio) > 0.999_99, "One: audio cosine {}", cosine(&one.audio, &fp32.audio));
+        // Two levels compute what the int8 weights do: against the fp32 model
+        // on those same rounded weights, what is left is the activation's
+        // second-level rounding, whatever the weights' own rounding costs a
+        // given seed against the unrounded model: 1 - cosine measured near
+        // 1e-12 across seeds.
+        let rounded = Int8RoundedWeights { inner: &tensors, cfg, blocks: 0..cfg.num_layers as usize, kinds: &[], group: model::int8::GROUP };
+        let m = H3Transformer::load_on(&rounded, cfg, plan(), None, Dtype::F32, None).expect("a resident tiny model");
+        let _p = m.prepare(&rounded, packed.inputs().timestep).expect("prepare");
+        let exact = m.forward(&packed.inputs());
+        let two = run(Dtype::I8, block::ActLevels::Two);
+        assert!(cosine(&two.video, &exact.video) > 1.0 - 1e-9, "Two: video cosine {} against the rounded weights", cosine(&two.video, &exact.video));
+        assert!(cosine(&two.audio, &exact.audio) > 1.0 - 1e-9, "Two: audio cosine {} against the rounded weights", cosine(&two.audio, &exact.audio));
     }
 
     /// Splitting the block stack over two stages must change WHERE the work
