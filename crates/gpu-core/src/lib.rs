@@ -1374,7 +1374,7 @@ mod native_facade {
         /// | `gpu` | [`Gpu::new_gpu`] |
         /// | `wgpu` | [`Gpu::new_wgpu`] |
         /// | `gpu<i>` | [`Gpu::new_on_index`] - that physical card |
-        /// | anything else | [`Gpu::new`] (ambient) |
+        /// | anything else | what [`crate::devices::open_target`] resolves it to: a list's lowest-numbered card, the CPU, or the software adapter the process runs - a token it refuses panics, naming it |
         ///
         /// The `gpu<i>` arm is the reason this is shared rather than
         /// re-written per crate: seventeen private copies of this match
@@ -1392,7 +1392,14 @@ mod native_facade {
                 Some(tok) => match tok.strip_prefix("gpu").and_then(|i| i.parse::<u32>().ok()) {
                     Some(index) => Gpu::new_on_index(index, kernels)
                         .unwrap_or_else(|e| panic!("device '{tok}': {e}")),
-                    None => Gpu::new(kernels),
+                    None => {
+                        use crate::devices::{open_target, OpenTarget};
+                        match open_target(tok, &crate::devices::Inventory::probe(), crate::devices::ambient_compute_set()).unwrap_or_else(|e| panic!("{e}")) {
+                            OpenTarget::Cpu => Gpu::new_cpu(kernels),
+                            OpenTarget::Card(index) => Gpu::new_on_index(index, kernels).unwrap_or_else(|e| panic!("device '{tok}': {e}")),
+                            OpenTarget::Ambient => Gpu::new(kernels),
+                        }
+                    }
                 },
                 None => Gpu::new(kernels),
             }

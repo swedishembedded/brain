@@ -1364,6 +1364,42 @@ pub fn ambient_compute_set() -> &'static ComputeSet {
     })
 }
 
+/// What a `--device`-shaped token names for ONE handle, beside the process's
+/// own compute set `ambient`: [`crate::Gpu::open`]'s mapping for every token
+/// it has no arm of its own for (a list such as `gpu0,gpu1`, `cpu0-7`,
+/// `vulkan`, `software`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenTarget {
+    /// The CPU backend: the token names no card.
+    Cpu,
+    /// This physical card, the lowest-numbered the token names.
+    Card(u32),
+    /// The process's own device: the software adapter it already runs.
+    Ambient,
+}
+
+/// [`OpenTarget`] of `token` resolved against `probe`. `Err`, naming the
+/// token, when it does not parse or resolve on the machine, names only NPUs
+/// (no handle opens one), asks for a backend other than the one the process
+/// runs, or asks for the software adapter in a process that does not run it -
+/// never a different device instead.
+pub fn open_target(token: &str, probe: &Inventory, ambient: &ComputeSet) -> Result<OpenTarget, String> {
+    let set = DeviceSpec::parse(token).and_then(|spec| spec.resolve(probe)).map_err(|e| format!("device {token:?}: {e}"))?;
+    if set.software {
+        return if ambient.software { Ok(OpenTarget::Ambient) } else { Err(format!("device {token:?} names the software adapter, which this process does not run")) };
+    }
+    if let Some(&card) = set.gpus.first() {
+        if set.backend != ambient.backend {
+            return Err(format!("device {token:?} asks for the {} backend; this process runs {}", set.backend.name(), ambient.backend.name()));
+        }
+        return Ok(OpenTarget::Card(card));
+    }
+    if set.backend == Backend::Cpu || !set.cpu_cores.is_empty() {
+        return Ok(OpenTarget::Cpu);
+    }
+    Err(format!("device {token:?} names no card and no CPU a handle can open"))
+}
+
 /// Resolve `BRAIN_DEVICE` and `BRAIN_BACKEND` into a fresh, unpublished
 /// [`ComputeSet`] - the body [`ambient_compute_set`] caches, which every
 /// caller goes through: resolving twice would re-read the environment and
@@ -1781,6 +1817,26 @@ mod tests {
         assert_eq!(set.gpus, vec![0], "the backend text must not change which card");
         apply_backend_text(&mut set, "").unwrap();
         assert_eq!(set.backend, Backend::Cuda, "an empty value is no override at all");
+    }
+
+    /// A device token a handle has no arm of its own for opens what the token
+    /// names - a list's lowest-numbered card, the CPU - or is refused naming it; it is
+    /// never read as the ambient device.
+    #[test]
+    fn a_device_token_opens_what_it_names_or_is_refused() {
+        let probe = inv(2, 8, 0);
+        let ambient = resolve("", probe).unwrap();
+        let target = |t: &str| open_target(t, &probe, &ambient);
+        assert_eq!(target("gpu1,gpu0"), Ok(OpenTarget::Card(0)), "a list opens its lowest-numbered card");
+        assert_eq!(target("gpu0,cpu"), Ok(OpenTarget::Card(0)));
+        assert_eq!(target("cpu0-3"), Ok(OpenTarget::Cpu));
+        assert_eq!(target("wgpu"), Ok(OpenTarget::Card(0)), "the process's own backend over its cards");
+        for refused in ["gpu7", "tpu", "npu", "software"] {
+            let e = target(refused).unwrap_err();
+            assert!(e.contains(refused), "{refused}: {e}");
+        }
+        let e = target("vulkan").unwrap_err();
+        assert!(e.contains("vulkan") && e.contains("wgpu"), "another backend than the process runs: {e}");
     }
 
     /// A typo or an unsatisfiable request is an error that quotes what was

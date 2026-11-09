@@ -649,12 +649,9 @@ fn schedulable_gpus(device: Option<&str>) -> Vec<usize> {
     use gpu_core::devices;
     let set = match device {
         None => devices::ambient_compute_set().clone(),
-        Some(tok) => match devices::DeviceSpec::parse(tok).and_then(|s| s.resolve(&devices::Inventory::probe())) {
-            Ok(s) => s,
-            // An unparseable token is `Gpu::open`'s "anything else" case: the
-            // ambient selection decides, so this does too.
-            Err(_) => devices::ambient_compute_set().clone(),
-        },
+        // A token that names nothing on this machine is refused, as
+        // `Gpu::open` refuses it, never read as the ambient selection.
+        Some(tok) => devices::DeviceSpec::parse(tok).and_then(|s| s.resolve(&devices::Inventory::probe())).unwrap_or_else(|e| panic!("device {tok:?}: {e}")),
     };
     if set.backend == devices::Backend::Cpu {
         return Vec::new();
