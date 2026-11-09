@@ -427,6 +427,7 @@ navigation:
           - docs/book/v06-language-models/08-long-context.md
           - docs/book/v06-language-models/09-spectral-lm.md
           - docs/book/v06-language-models/10-model-cost.md
+          - docs/book/v06-language-models/11-project-architecture-comparison.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

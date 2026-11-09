@@ -1,0 +1,38 @@
+<!-- source-sha256: 49dd255973f686d8a1f27a8d0121246c580cd34c745aa302673fb7e229ceb5e1 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 360" width="620" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="360" fill="#ffffff"/>
+<line x1="61.16" y1="314" x2="61.16" y2="30" stroke="#edf2f7"/>
+<text x="61.16" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">7000</text>
+<line x1="218.93" y1="314" x2="218.93" y2="30" stroke="#edf2f7"/>
+<text x="218.93" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">8000</text>
+<line x1="376.7" y1="314" x2="376.7" y2="30" stroke="#edf2f7"/>
+<text x="376.7" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">9000</text>
+<line x1="534.47" y1="314" x2="534.47" y2="30" stroke="#edf2f7"/>
+<text x="534.47" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10000</text>
+<line x1="58" y1="302.03" x2="602" y2="302.03" stroke="#edf2f7"/>
+<text x="52" y="306.03" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="228.61" x2="602" y2="228.61" stroke="#edf2f7"/>
+<text x="52" y="232.61" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="155.19" x2="602" y2="155.19" stroke="#edf2f7"/>
+<text x="52" y="159.19" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="81.77" x2="602" y2="81.77" stroke="#edf2f7"/>
+<text x="52" y="85.77" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.5</text>
+<rect x="58" y="30" width="544" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.4" points="491.56,266.19 491.56,171.55"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.4" points="477.36,266.19 505.76,266.19"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.4" points="477.36,171.55 505.76,171.55"/><circle cx="491.56" cy="218.87" r="5" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.4" points="168.44,302.76 168.44,131.53"/><polyline fill="none" stroke="#c05621" stroke-width="2.4" points="154.24,302.76 182.64,302.76"/><polyline fill="none" stroke="#c05621" stroke-width="2.4" points="154.24,131.53 182.64,131.53"/><circle cx="168.44" cy="217.14" r="5" fill="#c05621"/><polyline fill="none" stroke="#2f855a" stroke-width="2.4" points="370.39,300.04 370.39,292.21"/><polyline fill="none" stroke="#2f855a" stroke-width="2.4" points="356.19,300.04 384.59,300.04"/><polyline fill="none" stroke="#2f855a" stroke-width="2.4" points="356.19,292.21 384.59,292.21"/><circle cx="370.39" cy="296.12" r="5" fill="#2f855a"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.4" points="309.81,96.24 309.81,52.03"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.4" points="295.61,96.24 324,96.24"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.4" points="295.61,52.03 324,52.03"/><circle cx="309.81" cy="74.13" r="5" fill="#9b2c2c"/><polyline fill="none" stroke="#6b46c1" stroke-width="2.4" points="430.97,306.66 430.97,284.07"/><polyline fill="none" stroke="#6b46c1" stroke-width="2.4" points="416.77,306.66 445.17,306.66"/><polyline fill="none" stroke="#6b46c1" stroke-width="2.4" points="416.77,284.07 445.17,284.07"/><circle cx="430.97" cy="295.36" r="5" fill="#6b46c1"/><line x1="58" y1="38.92" x2="602" y2="38.92" stroke="#a0aec0" stroke-dasharray="4 4"/></g>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">decode FLOPs of the 13th token</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">held-out loss (nats), mean and 95 percent interval over 6 seeds</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Quality against cost per block</text>
+<rect x="511.9" y="38" width="82.1" height="95" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<circle cx="529.9" cy="53" r="3.5" fill="#2b6cb0"/>
+<text x="545.9" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">dense</text>
+<circle cx="529.9" cy="70" r="3.5" fill="#c05621"/>
+<text x="545.9" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">moe</text>
+<circle cx="529.9" cy="87" r="3.5" fill="#2f855a"/>
+<text x="545.9" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">gdn</text>
+<circle cx="529.9" cy="104" r="3.5" fill="#9b2c2c"/>
+<text x="545.9" y="108" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">swa</text>
+<circle cx="529.9" cy="121" r="3.5" fill="#6b46c1"/>
+<text x="545.9" y="125" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">hybrid</text>
+</svg>

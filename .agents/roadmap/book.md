@@ -64,7 +64,8 @@ reproduced its worked examples from the text alone in another language.
       bug in a worked module and stale prose). All were fixed in the
       following commits; the project reproduced completely. A recheck has
       not been run.
-- [ ] Volume VI, Advanced Language Model Architectures: chapters 1 to 10 written.
+- [ ] Volume VI, Advanced Language Model Architectures: all 10 chapters and
+      the project written; the independent reader pass has not been run.
 
 ## Open
 

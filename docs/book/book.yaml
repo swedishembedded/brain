@@ -558,7 +558,7 @@ volumes:
         title: "Project: Comparing Language Model Blocks"
         question: "Can you implement several alternative language-model blocks and compare their quality, cost and memory fairly?"
         introduces: []
-        requires: [grouped-query-attention, router, gated-delta-network, flops-per-token, parity-tolerance, ablation]
+        requires: [grouped-query-attention, sliding-window-attention, router, load-balancing, gated-delta-network, chunked-recurrence, hybrid-architecture, reference-golden, parity-tolerance, flops-per-token, parameter-count, architecture-hypothesis-testing, ablation, gradient-check, kv-cache]
         brain: []
 
   - id: v07

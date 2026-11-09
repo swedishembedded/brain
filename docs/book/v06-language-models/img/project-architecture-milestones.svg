@@ -1,0 +1,24 @@
+<!-- source-sha256: 7d26e57e5c7d5927069ba0a49d115a9eadde2f0cd419ad4f6cfa54fc6dd07017 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="900" height="300" fill="#ffffff"/>
+<rect x="15" y="117" width="190" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  Four blocks</text>
+<text x="110" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gradients, chunked = recurrent</text>
+<rect x="245" y="27" width="190" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="56.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2  Cost model</text>
+<text x="340" y="72.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">counted = formula</text>
+<rect x="245" y="207" width="190" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="236.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3  Parity harness</text>
+<text x="340" y="252.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tolerance, planted bugs</text>
+<rect x="475" y="117" width="190" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4  Comparison</text>
+<text x="570" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">paired intervals, verdicts</text>
+<rect x="695" y="117" width="190" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="790" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5  Hybrid</text>
+<text x="790" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cost against quality</text>
+<path d="M110,117 L110,70 Q110,60 120,60 L242,60" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M110,183 L110,230 Q110,240 120,240 L242,240" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M435,60 L560,60 Q570,60 570,70 L570,114" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M435,240 L560,240 Q570,240 570,230 L570,186" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="208" y1="150" x2="472" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="668" y1="150" x2="692" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>
