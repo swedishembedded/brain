@@ -1,0 +1,21 @@
+<!-- source-sha256: 36a9dc8e48a65e7ee097bd6c2b063b503ac0890321eb19e9d023ce9cffd5c4a0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="760" height="300" fill="#ffffff"/>
+<text x="380" y="32.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Cache one token adds, all 36 layers, bf16 (Qwen3 8B shape)</text>
+<text x="250" y="60.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">bar length is proportional to bytes per token</text>
+<text x="20" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">multi-head</text>
+<text x="20" y="106.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">32 key-value heads</text>
+<rect x="250" y="77" width="400" height="30" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="660" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">576 KiB</text>
+<text x="20" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">grouped-query</text>
+<text x="20" y="164.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">8 key-value heads</text>
+<rect x="250" y="135" width="100" height="30" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="360" y="154.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">144 KiB</text>
+<text x="20" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">multi-query</text>
+<text x="20" y="222.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">1 key-value head</text>
+<rect x="250" y="193" width="12.5" height="30" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="272.5" y="212.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">18 KiB</text>
+<text x="20" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">multi-head latent</text>
+<text x="20" y="280.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">latent 512 + rotary key 64</text>
+<rect x="250" y="251" width="28.12" height="30" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="288.12" y="270.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">40.5 KiB</text>
+</svg>

@@ -509,8 +509,8 @@ volumes:
         title: "Attention Variants: Sharing and Compressing Keys"
         question: "How do we shrink the KV cache without losing what attention needs?"
         introduces: [multi-query-attention, multi-latent-attention, sliding-window-attention, attention-sink]
-        requires: [grouped-query-attention, kv-cache, low-rank-approximation]
-        brain: [deepseek2, ricursive]
+        requires: [grouped-query-attention, kv-cache, low-rank-approximation, rotary-position-embedding, causal-mask, stable-softmax, arithmetic-intensity, decode-phase]
+        brain: [deepseek2, ricursive, glmdsa]
       - id: mixture-of-experts
         title: "Mixture of Experts"
         question: "How can a model have a trillion parameters yet use only a few billion per token?"

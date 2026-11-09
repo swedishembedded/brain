@@ -1,0 +1,76 @@
+<!-- source-sha256: 058127fa5010e374f4b79cc704aaabe3d3d476a8f1437e8420e613e6489d29b3 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" width="960" height="640"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="960" height="640" fill="#ffffff"/>
+<rect x="10" y="10" width="460" height="620" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Rebuild every key and value (training, prefill)</text>
+<rect x="490" y="10" width="460" height="620" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="504" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Absorb the up-projections (decode)</text>
+<ellipse cx="240" cy="85" rx="75" ry="19" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="240" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x_j  (token j)</text>
+<rect x="60" y="143" width="150" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="135" y="161.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_DKV</text>
+<text x="135" y="177.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">d_c = 5</text>
+<rect x="270" y="143" width="150" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="345" y="161.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_KR, then RoPE</text>
+<text x="345" y="177.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">d_R = 2</text>
+<ellipse cx="135" cy="250" rx="75" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="135" y="254.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">c_j  (cached)</text>
+<ellipse cx="345" cy="250" rx="75" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="345" y="254.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">k_R,j  (cached)</text>
+<rect x="25" y="315" width="100" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="75" y="339.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_UK</text>
+<rect x="145" y="315" width="100" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="339.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_UV</text>
+<ellipse cx="75" cy="420" rx="50" ry="19" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="75" y="424.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">k_j</text>
+<ellipse cx="195" cy="420" rx="50" ry="19" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="424.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">v_j</text>
+<rect x="40" y="480" width="400" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="240" y="501.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">q . k_j + q_R . k_R,j, softmax,</text>
+<text x="240" y="517.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">weighted sum of the v_j  (all H heads)</text>
+<rect x="165" y="555" width="150" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="240" y="579.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_O</text>
+<line x1="237.19" y1="105.04" x2="137.81" y2="141.96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="242.81" y1="105.04" x2="342.19" y2="141.96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="135" y1="190" x2="135" y2="227" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="345" y1="190" x2="345" y2="227" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="132.6" y1="271.8" x2="77.4" y2="313.2" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="137.4" y1="271.8" x2="192.6" y2="313.2" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="75" y1="358" x2="75" y2="398" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="195" y1="358" x2="195" y2="398" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="75" y1="442" x2="75" y2="477" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="195" y1="442" x2="195" y2="477" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="345" y1="273" x2="345" y2="477" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="240" y1="533" x2="240" y2="552" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="585" cy="85" rx="60" ry="22" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="585" y="81.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">q, q_R</text>
+<text x="585" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(new token)</text>
+<ellipse cx="720" cy="85" rx="60" ry="19" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="720" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">c_j  (cached)</text>
+<ellipse cx="855" cy="85" rx="60" ry="19" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="855" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">k_R,j  (cached)</text>
+<rect x="525" y="143" width="120" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="585" y="161.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_UK^T</text>
+<text x="585" y="177.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">on q only</text>
+<ellipse cx="585" cy="250" rx="60" ry="19" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="585" y="254.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">q~  (d_c = 5)</text>
+<rect x="510" y="310" width="420" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="720" y="331.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">q~ . c_j + q_R . k_R,j, softmax</text>
+<text x="720" y="347.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(one latent shared by all H heads)</text>
+<rect x="570" y="398" width="300" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="720" y="416.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">weighted sum of the c_j</text>
+<text x="720" y="432.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(d_c = 5 per head)</text>
+<rect x="570" y="480" width="300" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="720" y="501.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_UV on each head, then W_O,</text>
+<text x="720" y="517.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">or W_OV = W_O W_UV in one product</text>
+<ellipse cx="720" cy="580" rx="75" ry="19" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="720" y="584.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">output  (D)</text>
+<line x1="585" y1="110" x2="585" y2="140" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="585" y1="190" x2="585" y2="228" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="585" y1="272" x2="585" y2="307" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="720" y1="107" x2="720" y2="307" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="855" y1="107" x2="855" y2="307" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="720" y1="363" x2="720" y2="395" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="720" y1="445" x2="720" y2="477" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="720" y1="533" x2="720" y2="558" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="720" y="626.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">no key or value is ever rebuilt for a cached token</text>
+</svg>

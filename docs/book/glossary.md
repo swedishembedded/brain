@@ -38,6 +38,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **attention backward**: the gradient of attention, obtained by undoing in order the weighted average, the softmax rule on each row, the score product with its scale and the three projections, with the input collecting three contributions and no step of its own for the mask. *([Self-Attention](v05-sequences/07-self-attention.md))*
 
+**attention sink**: a key, usually at one of the first positions of the text, that most queries score high whatever their content and whose value is near zero, so that the softmax has somewhere to put its mass; a window that keeps the sink beside its recent keys keeps this behaviour. *([Attention Variants: Sharing and Compressing Keys](v06-language-models/03-attention-variants.md))*
+
 **autoencoder**: a network trained to output its own input after passing it through a bottleneck layer much narrower than the input, so that it must learn a short code from which the input can be rebuilt. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 **autoregressive factorization**: writing the probability of a sequence as the product, over its positions, of the probability of each token given all the tokens before it, an identity that holds for every distribution over sequences. *([Language Modeling](v05-sequences/04-language-modeling.md))*
@@ -498,6 +500,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **multi-head attention**: attention run $H$ times on slices of the width, each head with its own queries, keys and values, the outputs placed side by side and mixed by one output matrix, so that a position can ask several different questions of the same set at once. *([Self-Attention](v05-sequences/07-self-attention.md))*
 
+**multi-latent attention**: attention that computes the keys and values of all heads from one small latent vector per token, caches only the latent and a small rotary key, and absorbs the up-projections into the query and the output at decode time so that no key or value is rebuilt. *([Attention Variants: Sharing and Compressing Keys](v06-language-models/03-attention-variants.md))*
+
+**multi-query attention**: attention in which every query head of a layer reads one shared key and one shared value per position, so a layer caches $2 d_h$ numbers per token instead of $2 H d_h$, and the heads differ only through their queries. *([Attention Variants: Sharing and Compressing Keys](v06-language-models/03-attention-variants.md))*
+
 **multilayer perceptron**: a network of fully connected layers, each followed by an activation function (usually except the last), so that each layer reads all of the outputs of the one before it; the name is historical, since its units rarely use the step. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **multiple comparisons**: the problem that testing many hypotheses makes some significant by chance, so that the chance of at least one false positive grows with their number, controlled by tests at a smaller level such as the Bonferroni correction. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
@@ -721,6 +727,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **sinusoid**: a wave $A\cos(2\pi f t + \varphi)$ described by an amplitude $A$ (its largest value), a frequency $f$ (cycles per second) and a phase $\varphi$ (where in its cycle it stands at time zero); a cosine and a sine are the same sinusoid a quarter period apart. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
 **sinusoidal encoding**: a position vector made of sines and cosines at a geometric scale of rates, $\sin(i\omega_m)$ and $\cos(i\omega_m)$, which needs no training and has, for every offset, a fixed linear map from the vector at one position to the vector at another. *([Positional Information](v05-sequences/08-positions.md))*
+
+**sliding-window attention**: attention in which a query reads only the last $n_{\mathrm{win}}$ keys, itself included, so the cache of the layer is bounded by the window; a stack of such layers reaches $L(n_{\mathrm{win}} - 1) + 1$ positions. *([Attention Variants: Sharing and Compressing Keys](v06-language-models/03-attention-variants.md))*
 
 **softmax**: the function that turns a vector of real scores into a probability vector by exponentiating each score and dividing by the sum of the exponentials, so that the outputs are positive, add to one and keep the order of the scores. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
