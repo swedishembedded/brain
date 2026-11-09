@@ -9,9 +9,9 @@
 //!     nope/rope head split and interleaved RoPE on the rope slice.
 //!   * **MoE** — sigmoid `noaux_tc` router (per-expert selection bias), a shared
 //!     always-on expert, and a `first_k_dense_replace` dense→MoE layer schedule.
-//!   * **DSA** sparse indexer + IndexShare and **MTP** are added in later phases;
-//!     with `index_topk >= block_size` the indexer is a no-op and attention is
-//!     exact dense MLA (the regime tiny models / tests run in).
+//!   * **DSA** sparse indexer (with IndexShare and indexer distillation) and
+//!     **MTP**; with `index_topk >= block_size` the indexer is a no-op and
+//!     attention is exact dense MLA (the regime tiny models / tests run in).
 //!
 //! `model.rs` holds the forward/backprop dispatch graph, `config.rs` the
 //! architecture + parameter layout, `import.rs` the HuggingFace weight import.
