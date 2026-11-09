@@ -84,18 +84,19 @@ fn default_attention_factor(scale: f32) -> f32 {
     }
 }
 
-/// HF's `find_correction_dim`: the (fractional) channel index whose rotation
-/// completes `num_rotations` full turns over a `max_position_embeddings`
-/// context, at this `(dim, base)` RoPE schedule.
+/// HF's `find_correction_dim`: the (fractional) rotary pair index `i` (pair
+/// `i` turns at `base^(-2i/dim)`, `0 <= i < dim/2`) whose rotation completes
+/// `num_rotations` full turns over a `max_position_embeddings` context.
 fn find_correction_dim(num_rotations: f32, dim: u32, base: f32, max_position_embeddings: u32) -> f32 {
     (dim as f32 * (max_position_embeddings as f32 / (num_rotations * 2.0 * PI)).ln()) / (2.0 * base.ln())
 }
 
-/// HF's `find_correction_range`: the `[low, high]` channel-index bounds (in
-/// the `dim`-space of [`find_correction_dim`], i.e. NOT yet halved) between
-/// which the linear ramp interpolates, floor/ceil'd (`truncate = true`, this
-/// module's fixed default - see the module doc) and clamped into `[0, dim -
-/// 1]`.
+/// HF's `find_correction_range`: the `[low, high]` pair-index bounds (the
+/// units of [`find_correction_dim`]) between which the linear ramp
+/// interpolates, floor/ceil'd (`truncate = true`, this module's fixed default -
+/// see the module doc) and clamped into `[0, dim - 1]` as HF does. The pairs
+/// stop at `dim/2 - 1`, so the upper clamp only matters if even the slowest
+/// pair turns more than `beta_slow` times, which no shipped config does.
 fn find_correction_range(low_rot: f32, high_rot: f32, dim: u32, base: f32, max_position_embeddings: u32) -> (f32, f32) {
     let low = find_correction_dim(low_rot, dim, base, max_position_embeddings).floor();
     let high = find_correction_dim(high_rot, dim, base, max_position_embeddings).ceil();
