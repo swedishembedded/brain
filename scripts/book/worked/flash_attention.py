@@ -798,7 +798,9 @@ def wrong_backward_passes():
     return (f"The check of the previous block (same inputs, same tiles) run on the correct tiled backward pass and on deliberately wrong "
             "ones. Cells are the largest relative difference |a - b| / max(|a|, |b|) of the tensor from the materialised backward pass over "
             "the entries whose gradient is above 1e-4; a difference of 1e-6 or more is written to one decimal, a smaller one as the "
-            "power of ten it stays below. Dropping D_i leaves dV, which does not use it, correct.\n\n"
+            "power of ten it stays below. Dropping D_i leaves dV, which does not use it, correct. The mutation 'the causal mask left out' "
+            "removes two things at once: the test of each recomputed score (a key after the query keeps its score) and the skip of the "
+            "tiles that lie wholly after a block's last row (every tile is visited).\n\n"
             + _table(["mask", "backward pass", "dQ", "dK", "dV"], rows, "llrrr"))
 
 
@@ -1004,10 +1006,17 @@ def float32_numerics():
         rows.append((f"tiled, B_k = {bk}", units(_max_abs(tiled, mat)), units(_max_abs(tiled, truth)), f"{same} of {n}"))
     return (f"{('Generator: the book\'s SplitMix64, seed ' + _seed(NAME_F32) + ' (`seed_of` of the name `' + NAME_F32 + '`).')} Causal attention of one head, "
             f"T = {t}, d_h = {d}. Draws, in this order: Q, K, V (each {t} by {d}, row by row, `normal()` rounded to float32). Every product, "
-            "sum, difference and quotient is rounded to float32 one operation at a time (no fused multiply-add), sums run left to right "
-            "(a dot product over the head width, the normalizer, and the weighted sum over the keys), exp is the library exp of double "
-            "precision rounded to float32, and the scale is the float32 nearest to 1 / sqrt(d). The tiled version applies the update of "
-            "the chapter per tile of B_k keys and divides by l at the end; the materialised version divides each weight first. The reference "
+            "sum, difference and quotient is rounded to float32 one operation at a time (no fused multiply-add: a product is rounded, then "
+            "added), sums run left to right from 0.0 (a dot product over the head width, the normalizer, and the weighted sum over the keys), "
+            "exp is the library exp of double precision rounded to float32, and the scale is the float32 nearest to 1 / sqrt(d). Row i reads "
+            "the keys 0 to i. The materialised version computes s_j = scale * (q . k_j), the maximum m of the row, e_j = exp(s_j - m), the sum z "
+            "of the e_j, the weights p_j = e_j / z, and each output channel as the sum of p_j v_j. The tiled version cuts the keys 0 to i into "
+            "tiles of B_k consecutive keys (the last tile is shorter) and keeps (m, l, o). For each tile it computes the scores s_j, the new "
+            "maximum m' = max(m, largest score of the tile), the correction corr = exp(m - m') (0 for the first tile), the weights "
+            "p_j = exp(s_j - m'), the tile's own partial sum of the p_j (left to right from 0.0) and, per channel, the tile's own partial sum of "
+            "the p_j v_j (left to right from 0.0), and updates l = l * corr + (the tile's sum of p) and o = o * corr + (the tile's sum of p v), "
+            "each product and sum rounded to float32; the output is o / l at the end. This per-tile order of additions is not the key-by-key "
+            "order of the kernel pseudocode above, which rounds differently; the table is for the order stated here. The reference "
             "in double is attention in double precision from the same float32 inputs. Differences are the largest absolute difference "
             "over the 768 outputs, in units of u = 2^-24 (the float32 unit roundoff) and rounded up to a whole number; the outputs are "
             "below 3 in magnitude. The last column counts outputs equal to the materialised float32 result in every bit; the count "

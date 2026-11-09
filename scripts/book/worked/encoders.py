@@ -114,6 +114,9 @@ V_A = len(WP_A)
 T_A = 10                       # [CLS] the NOUN STEM ##ed near the PLACE . [SEP]
 CFG_A = {"V": V_A, "D": 16, "H": 2, "FF": 24, "L": 1, "T": T_A}
 NAME_A_INIT, NAME_A_SENT, NAME_A_MASK = "encoders.mlm.init", "encoders.mlm.sentences", "encoders.mlm.mask"
+# the stable-digits rule changes one weight; this chapter names it
+NUDGE_NOTE = (" In this chapter the weight that is changed is the first coordinate of the row of the embedding table that belongs to "
+             "`[CLS]` (id 1 in both languages), the entry E[1][0], which every sentence reads.")
 SLOT_NAMES = {1: "the", 2: "noun", 3: "verb stem", 4: "##ed", 5: "near", 6: "the", 7: "place", 8: "full stop"}
 FULL = lambda i, j: True   # noqa: E731  (every position may read every other: the encoder's mask)
 CAUSAL = lambda i, j: j <= i   # noqa: E731
@@ -254,13 +257,14 @@ def corruption_example():
                 tot[k] += 1
     rows_c = []
     for rate_name, rate in (("0.15 (BERT)", RATE_BERT), ("0.30 (brain's default)", RATE_BRAIN), ("0.40 (this chapter's runs)", RATE_TOY)):
-        gr = bookrng.generator(NAME_CORRUPT + ".rate." + str(rate))
+        rate_name_seed = NAME_CORRUPT + ".rate." + str(rate)
+        gr = bookrng.generator(rate_name_seed)
         s = 0
         for _ in range(n):
             ids2 = ids_a(gr.integer(6), gr.integer(4))
             _, _, m2, _ = corrupt(ids2, gr, rate)
             s += sum(m2)
-        rows_c.append((rate_name, _fx(s / n, 3), _fx(s / n / 8, 3)))
+        rows_c.append((rate_name, f"`{rate_name_seed}`", _seed(rate_name_seed), _fx(s / n, 3), _fx(s / n / 8, 3)))
     return (f"{_seed(NAME_CORRUPT)} for `{NAME_CORRUPT}`. Draws: for each sentence `integer(6)` (the noun) then `integer(4)` (the place); "
             "then, positions in order with the specials `[CLS]` and `[SEP]` skipped, one `uniform()` for selection (selected when below "
             f"the rate, here {RATE_TOY}), and for a selected position a second `uniform()` r (r < 0.8: `[MASK]`; r < 0.9: the input becomes "
@@ -270,8 +274,10 @@ def corruption_example():
             + f"\n\nOver {_int(n)} sentences from `{NAME_CORRUPT}.count` at rate {RATE_TOY}, the selected positions divide into "
             + ", ".join(f"{_fx(tot[k] / sel, 3)} {k}" for k in ("mask", "random", "keep"))
             + " (the expected 0.8, 0.1 and 0.1; a `random` draw that lands on the true id counts as `random`). Selected positions per "
-            "sentence, of the 8 that are not special, from `" + NAME_CORRUPT + ".rate.<rate>`:\n\n"
-            + _table(["rate", "selected per sentence", "share of the 8 positions"], rows_c, "lrr"))
+            f"sentence, of the 8 that are not special, for {n:,} sentences each, drawn as above (noun, place, then the corruption draws) from the "
+            "stream named `" + NAME_CORRUPT + ".rate.` followed by the rate written as the shortest decimal (0.15, 0.3, 0.4, not the "
+            "0.30 and 0.40 of the first column):\n\n"
+            + _table(["rate", "stream", "seed", "selected per sentence", "share of the 8 positions"], rows_c, "llrrr"))
 
 
 def seen_token_odds():
@@ -359,7 +365,7 @@ def fill_blanks(p, kind):
 
 def train_a(job):
     """One run of a model of language A: (kind, nudge). Both start from `NAME_A_INIT` (one block, D = 16, 2 heads, F = 24,
-    V = 25, T = 10; `training_gpt.init_gpt`, every entry 0.02 normal(), tied head); `nudge` is added to E[0][0]. Every step
+    V = 25, T = 10; `training_gpt.init_gpt`, every entry 0.02 normal(), tied head); `nudge` is added to E[1][0], the first coordinate of the `[CLS]` row. Every step
     takes TRAIN_A['B'] sentences from `NAME_A_SENT` (noun then place per sentence, the same sentences for both kinds). The
     encoder corrupts each with `corrupt` at RATE_TOY from `NAME_A_MASK` and is scored at the selected positions only (full mask);
     the causal model reads positions 0 .. T-2 under the causal mask and is scored at every position on the next token. The loss
@@ -367,7 +373,7 @@ def train_a(job):
     kind, nudge = job
     o = TRAIN_A
     p = tg.init_gpt(NAME_A_INIT, CFG_A)
-    p["E"][0][0] += nudge
+    p["E"][CLS][0] += nudge
     ts = tg.tensors(p)
     mom = _zero_like(ts)
     decay = tg.decayed(CFG_A)
@@ -442,10 +448,21 @@ def slot_table():
             f"({_seed(NAME_A_INIT)}); sentences from `{NAME_A_SENT}` ({_seed(NAME_A_SENT)}), corruption draws from `{NAME_A_MASK}` "
             f"({_seed(NAME_A_MASK)}). {TRAIN_A['steps']} steps of {TRAIN_A['B']} sentences, AdamW (peak {TRAIN_A['peak']}, floor "
             f"{TRAIN_A['floor']}, {TRAIN_A['warmup']} warmup steps, cosine decay, weight decay {TRAIN_A['wd']}, betas "
-            f"{TRAIN_A['b1']} and {TRAIN_A['b2']}, epsilon {TRAIN_A['eps']}, global clip {TRAIN_A['clip']}). The encoder is scored "
+            f"{TRAIN_A['b1']} and {TRAIN_A['b2']}, epsilon {TRAIN_A['eps']}, global clip {TRAIN_A['clip']}). The training stream: "
+            f"every step takes {TRAIN_A['B']} sentences in turn from `{NAME_A_SENT}`, each as `integer(6)` (the noun) then `integer(4)` "
+            f"(the place), so both models see the same sentences. The encoder corrupts each sentence at once, in order, with the rule of "
+            f"the corruption section at rate {RATE_TOY} and draws from `{NAME_A_MASK}` only (a sentence's draws follow the previous "
+            "sentence's); it reads the corrupted sentence of 10 tokens under the full mask and is supervised at the selected positions, "
+            "so the number of supervised positions of a step varies with the draws. The causal model reads the first 9 tokens of the "
+            "sentence under the causal mask and is supervised at all 9 positions on the next token (16 x 9 = 144 per step); it draws "
+            "nothing from the mask stream. The loss of a step is the sum of the cross-entropies at the supervised positions of all "
+            f"{TRAIN_A['B']} sentences divided by the number of those positions, and its gradient is clipped by the coefficient "
+            "min(1, clip / (norm + 1e-6)) before the AdamW update (decoupled weight decay on every matrix, none on the gains, bias-corrected "
+            "moments, update number s = step + 1). The learning rate of the 0-based step t is peak (t + 1) / warmup for t below the warmup, "
+            "then floor + (peak - floor) (1 + cos(pi u)) / 2 with u = (t - warmup) / (steps - warmup). The encoder is scored "
             "after training with exactly one `[MASK]` in the sentence, each of the 8 word positions in turn, over all 24 sentences; the "
             "causal model is scored on the token at each position from the tokens before it. Cross-entropy in nats; the floor is the "
-            f"entropy of the slot given what the model reads. {stable.RULE}\n\n"
+            f"entropy of the slot given what the model reads. {stable.RULE}{NUDGE_NOTE}\n\n"
             + _table(["position", "slot", "encoder floor", "encoder", "causal floor", "causal"], rows, "rlrrrr"))
 
 
@@ -549,16 +566,26 @@ def vocabulary_b():
     docs, doc_m, queries = eval_set()
     ex = realize(5, 0, 0, 0, 0, 0, 0)
     ex2 = realize(5, 1, 1, 1, 2, 1, 1)
+    ids_text = ", ".join(f"`{w}` = {i}" for i, w in enumerate(WORDS_B))
     return (f"A sentence is `[CLS] det animal verb prep det place`, T = {T_B} tokens, V = {V_B} (`[PAD]`, `[CLS]`, then the words below). "
             "The meaning of a sentence is its pair (animal group, place group), 4 x 4 = 16 meanings numbered m = 4 a + b; a word that "
-            "is written `x = y` is one group (two synonyms). The determiners, the verb and the preposition carry no meaning.\n\n"
+            "is written `x = y` is one group (two synonyms). The determiners, the verb and the preposition carry no meaning. The ids "
+            "follow the table read top to bottom and each row left to right, after `[PAD]` and `[CLS]`, the first synonym of a group "
+            "before the second: " + ids_text + ".\n\n"
             + _table(["kind", "words"], rows, "ll")
+            + "\n\nA sentence is built from a meaning m, the index wa (0 or 1) of the animal word in its group, the index wb of the place "
+            "word in its group, and four noise indices into the lists above, always drawn in this order and range: the first determiner "
+            "`integer(2)`, the verb `integer(3)`, the preposition `integer(2)`, the second determiner `integer(2)`. The tokens are `[CLS]`, "
+            "determiner 1, animal word, verb, preposition, determiner 2, place word. The meanings of the training pairs are the 12 that are "
+            "not held out, in increasing order of m."
             + f"\n\nMeaning 5 is (animal group 1, place group 1): `{text_b(ex)}` and `{text_b(ex2)}` are two sentences of that meaning "
             f"with no content word in common. Meanings {HELD_MEANINGS} (animal group, place group) = "
             + ", ".join(str(ab) for ab in HELD_OUT)
             + f" are held out: no training pair has them. The collection used for retrieval has {len(docs)} documents (two per "
-            f"meaning, always the first synonym of each group) and {len(queries)} queries (one per meaning, always the second synonym), "
-            f"from `{NAME_B_EVAL}` ({_seed(NAME_B_EVAL)}); a document is relevant to the query of its meaning.")
+            f"meaning, always the first synonym of each group, wa = wb = 0) and {len(queries)} queries (one per meaning, always the second "
+            f"synonym, wa = wb = 1), from `{NAME_B_EVAL}` ({_seed(NAME_B_EVAL)}). Draws: the four noise indices of each document in turn "
+            "(meaning 0 twice, meaning 1 twice, and so on up to meaning 15: 32 documents), and then the four noise indices of each "
+            "query for the meanings 0 to 15 in order; nothing else is drawn. A document is relevant to the query of its meaning.")
 
 
 # ------------------------------------------------------------------------------------------------ encoding, pooling
@@ -682,14 +709,14 @@ def infonce_example():
             assert abs(ce - per[-1]) < 1e-12
         rows.append((f"{tau:g}", *[_fx(v, 4) for v in per], _fx(_sum(per) / B, 4)))
     p1 = _softmax_list([s / 0.1 for s in S[1]])
-    return ("A batch of B = 3 pairs; the matrix of cosines s_ij between the anchor of pair i (row) and the positive of pair j (column) is\n\n"
+    return ("A batch of B = 3 pairs; the matrix of cosines cs_ij between the anchor of pair i (row) and the positive of pair j (column) is\n\n"
             + _table(["", "j = 0", "j = 1", "j = 2"], [(f"i = {i}", *[_fx(v, 1) for v in S[i]]) for i in range(B)], "lrrr")
-            + "\n\nThe loss of row i is the cross-entropy of the softmax of (s_i0, s_i1, s_i2) / tau against the label i (the library "
-            "cross-entropy and the explicit -log(e^{s_ii/tau} / sum_j e^{s_ij/tau}) agree to 1e-12 in every cell):\n\n"
+            + "\n\nThe loss of row i is the cross-entropy of the softmax of (cs_i0, cs_i1, cs_i2) / tau against the label i (the library "
+            "cross-entropy and the explicit -log(e^{cs_ii/tau} / sum_j e^{cs_ij/tau}) agree to 1e-12 in every cell):\n\n"
             + _table(["tau", "row 0", "row 1", "row 2", "mean (one direction)"], rows, "lrrrr")
             + f"\n\nWith every similarity equal the loss is ln 3 = {_fx(math.log(3), 4)}. At tau = 0.1 the softmax of row 1 is "
-            + _vec_text(p1, 4) + f", so the gradient of the row's loss with respect to s_11 is (p_11 - 1) / tau = {_fx((p1[1] - 1) / 0.1, 3)} "
-            f"and with respect to the wrong cosine s_12 it is p_12 / tau = {_fx(p1[2] / 0.1, 3)}.")
+            + _vec_text(p1, 4) + f", so the gradient of the row's loss with respect to cs_11 is (p_11 - 1) / tau = {_fx((p1[1] - 1) / 0.1, 3)} "
+            f"and with respect to the wrong cosine cs_12 it is p_12 / tau = {_fx(p1[2] / 0.1, 3)}.")
 
 
 def _vec_text(v, d=3):
@@ -755,7 +782,7 @@ def bag_of_words():
 
 def train_b(job):
     """One contrastive run: (pool, tau, nudge). Weights from `NAME_B_INIT` (`init_gpt`, V = 25, T = 7, D = 16, one block); `nudge`
-    is added to E[0][0]. Each of the 100 steps draws one `shuffle` of the 12 trained meanings from `NAME_B_STREAM`, takes the
+    is added to E[1][0], the first coordinate of the `[CLS]` row. Each of the 100 steps draws one `shuffle` of the 12 trained meanings from `NAME_B_STREAM`, takes the
     first 8, and for them in order one `draw_pair`; every sentence is encoded with the full mask and pooled (`pool`), the vectors
     are scaled to length 1, the loss is the symmetric InfoNCE at temperature `tau`, the gradient goes through the pooling and the
     block, and AdamW (peak 0.01, floor 0.001, 10 warmup steps, cosine decay, decay 0.1, betas 0.9 and 0.95, clip 1) steps.
@@ -764,7 +791,7 @@ def train_b(job):
     pool, tau, nudge = job
     o = TRAIN_B
     p = tg.init_gpt(NAME_B_INIT, CFG_B)
-    p["E"][0][0] += nudge
+    p["E"][CLS][0] += nudge
     ts = tg.tensors(p)
     mom = _zero_like(ts)
     decay = tg.decayed(CFG_B)
@@ -832,9 +859,15 @@ def contrastive_training():
     return (f"Language B, one block (V = {cfg['V']}, T = {cfg['T']}, D = {cfg['D']}, {cfg['H']} heads, SwiGLU width {cfg['FF']}) with mean "
             f"pooling and tau = 0.1, initial weights from `{NAME_B_INIT}` ({_seed(NAME_B_INIT)}), pairs from `{NAME_B_STREAM}` "
             f"({_seed(NAME_B_STREAM)}), {o['steps']} steps of {o['B']} pairs, AdamW (peak {o['peak']}, floor {o['floor']}, {o['warmup']} "
-            f"warmup steps, cosine decay, decay {o['wd']}, betas {o['b1']} and {o['b2']}, clip {o['clip']}). After the step, on the "
+            f"warmup steps, cosine decay, decay {o['wd']}, betas {o['b1']} and {o['b2']}, epsilon {o['eps']}, clip {o['clip']}; the update "
+            "rule, the learning-rate curve and the clip coefficient are those of the training stream of language A). Each step: one "
+            f"`shuffle` of the 12 training meanings from `{NAME_B_STREAM}` (the permutation of the indices 0 to 11, then the first 8 "
+            "taken), and for those 8 meanings in that order one pair: wa = `integer(2)`, wb = `integer(2)`, the four noise indices of "
+            "the first sentence (anchor), the four noise indices of the second (positive); the first sentence has the animal word wa and "
+            "the place word wb, the second 1 - wa and 1 - wb. Every sentence is encoded with the full mask and pooled, the vectors are "
+            "scaled to length 1, and the loss is the symmetric InfoNCE of the batch. After the step, on the "
             "collection of the retrieval set: the loss (mean of the ten steps ending there), the mean cosine of a query with its two relevant "
-            "documents, with the 30 others, and recall at 2 over all 16 queries and over the 4 held-out meanings. " + stable.RULE
+            "documents, with the 30 others, and recall at 2 over all 16 queries and over the 4 held-out meanings. " + stable.RULE + NUDGE_NOTE
             + "\n\n" + _table(["step", "batch loss", "cosine, relevant", "cosine, others", "recall at 2", "recall at 2, held-out"], rows,
                               "rrrrrr"))
 
@@ -915,10 +948,15 @@ def pca_summary():
     return (f"Four meanings (animal group, place group) = (0,0), (1,1), (2,2), (3,3), named by the first synonym: {names}. Eight sentences "
             f"each: the four combinations of synonyms, two draws of the noise each, from `{NAME_PCA}` ({_seed(NAME_PCA)}). Each sentence "
             "is encoded with the full mask and mean-pooled (the run of the training table, un-nudged, and the same weights before "
-            "training). The 32 vectors are centred and projected on the first two principal directions (power iteration of Chapter 3). "
-            "The table gives the variance kept, the mean distance of a point from its meaning's centre in the plane, and the smallest "
-            "distance between two meanings' centres.\n\n"
-            + _table(["encoder", "variance in 2 directions", "mean spread within a meaning", "smallest gap between meanings"], rows, "lrrr"))
+            "training); the pooled vectors are the raw means of 16 numbers, not scaled to length 1. Draws: for each of the four meanings "
+            "in order, for (wa, wb) = (0,0), (0,1), (1,0), (1,1) in order, two repetitions each of the four noise indices (so wa and wb "
+            "are not drawn). The 32 vectors are centred and projected on the first two principal directions (power iteration of "
+            "Chapter 3 on the covariance with divisor 32, 500 iterations from the vector with entries (1 + 0.1 j) / 4 for j = 0 to 15, "
+            "the second direction after deflating the first). The variance kept is the sum of the two eigenvalues over the mean squared "
+            "length of the centred vectors. The spread of a meaning is the root-mean-square distance, in the plane, of its 8 points from "
+            "their mean, and the table gives the mean of the four spreads; the last column is the smallest distance between two "
+            "meanings' centres (the means of their 8 points).\n\n"
+            + _table(["encoder", "variance in 2 directions", "rms spread within a meaning, mean of the four", "smallest gap between meanings"], rows, "lrrr"))
 
 
 def pooling_table():
@@ -1019,7 +1057,7 @@ def probe_table():
             f"(a 16 by 4 matrix and 4 biases, zeros at the start) on the mean-pooled vector scaled to length 1, fitted by {PROBE_STEPS} "
             f"full-batch gradient steps of rate {PROBE_LR:g} on the mean cross-entropy of the first n labelled sentences, and scored on 200 test "
             f"sentences. Sentences: per sentence `integer(16)` for the meaning, `integer(2)` for wa, `integer(2)` for wb, then the four noise "
-            f"indices, from `{NAME_PROBE}.train` ({_seed(NAME_PROBE + '.train')}) and `{NAME_PROBE}.test` ({_seed(NAME_PROBE + '.test')}). "
+            f"indices (determiner `integer(2)`, verb `integer(3)`, preposition `integer(2)`, determiner `integer(2)`), from `{NAME_PROBE}.train` ({_seed(NAME_PROBE + '.train')}) and `{NAME_PROBE}.test` ({_seed(NAME_PROBE + '.test')}). "
             "Accuracy on the test sentences; chance is 0.25. The trained encoder is the contrastive run above (mean pooling, tau = 0.1).\n\n"
             + _table(["labelled sentences", "encoder with random weights", "contrastive encoder"], rows, "rrr"))
 
@@ -1085,11 +1123,16 @@ def cost_of_a_pass():
         total = dense + att
         rows.append((_int(T), _sci(dense, 3), _sci(att, 3), _sci(att_full, 3), _fx(total / bytes_w, 1), _fx(total / (T * bytes_w), 2)))
     pairs = band_pairs(8192, MB["window"])
+    norm_vectors = 1 + (MB["L"] - 1) + MB["L"] + 1
     full_layers = sum(1 for l in range(MB["L"]) if mb_layer_is_full(l))
     return (f"ModernBERT-large as `ModernBertConfig::modernbert_large` states it: V = {MB['V']}, D = {MB['D']}, {MB['L']} layers, "
             f"{MB['H']} heads, GeGLU width {MB['FF']}, full attention in layers 0, 3, 6, ... ({full_layers} of {MB['L']}), a window of "
             f"{MB['window']} positions to each side in the others. Parameters counted from the tensor manifest: {_int(mb_parameters())}; "
-            f"in the {MB['L']} layers' matrices (4 D^2 + 3 D F each): {_int(mb_matrix_parameters())}; fp32 weights {_fx(bytes_w / 1e9, 3)} GB "
+            f"in the {MB['L']} layers' matrices (4 D^2 + 3 D F each): {_int(mb_matrix_parameters())}; the rest of the count is the {MB['V']} x {MB['D']} "
+            f"token table and the {norm_vectors} norm vectors of {MB['D']} weights (one after the embedding, {MB['L'] - 1} in front of the "
+            f"attentions, since layer 0 has none, {MB['L']} in front of the feed-forward networks, and the final one: "
+            f"1 + {MB['L'] - 1} + {MB['L']} + 1); a layer holds Wqkv (3 D^2), the projection (D^2), Wi (2 F D, the two halves of the gated "
+            f"input) and Wo (F D). fp32 weights {_fx(bytes_w / 1e9, 3)} GB "
             f"({_fx(16 * P / 1e9, 2)} GB with a gradient and two AdamW moments). A pass over T tokens costs 2 T (matrix parameters) FLOPs in the "
             "matrices and 4 D (pairs) FLOPs per layer in attention, pairs = T^2 in a full layer and the pairs with |i - j| <= 64 in a local "
             f"one (at T = 8192 that is {_int(pairs)} of {_int(8192 * 8192)}). FLOPs per weight byte: all FLOPs of the pass over the bytes of "
@@ -1168,7 +1211,10 @@ def t5_buckets():
     seen = sorted({v for row in table for v in row})
     missing = [b for b in range(32) if b not in seen]
     return ("T5's encoder: 32 buckets, maximum distance 128, so half = 16 buckets for each direction and offsets below max_exact = 8 are "
-            "their own bucket. The offset is key - query: `behind` is a key before the query (offset -d), `ahead` a key after it.\n\n"
+            "their own bucket. The offset is key - query: `behind` is a key before the query (offset -d), `ahead` a key after it. For a "
+            "distance d = |key - query|: if d < 8 the bucket is d; otherwise it is b = 8 + int(ln(d / 8) / ln(128 / 8) x (16 - 8)) "
+            "(`int` truncates toward zero; ln is the natural logarithm computed in double precision), at most 15; and a key ahead "
+            "(key - query > 0) adds half = 16 to the bucket. Distance 0 is bucket 0.\n\n"
             + _table(["distance d", "bucket, key d behind", "bucket, key d ahead"], rows, "rrr")
             + "\n\nThe eight buckets that share the logarithmic range, as distances behind the query (those ahead are 16 higher):\n\n"
             + _table(["bucket", "distances", "count"], ranges, "rlr")

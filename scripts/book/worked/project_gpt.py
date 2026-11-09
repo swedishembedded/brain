@@ -304,8 +304,8 @@ def model_forward():
             f"(which is not the order of the draws), each tensor row by row, scaled by $10^{{12}}$: **{init_dg}**.\n\n"
             f"Forward check. Input: the first {CHECK_IDS_LEN} input ids of validation row 0, `{_ids(ids)}`. The logits are the {CHECK_IDS_LEN} by {cfg['V']} "
             f"matrix from the causal forward pass. Digest of all {CHECK_IDS_LEN * cfg['V']} logits row-major, scaled by $10^{{8}}$: **{real_digest(flat, 10 ** 8)}**. "
-            f"The logits of the last position for token ids 0 to 5: {first6}. The mean validation loss of this initialization over the {len(d['val']['rows'])} "
-            f"validation rows is {_fx(val0, 4)}, against $\\ln V$ = {_fx(math.log(cfg['V']), 4)} for a model that guesses uniformly.\n\n"
+            f"The logits of the last position for token ids 0 to 5: {first6}. The validation loss of this initialization, the pooled mean cross-entropy per supervised position over the {len(d['val']['rows'])} "
+            f"validation rows (the sum over all their supervised positions divided by their number, so a padded position counts for nothing), is {_fx(val0, 4)}, against $\\ln V$ = {_fx(math.log(cfg['V']), 4)} for a model that guesses uniformly.\n\n"
             + _table(["tensor index", "name", "shape", "what it is"], rows, "llll"))
 
 
@@ -540,7 +540,7 @@ def training_curve():
             f"Batches of {o['B']} rows in the order of milestone 2, {o['steps']} steps of AdamW (beta1 {o['b1']}, beta2 {o['b2']}, epsilon {o['eps']:g}, decay "
             f"{o['wd']} on every matrix except the gains), the rate warming up linearly over {o['warmup']} steps to {o['peak']} and following half a cosine to "
             f"{o['floor']} at step {o['steps']} (`schedules.cosine`; the table shows the rate of the update that ends at the step), global-norm clip at "
-            f"{o['clip']} with the coefficient $\\min(1, \\tau / (\\lVert g \\rVert + 10^{{-6}}))$. The training loss is the mean of the batch losses of the 10 steps that end "
+            f"{o['clip']} with the coefficient $\\min(1, \\tau_{{\\mathrm{{clip}}}} / (\\lVert g \\rVert + 10^{{-6}}))$. The training loss is the mean of the batch losses of the 10 steps that end "
             f"at the step; the gradient norm is that of the step itself, before the clip. Trained numbers are printed with the digits that survive four nudged "
             f"restarts (a weight changed by $\\pm 10^{{-12}}$ and $\\pm 3 \\times 10^{{-12}}$, `stable.py`).\n\n"
             + _table(["step", "learning rate", "gradient norm", "training loss", "validation loss"], rows)
@@ -711,7 +711,7 @@ U = 2.0 ** -53
 
 
 def logit_tolerance(cfg, z_max):
-    """Counted from the shapes: the only sums that the split order changes are the dot product of a query and a key (d_k terms) and the
+    """Counted from the shapes: the only sums that the split order changes are the dot product of a query and a key (d_h terms) and the
     weighted sum of the values (at most T terms), twice per layer; two orders of summing m terms differ by at most 2 m u S (Chapter 12)."""
     dk = cfg["D"] // cfg["H"]
     return 2 * cfg["L"] * (dk + cfg["T"]) * U * z_max
@@ -767,7 +767,7 @@ def cache_equivalence():
             f"Reference: the full causal forward pass over all n ids (the training code, no cache). Test: for every split $c$ = 1 .. n - 1, prefill the first $c$ ids with the "
             f"cache, then decode the remaining ids one at a time, and compare the logits of the positions $c - 1, \\dots, n - 1$ (the last row of the prefill and one row per decode step) with the reference. Orders of summing: 'serial' adds left to right as "
             f"the reference does; 'split' sums each query-key dot product as two partial sums (even and odd entries) and each weighted sum of values in blocks of 4 keys "
-            f"(`kv_cache.extend`). Tolerance: $2 L (d_k + T)\\, u\\, z_{{\\max}}$ with $L$ = {cfg['L']}, $d_k$ = {dk}, $T$ = {cfg['T']}, $u = 2^{{-53}}$ and $z_{{\\max}}$ = {z_txt}, the largest "
+            f"(`kv_cache.extend`). Tolerance: $2 L (d_h + T)\\, u\\, z_{{\\max}}$ with $L$ = {cfg['L']}, $d_h$ = {dk}, $T$ = {cfg['T']}, $u = 2^{{-53}}$ and $z_{{\\max}}$ = {z_txt}, the largest "
             f"absolute logit of the reference, which is **{tol_txt}**. The smallest gap between the best and second-best logit at any position is {gap_txt}.\n\n"
             + _table(["order of the sums", "splits tested", "splits with logits bit-identical", "largest logit difference", "within tolerance"], rows, "lrrrl")
             + f"\n\nThe tolerance is at least {_fx(tol / float(bound), 0)} times the difference of the 'split' order, and the smallest gap between the best and second-best logit "

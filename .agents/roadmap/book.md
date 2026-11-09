@@ -55,8 +55,15 @@ reproduced its worked examples from the text alone in another language.
       guess and 14 failed (unstated literals, seeds and orders, stale prose
       numbers, and one simulator bug in the ragged tiled-matmul count). All
       were fixed in the following commits; a recheck has not been run.
-- [ ] Volume V, Language, Sequences and Transformers: all 14 chapters and
-      the project written; the independent reader pass has not been run.
+- [x] Volume V, Language, Sequences and Transformers: all 14 chapters and
+      the project written. Verified by an independent C re-implementation
+      from the text alone (`scratchpad/reader/v05`): 1956 of 2297 items
+      passed, 221 after a guess, 113 failed (29 of them Unicode database
+      cells, now marked as such; the rest unstated initialisation recipes,
+      draw and summation orders, chaotic late training cells, a baseline
+      bug in a worked module and stale prose). All were fixed in the
+      following commits; the project reproduced completely. A recheck has
+      not been run.
 
 ## Open
 
