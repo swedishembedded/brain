@@ -25,7 +25,7 @@ struct Params {
     group: u32,
     hd: u32,
     src_stride: u32,   // heads_out/group * hd
-    dst_stride: u32,   // fused row width (3*d_model)
+    dst_stride: u32,   // row width of the destination buffer
     dst_off: u32,      // region offset within the fused row
 };
 

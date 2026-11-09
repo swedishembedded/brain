@@ -89,7 +89,11 @@ impl QwenConfig {
         QwenConfig { d_model: 64, d_ff: 96, ..QwenConfig::tiny() }
     }
 
-    /// The published Qwen3-0.6B shape (from its `config.json`).
+    /// The published Qwen3-0.6B shape (from its `config.json`). Like every
+    /// preset here, `block_size` and `max_position_embeddings` are the preset's
+    /// own training extent (1024), not the checkpoint's 40960: a model built
+    /// from a preset is trained at that length, and an import reads the
+    /// checkpoint's extent from its `config.json` instead.
     pub fn qwen3_0_6b() -> QwenConfig {
         QwenConfig {
             vocab: 151936,

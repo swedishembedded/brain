@@ -12,12 +12,13 @@
 //!   x += Wo · GQA-attention(q,k,v)
 //!   h  = RMSNorm(x)·ln2
 //!   x += Wdown · ( SiLU(Wgate·h) ⊙ (Wup·h) )
-//!   logits = tok.weightᵀ · RMSNorm(x)·norm    (tied head)
+//!   logits = Wᵀ · RMSNorm(x)·norm    (W = tok.weight when tied, lm_head.weight when not)
 //!   loss   = masked cross-entropy (ignore_index = IGNORE)
 //!
 //! RoPE uses Qwen's half-split convention + base 1e6 (`rope_base.wgsl`), QK-norm
-//! reuses `rmsnorm` over `head_dim`, and the tied head accumulates both the
-//! lm_head and embedding gradients into `tok.weight` (matmul_dw then emb_bwd).
+//! reuses `rmsnorm` over `head_dim`, and a tied head accumulates both the
+//! lm_head and embedding gradients into `tok.weight` (matmul_dw then emb_bwd);
+//! an untied one has its own `lm_head.weight` ([`QwenConfig::head_weight`]).
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -3453,8 +3454,9 @@ impl Qwen {
     /// single query over positions `0..=pos`. Expressed entirely in the WGSL op set,
     /// so it runs on whatever backend `Gpu` selected (GPU or the wgsl-cpu JIT).
     ///
-    /// The token is embedded through the tied `tok.weight` table; apply the (tied)
-    /// head to the returned hidden to get logits - `logits[v] = tok.weight[v]·hidden`.
+    /// The token is embedded through the `tok.weight` table; apply the head
+    /// ([`QwenConfig::head_weight`]: `tok.weight` when tied, `lm_head.weight` when
+    /// not) to the returned hidden to get logits, `logits[v] = head[v]·hidden`.
     pub fn step(&self, token_id: u32) -> Vec<f32> {
         let pos = self.dec_pos.get();
         let hidden = self.decode_at(Some(token_id), pos, None, None);
