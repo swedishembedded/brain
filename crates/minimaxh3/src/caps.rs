@@ -958,16 +958,13 @@ pub fn open_vsa_gates(path: &str, cfg: &H3TransformerConfig) -> Result<checkpoin
 
 /// Generate `req` and shape its outcome - the one entry point the direct
 /// provider below and the residency-scheduled adapter
-/// (`crates/catalog/src/resident_minimaxh3.rs`) both funnel through, so the
-/// presentation, the conditioning and the outcome cannot drift between them.
-///
-/// `model` is a caller-held resident [`crate::model::H3Transformer`] - of
-/// the partition [`Paths::dit_for`] names for the request (see
-/// [`pipeline::t2va_hot`]'s doc for why one serves every request shape).
-/// `None` streams the DiT from `ckpt.dit_tensors` one block at a time.
+/// (`crates/catalog/src/resident_minimaxh3.rs`) both funnel through
+/// ([`run_request`]), so the presentation, the conditioning and the outcome
+/// cannot drift between them. The text is encoded first and its tower
+/// dropped before the DiT loads, so the two never share the cards.
 /// `cancel` is polled every denoise step and `progress` reports each step
 /// and decode.
-pub fn generate_on(ckpt: &pipeline::H3Checkpoint, req: &Request, paths: &Paths, model: Option<&crate::model::H3Transformer>, cancel: &capability::CancelToken, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
+pub fn generate_on(ckpt: &pipeline::H3Checkpoint, req: &Request, paths: &Paths, cancel: &capability::CancelToken, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
     use crate::presentation::Presented;
     let opts = &req.params.opts;
     let items: Vec<Presented> = match &req.conditioning {
@@ -978,26 +975,30 @@ pub fn generate_on(ckpt: &pipeline::H3Checkpoint, req: &Request, paths: &Paths, 
     let text = encode_presentation(paths, &req.prompt, &items, opts.device.as_deref())?;
     let report = |done: u32, total: u32, phase: &str| progress(Progress::step(done, total, phase.to_string()));
     let av = match &req.conditioning {
-        Conditioning::Prompt => match model {
-            Some(m) => pipeline::t2va_hot(ckpt, &text, opts, m, cancel, report)?,
-            None => pipeline::t2va(ckpt, &text, opts, cancel, report)?,
-        },
-        Conditioning::Keyframes(keyframes) => {
-            let conditions = encode_keyframes(ckpt, keyframes, opts);
-            match model {
-                Some(m) => pipeline::fl2va_hot(ckpt, &text, &conditions, opts, m, cancel, report)?,
-                None => pipeline::fl2va(ckpt, &text, &conditions, opts, cancel, report)?,
-            }
-        }
+        Conditioning::Prompt => pipeline::t2va(ckpt, &text, opts, cancel, report)?,
+        Conditioning::Keyframes(keyframes) => pipeline::fl2va(ckpt, &text, &encode_keyframes(ckpt, keyframes, opts), opts, cancel, report)?,
         Conditioning::References(references) => {
             let encoded = encode_references(ckpt, paths, references, opts)?;
-            match model {
-                Some(m) => pipeline::ref2va_hot(ckpt, &text, &encoded, opts, m, cancel, report)?,
-                None => pipeline::ref2va(ckpt, &text, &encoded, opts, cancel, report)?,
-            }
+            pipeline::ref2va(ckpt, &text, &encoded, opts, cancel, report)?
         }
     };
     Ok(av_outcome(&av, opts.seed))
+}
+
+/// Run `action` for `inv` on `device` (`None`: every schedulable card): the
+/// request and its media checked, the adapter and gates resolved and checked,
+/// all before any weight is read - a request that could never run must not
+/// cost a checkpoint load to refuse (`wan::caps::WanAction::run`'s
+/// ordering) - then [`generate_on`].
+pub fn run_request(paths: &Paths, action: &str, inv: &Invocation, device: Option<&str>, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    let mut req = request_from(action, inv, paths)?;
+    req.params.opts.device = device.map(str::to_string);
+    let cfg = H3TransformerConfig::real();
+    let lora = req.params.adapter.as_ref().map(|a| crate::lora::runtime_adapter(a, &cfg)).transpose()?;
+    let gates = req.params.vsa_gate.as_deref().map(|p| open_vsa_gates(p, &cfg)).transpose()?;
+    let weights = LoadedWeights::load(paths, paths.dit_for(action)?)?;
+    let extras = (lora.as_ref(), gates.as_ref().map(|g| g as &dyn checkpoint::TensorSource));
+    generate_on(&weights.as_checkpoint(extras), &req, paths, &inv.cancel, progress)
 }
 
 /// VAE-encode `fl2va`'s fitted keyframes into the conditioning rows the
@@ -1086,16 +1087,7 @@ impl Action for MiniMaxH3Action {
         manifest().actions.into_iter().find(|a| a.name == self.name).expect("known action")
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        // The request and its media before any weight is read: a request
-        // that could never run must not cost a checkpoint load to refuse -
-        // `wan::caps::WanAction::run`'s own ordering.
-        let req = request_from(&self.name, inv, &self.paths)?;
-        let cfg = H3TransformerConfig::real();
-        let lora = req.params.adapter.as_ref().map(|a| crate::lora::runtime_adapter(a, &cfg)).transpose()?;
-        let gates = req.params.vsa_gate.as_deref().map(|p| open_vsa_gates(p, &cfg)).transpose()?;
-        let weights = LoadedWeights::load(&self.paths, self.paths.dit_for(&self.name)?)?;
-        let extras = (lora.as_ref(), gates.as_ref().map(|g| g as &dyn checkpoint::TensorSource));
-        generate_on(&weights.as_checkpoint(extras), &req, &self.paths, None, &inv.cancel, progress)
+        run_request(&self.paths, &self.name, inv, None, progress)
     }
 }
 

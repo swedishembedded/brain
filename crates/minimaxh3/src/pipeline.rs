@@ -865,59 +865,29 @@ pub struct GeneratedAv {
 /// and decodes nothing), and `progress(done, total, phase)`, called once per
 /// denoise step (`"denoise"`) and per decode (`"video decode"`,
 /// `"audio decode"`) against one fixed `total`. Loads
-/// (and drops) its own [`H3Transformer`] - the cold path; see [`t2va_hot`]
-/// for a call that reuses an already-resident one.
+/// (and drops) its own [`H3Transformer`] after the text is encoded, so the
+/// text tower and the DiT never share the cards.
 pub fn t2va(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
-    generate(ckpt, text, Conditioning::Keyframes(&[]), opts, None, cancel, progress)
+    generate(ckpt, text, Conditioning::Keyframes(&[]), opts, cancel, progress)
 }
 
 /// `fl2va`: text plus up to 2 keyframe conditioning rows, one `"first"`-
 /// and/or one `"last"`-anchored ([`Anchor`]), built via
-/// [`encode_keyframe_condition`] in packed order. Cold path - see
-/// [`fl2va_hot`] for a call that reuses an already-resident
-/// [`H3Transformer`].
+/// [`encode_keyframe_condition`] in packed order.
 pub fn fl2va(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
     if keyframes.is_empty() {
         return Err("fl2va: at least one keyframe is required - use t2va for a text-only request".to_string());
     }
-    generate(ckpt, text, Conditioning::Keyframes(keyframes), opts, None, cancel, progress)
-}
-
-/// [`t2va`], against a caller-held resident [`H3Transformer`] instead of a
-/// freshly loaded one - the residency-scheduled serving path's entry point.
-/// `model`'s own config must match `ckpt.dit_cfg`; a mismatch is a caller
-/// bug (wrong resident handed to the wrong checkpoint), asserted rather than
-/// silently forwarded into a shape error deep in `forward`.
-pub fn t2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts, model: &H3Transformer, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
-    assert_eq!(model.config(), &ckpt.dit_cfg, "t2va_hot: the resident H3Transformer's config does not match ckpt.dit_cfg");
-    generate(ckpt, text, Conditioning::Keyframes(&[]), opts, Some(model), cancel, progress)
-}
-
-/// [`fl2va`]'s [`t2va_hot`] analogue.
-pub fn fl2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts, model: &H3Transformer, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
-    if keyframes.is_empty() {
-        return Err("fl2va: at least one keyframe is required - use t2va for a text-only request".to_string());
-    }
-    assert_eq!(model.config(), &ckpt.dit_cfg, "fl2va_hot: the resident H3Transformer's config does not match ckpt.dit_cfg");
-    generate(ckpt, text, Conditioning::Keyframes(keyframes), opts, Some(model), cancel, progress)
+    generate(ckpt, text, Conditioning::Keyframes(keyframes), opts, cancel, progress)
 }
 
 /// `ref2va`: text plus 1..=12 references ([`EncodedReference`], in the
 /// order the presentation labels them), against the `transformer_ref`
 /// checkpoint partition - `ckpt.dit_tensors` must be that partition, which
-/// shares `transformer`'s architecture but not its weights. Cold path - see
-/// [`ref2va_hot`] for a call that reuses a resident [`H3Transformer`].
+/// shares `transformer`'s architecture but not its weights.
 pub fn ref2va(ckpt: &H3Checkpoint, text: &TextConditioning, references: &[EncodedReference], opts: &GenOpts, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
     check_references(references)?;
-    generate(ckpt, text, Conditioning::References(references), opts, None, cancel, progress)
-}
-
-/// [`ref2va`]'s [`t2va_hot`] analogue; `model` must hold the
-/// `transformer_ref` partition.
-pub fn ref2va_hot(ckpt: &H3Checkpoint, text: &TextConditioning, references: &[EncodedReference], opts: &GenOpts, model: &H3Transformer, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
-    check_references(references)?;
-    assert_eq!(model.config(), &ckpt.dit_cfg, "ref2va_hot: the resident H3Transformer's config does not match ckpt.dit_cfg");
-    generate(ckpt, text, Conditioning::References(references), opts, Some(model), cancel, progress)
+    generate(ckpt, text, Conditioning::References(references), opts, cancel, progress)
 }
 
 /// The released checkpoint's reference limits (`MiniMaxH3Ref2VASetupStep`).
@@ -986,7 +956,7 @@ enum Conditioning<'a> {
 /// compiled RoPE/kernel graph genuinely is sized per `(frames,width,height)`),
 /// so one resident transformer serves every request shape at a given
 /// checkpoint/device.
-fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditioning<'_>, opts: &GenOpts, model: Option<&H3Transformer>, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
+fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditioning<'_>, opts: &GenOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
     let device = opts.device.as_deref();
     let dit_cfg = &ckpt.dit_cfg;
     let vae_cfg = &ckpt.video_vae_cfg;
@@ -1054,9 +1024,8 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     let mut compact_audio = condition_audio.concat();
     compact_audio.extend((0..num_generated_audio_rows * audio_in_channels).map(|_| rng.next_gaussian() as f32));
 
-    // 4. Denoise, both VAEs still unopened. A caller-supplied `model` (the
-    // "hot"/resident serving path, `t2va_hot`/`fl2va_hot`) is reused as is.
-    // Otherwise the DiT is held resident at `RESIDENT_TIER` for this one
+    // 4. Denoise, both VAEs still unopened. The DiT is held resident at
+    // `RESIDENT_TIER` for this one
     // generation when the schedulable cards hold it with this request's
     // workspace free - every step reads every weight, so reading them once
     // is the whole difference - and streamed one block at a time
@@ -1075,17 +1044,16 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
         Some(f) => f,
         None => ckpt.dit_tensors,
     };
-    let owned = match model {
-        Some(_) => None,
-        None => match H3Transformer::load(dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels), ckpt.dit_gates) {
-            Ok(m) => Some(m),
-            Err(reason) => {
-                tracing::info!(%reason, "minimaxh3 DiT streamed one block at a time");
-                None
-            }
-        },
+    // Streaming re-reads the checkpoint every step, so the switch is said
+    // out loud: it is the difference between minutes and hours per clip.
+    let owned = match H3Transformer::load(dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels), ckpt.dit_gates) {
+        Ok(m) => Some(m),
+        Err(reason) => {
+            eprintln!("minimaxh3: the DiT does not hold resident, streaming it a block at a time ({reason})");
+            None
+        }
     };
-    let resident = model.or(owned.as_ref());
+    let resident = owned.as_ref();
     let streaming_ctx = resident.is_none().then(|| StreamingDit::open(dit_cfg, device));
     // A gated DiT runs the sparse attention the gates were trained with.
     let gated = resident.map_or(ckpt.dit_gates.is_some(), H3Transformer::has_gates);
@@ -1139,7 +1107,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
             Some(m) => m.forward(&inp),
             None => H3Transformer::forward_streaming(dit_tensors, ckpt.dit_gates, dit_cfg, streaming_ctx.as_ref().expect("streamed whenever nothing is resident"), &inp),
         };
-        if let Some(missed) = ckpt.dit_lora.filter(|_| model.is_none()).map(model::lora::RuntimeLora::unapplied).filter(|m| !m.is_empty()) {
+        if let Some(missed) = ckpt.dit_lora.map(model::lora::RuntimeLora::unapplied).filter(|m| !m.is_empty()) {
             return Err(format!("generate: the adapter targets {} rectangles no DiT linear read: {}", missed.len(), missed.join(", ")));
         }
 

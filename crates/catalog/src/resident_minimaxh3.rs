@@ -1,34 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! MiniMax-H3 `t2va`/`fl2va` behind the residency scheduler
-//! (`resident::build_executor`) - `resident_wan.rs`'s pattern, adapted to
-//! this model's own real structural difference: see
-//! `minimaxh3::caps`'s own module doc for why one resident
-//! [`minimaxh3::model::H3Transformer`] serves every request shape (no
-//! compiled graph is sized to `(frames, width, height)` the way `wan`'s or
-//! `ltxv`'s own DiT residency precedents are), and for why the instance key
-//! still names both latent extents anyway (matching this workspace's
-//! residency-key convention, and forward-compatible with a future
-//! compiled-graph backend) while the actual hot object is shared ACROSS
-//! keys rather than one-per-key.
+//! MiniMax-H3 behind the residency scheduler, as a model that spans every
+//! card it may use.
 //!
-//! The two video/audio VAEs are deliberately NOT resident (`minimaxh3::caps::
-//! VaeWeights` is read fresh per call) - `wan::pipeline`'s own precedent for
-//! its VAE/T5, restated in `minimaxh3::caps::VaeWeights`'s own doc: hundreds
-//! of MB against the DiT's tens of GB, not worth caching.
+//! A request runs in phases that each fill the cards: the Qwen3-VL text
+//! tower is placed over them, encodes the presentation and is dropped, then
+//! the DiT is held resident over them for the denoise and dropped before the
+//! VAEs decode (`minimaxh3::caps::run_request`, the direct provider's own
+//! path). On cards that cannot hold the DiT beside the text tower - two
+//! 24 GB cards cannot - keeping the DiT between requests would starve the
+//! next request's text encode, so nothing is kept: the instance claims the
+//! cards for as long as a request runs.
+//!
+//! The instance key still names the task and both latent extents (matching
+//! this workspace's residency-key convention) because they size the
+//! request's workspace on every card.
 //!
 //! Swedish Embedded AB implements residency-scheduled serving adapters like
 //! this one for its clients. If your team needs expertise in putting large
 //! diffusion models behind a memory-budgeted scheduler, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 
-use std::sync::Arc;
-
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use minimaxh3::block::ActLevels;
 use minimaxh3::config::H3TransformerConfig;
 use minimaxh3::video_vae::VideoVaeConfig;
+use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 /// MiniMax-H3 resident model family, built from one model-store checkout's
@@ -38,23 +36,34 @@ pub struct MiniMaxH3Resident {
     /// always the compiled-in constant.
     id: String,
     paths: minimaxh3::caps::Paths,
-    /// The resident DiT, shared across EVERY activated instance/key -
-    /// `(device_key, transformer)`. `minimaxh3::model::H3Transformer::
-    /// forward` takes a packed sequence of any length per call, so unlike
-    /// `WanResident::hot` (one `HotDit` per `(variant, extent, device)` key)
-    /// this needs splitting only by DEVICE, not by request shape - see this
-    /// module's own doc.
-    hot: Arc<capability::hot::Hot<String, minimaxh3::model::H3Transformer>>,
+    /// The cards a request spans, already narrowed by `--device`.
+    gpus: Vec<u32>,
 }
 
 impl MiniMaxH3Resident {
     /// The catalog/model-dir lane: one fetched-and-assembled
     /// `MiniMaxAI/MiniMax-H3` checkout whose five role directories
     /// (`minimaxh3::caps::Paths::from_assembly` resolved them) this resident
-    /// serves under `id`. `serving::model_dir::resident_for_compound`'s
+    /// serves under `id` over `gpus`. `serving::model_dir::resident_for_compound`'s
     /// `"minimaxh3"` arm builds one of these per scanned compound model.
-    pub fn from_paths(id: String, paths: minimaxh3::caps::Paths) -> MiniMaxH3Resident {
-        MiniMaxH3Resident { id, paths, hot: Arc::new(capability::hot::Hot::new()) }
+    pub fn from_paths(id: String, paths: minimaxh3::caps::Paths, gpus: Vec<u32>) -> MiniMaxH3Resident {
+        MiniMaxH3Resident { id, paths, gpus }
+    }
+
+    /// `(weights, activations, host)` of the request `key` names: the DiT
+    /// (and its gates) at its tier, one card's share of the forward's
+    /// workspace and the VAEs, and the host bytes beside them.
+    fn footprint(key: &InstanceKey) -> Option<(u64, u64, u64)> {
+        let Key { vf, vh, vw, audio, reference_rows, dtype, act_levels, gates, .. } = parse_key(&key.config)?;
+        let dit_cfg = H3TransformerConfig::real();
+        let tier = key_tier(&dtype)?;
+        let weights = minimaxh3::model::resident_cost(&dit_cfg, tier, gates).total();
+        let vae_weights = manifest_bytes(&VideoVaeConfig::real().tensor_manifest()) + manifest_bytes(&minimaxh3::vocoder::VocoderConfig::h3_32khz().tensor_manifest());
+        let rows = packed_rows(vf, vh, vw, audio) + reference_rows;
+        let activations = minimaxh3::model::forward_workspace_bytes(&dit_cfg, rows, act_levels) + if gates { minimaxh3::vsa::workspace_bytes(&dit_cfg, rows, true) } else { 0 };
+        let (ph, pw) = (dit_cfg.patch_size[1] as u64, dit_cfg.patch_size[2] as u64);
+        let pixels = vf as u64 * (vh as u64 * ph) * (vw as u64 * pw) * 3 * 4;
+        Some((weights, activations + vae_weights, dit_host_bytes(&dit_cfg) + vae_weights + pixels + (2u64 << 30)))
     }
 }
 
@@ -213,131 +222,69 @@ impl ResidentModel for MiniMaxH3Resident {
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        let Some(Key { vf, vh, vw, audio, reference_rows, dtype, act_levels, gates, .. }) = parse_key(&key.config) else {
-            // An unparseable key must not read as "free" - `resident_wan.
-            // rs::estimate`'s identical reasoning.
-            return MemCost::new(8u64 << 30, 4u64 << 30);
-        };
-        let dit_cfg = H3TransformerConfig::real();
-        // An unknown tier must still cost the most this model could.
-        let tier = key_tier(&dtype).unwrap_or(gpu_core::select::Dtype::F32);
-        let weights = minimaxh3::model::resident_cost(&dit_cfg, tier, gates).total();
-        let vae_weights = manifest_bytes(&VideoVaeConfig::real().tensor_manifest()) + manifest_bytes(&minimaxh3::vocoder::VocoderConfig::h3_32khz().tensor_manifest());
-        let rows = packed_rows(vf, vh, vw, audio) + reference_rows;
-        let activations = minimaxh3::model::forward_workspace_bytes(&dit_cfg, rows, act_levels) + if gates { minimaxh3::vsa::workspace_bytes(&dit_cfg, rows, true) } else { 0 };
-        let (ph, pw) = (dit_cfg.patch_size[1] as u64, dit_cfg.patch_size[2] as u64);
-        let pixels = vf as u64 * (vh as u64 * ph) * (vw as u64 * pw) * 3 * 4;
-
-        MemCost::new(weights + vae_weights + activations, dit_host_bytes(&dit_cfg) + vae_weights + pixels + (2u64 << 30))
+        // An unparseable key must not read as "free" - `resident_wan.
+        // rs::estimate`'s identical reasoning.
+        let Some((weights, per_card, host)) = Self::footprint(key) else { return MemCost::new(8u64 << 30, 4u64 << 30) };
+        MemCost::new(weights + per_card, host)
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        let device = match device {
+            Device::Cpu => "cpu".to_string(),
+            Device::Gpu(i) => format!("gpu{i}"),
+            Device::Npu(_) => return Err("minimaxh3: no NPU path".to_string()),
+        };
+        self.instance(key, device)
+    }
+}
+
+impl MultiDeviceResidentModel for MiniMaxH3Resident {
+    /// Every card, each holding its share of the DiT and its own copy of the
+    /// request's workspace - what the text tower's and the DiT's placements
+    /// over the same cards need at their peak.
+    fn estimate_multi(&self, key: &InstanceKey) -> MultiDeviceCost {
+        match (Self::footprint(key), self.gpus.len()) {
+            (Some((weights, per_card, host)), n) if n > 0 => MultiDeviceCost::new(self.gpus.iter().map(|&i| (Device::Gpu(i), weights / n as u64 + per_card)).collect(), host),
+            _ => MultiDeviceCost::new(Vec::new(), 0),
+        }
+    }
+
+    fn unavailable_reason(&self, key: &InstanceKey) -> Option<String> {
+        Some(if self.gpus.is_empty() { "minimaxh3 needs GPUs, and none is schedulable".to_string() } else { format!("minimaxh3: unreadable instance key {:?}", key.config) })
+    }
+
+    fn activate_multi(&self, key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        let cards: Vec<String> = devices.iter().map(|d| match d {
+            Device::Gpu(i) => Ok(format!("gpu{i}")),
+            other => Err(format!("minimaxh3: spans GPUs only, not {other:?}")),
+        }).collect::<Result<_, _>>()?;
+        self.instance(key, cards.join(","))
+    }
+}
+
+impl MiniMaxH3Resident {
+    fn instance(&self, key: &InstanceKey, device: String) -> Result<Box<dyn Instance>, String> {
         let Key { task, .. } = parse_key(&key.config).ok_or_else(|| format!("minimaxh3: bad instance key {:?}", key.config))?;
         if !["t2va", "fl2va", "ref2va"].contains(&task.as_str()) {
             return Err(format!("minimaxh3: unknown task {task:?} (t2va, fl2va, ref2va)"));
         }
-        // The DiT itself is built lazily, on the first run against this
-        // device (`MiniMaxH3Instance::ensure_hot`) - `activate` only fixes
-        // placement, matching `WanResident::activate`'s own "the DiT needs
-        // the request's own conditioning ordering first" reasoning, though
-        // here the deeper reason is simpler: nothing about the checkpoint or
-        // the device is known to be wrong yet, so there is nothing this
-        // function could usefully fail on before a real request arrives.
-        Ok(Box::new(MiniMaxH3Instance { paths: self.paths.clone(), device, hot: self.hot.clone() }))
+        Ok(Box::new(MiniMaxH3Instance { paths: self.paths.clone(), device }))
     }
 }
 
-/// The `device` string `minimaxh3::pipeline::GenOpts`/`H3Transformer::load`
-/// take, and this instance's own hot-DiT cache key - `resident_wan.rs::
-/// WanInstance::device_name`'s pattern, just also used to invalidate the
-/// shared hot slot on a device change.
-fn device_key(device: Device) -> String {
-    match device {
-        Device::Cpu => "cpu".to_string(),
-        Device::Gpu(i) => format!("gpu{i}"),
-        Device::Npu(i) => format!("npu{i}"),
-    }
-}
-
-fn device_name(device: Device) -> Option<String> {
-    match device {
-        Device::Cpu => Some("cpu".to_string()),
-        Device::Gpu(_) => Some("gpu".to_string()),
-        Device::Npu(_) => None,
-    }
-}
-
-/// A resident MiniMax-H3 instance: the weight paths, the assigned device, and
-/// a handle onto the SHARED hot-DiT slot (see [`MiniMaxH3Resident::hot`]'s
-/// doc - every instance this resident activates, regardless of its own key,
-/// shares one transformer per device).
+/// A MiniMax-H3 instance: the weight paths and the cards its requests run on.
 struct MiniMaxH3Instance {
     paths: minimaxh3::caps::Paths,
-    device: Device,
-    hot: Arc<capability::hot::Hot<String, minimaxh3::model::H3Transformer>>,
-}
-
-impl MiniMaxH3Instance {
-    /// Run `body` against the shared hot [`minimaxh3::model::H3Transformer`],
-    /// loading (or reloading, on a device change) it first if needed. Holds
-    /// the lock for the WHOLE forward - see [`Instance::run_batch`]'s own doc
-    /// for why this model's residency is sequential by design, same as
-    /// `resident_wan.rs::WanInstance::run_batch`'s reasoning.
-    /// The slot is keyed by the partition (`transformer/` or `ref2va`'s
-    /// `transformer_ref/`) as well as the device, so switching between them
-    /// reloads rather than running one's request on the other's weights.
-    /// An adapter is part of the slot's identity too: its corrections are
-    /// held beside the linears, so a model loaded for one never serves another.
-    fn with_hot_dit<R>(&self, dit: &str, (adapter, vsa_gate): (Option<&model::adapter::AdapterSpec>, Option<&str>), workspace: (u32, ActLevels), body: impl FnOnce(&minimaxh3::model::H3Transformer) -> Result<R, String>) -> Result<R, String> {
-        let lora = adapter.map(|a| format!("+{}*{}", a.path, a.scale)).unwrap_or_default();
-        let gates = vsa_gate.map(|g| format!("+gates:{g}")).unwrap_or_default();
-        let want = format!("{dit}{lora}{gates}@{}", device_key(self.device));
-        self.hot.try_get(
-            want,
-            || {
-                let cfg = H3TransformerConfig::real();
-                let lora = adapter.map(|a| minimaxh3::lora::runtime_adapter(a, &cfg)).transpose()?;
-                let gates = vsa_gate.map(|g| minimaxh3::caps::open_vsa_gates(g, &cfg)).transpose()?;
-                let dit_reader = minimaxh3::caps::open_dit_reader(dit)?;
-                let folded = lora.as_ref().map(|l| l.folded(&dit_reader));
-                let tensors: &dyn checkpoint::TensorSource = match &folded {
-                    Some(f) => f,
-                    None => &dit_reader,
-                };
-                let model = minimaxh3::model::H3Transformer::load(tensors, cfg, device_name(self.device).as_deref(), minimaxh3::pipeline::RESIDENT_TIER, workspace, gates.as_ref().map(|g| g as &dyn checkpoint::TensorSource))?;
-                match lora.as_ref().map(model::lora::RuntimeLora::unapplied).filter(|m| !m.is_empty()) {
-                    Some(missed) => Err(format!("minimaxh3: the adapter targets {} rectangles no DiT linear read: {}", missed.len(), missed.join(", "))),
-                    None => Ok(model),
-                }
-            },
-            body,
-        )
-    }
+    /// The `--device` grammar's selection (`gpu0,gpu1`).
+    device: String,
 }
 
 impl Instance for MiniMaxH3Instance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        // Params (and the license gate they carry) before the weights read -
-        // `wan::caps::WanAction::run`'s own ordering.
-        let mut req = minimaxh3::caps::request_from(action, inv, &self.paths)?;
-        req.params.opts.device = device_name(self.device);
-        let dit = self.paths.dit_for(action)?.to_string();
-        let vae = minimaxh3::caps::VaeWeights::load(&self.paths)?;
-        let (vf, vh, vw, audio) = latent_extents(inv);
-        let rows = packed_rows(vf, vh, vw, audio) + minimaxh3::caps::reference_rows_bound(action, inv, target_video_rows(vf, vh, vw), audio * minimaxh3::pipeline::AUDIO_CHANNELS);
-        self.with_hot_dit(&dit, (req.params.adapter.as_ref(), req.params.vsa_gate.as_deref()), (rows, req.params.opts.act_levels), |model| {
-            let empty = vae::blocks::Tensors::default();
-            let ckpt = vae.as_checkpoint(&empty, H3TransformerConfig::real(), (None, None));
-            minimaxh3::caps::generate_on(&ckpt, &req, &self.paths, Some(model), &inv.cancel, progress)
-        })
+        minimaxh3::caps::run_request(&self.paths, action, inv, Some(&self.device), progress)
     }
 
-    /// Sequential, deliberately - `resident_wan.rs::WanInstance::run_batch`'s
-    /// own reasoning applies unchanged here: every job at this resident
-    /// shares the SAME hot `H3Transformer` (now across every key too, not
-    /// just one), so N requests pay one load between them, but the forward
-    /// itself is not reentrant. Per-request cancellation is not yet real
-    /// either way (`minimaxh3::caps::t2va_hot_on`'s own doc names the gap).
+    /// Sequential: each request fills the cards in its own phases.
     fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         invs.iter().enumerate().map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p))).collect()
     }
@@ -349,11 +296,25 @@ mod tests {
     use serde_json::json;
 
     fn resident() -> MiniMaxH3Resident {
-        MiniMaxH3Resident {
-            id: minimaxh3::caps::MODEL.to_string(),
-            paths: minimaxh3::caps::Paths::resolve("/test-root"),
-            hot: Arc::new(capability::hot::Hot::new()),
-        }
+        MiniMaxH3Resident { id: minimaxh3::caps::MODEL.to_string(), paths: minimaxh3::caps::Paths::resolve("/test-root"), gpus: vec![0, 1] }
+    }
+
+    /// A request spans every card it may use, each holding its share of the
+    /// DiT and its own workspace - together more than the DiT alone; with no
+    /// card it is unplaceable, and says why.
+    #[test]
+    fn a_request_spans_every_card_and_none_without_cards() {
+        let r = resident();
+        let key = r.instance_key("ref2va", &Invocation::new().set("prompt", json!("a")).set("preset", json!("base")));
+        let cost = r.estimate_multi(&key);
+        let devices: Vec<Device> = cost.devices().collect();
+        assert_eq!(devices, vec![Device::Gpu(0), Device::Gpu(1)]);
+        let dit = minimaxh3::model::resident_cost(&H3TransformerConfig::real(), gpu_core::select::Dtype::I8, false).total();
+        assert!(devices.iter().map(|&d| cost.on(d)).sum::<u64>() > dit, "the cards hold the DiT and their workspace");
+
+        let none = MiniMaxH3Resident { gpus: Vec::new(), ..resident() };
+        assert_eq!(none.estimate_multi(&key).devices().count(), 0);
+        assert!(none.unavailable_reason(&key).unwrap().contains("GPU"));
     }
 
     #[test]
@@ -476,7 +437,7 @@ mod tests {
         let m = resident().manifest();
         assert_eq!(m.model, minimaxh3::caps::MODEL);
         assert_eq!(m.actions.len(), minimaxh3::caps::manifest().actions.len());
-        let fetched = MiniMaxH3Resident::from_paths("MiniMaxAI/MiniMax-H3".to_string(), resident().paths);
+        let fetched = MiniMaxH3Resident::from_paths("MiniMaxAI/MiniMax-H3".to_string(), resident().paths, vec![0, 1]);
         assert_eq!(fetched.manifest().model, "MiniMaxAI/MiniMax-H3");
         assert_eq!(fetched.instance_key("t2va", &Invocation::new()).model, "MiniMaxAI/MiniMax-H3");
     }

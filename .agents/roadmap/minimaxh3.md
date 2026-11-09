@@ -1027,9 +1027,12 @@ transplant onto ref2va uses 0.75.
   for a 704x384 clip's decode. At 768x448 the denoise is ~1080 s of device
   time per card, `flash_attn_bidir_reg2` 58% and `matmul_i8_dyn` 39%: the
   attention kernel is the largest remaining cost.
-- The residency adapter places its DiT on its ONE scheduled device; an int8
-  DiT with a 10k-row workspace does not fit one 24 GB card, so resident
-  serving refuses on this box while the direct path places over both.
+- ~~The residency adapter places its DiT on its ONE scheduled device~~ -
+  the served model is a multi-device resident spanning every card it may
+  use, and each request runs the direct path's phases (text tower, then the
+  DiT, then the VAEs). On two 24 GB cards the DiT cannot stay resident
+  beside the next request's text tower, so nothing is kept between requests;
+  keeping the DiT hot where the cards hold both is open.
 
 - ~~The DiT's GPU path dispatches the untiled `matmul.wgsl` and therefore
   measures ~20x slower than the optimized CPU path on a P40~~ - fixed:

@@ -459,6 +459,10 @@ impl Scan {
         let model = match &built {
             Built::Qwen(_) => built.erased(),
             Built::Other(other) => catalog::sampling_defaults::with_checkpoint_sampling(other.clone(), dir),
+            Built::Multi(multi) => {
+                self.multi.push(multi.clone());
+                return;
+            }
         };
         self.out.push(model);
     }
@@ -504,6 +508,8 @@ fn widen_to_hold(bank: AdapterBankSettings, card: &ModelCard, widen: Widen) -> A
 enum Built {
     Qwen(Arc<QwenResident>),
     Other(Arc<dyn ResidentModel>),
+    /// A model that occupies several cards at once, for `register_multi`.
+    Multi(Arc<dyn MultiDeviceResidentModel>),
 }
 
 impl Built {
@@ -511,6 +517,7 @@ impl Built {
         match self {
             Built::Qwen(q) => q.clone(),
             Built::Other(o) => o.clone(),
+            Built::Multi(m) => m.clone(),
         }
     }
 }
@@ -545,7 +552,8 @@ fn register_compound(local: &brain_modelstore::LocalModel, scan: &mut Scan, erro
         scan.register_ricursive(&dir.to_string_lossy(), &id);
         return;
     }
-    match build_for_local(local, scan.qwen_cfg_for(&id), scan.settings.qwen35.fp32) {
+    let gpus: Vec<u32> = scan.settings.gpus.iter().map(|&(i, _)| i).collect();
+    match build_for_local(local, scan.qwen_cfg_for(&id), scan.settings.qwen35.fp32, &gpus) {
         Ok(built) => scan.keep(&id, built, &local.dir),
         Err(reason) => {
             scan.seen.remove(&id); // free the id if the family declined, same as `register`
@@ -806,17 +814,21 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
 ///
 /// An adapter is not a resident of its own: it is served as a view over the
 /// base it rides on (`discover`), so `local` must be a base.
+///
+/// No card is offered here: a model that spans cards is never auto-fetched
+/// (it has no default reference), so it reaches serving only through
+/// [`discover`], which hands it the cards it may use.
 pub fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Result<Arc<dyn ResidentModel>, String> {
-    build_for_local(local, qwen_cfg, qwen35_sizing).map(|built| built.erased())
+    build_for_local(local, qwen_cfg, qwen35_sizing, &[]).map(|built| built.erased())
 }
 
-fn build_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Result<Built, String> {
+fn build_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, gpus: &[u32]) -> Result<Built, String> {
     let card = local.card.as_ref().ok_or_else(|| "no model card".to_string())?;
     if local.adapter.is_some() {
         return Err(format!("{}: an adapter is served by the base it rides on, not built as a model of its own", card.id));
     }
     if let Some(roles) = &local.roles {
-        return resident_for_compound(card, roles, qwen_cfg, qwen35_sizing);
+        return resident_for_compound(card, roles, qwen_cfg, qwen35_sizing, gpus);
     }
     let weights = local.weights.to_str().ok_or_else(|| "weights path is not valid UTF-8".to_string())?;
     let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
@@ -829,7 +841,7 @@ fn build_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resi
 /// A checkpoint of a family whose model reads a downloaded Hugging Face
 /// directory (the qwen3 decoder and its `llama`/`qwen2` rows, glmdsa, lfm2)
 /// is served straight from the directory its `weights` role names.
-fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Result<Built, String> {
+fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, gpus: &[u32]) -> Result<Built, String> {
     let implementation = brain_arch::by_id(&card.family).map(|a| a.implementation().id);
     if matches!(implementation, Some("qwen3" | "glmdsa" | "lfm2" | "qwen3omnimoe")) {
         let dir = roles.get("weights").ok_or("compound manifest missing role \"weights\"")?;
@@ -881,11 +893,9 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
         // Unlike zimage's, this construction cannot fail: the four roles ARE
         // the model, and the weights are read lazily at activate().
         "wan" => wan_paths_from_roles(roles).map(|paths| Arc::new(catalog::resident_wan::WanResident::from_paths(card.id.clone(), paths)) as Arc<dyn ResidentModel>),
-        // Same shape as wan's: five roles ARE the model (a 33B fp32 DiT is
-        // loaded lazily at the first request - see `catalog::
-        // resident_minimaxh3`'s own doc for why one hot transformer serves
-        // every request shape).
-        "minimaxh3" => minimaxh3_paths_from_roles(roles).map(|paths| Arc::new(catalog::resident_minimaxh3::MiniMaxH3Resident::from_paths(card.id.clone(), paths)) as Arc<dyn ResidentModel>),
+        // Five roles ARE the model, and a request spans every card it may use
+        // (`catalog::resident_minimaxh3`'s own doc).
+        "minimaxh3" => return minimaxh3_paths_from_roles(roles).map(|paths| Built::Multi(Arc::new(catalog::resident_minimaxh3::MiniMaxH3Resident::from_paths(card.id.clone(), paths, gpus.to_vec())))),
         // A draft model is not a model to serve: the target it drafts for loads it (`--speculative dflash`, found beside
         // the target or named with `--draft-model`).
         "dflash2" => Err("a draft model is loaded by the model it drafts for (brain serve --speculative dflash), not served on its own".to_string()),
