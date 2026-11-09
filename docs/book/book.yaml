@@ -461,7 +461,7 @@ volumes:
         title: "Decoding: Turning Probabilities into Text"
         question: "Given next-token probabilities, how do we choose what to say?"
         introduces: [greedy-decoding, temperature, top-k-sampling, top-p-sampling, repetition-penalty, beam-search, log-probabilities]
-        requires: [softmax, sampling-from-distribution, autoregressive-factorization]
+        requires: [softmax, sampling-from-distribution, autoregressive-factorization, logit, entropy, perplexity, overflow-and-underflow, reproducibility, two-pass-reduction]
         brain: []
       - id: kv-cache
         title: "The KV Cache"

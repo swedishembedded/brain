@@ -1,0 +1,34 @@
+<!-- source-sha256: b38c8d635db09707d4ac14a85f0e13a57183399ea77cf769e0152975d49b2ec3 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 340" width="600" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="340" fill="#ffffff"/>
+<line x1="189" y1="294" x2="189" y2="30" stroke="#edf2f7"/>
+<text x="189" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="334.56" y1="294" x2="334.56" y2="30" stroke="#edf2f7"/>
+<text x="334.56" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="480.11" y1="294" x2="480.11" y2="30" stroke="#edf2f7"/>
+<text x="480.11" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">15</text>
+<line x1="58" y1="294" x2="582" y2="294" stroke="#edf2f7"/>
+<text x="52" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="243.71" x2="582" y2="243.71" stroke="#edf2f7"/>
+<text x="52" y="247.71" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="193.43" x2="582" y2="193.43" stroke="#edf2f7"/>
+<text x="52" y="197.43" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="143.14" x2="582" y2="143.14" stroke="#edf2f7"/>
+<text x="52" y="147.14" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="92.86" x2="582" y2="92.86" stroke="#edf2f7"/>
+<text x="52" y="96.86" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="42.57" x2="582" y2="42.57" stroke="#edf2f7"/>
+<text x="52" y="46.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="524" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="72.56,242.57 101.67,194.81 130.78,150.71 159.89,110.27 189,88.15 218.11,66.03 247.22,60.02 276.33,56.09 305.44,53.87 334.56,52.02 363.67,50.46 392.78,49 421.89,47.63 451,46.26 480.11,45.07 509.22,44.18 538.33,43.37 567.44,42.57"/><circle cx="72.56" cy="242.57" r="2.6" fill="#2b6cb0"/><circle cx="101.67" cy="194.81" r="2.6" fill="#2b6cb0"/><circle cx="130.78" cy="150.71" r="2.6" fill="#2b6cb0"/><circle cx="159.89" cy="110.27" r="2.6" fill="#2b6cb0"/><circle cx="189" cy="88.15" r="2.6" fill="#2b6cb0"/><circle cx="218.11" cy="66.03" r="2.6" fill="#2b6cb0"/><circle cx="247.22" cy="60.02" r="2.6" fill="#2b6cb0"/><circle cx="276.33" cy="56.09" r="2.6" fill="#2b6cb0"/><circle cx="305.44" cy="53.87" r="2.6" fill="#2b6cb0"/><circle cx="334.56" cy="52.02" r="2.6" fill="#2b6cb0"/><circle cx="363.67" cy="50.46" r="2.6" fill="#2b6cb0"/><circle cx="392.78" cy="49" r="2.6" fill="#2b6cb0"/><circle cx="421.89" cy="47.63" r="2.6" fill="#2b6cb0"/><circle cx="451" cy="46.26" r="2.6" fill="#2b6cb0"/><circle cx="480.11" cy="45.07" r="2.6" fill="#2b6cb0"/><circle cx="509.22" cy="44.18" r="2.6" fill="#2b6cb0"/><circle cx="538.33" cy="43.37" r="2.6" fill="#2b6cb0"/><circle cx="567.44" cy="42.57" r="2.6" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="72.56,66.73 101.67,62.8 130.78,60.58 159.89,58.73 189,57.17 218.11,55.71 247.22,54.24 276.33,52.87 305.44,51.5 334.56,50.13 363.67,48.85 392.78,47.67 421.89,46.49 451,45.59 480.11,44.79 509.22,43.99 538.33,43.28 567.44,42.57"/><circle cx="72.56" cy="66.73" r="2.6" fill="#c05621"/><circle cx="101.67" cy="62.8" r="2.6" fill="#c05621"/><circle cx="130.78" cy="60.58" r="2.6" fill="#c05621"/><circle cx="159.89" cy="58.73" r="2.6" fill="#c05621"/><circle cx="189" cy="57.17" r="2.6" fill="#c05621"/><circle cx="218.11" cy="55.71" r="2.6" fill="#c05621"/><circle cx="247.22" cy="54.24" r="2.6" fill="#c05621"/><circle cx="276.33" cy="52.87" r="2.6" fill="#c05621"/><circle cx="305.44" cy="51.5" r="2.6" fill="#c05621"/><circle cx="334.56" cy="50.13" r="2.6" fill="#c05621"/><circle cx="363.67" cy="48.85" r="2.6" fill="#c05621"/><circle cx="392.78" cy="47.67" r="2.6" fill="#c05621"/><circle cx="421.89" cy="46.49" r="2.6" fill="#c05621"/><circle cx="451" cy="45.59" r="2.6" fill="#c05621"/><circle cx="480.11" cy="44.79" r="2.6" fill="#c05621"/><circle cx="509.22" cy="43.99" r="2.6" fill="#c05621"/><circle cx="538.33" cy="43.28" r="2.6" fill="#c05621"/><circle cx="567.44" cy="42.57" r="2.6" fill="#c05621"/><line x1="58" y1="67.71" x2="582" y2="67.71" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="159.89" y1="294" x2="159.89" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><text x="561.62" y="76.51" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">p = 0.9</text><text x="164.26" y="283.94" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">k = 4</text></g>
+<text x="320" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">number of tokens kept, most probable first</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">cumulative probability</text>
+<text x="320" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">The same k cuts different amounts of probability; the same p cuts different counts</text>
+<rect x="472.98" y="242" width="101.02" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="480.98" y1="257" x2="500.98" y2="257" stroke="#2b6cb0" stroke-width="2"/>
+<text x="506.98" y="261" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">after the</text>
+<line x1="480.98" y1="274" x2="500.98" y2="274" stroke="#c05621" stroke-width="2"/>
+<text x="506.98" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">after near</text>
+</svg>

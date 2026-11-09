@@ -70,6 +70,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Bayes' rule**: the identity $P(A \mid B) = P(B \mid A)P(A)/P(B)$ that turns the probability of evidence given a cause into the probability of the cause given the evidence, using the prior probability of the cause. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
+**beam search**: keeping the $B$ partial texts of highest total log-probability at every step instead of one, to find a more probable whole text than greedy decoding does, at $B$ times the work. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
+
 **Bernoulli distribution**: the distribution of a single yes/no outcome coded as $1$ or $0$, equal to $1$ with probability $p$; its mean is $p$ and its variance is $p(1-p)$. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **bf16 format**: the 16-bit floating-point layout of 1 sign bit, 8 exponent bits (the exponent field of fp32) and 7 fraction bits: fp32's range with 2.4 digits, obtained from an fp32 by dropping the low 16 bits (with rounding). *([Bits and Number Formats](v04-computation/01-number-formats.md))*
@@ -312,6 +314,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **graph export**: the one-time conversion of a model's forward computation into a static dataflow graph, with every operation a node of a known type, every tensor of a fixed shape and every constant stored in the graph, so that a compiler or device can run it without any of the model's own code. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
 
+**greedy decoding**: choosing, at every step, the token of largest probability (the first on a tie), so that the text is a deterministic function of the model and the prompt and, for a model that reads a bounded window, eventually repeats. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
+
 **group-normalization**: normalizing groups of consecutive channels of one example, over the group's channels and all spatial positions, with a learned gain and shift per channel; one group is layer normalization and one group per channel is instance normalization. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
 **group-wise quantization**: giving each run of $G$ consecutive weights its own scale, so that one large weight sets the step for its group only; it costs $(\text{scale bits})/G$ bits per weight in addition to the codes. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
@@ -407,6 +411,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **linear separability**: the property of labelled points that some line (plane, flat sheet) puts all points of one class on one side and all points of the other on the other; equivalently, the labelling is computed by a single threshold neuron. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
 
 **Lion**: an update that steps by exactly the learning rate in the sign of an interpolation of the momentum and the new gradient, keeping one state array instead of Adam's two. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
+
+**log-probabilities**: the logarithms of probabilities, at most 0, which a decoder reports and adds instead of multiplying probabilities, each stated for the distribution it belongs to: the model's or the sampler's. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
 
 **log-sum-exp**: the function $\log \sum_i e^{z_i}$, computed stably as $m + \log \sum_i e^{z_i - m}$ with $m = \max_i z_i$ so that no exponential overflows and the sum is at least $1$; it is the logarithm of a sum of probabilities given their logarithms, and the denominator of the log of a softmax. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
@@ -602,6 +608,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **relu**: the rectified linear unit $\max(0, z)$, zero for negative inputs and the identity for positive ones, with slope $1$ where it is positive and $0$ elsewhere. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
+**repetition penalty**: a factor applied to the logits of tokens already in the text, dividing a positive logit and multiplying a negative one, to make repeats less likely; its additive relatives subtract an amount per presence or per occurrence. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
+
 **reporting uncertainty**: stating with a result its intervals over seeds and over the test sample, the numbers of seeds and examples, what was tuned on which split, and how many variants were tried, so that a reader can judge how far to trust it. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
 **reproducibility**: the property that running again from the same recorded inputs (seed, data, code, settings) gives the same results exactly, which requires the same draws in the same order and the same floating-point arithmetic. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
@@ -710,6 +718,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **teacher forcing**: training a sequence model at every position with the true earlier tokens as its context, instead of its own earlier predictions, so that a sequence of $T$ tokens gives $T$ independent training examples in one pass. *([Language Modeling](v05-sequences/04-language-modeling.md))*
 
+**temperature**: a positive number $\tau$ by which the logits are divided before the softmax; low values sharpen the distribution toward the largest token, high values flatten it toward uniform, and the entropy rises with it. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
+
 **tensor**: an array of numbers with any number of axes (zero for a scalar, one for a vector, two for a matrix), described by its shape. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **tensor core**: a hardware unit that multiplies two small fixed-size matrices and adds a third in one operation, usually with narrow inputs and a wider accumulator, raising the peak arithmetic rate of a device for matrix products. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
@@ -725,6 +735,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **tiled matmul**: the matrix product computed one tile of the output at a time, with the matching tiles of the two inputs staged in a fast memory so that each number loaded is used once per row or column of the tile, cutting the loads from $2n^3$ to $2n^3/T$ for a tile of side $T$. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 
 **token**: the unit a model counts, one piece of the text a tokenizer cuts, with an integer id in the vocabulary; a token can be a character, a word, a part of a word or a single byte. *([Tokenization](v05-sequences/02-tokenization.md))*
+
+**top-k sampling**: keeping only the $k$ most probable tokens, setting the rest to zero and renormalizing before the draw. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
+
+**top-p sampling**: keeping the smallest set of most probable tokens whose cumulative probability reaches a threshold, also called nucleus sampling, so that the number of tokens kept follows how spread out the distribution is. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
 
 **train-vs-eval-mode**: the two behaviours of a layer that has a state of its own: in train mode batch normalization uses the batch statistics and updates its running averages, in eval mode it uses the running averages and changes nothing. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 

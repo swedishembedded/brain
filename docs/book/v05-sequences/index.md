@@ -74,7 +74,7 @@ generation.
    normalization fit into one repeating unit.
 10. [Training a GPT from Scratch](10-training-gpt.md): the full pipeline from raw text to a trained
     generative model.
-11. Decoding: Turning Probabilities into Text: how to choose what to say, given
+11. [Decoding: Turning Probabilities into Text](11-decoding.md): how to choose what to say, given
     next-token probabilities.
 12. The KV Cache: why the past is remembered instead of recomputed, and what
     remembering costs.
