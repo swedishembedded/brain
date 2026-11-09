@@ -1,0 +1,34 @@
+<!-- source-sha256: 44a8cc98d55ed1c9479cada3e1dab3f281a6ce3b5d1064b6897784f6aafb28ce -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="218" y1="334" x2="218" y2="30" stroke="#edf2f7"/>
+<text x="218" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="378" y1="334" x2="378" y2="30" stroke="#edf2f7"/>
+<text x="378" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="538" y1="334" x2="538" y2="30" stroke="#edf2f7"/>
+<text x="538" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">30</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="258" x2="602" y2="258" stroke="#edf2f7"/>
+<text x="52" y="262" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<line x1="58" y1="182" x2="602" y2="182" stroke="#edf2f7"/>
+<text x="52" y="186" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="106" x2="602" y2="106" stroke="#edf2f7"/>
+<text x="52" y="110" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">15</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#9b2c2c" stroke-width="1.6" points="74,325.45 90,316.9 122,299.8 186,265.6 314,197.2 570,60.4"/><circle cx="74" cy="325.45" r="3.5" fill="#9b2c2c"/><circle cx="90" cy="316.9" r="3.5" fill="#9b2c2c"/><circle cx="122" cy="299.8" r="3.5" fill="#9b2c2c"/><circle cx="186" cy="265.6" r="3.5" fill="#9b2c2c"/><circle cx="314" cy="197.2" r="3.5" fill="#9b2c2c"/><circle cx="570" cy="60.4" r="3.5" fill="#9b2c2c"/><text x="176.4" y="253.44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">4.50</text><text x="560.4" y="48.24" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">18.00</text><polyline fill="none" stroke="#2b6cb0" stroke-width="1.6" points="74,327.35 90,320.7 122,307.4 186,280.8 314,227.6"/><circle cx="74" cy="327.35" r="3.5" fill="#2b6cb0"/><circle cx="90" cy="320.7" r="3.5" fill="#2b6cb0"/><circle cx="122" cy="307.4" r="3.5" fill="#2b6cb0"/><circle cx="186" cy="280.8" r="3.5" fill="#2b6cb0"/><circle cx="314" cy="227.6" r="3.5" fill="#2b6cb0"/><text x="195.6" y="299.04" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">3.50</text><text x="323.6" y="245.84" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">7.00</text></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">key-value heads per layer</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">GiB for 32,768 tokens</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">What a long context costs, by key-value heads</text>
+<rect x="66" y="38" width="245.78" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#9b2c2c" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">8B shape: 32 query heads, 36 layers</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">0.6B shape: 16 query heads, 28 layers</text>
+</svg>

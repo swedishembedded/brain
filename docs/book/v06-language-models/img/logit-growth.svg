@@ -1,0 +1,34 @@
+<!-- source-sha256: aa98fc1f9fb00ca32a0e0d0b5da36b0d9cd5049d8b058ac37e9a2a4895750667 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="222.85" y1="334" x2="222.85" y2="30" stroke="#edf2f7"/>
+<text x="222.85" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="387.7" y1="334" x2="387.7" y2="30" stroke="#edf2f7"/>
+<text x="387.7" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="552.55" y1="334" x2="552.55" y2="30" stroke="#edf2f7"/>
+<text x="552.55" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">15</text>
+<line x1="58" y1="319.52" x2="602" y2="319.52" stroke="#edf2f7"/>
+<text x="52" y="323.52" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="247.14" x2="602" y2="247.14" stroke="#edf2f7"/>
+<text x="52" y="251.14" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100</text>
+<line x1="58" y1="174.76" x2="602" y2="174.76" stroke="#edf2f7"/>
+<text x="52" y="178.76" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">200</text>
+<line x1="58" y1="102.38" x2="602" y2="102.38" stroke="#edf2f7"/>
+<text x="52" y="106.38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">300</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">400</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#9b2c2c" stroke-width="1.8" points="74.48,319.26 90.97,318.48 107.45,317.16 123.94,315.33 140.42,312.97 156.91,310.09 173.39,306.68 189.88,302.75 206.36,298.29 222.85,293.31 239.33,287.81 255.82,281.78 272.3,275.22 288.79,268.15 305.27,260.55 321.76,252.42 338.24,243.77 354.73,234.59 371.21,224.9 387.7,214.67 404.18,203.93 420.67,192.65 437.15,180.86 453.64,168.54 470.12,155.7 486.61,142.33 503.09,128.43 519.58,114.02 536.06,99.08 552.55,83.61 569.03,67.62 585.52,51.11"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.8" points="74.48,318.01 90.97,318.01 107.45,318.01 123.94,318.01 140.42,318.01 156.91,318.01 173.39,318.01 189.88,318.01 206.36,318.01 222.85,318.01 239.33,318.01 255.82,318.01 272.3,318.01 288.79,318.01 305.27,318.01 321.76,318.01 338.24,318.01 354.73,318.01 371.21,318.01 387.7,318.01 404.18,318.01 420.67,318.01 437.15,318.01 453.64,318.01 470.12,318.01 486.61,318.01 503.09,318.01 519.58,318.01 536.06,318.01 552.55,318.01 569.03,318.01 585.52,318.01"/><line x1="58" y1="317.48" x2="602" y2="317.48" stroke="#4a5568" stroke-dasharray="4 4"/><text x="595.41" y="307.34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">bound sqrt(8) = 2.83</text><circle cx="90.97" cy="318.48" r="4" fill="#9b2c2c"/><circle cx="189.88" cy="302.75" r="4" fill="#9b2c2c"/><circle cx="585.52" cy="51.11" r="4" fill="#9b2c2c"/><text x="77.78" y="312.68" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">1.4</text><text x="176.69" y="296.96" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">23.2</text><text x="572.33" y="45.32" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">370.8</text></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">factor on W_Q and W_K</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">largest absolute attention logit</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Logits grow with the weights unless q and k are normalized</text>
+<rect x="66" y="38" width="156.9" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#9b2c2c" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">no normalization</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">RMS norm of q and k</text>
+</svg>

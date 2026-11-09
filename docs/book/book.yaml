@@ -497,7 +497,7 @@ volumes:
         title: "Anatomy of a Modern Decoder"
         question: "What changed between the first GPT and today's open-weight language models, and why?"
         introduces: [grouped-query-attention, qk-normalization, untied-output-head, modern-decoder-recipe]
-        requires: [gpt-architecture, rotary-position-embedding, swiglu, rms-normalization, kv-cache]
+        requires: [gpt-architecture, rotary-position-embedding, swiglu, rms-normalization, kv-cache, multi-head-attention, query-key-value, causal-mask, tied-embeddings, layer-normalization, gradient-check]
         brain: [qwen3]
       - id: importing-models
         title: "Importing Pretrained Models and Proving Parity"

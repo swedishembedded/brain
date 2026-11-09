@@ -332,6 +332,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **group-wise quantization**: giving each run of $G$ consecutive weights its own scale, so that one large weight sets the step for its group only; it costs $(\text{scale bits})/G$ bits per weight in addition to the codes. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
+**grouped-query attention**: attention in which each key-value head is read by a group of neighbouring query heads, so a layer stores $h_{\mathrm{kv}}$ key-value heads for $H$ query heads, the cache is $h_{\mathrm{kv}} / H$ of the multi-head cache, and the attention FLOPs are unchanged. *([Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md))*
+
 **gru**: gated recurrent unit, a recurrent cell with one state, an update gate that sets how far the state moves toward a new candidate and a reset gate that sets how much of the old state the candidate may read, so that the old state reaches the new one through a gate and not through a matrix. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
 
 ## H
@@ -482,6 +484,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **model**: a function whose rule has a fixed shape and whose behaviour is set by a list of parameters, used to turn the features of an example into a prediction. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
+**modern decoder recipe**: the combination of choices common to present-day open-weight decoders: pre-norm blocks with RMS normalization and no biases, rotary positions applied to normalized queries and keys, grouped key-value heads, a SwiGLU network, and an output matrix that is tied or untied by size. *([Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md))*
+
 **momentum**: a running weighted sum of past gradients, $\mathbf{m}_t = \beta\mathbf{m}_{t-1} + \mathbf{g}_t$, stepped along instead of the gradient, so that steady directions add up and back-and-forth directions cancel. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **monotonic function**: a function that never reverses direction, always increasing or always decreasing, and so keeps the order of single values. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
@@ -593,6 +597,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **pseudo-random generator**: a deterministic state machine (a state, a rule that advances it, and a rule that turns it into a number) whose outputs are judged by how closely they resemble draws from a uniform distribution, not by being unpredictable to someone who knows the rule. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 ## Q
+
+**QK-normalization**: the RMS normalization of every query and every key over its own head width, with a learned gain per channel and applied before the rotary rotation, which bounds attention logits by $\sqrt{d_h}$ times the gains. *([Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md))*
 
 **quantization error**: the difference $e = w' - w$ between a decoded weight and the original, bounded by half a step, and summarized by its mean squared error or the signal-to-quantization-noise ratio $10\log_{10}(\mathrm{mean}(w^2)/\mathrm{MSE})$ in decibels. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
@@ -795,6 +801,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **universal-approximation**: the theorem that, for any continuous function on a closed bounded set and any tolerance, some one-hidden-layer network with a non-polynomial activation stays within that tolerance everywhere on the set; it guarantees that the weights exist, not how many units they need or how to find them. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **unsupervised learning**: learning from examples without labels, to find structure such as groups in the features themselves. *([The Learning Problem](v02-learning/01-learning-problem.md))*
+
+**untied output head**: an output matrix $\mathbf{W}_{\mathrm{out}}$ of shape $[V, D]$ that is separate from the embedding table, so each has its own parameters and its own gradient. *([Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md))*
 
 **UTF-8**: the encoding that writes each Unicode scalar value as 1 to 4 bytes whose leading bits announce the sequence's length, compatible with ASCII, self-synchronizing and ordered like the code points; its decoder is a state machine of eight states. *([Text as Data](v05-sequences/01-text.md))*
 

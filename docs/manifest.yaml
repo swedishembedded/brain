@@ -414,6 +414,10 @@ navigation:
           - docs/book/v05-sequences/13-flash-attention.md
           - docs/book/v05-sequences/14-encoders.md
           - docs/book/v05-sequences/15-project-gpt.md
+      - title: "Volume VI: Advanced Language Model Architectures"
+        pages:
+          - docs/book/v06-language-models/index.md
+          - docs/book/v06-language-models/01-modern-decoder.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

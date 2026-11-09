@@ -1,0 +1,71 @@
+<!-- source-sha256: 2751cc2dde5edb0f36dd3891fcd1d25205104a1b14e86bae0e6079373a097b74 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 690" width="900" height="690"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="900" height="690" fill="#ffffff"/>
+<rect x="15" y="10" width="420" height="670" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="29" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">GPT-2 small (2019)</text>
+<rect x="55" y="58" width="340" height="48" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="78.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">token embedding + learned position</text>
+<text x="225" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(1,024 rows added at the input)</text>
+<rect x="55" y="132" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">LayerNorm (gain and shift)</text>
+<rect x="55" y="206" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Q, K, V projections with biases</text>
+<text x="225" y="242.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12 heads, one key-value head each</text>
+<rect x="55" y="280" width="340" height="48" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="300.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">no step between projection and scores</text>
+<text x="225" y="316.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(positions entered at the input)</text>
+<rect x="55" y="354" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="374.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">causal attention, then W_O with bias</text>
+<text x="225" y="390.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and the residual add</text>
+<rect x="55" y="428" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="456.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">LayerNorm (gain and shift)</text>
+<rect x="55" y="502" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="522.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">GELU network 768 - 3,072 - 768,</text>
+<text x="225" y="538.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">with biases, and the residual add</text>
+<rect x="55" y="576" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="596.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">LayerNorm, then the head,</text>
+<text x="225" y="612.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tied to the embedding table</text>
+<line x1="225" y1="109" x2="225" y2="129" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="225" y1="183" x2="225" y2="203" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="225" y1="257" x2="225" y2="277" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="225" y1="331" x2="225" y2="351" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="225" y1="405" x2="225" y2="425" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="225" y1="479" x2="225" y2="499" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="225" y1="553" x2="225" y2="573" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="41" y="112" width="368" height="458" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<text x="401" y="126.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">x 12 layers</text>
+<text x="225" y="656.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">124,439,808 parameters</text>
+<rect x="465" y="10" width="420" height="670" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="479" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Qwen3 0.6B as brain implements it</text>
+<rect x="505" y="58" width="340" height="48" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="675" y="78.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">token embedding</text>
+<text x="675" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(no position table)</text>
+<rect x="505" y="132" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="675" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">RMS norm (gain only)</text>
+<rect x="505" y="206" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="675" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Q, K, V projections, no biases</text>
+<text x="675" y="242.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 query heads, 8 key-value heads</text>
+<rect x="505" y="280" width="340" height="48" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="675" y="300.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">QK-norm per head, then the</text>
+<text x="675" y="316.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rotary rotation by position</text>
+<rect x="505" y="354" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="675" y="374.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">causal attention, each key-value head</text>
+<text x="675" y="390.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">read by 2 query heads; W_O, residual add</text>
+<rect x="505" y="428" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="675" y="456.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">RMS norm (gain only)</text>
+<rect x="505" y="502" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="675" y="522.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">SwiGLU 1,024 - 3,072 - 1,024,</text>
+<text x="675" y="538.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">no biases, and the residual add</text>
+<rect x="505" y="576" width="340" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="675" y="596.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">RMS norm, then the head: tied here,</text>
+<text x="675" y="612.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a separate matrix at 8B</text>
+<line x1="675" y1="109" x2="675" y2="129" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="675" y1="183" x2="675" y2="203" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="675" y1="257" x2="675" y2="277" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="675" y1="331" x2="675" y2="351" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="675" y1="405" x2="675" y2="425" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="675" y1="479" x2="675" y2="499" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="675" y1="553" x2="675" y2="573" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="491" y="112" width="368" height="458" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<text x="851" y="126.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">x 28 layers</text>
+<text x="675" y="656.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">596,049,920 parameters</text>
+</svg>

@@ -109,4 +109,8 @@ historical sections draw on in the [Chronology](history/chronology.md).
 13. [Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md): How can attention over long sequences be computed exactly without ever storing the full attention matrix?
 14. [Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md): How do models that read a whole text at once learn representations for search and classification?
 15. [Project: Your Own Small Language Model](v05-sequences/15-project-gpt.md): Can you train a small GPT from raw text and generate from it with a KV cache that provably matches uncached generation?
+
+### [Volume VI: Advanced Language Model Architectures](v06-language-models/index.md)
+
+1. [Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md): What changed between the first GPT and today's open-weight language models, and why?
 <!-- /contents -->
