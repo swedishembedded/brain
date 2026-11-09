@@ -124,7 +124,7 @@ pub const KERNELS: [(&str, &str); 23] = [
 /// This crate's rung set for [`model::block::flash_bidir_variant`] - all four
 /// registered, so the selector picks the best one this device's queried caps
 /// allow rather than this crate pinning a rung by hand.
-const FLASH_IDS: model::block::FlashIds = model::block::FlashIds {
+pub(crate) const FLASH_IDS: model::block::FlashIds = model::block::FlashIds {
     bidir: K_FLASH_ATTN_BIDIR,
     split: Some(K_FLASH_ATTN_BIDIR_SPLIT),
     reg: Some(K_FLASH_ATTN_BIDIR_REG),

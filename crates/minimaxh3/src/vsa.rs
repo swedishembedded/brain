@@ -310,7 +310,7 @@ pub(crate) fn attention(gpu: &Gpu, plan: &DevicePlan, qkv: &DeviceBuffer, gate: 
         k_step,
         gpu.step(K_VSA_TILE_SCORES, &[&scores, &qm, &km], &[n, heads, head_dim, scale.to_bits()], heads * n * n),
         gpu.step(K_VSA_SELECT, &[&mask, &scores, &plan.spans], &[n, heads, plan.geometry.prefix_tiles, plan.geometry.video_spans.len() as u32], heads * n * n),
-        gpu.dispatch(K_FLASH_ATTN_VSA, &[qkv, &out, &plan.slots, &plan.live, &mask], &[n, heads, head_dim, stride, 0, inner, 2 * inner, inner], gpu_core::Dispatch::Workgroups(heads * n)),
+        gpu.dispatch(K_FLASH_ATTN_VSA, &[qkv, &out, &plan.slots, &plan.live, &mask], &[n, heads, head_dim, stride, 0, inner, 2 * inner, inner], gpu_core::Dispatch::Workgroups(heads * n.div_ceil(2))),
     ];
     if let Some(gate) = gate {
         let (v_step, vm) = means(2 * inner);
@@ -496,6 +496,42 @@ mod tests {
                 let got = cx.gpu.read(&attention(&cx.gpu, &plan, &slab_dev, g.map(|_| &gate_dev), heads as u32, head_dim as u32), rows * inner);
                 let worst = close(&got, &want);
                 assert!(worst < 1e-4, "head_dim {head_dim}, gate {}: worst {worst}", g.is_some());
+            }
+        }
+    }
+
+    /// Dense flash attention against VSA at the shapes of a ref2va with one
+    /// image reference at 640x352 and 768x448, 121 frames: `make test/one
+    /// P=brain-minimaxh3 ARGS="vsa::tests::sparse_attention_time_at_a_real_shape
+    /// --ignored --nocapture"`. A measurement, not a check: it prints.
+    #[test]
+    #[ignore]
+    fn sparse_attention_time_at_a_real_shape() {
+        let cx = crate::block::Ctx::new(None);
+        for video in [[31, 11, 20], [31, 14, 24]] {
+            let segments = [Segment::Dense { rows: 4200 }, Segment::Dense { rows: 4096 }, Segment::Dense { rows: 414 }, Segment::Video { grid: video }];
+            let rows = segments.iter().map(Segment::rows).sum::<u32>();
+            let (heads, d) = (56u32, 128u32);
+            let inner = heads * d;
+            let mut rng = data::rng::Lcg::new(1);
+            let slab = cx.upload(&rng.vec_scaled((rows * 3 * inner) as usize, 1.0));
+            let gate = cx.upload(&rng.vec_scaled((rows * inner) as usize, 0.1));
+            let time = |what: &str, run: &dyn Fn() -> DeviceBuffer| {
+                cx.gpu.read(&run(), 1);
+                let t = std::time::Instant::now();
+                for _ in 0..3 {
+                    cx.gpu.read(&run(), 1);
+                }
+                eprintln!("{what}: {:.0} ms per attention ({} backend, {rows} rows, video {video:?})", t.elapsed().as_secs_f64() * 1000.0 / 3.0, gpu_core::backend_name());
+            };
+            time("dense flash", &|| {
+                let out = cx.gpu.storage((rows * inner) as u64);
+                cx.gpu.submit(&[], &[model::block::flash_bidir_step(&cx.gpu, crate::block::FLASH_IDS, 1, heads, rows, d, inner, &slab, &out)]);
+                out
+            });
+            for sparsity in [0.0, 0.75, 0.9] {
+                let plan = DevicePlan::new(&cx.gpu, TileGeometry::new(&segments), (sparsity, sparsity));
+                time(&format!("vsa {sparsity} with gates"), &|| attention(&cx.gpu, &plan, &slab, Some(&gate), heads, d));
             }
         }
     }
