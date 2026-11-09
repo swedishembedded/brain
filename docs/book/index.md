@@ -119,4 +119,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 5. [Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md): Can attention be computed in time linear in the sequence length, and what is lost?
 6. [Sparse Attention](v06-language-models/06-sparse-attention.md): If each token only needs a few others, how do we find them cheaply?
 7. [Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md): What if a model could think longer by reusing the same layers more times?
+8. [Long Context](v06-language-models/08-long-context.md): How do models trained on short texts read long ones?
 <!-- /contents -->

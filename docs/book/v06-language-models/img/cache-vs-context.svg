@@ -1,0 +1,34 @@
+<!-- source-sha256: 8516b2a7ae169c3f35c773a0e2c150ac789d27763dbd9e6d9a652bbf0855ffe3 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="311.15" y1="334" x2="311.15" y2="30" stroke="#edf2f7"/>
+<text x="311.15" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10,000</text>
+<line x1="566.94" y1="334" x2="566.94" y2="30" stroke="#edf2f7"/>
+<text x="566.94" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100,000</text>
+<line x1="58" y1="288.88" x2="597" y2="288.88" stroke="#edf2f7"/>
+<text x="52" y="292.88" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.1</text>
+<line x1="58" y1="202.59" x2="597" y2="202.59" stroke="#edf2f7"/>
+<text x="52" y="206.59" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="116.29" x2="597" y2="116.29" stroke="#edf2f7"/>
+<text x="52" y="120.29" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="30" x2="597" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100</text>
+<rect x="58" y="30" width="539" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="539" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,280.52 135,254.54 212,228.56 289,202.59 366,176.61 443,150.63 520,124.66 597,98.68"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" stroke-dasharray="6 4" points="58,305.34 135,279.36 212,253.39 289,227.41 366,201.43 443,175.46 520,149.48 597,123.5"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,246.18 135,220.2 212,194.22 289,168.25 366,142.27 443,116.29 520,90.32 597,64.34"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" stroke-dasharray="6 4" points="58,271 135,245.02 212,219.05 289,193.07 366,167.09 443,141.12 520,115.14 597,89.16"/><polyline fill="none" stroke="#6b46c1" stroke-width="2.0" stroke-dasharray="6 4" points="58,271 135,264.17 212,253.39 289,238.19 366,219.05 443,197.02 520,173.18 597,148.33"/></g>
+<text x="327.5" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">tokens in the sequence</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">cache of one sequence (GiB)</text>
+<text x="327.5" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Cache memory against context</text>
+<rect x="66" y="38" width="198.7" height="95" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">7.5B, bf16</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#2f855a" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">7.5B, int8</text>
+<line x1="74" y1="87" x2="94" y2="87" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">70B, bf16</text>
+<line x1="74" y1="104" x2="94" y2="104" stroke="#9b2c2c" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="108" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">70B, int8</text>
+<line x1="74" y1="121" x2="94" y2="121" stroke="#6b46c1" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="125" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">80 layers, 4:1 windowed, int8</text>
+</svg>

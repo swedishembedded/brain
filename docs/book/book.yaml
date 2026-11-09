@@ -539,7 +539,7 @@ volumes:
         title: "Long Context"
         question: "How do models trained on short texts read long ones?"
         introduces: [rope-scaling, yarn, context-extension, kv-offload]
-        requires: [rotary-position-embedding, kv-cache, sliding-window-attention]
+        requires: [rotary-position-embedding, kv-cache, sliding-window-attention, entropy, temperature, affine-quantization, fp8-format, flash-attention, prefill-phase]
         brain: []
       - id: spectral-lm
         title: "A Research Architecture: The Spectral Language Model"

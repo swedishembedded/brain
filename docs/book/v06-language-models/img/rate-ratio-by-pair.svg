@@ -1,0 +1,36 @@
+<!-- source-sha256: c58b79ecd29cd8b7a9759fa9c85f3156a1762a12f4a24d0aa9460082d85cf796 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="233.48" y1="334" x2="233.48" y2="30" stroke="#edf2f7"/>
+<text x="233.48" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="408.97" y1="334" x2="408.97" y2="30" stroke="#edf2f7"/>
+<text x="408.97" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="584.45" y1="334" x2="584.45" y2="30" stroke="#edf2f7"/>
+<text x="584.45" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">30</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.1</text>
+<line x1="58" y1="249.2" x2="602" y2="249.2" stroke="#edf2f7"/>
+<text x="52" y="253.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="137.1" x2="602" y2="137.1" stroke="#edf2f7"/>
+<text x="52" y="141.1" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="52.3" x2="602" y2="52.3" stroke="#edf2f7"/>
+<text x="52" y="56.3" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,306.7 75.55,306.7 93.1,306.7 110.65,306.7 128.19,306.7 145.74,306.7 163.29,306.7 180.84,306.7 198.39,306.7 215.94,306.7 233.48,306.7 251.03,306.7 268.58,306.7 286.13,306.7 303.68,306.7 321.23,306.7 338.77,306.7 356.32,306.7 373.87,306.7 391.42,306.7 408.97,306.7 426.52,306.7 444.06,306.7 461.61,306.7 479.16,306.7 496.71,306.7 514.26,306.7 531.81,306.7 549.35,306.7 566.9,306.7 584.45,306.7 602,306.7"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,52.3 75.55,60.51 93.1,68.72 110.65,76.92 128.19,85.13 145.74,93.34 163.29,101.54 180.84,109.75 198.39,117.96 215.94,126.16 233.48,134.37 251.03,142.57 268.58,150.78 286.13,158.99 303.68,167.19 321.23,175.4 338.77,183.61 356.32,191.81 373.87,200.02 391.42,208.23 408.97,216.43 426.52,224.64 444.06,232.84 461.61,241.05 479.16,249.26 496.71,257.46 514.26,265.67 531.81,273.88 549.35,282.08 566.9,290.29 584.45,298.49 602,306.7"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,52.3 75.55,52.3 93.1,52.3 110.65,52.3 128.19,52.3 145.74,52.3 163.29,52.3 180.84,52.3 198.39,52.3 215.94,52.3 233.48,52.3 251.03,60.83 268.58,69.99 286.13,79.9 303.68,90.68 321.23,102.5 338.77,115.59 356.32,130.24 373.87,146.9 391.42,166.18 408.97,189.08 426.52,217.29 444.06,254 461.61,306.7 479.16,306.7 496.71,306.7 514.26,306.7 531.81,306.7 549.35,306.7 566.9,306.7 584.45,306.7 602,306.7"/><polyline fill="none" stroke="#6b46c1" stroke-width="2.0" stroke-dasharray="6 4" points="58,52.3 75.55,52.3 93.1,52.3 110.65,52.3 128.19,52.3 145.74,52.3 163.29,52.3 180.84,52.3 198.39,52.3 215.94,52.3 233.48,52.3 251.03,68.96 268.58,99.73 286.13,129.26 303.68,157.28 321.23,183.51 338.77,207.7 356.32,229.6 373.87,249.05 391.42,265.98 408.97,280.42 426.52,292.48 444.06,302.38 461.61,306.7 479.16,306.7 496.71,306.7 514.26,306.7 531.81,306.7 549.35,306.7 566.9,306.7 584.45,306.7 602,306.7"/></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">frequency pair m (fast to slow)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">scaled rate / original rate</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">How each scheme rescales the rates (s = 8)</text>
+<rect x="66" y="248" width="214.21" height="78" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="263" x2="94" y2="263" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="267" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">position interpolation</text>
+<line x1="74" y1="280" x2="94" y2="280" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="284" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">NTK-aware</text>
+<line x1="74" y1="297" x2="94" y2="297" stroke="#2f855a" stroke-width="2"/>
+<text x="100" y="301" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">YaRN, ramp over the pair index</text>
+<line x1="74" y1="314" x2="94" y2="314" stroke="#6b46c1" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">YaRN, ramp over the turns</text>
+</svg>

@@ -160,6 +160,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **config default**: the value a reader substitutes for a field a configuration omits, which is a guess about the publisher: loud when the field fixes a shape and silent when it only changes a value. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
 
+**context extension**: making a model trained on texts of one length usable at a longer one, by choosing a scaling table for the new length and, usually, continuing to train it on texts of that length. *([Long Context](v06-language-models/08-long-context.md))*
+
 **context vector**: the vector that carries what an encoder has read to the decoder; in the first design a single vector, the encoder's last state, and in attention a vector of its own at every output step, a weighted average of the encoder states. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
 
 **contrastive loss**: a loss that trains vectors by comparison: for each anchor it is the softmax cross-entropy, at a temperature, over the cosines of the anchor to its partner and to the partners of the other pairs of the batch (the in-batch negatives), which raises the cosine of the pair and lowers the others. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
@@ -413,6 +415,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **KL divergence**: the excess of the cross-entropy over the entropy, $D_{\mathrm{KL}}(p \,\Vert\, q) = \sum_k p_k \log(p_k/q_k)$; it is never negative, zero only when $q = p$, and not symmetric in its arguments. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
 **KV cache**: for every layer, the key and the value of every token already seen, stored once and read by every later token, so that the past is never run through the model again; its size is two rows of $h_{\mathrm{kv}} d_h$ numbers per token and layer. *([The KV Cache](v05-sequences/12-kv-cache.md))*
+
+**KV offload**: keeping part of the key-value cache in host memory and moving it back to the device when it is needed; because a decoded sequence reads all its cache at every token, what pays is moving whole sequences between scheduling turns, which raises how many sequences can be admitted and not how long one running sequence can be. *([Long Context](v06-language-models/08-long-context.md))*
 
 ## L
 
@@ -700,6 +704,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **roofline model**: the bound that the attainable rate of a computation on a machine is the smaller of the machine's peak arithmetic rate and its arithmetic intensity times its memory bandwidth, drawn as a slanted line that meets a flat one at the ridge point. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
 
+**RoPE scaling**: changing the rotation rates of the rotary table (and sometimes the magnitude of the rotated vectors) so that a model trained on one length can be run at a longer one, by dividing all rates, a geometric ramp of them or a different rule for each pair. *([Long Context](v06-language-models/08-long-context.md))*
+
 **rotary position embedding**: a scheme that cuts each query and key into pairs of channels and rotates the pair $m$ of position $i$ by the angle $i\,\omega_m$ after the projections, so that every attention score depends on the two positions only through their offset. *([Positional Information](v05-sequences/08-positions.md))*
 
 **rotation matrix**: an orthogonal matrix with determinant $+1$; in the plane $\begin{pmatrix}\cos\theta&-\sin\theta\\\sin\theta&\cos\theta\end{pmatrix}$, and rotations compose by adding their angles. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
@@ -907,3 +913,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **xavier-initialization**: drawing the weights of a layer with variance $2/(n_{\mathrm{in}} + n_{\mathrm{out}})$, the harmonic mean of the forward-preserving and backward-preserving variances, for units that behave like the identity near zero. *([Initialization: Where Training Starts](v03-neural-networks/09-initialization.md))*
 
 **XOR problem**: the fact that the exclusive-or of two bits, whose two classes sit on opposite diagonals of a square, is not linearly separable and so no single threshold neuron computes it. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
+
+## Y
+
+**YaRN**: a rope scaling that gives each frequency pair a rate between its original and its original divided by the extension factor, by the number of turns it makes over the trained length, and multiplies the cosine and sine of every pair by $0.1\ln s + 1$ to restore the sharpness of the softmax. *([Long Context](v06-language-models/08-long-context.md))*
