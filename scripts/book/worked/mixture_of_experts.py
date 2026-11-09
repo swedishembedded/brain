@@ -791,11 +791,15 @@ def balance_training():
             cells = [stable.text(base["loads"][e], [t["loads"][e] for t in twins], lambda x: f"{x:.0f}") for e in range(TR_E)]
             loss = stable.text(base["loss"], [t["loss"] for t in twins], lambda x: _fx(x, 4))
             rows.append([_fx(a, 2), str(s)] + cells + [loss])
-    return (f"Slots per expert after {TR_STEPS} steps, on the {TR_N} training tokens, for three strengths of the balancing loss and "
+    return (_seed_line(NAME_TRAIN_DATA) + f" The data: 6 cluster centers, each 6 draws of `normal()` (scale {TR_SPREAD:g}); then 6 maps "
+            f"of 6 x 6 entries, each `normal() / sqrt(6)`, row by row; then for each of the {TR_N} tokens the cluster `integer(6)` and 6 "
+            f"values of `{TR_NOISE:g} * normal()` added to the center. The initial weights are `{TR_INIT:g} * normal()`. "
+            f"Slots per expert after {TR_STEPS} steps, on the {TR_N} training tokens, for three strengths of the balancing loss and "
             f"three initialisations (each initialisation is the generator `mixture_of_experts.train_init.<seed>`, with seed "
             + ", ".join(f"{s}: {bookrng.seed_of(train_init_name(s)):#018x}" for s in TR_SEEDS)
             + f"). A balanced router has {ideal} slots per expert. The last column is the training loss, "
-            "half the squared error summed over the 6 outputs and averaged over tokens. " + stable.RULE + "\n\n"
+            "half the squared error summed over the 6 outputs and averaged over tokens, as computed in the forward pass of step "
+            f"{TR_STEPS} (with the weights before that step's update, not the final weights); the slots are counted with the final router. " + stable.RULE + "\n\n"
             + _table(["$\\alpha_{\\mathrm{bal}}$", "seed"] + [f"e{e}" for e in range(TR_E)] + ["loss"], rows))
 
 

@@ -253,8 +253,10 @@ def ladder():
             "GPT-2; each later row keeps all earlier changes. SwiGLU takes F = 2,048 so that its three matrices "
             "(3 x 768 x 2,048) hold exactly as many numbers as the two matrices of the GELU network (2 x 768 x 3,072). "
             "Cache bytes are per token in bf16. FLOPs are those of the matrix products of one decoded token that sees 1,024 "
-            "keys (cache of 1,023): 2 FLOPs for every weight of the blocks, 4 x layers x H x head width for every visible key, "
-            "and 2 x D x V for the head.\n\n"
+            "keys (cache of 1,023): 2 FLOPs for every matrix weight of the blocks (the biases, the norms and the rotation add "
+            "FLOPs that are not counted), 4 x layers x H x head width for every visible key, and 2 x D x V for the head. "
+            "Until the row \"no biases\" the SwiGLU network keeps biases: one on each of gate and up (F = 2,048 numbers each) "
+            "and one on down (D = 768 numbers), in every layer.\n\n"
             + _table(["step", "parameters", "change", "cache bytes", "change", "FLOPs per decoded token", "change"], rows))
 
 

@@ -221,16 +221,16 @@ The harness on correct candidates. The candidate is the stack with every weight 
 
 | stack | $N_{\mathrm{rnd}}$ | bound $\tau_{\mathrm{par}}$ | rel_l2 of logits | max_abs of logits | all three tests pass | bound over rel_l2 |
 |---|---:|---:|---:|---:|---:|---:|
-| `dense` | 371 | 2.22e-5 | 2.17e-7 | below 1e-6 | yes | 102 |
-| `moe` | 389 | 2.32e-5 | below 1e-7 | below 1e-6 | yes | 361 |
-| `gdn` | 531 | 3.17e-5 | 2.52e-7 | 1.62e-6 | yes | 126 |
-| `swa` | 335 | 2.00e-5 | 1.66e-7 | below 1e-6 | yes | 120 |
-| `hybrid` | 451 | 2.69e-5 | 1.13e-7 | below 1e-6 | yes | 237 |
+| `dense` | 378 | 2.26e-5 | 2.17e-7 | below 1e-6 | yes | 104 |
+| `moe` | 396 | 2.37e-5 | below 1e-7 | below 1e-6 | yes | 367 |
+| `gdn` | 540 | 3.22e-5 | 2.52e-7 | 1.62e-6 | yes | 128 |
+| `swa` | 342 | 2.04e-5 | 1.66e-7 | below 1e-6 | yes | 123 |
+| `hybrid` | 459 | 2.74e-5 | 1.13e-7 | below 1e-6 | yes | 242 |
 
 The dense stack against the decoder of Chapter 1 (`modern_decoder.forward`, same weights, 64 bits both): rel_l2 below 1e-14.
 <!-- /worked -->
 
-All five stacks pass all three tests, with a bound between 102 and 361 times above the measured error (the last column), a ratio of the order that Chapter 2 found for the 32-bit pass of the decoder. The dense stack also agrees with the decoder of Chapter 1 to rounding when both run in 64 bits, which is the last row's claim: the engine's dense block and the reference decoder are two independent implementations of one function.
+All five stacks pass all three tests, with a bound between 104 and 367 times above the measured error (the last column), a ratio of the order that Chapter 2 found for the 32-bit pass of the decoder. The dense stack also agrees with the decoder of Chapter 1 to rounding when both run in 64 bits, which is the last row's claim: the engine's dense block and the reference decoder are two independent implementations of one function.
 
 Now the other direction. A harness that passes correct code has shown nothing until it has been shown to fail on wrong code, so each row of the next table plants one mistake in a stack that passes, runs the harness, and records which of the three tests fired and which tap, going forward through the network, was the first to leave its bound. The mistakes are the ones that the blocks make easy: a key-value head assigned by $h \bmod 2$ in place of $\lfloor h/2 \rfloor$; queries left unrotated; QK-norm gains dropped; a window of 5 keys; combine weights that are the raw probabilities; a decay gate with the wrong sign. Each is planted in layer 1 only, so the taps before it must stay inside their bounds and the first tap beyond its bound must be the output of layer 1. The last three rows are not mistakes of the blocks but of the harness's resolution.
 

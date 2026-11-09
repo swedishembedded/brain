@@ -1,4 +1,4 @@
-<!-- source-sha256: 4a4e8c3140b3babf05e531ba542576d642071f074e0d84a6b6b4fb136ec39593 -->
+<!-- source-sha256: e8e2e40a894c696d795026cdd010b2d0edf9dafb55015812e757bed433fee8fa -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="760" height="300" fill="#ffffff"/>
 <text x="380" y="32.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Cache one token adds, all 36 layers, bf16 (Qwen3 8B shape)</text>
 <text x="250" y="60.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">bar length is proportional to bytes per token</text>

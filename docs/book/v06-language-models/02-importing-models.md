@@ -118,7 +118,7 @@ The column of relative differences is the cost of storage. Round to nearest in a
 The relative change is small per weight and is not small per model. The tiny decoder's 1,114 weights, as drawn and then rounded to bf16, give logits that differ by this much:
 
 <!-- worked: importing_models.bf16_weights_effect -->
-The weights of the tiny model as drawn (64 bits) and rounded to bf16, 1,114 numbers. Largest relative change of one weight 3.75e-3 (the bound for round to nearest is 2^-8 = 3.91e-3). Logits of the two models on the text of Chapter 1: rel_l2 2.91e-3, max_abs 9.19e-3, cosine 0.999996. The bound of the previous section, 1.34e-5, is 218 times smaller than this change, which is why a golden has to be computed from the published weights and not from the weights before they were rounded.
+The weights of the tiny model as drawn (64 bits) and rounded to bf16, 1,114 numbers. Largest relative change of one weight 3.75e-3 (the bound for round to nearest is 2^-8 = 3.91e-3). Logits of the two models on the text of Chapter 1: rel_l2 2.91e-3, max_abs 9.19e-3, cosine 0.999996. The bound of the previous section, 1.38e-5, is 211 times smaller than this change, which is why a golden has to be computed from the published weights and not from the weights before they were rounded.
 <!-- /worked -->
 
 That is the first rule of a golden: it is computed from the published numbers, the ones in the file, and never from the weights as they were before the publisher rounded them. The rest of the chapter takes the bf16 weights as the model, and its goldens are the outputs of those numbers.
@@ -128,7 +128,29 @@ That is the first rule of a golden: it is computed from the published numbers, t
 A checkpoint of a few gigabytes is split into shards, because a hosting service limits the size of a file and because a writer can then write the shards one after another. The split carries a small second file, the index, which lists for each tensor name the shard that holds it and the total size. The tiny model, cut greedily at 1,024 bytes per shard (a new shard when the next tensor would take the current one past the budget, a tensor larger than the budget alone in a shard), is three files:
 
 <!-- worked: importing_models.sharded_index -->
-The 19 tensors of the published tiny model in bf16 (2,228 bytes of tensor data), in file order, cut into shards by the greedy rule (a new shard when the next tensor would take the current one past 1024 bytes). Each shard is a safetensors file of its own; the index lists, for every tensor name, the shard that holds it, and the total size.
+The 19 tensors of the published tiny model in bf16 (2,228 bytes of tensor data), in file order, cut into shards by the greedy rule (a new shard when the next tensor would take the current one past 1024 bytes). Each shard is a safetensors file of its own, in exactly the format of the single file above (the 8-byte length N, the compact JSON header with `__metadata__` `{"format":"pt"}` first and then one entry per tensor of the shard with offsets counted from the start of that shard's data, padded with spaces to a multiple of 8, then the data), so the file size is 8 + N + tensor bytes; the index lists, for every tensor name, the shard that holds it, and the total size. The tensors, in file order, each BF16:
+
+| tensor | shape | shard |
+|---|---|---:|
+| `model.embed_tokens.weight` | 11 x 6 | 1 |
+| `model.layers.0.input_layernorm.weight` | 6 | 1 |
+| `model.layers.0.self_attn.qkv_proj.weight` | 32 x 6 | 1 |
+| `model.layers.0.self_attn.q_norm.weight` | 4 | 1 |
+| `model.layers.0.self_attn.k_norm.weight` | 4 | 1 |
+| `model.layers.0.self_attn.o_proj.weight` | 6 x 16 | 1 |
+| `model.layers.0.post_attention_layernorm.weight` | 6 | 1 |
+| `model.layers.0.mlp.gate_up_proj.weight` | 20 x 6 | 1 |
+| `model.layers.0.mlp.down_proj.weight` | 6 x 10 | 2 |
+| `model.layers.1.input_layernorm.weight` | 6 | 2 |
+| `model.layers.1.self_attn.qkv_proj.weight` | 32 x 6 | 2 |
+| `model.layers.1.self_attn.q_norm.weight` | 4 | 2 |
+| `model.layers.1.self_attn.k_norm.weight` | 4 | 2 |
+| `model.layers.1.self_attn.o_proj.weight` | 6 x 16 | 2 |
+| `model.layers.1.post_attention_layernorm.weight` | 6 | 2 |
+| `model.layers.1.mlp.gate_up_proj.weight` | 20 x 6 | 2 |
+| `model.layers.1.mlp.down_proj.weight` | 6 x 10 | 3 |
+| `model.norm.weight` | 6 | 3 |
+| `lm_head.weight` | 11 x 6 | 3 |
 
 | shard | file bytes | tensors | tensor bytes | first .. last tensor |
 |---|---:|---:|---:|---|
@@ -220,7 +242,7 @@ This is the degenerate-dimension lesson of Volume III, Chapter 6 and knowledge #
 Each of the mistakes a mapping invites can now be made on purpose and measured. In the worked module, each is a change to the plan of the previous section; each run uses 64-bit arithmetic, so that the numbers below are the effect of the mistake alone. "Square" is a second tiny decoder, with every matrix square ($D = 8$ and four heads of width 2 over four key-value heads, so $\mathbf{W}_Q$, $\mathbf{W}_K$, $\mathbf{W}_V$ and $\mathbf{W}_O$ are 8 by 8, and $F = 8$) so that the shape check has nothing to object to.
 
 <!-- worked: importing_models.import_mistakes -->
-Each mistake of the mapping, made in the import plan and run through the 64-bit forward pass on the text of Chapter 1 (ids 3, 9, 1, 7, 4, 4, 10, 2, eps 1e-6, base 100). The published numbers are the bf16 weights; the golden is the logits of those weights, and the three measures compare the 8 x 11 logits of the imported model with it (max_abs, rel_l2 and cosine are defined in the next section). "Square" is a model whose matrices are all square (V = 11, D = 8, L = 2, H = HKV = 4, head width 2, F = 8; weights from the generator `importing_models.square`, seed 0x39d64f12e64012f2, drawn in the order of Chapter 1). A plan checks the shape of each tensor it builds before it runs anything.
+Each mistake of the mapping, made in the import plan and run through the 64-bit forward pass on the text of Chapter 1 (ids 3, 9, 1, 7, 4, 4, 10, 2, eps 1e-6, the epsilon of the published configuration, base 100). The published numbers are the bf16 weights; the golden is the logits of those weights, and the three measures compare the 8 x 11 logits of the imported model with it (max_abs, rel_l2 and cosine are defined in the next section). "Square" is a model whose matrices are all square (V = 11, D = 8, L = 2, H = HKV = 4, head width 2, F = 8; weights from the generator `importing_models.square`, seed 0x39d64f12e64012f2, drawn in the order of Chapter 1). A plan checks the shape of each tensor it builds before it runs anything.
 
 | mistake | model | outcome | max_abs | rel_l2 | cosine | argmax agrees |
 |---|---|---|---|---:|---:|---:|
@@ -240,7 +262,7 @@ Brain's history holds the same lessons at larger scale. Commit `0581928e9` (July
 
 The second file of a checkpoint is its configuration, a short JSON of the model's shape: width, depth, heads, the width of the feed-forward network, the vocabulary, the epsilon of the norms, the base of the rotary embedding, whether the head is tied. A reader that builds a model from it has to decide what to do with a field that is absent, and the decision is a **config default**: the value a reader substitutes for a field a configuration does not state. A default is a guess about the publisher. It is right when it equals what the publisher meant, and wrong in a way that only the model's output can show.
 
-The tiny model's published configuration states everything, and the table removes one field at a time and lets the reader supply its own default (the key-value heads default to the number of query heads, the epsilon to 1e-6, the rotary base to 10,000, the tied head to false):
+The tiny model's published configuration states everything, and the table removes one field at a time and lets the reader supply its own default (the key-value heads default to the number of query heads, the epsilon to 1e-5, the rotary base to 10,000, the tied head to false):
 
 <!-- worked: importing_models.config_defaults -->
 The published configuration of the tiny model, with the fields a reader needs:
@@ -257,33 +279,33 @@ The published configuration of the tiny model, with the fields a reader needs:
  "num_key_value_heads": 2,
  "head_dim": 4,
  "intermediate_size": 10,
- "rms_norm_eps": 1e-05,
+ "rms_norm_eps": 1e-06,
  "rope_theta": 100.0,
  "tie_word_embeddings": false
 }
 ```
 
-One field at a time is removed and the reader's default is used instead (the reader defaults the key-value heads to the query heads, the epsilon to 1e-6, the rotary base to 10000 and the tied head to false). The weights and the text are those of the previous table; the golden is the 64-bit forward pass with the published values (eps 1e-5, base 100); rel_l2 and cosine compare the logits computed with the default against it.
+One field at a time is removed and the reader's default is used instead (the reader defaults the key-value heads to the query heads, the epsilon to 1e-5, the rotary base to 10000 and the tied head to false). The weights and the text are those of the previous table; the golden is the 64-bit forward pass with the published values (eps 1e-6, base 100); rel_l2 and cosine compare the logits computed with the default against it.
 
 | omitted field | published | default | outcome | rel_l2 of logits | cosine |
 |---|---|---|---|---|---:|
 | `num_key_value_heads` | 2 | 4 (= the query heads) | refused: W_V (layer 0): rows 32 .. 47 of model.layers.0.self_attn.qkv_proj.weight, which has 32 rows |  |  |
-| `rms_norm_eps` | 1e-05 | 1e-06 | runs | 3.58e-6 | 1.000000 |
+| `rms_norm_eps` | 1e-06 | 1e-05 | runs | 3.58e-6 | 1.000000 |
 | `rope_theta` | 100 | 10000 | runs | 2.47e-2 | 0.999711 |
 | `tie_word_embeddings` | false | false | runs (the default is the truth) | 0 | 1.000000 |
-| `tie_word_embeddings`, read by a reader whose default is true | false | true | runs, `lm_head.weight` dropped | 2.97e+0 | 0.212803 |
+| `tie_word_embeddings`, read by a reader whose default is true | false | true | runs, `lm_head.weight` dropped | 2.97e+0 | 0.212802 |
 <!-- /worked -->
 
-Two of the defaults are stopped by the loader. Without `num_key_value_heads` the reader assumes four key-value heads, and the plan asks for 48 rows of a 32-row matrix: the fused shape contradicts the guess, so a wrong default of a field that fixes a shape fails loudly, which is the best kind of failure. Two others run, and they are the ones to fear, because they change values and shapes remain. The rotary base of 10,000 where the published one is 100 moves the logits by 2.5 percent of their norm. The epsilon of 1e-6 where the publisher used 1e-5 moves them by $3.6 \times 10^{-6}$, almost nothing, and the reason is in the formula of the RMS norm: the epsilon is added to the mean of squares, $\sqrt{\mathrm{mean}(x^2) + \epsilon_{\mathrm{norm}}}$, so it matters in proportion to how small the mean of squares is.
+Two of the defaults are stopped by the loader. Without `num_key_value_heads` the reader assumes four key-value heads, and the plan asks for 48 rows of a 32-row matrix: the fused shape contradicts the guess, so a wrong default of a field that fixes a shape fails loudly, which is the best kind of failure. Two others run, and they are the ones to fear, because they change values and shapes remain. The rotary base of 10,000 where the published one is 100 moves the logits by 2.5 percent of their norm. The epsilon of 1e-5 where the publisher used 1e-6 moves them by $3.6 \times 10^{-6}$, almost nothing, and the reason is in the formula of the RMS norm: the epsilon is added to the mean of squares, $\sqrt{\mathrm{mean}(x^2) + \epsilon_{\mathrm{norm}}}$, so it matters in proportion to how small the mean of squares is.
 
 <!-- worked: importing_models.eps_scale_table -->
-The same wrong epsilon (1e-6 for the published 1e-5) at three scales of the activations: the embedding table is multiplied by the factor in the first column, the weights are unchanged, and the golden is the 64-bit forward pass with eps 1e-5 on the same scaled table.
+The same wrong epsilon (1e-5 for the published 1e-6) at three scales of the activations: the embedding table is multiplied by the factor in the first column, the weights are unchanged, and the golden is the 64-bit forward pass with eps 1e-6 on the same scaled table.
 
 | factor on the embedding table | rel_l2 of logits | max_abs of logits |
 |---|---:|---:|
 | 1 | 3.58e-6 | 1.51e-5 |
 | 0.1 | 2.43e-4 | 1.31e-3 |
-| 0.01 | 5.63e-2 | 2.75e-1 |
+| 0.01 | 5.65e-2 | 2.75e-1 |
 <!-- /worked -->
 
 The error grows roughly as the inverse square of the activation scale, from $3.6 \times 10^{-6}$ to $5.6 \times 10^{-2}$ over two decades (and more slowly once the epsilon is comparable with the mean of squares), and a model whose activations are small in some layers is a model that reveals the wrong epsilon there and nowhere else. A parity run on one prompt at one scale can miss it, and the section below returns to what that implies for tolerances.
@@ -303,7 +325,7 @@ The import is done when a model that has never seen the reference's code compute
 A **reference golden** is the stored output of the reference implementation for fixed inputs, kept as a file the implementation under test is compared against. For a model the golden holds the input, the outputs and, because the end of the pipeline tells you only that something is wrong and not where, the intermediate activations: the hidden state after the embedding and after every layer. Here is the golden of a six-layer version of the tiny decoder, written by the module as one safetensors file:
 
 <!-- worked: importing_models.golden_contents -->
-The golden for a 6-layer version of the tiny decoder (V = 11, D = 6, H = 4, 2 key-value heads of width 4, F = 10, L = 6; weights from the generator `importing_models.deep`, seed 0x6b38c609eb7b8278, drawn in the order of Chapter 1 and rounded to bf16), written by `write_safetensors` as one safetensors file. It holds the text, the hidden state after the embedding and after each layer, the output of the final norm and the logits; the header also carries the metadata keys `generator`, `eps`, `rope_base`, `arithmetic`, `tolerance_basis`. The file is 2,768 bytes (1,920 of tensor data).
+The golden for a 6-layer version of the tiny decoder (V = 11, D = 6, H = 4, 2 key-value heads of width 4, F = 10, L = 6; weights from the generator `importing_models.deep`, seed 0x6b38c609eb7b8278, drawn in the order of Chapter 1 and rounded to bf16), written by `write_safetensors` as one safetensors file. It holds the text, the hidden state after the embedding and after each layer, the output of the final norm and the logits, each tensor stored in the order listed below with the data back to back. The header is the compact JSON of `write_safetensors` (`__metadata__` first, then the tensors in that order), padded with spaces to a multiple of 8, and its `__metadata__` is exactly `{"generator":"importing_models.deep","eps":"1e-06","rope_base":"100","arithmetic":"64-bit, stored as 32-bit","tolerance_basis":"rounding count x 2^-24"}`, so the header is 840 bytes. The file is 2,768 bytes (1,920 of tensor data).
 
 | tensor | dtype | shape | bytes | what |
 |---|---|---|---:|---|
@@ -327,7 +349,7 @@ The golden is stored in 32 bits (the reader decodes nothing wider), so one round
 
 ### Three ways to measure a difference
 
-Let $\mathbf{a}$ be what the implementation under test produced and $\mathbf{b}$ the golden, both flattened to $N$ numbers. Three measures are in common use, and each sees what the others miss:
+Let $\mathbf{a}$ be what the implementation under test produced and $\mathbf{b}$ the golden, both flattened to $n_{\mathrm{el}}$ numbers. Three measures are in common use, and each sees what the others miss:
 
 $$
 \mathrm{max\_abs}(\mathbf{a}, \mathbf{b}) = \max_i \lvert a_i - b_i \rvert, \qquad
@@ -338,7 +360,7 @@ $$
 `max_abs` is in the units of the outputs and finds the one bad entry that an average dilutes. `rel_l2` is the relative error of Volume III, Chapter 6 taken over the whole tensor, a norm-wise version of the entry-wise one, and it is dimensionless, so one tolerance reads the same for logits of size 2 and hidden states of size 200. Cosine similarity is a measure of direction only. Write $\mathbf{a} = \mathbf{b} + \mathbf{e}$ with the error $\mathbf{e}$ orthogonal to $\mathbf{b}$ and let $\rho$ be `rel_l2`: then $\cos = 1/\sqrt{1 + \rho^2}$, so $1 - \cos \approx \rho^2 / 2$. Cosine is quadratic in the error, which makes it blind in two ways. An error of 1 percent leaves $1 - \cos = 5 \times 10^{-5}$, and the floor 0.9999 of brain's DeepSeek ladder admits a relative error of $\sqrt{2 \times 10^{-4}} = 1.4$ percent. And a cosine computed in 32 bits is itself uncertain by about $10^{-7}$, so it cannot resolve an error below $\sqrt{2 \times 10^{-7}} \approx 4.5 \times 10^{-4}$ however well it is gated. A scale error is the extreme: $\mathbf{a} = s\mathbf{b}$ has cosine exactly 1 for every $s > 0$. This is knowledge #2, the lesson that cosine cannot see a dropped scale factor, and the worked table puts all three measures, and the gate of Chapter 1, on eight outputs:
 
 <!-- worked: importing_models.metric_blindness -->
-Eight outputs compared with the 64-bit logits of the published tiny model (the two rows about the rotary base and the epsilon: with the logits at the published eps 1e-5, base 100) by the three measures and by three tests: cosine at least 0.9999 (the floor of the DeepSeek ladder described below), rel_l2 at most the bound 1.34e-5 of the previous table, and the gate of Chapter 1's forward-parity test (the top prediction agrees at all 8 positions and max_abs is below 1.0). 1 - cosine is printed because cosine is 1 to six places for most rows.
+Eight outputs compared with the 64-bit logits of the published tiny model (the two rows about the rotary base and the epsilon: with the logits at the published eps 1e-6, base 100) by the three measures and by three tests: cosine at least 0.9999 (the floor of the DeepSeek ladder described below), rel_l2 at most the bound 1.38e-5 of the previous table, and the gate of Chapter 1's forward-parity test (the top prediction agrees at all 8 positions and max_abs is below 1.0). 1 - cosine is printed because cosine is 1 to six places for most rows.
 
 | output | 1 - cosine | cosine test | rel_l2 | rel_l2 test | max_abs | gate of Chapter 1 |
 |---|---:|---|---:|---|---:|---|
@@ -348,8 +370,8 @@ Eight outputs compared with the 64-bit logits of the published tiny model (the t
 | keys and values exchanged | 1.75e-1 | fail | 5.91e-1 | fail | 2.55e+0 | fail |
 | head tied to the embedding | 7.87e-1 | fail | 2.97e+0 | fail | 8.19e+0 | fail |
 | rotary base 10000 for the published 100 | 2.89e-4 | fail | 2.47e-2 | fail | 9.60e-2 | pass |
-| epsilon 1e-6 for the published 1e-5 | 4.03e-12 | pass | 3.58e-6 | pass | 1.51e-5 | pass |
-| 32-bit arithmetic, left to right | below 1e-12 | pass | 1.44e-7 | pass | 4.86e-7 | pass |
+| epsilon 1e-5 for the published 1e-6 | 4.03e-12 | pass | 3.58e-6 | pass | 1.51e-5 | pass |
+| 32-bit arithmetic, left to right | below 1e-12 | pass | 1.26e-7 | pass | 3.92e-7 | pass |
 <!-- /worked -->
 
 A final gain 5 percent too large is invisible to cosine (the cosine is 1 to a part in $10^{12}$ and the table says "below") and to the gate of Chapter 1 (0.115 is far under 1.0), and visible to `rel_l2` at exactly 0.050. The wrong rotary base passes the gate of Chapter 1 as well, with a largest error of 0.096, while its cosine of 0.9997 falls just under the floor and `rel_l2` stands at 2.5 percent. The wrong epsilon passes every test, and it should be asked why. Nothing here argues that one measure is the right one. Cosine finds direction errors, `rel_l2` finds those and scale errors, `max_abs` finds the localized ones, and a gate that asserts only one is a gate with a blind spot that the table located. Brain's records agree: `crates/rrdbnet/tests/it/parity.rs` defines the three measures and asserts both a cosine floor and a `rel_l2` ceiling at every rung, with a comment that its network has two residual scalings of 0.2 that "a cosine-only ladder would miss completely", and its test model asserts that its toy dimensions differ, citing the degenerate-dimension lesson (knowledge #4) by number. The file does not say where its ceiling of $2 \times 10^{-4}$ comes from; the derivation below is how it would be obtained. The DeepSeek ladder in `crates/qwen3/tests/it/deepseek_parity.rs` asserts the row cosine only, floor 0.9999; by the arithmetic above it would not see a doubled final gain, and it is a reason to add the `rel_l2` that knowledge #2 asks for.
@@ -367,50 +389,50 @@ $$
 Two assumptions sit in that sentence, and the chapter does not hide them. The factor of at most 1 is not a theorem for a network: a stage that cancels amplifies the relative error of its input by its condition number (Volume I, Chapter 15), and the bound is only as good as that is small. And only the chain counts, not the whole count of operations, since the roundings of different entries do not add. The table counts the chain for the tiny decoder, on the last of 8 positions, where the softmax and the weighted sum of the values run over 8 terms:
 
 <!-- worked: importing_models.error_budget -->
-Roundings along the longest chain of dependent operations of the tiny decoder for the last of T = 8 positions (D = 6, H = 4, head width 4, F = 10), counted by the rule that a sum of n products costs n roundings and each further operation on a result costs one:
+Roundings along the longest chain of dependent operations of the tiny decoder for the last of T = 8 positions (D = 6, H = 4, head width 4, F = 10), counted by the rule that a sum of n products costs n roundings and each further operation on a result costs one. The RMS norm is the one of the book's pseudocode: `inv_std = 1 / sqrt(mean(x^2) + eps)`, `xhat = x * inv_std`, `y = gamma * xhat`, with eps = 1e-6, so the two products follow the reciprocal on one chain (D roundings for the sum of D squares, then the divide, the addition of eps, the square root, the reciprocal and the two products: D + 6):
 
 | stage | roundings |
 |---|---:|
-| RMS norm 1 (sum of D squares, divide, add eps, sqrt, reciprocal, two products) | 11 |
+| RMS norm 1 (sum of D squares, divide by D, add eps, sqrt, reciprocal, product with x, product with the gain) | 12 |
 | projection to q, k, v (dot of length D) | 6 |
-| QK-norm (sum of DH squares and the same five operations) | 9 |
+| QK-norm (sum of d_h squares and the same six operations) | 10 |
 | rotation (angle, cosine or sine, product, add) | 4 |
-| scores (dot of length DH, scale) | 5 |
+| scores (dot of length d_h, scale) | 5 |
 | softmax (subtract, exp, sum of T terms, divide) | 11 |
 | weighted sum of values (T products added) | 8 |
-| W_O (dot of length H DH) | 16 |
+| W_O (dot of length H d_h) | 16 |
 | residual add | 1 |
-| RMS norm 2 | 11 |
+| RMS norm 2 (as norm 1) | 12 |
 | gate or up projection (dot of length D) | 6 |
 | silu, product with up (exp, add, divide, multiply) | 4 |
 | W_down (dot of length F) | 10 |
 | residual add | 1 |
-| one layer, total | 103 |
-| final RMS norm | 11 |
+| one layer, total | 106 |
+| final RMS norm (as norm 1) | 12 |
 | output projection (dot of length D) | 6 |
 | storing the golden in 32 bits | 1 |
 
-Two layers, the head and the stored golden give N = 224 roundings, so the bound on the relative error of the logits is N u = 224 x 2^-24 = 1.34e-5, and the random-walk estimate sqrt(N) u is 8.92e-7. Measured: eight draws of the weights of the tiny model (generators `importing_models.draws.0` to `importing_models.draws.7`, same shapes, scales and draw order as Chapter 1, rounded to bf16), each run in 32-bit arithmetic with the three summation orders against the 64-bit logits stored in 32 bits; rel_l2 of the 8 x 11 logits:
+Two layers, the head and the stored golden give N = 231 roundings, so the bound on the relative error of the logits is N u = 231 x 2^-24 = 1.38e-5, and the random-walk estimate sqrt(N) u is 9.06e-7. Measured: eight draws of the weights of the tiny model (generators `importing_models.draws.0` to `importing_models.draws.7`, same shapes, scales and draw order as Chapter 1, rounded to bf16), each run in 32-bit arithmetic with the three summation orders against the 64-bit logits stored in 32 bits. The 32-bit run rounds to the nearest 32-bit number after every operation: each product and each addition of every sum (the sum of squares of a norm, every dot product, the softmax denominator, the weighted sum of values), each division, square root and reciprocal, each exp, cos and sin (the 64-bit library value rounded once), and the constants eps, the rotary rates and 1/sqrt(d_h) before they are used; the bf16 weights are exactly representable, and the maximum of the softmax is exact. The 'left to right' order adds the terms of a sum one after another from the first; 'right to left' from the last; 'pairwise' adds the sum of the first half to the sum of the second half, recursively, the middle of n terms being n // 2. rel_l2 of the 8 x 11 logits:
 
 | seed of the draw | left to right | right to left | pairwise |
 |---|---:|---:|---:|
-| 0x6886c84cce118975 | 1.31e-7 | 1.70e-7 | 1.65e-7 |
-| 0xd97e1a73b4b25a0f | 1.82e-7 | 1.48e-7 | 1.51e-7 |
-| 0x0f513e21f133e079 | 1.71e-7 | 2.06e-7 | 1.85e-7 |
-| 0xacb2944e0b3cfc15 | 1.91e-7 | 1.95e-7 | 2.11e-7 |
-| 0xe9e1be578625515c | 1.61e-7 | 1.28e-7 | 1.52e-7 |
-| 0x0ee3ca3f44cc3174 | 2.41e-7 | 2.18e-7 | 2.91e-7 |
-| 0xb54d5dd123aa34f5 | 1.63e-7 | 1.78e-7 | 1.70e-7 |
-| 0x99bbac5c15de052b | 2.23e-7 | 1.52e-7 | 1.59e-7 |
+| 0x6886c84cce118975 | 1.61e-7 | 1.75e-7 | 1.23e-7 |
+| 0xd97e1a73b4b25a0f | 2.39e-7 | 1.77e-7 | 2.31e-7 |
+| 0x0f513e21f133e079 | 1.70e-7 | 1.54e-7 | 1.24e-7 |
+| 0xacb2944e0b3cfc15 | 1.88e-7 | 1.37e-7 | 2.12e-7 |
+| 0xe9e1be578625515c | 1.31e-7 | 1.83e-7 | 1.36e-7 |
+| 0x0ee3ca3f44cc3174 | 2.66e-7 | 1.84e-7 | 3.16e-7 |
+| 0xb54d5dd123aa34f5 | 2.42e-7 | 2.15e-7 | 1.40e-7 |
+| 0x99bbac5c15de052b | 1.96e-7 | 1.67e-7 | 2.47e-7 |
 
-The largest measured error is 2.91e-7, 46 times below the bound and 0.33 times the random-walk estimate.
+The largest measured error is 3.16e-7, 44 times below the bound and 0.35 times the random-walk estimate.
 <!-- /worked -->
 
-The bound is $224 \times 2^{-24} = 1.34 \times 10^{-5}$. A second estimate treats the roundings as independent errors of random sign, which add in quadrature, so that $\sqrt{N_{\mathrm{rnd}}}\,u = 8.9 \times 10^{-7}$ is what a typical run should show. The measurements sit under both: 24 runs of 32-bit arithmetic against the golden, on eight independent draws of the weights and with three orders of summation each, give relative errors between $1.3 \times 10^{-7}$ and $2.9 \times 10^{-7}$, 46 times below the bound and a third of the random-walk estimate. The first set of numbers is a theorem under the assumptions, and the second set is evidence that the assumptions held on these models. That is why the bound, and not the random-walk estimate, is the tolerance: it never raises a false alarm unless the stages amplify error, and the measurement is how that is checked.
+The bound is $231 \times 2^{-24} = 1.38 \times 10^{-5}$. A second estimate treats the roundings as independent errors of random sign, which add in quadrature, so that $\sqrt{N_{\mathrm{rnd}}}\,u = 9.1 \times 10^{-7}$ is what a typical run should show. The measurements sit under both: 24 runs of 32-bit arithmetic against the golden, on eight independent draws of the weights and with three orders of summation each, give relative errors between $1.2 \times 10^{-7}$ and $3.2 \times 10^{-7}$, 44 times below the bound and a third of the random-walk estimate. The first set of numbers is a theorem under the assumptions, and the second set is evidence that the assumptions held on these models. That is why the bound, and not the random-walk estimate, is the tolerance: it never raises a false alarm unless the stages amplify error, and the measurement is how that is checked.
 
-A tolerance derived this way also says what it cannot see. A difference below $\tau_{\mathrm{par}}$ is indistinguishable from rounding, so a bug whose effect is smaller than the tolerance passes. The wrong epsilon at the scale of the table above is exactly that: its relative error of $3.6 \times 10^{-6}$ is 3.7 times below $1.34 \times 10^{-5}$, so no parity test at this tolerance can see it, on this prompt, with these activations. Three responses are open, and the first two are the ones to use. Compare the configuration itself, field by field with the published values, in a test that is not about outputs, since a value read from a file is a value and can be compared exactly. Run the parity at an input where the quantity that the bug scales is made large, the way the table shrank the activations until the epsilon showed: at a factor of 0.1 on the embeddings, the same wrong epsilon moves the logits by $2.4 \times 10^{-4}$, 18 times the tolerance. And tighten the tolerance only with evidence that it is safe, by measuring the spread of correct implementations as above; do not pick the number from the failing one.
+A tolerance derived this way also says what it cannot see. A difference below $\tau_{\mathrm{par}}$ is indistinguishable from rounding, so a bug whose effect is smaller than the tolerance passes. The wrong epsilon at the scale of the table above is exactly that: its relative error of $3.6 \times 10^{-6}$ is 3.8 times below $1.38 \times 10^{-5}$, so no parity test at this tolerance can see it, on this prompt, with these activations. Three responses are open, and the first two are the ones to use. Compare the configuration itself, field by field with the published values, in a test that is not about outputs, since a value read from a file is a value and can be compared exactly. Run the parity at an input where the quantity that the bug scales is made large, the way the table shrank the activations until the epsilon showed: at a factor of 0.1 on the embeddings, the same wrong epsilon moves the logits by $2.4 \times 10^{-4}$, 18 times the tolerance. And tighten the tolerance only with evidence that it is safe, by measuring the spread of correct implementations as above; do not pick the number from the failing one.
 
-The same derivation settles how to read a mismatch between a golden and a model that has been rounded on the way. The bf16 table earlier changes the logits by $2.9 \times 10^{-3}$, 218 times the tolerance, so a comparison between a model run on the weights as trained and one run on the weights as published fails the parity test, and rightly: they are different functions. The golden and the implementation under test must start from the same bytes.
+The same derivation settles how to read a mismatch between a golden and a model that has been rounded on the way. The bf16 table earlier changes the logits by $2.9 \times 10^{-3}$, 211 times the tolerance, so a comparison between a model run on the weights as trained and one run on the weights as published fails the parity test, and rightly: they are different functions. The golden and the implementation under test must start from the same bytes.
 
 ### Finding the first layer that is wrong
 
@@ -434,18 +456,18 @@ function first_divergence(got: list<array<real>>, want: list<array<real>>,
 The search is run on the six-layer model, with one injected error: in layer 3 only, the import exchanges gate and up. The implementation under test is the 32-bit forward pass, so its correct version carries real rounding noise, and the comparison is against the golden of the previous table.
 
 <!-- worked: importing_models.bisection -->
-Layer-by-layer comparison for the 6-layer model of the previous table. The implementation under test is the 32-bit forward pass (summation left to right); the golden is the stored 64-bit one. The mistake is an import in which gate and up are exchanged in layer 3 only. For each hidden state, the rel_l2 of the correct import, the rel_l2 of the mistaken one, and the bound (roundings of the layers so far, plus one for the stored golden, times 2^-24).
+Layer-by-layer comparison for the 6-layer model of the previous table. The implementation under test is the 32-bit forward pass (summation left to right); the golden is the stored 64-bit one. The mistake is an import in which gate and up are exchanged in layer 3 only. For each hidden state, the rel_l2 of the correct import, the rel_l2 of the mistaken one, and the bound (roundings of the layers so far, plus one for the stored golden, times 2^-24). Every layer counts 106 roundings (the table above, with eps 1e-6 and the same 32-bit rules), so the bound after k layers is (k x that + 1) x 2^-24; the final norm adds its own 12 roundings (D + 6), so its bound is (6 x 106 + 12 + 1) x 2^-24.
 
 | hidden state | rel_l2, correct import | rel_l2, mistaken import | bound | mistaken import is |
 |---|---:|---:|---:|---|
 | embeddings | 0 | 0 | 5.96e-8 | within |
-| layer 0 | 1.05e-7 | 1.05e-7 | 6.20e-6 | within |
-| layer 1 | 1.33e-7 | 1.33e-7 | 1.23e-5 | within |
-| layer 2 | 1.84e-7 | 1.84e-7 | 1.85e-5 | within |
-| layer 3 | 2.02e-7 | 1.42e-1 | 2.46e-5 | above |
-| layer 4 | 1.95e-7 | 1.35e-1 | 3.08e-5 | above |
-| layer 5 | 1.77e-7 | 1.29e-1 | 3.69e-5 | above |
-| final norm | 2.09e-7 | 1.50e-1 | 3.76e-5 | above |
+| layer 0 | 1.15e-7 | 1.15e-7 | 6.38e-6 | within |
+| layer 1 | 1.57e-7 | 1.57e-7 | 1.27e-5 | within |
+| layer 2 | 1.43e-7 | 1.43e-7 | 1.90e-5 | within |
+| layer 3 | 1.55e-7 | 1.42e-1 | 2.53e-5 | above |
+| layer 4 | 2.29e-7 | 1.35e-1 | 3.17e-5 | above |
+| layer 5 | 2.20e-7 | 1.29e-1 | 3.80e-5 | above |
+| final norm | 3.23e-7 | 1.50e-1 | 3.87e-5 | above |
 
 The first hidden state above its bound is the output of layer 3.
 <!-- /worked -->
@@ -463,7 +485,7 @@ The pieces of the chapter are spread over three crates, and none of them is a hi
 1. A safetensors file's first eight bytes are `00 00 00 00 40 00 00 00`. Read as a little-endian number, what is $N$, and what does a reader do with a file of 1,000 bytes?
 2. A loader reads a matrix of a published model whose header says shape [4096, 4096] and element type BF16, and reshapes the buffer to the model's [4096, 4096] without transposing. Why does no check of shape or size complain, and what is the cheapest test that would?
 3. Someone proposes to test an importer with a toy model in which $D = H d_h = h_{\mathrm{kv}} d_h = F$. Which mistakes of this chapter can that model not detect, and what should the toy model look like?
-4. A configuration omits the epsilon of its norms, and a reader fills in 1e-6 where the publisher used 1e-5. A parity run on one prompt reports `rel_l2` $= 4 \times 10^{-6}$ at tolerance $10^{-5}$. Is the import correct? What would you change in the test?
+4. A configuration omits the epsilon of its norms, and a reader fills in 1e-5 where the publisher used 1e-6. A parity run on one prompt reports `rel_l2` $= 4 \times 10^{-6}$ at tolerance $10^{-5}$. Is the import correct? What would you change in the test?
 5. A parity test asserts `cos_sim` above 0.99999 at every layer. A colleague points out that the final RMS norm's gain was loaded twice as large. Does the test catch it, and why or why not?
 6. The tolerance of the tiny decoder, $N_{\mathrm{rnd}} u$, was computed for 8 positions. What changes for 800, and which stage grows?
 7. A golden is generated on a GPU in bf16 and the implementation under test runs in 32 bits on a CPU. Which part of the derivation of $\tau_{\mathrm{par}}$ no longer applies, and what is the right way to build the tolerance?
@@ -471,7 +493,7 @@ The pieces of the chapter are spread over three crates, and none of them is a hi
 
 ## Summary
 
-Importing a published model has four steps, and each is a place where a model that loads can still be the wrong model. The checkpoint format has to be read without trusting it: the length prefix, the offsets and the extents of safetensors are validated before anything is sized by them, the dtype of each tensor is decoded as stored and refused when it cannot be, and a sharded checkpoint is whole only when every shard its index names is there. The names are mapped by a table and a plan that is checked before it runs, for coverage and for shape, and the checks cannot see what is shape-legal: a transposed square matrix, keys exchanged with values, gate exchanged with up, or a head dropped because a default said it was tied, each of which loads and runs, which is why the importer's test model has all its dimensions different and why the model's outputs are the only evidence. The configuration is read without guessing: a default is a guess about the publisher, a missing field that fixes a shape fails loudly and one that changes a value does not, and the cure is a single resolver that refuses what it cannot interpret, round-trip tests of the writer, and comparisons of configuration values themselves. And parity is proved against a stored reference, with three measures that see different things, a tolerance derived from the rounding model (the count of roundings on the longest chain of dependent operations times $u$, here $1.34 \times 10^{-5}$ for the tiny decoder, with the measured errors 46 times below it), goldens that hold every hidden state so that a failure is a search for the first state above its bound, and an honest account of what the tolerance cannot see.
+Importing a published model has four steps, and each is a place where a model that loads can still be the wrong model. The checkpoint format has to be read without trusting it: the length prefix, the offsets and the extents of safetensors are validated before anything is sized by them, the dtype of each tensor is decoded as stored and refused when it cannot be, and a sharded checkpoint is whole only when every shard its index names is there. The names are mapped by a table and a plan that is checked before it runs, for coverage and for shape, and the checks cannot see what is shape-legal: a transposed square matrix, keys exchanged with values, gate exchanged with up, or a head dropped because a default said it was tied, each of which loads and runs, which is why the importer's test model has all its dimensions different and why the model's outputs are the only evidence. The configuration is read without guessing: a default is a guess about the publisher, a missing field that fixes a shape fails loudly and one that changes a value does not, and the cure is a single resolver that refuses what it cannot interpret, round-trip tests of the writer, and comparisons of configuration values themselves. And parity is proved against a stored reference, with three measures that see different things, a tolerance derived from the rounding model (the count of roundings on the longest chain of dependent operations times $u$, here $1.38 \times 10^{-5}$ for the tiny decoder, with the measured errors 46 times below it), goldens that hold every hidden state so that a failure is a search for the first state above its bound, and an honest account of what the tolerance cannot see.
 
 The limits are those of the model of error. The bound assumes that stages do not amplify relative error and the measurements only support it on these models; a network with an unnormalized stage of high condition number would need its own factor. The tolerance is silent about bugs smaller than rounding, and for those the test has to be about values, not outputs. And parity with a reference proves that the engine computes the reference's function, not that the function is good. The chapters that follow lean on the result: the variants of attention, the experts and the recurrent layers of Volume VI are met as checkpoints, and a variant that has not been compared with its reference through a tolerance of this kind is a variant that may be quietly wrong. The next chapter turns to the first of them, the keys and values themselves, and how they can be shared or compressed to shrink the cache.
 
@@ -485,7 +507,7 @@ The limits are those of the model of error. The bound assumes that stages do not
 2. **[Calculate]** The bf16 pattern of a weight is 0xBF35. Decode it to a 32-bit pattern and to a decimal number. What is the relative error bound of rounding a number to bf16, and what is the largest absolute error for a weight of size 0.02?
 3. **[Calculate]** A model of 7 billion parameters is stored in bf16 and sharded at a budget of 5 GB (decimal) per shard, greedily, with all tensors much smaller than a shard. How many shards are there, and how many bytes does the index's `total_size` hold?
 4. **[Calculate]** A fused matrix has shape [3 H $d_h$, $D$] with queries, keys and values in that order and equal widths ($h_{\mathrm{kv}} = H$). With $H = 4$, $d_h = 8$, $D = 32$, give the row ranges of the three parts. What are they, in the same fused matrix, if there are 2 key-value heads?
-5. **[Calculate]** For a decoder of $L = 24$ layers with $D = 1{,}024$, $H d_h = 2{,}048$, $F = 3{,}072$, $d_h = 128$ and $T = 512$ positions, use the stage counts of the chapter's table (a dot product of length $n$ costs $n$; an RMS norm costs $D + 5$; the QK-norm costs $d_h + 5$; the rotation 4; the scores $d_h + 1$; the softmax $T + 3$; the weighted sum $T$; the activation of the feed-forward network 4; each residual 1) to compute $N_{\mathrm{rnd}}$ of the layer stack, the bound $N_{\mathrm{rnd}} u$, and the random-walk estimate. Which stage is the largest?
+5. **[Calculate]** For a decoder of $L = 24$ layers with $D = 1{,}024$, $H d_h = 2{,}048$, $F = 3{,}072$, $d_h = 128$ and $T = 512$ positions, use the stage counts of the chapter's table (a dot product of length $n$ costs $n$; an RMS norm costs $D + 6$; the QK-norm costs $d_h + 6$; the rotation 4; the scores $d_h + 1$; the softmax $T + 3$; the weighted sum $T$; the activation of the feed-forward network 4; each residual 1) to compute $N_{\mathrm{rnd}}$ of the layer stack, the bound $N_{\mathrm{rnd}} u$, and the random-walk estimate. Which stage is the largest?
 6. **[Calculate]** A relative error $\rho$ orthogonal to the reference gives $\cos = 1/\sqrt{1 + \rho^2}$. For which $\rho$ is $1 - \cos = 10^{-4}$? For which is it $10^{-7}$, the resolution of a 32-bit cosine?
 7. **[Implement]** Reproduce `importing_models.safetensors_file` and `importing_models.dtype_decoding`: write the three-tensor file byte by byte (header text, padding to a multiple of 8, data in the order given), print its bytes, parse it back with the two checks of the chapter, and decode the 16-bit patterns with your own conversion, to the digits printed.
 8. **[Implement]** Reproduce `importing_models.name_mapping` and `importing_models.import_mistakes`: build the published layout of the tiny decoder from the seed and draw order of Chapter 1 (rounded to bf16), write the plan, check it before it runs, and then make each mistake of the table and measure `max_abs`, `rel_l2` and cosine of the logits against the golden.
@@ -521,7 +543,7 @@ The limits are those of the model of error. The bound assumes that stages do not
 3. A toy with all those dimensions equal cannot detect a transposed matrix, the exchange of keys and values (equal widths), or a swap of the head count with the head width. The toy should have every dimension different ($D$, $H d_h$, $h_{\mathrm{kv}} d_h$, $F$, $V$, $d_h$ and the text length), as the tiny decoder of Chapter 1 does.
 4. Not necessarily. The error is 2.5 times below the tolerance, so a wrong epsilon at the scale of that prompt passes whether or not it is wrong. Add a test that compares the configuration's values with the published ones, and a run at a smaller activation scale where the epsilon is visible.
 5. Likely not. A doubled gain at the end scales the output by 2 and leaves the direction unchanged, so the cosine is 1 and passes; `rel_l2` of 1.0 would fail it. The test needs a `rel_l2` (or `max_abs`) bound beside the cosine.
-6. $T$ appears in the softmax ($T + 3$) and the weighted sum of values ($T$), so $N_{\mathrm{layer}}$ grows by $2 \times 792 = 1{,}584$ per layer, to $103 + 1{,}584 = 1{,}687$, and the bound grows about 16-fold. The two stages that read the whole context dominate at long contexts.
+6. $T$ appears in the softmax ($T + 3$) and the weighted sum of values ($T$), so $N_{\mathrm{layer}}$ grows by $2 \times 792 = 1{,}584$ per layer, to $106 + 1{,}584 = 1{,}690$, and the bound grows about 16-fold. The two stages that read the whole context dominate at long contexts.
 7. The derivation assumed 32-bit rounding of every operation of the implementation under test; with a bf16 golden, the reference itself carries rounding of $2^{-8}$ per operation, a factor of $2^{16}$ larger, and the tolerance must be built from the roundings of both implementations, or the golden must be produced in 32 bits.
 8. The head: the final norm and the output projection were within bound at the preceding state, so the difference is in the final RMS norm's gain, in the output matrix (tied against untied, or transposed), or in the logit computation, which is where a dropped head or a wrong tie shows.
 
@@ -531,7 +553,7 @@ The limits are those of the model of error. The bound assumes that stages do not
 2. 0xBF35 shifted left by 16 is the 32-bit pattern 0xBF350000, the number $-(1 + 53/128) \times 2^{-1} = -0.70703125$. The relative error of rounding to bf16 is at most $2^{-8} \approx 3.9 \times 10^{-3}$, and for a weight of size 0.02 the largest absolute error is at most $0.02 \times 2^{-8} = 7.8 \times 10^{-5}$.
 3. $14 \times 10^9$ bytes at $5 \times 10^9$ per shard is 3 shards (two full ones and a third with $4 \times 10^9$), and `total_size` is $14 \times 10^9$ bytes.
 4. With $H = 4$, $d_h = 8$ and equal widths each part is $4 \times 8 = 32$ rows: queries rows 0 .. 31, keys 32 .. 63, values 64 .. 95. With 2 key-value heads the key and value parts are 16 rows each: queries 0 .. 31, keys 32 .. 47, values 48 .. 63.
-5. Per layer: norm 1, $1{,}024 + 5 = 1{,}029$; q, k, v projection 1,024; QK-norm 133; rotation 4; scores 129; softmax 515; weighted sum 512; $\mathbf{W}_O$ 2,048; residual 1; norm 2, 1,029; gate or up 1,024; activation 4; $\mathbf{W}_{\mathrm{down}}$ 3,072; residual 1, in all 10,525 roundings. Times 24 layers is 252,600, so the bound is $252{,}600 \times 2^{-24} \approx 1.5 \times 10^{-2}$ (before the head and the golden) and the random-walk estimate is $\sqrt{252{,}600} \times 2^{-24} \approx 3.0 \times 10^{-5}$. The largest stage is $\mathbf{W}_{\mathrm{down}}$, a dot product of length 3,072.
+5. Per layer: norm 1, $1{,}024 + 6 = 1{,}030$; q, k, v projection 1,024; QK-norm 134; rotation 4; scores 129; softmax 515; weighted sum 512; $\mathbf{W}_O$ 2,048; residual 1; norm 2, 1,030; gate or up 1,024; activation 4; $\mathbf{W}_{\mathrm{down}}$ 3,072; residual 1, in all 10,528 roundings. Times 24 layers is 252,672, so the bound is $252{,}672 \times 2^{-24} \approx 1.5 \times 10^{-2}$ (before the head and the golden) and the random-walk estimate is $\sqrt{252{,}672} \times 2^{-24} \approx 3.0 \times 10^{-5}$. The largest stage is $\mathbf{W}_{\mathrm{down}}$, a dot product of length 3,072.
 6. $\rho = \sqrt{2 \times 10^{-4}} = 1.4 \times 10^{-2}$, 1.4 percent, and $\rho = \sqrt{2 \times 10^{-7}} = 4.5 \times 10^{-4}$.
 
 **Implement and Investigate.** The Implement exercises must reproduce the printed tables to their digits; the Investigate exercises have no printed answer. In Exercise 11 the missing bias moves the outputs for the same reason as in the history, and a gradient check on weights with a zero bias passes because the model is compared with itself.

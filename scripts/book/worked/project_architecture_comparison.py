@@ -1031,7 +1031,7 @@ def layer_roundings(spec, cfg, T):
     D = cfg["D"]
     if mixer == "gdn":
         DK, DV, HG = cfg["DK"], cfg["DV"], cfg["HG"]
-        mix = (D + 5) + D + (DK + 5) + T * (DK + 4) + DK + (DV + 5) + HG * DV + 1
+        mix = (D + 6) + D + (DK + 6) + T * (DK + 4) + DK + (DV + 6) + HG * DV + 1
     else:
         layer, _ = im.stages(cfg, min(T, cfg["WINDOW"]) if mixer == "swa" else T)
         mix = sum(c for _, c in layer[:9])
@@ -1039,14 +1039,14 @@ def layer_roundings(spec, cfg, T):
         layer, _ = im.stages(cfg, T)
         net = sum(c for _, c in layer[9:])
     else:
-        net = (D + 5) + D + (cfg["E"] + 3) + 2 + D + 4 + cfg["FE"] + cfg["K"] + 1
+        net = (D + 6) + D + (cfg["E"] + 3) + 2 + D + 4 + cfg["FE"] + cfg["K"] + 1
     return mix + net
 
 
 def roundings(specs, cfg, T, layers=None, head=True):
     k = len(specs) if layers is None else layers
     n = sum(layer_roundings(s, cfg, T) for s in specs[:k])
-    return n + ((cfg["D"] + 5) + cfg["D"] if head else 0)
+    return n + ((cfg["D"] + 6) + cfg["D"] if head else 0)
 
 
 def golden_blob(arm):

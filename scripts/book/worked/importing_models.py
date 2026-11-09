@@ -37,7 +37,8 @@ import positions as pos_mod
 
 U32 = 2.0 ** -24          # unit round-off of the 32-bit format (Volume I, Chapter 15)
 COS_FLOOR = 0.9999       # the row-cosine floor of the DeepSeek parity ladder
-EPS_PUBLISHED = 1e-5      # the epsilon of the RMS norms in the published configuration
+EPS_PUBLISHED = md.tb.EPS  # the epsilon of the RMS norms in the published configuration (1e-6, as in Chapter 1)
+EPS_READER_DEFAULT = 1e-5  # the epsilon a reader falls back on when the configuration omits it
 BASE_PUBLISHED = md.CFG["BASE"]
 SHARD_BYTES = 1024        # the byte budget of one shard of the sharded example
 NAME_DRAWS = "importing_models.draws"         # weights of the eight draws of the error budget
@@ -367,8 +368,13 @@ def sharded_index():
     total = index["metadata"]["total_size"]
     return (f"The 19 tensors of the published tiny model in bf16 ({_int(total)} bytes of tensor data), in file order, cut into shards "
             f"by the greedy rule (a new shard when the next tensor would take the current one past {SHARD_BYTES} bytes). Each shard is a "
-            "safetensors file of its own; the index lists, for every tensor name, the shard that holds it, and the total size.\n\n"
-            + _table(["shard", "file bytes", "tensors", "tensor bytes", "first .. last tensor"], rows, "lrrrl")
+            "safetensors file of its own, in exactly the format of the single file above (the 8-byte length N, the compact JSON header "
+            "with `__metadata__` `{\"format\":\"pt\"}` first and then one entry per tensor of the shard with offsets counted from the start of "
+            "that shard's data, padded with spaces to a multiple of 8, then the data), so the file size is 8 + N + tensor bytes; the "
+            "index lists, for every tensor name, the shard that holds it, and the total size. The tensors, in file order, each BF16:\n\n"
+            + _table(["tensor", "shape", "shard"], [(f"`{n}`", " x ".join(str(d) for d in s_), int(index["weight_map"][n].split("-")[1]))
+                                                    for n, _, s_, _ in tensors], "llr")
+            + "\n\n" + _table(["shard", "file bytes", "tensors", "tensor bytes", "first .. last tensor"], rows, "lrrrl")
             + "\n\nThe index file, abbreviated to its first three names:\n\n```text\n"
             + "{\n \"metadata\": {\"total_size\": " + str(total) + "},\n \"weight_map\": {\n"
             + ",\n".join(f"  \"{k}\": \"{v}\"" for k, v in list(index["weight_map"].items())[:3]) + ",\n  ...\n }\n}\n```\n\n"
@@ -564,7 +570,7 @@ def rms(X, g, r, order, eps):
     for x in X:
         ms = r(dot(x, x, r, order) / D)
         inv = r(1.0 / r(math.sqrt(r(ms + e))))
-        out.append([r(r(gj * xj) * inv) for gj, xj in zip(g, x)])
+        out.append([r(gj * r(xj * inv)) for gj, xj in zip(g, x)])
     return out
 
 
@@ -697,7 +703,7 @@ def import_mistakes():
         m = _measure(run(q, c, list(md.IDS)), g)
         rows.append((label, model, "runs", _sci(m[0], 3), _sci(m[1], 3), f"{m[2]:.6f}", f"{m[3]} of {len(md.IDS)}"))
     return ("Each mistake of the mapping, made in the import plan and run through the 64-bit forward pass on the text of Chapter 1 "
-            "(ids 3, 9, 1, 7, 4, 4, 10, 2, eps 1e-6, base 100). The published numbers are the bf16 weights; the golden is the logits of "
+            "(ids 3, 9, 1, 7, 4, 4, 10, 2, eps 1e-6, the epsilon of the published configuration, base 100). The published numbers are the bf16 weights; the golden is the logits of "
             "those weights, and the three measures compare the 8 x 11 logits of the imported model with it (max_abs, rel_l2 and cosine "
             "are defined in the next section). \"Square\" is a model whose matrices are all square (V = 11, D = 8, L = 2, H = HKV = 4, "
             f"head width 2, F = 8; weights from the generator `{NAME_SQUARE}`, seed {bookrng.seed_of(NAME_SQUARE):#018x}, drawn in "
@@ -710,7 +716,7 @@ def import_mistakes():
 PUBLISHED_CONFIG = {"architectures": ["TinyForCausalLM"], "vocab_size": 11, "hidden_size": 6, "num_hidden_layers": 2,
                     "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 4, "intermediate_size": 10,
                     "rms_norm_eps": EPS_PUBLISHED, "rope_theta": BASE_PUBLISHED, "tie_word_embeddings": False}
-LIBRARY_DEFAULTS = {"rms_norm_eps": 1e-6, "rope_theta": 10000.0, "tie_word_embeddings": False}   # the reader's own defaults
+LIBRARY_DEFAULTS = {"rms_norm_eps": EPS_READER_DEFAULT, "rope_theta": 10000.0, "tie_word_embeddings": False}   # the reader's own defaults
 
 
 def resolve_config(cfg_json):
@@ -754,9 +760,9 @@ def config_defaults():
             rows.append((f"`{field}`", truth, default, "runs", _sci(m[1], 2), f"{m[2]:.6f}"))
     return ("The published configuration of the tiny model, with the fields a reader needs:\n\n```json\n" + shown
             + "\n```\n\nOne field at a time is removed and the reader's default is used instead (the reader defaults the key-value "
-            "heads to the query heads, the epsilon to 1e-6, the rotary base to 10000 and the tied head to false). The weights and "
+            "heads to the query heads, the epsilon to 1e-5, the rotary base to 10000 and the tied head to false). The weights and "
             "the text are those of the previous table; the golden is the 64-bit forward pass with the published values "
-            "(eps 1e-5, base 100); rel_l2 and cosine compare the logits computed with the default against it.\n\n"
+            "(eps 1e-6, base 100); rel_l2 and cosine compare the logits computed with the default against it.\n\n"
             + _table(["omitted field", "published", "default", "outcome", "rel_l2 of logits", "cosine"], rows, "lllllr"))
 
 
@@ -767,10 +773,10 @@ def eps_scale_table():
         q = dict(p)
         q["emb"] = [[s * x for x in row] for row in p["emb"]]
         gold = golden_logits(q, cfg, eps=EPS_PUBLISHED)
-        got = golden_logits(q, cfg, eps=1e-6)
+        got = golden_logits(q, cfg, eps=EPS_READER_DEFAULT)
         rows.append((f"{s:g}", _sci(rel_l2(got, gold), 2), _sci(max_abs(got, gold), 2)))
-    return ("The same wrong epsilon (1e-6 for the published 1e-5) at three scales of the activations: the embedding table is multiplied "
-            "by the factor in the first column, the weights are unchanged, and the golden is the 64-bit forward pass with eps 1e-5 on "
+    return ("The same wrong epsilon (1e-5 for the published 1e-6) at three scales of the activations: the embedding table is multiplied "
+            "by the factor in the first column, the weights are unchanged, and the golden is the 64-bit forward pass with eps 1e-6 on "
             "the same scaled table.\n\n" + _table(["factor on the embedding table", "rel_l2 of logits", "max_abs of logits"], rows))
 
 
@@ -782,21 +788,21 @@ def stages(cfg, T):
     sum of n products costs n roundings (n multiplications and n - 1 additions, each at most u, by the bound of Chapter 15 of
     Volume I); one more rounding for each further operation applied to its result."""
     D, H, DH, F = cfg["D"], cfg["H"], cfg["DH"], cfg["F"]
-    layer = [("RMS norm 1 (sum of D squares, divide, add eps, sqrt, reciprocal, two products)", D + 5),
+    layer = [("RMS norm 1 (sum of D squares, divide by D, add eps, sqrt, reciprocal, product with x, product with the gain)", D + 6),
              ("projection to q, k, v (dot of length D)", D),
-             ("QK-norm (sum of DH squares and the same five operations)", DH + 5),
+             ("QK-norm (sum of d_h squares and the same six operations)", DH + 6),
              ("rotation (angle, cosine or sine, product, add)", 4),
-             ("scores (dot of length DH, scale)", DH + 1),
+             ("scores (dot of length d_h, scale)", DH + 1),
              ("softmax (subtract, exp, sum of T terms, divide)", T + 3),
              ("weighted sum of values (T products added)", T),
-             ("W_O (dot of length H DH)", H * DH),
+             ("W_O (dot of length H d_h)", H * DH),
              ("residual add", 1),
-             ("RMS norm 2", D + 5),
+             ("RMS norm 2 (as norm 1)", D + 6),
              ("gate or up projection (dot of length D)", D),
              ("silu, product with up (exp, add, divide, multiply)", 4),
              ("W_down (dot of length F)", F),
              ("residual add", 1)]
-    head = [("final RMS norm", D + 5), ("output projection (dot of length D)", D)]
+    head = [("final RMS norm (as norm 1)", D + 6), ("output projection (dot of length D)", D)]
     return layer, head
 
 
@@ -849,12 +855,22 @@ def error_budget():
     mrows = [(f"{bookrng.seed_of(f'{NAME_DRAWS}.{r[0]}'):#018x}", _sci(r[1], 2), _sci(r[2], 2), _sci(r[3], 2)) for r in meas]
     return ("Roundings along the longest chain of dependent operations of the tiny decoder for the last of T = "
             f"{T} positions (D = 6, H = 4, head width 4, F = 10), counted by the rule that a sum of n products costs n roundings and "
-            "each further operation on a result costs one:\n\n" + _table(["stage", "roundings"], rows, "lr")
+            "each further operation on a result costs one. The RMS norm is the one of the book's pseudocode: `inv_std = 1 / sqrt(mean(x^2) + eps)`, "
+            "`xhat = x * inv_std`, `y = gamma * xhat`, with eps = 1e-6, so the two products follow the reciprocal on one chain (D "
+            "roundings for the sum of D squares, then the divide, the addition of eps, the square root, the reciprocal and the two "
+            "products: D + 6):\n\n" + _table(["stage", "roundings"], rows, "lr")
             + f"\n\nTwo layers, the head and the stored golden give N = {total} roundings, so the bound on the relative error of the "
             f"logits is N u = {total} x 2^-24 = {_sci(bound_logits(cfg, T), 2)}, and the random-walk estimate sqrt(N) u is "
             f"{_sci(statistical_logits(cfg, T), 2)}. Measured: eight draws of the weights of the tiny model "
             f"(generators `{NAME_DRAWS}.0` to `{NAME_DRAWS}.7`, same shapes, scales and draw order as Chapter 1, rounded to bf16), "
-            "each run in 32-bit arithmetic with the three summation orders against the 64-bit logits stored in 32 bits; rel_l2 of the "
+            "each run in 32-bit arithmetic with the three summation orders against the 64-bit logits stored in 32 bits. The 32-bit run "
+            "rounds to the nearest 32-bit number after every operation: each product and each addition of every sum (the sum of "
+            "squares of a norm, every dot product, the softmax denominator, the weighted sum of values), each division, square root "
+            "and reciprocal, each exp, cos and sin (the 64-bit library value rounded once), and the constants eps, the rotary rates "
+            "and 1/sqrt(d_h) before they are used; the bf16 weights are exactly representable, and the maximum of the softmax is exact. "
+            "The 'left to right' order adds the terms of a sum one after another from the first; 'right to left' from the last; "
+            "'pairwise' adds the sum of the first half to the sum of the second half, recursively, the middle of n terms being "
+            "n // 2. rel_l2 of the "
             "8 x 11 logits:\n\n" + _table(["seed of the draw", "left to right", "right to left", "pairwise"], mrows)
             + f"\n\nThe largest measured error is {_sci(worst, 2)}, {bound_logits(cfg, T) / worst:.0f} times below the bound "
             f"and {worst / statistical_logits(cfg, T):.2f} times the random-walk estimate.")
@@ -879,7 +895,7 @@ def metric_blindness():
         q, _ = _imported(p, cfg, bug)
         cases.append((label, golden_logits(q, cfg), gold))
     cases.append(("rotary base 10000 for the published 100", golden_logits(p, cfg, eps=EPS_PUBLISHED, base=10000.0), gold5))
-    cases.append(("epsilon 1e-6 for the published 1e-5", golden_logits(p, cfg, eps=1e-6), gold5))
+    cases.append(("epsilon 1e-5 for the published 1e-6", golden_logits(p, cfg, eps=EPS_READER_DEFAULT), gold5))
     cases.append(("32-bit arithmetic, left to right", run(p, cfg, list(md.IDS), r=r32), gold))
     rows = []
     for label, got, want in cases:
@@ -889,7 +905,7 @@ def metric_blindness():
         loose = "pass" if (m[3] == T and m[0] < 1.0) else "fail"
         rows.append((label, "below 1e-12" if 1 - m[2] < 1e-12 else _sci(1 - m[2], 2), cos_pass, _sci(m[1], 2), rl_pass, _sci(m[0], 2), loose))
     return (f"Eight outputs compared with the 64-bit logits of the published tiny model (the two rows about the rotary base and the "
-            f"epsilon: with the logits at the published eps 1e-5, base 100) by the three measures and by three tests: cosine at least "
+            f"epsilon: with the logits at the published eps 1e-6, base 100) by the three measures and by three tests: cosine at least "
             f"{COS_FLOOR} (the floor of the DeepSeek ladder described below), rel_l2 at most the bound {_sci(tol, 2)} of the previous "
             "table, and the gate of Chapter 1's forward-parity test (the top prediction agrees at all 8 positions and max_abs is below "
             "1.0). 1 - cosine is printed because cosine is 1 to six places for most rows.\n\n"
@@ -935,7 +951,7 @@ def golden_file(p, cfg):
         items.append((f"hidden_{i:02d}", "F32", [T, cfg["D"]], [r32(x) for x in _flatten(t)]))
     items.append(("final_norm", "F32", [T, cfg["D"]], [r32(x) for x in _flatten(taps[-1])]))
     items.append(("logits", "F32", [T, cfg["V"]], [r32(x) for x in _flatten(logits)]))
-    meta = {"generator": NAME_BIS, "eps": "1e-06", "rope_base": f"{cfg['BASE']:g}", "arithmetic": "64-bit, stored as 32-bit",
+    meta = {"generator": NAME_BIS, "eps": f"{EPS_PUBLISHED:g}", "rope_base": f"{cfg['BASE']:g}", "arithmetic": "64-bit, stored as 32-bit",
             "tolerance_basis": "rounding count x 2^-24"}
     blob, header, offsets = write_safetensors(items, meta)
     return blob, header, offsets, items
@@ -957,8 +973,11 @@ def golden_contents():
     return ("The golden for a 6-layer version of the tiny decoder (V = 11, D = 6, H = 4, 2 key-value heads of width 4, F = 10, "
             f"L = 6; weights from the generator `{NAME_BIS}`, seed {bookrng.seed_of(NAME_BIS):#018x}, drawn in the order of Chapter 1 "
             "and rounded to bf16), written by `write_safetensors` as one safetensors file. It holds the text, the hidden state "
-            "after the embedding and after each layer, the output of the final norm and the logits; the header also carries the "
-            f"metadata keys {', '.join('`' + k + '`' for k in json.loads(header.decode())['__metadata__'])}. "
+            "after the embedding and after each layer, the output of the final norm and the logits, each tensor stored in the order "
+            "listed below with the data back to back. The header is the compact JSON of `write_safetensors` (`__metadata__` first, "
+            "then the tensors in that order), padded with spaces to a multiple of 8, and its `__metadata__` is exactly "
+            f"`{json.dumps(json.loads(header.decode())['__metadata__'], separators=(',', ':'))}`, "
+            f"so the header is {len(header)} bytes. "
             f"The file is {_int(len(blob))} bytes ({_int(total)} of tensor data).\n\n"
             + _table(["tensor", "dtype", "shape", "bytes", "what"], rows, "lllrl"))
 
@@ -1003,12 +1022,17 @@ def first_divergence(rows):
 def bisection():
     rows = bisection_data()
     first = first_divergence(rows)
+    layer, head = stages(md.cfg_with(L=BIS_L), len(md.IDS))
+    n_layer, n_norm = sum(c for _, c in layer), head[0][1]
     body = [(nm, _sci(g, 2) if g else "0", _sci(b, 2) if b else "0", _sci(bound, 2), "above" if b > bound else "within")
             for nm, g, b, bound in rows]
     return ("Layer-by-layer comparison for the 6-layer model of the previous table. The implementation under test is the 32-bit forward "
             "pass (summation left to right); the golden is the stored 64-bit one. The mistake is an import in which gate and up are "
             f"exchanged in layer {BIS_BUG_LAYER} only. For each hidden state, the rel_l2 of the correct import, the rel_l2 of the "
-            "mistaken one, and the bound (roundings of the layers so far, plus one for the stored golden, times 2^-24).\n\n"
+            "mistaken one, and the bound (roundings of the layers so far, plus one for the stored golden, times 2^-24). Every layer "
+            f"counts {n_layer} roundings (the table above, with eps 1e-6 and the "
+            f"same 32-bit rules), so the bound after k layers is (k x that + 1) x 2^-24; the final norm adds its own "
+            f"{n_norm} roundings (D + 6), so its bound is ({BIS_L} x {n_layer} + {n_norm} + 1) x 2^-24.\n\n"
             + _table(["hidden state", "rel_l2, correct import", "rel_l2, mistaken import", "bound", "mistaken import is"], body, "lrrrl")
             + f"\n\nThe first hidden state above its bound is the output of {first}.")
 

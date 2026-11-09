@@ -17,7 +17,7 @@ picture and the table beside it cannot disagree.
 * the receptive field of stacked sliding windows, a ring buffer's slack, and the cache of a hybrid of windowed and global layers;
 * a softmax row that has nowhere to put its mass, and a stream where the first token leaves the window.
 
-The rotary rotation is the one of Volume V, Chapter 8 (`positions.rotate`), imported and not copied. Every random quantity comes
+The rotary rotation is the one of Volume V, Chapter 8 (`rotary`, implemented in `positions`), imported and not copied. Every random quantity comes
 from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of products are plain left-to-right
 additions, the order a C loop would use (never Python's `sum`, which may compensate).
 
@@ -295,7 +295,7 @@ def absorption():
             "(ties away from zero), drawn row by row in this order: X [8, 7]; W_DKV [5, 7]; W_UK for heads 0, 1, 2 (each [4, 5]); "
             "W_UV for heads 0, 1, 2 (each [6, 5]); W_Q for heads 0, 1, 2 (each [4, 7]); W_QR for heads 0, 1, 2 (each [2, 7]); "
             "W_KR [2, 7]; W_O [7, 18]. The latent of token j is c_j = W_DKV x_j; the rotary parts are rotated by "
-            "`positions.rotate` with one pair of rate 1.0 radian per position, the pair being the two channels; scores are "
+            "the `rotary` of Volume V, Chapter 8 with one pair of rate 1.0 radian per position, the pair being the two channels; scores are "
             f"divided by sqrt(d_h + d_R) = sqrt(6); the mask is causal; the head outputs are concatenated in head order. The "
             "explicit run reconstructs every key and value from the latents. The absorbed run starts from the cache alone "
             "(the 8 latents and the 8 rotary keys), forms q~ = W_UK^T q for each head, scores it against the latents, "
@@ -339,7 +339,7 @@ def rope_breaks_absorption():
         vec_rows.append((delta, _vec(q_off, 4)))
     return (_seed_line(NAME_MLA) + f" The same tensors as before (the block above); head 0 only, query at position {i}, the "
             "rotation now applied to the whole content key and query of width 4 (two pairs, rates 1.0 and 0.5 radian per position, "
-            "adjacent channels; the book's `rotary` with base 4, because 4^(-2m/4) is 1.0 for m = 0 and 0.5 for m = 1) instead of to a separate rotary slice. The true score rotates the query by its position and "
+            "adjacent channels; the `rotary` of Volume V, Chapter 8 with base 4, because 4^(-2m/4) is 1.0 for m = 0 and 0.5 for m = 1) instead of to a separate rotary slice. Scores in this block are raw dot products, without the division by sqrt(d_h + d_R) = sqrt(6) that the scores of the block above carry (the three columns are compared with each other, so a common factor changes none of the comparisons). The true score rotates the query by its position and "
             "the up-projected key W_UK c_j by its own. 'By offset' absorbs the query as q~_delta = W_UK^T R(delta) q, with "
             "delta = i - j; 'fixed' absorbs it once, as W_UK^T R(i) q, and scores that against the unrotated latent.\n\n"
             + _table(["offset delta = i - j", "j", "true score", "by offset: q~_delta . c_j", "fixed: q~ . c_j"], rows)

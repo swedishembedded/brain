@@ -1,4 +1,4 @@
-<!-- source-sha256: ea013e07856813b9015bc234772b651e3007b6d452dae583660fb8d7449e2d25 -->
+<!-- source-sha256: 5385728592fe2d8ec80fefbeec1477d956451ffaad40d6a124054e1f7ad90d08 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 360" width="780" height="360"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="360" fill="#ffffff"/>
 <text x="390" y="30.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Share of each model&#x27;s own parameters, by component</text>
 <text x="20" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">small decoder</text>
