@@ -364,7 +364,7 @@ impl GgufArchitectureImporter for Deepseek2OcrImporter {
         true
     }
     fn summary(&self) -> &'static str {
-        "DeepSeek-OCR decoder (DeepSeek-V2 MLA; the vision tower is its own mmproj file)"
+        "DeepSeek-OCR decoder (DeepSeek-V2 with multi-head attention; the vision tower is its own mmproj file)"
     }
     fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
         gguf::deepseek_ocr::import(gguf, out_path, id_override).map(|_| ())

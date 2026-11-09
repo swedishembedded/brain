@@ -9,7 +9,7 @@
 //! "deepseek2-ocr"`) carries square `q_proj`/`k_proj`/`v_proj`/`o_proj` weights
 //! with `head_count == head_count_kv`, no biases, and none of DeepSeek-V2's MLA
 //! tensors - it is a `deepseek2`-family *config* over a plain *multi-head*
-//! attention. `crates/glm` is the MLA + DSA-indexer + MTP decoder for a
+//! attention. `crates/glmdsa` is the MLA + DSA-indexer + MTP decoder for a
 //! different model family and shares no attention code with this crate.
 //!
 //! Per pre-norm block (RMSNorm everywhere, eps 1e-6, no bias anywhere):

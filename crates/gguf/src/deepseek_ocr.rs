@@ -56,8 +56,7 @@
 //! fused form, which is arithmetically identical and one matmul instead of two.
 //!
 //! The brain-side names above mirror `crates/qwen35moe`'s scheme. The decoder
-//! that consumes them (expected to live in `crates/deepseekv2`) is future
-//! work; this module is the loader half only.
+//! that consumes them is `crates/deepseek2`; this module is the loader half.
 
 use checkpoint::gguf::MmapGguf;
 use checkpoint::st::ModelCard;
