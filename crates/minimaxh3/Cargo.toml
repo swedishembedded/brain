@@ -60,3 +60,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+
+# The checks that need a card, which is an argument: `-- --device gpu1 [--backend cuda]`.
+[[test]]
+name = "device"
+harness = false

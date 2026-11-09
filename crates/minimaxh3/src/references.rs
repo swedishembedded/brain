@@ -385,7 +385,7 @@ mod tests {
         use crate::pipeline::tests::*;
         let dit_cfg = tiny_dit_cfg();
         let vae_cfg = tiny_video_vae_cfg();
-        let dit_tensors = rand_dit_tensors(&dit_cfg, 61);
+        let dit_tensors = crate::model::random_checkpoint(&dit_cfg, 61);
         let vae_tensors = rand_manifest_tensors(vae_cfg.tensor_manifest(), 62);
         let vocoder_tensors = rand_manifest_tensors(tiny_vocoder_cfg().tensor_manifest(), 63);
         let audio_cfg = AudioEncoderConfig { encoder_dim: 4, rates: vec![2, 4, 5], latent_dim: 16, latent_channels: dit_cfg.audio_in_channels, num_attention_heads: 2 };

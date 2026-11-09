@@ -40,7 +40,6 @@ use model::hostmath::{linear_rows, silu_slice, timestep_embedding};
 use model::ops::Weight;
 use model::shard::LayerBytes;
 use model::StreamPlan;
-#[cfg(test)]
 use vae::blocks::Tensors;
 
 use crate::adaln::{AdalnCache, AdalnPlan};
@@ -366,6 +365,70 @@ pub fn resident_cost(cfg: &H3TransformerConfig, tier: Dtype, gated: bool) -> Lay
     let embed = fp32(hidden, cfg.video_patch_dim() as usize) + fp32(hidden, cfg.audio_in_channels as usize) + fp32(hidden, cfg.text_dim as usize) + cfg.num_refiner_layers as u64 * block_bytes(cfg, tier);
     let head = fp32(cfg.video_patch_dim() as usize, hidden) + fp32(cfg.audio_in_channels as usize, hidden) + hidden as u64 * 4;
     LayerBytes { per_layer: vec![block_bytes(cfg, tier) + gate; cfg.num_layers as usize], embed, head }
+}
+
+/// Seeded random weights under every name and shape [`H3Transformer::load`]
+/// reads for `cfg`: a synthetic checkpoint for tests and measurements that
+/// need the model's structure, not its trained values.
+pub fn random_checkpoint(cfg: &H3TransformerConfig, seed: u64) -> Tensors {
+    let mut rng = data::rng::Lcg::new(seed);
+    let mut t: Tensors = std::collections::HashMap::new();
+    let mut put = |name: &str, shape: Vec<usize>| {
+        let n: usize = shape.iter().product();
+        t.insert(name.to_string(), (shape, rng.vec_scaled(n, 0.2)));
+    };
+    let (hidden, inner, hd, ffn, te) = (cfg.hidden_size as usize, cfg.inner_dim() as usize, cfg.attention_head_dim as usize, cfg.ffn_dim as usize, cfg.time_embed_dim as usize);
+
+    let put_attn = |name: &mut dyn FnMut(&str, Vec<usize>), prefix: &str| {
+        name(&format!("{prefix}.to_q.weight"), vec![inner, hidden]);
+        name(&format!("{prefix}.to_k.weight"), vec![inner, hidden]);
+        name(&format!("{prefix}.to_v.weight"), vec![inner, hidden]);
+        name(&format!("{prefix}.norm_q.weight"), vec![hd]);
+        name(&format!("{prefix}.norm_k.weight"), vec![hd]);
+        name(&format!("{prefix}.to_out.0.weight"), vec![hidden, inner]);
+    };
+    let put_ff = |name: &mut dyn FnMut(&str, Vec<usize>), prefix: &str| {
+        name(&format!("{prefix}.ff.net.0.proj.weight"), vec![2 * ffn, hidden]);
+        name(&format!("{prefix}.ff.net.2.weight"), vec![hidden, ffn]);
+    };
+
+    for i in 0..cfg.num_refiner_layers {
+        let p = format!("token_refiner.refiner_blocks.{i}");
+        put_attn(&mut put, &format!("{p}.attn"));
+        put_ff(&mut put, &p);
+        put(&format!("{p}.norm1.weight"), vec![hidden]);
+        put(&format!("{p}.norm2.weight"), vec![hidden]);
+    }
+    put("token_refiner.final_norm.weight", vec![hidden]);
+
+    for i in 0..cfg.num_layers {
+        let p = format!("transformer_blocks.{i}");
+        put_attn(&mut put, &format!("{p}.attn"));
+        put_ff(&mut put, &p);
+        put(&format!("{p}.norm1.weight"), vec![hidden]);
+        put(&format!("{p}.norm2.weight"), vec![hidden]);
+        put(&format!("{p}.adaln_proj.linear.weight"), vec![18 * hidden, te]);
+        put(&format!("{p}.adaln_proj.linear.bias"), vec![18 * hidden]);
+    }
+
+    put("proj_in.weight", vec![hidden, cfg.video_patch_dim() as usize]);
+    put("proj_in.bias", vec![hidden]);
+    put("audio_proj_in.weight", vec![hidden, cfg.audio_in_channels as usize]);
+    put("audio_proj_in.bias", vec![hidden]);
+    put("context_embedder.weight", vec![hidden, cfg.text_dim as usize]);
+    put("context_embedder.bias", vec![hidden]);
+    put("time_embedder.linear_1.weight", vec![cfg.time_embed_hidden_dim as usize, cfg.freq_dim as usize]);
+    put("time_embedder.linear_1.bias", vec![cfg.time_embed_hidden_dim as usize]);
+    put("time_embedder.linear_2.weight", vec![te, cfg.time_embed_hidden_dim as usize]);
+    put("time_embedder.linear_2.bias", vec![te]);
+    put("norm_out.norm.weight", vec![hidden]);
+    put("norm_out.linear.weight", vec![2 * hidden, te]);
+    put("norm_out.linear.bias", vec![2 * hidden]);
+    put("proj_out.weight", vec![cfg.video_patch_dim() as usize, hidden]);
+    put("proj_out.bias", vec![cfg.video_patch_dim() as usize]);
+    put("audio_proj_out.weight", vec![cfg.audio_in_channels as usize, hidden]);
+    put("audio_proj_out.bias", vec![cfg.audio_in_channels as usize]);
+    t
 }
 
 /// The device bytes a streamed DiT holds on each card it runs a stage on:
@@ -1186,66 +1249,6 @@ mod tests {
         assert_eq!(idx, vec![0, 3, 4]);
     }
 
-    fn rand_tensors(cfg: &H3TransformerConfig, seed: u64) -> Tensors {
-        let mut rng = data::rng::Lcg::new(seed);
-        let mut t: Tensors = std::collections::HashMap::new();
-        let mut put = |name: &str, shape: Vec<usize>| {
-            let n: usize = shape.iter().product();
-            t.insert(name.to_string(), (shape, rng.vec_scaled(n, 0.2)));
-        };
-        let (hidden, inner, hd, ffn, te) = (cfg.hidden_size as usize, cfg.inner_dim() as usize, cfg.attention_head_dim as usize, cfg.ffn_dim as usize, cfg.time_embed_dim as usize);
-
-        let put_attn = |name: &mut dyn FnMut(&str, Vec<usize>), prefix: &str| {
-            name(&format!("{prefix}.to_q.weight"), vec![inner, hidden]);
-            name(&format!("{prefix}.to_k.weight"), vec![inner, hidden]);
-            name(&format!("{prefix}.to_v.weight"), vec![inner, hidden]);
-            name(&format!("{prefix}.norm_q.weight"), vec![hd]);
-            name(&format!("{prefix}.norm_k.weight"), vec![hd]);
-            name(&format!("{prefix}.to_out.0.weight"), vec![hidden, inner]);
-        };
-        let put_ff = |name: &mut dyn FnMut(&str, Vec<usize>), prefix: &str| {
-            name(&format!("{prefix}.ff.net.0.proj.weight"), vec![2 * ffn, hidden]);
-            name(&format!("{prefix}.ff.net.2.weight"), vec![hidden, ffn]);
-        };
-
-        for i in 0..cfg.num_refiner_layers {
-            let p = format!("token_refiner.refiner_blocks.{i}");
-            put_attn(&mut put, &format!("{p}.attn"));
-            put_ff(&mut put, &p);
-            put(&format!("{p}.norm1.weight"), vec![hidden]);
-            put(&format!("{p}.norm2.weight"), vec![hidden]);
-        }
-        put("token_refiner.final_norm.weight", vec![hidden]);
-
-        for i in 0..cfg.num_layers {
-            let p = format!("transformer_blocks.{i}");
-            put_attn(&mut put, &format!("{p}.attn"));
-            put_ff(&mut put, &p);
-            put(&format!("{p}.norm1.weight"), vec![hidden]);
-            put(&format!("{p}.norm2.weight"), vec![hidden]);
-            put(&format!("{p}.adaln_proj.linear.weight"), vec![18 * hidden, te]);
-            put(&format!("{p}.adaln_proj.linear.bias"), vec![18 * hidden]);
-        }
-
-        put("proj_in.weight", vec![hidden, cfg.video_patch_dim() as usize]);
-        put("proj_in.bias", vec![hidden]);
-        put("audio_proj_in.weight", vec![hidden, cfg.audio_in_channels as usize]);
-        put("audio_proj_in.bias", vec![hidden]);
-        put("context_embedder.weight", vec![hidden, cfg.text_dim as usize]);
-        put("context_embedder.bias", vec![hidden]);
-        put("time_embedder.linear_1.weight", vec![cfg.time_embed_hidden_dim as usize, cfg.freq_dim as usize]);
-        put("time_embedder.linear_1.bias", vec![cfg.time_embed_hidden_dim as usize]);
-        put("time_embedder.linear_2.weight", vec![te, cfg.time_embed_hidden_dim as usize]);
-        put("time_embedder.linear_2.bias", vec![te]);
-        put("norm_out.norm.weight", vec![hidden]);
-        put("norm_out.linear.weight", vec![2 * hidden, te]);
-        put("norm_out.linear.bias", vec![2 * hidden]);
-        put("proj_out.weight", vec![cfg.video_patch_dim() as usize, hidden]);
-        put("proj_out.bias", vec![cfg.video_patch_dim() as usize]);
-        put("audio_proj_out.weight", vec![cfg.audio_in_channels as usize, hidden]);
-        put("audio_proj_out.bias", vec![cfg.audio_in_channels as usize]);
-        t
-    }
 
     /// Weight-free tiny-config smoke test (porting.md's own ladder rung,
     /// before any real/golden weights exist): builds a full `H3Transformer`
@@ -1258,7 +1261,7 @@ mod tests {
     #[test]
     fn tiny_config_forward_is_finite_and_the_right_shape() {
         let cfg = H3TransformerConfig::tiny();
-        let tensors = rand_tensors(&cfg, 3);
+        let tensors = random_checkpoint(&cfg, 3);
         let model = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, None).expect("a resident tiny model");
         let cfg = model.config();
 
@@ -1409,7 +1412,7 @@ mod tests {
         use crate::dit_shard::StreamingDit;
 
         let cfg = H3TransformerConfig::tiny();
-        let src = Counting::new(rand_tensors(&cfg, 23));
+        let src = Counting::new(random_checkpoint(&cfg, 23));
         let model = H3Transformer::load_on(&src, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, None).expect("a resident tiny model");
         assert!(src.take_matching("adaln_proj").is_empty(), "loading the resident model must not read adaln_proj");
         let packed = Packed::random(&cfg);
@@ -1438,7 +1441,7 @@ mod tests {
         use crate::dit_shard::StreamingDit;
 
         let cfg = H3TransformerConfig::tiny();
-        let tensors = rand_tensors(&cfg, data::rng::random_seed());
+        let tensors = random_checkpoint(&cfg, data::rng::random_seed());
         let path = std::env::temp_dir().join(format!("brain-minimaxh3-adapter-forward-{}.safetensors", std::process::id()));
         crate::lora::tests::write_peft(&path, &crate::lora::tests::every_linear(&cfg, 2, 9), 1.0);
         let path = path.to_str().unwrap().to_string();
@@ -1477,15 +1480,15 @@ mod tests {
     /// and the streamed forward compute the same, and both the gates and a
     /// sparsity change what it computes.
     /// A block's row-local work run over many small row chunks computes
-    /// what one chunk over the whole sequence does - dense attention and
-    /// sparse attention with the gates' coarse branch alike, so every
-    /// full-length buffer a chunk writes into (the q/k/v slab, the gate, the
-    /// output) and every per-chunk table (AdaLN indices, rotary rows) is
-    /// placed at its own rows.
+    /// what one chunk over the whole sequence does, so every full-length
+    /// buffer a chunk writes into (the q/k/v slab, the output) and every
+    /// per-chunk table (AdaLN indices, rotary rows) is placed at its own
+    /// rows. Dense attention on the CPU; `tests/device.rs` checks sparse
+    /// attention with the gates' coarse branch on a card.
     #[test]
     fn row_chunks_compute_what_one_chunk_computes() {
         let cfg = H3TransformerConfig::tiny();
-        let tensors = rand_tensors(&cfg, data::rng::random_seed());
+        let tensors = random_checkpoint(&cfg, data::rng::random_seed());
         let [_, ph, pw] = cfg.patch_size;
         let layout = crate::pipeline::build_packed_sequence(&[TAG_TEXT; 3], 8, 4 * ph, 4 * pw, 3, cfg.patch_size, crate::pipeline::AUDIO_CHANNELS, &[]);
         let seq_len = layout.token_tags.len() as u32;
@@ -1523,84 +1526,6 @@ mod tests {
         for chunk in chunkings {
             close(&cpu.forward(&inputs(None, chunk)), &whole, &format!("dense on the CPU in {chunk}-row chunks"));
         }
-        drop(cpu);
-
-        if !model::block::flash_gate(&Ctx::new(None).gpu.caps(), cfg.attention_head_dim <= 128) {
-            brain_testutil::skip("row chunks with sparse attention: needs a device with workgroup reductions");
-            return;
-        }
-        let (inner, hidden) = (cfg.inner_dim() as usize, cfg.hidden_size as usize);
-        let gates: Tensors = (0..cfg.num_layers).map(|i| (format!("blocks.{i}.attn.to_gate_compress.weight"), (vec![inner, hidden], rng.vec_scaled(inner * hidden, 0.2)))).collect();
-        let gated = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), None, Dtype::F32, Some(&gates)).expect("a resident gated model");
-        let _p = gated.prepare(&tensors, &[0.3, 0.7]).expect("prepare");
-        for sparsity in [None, Some(0.0)] {
-            let whole = gated.forward(&inputs(sparsity, seq_len));
-            for chunk in chunkings {
-                close(&gated.forward(&inputs(sparsity, chunk)), &whole, &format!("sparsity {sparsity:?} in {chunk}-row chunks"));
-            }
-        }
-    }
-
-    #[test]
-    fn video_sparse_attention_runs_resident_and_streamed_alike() {
-        use crate::dit_shard::StreamingDit;
-
-        let cfg = H3TransformerConfig::tiny();
-        if !model::block::flash_gate(&Ctx::new(None).gpu.caps(), cfg.attention_head_dim <= 128) {
-            brain_testutil::skip("vsa: needs a device with workgroup reductions");
-            return;
-        }
-        let tensors = rand_tensors(&cfg, data::rng::random_seed());
-        let [_, ph, pw] = cfg.patch_size;
-        let layout = crate::pipeline::build_packed_sequence(&[TAG_TEXT; 3], 8, 4 * ph, 4 * pw, 3, cfg.patch_size, crate::pipeline::AUDIO_CHANNELS, &[]);
-        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
-        let (video, audio, text) = (rng.vec_scaled(layout.video_indices.len() * cfg.video_patch_dim() as usize, 0.3), rng.vec_scaled(layout.audio_indices.len() * cfg.audio_in_channels as usize, 0.3), rng.vec_scaled(3 * cfg.text_dim as usize, 0.3));
-        let ts_idx = vec![0u32; layout.token_tags.len()];
-        let inputs = |sparsity: Option<f32>| PackedInputs {
-            hidden_states: &video,
-            audio_hidden_states: &audio,
-            encoder_hidden_states: &text,
-            timestep: &[0.5],
-            timestep_indices: &ts_idx,
-            token_tags: &layout.token_tags,
-            position_ids: &layout.position_ids,
-            video_indices: &layout.video_indices,
-            audio_indices: &layout.audio_indices,
-            text_indices: &layout.text_indices,
-            act_levels: block::ActLevels::One,
-            vsa: sparsity.map(|sparsity| crate::vsa::Spec { segments: &layout.segments, sparsity, reference_sparsity: sparsity }),
-            row_chunk: block::ROW_CHUNK,
-        };
-        let close = |a: &H3Output, b: &H3Output, what: &str| {
-            let worst = a.video.iter().chain(&a.audio).zip(b.video.iter().chain(&b.audio)).map(|(x, y)| (x - y).abs() / (1.0 + y.abs())).fold(0.0f32, f32::max);
-            assert!(worst < 1e-3, "{what}: worst relative difference {worst}");
-        };
-        let single = StreamPlan::single(cfg.num_layers as usize);
-
-        let plain = H3Transformer::load_on(&tensors, cfg, single.clone(), None, Dtype::F32, None).expect("a resident tiny model");
-        let _p = plain.prepare(&tensors, &[0.5]).expect("prepare");
-        let dense = plain.forward(&inputs(None));
-        close(&plain.forward(&inputs(Some(0.0))), &dense, "every tile kept, no gate");
-        drop(plain);
-
-        let (inner, hidden) = (cfg.inner_dim() as usize, cfg.hidden_size as usize);
-        let gates: Tensors = (0..cfg.num_layers).map(|i| (format!("blocks.{i}.attn.to_gate_compress.weight"), (vec![inner, hidden], rng.vec_scaled(inner * hidden, 0.2)))).collect();
-        let gated = H3Transformer::load_on(&tensors, cfg, single, None, Dtype::F32, Some(&gates)).expect("a resident gated model");
-        assert!(gated.has_gates());
-        let _p = gated.prepare(&tensors, &[0.5]).expect("prepare");
-        // Every tile kept, the gates' coarse branch on: the selection cannot
-        // differ between the two builds, so their arithmetic must agree. A
-        // dropping selection is discontinuous in the scores - a last-ulp
-        // difference may flip a near tie - and is checked exactly against the
-        // host reference by `vsa`'s own device test.
-        let resident = gated.forward(&inputs(Some(0.0)));
-        let dit = StreamingDit::open_single(&cfg, None);
-        let _s = dit.prepare(&tensors, &cfg, &[0.5]).expect("prepare");
-        let streamed = H3Transformer::forward_streaming(&tensors, Some(&gates), &cfg, &dit, &inputs(Some(0.0)));
-        close(&resident, &streamed, "resident and streamed with gates");
-        let sparse = gated.forward(&inputs(Some(0.5)));
-        assert!(sparse.video.iter().zip(&resident.video).any(|(a, b)| a != b), "dropping tiles must change the forward");
-        assert!(resident.video.iter().zip(&dense.video).any(|(a, b)| a != b), "the gates' coarse branch must change the forward");
     }
 
     #[test]
@@ -1608,7 +1533,7 @@ mod tests {
         use crate::dit_shard::StreamingDit;
 
         let cfg = H3TransformerConfig::tiny();
-        let tensors = rand_tensors(&cfg, data::rng::random_seed());
+        let tensors = random_checkpoint(&cfg, data::rng::random_seed());
         let packed = Packed::random(&cfg);
         let streamed = H3Transformer::forward_streaming(&tensors, None, &cfg, &StreamingDit::open_single(&cfg, Some("cpu")), &packed.inputs());
         let resident = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, None).expect("a resident tiny model");
@@ -1629,7 +1554,7 @@ mod tests {
             brain_testutil::skip("the ambient device has no packed int8 dot product");
             return;
         }
-        let tensors = rand_tensors(&cfg, data::rng::random_seed());
+        let tensors = random_checkpoint(&cfg, data::rng::random_seed());
         let packed = Packed::random(&cfg);
         let plan = || StreamPlan::single(cfg.num_layers as usize);
         let run = |tier: Dtype, act_levels: block::ActLevels| {
@@ -1681,7 +1606,7 @@ mod tests {
 
         let cfg = H3TransformerConfig::tiny();
         assert!(cfg.num_layers >= 2, "a two-stage split needs at least two blocks");
-        let tensors = rand_tensors(&cfg, 17);
+        let tensors = random_checkpoint(&cfg, 17);
         let packed = Packed::random(&cfg);
         let inp = packed.inputs();
 

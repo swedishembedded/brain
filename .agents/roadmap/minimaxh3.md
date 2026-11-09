@@ -958,7 +958,7 @@ MiniMax H3 Community License derivatives.
       and ~4.2k vision tokens); it streams. Measure where the resident
       workspace goes at that size.
 - [x] Sparse attention is faster than dense on CUDA at ref2va's own
-      shapes (one P40, 56 heads, `vsa::tests::sparse_attention_time_at_a_real_shape`,
+      shapes (one P40, 56 heads, `cargo test -p brain-minimaxh3 --test device -- --device gpu1 --backend cuda --ignored sparse_attention_time`,
       ms per attention incl. tile means, selection and the gated coarse
       branch):
 

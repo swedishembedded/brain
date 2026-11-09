@@ -1449,71 +1449,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// Duplicates `crate::model`'s own private test-only `rand_tensors` (not
-    /// reusable from here: it is `#[cfg(test)]`-private to that module) -
-    /// the exact tensor names `H3Transformer::load` reads, seeded random
-    /// values.
-    pub(crate) fn rand_dit_tensors(cfg: &H3TransformerConfig, seed: u64) -> Tensors {
-        let mut rng = data::rng::Lcg::new(seed);
-        let mut t: Tensors = std::collections::HashMap::new();
-        let mut put = |name: &str, shape: Vec<usize>| {
-            let n: usize = shape.iter().product();
-            t.insert(name.to_string(), (shape, rng.vec_scaled(n, 0.2)));
-        };
-        let (hidden, inner, hd, ffn, te) = (cfg.hidden_size as usize, cfg.inner_dim() as usize, cfg.attention_head_dim as usize, cfg.ffn_dim as usize, cfg.time_embed_dim as usize);
-
-        let put_attn = |name: &mut dyn FnMut(&str, Vec<usize>), prefix: &str| {
-            name(&format!("{prefix}.to_q.weight"), vec![inner, hidden]);
-            name(&format!("{prefix}.to_k.weight"), vec![inner, hidden]);
-            name(&format!("{prefix}.to_v.weight"), vec![inner, hidden]);
-            name(&format!("{prefix}.norm_q.weight"), vec![hd]);
-            name(&format!("{prefix}.norm_k.weight"), vec![hd]);
-            name(&format!("{prefix}.to_out.0.weight"), vec![hidden, inner]);
-        };
-        let put_ff = |name: &mut dyn FnMut(&str, Vec<usize>), prefix: &str| {
-            name(&format!("{prefix}.ff.net.0.proj.weight"), vec![2 * ffn, hidden]);
-            name(&format!("{prefix}.ff.net.2.weight"), vec![hidden, ffn]);
-        };
-
-        for i in 0..cfg.num_refiner_layers {
-            let p = format!("token_refiner.refiner_blocks.{i}");
-            put_attn(&mut put, &format!("{p}.attn"));
-            put_ff(&mut put, &p);
-            put(&format!("{p}.norm1.weight"), vec![hidden]);
-            put(&format!("{p}.norm2.weight"), vec![hidden]);
-        }
-        put("token_refiner.final_norm.weight", vec![hidden]);
-
-        for i in 0..cfg.num_layers {
-            let p = format!("transformer_blocks.{i}");
-            put_attn(&mut put, &format!("{p}.attn"));
-            put_ff(&mut put, &p);
-            put(&format!("{p}.norm1.weight"), vec![hidden]);
-            put(&format!("{p}.norm2.weight"), vec![hidden]);
-            put(&format!("{p}.adaln_proj.linear.weight"), vec![18 * hidden, te]);
-            put(&format!("{p}.adaln_proj.linear.bias"), vec![18 * hidden]);
-        }
-
-        put("proj_in.weight", vec![hidden, cfg.video_patch_dim() as usize]);
-        put("proj_in.bias", vec![hidden]);
-        put("audio_proj_in.weight", vec![hidden, cfg.audio_in_channels as usize]);
-        put("audio_proj_in.bias", vec![hidden]);
-        put("context_embedder.weight", vec![hidden, cfg.text_dim as usize]);
-        put("context_embedder.bias", vec![hidden]);
-        put("time_embedder.linear_1.weight", vec![cfg.time_embed_hidden_dim as usize, cfg.freq_dim as usize]);
-        put("time_embedder.linear_1.bias", vec![cfg.time_embed_hidden_dim as usize]);
-        put("time_embedder.linear_2.weight", vec![te, cfg.time_embed_hidden_dim as usize]);
-        put("time_embedder.linear_2.bias", vec![te]);
-        put("norm_out.norm.weight", vec![hidden]);
-        put("norm_out.linear.weight", vec![2 * hidden, te]);
-        put("norm_out.linear.bias", vec![2 * hidden]);
-        put("proj_out.weight", vec![cfg.video_patch_dim() as usize, hidden]);
-        put("proj_out.bias", vec![cfg.video_patch_dim() as usize]);
-        put("audio_proj_out.weight", vec![cfg.audio_in_channels as usize, hidden]);
-        put("audio_proj_out.bias", vec![cfg.audio_in_channels as usize]);
-        t
-    }
-
     pub(crate) fn rand_manifest_tensors(manifest: Vec<(String, Vec<usize>)>, seed: u64) -> Tensors {
         let mut rng = data::rng::Lcg::new(seed);
         manifest
@@ -1567,7 +1502,7 @@ pub(crate) mod tests {
         let dit_cfg = tiny_dit_cfg();
         let video_vae_cfg = tiny_video_vae_cfg();
         let vocoder_cfg = tiny_vocoder_cfg();
-        let dit_tensors = rand_dit_tensors(&dit_cfg, 1);
+        let dit_tensors = crate::model::random_checkpoint(&dit_cfg, 1);
         let video_vae_tensors = rand_manifest_tensors(video_vae_cfg.tensor_manifest(), 2);
         let vocoder_tensors = rand_manifest_tensors(vocoder_cfg.tensor_manifest(), 3);
         let ckpt = tiny_checkpoint(&dit_tensors, &video_vae_tensors, &vocoder_tensors);
@@ -1587,7 +1522,7 @@ pub(crate) mod tests {
         let dit_cfg = tiny_dit_cfg();
         let video_vae_cfg = tiny_video_vae_cfg();
         let vocoder_cfg = tiny_vocoder_cfg();
-        let dit_tensors = rand_dit_tensors(&dit_cfg, 1);
+        let dit_tensors = crate::model::random_checkpoint(&dit_cfg, 1);
         let video_vae_tensors = rand_manifest_tensors(video_vae_cfg.tensor_manifest(), 2);
         let vocoder_tensors = rand_manifest_tensors(vocoder_cfg.tensor_manifest(), 3);
         let ckpt = tiny_checkpoint(&dit_tensors, &video_vae_tensors, &vocoder_tensors);
@@ -1619,7 +1554,7 @@ pub(crate) mod tests {
         let dit_cfg = tiny_dit_cfg();
         let video_vae_cfg = tiny_video_vae_cfg();
         let vocoder_cfg = tiny_vocoder_cfg();
-        let dit_tensors = rand_dit_tensors(&dit_cfg, 11);
+        let dit_tensors = crate::model::random_checkpoint(&dit_cfg, 11);
         let video_vae_tensors = rand_manifest_tensors(video_vae_cfg.tensor_manifest(), 12);
         let vocoder_tensors = rand_manifest_tensors(vocoder_cfg.tensor_manifest(), 13);
         let ckpt = tiny_checkpoint(&dit_tensors, &video_vae_tensors, &vocoder_tensors);
@@ -1653,7 +1588,7 @@ pub(crate) mod tests {
         let dit_cfg = tiny_dit_cfg();
         let video_vae_cfg = tiny_video_vae_cfg();
         let vocoder_cfg = tiny_vocoder_cfg();
-        let dit_tensors = rand_dit_tensors(&dit_cfg, 41);
+        let dit_tensors = crate::model::random_checkpoint(&dit_cfg, 41);
         let video_vae_tensors = rand_manifest_tensors(video_vae_cfg.tensor_manifest(), 42);
         let vocoder_tensors = rand_manifest_tensors(vocoder_cfg.tensor_manifest(), 43);
         let ckpt = tiny_checkpoint(&dit_tensors, &video_vae_tensors, &vocoder_tensors);
@@ -1710,7 +1645,7 @@ pub(crate) mod tests {
         let dit_cfg = tiny_dit_cfg();
         let video_vae_cfg = tiny_video_vae_cfg();
         let vocoder_cfg = tiny_vocoder_cfg();
-        let dit_tensors = rand_dit_tensors(&dit_cfg, 31);
+        let dit_tensors = crate::model::random_checkpoint(&dit_cfg, 31);
         let video_vae_tensors = rand_manifest_tensors(video_vae_cfg.tensor_manifest(), 32);
         let vocoder_tensors = rand_manifest_tensors(vocoder_cfg.tensor_manifest(), 33);
         let ckpt = tiny_checkpoint(&dit_tensors, &video_vae_tensors, &vocoder_tensors);
@@ -1749,7 +1684,7 @@ pub(crate) mod tests {
         let dit_cfg = tiny_dit_cfg();
         let video_vae_cfg = tiny_video_vae_cfg();
         let vocoder_cfg = tiny_vocoder_cfg();
-        let dit_tensors = rand_dit_tensors(&dit_cfg, 21);
+        let dit_tensors = crate::model::random_checkpoint(&dit_cfg, 21);
         let video_vae_tensors = rand_manifest_tensors(video_vae_cfg.tensor_manifest(), 22);
         let vocoder_tensors = rand_manifest_tensors(vocoder_cfg.tensor_manifest(), 23);
         let ckpt = tiny_checkpoint(&dit_tensors, &video_vae_tensors, &vocoder_tensors);
