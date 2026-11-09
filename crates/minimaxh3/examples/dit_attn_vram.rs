@@ -26,9 +26,11 @@
 //! linears at the given tier, exactly as the DiT holds them, and the fastest
 //! of `reps` timed forwards after a warm-up one. The last argument pins the
 //! attention arm.
-//! Poll `nvidia-smi --query-gpu=memory.used` alongside it for the peak - the
-//! number this prints is the wall time, and the allocation peak lives in the
-//! driver.
+//! It prints the forward's transient peak by the backend's own allocation
+//! accounting where the backend keeps one (CUDA, wgpu): the live bytes above
+//! the weights and inputs at the forward's high-water mark, which is what
+//! `minimaxh3::model::block_workspace_bytes` models. Elsewhere poll
+//! `nvidia-smi --query-gpu=memory.used` alongside it.
 //!
 //! Swedish Embedded AB implements measurement-driven inference optimization for
 //! its clients. If your team needs expertise in fitting large transformer
@@ -38,7 +40,7 @@
 use std::time::Instant;
 
 use gpu_core::select::Dtype;
-use minimaxh3::block::{attn_mode, block_forward, ActLevels, AttnMode, BlockInputs, BlockWeights, Ctx};
+use minimaxh3::block::{attn_mode, block_forward, row_chunks, ActLevels, AttnMode, BlockInputs, BlockWeights, Ctx, ROW_CHUNK};
 use minimaxh3::config::{H3TransformerConfig, MODALITY_NUM};
 use model::ops::Weight;
 
@@ -97,9 +99,8 @@ fn main() {
     // One distinct timestep, every row at its first modality's row: the
     // modulation's values change no cost, only its table's row count does.
     let modulation = fill(MODALITY_NUM as usize * 6 * hidden as usize);
-    let adaln_idx = cx.upload_u32(&vec![0u32; seq as usize]);
-    let half = 3 * cfg.rope_freq_dim;
-    let (cos, sin) = (cx.upload(&vec![1.0; (seq * half) as usize]), cx.upload(&vec![0.0; (seq * half) as usize]));
+    let half = 3 * cfg.rope_freq_dim as usize;
+    let chunks = row_chunks(&cx, &vec![0u32; seq as usize], (&vec![1.0; seq as usize * half], &vec![0.0; seq as usize * half], half), ROW_CHUNK);
 
     // Each forward ends in a readback: on the Vulkan backend `submit` only
     // records and queues, so without a fence this would time submission and
@@ -109,13 +110,19 @@ fn main() {
         // The arena the model's own forward replays its blocks in.
         let out = {
             let arena = cx.gpu.scratch_scope_in("minimaxh3 block");
-            block_forward(&cx, &w, &BlockInputs { x: &x, adaln_indices: &adaln_idx, cos: &cos, sin: &sin, modulation: &[&modulation], seq_len: seq, levels: ActLevels::One, scope: Some(&arena), vsa: None }, &cfg).0
+            block_forward(&cx, &w, &BlockInputs { x: &x, chunks: &chunks, modulation: &[&modulation], seq_len: seq, levels: ActLevels::One, scope: Some(&arena), vsa: None, tap_attn_out: false }, &cfg).0
         };
         let probe = cx.gpu.read(&out, 1);
         assert!(probe[0].is_finite(), "non-finite block output");
         t.elapsed().as_secs_f64()
     };
+    let before = cx.gpu.memory_usage();
+    cx.gpu.reset_memory_peak();
     let warm = run();
+    if let (Some(before), Some(after)) = (before, cx.gpu.memory_usage()) {
+        let modelled = minimaxh3::model::block_workspace_bytes(&cfg, seq, ActLevels::One);
+        println!("one block forward's transient peak: {:.3} GB measured, {:.3} GB modelled", (after.peak_live - before.live) as f64 / 1e9, modelled as f64 / 1e9);
+    }
     let best = (0..reps).map(|_| run()).fold(f64::INFINITY, f64::min);
     let flops = 2.0 * seq as f64 * (4.0 * inner as f64 * hidden as f64 + 3.0 * ffn as f64 * hidden as f64) + 4.0 * seq as f64 * seq as f64 * inner as f64;
     println!("one block forward: warm-up {warm:.3}s, best of {reps} {best:.3}s ({:.2} TFLOP/s on the linears + attention)", flops / best / 1e12);

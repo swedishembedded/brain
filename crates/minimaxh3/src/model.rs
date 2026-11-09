@@ -82,6 +82,9 @@ pub struct PackedInputs<'a> {
     /// Video sparse attention over this layout (`crate::vsa`), `None` for
     /// dense attention.
     pub vsa: Option<crate::vsa::Spec<'a>>,
+    /// Rows a block runs its row-local work over at a time
+    /// ([`block::block_forward`]); [`block::ROW_CHUNK`] outside a test.
+    pub row_chunk: u32,
 }
 
 /// `MiniMaxH3TransformerOutput`, minus the batch axis.
@@ -313,30 +316,33 @@ fn block_bytes(cfg: &H3TransformerConfig, tier: Dtype) -> u64 {
 }
 
 /// Peak transient device bytes one block's forward allocates over `rows`
-/// packed rows. The block runs in a scratch scope that rewinds between its
-/// attention and FFN halves (`block::BlockInputs::scope`), so the halves
-/// share slots: at `hidden`, one norm and one modulated input serving both
-/// halves, the attention residual `h1`, and the attention and FFN projection
-/// outputs; at `inner`, the normed k, the flash path's packed qkv slab and
-/// the attention result; one slot holding the larger of the normed q and the
-/// SwiGLU product (`ffn`); the larger of q/k/v and the FFN's value/gate,
-/// which the linears' allocator reuses once the rewind has drained the
-/// attention half - all fp32 - plus the int8 copy of each linear's input.
-/// Measured at 13312 rows on a P40 with one activation level: 6.05 GB beside
-/// the block's weights, against 6.05 GB modelled. Two levels
-/// ([`block::ActLevels::Two`]) add a second int8 copy of each input and, per
-/// linear, one fp32 slab of `model::ops::TWO_LEVEL_PASS_ROWS` rows its second
-/// product is folded through.
+/// packed rows. Held at full length ([`block::block_forward`]): the packed
+/// q/k/v slab, the attention result and the output (the VSA gate's
+/// full-length buffer is [`crate::vsa::workspace_bytes`]'). Everything else
+/// lives for one [`block::ROW_CHUNK`] of rows, each chunk handed the previous
+/// one's buffers, and the larger pass is the FFN's: the chunk's attention
+/// rows, its input rows, `to_out`'s output, the residual `h1`, a norm and a
+/// modulated input, the FFN's value, gate and SwiGLU product, its output and
+/// the chunk's output - all fp32 - plus the int8 copy of each linear's input,
+/// and one more hidden-wide fp32 row the measured peak holds beyond those.
+/// Measured on a P40 with one activation level (`examples/dit_attn_vram.rs`):
+/// 3.465 GB at 13312 rows and 4.257 GB at 19126 beside the block's weights,
+/// against 3.472 and 4.264 GB modelled.
+/// Two levels ([`block::ActLevels::Two`]) add a second int8 copy of each
+/// input and, per linear, one fp32 slab of `model::ops::TWO_LEVEL_PASS_ROWS`
+/// rows its second product is folded through.
 pub fn block_workspace_bytes(cfg: &H3TransformerConfig, rows: u32, levels: block::ActLevels) -> u64 {
     let (hidden, inner, ffn) = (cfg.hidden_size as u64, cfg.inner_dim() as u64, cfg.ffn_dim as u64);
-    let fp32 = (5 * hidden + 5 * inner + ffn + (3 * inner).max(2 * ffn)) * 4;
+    let chunk = rows.min(block::ROW_CHUNK) as u64;
+    let full = rows as u64 * (3 * inner + inner + hidden) * 4;
+    let fp32 = (inner + 8 * hidden + 3 * ffn) * 4;
     let int8_inputs = 2 * hidden + inner + ffn;
-    let one = rows as u64 * (fp32 + int8_inputs);
+    let one = full + chunk * (fp32 + int8_inputs);
     match levels {
         block::ActLevels::One => one,
         block::ActLevels::Two => {
-            let slab_rows = rows.min(model::ops::TWO_LEVEL_PASS_ROWS) as u64;
-            one + rows as u64 * int8_inputs + slab_rows * (3 * inner + 2 * hidden + 2 * ffn) * 4
+            let slab_rows = chunk.min(model::ops::TWO_LEVEL_PASS_ROWS as u64);
+            one + chunk * int8_inputs + slab_rows * (3 * inner + 2 * hidden + 2 * ffn) * 4
         }
     }
 }
@@ -537,7 +543,7 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
         let cx = stage(s);
         // A stage with no blocks of its own (a plan may put the endpoint
         // weights alone on a card) never uploads the block tables.
-        let block_tables = (shard.end > shard.start).then(|| (cx.upload(&rope_tables.cos), cx.upload(&rope_tables.sin), cx.upload_u32(&adaln_idx)));
+        let row_chunks = (shard.end > shard.start).then(|| block::row_chunks(cx, &adaln_idx, (&rope_tables.cos, &rope_tables.sin, rope_tables.half), inp.row_chunk));
         // The modality row indices are read by the input scatter (embed
         // stage) and the output gather (head stage); a middle stage never
         // touches them.
@@ -589,7 +595,7 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
             tap_block0_input = cx.gpu.read(&h, (seq_len * hidden) as usize);
         }
         for i in shard.start..shard.end {
-            let (cos, sin, adaln_idx_dev) = block_tables.as_ref().expect("a stage with blocks uploads its own RoPE/AdaLN tables");
+            let chunks = row_chunks.as_deref().expect("a stage with blocks uploads its own RoPE/AdaLN tables");
             let w = weights.block(i, cx);
             // Every block allocates the same activations in the same order;
             // the arena hands each block the previous block's buffers instead
@@ -598,8 +604,9 @@ fn forward_core<'c>(cfg: &H3TransformerConfig, plan: &StreamPlan, stage: &dyn Fn
             let out = {
                 let arena = cx.gpu.scratch_scope_in(BLOCK_ARENA);
                 let rows = modulation.block_rows(i, inp.timestep).unwrap_or_else(|e| panic!("minimaxh3 forward: {e}"));
-                let (out, attn_out) = block::block_forward(cx, &w, &block::BlockInputs { x: &h, adaln_indices: adaln_idx_dev, cos, sin, modulation: &rows, seq_len, levels: inp.act_levels, scope: Some(&arena), vsa: vsa_plan.as_ref() }, cfg);
-                if taps && i == 0 {
+                let tap_attn_out = taps && i == 0;
+                let (out, attn_out) = block::block_forward(cx, &w, &block::BlockInputs { x: &h, chunks, modulation: &rows, seq_len, levels: inp.act_levels, scope: Some(&arena), vsa: vsa_plan.as_ref(), tap_attn_out }, cfg);
+                if let Some(attn_out) = attn_out {
                     tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
                     tap_block0_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
                 }
@@ -821,6 +828,7 @@ mod tests {
                 text_indices: &self.text_indices,
                 act_levels,
                 vsa: None,
+                row_chunk: block::ROW_CHUNK,
             }
         }
     }
@@ -1034,6 +1042,7 @@ mod tests {
                 text_indices: &packed.text_indices,
                 act_levels: block::ActLevels::One,
                 vsa: None,
+                row_chunk: block::ROW_CHUNK,
             };
             let t = std::time::Instant::now();
             let exact = H3Transformer::forward_streaming(&reader, None, &cfg, &dit, &inp);
@@ -1303,6 +1312,7 @@ mod tests {
             text_indices: &text_indices,
             act_levels: block::ActLevels::One,
             vsa: None,
+            row_chunk: block::ROW_CHUNK,
         };
 
         let _plan = model.prepare(&tensors, &timestep).expect("prepare");
@@ -1386,6 +1396,7 @@ mod tests {
                 text_indices: &self.text_indices,
                 act_levels: block::ActLevels::One,
                 vsa: None,
+                row_chunk: block::ROW_CHUNK,
             }
         }
     }
@@ -1465,6 +1476,71 @@ mod tests {
     /// gates it is the dense forward; with every block's gate the resident
     /// and the streamed forward compute the same, and both the gates and a
     /// sparsity change what it computes.
+    /// A block's row-local work run over many small row chunks computes
+    /// what one chunk over the whole sequence does - dense attention and
+    /// sparse attention with the gates' coarse branch alike, so every
+    /// full-length buffer a chunk writes into (the q/k/v slab, the gate, the
+    /// output) and every per-chunk table (AdaLN indices, rotary rows) is
+    /// placed at its own rows.
+    #[test]
+    fn row_chunks_compute_what_one_chunk_computes() {
+        let cfg = H3TransformerConfig::tiny();
+        let tensors = rand_tensors(&cfg, data::rng::random_seed());
+        let [_, ph, pw] = cfg.patch_size;
+        let layout = crate::pipeline::build_packed_sequence(&[TAG_TEXT; 3], 8, 4 * ph, 4 * pw, 3, cfg.patch_size, crate::pipeline::AUDIO_CHANNELS, &[]);
+        let seq_len = layout.token_tags.len() as u32;
+        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
+        let (video, audio, text) = (rng.vec_scaled(layout.video_indices.len() * cfg.video_patch_dim() as usize, 0.3), rng.vec_scaled(layout.audio_indices.len() * cfg.audio_in_channels as usize, 0.3), rng.vec_scaled(3 * cfg.text_dim as usize, 0.3));
+        // Two timesteps over alternating rows, so a chunk's AdaLN indices are
+        // not one constant.
+        let ts_idx: Vec<u32> = (0..seq_len).map(|r| r % 2).collect();
+        let inputs = |sparsity: Option<f32>, row_chunk: u32| PackedInputs {
+            hidden_states: &video,
+            audio_hidden_states: &audio,
+            encoder_hidden_states: &text,
+            timestep: &[0.3, 0.7],
+            timestep_indices: &ts_idx,
+            token_tags: &layout.token_tags,
+            position_ids: &layout.position_ids,
+            video_indices: &layout.video_indices,
+            audio_indices: &layout.audio_indices,
+            text_indices: &layout.text_indices,
+            act_levels: block::ActLevels::One,
+            vsa: sparsity.map(|sparsity| crate::vsa::Spec { segments: &layout.segments, sparsity, reference_sparsity: sparsity }),
+            row_chunk,
+        };
+        let close = |a: &H3Output, b: &H3Output, what: &str| {
+            let worst = a.video.iter().chain(&a.audio).zip(b.video.iter().chain(&b.audio)).map(|(x, y)| (x - y).abs() / (1.0 + y.abs())).fold(0.0f32, f32::max);
+            assert!(worst < 1e-4, "{what}: worst relative difference {worst}");
+        };
+        // 7 rows leave a short last chunk; 1 row is every row its own chunk.
+        let chunkings = [7u32, 1];
+        assert!(seq_len > 7 && !seq_len.is_multiple_of(7), "the layout spans several chunks with a remainder ({seq_len} rows)");
+
+        let cpu = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), Some("cpu"), Dtype::F32, None).expect("a resident tiny model");
+        let _p = cpu.prepare(&tensors, &[0.3, 0.7]).expect("prepare");
+        let whole = cpu.forward(&inputs(None, seq_len));
+        for chunk in chunkings {
+            close(&cpu.forward(&inputs(None, chunk)), &whole, &format!("dense on the CPU in {chunk}-row chunks"));
+        }
+        drop(cpu);
+
+        if !model::block::flash_gate(&Ctx::new(None).gpu.caps(), cfg.attention_head_dim <= 128) {
+            brain_testutil::skip("row chunks with sparse attention: needs a device with workgroup reductions");
+            return;
+        }
+        let (inner, hidden) = (cfg.inner_dim() as usize, cfg.hidden_size as usize);
+        let gates: Tensors = (0..cfg.num_layers).map(|i| (format!("blocks.{i}.attn.to_gate_compress.weight"), (vec![inner, hidden], rng.vec_scaled(inner * hidden, 0.2)))).collect();
+        let gated = H3Transformer::load_on(&tensors, cfg, StreamPlan::single(cfg.num_layers as usize), None, Dtype::F32, Some(&gates)).expect("a resident gated model");
+        let _p = gated.prepare(&tensors, &[0.3, 0.7]).expect("prepare");
+        for sparsity in [None, Some(0.0)] {
+            let whole = gated.forward(&inputs(sparsity, seq_len));
+            for chunk in chunkings {
+                close(&gated.forward(&inputs(sparsity, chunk)), &whole, &format!("sparsity {sparsity:?} in {chunk}-row chunks"));
+            }
+        }
+    }
+
     #[test]
     fn video_sparse_attention_runs_resident_and_streamed_alike() {
         use crate::dit_shard::StreamingDit;
@@ -1493,6 +1569,7 @@ mod tests {
             text_indices: &layout.text_indices,
             act_levels: block::ActLevels::One,
             vsa: sparsity.map(|sparsity| crate::vsa::Spec { segments: &layout.segments, sparsity, reference_sparsity: sparsity }),
+            row_chunk: block::ROW_CHUNK,
         };
         let close = |a: &H3Output, b: &H3Output, what: &str| {
             let worst = a.video.iter().chain(&a.audio).zip(b.video.iter().chain(&b.audio)).map(|(x, y)| (x - y).abs() / (1.0 + y.abs())).fold(0.0f32, f32::max);
@@ -1695,6 +1772,7 @@ mod tests {
             text_indices: &get_u32("input_text_indices"),
             act_levels: block::ActLevels::One,
             vsa: None,
+            row_chunk: block::ROW_CHUNK,
         };
 
         let _plan = model.prepare(&tensors, inp.timestep).expect("prepare");

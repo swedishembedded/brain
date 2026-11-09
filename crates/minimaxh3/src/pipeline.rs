@@ -1129,6 +1129,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
             text_indices: &packed.text_indices,
             act_levels: opts.act_levels,
             vsa: (opts.vsa_sparsity > 0.0 || gated).then_some(crate::vsa::Spec { segments: &packed.segments, sparsity: opts.vsa_sparsity, reference_sparsity: opts.vsa_sparsity }),
+            row_chunk: crate::block::ROW_CHUNK,
         };
         let out = match resident {
             Some(m) => m.forward(&inp),

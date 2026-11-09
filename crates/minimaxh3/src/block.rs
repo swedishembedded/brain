@@ -94,8 +94,11 @@ pub(crate) const K_VSA_SELECT: usize = 19;
 pub(crate) const K_FLASH_ATTN_VSA: usize = 20;
 pub(crate) const K_VSA_COARSE: usize = 21;
 pub(crate) const K_VSA_GATE_ADD: usize = 22;
+/// A row range of one matrix into a column range of another: a block's row
+/// chunks in and out of its full-sequence buffers ([`block_forward`]).
+const K_COPY_COLS: usize = 23;
 
-pub const KERNELS: [(&str, &str); 23] = [
+pub const KERNELS: [(&str, &str); 24] = [
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("rope2d_partial", kernels::ROPE2D_PARTIAL),
@@ -119,6 +122,7 @@ pub const KERNELS: [(&str, &str); 23] = [
     ("flash_attn_vsa", kernels::FLASH_ATTN_VSA),
     ("vsa_coarse", kernels::VSA_COARSE),
     ("vsa_gate_add", kernels::VSA_GATE_ADD),
+    ("copy_cols", kernels::COPY_COLS),
 ];
 
 /// This crate's rung set for [`model::block::flash_bidir_variant`] - all four
@@ -409,9 +413,38 @@ fn attention_flash(gpu: &Gpu, ids: &AttnKernels, q: &DeviceBuffer, k: &DeviceBuf
     let inner = heads * head_dim;
     let qkv = gpu.storage((seq_len * 3 * inner) as u64);
     gpu.submit(&[], &[gpu.step(ids.pack_qkv, &[q, k, v, &qkv], &[seq_len, inner], seq_len * 3 * inner)]);
+    flash_packed(gpu, ids, &qkv, seq_len, heads, head_dim)
+}
+
+/// Flash attention over a packed `[seq_len, 3*inner]` q/k/v slab.
+fn flash_packed(gpu: &Gpu, ids: &AttnKernels, qkv: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
+    let inner = heads * head_dim;
     let out = gpu.storage((seq_len * inner) as u64);
-    gpu.submit(&[], &[model::block::flash_bidir_step(gpu, ids.flash, 1, heads, seq_len, head_dim, inner, &qkv, &out)]);
+    gpu.submit(&[], &[model::block::flash_bidir_step(gpu, ids.flash, 1, heads, seq_len, head_dim, inner, qkv, &out)]);
     out
+}
+
+/// [`attention`] over a packed `[seq_len, 3*inner]` q/k/v slab: the flash
+/// arm reads it as it is, the materialized arm unpacks it first.
+fn attention_packed(cx: &Ctx, mode: AttnMode, qkv: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
+    let inner = heads * head_dim;
+    match mode {
+        AttnMode::Flash => flash_packed(&cx.gpu, &DIT_ATTN, qkv, seq_len, heads, head_dim),
+        AttnMode::Materialized => {
+            let [q, k, v] = [0, 1, 2].map(|i| {
+                let part = cx.gpu.storage((seq_len * inner) as u64);
+                copy_cols(cx, (qkv, 3 * inner, i * inner), (&part, inner, 0), seq_len, inner);
+                part
+            });
+            attention_trio(&cx.gpu, &DIT_ATTN, &q, &k, &v, seq_len, heads, head_dim)
+        }
+    }
+}
+
+/// `dst[r * dst_stride + dst_off + j] = src[r * src_stride + src_off + j]`
+/// for `rows` rows of `cols` columns.
+fn copy_cols(cx: &Ctx, (src, src_stride, src_off): (&DeviceBuffer, u32, u32), (dst, dst_stride, dst_off): (&DeviceBuffer, u32, u32), rows: u32, cols: u32) {
+    cx.gpu.submit(&[], &[cx.gpu.step(K_COPY_COLS, &[src, dst], &[rows, cols, src_stride, src_off, dst_stride, dst_off], rows * cols)]);
 }
 
 /// `y = silu(gate) * value` - the checkpoint's fused SwiGLU
@@ -800,17 +833,49 @@ fn adaln_tables(rows: &[&[f32]], hidden: usize) -> [Vec<f32>; 6] {
     tables
 }
 
+/// Rows a block runs its row-local work over at a time ([`block_forward`]):
+/// small enough that a chunk's intermediates are a fraction of the
+/// full-sequence buffers, large enough that each chunk's linears stay
+/// compute-bound.
+pub const ROW_CHUNK: u32 = 4096;
+
+/// One run of [`ROW_CHUNK`] packed rows with the per-row tables a block reads
+/// for it, uploaded once per forward stage and shared by its blocks.
+pub struct RowChunk {
+    /// The chunk's first packed row.
+    pub row0: u32,
+    pub rows: u32,
+    /// `[rows]` u32 (`crate::model::adaln_indices` - THIS port's row
+    /// convention, not the reference's, see this module's own doc).
+    pub adaln_indices: DeviceBuffer,
+    /// `[rows, half]` rotary tables (`crate::rope::build_tables`).
+    pub cos: DeviceBuffer,
+    pub sin: DeviceBuffer,
+}
+
+/// A forward's packed rows cut into [`RowChunk`]s of at most `chunk` rows,
+/// from its per-row AdaLN indices and `half`-wide rotary tables.
+pub fn row_chunks(cx: &Ctx, adaln_indices: &[u32], (cos, sin, half): (&[f32], &[f32], usize), chunk: u32) -> Vec<RowChunk> {
+    assert!(chunk > 0, "minimaxh3 row_chunks: a chunk holds at least one row");
+    assert_eq!(cos.len(), adaln_indices.len() * half, "minimaxh3 row_chunks: one rotary row per packed row");
+    let seq_len = u32::try_from(adaln_indices.len()).expect("minimaxh3 row_chunks: the packed rows fit u32");
+    (0..seq_len)
+        .step_by(chunk as usize)
+        .map(|row0| {
+            let rows = chunk.min(seq_len - row0);
+            let (r0, r1) = (row0 as usize, (row0 + rows) as usize);
+            RowChunk { row0, rows, adaln_indices: cx.upload_u32(&adaln_indices[r0..r1]), cos: cx.upload(&cos[r0 * half..r1 * half]), sin: cx.upload(&sin[r0 * half..r1 * half]) }
+        })
+        .collect()
+}
+
 /// What one [`block_forward`] reads besides the block's weights.
 #[derive(Clone, Copy)]
 pub struct BlockInputs<'a> {
     /// `[seq_len, hidden]`.
     pub x: &'a DeviceBuffer,
-    /// `[seq_len]` u32 (`crate::model::adaln_indices` - THIS port's row
-    /// convention, not the reference's, see this module's own doc).
-    pub adaln_indices: &'a DeviceBuffer,
-    /// `[seq_len, half]` rotary tables (`crate::rope::build_tables`).
-    pub cos: &'a DeviceBuffer,
-    pub sin: &'a DeviceBuffer,
+    /// The packed rows in order, covering `0..seq_len` ([`row_chunks`]).
+    pub chunks: &'a [RowChunk],
     /// This block's cached `adaln_proj` row for each of the forward's
     /// distinct timesteps, in `timestep` order
     /// ([`crate::adaln::AdalnPlan::block_rows`]).
@@ -818,80 +883,115 @@ pub struct BlockInputs<'a> {
     pub seq_len: u32,
     /// The request's activation quantization for the block's linears.
     pub levels: ActLevels,
-    /// The scratch scope the block runs in, when it runs in one: the FFN
-    /// half then reuses the attention half's dropped intermediates
+    /// The scratch scope the block runs in, when it runs in one: each chunk
+    /// then reuses the previous chunk's dropped intermediates
     /// ([`gpu_core::ScratchScope::rewind`]) instead of adding to them.
     pub scope: Option<&'a gpu_core::ScratchScope<'a>>,
     /// The request's sparse attention on this block's device, `None` for
     /// dense attention.
     pub vsa: Option<&'a crate::vsa::DevicePlan>,
+    /// Also return the attention sub-block's own output (a parity tap).
+    pub tap_attn_out: bool,
 }
 
 /// `MiniMaxH3TransformerBlock.forward`: RoPE'd, AdaLN-Zero modulated
 /// pre-norm attention + pre-norm SwiGLU FFN, both residual-gated per row.
 ///
-/// Returns `(output, attn_out)` - `attn_out` is the attention sub-block's own
-/// output (post `to_out`, pre gated residual), exposed as a parity tap
-/// (`crate::model`'s numeric parity test reads it for block 0) rather than
-/// only the block's final output, so a bug localizes to whichever half of
-/// the block introduced it.
-pub fn block_forward(cx: &Ctx, w: &BlockWeights, inp: &BlockInputs, cfg: &H3TransformerConfig) -> (DeviceBuffer, DeviceBuffer) {
-    let BlockInputs { x, adaln_indices, cos, sin, modulation, seq_len, levels, scope, vsa } = *inp;
-    let (hidden, heads, hd, ffn) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim, cfg.ffn_dim);
+/// Everything but the attention itself is row-local, so it runs one
+/// [`RowChunk`] at a time: a first pass normalizes, modulates and projects
+/// each chunk and writes its normed, rotated q/k and its v straight into one
+/// packed `[seq_len, 3*inner]` slab (and its VSA gate into a `[seq_len,
+/// inner]` buffer); the attention runs once over the whole slab; a second
+/// pass takes each chunk of its result through `to_out`, the gated residual
+/// and the FFN into the output. Only the slab, the attention result and the
+/// output are held at full length.
+///
+/// Returns `(output, attn_out)` - `attn_out`, when `tap_attn_out` asks for
+/// it, is the attention sub-block's own output (post `to_out`, pre gated
+/// residual), a parity tap (`crate::model`'s numeric parity test reads it for
+/// block 0) so a bug localizes to whichever half of the block introduced it.
+pub fn block_forward(cx: &Ctx, w: &BlockWeights, inp: &BlockInputs, cfg: &H3TransformerConfig) -> (DeviceBuffer, Option<DeviceBuffer>) {
+    let BlockInputs { x, chunks, modulation, seq_len, levels, scope, vsa, tap_attn_out } = *inp;
+    let (hidden, heads, hd) = (cfg.hidden_size, cfg.num_attention_heads, cfg.attention_head_dim);
+    let inner = heads * hd;
     let half = 3 * cfg.rope_freq_dim;
-
     assert!(!modulation.is_empty(), "block_forward: at least one timestep's modulation is required");
+    assert_eq!(chunks.iter().map(|c| c.rows).sum::<u32>(), seq_len, "block_forward: the row chunks cover the sequence");
+    let offset = |row0: u32, stride: u32| row0.checked_mul(stride).expect("block_forward: a row offset past u32");
+
     let tables = adaln_tables(modulation, hidden as usize);
     let [shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp] = tables.map(|t| cx.upload(&t));
-    let attention_start = scope.map(|s| s.mark());
+    let gated = w.gate.is_some() && vsa.is_some();
+    let qkv = cx.gpu.storage_uninit(seq_len as u64 * 3 * inner as u64);
+    let gate_full = gated.then(|| cx.gpu.storage_uninit(seq_len as u64 * inner as u64));
+    // Run `f` over every chunk, each chunk's intermediates handed to the next.
+    let each_chunk = |f: &dyn Fn(&RowChunk)| {
+        for c in chunks {
+            let start = scope.map(|s| s.mark());
+            f(c);
+            if let (Some(s), Some(m)) = (scope, start) {
+                s.rewind(m);
+            }
+        }
+    };
+    let x_rows = |c: &RowChunk| {
+        let xc = cx.gpu.storage_uninit((c.rows * hidden) as u64);
+        copy_cols(cx, (x, hidden, offset(c.row0, hidden)), (&xc, hidden, 0), c.rows, hidden);
+        xc
+    };
 
-    // attention sub-block: everything but its result and output is dropped
-    // when this block ends, which is what lets the FFN half reuse it.
-    let (attn_out, h1) = {
-        let n1 = rmsnorm(cx, x, &w.norm1, seq_len, hidden, cfg.norm_eps);
-        let mod1 = modulate(cx, &n1, adaln_indices, &scale_msa, &shift_msa, seq_len, hidden);
-        let (q, k, v, gate) = match (&w.gate, vsa) {
-            (Some(g), Some(_)) => {
-                let [q, k, v, gate] = linears(cx, levels, &mod1, [&w.wq, &w.wk, &w.wv, g], seq_len);
-                (q, k, v, Some(gate))
+    // attention inputs
+    each_chunk(&|c| {
+        let xc = x_rows(c);
+        let n1 = rmsnorm(cx, &xc, &w.norm1, c.rows, hidden, cfg.norm_eps);
+        let mod1 = modulate(cx, &n1, &c.adaln_indices, &scale_msa, &shift_msa, c.rows, hidden);
+        let (q, k, v) = match (&w.gate, &gate_full) {
+            (Some(g), Some(full)) => {
+                let [q, k, v, gate] = linears(cx, levels, &mod1, [&w.wq, &w.wk, &w.wv, g], c.rows);
+                copy_cols(cx, (&gate, inner, 0), (full, inner, offset(c.row0, inner)), c.rows, inner);
+                (q, k, v)
             }
             _ => {
-                let [q, k, v] = linears(cx, levels, &mod1, [&w.wq, &w.wk, &w.wv], seq_len);
-                (q, k, v, None)
+                let [q, k, v] = linears(cx, levels, &mod1, [&w.wq, &w.wk, &w.wv], c.rows);
+                (q, k, v)
             }
         };
-        let qn = rmsnorm(cx, &q, &w.norm_q, seq_len * heads, hd, cfg.qk_norm_eps);
-        let kn = rmsnorm(cx, &k, &w.norm_k, seq_len * heads, hd, cfg.qk_norm_eps);
-        rope_partial(cx, &qn, cos, sin, seq_len, heads, hd, half);
-        rope_partial(cx, &kn, cos, sin, seq_len, heads, hd, half);
-        let attn = match vsa {
-            Some(plan) => {
-                let inner = heads * hd;
-                let qkv = cx.gpu.storage((seq_len * 3 * inner) as u64);
-                cx.gpu.submit(&[], &[cx.gpu.step(K_PACK_QKV, &[&qn, &kn, &v, &qkv], &[seq_len, inner], seq_len * 3 * inner)]);
-                crate::vsa::attention(&cx.gpu, plan, &qkv, gate.as_ref(), heads, hd)
-            }
-            None => {
-                let mode = cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd));
-                attention(&cx.gpu, &DIT_ATTN, mode, &qn, &kn, &v, seq_len, heads, hd)
-            }
-        };
-        let attn_out = linear(cx, levels, &attn, &w.wo, None, seq_len);
-        let h1 = gated_residual(cx, x, adaln_indices, &gate_msa, &attn_out, seq_len, hidden);
-        (attn_out, h1)
-    };
-    if let (Some(s), Some(m)) = (scope, attention_start) {
-        s.rewind(m);
-    }
+        let qn = rmsnorm(cx, &q, &w.norm_q, c.rows * heads, hd, cfg.qk_norm_eps);
+        let kn = rmsnorm(cx, &k, &w.norm_k, c.rows * heads, hd, cfg.qk_norm_eps);
+        rope_partial(cx, &qn, &c.cos, &c.sin, c.rows, heads, hd, half);
+        rope_partial(cx, &kn, &c.cos, &c.sin, c.rows, heads, hd, half);
+        for (part, at) in [(&qn, 0), (&kn, inner), (&v, 2 * inner)] {
+            copy_cols(cx, (part, inner, 0), (&qkv, 3 * inner, offset(c.row0, 3 * inner) + at), c.rows, inner);
+        }
+    });
 
-    // FFN sub-block
-    let n2 = rmsnorm(cx, &h1, &w.norm2, seq_len, hidden, cfg.norm_eps);
-    let mod2 = modulate(cx, &n2, adaln_indices, &scale_mlp, &shift_mlp, seq_len, hidden);
-    let [value, gate] = linears(cx, levels, &mod2, [&w.fc1_value, &w.fc1_gate], seq_len);
-    let act = swiglu(cx, &value, &gate, seq_len * ffn);
-    let ff_out = linear(cx, levels, &act, &w.fc2, None, seq_len);
-    let out = gated_residual(cx, &h1, adaln_indices, &gate_mlp, &ff_out, seq_len, hidden);
-    (out, attn_out)
+    let attn = match vsa {
+        Some(plan) => crate::vsa::attention(&cx.gpu, plan, &qkv, gate_full.as_ref(), heads, hd),
+        None => attention_packed(cx, cx.attn.unwrap_or_else(|| attn_mode(&cx.gpu, hd)), &qkv, seq_len, heads, hd),
+    };
+    drop((qkv, gate_full));
+
+    // attention output, gated residual and FFN
+    let out = cx.gpu.storage_uninit((seq_len * hidden) as u64);
+    let attn_out_full = tap_attn_out.then(|| cx.gpu.storage_uninit((seq_len * hidden) as u64));
+    each_chunk(&|c| {
+        let ac = cx.gpu.storage_uninit((c.rows * inner) as u64);
+        copy_cols(cx, (&attn, inner, offset(c.row0, inner)), (&ac, inner, 0), c.rows, inner);
+        let attn_out = linear(cx, levels, &ac, &w.wo, None, c.rows);
+        if let Some(full) = &attn_out_full {
+            copy_cols(cx, (&attn_out, hidden, 0), (full, hidden, offset(c.row0, hidden)), c.rows, hidden);
+        }
+        let xc = x_rows(c);
+        let h1 = gated_residual(cx, &xc, &c.adaln_indices, &gate_msa, &attn_out, c.rows, hidden);
+        let n2 = rmsnorm(cx, &h1, &w.norm2, c.rows, hidden, cfg.norm_eps);
+        let mod2 = modulate(cx, &n2, &c.adaln_indices, &scale_mlp, &shift_mlp, c.rows, hidden);
+        let [value, gate] = linears(cx, levels, &mod2, [&w.fc1_value, &w.fc1_gate], c.rows);
+        let act = swiglu(cx, &value, &gate, c.rows * cfg.ffn_dim);
+        let ff_out = linear(cx, levels, &act, &w.fc2, None, c.rows);
+        let oc = gated_residual(cx, &h1, &c.adaln_indices, &gate_mlp, &ff_out, c.rows, hidden);
+        copy_cols(cx, (&oc, hidden, 0), (&out, hidden, offset(c.row0, hidden)), c.rows, hidden);
+    });
+    (out, attn_out_full)
 }
 
 #[cfg(test)]
