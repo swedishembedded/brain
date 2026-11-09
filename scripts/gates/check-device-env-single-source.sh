@@ -75,7 +75,7 @@ done
 if [ "$fail" -ne 0 ]; then
   echo
   echo "BRAIN_DEVICE and BRAIN_BACKEND must each be read in exactly one place: crates/gpu-core/src/devices.rs's"
-  echo "resolve_ambient_compute_set(). Every other caller should read gpu_core::ambient_compute_set()"
+  echo "resolve_ambient_compute_set(), behind gpu_core::ambient_compute_set(), which every other caller reads"
   echo "(or the CLI's own gpu_core::publish_compute_set()-fed compute_set()) instead of"
   echo "re-deriving its own resolution of the env var."
   exit 1

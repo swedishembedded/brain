@@ -1306,56 +1306,40 @@ pub fn published_compute_set() -> Option<&'static ComputeSet> {
 /// side effects of [`ComputeSet::apply`]), and caches the result for the
 /// process lifetime (deliberately: one resolution per process).
 ///
-/// A `BRAIN_DEVICE` value that fails to parse or fails to resolve against
-/// this machine's real hardware (an out-of-range `gpu99`, an NPU request on
-/// a box with none, …) prints ONE warning to stderr and falls back to the
-/// default "all devices" set - this never panics, and never silently
-/// reinterprets an unrecognised token as "just use wgpu, ambient card" the
-/// way the old weak ladder did.
+/// # Panics
+/// When `BRAIN_DEVICE` fails to parse or to resolve against this machine's
+/// real hardware (an out-of-range `gpu99`, an NPU request on a box with
+/// none, …), when `BRAIN_BACKEND` names no backend or one the set cannot
+/// run, or when the backend cannot be applied: the process was asked for
+/// hardware it cannot have, and running on some other hardware instead
+/// would be a silent substitution.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn ambient_compute_set() -> &'static ComputeSet {
     AMBIENT_COMPUTE.get_or_init(|| {
-        let set = resolve_ambient_compute_set();
-        // Best-effort: only the backend/GPU-pin half applies here (see the
-        // doc above); a failure has nothing more to do than leave the
-        // process on whatever backend it already had.
-        let _ = set.apply_backend();
+        let set = resolve_ambient_compute_set().unwrap_or_else(|e| panic!("brain: {e}"));
+        // Only the backend/GPU-pin half applies here (see the doc above).
+        set.apply_backend().unwrap_or_else(|e| panic!("brain: the ambient compute set's backend: {e}"));
         set
     })
 }
 
-/// Resolve `BRAIN_DEVICE` into a fresh, unpublished [`ComputeSet`] - the body
-/// [`ambient_compute_set`] caches, exposed so `crates/cli` can layer its
-/// `--backend` flag onto the set BEFORE publishing it.
+/// Resolve `BRAIN_DEVICE` and `BRAIN_BACKEND` into a fresh, unpublished
+/// [`ComputeSet`] - the body [`ambient_compute_set`] caches, which every
+/// caller goes through: resolving twice would re-read the environment and
+/// produce a second opinion, the failure mode
+/// `check-device-env-single-source.sh` exists to prevent.
 ///
-/// **CLI-only**, exactly like [`publish_compute_set`]: every other caller must
-/// go through [`ambient_compute_set`], which resolves once and caches. Calling
-/// this a second time re-reads the environment and produces a second opinion,
-/// which is the whole failure mode `check-device-env-single-source.sh` exists
-/// to prevent. It is here, in the one file that reads `BRAIN_DEVICE`, so that
-/// the CLI does not grow a second parser to apply a backend override.
+/// `Err` - naming the variable and what it said - when either variable asks
+/// for something this machine cannot give; never a different set instead.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn resolve_ambient_compute_set() -> ComputeSet {
+fn resolve_ambient_compute_set() -> Result<ComputeSet, String> {
     let text = std::env::var("BRAIN_DEVICE").unwrap_or_default();
-    let probe = Inventory::probe();
-    let resolved = DeviceSpec::parse(&text).and_then(|spec| spec.resolve(&probe));
-    let mut set = match resolved {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("brain: BRAIN_DEVICE={text:?}: {e}; falling back to the default all-devices set");
-            DeviceSpec::default()
-                .resolve(&probe)
-                .expect("the empty/default device spec always resolves")
-        }
-    };
+    let mut set = DeviceSpec::parse(&text).and_then(|spec| spec.resolve(&Inventory::probe())).map_err(|e| format!("BRAIN_DEVICE={text:?}: {e}"))?;
     // `BRAIN_BACKEND` is `--backend` for processes with no CLI in the loop (a
     // test binary, an embedding application): how the selected hardware is
     // driven. The CLI layers its own flag on top of this, so a flag wins.
-    let backend = std::env::var("BRAIN_BACKEND").unwrap_or_default();
-    if let Err(e) = apply_backend_text(&mut set, &backend) {
-        eprintln!("brain: {e}; ignoring it");
-    }
-    set
+    apply_backend_text(&mut set, &std::env::var("BRAIN_BACKEND").unwrap_or_default())?;
+    Ok(set)
 }
 
 /// The compute set of a brain CLI run given no `--device`: every device this machine has, whatever the environment says.
