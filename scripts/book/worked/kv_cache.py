@@ -448,7 +448,9 @@ def summation_order():
             f"sum of the 64 float32 values is {exact:.9g} (`math.fsum`).\n\n"
             + _table(["order", "float32 sum", "sum minus exact"], rows)
             + f"\n\nThe five sums take {len(set(vals))} different values; the largest gap between two of them is {max(vals) - min(vals):.2e}, "
-            f"about {(max(vals) - min(vals)) / abs(exact):.1e} of the sum.")
+            f"about {(max(vals) - min(vals)) / abs(exact):.1e} of the sum. The largest error against the exact sum is "
+            f"{max(abs(v - exact) for v in vals):.2e}, which is {max(abs(v - exact) for v in vals) / abs(exact):.1e} of the sum "
+            f"(relative error), {max(abs(v - exact) for v in vals) / abs(exact) / 2.0 ** -24:.1f} unit round-offs of 2^-24.")
 
 
 def _generate_cached_split(p, cfg, prompt, n_new):
@@ -623,6 +625,9 @@ def decode_and_prefill():
             f"FLOPs: the formula of the text, {2 * (n_params - s['V'] * s['D']):,} per token for the blocks, 4 L H d_h = "
             f"{4 * s['L'] * s['H'] * s['dh']:,} per visible key, and the head once. Bytes: the weights once (the embedding lookup reads one row and is "
             f"left out) plus the cache rows read (decode) or written (prefill) at {_int(cache_bytes_per_token(s))} bytes per token; activations are not counted. "
+            f"A decode step at context c counts the c stored rows as bytes read, while its attention FLOPs count c + 1 keys: the new token attends to its own "
+            f"key and value too, which it has just computed, so they are not read from the cache and their write is left out of the bytes. "
+            f"The decoder's head is a matrix of its own (D by V), not tied to the embedding table, and counted once per step. "
             f"The device is the illustrative GPU of Volume IV (F_pk = {peak_g:,.0f} (GFLOP/s), BW = {bw_g:,.0f} (GB/s)), whose ridge is {ridge:g} FLOP per byte.\n\n"
             + _table(["phase", "size", "FLOPs", "weight bytes", "cache bytes", "FLOP per byte", "limited by"], rows, "llrrrrl")
             + "\n\nDecoding at context 4,096 for several sequences at once: the weights are read once for the step and every sequence reads its own cache.\n\n"
@@ -641,14 +646,26 @@ def cache_memory():
         per = cache_bytes_per_token(s)
         rows.append((name, f"2 x {s['L']} x {s['kvh']} x {s['dh']} x {BYTES}", _int(per)) + tuple(f"{_gib(per * c):.2f}" for c in ctxs)
                     + (f"{_gib(weight_params(s) * BYTES):.1f}",))
+    arch = []
+    for name, s in configs:
+        arch.append((name, _int(s["V"]), _int(s["D"]), s["L"], s["H"], s["kvh"], s["dh"], _int(s["F"]), s["mlp"], _int(weight_params(s))))
     device = 80.0
     fit = []
     for name, s in configs[1:3]:
         free = device - _gib(weight_params(s) * BYTES)
         per_seq = _gib(cache_bytes_per_token(s) * 32768)
         fit.append((name, f"{free:.1f}", f"{per_seq:.2f}", max(0, int(free // per_seq))))
-    return ("Cache bytes per token = 2 (keys and values) x layers x key-value heads x head width x bytes per value, in bf16 (2 bytes). The context "
-            "columns are GiB of cache for ONE sequence of that many tokens; the last column is the GiB of the weights in bf16, for comparison.\n\n"
+    return ("The four architectures, with every number the weights need. The weights counted are the parameters that take part in a matrix product "
+            "per token, as in the text: per block W_Q and W_O (D by H d_h each), W_K and W_V (D by h_kv d_h each) and the feed-forward network "
+            "(m matrices D by F, m = 2 for GPT-2 small's GELU network and 3 for the SwiGLU network of the others), times L, plus one head D by V "
+            "(a matrix of its own, not tied to the embedding table, whose lookup is not a product); norm gains and position tables are left out. "
+            "'Same, 32 key-value heads' is the 7.5-billion decoder with W_K and W_V widened from D by 1,024 to D by 4,096, which is why its weights "
+            "are larger.\n\n"
+            + _table(["model", "V", "D", "L", "query heads H", "key-value heads h_kv", "head width d_h", "F", "m", "parameters in matrix products"],
+                     arch, "lrrrrrrrrr")
+            + "\n\nCache bytes per token = 2 (keys and values) x layers x key-value heads x head width x bytes per value, in bf16 (2 bytes). The context "
+            "columns are GiB of cache for ONE sequence of that many tokens; the last column is the GiB of the weights in bf16 (2 bytes per "
+            "parameter of the table above), for comparison.\n\n"
             + _table(["model", "2 x L x kv heads x d_h x bytes", "bytes per token"] + [f"GiB at {_int(c)}" for c in ctxs] + ["weights, GiB"], rows, "llrrrrrr")
             + f"\n\nSessions of 32,768 tokens that fit beside the weights on a device of {device:.0f} GiB (the cache is the only other memory counted):\n\n"
             + _table(["model", "GiB free after the weights", "GiB per session", "sessions that fit"], fit))

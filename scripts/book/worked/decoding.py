@@ -470,7 +470,7 @@ def filter_order():
         "'tokens' is how many remain, 'largest' the probability of the most likely, and 'non-nouns' the total probability on tokens the language does not allow after `the`. "
         "The line without a temperature is the same cuts on the model's own distribution.\n\n"
         + _table(["order of the steps", "tokens", "largest $p$", "non-nouns"], rows, "lrrr")
-        + f"\n\nThe softmax of the logits of the six best tokens and the probabilities of those six renormalized agree to {ident:.1e} (largest absolute difference).\n\n"
+        + f"\n\nThe softmax of the logits of the six best tokens and the probabilities of those six renormalized agree to {('below 1e-16' if ident < 1e-16 else f'{ident:.0e}')} (largest absolute difference; the digits of a difference at the last bit of a probability are rounding noise).\n\n"
         "The probability of `fox` after `the` when `fox` and `dog` have been seen, with the penalty applied to the logits before or after they are divided by "
         f"$\\tau = {tau2}$ (the logits $z$ above, penalties on `fox` and `dog`):\n\n"
         + _table(["penalty and place", "$p$(`fox`)"], pen_rows, "lr")
@@ -784,7 +784,8 @@ def beam_language():
     return (
         "Beam search on the order-4 model of Chapter 4 (interpolation ratio "
         f"{_ratio(4):g}), started from `<s>`, at most {MAX_LEN} tokens; the rule is the one in the text: the `width` best extensions by total log-probability, those ending in the full stop leave "
-        "the beam, and the search ends when `width` hypotheses have finished. For each width, the finished hypothesis with the largest total log-probability and the one with the largest "
+        "the beam, and the search ends after the first step that leaves at least `width` hypotheses finished (one step can finish several, "
+        "so more than `width` may be returned), when no beam is left, or after 12 tokens. For each width, the finished hypothesis with the largest total log-probability and the one with the largest "
         "mean log-probability per token (length normalization with exponent 1).\n\n"
         + _table(["width", "finished", "best by total", "total $\\ln p$", "best by mean", "mean $\\ln p$"], rows, "rrlrlr")
         + "\n\nThe four best finished hypotheses at width 8 by mean log-probability:\n\n" + "\n".join(lines)

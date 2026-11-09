@@ -218,7 +218,9 @@ def corpus_and_tokens():
             f"{N_VAL_DOCS} validation documents from `{NAME_VAL}` (seed {_seed(NAME_VAL)}). A sentence has "
             f"{math.prod(len(s) for s in SLOTS):,} possible spellings, so its entropy is ln of that, {_fx(SENTENCE_NATS)} nats, "
             f"and {leak} of the {N_VAL_DOCS} validation documents also occur among the training documents.\n\n"
-            f"The tokenizer is the byte-pair encoder of Chapter 2 with its pre-tokenizer (a word carries the space before it), "
+            f"The tokenizer is the byte-pair encoder of Chapter 2 with its pre-tokenizer (a word carries the space before it; "
+            f"the first word of a document has no space before it, since the text starts with it; every later word carries "
+            f"the space before it and the full stop has none), "
             f"learned with {MERGES} merges on the training documents only. The vocabulary has id 0 for the document separator "
             f"`EOT`, then the {tk.n_bytes} bytes that occur in the training text in increasing order, then the {len(tk.merges)} merges: "
             f"V = 1 + {tk.n_bytes} + {len(tk.merges)} = {tk.vocab}. Merges in the order learned (a space is written `_`): {merges}.\n\n"
@@ -736,7 +738,7 @@ def packed_rows():
     return (f"The training stream has {_int(len(d['ids']))} tokens: every document is its separator `EOT` followed by its tokens. "
             f"Rows have T = {T} positions. Row r takes the inputs `ids[{T} r .. {T} r + {T - 1}]` and the targets `ids[{T} r + 1 .. {T} r + {T}]`, "
             f"so each token except the first is a target exactly once and the stream gives ceil(({len(d['ids'])} - 1) / {T}) = "
-            f"{len(d['rows'])} rows; the last row is padded with the separator and a loss mask of 0. The first four rows touch these documents:\n\n"
+            f"{len(d['rows'])} rows; the last row is padded with the separator and a loss mask of 0 (the loss mask holds a 0 or a 1 for every position: 1 where the model is scored on the target, 0 where it is not, as in the column m below). The first four rows touch these documents:\n\n"
             + _table(["row r", "first input at", "targets are tokens", "documents touched"], spans, "rrrl")
             + f"\n\nRow 1 position by position (`doc` is the index of the document the position belongs to; a position belongs to the "
             f"document whose separator or tokens it holds):\n\n"
@@ -822,18 +824,18 @@ def gpt_parameters():
     b0 = p["blocks"][0]
     cnt = lambda t: sum(len(r) for r in t)
     blk_t = sum(cnt(b0[k]) for k in BLOCK_KEYS)
-    trows = [("E (token embedding, also the head)", f"{Vt} x {Dt}", _int(cnt(p["E"]))), ("P (positions)", f"{Tt} x {Dt}", _int(cnt(p["P"])))]
+    trows = [("W_emb (token embedding, also the head)", f"{Vt} x {Dt}", _int(cnt(p["E"]))), ("W_pos (positions)", f"{Tt} x {Dt}", _int(cnt(p["P"])))]
     trows += [(n, f"{len(b0[k])} x {len(b0[k][0])}", _int(cnt(b0[k]))) for n, k in
               (("W_Q", "Wq"), ("W_K", "Wk"), ("W_V", "Wv"), ("W_O", "Wo"), ("W_gate", "Wg"), ("W_up", "Wu"), ("W_down", "Wd"))]
     trows += [("two RMS gains", f"2 x {Dt}", _int(cnt(b0["g1"]) + cnt(b0["g2"]))), ("one block", "", _int(blk_t)),
               (f"{Lt} blocks", f"{Lt} x", _int(Lt * blk_t)), ("final RMS gain", f"1 x {Dt}", _int(cnt(p["gf"])))]
     tiny_total = parameter_count(p)
-    trows.append(("total, head tied to E", "", _int(tiny_total)))
+    trows.append(("total, head tied to W_emb", "", _int(tiny_total)))
     return ("GPT-2 small as published (Radford and colleagues, 2019): vocabulary V = 50,257, T = 1,024, D = 768, L = 12 blocks, "
             "12 heads, F = 4 D = 3,072, LayerNorm with a gain and a shift, a GELU feed-forward network, biases on every linear map.\n\n"
             + _table(["part", "formula", "parameters"], rows, "llr")
             + f"\n\nThe tiny model of this chapter: V = {Vt}, T = {Tt}, D = {Dt}, L = {Lt}, {cfg['H']} heads, "
-            f"SwiGLU of hidden width F = {Ff}, RMS norms with a gain and no shift, no biases, the head tied to E.\n\n"
+            f"SwiGLU of hidden width F = {Ff}, RMS norms (epsilon 1e-6) with a gain and no shift, no biases, the head tied to W_emb.\n\n"
             + _table(["tensor", "shape", "parameters"], trows, "llr")
             + f"\n\nA separate head would add V D = {_int(Vt * Dt)} parameters.")
 
@@ -861,7 +863,7 @@ def init_scales():
             f"as `std * normal()` from `training_gpt.init_scale` (seed {_seed('training_gpt.init_scale')}; the draw order is that of the "
             f"initialization section), no training. Loss: mean cross-entropy over the supervised positions of the first 8 training "
             f"rows. The final RMS norm gives a vector of root mean square 1 (squared length D), so a logit is a sum of D products "
-            f"with an entry of E and has standard deviation std sqrt(D); 'measured' is the root mean square of all logits.\n\n"
+            f"with an entry of W_emb and has standard deviation std sqrt(D); 'measured' is the root mean square of all logits.\n\n"
             + _table(["std", "std sqrt(D)", "measured logit rms", "initial loss"], out)
             + f"\n\nA model that guesses uniformly has loss ln V = {_fx(math.log(V), 4)}.\n\n"
             "Residual scaling: each of the L blocks writes twice to the stream (attention, feed-forward), so 2 L writes; the output "
@@ -887,7 +889,7 @@ def _diffs(a, n):
     return worst_abs, worst_rel
 
 
-GROUPS = (("E (token embedding and head)", "E"), ("P (positions)", "P"), ("W_Q", "Wq"), ("W_K", "Wk"), ("W_V", "Wv"), ("W_O", "Wo"),
+GROUPS = (("W_emb (token embedding and head)", "E"), ("W_pos (positions)", "P"), ("W_Q", "Wq"), ("W_K", "Wk"), ("W_V", "Wv"), ("W_O", "Wo"),
           ("W_gate", "Wg"), ("W_up", "Wu"), ("W_down", "Wd"), ("block gains", "g"), ("final gain", "gf"))
 
 
@@ -959,16 +961,19 @@ def gradient_check():
     for label, _ in GROUPS:
         a = res["causal"][label]
         b = res["block"][label]
-        rows.append((label, _int(a[0]), tb._bound(a[1]), tb._bound(a[2]), tb._bound(b[1]), tb._bound(b[2])))
+        rows.append((label, _int(a[0]), tb._under_criterion(a[1]), tb._under_criterion(a[2]), tb._under_criterion(b[1]), tb._under_criterion(b[2])))
     return (f"A GPT with V = {cfg['V']}, T = {cfg['T']}, D = {cfg['D']}, {cfg['H']} heads, F = {cfg['FF']}, L = {cfg['L']}, every matrix "
-            f"`0.3 * normal()` from `{NAME_GC_INIT}` ({_seed(NAME_GC_INIT)}), in the draw order of the initialization section. Two rows "
+            f"`0.3 * normal()` from `{NAME_GC_INIT}` ({_seed(NAME_GC_INIT)}), in the draw order of the initialization section, with W_O and W_down of "
+            f"each block then multiplied by 1/sqrt(2 L) = {1 / math.sqrt(2 * cfg['L']):.4f} as in the main run (so their entries have standard "
+            f"deviation {0.3 / math.sqrt(2 * cfg['L']):.2f}); all gains 1 and every RMS norm at epsilon 1e-6. Two rows "
             f"from `{NAME_GC}` ({_seed(NAME_GC)}): x (6 draws of `integer(7)`) then y (6 draws), for row 0 then row 1; row 0 has documents "
             "0 0 0 1 1 1 and mask 1 everywhere; row 1 has documents 0 0 1 1 and two padding positions (document -1, mask 0). The "
             "loss is the mean cross-entropy over the 10 supervised positions. Central differences with step "
-            f"{GC_STEP:g} on every entry of every parameter. Each cell is the power of ten that the largest difference stays below "
-            "(the criterion is 1e-6); the relative difference |a - n| / max(|a|, |n|) is taken over entries whose gradient is above 1e-3.\n\n"
-            + _table(["parameters", "entries", "causal: absolute below", "causal: relative below",
-                      "block-diagonal: absolute below", "block-diagonal: relative below"], rows)
+            f"{GC_STEP:g} on every entry of every parameter. A cell says 'below 1e-6' when the largest difference meets the criterion of 1e-6 "
+            "(the digits of a smaller difference are finite-difference noise); the absolute difference is |a - n|, the relative difference "
+            "|a - n| / max(|a|, |n|) is taken over entries whose gradient is above 1e-3.\n\n"
+            + _table(["parameters", "entries", "causal: absolute", "causal: relative",
+                      "block-diagonal: absolute", "block-diagonal: relative"], rows)
             + f"\n\nThe forward pass of this module's block with the causal mask against the block of Chapter 9 on a random "
             f"6 by 8 input: the largest absolute difference is {_fx(res['block_difference'], 1)}.")
 
@@ -988,7 +993,10 @@ def setup_text():
             f"run below. {o['steps']} steps of AdamW (beta1 {o['b1']}, beta2 {o['b2']}, epsilon {o['eps']:g}, weight decay {o['wd']} on every "
             f"matrix except the gains), the learning rate warming up linearly over {o['warmup']} steps to {o['peak']} and following half a cosine "
             f"to {o['floor']} at step {o['steps']} (`schedules.cosine`, 0-based: step s uses the rate at index s - 1), the global gradient norm "
-            f"clipped to {o['clip']} by the factor min(1, {o['clip']} / (norm + 1e-6)). Validation: every one of the {len(d['val']['rows'])} "
+            f"clipped to {o['clip']} by the factor min(1, {o['clip']} / (norm + 1e-6)); the 'gradient norm' column is that norm for the step that ends at "
+            f"the row, before the clip (the square root of the sum of the squares of every entry of every gradient, the gains and the position "
+            f"table included), and the 'learning rate' column is the rate of that step's update. Every RMS norm has epsilon 1e-6 and the "
+            f"gradient is that of the mean over the supervised positions of the 8 rows of the step. Validation: every one of the {len(d['val']['rows'])} "
             f"validation rows, after every {EVAL_EVERY} steps. A training loss is the mean of the batch losses of the {EVAL_EVERY} steps that end "
             "at the step. " + stable.RULE)
 
@@ -1055,7 +1063,11 @@ def mask_choice():
             + _table(["trained with", "evaluated on packed rows, causal", "packed rows, block-diagonal", "each document alone"], rows, "lrrr")
             + "\n\nFor the model trained with the causal mask, the attention weight that a position puts on positions of an earlier "
             "document (mean over the validation rows), per layer and head, over all positions and over the positions that hold a "
-            "document's opening separator; the last row is the same mean if every visible position had the same weight.\n\n"
+            "document's opening separator; the last row is the same mean if every visible position had the same weight. For a position i of a "
+            "validation row (padding positions excluded) the mass is the sum, over the keys j <= i that belong to another document, of the "
+            "attention weight of that head and layer; a cell is the mean of that mass over all the real positions of all the validation rows "
+            "(first column) or over those whose input token is the separator (second column), each position counting once. The uniform row "
+            "uses the same positions with the mass (number of other-document keys) / (i + 1).\n\n"
             + _table(["", "mass on other documents, all positions", "mass on other documents, opening positions"], mrows, "lrr"))
 
 
@@ -1081,8 +1093,13 @@ def copy_task():
     return (f"Lines `S=S` and a line feed, S three letters from `abcd` (draws: three `integer(4)` per line, in order, from `{NAME_COPY_TRAIN}`, "
             f"{_seed(NAME_COPY_TRAIN)}); ids a .. d = 0 .. 3, `=` = 4, line feed = 5. A row is the 7 inputs `S = S` and the 7 targets that follow, so the "
             "targets are s2 s3 = a1 a2 a3 line-feed. Model: V = 6, T = 7, D = 16, one block, 2 heads, SwiGLU width 24, from "
-            f"`{NAME_COPY_INIT}` ({_seed(NAME_COPY_INIT)}), the same start for every row below. {o['B']} fresh lines per step, {o['steps']} steps "
-            f"of AdamW (peak {o['peak']}, floor {o['floor']}, warmup {o['warmup']}, clip {o['clip']}, the settings of the main run). The three masks "
+            f"`{NAME_COPY_INIT}` ({_seed(NAME_COPY_INIT)}), the same start for every row below, drawn as in the main run: standard deviation "
+            f"{INIT_STD} for every matrix, W_O and W_down times 1/sqrt(2 L) = {1 / math.sqrt(2 * COPY_CFG['L']):.4f}, the table W_emb [6, 16] "
+            "also the head, a position table of 7 rows, all gains 1, RMS norms at epsilon 1e-6. "
+            f"{o['B']} fresh lines per step (a batch of 8 rows, loss and gradient averaged over the counted targets of the batch), {o['steps']} steps "
+            f"of AdamW (beta1 {o['b1']}, beta2 {o['b2']}, epsilon {o['eps']:g}, weight decay {o['wd']} on every matrix except the gains, peak {o['peak']}, "
+            f"floor {o['floor']}, warmup {o['warmup']}, half a cosine over the {o['steps']} steps, clip {o['clip']} by the factor min(1, {o['clip']} / "
+            "(norm + 1e-6)): the settings of the main run with these steps). The three masks "
             "differ only in which of the 7 targets count (1 = counted): 'every target' 1 1 1 1 1 1 1; 'the answer targets' (the four after the "
             "input `=`, a1 a2 a3 and the line feed) 0 0 0 1 1 1 1; 'off by one' (the mask of the answer tokens, which are tokens 4 to 7 of the "
             "line, laid on the input positions 4 to 6 instead of on the target positions 3 to 6) 0 0 0 0 1 1 1. 'Reported loss' is the training loss of the last 20 steps under the run's own mask. The "
@@ -1131,7 +1148,7 @@ def tiny_ops(cfg):
                  ("W_O", f"[{T},{D}] x [{D},{D}]", 2 * T * D * D),
                  ("W_gate, W_up", f"2 x [{T},{D}] x [{D},{F}]", 2 * 2 * T * D * F),
                  ("W_down", f"[{T},{F}] x [{F},{D}]", 2 * T * F * D)]
-    return per_layer, ("head logits = xn E^T", f"[{T},{D}] x [{D},{V}]", 2 * T * D * V)
+    return per_layer, ("head logits = xn W_emb^T", f"[{T},{D}] x [{D},{V}]", 2 * T * D * V)
 
 
 def flops_per_token_formula(V, D, F, L, T, mlp_matrices, attention_full=True):

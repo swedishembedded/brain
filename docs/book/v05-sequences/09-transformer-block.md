@@ -20,7 +20,7 @@ Some things from earlier chapters come back first. Answer them from memory; the 
 
 ## One block on three tokens
 
-Three tokens, each a vector of four numbers, and one block of weights. The numbers are random stand-ins for a trained model, printed so that every later table can be recomputed. The block has the two parts that a transformer repeats, each called a sublayer: an attention layer, and a layer that works on each position alone. Between and around them sit a normalization and an addition.
+Three tokens, each a vector of four numbers, and one block of weights. The numbers are random stand-ins for a trained model, printed so that every later table can be recomputed. The block has the two parts that a transformer repeats, each called a sublayer: an attention layer, and a layer that works on each position alone. Between and around them sit a normalization and an addition. The second layer is a gated network whose three matrices are called $\mathbf{W}_{\mathrm{gate}}$, $\mathbf{W}_{\mathrm{up}}$ and $\mathbf{W}_{\mathrm{down}}$; its name, SwiGLU, and the reason for its form come two sections on, and until then they are three more weight matrices whose products the tables follow.
 
 <!-- worked: transformer_block.tiny_inputs -->
 Generator: the book's SplitMix64, seed 0x85cbf50e92110958 (`seed_of` of the name `transformer_block.tiny`). Draws, in this order: the 12 entries of X (3 tokens of 4 numbers), each `round(normal(), 1)`; then W_Q, W_K, W_V, W_O (4 by 4 each), W_gate and W_up (4 by 6 each) and W_down (6 by 4), each row by row and each `round(0.5 * normal(), 1)` (`round` to one decimal, ties away from zero). Both gains are 1 and the epsilon of the normalization is 1e-6. The block has H = 2 heads of width 2, a causal mask and no position information, and a feed-forward network of hidden width 6. The numbers are random stand-ins for a trained model.
@@ -201,7 +201,7 @@ The Frobenius norm of the gradient that reaches the input of the block k below t
 
 ![Gradient norm at the input of the block k below the top, relative to the norm at the top, on a base-10 logarithmic scale, for a freshly initialized stack of 32 blocks. Dashed: skip paths only. The pre-norm line is flat at 0 and the post-norm line falls to about minus 6. Solid: all paths. Pre-norm and post-norm rise slowly to about 10 and 7; the stack without a skip rises to about 750.](img/identity-path-gradient.svg)
 
-The dashed lines are the derivation. With the skip paths alone the pre-norm stack passes the gradient unchanged, exactly 1 at every depth, and the post-norm stack passes $9.38\times10^{-7}$ of it through 32 blocks, which is a factor of about 0.65 per block: each of its two norms divides by the root mean square of a sum that is larger than the stream it extends. The solid lines show what a freshly initialized stack does with all paths included, and they do not show the post-norm stack failing: at initialization the gradient of both stacks stays within a factor of ten of the top. The sublayer Jacobians contribute enough through their own paths to make up the loss, which is a property of random weights and not a promise: it holds at the start, and a trained stack has no reason to keep it. The stack without a skip shows the exploding gradient of Volume III, 751 times the top gradient after 32 blocks, a growth of about 1.23 per block that nothing bounds. What the identity path buys is a coefficient of 1 by construction and not by the luck of a random draw.
+The dashed lines are the derivation. With the skip paths alone the pre-norm stack passes the gradient unchanged, exactly 1 at every depth, and the post-norm stack passes $9.38\times10^{-7}$ of it through 32 blocks, which is a factor of about 0.65 per block: each of its two norms divides by the root mean square of a sum that is larger than the stream it extends. The solid lines show what a freshly initialized stack does with all paths included, and they do not show the post-norm stack failing: at initialization the gradient that reaches the bottom of either stack is between 0.76 and about 10 times the gradient put in at the top (the largest entries of the table are 10.0 for the pre-norm stack and 6.87 for the post-norm one, both at 32 blocks). The sublayer Jacobians contribute enough through their own paths to make up the loss, which is a property of random weights and not a promise: it holds at the start, and a trained stack has no reason to keep it. The stack without a skip shows the exploding gradient of Volume III, 751 times the top gradient after 32 blocks, a growth of about 1.23 per block that nothing bounds. What the identity path buys is a coefficient of 1 by construction and not by the luck of a random draw.
 
 The forward table is the other cost. A pre-norm stream grows: its root mean square follows $\sqrt{1 + k}$ closely (5.87 after 32 blocks against 5.74), because each block adds a contribution of mean square about 1 to a stream whose mean square was 1 at the start. The post-norm stream is pinned at 1.00, since every block ends in a norm. The stack without a skip hovers near 0.55, below 1, because attention averages and an average has a smaller mean square than its inputs. The row in the middle shows the cure for the growth. Scaling the two output matrices of every block, $\mathbf{W}_O$ and $\mathbf{W}_{\mathrm{down}}$, by $1/\sqrt{2L}$ cuts the mean square of each contribution by $2L = 64$, so the stream ends at about $1 + 64 \cdot 0.5/64 = 1.5$ in mean square, a root mean square of 1.22, and the measured value is 1.23. The gradient at the bottom is then 1.31 times the top, against 10.0 for the unscaled stack. This is the rule of Volume III, a branch that starts small, now stated for two branches per block, and `crates/gpt2/src/init.rs` implements it: the residual projections of every block start at a standard deviation of $0.02/\sqrt{2L}$ (the last section returns to it).
 
@@ -335,11 +335,13 @@ function block_forward(X: array<real>[T, D],
     return X1 + f                                   # second write
 ```
 
-The backward pass undoes it from the bottom, and each line of it is a rule already derived. Let $d\mathbf{X}_2$ be the gradient arriving at the output. The last addition sends it unchanged to both of its inputs, the stream and the feed-forward result; the products and the activation give the gradients of the three matrices by the matrix-product rule of Volume III, with the SiLU slope $\mathrm{silu\_slope}(z) = s(z)\bigl(1 + z(1 - s(z))\bigr)$ for $s = \mathrm{sigmoid}$ on the gate side and $\mathrm{silu}(z)$ on the up side; the normalization gives its input gradient $r\gamma_j\,dy_j - r^3 x_j\,\mathrm{mean}_k(dy_k\gamma_k x_k)$ per row and $d\gamma_j = \sum_{\mathrm{rows}} dy_j\hat x_j$; and at the first addition the gradient of the stream is the sum of what arrives from above and what comes back through the branch.
+The backward pass undoes it from the bottom, and each line of it is a rule already derived. Let $d\mathbf{X}_2$ be the gradient arriving at the output. The last addition sends it unchanged to both of its inputs, the stream and the feed-forward result; the products and the activation give the gradients of the three matrices by the matrix-product rule of Volume III, with the SiLU slope $\mathrm{silu\_slope}(z) = s(z)\bigl(1 + z(1 - s(z))\bigr)$ for $s = \mathrm{sigmoid}$ on the gate side and $\mathrm{silu}(z)$ on the up side; the normalization gives its input gradient $r\gamma_j\,dy_j - r^3 x_j\,\mathrm{mean}_k(dy_k\gamma_k x_k)$ per row and $d\gamma_j = \sum_{\mathrm{rows}} dy_j\hat x_j$ (this is `rms_norm_backward`, which takes the `xhat` and `r` that `rms_norm` returned; `multi_head_backward` is the attention backward pass of Chapter 7 run head by head, both on the pseudocode page); and at the first addition the gradient of the stream is the sum of what arrives from above and what comes back through the branch.
 
 ```text
-function block_backward(dX2: array<real>[T, D], saved, ...)
+function block_backward(dX2: array<real>[T, D], saved,
+                        Wq, Wk, Wv, Wo, g1, g2, Wgate, Wup, Wdown, H: int)
         -> (array<real>[T, D], grads):
+    # saved: X, n1, xhat1, r1, X1, n2, xhat2, r2, Zg, Zu, Hd from block_forward
     # second sublayer: X2 = X1 + f
     dHd = matmul(dX2, transpose(Wdown))             # dX2 also goes to X1 below
     dWdown = matmul(transpose(Hd), dX2)
@@ -348,11 +350,11 @@ function block_backward(dX2: array<real>[T, D], saved, ...)
     dn2 = matmul(dZg, transpose(Wgate)) + matmul(dZu, transpose(Wup))
     dWgate = matmul(transpose(n2), dZg)
     dWup = matmul(transpose(n2), dZu)
-    (dX1branch, dg2) = rms_norm_backward(dn2, X1, g2, eps)
+    (dX1branch, dg2) = rms_norm_backward(dn2, xhat2, r2, g2)
     dX1 = dX2 + dX1branch                           # identity path plus the branch
     # first sublayer: X1 = X + a
-    (dn1, dWq, dWk, dWv, dWo) = multi_head_backward(dX1, n1, ...)   # Chapter 7
-    (dXbranch, dg1) = rms_norm_backward(dn1, X, g1, eps)
+    (dn1, dWq, dWk, dWv, dWo) = multi_head_backward(dX1, n1, Wq, Wk, Wv, Wo, H, true)
+    (dXbranch, dg1) = rms_norm_backward(dn1, xhat1, r1, g1)
     dX = dX1 + dXbranch                             # identity path plus the branch
     return (dX, grads)
 ```
@@ -360,60 +362,59 @@ function block_backward(dX2: array<real>[T, D], saved, ...)
 A derivation of this length has places for mistakes to hide, and the check of Volume III finds them. The block, with a classifier on top and a softmax cross-entropy at each position, against central differences on every parameter and on the input:
 
 <!-- worked: transformer_block.gradient_check -->
-Generator: the book's SplitMix64, seeds 0xd1c1a673d9969d56 (`seed_of` of the name `transformer_block.check.swiglu`) and 0xbce6226f791222ce (`transformer_block.check.gelu`, for the GELU network). T = 5 positions, D = 6, H = 2 heads of width 3, hidden width 8, 4 classes, causal mask. Draws, in this order: X (5 by 6, each `normal()`), W_Q, W_K, W_V, W_O (6 by 6, each row by row with `0.5 * normal()`), the two gains (6 numbers each, `1 + 0.1 * normal()`), the feed-forward matrices (SwiGLU: W_gate and W_up, 6 by 8, then W_down, 8 by 6; GELU: W_1, 6 by 8, then W_2, 8 by 6; `0.5 * normal()`), W_C (6 by 4, `0.5 * normal()`), then the 5 target classes `integer(4)`. The model is one pre-norm block (RMS norm, epsilon 1e-6), then the classifier logits = x2 W_C at every position, and the loss is the mean over positions of the softmax cross-entropy. Central differences with step 1e-05 on every entry of every parameter and of the input X. Each cell is the power of ten that the largest difference stays below (the criterion is 1e-6); the relative difference |a - n| / max(|a|, |n|) is taken over the entries whose gradient is above 1e-4.
+Generator: the book's SplitMix64, seeds 0xd1c1a673d9969d56 (`seed_of` of the name `transformer_block.check.swiglu`, used by every row with a SwiGLU network: the pre-norm, post-norm and no-skip wirings share these parameters) and 0xbce6226f791222ce (`transformer_block.check.gelu`, for the GELU network). T = 5 positions, D = 6, H = 2 heads of width 3, hidden width 8, 4 classes, causal mask. Draws, in this order: X (5 by 6, each `normal()`), W_Q, W_K, W_V, W_O (6 by 6, each row by row with `0.5 * normal()`), the two gains (6 numbers each, `1 + 0.1 * normal()`), the feed-forward matrices (SwiGLU: W_gate and W_up, 6 by 8, then W_down, 8 by 6; GELU: W_1, 6 by 8, then W_2, 8 by 6; `0.5 * normal()`), W_C (6 by 4, `0.5 * normal()`), then the 5 target classes `integer(4)`. No matrix is scaled by 1/sqrt(2 L) here: W_O and W_down are used as drawn. The model is one block (RMS norm, epsilon 1e-6), then the classifier logits = x2 W_C at every position, and the loss is the mean over positions of the softmax cross-entropy. Central differences with step 1e-05 on every entry of every parameter and of the input X. A cell says 'below 1e-6' when the largest difference meets the criterion of 1e-6; the digits of a difference that small are noise of the finite difference and are not printed. The absolute difference is |a - n|; the relative difference |a - n| / max(|a|, |n|) is taken over the entries whose gradient is above 1e-4.
 
-| tensor (pre-norm SwiGLU block) | entries checked | largest absolute difference below | largest relative difference below |
+| tensor (pre-norm SwiGLU block) | entries checked | largest absolute difference | largest relative difference |
 |---|---:|---:|---:|
-| W_Q | 36 | 1e-9 | 1e-8 |
-| W_K | 36 | 1e-9 | 1e-7 |
-| W_V | 36 | 1e-9 | 1e-8 |
-| W_O | 36 | 1e-9 | 1e-7 |
-| gain 1 | 6 | 1e-9 | 1e-9 |
-| gain 2 | 6 | 1e-9 | 1e-7 |
-| W_gate | 48 | 1e-10 | 1e-8 |
-| W_up | 48 | 1e-10 | 1e-7 |
-| W_down | 48 | 1e-10 | 1e-8 |
-| W_C | 24 | 1e-10 | 1e-8 |
-| X | 30 | 1e-10 | 1e-9 |
+| W_Q | 36 | below 1e-6 | below 1e-6 |
+| W_K | 36 | below 1e-6 | below 1e-6 |
+| W_V | 36 | below 1e-6 | below 1e-6 |
+| W_O | 36 | below 1e-6 | below 1e-6 |
+| gain 1 | 6 | below 1e-6 | below 1e-6 |
+| gain 2 | 6 | below 1e-6 | below 1e-6 |
+| W_gate | 48 | below 1e-6 | below 1e-6 |
+| W_up | 48 | below 1e-6 | below 1e-6 |
+| W_down | 48 | below 1e-6 | below 1e-6 |
+| W_C | 24 | below 1e-6 | below 1e-6 |
+| X | 30 | below 1e-6 | below 1e-6 |
 
 The same check on every wiring and both feed-forward networks, all tensors together:
 
-| wiring | feed-forward network | entries checked | largest absolute difference below | largest relative difference below |
-|---|---|---:|---:|---:|
-| pre | swiglu | 354 | 1e-9 | 1e-7 |
-| post | swiglu | 354 | 1e-9 | 1e-7 |
-| plain | swiglu | 354 | 1e-8 | 1e-7 |
-| pre | gelu | 306 | 1e-9 | 1e-7 |
+| wiring | feed-forward network | seed | entries checked | largest absolute difference | largest relative difference |
+|---|---|---|---:|---:|---:|
+| pre | swiglu | 0xd1c1a673d9969d56 | 354 | below 1e-6 | below 1e-6 |
+| post | swiglu | 0xd1c1a673d9969d56 | 354 | below 1e-6 | below 1e-6 |
+| plain | swiglu | 0xd1c1a673d9969d56 | 354 | below 1e-6 | below 1e-6 |
+| pre | gelu | 0xbce6226f791222ce | 306 | below 1e-6 | below 1e-6 |
 <!-- /worked -->
 
-Every tensor passes at a relative difference between $10^{-9}$ and $10^{-7}$, for the pre-norm block and for the two other wirings, and for the GELU network in place of the SwiGLU one. The sizes are all different on purpose, $T = 5$, $D = 6$, $H = 2$, $F = 8$ and 4 classes, so that an index used where another belongs would not cancel by coincidence. A check that cannot fail proves nothing, so here are three plausible mistakes, one in each place the block adds something of its own:
+Every tensor meets the criterion of $10^{-6}$ on both differences, for the pre-norm block and for the two other wirings, and for the GELU network in place of the SwiGLU one. The tables print no digits below the criterion: a difference of $10^{-9}$ against one of $10^{-8}$ is finite-difference noise, and another implementation that adds in another order lands on its own digits well under $10^{-6}$. The sizes are all different on purpose, $T = 5$, $D = 6$, $H = 2$, $F = 8$ and 4 classes, so that an index used where another belongs would not cancel by coincidence. A check that cannot fail proves nothing, so here are three plausible mistakes, one in each place the block adds something of its own:
 
 <!-- worked: transformer_block.wrong_backward_passes -->
-The check of the previous block (same parameters, same step, pre-norm SwiGLU block) run on the correct backward pass and on three wrong ones. Entries: the largest relative difference |a - n| / max(|a|, |n|) over the entries of the tensor whose gradient is above 1e-4; a difference of 1e-6 or more is written to one decimal, a smaller one as the power of ten it stays below (a tensor that the wrong step does not touch keeps its correct gradient).
+The check of the previous block (same parameters, same step, pre-norm SwiGLU block) run on the correct backward pass and on three wrong ones. Entries: the largest relative difference |a - n| / max(|a|, |n|) over the entries of the tensor whose gradient is above 1e-4; a difference of 1e-6 or more is written to one decimal, a smaller one as 'below 1e-6' (a tensor that the wrong step does not touch keeps its correct gradient).
 
 | backward pass | W_Q | W_K | W_V | W_O | gain 1 | gain 2 | W_gate | W_up | W_down | X |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| the block's backward pass | 1e-8 | 1e-7 | 1e-8 | 1e-7 | 1e-9 | 1e-7 | 1e-8 | 1e-7 | 1e-8 | 1e-9 |
-| second residual add passes no gradient to the stream | about 1.1 | about 1.4 | about 1.7 | about 1.8 | about 1.8 | 1e-7 | 1e-8 | 1e-7 | 1e-8 | about 1.9 |
-| each norm differentiated with its scale held constant | about 1.0 | about 1.9 | about 1.8 | about 1.6 | about 1.4 | 1e-7 | 1e-8 | 1e-7 | 1e-8 | about 1.9 |
-| gate and up exchanged in the SwiGLU backward | about 1.7 | about 2.0 | about 1.8 | about 1.5 | about 1.3 | about 1.5 | about 1.9 | about 1.9 | 1e-8 | about 1.8 |
+| the block's backward pass | below 1e-6 | below 1e-6 | below 1e-6 | below 1e-6 | below 1e-6 | below 1e-6 | below 1e-6 | below 1e-6 | below 1e-6 | below 1e-6 |
+| second residual add passes no gradient to the stream | about 1.1 | about 1.4 | about 1.7 | about 1.8 | about 1.8 | below 1e-6 | below 1e-6 | below 1e-6 | below 1e-6 | about 1.9 |
+| each norm differentiated with its scale held constant | about 1.0 | about 1.9 | about 1.8 | about 1.6 | about 1.4 | below 1e-6 | below 1e-6 | below 1e-6 | below 1e-6 | about 1.9 |
+| gate and up exchanged in the SwiGLU backward | about 1.7 | about 2.0 | about 1.8 | about 1.5 | about 1.3 | about 1.5 | about 1.9 | about 1.9 | below 1e-6 | about 1.8 |
 <!-- /worked -->
 
 The second row drops the identity path of the second residual: the gradient arriving at $\mathbf{X}_2$ goes into the feed-forward branch and not also to $\mathbf{X}_1$. The tensors above that point (the feed-forward matrices, the second gain) are right, the ones below it (attention, the first gain, the input) are wrong by an amount of the size of the gradient. The third differentiates each norm with the factor $r$ held constant: the gains' own gradients are right when their incoming gradient is, and everything that passes through a norm backward is wrong. The fourth uses the roles of the gate and the up projection exchanged: $\mathbf{W}_{\mathrm{down}}$, which sits above the product, is right; the two matrices that make it and everything below are wrong. The pattern of which tensors fail points at the place; it costs nothing to read and is worth reading before reaching for a debugger.
 
 ## What a block costs
 
-A stack of $L$ blocks has $L$ times the parameters and $L$ times the work of one, so everything that can be planned is in the count of one block. With no biases (modern blocks have none), the attention layer has four $D \times D$ matrices, $4D^2$; the plain network $2DF$ and the gated one $3DF$; the two norms $2D$ gains. For the forward pass on $T$ tokens, the counting rule of the previous chapters (a product of an $m \times k$ and a $k \times n$ matrix costs $2mkn$) gives $8TD^2$ for the four projections, $4T^2D$ for the score and average products, $5HT^2$ for the softmax and scale, $4TDF$ for the plain network or $6TDF$ for the gated one, and a small remainder for the norms, the two adds and the activation. Four configurations, with the widths stated and no claim that a particular model has them:
+A stack of $L$ blocks has $L$ times the parameters and $L$ times the work of one, so everything that can be planned is in the count of one block. With no biases (modern blocks have none), the attention layer has four $D \times D$ matrices, $4D^2$; the plain network $2DF$ and the gated one $3DF$; the two norms $2D$ gains. For the forward pass on $T$ tokens, the counting rule of the previous chapters (a product of an $m \times k$ and a $k \times n$ matrix costs $2mkn$) gives $8TD^2$ for the four projections, $4T^2D$ for the score and average products, $5HT^2$ for the softmax and scale, $4TDF$ for the plain network or $6TDF$ for the gated one, and a small remainder for the norms, the two adds and the activation. Four configurations, with the widths stated and no claim that a particular model has them (the fourth is the third at a longer sequence, so it adds a row to the table of arithmetic and none to the table of parameters):
 
 <!-- worked: transformer_block.block_parameters_table -->
-Parameters of one block, no biases: attention 4 D^2 (the four D by D matrices), feed-forward network 2 D F (GELU) or 3 D F (SwiGLU), normalization gains 2 D.
+Parameters of one block, no biases: attention 4 D^2 (the four D by D matrices), feed-forward network 2 D F (GELU) or 3 D F (SwiGLU), normalization gains 2 D. The configuration D has the block of C, so it has no row of its own here (only the sequence length of the next table differs).
 
 | configuration | D | heads H | hidden width F | attention | feed-forward | norm gains | block total | attention % | feed-forward % |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | A: GELU, 4 D | 768 | 12 | 3,072 | 2,359,296 | 4,718,592 | 1,536 | 7,079,424 | 33.3 | 66.7 |
 | B: SwiGLU | 1024 | 16 | 3,072 | 4,194,304 | 9,437,184 | 2,048 | 13,633,536 | 30.8 | 69.2 |
 | C: SwiGLU | 4096 | 32 | 11,008 | 67,108,864 | 135,266,304 | 8,192 | 202,383,360 | 33.2 | 66.8 |
-| D: as C, long | 4096 | 32 | 11,008 | 67,108,864 | 135,266,304 | 8,192 | 202,383,360 | 33.2 | 66.8 |
 <!-- /worked -->
 
 <!-- worked: transformer_block.block_flops_table -->
@@ -481,22 +482,28 @@ A model that guesses has loss ln 4 = 1.3863 nats and accuracy 0.25. A model that
 The wirings of the chapter are trained at two depths: the pre-norm block, the post-norm block and the stack without a skip with 2 blocks, and at 6 blocks also the pre-norm block with output matrices scaled by $1/\sqrt{2L}$ at initialization, and both pre-norm and post-norm at a smaller learning rate.
 
 <!-- worked: transformer_block.two_hop_training -->
-Training: Adam (beta1 0.9, beta2 0.999, epsilon 1e-08, with the bias correction of Volume III, the learning rate in the table), minibatches of 16 fresh examples from the generator `transformer_block.train.data` (0xf3a320d545b6b68b), the same examples for every model, 400 updates, no clipping, no warmup. The parameters are drawn from `transformer_block.train.init.<wiring>.<L>` (seeds in the table; wiring names pre, pre_scaled, post, plain; the two rates of one wiring start from the same parameters). A loss column is the mean of the 20 batch losses that end at that step. Accuracy is the fraction of the 400 test examples of `transformer_block.train.test` (0x343230a562bae7aa) whose largest logit (first on a tie) is the target. The last column counts, among the run and its four copies, those with an accuracy above 0.9, a qualitative outcome that does not depend on the last digits. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
+Initialization. The parameters of a model are drawn from `transformer_block.train.init.<wiring>.<L>` (wiring names pre, pre_scaled, post, plain; seeds in the table; the two rates of one wiring start from the same parameters), every matrix row by row, in this order: the embedding table E [20, 16], each entry `normal()` (no scale); then, for each block in turn, W_Q, W_K, W_V, W_O (16 by 16) and W_gate, W_up (16 by 24), each entry `normal() / sqrt(16)`, and W_down (24 by 16), each entry `normal() / sqrt(24)` (the square root of the number of rows of the matrix); then, after the last block, the head W_C (16 by 4), each entry `normal() / sqrt(16)`. The norm gains are not drawn: the two gains of every block and the final gain all start at 1. In the wiring pre_scaled, W_O and W_down of every block are multiplied by 1/sqrt(2 L) = 0.2887 (L = 6) after they are drawn and scaled. Every RMS norm has epsilon 1e-6 and the gain-only final norm exists in the pre_scaled, pre and no-skip wirings, not in post-norm. The read-out is logits = x W_C, with x the final stream row of the last position (no bias), and the loss of an example is the softmax cross-entropy -ln p[target] of these 4 logits. Only the last position has a loss.
+
+Training. An example is a sequence of T = 5 ids processed on its own (no padding, causal mask, no position information). Every model reads the generator `transformer_block.train.data` (0xf3a320d545b6b68b) from its start with the draw order of the task above, one example after another: step s of 400 takes the examples numbered 16 (s - 1) to 16 s - 1 of that stream (counting from 0), so all models see the same examples. The gradient of a step is the mean of the 16 example gradients (each divided by 16 and added in example order), computed with the parameters before the update; the loss of the step is the mean of the 16 example losses of that same pass. The optimizer is Adam on every tensor, gains included, no weight decay, no clipping, no warmup, the rate constant in the table: m <- 0.9 m + 0.1 g, v <- 0.999 v + 0.001 g^2 (both zero at the start), and at step s = 1 .. 400 p <- p - rate (m / (1 - 0.9^s)) / (sqrt(v / (1 - 0.999^s)) + 1e-08). A loss column is the mean of the 20 step losses of the steps s - 19 .. s. Accuracy is measured after step 400: the fraction of the 400 test examples (the first 400 draws of `transformer_block.train.test`, 0x343230a562bae7aa) whose largest logit (the lowest id on a tie) is the target.
+
+The last column counts, among the run and its four copies, those with an accuracy above 0.9. 'None' and 'all' are outcomes that survive the copies; 'mixed' means the run sits at a fork, the five copies split, and a reimplementation should expect its own copies to split too, with a count of its own: only the none and all cells are claims about every implementation. The first weight of the nudged copies is E[0][0] (row 0, column 0 of the embedding table, the first number of the first tensor drawn), the first coordinate of the token `A0B0`, which stands in about a quarter of the examples and so enters the computation in the first steps. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | L | wiring | rate | seed of the initial parameters | loss, step 50 | loss, step 100 | loss, step 200 | loss, step 400 | test accuracy | runs above 0.9 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 2 | pre-norm, skip | 0.01 | 0x56d93c643d851f35 | 1.0216 | 0.7923 | 0.5868 | unstable | unstable | 5 of 5 |
-| 2 | post-norm, skip | 0.01 | 0xd8fec24ed2642e4c | 0.9907 | 0.9390 | 0.5266 | unstable | unstable | 4 of 5 |
-| 2 | norm before each sublayer, no skip | 0.01 | 0x2073594250140143 | 1.3727 | 1.3658 | about 1 | about 1 | unstable | 0 of 5 |
-| 6 | pre-norm, skip | 0.01 | 0x3d9cbd919f8e279b | 1.1634 | 0.9755 | 0.8195 | unstable | unstable | 0 of 5 |
-| 6 | pre-norm, skip, output matrices times 1/sqrt(2 L) | 0.01 | 0xfbee8906d52afd1d | 1.0258 | 0.8147 | 0.5134 | unstable | unstable | 5 of 5 |
-| 6 | post-norm, skip | 0.01 | 0x9005ddf3207fa9f9 | 1.3526 | 1.2963 | about 1.4 | about 1.4 | unstable | 0 of 5 |
-| 6 | norm before each sublayer, no skip | 0.01 | 0x44d86cc35b370172 | 1.3916 | 1.3949 | about 1.39 | about 1.4 | 0.230 | 0 of 5 |
-| 6 | pre-norm, skip | 0.003 | 0x3d9cbd919f8e279b | 1.1725 | 0.8985 | 0.6700 | about 0.242 | 0.948 | 5 of 5 |
-| 6 | post-norm, skip | 0.003 | 0x9005ddf3207fa9f9 | 1.2805 | 1.0724 | 0.8630 | about 0.64 | about 0.8 | 0 of 5 |
+| 2 | pre-norm, skip | 0.01 | 0x56d93c643d851f35 | 1.0216 | 0.7923 | 0.5868 | unstable | unstable | all 5 |
+| 2 | post-norm, skip | 0.01 | 0xd8fec24ed2642e4c | 0.9907 | 0.9390 | 0.5266 | unstable | unstable | 4 of 5, mixed |
+| 2 | norm before each sublayer, no skip | 0.01 | 0x2073594250140143 | 1.3727 | 1.3658 | about 1 | about 1 | unstable | none of 5 |
+| 6 | pre-norm, skip | 0.01 | 0x3d9cbd919f8e279b | 1.1634 | 0.9755 | 0.8195 | unstable | unstable | none of 5 |
+| 6 | pre-norm, skip, output matrices times 1/sqrt(2 L) | 0.01 | 0xfbee8906d52afd1d | 1.0258 | 0.8147 | 0.5134 | unstable | unstable | all 5 |
+| 6 | post-norm, skip | 0.01 | 0x9005ddf3207fa9f9 | 1.3526 | 1.2963 | about 1.4 | about 1.4 | unstable | none of 5 |
+| 6 | norm before each sublayer, no skip | 0.01 | 0x44d86cc35b370172 | 1.3916 | 1.3949 | about 1.39 | about 1.4 | 0.230 | none of 5 |
+| 6 | pre-norm, skip | 0.003 | 0x3d9cbd919f8e279b | 1.1725 | 0.8985 | 0.6700 | about 0.242 | 0.948 | all 5 |
+| 6 | post-norm, skip | 0.003 | 0x9005ddf3207fa9f9 | 1.2805 | 1.0724 | 0.8630 | about 0.64 | about 0.8 | none of 5 |
 <!-- /worked -->
 
-At two blocks the skip decides the outcome and the norm placement does not. Both the pre-norm and the post-norm stack train (all five runs of the first, four of five of the second end above 0.9 accuracy), while the stack without a skip sits at the loss of a guess, about 1, and reaches no run above 0.9. It has the same two lookups to make and no stream to carry the first result to the second except through its own weights.
+The last column is read with care. A count of runs above a threshold is itself the outcome of a chaotic training, and only the cells that say all or none are claims a reimplementation can check: it should find all five of its own copies above 0.9 in the rows that say all 5, and none in the rows that say none. The one mixed cell, the two-block post-norm stack with four of five, sits at a fork: a reimplementation should expect its five copies to split as well, with a count of its own between one and four, and it confirms the finding if some end above 0.9 and some do not. A row whose test accuracy is printed 'unstable' has copies that differ in the last digits of the accuracy, not on which side of 0.9 they fall, when it says all or none.
+
+At two blocks the skip decides the outcome and the norm placement does not. Both the pre-norm and the post-norm stack train (all five runs of the first end above 0.9 accuracy, four of five of the second), while the stack without a skip sits at the loss of a guess, about 1, and reaches no run above 0.9. It has the same two lookups to make and no stream to carry the first result to the second except through its own weights.
 
 At six blocks the wirings separate. The post-norm stack at rate 0.01 never leaves the loss of a guess (about 1.4 at steps 200 and 400, no run above 0.9), and neither does the stack without a skip (0.230 test accuracy, no run above 0.9). The pre-norm stack with the weights as drawn is learning, from 1.1634 at step 50 to 0.8195 at step 200, and slowly: none of its five runs passes 0.9 within 400 steps. Starting its branches small changes that. With the output matrices scaled by $1/\sqrt{2L}$ the loss is 0.5134 at step 200 and all five runs end above 0.9, which is the stream table of the third section at work: a stream that starts near 1.2 instead of 5.9 is a stream the first updates do not wreck. The rate row makes the placement visible. At rate 0.003 the pre-norm stack trains in all five runs (test accuracy 0.948), and the post-norm stack, which at 0.01 did not move, now learns (loss about 0.64 at step 400) and still reaches 0.9 in none of its five runs. The pre-norm stack tolerates the larger rate and the post-norm stack does not, which is what the analysis of Xiong and colleagues predicts about warmup, here with a rate in place of a warmup. The derivation explains why the identity path is the place to look; this experiment does not isolate it as the cause, and one task, one size and one seed per row prove nothing about large models. Several entries are written 'unstable' or 'about': after 400 steps with rate 0.01 the digits of these runs are not reproducible in another implementation, which is why the last column counts runs and does not average them.
 
@@ -552,7 +559,7 @@ Both kernels do little arithmetic per byte (a few to a dozen FLOPs per element a
 
 ## Summary
 
-A transformer block is two sublayers on a residual stream. Each reads a normalized copy of the stream, computes, and adds its result to the stream: attention to move information between positions, and a feed-forward network to compute with it at each position. The stream after $L$ blocks is the embedding plus $2L$ contributions, and the gradient through it has a path made of additions alone, whose coefficient is exactly 1. Where the norm sits decides whether that path is clean: before the sublayer (pre-norm) the stream is never normalized and the identity path carries a factor 1 at every depth, while after the addition (post-norm) every path carries a norm and the skip path of a 32-block stack passes $9.4\times10^{-7}$ of the gradient. The price of a clean path is a stream that grows with depth, as $\sqrt{1+k}$ in the measurement, which a final norm hides from the head and which output matrices scaled by $1/\sqrt{2L}$ keep near 1. The feed-forward network has $8D^2$ parameters in its plain form, twice the attention layer's $4D^2$; the gated form $(\mathrm{silu}(\mathbf{x}\mathbf{W}_{\mathrm{gate}}) \odot \mathbf{x}\mathbf{W}_{\mathrm{up}})\mathbf{W}_{\mathrm{down}}$ computes a product of two linear functions and keeps the parameters equal at $F = 8D/3$. A whole block's forward and backward pass is a page of pseudocode and passes the gradient check at $10^{-7}$ and below, and the three wrong passes it was tested against fail in the tensors the mistake touches. The parameter split of a block is one third attention and two thirds feed-forward network at every size, while the split of the arithmetic depends on the sequence length. In brain the pieces are shared builders, the layout of each model is declared in its module and verified against references, and three episodes (an epsilon compiled in, passes that moved a tensor twice, a pair of projections that only an exact comparison could tell apart) show where such code goes wrong. The next chapter stacks blocks into a decoder and trains it on raw text, which makes the data, the batching and the loss the subject.
+A transformer block is two sublayers on a residual stream. Each reads a normalized copy of the stream, computes, and adds its result to the stream: attention to move information between positions, and a feed-forward network to compute with it at each position. The stream after $L$ blocks is the embedding plus $2L$ contributions, and the gradient through it has a path made of additions alone, whose coefficient is exactly 1. Where the norm sits decides whether that path is clean: before the sublayer (pre-norm) the stream is never normalized and the identity path carries a factor 1 at every depth, while after the addition (post-norm) every path carries a norm and the skip path of a 32-block stack passes $9.4\times10^{-7}$ of the gradient. The price of a clean path is a stream that grows with depth, as $\sqrt{1+k}$ in the measurement, which a final norm hides from the head and which output matrices scaled by $1/\sqrt{2L}$ keep near 1. The feed-forward network has $8D^2$ parameters in its plain form, twice the attention layer's $4D^2$; the gated form $(\mathrm{silu}(\mathbf{x}\mathbf{W}_{\mathrm{gate}}) \odot \mathbf{x}\mathbf{W}_{\mathrm{up}})\mathbf{W}_{\mathrm{down}}$ computes a product of two linear functions and keeps the parameters equal at $F = 8D/3$. A whole block's forward and backward pass is a page of pseudocode and passes the gradient check at the criterion of $10^{-6}$ on every tensor, and the three wrong passes it was tested against fail in the tensors the mistake touches. The parameter split of a block is one third attention and two thirds feed-forward network at every size, while the split of the arithmetic depends on the sequence length. In brain the pieces are shared builders, the layout of each model is declared in its module and verified against references, and three episodes (an epsilon compiled in, passes that moved a tensor twice, a pair of projections that only an exact comparison could tell apart) show where such code goes wrong. The next chapter stacks blocks into a decoder and trains it on raw text, which makes the data, the batching and the loss the subject.
 
 ## References
 
@@ -618,7 +625,7 @@ A transformer block is two sublayers on a residual stream. Each reads a normaliz
 5. At $z = 0$ the slope is $0.5\cdot(1 + 0) = 0.5$; at $z = 2$, $\mathrm{sigmoid}(2) = 0.8808$ and the slope is $0.8808\,(1 + 2\cdot 0.1192) = 1.0908$. Then $dz_{\mathrm{gate}} = dh \cdot z_{\mathrm{up}}\cdot\text{slope}(2) = 0.5 \cdot 1.0908 = 0.5454$.
 6. The Jacobian of the norm is $\frac{1}{\rho}(\mathbf{I} - \hat{\mathbf{s}}\hat{\mathbf{s}}^\top/D)$ with $\rho = 1.25$, which multiplies the component along $\hat{\mathbf{s}}$ by $0$ (the projection removes it, since $\hat{\mathbf{s}}^\top\hat{\mathbf{s}} = D$) and every orthogonal component by $1/1.25 = 0.8$. Over 64 norms the orthogonal factor is $0.8^{64} = 6.3\times10^{-7}$.
 7. The tiny block's attention half and feed-forward half: the stream after the first addition has rows of root mean square 0.864, 0.698, 1.765 and after the second 0.838, 0.603, 1.698, with the numbers of the tables.
-8. Relative differences at or below $10^{-7}$ on every tensor for the correct passes; the wrong ones differ by about 1.0 to 2.0 in the tensors named in the table.
+8. Differences below the criterion of $10^{-6}$, absolute and relative, on every tensor for the correct passes; the wrong ones differ by about 1.0 to 2.0 in the tensors named in the table.
 9. Stream root mean square of the pre-norm row: 1.40, 1.77, 2.24, 3.10, 4.33, 5.87; gradient ratios of the pre-norm row and of the no-skip row as in the table.
 10. See the table: the pre-norm model's loss falls, the post-norm model's stays near the entropy of a guess; the numbers are in the table to the printed digits.
 11. An investigation. The chapter did not run it; the table's rate-0.003 run is the comparison.

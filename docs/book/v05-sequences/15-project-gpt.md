@@ -200,8 +200,8 @@ The model of the forward check at its initialization, the loss of one training r
 
 | parameters | coordinates drawn | largest |analytic| | largest |analytic - numeric| |
 |---|---:|---:|---:|
-| E (token embedding and head) | 2 | 2.5e-3 | below 1e-10 |
-| P (positions) | 3 | 2.4e-2 | below 1e-9 |
+| W_emb (token embedding and head) | 2 | 2.5e-3 | below 1e-10 |
+| W_pos (positions) | 3 | 2.4e-2 | below 1e-9 |
 | W_Q | 11 | 3.4e-5 | below 1e-9 |
 | W_K | 3 | 2.1e-5 | below 1e-10 |
 | W_V | 5 | 5.1e-3 | below 1e-10 |

@@ -78,6 +78,15 @@ def _bound(x):
     return f"1e{math.ceil(math.log10(x * 1.0000001)):d}".replace("e-0", "e-")
 
 
+CRITERION = 1e-6   # a gradient check passes when the difference stays under this
+
+
+def _under_criterion(x):
+    """A gradient-check cell: 'below 1e-6' when the difference meets the criterion, else the difference to two digits. The digits
+    of a difference far under the criterion are finite-difference and rounding noise that no other implementation shares."""
+    return "below 1e-6" if x < CRITERION else f"{x:.1e}, FAILS"
+
+
 def _sci(x, d=2):
     """x in scientific notation with d decimals in the mantissa, written 1.23e-4."""
     m, e = f"{x:.{d}e}".split("e")
@@ -622,27 +631,30 @@ _CHECK_NAMES = {"Wq": "W_Q", "Wk": "W_K", "Wv": "W_V", "Wo": "W_O", "g1": "gain 
 
 def gradient_check():
     res = check_results()
-    rows = [(_CHECK_NAMES[k], n, _bound(a), _bound(r)) for k, (n, a, r) in res[("pre", "swiglu")].items()]
+    rows = [(_CHECK_NAMES[k], n, _under_criterion(a), _under_criterion(r)) for k, (n, a, r) in res[("pre", "swiglu")].items()]
+    seed_of = {"swiglu": f"{bookrng.seed_of(NAME_CHECK + '.swiglu'):#018x}", "gelu": f"{bookrng.seed_of(NAME_CHECK + '.gelu'):#018x}"}
     summary = []
     for (layout, ffn), r in res.items():
-        summary.append((layout, ffn, sum(v[0] for v in r.values()), _bound(max(v[1] for v in r.values())),
-                        _bound(max(v[2] for v in r.values()))))
-    return (f"Generator: the book's SplitMix64, seeds {bookrng.seed_of(NAME_CHECK + '.swiglu'):#018x} (`seed_of` of the name "
-            f"`{NAME_CHECK}.swiglu`) and {bookrng.seed_of(NAME_CHECK + '.gelu'):#018x} (`{NAME_CHECK}.gelu`, for the GELU network)."
+        summary.append((layout, ffn, seed_of[ffn], sum(v[0] for v in r.values()), _under_criterion(max(v[1] for v in r.values())),
+                        _under_criterion(max(v[2] for v in r.values()))))
+    return (f"Generator: the book's SplitMix64, seeds {seed_of['swiglu']} (`seed_of` of the name "
+            f"`{NAME_CHECK}.swiglu`, used by every row with a SwiGLU network: the pre-norm, post-norm and no-skip wirings share these parameters) "
+            f"and {seed_of['gelu']} (`{NAME_CHECK}.gelu`, for the GELU network)."
             +f" T = {CHECK_T} positions, D = {CHECK_D}, H = {CHECK_H} heads of width {CHECK_D // CHECK_H}, hidden width {CHECK_FF}, "
             f"{CHECK_CLASSES} classes, causal mask. Draws, in this order: X (5 by 6, each `normal()`), W_Q, W_K, W_V, W_O (6 by 6, each "
             "row by row with `0.5 * normal()`), the two gains (6 numbers each, `1 + 0.1 * normal()`), the feed-forward matrices "
             "(SwiGLU: W_gate and W_up, 6 by 8, then W_down, 8 by 6; GELU: W_1, 6 by 8, then W_2, 8 by 6; `0.5 * normal()`), W_C "
-            "(6 by 4, `0.5 * normal()`), then the 5 target classes `integer(4)`. The model is one pre-norm block (RMS norm, "
+            "(6 by 4, `0.5 * normal()`), then the 5 target classes `integer(4)`. No matrix is scaled by 1/sqrt(2 L) here: W_O and W_down "
+            "are used as drawn. The model is one block (RMS norm, "
             "epsilon 1e-6), then the classifier logits = x2 W_C at every position, and the loss is the mean over positions of the "
             f"softmax cross-entropy. Central differences with step {CHECK_STEP:g} on every entry of every parameter and of the input X. "
-            "Each cell is the power of ten that the largest difference stays below (the criterion is 1e-6); the relative difference "
+            "A cell says 'below 1e-6' when the largest difference meets the criterion of 1e-6; the digits of a difference that small "
+            "are noise of the finite difference and are not printed. The absolute difference is |a - n|; the relative difference "
             "|a - n| / max(|a|, |n|) is taken over the entries whose gradient is above 1e-4.\n\n"
-            + _table(["tensor (pre-norm SwiGLU block)", "entries checked", "largest absolute difference below",
-                      "largest relative difference below"], rows)
+            + _table(["tensor (pre-norm SwiGLU block)", "entries checked", "largest absolute difference", "largest relative difference"], rows)
             + "\n\nThe same check on every wiring and both feed-forward networks, all tensors together:\n\n"
-            + _table(["wiring", "feed-forward network", "entries checked", "largest absolute difference below",
-                      "largest relative difference below"], summary, "llrrr"))
+            + _table(["wiring", "feed-forward network", "seed", "entries checked", "largest absolute difference",
+                      "largest relative difference"], summary, "lllrrr"))
 
 
 BUGS = (("the block's backward pass", None),
@@ -667,13 +679,13 @@ def wrong_backward_passes():
     keys = [k for k in CHECK_KEYS["swiglu"] if k != "Wc"]
 
     def cell(v):
-        return _bound(v) if v < 1e-6 else f"about {v:.1f}"
+        return "below 1e-6" if v < CRITERION else f"about {v:.1f}"
 
     rows = [(label, *[cell(res[label][k]) for k in keys]) for label, _ in BUGS]
     return ("The check of the previous block (same parameters, same step, pre-norm SwiGLU block) run on the correct backward pass and "
             "on three wrong ones. Entries: the largest relative difference |a - n| / max(|a|, |n|) over the entries of the tensor "
-            "whose gradient is above 1e-4; a difference of 1e-6 or more is written to one decimal, a smaller one as the power of "
-            "ten it stays below (a tensor that the wrong step does not touch keeps its correct gradient).\n\n"
+            "whose gradient is above 1e-4; a difference of 1e-6 or more is written to one decimal, a smaller one as 'below 1e-6' "
+            "(a tensor that the wrong step does not touch keeps its correct gradient).\n\n"
             + _table(["backward pass", *[_CHECK_NAMES[k] for k in keys]], rows))
 
 
@@ -834,13 +846,21 @@ def accounting_data():
 
 def block_parameters_table():
     rows = []
+    seen = {}
     for e in accounting_data():
+        shape = (e["D"], e["H"], e["kind"], e["hidden"])
+        if shape in seen:   # the same block at another sequence length: same parameters
+            seen[shape].append(e["label"].split(":")[0])
+            continue
+        seen[shape] = [e["label"].split(":")[0]]
         pa, pf, pn = e["params"]
         tot = pa + pf + pn
         rows.append((e["label"], e["D"], e["H"], _int(e["hidden"]), _int(pa), _int(pf), _int(pn), _int(tot),
                      _fx(pa / tot * 100, 1), _fx(pf / tot * 100, 1)))
+    same = [f"configuration {names[1]} has the block of {names[0]}" for names in seen.values() if len(names) > 1]
     return ("Parameters of one block, no biases: attention 4 D^2 (the four D by D matrices), feed-forward network 2 D F (GELU) or 3 D F "
-            "(SwiGLU), normalization gains 2 D.\n\n"
+            "(SwiGLU), normalization gains 2 D. The " + "; the ".join(same) + ", so it has no row of its own here (only the sequence length "
+            "of the next table differs).\n\n"
             + _table(["configuration", "D", "heads H", "hidden width F", "attention", "feed-forward", "norm gains", "block total",
                       "attention %", "feed-forward %"], rows))
 
@@ -1032,6 +1052,15 @@ def two_hop_task():
             f"{_int(params[6])} for L = 6 (the gains and the output matrices differ by wiring only in their values).")
 
 
+def _count_cell(good, total):
+    """The number of runs that end above 0.9: 'none' and 'all' survive the nudged copies, anything between is a split."""
+    if good == 0:
+        return f"none of {total}"
+    if good == total:
+        return f"all {total}"
+    return f"{good} of {total}, mixed"
+
+
 def two_hop_training():
     rows = []
     for L, lay, lr, label in TRAIN_CONFIGS:
@@ -1040,15 +1069,37 @@ def two_hop_training():
         acc = _stable_cell(key, lambda r: r["right"] / N_TEST, 3)
         base, twins = train_results()[key]
         good = sum(1 for r in [base, *twins] if r["right"] / N_TEST > 0.9)
-        rows.append((L, label, lr, f"{bookrng.seed_of(f'transformer_block.train.init.{lay}.{L}'):#018x}", *cells, acc, f"{good} of 5"))
-    return (f"Training: Adam (beta1 {BETA1}, beta2 {BETA2}, epsilon {EPS_ADAM:g}, with the bias correction of Volume III, the learning rate in the "
-            f"table), minibatches of {BATCH} fresh examples from the generator `{NAME_TRAIN_DATA}` ({bookrng.seed_of(NAME_TRAIN_DATA):#018x}), the "
-            f"same examples for every model, {STEPS} updates, no clipping, no warmup. The parameters are drawn from "
-            "`transformer_block.train.init.<wiring>.<L>` (seeds in the table; wiring names pre, pre_scaled, post, plain; the "
-            "two rates of one wiring start from the same parameters). A loss column "
-            f"is the mean of the {WINDOW} batch losses that end at that step. Accuracy is the fraction of the {N_TEST} test examples of "
-            f"`{NAME_TRAIN_TEST}` ({bookrng.seed_of(NAME_TRAIN_TEST):#018x}) whose largest logit (first on a tie) is the target. The last column counts, among the run and its four copies, "
-            "those with an accuracy above 0.9, a qualitative outcome that does not depend on the last digits. "
-            + stable.RULE + "\n\n"
-            + _table(["L", "wiring", "rate", "seed of the initial parameters"] + [f"loss, step {c}" for c in CHECKPOINTS] + ["test accuracy", "runs above 0.9"],
-                     rows, "llrr" + "r" * 6))
+        rows.append((L, label, lr, f"{bookrng.seed_of(f'transformer_block.train.init.{lay}.{L}'):#018x}", *cells, acc,
+                     _count_cell(good, 1 + len(twins))))
+    d, f_, v = TRAIN_D, TRAIN_FF, VOCAB
+    return (
+        f"Initialization. The parameters of a model are drawn from `transformer_block.train.init.<wiring>.<L>` (wiring names pre, "
+        f"pre_scaled, post, plain; seeds in the table; the two rates of one wiring start from the same parameters), every matrix row by "
+        f"row, in this order: the embedding table E [{v}, {d}], each entry `normal()` (no scale); then, for each block in turn, W_Q, W_K, W_V, "
+        f"W_O ({d} by {d}) and W_gate, W_up ({d} by {f_}), each entry `normal() / sqrt({d})`, and W_down ({f_} by {d}), each entry "
+        f"`normal() / sqrt({f_})` (the square root of the number of rows of the matrix); then, after the last block, the head W_C ({d} by "
+        f"{N_KEYS}), each entry `normal() / sqrt({d})`. The norm gains are not drawn: the two gains of every block and the final gain "
+        f"all start at 1. In the wiring pre_scaled, W_O and W_down of every block are multiplied by 1/sqrt(2 L) = 0.2887 (L = 6) after "
+        f"they are drawn and scaled. Every RMS norm has epsilon 1e-6 and the gain-only final norm exists in the pre_scaled, pre and no-skip "
+        f"wirings, not in post-norm. The read-out is logits = x W_C, with x the final stream row of the last position (no bias), and the "
+        f"loss of an example is the softmax cross-entropy -ln p[target] of these {N_KEYS} logits. Only the last position has a loss.\n\n"
+        f"Training. An example is a sequence of T = 5 ids processed on its own (no padding, causal mask, no position information). "
+        f"Every model reads the generator `{NAME_TRAIN_DATA}` ({bookrng.seed_of(NAME_TRAIN_DATA):#018x}) from its start with the draw order of the "
+        f"task above, one example after another: step s of {STEPS} takes the examples numbered {BATCH} (s - 1) to {BATCH} s - 1 of that stream "
+        f"(counting from 0), so all models see the same examples. "
+        f"The gradient of a step is the mean of the {BATCH} example gradients (each divided by {BATCH} and added in example order), computed "
+        f"with the parameters before the update; the loss of the step is the mean of the {BATCH} example losses of that same pass. "
+        f"The optimizer is Adam on every tensor, gains included, no weight decay, no clipping, no warmup, the rate constant in the "
+        f"table: m <- {BETA1} m + {1 - BETA1:.1f} g, v <- {BETA2} v + {1 - BETA2:.3f} g^2 (both zero at the start), and at step s = 1 .. {STEPS} "
+        f"p <- p - rate (m / (1 - {BETA1}^s)) / (sqrt(v / (1 - {BETA2}^s)) + {EPS_ADAM:g}). "
+        f"A loss column is the mean of the {WINDOW} step losses of the steps s - {WINDOW - 1} .. s. Accuracy is measured after step {STEPS}: "
+        f"the fraction of the {N_TEST} test examples (the first {N_TEST} draws of `{NAME_TRAIN_TEST}`, {bookrng.seed_of(NAME_TRAIN_TEST):#018x}) "
+        f"whose largest logit (the lowest id on a tie) is the target.\n\n"
+        "The last column counts, among the run and its four copies, those with an accuracy above 0.9. 'None' and 'all' are outcomes "
+        "that survive the copies; 'mixed' means the run sits at a fork, the five copies split, and a reimplementation should expect its "
+        "own copies to split too, with a count of its own: only the none and all cells are claims about every implementation. "
+        "The first weight of the nudged copies is E[0][0] (row 0, column 0 of the embedding table, the first number of the first tensor "
+        "drawn), the first coordinate of the token `A0B0`, which stands in about a quarter of the examples and so enters the computation in "
+        "the first steps. " + stable.RULE + "\n\n"
+        + _table(["L", "wiring", "rate", "seed of the initial parameters"] + [f"loss, step {c}" for c in CHECKPOINTS] + ["test accuracy", "runs above 0.9"],
+                 rows, "llrr" + "r" * 6))

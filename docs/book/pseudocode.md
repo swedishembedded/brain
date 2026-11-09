@@ -97,6 +97,8 @@ changes the original. Where a copy is needed, the pseudocode says
 `copy(...)`: `copy(x)` returns a new array (or list) of the same shape and
 values that shares no storage with `x`.
 
+**Assigning to a slice.** A slice may stand on the left of `=`: `A[i:j, :] = B` copies the elements of `B` into the elements of `A` that the slice selects and changes no other element of `A`. The right side is evaluated first, and its shape must equal the shape of the slice (an integer index drops its axis on both sides alike: `A[r, :] = v` needs a vector `v` of the width of row `r`, and `O[:, a:b] = Oh` needs `Oh` of shape `[T, b - a]`); a shape that differs is an error. The slice is a view, so the write changes the array that the slice was cut from, and `X[c:c + n, :] = matmul(A, W)` fills rows `c .. c + n - 1` of `X`.
+
 `rows(A, idx)` gathers rows: for `A` of shape `[N, ...]` and a list `idx` of integers, each in `0 .. N-1`, it returns a new array of shape `[len(idx), ...]` whose row `m` is a copy of `A[idx[m], ...]`. The indices may repeat and need not be sorted; an index outside `0 .. N-1` is an error. (A slice cannot express this, because a slice selects a regular range.)
 
 A list comprehension `[expression for i in 0 .. n]` builds the vector of the
@@ -128,14 +130,15 @@ named operations:
 | `sd(a)` | the sample standard deviation of a vector `a` with `m >= 2` elements, with divisor `m - 1`: `sqrt(sum((a[i] - mean(a))^2 for i in 0 .. m) / (m - 1))`. A standardiser that divides by `m` says so in its signature and does not call `sd` |
 | `correlation(a, b)` | the Pearson correlation of two vectors of equal length `m >= 2`: `sum((a[i] - mean(a)) * (b[i] - mean(b))) / sqrt(sum((a[i] - mean(a))^2) * sum((b[i] - mean(b))^2))`, a `real` in `[-1, 1]`; it is an error (`require`) when either vector is constant, because a denominator is then zero. The divisor of the covariance cancels, so none is stated |
 | `all(c)`, `any(c)` | for an array or list `c` of `bool`: true when every (some) element is true; `all` of an empty list is true and `any` of an empty list is false |
+| `dot(a, b)` | `sum(a[i] * b[i] for i in 0 .. len(a))` for two vectors of equal length (an error otherwise); the scalar $\mathbf{a}\cdot\mathbf{b}$ |
 | `norm(x)` | the Euclidean length `sqrt(sum(x[i]^2 for i in 0 .. len(x)))` of a vector, also written $\lVert\mathbf{x}\rVert$; for a list of tensors the square root of the sum of the squares of every entry of every tensor (the global norm) |
 | `geometric_mean(a)` | `exp(mean(log(a)))` for a vector `a` of positive numbers |
 | `sha256(b)` | the SHA-256 digest (FIPS 180-4) of the `bytes` `b`, as 32 bytes; written as 64 lowercase hexadecimal digits when printed. The book prints only a prefix of it to compare two runs (Volume III, Chapter 13) |
 | `power_iteration(W, iters, v0)` | an estimate of the largest singular value of a matrix `W: [m, n]`: starting from the vector `v0` of length `n`, repeat `iters` times: multiply `v` by `W`, multiply the result by the transpose of `W`, and divide by its norm to get the new `v`; return `norm(W v)` at the end. `v0` is used as given, not normalised first (the division after the first round does it, so `iters >= 1` and `v0` must not be zero); normalising `v0` first would change nothing in the result. The result is the spectral norm of Volume I, Chapter 6 (Eigenvalues, Rotations and Low-Rank Structure); this is a different function from the eigenvalue `power_iteration` of that chapter |
 | `onehot(c, C)` | the vector of length `C` with `1.0` at index `c` and `0.0` elsewhere (`0 <= c < C`) |
 | `softmax(z)`, `lse(z)` | for a vector `z` of length `C >= 1`: `m = max(z)`, `lse(z) = m + log(sum(exp(z[i] - m)))` and `softmax(z)[i] = exp(z[i] - m) / sum(exp(z[j] - m))`, the stable forms of Volume III, chapter 3 (`logsumexp` is a synonym of `lse`); applied to a matrix `softmax(Z)` works on each row |
-| `map(f, a)` | applies the scalar function `f` to every element |
-| `a + b`, `a * b` on arrays | elementwise, and **only** when the shapes are equal or the text states the broadcast |
+| `map(f, a)` | applies the scalar function `f` (a function passed by name, `map(silu, Zg)`) to every element of the array `a` and returns an array of the same shape. It is a different thing from the table type `map<K, V>` of the Volume V section below, which has type arguments in angle brackets |
+| `a + b`, `a - b`, `a * b`, `a / b` on arrays | elementwise (the Hadamard product $\odot$ for `*`), and **only** when the shapes are equal or the text states the broadcast; a chain such as `dHd * Zu * map(silu_slope, Zg)` is evaluated left to right on arrays of one shape. `matmul` is the only operation that multiplies matrices |
 
 `sort a ascending` and `sort a descending` as statements sort the array
 `a` in place with the same tie rule.
@@ -168,6 +171,7 @@ row of `x: [T, D]`".
 | `relu(x)` | `max(0, x)`: `x` when `x > 0` and `0` otherwise, so `relu(0) = 0`; its slope is taken as `1` for `x > 0` and `0` for `x <= 0` (Volume III, chapter 2) |
 | `gelu(x)` | the exact Gaussian-error linear unit `0.5 * x * (1 + erf(x / sqrt(2)))`, that is `x` times the standard Gaussian cumulative distribution at `x`; the tanh approximation is always named `gelu_tanh` (Volume III, chapter 2) |
 | `silu(x)` | `x * sigmoid(x)` (Volume III, chapter 2) |
+| `silu_slope(z)` | the derivative of `silu` at `z`: with `s = sigmoid(z)`, `s * (1 + z * (1 - s))`; `silu_slope(0) = 0.5` (Volume V, Chapter 9) |
 | `erf(x)` | the error function $\frac{2}{\sqrt\pi}\int_0^x e^{-s^2}ds$, odd, with `erf(0) = 0` and limits $\pm 1$; the standard Gaussian cumulative distribution is $\Phi(z) = \frac12\bigl(1 + \mathrm{erf}(z/\sqrt2)\bigr)$. Use the library routine of your language (a reproduction agrees to the printed digits; its series is not needed) |
 | `acos(x)`, `angle(a, b)` | `acos(x)` is the angle in $[0, \pi]$ whose cosine is `x`, for `x` in `[-1, 1]` (clamp a quotient that rounding pushed just outside). `angle(a, b)` for two nonzero vectors is `acos(dot(a, b) / (norm(a) * norm(b)))` |
 | `cos_sim(a, b)` | the cosine similarity of two nonzero vectors of equal length, `dot(a, b) / (norm(a) * norm(b))`, a `real` in `[-1, 1]` (clamp a quotient that rounding pushed just outside); it is an error (`require`) when either vector is zero, because the denominator is then zero (Volume I, chapter 3). `angle(a, b)` is its `acos` |
@@ -468,6 +472,15 @@ serve them; each is defined by what it returns, never by how it is stored.
 | `reverse(L)` | a new list with the elements of `L` in the opposite order |
 | `s[i:j]`, `len(s)` for `text` | the characters (code points, not bytes) `i .. j - 1` of `s` as a `text`, and the number of characters of `s`; `s[i:j]` is the empty text when `i >= j` |
 | `heap<T>` | a priority queue of tuples. `push(q, x)` adds `x`; `pop_min(q)` removes and returns the smallest element in tuple order (an error on an empty queue); `len(q)` is the number of elements |
+
+## Routines of the transformer chapters (Volume V)
+
+Chapters 9 to 12 use four routines of the normalization and attention chapters without writing them out again. Each is defined here by what it returns.
+
+- **`rms_norm(x, gamma, eps)`** of Volume III, chapter 10 (the pseudocode of its RMS normalization section) normalizes every row of `x: [R, D]`: `inv_std[i] = 1 / sqrt(mean(x[i, :]^2) + eps)`, `xhat[i, :] = x[i, :] * inv_std[i]` and `y[i, :] = gamma * xhat[i, :]`. It returns the triple `(y, xhat, inv_std)`, and a caller that needs only the result writes `(y, _, _) = rms_norm(...)`, where `_` is a name whose value is not used.
+- **`rms_norm_backward(dy, xhat, inv_std, gamma)`** returns `(dx, dgamma)` for the gradient `dy: [R, D]` of the loss with respect to `y`, using the `xhat` and `inv_std` that `rms_norm` returned: `dx[i, j] = inv_std[i] * (gamma[j] * dy[i, j] - xhat[i, j] * mean(gamma * dy[i, :] * xhat[i, :]))` and `dgamma[j] = sum(dy[i, j] * xhat[i, j] for i in 0 .. R)`. It is the rule of Volume V, Chapter 9.
+- **`multi_head(X, Wq, Wk, Wv, Wo, H, causal)`** is the function of Volume V, Chapter 7, and **`multi_head_backward(dY, X, Wq, Wk, Wv, Wo, H, causal)`** its backward pass: `dOcat = matmul(dY, transpose(Wo))`; for each head `h` with columns `a .. b - 1`, `attention_backward` of that chapter, run on `dOcat[:, a:b]` with the head's queries, keys, values and weights recomputed from `X` and the column blocks of the matrices, gives the head's gradient of the input and the column blocks `dWq[:, a:b]`, `dWk[:, a:b]`, `dWv[:, a:b]`; `dX` is the sum of the heads' input gradients and `dWo = matmul(transpose(Ocat), dY)` with `Ocat` the concatenated head outputs. It returns `(dX, dWq, dWk, dWv, dWo)`.
+- **`silu_slope`**, the derivative of `silu`, is in the table of scalar operations.
 
 ## Randomness
 
