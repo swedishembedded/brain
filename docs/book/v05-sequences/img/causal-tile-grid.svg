@@ -1,0 +1,74 @@
+<!-- source-sha256: beed669a1ef8510f9b640e9bcfc2514d6302277fd5bb5d3d9834c1f4c493da27 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" width="1000" height="500"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="500" fill="#ffffff"/>
+<text x="500" y="28.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Tiles of a causal score matrix, T = 24: query blocks down the side, key tiles across</text>
+<rect x="12" y="46" width="484" height="400" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="26" y="68" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">4 query rows x 4 keys per tile</text>
+<rect x="122" y="108" width="44" height="44" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<rect x="166" y="108" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="210" y="108" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="254" y="108" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="298" y="108" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="342" y="108" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="122" y="152" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="166" y="152" width="44" height="44" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<rect x="210" y="152" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="254" y="152" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="298" y="152" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="342" y="152" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="122" y="196" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="166" y="196" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="210" y="196" width="44" height="44" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<rect x="254" y="196" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="298" y="196" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="342" y="196" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="122" y="240" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="166" y="240" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="210" y="240" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="254" y="240" width="44" height="44" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<rect x="298" y="240" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="342" y="240" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="122" y="284" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="166" y="284" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="210" y="284" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="254" y="284" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="298" y="284" width="44" height="44" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<rect x="342" y="284" width="44" height="44" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="122" y="328" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="166" y="328" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="210" y="328" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="254" y="328" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="298" y="328" width="44" height="44" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="342" y="328" width="44" height="44" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<text x="254" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">key tiles, left to right</text>
+<text x="254" y="402.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">36 tiles: 15 full, 6 diagonal, 15 skipped</text>
+<text x="254" y="422.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">scores computed: 0.5833 of T^2 (the mask allows 0.5208)</text>
+<rect x="504" y="46" width="484" height="400" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="518" y="68" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">8 query rows x 4 keys per tile</text>
+<rect x="614" y="108" width="44" height="88" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<rect x="658" y="108" width="44" height="88" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<rect x="702" y="108" width="44" height="88" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="746" y="108" width="44" height="88" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="790" y="108" width="44" height="88" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="834" y="108" width="44" height="88" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="614" y="196" width="44" height="88" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="658" y="196" width="44" height="88" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="702" y="196" width="44" height="88" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<rect x="746" y="196" width="44" height="88" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<rect x="790" y="196" width="44" height="88" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="834" y="196" width="44" height="88" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="614" y="284" width="44" height="88" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="658" y="284" width="44" height="88" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="702" y="284" width="44" height="88" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="746" y="284" width="44" height="88" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<rect x="790" y="284" width="44" height="88" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<rect x="834" y="284" width="44" height="88" fill="#fbd38d" stroke="#a0aec0" stroke-width="1"/>
+<text x="746" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">key tiles, left to right</text>
+<text x="746" y="402.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">18 tiles: 6 full, 6 diagonal, 6 skipped</text>
+<text x="746" y="422.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">scores computed: 0.6667 of T^2 (the mask allows 0.5208)</text>
+<rect x="60" y="464" width="22" height="14" rx="3" fill="#9ec5e8" stroke="#4a5568" stroke-width="1.2"/>
+<text x="90" y="475.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">full: computed without a mask</text>
+<rect x="360" y="464" width="22" height="14" rx="3" fill="#fbd38d" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="475.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">diagonal: computed, keys past the row masked</text>
+<rect x="660" y="464" width="22" height="14" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="690" y="475.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">skipped: never loaded</text>
+</svg>

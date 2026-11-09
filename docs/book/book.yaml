@@ -473,7 +473,7 @@ volumes:
         title: "Attention Without the Quadratic Memory"
         question: "How can attention over long sequences be computed exactly without ever storing the full attention matrix?"
         introduces: [online-softmax, tiled-attention, flash-attention, flash-attention-backward]
-        requires: [stable-softmax, attention-backward, tiled-matmul, parallel-reduction, shared-memory]
+        requires: [stable-softmax, log-sum-exp, causal-mask, attention-backward, kv-cache, memory-traffic-accounting, tiled-matmul, parallel-reduction, shared-memory]
         brain: [kernels]
       - id: encoders
         title: "Bidirectional Encoders and Embedding Models"

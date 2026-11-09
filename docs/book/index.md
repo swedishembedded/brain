@@ -106,4 +106,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 10. [Training a GPT from Scratch](v05-sequences/10-training-gpt.md): What does the full pipeline from raw text to a trained generative model look like?
 11. [Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md): Given next-token probabilities, how do we choose what to say?
 12. [The KV Cache](v05-sequences/12-kv-cache.md): Why recompute the past at every step when we could remember it, and what does remembering cost?
+13. [Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md): How can attention over long sequences be computed exactly without ever storing the full attention matrix?
 <!-- /contents -->

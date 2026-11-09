@@ -270,6 +270,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **finite difference**: an estimate of a derivative built from values of the function at nearby points, such as the forward difference $(f(x+h) - f(x))/h$. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
+**flash attention**: tiled attention with the online softmax in one fused kernel: exact attention whose only results are the output and one log-sum-exp per row, using memory linear in the sequence length and global-memory traffic of $\Theta(T^2 d_h^2 / M)$ for a fast memory of $M$ numbers. *([Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md))*
+
+**flash attention backward**: the backward pass of attention that saves only the output and the row log-sum-exp, rebuilds each weight as $e^{s - \mathrm{lse}}$ tile by tile, replaces the row sum of the softmax rule by $D_i = d\mathbf{o}_i \cdot \mathbf{o}_i$, and produces the gradients of the queries, keys and values without storing any $T \times T$ matrix. *([Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md))*
+
 **floating-point number**: a number stored as a sign, an exponent in a fixed range and a significand of fixed precision $p$ bits, $(-1)^s(1 + f/2^{p-1})2^e$; it keeps the same number of significant digits at every scale, so the absolute gap between neighbours doubles with each binade. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **forward pass**: computing every value of the computational graph in order, from the inputs to the loss. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
@@ -518,6 +522,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **one-hot-encoding**: writing a class index as a vector with a one in the position of that class and zeros elsewhere, the probability vector that puts all its weight on that class. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
+**online softmax**: the way of computing a softmax and the weighted sum of values in one pass over a row of scores read in chunks, by carrying the running maximum $m$, the running sum $\ell$ of exponentials relative to it and the running weighted sum $\mathbf{o}$, and multiplying the old sum and the old output by $e^{m - m'}$ whenever a chunk raises the maximum from $m$ to $m'$. *([Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md))*
+
 **ONNX graph**: the interchange form of an exported graph: typed and shaped inputs and outputs, constant tensors (initializers), nodes in an order that defines every input before use, each naming an operator, its inputs, its output and its attributes, and an opset number that fixes the meaning of every operator. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
 
 **ordinary differential equation**: an equation $dx/dt = f(t, x)$ that gives the rate of change of an unknown function of one variable in terms of the function itself; its solution is a curve that follows the prescribed slopes from a given starting value. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
@@ -739,6 +745,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **thread parallelism**: using several threads, each running on its own core with its own registers and first caches and sharing the later caches and memory, to carry out the pieces of one computation at the same time. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 
 **tied embeddings**: using one table both to embed the input tokens and as the output layer that scores the tokens, so that the logits are $\mathbf{H}\mathbf{W}_{\mathrm{emb}}^\top$, which saves one table of $V D$ parameters and gives that table the gradient of both uses. *([Embeddings](v05-sequences/03-embeddings.md))*
+
+**tiled attention**: the schedule that computes attention for a block of query rows by walking tiles of keys and values through fast memory, forming the block of scores of each tile only on chip and folding it into the running state of its rows, so that no score matrix is ever written to global memory. *([Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md))*
 
 **tiled matmul**: the matrix product computed one tile of the output at a time, with the matching tiles of the two inputs staged in a fast memory so that each number loaded is used once per row or column of the tile, cutting the loads from $2n^3$ to $2n^3/T$ for a tile of side $T$. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 

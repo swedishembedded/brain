@@ -174,7 +174,7 @@ row of `x: [T, D]`".
 | `step(z)` | `1` if `z >= 0` and `0` otherwise, so `step(0) = 1` (Volume III, chapter 1) |
 | `atan2(y, x)` | the angle in radians, in $(-\pi, \pi]$, of the point with horizontal coordinate `x` and vertical coordinate `y` (the angle from the positive horizontal axis, anticlockwise); `atan2(0, 0)` is `0` |
 | `is_finite(x)` | true when `x` is neither `infinity`, `-infinity` nor not-a-number, false otherwise (so `is_finite(0.0 / 1.0)` is true and `is_finite(infinity - infinity)` is false); it is the test that a value can still be used in arithmetic (Volume III, chapter 12) |
-| `pi`, `infinity`, `nan` | the constant $\pi$, positive infinity (`-infinity` is its negative) and the not-a-number value (`is_finite(nan)` is false, `nan == nan` is false) |
+| `pi`, `infinity`, `nan` | the constant $\pi$, positive infinity (`-infinity` is its negative) and the not-a-number value (`is_finite(nan)` is false, `nan == nan` is false). `exp(-infinity)` is `0` and `max(x, -infinity)` is `x`, so a running maximum can start at `-infinity` and a masked score of `-infinity` has weight 0; `-infinity - (-infinity)` is `nan`, so an algorithm that subtracts a running maximum tests for a row that has seen nothing (Volume V, Chapter 13) |
 | `and`, `or`, `not` | logical operations on `bool`; `and` and `or` stop at the first operand that decides the result |
 | `x if c else y` | `x` when the condition `c` is true, otherwise `y`; only the chosen operand is evaluated |
 
