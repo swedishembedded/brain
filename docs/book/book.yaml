@@ -527,7 +527,7 @@ volumes:
         title: "Sparse Attention"
         question: "If each token only needs a few others, how do we find them cheaply?"
         introduces: [sparse-attention-pattern, learned-index-selection, latent-sparse-attention, paged-sparse-layout]
-        requires: [flash-attention, kv-cache, top-k-gating]
+        requires: [flash-attention, kv-cache, top-k-gating, scaled-dot-product-attention, causal-mask, sliding-window-attention, attention-sink, kl-divergence, cross-entropy]
         brain: []
       - id: recurrent-depth
         title: "Looped and Recurrent-Depth Transformers"

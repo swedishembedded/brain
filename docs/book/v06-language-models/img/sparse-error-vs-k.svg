@@ -1,0 +1,40 @@
+<!-- source-sha256: 807c475e25832c2be045dca22bf4aae755a874cf85d9926875c0e7e0eb1123e8 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 360" width="620" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="360" fill="#ffffff"/>
+<line x1="72.51" y1="314" x2="72.51" y2="30" stroke="#edf2f7"/>
+<text x="72.51" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="217.57" y1="314" x2="217.57" y2="30" stroke="#edf2f7"/>
+<text x="217.57" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="362.64" y1="314" x2="362.64" y2="30" stroke="#edf2f7"/>
+<text x="362.64" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="507.71" y1="314" x2="507.71" y2="30" stroke="#edf2f7"/>
+<text x="507.71" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="58" y1="314" x2="602" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="266.67" x2="602" y2="266.67" stroke="#edf2f7"/>
+<text x="52" y="270.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="219.33" x2="602" y2="219.33" stroke="#edf2f7"/>
+<text x="52" y="223.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="172" x2="602" y2="172" stroke="#edf2f7"/>
+<text x="52" y="176" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.5</text>
+<line x1="58" y1="124.67" x2="602" y2="124.67" stroke="#edf2f7"/>
+<text x="52" y="128.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="77.33" x2="602" y2="77.33" stroke="#edf2f7"/>
+<text x="52" y="81.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2.5</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">3</text>
+<rect x="58" y="30" width="544" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="72.51,59.28 145.04,94.72 217.57,127.55 290.11,152 362.64,173.88 435.17,190.24 507.71,212.15 580.24,264.91"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="72.51,107.81 145.04,168.54 217.57,221.68 290.11,246.64 362.64,270.37 435.17,288.71 507.71,301.9 580.24,310.89"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="72.51,151 145.04,223.06 217.57,267.38 290.11,283.96 362.64,292.95 435.17,301.35 507.71,308.31 580.24,312.81"/><circle cx="72.51" cy="107.81" r="3.5" fill="#c05621"/><circle cx="145.04" cy="168.54" r="3.5" fill="#c05621"/><circle cx="217.57" cy="221.68" r="3.5" fill="#c05621"/><circle cx="290.11" cy="246.64" r="3.5" fill="#c05621"/><circle cx="362.64" cy="270.37" r="3.5" fill="#c05621"/><circle cx="435.17" cy="288.71" r="3.5" fill="#c05621"/><circle cx="507.71" cy="301.9" r="3.5" fill="#c05621"/><circle cx="580.24" cy="310.89" r="3.5" fill="#c05621"/><circle cx="72.51" cy="151" r="3.5" fill="#2b6cb0"/><circle cx="145.04" cy="223.06" r="3.5" fill="#2b6cb0"/><circle cx="217.57" cy="267.38" r="3.5" fill="#2b6cb0"/><circle cx="290.11" cy="283.96" r="3.5" fill="#2b6cb0"/><circle cx="362.64" cy="292.95" r="3.5" fill="#2b6cb0"/><circle cx="435.17" cy="301.35" r="3.5" fill="#2b6cb0"/><circle cx="507.71" cy="308.31" r="3.5" fill="#2b6cb0"/><circle cx="580.24" cy="312.81" r="3.5" fill="#2b6cb0"/></g>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log2 of k, the number of keys read</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">relative error of the output</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Output error against the number of keys read</text>
+<rect x="404.98" y="38" width="189.02" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="412.98" y1="53" x2="432.98" y2="53" stroke="#9b2c2c" stroke-width="2"/>
+<text x="438.98" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">the k most recent keys</text>
+<line x1="412.98" y1="70" x2="432.98" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="438.98" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">top k of the trained indexer</text>
+<line x1="412.98" y1="87" x2="432.98" y2="87" stroke="#2b6cb0" stroke-width="2"/>
+<text x="438.98" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">top k of the true weights</text>
+</svg>

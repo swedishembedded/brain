@@ -1,0 +1,37 @@
+<!-- source-sha256: cf0cf9bdeb29aaf3add6c2e4751a4ca1417704b523a8a148fc42ec9cbf013396 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 385" width="620" height="385">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="385" fill="#ffffff"/>
+<line x1="72.51" y1="314" x2="72.51" y2="30" stroke="#edf2f7"/>
+<text x="72.51" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="217.57" y1="314" x2="217.57" y2="30" stroke="#edf2f7"/>
+<text x="217.57" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="362.64" y1="314" x2="362.64" y2="30" stroke="#edf2f7"/>
+<text x="362.64" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="507.71" y1="314" x2="507.71" y2="30" stroke="#edf2f7"/>
+<text x="507.71" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="58" y1="314" x2="602" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="257.2" x2="602" y2="257.2" stroke="#edf2f7"/>
+<text x="52" y="261.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="200.4" x2="602" y2="200.4" stroke="#edf2f7"/>
+<text x="52" y="204.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="143.6" x2="602" y2="143.6" stroke="#edf2f7"/>
+<text x="52" y="147.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="86.8" x2="602" y2="86.8" stroke="#edf2f7"/>
+<text x="52" y="90.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="544" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="72.51,204.79 145.04,148.97 217.57,103.01 290.11,86.09 362.64,73.6 435.17,59.33 507.71,44.49 580.24,33.09"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="72.51,253.91 145.04,215.01 217.57,169.66 290.11,139.34 362.64,108.66 435.17,81.26 507.71,58.11 580.24,37.48"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="72.51,312.03 145.04,310.35 217.57,306.37 290.11,303.07 362.64,285.65 435.17,257.85 507.71,211.34 580.24,108.97"/><circle cx="72.51" cy="204.79" r="3.5" fill="#2b6cb0"/><circle cx="145.04" cy="148.97" r="3.5" fill="#2b6cb0"/><circle cx="217.57" cy="103.01" r="3.5" fill="#2b6cb0"/><circle cx="290.11" cy="86.09" r="3.5" fill="#2b6cb0"/><circle cx="362.64" cy="73.6" r="3.5" fill="#2b6cb0"/><circle cx="435.17" cy="59.33" r="3.5" fill="#2b6cb0"/><circle cx="507.71" cy="44.49" r="3.5" fill="#2b6cb0"/><circle cx="580.24" cy="33.09" r="3.5" fill="#2b6cb0"/><circle cx="72.51" cy="253.91" r="3.5" fill="#c05621"/><circle cx="145.04" cy="215.01" r="3.5" fill="#c05621"/><circle cx="217.57" cy="169.66" r="3.5" fill="#c05621"/><circle cx="290.11" cy="139.34" r="3.5" fill="#c05621"/><circle cx="362.64" cy="108.66" r="3.5" fill="#c05621"/><circle cx="435.17" cy="81.26" r="3.5" fill="#c05621"/><circle cx="507.71" cy="58.11" r="3.5" fill="#c05621"/><circle cx="580.24" cy="37.48" r="3.5" fill="#c05621"/></g>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">log2 of k, the number of keys read</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">share of the attention mass kept</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Attention mass kept against the number of keys read</text>
+<line x1="49.28" y1="373" x2="69.28" y2="373" stroke="#2b6cb0" stroke-width="2"/>
+<text x="75.28" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">top k of the true weights</text>
+<line x1="225.01" y1="373" x2="245.01" y2="373" stroke="#c05621" stroke-width="2"/>
+<text x="251.01" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">top k of the trained indexer</text>
+<line x1="416.03" y1="373" x2="436.03" y2="373" stroke="#9b2c2c" stroke-width="2"/>
+<text x="442.03" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">the k most recent keys</text>
+</svg>

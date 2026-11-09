@@ -422,11 +422,15 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **label-smoothing**: replacing the one-hot target by a mixture of it with the uniform distribution, so that the loss is smallest at a finite gap between the scores instead of only in the limit of infinite confidence. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
+**latent sparse attention**: selecting keys by scoring buckets of keys in a low-dimensional unit-length index space, reading the members of the best buckets together with the most recent keys and the first few, so that the scoring work grows with the number of buckets and not the number of keys. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
+
 **launch overhead**: the fixed cost of starting work on a device, paid per submission and per dispatch regardless of how much the kernel does, which makes many tiny kernels cost mostly their starts. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
 
 **law of large numbers**: the statement that the average of $n$ independent draws with finite variance converges to their expectation, with the probability of an error above any fixed amount going to zero as $n$ grows. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **layer-normalization**: normalizing each example's features with the mean and variance taken over the features of that one example, then applying a learned gain and shift; it does not depend on the batch or the mode. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
+
+**learned index selection**: choosing the keys a query reads by ranking all keys with a second, cheaper scorer (the indexer) and attending exactly to the top few; the scorer is trained to imitate the dense attention because the ranking itself has no gradient. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
 
 **learned-controller**: a network trained to produce a control command from the state of a system, here by imitating the commands of a classical controller, and judged by the behaviour of the system when it is in charge. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
@@ -575,6 +579,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **overflow and underflow**: overflow is an exact result too large for the format, stored as infinity; underflow is a nonzero result too small, stored with fewer and fewer significant digits (subnormal numbers) and finally as zero. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 ## P
+
+**paged sparse layout**: storing keys and values in fixed-size pages reached through a block table and reading a content-based selection as a list of positions resolved through that table, row by row, without copying the selected rows into one buffer. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
 
 **paired test**: a comparison of two systems scored on the same examples through the per-example differences, whose standard error is smaller than an unpaired one when the systems' answers are correlated; the paired z-test and the exact sign test are two of them. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
@@ -757,6 +763,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **softmax-cross-entropy**: the loss of a classifier computed directly from its scores and the true class as the log-sum-exp of the scores minus the score of the true class; it is the negative log-likelihood of the true class under the softmax, and its gradient with respect to the scores is the probability vector minus the one-hot target. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **sorting**: rearranging a list into non-decreasing order; comparison sorts need $\Omega(n \log n)$ comparisons in the worst case and merge sort achieves it, while sorts that use the values of integer keys as addresses can be linear. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
+
+**sparse attention pattern**: the rule that gives each query the set of keys it reads, instead of all earlier keys, so that attention is a softmax over those keys only; fixed patterns depend on positions alone, such as a window, global tokens, a stride or blocks. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
 
 **special tokens**: ids that stand for no piece of text, such as the beginning or end of a sequence, padding, an unknown piece or the markers of a chat turn, matched from their literals before ordinary encoding and never to be produced from text a client wrote. *([Tokenization](v05-sequences/02-tokenization.md))*
 

@@ -1,0 +1,62 @@
+<!-- source-sha256: 6feb185a35333fb820034375c6c6ce2585e68d9e0ddea365394970db50084427 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 570" width="980" height="570"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="980" height="570" fill="#ffffff"/>
+<rect x="10" y="10" width="470" height="290" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Key-level indexer: a score for every cached key</text>
+<ellipse cx="135" cy="80" rx="85" ry="22" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="135" y="76.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">query token:</text>
+<text x="135" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">indexer query</text>
+<ellipse cx="355" cy="80" rx="85" ry="22" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="355" y="76.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">indexer keys,</text>
+<text x="355" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">T rows</text>
+<rect x="130" y="125" width="230" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="245" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">score every key</text>
+<text x="245" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">T cheap dot products</text>
+<rect x="130" y="190" width="230" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="245" y="211.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">keep the k</text>
+<text x="245" y="227.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">largest scores</text>
+<ellipse cx="245" cy="275" rx="100" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="245" y="279.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">selection: k positions</text>
+<line x1="137.73" y1="103.25" x2="182.27" y2="123.75" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="352.27" y1="103.25" x2="307.73" y2="123.75" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="245" y1="178" x2="245" y2="187" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="254" y="186.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">T scores</text>
+<line x1="245" y1="243" x2="245" y2="252" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="500" y="10" width="470" height="290" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="514" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Bucket-level index: a score for every bucket</text>
+<ellipse cx="625" cy="80" rx="85" ry="22" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="625" y="76.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">query token:</text>
+<text x="625" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">index query</text>
+<ellipse cx="845" cy="80" rx="85" ry="22" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="845" y="76.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bucket</text>
+<text x="845" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">centroids</text>
+<rect x="620" y="125" width="230" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="735" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">score every bucket</text>
+<text x="735" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">about T / 8 dot products</text>
+<rect x="620" y="190" width="230" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="735" y="211.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">members of the best</text>
+<text x="735" y="227.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">buckets, window, sinks</text>
+<ellipse cx="735" cy="275" rx="100" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="735" y="279.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">selection: some thousand keys</text>
+<line x1="627.73" y1="103.25" x2="672.27" y2="123.75" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="842.27" y1="103.25" x2="797.73" y2="123.75" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="735" y1="178" x2="735" y2="187" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="744" y="186.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">bucket scores</text>
+<line x1="735" y1="243" x2="735" y2="252" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="10" y="315" width="960" height="245" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="337" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Attention over the selection</text>
+<rect x="350" y="360" width="280" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="490" y="381.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block table</text>
+<text x="490" y="397.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">position -&gt; (page, row)</text>
+<rect x="350" y="435" width="280" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="490" y="456.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">attention over the selection</text>
+<text x="490" y="472.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">one softmax over its scores</text>
+<ellipse cx="490" cy="530" rx="100" ry="20" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="490" y="534.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">output, as wide as dense</text>
+<path d="M245,295 L245,375 Q245,385 255,385 L347,385" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M735,295 L735,375 Q735,385 725,385 L633,385" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="490" y1="413" x2="490" y2="432" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="499" y="426.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">K, V rows</text>
+<line x1="490" y1="488" x2="490" y2="507" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="237" y="366.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">key positions per query</text>
+<text x="743" y="366.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">key positions per query</text>
+</svg>
