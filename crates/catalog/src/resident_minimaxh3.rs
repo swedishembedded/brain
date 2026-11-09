@@ -50,21 +50,39 @@ impl MiniMaxH3Resident {
         MiniMaxH3Resident { id, paths, gpus }
     }
 
-    /// `(dit, workspace, vae, host)` of the request `key` names: the DiT
-    /// (and its gates) at its tier, the forward's workspace on each card that
-    /// holds a stage of it, the VAEs a decode holds after the DiT is gone, and
-    /// the host bytes beside them.
-    fn footprint(key: &InstanceKey) -> Option<(u64, u64, u64, u64)> {
-        let Key { vf, vh, vw, audio, reference_rows, dtype, act_levels, gates, .. } = parse_key(&key.config)?;
+    /// What the request `key` names holds: see [`Footprint`].
+    fn footprint(key: &InstanceKey) -> Option<Footprint> {
+        let Key { vf, vh, vw, audio, reference_rows, dtype, act_levels, gates, streamed, .. } = parse_key(&key.config)?;
         let dit_cfg = H3TransformerConfig::real();
         let tier = key_tier(&dtype)?;
-        let weights = minimaxh3::model::resident_cost(&dit_cfg, tier, gates).total();
+        let weights = if streamed { 0 } else { minimaxh3::model::resident_cost(&dit_cfg, tier, gates).total() };
+        let slot = if streamed { minimaxh3::model::streamed_cost(&dit_cfg, gates) } else { 0 };
         let vae_weights = manifest_bytes(&VideoVaeConfig::real().tensor_manifest()) + manifest_bytes(&minimaxh3::vocoder::VocoderConfig::h3_32khz().tensor_manifest());
         let rows = packed_rows(vf, vh, vw, audio) + reference_rows;
         let activations = minimaxh3::model::forward_workspace_bytes(&dit_cfg, rows, act_levels) + if gates { minimaxh3::vsa::workspace_bytes(&dit_cfg, rows, true) } else { 0 };
         let (ph, pw) = (dit_cfg.patch_size[1] as u64, dit_cfg.patch_size[2] as u64);
         let pixels = vf as u64 * (vh as u64 * ph) * (vw as u64 * pw) * 3 * 4;
-        Some((weights, activations, vae_weights, dit_host_bytes(&dit_cfg) + vae_weights + pixels + (2u64 << 30)))
+        Some(Footprint { dit: weights, slot, workspace: activations, vae: vae_weights, host: dit_host_bytes(&dit_cfg) + vae_weights + pixels + (2u64 << 30) })
+    }
+}
+
+/// A request's memory: the DiT (and its gates) held resident at its tier,
+/// split over the cards, or the slot a streamed DiT holds on each card it
+/// runs a stage on; the forward's workspace on each such card; the VAEs a
+/// decode holds after the DiT is gone; and the host bytes beside them.
+struct Footprint {
+    dit: u64,
+    slot: u64,
+    workspace: u64,
+    vae: u64,
+    host: u64,
+}
+
+impl Footprint {
+    /// One of `cards` cards: its share of the DiT with its own workspace, or
+    /// the VAEs, whichever phase is larger.
+    fn per_card(&self, cards: u64) -> u64 {
+        (self.dit / cards + self.slot + self.workspace).max(self.vae)
     }
 }
 
@@ -76,7 +94,8 @@ impl MiniMaxH3Resident {
 /// held at ([`RESIDENT_DTYPE`]), `"f32"` when the `@{dtype}` suffix is
 /// absent - `resident_wan.rs::parse_key`'s own precedent - and, with `/a2`,
 /// that the request quantizes its activations in two int8 levels, whose
-/// forward needs more workspace; with `/g`, the blocks' VSA gates.
+/// forward needs more workspace; with `/g`, the blocks' VSA gates; with `/s`,
+/// that the DiT is streamed a block at a time.
 #[derive(Debug, PartialEq)]
 struct Key {
     task: String,
@@ -89,6 +108,8 @@ struct Key {
     act_levels: ActLevels,
     /// Whether the DiT holds every block's VSA gate (`/g`).
     gates: bool,
+    /// Whether the request streams the DiT a block at a time (`/s`).
+    streamed: bool,
 }
 
 fn parse_key(config: &str) -> Option<Key> {
@@ -98,11 +119,12 @@ fn parse_key(config: &str) -> Option<Key> {
     };
     let mut suffixes = dtype.split('/');
     let dtype = suffixes.next()?.to_string();
-    let (mut act_levels, mut gates) = (ActLevels::One, false);
+    let (mut act_levels, mut gates, mut streamed) = (ActLevels::One, false, false);
     for suffix in suffixes {
         match suffix {
             "a2" => act_levels = ActLevels::Two,
             "g" => gates = true,
+            "s" => streamed = true,
             _ => return None,
         }
     }
@@ -115,7 +137,7 @@ fn parse_key(config: &str) -> Option<Key> {
         Some(r) => r.parse().ok()?,
         None => 0,
     };
-    Some(Key { task, vf, vh, vw, audio, reference_rows, dtype, act_levels, gates })
+    Some(Key { task, vf, vh, vw, audio, reference_rows, dtype, act_levels, gates, streamed })
 }
 
 /// Resolve one invocation's `(video latent extent, audio latent extent)`
@@ -219,14 +241,17 @@ impl ResidentModel for MiniMaxH3Resident {
         // costs nothing beside them.
         let (_, gates) = minimaxh3::caps::requested_extras(inv, &self.paths).unwrap_or_default();
         let gates = if gates.is_some() { "/g" } else { "" };
-        InstanceKey::new(&self.id, format!("{extent}@{RESIDENT_DTYPE}{levels}{gates}"))
+        // An unparseable placement keys as resident; the request itself is
+        // refused once `gen_params_from` runs.
+        let streamed = if inv.get_str("dit_placement").as_deref() == Some("streamed") { "/s" } else { "" };
+        InstanceKey::new(&self.id, format!("{extent}@{RESIDENT_DTYPE}{levels}{gates}{streamed}"))
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
         // An unparseable key must not read as "free" - `resident_wan.
         // rs::estimate`'s identical reasoning.
-        let Some((dit, workspace, vae, host)) = Self::footprint(key) else { return MemCost::new(8u64 << 30, 4u64 << 30) };
-        MemCost::new((dit + workspace).max(vae), host)
+        let Some(f) = Self::footprint(key) else { return MemCost::new(8u64 << 30, 4u64 << 30) };
+        MemCost::new(f.per_card(1), f.host)
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
@@ -246,7 +271,7 @@ impl MultiDeviceResidentModel for MiniMaxH3Resident {
     /// same cards and dropped before the DiT loads.
     fn estimate_multi(&self, key: &InstanceKey) -> MultiDeviceCost {
         match (Self::footprint(key), self.gpus.len()) {
-            (Some((dit, workspace, vae, host)), n) if n > 0 => MultiDeviceCost::new(self.gpus.iter().map(|&i| (Device::Gpu(i), (dit / n as u64 + workspace).max(vae))).collect(), host),
+            (Some(f), n) if n > 0 => MultiDeviceCost::new(self.gpus.iter().map(|&i| (Device::Gpu(i), f.per_card(n as u64))).collect(), f.host),
             _ => MultiDeviceCost::new(Vec::new(), 0),
         }
     }
@@ -325,7 +350,7 @@ mod tests {
 
     #[test]
     fn key_parsing_round_trips_and_a_bad_key_still_costs_something() {
-        let key = |task: &str, reference_rows: u32, dtype: &str, act_levels| Some(Key { task: task.to_string(), vf: 37, vh: 32, vw: 32, audio: 207, reference_rows, dtype: dtype.to_string(), act_levels, gates: false });
+        let key = |task: &str, reference_rows: u32, dtype: &str, act_levels| Some(Key { task: task.to_string(), vf: 37, vh: 32, vw: 32, audio: 207, reference_rows, dtype: dtype.to_string(), act_levels, gates: false, streamed: false });
         assert_eq!(parse_key("t2va:37x32x32:207"), key("t2va", 0, "f32", ActLevels::One));
         assert_eq!(parse_key("t2va:37x32x32:207@f32"), key("t2va", 0, "f32", ActLevels::One));
         assert_eq!(parse_key("ref2va:37x32x32:207:16384@i8"), key("ref2va", 16384, "i8", ActLevels::One));
@@ -372,6 +397,27 @@ mod tests {
         assert!(audio > 0, "the audio latent extent must be real, got {audio}");
         assert_eq!(dtype, "i8");
         assert_eq!(key_tier(&dtype), Some(minimaxh3::pipeline::RESIDENT_TIER), "the key names the tier the adapter loads");
+    }
+
+    /// A request that streams its DiT keys apart from one that holds it
+    /// resident, and plans what streaming holds - a block's slot on each card
+    /// - not a share of the resident weights.
+    #[test]
+    fn a_streamed_dit_is_its_own_instance_and_plans_its_block_slot() {
+        let r = resident();
+        let base = Invocation::new().set("prompt", json!("a"));
+        let held = r.instance_key("t2va", &base);
+        let streamed = r.instance_key("t2va", &base.clone().set("dit_placement", json!("streamed")));
+        assert_ne!(held.config, streamed.config, "a streamed DiT is another instance");
+        assert!(parse_key(&streamed.config).expect("a streamed key parses").streamed);
+        assert!(!parse_key(&held.config).unwrap().streamed);
+        let card = |k: &InstanceKey| {
+            let cost = r.estimate_multi(k);
+            cost.devices().map(|d| cost.on(d)).max().expect("a card")
+        };
+        let slot = minimaxh3::model::streamed_cost(&H3TransformerConfig::real(), false);
+        assert!(card(&streamed) >= slot, "each card holds the streamed block's slot");
+        assert!(card(&streamed) < card(&held), "streaming holds less than the resident share");
     }
 
     /// A `ref2va` request's references take rows of their own - an image at

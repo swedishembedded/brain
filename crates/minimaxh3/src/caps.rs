@@ -154,6 +154,7 @@ pub fn manifest() -> Manifest {
             .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (shared by both the video and the audio schedule, one forward per step - no CFG, this model is guidance-distilled)").min(1.0).max(capability::bounds::DENOISE_STEPS).default(json!(20)))
             .param(ParamSpec::new("seed", ParamType::Int, "initial-noise seed (omit for random; the outcome reports the one used)"))
             .param(ParamSpec::new("int8_activation_levels", ParamType::Int, "int8 levels the DiT's linears quantize their activations to against its int8 weights: 1 (the int8 tier's ordinary arithmetic), or 2 (also quantizes what the first level rounds away - closer to the fp32 model, at a second product per linear)").min(1.0).max(2.0).default(json!(1)))
+            .param(ParamSpec::new("dit_placement", ParamType::Enum(pipeline::DitPlacement::NAMES.iter().map(|n| n.to_string()).collect()), "where the DiT's weights live while it denoises: resident (held on the cards at int8, refused naming the bytes when they cannot hold it with this request's workspace) or streamed (one block at a time at fp32, read from the checkpoint every step: any card holds it, many times slower)").default(json!("resident")))
             .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter for this action's DiT (a diffusers PEFT save, such as a few-step distillation); folded into the weights before they are quantized").host_resolved())
             .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier on top of the adapter's own alpha/rank; 1.0 = as trained. Only read when adapter is set.").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
             .param(ParamSpec::new("vsa_sparsity", ParamType::Float, "video sparse attention: the share of the video's key tiles each video query drops (0.75 keeps a quarter), selected per head by tile-mean scores; text, references and audio always stay dense. Omitted: the preset's own, else 0 (dense attention)").min(0.0).max(0.99).step(0.05))
@@ -366,6 +367,7 @@ fn decode_gen_params(inv: &capability::Invocation) -> Result<GenParams, String> 
             2 => crate::block::ActLevels::Two,
             n => return Err(format!("gen_params_from: int8_activation_levels must be 1 or 2, got {n}")),
         },
+        dit_placement: pipeline::DitPlacement::parse(&inv.get_str("dit_placement").unwrap_or_else(|| "resident".into()))?,
     };
     let adapter_scale = match inv.get_f64("lora_scale").unwrap_or(1.0) {
         scale if scale.is_finite() && scale >= 0.0 => scale as f32,
@@ -1142,6 +1144,18 @@ mod tests {
 
     /// The activation precision is the request's: one int8 level unless it
     /// asks for two, and nothing else is accepted.
+    /// The DiT is held resident unless a request asks for it streamed, and
+    /// a placement it does not know is refused, never read as either.
+    #[test]
+    fn a_request_chooses_where_its_dit_lives() {
+        let inv = Invocation::new().set("prompt", json!("a"));
+        let placement = |v: Option<&str>| decode_gen_params(&v.map_or(inv.clone(), |v| inv.clone().set("dit_placement", json!(v)))).map(|p| p.opts.dit_placement);
+        assert_eq!(placement(None), Ok(pipeline::DitPlacement::Resident));
+        assert_eq!(placement(Some("streamed")), Ok(pipeline::DitPlacement::Streamed));
+        let err = placement(Some("auto")).unwrap_err();
+        assert!(err.contains("dit_placement"), "{err}");
+    }
+
     #[test]
     fn a_request_chooses_its_int8_activation_levels() {
         let levels = |v: Option<i64>| {

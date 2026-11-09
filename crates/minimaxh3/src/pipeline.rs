@@ -837,6 +837,35 @@ pub struct GenOpts {
     /// How the DiT's linears quantize their activations against its int8
     /// weights ([`crate::block::ActLevels`]).
     pub act_levels: crate::block::ActLevels,
+    /// Where the DiT's weights live while it denoises.
+    pub dit_placement: DitPlacement,
+}
+
+/// Where the DiT's weights live while it denoises. Never chosen for the
+/// caller: a resident DiT the cards cannot hold is refused, not streamed,
+/// since streaming re-reads the whole checkpoint every step - the difference
+/// between minutes and hours per clip.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DitPlacement {
+    /// Held on the schedulable cards at int8 for the whole generation, every
+    /// step reading weights already there.
+    #[default]
+    Resident,
+    /// One block at a time at fp32, read from the checkpoint every step: any
+    /// card holds it.
+    Streamed,
+}
+
+impl DitPlacement {
+    pub const NAMES: [&'static str; 2] = ["resident", "streamed"];
+
+    pub fn parse(name: &str) -> Result<DitPlacement, String> {
+        match name {
+            "resident" => Ok(DitPlacement::Resident),
+            "streamed" => Ok(DitPlacement::Streamed),
+            other => Err(format!("minimaxh3: dit_placement must be resident or streamed, got {other:?}")),
+        }
+    }
 }
 
 /// One decoded `t2va`/`fl2va` result: RGB video in `[0, 1]` plus a stereo
@@ -1024,13 +1053,12 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     let mut compact_audio = condition_audio.concat();
     compact_audio.extend((0..num_generated_audio_rows * audio_in_channels).map(|_| rng.next_gaussian() as f32));
 
-    // 4. Denoise, both VAEs still unopened. The DiT is held resident at
-    // `RESIDENT_TIER` for this one
-    // generation when the schedulable cards hold it with this request's
-    // workspace free - every step reads every weight, so reading them once
-    // is the whole difference - and streamed one block at a time
-    // (`H3Transformer::forward_streaming`) when they do not: its ~2.6 GB per
-    // block fits any card. Either way it is gone before decode.
+    // 4. Denoise, both VAEs still unopened. The DiT is placed as the request
+    // says (`DitPlacement`): held resident at `RESIDENT_TIER` for this one
+    // generation - every step reads every weight, so reading them once is
+    // the whole difference - or streamed one block at a time
+    // (`H3Transformer::forward_streaming`), ~2.6 GB per block, which any
+    // card holds. Either way it is gone before decode.
     //
     // The streamed devices are opened ONCE here, outside the step loop, and
     // reused for every step: opening a fresh device per step OOM'd a 24 GB
@@ -1050,14 +1078,9 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     // A request is under way from here: loading the DiT can take longer than
     // the steps that follow it.
     progress(0, total, "load DiT");
-    // Streaming re-reads the checkpoint every step, so the switch is said
-    // out loud: it is the difference between minutes and hours per clip.
-    let owned = match H3Transformer::load(dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels), ckpt.dit_gates) {
-        Ok(m) => Some(m),
-        Err(reason) => {
-            eprintln!("minimaxh3: the DiT does not hold resident, streaming it a block at a time ({reason})");
-            None
-        }
+    let owned = match opts.dit_placement {
+        DitPlacement::Resident => Some(H3Transformer::load(dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels), ckpt.dit_gates).map_err(|reason| format!("{reason}; dit_placement streamed streams it a block at a time instead, re-reading the checkpoint every step"))?),
+        DitPlacement::Streamed => None,
     };
     let resident = owned.as_ref();
     let streaming_ctx = resident.is_none().then(|| StreamingDit::open(dit_cfg, device));
@@ -1531,9 +1554,28 @@ pub(crate) mod tests {
     /// bypassed) - the "tiny" in this test's name is the WEIGHT/channel
     /// scale, not the frame count, since the duration bound is a genuine
     /// request-level business rule this pipeline enforces for a real
-    /// caller too.
+    /// caller too. Streamed: the CPU holds no resident int8 DiT.
     pub(crate) fn tiny_gen_opts(seed: u64) -> GenOpts {
-        GenOpts { canvas: Some((32, 32)), num_frames: 124, denoise_steps: 2, vsa_sparsity: 0.0, seed, device: Some("cpu".to_string()), act_levels: Default::default() }
+        GenOpts { canvas: Some((32, 32)), num_frames: 124, denoise_steps: 2, vsa_sparsity: 0.0, seed, device: Some("cpu".to_string()), act_levels: Default::default(), dit_placement: DitPlacement::Streamed }
+    }
+
+    /// A resident DiT the device cannot hold is refused before anything is
+    /// denoised, naming the streamed placement - never streamed instead.
+    #[test]
+    fn a_resident_dit_the_device_cannot_hold_is_refused_not_streamed() {
+        let dit_cfg = tiny_dit_cfg();
+        let video_vae_cfg = tiny_video_vae_cfg();
+        let vocoder_cfg = tiny_vocoder_cfg();
+        let dit_tensors = rand_dit_tensors(&dit_cfg, 1);
+        let video_vae_tensors = rand_manifest_tensors(video_vae_cfg.tensor_manifest(), 2);
+        let vocoder_tensors = rand_manifest_tensors(vocoder_cfg.tensor_manifest(), 3);
+        let ckpt = tiny_checkpoint(&dit_tensors, &video_vae_tensors, &vocoder_tensors);
+        let text = tiny_text(3, dit_cfg.text_dim as usize, 4);
+        let opts = GenOpts { dit_placement: DitPlacement::Resident, ..tiny_gen_opts(5) };
+        let mut steps = 0;
+        let err = t2va(&ckpt, &text, &opts, &capability::CancelToken::default(), |_, _, phase| steps += u32::from(phase == "denoise")).err().expect("the CPU holds no resident int8 DiT");
+        assert!(err.contains("dit_placement streamed"), "{err}");
+        assert_eq!(steps, 0, "nothing is denoised");
     }
 
     /// The end-to-end gate: encode (pre-built) -> pack -> denoise

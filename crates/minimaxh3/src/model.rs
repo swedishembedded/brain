@@ -362,6 +362,14 @@ pub fn resident_cost(cfg: &H3TransformerConfig, tier: Dtype, gated: bool) -> Lay
     LayerBytes { per_layer: vec![block_bytes(cfg, tier) + gate; cfg.num_layers as usize], embed, head }
 }
 
+/// The device bytes a streamed DiT holds on each card it runs a stage on:
+/// one block's slot at fp32 - with its VSA gate when `gated` - and the embed
+/// and head stages' weights.
+pub fn streamed_cost(cfg: &H3TransformerConfig, gated: bool) -> u64 {
+    let cost = resident_cost(cfg, Dtype::F32, gated);
+    cost.per_layer[0] + cost.embed + cost.head
+}
+
 impl H3Transformer {
     /// Hold the DiT resident at linear tier `tier`, over the fewest cards
     /// `device` may schedule that hold it while keeping `rows` packed rows of

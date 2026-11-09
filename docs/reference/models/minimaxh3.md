@@ -127,11 +127,13 @@ one at 640x352 with one image reference and ~10% less at 768x448 (~16% at
   Qwen3-VL language tower (~27 GB at int8) are spread over as many of the
   `--device` cards as hold them, run once, and dropped before the DiT loads.
   A selection that cannot hold them is refused, naming the bytes.
-* **The DiT is held resident at int8 when the cards hold it**, with the
-  request's forward workspace free on each (~25 GB of packed linears and
-  norms, split over two cards), so every step reads weights already on the
-  cards. Otherwise it streams one block at a time at fp32, which any card
-  holds but which reads the whole checkpoint every step. On two P40s,
+* **The DiT is held resident at int8** (`--dit_placement resident`, the
+  default), with the request's forward workspace free on each card (~25 GB
+  of packed linears and norms, split over two cards), so every step reads
+  weights already on the cards. A request the cards cannot hold that way is
+  refused, naming the bytes. `--dit_placement streamed` streams it one block
+  at a time at fp32 instead, which any card holds but which reads the whole
+  checkpoint every step - many times slower, so it is never chosen for you. On two P40s,
   768x448 x 121 frames (~13.6k packed rows) holds resident and peaks at
   ~19.0 GB per card; a 20-step `fl2va` clip at that size takes ~50 min.
 * **`--int8-activation-levels 2`** (`int8_activation_levels: 2` on a
