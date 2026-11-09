@@ -1,0 +1,55 @@
+<!-- source-sha256: c1575d4bd0c4830c81bc75ce21c2ded71cbfe419e37f57e8e3ee7280953efaff -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 610" width="1000" height="610"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="610" fill="#ffffff"/>
+<ellipse cx="130" cy="70" rx="85" ry="28" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="130" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x</text>
+<text x="130" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">n tokens, width D</text>
+<rect x="280" y="41" width="240" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">router</text>
+<text x="400" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">z = x W_r, softmax,</text>
+<text x="400" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">top-k, renormalize</text>
+<ellipse cx="760" cy="70" rx="105" ry="29" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="760" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">n k slots:</text>
+<text x="760" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">expert id, gate weight</text>
+<rect x="645" y="171" width="230" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="760" y="196.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">counting sort of the slots</text>
+<text x="760" y="212.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">histogram, scan, emit</text>
+<rect x="280" y="171" width="240" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="196.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gather the rows of x</text>
+<text x="400" y="212.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">expert by expert</text>
+<line x1="218" y1="70" x2="277" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="523" y1="70" x2="652" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="760" y1="102" x2="760" y2="168" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="642" y1="200" x2="523" y2="200" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="582.5" y="191.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">expert-major order</text>
+<path d="M130,98 L130,190 Q130,200 140,200 L277,200" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="30" y="290" width="740" height="100" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<text x="400" y="308.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">every expert runs once, on its own rows (the example&#x27;s counts)</text>
+<rect x="50" y="328" width="160" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="130" y="348.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">expert 0</text>
+<text x="130" y="364.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 rows</text>
+<rect x="230" y="328" width="160" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="310" y="348.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">expert 1</text>
+<text x="310" y="364.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5 rows</text>
+<rect x="410" y="328" width="160" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="490" y="348.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">expert 2</text>
+<text x="490" y="364.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5 rows</text>
+<rect x="590" y="328" width="160" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="670" y="348.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">expert 3</text>
+<text x="670" y="364.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 rows</text>
+<line x1="400" y1="232" x2="400" y2="287" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="775" y="302" width="180" height="76" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="865" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">shared expert</text>
+<text x="865" y="344.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reads all n rows,</text>
+<text x="865" y="360.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">no router</text>
+<rect x="230" y="449" width="340" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="468.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">scatter back and add</text>
+<text x="400" y="484.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">out[token] += g * expert output,</text>
+<text x="400" y="500.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">plus the shared expert&#x27;s output</text>
+<line x1="400" y1="393" x2="400" y2="446" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M865,70 L955,70 Q965,70 965,80 L965,456 Q965,466 955,466 L573,466" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M865,378 L865,484 Q865,494 855,494 L573,494" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="952" y="254.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">gate weights g</text>
+<ellipse cx="400" cy="570" rx="110" ry="22" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="574.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">y: n tokens, width D</text>
+<line x1="400" y1="514" x2="400" y2="545" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

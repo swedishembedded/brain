@@ -515,7 +515,7 @@ volumes:
         title: "Mixture of Experts"
         question: "How can a model have a trillion parameters yet use only a few billion per token?"
         introduces: [expert, router, top-k-gating, load-balancing, shared-expert, expert-parallelism]
-        requires: [feed-forward-network, softmax, sigmoid, transformer-block]
+        requires: [feed-forward-network, swiglu, softmax, sigmoid, transformer-block, prefix-sum, gradient-check, adam, arithmetic-intensity, bandwidth-bound, decode-phase]
         brain: [toymoe, qwen35moe, glmdsa]
       - id: linear-attention
         title: "Linear Attention, Recurrence and Hybrid Models"

@@ -1,0 +1,36 @@
+<!-- source-sha256: 2d37b5cbdb40075e1a7ed3488a1a5572655bf12c6df8ce46b094e24ab6a32483 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 360" width="620" height="360">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="360" fill="#ffffff"/>
+<line x1="85.9" y1="314" x2="85.9" y2="30" stroke="#edf2f7"/>
+<text x="85.9" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="225.38" y1="314" x2="225.38" y2="30" stroke="#edf2f7"/>
+<text x="225.38" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="364.87" y1="314" x2="364.87" y2="30" stroke="#edf2f7"/>
+<text x="364.87" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="504.36" y1="314" x2="504.36" y2="30" stroke="#edf2f7"/>
+<text x="504.36" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="58" y1="314" x2="602" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="243" x2="602" y2="243" stroke="#edf2f7"/>
+<text x="52" y="247" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<line x1="58" y1="172" x2="602" y2="172" stroke="#edf2f7"/>
+<text x="52" y="176" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">40</text>
+<line x1="58" y1="101" x2="602" y2="101" stroke="#edf2f7"/>
+<text x="52" y="105" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">60</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">80</text>
+<rect x="58" y="30" width="544" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="284"/></clipPath>
+<g clip-path="url(#plot)"><line x1="58" y1="200.4" x2="602" y2="200.4" stroke="#a0aec0" stroke-dasharray="4 4"/><polyline fill="none" stroke="#9b2c2c" stroke-width="1.6" points="85.9,196.85 155.64,207.5 225.38,314 295.13,168.45 364.87,65.5 434.62,175.55 504.36,218.15 574.1,257.2"/><circle cx="85.9" cy="196.85" r="3.5" fill="#9b2c2c"/><circle cx="155.64" cy="207.5" r="3.5" fill="#9b2c2c"/><circle cx="225.38" cy="314" r="3.5" fill="#9b2c2c"/><circle cx="295.13" cy="168.45" r="3.5" fill="#9b2c2c"/><circle cx="364.87" cy="65.5" r="3.5" fill="#9b2c2c"/><circle cx="434.62" cy="175.55" r="3.5" fill="#9b2c2c"/><circle cx="504.36" cy="218.15" r="3.5" fill="#9b2c2c"/><circle cx="574.1" cy="257.2" r="3.5" fill="#9b2c2c"/><polyline fill="none" stroke="#c05621" stroke-width="1.6" points="85.9,200.4 155.64,189.75 225.38,182.65 295.13,235.9 364.87,189.75 434.62,182.65 504.36,218.15 574.1,203.95"/><circle cx="85.9" cy="200.4" r="3.5" fill="#c05621"/><circle cx="155.64" cy="189.75" r="3.5" fill="#c05621"/><circle cx="225.38" cy="182.65" r="3.5" fill="#c05621"/><circle cx="295.13" cy="235.9" r="3.5" fill="#c05621"/><circle cx="364.87" cy="189.75" r="3.5" fill="#c05621"/><circle cx="434.62" cy="182.65" r="3.5" fill="#c05621"/><circle cx="504.36" cy="218.15" r="3.5" fill="#c05621"/><circle cx="574.1" cy="203.95" r="3.5" fill="#c05621"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.6" points="85.9,200.4 155.64,200.4 225.38,203.95 295.13,193.3 364.87,203.95 434.62,211.05 504.36,193.3 574.1,196.85"/><circle cx="85.9" cy="200.4" r="3.5" fill="#2b6cb0"/><circle cx="155.64" cy="200.4" r="3.5" fill="#2b6cb0"/><circle cx="225.38" cy="203.95" r="3.5" fill="#2b6cb0"/><circle cx="295.13" cy="193.3" r="3.5" fill="#2b6cb0"/><circle cx="364.87" cy="203.95" r="3.5" fill="#2b6cb0"/><circle cx="434.62" cy="211.05" r="3.5" fill="#2b6cb0"/><circle cx="504.36" cy="193.3" r="3.5" fill="#2b6cb0"/><circle cx="574.1" cy="196.85" r="3.5" fill="#2b6cb0"/><text x="595.03" y="191.52" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">balanced: 32</text></g>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">expert</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">slots routed to the expert</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Load of each expert after training (initialisation 0)</text>
+<rect x="414.44" y="38" width="179.56" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="422.44" y1="53" x2="442.44" y2="53" stroke="#9b2c2c" stroke-width="2"/>
+<text x="448.44" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">no balancing loss</text>
+<line x1="422.44" y1="70" x2="442.44" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="448.44" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">balancing coefficient 0.05</text>
+<line x1="422.44" y1="87" x2="442.44" y2="87" stroke="#2b6cb0" stroke-width="2"/>
+<text x="448.44" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">balancing coefficient 0.5</text>
+</svg>

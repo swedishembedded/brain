@@ -262,6 +262,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **expectation**: the probability-weighted average $\sum_x x\,p(x)$ (or $\int x f(x)\,dx$) of a random variable, the value its long-run average approaches; it is linear, $\mathbb{E}[X + Y] = \mathbb{E}[X] + \mathbb{E}[Y]$. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
+**expert**: one of several feed-forward networks of the same shape inside a layer, each used only by the tokens that are routed to it; the word does not say what it knows. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
+
+**expert parallelism**: placing different experts of a layer on different devices, so that tokens are exchanged between devices by an all-to-all to reach their experts and returned with the results. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
+
 **exploding-gradient**: the same product with factors above one, so that the gradient grows geometrically toward the early layers and a step on them is enormous. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
 **exponent**: the count of repeated factors in $b^n$, extended to zero, negative and fractional counts by the rule $b^m b^n = b^{m+n}$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
@@ -433,6 +437,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **linear separability**: the property of labelled points that some line (plane, flat sheet) puts all points of one class on one side and all points of the other on the other; equivalently, the labelling is computed by a single threshold neuron. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
 
 **Lion**: an update that steps by exactly the learning rate in the sign of an interpolation of the momentum and the new gradient, keeping one state array instead of Adam's two. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
+
+**load balancing**: any way of making the experts receive about equal numbers of tokens, by an added loss on the router's probabilities or by a selection bias moved with the observed load. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
 
 **log-probabilities**: the logarithms of probabilities, at most 0, which a decoder reports and adds instead of multiplying probabilities, each stated for the distribution it belongs to: the model's or the sampler's. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
 
@@ -678,6 +684,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **rounding error**: the difference between an exact result and the stored number nearest to it; for round to nearest, ties to even, its relative size is at most $u$ for results inside the normal range, and every arithmetic operation commits one. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
+**router**: the small linear map, followed by a softmax or a sigmoid, that scores every expert for a token so that a selection can be made. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
+
 **row-major layout**: storing a tensor in memory with the last index changing fastest, so that the element $(i_0, \dots, i_{R-1})$ sits at offset $\sum_k i_k s_k$ with $s_k$ the product of the sizes to its right. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 ## S
@@ -709,6 +717,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **shader translation**: rewriting a kernel from its own language into the form a device accepts so that it still computes what the source computes, which requires keeping every promise the language makes (clamped bounds, wrapping integers, barrier and return semantics, zeroed workgroup memory, layout) that the target does not make by itself. *([One Program, Many Devices](v04-computation/09-backends.md))*
 
 **shape**: the list of the sizes of a tensor's axes, outermost first; the number of elements is their product. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
+**shared expert**: an expert outside the routing that every token uses, whose output is added to the routed sum, so that what all tokens need is not copied across the routed experts. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
 
 **shared memory**: the small, fast, on-chip memory of a compute unit that all invocations of one workgroup can read and write and no other workgroup can see, a cache whose contents the programmer chooses. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
@@ -785,6 +795,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **tiled matmul**: the matrix product computed one tile of the output at a time, with the matching tiles of the two inputs staged in a fast memory so that each number loaded is used once per row or column of the tile, cutting the loads from $2n^3$ to $2n^3/T$ for a tile of side $T$. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 
 **token**: the unit a model counts, one piece of the text a tokenizer cuts, with an integer id in the vocabulary; a token can be a character, a word, a part of a word or a single byte. *([Tokenization](v05-sequences/02-tokenization.md))*
+
+**top-k gating**: choosing the $k$ experts with the largest router scores for a token and combining their outputs with weights that come from those scores, normalized to sum to 1. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
 
 **top-k sampling**: keeping only the $k$ most probable tokens, setting the rest to zero and renormalizing before the draw. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
 

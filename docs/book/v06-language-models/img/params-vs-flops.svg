@@ -1,0 +1,37 @@
+<!-- source-sha256: 37d4cbe0dcb7d0f311db127e260877d10cf00b1ed6f27ac93949933e1d231b9a -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 442" width="620" height="442">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="442" fill="#ffffff"/>
+<line x1="58" y1="354" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="178.89" y1="354" x2="178.89" y2="30" stroke="#edf2f7"/>
+<text x="178.89" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="299.78" y1="354" x2="299.78" y2="30" stroke="#edf2f7"/>
+<text x="299.78" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">40</text>
+<line x1="420.67" y1="354" x2="420.67" y2="30" stroke="#edf2f7"/>
+<text x="420.67" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">60</text>
+<line x1="541.56" y1="354" x2="541.56" y2="30" stroke="#edf2f7"/>
+<text x="541.56" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">80</text>
+<line x1="58" y1="354" x2="602" y2="354" stroke="#edf2f7"/>
+<text x="52" y="358" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="282" x2="602" y2="282" stroke="#edf2f7"/>
+<text x="52" y="286" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">200</text>
+<line x1="58" y1="210" x2="602" y2="210" stroke="#edf2f7"/>
+<text x="52" y="214" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">400</text>
+<line x1="58" y1="138" x2="602" y2="138" stroke="#edf2f7"/>
+<text x="52" y="142" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">600</text>
+<line x1="58" y1="66" x2="602" y2="66" stroke="#edf2f7"/>
+<text x="52" y="70" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">800</text>
+<rect x="58" y="30" width="544" height="324" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="324"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#9b2c2c" stroke-width="1.6" points="96.03,352.87 134.06,351.74 210.11,349.47 362.23,344.94 666.45,335.88 1274.91,317.76 2491.81,281.52 4925.63,209.04 9793.26,64.09"/><circle cx="96.03" cy="352.87" r="3" fill="#9b2c2c"/><circle cx="134.06" cy="351.74" r="3" fill="#9b2c2c"/><circle cx="210.11" cy="349.47" r="3" fill="#9b2c2c"/><circle cx="362.23" cy="344.94" r="3" fill="#9b2c2c"/><circle cx="666.45" cy="335.88" r="3" fill="#9b2c2c"/><circle cx="1274.91" cy="317.76" r="3" fill="#9b2c2c"/><circle cx="2491.81" cy="281.52" r="3" fill="#9b2c2c"/><circle cx="4925.63" cy="209.04" r="3" fill="#9b2c2c"/><circle cx="9793.26" cy="64.09" r="3" fill="#9b2c2c"/><polyline fill="none" stroke="#c05621" stroke-width="1.6" points="134.25,344.93 134.45,335.87 134.85,317.74 135.64,281.48 137.23,208.95 140.39,63.9"/><circle cx="134.25" cy="344.93" r="3.5" fill="#c05621"/><circle cx="134.45" cy="335.87" r="3.5" fill="#c05621"/><circle cx="134.85" cy="317.74" r="3.5" fill="#c05621"/><circle cx="135.64" cy="281.48" r="3.5" fill="#c05621"/><circle cx="137.23" cy="208.95" r="3.5" fill="#c05621"/><circle cx="140.39" cy="63.9" r="3.5" fill="#c05621"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.6" points="362.42,344.93 362.62,335.87 363.02,317.74 363.81,281.48 365.4,208.95 368.56,63.9"/><circle cx="362.42" cy="344.93" r="3.5" fill="#2b6cb0"/><circle cx="362.62" cy="335.87" r="3.5" fill="#2b6cb0"/><circle cx="363.02" cy="317.74" r="3.5" fill="#2b6cb0"/><circle cx="363.81" cy="281.48" r="3.5" fill="#2b6cb0"/><circle cx="365.4" cy="208.95" r="3.5" fill="#2b6cb0"/><circle cx="368.56" cy="63.9" r="3.5" fill="#2b6cb0"/><text x="377.63" y="65.34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">E = 256, k = 8:</text><text x="377.63" y="77.58" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">806 M parameters,</text><text x="377.63" y="89.82" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">51.4 MFLOPs</text></g>
+<text x="330" y="390" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">MFLOPs per token in the layer</text>
+<text x="14" y="192" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 192)">parameters of the layer (millions)</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Capacity against compute, one feed-forward layer</text>
+<line x1="69.44" y1="413" x2="89.44" y2="413" stroke="#9b2c2c" stroke-width="2"/>
+<text x="95.44" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">dense (hidden width 512 to 131,072)</text>
+<line x1="295.33" y1="413" x2="315.33" y2="413" stroke="#c05621" stroke-width="2"/>
+<text x="321.33" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">mixture, 2 of E experts used (E = 8 to 256)</text>
+<line x1="182.38" y1="430" x2="202.38" y2="430" stroke="#2b6cb0" stroke-width="2"/>
+<text x="208.38" y="434" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">mixture, 8 of E experts used (E = 8 to 256)</text>
+</svg>
