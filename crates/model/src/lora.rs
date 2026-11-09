@@ -851,23 +851,30 @@ impl FoldedTensors<'_> {
     fn folded_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
         let deltas: Vec<(&RuntimeDelta, &std::cell::Cell<bool>)> = self.lora.deltas.iter().zip(&self.lora.used).filter(|(d, _)| d.key == name).collect();
         let stride = deltas[0].0.row_stride;
+        let corrections: Vec<&RuntimeDelta> = deltas.iter().map(|(d, _)| *d).collect();
         assert!(deltas.iter().all(|(d, _)| d.row_stride == stride), "lora: the corrections of {name} disagree on its row length");
         let found = self.base.with_tensor_chunks(name, (max_elems / stride).max(1) * stride, &mut |off, chunk| {
             assert!((off as usize).is_multiple_of(stride) && chunk.len().is_multiple_of(stride), "lora: {name}: a chunk of {} values at {off} is not whole rows of {stride}", chunk.len());
-            let (first, rows) = (off as usize / stride, chunk.len() / stride);
+            let first = off as usize / stride;
             let mut out = chunk.to_vec();
-            for (d, _) in &deltas {
-                let (r, inn) = (d.pair.r, d.pair.inn);
-                for row in first.max(d.row0)..(first + rows).min(d.row0 + d.pair.out) {
+            // One task per row: rows are disjoint and each sums its rank in
+            // order, so the fold is the same whatever the thread count.
+            par::rows_mut(&mut out, stride, |i, row_out| {
+                let row = first + i;
+                for d in &corrections {
+                    if row < d.row0 || row >= d.row0 + d.pair.out {
+                        continue;
+                    }
+                    let (r, inn) = (d.pair.r, d.pair.inn);
                     let b = &d.pair.b[(row - d.row0) * r..][..r];
-                    let w = &mut out[(row - first) * stride + d.col0..][..inn];
+                    let w = &mut row_out[d.col0..][..inn];
                     for (k, &bk) in b.iter().enumerate() {
                         for (wi, &ai) in w.iter_mut().zip(&d.pair.a[k * inn..(k + 1) * inn]) {
                             *wi += bk * ai;
                         }
                     }
                 }
-            }
+            });
             f(off, &out);
         });
         if found {
