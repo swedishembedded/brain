@@ -1,0 +1,32 @@
+<!-- source-sha256: e9badb343d8c072ebea52651bee514437c89d4d58ca650412efe127016cac382 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="171.33" y1="334" x2="171.33" y2="30" stroke="#edf2f7"/>
+<text x="171.33" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">50</text>
+<line x1="284.67" y1="334" x2="284.67" y2="30" stroke="#edf2f7"/>
+<text x="284.67" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="398" y1="334" x2="398" y2="30" stroke="#edf2f7"/>
+<text x="398" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">150</text>
+<line x1="511.33" y1="334" x2="511.33" y2="30" stroke="#edf2f7"/>
+<text x="511.33" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">200</text>
+<line x1="58" y1="266.64" x2="602" y2="266.64" stroke="#edf2f7"/>
+<text x="52" y="270.64" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.1</text>
+<line x1="58" y1="97.36" x2="602" y2="97.36" stroke="#edf2f7"/>
+<text x="52" y="101.36" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="1.0" points="58,76.78 103.33,211.78 148.67,250.56 194,262.03 239.33,276.45 284.67,282.49 330,285.75 375.33,286.54 420.67,287.14 466,288.73 511.33,291.16 556.67,292.74 602,293.79"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.0" points="58,34.23 103.33,185.88 148.67,220.01 194,236.18 239.33,246.65 284.67,250.68 330,253.44 375.33,253.33 420.67,253.71 466,254.12 511.33,254.48 556.67,254.76 602,254.33"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.4" points="58,54.58 103.33,197.37 148.67,232.87 194,249.23 239.33,262.05 284.67,267.32 330,268.18 375.33,269.75 420.67,270.19 466,270.37 511.33,270.5 556.67,270.59 602,270.66"/><polyline fill="none" stroke="#c05621" stroke-width="1.0" points="58,68.07 103.33,192.73 148.67,218.36 194,233.39 239.33,240.72 284.67,238.58 330,252.34 375.33,253.5 420.67,257.04 466,257.94 511.33,258.96 556.67,259.41 602,259.7"/><polyline fill="none" stroke="#c05621" stroke-width="1.0" points="58,33.51 103.33,154.82 148.67,180.35 194,193.48 239.33,186 284.67,206.37 330,214.54 375.33,212.91 420.67,218.71 466,219.82 511.33,220.7 556.67,221.4 602,221.87"/><polyline fill="none" stroke="#c05621" stroke-width="2.4" points="58,46.43 103.33,177.75 148.67,201.19 194,215.31 239.33,220.2 284.67,227.44 330,234.66 375.33,236.74 420.67,241.05 466,242.76 511.33,243.82 556.67,244.58 602,245.36"/><polyline fill="none" stroke="#2f855a" stroke-width="1.0" points="58,75.41 103.33,255.46 148.67,290.23 194,306.88 239.33,303.89 284.67,295.65 330,289.99 375.33,286.32 420.67,283.9 466,282.21 511.33,281.08 556.67,280.31 602,279.71"/><polyline fill="none" stroke="#2f855a" stroke-width="1.0" points="58,34.58 103.33,228.57 148.67,259.14 194,263.64 239.33,258.03 284.67,253.3 330,248.64 375.33,244.53 420.67,241.98 466,240.44 511.33,239.41 556.67,238.72 602,238.19"/><polyline fill="none" stroke="#2f855a" stroke-width="2.4" points="58,53.9 103.33,241.65 148.67,279.57 194,284.31 239.33,278.78 284.67,272.51 330,267.52 375.33,263.6 420.67,260.96 466,259.22 511.33,258.06 556.67,257.27 602,256.66"/></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">training step (full batch)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">population cross-entropy minus entropy rate (nats)</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Eight runs per arm: mean and range</text>
+<rect x="320.06" y="38" width="273.94" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="328.06" y1="53" x2="348.06" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="354.06" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">spectral mixer, equal parameters to Q_par</text>
+<line x1="328.06" y1="70" x2="348.06" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="354.06" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">SwiGLU, equal parameters</text>
+<line x1="328.06" y1="87" x2="348.06" y2="87" stroke="#2f855a" stroke-width="2"/>
+<text x="354.06" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">SwiGLU, equal arithmetic</text>
+</svg>

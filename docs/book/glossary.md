@@ -32,6 +32,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Amdahl's law**: the speedup of a whole from making a part that takes the share $p$ of the time $g$ times as fast, $1/((1 - p) + p/g)$, bounded by the ceiling $1/(1 - p)$ however fast the part becomes. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
+**architecture hypothesis testing**: deciding whether a new architectural idea is worth anything by a hypothesis and a margin stated before the run, a baseline that differs from the candidate in exactly one thing, equal tuning and paired seeds, an ablation of the part the idea is named for, and an effect size with its interval judged against the margin. *([A Research Architecture: The Spectral Language Model](v06-language-models/09-spectral-lm.md))*
+
 **arithmetic intensity**: the number of floating-point operations a computation performs per byte it must move between main memory and the arithmetic, a property of the algorithm and the sizes and formats and not of the machine. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
 
 **artificial neuron**: a function of an input vector that forms a weighted sum of its entries plus a bias and passes the total through an activation function, $y = g(\mathbf{w}\cdot\mathbf{x} + b)$; the weights and the bias are what is learned. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
@@ -301,6 +303,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **forward pass**: computing every value of the computational graph in order, from the inputs to the loss. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **forward-mode differentiation**: computing derivatives by carrying the derivative with respect to one input forward through the graph, which costs one pass per input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
+
+**Fourier residual stream**: a residual stream whose entries are the lowest $m$ coefficients of a real orthonormal Fourier basis of a virtual signal of $D$ samples, never stored in full; a basis change alone is absorbed into a dense model's weights, so it matters only together with operators defined relative to the basis. *([A Research Architecture: The Spectral Language Model](v06-language-models/09-spectral-lm.md))*
 
 **fp16 format**: the 16-bit floating-point layout of 1 sign bit, 5 exponent bits (bias 15) and 10 fraction bits: about 3.3 digits, but a largest finite number of only 65504 and a smallest subnormal of $6 \times 10^{-8}$. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
 

@@ -425,6 +425,7 @@ navigation:
           - docs/book/v06-language-models/06-sparse-attention.md
           - docs/book/v06-language-models/07-recurrent-depth.md
           - docs/book/v06-language-models/08-long-context.md
+          - docs/book/v06-language-models/09-spectral-lm.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

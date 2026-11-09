@@ -543,9 +543,9 @@ volumes:
         brain: []
       - id: spectral-lm
         title: "A Research Architecture: The Spectral Language Model"
-        question: "How does a new architecture idea go from hypothesis to evidence?"
+        question: "How do you test a new architectural idea honestly, using brain's spectral language model as the example?"
         introduces: [fourier-residual-stream, architecture-hypothesis-testing]
-        requires: [discrete-fourier-transform, residual-stream, ablation, causal-language-model]
+        requires: [discrete-fourier-transform, fast-fourier-transform, convolution-theorem, residual-stream, swiglu, rms-normalization, causal-mask, causal-language-model, tied-embeddings, ablation, baseline, controlled-experiment, effect-size, reporting-uncertainty, confidence-interval, seed, gradient-check, adam, cosine-schedule, cross-entropy, kl-divergence]
         brain: [spectrallm]
       - id: model-cost
         title: "Counting Parameters, FLOPs and Memory"
