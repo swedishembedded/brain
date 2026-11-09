@@ -317,7 +317,8 @@ fn tensor_byte_total(bytes: &[u8], source: &str) -> Result<u64, String> {
     Ok(total)
 }
 
-/// Parse a safetensors byte buffer into fp32 tensors (declared order preserved).
+/// Parse a safetensors byte buffer into fp32 tensors, in name order (the header
+/// is read into a serde_json map, which sorts its keys without `preserve_order`).
 pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
     parse_inner(bytes, "in-memory buffer", |_| {})
 }
