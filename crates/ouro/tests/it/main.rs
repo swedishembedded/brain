@@ -8,6 +8,7 @@
 //! others run beside it.
 
 mod decode;
+mod exit_rule;
 mod forward;
 mod layer_streamed;
 mod optimizer_state;

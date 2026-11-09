@@ -210,25 +210,8 @@ impl<'a> Decode<'a> {
     /// The reference's CDF rule over the one row.
     fn choose_exit(&self) -> u32 {
         let t = self.cfg.total_ut_steps;
-        let mut remaining = 1.0f64;
-        let mut cdf = 0.0f64;
-        let mut out = t - 1;
-        for pass in 0..t {
-            let gate = self.gpu.read(&self.gates[pass as usize], 1)[0] as f64;
-            let lambda = 1.0 / (1.0 + (-gate).exp());
-            let p = if pass + 1 < t {
-                let v = lambda * remaining;
-                remaining *= 1.0 - lambda;
-                v
-            } else {
-                remaining
-            };
-            cdf += p;
-            if cdf >= self.cfg.early_exit_threshold as f64 {
-                out = pass;
-            }
-        }
-        out
+        let gates: Vec<f64> = (0..t).map(|pass| self.gpu.read(&self.gates[pass as usize], 1)[0] as f64).collect();
+        crate::model::exit_pass(&gates, self.cfg.early_exit_threshold as f64) as _
     }
 }
 

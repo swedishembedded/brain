@@ -771,22 +771,13 @@ impl Ouro {
     pub fn exit_steps(&self) -> Vec<u32> {
         let n = self.rows() as usize;
         let t = self.cfg.total_ut_steps as usize;
-        let mut out = vec![t as u32 - 1; n];
-        let mut remaining = vec![1.0f64; n];
-        let mut cdf = vec![0.0f64; n];
-        for pass in 0..t {
-            let gate = self.gpu.read(&self.gates[pass], n);
-            for r in 0..n {
-                let lambda = 1.0 / (1.0 + (-(gate[r] as f64)).exp());
-                let p = if pass + 1 < t { lambda * remaining[r] } else { remaining[r] };
-                remaining[r] *= 1.0 - lambda;
-                cdf[r] += p;
-                if cdf[r] >= self.cfg.early_exit_threshold as f64 {
-                    out[r] = pass as u32;
-                }
-            }
-        }
-        out
+        let gates: Vec<Vec<f32>> = (0..t).map(|pass| self.gpu.read(&self.gates[pass], n)).collect();
+        (0..n)
+            .map(|r| {
+                let row: Vec<f64> = gates.iter().map(|g| g[r] as f64).collect();
+                exit_pass(&row, self.cfg.early_exit_threshold as f64) as u32
+            })
+            .collect()
     }
 
     /// Inference forward: trunk, exit selection, head for the selected pass.
@@ -1145,4 +1136,26 @@ mod tests {
             assert!(gpu_core::cost::covers(name), "kernel {name} has no cost formula");
         }
     }
+}
+
+/// The exit pass of one row, the reference's CDF rule: pass `t` exits with
+/// probability `sigmoid(gate[t])` of the mass still remaining (the last pass
+/// takes all of it, so its gate is unused), and the chosen pass is the first
+/// whose cumulative exit mass reaches `threshold`. `gates` holds one logit per
+/// pass. Every exit decision (training's [`Ouro::exit_steps`], decode and
+/// serving) goes through this one function.
+pub fn exit_pass(gates: &[f64], threshold: f64) -> usize {
+    let t = gates.len();
+    let (mut remaining, mut cdf, mut out) = (1.0f64, 0.0f64, t - 1);
+    for (pass, &gate) in gates.iter().enumerate() {
+        let lambda = 1.0 / (1.0 + (-gate).exp());
+        let p = if pass + 1 < t { lambda * remaining } else { remaining };
+        remaining *= 1.0 - lambda;
+        cdf += p;
+        if cdf >= threshold {
+            out = pass;
+            break;
+        }
+    }
+    out
 }

@@ -22,9 +22,10 @@
 //! layers' parameters. Each pass ends with the model's final RMSNorm and an
 //! exit-gate projection, and those pass outputs are what the LM head sees:
 //!
-//! - training/weighted inference: the exit distribution `p(t|x)` weights the
-//!   per-pass logits into one expected distribution (the released objective
-//!   computes cross-entropy on that expectation);
+//! - training: the exit distribution `p(t|x)` weights each pass's
+//!   cross-entropy, and the objective is that expected loss, the sum over
+//!   passes of `p(t|x)` times the pass's cross-entropy (not the cross-entropy
+//!   of an expected distribution; see `model.rs`);
 //! - inference: a step or a cumulative-probability threshold selects one pass.
 //!
 //! Per-pass attention history is required, not optional: the reference keys

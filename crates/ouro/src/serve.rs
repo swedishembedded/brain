@@ -528,18 +528,8 @@ impl Engine {
         gpu.submit(&[], &steps);
 
         // The last token's exit pass, by the same CDF rule as decode.
-        let mut remaining = 1.0f64;
-        let mut cdf = 0.0f64;
-        let mut pass = t - 1;
-        for p in 0..t {
-            let gate = gpu.read(&b.gates[p], n as usize)[n as usize - 1] as f64;
-            let lambda = 1.0 / (1.0 + (-gate).exp());
-            let pr = if p + 1 < t { let v = lambda * remaining; remaining *= 1.0 - lambda; v } else { remaining };
-            cdf += pr;
-            if cdf >= cfg.early_exit_threshold as f64 {
-                pass = p;
-            }
-        }
+        let gates: Vec<f64> = (0..t).map(|p| gpu.read(&b.gates[p], n as usize)[n as usize - 1] as f64).collect();
+        let pass = model::exit_pass(&gates, cfg.early_exit_threshold as f64);
         self.last_pass.set(pass);
         let all = gpu.read(&b.hs[pass], n as usize * cfg.d_model as usize);
         all[(n as usize - 1) * cfg.d_model as usize..].to_vec()
@@ -547,25 +537,8 @@ impl Engine {
 
     fn choose_exit(&self) -> usize {
         let t = self.cfg.total_ut_steps;
-        let mut remaining = 1.0f64;
-        let mut cdf = 0.0f64;
-        let mut out = (t - 1) as usize;
-        for pass in 0..t {
-            let gate = self.gpu.read(&self.gates[pass as usize], 1)[0] as f64;
-            let lambda = 1.0 / (1.0 + (-gate).exp());
-            let p = if pass + 1 < t {
-                let v = lambda * remaining;
-                remaining *= 1.0 - lambda;
-                v
-            } else {
-                remaining
-            };
-            cdf += p;
-            if cdf >= self.cfg.early_exit_threshold as f64 {
-                out = pass as usize;
-            }
-        }
-        out
+        let gates: Vec<f64> = (0..t).map(|pass| self.gpu.read(&self.gates[pass as usize], 1)[0] as f64).collect();
+        model::exit_pass(&gates, self.cfg.early_exit_threshold as f64)
     }
 
     fn release_extras(&mut self, table: &mut BlockTable) {
