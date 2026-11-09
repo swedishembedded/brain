@@ -28,7 +28,8 @@
 // dO tiles of BC = 8 rows (plus their lse and D) are staged in shared memory;
 // the causal mask makes every query tile that ends before this key tile starts
 // all-zero, so the walk starts at the first tile that can see it. Shared use
-// is 32 KiB (qsh 8 + dosh 8 + two partial buffers 8 each); callers gate on the device's workgroup memory.
+// is 32 KiB + 64 B (qsh 8 + dosh 8 + two partial buffers 8 KiB each, lse_sh and
+// d_sh 32 B each); callers gate on the device's workgroup memory.
 
 const WG: u32 = 256u;    // threads per workgroup == BR * lanes in both modes
 const BC: u32 = 8u;      // query rows per shared tile

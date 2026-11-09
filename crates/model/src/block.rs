@@ -1286,10 +1286,12 @@ pub struct FlashGqaIds {
 }
 
 impl FlashGqaIds {
-    /// Workgroup memory the backward kernels declare (`flash_attn_causal_gqa
-    /// _bwd_{dq,dkv}.wgsl`: two `[8,256]` tiles plus two `[8,256]` partial
-    /// buffers).
-    pub const BWD_WORKGROUP_BYTES: u32 = 32 * 1024;
+    /// Workgroup memory the larger backward kernel declares
+    /// (`flash_attn_causal_gqa_bwd_dkv.wgsl`: two `[8,256]` tiles and two
+    /// `[8,256]` partial buffers, plus its 8-row `lse_sh` and `d_sh`; the dq
+    /// kernel has the four arrays only). A device with exactly 32 KiB cannot
+    /// build the dkv kernel, so the gate must ask for the extra 64 bytes.
+    pub const BWD_WORKGROUP_BYTES: u32 = 32 * 1024 + 2 * 8 * 4;
 
     /// Shortest sequence the training mixers hand to the trio by default. Below
     /// it the `[H,T,T]` slab is a few MiB and the materialised chain's
