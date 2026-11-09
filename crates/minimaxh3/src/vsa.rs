@@ -474,6 +474,7 @@ mod tests {
     #[test]
     fn the_device_attention_computes_the_host_reference() {
         let cx = crate::block::Ctx::new(None);
+        eprintln!("vsa device test on the {} backend", gpu_core::backend_name());
         if !model::block::flash_gate(&cx.gpu.caps(), true) {
             brain_testutil::skip("vsa: the flash pass needs workgroup reductions, which this device lacks");
             return;
