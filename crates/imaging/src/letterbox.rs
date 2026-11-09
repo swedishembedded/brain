@@ -12,10 +12,9 @@
 //! `map50`, and a second definition free to drift from this one is precisely the
 //! `rmsnorm`-was-seven-times failure `AGENTS.md` forbids.
 //!
-//! Still outstanding for the migrator: `cli::depth_cli::letterbox_chw` is a
-//! *third* variant (CHW in, `pad = 0.5`) and has not moved, because doing so
-//! changes the ZipDepth INT8 calibration inputs and must be gated on the
-//! quantized-accuracy check rather than on a build passing.
+//! The ZipDepth INT8 calibration no longer letterboxes: it preprocesses with
+//! `zipdepth::predict::preprocess_chw`, the same function inference uses, so
+//! calibration and inference see the same inputs.
 //!
 //! This is the one **host** resampler in the crate, and it is host for a reason
 //! that is worth reading before "fixing" it.

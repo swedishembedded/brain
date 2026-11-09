@@ -171,9 +171,9 @@ pub enum Filter {
     /// This is **not** the half-pixel nearest that
     /// [`crate::letterbox::letterbox_rgb`] uses. See that module.
     Nearest,
-    /// `resize_bilinear.wgsl`. The default, and bit-equivalent (under
-    /// [`AlignCorners::HalfPixel`]) to the three host bilinear copies in
-    /// `zipdepth::predict` / `cli::depth_cli` / `cli::resident_depth`.
+    /// `resize_bilinear.wgsl`. The default; under [`AlignCorners::HalfPixel`]
+    /// it computes the formula of the one host resampler ([`crate::host`]),
+    /// within 1e-5 of it (`device_ops.rs`).
     #[default]
     Bilinear,
     /// `resize_bicubic.wgsl` — PyTorch's **non-antialiased** cubic convolution,

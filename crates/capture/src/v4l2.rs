@@ -172,7 +172,7 @@ impl Device {
         self.xioctl(VIDIOC_S_FMT, fmt.as_mut_ptr() as *mut c_void)?;
         // The driver may have adjusted the geometry and format.
         if rd_u32(&fmt, OFF_FMT_PIX + OFF_PIX_PIXFMT) != V4L2_PIX_FMT_YUYV {
-            return Err("device would not accept YUYV (likely MJPEG-only; brain has no JPEG decoder)".into());
+            return Err("device would not accept YUYV (likely MJPEG-only; the capture path decodes YUYV frames only)".into());
         }
         self.width = rd_u32(&fmt, OFF_FMT_PIX + OFF_PIX_WIDTH);
         self.height = rd_u32(&fmt, OFF_FMT_PIX + OFF_PIX_HEIGHT);

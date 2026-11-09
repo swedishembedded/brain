@@ -18,8 +18,9 @@
 //!
 //! Those three sites each carried a byte-identical copy of the same two
 //! functions (six functions, one implementation). They now all call the one
-//! below. It is **bit-equivalent** to `resize_bilinear.wgsl` under
-//! [`crate::AlignCorners::HalfPixel`]: both compute
+//! below. It computes the same formula as `resize_bilinear.wgsl` under
+//! [`crate::AlignCorners::HalfPixel`] (`device_ops.rs` holds the two within
+//! 1e-5, not bit for bit): both compute
 //! `s = clamp((o + 0.5)*in/out - 0.5, 0)` with `i1 = min(i0 + 1, in - 1)`, and
 //! the extra high-side clamp here is provably inert once `i1` is clamped.
 //! `crates/imaging/tests/it/device_ops.rs` pins that equivalence.

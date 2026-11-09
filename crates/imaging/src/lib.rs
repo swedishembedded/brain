@@ -43,10 +43,10 @@
 //! | [`IMAGENET_MEAN`] / [`IMAGENET_STD`] | `zipdepth::init`, `worldmirror2::preprocess` | **moved**; one pair of arrays |
 //! | [`Rgb8`] / [`codec::load`] | `worldmirror2::preprocess::{RgbImage, load_ppm}` | **moved**; the second P6 parser is gone |
 //!
-//! `cli::depth_cli`'s calibration letterbox now calls [`letterbox_rgb`] with
-//! `pad = 0.5` - bit-identical to the copy it replaced, which deliberately keeps
-//! the ZipDepth INT8 scales stable while leaving survey §6.2 (calibration
-//! preprocesses differently from inference) as its own gated fix.
+//! The ZipDepth INT8 calibration, which once letterboxed through its own copy,
+//! now preprocesses with `zipdepth::predict::preprocess_chw`, the function
+//! inference uses, so calibration no longer preprocesses differently from
+//! inference.
 //!
 //! Still owed, each blocked on a numeric gate rather than on effort:
 //! `s3dit::pipeline::{feather_mask, downsample_mask}` (no in-tree inpaint
@@ -118,7 +118,8 @@
 //!   candidate-ratio grid). They sit next to each other and share no code,
 //!   which is the point.
 //! * **A host resize *for callers that hold a `Gpu`*.** `resize_bilinear.wgsl`
-//!   with `AlignCorners::HalfPixel` is bit-equivalent to the host loop, and
+//!   with `AlignCorners::HalfPixel` computes the host loop's formula (the
+//!   device test holds the two within 1e-5), and
 //!   shipping a convenience twin next to a kernel is the trap. [`host`] carries
 //!   exactly one host resampler, for the NPU paths that have no device handle at
 //!   all; its module header states the case. Three copies became that one.

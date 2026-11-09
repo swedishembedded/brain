@@ -8,9 +8,10 @@
 //! is *not* safe is unifying where they are applied, and that is worth stating
 //! at the point where the constants live:
 //!
-//! * `depth` folds mean/std into the **first BatchNorm's** parameters at import
-//!   (`zipdepth::init`), so the model consumes `[0, 1]` directly and its predictor
-//!   never normalises. Nothing to migrate there but the two arrays.
+//! * `depth` stores mean/std as two weights (`zipdepth::init`) and applies them
+//!   inside the model's forward (`ZipDepth::normalize`), so its predictor feeds
+//!   `[0, 1]` and never normalises on the host. Nothing to migrate there but the
+//!   two arrays.
 //! * `mirror` applies them **per frame** inside `worldmirror2::model::forward`, for
 //!   reference parity. `worldmirror2::preprocess::preprocess` also applies them and
 //!   has zero callers, while `cli::mirror_cli` re-implements that function
